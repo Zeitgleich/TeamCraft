@@ -4253,11 +4253,18 @@ notetaker hears nobody who didn't tap.
 
 **On mobile.** The Android and iOS call screens have "Add notetaker" for whoever the policy lets
 ask it in, and its notice with "Remove notetaker" while it is in the call. Their core reads the
-notetaker through `notetaker_in_call` (teamcraft-ffi, the same rules as desktop and web). Where the
-notetaker is a member of the conversation they ask it in (`ask_notetaker_in`); in every other call
-they move the call into a room with the notetaker (`add_people_to_call` with the notetaker as the
-added one), also in a channel the user manages or a meeting the user organizes, where desktop and web
-add the bot instead: the apps have no member-add path for bots. Android has the button in the call
+notetaker through `notetaker_in_call` (teamcraft-ffi, the same rules as desktop and web). "Add
+notetaker" takes the route desktop and web take (`bring_in_notetaker`, issue #1303, with the route
+rule of `teamcraft_client_api::notetaker`): where the notetaker is a member of the conversation the
+core asks it in; in a channel whose members the user manages it adds the bot from the channel's
+integrations first (`HistoryPolicy::FromJoin`, into the space as a guest where the user may put it
+there), in a meeting the user organizes as one of its invitees (the meeting's edit and the meeting
+chat's group, as desktop saves it), and asks it in once that went through, so the call stays where
+it is. In every other call the apps move the call into a room with the notetaker
+(`add_people_to_call` with the notetaker as the added one). Before joining a running call, the
+apps read who is in it (`call_participants`, the server's roster, as desktop and web) and say when
+the notetaker is: Android in its pre-join dialog, iOS (which joins from the call buttons without
+one) in a notice to confirm before joining. Android has the button in the call
 screen's "More" menu, iOS among the round controls (in one "+" menu with "Add people" in a DM
 call). The others' move banner on mobile says, as on desktop, that the notetaker was added and
 where the audio goes. While the notetaker is in the call, the encryption badge says so on mobile

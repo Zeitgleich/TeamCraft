@@ -600,6 +600,13 @@ impl Conversation {
     !self.kind.is_direct_like() && self.maybe_holds(&Permission::DeleteChannel).unwrap_or(false)
   }
 
+  /// Whether the server says the user may add people to the channel (`manage_members`); never in
+  /// DMs, and not without the server's answer (an older server), where the caller takes the way
+  /// that needs no such right.
+  pub fn can_add_members(&self) -> bool {
+    !self.kind.is_direct_like() && self.maybe_holds(&Permission::ManageMembers).unwrap_or(false)
+  }
+
   /// Whether the server says the user holds `permission` here; `None` when it didn't say.
   fn maybe_holds(&self, permission: &Permission) -> Option<bool> {
     self

@@ -222,10 +222,12 @@ final class CallManager: NSObject, @unchecked Sendable {
     noteAnnouncedMove(CallMove(from: conversationId, to: room))
   }
 
-  /// "Add notetaker" in the call of `conversationId` (e2ee.md §8.2, "In every call"): where the
-  /// notetaker is a member, it is asked in; anywhere else the call moves into a meeting room with
-  /// everybody in it and the notetaker, which the core asks in there (it isn't rung), and this
-  /// device follows. A retry with the same `requestKey` gets the same room.
+  /// "Add notetaker" in the call of `conversationId` (e2ee.md §8.2, "In every call"), on the route
+  /// desktop and web take: where the notetaker is a member the core asks it in; in a channel whose
+  /// members the user manages or a meeting the user organizes the core adds it there first and the
+  /// call stays where it is. Anywhere else the call moves into a meeting room with everybody in it
+  /// and the notetaker, which the core asks in there (it isn't rung), and this device follows. A
+  /// retry with the same `requestKey` gets the same room.
   @MainActor
   func addNotetaker(conversationId: String, notetaker: NotetakerCallInfo, requestKey: String) async {
     guard activeCall?.conversationId == conversationId, notetaker.canInvite, !isAddingNotetaker else { return }
@@ -233,9 +235,7 @@ final class CallManager: NSObject, @unchecked Sendable {
     maybeNotetakerFailure = nil
     defer { isAddingNotetaker = false }
     do {
-      if notetaker.isMember {
-        try await AppModel.shared.askNotetakerIn(conversationId: conversationId)
-      } else {
+      if try await AppModel.shared.bringInNotetaker(conversationId: conversationId) == .moveToRoom {
         guard let me = AppModel.shared.maybeUserId else { return }
         // The people in the call and the user; the core keeps only members of the group.
         let inCall = Array(Set((activeCall?.participantUserIds ?? []) + [me])).sorted()

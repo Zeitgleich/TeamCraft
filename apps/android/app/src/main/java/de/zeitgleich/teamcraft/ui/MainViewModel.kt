@@ -899,6 +899,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun startCall(conversationId: String, displayName: String, options: CallOptions = CallOptions()) =
     graph.calls.startCall(conversationId, displayName, options)
 
+  /**
+   * Whether the call running in `conversationId` has the notetaker in it, for the pre-join notice
+   * (e2ee.md §8.2): who it is comes from the verified policy, who is in the call from the roster.
+   */
+  suspend fun isNotetakerInRunningCall(conversationId: String): Boolean =
+    read { notetakerInCall(conversationId, callParticipants(conversationId))?.isPresent } ?: false
+
   /** Ask before `@channel` in conversations with more members than this (0 = never). */
   fun confirmChannelOver(): Int = graph.mentionPrefs.confirmChannelOver
 

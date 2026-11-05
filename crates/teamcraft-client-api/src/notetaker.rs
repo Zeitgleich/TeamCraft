@@ -4,9 +4,9 @@
 //! notetaker decides on every request from its own copy of the signed data. Desktop, web and the
 //! mobile apps (through teamcraft-ffi) show the same.
 
-use teamcraft_proto::{NotetakerInviters, NotetakerPolicy};
+use teamcraft_proto::{MeetingId, NotetakerInviters, NotetakerPolicy};
 
-use crate::model::UserId;
+use crate::model::{Conversation, Space, UserId};
 
 /// What the call screen shows and offers about the notetaker.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,6 +91,69 @@ pub fn may_ask_in(policy: &NotetakerPolicy, is_person: bool, is_roster_admin: bo
       NotetakerInviters::Admins => is_roster_admin,
       NotetakerInviters::Unknown(_) => false,
     }
+}
+
+/// How the user brings the notetaker into the call of a conversation where it is no member yet
+/// (e2ee.md §8.2, "In every call").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddRoute {
+  /// A channel of a space where the user manages members: the bot goes in as from the channel's
+  /// integrations, into the space first (as a guest) where the user may put it there.
+  Channel { joins_space: bool },
+  /// A meeting the user organizes: the bot becomes one of its invitees, which puts it into the
+  /// meeting chat's group (e2ee.md §4.6, "Meeting chats").
+  Meeting(MeetingId),
+  /// A conversation the user can't add the bot to: the call moves into a new meeting room with
+  /// everybody in it and the bot (docs/meetings.md, "A call becomes a meeting"), where the core
+  /// asks it in. The conversation keeps its members and history; the bot never sees them.
+  MoveToRoom,
+}
+
+/// What the user can do in the conversation of the call, which decides the [`AddRoute`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConversationRights {
+  /// A meeting the user organizes.
+  OrganizesMeeting(MeetingId),
+  /// A channel of a space where the user manages members.
+  ManagesChannel { joins_space: bool },
+  /// A DM or group DM (which takes nobody more), a channel whose members the user doesn't manage,
+  /// or a meeting somebody else organizes: the user can't add anybody there.
+  CannotAdd,
+}
+
+/// Where the user can bring the notetaker in: a meeting the user organizes (as an invitee), a
+/// channel of a space where the user manages members (as from its integrations). Anywhere else
+/// (a DM or group DM, a channel whose members somebody else manages, a meeting somebody else
+/// organizes) its call moves into a meeting room with the notetaker, `can_move`: the app can move
+/// calls; the call stays where it is for those who don't follow (e2ee.md §8.2, "In every call").
+pub fn add_route(rights: ConversationRights, can_move: bool) -> Option<AddRoute> {
+  match rights {
+    ConversationRights::OrganizesMeeting(meeting) => Some(AddRoute::Meeting(meeting)),
+    ConversationRights::ManagesChannel { joins_space } => Some(AddRoute::Channel { joins_space }),
+    ConversationRights::CannotAdd => can_move.then_some(AddRoute::MoveToRoom),
+  }
+}
+
+/// The user's rights in `conversation` for bringing the notetaker in: `maybe_organized`, the
+/// meeting the user organizes whose chat it is; `can_add_members`, the user manages the channel's
+/// members; `spaces`, the user's, for whether the bot may be put into the channel's space first.
+pub fn conversation_rights(
+  conversation: &Conversation,
+  maybe_organized: Option<MeetingId>,
+  can_add_members: bool,
+  spaces: &[Space],
+) -> ConversationRights {
+  if let Some(meeting) = maybe_organized {
+    return ConversationRights::OrganizesMeeting(meeting);
+  }
+  if !conversation.has_channel_settings() || !can_add_members {
+    return ConversationRights::CannotAdd;
+  }
+  let joins_space = spaces
+    .iter()
+    .find(|space| Some(space.id) == conversation.maybe_space)
+    .is_some_and(|space| space.can_add_members || space.can_invite_guests);
+  ConversationRights::ManagesChannel { joins_space }
 }
 
 #[cfg(test)]
@@ -196,6 +259,105 @@ mod tests {
     assert!(in_call.is_present && !in_call.can_invite);
     policy.maybe_bot = None;
     assert_eq!(notetaker_in_call(&policy, true, false, &[], &[], true), None);
+  }
+
+  /// #1303: desktop, web and the apps bring the notetaker in on the same route: added in a meeting
+  /// the user organizes and a channel whose members the user manages (into the space first where
+  /// the user may put it there), moved into a room anywhere else.
+  #[test]
+  fn the_route_follows_what_the_user_can_do_in_the_conversation() {
+    use crate::model::{ConversationKind, JoinPolicy, SidebarCategory};
+
+    let space_id = id_of(2);
+    let channel = |kind, maybe_space| Conversation {
+      id: id_of(5),
+      maybe_space,
+      kind,
+      category: SidebarCategory::Channels,
+      name: "news".into(),
+      topic: String::new(),
+      member_ids: Vec::new(),
+      unread_count: 0,
+      mention_count: 0,
+      is_favorite: false,
+      is_muted: false,
+      can_post: true,
+      bookmarks: Vec::new(),
+      is_catching_up: false,
+      maybe_image_version: None,
+      is_notes_to_self: false,
+      is_archived: false,
+      is_imported: false,
+      maybe_permissions: Some(vec![teamcraft_proto::Permission::ManageMembers]),
+      has_only_deactivated_others: false,
+    };
+    let space = |can_add_members, can_invite_guests| Space {
+      id: space_id,
+      name: "Project".into(),
+      hue: 0,
+      maybe_color: None,
+      maybe_image_version: None,
+      unread_count: 0,
+      mention_count: 0,
+      maybe_description: None,
+      member_count: 3,
+      join_policy: JoinPolicy::Open,
+      can_add_members,
+      can_invite_guests,
+      can_manage_space: false,
+      can_delete_space: false,
+      deleted_channel_count: 0,
+      can_create_channels: false,
+      maybe_my_role: None,
+    };
+    let managed = channel(ConversationKind::Private, Some(space_id));
+    assert!(managed.can_add_members());
+    let rights = conversation_rights(&managed, None, managed.can_add_members(), &[space(false, true)]);
+    assert_eq!(
+      add_route(rights, true),
+      Some(AddRoute::Channel { joins_space: true })
+    );
+    let rights = conversation_rights(&managed, None, true, &[space(false, false)]);
+    assert_eq!(
+      add_route(rights, true),
+      Some(AddRoute::Channel { joins_space: false }),
+      "the bot can't be put into the space: added to the channel only"
+    );
+    let rights = conversation_rights(&managed, None, false, &[space(true, true)]);
+    assert_eq!(
+      add_route(rights, true),
+      Some(AddRoute::MoveToRoom),
+      "members managed by others"
+    );
+
+    let meeting: MeetingId = id_of(7);
+    let meeting_chat = channel(ConversationKind::Private, None);
+    let rights = conversation_rights(&meeting_chat, Some(meeting), false, &[]);
+    assert_eq!(add_route(rights, true), Some(AddRoute::Meeting(meeting)));
+    let rights = conversation_rights(&meeting_chat, None, true, &[]);
+    assert_eq!(
+      add_route(rights, true),
+      Some(AddRoute::MoveToRoom),
+      "somebody else's meeting"
+    );
+
+    let mut group = channel(ConversationKind::Group, None);
+    assert!(!group.can_add_members(), "a group DM takes nobody more");
+    group.maybe_permissions = None;
+    let rights = conversation_rights(&group, None, group.can_add_members(), &[]);
+    assert_eq!(add_route(rights, true), Some(AddRoute::MoveToRoom));
+    assert_eq!(add_route(rights, false), None, "an app that moves no calls");
+
+    let mut older_server = managed.clone();
+    older_server.maybe_permissions = None;
+    assert!(
+      !older_server.can_add_members(),
+      "without the server's word the call moves"
+    );
+  }
+
+  fn id_of<T: Id>(raw: i64) -> T {
+    T::from_snowflake(Snowflake::new(raw).unwrap())
   }
 
   fn policy(inviters: NotetakerInviters) -> NotetakerPolicy {

@@ -21,6 +21,7 @@
   <string name="call_prejoin_camera">Camera on</string>
   <string name="call_prejoin_muted">Join muted</string>
   <string name="call_prejoin_join">Join</string>
+  <string name="call_prejoin_notetaker">The notetaker is in this call: what you say is sent to OpenRouter for a transcript.</string>
   <string name="call_add_people">Add people</string>
   <string name="call_add_hint">The call moves into a new meeting room with everybody in it. The direct messages stay as they are; the people you add don\'t see them.</string>
   <string name="call_add_nobody">There is nobody else to add.</string>

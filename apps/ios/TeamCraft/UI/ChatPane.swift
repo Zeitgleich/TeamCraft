@@ -58,6 +58,9 @@ struct ChatPane: View {
   @State private var rowsOnScreen: Set<String> = []
   /// The message the heart button goes to, until its row is loaded.
   @State private var maybeReactionTarget: String?
+  /// A call about to be joined whose running call has the notetaker in it: the user confirms
+  /// after the notice (`true`: with video).
+  @State private var maybeNotetakerCall: Bool?
   @AppStorage("share_typing") private var isSharingTyping = true
   @FocusState private var isComposerFocused: Bool
 
@@ -202,6 +205,12 @@ struct ChatPane: View {
       }
     } message: { _ in
       Text("delete_confirm_text")
+    }
+    .alert("call_start", isPresented: notetakerCallBinding, presenting: maybeNotetakerCall) { withVideo in
+      Button("call_prejoin_join") { startCall(withVideo: withVideo) }
+      Button("cancel", role: .cancel) {}
+    } message: { _ in
+      Text("call_prejoin_notetaker")
     }
     .alert("send_failed", isPresented: $isSendFailed) {
       Button("done", role: .cancel) {}
@@ -559,6 +568,24 @@ struct ChatPane: View {
     !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (maybeEditing == nil && !attachments.isEmpty)
   }
 
+  private var notetakerCallBinding: Binding<Bool> {
+    Binding(get: { maybeNotetakerCall != nil }, set: { if !$0 { maybeNotetakerCall = nil } })
+  }
+
+  /// The call buttons: where the running call has the notetaker in it, the notice comes first, as on
+  /// the pre-join screens of desktop, web and Android (e2ee.md §8.2); otherwise the call starts.
+  private func prepareCall(withVideo: Bool) async {
+    if await model.isNotetakerInRunningCall(conversationId: conversation.id) {
+      maybeNotetakerCall = withVideo
+    } else {
+      startCall(withVideo: withVideo)
+    }
+  }
+
+  private func startCall(withVideo: Bool) {
+    model.calls.startCall(conversationId: conversation.id, displayName: conversation.name, withVideo: withVideo)
+  }
+
   private var deletingBinding: Binding<Bool> {
     Binding(get: { maybeDeleting != nil }, set: { if !$0 { maybeDeleting = nil } })
   }
@@ -577,13 +604,13 @@ struct ChatPane: View {
     ToolbarItemGroup(placement: .topBarTrailing) {
       if conversation.kind != .integration {
         Button {
-          model.calls.startCall(conversationId: conversation.id, displayName: conversation.name)
+          Task { await prepareCall(withVideo: false) }
         } label: {
           Image(systemName: "phone")
         }
         .accessibilityLabel(Text("call_start"))
         Button {
-          model.calls.startCall(conversationId: conversation.id, displayName: conversation.name, withVideo: true)
+          Task { await prepareCall(withVideo: true) }
         } label: {
           Image(systemName: "video")
         }

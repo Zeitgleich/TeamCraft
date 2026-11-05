@@ -6,6 +6,9 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use leptos::prelude::*;
+pub use teamcraft_client_api::meeting_invitees::{
+  adding_invitee, adding_invitees, attending_users, saved_change,
+};
 use teamcraft_client_api::model::SpaceId;
 use teamcraft_proto::{
   CancelScope, CreateGuestLinkRequest, CreateInstantMeetingRequest, CreateMeetingRequest, ErrorBody,
@@ -516,17 +519,6 @@ pub fn invitee_change(
   Some((now, removed))
 }
 
-/// The same from the server's answer to the save: the invitee list as saved and the users who were
-/// on `before` and are not on it any more.
-pub fn saved_change(before: &MeetingResponse, saved: &MeetingResponse) -> (Vec<UserId>, Vec<UserId>) {
-  let now = attending_users(saved);
-  let removed = attending_users(before)
-    .into_iter()
-    .filter(|user| !now.contains(user) && *user != before.organizer_user_id)
-    .collect();
-  (now, removed)
-}
-
 // ---- Edits whose chat change is still owed ----------------------------------------------------
 
 const PENDING_EDITS_KEY: &str = "meeting-edits-pending";
@@ -644,56 +636,6 @@ pub fn finish_pending_edits(state: crate::state::AppState, hub: MeetingsHub) {
   reconcile_pending_edits(now_ms(), &meetings, |conversation, invitees, removed| {
     state.try_write(|backend| backend.update_meeting_chat_members(conversation, invitees, removed));
   });
-}
-
-/// The TeamCraft users a saved meeting lists as attendees (externals have no account). The
-/// organizer's own device sets the meeting chat's group up from this as it knows the meeting.
-pub fn attending_users(meeting: &MeetingResponse) -> Vec<UserId> {
-  meeting
-    .attendees
-    .iter()
-    .filter_map(|attendee| attendee.maybe_user_id)
-    .collect()
-}
-
-/// The edit that adds `user` to the invitees of the meeting `me` organizes and changes nothing
-/// else: the notetaker added during one of its calls (e2ee.md §8.2). The invitees go as a whole
-/// list, as the meeting has them now.
-pub fn adding_invitee(meeting: &MeetingResponse, me: UserId, user: UserId) -> UpdateMeetingRequest {
-  adding_invitees(meeting, me, &[user])
-}
-
-/// The edit that adds `users` to the invitees of the meeting `me` organizes, as the people the
-/// organizer adds during its call (#1141); the organizer and people invited already are no
-/// additions.
-pub fn adding_invitees(meeting: &MeetingResponse, me: UserId, users: &[UserId]) -> UpdateMeetingRequest {
-  let form = ScheduleForm::from_meeting(meeting, me);
-  let mut invitees: Vec<MeetingInvitee> = form
-    .members
-    .into_iter()
-    .filter(|member| !users.contains(member))
-    .map(|user_id| MeetingInvitee::User { user_id })
-    .collect();
-  let mut added: Vec<UserId> = Vec::new();
-  for user in users {
-    if *user != me && !added.contains(user) {
-      added.push(*user);
-    }
-  }
-  invitees.extend(added.into_iter().map(|user_id| MeetingInvitee::User { user_id }));
-  invitees.extend(
-    form
-      .externals
-      .into_iter()
-      .map(|external| MeetingInvitee::External {
-        email: external.email,
-        maybe_name: Some(external.name).filter(|name| !name.is_empty()),
-      }),
-  );
-  UpdateMeetingRequest {
-    maybe_invitees: Some(invitees),
-    ..UpdateMeetingRequest::default()
-  }
 }
 
 /// A live meeting where `me` is the host, so guests and members with its link may wait in its
