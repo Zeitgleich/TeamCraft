@@ -42,9 +42,9 @@ either, the app says so: allow it with the icon in the address bar and try again
   says so instead of calling.
 - **Ringing:** an incoming call rings in that tab and shows a notification. Browsers play sound only
   after you clicked or typed in the tab once since it loaded.
-- **Background effects:** blur, the drawn scenes and your own and your organization's pictures,
-  picked in the call. The first effect of a session downloads the person detection (about 2 MB)
-  once; the photo scenes are only in the apps.
+- **Background effects:** blur, the photo and drawn scenes and your own and your organization's
+  pictures, picked in the call. The first effect of a session downloads the person detection (about
+  2 MB) once, and a photo scene its picture (at most 0.4 MB) when you pick it.
 - **Not in the browser yet:** sharing your computer's sound with the screen.
 - **Older browsers** without WebTransport can't call; the call buttons explain this.
 - **Networks that block UDP** (some companies, hotels and guest networks): the call still connects,

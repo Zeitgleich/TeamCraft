@@ -9,8 +9,8 @@
 # and the signed-in app's, #334): the worker fetches those when needed or after a member's page
 # loaded instead of on install, so a guest's meeting page doesn't download the signed-in app.
 # `on_demand` (also in `lazy`) lists the background effects' segmentation (#439: the worker's
-# script and module, the model): fetched only when someone turns an effect on, never in the
-# background. Both are outside the signature (older workers verify {version, files} only, and
+# script and module, the model) and the photo backgrounds' full pictures: fetched only when someone
+# turns an effect on or picks the photo, never in the background. Both are outside the signature (older workers verify {version, files} only, and
 # fetch `on_demand` files like lazy ones); every file is checked against its hash.
 # Run it on the machine that holds the release key, not on the server that serves the files.
 # Needs openssl 3, python3 and sha256sum (or shasum on macOS).
@@ -51,9 +51,13 @@ signature = subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", k
 os.unlink(handle.name)
 entry_points = "".join(open(os.path.join(dist, name), encoding="utf-8").read() for name in ("index.html", "sw.js"))
 # The segmentation worker's script and the model (#439) are named in index.html, but only the call
-# module loads them, when the first background effect starts.
+# module loads them, when the first background effect starts; a photo background's picture
+# (add-background-photos.sh) when the photo is picked. The picker's thumbnails stay as they are.
 on_demand_prefixes = ("teamcraft-segmentation-worker-", "teamcraft-web-segmentation-")
-on_demand = sorted(path for path in files if path.endswith(".onnx") or path.startswith(on_demand_prefixes))
+def is_photo(path):
+    return path.startswith("backgrounds/") and path.count("/") == 1 and path.endswith(".jpg")
+on_demand = sorted(path for path in files
+                   if path.endswith(".onnx") or path.startswith(on_demand_prefixes) or is_photo(path))
 lazy = sorted(set(on_demand) | {path for path in files if path.endswith(".wasm") and path not in entry_points})
 manifest = {
     "version": version,

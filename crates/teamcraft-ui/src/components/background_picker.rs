@@ -58,7 +58,7 @@ pub fn BackgroundPicker(
   let own = Memo::new(move |_| state.read(|backend| backend.background_images()));
   let error = RwSignal::new(None::<String>);
   let file_input = NodeRef::<leptos::html::Input>::new();
-  // The browser offers no photos (their full pictures are only in the apps, #439).
+  // A browser without the effects' graphics offers none (#439).
   let offer = untrack(|| state.read(|backend| backend.effects_offer()));
   let options = Memo::new(move |_| effect_options(&own.get(), offer));
   let is_expanded = RwSignal::new(false);
@@ -414,28 +414,21 @@ mod tests {
     }
   }
 
-  /// #439: the browser has no photos; the compact picker then shows none, blur and the rest.
+  /// #439: a browser that runs the effects offers what the apps do, photos included; one that
+  /// can't offers nothing but no effect.
   #[test]
-  fn the_browser_picker_leaves_the_photos_out() {
-    let options = effect_options(&[image(3)], EffectsOffer::InCall);
-    assert!(!options.iter().any(|option| option.group() == EffectGroup::Photos));
-    assert!(options.contains(&BackgroundEffect::BlurStrong));
-    assert!(options.contains(&BackgroundEffect::Preset(BackgroundPreset::Forest)));
+  fn the_browser_picker_offers_what_the_apps_do() {
+    let own = [image(3)];
+    let options = effect_options(&own, EffectsOffer::InCall);
+    assert_eq!(options, effect_options(&own, EffectsOffer::Full));
+    assert!(options.contains(&BackgroundEffect::Preset(BackgroundPreset::LivingRoom)));
     assert_eq!(
       options.last(),
       Some(&BackgroundEffect::Custom("3".parse().unwrap()))
     );
     assert_eq!(
-      picker_items(&options).first(),
-      Some(&PickerItem::Tile(BackgroundEffect::None))
-    );
-    assert_eq!(
-      compact_options(&options, BackgroundEffect::None),
-      vec![
-        BackgroundEffect::None,
-        BackgroundEffect::BlurLight,
-        BackgroundEffect::BlurStrong
-      ]
+      effect_options(&own, EffectsOffer::Unavailable),
+      vec![BackgroundEffect::None]
     );
   }
 
