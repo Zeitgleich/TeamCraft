@@ -137,8 +137,8 @@ pub fn SendLaterItems(
       </button>
       <Show when=move || is_custom_open.get() && is_ready.get() fallback=|| ()>
         <div id=FORM_ID class="send-later-custom">
+          <label class="send-later-label" for=TIME_FIELD>{move || i18n.t("schedule-custom-label")}</label>
           <div class="field-row menu-custom-until">
-            <label class="visually-hidden" for=TIME_FIELD>{move || i18n.t("schedule-custom-label")}</label>
             <input
               id=TIME_FIELD
               class="input grow"
@@ -346,6 +346,7 @@ fn ScheduledEditor(
       (found, chosen)
     }
   };
+  let saving = PendingAction::new();
   let save = {
     let (validate, form_id) = (validate.clone(), form_id.clone());
     move |_| {
@@ -353,8 +354,11 @@ fn ScheduledEditor(
       match chosen.filter(|_| found.is_empty()) {
         Some(due_at) => {
           let body = text.get_untracked();
-          state.write(|backend| backend.update_scheduled(id, &body, due_at));
-          on_close.run(());
+          // Stays open if the core refused it, with the input.
+          saving.run_and_then(
+            || state.write(|backend| backend.update_scheduled(id, &body, due_at)),
+            move || on_close.run(()),
+          );
         },
         None => errors.refuse(form_id.clone(), found),
       }
@@ -397,9 +401,9 @@ fn ScheduledEditor(
       />
       <FieldError errors=errors field=time_field.clone() />
       <div class="saved-actions">
-        <button type="button" class="btn btn-small btn-primary" on:click=save>
+        <PendingButton pending=saving class="btn btn-small btn-primary" on_click=save>
           {move || i18n.t("scheduled-save")}
-        </button>
+        </PendingButton>
         <button type="button" class="btn btn-small btn-quiet" on:click=move |_| on_close.run(())>
           {move || i18n.t("cancel")}
         </button>

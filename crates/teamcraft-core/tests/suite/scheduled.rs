@@ -381,7 +381,13 @@ mod held_back {
       .run_ui_command(CoreCommand::ScheduleMessage { message, due_at_ms })
       .await;
     assert!(outcome.is_err());
-    assert!(world.phone.client.account_data().scheduled_messages().is_empty());
+    let data = world.phone.client.account_data();
+    assert!(data.scheduled_messages().is_empty());
+    assert_eq!(
+      data.draft(world.channel, None),
+      Some("Nope"),
+      "the text isn't lost"
+    );
   }
 
   fn pending(world: &World) -> PendingWork {

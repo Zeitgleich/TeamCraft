@@ -83,6 +83,10 @@ key bag read and its upload. The other device sent the older text, and the edit,
 the entry back; when it comes due, the server's deduplication drops it and the entry ends. Nothing is
 sent twice, but that edit was too late. Devices of one user rarely do this within seconds of the time.
 
+An app from before this field drops it when it uploads the key bag, like the other newer fields of
+§6.4, and the next newer device puts its entries back. With such an app in the mix a cancel can be lost
+in that gap. The deduplication still holds: at worst a cancelled message goes out, once.
+
 ## Time
 
 Every time is server time. The server's clock comes with each key bag answer and is kept as an offset

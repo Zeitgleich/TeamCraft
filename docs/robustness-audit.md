@@ -626,3 +626,12 @@ session (the core has no call-state API yet).
   unreadable stores, convergent edits (e2ee.md §9.5). Linking keeps the received keys across a
   restart (#168, e2ee.md §5); a setup given up on drops its device key pair and revokes its device,
   and the receipt is awaited beside the core loop (#415, e2ee.md §3.2, §5).
+
+### B16 Scheduled messages depend on the sender's devices – medium, by design (#203)
+
+- **Scope:** a scheduled message goes out only when a device of the sender is online at or after its
+  time (docs/scheduled-messages.md). Closed mobile apps try through WorkManager and `BGProcessingTask`,
+  which the OS may defer or skip. Known gaps: an edit in the seconds around the time can come too late;
+  an app from before the feature can drop a cancel from the key bag.
+- **Status:** accepted and shown to the user: every waiting message says where it stands, and one that
+  is too late waits for its owner instead of going out unseen.

@@ -517,6 +517,12 @@
   margin-top: var(--space-2);
 }
 
+.send-later-label {
+  display: block;
+  padding: 4px 14px 0 36px;
+  font-size: var(--text-xs);
+}
+
 .send-later-hint {
   margin: 0;
   padding: 0 14px 4px;

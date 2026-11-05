@@ -5,7 +5,7 @@
 
 use teamcraft_client_api::actions::{MessagePriority, OutgoingMessage};
 use teamcraft_client_api::scheduled::{ScheduleCheck, ScheduleRefusal, ScheduledStatus, status_of};
-use teamcraft_proto::{ClientMessageId, ScheduledMessagePolicy};
+use teamcraft_proto::{ClientMessageId, ConversationId, ScheduledMessagePolicy};
 
 use super::Client;
 use crate::account_data::ScheduledEntry;
@@ -55,7 +55,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .maybe_client_message_id
       .unwrap_or_else(records::new_client_message_id);
     let is_new = self.account_data().scheduled_message(id).is_none();
-    self.check_schedule(&message.body, due_at_ms, is_new)?;
+    if let Err(refused) = self.check_schedule(&message.body, due_at_ms, is_new) {
+      // The composer was emptied when it handed the text over: it comes back as the draft.
+      self.update_account_data(|data, now| {
+        data.set_draft(message.conversation, message.maybe_thread, &message.body, now)
+      })?;
+      return Err(refused);
+    }
     let entry = ScheduledEntry {
       client_message_id: id,
       conversation_id: message.conversation,
@@ -104,6 +110,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Some(entry) = self.account_data().scheduled_message(id).cloned() else {
       return Ok(());
     };
+    if !is_known_conversation(&self.store, entry.conversation_id)? {
+      return Ok(());
+    }
     self.enqueue_scheduled(std::slice::from_ref(&entry))?;
     self.flush_outbox().await.map(|_| ())
   }
@@ -154,7 +163,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // What the backend queued is what the upkeep's flush does next.
     drop(backend.drain_commands());
     drop(backend);
-    let sent: Vec<ClientMessageId> = entries.iter().map(|entry| entry.client_message_id).collect();
+    // Writing to the store can fail, and sending logs that and goes on: what isn't there stays waiting,
+    // or its text would be gone.
+    let mut sent: Vec<ClientMessageId> = Vec::with_capacity(entries.len());
+    for entry in entries {
+      if self
+        .store
+        .message(entry.conversation_id, entry.client_message_id)?
+        .is_some()
+      {
+        sent.push(entry.client_message_id);
+      }
+    }
     self.update_account_data(|data, now| {
       let mut is_changed = false;
       for id in &sent {
@@ -199,14 +219,20 @@ pub(crate) fn due_entries(
   let policy = workspace_policy(store)?;
   let mut due = Vec::new();
   for entry in waiting.into_iter().take_while(|entry| entry.due_at_ms <= now) {
-    let is_known = store
-      .get(Table::Conversations, &entry.conversation_id.to_string())?
-      .is_some();
+    let is_known = is_known_conversation(store, entry.conversation_id)?;
     if status_of(entry.due_at_ms, now, &policy, is_known) == ScheduledStatus::Due {
       due.push(entry.clone());
     }
   }
   Ok(due)
+}
+
+fn is_known_conversation(store: &impl LocalStore, conversation: ConversationId) -> Result<bool, CoreError> {
+  Ok(
+    store
+      .get(Table::Conversations, &conversation.to_string())?
+      .is_some(),
+  )
 }
 
 fn workspace_policy(store: &impl LocalStore) -> Result<ScheduledMessagePolicy, CoreError> {
