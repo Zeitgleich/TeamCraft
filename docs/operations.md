@@ -312,10 +312,19 @@ the server itself is down.
   - Bounds, each with a setting: `TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS` (in a call, default 1024),
     `TEAMCRAFT_SFU_FALLBACK_MAX_UNJOINED_CONNECTIONS` (not yet in a call, default 128),
     `TEAMCRAFT_SFU_FALLBACK_HANDSHAKE_TIMEOUT_MILLIS` (the upgrade, default 3000),
+    `TEAMCRAFT_SFU_FALLBACK_FIRST_FRAME_TIMEOUT_MILLIS` (the `join` of a connection that showed no
+    join token in the upgrade, default 3000),
     `TEAMCRAFT_SFU_FALLBACK_QUEUE_BYTES` (per connection, default 1 MiB, so at most about 1 GiB in all
     with every connection full), `TEAMCRAFT_SFU_FALLBACK_QUEUE_MAX_AGE_MILLIS` (default 300) and
     `TEAMCRAFT_SFU_FALLBACK_SEND_BUFFER_BYTES` (default 128 KiB). `teamcraft_sfu_fallback_connections`
     in the metrics shows how many use it.
+  - Clients send their join token with the upgrade too (`Sec-WebSocket-Protocol`, #1297), and the
+    SFU checks it before upgrading: a client with a valid one doesn't hold the slots anybody can
+    open. **Update the SFU before or with the server and the apps**: a client that offers the header to an
+    SFU from before can't open the fallback (QUIC is not affected). Once no client from before #1297
+    is left, `TEAMCRAFT_SFU_FALLBACK_REQUIRE_UPGRADE_TOKEN=1` refuses upgrades without a token, so
+    someone with many addresses can hold an unjoined slot only for the upgrade. The proxy must pass
+    `Sec-WebSocket-Protocol` through (nginx and Caddy do) and shouldn't log it.
   - **Descriptors:** the SFU warns at start when `RLIMIT_NOFILE` is below those two connection limits
     plus a margin. Raise it (`LimitNOFILE=` in systemd, `--ulimit nofile=` in Docker) or lower the
     limits: running out would also hurt QUIC calls through the roster reports and the health endpoint.

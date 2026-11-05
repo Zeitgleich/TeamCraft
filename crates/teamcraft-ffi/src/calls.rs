@@ -1123,8 +1123,8 @@ fn native_config(
   // A development SFU's self-signed certificates; rejoins use their fresh token's.
   config.certificate_hashes = ticket.certificate_hashes;
   config.maybe_fallback_url = ticket.maybe_fallback_url;
-  config.maybe_fallback_opener = Some(fallback_opener(|url| async move {
-    let socket = teamcraft_core::api::open_call_socket(&url)
+  config.maybe_fallback_opener = Some(fallback_opener(|url, protocols| async move {
+    let socket = teamcraft_core::api::open_call_socket(&url, &protocols)
       .await
       .map_err(|error| error.to_string())?;
     Ok(FallbackSocket::new(socket))

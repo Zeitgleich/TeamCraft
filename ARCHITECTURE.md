@@ -773,13 +773,20 @@ reverse proxy as the gateway. Setup and what an existing deployment has to chang
   #1195) is checked by the server's REST API when it issues the join token, which is short-lived and
   names the call and the device; gateway and rendezvous relay check their proofs because they take
   the sign-in token itself in their first frame. The join token never travels in a URL.
+- **The token in the upgrade, too** (#1297): clients offer `Sec-WebSocket-Protocol: teamcraft-call,
+  teamcraft-join.<token as base64url>` (the one header a browser's `WebSocket` can set), the SFU
+  verifies the token before it upgrades and answers with `teamcraft-call` alone, so the token isn't
+  echoed. An invalid token gets `401` and no upgrade; the `join` that follows has to carry the same
+  token, and goes through `admit` as before. Clients from before #1297 send no header and are still
+  let in, under a shorter limit (below).
 - **Choosing the path** (`call_resilience::connect_preferring_quic`): QUIC starts first. Only if it
   hasn't connected after `ResilienceConfig::fallback_after` (3 s) or failed does the fallback start
   next to it, and whichever connects first wins; nothing is sent before that. So a network where
   QUIC works never opens a socket and joins as fast as before, and a slow QUIC isn't punished. The
   choice lasts one call. A rejoin within a call that is on the fallback starts both at once; a new
   call always tries QUIC first. A call on the fallback doesn't move back to QUIC by itself until it
-  rejoins for another reason.
+  rejoins for another reason. Moving it over when UDP works again needs a switch without a rejoin
+  (a rejoin re-keys DAVE and counts against the join pace); its design is in #1309.
 - **Head-of-line blocking** (`fallback_queue::MediaQueue`): a lost TCP segment holds up all that
   follows. In front of each socket, on the SFU and in the native clients, a queue bounded in bytes
   (1 MiB) and age (300 ms) drops the oldest video first and audio last; audio overtakes video. A
@@ -795,11 +802,18 @@ reverse proxy as the gateway. Setup and what an existing deployment has to chang
   target (`call_fallback_frame`).
 - **Before the join**, anybody can connect, so those connections get limits that can't touch anything
   else: a cap of their own (128), 3 s for the upgrade, 16 per address (an IPv6 /64 counts as one)
-  in a limiter apart from QUIC's. `X-Forwarded-For` counts only from the listed trusted proxies. A
+  in a limiter apart from QUIC's. A connection whose upgrade showed a valid token leaves these at
+  once: it takes its place among the connections in a call and counts against its device (2 unjoined
+  per device), with the join timeout for its `join`. One without a token has 3 s for its `join`
+  (`TEAMCRAFT_SFU_FALLBACK_FIRST_FRAME_TIMEOUT_MILLIS`) instead of the join timeout. `X-Forwarded-For` counts only from the listed trusted proxies. A
   flood costs new fallback joins while it lasts, not a running call or a QUIC session. A client
   turned away after the upgrade counts that as a failed attempt: it retries with backoff and jitter
   until the grace period ends, so a full SFU isn't hammered and the call doesn't end. Someone with
-  many addresses can still fill the 128 (each holds its place at most 3 s plus the join timeout).
+  many addresses but no token can still fill the 128, each for at most 3 s of upgrade plus 3 s to
+  the `join`; with `TEAMCRAFT_SFU_FALLBACK_REQUIRE_UPGRADE_TOKEN=1` (once every client sends the
+  header) for the 3 s of the upgrade alone. That still blocks new fallback joins while it lasts, not
+  a running call or a QUIC session: what is left is a slow-request flood on the HTTP upgrade, which
+  the reverse proxy in front is the place to limit.
 - **Rejoin loops re-key.** A member with a valid token who connects, joins and drops in a loop would
   make the group re-key each time, on QUIC as here. The SFU paces joins per call and device in one
   place for both transports (`server::admit`, `rejoin.rs`; e2ee.md §8, "Joining too often"), and
