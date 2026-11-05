@@ -29,16 +29,21 @@ struct ScheduledMessagesView: View {
       }
     }
     .confirmationDialog(
-      Text(maybeCancelling?.isRemoved == true ? "scheduled_dismiss_question" : "scheduled_cancel_question"),
+      Text(maybeCancelling?.isRemoved == true ? LocalizedStringKey("scheduled_dismiss_question") : LocalizedStringKey("scheduled_cancel_question")),
       isPresented: Binding(get: { maybeCancelling != nil }, set: { if !$0 { maybeCancelling = nil } }),
       titleVisibility: .visible,
       presenting: maybeCancelling
     ) { message in
-      Button(message.isRemoved ? "scheduled_dismiss_confirm" : "scheduled_cancel_confirm", role: .destructive) {
+      Button(message.isRemoved ? LocalizedStringKey("scheduled_dismiss_confirm") : LocalizedStringKey("scheduled_cancel_confirm"), role: .destructive) {
         Task { await model.perform(.cancelScheduled(id: message.id)) }
       }
       Button("scheduled_keep", role: .cancel) {}
     }
+  }
+
+  /// A message the server removed only goes from this device: "remove", not "cancel".
+  private func cancelKey(_ message: ScheduledMessage) -> LocalizedStringKey {
+    message.isRemoved ? "scheduled_dismiss" : "scheduled_cancel"
   }
 
   private func row(_ message: ScheduledMessage) -> some View {
@@ -64,7 +69,7 @@ struct ScheduledMessagesView: View {
         .textSelection(.enabled)
     }
     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-      Button(message.isRemoved ? "scheduled_dismiss" : "scheduled_cancel", role: .destructive) { maybeCancelling = message }
+      Button(cancelKey(message), role: .destructive) { maybeCancelling = message }
     }
     .contextMenu {
       if message.canGoOut {
@@ -75,7 +80,7 @@ struct ScheduledMessagesView: View {
       if message.canEdit {
         Button("scheduled_edit", systemImage: "pencil") { maybeEditing = message }
       }
-      Button(message.isRemoved ? "scheduled_dismiss" : "scheduled_cancel", systemImage: "trash", role: .destructive) {
+      Button(cancelKey(message), systemImage: "trash", role: .destructive) {
         maybeCancelling = message
       }
     }

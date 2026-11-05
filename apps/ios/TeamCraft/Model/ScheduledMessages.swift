@@ -18,7 +18,7 @@ struct ScheduledMessage: Decodable, Equatable, Identifiable, Sendable {
   let dueAt: Int64
   let status: ScheduledStatus
   /// When the server removes a hold nothing can solve any more.
-  let maybeRemovesAt: Int64?
+  var maybeRemovesAt: Int64? = nil
 
   /// Gone from the server: only the text is left on the device, until the user removes it.
   var isRemoved: Bool { status == .removedByServer }
