@@ -215,6 +215,9 @@ pub struct ConversationItem {
   /// Delete the channel for everybody (`delete_channel`); never in DMs.
   #[uniffi(default = false)]
   pub can_delete_channel: bool,
+  /// Read-only, and out of the lists by default (issue #212); Browse finds it.
+  #[uniffi(default = false)]
+  pub is_archived: bool,
   /// The other person in a one-to-one DM, so the list can show their profile picture.
   #[uniffi(default = None)]
   pub maybe_peer_id: Option<String>,
@@ -222,9 +225,6 @@ pub struct ConversationItem {
   /// the DM's participants; its `name` is empty, the apps name it in the user's language.
   #[uniffi(default = false)]
   pub is_notes_to_self: bool,
-  /// Read-only, and out of the lists by default (issue #212); Browse finds it.
-  #[uniffi(default = false)]
-  pub is_archived: bool,
   /// When the newest top-level message was sent; filled only where the order needs it
   /// ([`share_targets`]), `None` elsewhere and for conversations without messages.
   #[uniffi(default = None)]
@@ -675,10 +675,10 @@ impl ConversationItem {
       is_favorite: conversation.is_favorite,
       is_muted: conversation.is_muted,
       can_post: conversation.can_post,
+      is_archived: conversation.is_archived,
       maybe_peer_presence: maybe_peer.as_ref().and_then(|peer| peer.maybe_presence),
       maybe_peer_id: maybe_peer.map(|peer| peer.id.to_string()),
       is_notes_to_self: conversation.is_notes_to_self,
-      is_archived: conversation.is_archived,
       maybe_last_activity_ms: None,
     }
   }
