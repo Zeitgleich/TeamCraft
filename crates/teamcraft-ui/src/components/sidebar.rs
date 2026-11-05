@@ -7,7 +7,7 @@ use wasm_bindgen::JsCast;
 
 use crate::channel_access::{can_create_channel_in, can_invite_to, is_guest};
 use crate::components::avatar::PresenceDot;
-use crate::components::channel_glyph::ChannelGlyph;
+use crate::components::channel_glyph::{ChannelGlyph, channel_fallback_icon};
 use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::entry_menu::EntryMenuTrigger;
 use crate::components::icons::{Icon, IconName};
@@ -888,16 +888,11 @@ pub fn SidebarItem(#[prop(into)] conversation: Signal<Conversation>) -> impl Int
   });
 
   let leading = match kind {
-    ConversationKind::Public | ConversationKind::Private => {
-      let fallback = if kind == ConversationKind::Public {
-        IconName::Hash
-      } else {
-        IconName::Lock
-      };
+    ConversationKind::Public | ConversationKind::Private | ConversationKind::Integration => {
+      let fallback = channel_fallback_icon(kind).unwrap_or(IconName::Hash);
       let version = Memo::new(move |_| conversation.with(|conv| conv.maybe_image_version.clone()));
       view! { <ChannelGlyph conversation=id maybe_version=version fallback=fallback /> }.into_any()
     },
-    ConversationKind::Integration => view! { <Icon name=IconName::Terminal /> }.into_any(),
     ConversationKind::Group => view! { <Icon name=IconName::Users /> }.into_any(),
     ConversationKind::Direct => {
       // Presence arrives later than the row is built, so it is read reactively.

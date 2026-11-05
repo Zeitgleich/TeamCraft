@@ -5,7 +5,7 @@ use crate::auth::tauri;
 use crate::brand::Brand;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::brand_logo::BrandLogo;
-use crate::components::channel_glyph::ChannelGlyph;
+use crate::components::channel_glyph::{ChannelGlyph, channel_fallback_icon};
 use crate::components::icons::{Icon, IconName};
 use crate::components::window_controls::{ClickOrDrag, window_drag_handler};
 use crate::history::{Travel, travel};
@@ -226,13 +226,8 @@ fn ScopeGlyph(state: AppState, conversation: Conversation) -> impl IntoView {
       }
     },
     ConversationKind::Group => view! { <Icon name=IconName::Users /> }.into_any(),
-    ConversationKind::Integration => view! { <Icon name=IconName::Terminal /> }.into_any(),
-    ConversationKind::Public | ConversationKind::Private => {
-      let fallback = if conversation.kind == ConversationKind::Public {
-        IconName::Hash
-      } else {
-        IconName::Lock
-      };
+    ConversationKind::Public | ConversationKind::Private | ConversationKind::Integration => {
+      let fallback = channel_fallback_icon(conversation.kind).unwrap_or(IconName::Hash);
       view! {
         <ChannelGlyph conversation=conversation.id maybe_version=conversation.maybe_image_version.clone() fallback=fallback />
       }
