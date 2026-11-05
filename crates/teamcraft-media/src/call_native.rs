@@ -1028,6 +1028,10 @@ struct SwitchBack {
   /// The QUIC link the SFU moved the session to, while the fallback still brings what was queued
   /// for it; and since when.
   maybe_moving: Option<(Link, Instant)>,
+  /// The last try's link whose answer didn't come in time: the SFU may have moved the session to it
+  /// all the same, which the fallback's close would tell. Kept open until the next try, or until a
+  /// rejoin is back in the call.
+  maybe_unanswered: Option<Link>,
   /// The SFU doesn't know `switch` (it is from before #1309): no more tries in this call.
   is_unsupported: bool,
 }
@@ -1194,7 +1198,7 @@ impl CallConnection {
     link.stop_reading();
     self.lost_links.push(link);
     // A link the session may have moved to is the SFU's slot as well: kept open, as lost ones are.
-    if let Some(moving) = self.switch.stop() {
+    for moving in self.switch.stop() {
       moving.stop_reading();
       self.lost_links.push(moving);
     }
@@ -1397,6 +1401,8 @@ impl CallConnection {
       return;
     };
     debug!("trying QUIC again");
+    // A minute or more ago: had the SFU moved the session to it, the fallback would have closed.
+    self.switch.maybe_unanswered = None;
     let hashes = accepted_hashes(self.maybe_pinned_hash, &self.ticket.certificate_hashes);
     let sfu_url = self.ticket.sfu_url.clone();
     let resilience = self.resilience;
@@ -1462,6 +1468,9 @@ impl CallConnection {
     self.monitor = PathMonitor::new(now);
     self.route = RouteWatch::new();
     self.switch.maybe_schedule = None;
+    if let Some(unanswered) = self.switch.maybe_unanswered.take() {
+      unanswered.close_as_leave();
+    }
     engine.moved_to_another_path();
     info!("the call moved to QUIC");
     Some(early)
@@ -1480,7 +1489,7 @@ impl CallConnection {
         debug!("no answer to the switch in time");
         // If the SFU moved the session after all, it is its slot: kept open, as lost links are.
         link.stop_reading();
-        self.lost_links.push(*link);
+        self.switch.maybe_unanswered = Some(*link);
       },
       error @ (SwitchError::Connect(_) | SwitchError::Refused(_)) => debug!(%error, "QUIC try failed"),
     }
@@ -1494,13 +1503,8 @@ impl CallConnection {
     if let Some(attempt) = self.maybe_attempt {
       attempt.abort();
     }
-    let maybe_moving = self.switch.stop();
-    for link in self
-      .maybe_link
-      .into_iter()
-      .chain(maybe_moving)
-      .chain(self.lost_links)
-    {
+    let moving = self.switch.stop();
+    for link in self.maybe_link.into_iter().chain(moving).chain(self.lost_links) {
       link.stop_reading();
       link.close_as_leave();
     }
@@ -1527,14 +1531,18 @@ impl SwitchBack {
     }
   }
 
-  /// Stops trying (the link is gone, or the call ends); returns the link the session was moving
-  /// to, if it was. Whether the SFU can move sessions at all stays known.
-  fn stop(&mut self) -> Option<Link> {
+  /// Stops trying (the link is gone, or the call ends); returns the links the session may have
+  /// moved to. Whether the SFU can move sessions at all stays known.
+  fn stop(&mut self) -> Vec<Link> {
     if let Some(running) = self.maybe_try.take() {
       running.abort();
     }
     self.maybe_schedule = None;
-    self.maybe_moving.take().map(|(link, _)| link)
+    let maybe_moving = self.maybe_moving.take().map(|(link, _)| link);
+    maybe_moving
+      .into_iter()
+      .chain(self.maybe_unanswered.take())
+      .collect()
   }
 }
 
@@ -2964,6 +2972,16 @@ mod tests {
     for code in [0, 0x4801, 0x4802, 0x4804] {
       assert_eq!(application_close_end(code), LinkEnd::Closed, "{code:#x}");
     }
+  }
+
+  /// The SFU moved the session to another connection (#1309): neither the end of the call nor a
+  /// loss, on QUIC and on the fallback alike (whose close frame carries the same code).
+  #[test]
+  fn a_moved_session_closes_its_old_connection_with_its_own_code() {
+    assert_eq!(
+      application_close_end(u64::from(SFU_SWITCHED_CLOSE_CODE)),
+      LinkEnd::Switched
+    );
   }
 
   #[test]

@@ -3,7 +3,8 @@
 //! The client opens a WebTransport session to the SFU, opens one bidirectional stream and sends
 //! [`CallClientMessage::Join`] with a join token from `teamcraft-server`. Messages on that stream
 //! are framed as a 4-byte big-endian length followed by one JSON message. Every
-//! [`CallServerMessage::Event`] carries a sequence number that increases by one per connection.
+//! [`CallServerMessage::Event`] carries a sequence number that increases by one per session (a
+//! connection, and the one it moves to, below).
 //! A QUIC connection survives a change of the client's address (connection migration). If it is
 //! lost anyway, the SFU keeps the device's slot for a grace period ([`CallEvent::Joined`] says how
 //! long) and tells the others it is reconnecting; the client joins again with a fresh token on a

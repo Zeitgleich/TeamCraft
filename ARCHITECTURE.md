@@ -792,9 +792,30 @@ reverse proxy as the gateway. Setup and what an existing deployment has to chang
   next to it, and whichever connects first wins; nothing is sent before that. So a network where
   QUIC works never opens a socket and joins as fast as before, and a slow QUIC isn't punished. The
   choice lasts one call. A rejoin within a call that is on the fallback starts both at once; a new
-  call always tries QUIC first. A call on the fallback doesn't move back to QUIC by itself until it
-  rejoins for another reason. Moving it over when UDP works again needs a switch without a rejoin
-  (a rejoin re-keys DAVE and counts against the join pace); its design is in #1309.
+  call always tries QUIC first.
+- **Back to QUIC** (#1309): a network that blocks UDP now may not later (the VPN went away), and a
+  call on the fallback moves back without a rejoin, which would re-key DAVE twice and count against
+  the join pace. Every `joined` carries a random secret of its session (`switch_secret`, 32 bytes),
+  which goes out only over that session's own connection. While on the fallback and in the call,
+  native clients try QUIC about every 60 s (±20 %, doubling up to 5 min after failed tries,
+  `ResilienceConfig::quic_retry_interval`). A QUIC connection that opens sends `switch` with the
+  secret instead of `join`. It goes through the same pre-join limits and timeout as a join, but its
+  token isn't checked again and it takes no turn of the join pace; the SFU finds the session by the
+  secret's first 8 bytes and compares the whole secret in constant time (`sfu/src/switch.rs`), and
+  a secret works once and only while its session runs. `Room::switch_link` then swaps the
+  participant's connection: slot, tracks, subscriptions and DAVE leaf stay, nobody hears of it, and
+  the old connection's end is no leave and no loss any more. The session's signaling queue and its
+  event numbering move along (`signaling::SignalQueue`): the old connection sends what was queued
+  before the move, closes with `SFU_SWITCHED_CLOSE_CODE`, and hands the queue to the new one, which
+  numbers on. The SFU answers `switched` (not an event) first on the new connection, and reads the
+  old one up to 5 s more for what the client sent before it knew. The client sends everything on
+  QUIC from `switched` on, reads the fallback up to its close and only then the new connection, so
+  the engine's event sequence has no gap; then it closes the fallback, its jitter buffers go back to
+  QUIC's, and the uplink is measured afresh. No `switched` within 2 s, a refusal, or an SFU from
+  before (it answers anything but `join` with "expected join", after which the client stops trying
+  for the call) leave the call on the fallback. A fallback that breaks before its close is a loss
+  as any other, and the call rejoins. Moving from QUIC to the fallback without a rejoin is not done:
+  a broken QUIC path rejoins. The web client doesn't switch yet (#1338).
 - **Head-of-line blocking** (`fallback_queue::MediaQueue`): a lost TCP segment holds up all that
   follows. In front of each socket, on the SFU and in the native clients, a queue bounded in bytes
   (1 MiB) and age (300 ms) drops the oldest video first and audio last; audio overtakes video. A

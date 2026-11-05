@@ -4038,6 +4038,17 @@ costs nobody a re-key. A lost session's wait through the grace period ends as so
 back on a newer one, so a looping device leaves at most one waiting behind. That bounds what one
 looping device costs the call to about two commits per 10 s.
 
+**Moving to another connection is no join** (#1309). A call on the WebSocket fallback moves back to
+QUIC with `switch` instead of `join` (ARCHITECTURE.md §6.6): the session keeps its slot and its
+leaf, so the group doesn't re-key and the move takes no turn of the join pace. What lets a
+connection take a session over is a random 32-byte secret of that session, sent only in its own
+`joined` over its own TLS connection, compared in constant time, good once and only while the
+session runs. It proves the new connection belongs to the client of the old one; it is no key, and
+nothing of DAVE or the call key bindings changes. Somebody who could read the old connection (a
+TLS-intercepting middlebox, as above) could take the session's place with it, the same as with the
+join token on that path: signaling and RTP headers, not media, which stays bound to the device's
+DAVE key.
+
 What a legitimately flapping client gets: its own pace first. A client that loses the call within
 30 s of rejoining waits before the next rejoin, 1 s and doubling up to 10 s (with up to half of it
 again as jitter, never less), which keeps it below the SFU's pace; a stable stretch resets it. If
