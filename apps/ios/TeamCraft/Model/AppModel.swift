@@ -181,6 +181,7 @@ final class AppModel {
   /// Admins' requests to join channels the user owns, oldest first (issue #799); read on every
   /// change (`AppModel+JoinRequests`).
   var joinRequests: [JoinRequestItem] = []
+  var expiringGuests: [ExpiringGuest] = []
   /// Requests (`JoinRequests.key`) and channels (ID) whose action runs: their buttons wait.
   var pendingJoinKeys: Set<String> = []
   /// Why the last action on a request didn't go through; the screen showing it clears it.
@@ -1057,6 +1058,7 @@ final class AppModel {
     }
     Task { [weak self] in await self?.refreshLinkRequests() }
     Task { [weak self] in await self?.refreshJoinRequests() }
+    Task { [weak self] in await self?.refreshExpiringGuests() }
     Task { [weak self] in await self?.leaveIfStoreTurnedUnreadable() }
     guard maybeReconcile == nil else { return }
     maybeReconcile = Task { [weak self] in
@@ -1220,6 +1222,18 @@ final class AppModel {
   func browseSnapshot() async -> BrowseSnapshot? {
     guard let json = try? await core().snapshot() else { return nil }
     return Wire.decode(BrowseSnapshot.self, from: json)
+  }
+
+  /// Reads the stored list (cheap: called on every change the core reports). A failed read keeps
+  /// what is shown; the next change reads again.
+  func refreshExpiringGuests() async {
+    guard case .ready = phase else {
+      if !expiringGuests.isEmpty { expiringGuests = [] }
+      return
+    }
+    if let guests = await answer(.expiringGuests)?.guests, guests != expiringGuests {
+      expiringGuests = guests
+    }
   }
 
   func browseChannels(spaceId: String) async -> [BrowsableChannel] {

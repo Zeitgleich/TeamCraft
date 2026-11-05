@@ -264,3 +264,17 @@ app-link-open-browser = Open in browser
 open-in-app = Open in the app
 tray-custom-status = Set a custom status…
 tray-new-message = New message…
+
+guest-notice-self = Your guest access to { $space } ends on { $date }. Ask the person who invited you to extend it.
+guest-notice-others = { $count ->
+    [one] The access of one guest ends soon.
+   *[other] The access of { $count } guests ends soon.
+}
+guest-notice-show = Show
+guest-notice-hide = Hide
+guest-notice-row = { $name } in { $space }, until { $date }
+guest-notice-extend = { $count ->
+    [one] { $count } more day
+   *[other] { $count } more days
+}
+guest-notice-extend-until = Until { $date }

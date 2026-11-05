@@ -211,6 +211,22 @@ mod lifecycle {
       .await;
     assert_eq!(history.body["messages"][0]["sender_user_id"], bot.as_str());
 
+    // An archived channel refuses a bot as it refuses everybody, with a status that says so.
+    let path = format!("/conversations/{channel}");
+    let reply = app.patch(&alice, &path, json!({"is_archived": true})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let (status, refusal) = call_with_token(
+      &app,
+      &token,
+      Method::POST,
+      &format!("{path}/messages"),
+      Some(message_body(2, device["id"].as_str().unwrap())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
+    let reply = app.patch(&alice, &path, json!({"is_archived": false})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+
     // Anywhere else the bot sees nothing.
     let other = create_channel(&app, &alice, &space, "private", "private").await;
     let hidden = call_with_token(

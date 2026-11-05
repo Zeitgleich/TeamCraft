@@ -280,6 +280,12 @@ wire_enum! {
   }
 }
 
+/// Days before a guest's expiry that notices go out unless the policy says otherwise (issue #212).
+pub const DEFAULT_GUEST_NOTICE_DAYS: [u32; 2] = [14, 3];
+/// How far a sponsor may extend their guest unless the policy says otherwise (issue #212): room for
+/// "90 days more" from the longest default notice.
+pub const DEFAULT_SPONSOR_EXTENSION_DAYS: u32 = 120;
+
 /// Guest rules the server enforces (PLAN.md §12).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct GuestPolicy {
@@ -296,6 +302,22 @@ pub struct GuestPolicy {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_default_expiry_days: Option<u32>,
+  /// Days before a guest's expiry that the guest, their sponsor and the space's admins get a
+  /// notice; empty: none. Absent: [`DEFAULT_GUEST_NOTICE_DAYS`].
+  #[serde(
+    rename = "expiry_notice_days",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_expiry_notice_days: Option<Vec<u32>>,
+  /// How many days from now a sponsor who isn't an admin may extend their guest to; `0`: not at
+  /// all. Absent: [`DEFAULT_SPONSOR_EXTENSION_DAYS`]. Admins aren't limited.
+  #[serde(
+    rename = "sponsor_extension_days",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_sponsor_extension_days: Option<u32>,
   /// Whom a guest may start a direct message with. Absent: the older
   /// `dm_only_with_shared_conversations` decides, and without it the server file.
   #[serde(rename = "dm_start", default, skip_serializing_if = "Option::is_none")]
@@ -312,6 +334,21 @@ pub struct GuestPolicy {
 }
 
 impl GuestPolicy {
+  /// The notice lead times in force, in days.
+  pub fn effective_notice_days(&self) -> Vec<u32> {
+    self
+      .maybe_expiry_notice_days
+      .clone()
+      .unwrap_or_else(|| DEFAULT_GUEST_NOTICE_DAYS.to_vec())
+  }
+
+  /// How far a sponsor may extend their guest, in days from now.
+  pub fn effective_sponsor_extension_days(&self) -> u32 {
+    self
+      .maybe_sponsor_extension_days
+      .unwrap_or(DEFAULT_SPONSOR_EXTENSION_DAYS)
+  }
+
   /// What guests may start: the explicit setting, else the 1.0.9 flag, else the server file's
   /// default. An unknown (newer) value counts as [`GuestDmStart::Nobody`], the strictest.
   pub fn effective_dm_start(&self, server_default: GuestDmStart) -> GuestDmStart {

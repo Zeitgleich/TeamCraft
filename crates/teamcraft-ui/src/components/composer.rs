@@ -231,6 +231,9 @@ pub fn Composer(
   let conversation_name = StoredValue::new(conversation_name);
   let i18n = use_i18n();
   let state = use_app_state();
+  let is_archived = state
+    .read(|backend| backend.conversation(conversation))
+    .is_some_and(|found| found.is_archived);
   // Thread replies can also be posted to the conversation itself.
   let also_send_to_channel = RwSignal::new(false);
   // Only a channel's thread reply can also go to the channel: in a direct or group conversation
@@ -1237,7 +1240,7 @@ pub fn Composer(
       <Show
         when=move || can_post
         fallback=move || {
-          view! { <p class="composer-readonly">{move || i18n.t("composer-readonly")}</p> }
+          view! { <p class="composer-readonly">{move || i18n.t(if is_archived { "composer-archived" } else { "composer-readonly" })}</p> }
         }
       >
         <Show when=move || !attachments.with(Vec::is_empty) fallback=|| ()>

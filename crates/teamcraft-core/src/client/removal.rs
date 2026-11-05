@@ -741,7 +741,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Whether this device knows the channel as archived.
-  fn is_archived(&self, conversation: ConversationId) -> Result<bool, CoreError> {
+  pub fn is_archived(&self, conversation: ConversationId) -> Result<bool, CoreError> {
     Ok(
       self
         .cached_conversations()?

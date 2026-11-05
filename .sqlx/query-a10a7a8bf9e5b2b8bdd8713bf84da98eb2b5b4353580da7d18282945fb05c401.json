@@ -1,0 +1,73 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.space_id, m.user_id, sponsor.id AS \"sponsor_user_id?\", m.expires_at AS \"expires_at!\",\n                due.lead_days AS \"lead_days!\"\n         FROM space_members m\n         JOIN users guest ON guest.id = m.user_id AND guest.deactivated_at IS NULL AND guest.deleted_at IS NULL\n         LEFT JOIN space_members sm ON sm.space_id = m.space_id AND sm.user_id = m.sponsor_user_id\n         LEFT JOIN users sponsor ON sponsor.id = sm.user_id AND sponsor.deactivated_at IS NULL AND sponsor.deleted_at IS NULL\n         CROSS JOIN LATERAL (\n           SELECT min(lead) AS lead_days FROM unnest($2::int[]) AS lead\n           WHERE m.expires_at <= $1::timestamptz + make_interval(days => lead)\n         ) due\n         WHERE m.role = 'guest' AND m.expires_at > $1::timestamptz AND due.lead_days IS NOT NULL\n           AND (m.expiry_notice_lead_days IS NULL OR m.expiry_notice_lead_days > due.lead_days)\n         ORDER BY m.expires_at LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "space_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "space_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "sponsor_user_id?",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "expires_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "lead_days!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int4Array",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "a10a7a8bf9e5b2b8bdd8713bf84da98eb2b5b4353580da7d18282945fb05c401"
+}

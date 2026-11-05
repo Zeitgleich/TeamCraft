@@ -68,6 +68,17 @@ final class BrowseTests: XCTestCase {
     XCTAssertEqual(decoded.spaces?.map(\.offersChannelCreation), [false, true])
   }
 
+  func testGuestNoticesDecodeTheServersOffers() throws {
+    let json = #"""
+      {"answer":"expiring_guests","guests":[{"space_id":"1","space_name":"Project A",
+       "user":{"id":"2","display_name":"Guest","kind":"guest"},"expires_at":1000,"is_own":false,
+       "extend_offers":[{"until":2000,"days":30},{"until":3000}]}]}
+      """#
+    let guest = try XCTUnwrap(Wire.decode(ChatAnswer.self, from: json)?.guests?.first)
+    XCTAssertEqual(guest.extendOffers?.first?.days, 30)
+    XCTAssertNil(guest.extendOffers?.last?.days)
+  }
+
   func testBrowseActionsOnTheWire() {
     XCTAssertEqual(ChatAction.openDm(userId: "2").json, #"{"action":"open_dm","user":"2"}"#)
     XCTAssertEqual(

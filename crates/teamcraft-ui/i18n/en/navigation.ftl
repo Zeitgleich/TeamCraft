@@ -56,6 +56,7 @@ sidebar-threads = Threads
 sidebar-unreads = Unreads
 sidebar-favorites = Favorites
 sidebar-conversations = Conversations
+sidebar-archived = Archived
 sidebar-channels = Channels
 sidebar-integrations = Integrations
 sidebar-direct-messages = Direct messages

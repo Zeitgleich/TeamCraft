@@ -586,3 +586,137 @@ async fn someone_in_no_conversation_still_has_their_name() {
   let me = backend_of(&erin).me();
   assert_eq!(me.display_name, "Erin");
 }
+
+mod expiring_guests {
+  use teamcraft_proto::{ExpiringGuestResponse, UnixMillis};
+
+  use super::*;
+
+  fn ending(space: SpaceId, user: teamcraft_proto::UserId, expires_at: i64) -> ExpiringGuestResponse {
+    serde_json::from_value(serde_json::json!({
+      "space_id": space.to_string(),
+      "space_name": "Project A",
+      "user": {"id": user.to_string(), "display_name": "Guest", "kind": "guest"},
+      "expires_at": expires_at,
+      "is_own": false,
+    }))
+    .unwrap()
+  }
+
+  /// Far enough ahead of the fake clock not to count as past.
+  const LATER_MS: i64 = i64::MAX / 2;
+
+  #[tokio::test]
+  async fn extending_reads_the_list_again() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let bob = Peer::enroll(&server, "Bob").await;
+    let space = alice.space().await;
+    let guest = ending(space, bob.client.user_id(), LATER_MS);
+    server.set_expiring_guests(vec![guest.clone()]);
+
+    let ui = backend_of(&alice);
+    assert!(ui.expiring_guests().is_empty(), "nothing read yet");
+    ui.extend_guest(space, guest.user.id, LATER_MS + 1);
+    run_commands(&mut alice, &ui).await;
+
+    let listed = ui.expiring_guests();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].expires_at, UnixMillis(LATER_MS + 1));
+  }
+
+  /// Enrolling connects for the first time, which is a fresh session, not a resumed one.
+  #[tokio::test]
+  async fn a_fresh_connect_reads_the_list_and_what_is_past_is_not_shown() {
+    let server = FakeServer::new();
+    let (space, user) = ("1".parse().unwrap(), "2".parse().unwrap());
+    let later = ending(space, user, LATER_MS);
+    server.set_expiring_guests(vec![later.clone(), ending(space, user, 1)]);
+
+    let alice = Peer::enroll(&server, "Alice").await;
+
+    assert_eq!(backend_of(&alice).expiring_guests(), vec![later]);
+  }
+}
+
+mod guest_list_refresh {
+  use teamcraft_proto::{GatewayEvent, GatewayServerMessage, UnixMillis};
+
+  use super::*;
+
+  fn event(seq: u64) -> GatewayServerMessage {
+    GatewayServerMessage::Event {
+      seq,
+      event: GatewayEvent::GuestTermsUpdate,
+    }
+  }
+
+  fn guest(expires_at: i64) -> teamcraft_proto::ExpiringGuestResponse {
+    serde_json::from_value(serde_json::json!({
+      "space_id": "1",
+      "space_name": "Project A",
+      "user": {"id": "2", "display_name": "Guest", "kind": "guest"},
+      "expires_at": expires_at,
+      "is_own": false,
+    }))
+    .unwrap()
+  }
+
+  /// A sweep or a bulk action sends hundreds of these; they must not each read the list.
+  #[tokio::test]
+  async fn many_events_read_the_list_once_and_the_last_change_still_arrives() {
+    const LATER_MS: i64 = i64::MAX / 2;
+    let server = FakeServer::new();
+    let clock = std::sync::Arc::new(teamcraft_core::clock::ManualClock::new(1_800_000_000_000));
+    let mut alice = Peer::enroll_on_clock(
+      server.add_user("Alice"),
+      "Alice",
+      common::settings(),
+      Box::new(clock.clone()),
+    )
+    .await;
+    let ui = backend_of(&alice);
+
+    server.set_expiring_guests(vec![guest(LATER_MS)]);
+    alice.client.handle_frame(event(1_000)).await.unwrap();
+    assert_eq!(ui.expiring_guests().len(), 1, "the first event reads at once");
+
+    server.set_expiring_guests(vec![guest(LATER_MS), guest(LATER_MS + 1)]);
+    alice.client.handle_frame(event(1_001)).await.unwrap();
+    alice.client.handle_frame(event(1_002)).await.unwrap();
+    assert_eq!(ui.expiring_guests().len(), 1, "the next ones wait");
+
+    clock.advance(6_000);
+    alice
+      .client
+      .handle_frame(GatewayServerMessage::HeartbeatAck)
+      .await
+      .unwrap();
+    let listed = ui.expiring_guests();
+    assert_eq!(listed.len(), 2, "any later frame reads what waited");
+    assert_eq!(listed[1].expires_at, UnixMillis(LATER_MS + 1));
+  }
+}
+
+mod archived_channels {
+  use super::*;
+
+  /// What a queued send meets once the channel is archived: failed for good, not retried forever.
+  #[tokio::test]
+  async fn a_queued_message_fails_visibly_when_the_channel_was_archived() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let space = alice.space().await;
+    let channel = create_public_channel(&mut alice, space, "Old").await;
+    let queued = alice
+      .client
+      .queue_text_with_files(channel, "still there?", Vec::new(), Vec::new(), None)
+      .unwrap();
+    server.refuse_posts_in(channel);
+
+    let report = alice.client.flush_outbox().await.unwrap();
+
+    assert_eq!(report.failed, 1);
+    assert!(alice.client.is_refused(channel, queued).unwrap());
+  }
+}

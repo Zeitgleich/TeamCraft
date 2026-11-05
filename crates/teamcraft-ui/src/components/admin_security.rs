@@ -13,6 +13,14 @@ const SESSION_HOURS: [u32; 5] = [24, 7 * 24, 30 * 24, 90 * 24, 0];
 const IDLE_MINUTES: [u32; 5] = [15, 60, 120, 480, 0];
 const PASSWORD_CHARS: [u32; 5] = [0, 10, 12, 14, 16];
 const GUEST_EXPIRY_DAYS: [u32; 6] = [u32::MAX, 7, 30, 90, 180, 0];
+/// The notice schedules on offer, slug first; the slug is what the select keeps.
+const GUEST_NOTICE_SCHEDULES: [(&str, &[u32]); 4] = [
+  ("default", &[14, 3]),
+  ("long", &[30, 14, 3]),
+  ("short", &[7, 1]),
+  ("off", &[]),
+];
+const SPONSOR_EXTENSION_DAYS: [u32; 6] = [120, 30, 90, 180, 365, 0];
 const APPROVALS: [u8; 2] = [2, 3];
 
 /// Security policy: the signed settings that the server and every member client enforce.
@@ -55,6 +63,29 @@ pub fn SecuritySection() -> impl IntoView {
           chars => i18n.t_count("policy-chars", chars as usize),
         };
         (chars.to_string(), label)
+      })
+      .collect()
+  });
+  let notice_options = Signal::derive(move || {
+    GUEST_NOTICE_SCHEDULES
+      .iter()
+      .map(|(slug, _)| {
+        (
+          (*slug).to_owned(),
+          i18n.t(&format!("policy-guest-notices-{slug}")),
+        )
+      })
+      .collect()
+  });
+  let sponsor_options = Signal::derive(move || {
+    SPONSOR_EXTENSION_DAYS
+      .into_iter()
+      .map(|days| {
+        let label = match days {
+          0 => i18n.t("policy-guest-sponsor-none"),
+          days => i18n.t_count("policy-guest-sponsor-days", days as usize),
+        };
+        (days.to_string(), label)
       })
       .collect()
   });
@@ -296,6 +327,36 @@ pub fn SecuritySection() -> impl IntoView {
             policy.edit(|p| p.guests.maybe_default_expiry_days = (days != u32::MAX).then_some(days));
           }
         />
+        <SelectRow
+          id="policy-guest-notices"
+          label=Signal::derive(move || i18n.t("policy-guest-notices"))
+          options=notice_options
+          selected=Signal::derive(move || {
+            let days = draft.get().guests.effective_notice_days();
+            GUEST_NOTICE_SCHEDULES
+              .iter()
+              .find(|(_, schedule)| *schedule == days.as_slice())
+              .map_or_else(|| "default".to_owned(), |(slug, _)| (*slug).to_owned())
+          })
+          on_select=move |value: String| {
+            let days = GUEST_NOTICE_SCHEDULES
+              .iter()
+              .find(|(slug, _)| *slug == value)
+              .map(|(_, schedule)| schedule.to_vec());
+            policy.edit(|p| p.guests.maybe_expiry_notice_days = days);
+          }
+        />
+        <p class="muted-text small">{move || i18n.t("policy-guest-notices-hint")}</p>
+        <SelectRow
+          id="policy-guest-sponsor-extension"
+          label=Signal::derive(move || i18n.t("policy-guest-sponsor-extension"))
+          options=sponsor_options
+          selected=Signal::derive(move || draft.get().guests.effective_sponsor_extension_days().to_string())
+          on_select=move |value: String| {
+            policy.edit(|p| p.guests.maybe_sponsor_extension_days = value.parse().ok());
+          }
+        />
+        <p class="muted-text small">{move || i18n.t("policy-guest-sponsor-extension-hint")}</p>
       </fieldset>
 
       <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>

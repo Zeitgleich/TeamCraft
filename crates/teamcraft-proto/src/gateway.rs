@@ -202,12 +202,16 @@ pub enum GatewayEvent {
   UserGroupUpdate {
     group_id: UserGroupId,
   },
-  /// A guest's membership of a space ran out and they were removed. Sent to the sponsor and the
-  /// space's admins.
+  /// A guest's membership of a space ran out and they were removed. Sent to the guest, the sponsor
+  /// if still in the space, and the space's admins.
   GuestExpired {
     space_id: SpaceId,
     user: UserSummary,
   },
+  /// Guest memberships are about to end, got a new end or ended: read `GET /guests/expiring` again.
+  /// Sent to the guests, their sponsors and the spaces' admins; one per run of the notices, however
+  /// many guests it is about.
+  GuestTermsUpdate,
   /// A member acknowledged an urgent message. Sent to the message's sender and to the member's
   /// other devices.
   MessageAck {

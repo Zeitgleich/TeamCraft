@@ -451,6 +451,7 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
   let id = channel.id;
   let is_private = channel.kind == ConversationKind::Private;
   let delete_access = ChannelAccess::new(state, id);
+  let is_confirming_archive = RwSignal::new(false);
   // The channel as the last refresh has it; the one it was opened with once it is gone.
   let current = Memo::new(move |previous: Option<&AdminChannel>| {
     latest
@@ -533,8 +534,38 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
           }
         })
       }}
-      <button class="btn" disabled title=move || i18n.t("admin-soon")>{move || i18n.t("admin-archive")}</button>
+      <Show when=move || delete_access.can(&Permission::ManageChannelProperties) fallback=|| ()>
+      <button
+        type="button"
+        class="btn"
+        on:click=move |_| {
+          if current.with(|channel| channel.is_archived) {
+            state.write(|backend| backend.admin_set_channel_archived(id, false));
+          } else {
+            is_confirming_archive.set(true);
+          }
+        }
+      >
+        {move || i18n.t(if current.with(|channel| channel.is_archived) { "admin-channel-restore" } else { "admin-archive" })}
+      </button>
+      </Show>
     </div>
+    <Show when=move || is_confirming_archive.get() fallback=|| ()>
+      <div class="detail-actions" role="alert">
+        <p>{move || i18n.t("admin-channel-archive-confirm")}</p>
+        <button
+          type="button"
+          class="btn btn-danger"
+          on:click=move |_| {
+            state.write(|backend| backend.admin_set_channel_archived(id, true));
+            is_confirming_archive.set(false);
+          }
+        >
+          {move || i18n.t("admin-archive")}
+        </button>
+        <button type="button" class="btn" on:click=move |_| is_confirming_archive.set(false)>{move || i18n.t("cancel")}</button>
+      </div>
+    </Show>
     {move || maybe_owner.get().is_none().then(|| view! { <OwnerAssign channel=id /> })}
     <ModerationEditor channel=id />
     <Show when=move || delete_access.can(&Permission::DeleteChannel) fallback=|| ()>

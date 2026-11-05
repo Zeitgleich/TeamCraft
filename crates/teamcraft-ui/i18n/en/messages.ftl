@@ -14,6 +14,7 @@ composer-placeholder = Write to { $name }
 composer-placeholder-untitled = Write a message
 composer-placeholder-reply = Reply…
 composer-readonly = You can't post in this channel.
+composer-archived = This channel is archived. You can read it, but nobody can post here.
 composer-label = Message
 composer-attachments = Attachments
 composer-remove-attachment = Remove attachment

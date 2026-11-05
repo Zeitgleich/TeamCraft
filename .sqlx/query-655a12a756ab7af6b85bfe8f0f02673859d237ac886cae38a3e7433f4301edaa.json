@@ -1,0 +1,91 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.space_id, s.name AS space_name, m.user_id, m.sponsor_user_id,\n                m.expires_at AS \"expires_at!\", me.role AS \"viewer_role?\"\n         FROM space_members m\n         JOIN spaces s ON s.id = m.space_id\n         LEFT JOIN space_members me ON me.space_id = m.space_id AND me.user_id = $1\n         WHERE m.role = 'guest' AND m.expires_at > $2 AND m.expires_at <= $3\n           AND (m.user_id = $1 OR (m.sponsor_user_id = $1 AND me.user_id IS NOT NULL) OR me.role = 'space_admin')\n         ORDER BY m.expires_at, m.space_id, m.user_id LIMIT $4",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "space_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "space_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "space_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "spaces",
+            "name": "name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "sponsor_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "sponsor_user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "expires_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "expires_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "viewer_role?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "role"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "655a12a756ab7af6b85bfe8f0f02673859d237ac886cae38a3e7433f4301edaa"
+}

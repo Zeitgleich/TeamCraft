@@ -115,8 +115,8 @@ pub use server_settings::{StoredBrand, StoredBrandAsset, StoredSetting};
 pub use share_link::{NewShareLink, ShareLink, ShareTarget};
 pub use snowflake::{Clock, SnowflakeError, SnowflakeGenerator, SystemClock};
 pub use space::{
-  Category, ExpiredGuest, ExpiryChange, NewSpace, NewSpaceMember, Space, SpaceChanges, SpaceListing,
-  SpaceMember, SpaceView, StoredSpaceImage,
+  AdminGuestListFilter, AdminGuestRow, Category, ExpiredGuest, ExpiringGuest, ExpiryChange, GuestNoticeDue,
+  NewSpace, NewSpaceMember, Space, SpaceChanges, SpaceListing, SpaceMember, SpaceView, StoredSpaceImage,
 };
 pub use status::StoredStatus;
 pub use sync_heads::ConversationHeadRow;
