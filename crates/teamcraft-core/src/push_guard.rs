@@ -8,13 +8,15 @@
 //!   settings again, so a change the server had not seen yet (or a push that was already on its way)
 //!   stays silent.
 //! - **Diagnostics**: when the last push arrived, what it was and how long it took.
+//! - **Late rings**: whether a ring looked at too late to ring was answered on another device
+//!   ([`is_ring_answered`]).
 
 use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
-  ConversationId, ConversationResponse, DndCandidate, MessageId, NotificationLevel, NotificationSettings,
-  PresenceState, PushKind, PushWakeUp, TestPushResponse,
+  CallId, ConversationId, ConversationResponse, DndCandidate, ListCallHistoryQuery, MessageId,
+  NotificationLevel, NotificationSettings, PresenceState, PushKind, PushWakeUp, TestPushResponse,
 };
 
 use crate::api::ServerApi;
@@ -169,6 +171,29 @@ pub async fn send_test_push<A: ServerApi>(
 ) -> Result<TestPushResponse, CoreError> {
   let account = records::load_account(store)?.ok_or(CoreError::NotEnrolled)?;
   Ok(api.send_test_push(account.device_id).await?)
+}
+
+/// How many of the user's newest calls [`is_ring_answered`] looks through. A late look comes at most
+/// about an hour after the ring; more calls than this in that time are not expected.
+const RING_OUTCOME_CALLS: u32 = 50;
+
+/// Whether the server's call history says this user didn't miss the call of a ring that is looked
+/// at only after it ended (issue #1257): they answered it on another device, or it never rang them.
+/// The wake-up itself doesn't say how the call ended, and a `dismiss` doesn't either: it comes for a
+/// ring that timed out as much as for one answered. `false` when the history says it was missed, or
+/// doesn't have it among the newest calls: the app tells it as a missed call then, as before.
+pub async fn is_ring_answered<A: ServerApi>(api: &A, call: CallId) -> Result<bool, CoreError> {
+  let query = ListCallHistoryQuery {
+    maybe_before: None,
+    maybe_limit: Some(RING_OUTCOME_CALLS),
+  };
+  let history = api.list_call_history(&query).await?;
+  Ok(
+    history
+      .calls
+      .iter()
+      .any(|entry| entry.call_id == call && !entry.is_missed),
+  )
 }
 
 /// Remembers the settings the second layer checks.

@@ -389,7 +389,11 @@ ring is over, so it leaves a missed-call note and never reaches Telecom; no cloc
 the first retry is 30 s later and a ring lasts 30 s by default (`ring_timeout_secs`). With a longer
 configured ring, one still going is told as missed. The expedited job reopening a wake-up compares the
 server's send time with the device's clock over 45 s; a first delivery always rings, because the push
-service's time to live is the ring's own and a wrong clock must not silence a real call.
+service's time to live is the ring's own and a wrong clock must not silence a real call. Since the
+wake-up doesn't say how the call ended, and a `dismiss` comes for a ring that timed out as much as for
+one answered, a late look at a ring asks the server's call history (`is_ring_answered`, issue #1257):
+answered on another device, it leaves no note and stops a ring of it still going here. Without an
+answer within the fetch budget, or with the call not among the newest 50, it stays a missed call.
 
 **Android on watches (issue #739).** Wear OS and vendor bridges (Garmin Connect, Galaxy Wearable)
 mirror the phone's notifications. A message is posted once, after the wake-up was opened, and every

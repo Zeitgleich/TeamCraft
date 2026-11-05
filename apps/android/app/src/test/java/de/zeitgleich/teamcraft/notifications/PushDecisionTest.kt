@@ -52,6 +52,21 @@ class PushDecisionTest {
     assertEquals(false, PushRetry.isRingOver(1_000_000, 900_000))
   }
 
+  /**
+   * Issue #1257: a ring opened late that was answered on another device is no missed call. Only the
+   * server's answer says so; without it the late ring stays a missed call.
+   */
+  @Test
+  fun aRingOpenedLateAndAnsweredElsewhereIsNoMissedCall() {
+    val answered = push(PushNotificationKind.CALL, maybeCallId = "77").copy(isRingAnswered = true)
+    assertEquals(PushDecision.RingAnswered("77"), PushDecision.of(answered, isRingOver = true))
+    // Also when the device's own check would have kept it quiet, or the ring isn't over yet.
+    assertEquals(PushDecision.RingAnswered("77"), PushDecision.of(answered.copy(maybeSuppression = NotificationSuppression.MUTED)))
+    assertEquals(PushDecision.RingAnswered("77"), PushDecision.of(answered))
+    val missed = push(PushNotificationKind.CALL, maybeCallId = "77")
+    assertEquals(PushDecision.ShowQuietCall(missed), PushDecision.of(missed, isRingOver = true))
+  }
+
   @Test
   fun aSilentMessageShowsWithoutAlerting() {
     val wakeUp = push(PushNotificationKind.MESSAGE, isSilent = true)

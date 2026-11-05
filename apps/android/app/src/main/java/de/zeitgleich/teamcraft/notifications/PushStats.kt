@@ -119,6 +119,9 @@ enum class PushPath {
   /** A wake-up that could not be opened at first opened on a retry. */
   OPENED_LATE,
 
+  /** A ring opened after it ended that the server says was answered on another device: says nothing. */
+  RING_ANSWERED,
+
   /** FCM delivered a message with a lower priority than the server sent it with. */
   FCM_DEPRIORITIZED,
   ;

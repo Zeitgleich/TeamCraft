@@ -48,6 +48,12 @@ class PushHandler(
         if (!notifier.applyRead(decision.notification) && isVisible) notifier.showQuietNote()
       }
       is PushDecision.Ring -> calls.ring(ring(decision.conversationId, decision.maybeCallId, decision.notification))
+      is PushDecision.RingAnswered -> {
+        stats.record(PushPath.RING_ANSWERED)
+        decision.maybeCallId?.let(calls::stopRinging)
+        // FCM lowers the priority of apps whose high-priority messages show nothing.
+        if (isVisible) notifier.showQuietNote()
+      }
       is PushDecision.ShowQuietCall -> {
         stats.recordIgnored(IgnoreReason.SUPPRESSED)
         notifier.showQuietCall(ring(decision.notification.conversationId, null, decision.notification).displayName)

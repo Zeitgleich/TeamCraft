@@ -570,6 +570,11 @@ pub struct PushNotification {
   /// The device's own check of mutes and DND says: show nothing (iOS without the filtering
   /// entitlement: show it silently).
   pub maybe_suppression: Option<NotificationSuppression>,
+  /// A ring looked at late ([`crate::TeamCraft::notification_for_late_push`]): the server's call
+  /// history says this user didn't miss the call, they answered it on another device (issue #1257).
+  /// The app shows no missed call then. Defaulted, so items the apps build need no change.
+  #[uniffi(default = false)]
+  pub is_ring_answered: bool,
 }
 
 /// What the newest notification showed of a conversation (issue #1065): opening it from the
@@ -797,6 +802,7 @@ impl From<PushPreview> for PushNotification {
       is_duplicate: false,
       is_read: false,
       maybe_suppression: None,
+      is_ring_answered: false,
       conversation_id: preview.wake_up.conversation_id.to_string(),
       maybe_message_id: preview.wake_up.maybe_message_id.map(|id| id.to_string()),
       maybe_conversation_name: preview.maybe_conversation_name,
