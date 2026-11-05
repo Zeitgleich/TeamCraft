@@ -73,6 +73,16 @@ final class SystemLineTests: XCTestCase {
     XCTAssertEqual(SystemLine.changed.text, isGerman ? "Unterhaltung geändert" : "Conversation updated")
   }
 
+  func testAMovedCallLinksToTheRoomOnlyForItsMembers() {
+    // Issue #1290: the core names the room only where the user is in it.
+    XCTAssertEqual(
+      line(extras: #"{"event":"call_moved","by":"1","room":"5","room_name":"Call with notetaker"}"#),
+      .callMoved(by: "Ada", maybeRoomId: "5", roomName: "Call with notetaker"))
+    XCTAssertEqual(
+      line(extras: #"{"event":"call_moved","by":"1","room":"5"}"#),
+      .callMoved(by: "Ada", maybeRoomId: nil, roomName: ""))
+  }
+
   func testWorkspaceEventsAreReadLeniently() {
     XCTAssertEqual(extras(#""maybe_workspace_event":{"event":"member_added"}"#)?.maybeWorkspaceEvent,
       .memberAdded(user: "", by: "", sharesHistory: false))
