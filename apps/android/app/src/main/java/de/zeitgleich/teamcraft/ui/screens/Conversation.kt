@@ -1136,11 +1136,13 @@ internal fun Composer(
   var isSendLaterOpen by remember { mutableStateOf(false) }
   // The time while @channel waits for its confirmation; none for a plain send.
   var maybeSendLaterAt by remember { mutableStateOf<Long?>(null) }
-  // This text's message ID until the server took it, so a retry after a lost answer holds one message.
+  // This text's message ID after a failed try, so a retry after a lost answer holds one message. Gone
+  // once the server took it or the text changes: a later message with the same words is another one.
   var maybeScheduleAttempt by remember { mutableStateOf<Pair<String, String>?>(null) }
   fun schedule(dueAtMs: Long) {
     val id = maybeScheduleAttempt?.takeIf { it.first == text }?.second
       ?: java.util.UUID.randomUUID().toString().replace("-", "")
+    maybeScheduleAttempt = null
     val options = SendOptions(
       maybeThread = maybeThread,
       maybeReplyTo = maybeReply?.messageId,
@@ -1253,6 +1255,7 @@ internal fun Composer(
       text = text,
       onTextChange = {
         text = it
+        if (maybeScheduleAttempt?.first != it) maybeScheduleAttempt = null
         val now = System.currentTimeMillis()
         if (isSharingTyping && shouldNotifyTyping(it, now, maybeLastTypingAt)) {
           maybeLastTypingAt = now

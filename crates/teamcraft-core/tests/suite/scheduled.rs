@@ -301,6 +301,207 @@ mod the_group_moved {
     assert_eq!(world.backend().scheduled_overview().messages.len(), 1);
   }
 
+  mod a_retry_after_the_user_changed_something {
+    use teamcraft_proto::{ClientMessageId, Id, Snowflake, ThreadId};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn takes_the_new_time() {
+      let mut world = World::new().await;
+      let message = world.with_id("Retried");
+      let first = world.server.server_now_ms() + MINUTE_MS;
+      let second = first + 10 * MINUTE_MS;
+      world.schedule_at(message.clone(), first).await;
+      world.schedule_at(message, second).await;
+      let listed = world.phone.api.list_scheduled_messages().await.unwrap().messages;
+      assert_eq!(listed.len(), 1);
+      assert_eq!(listed[0].due_at.0, second);
+    }
+
+    #[tokio::test]
+    async fn takes_the_new_reply_target() {
+      let mut world = World::new().await;
+      let message = world.with_id("Retried");
+      let due_at_ms = world.server.server_now_ms() + MINUTE_MS;
+      world.schedule_at(message.clone(), due_at_ms).await;
+      world
+        .phone
+        .client
+        .send_text(world.channel, None, "Quoted")
+        .await
+        .unwrap();
+      let quoted = world
+        .phone
+        .store
+        .messages(world.channel, MessageFilter::TopLevel)
+        .unwrap()
+        .into_iter()
+        .find_map(|message| message.maybe_server_id)
+        .unwrap();
+      let replying = OutgoingMessage {
+        maybe_reply_to: Some(quoted),
+        ..message
+      };
+      world.schedule_at(replying, due_at_ms).await;
+      let listed = world.phone.api.list_scheduled_messages().await.unwrap().messages;
+      assert_eq!(listed.len(), 1);
+      assert_eq!(listed[0].version, 2);
+    }
+
+    #[tokio::test]
+    async fn moves_to_the_new_thread() {
+      let mut world = World::new().await;
+      let message = world.with_id("Retried");
+      let due_at_ms = world.server.server_now_ms() + MINUTE_MS;
+      world.schedule_at(message.clone(), due_at_ms).await;
+      let thread = ThreadId::from_snowflake(Snowflake::new(78).unwrap());
+      let in_thread = OutgoingMessage {
+        maybe_thread: Some(thread),
+        ..message
+      };
+      world.schedule_at(in_thread, due_at_ms).await;
+      let listed = world.phone.api.list_scheduled_messages().await.unwrap().messages;
+      assert_eq!(listed.len(), 1);
+      assert_eq!(listed[0].maybe_thread_id, Some(thread));
+    }
+
+    #[tokio::test]
+    async fn changes_nothing_when_nothing_changed() {
+      let mut world = World::new().await;
+      let message = world.with_id("Retried");
+      let due_at_ms = world.server.server_now_ms() + MINUTE_MS;
+      world.schedule_at(message.clone(), due_at_ms).await;
+      world.schedule_at(message, due_at_ms).await;
+      let listed = world.phone.api.list_scheduled_messages().await.unwrap().messages;
+      assert_eq!(listed[0].version, 1);
+    }
+
+    impl World {
+      fn with_id(&self, body: &str) -> OutgoingMessage {
+        OutgoingMessage {
+          maybe_client_message_id: Some(ClientMessageId::from_bytes([5; 16])),
+          ..self.outgoing(body)
+        }
+      }
+
+      async fn schedule_at(&mut self, message: OutgoingMessage, due_at_ms: i64) {
+        self
+          .run(CoreCommand::ScheduleMessage { message, due_at_ms })
+          .await;
+      }
+    }
+  }
+
+  mod the_upkeep {
+    use teamcraft_proto::ErrorCode;
+
+    use super::*;
+
+    const TICK_MS: i64 = 5_000;
+    const INTERVAL_MS: i64 = 60_000;
+
+    /// A round that fails isn't repeated on the next tick, and each failure in a row waits longer.
+    #[tokio::test]
+    async fn backs_off_when_sealing_keeps_failing() {
+      let mut world = World::new().await;
+      world.schedule("Failing", 500 * MINUTE_MS).await;
+      world.move_epoch().await;
+      world.phone.client.refresh_scheduled().await.unwrap();
+      world
+        .server
+        .fail_scheduled_updates(Some((400, ErrorCode::InvalidRequest)));
+
+      let mut upkeep = Upkeep::new(Duration::from_secs(60));
+      assert_eq!(world.rounds_within(&mut upkeep, TICK_MS).await, 1, "the first");
+      for (window_ms, label) in [
+        (INTERVAL_MS, "after one failure"),
+        (2 * INTERVAL_MS, "after two"),
+        (4 * INTERVAL_MS, "after three"),
+        (8 * INTERVAL_MS, "after four"),
+        // The cap: not 16 intervals.
+        (10 * MINUTE_MS, "at the cap"),
+        (10 * MINUTE_MS, "still at the cap"),
+      ] {
+        assert_eq!(world.rounds_within(&mut upkeep, window_ms).await, 1, "{label}");
+      }
+
+      world.server.fail_scheduled_updates(None);
+      assert_eq!(world.rounds_within(&mut upkeep, 10 * MINUTE_MS).await, 1);
+      assert_eq!(world.first_status(), ScheduledStatus::Waiting);
+    }
+
+    use teamcraft_proto::ChannelRole;
+
+    /// Without the group there is nothing to seal with: no asking, on any tick.
+    #[tokio::test]
+    async fn leaves_alone_what_this_device_has_no_group_for() {
+      let mut world = World::new().await;
+      world.schedule("Removed before its time", 500 * MINUTE_MS).await;
+      let phone = world.phone.client.user_id();
+      world
+        .server
+        .set_channel_role_unsigned(world.channel, world.bob.client.user_id(), ChannelRole::Admin);
+      world.bob.client.full_sync().await.unwrap();
+      world.bob.client.remove_member(world.channel, phone).await.unwrap();
+      let removed = world.phone.client.sync_mls(world.channel).await;
+      assert!(
+        !world.phone.client.has_group(world.channel).unwrap(),
+        "{removed:?}"
+      );
+      world.phone.client.refresh_scheduled().await.unwrap();
+
+      let mut upkeep = Upkeep::new(Duration::from_secs(60));
+      assert_eq!(world.rounds_within(&mut upkeep, 10 * MINUTE_MS).await, 0);
+    }
+
+    #[tokio::test]
+    async fn looks_at_once_when_the_clock_jumps_back() {
+      let mut world = World::new().await;
+      world.schedule("Jumping", 500 * MINUTE_MS).await;
+      world.move_epoch().await;
+      world.phone.client.refresh_scheduled().await.unwrap();
+      world
+        .server
+        .fail_scheduled_updates(Some((400, ErrorCode::InvalidRequest)));
+      let mut upkeep = Upkeep::new(Duration::from_secs(60));
+      assert_eq!(world.rounds_within(&mut upkeep, TICK_MS).await, 1);
+
+      world.clock.advance(-10 * INTERVAL_MS);
+      assert_eq!(world.rounds_within(&mut upkeep, TICK_MS).await, 1);
+    }
+
+    /// The runner re-reads the store only when the tick says something changed.
+    #[tokio::test]
+    async fn says_so_when_the_gateway_changed_the_list() {
+      let mut world = World::new().await;
+      let mut upkeep = Upkeep::new(Duration::from_secs(60));
+      upkeep.tick(&mut world.phone.client).await;
+      world.clock.advance(TICK_MS);
+      assert!(!upkeep.tick(&mut world.phone.client).await, "nothing happened");
+
+      world.phone.client.note_scheduled_list_stale();
+      world.clock.advance(TICK_MS);
+      assert!(upkeep.tick(&mut world.phone.client).await);
+      world.clock.advance(TICK_MS);
+      assert!(!upkeep.tick(&mut world.phone.client).await);
+    }
+
+    impl World {
+      /// How many rounds of sealing got to the server while `window_ms` passed tick by tick.
+      async fn rounds_within(&mut self, upkeep: &mut Upkeep, window_ms: i64) -> u64 {
+        let before = self.server.scheduled_update_attempts();
+        let mut passed = 0;
+        while passed < window_ms {
+          upkeep.tick(&mut self.phone.client).await;
+          self.clock.advance(TICK_MS);
+          passed += TICK_MS;
+        }
+        self.server.scheduled_update_attempts() - before
+      }
+    }
+  }
+
   #[tokio::test]
   async fn a_burst_of_events_costs_one_read() {
     let mut world = World::new().await;

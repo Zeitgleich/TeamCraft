@@ -460,7 +460,11 @@ struct ChatPane: View {
             }
             TextField("composer_hint", text: $draft, axis: .vertical)
               .focused($isComposerFocused)
-              .onChange(of: draft) { _, text in announceTyping(text) }
+              .onChange(of: draft) { _, text in
+                announceTyping(text)
+                // Another text is another message, also if the same words come back later.
+                if let attempt = maybeScheduleAttempt, attempt.body != text { maybeScheduleAttempt = nil }
+              }
               .lineLimit(1...6)
               .padding(.vertical, 10)
             // While typing the field needs the room; the camera comes back when it is empty.
@@ -833,7 +837,7 @@ struct ChatPane: View {
     maybeReplying = nil
     maybeReplyingImage = nil
     let id = maybeScheduleAttempt.flatMap { $0.body == body ? $0.id : nil } ?? newClientMessageId()
-    maybeScheduleAttempt = (body, id)
+    maybeScheduleAttempt = nil
     let request = SendRequest(
       conversationId: conversation.id, maybeThreadId: threadId, body: body,
       maybeReplyToId: replyingImage?.message ?? replying?.id, maybeReplyAttachmentId: replyingImage?.fileId, maybeClientMessageId: id)

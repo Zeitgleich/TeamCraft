@@ -761,7 +761,8 @@ final class AppModel {
     // A cold background launch has no phase yet: the core opens from the store, as for a push.
     guard let core = try? core() else { return false }
     // In the foreground the app holds the lock already; otherwise take it like the extension does.
-    let needsLock = !isSyncing
+    // Asks the lock, not `isSyncing`: background expiry gives up the lock with the sync still marked.
+    let needsLock = !processLock.isHeld
     if needsLock {
       let lock = processLock
       guard await Task.detached(operation: { lock.acquire(timeout: 5) }).value else { return false }

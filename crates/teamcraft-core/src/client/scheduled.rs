@@ -62,7 +62,8 @@ enum SealFailure {
   EpochMoved,
   /// Another device was first: it drops its work and reads the list.
   LostRace,
-  /// The server says no (403, 404): not tried again until something changes.
+  /// The server says no (403, 404), or the group is gone from this device: not tried again until
+  /// something changes.
   Refused,
   /// Offline, the server in trouble, or the sign-in ran out: stops this round.
   Later,
@@ -75,8 +76,10 @@ impl SealFailure {
     if error.is_retry_later() {
       return Self::Later;
     }
-    let CoreError::Api(api) = error else {
-      return Self::Other;
+    let api = match error {
+      CoreError::Api(api) => api,
+      CoreError::NoGroup(_) => return Self::Refused,
+      _ => return Self::Other,
     };
     match api.error_code() {
       Some(ErrorCode::EpochConflict) => Self::EpochMoved,
@@ -206,7 +209,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         due_at: UnixMillis(due_at_ms),
       };
       match self.api.schedule_message(conversation, &request).await {
-        Ok(_) => break,
+        Ok(answer) => {
+          self.settle_retry(conversation, &request, &answer, &content).await?;
+          break;
+        },
         Err(error) if !is_retry && error.error_code() == Some(&ErrorCode::EpochConflict) => is_retry = true,
         Err(error) => return Err(error.into()),
       }
@@ -217,6 +223,45 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         && data.set_draft(conversation, maybe_thread, "", now)
     })?;
     self.refresh_scheduled().await
+  }
+
+  /// The server answers a known ID with what it holds (a retry after a lost answer), and a sealing is
+  /// never the same twice, so its own ciphertext coming back means it took this one. Otherwise the user
+  /// may have picked another time, or another reply target, since the first try: what the user asked
+  /// for now is what counts. A thread can't change on a held message, so that one starts over.
+  async fn settle_retry(
+    &mut self,
+    conversation: ConversationId,
+    request: &ScheduleMessageRequest,
+    answer: &ScheduledMessageResponse,
+    content: &MessageContent,
+  ) -> Result<(), CoreError> {
+    if answer.ciphertext == request.sealed.ciphertext {
+      return Ok(());
+    }
+    if answer.maybe_thread_id != request.maybe_thread_id {
+      self.api.cancel_scheduled_message(answer.id).await?;
+      self.api.schedule_message(conversation, request).await?;
+      return Ok(());
+    }
+    let is_same_content = self
+      .read_scheduled(answer)
+      .is_some_and(|held| without_heads(held) == without_heads(content.clone()));
+    if answer.due_at == request.due_at && is_same_content {
+      return Ok(());
+    }
+    self
+      .api
+      .update_scheduled_message(
+        answer.id,
+        &UpdateScheduledMessageRequest {
+          expected_version: answer.version,
+          due_at: request.due_at,
+          maybe_sealed: Some(request.sealed.clone()),
+        },
+      )
+      .await?;
+    Ok(())
   }
 
   /// Changes the text and time of a held message. A changed text is sealed again; a new time alone
@@ -348,15 +393,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       None | Some(ScheduledHoldReason::StaleEpoch) => {},
       Some(_) => return Ok(false),
     }
-    let maybe_epoch = if self.has_group(response.conversation_id)? {
-      Some(self.group_or_error(response.conversation_id)?.epoch())
-    } else {
-      None
-    };
+    // Without the group this device can't seal: it comes back with a welcome, or the sender was removed
+    // and the server's check says so at the time.
+    if !self.has_group(response.conversation_id)? {
+      return Ok(false);
+    }
+    let epoch = self.group_or_error(response.conversation_id)?.epoch();
     // A refusal counts for its version in its epoch: once the group moved on, it may not hold.
     if let Some(refused) = entry.maybe_seal_refused
       && refused.version == response.version
-      && Some(refused.epoch) == maybe_epoch
+      && refused.epoch == epoch
     {
       return Ok(false);
     }
@@ -364,7 +410,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(true);
     }
     // The server's word when the list was read is old by now; this device may have merged a commit.
-    Ok(maybe_epoch.is_some_and(|epoch| epoch > response.mls_epoch))
+    Ok(epoch > response.mls_epoch)
   }
 
   /// Seals a held message again in the current epoch, keeping its time.
@@ -504,6 +550,15 @@ fn write_list(store: &impl LocalStore, list: &ScheduledList) -> Result<(), CoreE
   records::put_json(store, Table::Account, SCHEDULED_LIST_KEY, list)
 }
 
+/// A message's content without what sealing adds to it at that moment.
+fn without_heads(mut content: MessageContent) -> MessageContent {
+  if let MessageContent::Text { meta, .. } = &mut content {
+    meta.maybe_workspace_head = None;
+    meta.maybe_channel_roles_head = None;
+  }
+  content
+}
+
 pub(crate) fn message_priority(priority: Priority) -> MessagePriority {
   match priority {
     Priority::Important => MessagePriority::Important,
@@ -543,15 +598,15 @@ mod tests {
         SealFailure::Later,
       ),
       (status(400, ErrorCode::InvalidRequest), SealFailure::Other),
-      (
-        CoreError::NoContentKey(ConversationId::from_snowflake(
-          teamcraft_proto::Snowflake::new(1).unwrap(),
-        )),
-        SealFailure::Other,
-      ),
+      (CoreError::NoGroup(conversation()), SealFailure::Refused),
+      (CoreError::NoContentKey(conversation()), SealFailure::Other),
     ] {
       assert_eq!(SealFailure::of(&error), expected, "{error}");
     }
+  }
+
+  fn conversation() -> ConversationId {
+    ConversationId::from_snowflake(teamcraft_proto::Snowflake::new(1).unwrap())
   }
 
   fn status(status: u16, code: ErrorCode) -> CoreError {

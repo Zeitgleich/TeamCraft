@@ -192,6 +192,7 @@ struct State {
   /// Scripted answers to `update_scheduled_message`: always, or for the next one only.
   scheduled_update_failure: Option<(u16, ErrorCode)>,
   next_scheduled_update_failure: Option<(u16, ErrorCode)>,
+  scheduled_update_attempts: u64,
   device_lists: HashMap<UserId, DeviceListResponse>,
   sessions: HashMap<String, Session>,
   offline_users: HashSet<UserId>,
@@ -1005,6 +1006,11 @@ impl FakeServer {
   /// Every update of a held message answers with this from now on.
   pub fn fail_scheduled_updates(&self, maybe_failure: Option<(u16, ErrorCode)>) {
     self.lock().scheduled_update_failure = maybe_failure;
+  }
+
+  /// How many updates of held messages reached the server, also those it refused.
+  pub fn scheduled_update_attempts(&self) -> u64 {
+    self.lock().scheduled_update_attempts
   }
 
   /// The next update of a held message answers with this.
@@ -4810,6 +4816,7 @@ impl ServerApi for FakeServerApi {
     request: &UpdateScheduledMessageRequest,
   ) -> Result<ScheduledMessageResponse, ApiError> {
     self.with(|state, me| {
+      state.scheduled_update_attempts += 1;
       if let Some((status, code)) = state
         .next_scheduled_update_failure
         .take()

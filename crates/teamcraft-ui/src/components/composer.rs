@@ -1030,6 +1030,8 @@ pub fn Composer(
     let Some(element) = editor.get_untracked() else {
       return;
     };
+    // Another text is another message, also if the same words come back later.
+    schedule_attempt.set_value(None);
     // Typed Markdown formats as it's typed; pastes and autocorrect insert text as it is.
     if let Some(input) = ev.dyn_ref::<web_sys::InputEvent>()
       && input.input_type() == "insertText"
