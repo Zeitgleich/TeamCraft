@@ -237,6 +237,10 @@ pub struct ConversationItem {
   /// picture by it. `None`: the space has no picture (or this is a DM), the letter tile shows.
   #[uniffi(default = None)]
   pub maybe_space_image_version: Option<String>,
+  /// The core is still catching up this conversation after the device was away (issue #247): the
+  /// newest messages may be missing yet, so the apps show that it is loading.
+  #[uniffi(default = false)]
+  pub is_catching_up: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -702,6 +706,7 @@ impl ConversationItem {
       maybe_draft_preview: conversation.maybe_draft_preview,
       maybe_last_activity_ms: None,
       maybe_space_image_version: None,
+      is_catching_up: conversation.is_catching_up,
     }
   }
 }

@@ -82,6 +82,8 @@ data class Conversation(
   val bookmarks: List<Bookmark> = emptyList(),
   /** The user's notes to themself (issue #829); their `name` is empty. Absent from older cores. */
   @SerialName("is_notes_to_self") val isNotesToSelf: Boolean = false,
+  /** Still being caught up after the device was away (issue #247): newer messages may come. */
+  @SerialName("is_catching_up") val isCatchingUp: Boolean = false,
 ) {
   val isDirect: Boolean get() = kind == "Direct" || kind == "Group"
 }
