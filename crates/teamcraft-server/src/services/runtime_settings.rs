@@ -5,8 +5,8 @@
 use serde_json::json;
 use teamcraft_db::StoredSetting;
 use teamcraft_proto::{
-  AppLinkSettings, DpopPolicy, EmailDigestSettings, HealthAlertSettings, IntegrationSettings, LimitSettings,
-  LocalAccountSettings, MailTextSettings, MeetingMailSettings, NotificationLevel,
+  AppLinkSettings, DpopPolicy, EmailDigestSettings, GatewayEvent, HealthAlertSettings, IntegrationSettings,
+  LimitSettings, LocalAccountSettings, MailTextSettings, MeetingMailSettings, NotificationLevel,
   NotificationRuntimeSettings, Permission, RuntimeSettingsKey, RuntimeSettingsResponse,
   RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource, ShareSettings,
   SignInMethod, SignInPageSettings, Target,
@@ -104,11 +104,13 @@ pub async fn put_settings(
   let value = serde_json::to_string(&section).map_err(|error| ApiError::Internal(error.to_string()))?;
   {
     let _guard = state.settings_lock.lock().await;
+    let before = state.settings.get().max_attachment_bytes;
     state
       .database
       .put_server_setting(&row_name(&key), &value, None, caller.user.id)
       .await?;
     load(state).await?;
+    announce_attachment_limit(state, before);
   }
   audit::record(
     state,
@@ -119,6 +121,17 @@ pub async fn put_settings(
   )
   .await?;
   response(state).await
+}
+
+/// Tells everyone online the new attachment limit if the settings changed it, so that clients
+/// check files against it at once, without a restart.
+fn announce_attachment_limit(state: &AppState, before: u64) {
+  let now = state.settings.get().max_attachment_bytes;
+  if now != before {
+    state.hub.publish_all(&GatewayEvent::AttachmentLimitUpdate {
+      max_attachment_bytes: now,
+    });
+  }
 }
 
 /// Goes back to the configuration file's values of one group.
@@ -133,8 +146,10 @@ pub async fn reset_settings(
   }
   let is_deleted = {
     let _guard = state.settings_lock.lock().await;
+    let before = state.settings.get().max_attachment_bytes;
     let is_deleted = state.database.delete_server_setting(&row_name(&key)).await?;
     load(state).await?;
+    announce_attachment_limit(state, before);
     is_deleted
   };
   if is_deleted {

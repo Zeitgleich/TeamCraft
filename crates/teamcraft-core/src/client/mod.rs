@@ -78,6 +78,9 @@ pub use devices::OwnDeviceCheck;
 pub(crate) use enroll::{WRAPPED_KEYS_KEY, decode_wrapped_keys};
 /// Where the engine records its upload limit for the UI.
 pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";
+/// Account record: the largest attachment the server takes (bytes of the encrypted file), as the
+/// server published it; absent for servers that don't.
+pub const SERVER_ATTACHMENT_LIMIT_KEY: &str = "server_max_attachment_bytes";
 pub use actions::{
   ForwardScope, OutgoingText, REPLY_EXCERPT_CHARS, album_attachment, forward_content, imported_author_name,
   reply_ref,
@@ -169,7 +172,9 @@ pub struct ClientSettings {
   /// Delay per rank before a member commits a colleague's new device, and between retries while
   /// the device has no key package yet.
   pub device_add_stagger: std::time::Duration,
-  /// Largest file this client uploads (the server's default limit; it rejects larger ones too).
+  /// Largest file this client uploads while it doesn't know the server's limit (the server's
+  /// default limit; it rejects larger ones too). Servers publish their own
+  /// (`max_attachment_bytes`, bytes of the encrypted file): that replaces this.
   pub max_upload_bytes: u64,
   /// This process is short of memory (the iOS notification extension): it doesn't move a version
   /// before 1.0.9's MLS record (the client doesn't open, [`CoreError::MlsStateNotMoved`]) or tidy

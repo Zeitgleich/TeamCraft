@@ -6,10 +6,12 @@
 use crate::common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::*;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
+use teamcraft_proto::GatewayEvent;
 use teamcraft_server::config::{BrandConfig, MailTexts, MeetingsConfig, UnknownHostPolicy};
 use teamcraft_server::services::brands;
 use teamcraft_server::testing::{FakeCalendar, FakeMailer, TestApp, TestUser};
@@ -833,6 +835,65 @@ mod instance_settings {
     assert!(
       actions.contains(&"settings_updated".to_owned()) && actions.contains(&"settings_reset".to_owned())
     );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_attachment_limit_is_published_to_members_and_changes_reach_them_at_once() {
+    let app = app!(TestApp::start());
+    let (bob, carol) = (admin(), member("carol"));
+    let device = register_device(&app, &carol).await;
+    let mut socket = ws::connect(&app, &carol, &device).await;
+    ws::events(&mut socket, Duration::from_millis(400)).await;
+
+    let configured = app.state.settings.get().max_attachment_bytes;
+    let me = app.get(&carol, "/me").await;
+    assert_eq!(me.body["max_attachment_bytes"], configured);
+
+    let current = app.get(&bob, "/admin/settings").await.body;
+    let mut limits = current["limits"].clone();
+    limits["max_attachment_bytes"] = json!(5 << 20);
+    let saved = app
+      .put(
+        &bob,
+        "/admin/settings",
+        json!({"section": "limits", "values": limits}),
+      )
+      .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+    let events = ws::events(&mut socket, Duration::from_millis(400)).await;
+    assert!(
+      events.iter().any(|event| matches!(
+        event,
+        GatewayEvent::AttachmentLimitUpdate { max_attachment_bytes } if *max_attachment_bytes == 5 << 20
+      )),
+      "{events:?}"
+    );
+    assert_eq!(app.get(&carol, "/me").await.body["max_attachment_bytes"], 5 << 20);
+
+    // Saving the same values again changes nothing, so nothing is announced.
+    let again = app
+      .put(
+        &bob,
+        "/admin/settings",
+        json!({"section": "limits", "values": saved.body["limits"]}),
+      )
+      .await;
+    assert_eq!(again.status, StatusCode::OK);
+    let quiet = ws::events(&mut socket, Duration::from_millis(400)).await;
+    assert!(
+      !quiet
+        .iter()
+        .any(|event| matches!(event, GatewayEvent::AttachmentLimitUpdate { .. }))
+    );
+
+    // Back to the configuration: members hear the configured limit.
+    app.delete(&bob, "/admin/settings/limits").await;
+    let events = ws::events(&mut socket, Duration::from_millis(400)).await;
+    assert!(events.iter().any(|event| matches!(
+      event,
+      GatewayEvent::AttachmentLimitUpdate { max_attachment_bytes } if *max_attachment_bytes == configured
+    )));
     app.stop().await;
   }
 

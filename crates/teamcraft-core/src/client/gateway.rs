@@ -728,6 +728,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         unread_count,
         mention_count,
       } => read_state::note_unread(&self.store, conversation_id, unread_count, mention_count),
+      GatewayEvent::AttachmentLimitUpdate { max_attachment_bytes } => {
+        self.store_attachment_limit(Some(max_attachment_bytes))
+      },
       // The UI reads the announcement itself; the mark tells it to do so now.
       GatewayEvent::AnnouncementUpdate => {
         read_state::update_marks(&self.store, |marks| marks.announcements += 1)

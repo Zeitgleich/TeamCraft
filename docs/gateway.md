@@ -91,6 +91,9 @@ conversation's events immediately. Event types: `message_create`, `conversation_
 see notifications.md, "Unread and mention counts"), and more listed in `teamcraft-proto`'s
 `GatewayEvent`. `conversation_update` and `space_update` carry only IDs: refetch the object over REST (it
 differs per viewer).
+`attachment_limit_update` carries the new `max_attachment_bytes` (the largest encrypted attachment) and goes
+to everyone online when an admin changes it; `GET /api/v1/me` returns the current value as
+`max_attachment_bytes` (absent on older servers, where clients keep their default).
 
 ## Client frames
 

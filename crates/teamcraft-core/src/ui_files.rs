@@ -462,7 +462,25 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.command(CoreCommand::ControlDownload { attachment, control });
   }
 
+  /// The largest file (plain size) the server takes: from the limit it published, or the
+  /// client's default for servers that don't.
   pub(crate) fn ui_max_upload_bytes(&self) -> Option<u64> {
+    let maybe_published: Option<u64> = self
+      .read(records::get_json::<Option<u64>>(
+        self.store_ref(),
+        Table::Account,
+        crate::client::SERVER_ATTACHMENT_LIMIT_KEY,
+      ))
+      .flatten();
+    if let Some(limit) = maybe_published {
+      return Some(
+        teamcraft_crypto::attachment::max_plaintext_len(
+          limit,
+          teamcraft_crypto::attachment::DEFAULT_CHUNK_SIZE,
+        )
+        .unwrap_or(0),
+      );
+    }
     self.read(records::get_json(
       self.store_ref(),
       Table::Account,

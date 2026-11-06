@@ -180,6 +180,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   async fn finish_full_sync(&mut self) -> Result<(), CoreError> {
     self.refresh_notification_settings().await?;
     self.trace_lap("notification settings");
+    if let Err(error) = self.refresh_attachment_limit().await {
+      if error.is_transient() {
+        return Err(error);
+      }
+      // The client keeps the limit it knows (or its default).
+      tracing::warn!(%error, "could not read the server's attachment limit");
+    }
     // A `device_add` missed while offline beyond the resume window would leave them waiting.
     self.recheck_waiting_additions().await?;
     self.trace_lap("waiting additions");

@@ -131,6 +131,25 @@ pub fn encrypted_len(plaintext_len: u64, chunk_size: u32) -> u64 {
   HEADER_LEN as u64 + full_chunks * (chunk + TAG_LEN as u64) + last + TAG_LEN as u64
 }
 
+/// The largest plaintext whose [`encrypted_len`] is at most `limit`; `None` if not even an empty
+/// file fits. What a user is told when a server limits the encrypted size.
+pub fn max_plaintext_len(limit: u64, chunk_size: u32) -> Option<u64> {
+  if encrypted_len(0, chunk_size) > limit {
+    return None;
+  }
+  // `encrypted_len` grows with the plaintext, and by at least one byte per byte.
+  let (mut fits, mut over) = (0_u64, limit.saturating_add(1));
+  while over - fits > 1 {
+    let middle = fits + (over - fits) / 2;
+    if encrypted_len(middle, chunk_size) <= limit {
+      fits = middle;
+    } else {
+      over = middle;
+    }
+  }
+  Some(fits)
+}
+
 /// How many chunks a file of `plaintext_len` bytes has, the final (possibly short or empty) one
 /// included.
 pub fn chunk_count(plaintext_len: u64, chunk_size: u32) -> u64 {
@@ -574,6 +593,25 @@ mod tests {
   use super::*;
 
   const CHUNK: u32 = MIN_CHUNK_SIZE;
+
+  #[test]
+  fn the_largest_plaintext_for_a_ciphertext_limit_is_exact() {
+    for chunk_size in [1_u32, 16, 64 * 1024] {
+      for plaintext in [0_u64, 1, 15, 16, 17, 65_536, 65_537, 200_000] {
+        let limit = encrypted_len(plaintext, chunk_size);
+        assert_eq!(
+          max_plaintext_len(limit, chunk_size),
+          Some(plaintext),
+          "{chunk_size}/{plaintext}"
+        );
+        let largest = max_plaintext_len(limit + 1, chunk_size).unwrap();
+        assert!(largest >= plaintext);
+        assert!(encrypted_len(largest, chunk_size) <= limit + 1);
+        assert!(encrypted_len(largest + 1, chunk_size) > limit + 1);
+      }
+    }
+    assert_eq!(max_plaintext_len(encrypted_len(0, 16) - 1, 16), None);
+  }
 
   #[test]
   fn round_trip_for_boundary_sizes() {
