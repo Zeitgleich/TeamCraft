@@ -312,7 +312,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         "catch-up: the focused conversation is caught up"
       );
     }
+    self.send_while_catching_up().await;
     Ok(())
+  }
+
+  /// Sends what the user wrote meanwhile into conversations already caught up (the open one comes
+  /// first), instead of after the whole catch-up. What fails waits for the flush after it.
+  async fn send_while_catching_up(&mut self) {
+    match self.flush_outbox_of_current().await {
+      Ok(report) if report.sent > 0 => self.note_sync_progress(),
+      Ok(_) => {},
+      Err(error) => tracing::debug!(%error, "outbox not sent during the catch-up"),
+    }
   }
 
   /// Member lists like [`Self::refresh_members_of`], the focused conversation taken ahead between
@@ -411,6 +422,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     ahead.done.insert(focus);
     self.catch_up_focus.note_caught_up();
     self.note_sync_progress();
+    self.send_while_catching_up().await;
     tracing::info!(
       ms = self.now_ms().saturating_sub(phases.started_ms),
       "catch-up: the focused conversation is caught up ahead of the rest"

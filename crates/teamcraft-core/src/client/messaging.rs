@@ -32,6 +32,14 @@ pub struct FlushReport {
   pub failed: usize,
 }
 
+/// Which outbox entries a flush sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutboxScope {
+  All,
+  /// Only those whose conversation was caught up on this connection (during a catch-up).
+  CaughtUp,
+}
+
 /// Messages a removed device sent shortly before its removal reached this device can carry a
 /// slightly later server time; they still count.
 pub(crate) const REMOVED_SENDER_GRACE_MS: i64 = 5 * 60 * 1000;
@@ -135,8 +143,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Sends what's in the outbox, oldest first. Stops at the first network error.
   pub async fn flush_outbox(&mut self) -> Result<FlushReport, CoreError> {
+    self.flush_outbox_where(OutboxScope::All).await
+  }
+
+  /// Sends what waits for conversations already caught up on this connection, during a catch-up of
+  /// the others: a reply typed right after opening the app goes out once its conversation is current,
+  /// not after every other one. The rest waits for the end, as their groups may still move.
+  pub(crate) async fn flush_outbox_of_current(&mut self) -> Result<FlushReport, CoreError> {
+    self.flush_outbox_where(OutboxScope::CaughtUp).await
+  }
+
+  async fn flush_outbox_where(&mut self, scope: OutboxScope) -> Result<FlushReport, CoreError> {
     let mut report = FlushReport::default();
     let mut entries = records::outbox(&self.store)?;
+    if scope == OutboxScope::CaughtUp {
+      entries.retain(|entry| self.mls_current.contains(&entry.conversation_id));
+    }
     entries.sort_by_key(|entry| {
       self
         .store
