@@ -751,7 +751,8 @@ fn default_admin_role() -> String {
   DEFAULT_ADMIN_ROLE.to_owned()
 }
 
-fn is_zero(value: &u64) -> bool {
+/// For `skip_serializing_if` on counts that start at zero.
+pub fn is_zero(value: &u64) -> bool {
   *value == 0
 }
 

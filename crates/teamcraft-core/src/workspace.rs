@@ -53,7 +53,7 @@ pub struct RosterDocument {
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub provider_marks: BTreeMap<UserId, ProviderMark>,
   /// The provider move (the signed policy's `provider_moves`) the marks' accounts belong to.
-  #[serde(default, skip_serializing_if = "is_zero")]
+  #[serde(default, skip_serializing_if = "teamcraft_proto::is_zero")]
   pub provider_moves: u64,
   /// What an owner's app changed in this version by itself and why: the audit line.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -576,16 +576,14 @@ impl WorkspaceState {
       .or_else(|| self.policy.maybe_role_signing.take());
     self.policy = document.policy;
     self.policy.maybe_role_signing = maybe_role_signing;
+    self.settle_provider_move(self.roster.provider_moves);
     Ok(())
   }
 
   /// Takes over the marks of a verified roster; each only ever moves forward. A roster that follows a
   /// provider move forgets the accounts noted at the old one, also those it leaves out.
   fn keep_provider_marks(&mut self, roster: &RosterDocument) {
-    if roster.provider_moves > self.provider_moves {
-      self.provider_marks = forget_accounts(&self.provider_marks);
-      self.provider_moves = roster.provider_moves;
-    }
+    self.settle_provider_move(roster.provider_moves);
     for (user, mark) in &roster.provider_marks {
       let is_newer = self
         .provider_marks
@@ -594,6 +592,30 @@ impl WorkspaceState {
       if is_newer {
         self.provider_marks.insert(*user, mark.clone());
       }
+    }
+  }
+
+  /// Forgets the accounts noted at the provider before a move, once a verified roster follows it, and
+  /// only as far as the verified policy counted moves: a roster's count alone, though signed, is an
+  /// owner's app's word, and one above the policy's forgets nothing more. Rosters are applied before
+  /// policies, so the policy that counts a move settles it too.
+  fn settle_provider_move(&mut self, roster_moves: u64) {
+    let counted = self
+      .policy
+      .maybe_role_signing
+      .as_deref()
+      .map_or(0, |signing| signing.provider_moves);
+    if roster_moves > counted {
+      tracing::debug!(
+        roster_moves,
+        counted,
+        "a roster counts more provider moves than the verified policy"
+      );
+    }
+    let settled = roster_moves.min(counted);
+    if settled > self.provider_moves {
+      self.provider_marks = forget_accounts(&self.provider_marks);
+      self.provider_moves = settled;
     }
   }
 
@@ -985,10 +1007,6 @@ pub fn verified_client_update_policy(store: &impl LocalStore) -> Option<ClientUp
     .map(|state| state.policy.client_updates)
 }
 
-fn is_zero(value: &u64) -> bool {
-  *value == 0
-}
-
 #[cfg(test)]
 mod tests {
   use rand_core::OsRng;
@@ -1082,7 +1100,7 @@ mod tests {
     fn a_roster_after_a_provider_move_forgets_the_accounts_and_an_older_clients_does_not_undo_it() {
       let alice = Owner::new(1);
       let bob = UserId::from_snowflake(Snowflake::new(2).unwrap());
-      let mut state = WorkspaceState::default();
+      let mut state = with_counted_moves(1);
       let mut first = roster(1, &[&alice], None, &state);
       first.provider_marks.insert(alice.user_id, mark("sub-a", 100));
       first.provider_marks.insert(bob, mark("sub-b", 100));
@@ -1112,6 +1130,34 @@ mod tests {
     }
 
     #[test]
+    fn a_roster_counting_more_moves_than_the_policy_forgets_only_as_far_as_the_policy() {
+      let alice = Owner::new(1);
+      let mut state = with_counted_moves(0);
+      let mut first = roster(1, &[&alice], None, &state);
+      first.provider_marks.insert(alice.user_id, mark("sub-a", 100));
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 1, &first)])
+        .unwrap();
+      let mut overcounting = roster(2, &[&alice], None, &state);
+      overcounting.provider_moves = 999;
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 2, &overcounting)])
+        .unwrap();
+
+      assert_eq!(state.provider_moves, 0);
+      assert_eq!(
+        state.provider_marks[&alice.user_id].maybe_subject.as_deref(),
+        Some("sub-a")
+      );
+
+      // The policy counts one move: that far, and no further.
+      state.policy = with_counted_moves(1).policy;
+      state.settle_provider_move(state.roster.provider_moves);
+      assert_eq!(state.provider_moves, 1);
+      assert_eq!(state.provider_marks[&alice.user_id].maybe_subject, None);
+    }
+
+    #[test]
     fn a_new_device_reading_the_log_gets_the_same_marks() {
       let alice = Owner::new(1);
       let mut state = WorkspaceState::default();
@@ -1126,6 +1172,16 @@ mod tests {
       fresh.apply_entries(vec![entry_2, entry_1]).unwrap();
 
       assert_eq!(fresh.provider_marks[&alice.user_id].issued_at, 100);
+    }
+
+    /// A state whose verified policy counts `moves` provider moves.
+    fn with_counted_moves(moves: u64) -> WorkspaceState {
+      let mut state = WorkspaceState::default();
+      state.policy.maybe_role_signing = Some(Box::new(teamcraft_proto::RoleSigningPolicy {
+        provider_moves: moves,
+        ..teamcraft_proto::RoleSigningPolicy::default()
+      }));
+      state
     }
 
     fn mark(subject: &str, issued_at: i64) -> ProviderMark {

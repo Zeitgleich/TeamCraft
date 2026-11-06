@@ -274,11 +274,20 @@ pub fn forget_accounts(marks: &BTreeMap<UserId, ProviderMark>) -> BTreeMap<UserI
     .collect()
 }
 
-/// Counts an owner's move to another provider into `signing`, the verified policy about to pin the new
-/// one: only a policy an owner signed to take a new provider (`accepts_new_provider`) is a move. Higher
-/// than any move this device saw, also one an older owner's app signed the count away from (`settled`).
-pub fn count_provider_move(signing: &mut RoleSigningPolicy, settled: u64) {
-  if signing.accepts_new_provider {
+/// Counts an owner's move to another provider into `signing`, the verified policy about to pin
+/// `issuer`: only a policy an owner signed to take a new provider (`accepts_new_provider`) is a move.
+/// Higher than any move this device saw, also one an older owner's app signed the count away from
+/// (`settled`). Accounts (`sub`) belong to an issuer, so signing in at the one this device used before
+/// (`maybe_previous_issuer`) is no move and keeps them; a device that knows none counts it.
+pub fn count_provider_move(
+  signing: &mut RoleSigningPolicy,
+  settled: u64,
+  maybe_previous_issuer: Option<&str>,
+  issuer: &str,
+) {
+  let is_same_issuer = maybe_previous_issuer
+    .is_some_and(|previous| previous.trim_end_matches('/') == issuer.trim_end_matches('/'));
+  if signing.accepts_new_provider && !is_same_issuer {
     signing.provider_moves = signing.provider_moves.max(settled).saturating_add(1);
   }
 }
@@ -1242,6 +1251,8 @@ mod tests {
 
     use super::*;
 
+    const NEW: &str = "https://new.example";
+
     #[test]
     fn only_a_higher_count_under_a_named_provider_is_unsettled() {
       let mut policy = RoleSigningPolicy {
@@ -1262,11 +1273,26 @@ mod tests {
     #[test]
     fn only_a_signed_move_counts_and_above_everything_seen() {
       let mut signing = RoleSigningPolicy::default();
-      count_provider_move(&mut signing, 4);
+      count_provider_move(&mut signing, 4, None, NEW);
       assert_eq!(signing.provider_moves, 0, "no move");
       signing.accepts_new_provider = true;
-      count_provider_move(&mut signing, 4);
+      count_provider_move(&mut signing, 4, Some("https://old.example"), NEW);
       assert_eq!(signing.provider_moves, 5, "an older app signed the count away");
+    }
+
+    #[test]
+    fn signing_in_at_the_same_issuer_again_is_no_move() {
+      let mut signing = RoleSigningPolicy {
+        accepts_new_provider: true,
+        ..RoleSigningPolicy::default()
+      };
+      count_provider_move(&mut signing, 0, Some("https://new.example/"), NEW);
+      assert_eq!(signing.provider_moves, 0);
+      count_provider_move(&mut signing, 0, None, NEW);
+      assert_eq!(
+        signing.provider_moves, 1,
+        "a device that knows no provider before counts it"
+      );
     }
 
     #[test]

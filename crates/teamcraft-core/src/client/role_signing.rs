@@ -198,6 +198,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }))?;
       return Ok(true);
     };
+    // What this device signed in at before: signing in at the same provider after a reset is no move.
+    let maybe_previous_issuer = self.role_signing_record()?.maybe_seen_provider;
     self.remember_provider(&claims)?;
     // Before anything else, mapper or not: without a pin, a server could later announce another issuer.
     if self.is_verified_owner(&state)
@@ -207,7 +209,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .as_deref()
         .is_none_or(|policy| policy.maybe_provider.is_none())
     {
-      self.pin_provider(&anchor).await?;
+      self
+        .pin_provider(&anchor, maybe_previous_issuer.as_deref())
+        .await?;
     }
     let state = self.workspace()?;
     let role = provider_role(claims.maybe_roles.as_deref(), &anchor);
@@ -544,7 +548,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_issued_at: Some(issued_at),
     };
     self.append_roster_automatically(document, vec![change]).await?;
-    self.pin_provider(anchor).await?;
+    self.pin_provider(anchor, None).await?;
     Ok(true)
   }
 
@@ -639,12 +643,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Writes the provider into the signed policy, so from now on the server's word doesn't count for
   /// it. On an instance that updated this is the moment it is pinned: from the token this device got
   /// itself, not from anything the server says.
-  async fn pin_provider(&mut self, anchor: &RoleProviderAnchor) -> Result<(), CoreError> {
+  /// `maybe_previous_issuer`: the provider this device signed in at before, if it knows one.
+  async fn pin_provider(
+    &mut self,
+    anchor: &RoleProviderAnchor,
+    maybe_previous_issuer: Option<&str>,
+  ) -> Result<(), CoreError> {
     let state = self.workspace()?;
     let mut policy = state.policy;
     let mut signing = policy.maybe_role_signing.take().unwrap_or_default();
     // A move the owners signed: the roster's accounts belong to the provider before (e2ee.md §3.1.3).
-    count_provider_move(&mut signing, state.provider_moves);
+    count_provider_move(
+      &mut signing,
+      state.provider_moves,
+      maybe_previous_issuer,
+      &anchor.issuer,
+    );
     signing.maybe_provider = Some(RoleProvider {
       issuer: anchor.issuer.clone(),
       client_id: anchor.client_id.clone(),

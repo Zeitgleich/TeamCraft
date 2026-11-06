@@ -818,6 +818,26 @@ mod provider_move {
     assert_eq!(subject_of(&alice, bob_id).as_deref(), Some("new-sub-of-Bob"));
   }
 
+  #[tokio::test]
+  async fn trusting_the_same_provider_again_forgets_nothing() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let bob_id = bob.client.user_id();
+    note_admin(&world, &mut alice, &mut bob).await;
+    trust_the_next_provider(&mut alice).await;
+    world.give_token(&alice, &["owner"], T0 + 10);
+    alice.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+
+    let state = alice.client.workspace().unwrap();
+    let signing = state.policy.maybe_role_signing.unwrap();
+    assert_eq!(signing.maybe_provider.unwrap().issuer, ISSUER);
+    assert!(!signing.accepts_new_provider);
+    assert_eq!(signing.provider_moves, 0);
+    assert_eq!(state.provider_moves, 0);
+    assert_eq!(subject_of(&alice, bob_id).as_deref(), Some("sub-of-Bob"));
+  }
+
   /// Bob holds the admin role at the first provider, and Alice's app noted his account there.
   async fn note_admin(world: &World, alice: &mut Peer, bob: &mut Peer) {
     world.give_token(bob, &["admin"], T0);
@@ -834,12 +854,7 @@ mod provider_move {
 
   /// Alice signs the move to another provider and signs in there; her app pins it.
   async fn move_provider(world: &World, alice: &mut Peer, bob: &mut Peer) -> Arc<Provider> {
-    let mut policy = alice.client.workspace().unwrap().policy;
-    let mut signing = policy.maybe_role_signing.take().unwrap();
-    signing.maybe_provider = None;
-    signing.accepts_new_provider = true;
-    policy.maybe_role_signing = Some(signing);
-    alice.client.publish_policy(policy).await.unwrap();
+    trust_the_next_provider(alice).await;
     let moved = Arc::new(Provider::new());
     alice.client.set_jwks_source(Box::new(Jwks(moved.clone())));
     bob.client.set_jwks_source(Box::new(Jwks(moved.clone())));
@@ -847,6 +862,16 @@ mod provider_move {
     alice.client.run_role_signing().await.unwrap();
     settle(&mut [&mut *alice, &mut *bob]).await;
     moved
+  }
+
+  /// Alice signs that the provider she signs in with next counts ("Trust the provider I sign in with next").
+  async fn trust_the_next_provider(alice: &mut Peer) {
+    let mut policy = alice.client.workspace().unwrap().policy;
+    let mut signing = policy.maybe_role_signing.take().unwrap();
+    signing.maybe_provider = None;
+    signing.accepts_new_provider = true;
+    policy.maybe_role_signing = Some(signing);
+    alice.client.publish_policy(policy).await.unwrap();
   }
 
   fn subject_of(peer: &Peer, user: UserId) -> Option<String> {
