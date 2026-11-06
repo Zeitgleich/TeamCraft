@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.push
 
 import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import de.zeitgleich.teamcraft.core.NotSignedInException
 import de.zeitgleich.teamcraft.notifications.HeldLine
@@ -10,13 +11,14 @@ import de.zeitgleich.teamcraft.notifications.PushRetry
 import uniffi.teamcraft_ffi.PushNotification
 
 /**
- * What happens after a wake-up could not be read at once: the try right away while the alert is
- * held, the later retries, and how a hold ends (notifications.md, "Filling a placeholder in"). Apart
- * from Android's classes, so failures, timeouts and holds are unit-tested.
+ * What happens after a wake-up could not be read at once: the tries before anything is posted
+ * ([settle]), the later retries of a placeholder, and how a hold an earlier version left ends
+ * (notifications.md, "Filling a placeholder in"). Apart from Android's classes, so failures,
+ * timeouts and holds are unit-tested.
  *
- * A hold always ends: when the text comes, after any failed try, with a time bound that a job
- * without a network constraint enforces, when the car goes, and at the next process start. How it
- * ends looks at the state then ([PushRetry.holdEnd]): a muted, read or old message never alerts.
+ * A hold always ends: when the text comes, after any failed try, when the car goes, and at the next
+ * process start. How it ends looks at the state then ([PushRetry.holdEnd]): a muted, read or old
+ * message never alerts.
  */
 class WakeUpRetries(
   private val opener: WakeUpOpener,
@@ -26,23 +28,47 @@ class WakeUpRetries(
   private val isAppVisible: () -> Boolean,
   private val isSigningOut: () -> Boolean,
   private val elapsedNow: () -> Long,
+  /** Waits up to the given time for a usable network; whether there is one. */
+  private val awaitNetwork: suspend (Long) -> Boolean,
   private val log: (String) -> Unit,
+  private val pause: suspend (Long) -> Unit = { delay(it) },
 ) {
   /**
-   * The message of a wake-up was not read: keeps the later retries safe from a process death first,
-   * then tries once more right away while its alert is held, so that it usually alerts once and
-   * with the text.
+   * The first try could not read the message (the radio still waking up after Doze, a network
+   * change, a busy server): tries again before anything is posted, each time once a network is
+   * there, so the notification goes out once and with the text. A watch, a band and Android Auto
+   * only ever take a message's first post; a "New message" filled in later never reaches them
+   * (issue #1249). Bounded by [PushRetry.SETTLE_BOUND_MS], within the time a push service and the
+   * expedited job give the app. Returns the newest result: still a placeholder when the bound passed.
    */
-  suspend fun readSoon(payload: ByteArray, shown: PushNotification) {
-    log("message not read in time (${shown.maybeGap}); trying again")
-    startChain(payload, RetryOf.PLACEHOLDER)
-    scheduler.scheduleHoldEnd(PushRetry.holdBoundMs(isInCar()) + HOLD_END_MARGIN_MS)
-    val maybeAgain = withTimeoutOrNull(PushRetry.HOLD_TRY_MS) {
-      catching { opener.openSoon(payload) }.getOrNull()
+  suspend fun settle(payload: ByteArray, first: PushNotification): PushNotification {
+    // Nothing shows yet: should the process die meanwhile, this later look shows the message. Its
+    // attempt waits longer than the bound, so it never runs next to this wait.
+    startChain(payload, RetryOf.UNOPENED_QUIET, SAFETY_ATTEMPT)
+    val startedAtMs = elapsedNow()
+    val deadlineMs = startedAtMs + PushRetry.SETTLE_BOUND_MS
+    var latest = first
+    var tries = 0
+    while (PushRetry.isPlaceholder(latest) && !isSigningOut()) {
+      val pauseMs = PushRetry.settleDelayMs(tries)
+      if (elapsedNow() + pauseMs >= deadlineMs) break
+      pause(pauseMs)
+      if (!awaitNetwork(deadlineMs - elapsedNow())) break
+      tries += 1
+      val maybeAgain = withTimeoutOrNull((deadlineMs - elapsedNow()).coerceAtLeast(1)) {
+        catching { opener.openSoon(payload) }.getOrNull()
+      }
+      maybeAgain?.let { latest = it }
     }
-    if (isSigningOut()) return
-    maybeAgain?.let { target.handleRetry(it, PushPath.FILLED_HOLD) }
-    if (!isInCar()) endHold(payload, maybeAgain ?: shown)
+    // The gap is logged, never the content (notifications.md, "Mobile push delivery").
+    log("message not read at once (${first.maybeGap}): $tries more tries in ${elapsedNow() - startedAtMs} ms, now ${latest.maybeGap}")
+    scheduler.cancelRetry(payload, SAFETY_ATTEMPT)
+    return latest
+  }
+
+  /** A placeholder went out after [settle]: later retries fill it in, within the bound on chains. */
+  fun afterPlaceholder(payload: ByteArray) {
+    startChain(payload, RetryOf.PLACEHOLDER)
   }
 
   /** A wake-up that did not open: later tries, within the device's bound on chains. */
@@ -127,17 +153,18 @@ class WakeUpRetries(
     return heldMs < 0 || heldMs >= PushRetry.holdBoundMs(isInCar())
   }
 
-  private fun startChain(payload: ByteArray, retryOf: RetryOf) {
+  private fun startChain(payload: ByteArray, retryOf: RetryOf, attempt: Int = 1) {
     if (scheduler.pendingChains() >= scheduler.maxChains()) {
       // A broken store must not pile up jobs; the sync still fills in what it brings.
       target.recordCapped()
     } else {
-      scheduler.enqueueRetry(payload, attempt = 1, retryOf, elapsedNow())
+      scheduler.enqueueRetry(payload, attempt, retryOf, elapsedNow())
     }
   }
 
   private companion object {
-    const val HOLD_END_MARGIN_MS = 1_000L
+    /** The attempt of the look kept during [settle]: its delay (10 min) is past [PushRetry.SETTLE_BOUND_MS]. */
+    const val SAFETY_ATTEMPT = 3
   }
 }
 
@@ -169,8 +196,8 @@ interface RetryTarget {
 interface RetryScheduler {
   fun enqueueRetry(payload: ByteArray, attempt: Int, retryOf: RetryOf, arrivedAtMs: Long)
 
-  /** A job without a network constraint: a hold ends without a network too. */
-  fun scheduleHoldEnd(delayMs: Long)
+  /** Takes back `attempt` of this wake-up's retries if it hasn't run yet. */
+  fun cancelRetry(payload: ByteArray, attempt: Int)
 
   /** Chains of retries waiting now. */
   fun pendingChains(): Int

@@ -116,28 +116,29 @@ sealed interface PushDecision {
 }
 
 /**
- * A message notification shown before its text could be read (the fetch timed out, decryption
- * failed or no session): the app tries again right away while the alert is held back, then opens
- * the same wake-up again later and updates the notification under the same ID (issues #739,
- * #1249). Each wait is for a network too. Policy or setting cuts are not retried. Bounded: only
- * while the placeholder shows, and with the last try the placeholder stays until it is read, the
- * sync brings the message ([PlaceholderWatcher]) or the notification goes.
+ * A message whose text could not be read at once (the fetch timed out, decryption failed or no
+ * session): the app tries again before it posts anything, so the one post goes out with the text
+ * ([SETTLE_BOUND_MS], issue #1249). Only when that bound passes does a placeholder go out, and the
+ * same wake-up is opened again later to update it under the same ID (issues #739, #1249). Each wait
+ * is for a network too. Policy or setting cuts are not retried. Bounded: only while the placeholder
+ * shows, and with the last try the placeholder stays until it is read, the sync brings the message
+ * ([PlaceholderWatcher]) or the notification goes.
  */
 object PushRetry {
   /** Tries after the one right away; each waits for a network. */
   const val MAX_ATTEMPTS = 4
 
-  /**
-   * The longest the try right away may take: with the first try (at most 7 s, the core's budget),
-   * how long an alert is held off the road. Short, because a wake-up past the receiver's 8 s costs
-   * expedited quota; a try that takes longer isn't likely to read it anyway.
-   */
-  const val HOLD_TRY_MS = 5_000L
-
   /** Chains of retries that may wait at a time, unless the device's management says otherwise. */
   const val DEFAULT_MAX_CHAINS = 32
 
-  /** The longest the first try and the try right away may hold an alert, with room to spare. */
+  /**
+   * How long a message waits for its text before a placeholder goes out instead: within the time
+   * the expedited job keeps the process ([WakeUpWork]). Threema, which also only gets a wake-up,
+   * waits as long for the server and posts nothing until it has the message.
+   */
+  const val SETTLE_BOUND_MS = 2 * 60_000L
+
+  /** The longest an alert held by an earlier version waits, with room to spare. */
   private const val HOLD_BOUND_MS = 20_000L
 
   /** The longest an alert waits while the phone projects to a car (no network needed to end it). */
@@ -151,6 +152,9 @@ object PushRetry {
 
   /** The server's ring lasts 30 s by default, this device's 45 s: past this, the ring is over. */
   private const val RING_OVER_AFTER_MS = 45_000L
+
+  /** The pauses between the tries before posting, by try: short first, a link that is up again is read at once. */
+  private val SETTLE_DELAYS_MS = longArrayOf(500L, 1_000L, 2_000L, 3_000L, 4_000L)
 
   /** Before these attempts, by attempt: the first ones for a slow moment, the last for a long one. */
   private val DELAYS_MS = longArrayOf(30_000L, 2 * 60_000L, 10 * 60_000L, 60 * 60_000L)
@@ -168,6 +172,9 @@ object PushRetry {
 
   /** How long `attempt` waits (it may be longer: WorkManager's jobs wait for Doze windows). */
   fun delayMs(attempt: Int): Long = DELAYS_MS[(attempt - 1).coerceIn(0, DELAYS_MS.lastIndex)]
+
+  /** The pause before try `tries + 1` of the wait for the text ([SETTLE_BOUND_MS]). */
+  fun settleDelayMs(tries: Int): Long = SETTLE_DELAYS_MS[tries.coerceIn(0, SETTLE_DELAYS_MS.lastIndex)]
 
   /** Whether a quiet note may go up now, after the last one at `maybeLastAtMs`. */
   fun isQuietNoteDue(maybeLastAtMs: Long?, nowMs: Long): Boolean =

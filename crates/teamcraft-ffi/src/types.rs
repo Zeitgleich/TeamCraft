@@ -513,6 +513,9 @@ pub enum NotificationGap {
   /// A reaction, edit, delete or another change to the conversation: no message to announce. Added
   /// with #1249; a client that ignores it shows "New message" as it did before.
   Hidden,
+  /// This user was added to the conversation: the app says so ("added you") instead of "New
+  /// message". Added with #1249; a client that ignores it shows "New message" as before.
+  AddedYou,
   /// The workspace policy shows less.
   WorkspacePolicy,
   /// This device's setting shows less.
@@ -907,6 +910,7 @@ impl From<PreviewGap> for NotificationGap {
       PreviewGap::TimedOut => Self::TimedOut,
       PreviewGap::NotShowable => Self::NotShowable,
       PreviewGap::Hidden => Self::Hidden,
+      PreviewGap::AddedYou => Self::AddedYou,
       PreviewGap::WorkspacePolicy => Self::WorkspacePolicy,
       PreviewGap::DeviceSetting => Self::DeviceSetting,
     }

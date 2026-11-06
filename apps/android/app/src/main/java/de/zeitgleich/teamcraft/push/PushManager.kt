@@ -11,12 +11,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.core.NotSignedInException
 import de.zeitgleich.teamcraft.notifications.CarProjection
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
+import de.zeitgleich.teamcraft.notifications.PushDecision
 import de.zeitgleich.teamcraft.notifications.PushHandler
 import de.zeitgleich.teamcraft.notifications.PushRetry
 import de.zeitgleich.teamcraft.server.ManagedConfig
@@ -36,6 +40,8 @@ class PushManager(
   private val contentPrefs: NotificationContentPrefs,
   private val car: CarProjection,
   private val managedConfig: ManagedConfig,
+  /** A validated network the app may use (not cut off by Doze): what a try of a fetch waits for. */
+  private val isOnline: StateFlow<Boolean>,
   private val scope: CoroutineScope,
 ) {
   private val backends: List<PushBackend> = PushBackends.all()
@@ -64,7 +70,7 @@ class PushManager(
       override fun enqueueRetry(payload: ByteArray, attempt: Int, retryOf: RetryOf, arrivedAtMs: Long) =
         WakeUpWork.enqueueRetry(context, payload, attempt, retryOf, arrivedAtMs)
 
-      override fun scheduleHoldEnd(delayMs: Long) = WakeUpWork.scheduleHoldEnd(context, delayMs)
+      override fun cancelRetry(payload: ByteArray, attempt: Int) = WakeUpWork.cancelRetry(context, payload, attempt)
 
       override fun pendingChains(): Int = WakeUpWork.pendingRetries(context)
 
@@ -74,6 +80,7 @@ class PushManager(
     isAppVisible = { ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED) },
     isSigningOut = { isSigningOut },
     elapsedNow = SystemClock::elapsedRealtime,
+    awaitNetwork = { timeoutMs -> withTimeoutOrNull(timeoutMs) { isOnline.first { it } } ?: false },
     log = { Log.i(TAG, it) },
   )
 
@@ -211,17 +218,25 @@ class PushManager(
       }
     }
       // Checked again: sign-out may have started while the wake-up was being opened.
-      .onSuccess {
+      .onSuccess { first ->
         if (isSigningOut) return
-        val isRingOver = kind == WakeUpRun.RESUMED && PushRetry.isRingOver(it.maybeSentAtMs, System.currentTimeMillis())
-        handler.handle(it, payload, isVisible, isRingOver)
-        if (handler.isPlaceholderShowing(it) && PushRetry.isWanted(it, attempt = 1)) retries.readSoon(payload, it)
+        // A message without its text waits for it: its one post is all a watch or a car gets.
+        val opened = if (isSettled(first)) first else retries.settle(payload, first)
+        if (isSigningOut) return
+        if (opened !== first && !PushRetry.isPlaceholder(opened)) handler.recordSettled()
+        val isRingOver = kind == WakeUpRun.RESUMED && PushRetry.isRingOver(opened.maybeSentAtMs, System.currentTimeMillis())
+        handler.handle(opened, payload, isVisible, isRingOver)
+        if (handler.isPlaceholderShowing(opened) && PushRetry.isWanted(opened, attempt = 1)) retries.afterPlaceholder(payload)
       }
       .onFailure {
         Log.w(TAG, "wake-up could not be opened: ${it.javaClass.simpleName}")
         onNotOpened(payload, isVisible, isSignedOut = false)
       }
   }
+
+  /** Whether what the first try opened is final: anything but a message that would show as a placeholder. */
+  private fun isSettled(opened: PushNotification): Boolean =
+    !PushRetry.isPlaceholder(opened) || PushDecision.of(opened) !is PushDecision.ShowMessage
 
   /**
    * Not opened: says "New message" if it must show something, and tries again later, since what

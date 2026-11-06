@@ -365,8 +365,9 @@ notes, search index segments, edits of a channel's notes page and other changes 
 other, so the server can't tell them apart and wakes the device for them too (routing only knows the
 recipient's settings). Once the device has read one, the core names it (`maybe_gap` hidden) and Android
 announces nothing: it updates the conversation's notification silently, or takes away a placeholder
-that stood for it. Being added to a conversation is the one change that still says "New message", to
-the person added only, as far as routing wakes them at all (a channel on the default "mentions" level
+that stood for it. Being added to a conversation is the one change that is announced, to the person
+added only, as "<name>: Added you to the conversation" (`maybe_gap` added-you; the text is the app's,
+the event carries none), never "New message", as far as routing wakes them at all (a channel on the default "mentions" level
 doesn't, as before; the channel shows on the next sync). Requests to join a channel don't go through
 this path: they come over the gateway (`JoinRequestWatcher`), not as messages. Pictures and files without a caption are a text message with an empty body: they
 show their label like a single file. A kind only a newer client knows may be a message, so it
@@ -391,11 +392,14 @@ gap, how long it ran, whether the client was idle, and why a fetch failed by cla
 rates can be read off an export. Never content.
 
 **Filling a placeholder in.** When the text could not be read in time (timed out, not decrypted, no
-session), the app tries once more right away (`notification_for_push_retry`, not counted as a received
-push; at most 5 s), then opens the same wake-up again after 30 s, 2 min, 10 min and 1 h once a network
-is there. Only being signed out ends that chain: a failed attempt, a timeout or a closed core lead to
-the next one. Those are ordinary WorkManager jobs, so a dozing phone may run them in its next window,
-which is the reason for the try right away. A placeholder that went meanwhile costs no fetch. At most
+session), the app first waits for it before posting anything (`notification_for_push_retry`, not
+counted as a received push; see "Watches, bands and Android Auto" for the bound and pauses). Only if
+that wait ends without the text does a placeholder go out, and the app opens the same wake-up again
+after 30 s, 2 min, 10 min and 1 h once a network is there. Only being signed out ends that chain: a
+failed attempt, a timeout or a closed core lead to the next one. Those are ordinary WorkManager jobs,
+so a dozing phone may run them only in its next window, which on a phone left alone is many minutes
+away (seen: a placeholder still unfilled after 3 min of Doze, #1249); that is why the wait comes
+before the post. A placeholder that went meanwhile costs no fetch. At most
 32 chains wait at a time (managed configuration `max_push_retry_chains`), so a broken store can't pile
 up jobs. Independently, while a placeholder shows, every change of the store and every start of the
 process look in the store (`notification_from_store`, no network): whatever the sync brought fills it
@@ -410,7 +414,7 @@ copy is looked at, and what didn't get through is posted once more, alerting onl
 alerted is what got lost. One gap stays: an alert dropped right before a silent post that gets through
 (a picture arriving) can't be told apart from one that went out, and isn't repeated.
 
-**A late look checks first.** Each later look, not the try right away with its tight bound (a text read
+**A late look checks first.** Each later look, not the tries before the post with their tight bound (a text read
 must not be lost to the wait), asks the server how far the user has read, while the client is idle (the sync doesn't run in the background and a `dismiss` can be late), and `is_read` then
 takes the line away instead of filling it in. Thread messages rely on the `dismiss`: a thread's read
 position isn't in the conversation's record. A wake-up that opens only on a retry never rings: the
@@ -470,22 +474,27 @@ record exists. On the network the focused conversation's members come before its
 and Android Auto read what the phone posts. They must not get "New message" for a message that has
 more (#739, #1093), and Android Auto must get the text with an alert to announce it (#1250: MessagingStyle
 with a `Person`, reply with one `RemoteInput`, mark as read, both with their semantic actions and showing
-no UI; `NotificationsOnDeviceTest` pins these). The rule, in order:
+no UI; `NotificationsOnDeviceTest` pins these). Bridges and Auto take a message's first post and
+ignore what an update changes, so the text has to be in that post (#1249). The rule, in order:
 
-| When                                   | Phone                   | Bridges and Android Auto              |
-|----------------------------------------|-------------------------|---------------------------------------|
-| The text is read on the first try      | Alerts                  | Show it; Auto announces               |
-| Not read: placeholder, local-only      | Silent, the alert waits | Nothing                               |
-| Read during the hold                   | Alerts once, with text  | Show it; Auto announces               |
-| Hold ended without the text            | Alerts, "New message"   | Nothing                               |
-| Read after that                        | Silent update           | Show it as new; Auto may only list it |
-| Read within 5 min, projecting to a car | Alerts again            | Show it; Auto announces               |
-| Never read                             | Stays "New message"     | Nothing                               |
+| When                                     | Phone                  | Bridges and Android Auto              |
+|------------------------------------------|------------------------|---------------------------------------|
+| The text is read on the first try        | Alerts                 | Show it; Auto announces               |
+| Not read: nothing is posted yet          | Nothing                | Nothing                               |
+| Read while waiting (up to 2 min)         | Alerts once, with text | Show it; Auto announces               |
+| Wait over without the text               | Alerts, "New message"  | Nothing (placeholder, local-only)     |
+| Read after that                          | Silent update          | Show it as new; Auto may only list it |
+| Read within 5 min, projecting to a car   | Alerts again           | Show it; Auto announces               |
+| Never read                               | Stays "New message"    | Nothing                               |
 
-A hold always ends: with the text; after any failed try; at its bound (20 s, in a car 2 min), which a
-job without a network constraint enforces, also after the process died; when the phone stops
-projecting; at the next process start. Urgent messages aren't held, they alert at once with the
-placeholder. How a hold ends looks at the state then, not just the time:
+While waiting, the app tries again after a short pause (0.5, 1, 2, 3, then every 4 s), each time
+once the device has a validated network the app may use, up to 2 min: the usual reason a first try fails is a
+radio still waking up after Doze or a network change, which fails at once rather than slowly (seen on
+a phone: the second try came 16 ms after the first and failed the same way, #1249). Threema, which
+also gets only a wake-up, likewise waits up to 2 min and posts nothing until it has the message.
+The receiver's 8 s and then the expedited job (150 s) keep the process for the wait; no wakelock. A retry job is queued before the wait
+and taken back after it, so a process that dies meanwhile still shows the message later. Holds of
+earlier versions (a silent placeholder whose alert waited) still end as before:
 
 | At the end of a hold                                    | What happens                |
 |---------------------------------------------------------|-----------------------------|
@@ -500,11 +509,13 @@ counts as too old. Past 5 min a text doesn't alert either, in a car neither: it 
 silent on the phone. A message the sender sent silently never alerts, and a keyword mention found in
 the text moves the notification to the mentions channel.
 
-Trade-offs: a message read only after the hold reaches a band as a new notification without the band
+Trade-offs: a message reaches the phone up to 2 min later when the first try fails, in exchange for one post with the text everywhere; a message read only after the wait reaches a band as a new notification without the band
 buzzing out of step, but off the road Android Auto isn't told; a message nobody can read (a device
 that must re-link) is never announced in the car and shows only on the phone; an older line that stays
 a placeholder under a newer message with text does travel with the conversation's MessagingStyle. A
 filled-in notification is posted without `setOnlyAlertOnce`, because bridges skip updates that carry it.
+Android Auto logs "No semantic reply action" for the group summary, which has no conversation; it
+skips it and shows the conversations' notifications (checked with its head unit).
 
 **FCM's rule for what shows nothing.** [FCM](https://firebase.google.com/docs/cloud-messaging/android-message-priority)
 may deprioritise an app's high-priority messages "if FCM detects a pattern" of them not leading to

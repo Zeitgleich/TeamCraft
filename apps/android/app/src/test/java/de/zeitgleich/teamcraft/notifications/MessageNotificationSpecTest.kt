@@ -213,7 +213,7 @@ class MessageNotificationSpecTest {
 
   @Test
   fun aPolicyOrSettingCutIsNotRetried() {
-    for (gap in listOf(NotificationGap.WORKSPACE_POLICY, NotificationGap.DEVICE_SETTING, NotificationGap.NOT_SHOWABLE, NotificationGap.HIDDEN, null)) {
+    for (gap in listOf(NotificationGap.WORKSPACE_POLICY, NotificationGap.DEVICE_SETTING, NotificationGap.NOT_SHOWABLE, NotificationGap.HIDDEN, NotificationGap.ADDED_YOU, null)) {
       val shown = PushDecisionTest.push(PushNotificationKind.MESSAGE).copy(maybeGap = gap)
       assertFalse(PushRetry.isWanted(shown, attempt = 1))
     }
@@ -329,6 +329,7 @@ class MessageNotificationSpecTest {
     assertEquals(PushPath.PLACEHOLDER_TIMED_OUT, paths[NotificationGap.TIMED_OUT])
     assertEquals(PushPath.NOT_SHOWABLE, paths[NotificationGap.NOT_SHOWABLE])
     assertEquals(PushPath.HIDDEN, paths[NotificationGap.HIDDEN])
+    assertEquals(PushPath.ADDED_YOU, paths[NotificationGap.ADDED_YOU])
     assertEquals(PushPath.LIMITED, paths[NotificationGap.WORKSPACE_POLICY])
     assertEquals(PushPath.LIMITED, paths[NotificationGap.DEVICE_SETTING])
     assertEquals(PushPath.SHOWN, PushPath.of(push))
@@ -415,6 +416,7 @@ class MessageNotificationSpecTest {
     val LABELS = NotificationText.Labels(
       appName = "App",
       newMessage = "New message",
+      addedYou = "Added you",
       newMessageFrom = { "from $it" },
       newMessagesFrom = { count, names -> "$count from $names" },
       newMessages = { count -> "$count new" },

@@ -84,14 +84,14 @@ class AppGraph(context: Context) {
   val calls = CallController(context, core, scope)
   val pushStats = PushStats(context)
   val pushHandler = PushHandler(context, notifier, calls, pushStats)
-  val push = PushManager(context, core, pushHandler, mentionPrefs, notificationContent, carProjection, managedConfig, scope)
+  val network = NetworkWatcher(context) { core.networkChanged() }
+  val push = PushManager(context, core, pushHandler, mentionPrefs, notificationContent, carProjection, managedConfig, network.isOnline, scope)
   val placeholderWatcher = PlaceholderWatcher(core, notifier, pushHandler, scope, endDueHolds = { push.endHolds() })
   val segmentPrefetch = SegmentPrefetch(context)
   val readWatcher = ReadWatcher(core, notifier, scope)
   /** Admins asking to join a channel the user owns: notified while the app runs (#799). */
   val joinRequestNotifier = JoinRequestNotifier(context, notificationContent)
   val joinRequestWatcher = JoinRequestWatcher(core, joinRequestNotifier, scope)
-  val network = NetworkWatcher(context) { core.networkChanged() }
   /** The sync loop should run but couldn't be started; the banner says so (issue #1142). */
   val isSyncStartFailing = MutableStateFlow(false)
   /** The connection banner's grace period, shared by every screen (issue #700). */

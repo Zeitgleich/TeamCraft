@@ -40,7 +40,8 @@ object WakeUpWork {
   private const val HOLD_END_AGAIN_MS = 30_000L
   private const val WORK_PREFIX = "wake-up-"
   private const val RETRY_PREFIX = "wake-up-retry-"
-  private const val WORK_BUDGET_MS = 60_000L
+  /** Past [PushRetry.SETTLE_BOUND_MS], so the wait for a message's text ends inside the job. */
+  private const val WORK_BUDGET_MS = 150_000L
   private const val FOREGROUND_ID = 2003
 
   /**
@@ -70,9 +71,10 @@ object WakeUpWork {
       .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
       .addTag(RETRY_TAG)
       .build()
-    val name = RETRY_PREFIX + Integer.toHexString(encoded.hashCode()) + "-" + attempt
-    WorkManager.getInstance(context).enqueueUniqueWork(name, ExistingWorkPolicy.KEEP, request)
+    WorkManager.getInstance(context).enqueueUniqueWork(retryName(encoded, attempt), ExistingWorkPolicy.KEEP, request)
   }
+
+  private fun retryName(encoded: String, attempt: Int): String = RETRY_PREFIX + Integer.toHexString(encoded.hashCode()) + "-" + attempt
 
   /**
    * The retries waiting now; one per chain, since a chain's next attempt is enqueued by the last.
@@ -82,16 +84,9 @@ object WakeUpWork {
     runCatching { WorkManager.getInstance(context).getWorkInfosByTag(RETRY_TAG).get().count { !it.state.isFinished } }
       .getOrDefault(0)
 
-  /**
-   * Ends the holds due after `delayMs`, with no network needed, also when the process died. One job;
-   * it looks again as long as a hold is left, and its time is a bound Doze can stretch: then the
-   * alert is silent when it ends ([PushRetry.holdEnd]).
-   */
-  fun scheduleHoldEnd(context: Context, delayMs: Long) {
-    val request = OneTimeWorkRequestBuilder<HoldEndWorker>()
-      .setInitialDelay(delayMs, TimeUnit.MILLISECONDS)
-      .build()
-    WorkManager.getInstance(context).enqueueUniqueWork(HOLD_END_WORK, ExistingWorkPolicy.KEEP, request)
+  /** Takes back `attempt` of this wake-up's retries if it hasn't run yet. */
+  fun cancelRetry(context: Context, payload: ByteArray, attempt: Int) {
+    WorkManager.getInstance(context).cancelUniqueWork(retryName(Base64.getEncoder().encodeToString(payload), attempt))
   }
 
   private fun enqueue(context: Context, payload: ByteArray, isVisible: Boolean) {
@@ -145,7 +140,7 @@ object WakeUpWork {
     }
   }
 
-  /** Ends the holds past their bound (see [scheduleHoldEnd]). */
+  /** Ends the holds past their bound; held alerts are from earlier versions, this one posts none. */
   class HoldEndWorker(context: Context, parameters: WorkerParameters) : CoroutineWorker(context, parameters) {
     override suspend fun doWork(): Result {
       val isHoldLeft = TeamCraftApplication.graph(applicationContext).push.endHolds()
