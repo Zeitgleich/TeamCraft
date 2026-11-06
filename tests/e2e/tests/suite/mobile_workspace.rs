@@ -33,10 +33,11 @@ use teamcraft_e2e::{Peer, Stack};
 use teamcraft_proto::{ConversationId, UserId};
 
 const PORT: u16 = 8091;
-/// The web client's policy: the dev realm's sign-in page on :8080 besides the server itself.
+/// The web client's policy: the dev realm's sign-in page on :8080 and the dev storage on :3900
+/// besides the server itself.
 const WEB_CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
   img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; \
-  connect-src 'self' http://127.0.0.1:8080 ws: wss: https:; worker-src 'self' blob:; \
+  connect-src 'self' http://127.0.0.1:8080 http://127.0.0.1:3900 ws: wss: https:; worker-src 'self' blob:; \
   frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const IMAGES: [&[u8]; 3] = [
   include_bytes!("../../../../assets/backgrounds/lake-morning.jpg"),
