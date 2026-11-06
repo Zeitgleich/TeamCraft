@@ -15,9 +15,11 @@
 //!   [`RETRY_AFTER_FAILURE`], because the UI asks for the core's status again and again and each
 //!   attempt would raise another dialog. The user asking again ([`SecretVault::allow_retry`]) ends
 //!   that at once.
-//! - **Signing out** ([`SecretVault::purge_after_sign_out`]) also deletes what normally nobody looks
-//!   at: set-aside files, and old token entries an older version of the app may have written after
-//!   the move.
+//! - **Signing out** ([`SecretVault::purge_after_sign_out`]) gives the files a new key, so an older
+//!   copy put back by a process that can write them but not read them doesn't open any more and
+//!   brings no signed-out token back (#1155). It also deletes what normally nobody looks at:
+//!   set-aside files, and old token entries an older version of the app may have written after the
+//!   move.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -51,11 +53,15 @@ const SET_ASIDE_FILE: &str = "secrets.sealed.damaged";
 const KEYS_FILE: &str = "keys.sealed";
 const KEYS_TEMPORARY_FILE: &str = "keys.sealed.tmp";
 const KEYS_SET_ASIDE_FILE: &str = "keys.sealed.damaged";
+/// A file sealed under the key a sign-out is changing to, waiting for the keychain to have that key.
+const STAGED_FILE: &str = "secrets.sealed.next";
+const KEYS_STAGED_FILE: &str = "keys.sealed.next";
 /// Everything, rewritten at every token refresh.
 const SECRETS: SealedFile = SealedFile {
   name: VAULT_FILE,
   temporary: TEMPORARY_FILE,
   set_aside: SET_ASIDE_FILE,
+  staged: STAGED_FILE,
 };
 /// The second copy of the database and backup keys, rewritten only when a key is new or changed:
 /// what the keychain entries were for a damaged secrets file before #1223.
@@ -63,6 +69,7 @@ const KEYS: SealedFile = SealedFile {
   name: KEYS_FILE,
   temporary: KEYS_TEMPORARY_FILE,
   set_aside: KEYS_SET_ASIDE_FILE,
+  staged: KEYS_STAGED_FILE,
 };
 const DATABASE_KEY_KIND: &str = "database-key";
 const BACKUP_KEY_KIND: &str = "backup-key";
@@ -166,11 +173,21 @@ struct State {
   tried_this_run: BTreeSet<String>,
 }
 
-/// One of the two sealed files, with the names of its temporary and set-aside copies.
+/// One of the two sealed files, with the names of its temporary, set-aside and staged copies.
 struct SealedFile {
   name: &'static str,
   temporary: &'static str,
   set_aside: &'static str,
+  /// Sealed under the next key during a sign-out's key change ([`SecretVault::change_file_key`]).
+  staged: &'static str,
+}
+
+/// What is at a sealed file's path, opened with the key at hand.
+enum Sealed {
+  Missing,
+  Opened(Contents),
+  /// Doesn't open: damaged, too big, or sealed under another key.
+  Unreadable,
 }
 
 /// The last keychain failure, standing until `until`.
@@ -315,11 +332,16 @@ impl SecretVault {
     flush(&mut state)
   }
 
-  /// The user signed out of `server` or left it: deletes what the files don't speak for. A set-aside
-  /// file may hold old tokens and keys; nothing opens it again. An older version of the app, run
-  /// after the move, may have written the old token entries again, and nothing looks at them on a
-  /// normal start. Deleting an entry that isn't there raises no dialog. The user asked for this, so
-  /// a failure still standing doesn't hold it back; a failure now is reported.
+  /// The user signed out of `server` or left it. The files get a new key, so a copy from before
+  /// the sign-out that a process of the user puts back doesn't open any more (#1155): one keychain
+  /// write, the only one outside a first start. Then it deletes what the files don't speak for. A
+  /// set-aside file may hold old tokens and keys; nothing opens it again. An older version of the
+  /// app, run after the move, may have written the old token entries again, and nothing looks at
+  /// them on a normal start. Deleting an entry that isn't there raises no dialog. The user asked
+  /// for this, so a failure still standing doesn't hold it back; a failure now is reported.
+  ///
+  /// The key goes first: a keychain that refuses deletes (an access list on macOS) must not keep
+  /// the old key in place.
   pub fn purge_after_sign_out(&self, token_servers: &[(TokenKind, &str)]) -> Result<(), KeySourceError> {
     let mut state = self.lock();
     state.maybe_blocked = None;
@@ -327,7 +349,7 @@ impl SecretVault {
       remove_if_there(&directory.join(SECRETS.set_aside));
       remove_if_there(&directory.join(KEYS.set_aside));
     }
-    let mut outcome = Ok(());
+    let mut outcome = self.change_file_key(&mut state);
     for (kind, server) in token_servers {
       let name = token_name(*kind, server);
       if let Err(error) = self.call(&mut state, |keystore| keystore.delete(VAULT_SERVICE, &name)) {
@@ -504,6 +526,67 @@ impl SecretVault {
       set_aside(directory, &KEYS);
     }
     Ok(key)
+  }
+
+  /// Seals both files under a new key and puts it in the keychain item in place of the old one
+  /// (#1155). The item keeps its name and format, so a normal start still reads it once and an
+  /// older version of the app still opens the files.
+  ///
+  /// The keychain never holds a key that opens neither file. The files sealed under the new key
+  /// are staged next to the current ones, then the keychain takes the key, then the staged files
+  /// replace the current ones. A start finds each file's staged copy where a crash left one, and
+  /// keeps whichever of the two opens under the key the keychain gave (see [`take_staged`]). A
+  /// crash before the keychain took the key leaves the old key and files, signed out all the same.
+  fn change_file_key(&self, state: &mut State) -> Result<(), KeySourceError> {
+    self.ensure_open(state)?;
+    let directory = state.maybe_directory.clone().ok_or_else(not_open)?;
+    let key = SymmetricKey::generate(&mut OsRng);
+    let contents = state.maybe_contents.as_ref().ok_or_else(not_open)?;
+    let staged = write_staged(&directory, &SECRETS, &key, contents)
+      .and_then(|()| write_staged(&directory, &KEYS, &key, &kept_keys_of(contents)));
+    if let Err(error) = staged {
+      discard_staged(&directory);
+      return Err(error);
+    }
+    if let Err(error) = self.put_file_key(state, &key) {
+      discard_staged(&directory);
+      return Err(error);
+    }
+    state.maybe_key = Some(key);
+    // Whatever was due is in the staged files now.
+    state.is_dirty = false;
+    state.are_keys_dirty = false;
+    for file in [&SECRETS, &KEYS] {
+      if let Err(error) = promote_staged(&directory, file) {
+        // The keychain has the new key: the next write seals the file under it and the stale
+        // staged copy goes, and until then a start promotes it.
+        state.is_dirty = true;
+        state.are_keys_dirty = true;
+        return Err(error);
+      }
+    }
+    Ok(())
+  }
+
+  /// Writes the files' new key to the keychain. A keychain may report a failure and still have
+  /// taken it; then only the staged files open, so one read on that path says which it was.
+  fn put_file_key(&self, state: &mut State, key: &SymmetricKey) -> Result<(), KeySourceError> {
+    let Err(error) = self.call(state, |keystore| {
+      keystore.write_secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT, key.expose_secret())
+    }) else {
+      return Ok(());
+    };
+    // Not through `call`: the failure just now stands, and this is the one read that settles it.
+    let is_taken = matches!(
+      self.keystore.read_secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT),
+      Ok(Some(bytes)) if SymmetricKey::from_slice(&bytes).is_some_and(|kept| kept.is_same_key(key))
+    );
+    if is_taken {
+      tracing::info!("the keychain reported a failure but took the files' new key");
+      state.maybe_blocked = None;
+      return Ok(());
+    }
+    Err(error)
   }
 
   /// Keeps a key found in an old keychain entry. The entry goes once both files have the key; until
@@ -857,16 +940,70 @@ fn has_same_keys(contents: &Contents, kept: &Contents) -> bool {
 fn has_sealed_files(directory: &Path) -> bool {
   [&SECRETS, &KEYS]
     .into_iter()
-    .any(|file| directory.join(file.name).exists())
+    .flat_map(|file| [file.name, file.staged])
+    .any(|name| directory.join(name).exists())
 }
 
 /// A file's contents. A missing one is empty; one that doesn't open is set aside: the secrets file
 /// costs a sign-in, the keys file a second copy until the next write. A file that can't be read at
 /// all (a disk error) stays where it is and fails the call.
+///
+/// A copy from before the last sign-out is sealed under a key the keychain no longer has, so it
+/// is set aside like a damaged file (#1155).
 fn read_file(key: &SymmetricKey, directory: &Path, file: &SealedFile) -> Result<Contents, KeySourceError> {
-  let handle = match fs::File::open(directory.join(file.name)) {
+  let current = open_sealed(key, &directory.join(file.name))?;
+  match take_staged(key, directory, file, current)? {
+    Sealed::Missing => Ok(Contents::default()),
+    Sealed::Opened(contents) => Ok(contents),
+    Sealed::Unreadable => {
+      tracing::warn!(
+        file = file.name,
+        "a sealed file of local secrets is damaged or out of date and set aside"
+      );
+      set_aside(directory, file);
+      Ok(Contents::default())
+    },
+  }
+}
+
+/// Settles a staged copy a sign-out's key change left behind ([`SecretVault::change_file_key`]).
+/// The keychain's key decides: where the current file opens under it, the change never reached the
+/// keychain or was finished, and the staged copy goes; where only the staged copy opens, the
+/// keychain took the new key before the crash, and the staged copy replaces the current file.
+/// A staged copy that doesn't open is a leftover of an earlier change and goes.
+fn take_staged(
+  key: &SymmetricKey,
+  directory: &Path,
+  file: &SealedFile,
+  current: Sealed,
+) -> Result<Sealed, KeySourceError> {
+  let staged_path = directory.join(file.staged);
+  if matches!(current, Sealed::Opened(_)) {
+    remove_if_there(&staged_path);
+    return Ok(current);
+  }
+  match open_sealed(key, &staged_path)? {
+    Sealed::Missing => Ok(current),
+    Sealed::Unreadable => {
+      remove_if_there(&staged_path);
+      Ok(current)
+    },
+    Sealed::Opened(contents) => {
+      promote_staged(directory, file)?;
+      tracing::info!(
+        file = file.name,
+        "finished a change of the files' key that a crash had stopped"
+      );
+      Ok(Sealed::Opened(contents))
+    },
+  }
+}
+
+/// What is at `path`, opened with `key`. Only a disk error is an error.
+fn open_sealed(key: &SymmetricKey, path: &Path) -> Result<Sealed, KeySourceError> {
+  let handle = match fs::File::open(path) {
     Ok(handle) => handle,
-    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Contents::default()),
+    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Sealed::Missing),
     Err(error) => return Err(KeySourceError::SecretsFile(error.to_string())),
   };
   let mut sealed = Vec::new();
@@ -878,17 +1015,7 @@ fn read_file(key: &SymmetricKey, directory: &Path, file: &SealedFile) -> Result<
     .then(|| secret_file::open(key, &sealed).ok())
     .flatten()
     .and_then(|plaintext| serde_json::from_slice(plaintext.expose_secret()).ok());
-  match parsed {
-    Some(contents) => Ok(contents),
-    None => {
-      tracing::warn!(
-        file = file.name,
-        "a sealed file of local secrets is damaged and set aside"
-      );
-      set_aside(directory, file);
-      Ok(Contents::default())
-    },
-  }
+  Ok(parsed.map_or(Sealed::Unreadable, Sealed::Opened))
 }
 
 fn set_aside(directory: &Path, file: &SealedFile) {
@@ -898,12 +1025,40 @@ fn set_aside(directory: &Path, file: &SealedFile) {
   }
 }
 
+/// Deletes a copy nothing reads any more (set aside or stale staged).
 fn remove_if_there(path: &Path) {
   match fs::remove_file(path) {
     Err(error) if error.kind() != io::ErrorKind::NotFound => {
-      tracing::warn!(%error, "could not delete a set-aside secrets file");
+      tracing::warn!(%error, "could not delete a leftover secrets file");
     },
     _ => {},
+  }
+}
+
+/// Seals `contents` under the files' next key into the file's staged copy.
+fn write_staged(
+  directory: &Path,
+  file: &SealedFile,
+  key: &SymmetricKey,
+  contents: &Contents,
+) -> Result<(), KeySourceError> {
+  let sealed = seal(key, contents)?;
+  replace_file(directory, file.temporary, file.staged, &sealed)
+    .map_err(|error| KeySourceError::SecretsFile(error.to_string()))
+}
+
+/// The staged copy replaces the file, in one step.
+fn promote_staged(directory: &Path, file: &SealedFile) -> Result<(), KeySourceError> {
+  fs::rename(directory.join(file.staged), directory.join(file.name))
+    .map_err(|error| KeySourceError::SecretsFile(error.to_string()))?;
+  sync_directory(directory);
+  Ok(())
+}
+
+/// The keychain kept the old key: the staged copies would never open.
+fn discard_staged(directory: &Path) {
+  for file in [&SECRETS, &KEYS] {
+    remove_if_there(&directory.join(file.staged));
   }
 }
 
@@ -932,13 +1087,21 @@ fn flush_all(state: &mut State) -> Result<(), KeySourceError> {
 
 /// Seals `contents` and replaces the file in one step, so a crash leaves the old file or the new one
 /// and never half of either.
+/// A staged copy left by a key change whose promotion failed is stale once the file is written.
 fn write_file(state: &State, file: &SealedFile, contents: &Contents) -> Result<(), KeySourceError> {
   let directory = state.maybe_directory.as_ref().ok_or_else(not_open)?;
   let key = state.maybe_key.as_ref().ok_or_else(not_open)?;
-  let plaintext = serialize(contents)?;
-  let sealed = secret_file::seal(key, &plaintext, &mut OsRng)
+  let sealed = seal(key, contents)?;
+  replace_file(directory, file.temporary, file.name, &sealed)
     .map_err(|error| KeySourceError::SecretsFile(error.to_string()))?;
-  replace_file(directory, file, &sealed).map_err(|error| KeySourceError::SecretsFile(error.to_string()))
+  remove_if_there(&directory.join(file.staged));
+  Ok(())
+}
+
+fn seal(key: &SymmetricKey, contents: &Contents) -> Result<Vec<u8>, KeySourceError> {
+  let plaintext = serialize(contents)?;
+  secret_file::seal(key, &plaintext, &mut OsRng)
+    .map_err(|error| KeySourceError::SecretsFile(error.to_string()))
 }
 
 fn not_open() -> KeySourceError {
@@ -959,9 +1122,9 @@ fn serialize(contents: &Contents) -> Result<Zeroizing<Vec<u8>>, KeySourceError> 
   Ok(writer.0)
 }
 
-fn replace_file(directory: &Path, file: &SealedFile, sealed: &[u8]) -> io::Result<()> {
+fn replace_file(directory: &Path, temporary: &str, target: &str, sealed: &[u8]) -> io::Result<()> {
   fs::create_dir_all(directory)?;
-  let temporary = directory.join(file.temporary);
+  let temporary = directory.join(temporary);
   // Left by a crash; created anew below, so its permissions are certainly ours.
   match fs::remove_file(&temporary) {
     Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
@@ -978,7 +1141,7 @@ fn replace_file(directory: &Path, file: &SealedFile, sealed: &[u8]) -> io::Resul
   handle.write_all(sealed)?;
   handle.sync_all()?;
   drop(handle);
-  fs::rename(&temporary, directory.join(file.name))?;
+  fs::rename(&temporary, directory.join(target))?;
   sync_directory(directory);
   Ok(())
 }
@@ -1011,6 +1174,10 @@ mod tests {
   const ACCOUNT_B: &str = "https://b.example.com|2";
   const OLD_REFRESH_A: &str = "oidc-refresh-token@https://a.example.com";
   const OLD_SESSION_A: &str = "local-session@https://a.example.com";
+  const SIGN_OUT_ITEMS: [(TokenKind, &str); 2] = [
+    (TokenKind::RefreshToken, SERVER_A),
+    (TokenKind::LocalSession, SERVER_A),
+  ];
   /// Throwaway keystore entry of the real keychain's tests; deleted again at the end.
   const TEST_SERVICE: &str = "de.zeitgleich.teamcraft.test-keystore-runtime";
 
@@ -1747,9 +1914,10 @@ mod tests {
         fake.counts(),
         Counts {
           reads: 0,
-          writes: 0,
+          writes: 1,
           deletes: 2
-        }
+        },
+        "the files' new key is the one write"
       );
     }
 
@@ -1806,6 +1974,346 @@ mod tests {
       fake.deny(false);
       vault.purge_after_sign_out(&ITEMS).unwrap();
       assert!(!fake.has(VAULT_SERVICE, OLD_REFRESH_A));
+    }
+  }
+
+  /// Issue #1155: a process of the user that can write the files but not read them puts back a
+  /// copy from before a sign-out.
+  mod rollback {
+    use super::*;
+
+    #[test]
+    fn a_copy_from_before_sign_out_brings_no_token_back() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let database_key = vault.database_key(ACCOUNT_A).unwrap();
+      let before = fs::read(directory.path().join(VAULT_FILE)).unwrap();
+      sign_out(&vault);
+      drop(vault);
+
+      fs::write(directory.path().join(VAULT_FILE), before).unwrap();
+
+      let vault = reopen(&fake, &directory);
+      assert!(
+        vault
+          .load_token(TokenKind::RefreshToken, SERVER_A)
+          .unwrap()
+          .is_none()
+      );
+      assert!(
+        vault.database_key(ACCOUNT_A).unwrap().is_same_key(&database_key),
+        "the keys file still has the database key"
+      );
+      assert!(directory.path().join(SET_ASIDE_FILE).exists());
+    }
+
+    /// Both files put back: no token either. The database key goes with them, as it would if they
+    /// were deleted, which such a process can do anyway.
+    #[test]
+    fn copies_of_both_files_bring_no_token_back() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let before = [VAULT_FILE, KEYS_FILE].map(|name| fs::read(directory.path().join(name)).unwrap());
+      sign_out(&vault);
+      drop(vault);
+
+      for (name, copy) in [VAULT_FILE, KEYS_FILE].into_iter().zip(before) {
+        fs::write(directory.path().join(name), copy).unwrap();
+      }
+
+      let vault = reopen(&fake, &directory);
+      assert!(
+        vault
+          .load_token(TokenKind::RefreshToken, SERVER_A)
+          .unwrap()
+          .is_none()
+      );
+      assert!(
+        vault
+          .load_session_note(SessionNote::TokenSubject, SERVER_A)
+          .unwrap()
+          .is_none()
+      );
+    }
+
+    /// The goal of #1150 and #1223 holds after a sign-out: the key changed, the item didn't.
+    #[test]
+    fn a_normal_start_after_sign_out_still_reads_the_keychain_once() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let database_key = vault.database_key(ACCOUNT_A).unwrap();
+      sign_out(&vault);
+      drop(vault);
+      fake.reset_counts();
+
+      let vault = start(&fake, &directory);
+
+      assert_eq!(
+        fake.counts(),
+        Counts {
+          reads: 1,
+          writes: 0,
+          deletes: 0
+        }
+      );
+      assert!(vault.database_key(ACCOUNT_A).unwrap().is_same_key(&database_key));
+      assert_eq!(
+        fake.entries(),
+        [(VAULT_SERVICE.to_owned(), VAULT_KEY_ACCOUNT.to_owned())]
+      );
+    }
+
+    /// Versions from 1.0.18 read the same item as a 32-byte key and the files under it.
+    #[test]
+    fn an_older_version_still_opens_the_files_after_sign_out() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let old_key = fake.secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT).unwrap();
+      sign_out(&vault);
+      drop(vault);
+
+      let new_key = fake.secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT).unwrap();
+      assert_ne!(new_key, old_key);
+      let key = SymmetricKey::from_slice(&new_key).unwrap();
+      for name in [VAULT_FILE, KEYS_FILE] {
+        let sealed = fs::read(directory.path().join(name)).unwrap();
+        assert!(secret_file::open(&key, &sealed).is_ok(), "{name}");
+      }
+      assert!(!has_staged_files(&directory));
+    }
+
+    #[test]
+    fn an_install_from_1_0_18_is_protected_from_its_first_sign_out() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      write_file_of_1_0_18(&fake, &directory);
+      let vault = start(&fake, &directory);
+      let before = fs::read(directory.path().join(VAULT_FILE)).unwrap();
+      sign_out(&vault);
+      drop(vault);
+
+      fs::write(directory.path().join(VAULT_FILE), before).unwrap();
+
+      let vault = reopen(&fake, &directory);
+      assert!(
+        vault
+          .load_token(TokenKind::RefreshToken, SERVER_A)
+          .unwrap()
+          .is_none()
+      );
+      assert_eq!(vault.database_key(ACCOUNT_A).unwrap().expose_secret(), &[3; 32]);
+    }
+
+    /// A staged copy only wins where the current file doesn't open: a signed-out copy from the last
+    /// change, put at the staged name after a new sign-in, doesn't undo the sign-in.
+    #[test]
+    fn a_staged_copy_never_wins_over_a_current_file() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let older = fs::read(directory.path().join(VAULT_FILE)).unwrap();
+      sign_out(&vault);
+      let signed_out = fs::read(directory.path().join(VAULT_FILE)).unwrap();
+      vault
+        .save_token(TokenKind::RefreshToken, SERVER_A, "signed-in-again")
+        .unwrap();
+      drop(vault);
+
+      for copy in [older, signed_out] {
+        fs::write(directory.path().join(STAGED_FILE), copy).unwrap();
+        fs::write(directory.path().join(KEYS_STAGED_FILE), b"not a sealed file").unwrap();
+
+        let vault = reopen(&fake, &directory);
+        assert_eq!(
+          vault
+            .load_token(TokenKind::RefreshToken, SERVER_A)
+            .unwrap()
+            .unwrap()
+            .as_str(),
+          "signed-in-again"
+        );
+        assert!(!has_staged_files(&directory));
+      }
+    }
+  }
+
+  /// A sign-out's key change stopped at each step: never locked out, at worst signed out.
+  mod key_change {
+    use super::*;
+
+    /// The files were staged under the new key, but the keychain never got it.
+    #[test]
+    fn a_crash_before_the_keychain_keeps_the_old_key() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let (database_key, old_key, old_files) = sign_out_up_to_the_key_change(&fake, &directory);
+      stage_current_files(&directory, &old_files);
+      fake.put_secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT, &old_key);
+
+      assert_finished(&fake, &directory, &database_key);
+      assert_eq!(fake.secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT).unwrap(), old_key);
+    }
+
+    /// The keychain has the new key, the files under it are still staged.
+    #[test]
+    fn a_crash_after_the_keychain_finishes_the_change() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let (database_key, _, old_files) = sign_out_up_to_the_key_change(&fake, &directory);
+      stage_current_files(&directory, &old_files);
+
+      assert_finished(&fake, &directory, &database_key);
+      assert_opens_under_the_keychains_key(&fake, &directory);
+    }
+
+    /// The secrets file was replaced, the keys file still waits.
+    #[test]
+    fn a_crash_between_the_files_finishes_the_change() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let (database_key, _, old_files) = sign_out_up_to_the_key_change(&fake, &directory);
+      fs::rename(
+        directory.path().join(KEYS_FILE),
+        directory.path().join(KEYS_STAGED_FILE),
+      )
+      .unwrap();
+      fs::write(directory.path().join(KEYS_FILE), &old_files[1]).unwrap();
+
+      assert_finished(&fake, &directory, &database_key);
+      assert_opens_under_the_keychains_key(&fake, &directory);
+    }
+
+    #[test]
+    fn a_denied_keychain_keeps_the_old_key_and_says_so() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let database_key = vault.database_key(ACCOUNT_A).unwrap();
+      clear_tokens(&vault);
+      let old_key = fake.secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT).unwrap();
+      fake.deny(true);
+
+      assert!(vault.purge_after_sign_out(&SIGN_OUT_ITEMS).is_err());
+
+      fake.deny(false);
+      assert_eq!(fake.secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT).unwrap(), old_key);
+      assert!(!has_staged_files(&directory));
+      drop(vault);
+      assert_finished(&fake, &directory, &database_key);
+    }
+
+    /// The keychain took the key but reported a failure: then only the new files open.
+    #[test]
+    fn a_keychain_that_took_the_key_but_said_no_counts_as_done() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let database_key = vault.database_key(ACCOUNT_A).unwrap();
+      clear_tokens(&vault);
+      fake.lose_next_write_answer();
+
+      vault.purge_after_sign_out(&SIGN_OUT_ITEMS).unwrap();
+
+      drop(vault);
+      assert_finished(&fake, &directory, &database_key);
+      assert_opens_under_the_keychains_key(&fake, &directory);
+    }
+
+    /// The staged file couldn't take the file's place while running: the next write or start does.
+    #[test]
+    fn a_failed_replacement_is_finished_later() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let database_key = vault.database_key(ACCOUNT_A).unwrap();
+      clear_tokens(&vault);
+      // A directory with something in it can't be replaced by a file.
+      let file = directory.path().join(VAULT_FILE);
+      fs::remove_file(&file).unwrap();
+      fs::create_dir(&file).unwrap();
+      fs::write(file.join("in-the-way"), b"").unwrap();
+
+      assert!(vault.purge_after_sign_out(&SIGN_OUT_ITEMS).is_err());
+
+      fs::remove_dir_all(&file).unwrap();
+      vault
+        .save_token(TokenKind::RefreshToken, SERVER_A, "signed-in-again")
+        .unwrap();
+      assert!(!directory.path().join(STAGED_FILE).exists());
+      drop(vault);
+      let vault = reopen(&fake, &directory);
+      assert_eq!(
+        vault
+          .load_token(TokenKind::RefreshToken, SERVER_A)
+          .unwrap()
+          .unwrap()
+          .as_str(),
+        "signed-in-again"
+      );
+      assert!(vault.database_key(ACCOUNT_A).unwrap().is_same_key(&database_key));
+      assert!(!has_staged_files(&directory));
+    }
+
+    /// Signs out and returns the database key, the files' key before the change, and the files
+    /// as they were then, already signed out.
+    fn sign_out_up_to_the_key_change(
+      fake: &Arc<Fake>,
+      directory: &TestDir,
+    ) -> (SymmetricKey, Vec<u8>, [Vec<u8>; 2]) {
+      let vault = start(fake, directory);
+      let database_key = vault.database_key(ACCOUNT_A).unwrap();
+      clear_tokens(&vault);
+      let old_key = fake.secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT).unwrap();
+      let old_files = [VAULT_FILE, KEYS_FILE].map(|name| fs::read(directory.path().join(name)).unwrap());
+      vault.purge_after_sign_out(&SIGN_OUT_ITEMS).unwrap();
+      (database_key, old_key, old_files)
+    }
+
+    /// Back to the moment the files were staged: the files under the new key at their staged names,
+    /// the old ones in place.
+    fn stage_current_files(directory: &TestDir, old_files: &[Vec<u8>; 2]) {
+      for (file, old) in [&SECRETS, &KEYS].into_iter().zip(old_files) {
+        let path = directory.path().join(file.name);
+        fs::rename(&path, directory.path().join(file.staged)).unwrap();
+        fs::write(&path, old).unwrap();
+      }
+    }
+
+    /// A start after the crash: one keychain read, signed out, the database key kept, nothing
+    /// staged left.
+    fn assert_finished(fake: &Arc<Fake>, directory: &TestDir, database_key: &SymmetricKey) {
+      fake.reset_counts();
+      let vault = reopen(fake, directory);
+      assert!(
+        vault
+          .load_token(TokenKind::RefreshToken, SERVER_A)
+          .unwrap()
+          .is_none()
+      );
+      assert!(vault.database_key(ACCOUNT_A).unwrap().is_same_key(database_key));
+      assert_eq!(
+        fake.counts(),
+        Counts {
+          reads: 1,
+          writes: 0,
+          deletes: 0
+        }
+      );
+      assert!(!has_staged_files(directory));
+      assert!(!directory.path().join(SET_ASIDE_FILE).exists());
+      assert!(!directory.path().join(KEYS_SET_ASIDE_FILE).exists());
+    }
+
+    fn assert_opens_under_the_keychains_key(fake: &Fake, directory: &TestDir) {
+      let key = SymmetricKey::from_slice(&fake.secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT).unwrap()).unwrap();
+      for name in [VAULT_FILE, KEYS_FILE] {
+        let sealed = fs::read(directory.path().join(name)).unwrap();
+        assert!(secret_file::open(&key, &sealed).is_ok(), "{name}");
+      }
     }
   }
 
@@ -2394,6 +2902,8 @@ mod tests {
     is_denied: bool,
     are_deletes_failing: bool,
     is_next_read_hidden: bool,
+    /// The next write is stored, but reported as failed.
+    is_next_write_answer_lost: bool,
   }
 
   impl Fake {
@@ -2430,6 +2940,10 @@ mod tests {
 
     fn fail_deletes(&self, are_failing: bool) {
       self.with(|inner| inner.are_deletes_failing = are_failing);
+    }
+
+    fn lose_next_write_answer(&self) {
+      self.with(|inner| inner.is_next_write_answer_lost = true);
     }
 
     fn put_text(&self, service: &str, account: &str, text: &str) {
@@ -2522,6 +3036,9 @@ mod tests {
         inner
           .entries
           .insert((service.to_owned(), account.to_owned()), secret.to_vec());
+        if std::mem::take(&mut inner.is_next_write_answer_lost) {
+          return Err(denied());
+        }
         Ok(())
       })
     }
@@ -2567,6 +3084,24 @@ mod tests {
     vault.set_directory(directory.path());
     vault.pause = Box::new(|_| {});
     vault
+  }
+
+  /// What the sign-in service does at sign-out (`auth/mod.rs`), for server A.
+  fn sign_out(vault: &SecretVault) {
+    clear_tokens(vault);
+    vault.purge_after_sign_out(&SIGN_OUT_ITEMS).unwrap();
+  }
+
+  fn clear_tokens(vault: &SecretVault) {
+    for (kind, server) in SIGN_OUT_ITEMS {
+      vault.clear_token(kind, server).unwrap();
+    }
+  }
+
+  fn has_staged_files(directory: &TestDir) -> bool {
+    [STAGED_FILE, KEYS_STAGED_FILE]
+      .into_iter()
+      .any(|name| directory.path().join(name).exists())
   }
 
   /// The secrets file as versions 1.0.18 to 1.0.21 left it for one server and account: tokens moved
