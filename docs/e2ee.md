@@ -4818,7 +4818,10 @@ start and remain visible while the server or its object storage is unavailable.
   conversation's whole group – its channel picture and the renditions of all its messages, sent or
   not, however many – and only then deletes the record, so a purge cut short by a crash or a cache
   that isn't open yet is finished by a later change or the next start. Nothing reads the
-  conversation's messages for it.
+  conversation's messages for it. The desktop deletes the folder on a blocking thread. Each record
+  is handed out once until the host reports it; one that failed is handed out again after a pause
+  that doubles with each failure. For ten minutes after a purge the group takes no new entries, so
+  a picture whose download ends after the purge isn't cached again.
 - **Desktop:** one sealed file per entry under the app's data directory, a folder per server and
   user beside the encrypted database, with keys derived from the SQLCipher key from the OS keystore.
   The shell opens it together with the store; the webview reads and fills it through the shell,
@@ -4854,8 +4857,9 @@ start and remain visible while the server or its object storage is unavailable.
   (notifications.md, "Desktop notifications").
 - The mobile apps don't use it: Android keeps avatars and space pictures in its own file caches
   (by user and space, nothing of a conversation) and inline pictures only in memory. Its one file of
-  a conversation, an unfinished picture selection with its camera shots, goes once the conversation
-  is no longer listed.
+  a conversation, an unfinished picture selection with its camera shots, goes with the
+  conversation: the core hands the app the same records (`dropped_conversations`), and the app
+  reports each back once the files are gone.
 
 ### 9.7 Desktop: one keychain item, read once per start (issues #1150, #1223, implemented)
 

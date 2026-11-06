@@ -161,8 +161,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val feedSeeds = FeedSeeds()
   private var maybeReadAhead: Job? = null
   private var maybeStartCacheWrite: Job? = null
-  /** The conversations of the list read last, whose media drafts stay ([dropUnlistedDrafts]). */
-  private var lastListedConversations: Set<String> = emptySet()
 
   /**
    * The store changed since the list was read last: a message deleted, redacted or purged while
@@ -305,6 +303,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     viewModelScope.launch(Dispatchers.IO) { MediaDraftStore.sweep(getApplication(), System.currentTimeMillis()) }
     viewModelScope.launch { graph.core.changeCount.collect { isStartCacheStale = true } }
+    viewModelScope.launch(Dispatchers.IO) { graph.core.changeCount.collect { dropDraftsOfDroppedConversations() } }
     ProcessLifecycleOwner.get().lifecycle.addObserver(startCacheOnLeave)
     refresh()
     retryServerWhenOnline()
@@ -611,7 +610,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   suspend fun refreshChatList(myId: String) = chatListLock.withLock {
     val conversations = conversations()
     chatListState.update { it.copy(maybeConversations = conversations, runningCalls = runningCalls()) }
-    dropUnlistedDrafts(conversations)
     val previews = chatPreviews(conversations, myId)
     chatListState.update { it.copy(previews = previews) }
     isStartCacheStale = false
@@ -620,14 +618,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   /**
-   * Media drafts of conversations that went from the list (#1161); only when the list changed, and
-   * never on an empty one (a read that failed reads as empty).
+   * Media drafts and their camera shots of conversations the core purged or no longer lists
+   * (#1161): deleted, then reported back. The core hands each out once and remembers it across a
+   * restart until it is reported dropped.
    */
-  private fun dropUnlistedDrafts(conversations: List<ConversationItem>) {
-    val listed = conversations.mapTo(HashSet()) { it.id }
-    if (listed.isEmpty() || listed == lastListedConversations) return
-    lastListedConversations = listed
-    viewModelScope.launch(Dispatchers.IO) { MediaDraftStore.dropUnlisted(getApplication(), listed) }
+  private suspend fun dropDraftsOfDroppedConversations() {
+    val core = runCatching { graph.core.core() }.getOrNull() ?: return
+    val dropped = runCatching { core.droppedConversations() }.getOrNull().orEmpty()
+    for (conversation in dropped) {
+      val isDropped = MediaDraftStore.dropConversation(getApplication(), conversation)
+      runCatching {
+        if (isDropped) core.conversationFilesDropped(conversation) else core.conversationFilesKept(conversation)
+      }
+    }
   }
 
   /** What [conversationId] showed last or was read ahead with, to show before its first read. */

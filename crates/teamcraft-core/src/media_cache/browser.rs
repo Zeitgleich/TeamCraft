@@ -168,6 +168,9 @@ impl BrowserMediaCache {
   ) -> Result<(), MediaCacheError> {
     let policy = policy.clamped();
     let id = self.sealer.entry_id(key);
+    if self.index.borrow().is_fenced(&id.group, now_ms()) {
+      return Ok(());
+    }
     if media.bytes.len() as u64 > MAX_ENTRY_BYTES.min(policy.budget_bytes) {
       return self.delete_entries(&[id]).await;
     }
@@ -195,7 +198,12 @@ impl BrowserMediaCache {
     for old in &evicted {
       delete_in(&store, old)?;
     }
-    Ok(idb::transaction_done(&transaction).await?)
+    idb::transaction_done(&transaction).await?;
+    // Purged while this was written: the purge's ranges may have run first.
+    if self.index.borrow().is_fenced(&id.group, now_ms()) {
+      return self.delete_entries(&[id]).await;
+    }
+    Ok(())
   }
 
   pub async fn remove(&self, key: &MediaKey) -> Result<(), MediaCacheError> {
@@ -203,21 +211,23 @@ impl BrowserMediaCache {
   }
 
   /// Drops every entry of `conversation` – its channel picture and the renditions of all its
-  /// messages, sent or not – however many there are (e2ee.md §4.6, §9.6), in one transaction.
+  /// messages, sent or not – however many there are (e2ee.md §4.6, §9.6), in one transaction. A
+  /// picture of it still downloading isn't cached afterwards ([`CacheIndex::fence`]).
   pub async fn remove_conversation(&self, conversation: ConversationId) -> Result<(), MediaCacheError> {
     let group = self.sealer.conversation_group(conversation);
-    self.index.borrow_mut().remove_group(&group);
+    self.index.borrow_mut().fence(group, now_ms());
     let (transaction, store) = self.transaction(IdbTransactionMode::Readwrite)?;
-    for prefix in [DATA_PREFIX, META_PREFIX] {
-      let start = format!("{prefix}{}{GROUP_SEPARATOR}", hex_name(&group));
-      let end = format!("{prefix}{}{GROUP_END}", hex_name(&group));
+    for (start, end) in group_ranges(&group) {
       let range = IdbKeyRange::bound(&JsValue::from_str(&start), &JsValue::from_str(&end))
         .map_err(|error| idb::js_error("range", &error))?;
       store
         .delete(&range)
         .map_err(|error| idb::js_error("delete", &error))?;
     }
-    Ok(idb::transaction_done(&transaction).await?)
+    idb::transaction_done(&transaction).await?;
+    // Only now: records a failed transaction left stay counted against the limit.
+    self.index.borrow_mut().remove_group(&group);
+    Ok(())
   }
 
   async fn read(&self, id: &EntryId) -> Result<Option<Vec<u8>>, StoreError> {
@@ -339,6 +349,18 @@ async fn delete_ungrouped(database: &IdbDatabase, ids: &[LookupId]) -> Result<()
     }
   }
   Ok(idb::transaction_done(&transaction).await?)
+}
+
+/// The key ranges, data and meta records, holding every record of `group` and nothing else:
+/// `{prefix}{group}/` up to `{prefix}{group}0`, the character after the separator.
+fn group_ranges(group: &LookupId) -> [(String, String); 2] {
+  let group = hex_name(group);
+  [DATA_PREFIX, META_PREFIX].map(|prefix| {
+    (
+      format!("{prefix}{group}{GROUP_SEPARATOR}"),
+      format!("{prefix}{group}{GROUP_END}"),
+    )
+  })
 }
 
 /// The entry a record is named after (`{group}/{entry}`), if it is named like one.

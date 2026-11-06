@@ -598,7 +598,8 @@ impl Engine {
       (SealedSqliteStore::open(&path, &key_source), MESSAGE_CACHE_BYTES)
     };
     let store = store.map_err(|error| open_error(error.into()))?;
-    let store = TrackedStore::with_message_cache(Arc::new(store), cached_bytes);
+    // The apps keep drafts of conversations, which go with them (#1161).
+    let store = TrackedStore::with_message_cache(Arc::new(store), cached_bytes).with_conversation_purges();
     // A broken record only costs the preferences, not the store.
     let mentions: MentionSettings = load_mention_preferences(&store).unwrap_or_default().into();
     let maybe_account = records::load_account(&store).map_err(open_error)?;

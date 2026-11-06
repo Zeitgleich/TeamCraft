@@ -385,6 +385,49 @@ impl TeamCraft {
       .await
   }
 
+  /// Conversations purged or no longer listed whose files the app keeps (media drafts) are to go
+  /// (#1161; e2ee.md §9.6). Each is handed out once: the app deletes its files, then reports it
+  /// with [`Self::conversation_files_dropped`] or [`Self::conversation_files_kept`]. Cheap when none
+  /// waits; read after change notifications.
+  pub async fn dropped_conversations(&self) -> Result<Vec<String>, TeamCraftError> {
+    self
+      .read(|reads| {
+        Ok(
+          reads
+            .store
+            .take_media_purges()
+            .into_iter()
+            .map(|conversation| conversation.to_string())
+            .collect(),
+        )
+      })
+      .await
+  }
+
+  /// The app deleted its files of `conversation_id`, handed out by [`Self::dropped_conversations`].
+  pub async fn conversation_files_dropped(&self, conversation_id: String) -> Result<(), TeamCraftError> {
+    let conversation = engine::parse_id(&conversation_id)?;
+    self
+      .read(move |reads| {
+        reads
+          .store
+          .media_purged(conversation)
+          .map_err(|error| TeamCraftError::Storage(error.to_string()))
+      })
+      .await
+  }
+
+  /// The app couldn't delete its files of `conversation_id` now: handed out again later.
+  pub async fn conversation_files_kept(&self, conversation_id: String) -> Result<(), TeamCraftError> {
+    let conversation = engine::parse_id(&conversation_id)?;
+    self
+      .read(move |reads| {
+        reads.store.media_purge_failed(conversation);
+        Ok(())
+      })
+      .await
+  }
+
   /// Deletes this account's plaintext files on the device (decrypted downloads, staged uploads);
   /// for sign-out. The sealed store stays.
   pub async fn delete_plaintext_files(&self) -> Result<(), TeamCraftError> {

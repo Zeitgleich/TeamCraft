@@ -5,11 +5,18 @@ use std::collections::HashMap;
 
 use teamcraft_crypto::local_store::LookupId;
 
+/// How long after a conversation's purge its group takes no new entries: a picture whose download
+/// started before the purge and ends after it isn't cached again (#1161). One finishing later
+/// still is, and goes with the age limit.
+const PURGE_FENCE_MS: u64 = 10 * 60 * 1000;
+
 /// Entries by ID with their size and last use, within a byte budget.
 #[derive(Debug, Default)]
 pub struct CacheIndex {
   entries: HashMap<EntryId, IndexEntry>,
   used_bytes: u64,
+  /// Groups purged in the last [`PURGE_FENCE_MS`], with when (device clock).
+  fenced: HashMap<LookupId, u64>,
 }
 
 /// Where an entry is stored: its group (the conversation it belongs to, or the group of pictures
@@ -100,6 +107,21 @@ impl CacheIndex {
     expired
   }
 
+  /// `group` is being purged: for a while it takes no entries ([`Self::is_fenced`]). Set before the
+  /// deletion, so a write that ends during it is caught too.
+  pub fn fence(&mut self, group: LookupId, now_ms: u64) {
+    self.fenced.retain(|_, at_ms| is_recent(*at_ms, now_ms));
+    self.fenced.insert(group, now_ms);
+  }
+
+  /// Whether `group` was purged so recently that an entry written now is dropped instead.
+  pub fn is_fenced(&self, group: &LookupId, now_ms: u64) -> bool {
+    self
+      .fenced
+      .get(group)
+      .is_some_and(|at_ms| is_recent(*at_ms, now_ms))
+  }
+
   /// Takes out every entry of `group` (a conversation was purged); returns how many there were.
   pub fn remove_group(&mut self, group: &LookupId) -> usize {
     let before = self.entries.len();
@@ -130,6 +152,11 @@ impl CacheIndex {
   pub fn is_empty(&self) -> bool {
     self.entries.is_empty()
   }
+}
+
+/// Within the fence of a purge at `at_ms`; a clock that went back counts the same distance.
+fn is_recent(at_ms: u64, now_ms: u64) -> bool {
+  at_ms.abs_diff(now_ms) < PURGE_FENCE_MS
 }
 
 #[cfg(test)]
@@ -201,6 +228,18 @@ mod tests {
     assert_eq!((index.len(), index.used_bytes()), (1, 25));
     assert!(index.contains(&id(9)));
     assert_eq!(index.remove_group(&LookupId([7; 32])), 0, "nothing left of it");
+  }
+
+  #[test]
+  fn a_purged_group_is_fenced_for_a_while_and_others_are_not() {
+    let mut index = CacheIndex::default();
+    let group = LookupId([7; 32]);
+    index.fence(group, 1_000);
+    assert!(index.is_fenced(&group, 1_000 + PURGE_FENCE_MS - 1));
+    assert!(!index.is_fenced(&LookupId([8; 32]), 1_000));
+    assert!(!index.is_fenced(&group, 1_000 + PURGE_FENCE_MS), "over");
+    index.fence(LookupId([8; 32]), 1_000 + PURGE_FENCE_MS);
+    assert_eq!(index.fenced.len(), 1, "expired fences are swept");
   }
 
   fn id(n: u8) -> EntryId {

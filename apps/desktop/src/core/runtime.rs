@@ -29,10 +29,11 @@ use teamcraft_core::connection::{
   ConnectionSettings, ConnectionState, ConnectionStatus, ConnectionSupervisor,
 };
 use teamcraft_core::downloads::Downloads;
+use teamcraft_core::media_cache::FileMediaCache;
 use teamcraft_core::records;
 use teamcraft_core::store::{
-  DEFAULT_MESSAGE_CACHE_BYTES, DatabaseKeySource, KeySourceError, SecretVault, SqlCipherStore, StoreError,
-  StoreLock, TrackedStore,
+  DEFAULT_MESSAGE_CACHE_BYTES, DatabaseKeySource, KeySourceError, LocalStore, SecretVault, SqlCipherStore,
+  StoreError, StoreLock, TrackedStore,
 };
 use teamcraft_core::typing::TypingAnnouncer;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
@@ -2483,34 +2484,51 @@ impl Core {
   }
 
   /// The renditions whose message went away (#749), and every picture of a conversation that was
-  /// purged or is no longer listed (#1161): out of the media cache. A conversation's record stays
-  /// until its pictures are gone, so a later change or the next start tries again.
+  /// purged or is no longer listed (#1161): out of the media cache. A conversation's folder is
+  /// deleted on a blocking thread, then its record in the store; until then a later change or the
+  /// next start tries again.
   fn drop_removed_renditions(&self) {
-    let Some(store) = &self.store else {
+    let (Some(store), Some(cache)) = (&self.store, self.media.get()) else {
       return;
     };
-    let removed = store.take_removed_renditions();
-    let purges = store.take_media_purges();
-    let Some(cache) = self.media.get() else {
-      return;
-    };
-    for rendition in removed {
+    for rendition in store.take_removed_renditions() {
       if let Err(error) = cache.remove(&rendition.into()) {
         tracing::debug!(%error, "could not drop a cached rendition");
       }
     }
-    for conversation in purges {
-      let dropped = cache
-        .remove_conversation(conversation)
-        .map_err(|error| error.to_string())
-        .and_then(|()| {
-          store
-            .media_purged(conversation)
-            .map_err(|error| error.to_string())
-        });
-      if let Err(error) = dropped {
-        tracing::warn!(conversation_id = %conversation, %error, "could not drop a conversation's cached pictures");
-      }
+    let purges = store.take_media_purges();
+    if purges.is_empty() {
+      return;
+    }
+    let store = store.clone();
+    let purge = move || drop_conversations_media(&cache, &store, purges);
+    match tokio::runtime::Handle::try_current() {
+      Ok(runtime) => drop(runtime.spawn_blocking(purge)),
+      Err(_) => purge(),
+    }
+  }
+}
+
+/// Deletes the cached pictures of `conversations`, then their records. A record deleted while the
+/// core thread's group of writes is open joins that group; were it rolled back, the folder (already
+/// gone) is only deleted again.
+fn drop_conversations_media<S: LocalStore>(
+  cache: &FileMediaCache,
+  store: &TrackedStore<S>,
+  conversations: Vec<ConversationId>,
+) {
+  for conversation in conversations {
+    let dropped = cache
+      .remove_conversation(conversation)
+      .map_err(|error| error.to_string())
+      .and_then(|()| {
+        store
+          .media_purged(conversation)
+          .map_err(|error| error.to_string())
+      });
+    if let Err(error) = dropped {
+      tracing::warn!(conversation_id = %conversation, %error, "could not drop a conversation's cached pictures");
+      store.media_purge_failed(conversation);
     }
   }
 }
@@ -2888,6 +2906,52 @@ fn on_heap<'a, F: Future + 'a>(make: impl FnOnce() -> F) -> Pin<Box<dyn Future<O
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Issue #1161: the shell drops a purged conversation's folder, then its record; one it couldn't
+  /// confirm (the app ended in between) is dropped again after the restart.
+  #[test]
+  fn a_purge_drops_the_pictures_then_the_record_and_survives_an_interruption() {
+    use teamcraft_core::media_cache::{CachePolicy, CachedMedia, MediaKey};
+    use teamcraft_core::store::MemoryStore;
+    use teamcraft_proto::{Id, Snowflake};
+
+    let id = |raw: i64| ConversationId::from_snowflake(Snowflake::new(raw).expect("an ID"));
+    let dir = std::env::temp_dir().join(format!("teamcraft-runtime-purge-{}", std::process::id()));
+    let key = SymmetricKey::from_bytes([3; 32]);
+    let cache = FileMediaCache::open(&dir, &key).expect("cache");
+    let picture = CachedMedia {
+      version: "v".to_owned(),
+      content_type: "image/png".to_owned(),
+      bytes: SecretBytes::new(b"picture".to_vec()),
+    };
+    for conversation in [id(1), id(2)] {
+      cache
+        .put(
+          &MediaKey::ChannelImage(conversation),
+          &picture,
+          CachePolicy::default(),
+        )
+        .expect("put");
+    }
+    let disk = Arc::new(MemoryStore::new());
+    let store = TrackedStore::new(disk.clone()).with_media_cache();
+    store.delete_messages(id(1)).expect("purge");
+
+    // Dropped, not confirmed: the app ended.
+    assert_eq!(store.take_media_purges(), vec![id(1)]);
+    cache.remove_conversation(id(1)).expect("drop");
+    drop(store);
+
+    let restarted = TrackedStore::new(disk).with_media_cache();
+    let again = restarted.take_media_purges();
+    assert_eq!(again, vec![id(1)], "still due after the restart");
+    drop_conversations_media(&cache, &restarted, again);
+    assert!(restarted.take_media_purges().is_empty(), "confirmed");
+    let max_age = Duration::from_secs(3600);
+    assert!(cache.get(&MediaKey::ChannelImage(id(1)), max_age).is_none());
+    assert!(cache.get(&MediaKey::ChannelImage(id(2)), max_age).is_some());
+    drop(std::fs::remove_dir_all(dir));
+  }
 
   #[test]
   fn a_core_never_gets_the_token_of_another_server() {

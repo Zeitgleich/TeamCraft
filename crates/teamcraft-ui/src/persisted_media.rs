@@ -182,27 +182,24 @@ pub fn drop_renditions(removed: Vec<teamcraft_core::store::RemovedRendition>) {
 }
 
 /// Every picture of `conversations` (purged, or no longer listed; the core in the page notes them):
-/// out of the cache, however many there are. `on_dropped` is called for each one that went; one
-/// whose cache isn't open (yet) is left for the next call.
+/// out of the cache, however many there are. `on_done` hears of each: dropped, or why not (the
+/// cache isn't open, or its deletion failed).
 #[cfg(target_arch = "wasm32")]
 pub fn drop_conversations(
   conversations: Vec<teamcraft_proto::ConversationId>,
-  on_dropped: impl Fn(teamcraft_proto::ConversationId) + 'static,
+  on_done: impl Fn(teamcraft_proto::ConversationId, Result<(), String>) + 'static,
 ) {
-  if is_demo() {
-    return;
-  }
   leptos::task::spawn_local(async move {
-    let Some(cache) = browser_cache().await else {
-      return;
-    };
+    let maybe_cache = if is_demo() { None } else { browser_cache().await };
     for conversation in conversations {
-      match cache.remove_conversation(conversation).await {
-        Ok(()) => on_dropped(conversation),
-        Err(error) => {
-          tracing::debug!(conversation_id = %conversation, %error, "could not drop a conversation's cached pictures");
-        },
-      }
+      let outcome = match &maybe_cache {
+        Some(cache) => cache
+          .remove_conversation(conversation)
+          .await
+          .map_err(|error| error.to_string()),
+        None => Err("no media cache is open".to_owned()),
+      };
+      on_done(conversation, outcome);
     }
   });
 }

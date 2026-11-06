@@ -73,20 +73,39 @@ impl FileMediaCache {
 
   /// Drops every entry of `conversation` – its channel picture and the renditions of all its
   /// messages, sent or not – however many there are (e2ee.md §4.6, §9.6). Nothing there is fine.
+  /// A picture of it still downloading isn't cached afterwards ([`CacheIndex::fence`]). Blocking
+  /// for as long as the folder takes to delete.
   pub fn remove_conversation(&self, conversation: ConversationId) -> Result<(), MediaCacheError> {
-    let group = self.sealer.conversation_group(conversation);
-    let dropped = self.lock().remove_group(&group);
-    match fs::remove_dir_all(self.group_dir(&group)) {
-      Err(error) if error.kind() != ErrorKind::NotFound => Err(error.into()),
-      _ => {
-        tracing::debug!(conversation_id = %conversation, dropped, "dropped a conversation's cached pictures");
-        Ok(())
-      },
-    }
+    self.remove_conversation_at(conversation, SystemTime::now())
   }
 
   pub fn used_bytes(&self) -> u64 {
     self.lock().used_bytes()
+  }
+
+  fn remove_conversation_at(
+    &self,
+    conversation: ConversationId,
+    now: SystemTime,
+  ) -> Result<(), MediaCacheError> {
+    let group = self.sealer.conversation_group(conversation);
+    let folder = self.group_dir(&group);
+    self.lock().fence(group, millis(now));
+    let deleted = match fs::remove_dir_all(&folder) {
+      Err(error) if error.kind() != ErrorKind::NotFound => Err(error),
+      _ => Ok(()),
+    };
+    let mut index = self.lock();
+    let dropped = index.remove_group(&group);
+    if let Err(error) = deleted {
+      // What is left is counted against the limit again; the next purge finds it.
+      if let Err(scan_error) = scan_group(&folder, group, &mut index) {
+        tracing::debug!(error = %scan_error, "could not count what a purge left");
+      }
+      return Err(error.into());
+    }
+    tracing::debug!(conversation_id = %conversation, dropped, "dropped a conversation's cached pictures");
+    Ok(())
   }
 
   fn get_at(&self, key: &MediaKey, max_age: Duration, now: SystemTime) -> Option<CachedMedia> {
@@ -149,6 +168,9 @@ impl FileMediaCache {
       return self.remove(key);
     }
     let id = self.sealer.entry_id(key);
+    if self.lock().is_fenced(&id.group, millis(now)) {
+      return Ok(());
+    }
     let path = self.path(&id);
     let partial = path.with_extension(PARTIAL_SUFFIX.trim_start_matches('.'));
     fs::create_dir_all(self.group_dir(&id.group))?;
@@ -163,6 +185,11 @@ impl FileMediaCache {
     fs::rename(&partial, &path)?;
     let evicted = {
       let mut index = self.lock();
+      // Purged while this was written: the purge may have missed the file.
+      if index.is_fenced(&id.group, millis(now)) {
+        drop(index);
+        return remove_file(&path);
+      }
       index.insert(id, size_bytes, millis(now));
       let mut evicted = index.take_expired(millis(now), policy.max_age_ms());
       evicted.extend(index.evict_to(policy.budget_bytes, Some(&id)));
@@ -594,6 +621,46 @@ mod tests {
       assert_eq!(reopened.used_bytes(), 0);
       assert!(files_in(dir.path()).is_empty());
       cache_has_none_of(&reopened, purged);
+    }
+
+    #[test]
+    fn a_download_ending_after_the_purge_is_not_cached_again() {
+      let dir = TestDir::new("purge-race");
+      let cache = FileMediaCache::open(dir.path(), &database_key(1)).expect("open");
+      let purged = id::<ConversationId>(1);
+      let other = rendition_in(id(2), 1);
+      cache.remove_conversation_at(purged, at(100)).expect("purge");
+      // The download started before the purge and ends a minute after it.
+      cache
+        .put_at(&rendition_in(purged, 1), &media("r", PICTURE), policy(), at(160))
+        .expect("refused quietly");
+      cache
+        .put_at(
+          &MediaKey::ChannelImage(purged),
+          &media("v", PICTURE),
+          policy(),
+          at(160),
+        )
+        .expect("refused quietly");
+      cache
+        .put_at(&other, &media("r", PICTURE), policy(), at(160))
+        .expect("put");
+      assert_eq!(files_in(dir.path()).len(), 1, "only the other conversation's");
+      assert!(cache.get_at(&other, DAY, at(161)).is_some());
+      // Long after (the conversation came back, say): cached as usual.
+      cache
+        .put_at(
+          &rendition_in(purged, 1),
+          &media("r", PICTURE),
+          policy(),
+          at(100 + 11 * 60),
+        )
+        .expect("put");
+      assert!(
+        cache
+          .get_at(&rendition_in(purged, 1), DAY, at(100 + 11 * 60))
+          .is_some()
+      );
     }
 
     #[test]

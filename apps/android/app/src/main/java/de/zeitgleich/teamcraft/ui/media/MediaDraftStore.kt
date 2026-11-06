@@ -71,11 +71,10 @@ class MediaDraftStore(context: Context, private val capturesRoot: suspend () -> 
     fun sweep(context: Context, nowMillis: Long) = sweep(context.filesDir, nowMillis)
 
     /**
-     * Drafts of conversations no longer listed – deleted here (e2ee.md §4.6), deleted elsewhere,
-     * or left – with their camera files: they could never be sent, and what they hold of the
-     * conversation goes with it (#1161). [listed] is the list just read, never empty.
+     * The drafts of [conversation], purged (e2ee.md §4.6) or no longer listed, with their camera
+     * files: what they hold of it goes with it (#1161). Whether none is left.
      */
-    fun dropUnlisted(context: Context, listed: Set<String>) = dropUnlisted(context.filesDir, listed)
+    fun dropConversation(context: Context, conversation: String): Boolean = dropConversation(context.filesDir, conversation)
 
     internal fun deleteAll(filesDir: File) {
       File(filesDir, DIRECTORY).deleteRecursively()
@@ -92,15 +91,16 @@ class MediaDraftStore(context: Context, private val capturesRoot: suspend () -> 
       dropOrphanedCaptures(filesDir)
     }
 
-    internal fun dropUnlisted(filesDir: File, listed: Set<String>) {
-      if (listed.isEmpty()) return
-      File(filesDir, DIRECTORY).listFiles()?.forEach { file ->
-        // `draft-{conversation}-{thread}.sealed` and its `.key` (keys as [MediaFlow] names them).
-        val conversation = file.name.removePrefix("draft-").substringBefore('-')
-        val isDraft = file.name.startsWith("draft-") && conversation.isNotEmpty() && conversation.all(Char::isDigit)
-        if (isDraft && conversation !in listed) file.delete()
-      }
-      dropOrphanedCaptures(filesDir)
+    internal fun dropConversation(filesDir: File, conversation: String): Boolean {
+      if (conversation.isEmpty() || !conversation.all(Char::isDigit)) return true
+      // `draft-{conversation}-{thread}.sealed` and its `.key` (keys as [MediaFlow] names them).
+      val prefix = "draft-$conversation-"
+      val drafts = File(filesDir, DIRECTORY).listFiles { file -> file.name.startsWith(prefix) }.orEmpty()
+      drafts.forEach { it.delete() }
+      captureFolders(filesDir)
+        .filter { it.name.startsWith("$CAPTURES-$conversation-") }
+        .forEach { it.deleteRecursively() }
+      return drafts.none { it.exists() }
     }
 
     /** The core's sweep of its staging folder skips folders, so these are this store's to remove. */

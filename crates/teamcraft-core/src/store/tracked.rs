@@ -18,8 +18,7 @@
 //! [`TrackedStore::take_media_purges`]). The latter is a record in the same group of writes, so a
 //! purge interrupted by a crash is finished by the next start (#1161).
 
-use std::collections::{BTreeSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
@@ -50,6 +49,9 @@ const MAX_REMOVED_RENDITIONS: usize = 4096;
 /// Records in [`Table::SyncState`], `media_purge/{conversation}`: the conversation's pictures are
 /// still to be dropped from the media cache. One per conversation, deleted once the host did.
 const MEDIA_PURGE_PREFIX: &str = "media_purge/";
+/// Most looks a purge the host failed is skipped before it is handed out again; the skips double
+/// with each failure up to this.
+const MAX_MEDIA_PURGE_SKIPS: u32 = 64;
 
 /// A [`LocalStore`] that notes what its writes changed. Clones share the notes.
 #[derive(Clone)]
@@ -58,11 +60,30 @@ pub struct TrackedStore<S> {
   changes: Arc<Mutex<StoreChanges>>,
   removed_renditions: Arc<Mutex<VecDeque<RemovedRendition>>>,
   messages: Arc<Mutex<MessageCache>>,
-  /// The host keeps a media cache: what goes from it is noted.
+  /// The host keeps a media cache: renditions of deleted messages are noted.
   has_media_cache: bool,
-  /// Whether [`MEDIA_PURGE_PREFIX`] records may exist: at start (one left by an earlier run) and
-  /// after one was written, so the host's look for them costs nothing otherwise.
-  media_purges_due: Arc<AtomicBool>,
+  /// The host keeps files of conversations (a media cache, drafts): conversations that went are
+  /// noted.
+  notes_conversation_purges: bool,
+  media_purges: Arc<Mutex<MediaPurges>>,
+}
+
+/// The host's work on [`MEDIA_PURGE_PREFIX`] records.
+#[derive(Debug)]
+struct MediaPurges {
+  /// Records may wait that aren't handed out: at start (left by an earlier run), after one was
+  /// written or a purge failed. Otherwise the host's look costs nothing.
+  is_due: bool,
+  /// Handed out, not yet confirmed or failed: not handed out again meanwhile.
+  in_flight: BTreeSet<ConversationId>,
+  /// Purges that failed, by how many looks they still sit out and how often they failed.
+  backoff: HashMap<ConversationId, Backoff>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Backoff {
+  failures: u32,
+  skips_left: u32,
 }
 
 /// An image attachment whose message went away: its cached rendition goes too. Identifies the entry
@@ -126,7 +147,12 @@ impl<S: LocalStore> TrackedStore<S> {
       removed_renditions: Arc::default(),
       messages: Arc::new(Mutex::new(MessageCache::new(max_size_bytes))),
       has_media_cache: false,
-      media_purges_due: Arc::new(AtomicBool::new(true)),
+      notes_conversation_purges: false,
+      media_purges: Arc::new(Mutex::new(MediaPurges {
+        is_due: true,
+        in_flight: BTreeSet::new(),
+        backoff: HashMap::new(),
+      })),
     }
   }
 
@@ -134,6 +160,13 @@ impl<S: LocalStore> TrackedStore<S> {
   /// ([`Self::take_removed_renditions`], [`Self::take_media_purges`]). Without it nothing is noted.
   pub fn with_media_cache(mut self) -> Self {
     self.has_media_cache = true;
+    self.with_conversation_purges()
+  }
+
+  /// The host keeps other files of conversations (the mobile apps' drafts): notes only which
+  /// conversations went ([`Self::take_media_purges`]).
+  pub fn with_conversation_purges(mut self) -> Self {
+    self.notes_conversation_purges = true;
     self
   }
 
@@ -146,37 +179,81 @@ impl<S: LocalStore> TrackedStore<S> {
     removed.drain(..).collect()
   }
 
-  /// The conversations whose pictures are to go from the media cache, as a whole: purged or no
-  /// longer listed. They stay until the host confirms each with [`Self::media_purged`], also across
-  /// a restart. Looks at the store only after such a write (or once after the start).
+  /// The conversations whose pictures are to go from the media cache (or the host's other files of
+  /// a conversation), as a whole: purged or no longer listed. Each is handed out once until the
+  /// host reports it with [`Self::media_purged`] or [`Self::media_purge_failed`]; the record stays
+  /// until it is purged, also across a restart. Looks at the store only when something may wait.
   pub fn take_media_purges(&self) -> Vec<ConversationId> {
-    if !self.has_media_cache || !self.media_purges_due.swap(false, Ordering::AcqRel) {
+    if !self.notes_conversation_purges {
+      return Vec::new();
+    }
+    let mut purges = self.purges();
+    if !purges.is_due {
       return Vec::new();
     }
     let records = match self.inner.list_prefix(Table::SyncState, MEDIA_PURGE_PREFIX) {
       Ok(records) => records,
       Err(error) => {
         tracing::debug!(%error, "could not list the conversations to drop from the media cache");
-        self.media_purges_due.store(true, Ordering::Release);
         return Vec::new();
       },
     };
-    let purges: Vec<ConversationId> = records
-      .iter()
-      .filter_map(|(key, _)| key.strip_prefix(MEDIA_PURGE_PREFIX)?.parse().ok())
-      .collect();
-    if !records.is_empty() {
-      // Due until the host confirms them.
-      self.media_purges_due.store(true, Ordering::Release);
+    let mut handed_out = Vec::new();
+    let mut is_waiting = false;
+    for conversation in records.iter().filter_map(|(key, _)| {
+      key
+        .strip_prefix(MEDIA_PURGE_PREFIX)?
+        .parse::<ConversationId>()
+        .ok()
+    }) {
+      if purges.in_flight.contains(&conversation) {
+        continue;
+      }
+      if let Some(backoff) = purges.backoff.get_mut(&conversation)
+        && backoff.skips_left > 0
+      {
+        backoff.skips_left -= 1;
+        is_waiting = true;
+        continue;
+      }
+      purges.in_flight.insert(conversation);
+      handed_out.push(conversation);
     }
-    purges
+    // In flight ones make it due again when they fail.
+    purges.is_due = is_waiting;
+    handed_out
   }
 
-  /// The host dropped `conversation`'s pictures from its media cache.
+  /// The host dropped `conversation`'s pictures: its record goes.
   pub fn media_purged(&self, conversation: ConversationId) -> Result<(), StoreError> {
-    self
+    let deleted = self
       .inner
-      .delete(Table::SyncState, &media_purge_key(conversation))
+      .delete(Table::SyncState, &media_purge_key(conversation));
+    let mut purges = self.purges();
+    purges.in_flight.remove(&conversation);
+    if deleted.is_ok() {
+      purges.backoff.remove(&conversation);
+    } else {
+      purges.is_due = true;
+    }
+    deleted
+  }
+
+  /// The host couldn't drop `conversation`'s pictures now: handed out again later, after a pause
+  /// that grows with each failure.
+  pub fn media_purge_failed(&self, conversation: ConversationId) {
+    let mut purges = self.purges();
+    purges.in_flight.remove(&conversation);
+    purges.is_due = true;
+    let backoff = purges.backoff.entry(conversation).or_insert(Backoff {
+      failures: 0,
+      skips_left: 0,
+    });
+    backoff.failures = backoff.failures.saturating_add(1);
+    backoff.skips_left = 1u32
+      .checked_shl(backoff.failures)
+      .unwrap_or(u32::MAX)
+      .min(MAX_MEDIA_PURGE_SKIPS);
   }
 
   /// The wrapped store (for what only it offers, like flushing to disk).
@@ -251,13 +328,13 @@ impl<S: LocalStore> TrackedStore<S> {
   /// Every picture of `conversation`, which went away for this user: a record in the same group
   /// of writes, so it is not lost to a crash before the host dropped them.
   fn note_removed_conversation(&self, conversation: ConversationId) -> Result<(), StoreError> {
-    if !self.has_media_cache {
+    if !self.notes_conversation_purges {
       return Ok(());
     }
     self
       .inner
       .put(Table::SyncState, &media_purge_key(conversation), &[])?;
-    self.media_purges_due.store(true, Ordering::Release);
+    self.purges().is_due = true;
     Ok(())
   }
 
@@ -271,6 +348,11 @@ impl<S: LocalStore> TrackedStore<S> {
   fn cache(&self) -> std::sync::MutexGuard<'_, MessageCache> {
     // Invariant-free data: at worst a conversation is read from the disk again.
     self.messages.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+
+  fn purges(&self) -> std::sync::MutexGuard<'_, MediaPurges> {
+    // Invariant-free data: at worst a purge is handed out again (dropping is idempotent).
+    self.media_purges.lock().unwrap_or_else(PoisonError::into_inner)
   }
 
   fn lock(&self) -> std::sync::MutexGuard<'_, StoreChanges> {
@@ -804,11 +886,7 @@ mod tests {
       store.delete_messages(id(8)).unwrap();
       store.end_writes().unwrap();
       assert_eq!(store.take_media_purges(), vec![id(7), id(8)]);
-      assert_eq!(
-        store.take_media_purges(),
-        vec![id(7), id(8)],
-        "not confirmed: still due"
-      );
+      assert!(store.take_media_purges().is_empty(), "in flight: once");
       store.media_purged(id(7)).unwrap();
       // The app ended before the cache dropped the second one.
       drop(store);
@@ -821,6 +899,29 @@ mod tests {
         restarted.take_media_purges().is_empty(),
         "and the store isn't read again"
       );
+    }
+
+    #[test]
+    fn a_failed_purge_comes_back_after_a_pause_that_grows() {
+      let store = TrackedStore::new(MemoryStore::new()).with_media_cache();
+      store.delete_messages(id(7)).unwrap();
+      assert_eq!(store.take_media_purges(), vec![id(7)]);
+      store.media_purge_failed(id(7));
+      assert_eq!(looks_until_handed_out(&store), 2);
+      store.media_purge_failed(id(7));
+      assert_eq!(looks_until_handed_out(&store), 4);
+      for _ in 0..10 {
+        store.media_purge_failed(id(7));
+        looks_until_handed_out(&store);
+      }
+      store.media_purge_failed(id(7));
+      assert_eq!(
+        looks_until_handed_out(&store),
+        MAX_MEDIA_PURGE_SKIPS as usize,
+        "capped"
+      );
+      store.media_purged(id(7)).unwrap();
+      assert!(store.take_media_purges().is_empty());
     }
 
     #[test]
@@ -844,6 +945,13 @@ mod tests {
           .is_empty(),
         "no record that nobody would delete"
       );
+    }
+
+    /// How many looks pass until the failed purge of conversation 7 is handed out again.
+    fn looks_until_handed_out(store: &TrackedStore<MemoryStore>) -> usize {
+      (0..1_000)
+        .find(|_| store.take_media_purges() == vec![id(7)])
+        .expect("handed out again")
     }
 
     fn removed(message: i64) -> RemovedRendition {

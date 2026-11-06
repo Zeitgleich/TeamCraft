@@ -3197,9 +3197,15 @@ fn drop_removed_media(store: &Store) {
     return;
   }
   let store = store.clone();
-  crate::persisted_media::drop_conversations(purges, move |conversation| {
-    if let Err(error) = store.media_purged(conversation) {
-      tracing::warn!(conversation_id = %conversation, %error, "could not note a conversation's pictures as dropped");
+  crate::persisted_media::drop_conversations(purges, move |conversation, outcome| {
+    let confirmed = outcome.and_then(|()| {
+      store
+        .media_purged(conversation)
+        .map_err(|error| error.to_string())
+    });
+    if let Err(error) = confirmed {
+      tracing::debug!(conversation_id = %conversation, %error, "could not drop a conversation's cached pictures");
+      store.media_purge_failed(conversation);
     }
   });
 }
