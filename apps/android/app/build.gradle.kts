@@ -182,10 +182,15 @@ dependencies {
   implementation(libs.androidx.camera.camera2)
   implementation(libs.androidx.camera.lifecycle)
   implementation(libs.androidx.camera.view)
+  // The in-app camera's video recording (#1358).
+  implementation(libs.androidx.camera.video)
   // QR codes for device linking, shown and scanned (pure Java, Apache-2.0; no Play services).
   // The in-app video player (#200): the platform's decoders behind Media3's demuxers and controls.
   implementation(libs.androidx.media3.exoplayer)
   implementation(libs.androidx.media3.ui)
+  // Trim, mute and scale videos on the device before sending (#1358): Media3 Transformer, Apache-2.0.
+  implementation(libs.androidx.media3.transformer)
+  implementation(libs.androidx.media3.effect)
   implementation(libs.zxing.core)
   // Search segment prefetch on unmetered networks while charging.
   implementation(libs.androidx.work.runtime)

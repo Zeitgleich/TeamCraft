@@ -228,6 +228,8 @@ private fun ChatsPage(viewModel: MainViewModel) {
   HorizontalDivider()
   OriginalDownloadSetting()
   HorizontalDivider()
+  SendQualitySetting()
+  HorizontalDivider()
   AnimatedImagesSetting()
   HorizontalDivider()
   Heading(R.string.search_prefetch_title)

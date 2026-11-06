@@ -944,14 +944,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
-  /** A photo the camera wrote into the app's cache. */
-  suspend fun importPhoto(photo: File): PickedFile? = withContext(Dispatchers.IO) {
-    stage(photo.name, "image/jpeg") { photo.inputStream() }
-  }
-
   /** An edited picture ([de.zeitgleich.teamcraft.ui.screens.PictureEditor]) staged like a picked file. */
   suspend fun stageEditedPicture(name: String, mediaType: String, bytes: ByteArray): PickedFile? = withContext(Dispatchers.IO) {
     stage(name, mediaType) { bytes.inputStream() }
+  }
+
+  /**
+   * A file the app made itself (an exported video, a camera recording) staged like a picked file:
+   * moved when it can be, else copied and deleted.
+   */
+  suspend fun stageMovedFile(name: String, mediaType: String, file: File): PickedFile? = withContext(Dispatchers.IO) {
+    val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return@withContext null
+    val target = File(directory, "${System.nanoTime()}-${cleanFileName(name).replace('/', '_')}")
+    if (file.length() <= MAX_IMPORT_BYTES && file.renameTo(target)) {
+      return@withContext PickedFile(fileName = name, mediaType = mediaType, path = target.absolutePath)
+    }
+    val maybeStaged = stage(name, mediaType) { file.inputStream() }
+    file.delete()
+    maybeStaged
   }
 
   /** Copies into the core's staging folder, at most [MAX_IMPORT_BYTES]. */

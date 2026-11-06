@@ -1,11 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
-import android.Manifest
-import android.content.Context
-import android.content.pm.PackageManager
-import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
@@ -31,7 +26,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -39,9 +33,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
-import java.io.File
 import kotlinx.coroutines.launch
 import android.text.format.DateUtils
 import androidx.compose.foundation.Image
@@ -69,75 +60,40 @@ import de.zeitgleich.teamcraft.ui.recentMediaThumbnail
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.media.MediaFlowLaunch
 
-/** Where camera photos wait (app cache, shared with the camera app through the FileProvider). */
-private const val CAMERA_DIR = "camera"
-
-/** The composer's "+": take a photo, pick photos and videos, or any file. */
+/** The composer's "+": the camera, the gallery (the app's own, #1358), or any file. */
 class AttachmentPickers(
-  val takePhoto: () -> Unit,
-  val pickMedia: () -> Unit,
+  val openCamera: () -> Unit,
+  val openGallery: () -> Unit,
   val pickFiles: () -> Unit,
-  /** Imports photos and videos chosen in the attach sheet's strip of recent ones. */
-  val addMedia: (List<Uri>) -> Unit,
+  /** Opens the review with photos and videos chosen in the attach sheet's strip of recent ones. */
+  val reviewMedia: (List<RecentMediaItem>) -> Unit,
 )
 
 /**
- * Pickers that import what the user chose into the core's staging folder and hand it to
- * `onPicked`. The photo picker needs no storage permission; the camera asks for its permission
- * first, because the app declares it (calls) and Android then requires it for capture intents too.
+ * Pickers for the composer: files go through the system's picker and are imported into the core's
+ * staging folder and handed to `onPicked`; camera, gallery and the recent strip open the app's
+ * media flow ([de.zeitgleich.teamcraft.ui.media.MediaFlow]).
  */
 @Composable
-fun rememberAttachmentPickers(viewModel: MainViewModel, onPicked: (List<PickedFile>) -> Unit): AttachmentPickers {
-  val context = LocalContext.current
+fun rememberAttachmentPickers(
+  viewModel: MainViewModel,
+  onMediaFlow: (MediaFlowLaunch) -> Unit,
+  onPicked: (List<PickedFile>) -> Unit,
+): AttachmentPickers {
   val scope = rememberCoroutineScope()
-  var maybePhotoPath by rememberSaveable { mutableStateOf<String?>(null) }
-  fun import(uris: List<Uri>) {
+  val files = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
     scope.launch { onPicked(uris.mapNotNull { viewModel.importFile(it) }) }
   }
-  val media = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { import(it) }
-  val files = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { import(it) }
-  val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { isTaken ->
-    val path = maybePhotoPath ?: return@rememberLauncherForActivityResult
-    maybePhotoPath = null
-    val photo = File(path)
-    if (!isTaken) {
-      photo.delete()
-      return@rememberLauncherForActivityResult
-    }
-    scope.launch {
-      onPicked(listOfNotNull(viewModel.importPhoto(photo)))
-      // The staged copy is what gets sent; the camera's original is no longer needed.
-      photo.delete()
-    }
-  }
-  fun launchCamera() {
-    val photo = newPhotoFile(context)
-    maybePhotoPath = photo.absolutePath
-    camera.launch(FileProvider.getUriForFile(context, "${context.packageName}.files", photo))
-  }
-  val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
-    if (isGranted) launchCamera()
-  }
-  return remember(media, files, camera, permission) {
+  return remember(files, onMediaFlow) {
     AttachmentPickers(
-      takePhoto = {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-          launchCamera()
-        } else {
-          permission.launch(Manifest.permission.CAMERA)
-        }
-      },
-      pickMedia = { media.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
+      openCamera = { onMediaFlow(MediaFlowLaunch.camera()) },
+      openGallery = { onMediaFlow(MediaFlowLaunch.gallery()) },
       pickFiles = { files.launch("*/*") },
-      addMedia = { import(it) },
+      reviewMedia = { onMediaFlow(MediaFlowLaunch.review(it)) },
     )
   }
-}
-
-private fun newPhotoFile(context: Context): File {
-  val directory = File(context.cacheDir, CAMERA_DIR).apply { mkdirs() }
-  return File(directory, "photo-${System.currentTimeMillis()}.jpg")
 }
 
 /**
@@ -150,9 +106,9 @@ private fun newPhotoFile(context: Context): File {
 fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit) {
   ModalBottomSheet(onDismissRequest = onDismiss) {
     RecentMediaStrip(
-      onAdd = { uris ->
+      onAdd = { items ->
         onDismiss()
-        pickers.addMedia(uris)
+        pickers.reviewMedia(items)
       },
     )
     Row(
@@ -161,11 +117,11 @@ fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit) {
     ) {
       AttachOption(R.drawable.ic_photo_camera, R.string.attach_camera) {
         onDismiss()
-        pickers.takePhoto()
+        pickers.openCamera()
       }
       AttachOption(R.drawable.ic_image, R.string.attach_gallery) {
         onDismiss()
-        pickers.pickMedia()
+        pickers.openGallery()
       }
       AttachOption(R.drawable.ic_description, R.string.attach_file) {
         onDismiss()
@@ -181,11 +137,11 @@ fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit) {
  * the user pick more. The gallery tile below always works without any access.
  */
 @Composable
-private fun RecentMediaStrip(onAdd: (List<Uri>) -> Unit) {
+private fun RecentMediaStrip(onAdd: (List<RecentMediaItem>) -> Unit) {
   val context = LocalContext.current
   var access by remember { mutableStateOf(MediaAccess.of(context)) }
   var items by remember { mutableStateOf<List<RecentMediaItem>>(emptyList()) }
-  var selected by remember { mutableStateOf(listOf<Uri>()) }
+  var selected by remember { mutableStateOf(listOf<RecentMediaItem>()) }
   val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
     access = MediaAccess.of(context)
   }
@@ -206,9 +162,9 @@ private fun RecentMediaStrip(onAdd: (List<Uri>) -> Unit) {
       }
     }
     items(items, key = { it.uri.toString() }) { item ->
-      val index = selected.indexOf(item.uri)
+      val index = selected.indexOf(item)
       MediaTile(item, selectionNumber = index + 1) {
-        selected = if (index >= 0) selected - item.uri else selected + item.uri
+        selected = if (index >= 0) selected - item else selected + item
       }
     }
   }
