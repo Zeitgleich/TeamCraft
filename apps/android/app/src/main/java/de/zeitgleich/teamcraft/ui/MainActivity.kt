@@ -61,6 +61,7 @@ class MainActivity : FragmentActivity() {
   /** A link the system handed over, until it was acted on (docs/app-links.md). */
   private val appLink = mutableStateOf<String?>(null)
   private val isLocked = mutableStateOf(false)
+  private val isUnlockRefused = mutableStateOf(false)
   /** Where the system splash left the TeamCraft mark, once it handed over (Android 12+). */
   private val splashHandoff = mutableStateOf<SplashHandoff?>(null)
 
@@ -125,7 +126,7 @@ class MainActivity : FragmentActivity() {
         LaunchedEffect(Unit) { viewModel.loginRetryIntents.collect { intent -> loginLauncher.launch(intent) } }
         Box(Modifier.fillMaxSize()) {
           if (isLocked.value) {
-            LockScreen(onUnlock = ::unlock)
+            LockScreen(onUnlock = ::unlock, isUnlockRefused = isUnlockRefused.value)
             maybeShare?.let { ShareWaitingNotice(onDiscard = viewModel::discardShare, Modifier.align(Alignment.TopCenter)) }
           } else {
             AppRoot(
@@ -234,10 +235,16 @@ class MainActivity : FragmentActivity() {
   }
 
   private fun unlock() {
-    promptUnlock(this, getString(R.string.app_lock_prompt)) {
-      isUnlockedInProcess = true
-      isLocked.value = false
-    }
+    promptUnlock(
+      this,
+      getString(R.string.app_lock_prompt),
+      onUnlocked = {
+        isUnlockedInProcess = true
+        isUnlockRefused.value = false
+        isLocked.value = false
+      },
+      onRefused = { isUnlockRefused.value = true },
+    )
   }
 
   /** The conversation of one of the app's own notifications, or nothing (other apps' intents). */

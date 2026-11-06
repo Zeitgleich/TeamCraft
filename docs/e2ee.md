@@ -8,16 +8,16 @@ Status: design draft.
 
 ## 1. What users experience
 
-| Situation                         | What the user does                                                              | What happens underneath                                                                      |
-|-----------------------------------|---------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------|
-| First login ever                  | Log in (OIDC), then "Create passkey" (Face ID / Windows Hello / fingerprint)    | Identity keys generated, key backup created and wrapped with the passkey                     |
-| Second device (laptop + phone)    | Log in on the new device → tap **"Approve"** on the old one (or scan a QR code) | Old device transfers identity + key bag over an encrypted rendezvous channel                 |
-| Lost all devices                  | Log in → unlock with passkey                                                    | Key backup unwrapped with the passkey PRF; full history available again                      |
-| Lost devices *and* passkey        | Ask IT                                                                          | Two admins approve the recovery; key bag unwrapped with the organization recovery key (§6.3) |
-| Joining a channel                 | Click "Join"                                                                    | Existing member's client shares the channel's history keys automatically                     |
-| Notification on the phone         | Nothing                                                                         | Encrypted wake-up push, app fetches and decrypts locally, shows sender + preview             |
-| Colleague gets a new laptop       | Nothing                                                                         | New device is signed by the colleague's identity key; no warning                             |
-| Someone's identity really changes | Sees a banner "Max's security key changed"                                      | Only happens on full reset without recovery                                                  |
+| Situation                         | What the user does                                                              |
+|-----------------------------------|---------------------------------------------------------------------------------|
+| First login ever                  | Log in (OIDC), then "Create passkey" (Face ID / Windows Hello / fingerprint)    |
+| Second device (laptop + phone)    | Log in on the new device → tap **"Approve"** on the old one (or scan a QR code) |
+| Lost all devices                  | Log in → unlock with passkey                                                    |
+| Lost devices *and* passkey        | Ask IT                                                                          |
+| Joining a channel                 | Click "Join"                                                                    |
+| Notification on the phone         | Nothing                                                                         |
+| Colleague gets a new laptop       | Nothing                                                                         |
+| Someone's identity really changes | Sees a banner "Max's security key changed"                                      |
 
 There are no "unverified session" warnings for normal device additions, because every device is
 cross-signed by the user's identity key (§3). Comparing verification codes is optional, like in
@@ -4531,12 +4531,42 @@ edited) with only their orientation, so no location or camera details go along. 
 can't pack again, unedited, goes as it is, as a file sent from the file picker does.
 
 **App lock (Android and iOS, optional).** A biometric or device-passcode gate in front of the app, and
-the app switcher shows a cover instead of the chats while it is on. It is a gate in the user interface
-only: the database key is protected the same way with or without it (it must open for push wake-ups
+the app switcher shows a cover instead of the chats while it is on. It is a gate, not storage
+encryption: the database key is protected the same way with or without it (it must open for push wake-ups
 while the phone is locked), so it protects against someone holding the unlocked phone, not against
 anyone who can read the app's storage. On iOS, while it is on, notifications say only that something
 arrived (no sender, no text; calls still ring); Android always shows a generic version on the lock
 screen. Switching it off or lengthening its delay asks again (iOS).
+
+On Android 11 and later the unlock is tied to a key operation (#1200): a non-exportable AES key in the
+Android Keystore (`AppLockKey`) that may be used only right after the system prompt checked strong
+biometrics or the screen lock, once per prompt. The prompt gets a cipher of that key; the app opens
+only when that same cipher then encrypts, which the Keystore (outside the app's process) refuses
+without the authentication. So a forged "success" callback, the way a hooking tool on a rooted phone
+would fake it, no longer opens the app. Weak biometrics (some face unlocks) can't authorize a key, so
+there the prompt asks for the screen lock. The key guards no data; it only proves the prompt:
+
+| Situation                               | What happens                                                          |
+|-----------------------------------------|-----------------------------------------------------------------------|
+| No key yet (first unlock, update)       | Created before the prompt                                             |
+| Screen lock removed                     | The device invalidates the key; the app opens and drops it            |
+| Screen lock set again or changed        | The invalidated key is replaced before the prompt                     |
+| Fingerprint or face added               | The device invalidates the key; replaced before the prompt            |
+| Keystore fails to create or use the key | The prompt alone decides (logged), so nobody is locked out            |
+| Prompt succeeds but the proof fails     | Lock screen says so; key replaced if broken; after 3, prompt alone    |
+| App lock turned off                     | Key deleted                                                           |
+| Android 8 to 10                         | The prompt alone decides: it can't combine the screen lock with a key |
+
+"No screen lock" is the device's own answer (`KeyguardManager.isDeviceSecure`), not whether the
+prompt is available. What it doesn't protect against: an attacker who already runs code inside the
+app's process on a rooted phone can skip the gate in other ways. Making the Keystore throw (a hooked
+`Cipher.init` or `KeyStore.getInstance`) or the proof fail three times leads to the prompt-alone
+fallback, where a forged success opens the app again; faking "no screen lock" opens it directly; and
+such code can call the unlock itself or read what the open app shows. These fallbacks are accepted
+so a misbehaving Keystore never locks anyone out of their chats. The database key stays unbound to
+the app lock because push wake-ups need it while the phone is locked; binding the store to the
+prompt would break notifications. The binding above raises the bar from hooking one callback, it is
+not storage encryption.
 
 ### 9.3 Web client integrity (implemented)
 

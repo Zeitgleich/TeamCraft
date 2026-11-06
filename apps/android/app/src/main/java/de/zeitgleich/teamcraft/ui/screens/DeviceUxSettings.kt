@@ -28,6 +28,7 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.calls.CallSoundPrefs
 import de.zeitgleich.teamcraft.security.AppLockPrefs
+import de.zeitgleich.teamcraft.security.deleteAppLockKey
 import de.zeitgleich.teamcraft.security.LockAfter
 import de.zeitgleich.teamcraft.ui.AnimatedImagesMode
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
@@ -51,6 +52,7 @@ fun AppLockSetting() {
     SettingSwitch(R.string.app_lock, isEnabled, isEnabled = isAvailable || isEnabled) {
       isEnabled = it
       prefs.setEnabled(it)
+      if (!it) deleteAppLockKey()
       // Notifications already shown follow the new setting at once.
       TeamCraftApplication.graph(context).notifier.repostAll()
     }

@@ -116,6 +116,7 @@
   <string name="app_lock_prompt">Unlock TeamCraft</string>
   <string name="app_lock_locked">TeamCraft is locked</string>
   <string name="app_lock_unlock">Unlock</string>
+  <string name="app_lock_refused">The unlock couldn\'t be confirmed. Try again.</string>
   <string name="send_with_enter">Send with Enter (hardware keyboard)</string>
 
   <!-- Message links and sign-in -->
