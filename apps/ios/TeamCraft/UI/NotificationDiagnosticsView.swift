@@ -203,6 +203,7 @@ struct NotificationDiagnosticsView: View {
     case .call: return String(localized: "diagnostics_kind_call")
     case .dismiss: return String(localized: "diagnostics_kind_dismiss")
     case .test: return String(localized: "diagnostics_kind_test")
+    case .sync: return String(localized: "diagnostics_kind_sync")
     case .scheduledSeal, .unknown: return String(localized: "diagnostics_unknown")
     }
   }

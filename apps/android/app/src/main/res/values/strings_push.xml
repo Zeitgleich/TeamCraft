@@ -85,6 +85,8 @@
   <string name="push_kind_call">Call</string>
   <string name="push_kind_dismiss">Read elsewhere</string>
   <string name="push_kind_test">Test</string>
+  <string name="push_kind_sync">Background update</string>
+  <string name="catching_up_in_background">Fetching new messages</string>
   <string name="push_kind_unknown">Unknown</string>
 
   <!-- Battery -->

@@ -81,6 +81,8 @@
   <string name="push_kind_call">Anruf</string>
   <string name="push_kind_dismiss">Anderswo gelesen</string>
   <string name="push_kind_test">Test</string>
+  <string name="push_kind_sync">Hintergrund-Aktualisierung</string>
+  <string name="catching_up_in_background">Neue Nachrichten werden abgerufen</string>
   <string name="push_kind_unknown">Unbekannt</string>
 
   <string name="battery_title">Akku und Hintergrund</string>
