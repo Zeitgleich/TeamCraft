@@ -605,9 +605,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Where a share can go (notes first, then by last activity), or null when it can't be read. */
   suspend fun shareTargets(): List<ConversationItem>? = read { shareTargets() }
 
-  /** Reads the conversations, shows them, then reads their previews. One refresh at a time. */
+  /**
+   * Reads the conversations, shows them, then reads their previews. One refresh at a time. A read
+   * that fails (the store still opening) keeps what is shown: an empty list would say "No direct
+   * messages yet" (#1371); the next change reads again.
+   */
   suspend fun refreshChatList(myId: String) = chatListLock.withLock {
-    val conversations = conversations()
+    val conversations = read { conversations() } ?: return@withLock
     chatListState.update { it.copy(maybeConversations = conversations, runningCalls = runningCalls()) }
     val previews = chatPreviews(conversations, myId)
     chatListState.update { it.copy(previews = previews) }
