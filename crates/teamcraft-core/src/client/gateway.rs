@@ -160,6 +160,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if let Some(answered) = self.maybe_on_answered.take() {
       answered();
     }
+    // The connection banner goes away now, not after the catch-up.
+    self.note_sync_progress();
   }
 
   /// The server refused the first frame's proof, which ends the connection: it had an old nonce (a

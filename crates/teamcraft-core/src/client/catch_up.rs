@@ -12,7 +12,7 @@
 //! runs side by side is waiting for the server: member lists, and the first page of each
 //! conversation's MLS queue and messages.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
@@ -20,7 +20,7 @@ use futures_util::future::join_all;
 use futures_util::task::AtomicWaker;
 use teamcraft_proto::{
   ConversationId, Id, ListConversationMembersResponse, ListMessagesQuery, ListMessagesResponse,
-  ListMlsMessagesQuery, ListMlsMessagesResponse, MlsMessageResponse, Snowflake,
+  ListMlsMessagesQuery, ListMlsMessagesResponse, MlsMessageResponse, Snowflake, UserId,
 };
 
 use super::Client;
@@ -63,11 +63,18 @@ struct AheadOfTheRest {
   maybe_welcomes: Option<Vec<MlsMessageResponse>>,
 }
 
+/// What the first pages of one conversation are read with: its MLS queue (`None` without a group)
+/// and its messages.
+type FirstPageQueries = (ConversationId, Option<ListMlsMessagesQuery>, ListMessagesQuery);
+
 /// The first page of a conversation's MLS queue and messages, read ahead.
 #[derive(Default)]
 pub(crate) struct FirstPages {
   pub(crate) maybe_mls: Option<Result<ListMlsMessagesResponse, ApiError>>,
   pub(crate) maybe_messages: Option<Result<ListMessagesResponse, ApiError>>,
+  /// The member list, read ahead for a queue with entries to process (each pass reads it once to
+  /// verify them). `None`: not read ahead, or the read failed; the pass reads it itself then.
+  pub(crate) maybe_members: Option<Vec<UserId>>,
 }
 
 impl Default for CatchUpFocus {
@@ -223,33 +230,87 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.settings.catch_up_concurrency,
       );
       let pages = self.read_first_pages(&batch).await?;
-      for (conversation, first) in batch.into_iter().zip(pages) {
-        let started_ms = self.now_ms();
-        let mls_written_before = self.saved_mls.written_bytes();
-        // One conversation's failure (a 403 right after a removal) marks it for another try and
-        // the catch-up goes on with the others (issue #159).
-        let result = self.catch_up_content_from(conversation, first).await;
-        // One line each, so a slow conversation shows (issue #972).
-        tracing::info!(
-          conversation_id = %conversation,
-          ms = self.now_ms().saturating_sub(started_ms),
-          mls_written_bytes = self.saved_mls.written_bytes().saturating_sub(mls_written_before),
-          is_ok = result.is_ok(),
-          "catch-up: conversation done"
-        );
-        if self.isolate(conversation, ResyncPart::Content, result)? {
-          self.unmark_resync(conversation, ResyncPart::Content)?;
-        }
-        self.store.delete(Table::SyncState, &marker_key(conversation))?;
-        self.note_first_sync_caught_up(conversation)?;
-        if self.catch_up_focus.get() == Some(conversation) {
-          self.catch_up_focus.note_caught_up();
-          tracing::info!(
-            ms = self.now_ms().saturating_sub(phases.started_ms),
-            "catch-up: the focused conversation is caught up"
-          );
-        }
+      let mut batch: VecDeque<(ConversationId, FirstPages)> = batch.into_iter().zip(pages).collect();
+      while let Some((conversation, maybe_first)) = self.next_in_batch(&mut batch, &mut waiting) {
+        let first = match maybe_first {
+          Some(first) => first,
+          None => self.read_focus_pages(conversation).await?.1,
+        };
+        self.catch_up_one(conversation, first, phases).await?;
       }
+    }
+    Ok(())
+  }
+
+  /// The next conversation of the batch, unless the user opened another one meanwhile: that one
+  /// doesn't wait for the rest of the batch, each of which may take a while (its MLS queue, its
+  /// member list). `None`: its first pages weren't read ahead.
+  fn next_in_batch(
+    &self,
+    batch: &mut VecDeque<(ConversationId, FirstPages)>,
+    waiting: &mut Vec<ConversationId>,
+  ) -> Option<(ConversationId, Option<FirstPages>)> {
+    if let Some(focus) = self.catch_up_focus.get() {
+      if let Some(place) = batch.iter().position(|(conversation, _)| *conversation == focus) {
+        return batch
+          .remove(place)
+          .map(|(conversation, first)| (conversation, Some(first)));
+      }
+      if let Some(place) = waiting.iter().position(|conversation| *conversation == focus) {
+        return Some((waiting.remove(place), None));
+      }
+    }
+    batch
+      .pop_front()
+      .map(|(conversation, first)| (conversation, Some(first)))
+  }
+
+  /// The conversation the user waits for: its member list and first pages in one round trip.
+  async fn read_focus_pages(
+    &mut self,
+    focus: ConversationId,
+  ) -> Result<(Result<ListConversationMembersResponse, ApiError>, FirstPages), CoreError> {
+    let queries = self.first_page_queries(&[focus])?;
+    let (read, mut pages) =
+      futures_util::join!(self.api.list_members(focus), read_pages(&self.api, &queries));
+    let mut first = pages.pop().unwrap_or_default();
+    first.maybe_members = read.as_ref().ok().map(member_ids);
+    Ok((read, first))
+  }
+
+  /// Catches up one conversation's MLS queue and messages, from the first pages read ahead.
+  async fn catch_up_one(
+    &mut self,
+    conversation: ConversationId,
+    first: FirstPages,
+    phases: &PhaseTimer,
+  ) -> Result<(), CoreError> {
+    let started_ms = self.now_ms();
+    let mls_written_before = self.saved_mls.written_bytes();
+    // One conversation's failure (a 403 right after a removal) marks it for another try and the
+    // catch-up goes on with the others (issue #159).
+    let result = self.catch_up_content_from(conversation, first).await;
+    // One line each, so a slow conversation shows (issue #972).
+    tracing::info!(
+      conversation_id = %conversation,
+      ms = self.now_ms().saturating_sub(started_ms),
+      mls_written_bytes = self.saved_mls.written_bytes().saturating_sub(mls_written_before),
+      is_ok = result.is_ok(),
+      "catch-up: conversation done"
+    );
+    if self.isolate(conversation, ResyncPart::Content, result)? {
+      self.unmark_resync(conversation, ResyncPart::Content)?;
+    }
+    self.store.delete(Table::SyncState, &marker_key(conversation))?;
+    self.note_first_sync_caught_up(conversation)?;
+    // Its newest messages show in the list now, not once every conversation is through.
+    self.note_sync_progress();
+    if self.catch_up_focus.get() == Some(conversation) {
+      self.catch_up_focus.note_caught_up();
+      tracing::info!(
+        ms = self.now_ms().saturating_sub(phases.started_ms),
+        "catch-up: the focused conversation is caught up"
+      );
     }
     Ok(())
   }
@@ -329,18 +390,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if !ahead.conversations.contains(&focus) || !ahead.tried.insert(focus) {
       return Ok(());
     }
-    let read = self.api.list_members(focus).await;
+    let (read, first) = self.read_focus_pages(focus).await?;
     let result = self.store_members(focus, read);
     if self.isolate(focus, ResyncPart::Members, result)? {
       self.unmark_resync(focus, ResyncPart::Members)?;
     }
+    // Without a group its queue wasn't read ahead; joining from a welcome reads it.
     if !self.has_group(focus)? {
       self.join_welcomes_of(focus, ahead).await?;
     }
     if !self.has_group(focus)? {
       return Ok(());
     }
-    let result = self.catch_up_content_from(focus, FirstPages::default()).await;
+    let result = self.catch_up_content_from(focus, first).await;
     if self.isolate(focus, ResyncPart::Content, result)? {
       self.unmark_resync(focus, ResyncPart::Content)?;
     }
@@ -348,6 +410,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.note_first_sync_caught_up(focus)?;
     ahead.done.insert(focus);
     self.catch_up_focus.note_caught_up();
+    self.note_sync_progress();
     tracing::info!(
       ms = self.now_ms().saturating_sub(phases.started_ms),
       "catch-up: the focused conversation is caught up ahead of the rest"
@@ -426,7 +489,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     first: FirstPages,
   ) -> Result<(), CoreError> {
     if self.has_group(conversation)? {
-      self.sync_mls_from(conversation, first.maybe_mls).await?;
+      self
+        .sync_mls_from(conversation, first.maybe_mls, first.maybe_members)
+        .await?;
     }
     self
       .catch_up_messages_from(conversation, first.maybe_messages)
@@ -441,6 +506,30 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Reads the first page of each conversation's MLS queue and messages at once. Failures are
   /// kept for the conversation's own catch-up to handle, like a failed read of its own.
   async fn read_first_pages(&mut self, batch: &[ConversationId]) -> Result<Vec<FirstPages>, CoreError> {
+    let queries = self.first_page_queries(batch)?;
+    let mut pages = read_pages(&self.api, &queries).await;
+    self.read_members_ahead(batch, &mut pages).await;
+    Ok(pages)
+  }
+
+  /// The member lists of the conversations whose queue has entries, all at once: each pass over a
+  /// queue reads its member list once to verify the entries, and one conversation after the other
+  /// that was a round trip each, the bulk of a catch-up after a long absence.
+  async fn read_members_ahead(&self, batch: &[ConversationId], pages: &mut [FirstPages]) {
+    let due: Vec<usize> = pages
+      .iter()
+      .enumerate()
+      .filter(|(_, first)| matches!(&first.maybe_mls, Some(Ok(page)) if !page.messages.is_empty()))
+      .map(|(index, _)| index)
+      .collect();
+    let reads = due.iter().map(|index| self.api.list_members(batch[*index]));
+    for (index, read) in due.iter().zip(join_all(reads).await) {
+      pages[*index].maybe_members = read.ok().map(|response| member_ids(&response));
+    }
+  }
+
+  /// What [`Self::read_first_pages`] asks the server for each conversation.
+  fn first_page_queries(&mut self, batch: &[ConversationId]) -> Result<Vec<FirstPageQueries>, CoreError> {
     let mut queries = Vec::with_capacity(batch.len());
     for conversation in batch {
       let maybe_mls = (self.has_group(*conversation)?
@@ -455,24 +544,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.first_messages_query(*conversation)?,
       ));
     }
-    let api = &self.api;
-    let reads = queries
-      .iter()
-      .map(|(conversation, maybe_mls, messages)| async move {
-        // Both pages at once: one round trip per conversation, not two (#714).
-        let mls = async {
-          match maybe_mls {
-            Some(query) => Some(api.list_mls_messages(*conversation, query).await),
-            None => None,
-          }
-        };
-        let (maybe_mls, messages) = futures_util::join!(mls, api.list_messages(*conversation, messages));
-        FirstPages {
-          maybe_mls,
-          maybe_messages: Some(messages),
-        }
-      });
-    Ok(join_all(reads).await)
+    Ok(queries)
   }
 
   /// The first request of [`Self::catch_up_messages`]: the first time a page of history (before
@@ -524,6 +596,32 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
 /// The next conversations to catch up, at most `size`: the focused one first, if it is still
 /// waiting, then the others in their order.
+/// Reads the first pages `queries` name, all at once.
+async fn read_pages<A: ServerApi>(api: &A, queries: &[FirstPageQueries]) -> Vec<FirstPages> {
+  let reads = queries
+    .iter()
+    .map(|(conversation, maybe_mls, messages)| async move {
+      // Both pages at once: one round trip per conversation, not two (#714).
+      let mls = async {
+        match maybe_mls {
+          Some(query) => Some(api.list_mls_messages(*conversation, query).await),
+          None => None,
+        }
+      };
+      let (maybe_mls, messages) = futures_util::join!(mls, api.list_messages(*conversation, messages));
+      FirstPages {
+        maybe_mls,
+        maybe_messages: Some(messages),
+        maybe_members: None,
+      }
+    });
+  join_all(reads).await
+}
+
+fn member_ids(response: &ListConversationMembersResponse) -> Vec<UserId> {
+  response.members.iter().map(|member| member.user.id).collect()
+}
+
 fn next_batch(
   waiting: &mut Vec<ConversationId>,
   maybe_focus: Option<ConversationId>,

@@ -17,7 +17,7 @@ use teamcraft_proto::{DeviceActivity, GatewayClientMessage, GatewayServerMessage
 use crate::api::{ApiError, ServerApi};
 use crate::client::Client;
 use crate::client::files::BlobUpload;
-use crate::client::notify_first_sync_during;
+use crate::client::notify_sync_progress_during;
 use crate::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor, NetworkChanges};
 use crate::downloads::{Downloads, Finished};
 use crate::pending_work::PendingWork;
@@ -171,10 +171,11 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   pub async fn run(mut self) -> Client<A, S> {
     self.flush().await;
     loop {
-      // A first sync happens in here: the UI is told as the list and the progress grow.
-      let signal = self.client.first_sync_signal();
+      // The sync after connecting happens in here: the UI is told as the server answers, the list
+      // grows and each conversation is caught up, the open one first.
+      let signal = self.client.sync_progress_signal();
       let notify = self.on_change.clone();
-      let connected = notify_first_sync_during(
+      let connected = notify_sync_progress_during(
         &signal,
         move || notify(),
         self.connection.connect_if_due(&mut self.client),

@@ -1235,7 +1235,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// server never got it. A device that can't follow the group any more asks to be added back
   /// (e2ee.md §4.6).
   pub async fn sync_mls(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    self.sync_mls_from(conversation, None).await
+    self.sync_mls_from(conversation, None, None).await
   }
 
   /// [`Self::sync_mls`] with the queue's first page already read (a catch-up reads several
@@ -1244,6 +1244,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     conversation: ConversationId,
     maybe_first: Option<Result<ListMlsMessagesResponse, ApiError>>,
+    maybe_members: Option<Vec<UserId>>,
   ) -> Result<(), CoreError> {
     if self.ignores_queue_while_founding(conversation)? {
       // Nobody else is in this group, so the queue can only hold another founding's group
@@ -1251,7 +1252,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // and ask to be added back to a group this device was never in.
       return Ok(());
     }
-    let mut catch_up = match self.catch_up_mls(conversation, maybe_first).await {
+    let mut catch_up = match self.catch_up_mls(conversation, maybe_first, maybe_members).await {
       Ok(catch_up) => catch_up,
       // The server no longer lets this user read the queue: removed, with the removal commit
       // still to come or refused, or a server that wants this device to stop following the
@@ -1268,7 +1269,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // Neither this commit nor another one for the epoch is in the queue: the server never got
       // it. Another commit may win meanwhile; the next pass finds out.
       self.post_pending_again(conversation).await?;
-      catch_up = self.catch_up_mls(conversation, None).await?;
+      catch_up = self.catch_up_mls(conversation, None, None).await?;
     }
     if catch_up.current_epoch > 0 && self.is_unfinished_meeting_founding(conversation)? {
       // A meeting chat's founder that read the queue and is still at epoch 0. Those commits may be
@@ -1309,13 +1310,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.sync_mls(conversation).await
   }
 
-  /// One pass over the queue after the cursor, starting with `maybe_first` when it was read ahead.
+  /// One pass over the queue after the cursor, starting with `maybe_first` and with the member list
+  /// `maybe_members` when they were read ahead (in the same catch-up, so the same answer the pass
+  /// would read itself).
   async fn catch_up_mls(
     &mut self,
     conversation: ConversationId,
     maybe_first: Option<Result<ListMlsMessagesResponse, ApiError>>,
+    maybe_members: Option<Vec<UserId>>,
   ) -> Result<CatchUp, CoreError> {
-    self.maybe_backlog_reads = Some(BacklogReads::new(conversation));
+    let mut reads = BacklogReads::new(conversation);
+    reads.maybe_members = maybe_members;
+    self.maybe_backlog_reads = Some(reads);
     let outcome = self.catch_up_mls_pages(conversation, maybe_first).await;
     self.maybe_backlog_reads = None;
     outcome
