@@ -126,6 +126,17 @@ pub fn elapsed_ms(joined_at: TimestampMs, now_ms: TimestampMs) -> u64 {
   u64::try_from(now_ms.saturating_sub(joined_at)).unwrap_or(0)
 }
 
+/// The call screen's duration: "04:07" within the first hour, "1:02:03" after it.
+pub fn call_clock(elapsed_ms: u64) -> String {
+  let seconds = elapsed_ms / 1000;
+  let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+  if hours == 0 {
+    format!("{minutes:02}:{seconds:02}")
+  } else {
+    format!("{hours}:{minutes:02}:{seconds:02}")
+  }
+}
+
 /// Keeps [`CallState::elapsed_ms`] ticking while a call runs, and quiet otherwise. Started once by
 /// the app; it ends with the app's scope.
 pub fn run_call_clock(call: CallState) {
@@ -312,12 +323,14 @@ pub struct CallState {
   pub video_qualities: RwSignal<HashMap<MediaStreamId, VideoQuality>>,
   /// How long this device has been in the call, in milliseconds; `None` outside one. Ticks once a
   /// second while [`run_call_clock`] runs (the app starts it), so anything showing the duration
-  /// reads it from here: the tray's call header shows the whole minutes (#1293).
+  /// reads it from here: the call screen's header, and the tray's call header the whole minutes
+  /// (#1293). A reloaded page counts on from the device's join (#1329).
   pub elapsed_ms: RwSignal<Option<u64>>,
   /// The tray's "End for everyone…" (#1293): the host controls of the call screen open with the
   /// ending waiting to be confirmed; they reset it.
   pub is_end_for_everyone_asked: RwSignal<bool>,
-  /// When this device entered the call (wall clock), the start of [`CallState::elapsed_ms`].
+  /// When this device entered the call (wall clock), the start of [`CallState::elapsed_ms`]: when
+  /// this page joined, or for a call it resumed, when the media layer says the device joined.
   joined_at: StoredValue<Option<TimestampMs>>,
   /// The video whose quality menu is open.
   pub maybe_quality_menu: RwSignal<Option<MediaStreamId>>,
@@ -577,7 +590,7 @@ impl CallState {
     self.effect.set(active.background);
     self.has_ended.set(false);
     self.incoming.set(None);
-    self.start_clock();
+    self.resume_clock(active.maybe_joined_at, crate::clock::now_ms());
     self.phase.set(CallPhase::Active);
   }
 
@@ -652,6 +665,15 @@ impl CallState {
     let now = crate::clock::now_ms();
     self.joined_at.set_value(Some(now));
     self.elapsed_ms.set(Some(0));
+  }
+
+  /// Counts the duration of a call this page shows but didn't join (#824): from when the media
+  /// layer says this device joined (#1329), so a reloaded page goes on where the last one was.
+  /// A shell that doesn't say starts the count at `now_ms`.
+  fn resume_clock(&self, maybe_joined_at: Option<TimestampMs>, now_ms: TimestampMs) {
+    let joined_at = maybe_joined_at.unwrap_or(now_ms);
+    self.joined_at.set_value(Some(joined_at));
+    self.elapsed_ms.set(Some(elapsed_ms(joined_at, now_ms)));
   }
 
   /// Brings [`CallState::elapsed_ms`] up to `now_ms`.
@@ -880,6 +902,7 @@ mod tests {
         reconnecting: Vec::new(),
         is_on_limited_network: false,
         maybe_moved_to: None,
+        maybe_joined_at: None,
       };
       call.resume(&active);
       assert_eq!(call.phase.get_untracked(), CallPhase::Active);
@@ -897,7 +920,75 @@ mod tests {
       assert_eq!(call.effect.get_untracked(), BackgroundEffect::BlurLight);
       assert!(!call.is_minimized.get_untracked());
       assert!(events.borrow().is_empty());
+      // A shell that doesn't say when it joined: the count starts with this page.
+      assert_eq!(call.elapsed_ms.get_untracked(), Some(0));
     });
+  }
+
+  #[test]
+  fn the_call_clock_shows_minutes_and_seconds_then_hours() {
+    assert_eq!(call_clock(0), "00:00");
+    assert_eq!(call_clock(999), "00:00");
+    assert_eq!(call_clock(247_000), "04:07");
+    assert_eq!(call_clock(3_599_999), "59:59");
+    assert_eq!(call_clock(3_723_000), "1:02:03");
+    assert_eq!(call_clock(36_000_000), "10:00:00");
+  }
+
+  /// #1329: a reloaded page counts the call's duration from when this device joined it, as the
+  /// shell kept it, not from the reload; the tray's call header reads the same count.
+  #[test]
+  fn resuming_counts_from_when_the_device_joined() {
+    let owner = Owner::new();
+    owner.with(|| {
+      let call = CallState::new();
+      call.set_handler(|_| {});
+      let now = crate::clock::now_ms();
+      let joined_at = now - 95_000;
+      let active = ActiveCall {
+        maybe_joined_at: Some(joined_at),
+        ..resumable_call()
+      };
+      call.resume(&active);
+      assert_eq!(call.elapsed_ms.get_untracked(), Some(95_000));
+      call.tick(now + 5_000);
+      assert_eq!(call.elapsed_ms.get_untracked(), Some(100_000));
+      // The next snapshot's resume (the same call) keeps the start.
+      call.resume(&active);
+      call.tick(now + 6_000);
+      assert_eq!(call.elapsed_ms.get_untracked(), Some(101_000));
+      // A start ahead of this computer's clock counts as no time.
+      call.resume(&ActiveCall {
+        maybe_joined_at: Some(now + 60_000),
+        ..resumable_call()
+      });
+      assert_eq!(call.elapsed_ms.get_untracked(), Some(0));
+      call.leave();
+      assert_eq!(call.elapsed_ms.get_untracked(), None);
+    });
+  }
+
+  fn resumable_call() -> ActiveCall {
+    ActiveCall {
+      conversation: id_from_raw(7),
+      kind: CallKind::Group,
+      is_muted: false,
+      is_deafened: false,
+      is_secured: true,
+      maybe_privacy_code: None,
+      participants: Vec::new(),
+      active_speakers: Vec::new(),
+      is_camera_on: false,
+      is_sharing_screen: false,
+      background: BackgroundEffect::None,
+      maybe_muted_by_host: None,
+      screen_sound: ScreenShareSound::Off,
+      is_reconnecting: false,
+      reconnecting: Vec::new(),
+      is_on_limited_network: false,
+      maybe_moved_to: None,
+      maybe_joined_at: None,
+    }
   }
 
   /// #453: the pre-join choice goes with the join, in one event; no camera action follows it.

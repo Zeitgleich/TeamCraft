@@ -354,6 +354,11 @@ impl CallHost {
     tickets: Arc<CoreJoinTickets>,
   ) -> Result<(), String> {
     let mut media = self.media.lock().await;
+    // Read before leaving: a call that moved into this one keeps its start (#1329).
+    let joined_at = lock(&self.state).view.start_for(
+      request.conversation,
+      teamcraft_core::clock::Clock::now_ms(&teamcraft_core::clock::SystemClock),
+    );
     // The call opens the camera and microphone itself.
     self.end_preview().await;
     if let Some(previous) = media.take() {
@@ -382,7 +387,7 @@ impl CallHost {
       let mut state = lock(&self.state);
       let background = state.background;
       state.view.set_this_device(this_device);
-      state.view.start_active(request, background);
+      state.view.start_active(request, background, joined_at);
       state
         .view
         .set_ends_when_one_side_leaves(ends_when_one_side_leaves);
@@ -1811,6 +1816,7 @@ mod tests {
         kind: teamcraft_client_api::calls::CallKind::Direct,
       },
       UiBackgroundEffect::None,
+      0,
     );
     let ended = |conversation_id, cause| GatewayEvent::CallEnd {
       conversation_id,
@@ -2282,7 +2288,9 @@ mod tests {
         conversation: conversation(5),
         kind: CallKind::Group,
       };
-      lock(&state).view.start_active(request, UiBackgroundEffect::None);
+      lock(&state)
+        .view
+        .start_active(request, UiBackgroundEffect::None, 0);
       let (sink, reported) = mpsc::unbounded_channel();
       let (controls, control_rx) = mpsc::unbounded_channel();
       let shared = MediaShared {
