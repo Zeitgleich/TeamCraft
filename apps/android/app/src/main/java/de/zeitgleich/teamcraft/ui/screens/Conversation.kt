@@ -139,6 +139,7 @@ import de.zeitgleich.teamcraft.ui.olderState
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.ConversationRights
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.media.MediaDraftKey
 import de.zeitgleich.teamcraft.ui.media.MediaFlow
 import de.zeitgleich.teamcraft.ui.media.MediaFlowLaunch
 import de.zeitgleich.teamcraft.ui.MessageAction
@@ -1368,7 +1369,7 @@ internal fun Composer(
   maybeMediaFlow?.let { launch ->
     MediaFlow(
       viewModel = viewModel,
-      key = "$conversationId-${maybeThread.orEmpty()}",
+      key = MediaDraftKey(conversationId, maybeThread),
       launch = launch,
       conversationName = snapshot?.conversation(conversationId)?.name.orEmpty(),
       initialCaption = text,

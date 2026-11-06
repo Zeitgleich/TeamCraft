@@ -86,7 +86,7 @@ data class MediaFlowLaunch(val id: String, val stage: MediaStage, val uris: List
 @Composable
 fun MediaFlow(
   viewModel: MainViewModel,
-  key: String,
+  key: MediaDraftKey,
   launch: MediaFlowLaunch,
   conversationName: String,
   initialCaption: String,
