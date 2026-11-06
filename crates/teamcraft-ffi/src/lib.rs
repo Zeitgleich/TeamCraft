@@ -847,6 +847,18 @@ impl TeamCraft {
       .await
   }
 
+  /// The newest `len` messages of a conversation as JSON (`MessageTail`), read ahead so that it
+  /// opens without waiting; it doesn't move the catch-up focus, as [`Self::message_tail`] does.
+  pub async fn message_tail_ahead(
+    &self,
+    conversation_id: String,
+    len: u32,
+  ) -> Result<String, TeamCraftError> {
+    self
+      .read(move |reads| reads.tail_ahead_json(&conversation_id, len))
+      .await
+  }
+
   /// Runs a `ChatAction` (JSON, tagged by `action`): send with reply/priority/files, react, edit,
   /// delete, forward, pin, save, mark (un)read, drafts, threads, presence and status, channels,
   /// downloads and share links. Admin actions stay on desktop and web.

@@ -141,6 +141,7 @@ import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.MessageAction
 import de.zeitgleich.teamcraft.ui.messageActions
 import de.zeitgleich.teamcraft.ui.EmojiInput
+import de.zeitgleich.teamcraft.ui.FeedSeed
 import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.Mentions
 import de.zeitgleich.teamcraft.ui.PagedFeed
@@ -181,12 +182,14 @@ fun ConversationScreen(
 ) {
   val changes by viewModel.changeCount.collectAsState()
   var snapshot by remember { mutableStateOf(viewModel.chat.maybeKeptSnapshot()) }
-  var messages by remember(conversationId) { mutableStateOf<List<Message>>(emptyList()) }
-  var extras by remember(conversationId) { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
+  // What it showed last or was read ahead with: the messages are there in the first frame.
+  val maybeSeed = remember(conversationId) { viewModel.feedSeed(conversationId) }
+  var messages by remember(conversationId) { mutableStateOf(maybeSeed?.messages ?: emptyList()) }
+  var extras by remember(conversationId) { mutableStateOf(maybeSeed?.extras ?: emptyMap()) }
   var pinned by remember(conversationId) { mutableStateOf<List<Message>>(emptyList()) }
   // Admins asking to join this channel, when the user owns it (admin.md §2.4.1).
   var joinRequests by remember { mutableStateOf<List<JoinRequestItem>>(emptyList()) }
-  var firstUnread by remember { mutableStateOf<FirstUnread>(FirstUnread.Loading) }
+  var firstUnread by remember(conversationId) { mutableStateOf(maybeSeed?.firstUnread ?: FirstUnread.Loading) }
   // Others' reactions to the user's messages not seen yet: the heart button (issue #1009).
   var unseenReactions by remember(conversationId) { mutableStateOf(UnseenReactions()) }
   // Counts sends from this screen's composer: each one brings the newest message into view.
@@ -199,7 +202,7 @@ fun ConversationScreen(
   val feed = remember(conversationId) {
     PagedFeed(PAGE, PAGE_BACK) { maybeOldest, older -> viewModel.readChat { tail(conversationId, maybeOldest, older) } }
   }
-  var hasOlder by remember(conversationId) { mutableStateOf(false) }
+  var hasOlder by remember(conversationId) { mutableStateOf(maybeSeed?.hasOlder ?: false) }
   var isLoadingOlder by remember(conversationId) { mutableStateOf(false) }
   // Older history the store doesn't hold: read when the feed reaches the store's end.
   var serverHistory by remember(conversationId) { mutableStateOf(ServerHistory.COMPLETE) }
@@ -221,6 +224,8 @@ fun ConversationScreen(
       hasOlder = maybeTail?.hasOlder ?: false
       // Reactions, files and receipts belong to the bubbles: right after them.
       extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras
+      // Read now: opened again, it starts at the end without an unread line.
+      viewModel.keepFeedSeed(conversationId, FeedSeed(messages, hasOlder, extras, FirstUnread.None))
       snapshot = viewModel.readChat { snapshot() } ?: snapshot
       serverHistory = viewModel.readChat { query(ChatQueries.olderHistory(conversationId)).olderHistory } ?: serverHistory
       isAskingServer = false

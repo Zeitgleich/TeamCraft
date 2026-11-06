@@ -77,6 +77,10 @@ class ChatClient(
       core().messageTail(conversation, maybeOldest?.id, maybeOldest?.sentAt ?: 0, older.toUInt()),
     )
 
+  /** The newest [len] messages, read ahead without moving the catch-up focus (the user isn't there yet). */
+  suspend fun tailAhead(conversation: String, len: Int): MessageTail =
+    WireJson.decodeFromString(MessageTail.serializer(), core().messageTailAhead(conversation, len.toUInt()))
+
   suspend fun query(query: String): ChatAnswer = decodeAnswer(core().query(query))
 
   /** A query whose answer goes back to the core undecoded (the image viewer's pages). */

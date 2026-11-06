@@ -17,6 +17,8 @@ import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import androidx.annotation.StringRes
 import androidx.compose.runtime.mutableStateMapOf
@@ -142,6 +144,19 @@ enum class LinkConfirmation { CONFIRMED, WRONG_CODE, ATTEMPT_ENDED, FAILED }
 class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val graph = TeamCraftApplication.graph(application)
   private val state = MutableStateFlow<AppState>(AppState.Starting)
+  // Above the `init` blocks: the first refresh fills it from the start cache before it suspends.
+  private val chatListState = MutableStateFlow(ChatListState())
+  private val chatListLock = Mutex()
+
+  /**
+   * The chat list's conversations and previews, kept here so that going back to the list shows it at
+   * once instead of loading it again; the list refreshes it on every change while it is shown.
+   */
+  val chatList: StateFlow<ChatListState> = chatListState
+  private val startCache = StartCacheStore(application.filesDir)
+  private val feedSeeds = FeedSeeds()
+  private var maybeReadAhead: Job? = null
+  private var maybeStartCacheWrite: Job? = null
   private val busy = MutableStateFlow(false)
   private val shares = graph.shares
   private val shareState = MutableStateFlow<ShareState?>(null)
@@ -260,6 +275,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    * confirm, or the server entry. The managed configuration is read again every time.
    */
   fun refresh() = launchBusy {
+    val maybeShownAccount = if (state.value == AppState.Starting) showStartCache() else null
     val maybePreset = withContext(Dispatchers.IO) { graph.managedConfig.preset() }
     val lock = maybePreset?.takeIf { it.isLocked }?.let {
       ServerLock(it.address, withContext(Dispatchers.Default) { normalizedOrigin(it.address) })
@@ -269,6 +285,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // The first read opens the stored server and session: files and the core's checks.
     val maybeStored = withContext(Dispatchers.IO) { graph.auth.server }
     val start = decideServerStart(maybeStored?.address?.origin, maybePreset, lock)
+    if (maybeShownAccount != null && maybeShownAccount != accountKey()) {
+      // Another account than the one shown last: its list goes before anything else shows.
+      chatListState.value = ChatListState()
+      state.value = AppState.Starting
+    }
     when {
       maybeStored != null && start is ServerStart.UseStored -> {
         showServer(maybeStored)
@@ -537,21 +558,85 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Where a share can go (notes first, then by last activity), or null when it can't be read. */
   suspend fun shareTargets(): List<ConversationItem>? = read { shareTargets() }
 
-  private val chatListState = MutableStateFlow(ChatListState())
-  private val chatListLock = Mutex()
-
-  /**
-   * The chat list's conversations and previews, kept here so that going back to the list shows it at
-   * once instead of loading it again; the list refreshes it on every change while it is shown.
-   */
-  val chatList: StateFlow<ChatListState> = chatListState
-
   /** Reads the conversations, shows them, then reads their previews. One refresh at a time. */
   suspend fun refreshChatList(myId: String) = chatListLock.withLock {
     val conversations = conversations()
     chatListState.update { it.copy(maybeConversations = conversations, runningCalls = runningCalls()) }
     val previews = chatPreviews(conversations, myId)
     chatListState.update { it.copy(previews = previews) }
+    rememberStartCache()
+    readAhead()
+  }
+
+  /** What [conversationId] showed last or was read ahead with, to show before its first read. */
+  fun feedSeed(conversationId: String): FeedSeed? = feedSeeds[conversationId]
+
+  /** Keeps what an open conversation shows, so opening it again shows it in the first frame. */
+  fun keepFeedSeed(conversationId: String, seed: FeedSeed) = feedSeeds.keep(conversationId, seed)
+
+  /**
+   * Reads the newest messages of the conversations at the top of the list ahead, so they open with
+   * their messages in the first frame. Only those whose newest message changed, one at a time on the
+   * read thread. A running pass isn't restarted (while syncing the list changes faster than a pass
+   * takes, and it would never finish): it looks at the list again when it is through.
+   */
+  private fun readAhead() {
+    if (maybeReadAhead?.isActive == true) return
+    maybeReadAhead = viewModelScope.launch {
+      // Twice at most: once, and once more for what changed meanwhile; later changes start another.
+      repeat(READ_AHEAD_PASSES) {
+        val ids = feedSeeds.toReadAhead(chatListState.value)
+        if (ids.isEmpty() || !readAhead(ids)) return@launch
+      }
+    }
+  }
+
+  /** `false` when a read failed (the store closed, say): the next list change tries again. */
+  private suspend fun readAhead(ids: List<String>): Boolean {
+    for (id in ids) {
+      val tail = readChat { tailAhead(id, FEED_SEED_MESSAGES) } ?: return false
+      val extras = readChat { extras(id, tail.messages.map { it.id }) } ?: emptyMap()
+      val maybeUnread = readChat { query(ChatQueries.firstUnread(id)).maybeMessage }
+      val firstUnread = maybeUnread?.let { FirstUnread.At(it) } ?: FirstUnread.None
+      feedSeeds.keep(id, FeedSeed(tail.messages, tail.hasOlder, extras, firstUnread))
+    }
+    return true
+  }
+
+  /**
+   * Shows the account and chat list of the last run at once, before the store is open; the real
+   * state replaces them when it is read. Read on the main thread on purpose: a few milliseconds
+   * that make the first frame the list instead of a loading screen. Returns the account it showed.
+   */
+  private fun showStartCache(): String? {
+    val cached = runCatching { startCache.read() }
+      .onFailure { Log.w(TAG, "start cache not read: ${it.javaClass.simpleName}") }
+      .getOrNull() ?: return null
+    chatListState.value = cached.listState()
+    state.value = cached.ready()
+    return cached.account
+  }
+
+  /** Keeps the list for the next start, once changes have settled for a moment. */
+  private fun rememberStartCache() {
+    val ready = state.value as? AppState.Ready ?: return
+    val list = chatListState.value
+    maybeStartCacheWrite?.cancel()
+    maybeStartCacheWrite = viewModelScope.launch(Dispatchers.IO) {
+      delay(START_CACHE_SETTLE_MILLIS)
+      val account = accountKey() ?: return@launch
+      val cache = StartCache.of(account, ready, list) ?: return@launch
+      // Under the store's lock, so a sign-out's delete can't come before a write already running.
+      runCatching { synchronized(startCache) { if (isActive) startCache.write(cache) } }
+        .onFailure { Log.w(TAG, "start cache not written: ${it.javaClass.simpleName}") }
+    }
+  }
+
+  /** The signed-in account as the store is keyed (`CoreRepository`), or `null` when signed out. */
+  private fun accountKey(): String? {
+    val origin = graph.auth.server?.address?.origin ?: return null
+    val subject = graph.auth.account ?: return null
+    return "$origin $subject"
   }
 
   /**
@@ -1058,6 +1143,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     graph.push.beginSignOut()
     linkRequestList.value = emptyList()
     chatListState.value = ChatListState()
+    maybeStartCacheWrite?.cancel()
+    maybeReadAhead?.cancel()
+    feedSeeds.clear()
+    withContext(Dispatchers.IO) { synchronized(startCache) { startCache.delete() } }
     review.value = null
     graph.calls.hangUp()
     graph.push.unregister()
@@ -1311,6 +1400,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** The core's logcat tag too (issue #1067): `adb logcat -s TeamCraft` shows both. */
     private const val TAG = "TeamCraft"
+
+    /** How long the chat list must stay unchanged before it is kept for the next start. */
+    private const val START_CACHE_SETTLE_MILLIS = 1_000L
+
+    /** Read-ahead passes in a row before it waits for the next list change. */
+    private const val READ_AHEAD_PASSES = 2
 
     /** A sign-in page this young (just fetched with the server check) is not asked for again. */
     private const val PAGE_REUSE_MILLIS = 10_000L

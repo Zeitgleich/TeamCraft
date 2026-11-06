@@ -4469,6 +4469,12 @@ Plaintext outside the sealed store, and how long it lives:
   copy once its upload finished or failed for good, and the folder is wiped at sign-out.
 - Notifications show what the workspace policy allows (§7) and are removed at sign-out.
 
+Sealed outside the store: the chat list as it was shown last (conversation names, unread counts and
+each conversation's last line, the same as the notifications show), so the next start shows it in
+its first frame instead of waiting for the store to open. It is AES-256-GCM in the app with a random
+key that the Keystore key wraps like the database key (`SealedCache`), excluded from backups like the
+rest of the app's files, replaced by the real list once that is read, and deleted at sign-out.
+
 **App lock (Android and iOS, optional).** A biometric or device-passcode gate in front of the app, and
 the app switcher shows a cover instead of the chats while it is on. It is a gate in the user interface
 only: the database key is protected the same way with or without it (it must open for push wake-ups
