@@ -105,12 +105,15 @@ fun rememberAttachmentPickers(
 @Composable
 fun AttachSheet(pickers: AttachmentPickers, onDismiss: () -> Unit) {
   ModalBottomSheet(onDismissRequest = onDismiss) {
-    RecentMediaStrip(
-      onAdd = { items ->
-        onDismiss()
-        pickers.reviewMedia(items)
-      },
-    )
+    // Not in the Play build: there the gallery tile opens the system photo picker.
+    if (MediaAccess.isOffered) {
+      RecentMediaStrip(
+        onAdd = { items ->
+          onDismiss()
+          pickers.reviewMedia(items)
+        },
+      )
+    }
     Row(
       Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 28.dp),
       horizontalArrangement = Arrangement.SpaceEvenly,

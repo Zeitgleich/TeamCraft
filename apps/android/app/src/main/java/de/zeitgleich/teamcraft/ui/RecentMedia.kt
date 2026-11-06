@@ -11,6 +11,7 @@ import android.os.Build
 import android.provider.MediaStore
 import android.util.Size
 import androidx.core.content.ContextCompat
+import de.zeitgleich.teamcraft.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -27,7 +28,14 @@ enum class MediaAccess {
   None;
 
   companion object {
+    /**
+     * Whether this build reads the media library at all: the Play build uses the system photo
+     * picker only (Play's photo and video policy), the others offer the strip and the albums.
+     */
+    val isOffered: Boolean = BuildConfig.READS_MEDIA_LIBRARY
+
     fun of(context: Context): MediaAccess {
+      if (!isOffered) return None
       fun granted(permission: String) = ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
       return when {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&

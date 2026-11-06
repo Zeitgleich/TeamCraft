@@ -92,11 +92,16 @@ android {
       buildConfigField("String", "FCM_APPLICATION_ID", "\"${setting("fcmApplicationId")}\"")
       buildConfigField("String", "FCM_API_KEY", "\"${setting("fcmApiKey")}\"")
       buildConfigField("String", "FCM_SENDER_ID", "\"${setting("fcmSenderId")}\"")
+      // Play's policy on photo and video access: the system photo picker only, no media library
+      // (no recent-photos strip, no albums). Its manifest removes the permissions.
+      buildConfigField("boolean", "READS_MEDIA_LIBRARY", "false")
     }
     // Builds without Google services (F-Droid style): UnifiedPush only.
     create("libre") {
       dimension = "push"
       applicationIdSuffix = ".libre"
+      // The recent-photos strip and the albums read the device's media library (libre manifest).
+      buildConfigField("boolean", "READS_MEDIA_LIBRARY", "true")
     }
   }
 

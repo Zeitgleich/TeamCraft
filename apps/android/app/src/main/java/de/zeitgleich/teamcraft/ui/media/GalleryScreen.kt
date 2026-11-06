@@ -45,6 +45,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -102,6 +103,9 @@ fun GalleryScreen(
     if (uris.isNotEmpty()) onPicked(uris)
   }
   fun openPicker() = picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo))
+  // A build without the media library (Play) goes straight to the system's picker; this screen
+  // stays behind it with a button to open it again.
+  LaunchedEffect(Unit) { if (!MediaAccess.isOffered) openPicker() }
   val maybeAlbum = draft.maybeAlbum
   Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
@@ -125,7 +129,10 @@ fun GalleryScreen(
       }
       Box(Modifier.weight(1f)) {
         when {
-          access == MediaAccess.None -> NoAccess(onAllow = { ask.launch(MediaAccess.permissions()) }, onPicker = ::openPicker)
+          access == MediaAccess.None -> NoAccess(
+            maybeOnAllow = if (MediaAccess.isOffered) ({ ask.launch(MediaAccess.permissions()) }) else null,
+            onPicker = ::openPicker,
+          )
           maybeAlbum == null -> Albums(
             isPartial = access == MediaAccess.Partial,
             onMore = { ask.launch(MediaAccess.permissions()) },
@@ -147,16 +154,21 @@ private fun albumName(album: MediaAlbumRef): String = when (album.kind) {
 }
 
 @Composable
-private fun NoAccess(onAllow: () -> Unit, onPicker: () -> Unit) {
+private fun NoAccess(maybeOnAllow: (() -> Unit)?, onPicker: () -> Unit) {
   Column(
     Modifier.fillMaxSize().padding(32.dp),
     horizontalAlignment = Alignment.CenterHorizontally,
     verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
   ) {
     Icon(painterResource(R.drawable.ic_photo_library), contentDescription = null, modifier = Modifier.size(48.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-    Text(stringResource(R.string.media_gallery_access), textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyLarge)
-    Button(onClick = onAllow) { Text(stringResource(R.string.media_gallery_allow)) }
-    TextButton(onClick = onPicker) { Text(stringResource(R.string.media_gallery_picker)) }
+    if (maybeOnAllow != null) {
+      Text(stringResource(R.string.media_gallery_access), textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyLarge)
+      Button(onClick = maybeOnAllow) { Text(stringResource(R.string.media_gallery_allow)) }
+      TextButton(onClick = onPicker) { Text(stringResource(R.string.media_gallery_picker)) }
+    } else {
+      Text(stringResource(R.string.media_gallery_picker_only), textAlign = TextAlign.Center, style = MaterialTheme.typography.bodyLarge)
+      Button(onClick = onPicker) { Text(stringResource(R.string.media_gallery_picker)) }
+    }
   }
 }
 

@@ -19,6 +19,7 @@
   <string name="media_gallery_access">Allow TeamCraft to show your photos and videos here, or pick some with the system picker.</string>
   <string name="media_gallery_allow">Allow access</string>
   <string name="media_gallery_picker">Pick with the system picker</string>
+  <string name="media_gallery_picker_only">Pick photos and videos to send. Only what you pick is shared with TeamCraft.</string>
   <string name="media_gallery_empty">No photos or videos on this device.</string>
   <string name="media_album_camera">Camera</string>
   <string name="media_album_all">All media</string>

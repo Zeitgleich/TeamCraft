@@ -18,6 +18,7 @@
   <string name="media_gallery_access">Erlaube TeamCraft, deine Fotos und Videos hier zu zeigen, oder wähle welche mit der Systemauswahl.</string>
   <string name="media_gallery_allow">Zugriff erlauben</string>
   <string name="media_gallery_picker">Mit der Systemauswahl wählen</string>
+  <string name="media_gallery_picker_only">Wähle Fotos und Videos zum Senden. TeamCraft sieht nur, was du auswählst.</string>
   <string name="media_gallery_empty">Keine Fotos oder Videos auf diesem Gerät.</string>
   <string name="media_album_camera">Kamera</string>
   <string name="media_album_all">Alle Medien</string>
