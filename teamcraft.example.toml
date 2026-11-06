@@ -585,6 +585,12 @@ dismiss_coalesce_ms = 3000
 # most one such wake per user and conversation per interval (docs/scheduled-messages.md).
 scheduled_wake_coalesce_ms = 10000
 scheduled_wake_min_interval_secs = 300
+# A silent wake-up makes phones fetch new messages in the background that they got no visible push for
+# (the user was at the desktop, mentions-only channels), so they are there when the app opens
+# (notifications.md, "Sync wake-ups"). New messages within this time make one, and there is at most one
+# per user per interval; 0 turns them off.
+sync_wake_coalesce_ms = 30000
+sync_wake_min_interval_secs = 300
 request_timeout_secs = 10
 # Per pool: APNs/FCM share one, Web Push/UnifiedPush (endpoints users chose) another.
 max_concurrent_sends = 32

@@ -105,6 +105,10 @@ struct Inner {
   pending_seal_wakes: HashSet<(UserId, ConversationId)>,
   /// When the last wake went out, for the minimum interval between them.
   last_seal_wakes: HashMap<(UserId, ConversationId), Instant>,
+  /// Sync wake-ups that wait for the end of a burst of messages, per user.
+  pending_sync_wakes: HashSet<UserId>,
+  /// When the last sync wake-up went out, for the minimum interval between them.
+  last_sync_wakes: HashMap<UserId, Instant>,
   /// Held pushes per user, oldest first (all have the same grace delay, so also soonest due first).
   held: HashMap<UserId, VecDeque<HeldPush>>,
   /// When each caller's recent rings were pushed (within the last minute).
@@ -277,33 +281,48 @@ impl PushTracker {
     coalesce: Duration,
     min_interval: Duration,
   ) -> Option<Duration> {
-    let now = Instant::now();
-    let mut inner = self.lock();
-    if inner.pending_seal_wakes.len() >= MAX_PENDING_DISMISSALS {
-      return None;
-    }
-    if !inner.pending_seal_wakes.insert((user, conversation)) {
-      return None;
-    }
-    if inner.last_seal_wakes.len() >= MAX_PENDING_DISMISSALS {
-      inner
-        .last_seal_wakes
-        .retain(|_, at| now.duration_since(*at) < min_interval);
-    }
-    let until_allowed = inner
-      .last_seal_wakes
-      .get(&(user, conversation))
-      .map_or(Duration::ZERO, |at| {
-        min_interval.saturating_sub(now.duration_since(*at))
-      });
-    Some(coalesce.max(until_allowed))
+    let inner = &mut *self.lock();
+    queue_wake(
+      &mut inner.pending_seal_wakes,
+      &mut inner.last_seal_wakes,
+      (user, conversation),
+      coalesce,
+      min_interval,
+    )
   }
 
   /// The queued wake goes out now.
   pub fn take_seal_wake(&self, user: UserId, conversation: ConversationId) {
-    let mut inner = self.lock();
-    inner.pending_seal_wakes.remove(&(user, conversation));
-    inner.last_seal_wakes.insert((user, conversation), Instant::now());
+    let inner = &mut *self.lock();
+    take_wake(
+      &mut inner.pending_seal_wakes,
+      &mut inner.last_seal_wakes,
+      (user, conversation),
+    );
+  }
+
+  /// Queues a sync wake-up for the user's phones; how long to wait before sending it, or `None` when
+  /// one is on its way already and covers this message too.
+  pub fn queue_sync_wake(
+    &self,
+    user: UserId,
+    coalesce: Duration,
+    min_interval: Duration,
+  ) -> Option<Duration> {
+    let inner = &mut *self.lock();
+    queue_wake(
+      &mut inner.pending_sync_wakes,
+      &mut inner.last_sync_wakes,
+      user,
+      coalesce,
+      min_interval,
+    )
+  }
+
+  /// The queued sync wake-up goes out now.
+  pub fn take_sync_wake(&self, user: UserId) {
+    let inner = &mut *self.lock();
+    take_wake(&mut inner.pending_sync_wakes, &mut inner.last_sync_wakes, user);
   }
 
   /// Remembers which devices ring for the call.
@@ -426,6 +445,35 @@ impl Inner {
     });
     self.shown_entries = self.shown_entries.saturating_sub(removed);
   }
+}
+
+/// Queues a coalesced wake under `key`: how long to wait before it goes out (the burst's end, or the
+/// end of the minimum interval since the last one), or `None` when one is queued already. Both maps
+/// stay bounded: beyond the limit nothing more is queued, and old send times are forgotten.
+fn queue_wake<K: std::hash::Hash + Eq + Copy>(
+  pending: &mut HashSet<K>,
+  last: &mut HashMap<K, Instant>,
+  key: K,
+  coalesce: Duration,
+  min_interval: Duration,
+) -> Option<Duration> {
+  let now = Instant::now();
+  if pending.len() >= MAX_PENDING_DISMISSALS || !pending.insert(key) {
+    return None;
+  }
+  if last.len() >= MAX_PENDING_DISMISSALS {
+    last.retain(|_, at| now.duration_since(*at) < min_interval);
+  }
+  let until_allowed = last.get(&key).map_or(Duration::ZERO, |at| {
+    min_interval.saturating_sub(now.duration_since(*at))
+  });
+  Some(coalesce.max(until_allowed))
+}
+
+/// The wake queued under `key` goes out now.
+fn take_wake<K: std::hash::Hash + Eq>(pending: &mut HashSet<K>, last: &mut HashMap<K, Instant>, key: K) {
+  pending.remove(&key);
+  last.insert(key, Instant::now());
 }
 
 #[cfg(test)]

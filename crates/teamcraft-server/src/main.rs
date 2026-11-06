@@ -1125,6 +1125,8 @@ fn push_settings(config: &Config) -> PushSettings {
     max_rings_per_minute: push.max_rings_per_minute,
     scheduled_wake_coalesce: Duration::from_millis(push.scheduled_wake_coalesce_ms),
     scheduled_wake_min_interval: Duration::from_secs(push.scheduled_wake_min_interval_secs),
+    sync_wake_coalesce: Duration::from_millis(push.sync_wake_coalesce_ms),
+    sync_wake_min_interval: Duration::from_secs(push.sync_wake_min_interval_secs),
     dismiss_coalesce: Duration::from_millis(push.dismiss_coalesce_ms),
     allow_private_endpoints: push.allow_private_endpoints,
   }

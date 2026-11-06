@@ -141,7 +141,7 @@ impl GatewayClient {
   /// read keeps the list read before; with none read yet the push is unavailable for now, so the
   /// retry queue sends it once the list is known rather than dropping it.
   async fn offers_kind(&self, kind: &PushKind) -> Result<bool, PushError> {
-    if *kind != PushKind::ScheduledSeal {
+    if !matches!(kind, PushKind::ScheduledSeal | PushKind::Sync) {
       return Ok(true);
     }
     let mut known = self.kinds.lock().await;

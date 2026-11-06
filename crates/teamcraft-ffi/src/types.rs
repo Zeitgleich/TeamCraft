@@ -455,6 +455,9 @@ pub enum PushNotificationKind {
   /// The group of a message the user scheduled changed: seal it again
   /// ([`crate::TeamCraft::seal_scheduled_messages`]). Never shows anything.
   ScheduledSeal,
+  /// Messages came that the device got no visible push for: catch up in the background
+  /// ([`crate::TeamCraft::catch_up_in_background`]). Never shows anything.
+  Sync,
   /// The diagnostics' test push: show a short confirmation on the "other" channel.
   Test,
   /// A kind this version doesn't know: show nothing.
@@ -937,6 +940,7 @@ pub(crate) fn notification_kind(kind: &PushKind) -> PushNotificationKind {
     PushKind::Call => PushNotificationKind::Call,
     PushKind::Dismiss => PushNotificationKind::Dismiss,
     PushKind::ScheduledSeal => PushNotificationKind::ScheduledSeal,
+    PushKind::Sync => PushNotificationKind::Sync,
     PushKind::Test => PushNotificationKind::Test,
     PushKind::Unknown(_) => PushNotificationKind::Unknown,
   }

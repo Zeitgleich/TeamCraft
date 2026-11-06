@@ -456,6 +456,11 @@ pub struct PushConfig {
   pub scheduled_wake_coalesce_ms: u64,
   /// At most one such wake per user and conversation within this time.
   pub scheduled_wake_min_interval_secs: u64,
+  /// New messages within this time make one silent wake-up for the phones to catch up in the
+  /// background (notifications.md, "Sync wake-ups").
+  pub sync_wake_coalesce_ms: u64,
+  /// At most one sync wake-up per user within this time; `0` sends none.
+  pub sync_wake_min_interval_secs: u64,
   pub request_timeout_secs: u64,
   /// Pushes sent in parallel, per pool: APNs and FCM share one, Web Push and UnifiedPush (endpoints
   /// users chose) another.
@@ -1566,6 +1571,8 @@ impl Default for PushConfig {
       dismiss_coalesce_ms: 3000,
       scheduled_wake_coalesce_ms: 10_000,
       scheduled_wake_min_interval_secs: 300,
+      sync_wake_coalesce_ms: 30_000,
+      sync_wake_min_interval_secs: 300,
       request_timeout_secs: 10,
       max_concurrent_sends: 32,
       max_concurrent_sends_per_user: 4,

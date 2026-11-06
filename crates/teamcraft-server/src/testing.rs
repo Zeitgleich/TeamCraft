@@ -497,6 +497,9 @@ impl TestApp {
     // Withdrawals coalesce for a moment only, so tests see them quickly.
     settings.push.dismiss_coalesce = Duration::from_millis(50);
     settings.push.scheduled_wake_coalesce = Duration::from_millis(50);
+    // Sync wake-ups would join the pushes every routing test counts; the tests about them turn them on.
+    settings.push.sync_wake_coalesce = Duration::from_millis(50);
+    settings.push.sync_wake_min_interval = Duration::ZERO;
     // One retry worker per pool: hundreds of parallel test apps share the dev Postgres's connections.
     settings.push.retry.workers = 1;
     customize(&mut settings);

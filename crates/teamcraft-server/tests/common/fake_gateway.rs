@@ -51,7 +51,8 @@ struct Inner {
   accepts_unbound: bool,
   /// Pushes are taken and never answered (a gateway that hangs, or a send cut off by a crash).
   is_hanging: bool,
-  /// `/v1/info` lists the wake to seal scheduled messages (a gateway that knows it).
+  /// `/v1/info` lists the kinds newer than the contract's first version: the wake to seal scheduled
+  /// messages and the sync wake-up (a gateway that knows them).
   offers_seal: bool,
   /// `/v1/info` answers 503.
   is_info_down: bool,
@@ -79,7 +80,7 @@ impl FakeGateway {
     (fake, url)
   }
 
-  /// From now on `/v1/info` lists the wake to seal scheduled messages.
+  /// From now on `/v1/info` lists the wake to seal scheduled messages and the sync wake-up.
   pub fn offer_seal(&self) {
     self.inner.lock().unwrap().offers_seal = true;
   }
@@ -255,6 +256,7 @@ async fn info(State(fake): State<FakeGateway>) -> Response {
   let mut kinds = vec!["message", "mention", "call", "dismiss", "test"];
   if offers_seal {
     kinds.push("scheduled_seal");
+    kinds.push("sync");
   }
   axum::Json(json!({
     "version": "1.0.0",

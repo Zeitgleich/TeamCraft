@@ -2719,3 +2719,112 @@ mod wake_to_seal {
     assert_eq!(seal_wakes(&recorder.wait_for(3).await).len(), 3);
   }
 }
+
+/// Silent wake-ups so a phone holds what it wasn't pushed for when the app opens (notifications.md,
+/// "Sync wake-ups").
+mod wake_to_sync {
+  use super::*;
+
+  async fn start_syncing(recorder: &Recorder, min_interval: Duration) -> Option<TestApp> {
+    TestApp::start_with_push(
+      |settings| {
+        settings.push.sync_wake_coalesce = Duration::from_millis(300);
+        settings.push.sync_wake_min_interval = min_interval;
+      },
+      recorder.dispatcher(),
+    )
+    .await
+  }
+
+  fn sync_wakes(seen: &[Recorded]) -> Vec<Recorded> {
+    seen
+      .iter()
+      .filter(|push| push.wake_up.kind == PushKind::Sync)
+      .cloned()
+      .collect()
+  }
+
+  #[tokio::test]
+  async fn a_message_the_phone_is_not_pushed_for_wakes_it_silently_naming_nothing() {
+    let recorder = Recorder::default();
+    let Some(app) = start_syncing(&recorder, Duration::from_secs(300)).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    // The channel notifies carol on mentions only: no visible push for this one.
+    set_level(&app, &s.carol, &s.channel, "mentions").await;
+    send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
+
+    let seen = recorder.wait_for(1).await;
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    let wake = &seen[0];
+    assert_eq!(wake.wake_up.kind, PushKind::Sync);
+    assert_eq!(wake.device, s.carol_push_device);
+    assert_eq!(wake.wake_up.conversation_id.to_string(), "0");
+    assert_eq!(wake.wake_up.maybe_message_id, None);
+    assert_eq!(wake.wake_up.maybe_sender_id, None);
+    // Silent: Doze delivers it in its next window, it never wakes a dozing phone.
+    assert_eq!(wake.urgency, Urgency::Normal);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_visible_push_needs_no_sync_wake() {
+    let recorder = Recorder::default();
+    let Some(app) = start_syncing(&recorder, Duration::from_secs(300)).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    set_level(&app, &s.carol, &s.channel, "all").await;
+    send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
+
+    let seen = recorder.wait_for(2).await;
+    assert!(sync_wakes(&seen).is_empty(), "{seen:?}");
+    assert_eq!(seen.len(), 1);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_burst_of_messages_makes_one_wake_and_the_next_waits_for_the_interval() {
+    let recorder = Recorder::default();
+    let Some(app) = start_syncing(&recorder, Duration::from_secs(3600)).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    set_level(&app, &s.carol, &s.channel, "mentions").await;
+    for n in 1..=5 {
+      send(&app, &s.alice, &s.channel, &s.alice_device, n).await;
+    }
+    assert_eq!(sync_wakes(&recorder.wait_for(1).await).len(), 1);
+    send(&app, &s.alice, &s.channel, &s.alice_device, 6).await;
+    assert_eq!(sync_wakes(&recorder.wait_for(2).await).len(), 1);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn web_push_gets_none_and_zero_turns_them_off() {
+    let recorder = Recorder::default();
+    let Some(app) = start_syncing(&recorder, Duration::from_secs(300)).await else {
+      return;
+    };
+    let (alice, erin) = (owner(), member("erin"));
+    let channel = channel_with(&app, &[&erin]).await;
+    let alice_device = register_push_device(&app, &alice, "apns").await;
+    // A browser must show every push: no silent ones.
+    register_push_device(&app, &erin, "webpush").await;
+    set_level(&app, &erin, &channel, "mentions").await;
+    send(&app, &alice, &channel, &alice_device, 1).await;
+    assert!(recorder.wait_for(1).await.is_empty());
+    app.stop().await;
+
+    let recorder = Recorder::default();
+    let Some(app) = start_syncing(&recorder, Duration::ZERO).await else {
+      return;
+    };
+    let s = scene(&app).await;
+    set_level(&app, &s.carol, &s.channel, "mentions").await;
+    send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
+    assert!(recorder.wait_for(1).await.is_empty());
+    app.stop().await;
+  }
+}
