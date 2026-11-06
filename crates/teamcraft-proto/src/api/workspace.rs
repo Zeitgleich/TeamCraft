@@ -722,6 +722,20 @@ pub struct RoleSigningPolicy {
   /// also if it differs from the one that device used before.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub accepts_new_provider: bool,
+  /// Whether apps pin a colleague's identity key only with the provider's attestation (e2ee.md §3.1).
+  /// Absent means optional: keys without one are pinned on first use and shown as not confirmed.
+  #[serde(rename = "key_attestation", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_key_attestation: Option<KeyAttestationMode>,
+}
+
+wire_enum! {
+  /// Whether an identity key needs the identity provider's attestation to be pinned (e2ee.md §3.1).
+  pub enum KeyAttestationMode {
+    /// Keys with a valid attestation are pinned as confirmed, others on first use.
+    Optional => "optional",
+    /// Keys without a valid attestation are not pinned: nobody shares a group with them.
+    Required => "required",
+  }
 }
 
 /// The identity provider whose tokens can change the admin roster.
@@ -754,6 +768,7 @@ impl Default for RoleSigningPolicy {
       admin_role: default_admin_role(),
       maybe_provider: None,
       accepts_new_provider: false,
+      maybe_key_attestation: None,
     }
   }
 }
@@ -762,6 +777,14 @@ impl RoleSigningPolicy {
   /// Whether owners' apps sign by themselves. A mode this version doesn't know doesn't.
   pub fn is_automatic(maybe_policy: Option<&Self>) -> bool {
     maybe_policy.is_none_or(|policy| policy.mode == RoleSigningMode::Automatic)
+  }
+}
+
+impl KeyAttestationMode {
+  /// Whether the signed policy requires attestations. A mode this version doesn't know doesn't: an
+  /// app never locks people out over a word it can't read.
+  pub fn is_required(maybe_policy: Option<&RoleSigningPolicy>) -> bool {
+    maybe_policy.and_then(|policy| policy.maybe_key_attestation.as_ref()) == Some(&Self::Required)
   }
 }
 

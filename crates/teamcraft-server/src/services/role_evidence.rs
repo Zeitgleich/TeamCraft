@@ -276,6 +276,19 @@ fn unix_now() -> i64 {
   time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
+/// The subject of an identity provider token, unverified: who it claims to be about.
+pub(super) fn token_subject(token: &str) -> Option<String> {
+  let payload = token.split('.').nth(1)?;
+  let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+  let outline: SubjectOutline = serde_json::from_slice(&bytes).ok()?;
+  Some(outline.sub)
+}
+
+#[derive(Deserialize)]
+struct SubjectOutline {
+  sub: String,
+}
+
 fn token_outline(token: &str) -> Option<TokenOutline> {
   let payload = token.split('.').nth(1)?;
   let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;

@@ -646,6 +646,13 @@ server refuses them and nobody can sign; give them `member` for a moment.
 **To check** a realm: `python3 dev/verify-realm.py` shows the checks against the dev realm; a token of your own decoded with any
 JWT tool should show `resource_access.<client>.roles` and `tc_identity_key` in the ID token.
 
+**Identity key attestation** (e2ee.md §3.1) uses the same two rows for the identity key: with them, every member's app
+publishes its key's attestation by itself, and colleagues' apps pin keys as confirmed by the provider once an owner's app
+has pinned the provider in the signed policy. Without them keys are pinned on first use, as before. Administration →
+Security → "Colleagues' keys" can require confirmed keys; only switch that on once the mapper and the attribute are in
+place, or nobody whose app can't attest can be added to channels. Keys apps pinned before stay trusted either way. The
+web app fetches the provider's signing keys from the browser: add the web app's origin to the client's web origins.
+
 **Manual instead of automatic:** Administration → Security → "Who signs role changes". Whoever controls the provider can appoint
 admins under the automatic default (e2ee.md §3.1.3); manual gives every change to an owner's hand.
 

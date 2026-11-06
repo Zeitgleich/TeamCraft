@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE identity_keys SET attestation = $1 WHERE user_id = $2 AND public_key = $3 AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9a9c7df1b71ee405978e103077bb1d71a9398319192e996a142dc4da242913a8"
+}

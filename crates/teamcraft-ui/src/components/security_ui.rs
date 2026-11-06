@@ -585,6 +585,9 @@ pub fn VerifyContactDialog(user: UserId) -> impl IntoView {
         <p class="status-line" role="status">
           {move || if verification.get().is_verified { i18n.t("contact-verified") } else { i18n.t("contact-not-verified") }}
         </p>
+        <p class="muted-text small">
+          {move || if verification.get().is_attested { i18n.t("contact-attested") } else { i18n.t("contact-not-attested") }}
+        </p>
       </div>
       <footer class="modal-foot">
         <span class="grow"></span>

@@ -102,25 +102,46 @@ key only keeps the passwords out of database dumps and backups ([admin.md](admin
 The OIDC provider (reference setup: Keycloak) runs on a separate server, not on the TeamCraft VPS.
 That makes it a second, independent trust anchor:
 
-- At enrollment, the client stores `"<TeamCraft user ID>:<identity key fingerprint>"` as a Keycloak
-  user attribute (via the Keycloak account API, authenticated by the user's own login) and requests an
-  ID token that contains it as claim `tc_identity_key`. Binding the user ID in the claim means the
-  mapping from the token's subject to a TeamCraft user doesn't come from the server either.
-- The client uploads this signed ID token to TeamCraft together with its identity key.
+- The client stores `"<TeamCraft user ID>:<identity key fingerprint>"` as a Keycloak user attribute
+  (via the Keycloak account API, authenticated by the user's own login) and the next ID token carries
+  it as claim `tc_identity_key` (realm setup: docs/operations.md, "Role signing"). Binding the user ID
+  in the claim means the mapping from the token's subject to a TeamCraft user doesn't come from the
+  server either.
+- The app then publishes that signed ID token as the attestation of its identity key, once per key
+  (`PUT /api/v1/me/identity-key/attestation`; at enrollment it can come with the key). This runs on
+  the upkeep path of every app with a provider session (desktop, web, Android, iOS), for every
+  member, role or not, next to role signing (§3.1.3). The server only checks that the token names the
+  caller and their current key; it judges nothing.
 - Other clients verify the token's signature against Keycloak's JWKS, fetched **directly from
   Keycloak**, not through the VPS (the discovery document's `jwks_uri` must be on the issuer's host),
   and check issuer, audience and the claim before pinning a key. Implemented for RS256, ES256 and EdDSA
   ID tokens (`teamcraft-crypto::attestation`). The token's expiry isn't checked: it attests a key, not
-  a session.
-- Configured per deployment (`ClientSettings::maybe_attestation`: issuer, client ID, required or
-  not). When required, a key without a valid attestation isn't pinned at all; otherwise it is pinned
-  as trust on first use and marked as not attested, so the UI can show it.
-- To inject a fake identity key, an attacker would have to compromise both the TeamCraft VPS and
-  Keycloak. Users get this without ever seeing a verification code.
+  a session. The web app needs the provider to allow its origin for the JWKS (Keycloak: the client's
+  web origins); where it can't fetch them it treats keys as not attested.
+- **Which provider counts** is the owners' word, never the server's: the provider pinned in the signed
+  policy (`role_signing.provider`, §3.1.3). A deployment can name one in the client settings instead
+  (`ClientSettings::maybe_attestation`). Without either, nothing is attested and keys are pinned on
+  first use.
+- **Optional or required** is the signed policy's `role_signing.key_attestation` (admin console,
+  Security; default optional). Optional: a key with a valid attestation is pinned as attested, one
+  without is pinned on first use and marked as not attested. Required: a key without a valid
+  attestation isn't pinned at all, so nobody adds that person to a group until their app attested it.
+- **Keys pinned before** stay pinned in both modes, so turning this on never locks anybody out. A key
+  pinned without an attestation is looked at again when it is next needed, at most once a day
+  (`ClientSettings::attestation_recheck`): once a valid attestation of the *same* key is there, it
+  counts as attested. A different key is never taken this way; it stays a key change the user decides
+  on (§3).
+- **What users see:** the contact's verification dialog says whether the identity provider confirmed
+  the key, or that the app took it as the server handed it out and comparing the safety number is the
+  way to be sure.
+- What this protects: a key pinned as attested can only be faked by compromising both the TeamCraft
+  VPS and Keycloak. It does not cover keys pinned on first use before the provider attested them, or
+  people whose app never publishes an attestation (a realm without the attribute or mapper, local
+  accounts, the integration bridge and other service accounts, meeting guests from outside the
+  realm): for those, first contact is trust on first use and the safety number is the check. Guests
+  in the company realm get the attestation like members.
 - Requires an OIDC provider that lets users write a profile attribute and emits it as a claim
-  (Keycloak does). Without that, and for optional local accounts and meeting guests, clients fall
-  back to trust on first use and optional verification codes. Guests in the company realm get the
-  attestation like members.
+  (Keycloak does).
 
 Later option: a key transparency log (append-only, auditable) so that a malicious server can't show
 different identity keys to different users.

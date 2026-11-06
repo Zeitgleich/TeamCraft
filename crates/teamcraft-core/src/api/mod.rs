@@ -630,6 +630,11 @@ pub trait ServerApi {
     &self,
     request: &teamcraft_proto::PutRoleEvidenceRequest,
   ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Stores the provider's attestation of this user's current identity key (e2ee.md §3.1).
+  fn put_identity_key_attestation(
+    &self,
+    request: &teamcraft_proto::PutIdentityKeyAttestationRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
   /// What owners' apps verify (owners only).
   fn list_role_evidence(
     &self,

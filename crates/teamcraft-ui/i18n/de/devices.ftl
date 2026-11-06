@@ -61,6 +61,8 @@ contact-verify-body = Vergleiche diese Nummer mit der Nummer, die { $name } in d
 contact-verified = Überprüft: Du hast diese Nummer verglichen.
 contact-not-verified = Noch nicht überprüft.
 contact-unmark = Überprüfung entfernen
+contact-attested = Die Anmeldung deiner Organisation hat bestätigt, dass dieser Schlüssel zu dieser Person gehört.
+contact-not-attested = Die Anmeldung deiner Organisation hat diesen Schlüssel nicht bestätigt. Diese App hat ihn so übernommen, wie der Server ihn ausgegeben hat; vergleiche die Nummer, um sicherzugehen.
 
 ## Einstellungen: Darstellung, Seitenleiste, Sprache, Datenschutz, Geräte, Anrufe
 contact-verified-short = Überprüft
