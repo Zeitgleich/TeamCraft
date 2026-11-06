@@ -22,7 +22,7 @@ use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi}
 use teamcraft_core::client::files::{BlobUpload, sweep_staged_copies};
 use teamcraft_core::client::{
   CatchUpFocus, HistoryBackfill, LinkAnnouncement, LinkApproval, LinkReceipt, LinkWait, LinkWaitCancel,
-  LinkedSecrets, ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE, notify_first_sync_during,
+  LinkedSecrets, ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE, notify_sync_progress_during,
 };
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{
@@ -2336,8 +2336,9 @@ impl Core {
     else {
       return Flow::Go;
     };
-    // A first sync happens in the connect: the UI is told as the list and the progress grow.
-    let signal = client.first_sync_signal();
+    // The sync after connecting happens in here: the UI is told as the server answers, the list and
+    // a first sync's progress grow and each conversation is caught up.
+    let signal = client.sync_progress_signal();
     let notify = on_change.clone();
     let mut reads = ReadsWhileBusy {
       backend: backend.as_ref(),
@@ -2350,7 +2351,7 @@ impl Core {
       on_change: on_change.as_ref(),
     };
     // On the heap: the connection's future holds the whole sync, too big for the core thread's stack.
-    let connecting = Box::pin(notify_first_sync_during(
+    let connecting = Box::pin(notify_sync_progress_during(
       &signal,
       move || notify(),
       connection.connect_if_due(client),
