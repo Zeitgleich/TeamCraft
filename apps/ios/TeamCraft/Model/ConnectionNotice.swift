@@ -15,6 +15,8 @@ enum ConnectionNotice: Equatable {
   case unreachable(retryInSeconds: Int, maybeInterception: NetworkInterception?)
   /// The server refused the session; shown at once, waiting doesn't fix it.
   case signInRequired
+  /// The identity provider lists no role for the account any more; an admin has to give one back.
+  case noRoleLeft
 
   /// The banner for this moment, or none. The device's own connectivity wins: without a network
   /// the server can't be the problem. No core open (`nil`): nothing to say about the server.
@@ -22,6 +24,7 @@ enum ConnectionNotice: Equatable {
     -> ConnectionNotice?
   {
     if case .signInRequired = maybeConnection { return .signInRequired }
+    if case .noRoleLeft = maybeConnection { return .noRoleLeft }
     // Connected, so no grace period: the core doesn't flip it back and forth.
     if isOnline, case .slow = maybeConnection { return .slow }
     guard grace.isPastGrace(now: now) else { return nil }
@@ -34,7 +37,7 @@ enum ConnectionNotice: Equatable {
       // Due but not started yet: "next attempt in 0 s" would read as stuck.
       if seconds == 0, maybeInterception == nil { return .connecting }
       return .unreachable(retryInSeconds: seconds, maybeInterception: maybeInterception)
-    case .connected, .slow, .signInRequired, nil:
+    case .connected, .slow, .signInRequired, .noRoleLeft, nil:
       return nil
     }
   }
@@ -46,7 +49,7 @@ enum ConnectionNotice: Equatable {
     if !isOnline { return true }
     switch maybeConnection {
     case .connecting, .offline: return true
-    case .connected, .slow, .signInRequired, nil: return false
+    case .connected, .slow, .signInRequired, .noRoleLeft, nil: return false
     }
   }
 }
@@ -56,7 +59,7 @@ extension ConnectionState {
   var isConnected: Bool {
     switch self {
     case .connected, .slow: return true
-    case .connecting, .offline, .signInRequired: return false
+    case .connecting, .offline, .signInRequired, .noRoleLeft: return false
     }
   }
 }

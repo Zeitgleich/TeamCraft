@@ -38,6 +38,9 @@ sealed interface ConnectionNotice {
 
   /** The server refused the token; shown at once, waiting doesn't fix it. */
   data object SignInRequired : ConnectionNotice
+
+  /** The identity provider lists no role for the account any more; an admin has to give one back. */
+  data object NoRoleLeft : ConnectionNotice
 }
 
 /**
@@ -72,6 +75,7 @@ fun connectionNotice(
   isSyncStartFailing: Boolean = false,
 ): ConnectionNotice? {
   if (maybeConnection is ConnectionState.SignInRequired) return ConnectionNotice.SignInRequired
+  if (maybeConnection is ConnectionState.NoRoleLeft) return ConnectionNotice.NoRoleLeft
   // Connected, so no grace period: the core doesn't flip it back and forth.
   if (isOnline && maybeConnection is ConnectionState.Slow) return ConnectionNotice.Slow
   if (!unsettled.isPastGrace(nowMs)) return null

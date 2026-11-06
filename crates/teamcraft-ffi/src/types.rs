@@ -14,8 +14,8 @@ use teamcraft_core::prefetch::SegmentPrefetch;
 use teamcraft_core::push_guard::{PushDiagnostics, Suppression};
 use teamcraft_core::push_preview::{AttachmentKind, PreviewContent, PreviewGap, PushPreview};
 use teamcraft_proto::{
-  DeviceLinkPlatform, Id, PushContentMode, PushKind, PushProvider, TestPushOutcome as TestPushOutcomeProto,
-  TestPushResponse,
+  DeviceLinkPlatform, Id, PushContentMode, PushKind, PushProvider, SignInReason,
+  TestPushOutcome as TestPushOutcomeProto, TestPushResponse,
 };
 
 /// Where the app keeps an account's data.
@@ -92,6 +92,9 @@ pub enum ConnectionState {
   },
   /// The server refused the access token: the user has to sign in again.
   SignInRequired,
+  /// The identity provider lists no TeamCraft role for the account any more. Nothing works until
+  /// an admin gives one back; then signing in again does.
+  NoRoleLeft,
 }
 
 /// An HTTP proxy the platform reports (see `set_network_proxy`).
@@ -1120,6 +1123,9 @@ impl From<teamcraft_core::connection::ConnectionState> for ConnectionState {
           Interception::ProofRefused => None,
         }),
       },
+      Core::SignInRequired {
+        reason: SignInReason::NoTeamcraftRole,
+      } => Self::NoRoleLeft,
       Core::SignInRequired { .. } => Self::SignInRequired,
     }
   }

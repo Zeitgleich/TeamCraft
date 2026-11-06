@@ -961,15 +961,16 @@ impl ApiError {
     self.is_transient() || self.is_sign_in_required()
   }
 
-  /// No access token, the server refused it, or the account is deactivated: retrying with the same
-  /// token won't help, the user (or the app's token refresh) has to sign in again. A deactivated
-  /// account's queued work waits for a reactivation like for a new token.
+  /// No access token, the server refused it, or the account is deactivated or has no role left:
+  /// retrying with the same token won't help, the user (or the app's token refresh) has to sign in
+  /// again. Queued work of such an account waits for a reactivation or a role given back like for a
+  /// new token, and the connection says why instead of retrying as if the network were down.
   pub fn is_sign_in_required(&self) -> bool {
     let is_refused = matches!(
       self,
       Self::Token(_) | Self::SignInExpired | Self::BoundKeyLost | Self::Status { status: 401, .. }
     );
-    (is_refused && !self.is_proof_refusal()) || self.is_account_deactivated()
+    (is_refused && !self.is_proof_refusal()) || self.is_account_deactivated() || self.has_no_role_left()
   }
 
   /// The server took the token and refused the DPoP proof with it, after the one retry
@@ -986,6 +987,12 @@ impl ApiError {
   /// The account is deactivated (suspended): nothing works until an admin reactivates it.
   pub fn is_account_deactivated(&self) -> bool {
     self.error_code() == Some(&ErrorCode::AccountDeactivated)
+  }
+
+  /// The identity provider lists no TeamCraft role for the account any more
+  /// (`no_teamcraft_role`): nothing works until an admin gives one back.
+  pub fn has_no_role_left(&self) -> bool {
+    self.error_code() == Some(&ErrorCode::NoTeamcraftRole)
   }
 
   /// The wait the server asked for with `Retry-After`, if it did.

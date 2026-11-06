@@ -171,7 +171,8 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
     },
     FailureKind::Server(code) => match code {
       ErrorCode::NotSpaceMember => "error-not-space-member",
-      ErrorCode::Forbidden | ErrorCode::NoTeamcraftRole => "error-forbidden",
+      ErrorCode::Forbidden => "error-forbidden",
+      ErrorCode::NoTeamcraftRole => "error-no-role-left",
       ErrorCode::Unauthorized | ErrorCode::InvalidToken | ErrorCode::AccountDeleted => "error-signed-out",
       ErrorCode::AccountDeactivated => "error-account-deactivated",
       ErrorCode::DpopRequired => "error-device-binding-required",

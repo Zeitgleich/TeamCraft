@@ -1014,6 +1014,13 @@ mod tests {
   }
 
   #[test]
+  fn an_account_with_no_role_left_needs_a_sign_in_not_a_retry_loop() {
+    let error = rejected(ErrorBody::new(ErrorCode::NoTeamcraftRole, "no role"));
+    assert!(error.is_sign_in_required());
+    assert!(!error.is_transient());
+  }
+
+  #[test]
   fn heartbeat_answers_are_heard_not_held() {
     let mut held = HeldFrames::default();
     held.hold(Some(Ok(GatewayServerMessage::HeartbeatAck)));

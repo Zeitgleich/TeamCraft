@@ -20,6 +20,7 @@ class ConnectionNoticeTest {
   @Test
   fun aRefusedTokenAsksToSignInAtOnce() {
     assertEquals(ConnectionNotice.SignInRequired, connectionNotice(true, ConnectionState.SignInRequired, Unsettled(), 0))
+    assertEquals(ConnectionNotice.NoRoleLeft, connectionNotice(true, ConnectionState.NoRoleLeft, Unsettled(), 0))
   }
 
   @Test
