@@ -7,8 +7,7 @@ import org.junit.Test
 
 class AppLockGateTest {
   private val key = FakeKey()
-  private var hasScreenLock = true
-  private val gate = AppLockGate(key) { hasScreenLock }
+  private val gate = AppLockGate(key)
 
   @Test
   fun anAuthorizedProofUnlocks() {
@@ -40,8 +39,7 @@ class AppLockGateTest {
   @Test
   fun noScreenLockOpensAndDropsTheKey() {
     promptedChallenge()
-    hasScreenLock = false
-    assertEquals(UnlockStart.Open, gate.start())
+    assertEquals(UnlockStart.Open, gate.start(hasScreenLock = false))
     assertFalse(key.exists)
   }
 
@@ -67,11 +65,53 @@ class AppLockGateTest {
   @Test
   fun aBrokenKeystoreFallsBackToThePromptAlone() {
     key.maybeFailure = IllegalStateException("keystore")
-    assertTrue(gate.start() is UnlockStart.PromptUnbound)
+    assertTrue(gate.start(hasScreenLock = true) is UnlockStart.PromptUnbound)
+  }
+
+  @Test
+  fun aBrokenKeyAtTheProofIsReplacedForTheNextPrompt() {
+    val challenge = promptedChallenge()
+    key.authorize(challenge)
+    key.isBrokenAtProof = true
+    assertFalse(gate.isUnlocked(challenge, challenge))
+    assertFalse(key.exists)
+    key.isBrokenAtProof = false
+    val next = promptedChallenge()
+    assertEquals(2, key.generations)
+    key.authorize(next)
+    assertTrue(gate.isUnlocked(next, next))
+  }
+
+  @Test
+  fun proofsThatKeepFailingAfterAPromptFallBackToThePromptAlone() {
+    // A Keystore that refuses every proof although the system said "success".
+    repeat(AppLockGate.MAX_REFUSED_PROOFS) {
+      val challenge = promptedChallenge()
+      key.authorize(challenge)
+      key.isRefusingEverything = true
+      assertFalse(gate.isUnlocked(challenge, challenge))
+    }
+    val start = gate.start(hasScreenLock = true)
+    assertTrue(start is UnlockStart.PromptUnbound)
+    assertTrue((start as UnlockStart.PromptUnbound).failure is ProofsRefusedException)
+  }
+
+  @Test
+  fun aValidProofClearsTheRefusals() {
+    repeat(AppLockGate.MAX_REFUSED_PROOFS - 1) {
+      val forged = promptedChallenge()
+      assertFalse(gate.isUnlocked(forged, forged))
+    }
+    val challenge = promptedChallenge()
+    key.authorize(challenge)
+    assertTrue(gate.isUnlocked(challenge, challenge))
+    val forged = promptedChallenge()
+    assertFalse(gate.isUnlocked(forged, forged))
+    assertTrue(gate.start(hasScreenLock = true) is UnlockStart.Prompt)
   }
 
   private fun promptedChallenge(): Challenge {
-    val start = gate.start()
+    val start = gate.start(hasScreenLock = true)
     check(start is UnlockStart.Prompt) { "expected a prompt, got $start" }
     return start.challenge
   }
@@ -87,6 +127,8 @@ class AppLockGateTest {
     var generations = 0
     var isInvalidated = false
     var maybeFailure: Exception? = null
+    var isBrokenAtProof = false
+    var isRefusingEverything = false
 
     override fun begin(): Challenge {
       maybeFailure?.let { throw it }
@@ -99,8 +141,13 @@ class AppLockGateTest {
       return Challenge(generations)
     }
 
-    override fun isProof(challenge: Challenge, maybeProof: Challenge?): Boolean =
-      maybeProof === challenge && challenge.isAuthorized && challenge.generation == generations && !isInvalidated
+    override fun prove(challenge: Challenge, maybeProof: Challenge?): Proof = when {
+      isBrokenAtProof -> Proof.KeyBroken
+      isRefusingEverything -> Proof.Refused
+      maybeProof !== challenge || !challenge.isAuthorized -> Proof.Refused
+      challenge.generation != generations || isInvalidated -> Proof.KeyBroken
+      else -> Proof.Valid
+    }
 
     override fun reset() {
       exists = false

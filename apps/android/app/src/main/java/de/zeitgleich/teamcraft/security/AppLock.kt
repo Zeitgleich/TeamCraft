@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.security
 
+import android.app.KeyguardManager
 import android.content.Context
 import android.os.Build
 import android.util.Log
@@ -7,9 +8,15 @@ import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_WEAK
 import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
+import androidx.annotation.RequiresApi
 import androidx.biometric.BiometricPrompt
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import javax.crypto.Cipher
 
 private const val TAG = "AppLock"
 
@@ -19,8 +26,10 @@ private const val TAG = "AppLock"
  * for the screen lock instead. Before, Android can't combine the screen lock with a key operation
  * in this prompt, so any biometrics count there.
  */
-val APP_LOCK_AUTHENTICATORS =
-  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) BIOMETRIC_STRONG or DEVICE_CREDENTIAL else BIOMETRIC_WEAK or DEVICE_CREDENTIAL
+val APP_LOCK_AUTHENTICATORS = when {
+  Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> BIOMETRIC_STRONG or DEVICE_CREDENTIAL
+  else -> BIOMETRIC_WEAK or DEVICE_CREDENTIAL
+}
 
 /** How long the app may be in the background before it asks to unlock again. */
 enum class LockAfter(val millis: Long) {
@@ -93,13 +102,27 @@ interface UnlockKey<T> {
   fun begin(): T
 
   /** Whether [maybeProof], from the prompt's result, is [challenge] authorized by the prompt. */
-  fun isProof(challenge: T, maybeProof: T?): Boolean
+  fun prove(challenge: T, maybeProof: T?): Proof
 
   fun reset()
 }
 
+/** What a prompt's result proved. */
+enum class Proof {
+  Valid,
+
+  /** Not authorized by the prompt: a forged result, or a Keystore that refuses for no clear reason. */
+  Refused,
+
+  /** The key itself failed (invalidated, Keystore error): it is replaced before the next prompt. */
+  KeyBroken,
+}
+
 /** The key can't be used any more: the screen lock was removed, or replaced since. */
 class UnlockKeyInvalidatedException(cause: Throwable) : Exception(cause)
+
+/** Proofs after a successful prompt kept failing; the prompt alone decides from now on. */
+class ProofsRefusedException : Exception("unlock proofs refused repeatedly")
 
 /** How an unlock starts. */
 sealed interface UnlockStart<out T> {
@@ -109,22 +132,30 @@ sealed interface UnlockStart<out T> {
   /** The prompt; its success counts only with a proof for [challenge]. */
   data class Prompt<T>(val challenge: T) : UnlockStart<T>
 
-  /** The Keystore failed: the prompt alone decides, as before #1200, so nobody is locked out. */
+  /**
+   * The Keystore failed, or proofs kept failing after successful prompts: the prompt alone decides,
+   * as before #1200, so nobody is locked out of their chats (e2ee.md §9.2 names the trade-off).
+   */
   data class PromptUnbound(val failure: Exception) : UnlockStart<Nothing>
 }
 
 /**
  * Ties the app lock to [key] (#1200). The device having no screen lock any more still opens the
  * app (locking the user out of their chats would be worse), and a key the device invalidated is
- * replaced before the prompt; neither lets a forged success through.
+ * replaced before the prompt; neither lets a forged success through. One per process: it counts
+ * refused proofs across prompts. [start] may run off the main thread (it can create the key).
  */
-class AppLockGate<T>(private val key: UnlockKey<T>, private val hasScreenLock: () -> Boolean) {
-  fun start(): UnlockStart<T> {
-    if (!hasScreenLock()) {
+class AppLockGate<T>(private val key: UnlockKey<T>) {
+  private var refusedProofs = 0
+
+  @Synchronized
+  fun start(hasScreenLock: Boolean): UnlockStart<T> {
+    if (!hasScreenLock) {
       // The device already made the key unusable; the next screen lock gets a new one.
       key.reset()
       return UnlockStart.Open
     }
+    if (refusedProofs >= MAX_REFUSED_PROOFS) return UnlockStart.PromptUnbound(ProofsRefusedException())
     return try {
       UnlockStart.Prompt(beginReplacingInvalidated())
     } catch (failure: Exception) {
@@ -132,7 +163,22 @@ class AppLockGate<T>(private val key: UnlockKey<T>, private val hasScreenLock: (
     }
   }
 
-  fun isUnlocked(challenge: T, maybeProof: T?): Boolean = key.isProof(challenge, maybeProof)
+  /** Whether the prompt's result unlocks; a broken key is dropped so the next prompt gets a new one. */
+  @Synchronized
+  fun isUnlocked(challenge: T, maybeProof: T?): Boolean {
+    when (key.prove(challenge, maybeProof)) {
+      Proof.Valid -> {
+        refusedProofs = 0
+        return true
+      }
+      Proof.Refused -> refusedProofs += 1
+      Proof.KeyBroken -> {
+        refusedProofs += 1
+        key.reset()
+      }
+    }
+    return false
+  }
 
   private fun beginReplacingInvalidated(): T =
     try {
@@ -141,31 +187,66 @@ class AppLockGate<T>(private val key: UnlockKey<T>, private val hasScreenLock: (
       key.reset()
       key.begin()
     }
+
+  companion object {
+    /**
+     * Refused proofs, each after the system said "success", before the prompt alone decides: a
+     * Keystore that keeps failing must not lock the user out for good.
+     */
+    const val MAX_REFUSED_PROOFS = 3
+  }
+}
+
+/** Per process, so refused proofs count across prompts and activities; created on first use. */
+@RequiresApi(Build.VERSION_CODES.R)
+private object ProcessGate {
+  val gate = AppLockGate(AppLockKey())
 }
 
 /**
- * Shows the system prompt; `onUnlocked` runs on success. Cancelling keeps the app locked. From
- * Android 11 the success must come with the Keystore operation of [AppLockKey].
+ * Shows the system prompt; `onUnlocked` runs on success, `onRefused` when the success came without
+ * a valid proof. Cancelling keeps the app locked. From Android 11 the success must come with the
+ * Keystore operation of [AppLockKey].
  */
-fun promptUnlock(activity: FragmentActivity, title: String, onUnlocked: () -> Unit) {
-  val hasScreenLock = {
-    BiometricManager.from(activity).canAuthenticate(APP_LOCK_AUTHENTICATORS) == BiometricManager.BIOMETRIC_SUCCESS
-  }
+fun promptUnlock(activity: FragmentActivity, title: String, onUnlocked: () -> Unit, onRefused: () -> Unit) {
+  val hasScreenLock = activity.getSystemService(KeyguardManager::class.java).isDeviceSecure
   if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
     // Android 8 to 10: a gate in the user interface only (e2ee.md §9.2, "App lock").
-    if (hasScreenLock()) showPrompt(activity, title, maybeCryptoObject = null) { onUnlocked() } else onUnlocked()
+    if (!hasScreenLock) return onUnlocked()
+    showPrompt(activity, title, maybeCryptoObject = null) { onUnlocked() }
     return
   }
-  val gate = AppLockGate(AppLockKey(), hasScreenLock)
-  when (val start = gate.start()) {
-    UnlockStart.Open -> onUnlocked()
-    is UnlockStart.PromptUnbound -> {
-      Log.w(TAG, "app lock key unusable, the prompt alone decides: ${start.failure.javaClass.simpleName}")
-      showPrompt(activity, title, maybeCryptoObject = null) { onUnlocked() }
+  activity.lifecycleScope.launch {
+    // Creating a key in the TEE can take a few hundred milliseconds.
+    val start = withContext(Dispatchers.Default) { ProcessGate.gate.start(hasScreenLock) }
+    when (start) {
+      UnlockStart.Open -> onUnlocked()
+      is UnlockStart.PromptUnbound -> {
+        Log.w(TAG, "no key proof, the prompt alone decides: ${start.failure.javaClass.simpleName}")
+        showPrompt(activity, title, maybeCryptoObject = null) { onUnlocked() }
+      }
+      is UnlockStart.Prompt -> {
+        val challenge = start.challenge
+        showPrompt(activity, title, BiometricPrompt.CryptoObject(challenge)) {
+          onPromptSucceeded(challenge, it, onUnlocked, onRefused)
+        }
+      }
     }
-    is UnlockStart.Prompt -> showPrompt(activity, title, BiometricPrompt.CryptoObject(start.challenge)) { result ->
-      if (gate.isUnlocked(start.challenge, result.cryptoObject?.cipher)) onUnlocked() else Log.w(TAG, "unlock without a valid key proof refused")
-    }
+  }
+}
+
+@RequiresApi(Build.VERSION_CODES.R)
+private fun onPromptSucceeded(
+  challenge: Cipher,
+  result: BiometricPrompt.AuthenticationResult,
+  onUnlocked: () -> Unit,
+  onRefused: () -> Unit,
+) {
+  if (ProcessGate.gate.isUnlocked(challenge, result.cryptoObject?.cipher)) {
+    onUnlocked()
+  } else {
+    Log.w(TAG, "unlock without a valid key proof refused")
+    onRefused()
   }
 }
 

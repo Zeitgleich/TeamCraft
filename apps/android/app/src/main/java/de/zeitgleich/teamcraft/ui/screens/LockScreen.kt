@@ -16,12 +16,16 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 
-/** Covers the app while it is locked; asks for the unlock right away and again on the button. */
+/**
+ * Covers the app while it is locked; asks for the unlock right away and again on the button.
+ * [isUnlockRefused]: the last prompt succeeded but its key proof failed, so the user knows to retry.
+ */
 @Composable
-fun LockScreen(onUnlock: () -> Unit) {
+fun LockScreen(onUnlock: () -> Unit, isUnlockRefused: Boolean) {
   LaunchedEffect(Unit) { onUnlock() }
   Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
     Column(
@@ -31,6 +35,14 @@ fun LockScreen(onUnlock: () -> Unit) {
     ) {
       Icon(Icons.Filled.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
       Text(stringResource(R.string.app_lock_locked), style = MaterialTheme.typography.titleMedium)
+      if (isUnlockRefused) {
+        Text(
+          stringResource(R.string.app_lock_refused),
+          style = MaterialTheme.typography.bodyMedium,
+          color = MaterialTheme.colorScheme.error,
+          textAlign = TextAlign.Center,
+        )
+      }
       Button(onClick = onUnlock) { Text(stringResource(R.string.app_lock_unlock)) }
     }
   }

@@ -6,7 +6,9 @@ import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.util.Log
 import androidx.annotation.RequiresApi
+import java.security.GeneralSecurityException
 import java.security.KeyStore
+import java.security.ProviderException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -38,15 +40,23 @@ class AppLockKey : UnlockKey<Cipher> {
     return cipher
   }
 
-  override fun isProof(challenge: Cipher, maybeProof: Cipher?): Boolean {
+  override fun prove(challenge: Cipher, maybeProof: Cipher?): Proof {
     // Only the cipher handed to the prompt: any other one (a software cipher) would encrypt freely.
-    if (maybeProof !== challenge) return false
+    if (maybeProof !== challenge) return Proof.Refused
     return try {
       challenge.doFinal(PROOF_PLAINTEXT)
-      true
-    } catch (refused: Exception) {
-      // Not authorized by the prompt: a forged result, or one the Keystore no longer accepts.
-      false
+      Proof.Valid
+    } catch (invalidated: KeyPermanentlyInvalidatedException) {
+      Proof.KeyBroken
+    } catch (keystoreFailure: ProviderException) {
+      // The Keystore itself failed (seen on some devices); a new key may work.
+      Proof.KeyBroken
+    } catch (notAuthorized: GeneralSecurityException) {
+      // Without the prompt's authorization the Keystore refuses the operation
+      // (IllegalBlockSizeException wrapping "key user not authenticated").
+      Proof.Refused
+    } catch (notInitialized: IllegalStateException) {
+      Proof.Refused
     }
   }
 
@@ -62,6 +72,8 @@ class AppLockKey : UnlockKey<Cipher> {
   private fun key(): SecretKey =
     (keyStore.getKey(ALIAS, null) as? SecretKey) ?: generate()
 
+  // No StrongBox: the key protects no data, it only proves the prompt, and StrongBox makes
+  // creating it slower and fails on many devices.
   private fun generate(): SecretKey {
     val spec = KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT)
       .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
@@ -69,7 +81,7 @@ class AppLockKey : UnlockKey<Cipher> {
       .setKeySize(KEY_BITS)
       .setUserAuthenticationRequired(true)
       // 0: every use needs its own prompt, bound to the operation (no time window).
-      .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL)
+      .setUserAuthenticationParameters(0, AUTHENTICATORS)
       .build()
     val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
     generator.init(spec)
@@ -81,11 +93,13 @@ class AppLockKey : UnlockKey<Cipher> {
     private const val ALIAS = "teamcraft_app_lock"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
     private const val KEY_BITS = 256
+    private const val AUTHENTICATORS =
+      KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL
     private val PROOF_PLAINTEXT = byteArrayOf(1)
-
-    /** Removes the key when the app lock is turned off; the next unlock creates a new one. */
-    fun delete() {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) AppLockKey().reset()
-    }
   }
+}
+
+/** Removes the app lock key when the lock is turned off; the next unlock creates a new one. */
+fun deleteAppLockKey() {
+  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) AppLockKey().reset()
 }
