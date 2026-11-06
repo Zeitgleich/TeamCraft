@@ -35,6 +35,9 @@ pub enum GatewayOutcome {
 /// longer (an app started again, a laptop that slept) the session is likely gone and the reads wait
 /// for the answer, so a refused resume costs no reads. Well under the server's default window.
 const LIKELY_RESUMABLE_MS: i64 = 60_000;
+/// Added to the server's resume window before a session counts as forgotten: the server notices a
+/// silently dead connection only after its heartbeat timeout, and starts the window then.
+const RESUME_SLACK_MS: i64 = 45_000;
 /// The guest list is read at most this often for gateway events.
 const EXPIRING_GUESTS_MIN_REFRESH_MS: i64 = 5_000;
 
@@ -156,10 +159,41 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     outcome
   }
 
+  /// The sync stops (the app went to the background) with its connection up: the session's window
+  /// starts now, which the next connect compares with, also after a restart of the app.
+  pub fn note_gateway_closing(&mut self) {
+    let now = self.now_ms();
+    self.maybe_last_heard_ms = Some(now);
+    if let Some(session) = &mut self.sync.maybe_gateway_session {
+      session.maybe_heard_at_ms = Some(now);
+      if let Err(error) = self.persist_sync() {
+        tracing::debug!(%error, "when the gateway was last heard not kept");
+      }
+    }
+  }
+
+  /// Whether the server has surely forgotten the session: this device last heard from it longer ago
+  /// than the window the server named, plus a heartbeat's slack (a connection that died silently is
+  /// noticed by the server only after its heartbeat timeout). Unknown window or time: try to resume.
+  fn is_resume_hopeless(&self, session: &GatewaySession) -> bool {
+    let Some(window_ms) = session
+      .maybe_resume_window_ms
+      .and_then(|window| i64::try_from(window).ok())
+    else {
+      return false;
+    };
+    let Some(heard_ms) = self.maybe_last_heard_ms.max(session.maybe_heard_at_ms) else {
+      return false;
+    };
+    self.now_ms().saturating_sub(heard_ms) > window_ms.saturating_add(RESUME_SLACK_MS)
+  }
+
   fn report_answered(&mut self) {
     if let Some(answered) = self.maybe_on_answered.take() {
       answered();
     }
+    // The connection banner goes away now, not after the catch-up.
+    self.note_sync_progress();
   }
 
   /// The server refused the first frame's proof, which ends the connection: it had an old nonce (a
@@ -183,6 +217,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     timing: GatewayTiming,
   ) -> Result<GatewayStart<A::Gateway>, CoreError> {
     let handshake_timeout = timing.handshake_timeout;
+    if let Some(session) = &self.sync.maybe_gateway_session
+      && self.is_resume_hopeless(session)
+    {
+      // Away for longer than the server keeps sessions: a resume would cost a whole connection
+      // only to be refused (a phone back from the pocket after minutes).
+      self.sync.maybe_gateway_session = None;
+      self.persist_sync()?;
+      self.trace_lap("resume window passed");
+    }
     if let Some(session) = self.sync.maybe_gateway_session.clone() {
       let token = self.api.gateway_token().await?;
       let resume = GatewayClientMessage::Resume {
@@ -276,19 +319,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let (mut connection, heartbeat_interval) = self.open_gateway(handshake_timeout, &identify).await?;
     self.trace_lap("socket and hello");
-    let session_id = match self.handshake_answer(&mut connection, handshake_timeout).await? {
-      GatewayServerMessage::Ready { session_id, .. } => {
-        self.trace_lap("identify answer");
-        self.report_answered();
-        session_id
-      },
-      GatewayServerMessage::Error { error } => return Err(rejected(error)),
-      other => {
-        return Err(CoreError::Gateway(format!(
-          "unexpected answer to identify: {other:?}"
-        )));
-      },
-    };
+    let (session_id, maybe_resume_window_ms) =
+      match self.handshake_answer(&mut connection, handshake_timeout).await? {
+        GatewayServerMessage::Ready {
+          session_id,
+          maybe_resume_window_ms,
+          ..
+        } => {
+          self.trace_lap("identify answer");
+          self.report_answered();
+          (session_id, maybe_resume_window_ms)
+        },
+        GatewayServerMessage::Error { error } => return Err(rejected(error)),
+        other => {
+          return Err(CoreError::Gateway(format!(
+            "unexpected answer to identify: {other:?}"
+          )));
+        },
+      };
     let mut held = HeldFrames::default();
     let heartbeat = heartbeat_interval.min(timing.max_heartbeat);
     keep_alive(
@@ -297,7 +345,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       heartbeat,
       timing.held_limits,
       &mut held,
-      self.sync_fresh_session(session_id),
+      self.sync_fresh_session(session_id, maybe_resume_window_ms),
     )
     .await?;
     self.refresh_link_requests().await;
@@ -316,12 +364,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// After `identify`: the full sync, then the session is kept. Only once the sync succeeded: a
   /// stored session makes the next connect resume instead of syncing, so a failed sync would
   /// otherwise leave its gap unfilled forever.
-  async fn sync_fresh_session(&mut self, session_id: String) -> Result<(), CoreError> {
+  async fn sync_fresh_session(
+    &mut self,
+    session_id: String,
+    maybe_resume_window_ms: Option<u64>,
+  ) -> Result<(), CoreError> {
     // Boxed: this future is large, and it would sit in everything that connects, up to the app's tasks.
     Box::pin(self.full_sync()).await?;
     self.sync.maybe_gateway_session = Some(GatewaySession {
       session_id,
       last_seq: 0,
+      maybe_resume_window_ms,
+      maybe_heard_at_ms: Some(self.now_ms()),
     });
     self.persist_sync()?;
     // The full sync already read the counters; the UI still reads what only it keeps.
@@ -458,8 +512,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayServerMessage::Event { seq, event } => {
         self.handle_event(event).await?;
         self.apply_pending_changes().await?;
+        let now = self.now_ms();
         if let Some(session) = &mut self.sync.maybe_gateway_session {
           session.last_seq = session.last_seq.max(seq);
+          session.maybe_heard_at_ms = Some(now);
         }
         self.persist_sync()?;
         self.note_replayed_event().await?;

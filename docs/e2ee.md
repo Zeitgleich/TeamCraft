@@ -3823,6 +3823,12 @@ Details:
   Android: high priority, with `v=0` outside the sealed payload, which only this kind sets: Google learns
   that the device's user holds a scheduled message and that a group of theirs just changed, not which
   (accepted, scheduled-messages.md). iOS: silent, and iOS may defer or drop it.
+- So that a phone holds the messages before the user opens it, also those it got no visible push for
+  (the user was at the desktop, a channel notifies on mentions only), the server wakes it with a
+  silent `sync` wake-up that names nothing, coalesced and at most one per user every five minutes by
+  default (notifications.md, "Sync wake-ups"). Apple/Google (and a gateway) learn that a silent push
+  went to the device, so roughly when messages arrived for the user while the phone was idle; no
+  conversation, sender or count.
 - Apple/Google see: that *a* push was sent to *a* device at time T. Nothing else, except the type and
   priority below and that FCM tag. (Through a push
   gateway, the gateway sees the same, plus an opaque ID of the sending server; §7.1.)
@@ -3856,7 +3862,8 @@ Details:
   key; the next registration chooses a new one.
 - Wake-up kinds: `message`, `mention`, `call`, `dismiss` (a notification was read on another device, or
   a ring ended: remove it; silent, APNs background push / FCM normal priority, never to Web Push),
-  `scheduled_seal` (above) and `test` (diagnostics). Besides conversation, message, sender, thread and call IDs the sealed wake-up
+  `scheduled_seal` (above), `sync` (catch up in the background, silent, names nothing; above) and `test`
+  (diagnostics). Besides conversation, message, sender, thread and call IDs the sealed wake-up
   carries the badge count and the send time; all of it is inside the ciphertext. What push services
   and a gateway additionally learn is the push type and priority: that a push was a silent withdrawal
   rather than an alert.

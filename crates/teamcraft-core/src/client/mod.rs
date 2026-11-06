@@ -59,6 +59,7 @@ mod server_changes;
 pub(crate) mod server_deletions;
 mod sources;
 mod sync;
+mod sync_progress;
 mod sync_trace;
 #[cfg(feature = "ui")]
 mod ui_commands;
@@ -92,10 +93,7 @@ pub(crate) use channel_roles::{channel_roles_alarmed_key, channel_roles_key, rol
 pub use enroll::{
   EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment, parse_recovery_key,
 };
-pub use first_sync::{
-  FirstSyncProgress, FirstSyncSignal, FirstSyncStage, HistoryBackfill, first_sync_progress,
-  notify_first_sync_during,
-};
+pub use first_sync::{FirstSyncProgress, FirstSyncStage, HistoryBackfill, first_sync_progress};
 pub use gateway::{
   DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, KeptAlive,
   keep_alive,
@@ -131,6 +129,7 @@ pub use role_signing::{RoleSigningProblem, RoleSigningRecord, role_signing_recor
 pub use segments::SegmentPrefetch;
 pub use self_add::is_waiting_for_admission;
 pub use sources::HistoryScan;
+pub use sync_progress::{SyncProgressSignal, notify_sync_progress_during};
 pub use sync_trace::SyncPhase;
 use teamcraft_crypto::membership::ChangeId;
 use teamcraft_crypto::mls::{ChangeHistory, ConversationGroup, PendingCommit, StoredGroupState};
@@ -419,6 +418,8 @@ pub struct Client<A, S> {
   catch_up_focus: CatchUpFocus,
   /// The first sync of a newly set up device, beside its record in the store.
   first_sync: first_sync::FirstSyncState,
+  /// Wakes the host while a sync stores what the UI should show.
+  sync_progress: SyncProgressSignal,
   /// Set while a catch-up joins the focused conversation's welcomes ahead of the others: the
   /// welcome cursor then stays where it is, so the welcomes before them are still read in order.
   /// Cleared right after each such join; a catch-up future dropped in between leaves it set until
@@ -587,6 +588,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),
       first_sync: Default::default(),
+      sync_progress: Default::default(),
       is_welcome_cursor_held: false,
       sync_trace: Default::default(),
       maybe_heads: None,

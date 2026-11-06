@@ -2745,6 +2745,22 @@
         }
       }
     },
+    "diagnostics_kind_sync": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Background update"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hintergrund-Aktualisierung"
+          }
+        }
+      }
+    },
     "diagnostics_kind_message": {
       "localizations": {
         "en": {

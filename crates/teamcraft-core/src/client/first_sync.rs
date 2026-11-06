@@ -17,13 +17,8 @@
 //! stood. A device that holds history already (an update of the app) never starts this.
 
 use std::cmp::Reverse;
-use std::pin::pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use futures_util::future::{Either, select};
-use futures_util::task::AtomicWaker;
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ConversationId, Id, ListMessagesQuery, MessageId, Snowflake};
 
@@ -81,18 +76,9 @@ pub enum FirstSyncStage {
   Older,
 }
 
-/// Wakes a host when the progress changed, also in the middle of a full sync. Clones share it.
-#[derive(Clone, Debug, Default)]
-pub struct FirstSyncSignal {
-  changes: Arc<AtomicU64>,
-  /// The host waiting in [`Self::changed_since`] (one waiter).
-  waker: Arc<AtomicWaker>,
-}
-
 /// What this process knows beside the record.
 #[derive(Debug, Default)]
 pub(super) struct FirstSyncState {
-  signal: FirstSyncSignal,
   /// The older stage is on, so a host's loop has pages to ask for without reading the store.
   is_loading_older: bool,
   /// No page before this time (after a failure).
@@ -160,49 +146,6 @@ impl HistoryBackfill {
   }
 }
 
-impl FirstSyncSignal {
-  /// Completes with the count of changes once it differs from `seen`: no timer, the sync wakes it.
-  pub fn changed_since(&self, seen: u64) -> impl Future<Output = u64> + '_ {
-    std::future::poll_fn(move |context| {
-      self.waker.register(context.waker());
-      match self.changes.load(Ordering::Relaxed) {
-        count if count != seen => std::task::Poll::Ready(count),
-        _ => std::task::Poll::Pending,
-      }
-    })
-  }
-
-  pub fn count(&self) -> u64 {
-    self.changes.load(Ordering::Relaxed)
-  }
-
-  fn note_change(&self) {
-    self.changes.fetch_add(1, Ordering::Relaxed);
-    self.waker.wake();
-  }
-}
-
-/// Runs `work` (a connection and its full sync, which can take minutes) and calls `notify` whenever
-/// the first sync's progress changed meanwhile, so the UI shows the list and the bar as they grow.
-pub async fn notify_first_sync_during<F: Future>(
-  signal: &FirstSyncSignal,
-  notify: impl Fn(),
-  work: F,
-) -> F::Output {
-  let mut work = pin!(work);
-  let mut seen = signal.count();
-  loop {
-    let changed = pin!(signal.changed_since(seen));
-    match select(work.as_mut(), changed).await {
-      Either::Left((output, _)) => return output,
-      Either::Right((count, _)) => {
-        seen = count;
-        notify();
-      },
-    }
-  }
-}
-
 /// The first sync's progress, or `None` when it isn't running. Reads one small record.
 pub fn first_sync_progress(store: &impl LocalStore) -> Result<Option<FirstSyncProgress>, CoreError> {
   if !TRACKS_FIRST_SYNC {
@@ -233,11 +176,6 @@ pub fn first_sync_progress(store: &impl LocalStore) -> Result<Option<FirstSyncPr
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
-  /// The handle a host waits on for the first sync's progress ([`notify_first_sync_during`]).
-  pub fn first_sync_signal(&self) -> FirstSyncSignal {
-    self.first_sync.signal.clone()
-  }
-
   /// Whether a host should ask for the next page of older history now.
   pub fn is_older_history_due(&self) -> bool {
     if !self.first_sync.is_loading_older {
@@ -255,7 +193,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// failure waits for its retry time, whatever it was. Returns whether the progress the UI shows
   /// changed: a page alone doesn't, so a long read doesn't make the UI read everything again.
   pub async fn load_older_history_page(&mut self) -> bool {
-    let before = self.first_sync.signal.count();
+    let before = self.sync_progress.count();
     match self.read_older_page().await {
       Ok(()) => self.first_sync.maybe_retry_at_ms = None,
       Err(error) => {
@@ -263,7 +201,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.first_sync.maybe_retry_at_ms = Some(self.now_ms().saturating_add(millis(OLDER_RETRY)));
       },
     }
-    self.first_sync.signal.count() != before
+    self.sync_progress.count() != before
   }
 
   /// At the start of a full sync: a device with no conversation stored shows the bar from now on,
@@ -491,7 +429,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   fn write_record(&mut self, record: &FirstSyncRecord) -> Result<(), CoreError> {
     records::put_json(&self.store, Table::SyncState, FIRST_SYNC_KEY, record)?;
     self.first_sync.is_loading_older = record.stage == Stage::Older;
-    self.first_sync.signal.note_change();
+    self.note_sync_progress();
     Ok(())
   }
 
@@ -530,16 +468,6 @@ fn ratio(done: usize, total: usize) -> f32 {
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  #[test]
-  fn the_signal_wakes_whoever_waits_and_only_on_a_change() {
-    use futures_util::FutureExt;
-    let signal = FirstSyncSignal::default();
-    assert_eq!(signal.changed_since(0).now_or_never(), None);
-    signal.clone().note_change();
-    assert_eq!(signal.changed_since(0).now_or_never(), Some(1));
-    assert_eq!(signal.changed_since(1).now_or_never(), None);
-  }
 
   #[test]
   fn a_backfill_without_a_budget_is_off() {

@@ -18,6 +18,13 @@ sealed interface PushDecision {
   /** A scheduled message's group changed: seal it again (docs/scheduled-messages.md). Shows nothing. */
   data object SealScheduled : PushDecision
 
+  /**
+   * Messages came that this phone got no visible push for (the user was at the desktop, a channel
+   * notifies on mentions only): fetch them in the background, so they are there when the app opens
+   * (notifications.md, "Sync wake-ups"). Shows nothing.
+   */
+  data object CatchUp : PushDecision
+
   /** Post nothing: muted or DND (the device's own check), or an unknown kind. */
   data class Ignore(val reason: IgnoreReason) : PushDecision
 
@@ -73,6 +80,7 @@ sealed interface PushDecision {
       PushNotificationKind.CALL -> call(notification, isRingOver)
       PushNotificationKind.DISMISS -> dismiss(notification)
       PushNotificationKind.SCHEDULED_SEAL -> SealScheduled
+      PushNotificationKind.SYNC -> CatchUp
       PushNotificationKind.TEST -> ShowTest(notification.maybeSentAtMs)
       PushNotificationKind.UNKNOWN -> Ignore(IgnoreReason.UNKNOWN_KIND)
     }

@@ -103,6 +103,7 @@ async fn handshake(
       let ready = GatewayServerMessage::Ready {
         session_id: attached.session_id.clone(),
         user: crate::services::convert::user_summary(state, &caller.user),
+        maybe_resume_window_ms: u64::try_from(state.hub.resume_window().as_millis()).ok(),
       };
       send(socket, &ready).await.ok()?;
       Some((caller, attached))

@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.notifications
 
 import android.content.Context
+import de.zeitgleich.teamcraft.core.CatchUpWork
 import de.zeitgleich.teamcraft.core.ScheduledSealWork
 import android.os.SystemClock
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -34,6 +35,7 @@ class PushHandler(
     when (val decision = PushDecision.of(notification, isRingOver)) {
       is PushDecision.Ignore -> stats.recordIgnored(decision.reason)
       is PushDecision.SealScheduled -> ScheduledSealWork.enqueue(context)
+      is PushDecision.CatchUp -> CatchUpWork.enqueue(context)
       is PushDecision.ShowMessage -> {
         stats.recordPreview(decision.notification.maybeGap)
         stats.record(PushPath.of(decision.notification))
@@ -81,6 +83,7 @@ class PushHandler(
   override fun handleRetry(notification: PushNotification, path: PushPath) {
     when (val decision = PushDecision.of(notification)) {
       is PushDecision.SealScheduled -> ScheduledSealWork.enqueue(context)
+      is PushDecision.CatchUp -> CatchUpWork.enqueue(context)
       is PushDecision.ShowMessage -> if (notifier.fillIn(notification)) stats.record(path)
       is PushDecision.HiddenChange -> notifier.applyHiddenChange(notification)
       is PushDecision.AlreadyRead -> if (notifier.applyRead(notification)) stats.record(PushPath.ALREADY_READ)

@@ -237,6 +237,10 @@ pub struct ConversationItem {
   /// picture by it. `None`: the space has no picture (or this is a DM), the letter tile shows.
   #[uniffi(default = None)]
   pub maybe_space_image_version: Option<String>,
+  /// The core is still catching up this conversation after the device was away (issue #247): the
+  /// newest messages may be missing yet, so the apps show that it is loading.
+  #[uniffi(default = false)]
+  pub is_catching_up: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -451,6 +455,9 @@ pub enum PushNotificationKind {
   /// The group of a message the user scheduled changed: seal it again
   /// ([`crate::TeamCraft::seal_scheduled_messages`]). Never shows anything.
   ScheduledSeal,
+  /// Messages came that the device got no visible push for: catch up in the background
+  /// ([`crate::TeamCraft::catch_up_in_background`]). Never shows anything.
+  Sync,
   /// The diagnostics' test push: show a short confirmation on the "other" channel.
   Test,
   /// A kind this version doesn't know: show nothing.
@@ -702,6 +709,7 @@ impl ConversationItem {
       maybe_draft_preview: conversation.maybe_draft_preview,
       maybe_last_activity_ms: None,
       maybe_space_image_version: None,
+      is_catching_up: conversation.is_catching_up,
     }
   }
 }
@@ -932,6 +940,7 @@ pub(crate) fn notification_kind(kind: &PushKind) -> PushNotificationKind {
     PushKind::Call => PushNotificationKind::Call,
     PushKind::Dismiss => PushNotificationKind::Dismiss,
     PushKind::ScheduledSeal => PushNotificationKind::ScheduledSeal,
+    PushKind::Sync => PushNotificationKind::Sync,
     PushKind::Test => PushNotificationKind::Test,
     PushKind::Unknown(_) => PushNotificationKind::Unknown,
   }

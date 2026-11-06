@@ -802,6 +802,25 @@ final class AppModel {
     return isSealed ?? false
   }
 
+  /// A `sync` wake-up: the sync loop runs until the connection is up and caught up, within the
+  /// background push's time, so what came while the phone wasn't pushed for it is there when the app
+  /// opens. The core stops the loop at the end unless the app is in the foreground.
+  func catchUpInBackground() async -> Bool {
+    // A cold background launch has no phase yet: the core opens from the store, as for a push.
+    guard let core = try? core(createsKey: false) else { return false }
+    let budget = Self.maxBackgroundFlushSeconds - Self.backgroundStopMarginSeconds
+    let isCaughtUp = await withProcessLock {
+      do {
+        _ = try await core.catchUpInBackground(maxWaitMs: UInt64(budget * 1000))
+        return true
+      } catch {
+        AppLog.failure("catching up in the background", error)
+        return false
+      }
+    }
+    return isCaughtUp ?? false
+  }
+
   func maxUploadBytes() async -> Int64? {
     await answer(.maxUploadBytes)?.maybeBytes
   }
@@ -1069,7 +1088,7 @@ final class AppModel {
   }
 
   /// A background (`content-available`) push: a `dismiss` removes what was read or ended elsewhere
-  /// and sets the badge.
+  /// and sets the badge; a `sync` fetches what came meanwhile (notifications.md, "Sync wake-ups").
   func handleBackgroundPush(_ userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
     guard let sealed = PushPayload.sealedBytes(from: userInfo) else { return .noData }
     guard let notification = await openPush(sealed) else { return .failed }
@@ -1080,6 +1099,8 @@ final class AppModel {
         calls.endRinging(conversationId: notification.conversationId, maybeCallId: notification.maybeCallId)
       }
       return .newData
+    case .sync:
+      return await catchUpInBackground() ? .newData : .failed
     case .scheduledSeal:
       if await sealScheduledMessages() { return .newData }
       // iOS gave too little time or no network: ask for a later run. It may not come, and the list says

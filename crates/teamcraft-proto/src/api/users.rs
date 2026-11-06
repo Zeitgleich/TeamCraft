@@ -297,6 +297,10 @@ wire_enum! {
     /// The group of a message the user scheduled changed: the device seals it again under the current
     /// key (docs/scheduled-messages.md). Shows nothing and says nothing but the conversation, sealed.
     ScheduledSeal => "scheduled_seal",
+    /// New messages wait for the device that it got no visible push for (the user was at a desktop,
+    /// a channel notifies on mentions only): catch up in the background so they are there when the
+    /// app opens (notifications.md, "Sync wake-ups"). Silent; names no conversation.
+    Sync => "sync",
     /// A test push the user asked for in the notification diagnostics.
     Test => "test",
   }
@@ -305,7 +309,7 @@ wire_enum! {
 impl PushKind {
   /// Whether the wake-up is meant to show something to the user (and may wake a dozing phone).
   pub fn is_visible(&self) -> bool {
-    !matches!(self, Self::Dismiss | Self::ScheduledSeal)
+    !matches!(self, Self::Dismiss | Self::ScheduledSeal | Self::Sync)
   }
 }
 

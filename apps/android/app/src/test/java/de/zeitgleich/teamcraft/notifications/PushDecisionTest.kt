@@ -112,6 +112,11 @@ class PushDecisionTest {
   }
 
   @Test
+  fun aSyncWakeUpShowsNothingAndCatchesUp() {
+    assertEquals(PushDecision.CatchUp, PushDecision.of(push(PushNotificationKind.SYNC)))
+  }
+
+  @Test
   fun aDismissWithACallStopsRinging() {
     val wakeUp = push(PushNotificationKind.DISMISS, maybeCallId = "77", maybeBadge = 3u)
     assertEquals(PushDecision.StopRinging("77", 3u), PushDecision.of(wakeUp))

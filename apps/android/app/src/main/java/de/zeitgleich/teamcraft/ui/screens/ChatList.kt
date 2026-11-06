@@ -276,7 +276,13 @@ fun ChatListScreen(
     onNavigate = onNavigate,
     banners = {
       OfflineBanner(onSignInAgain = { viewModel.signOut() })
-      maybeFirstSync?.let { FirstSyncBar(it) }
+      val firstSync = maybeFirstSync
+      // A first sync has its own bar.
+      if (firstSync != null) {
+        FirstSyncBar(firstSync)
+      } else {
+        SyncingLine(isCatchingUp = conversations.orEmpty().any { it.isCatchingUp })
+      }
       NotificationPermissionCard()
       ScheduledAttentionCard(viewModel) { onNavigate("scheduled") }
     },

@@ -14,7 +14,11 @@ types are ignored on both sides, so new ones can be added without breaking old c
    (for `GET` on `/api/v1/gateway`), because a browser can't set headers on the upgrade; a proof without
    the current nonce gets a `dpop_nonce` frame before the error, and connects once more with it (e2ee.md §3.1.2).
 3. Server answers `ready` (with the `session_id`) or `resumed` and then the missed events, or
-   `session_invalid`: the client then identifies again and refetches state over REST.
+   `session_invalid`: the client then identifies again and refetches state over REST. `ready` also
+   names how long the server keeps the session after its connection ends (`resume_window_ms`, from
+   `resume_window_secs`); a client that last heard from it longer ago than that (plus 45 s for a
+   connection that died silently) identifies at once instead of spending a connection on a resume
+   that can only be refused (a phone back from the pocket).
 4. The client sends `heartbeat` at the announced interval (answered by `heartbeat_ack`), also while the REST
    sync after `ready` and long commands run: it keeps reading the connection then and applies the events that
    arrived once the work is done, in their order. A connection without any frame for

@@ -216,6 +216,10 @@ pub struct PushSettings {
   pub scheduled_wake_coalesce: std::time::Duration,
   /// At most one such wake per user and conversation within this time.
   pub scheduled_wake_min_interval: std::time::Duration,
+  /// New messages within this time make one sync wake-up (notifications.md, "Sync wake-ups").
+  pub sync_wake_coalesce: std::time::Duration,
+  /// At most one sync wake-up per user within this time; zero sends none.
+  pub sync_wake_min_interval: std::time::Duration,
   pub allow_private_endpoints: bool,
 }
 
@@ -252,7 +256,7 @@ impl PushTtls {
     use teamcraft_proto::PushKind;
     match kind {
       PushKind::Call => self.call,
-      PushKind::Dismiss | PushKind::ScheduledSeal => self.dismiss,
+      PushKind::Dismiss | PushKind::ScheduledSeal | PushKind::Sync => self.dismiss,
       PushKind::Test => self.test,
       PushKind::Message | PushKind::Mention | PushKind::Unknown(_) => self.message,
     }
@@ -282,6 +286,8 @@ impl Default for PushSettings {
       dismiss_coalesce: Duration::from_millis(3000),
       scheduled_wake_coalesce: Duration::from_secs(10),
       scheduled_wake_min_interval: Duration::from_secs(300),
+      sync_wake_coalesce: Duration::from_secs(30),
+      sync_wake_min_interval: Duration::from_secs(300),
       allow_private_endpoints: false,
     }
   }

@@ -28,6 +28,12 @@ import kotlinx.coroutines.delay
 import uniffi.teamcraft_ffi.FirstSyncItem
 import uniffi.teamcraft_ffi.FirstSyncStageItem
 import uniffi.teamcraft_ffi.NetworkInterception
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.contentDescription
+import uniffi.teamcraft_ffi.ConnectionState
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
@@ -170,6 +176,37 @@ fun OfflineBanner(onSignInAgain: () -> Unit) {
 }
 
 /**
+ * A thin moving line under the top bar while the app gets what happened while it was away: the
+ * connection is being set up, or [isCatchingUp] (this conversation, or one in the list, still has
+ * messages to come). Without it a chat looked complete for seconds and then changed. It shows only
+ * after [SYNCING_LINE_DELAY_MILLIS], so a quick catch-up doesn't flash, and keeps its height, so
+ * nothing below moves. The banner above speaks once the connection fails for longer.
+ */
+@Composable
+fun SyncingLine(isCatchingUp: Boolean) {
+  val graph = TeamCraftApplication.graph(LocalContext.current)
+  val isOnline = rememberIsOnline()
+  val maybeConnection by graph.core.connectionState.collectAsState()
+  val isSyncing = isOnline && (isCatchingUp || maybeConnection is ConnectionState.Connecting)
+  val isShown by produceState(false, isSyncing) {
+    if (isSyncing) delay(SYNCING_LINE_DELAY_MILLIS)
+    value = isSyncing
+  }
+  val alpha by animateFloatAsState(if (isShown) 1f else 0f, label = "syncing line")
+  val description = stringResource(R.string.syncing_updates)
+  Box(Modifier.fillMaxWidth().height(SYNCING_LINE_HEIGHT)) {
+    if (alpha > 0f) {
+      LinearProgressIndicator(
+        modifier = Modifier
+          .fillMaxSize()
+          .graphicsLayer { this.alpha = alpha }
+          .semantics { contentDescription = description },
+      )
+    }
+  }
+}
+
+/**
  * A first sync's progress under the top bar: what is loading, how far in conversations, and the bar.
  * Numbers from the core; indeterminate until it has one. Gone while the connection is down, where
  * the banner above says why nothing moves.
@@ -218,3 +255,7 @@ fun FirstSyncBar(progress: FirstSyncItem) {
 
 /** How often the countdown to the next attempt (and the grace period) is checked. */
 private const val COUNTDOWN_MILLIS = 1_000L
+
+/** How long syncing goes on before [SyncingLine] shows it. */
+private const val SYNCING_LINE_DELAY_MILLIS = 300L
+private val SYNCING_LINE_HEIGHT = 2.dp

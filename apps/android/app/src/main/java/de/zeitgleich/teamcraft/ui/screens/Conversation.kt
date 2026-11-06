@@ -270,6 +270,7 @@ fun ConversationScreen(
       }
     },
   ) {
+    SyncingLine(isCatchingUp = conversation?.isCatchingUp == true)
     RunningCallBanner(viewModel, conversationId, conversation?.name.orEmpty(), runningCallCount)
     if (pinned.isNotEmpty()) PinnedBanner(pinned.last())
     JoinRequestBanner(joinRequests, viewModel.joinRequests)

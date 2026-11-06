@@ -232,6 +232,11 @@ impl Hub {
     }
   }
 
+  /// How long a session outlives its connection.
+  pub fn resume_window(&self) -> Duration {
+    self.options.resume_window
+  }
+
   pub fn open_session(&self, user: UserId, device: DeviceId, activity: DeviceActivity) -> Attached {
     let session_id = new_session_id();
     let mut inner = self.lock();

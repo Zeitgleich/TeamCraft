@@ -242,6 +242,8 @@ async fn push_to_recipient(
       if skip == Skip::DoNotDisturb {
         record_all(state, &recipient, DeliveryEvent::SuppressedDnd);
       }
+      // Nothing alerts, but the phone fetches it before the user opens the app.
+      wake_to_sync(state, &recipient);
       return;
     },
   };
@@ -260,6 +262,8 @@ async fn push_to_recipient(
   match decision.timing {
     Timing::Now => send_to_offline_devices(state, recipient.user, recipient.devices, &wake_up),
     Timing::AfterGrace => {
+      // Read on the desktop meanwhile, the held push is dropped; the phone still has the message.
+      wake_to_sync(state, &recipient);
       let grace = Duration::from_secs(state.settings.get().notifications.mobile_push_delay_secs);
       hold_for_desktop(state, recipient, wake_up, grace);
     },
@@ -472,6 +476,60 @@ pub fn wake_to_seal(state: AppState, user: UserId, conversation: ConversationId)
     let wake_up = PushWakeUp {
       kind: PushKind::ScheduledSeal,
       conversation_id: conversation,
+      maybe_message_id: None,
+      maybe_sender_id: None,
+      is_urgent: false,
+      maybe_thread_id: None,
+      maybe_call_id: None,
+      maybe_badge: None,
+      maybe_sent_at: Some(now_millis()),
+    };
+    for row in rows {
+      if can_dismiss(&row.provider) && !state.hub.is_device_connected(user, row.device) {
+        delivery::spawn(state.clone(), user, row, wake_up.clone());
+      }
+    }
+  });
+}
+
+/// Wakes the recipient's idle phones to catch up in the background (notifications.md, "Sync
+/// wake-ups"), for a message they got no visible push for, so it is there when the app opens. Silent
+/// and naming nothing; new messages within `sync_wake_coalesce` make one wake, and there is at most
+/// one per `sync_wake_min_interval` per user; a message in that time waits for its end instead of
+/// being lost. Only to providers that deliver silent pushes, and only to devices without a live
+/// connection when it goes out.
+fn wake_to_sync(state: &AppState, recipient: &PushRecipientRow) {
+  let settings = state.settings.get().push.clone();
+  if settings.sync_wake_min_interval.is_zero()
+    || !recipient
+      .devices
+      .iter()
+      .any(|device| can_dismiss(&device.provider))
+  {
+    return;
+  }
+  let user = recipient.user;
+  let Some(delay) =
+    state
+      .push_tracker
+      .queue_sync_wake(user, settings.sync_wake_coalesce, settings.sync_wake_min_interval)
+  else {
+    return;
+  };
+  let state = state.clone();
+  tokio::spawn(async move {
+    tokio::time::sleep(delay).await;
+    state.push_tracker.take_sync_wake(user);
+    let rows = match state.database.list_push_devices(user).await {
+      Ok(rows) => rows,
+      Err(error) => {
+        warn!(%error, "listing push devices for a sync wake failed");
+        return;
+      },
+    };
+    let wake_up = PushWakeUp {
+      kind: PushKind::Sync,
+      conversation_id: no_conversation(),
       maybe_message_id: None,
       maybe_sender_id: None,
       is_urgent: false,
