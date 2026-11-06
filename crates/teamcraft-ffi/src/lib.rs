@@ -83,7 +83,7 @@ pub use voice::{
   voice_file_name, voice_waveform_heights,
 };
 
-use crate::engine::{Engine, EngineThreads, Job, PushOpening, PushReader};
+use crate::engine::{DrainGoal, Engine, EngineThreads, Job, PushOpening, PushReader};
 use crate::logging::{LifecycleStep, outcome};
 use crate::reads::{ReadQueue, Reads};
 
@@ -428,14 +428,15 @@ impl TeamCraft {
   /// end while the app syncs; otherwise it stops then, also when the caller was cancelled. Other
   /// calls are answered meanwhile.
   pub async fn flush_pending_work(&self, max_wait_ms: u64) -> Result<PendingWorkItem, TeamCraftError> {
-    let max_wait = Duration::from_millis(max_wait_ms);
-    let answered = self
-      .call(move |engine| Box::pin(engine.begin_drain(max_wait)))
-      .await?;
-    answered
-      .await
-      .map_err(|_| TeamCraftError::EngineStopped)?
-      .map(PendingWorkItem::from)
+    self.drain(max_wait_ms, DrainGoal::PendingWork).await
+  }
+
+  /// Syncs until the connection is up and caught up or `max_wait_ms` has passed, and answers with
+  /// what is still pending: for a `sync` wake-up ([`PushNotificationKind::Sync`]), so the messages the
+  /// device got no visible push for are there when the app opens (notifications.md, "Sync
+  /// wake-ups"). Like [`Self::flush_pending_work`] the loop stops at the end unless the app syncs.
+  pub async fn catch_up_in_background(&self, max_wait_ms: u64) -> Result<PendingWorkItem, TeamCraftError> {
+    self.drain(max_wait_ms, DrainGoal::CaughtUp).await
   }
 
   /// Stops syncing; the store stays open. A [`Self::flush_pending_work`] under way keeps the sync
@@ -1371,6 +1372,18 @@ impl TeamCraft {
       activity: Mutex::default(),
       running_calls,
     }))
+  }
+
+  /// Runs the sync loop in the background until `goal` or `max_wait_ms`; what is still pending.
+  async fn drain(&self, max_wait_ms: u64, goal: DrainGoal) -> Result<PendingWorkItem, TeamCraftError> {
+    let max_wait = Duration::from_millis(max_wait_ms);
+    let answered = self
+      .call(move |engine| Box::pin(engine.begin_drain(max_wait, goal)))
+      .await?;
+    answered
+      .await
+      .map_err(|_| TeamCraftError::EngineStopped)?
+      .map(PendingWorkItem::from)
   }
 
   /// Runs `job` on the engine thread and waits for its result.

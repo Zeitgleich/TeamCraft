@@ -109,6 +109,30 @@ async fn back_from_the_pocket_the_open_chat_shows_its_news_at_once_and_the_list_
   );
 }
 
+/// The server's silent sync wake-up reached the phone in the pocket (notifications.md, "Sync
+/// wake-ups"): it caught up in the background, so the chat the user opens later shows everything in
+/// its first frame, before any connection, and so does the list.
+#[tokio::test(start_paused = true)]
+async fn after_a_sync_wake_up_everything_is_there_before_any_connection() {
+  let mut day = Day::begin().await;
+  day.phone.awake_until(None, Told::has_the_morning).await;
+  day.phone.import_history(day.ann.client.user_id(), IMPORTED);
+
+  day.desktop_afternoon().await;
+  day.server.delay_member_lists(day.me, MEMBER_LIST_DELAY);
+  day.phone.catch_up_in_background().await;
+  // Still in the pocket for a while; then the session is gone again.
+  tokio::time::advance(Duration::from_secs(10 * 60)).await;
+  day.server.expire_sessions();
+
+  let first_frame = day.phone.read_now();
+  assert_eq!(first_frame.direct_texts, DIRECT_COMPLETE, "the open chat");
+  assert_eq!(first_frame.channels_complete, CHANNELS, "the list");
+  assert_eq!(first_frame.channels_marked, 0);
+  day.phone.assert_everything_once(&day);
+  assert_eq!(day.phone.unread(day.direct), 0, "read on the desktop");
+}
+
 /// Away for less than the resume window (a look at another app): the server replays what was
 /// missed, and the open chat has it within the network's time, without a catch-up.
 #[tokio::test(start_paused = true)]
@@ -365,6 +389,38 @@ impl Phone {
         .unwrap();
     }
     self.imported = count;
+  }
+
+  /// A `sync` wake-up in the pocket: the sync loop runs until the connection is up and caught up,
+  /// then stops, as `TeamCraft::catch_up_in_background` does it. Nothing is on screen.
+  async fn catch_up_in_background(&mut self) {
+    let client = self.maybe_client.take().unwrap();
+    let (mut runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+    runner.share_connection_status(self.status.clone());
+    let (caught_up, is_caught_up) = futures_channel::oneshot::channel();
+    assert!(handle.send(RunnerCommand::CatchUp(caught_up)));
+    let woken_at = Instant::now();
+    let stop = async move {
+      is_caught_up.await.unwrap();
+      assert!(
+        woken_at.elapsed() < Duration::from_secs(60),
+        "the background catch-up took too long"
+      );
+      assert!(handle.send(RunnerCommand::Stop));
+    };
+    let (client, ()) = tokio::join!(runner.run(), stop);
+    self.maybe_client = Some(client);
+  }
+
+  /// What the UI reads from the store right now, before any connection (the app's first frame).
+  fn read_now(&self) -> Told {
+    Told::read(
+      Duration::ZERO,
+      &self.status,
+      self.store.as_ref(),
+      &self.channels,
+      (self.direct, self.imported),
+    )
   }
 
   /// The app in the foreground, `maybe_open` the chat on screen, until the UI would read what

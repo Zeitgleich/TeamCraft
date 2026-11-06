@@ -55,6 +55,8 @@ pub struct SyncRunner<A: ServerApi, S> {
   maybe_reported_bytes: Option<u64>,
   /// Told once nothing waits for the server any longer ([`RunnerCommand::Drain`]).
   drained: Vec<futures_channel::oneshot::Sender<()>>,
+  /// Told once a connection is up and caught up ([`RunnerCommand::CatchUp`]).
+  caught_up: Vec<futures_channel::oneshot::Sender<()>>,
 }
 
 /// How often the app is told to read again while a file goes up or down, for its progress.
@@ -94,6 +96,10 @@ pub enum RunnerCommand {
   /// mobile app keeps its background time until then (issue #158). Whoever asks bounds the wait;
   /// a dropped receiver costs nothing.
   Drain(futures_channel::oneshot::Sender<()>),
+  /// Answers once a gateway connection is up and its catch-up done (at once while connected): a
+  /// mobile app woken in the background to fetch what came meanwhile keeps its time until then
+  /// (notifications.md, "Sync wake-ups"). Whoever asks bounds the wait.
+  CatchUp(futures_channel::oneshot::Sender<()>),
   /// Ends [`SyncRunner::run`], which hands the client back.
   Stop,
 }
@@ -148,6 +154,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       downloads: Downloads::default(),
       maybe_reported_bytes: None,
       drained: Vec::new(),
+      caught_up: Vec::new(),
     };
     (runner, RunnerHandle { sender })
   }
@@ -188,6 +195,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         self.is_upload_due = true;
         self.flush().await;
         self.changed();
+        self.answer_caught_up();
       }
       self.start_upload().await;
       self.start_downloads().await;
@@ -287,6 +295,14 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         self.drained.push(drained);
         // Something may still wait for its retry time: try now rather than on the next tick.
         self.is_upload_due = true;
+      },
+      RunnerCommand::CatchUp(caught_up) => {
+        self.caught_up.push(caught_up);
+        // Connected already: the connection's catch-up is done and its events arrive live.
+        if self.connection.is_connected() {
+          self.answer_caught_up();
+        }
+        return;
       },
       RunnerCommand::SetActivity(activity) => {
         self.client.set_device_activity(activity);
@@ -507,6 +523,14 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       },
       Ok(_) => {},
       Err(error) => tracing::debug!(%error, "pending work not read"),
+    }
+  }
+
+  /// Answers the [`RunnerCommand::CatchUp`] requests: a connection is up and caught up.
+  fn answer_caught_up(&mut self) {
+    for caught_up in self.caught_up.drain(..) {
+      // The asker may have given up meanwhile; nothing to tell it then.
+      let _ = caught_up.send(());
     }
   }
 

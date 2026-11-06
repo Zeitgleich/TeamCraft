@@ -243,6 +243,15 @@ struct PendingApproval {
   misses: u8,
 }
 
+/// What a background run of the sync loop waits for ([`Engine::begin_drain`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DrainGoal {
+  /// Nothing waits for the server any more (issue #158).
+  PendingWork,
+  /// A connection is up and caught up (notifications.md, "Sync wake-ups").
+  CaughtUp,
+}
+
 /// Whether a push payload is opened as it arrives or again later to update its notification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PushOpening {
@@ -1029,20 +1038,25 @@ impl Engine {
     self.stop().await
   }
 
-  /// Runs the sync loop until nothing waits for the server or `max_wait` has passed (issue #158),
-  /// then answers with what is still pending. A loop the app syncs with keeps running; otherwise
-  /// the loop stops at the end. The end runs on the engine thread whatever the caller does, so an
-  /// OS that cancels the caller's background work leaves no loop running.
+  /// Runs the sync loop until `goal` is reached or `max_wait` has passed, then answers with what is
+  /// still pending. A loop the app syncs with keeps running; otherwise the loop stops at the end. The
+  /// end runs on the engine thread whatever the caller does, so an OS that cancels the caller's
+  /// background work leaves no loop running.
   pub(crate) async fn begin_drain(
     &mut self,
     max_wait: Duration,
+    goal: DrainGoal,
   ) -> Result<oneshot::Receiver<Result<PendingWork, TeamCraftError>>, TeamCraftError> {
     self.start().await?;
     self.active_drains += 1;
     let (drained, is_drained) = futures_channel::oneshot::channel();
     if let ClientSlot::Running { handle, .. } = &self.client {
+      let command = match goal {
+        DrainGoal::PendingWork => RunnerCommand::Drain(drained),
+        DrainGoal::CaughtUp => RunnerCommand::CatchUp(drained),
+      };
       // Refused only by a loop that ended abnormally: the wait ends at once then.
-      handle.send(RunnerCommand::Drain(drained));
+      handle.send(command);
     }
     let maybe_jobs = self.maybe_jobs.clone();
     let (answer, answered) = oneshot::channel();

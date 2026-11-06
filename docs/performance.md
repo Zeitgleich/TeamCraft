@@ -1926,9 +1926,11 @@ the network's and the core's waiting, not CPU.
 - Android shows a thin moving line under the top bar while the connection is set up or a
   conversation on screen is still caught up (`SyncingLine`), after 300 ms, so quick ones don't flash.
 
-Still waiting: whatever the phone doesn't have when the user taps costs its round trips. Zero needs the
-messages on the phone before that, a background sync woken by the server while the desktop holds
-the visible notifications back.
+What the phone doesn't have when the user taps still costs its round trips. So the server now wakes
+idle phones silently for what it doesn't push them visibly (notifications.md, "Sync wake-ups"), and
+they catch up in the background. The same day with that wake-up in the pocket
+(`after_a_sync_wake_up_everything_is_there_before_any_connection`): the open chat, the list and the
+read state are complete in the app's first frame, before it connects.
 
 ### Mobile core: start and channel switch on a large workspace
 
