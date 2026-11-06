@@ -104,9 +104,10 @@ That makes it a second, independent trust anchor:
 
 - The client stores `"<TeamCraft user ID>:<identity key fingerprint>"` as a Keycloak user attribute
   (via the Keycloak account API, authenticated by the user's own login) and the next ID token carries
-  it as claim `tc_identity_key` (realm setup: docs/operations.md, "Role signing"). Binding the user ID
-  in the claim means the mapping from the token's subject to a TeamCraft user doesn't come from the
-  server either.
+  it as claim `tc_identity_key` (realm setup: docs/operations.md, "Role signing"). **The claim is the
+  user's own word:** the attribute is theirs to edit, so anybody with an account in the realm can get
+  a genuine token naming another person's user ID and any key. What ties a token to a TeamCraft user
+  is its subject (`sub`), and only where the owners signed which account is that person's.
 - The app then publishes that signed ID token as the attestation of its identity key, once per key
   (`PUT /api/v1/me/identity-key/attestation`; at enrollment it can come with the key). This runs on
   the upkeep path of every app with a provider session (desktop, web, Android, iOS), for every
@@ -114,7 +115,10 @@ That makes it a second, independent trust anchor:
   caller and their current key; it judges nothing.
 - Other clients verify the token's signature against Keycloak's JWKS, fetched **directly from
   Keycloak**, not through the VPS (the discovery document's `jwks_uri` must be on the issuer's host),
-  and check issuer, audience and the claim before pinning a key. Implemented for RS256, ES256 and EdDSA
+  and check issuer, audience, that it is an ID token, the claim, and that its subject is the account
+  the owners signed for that person: the subject in the roster's provider marks (§3.1.3), which
+  exist for owners and admins. For anybody else a token confirms nothing, and their key is pinned on
+  first use. Implemented for RS256, ES256 and EdDSA
   ID tokens (`teamcraft-crypto::attestation`). The token's expiry isn't checked: it attests a key, not
   a session. The web app needs the provider to allow its origin for the JWKS (Keycloak: the client's
   web origins); where it can't fetch them it treats keys as not attested.
@@ -123,9 +127,12 @@ That makes it a second, independent trust anchor:
   (`ClientSettings::maybe_attestation`). Without either, nothing is attested and keys are pinned on
   first use.
 - **Optional or required** is the signed policy's `role_signing.key_attestation` (admin console,
-  Security; default optional). Optional: a key with a valid attestation is pinned as attested, one
-  without is pinned on first use and marked as not attested. Required: a key without a valid
-  attestation isn't pinned at all, so nobody adds that person to a group until their app attested it.
+  Security; default optional). Optional: a key with a valid attestation by the signed account is
+  pinned as attested, one without is pinned on first use and marked as not attested. Required: for a
+  person with a signed account, a key without such an attestation isn't pinned. Everybody else is
+  pinned on first use in both modes, so requiring it locks nobody out. For owners and admins the key
+  the owners signed in the roster is used anyway, so today the mode mostly decides what the pin
+  records; it takes full effect once every member's account is signed (#1378).
 - **Keys pinned before** stay pinned in both modes, so turning this on never locks anybody out. A key
   pinned without an attestation is looked at again when it is next needed, at most once a day
   (`ClientSettings::attestation_recheck`): once a valid attestation of the *same* key is there, it
@@ -135,7 +142,10 @@ That makes it a second, independent trust anchor:
   the key, or that the app took it as the server handed it out and comparing the safety number is the
   way to be sure.
 - What this protects: a key pinned as attested can only be faked by compromising both the TeamCraft
-  VPS and Keycloak. It does not cover keys pinned on first use before the provider attested them, or
+  VPS and Keycloak (or the person's own account there). **Today that covers owners and admins only.**
+  Plain members have no owner-signed account yet, so their keys are pinned on first use and the safety
+  number is the check; owner-signed accounts for every member are #1378. It also doesn't cover keys
+  pinned on first use before the provider attested them, or
   people whose app never publishes an attestation (a realm without the attribute or mapper, local
   accounts, the integration bridge and other service accounts, meeting guests from outside the
   realm): for those, first contact is trust on first use and the safety number is the check. Guests

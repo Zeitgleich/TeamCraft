@@ -1,9 +1,10 @@
 //! Checking an OIDC attestation of an identity key (e2ee.md §3.1, security review A1).
 //!
 //! The identity provider runs on a separate host and puts the claim `tc_identity_key` into the
-//! user's ID token. The claim value binds the TeamCraft user ID and the identity key fingerprint
-//! (`"<user id>:<fingerprint>"`, [`attestation_claim`]), so neither the identity key nor the mapping
-//! from the token's subject to a TeamCraft user comes from the server's word. A client verifies the
+//! user's ID token. The claim value names the TeamCraft user ID and the identity key fingerprint
+//! (`"<user id>:<fingerprint>"`, [`attestation_claim`]). The user may edit the attribute, so the claim
+//! is their own word: the caller compares [`VerifiedAttestation::subject`] with the account the owners
+//! signed for that user before trusting it. A client verifies the
 //! token against the identity provider's own signing keys (JWKS, fetched from the configured
 //! issuer, never through the TeamCraft server) before it pins a colleague's identity key.
 //!

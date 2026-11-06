@@ -39,7 +39,8 @@ pub trait JwksSource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PinCheck {
   Attested,
-  /// No attestation configured, or none presented and none required.
+  /// No attestation configured, nobody signed the person's account, or none presented and none
+  /// required.
   TrustOnFirstUse,
   Refused,
 }
@@ -120,6 +121,11 @@ impl AttestationCheck {
 
   /// Decides whether `user`'s identity key may be pinned, from the attestation the server passed
   /// along with it.
+  ///
+  /// The claim in the token is the person's own word (a profile attribute they may edit), so only the
+  /// token's subject says whose account vouches for the key. That counts only where the owners signed
+  /// the person's subject (the roster's provider marks, e2ee.md §3.1.3): owners and admins. Everybody
+  /// else is pinned on first use, also where attestation is required, which locks nobody out.
   pub(crate) async fn check<A: ServerApi, S: LocalStore>(
     &mut self,
     client: &Client<A, S>,
@@ -127,6 +133,9 @@ impl AttestationCheck {
     public_key: &[u8; 32],
     maybe_token: Option<&str>,
   ) -> PinCheck {
+    let Some(subject) = signed_subject(client, user) else {
+      return PinCheck::TrustOnFirstUse;
+    };
     let refused = if self.settings.is_required {
       PinCheck::Refused
     } else {
@@ -157,13 +166,23 @@ impl AttestationCheck {
       convert::user(user),
       &IdentityPublicKey::from_bytes(*public_key),
     ) {
-      Ok(_) => PinCheck::Attested,
+      Ok(verified) if verified.subject == subject => PinCheck::Attested,
+      Ok(_) => {
+        tracing::warn!(user_id = %user, "identity key attested by another account than the signed one");
+        refused
+      },
       Err(error) => {
         tracing::warn!(user_id = %user, %error, "identity key attestation failed");
         refused
       },
     }
   }
+}
+
+/// `user`'s account at the provider, as the owners signed it; `None` for somebody they never noted.
+fn signed_subject<A: ServerApi, S: LocalStore>(client: &Client<A, S>, user: UserId) -> Option<String> {
+  let mut workspace = client.workspace().ok()?;
+  workspace.provider_marks.remove(&user)?.maybe_subject
 }
 
 /// The signing keys of `issuer`, read from the issuer itself: the discovery document names the JWKS
