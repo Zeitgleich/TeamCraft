@@ -20,15 +20,15 @@ class MediaDraftTest {
   @Test
   fun removingAnItemBeforeTheShownOneKeepsShowingIt() {
     val draft = MediaDraft(items = listOf(item("a"), item("b"), item("c")), currentIndex = 2)
-    val removed = draft.removed("a")
+    val removed = draft.removed("id-a")
     assertEquals("c", removed.maybeCurrent?.uri)
   }
 
   @Test
   fun removingTheLastItemShowsTheOneBefore() {
     val draft = MediaDraft(items = listOf(item("a"), item("b")), currentIndex = 1)
-    assertEquals("a", draft.removed("b").maybeCurrent?.uri)
-    assertEquals(0, draft.removed("b").removed("a").currentIndex)
+    assertEquals("a", draft.removed("id-b").maybeCurrent?.uri)
+    assertEquals(0, draft.removed("id-b").removed("id-a").currentIndex)
   }
 
   @Test
