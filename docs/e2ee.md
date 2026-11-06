@@ -4532,7 +4532,7 @@ there the prompt asks for the screen lock. The key guards no data; it only prove
 | No key yet (first unlock, update)       | Created before the prompt                                             |
 | Screen lock removed                     | The device invalidates the key; the app opens and drops it            |
 | Screen lock set again or changed        | The invalidated key is replaced before the prompt                     |
-| Fingerprint added                       | Key kept (the screen lock opens it anyway)                            |
+| Fingerprint or face added               | The device invalidates the key; replaced before the prompt            |
 | Keystore fails to create or use the key | The prompt alone decides (logged), so nobody is locked out            |
 | App lock turned off                     | Key deleted                                                           |
 | Android 8 to 10                         | The prompt alone decides: it can't combine the screen lock with a key |

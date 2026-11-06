@@ -20,8 +20,8 @@ private const val TAG = "AppLockKey"
  * encrypts, which the Keystore refuses without a fresh authentication. A forged success callback
  * therefore opens nothing. The key guards no data: it is the proof, not a secret.
  *
- * The device removes the key's use when the screen lock is removed; [begin] replaces such a key.
- * Adding a fingerprint keeps it (the screen lock already opens it).
+ * The device invalidates the key when the screen lock is removed or a new fingerprint or face is
+ * enrolled; [begin] reports it, and the gate replaces the key before the prompt.
  */
 @RequiresApi(Build.VERSION_CODES.R)
 class AppLockKey : UnlockKey<Cipher> {
@@ -70,7 +70,6 @@ class AppLockKey : UnlockKey<Cipher> {
       .setUserAuthenticationRequired(true)
       // 0: every use needs its own prompt, bound to the operation (no time window).
       .setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL)
-      .setInvalidatedByBiometricEnrollment(false)
       .build()
     val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
     generator.init(spec)
