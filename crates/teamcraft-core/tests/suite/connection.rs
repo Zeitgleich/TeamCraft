@@ -128,6 +128,35 @@ async fn a_long_catch_up_shows_connected_once_the_server_answered() {
     .await;
 }
 
+/// The mobile apps read their state only when told (`EventListener::on_change`): they are told once
+/// the server answered, not when the catch-up is done, or the banner, the list and the open chat
+/// stay as they were for as long as it takes.
+#[tokio::test(start_paused = true)]
+async fn the_app_is_told_of_the_answer_before_a_long_catch_up_ends() {
+  let rig = Rig::start("Mia").await;
+  rig
+    .drive(|rig| async move {
+      rig.wait_for(is_connected, Duration::from_secs(5)).await;
+      // Back after the resume window, and the catch-up takes a minute.
+      rig.server.expire_sessions();
+      rig
+        .server
+        .delay_conversation_list(rig.user, Duration::from_secs(60));
+      rig.server.drop_gateways(rig.user);
+      rig
+        .wait_for(|state| !is_connected(state), Duration::from_secs(5))
+        .await;
+      let told_before = rig.told_connected.load(Ordering::SeqCst);
+      rig.wait_for_new_connection(2, Duration::from_secs(10)).await;
+      tokio::time::sleep(Duration::from_secs(1)).await;
+      assert!(
+        rig.told_connected.load(Ordering::SeqCst) > told_before,
+        "the app wasn't told it is connected before the catch-up ended"
+      );
+    })
+    .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_network_change_replaces_a_dead_connection_within_five_seconds() {
   let rig = Rig::start("Carol").await;
@@ -396,6 +425,8 @@ struct Rig {
   jump: ClockJump,
   /// How often the runner reported a change.
   changes: Arc<AtomicUsize>,
+  /// How often it reported one while the state was connected (the app then reads "connected").
+  told_connected: Arc<AtomicUsize>,
   handle: RunnerHandle,
   runner: SyncRunner<teamcraft_core::api::fake::FakeServerApi, Arc<MemoryStore>>,
 }
@@ -409,6 +440,7 @@ struct Steer {
   status: ConnectionStatus,
   jump: ClockJump,
   changes: Arc<AtomicUsize>,
+  told_connected: Arc<AtomicUsize>,
 }
 
 impl Rig {
@@ -428,17 +460,22 @@ impl Rig {
       .await
       .unwrap();
     let changes = Arc::new(AtomicUsize::new(0));
-    let counter = changes.clone();
+    let told_connected = Arc::new(AtomicUsize::new(0));
+    let status = ConnectionStatus::new();
+    let (counter, connected_counter, told_status) = (changes.clone(), told_connected.clone(), status.clone());
     let (mut runner, handle) = SyncRunner::new(
       client,
       RunnerSettings::default(),
       Box::new(move || {
         counter.fetch_add(1, Ordering::SeqCst);
+        if is_connected(told_status.get()) {
+          connected_counter.fetch_add(1, Ordering::SeqCst);
+        }
       }),
     );
+    runner.share_connection_status(status.clone());
     let network = NetworkChanges::new();
     runner.watch_network(&network);
-    let status = runner.connection_status();
     Self {
       server,
       user,
@@ -446,6 +483,7 @@ impl Rig {
       status,
       jump,
       changes,
+      told_connected,
       handle,
       runner,
     }
@@ -464,6 +502,7 @@ impl Rig {
       status: self.status,
       jump: self.jump,
       changes: self.changes,
+      told_connected: self.told_connected,
     };
     let handle = self.handle;
     let test = async move {

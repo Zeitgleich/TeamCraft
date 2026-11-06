@@ -1891,6 +1891,45 @@ Coming back after a long absence: the core reported `Connecting` until the whole
 show while new messages were already arriving. It reports connected once the server answers
 `identify` or `resume` now (test `a_long_catch_up_shows_connected_once_the_server_answered`).
 
+### Coming back to the phone with the desktop open (November 2026)
+
+The everyday case of a user with two devices: the desktop is open, so the server holds the phone's
+notifications back and drops them once the desktop read the messages (notifications.md,
+"Attention"); the phone gets nothing. After 45 minutes in the pocket the app comes out of standby
+past the resume window, the user taps the direct chat at the top. `tests/suite/coming_back.rs` in
+`teamcraft-core` plays it with real MLS clients on the fake server: Ann, the user's desktop and the
+user's phone, which runs the `SyncRunner` as the apps do and whose UI hears only `on_change`. Each
+call is checked against what the store holds at that moment. 24 channels with 4 new messages each,
+30 new direct messages plus the desktop's answer, 70,000 imported messages in the direct chat, and
+every member list 400 ms (a busy server on a mobile network). Tokio's paused clock, so the times are
+the network's and the core's waiting, not CPU.
+
+| What the phone's UI was told                     | Before | After  |
+|--------------------------------------------------|--------|--------|
+| Connected                                        | 10.4 s | 0 s    |
+| The open chat's news                             | 10.4 s | 0.4 s  |
+| A chat tapped 0.8 s in, during the catch-up      | 10.4 s | 1.6 s  |
+| Every conversation caught up                     | 10.4 s | 2.0 s  |
+| Times the chat list changed during the catch-up  | 1      | 5      |
+
+- **Nobody told the app.** The mobile sync loop called `on_change` after the whole catch-up only;
+  the conversation caught up first and the "connected" state sat in the store unread. Now the
+  client counts what a sync stored for the UI (`sync_progress.rs`: the server's answer, each
+  conversation caught up) and the loop tells the app at most every 250 ms. The browser read on
+  its own one-second timer and wasn't affected.
+- **One member list after the other.** Each pass over a conversation's MLS queue reads its member
+  list to verify the entries, a round trip per conversation, one at a time. The catch-up reads them
+  for a whole batch at once with the first pages, and the open chat its list and pages in one round
+  trip.
+- **A chat tapped during the catch-up** waited for its turn in the batch; it is taken next now, after
+  the round trip on its way.
+- Android shows a thin moving line under the top bar while the connection is set up or a
+  conversation on screen is still caught up (`SyncingLine`), after 300 ms, so quick ones don't flash.
+
+Still waiting: whatever the phone doesn't have when the user taps costs its round trips. Zero needs the
+messages on the phone before that, a background sync woken by the server while the desktop holds
+the visible notifications back.
+
 ### Mobile core: start and channel switch on a large workspace
 
 `crates/teamcraft-ffi/tests/start_budget.rs` measures through the API the apps call, on a sealed

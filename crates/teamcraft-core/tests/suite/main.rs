@@ -18,6 +18,7 @@ mod catch_up;
 mod channel_deletion;
 mod channel_roles;
 mod chat_actions;
+mod coming_back;
 #[path = "../common/mod.rs"]
 mod common;
 mod connection;
