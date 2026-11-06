@@ -287,6 +287,37 @@ class WakeUpRetriesTest {
   }
 
   @Test
+  fun aRefusedQuietWakeUpStillGetsTheGenericNote() = runBlocking {
+    world.pending = world.maxChains
+    world.retries.afterNotOpened(PAYLOAD, wasAnnounced = false)
+    assertTrue(world.enqueued.isEmpty())
+    assertEquals(1, world.capped)
+    assertEquals(1, world.announcedUnopened)
+  }
+
+  @Test
+  fun aRefusedAnnouncedWakeUpIsNotAnnouncedTwice() = runBlocking {
+    world.pending = world.maxChains
+    world.retries.afterNotOpened(PAYLOAD, wasAnnounced = true)
+    assertEquals(0, world.announcedUnopened)
+  }
+
+  @Test
+  fun aQuietWakeUpWithARetryStaysSilent() = runBlocking {
+    world.retries.afterNotOpened(PAYLOAD, wasAnnounced = false)
+    assertEquals(listOf(1), world.enqueued)
+    assertEquals(0, world.announcedUnopened)
+  }
+
+  @Test
+  fun theSafetyChainOfAWaitingWakeUpIsNotAnnouncedWhenRefused() = runBlocking {
+    world.pending = world.maxChains
+    world.openAgain = { text }
+    world.retries.settle(PAYLOAD, placeholder)
+    assertEquals(0, world.announcedUnopened)
+  }
+
+  @Test
   fun aWakeUpThatDidNotOpenSaysWhetherAnythingWentOut() = runBlocking {
     world.openAgain = { text }
     world.retries.retry(PAYLOAD, attempt = 1, RetryOf.UNOPENED_QUIET, NOW)
@@ -314,6 +345,7 @@ class WakeUpRetriesTest {
     var openedSoon = 0
     var gaveUp = 0
     var capped = 0
+    var announcedUnopened = 0
     private var held = listOf<HeldLine>()
 
     /** A placeholder of [PAYLOAD] shows, with its alert held. */
@@ -365,6 +397,10 @@ class WakeUpRetriesTest {
 
         override fun recordCapped() {
           capped += 1
+        }
+
+        override fun announceUnopened() {
+          announcedUnopened += 1
         }
       },
       scheduler = object : RetryScheduler {

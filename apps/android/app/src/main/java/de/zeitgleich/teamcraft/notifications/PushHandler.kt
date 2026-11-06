@@ -141,6 +141,13 @@ class PushHandler(
     stats.record(PushPath.RETRY_CAPPED)
   }
 
+  /** A quiet wake-up that got no retry: the generic note goes out once, not nothing (issue #1256). */
+  override fun announceUnopened() {
+    stats.record(PushPath.UNREADABLE)
+    notifier.showUnreadable()
+    handled.update { it + 1 }
+  }
+
   /** A visible wake-up that could not be opened: never nothing (see [MessageNotifier.showUnreadable]). */
   fun handleUnreadable() {
     stats.recordUnreadable()

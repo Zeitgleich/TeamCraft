@@ -73,7 +73,11 @@ class WakeUpRetries(
 
   /** A wake-up that did not open: later tries, within the device's bound on chains. */
   fun afterNotOpened(payload: ByteArray, wasAnnounced: Boolean) {
-    startChain(payload, RetryOf.of(wasAnnounced))
+    val isStarted = startChain(payload, RetryOf.of(wasAnnounced))
+    // Nothing showed and no retry will look: without a note the message stays unknown until the app
+    // syncs. One shared note (a fixed notification), however many are refused; it may stand for a
+    // withdrawal, but only a store too broken for 32 chains to open cannot tell either.
+    if (!isStarted && !wasAnnounced) target.announceUnopened()
   }
 
   /**
@@ -153,13 +157,15 @@ class WakeUpRetries(
     return heldMs < 0 || heldMs >= PushRetry.holdBoundMs(isInCar())
   }
 
-  private fun startChain(payload: ByteArray, retryOf: RetryOf, attempt: Int = 1) {
+  /** Whether the chain was started; false when the device's bound on chains refused it. */
+  private fun startChain(payload: ByteArray, retryOf: RetryOf, attempt: Int = 1): Boolean {
     if (scheduler.pendingChains() >= scheduler.maxChains()) {
       // A broken store must not pile up jobs; the sync still fills in what it brings.
       target.recordCapped()
-    } else {
-      scheduler.enqueueRetry(payload, attempt, retryOf, elapsedNow())
+      return false
     }
+    scheduler.enqueueRetry(payload, attempt, retryOf, elapsedNow())
+    return true
   }
 
   private companion object {
@@ -190,6 +196,9 @@ interface RetryTarget {
   fun endHold(payload: ByteArray, end: HoldEnd)
   fun recordGaveUp()
   fun recordCapped()
+
+  /** A generic "New message" for a wake-up that did not open and gets no retry; the same note for all. */
+  fun announceUnopened()
 }
 
 /** The persisted jobs behind the retries. `arrivedAtMs` is `elapsedRealtime`. */
