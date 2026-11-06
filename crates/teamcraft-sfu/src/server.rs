@@ -33,6 +33,7 @@ use std::{
 };
 
 use socket2::{Domain, Protocol, Socket, Type};
+use teamcraft_media::quic_send::set_datagram_send_buffer;
 use teamcraft_proto::{
   CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, ErrorBody, ErrorCode,
   SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, SfuControlRequest, SfuRosterReport,
@@ -45,6 +46,7 @@ use tokio::time::MissedTickBehavior;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 use wtransport::{
   Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig,
+  config::QuicTransportConfig,
   endpoint::{IncomingSession, endpoint_side::Server},
   tls::Sha256Digest,
 };
@@ -57,7 +59,9 @@ use crate::{
   prejoin::{PreJoinLimiter, PreJoinSlot},
   rejoin::{RejoinLimiter, RejoinTurn},
   reporting::{NoReporter, ParticipantReporter},
-  room::{JoinOutcome, ParticipantHandle, ParticipantLink, Room, RoomError, RoomStats, Rooms, SessionId},
+  room::{
+    JoinOutcome, ParticipantHandle, ParticipantLink, QuicLink, Room, RoomError, RoomStats, Rooms, SessionId,
+  },
   signaling::{Dequeued, Handover, Outgoing, SignalQueue, SignalingError, read_message, write_message},
   switch::{SwitchRegistration, SwitchSecret, SwitchSecrets, SwitchTarget},
 };
@@ -219,9 +223,12 @@ impl Sfu {
       .first()
       .ok_or(SfuError::NoCertificate)?
       .hash();
+    // The datagram buffer each receiver's queue fills only while QUIC keeps up (`QuicLink`).
+    let mut transport = QuicTransportConfig::default();
+    set_datagram_send_buffer(&mut transport);
     let server_config = ServerConfig::builder()
       .with_bind_socket(bind_socket(&config).map_err(SfuError::Bind)?)
-      .with_identity(identity)
+      .with_custom_transport(identity, transport)
       .keep_alive_interval(Some(config.keep_alive_interval))
       .max_idle_timeout(Some(config.idle_timeout))
       .map_err(|_| SfuError::IdleTimeout)?
@@ -449,7 +456,7 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
 
   let (signal_tx, signal_rx) = mpsc::channel(shared.config.signaling_queue_len.max(1));
   let handle = ParticipantHandle {
-    link: Arc::new(connection.clone()),
+    link: Arc::new(QuicLink::new(connection.clone())),
     signal_tx: signal_tx.clone(),
   };
   let Admitted {
@@ -503,7 +510,7 @@ async fn take_over(
     return Ok(());
   };
   let arrives = handover.prepare();
-  let link: Arc<dyn ParticipantLink> = Arc::new(connection.clone());
+  let link: Arc<dyn ParticipantLink> = Arc::new(QuicLink::new(connection.clone()));
   let (session_id, signal_tx) = match shared.rooms.switch(&room, grant.device_id, from, link) {
     Ok(switched) => switched,
     Err(error) => {

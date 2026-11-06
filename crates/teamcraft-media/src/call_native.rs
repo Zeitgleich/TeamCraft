@@ -47,6 +47,7 @@ use wtransport::config::ClientConfigBuilder;
 use wtransport::config::states::{WantsRootStore, WantsTransportConfigClient};
 use wtransport::endpoint::endpoint_side::Client;
 use wtransport::error::{ConnectionError, StreamReadExactError};
+use wtransport::quinn::{IdleTimeout, TransportConfig};
 use wtransport::tls::Sha256Digest;
 use wtransport::{ClientConfig, Connection, Endpoint, RecvStream, SendStream};
 
@@ -73,6 +74,8 @@ use crate::fallback_link::{
 use crate::fallback_queue::MediaQueueConfig;
 use crate::fallback_socket::{FallbackSender, WriterConfig, run_writer};
 use crate::jitter::JitterBufferConfig;
+use crate::quic_send::{QuicSender, set_datagram_send_buffer};
+use crate::send_queue::SendQueueConfig;
 use crate::sfu_address::{PinnedResolver, sfu_addresses};
 use crate::system_audio::{SystemAudioCapture, SystemAudioError, SystemAudioReceiver, system_audio_queue};
 use crate::video::{EncodedVideoFrame, TOP_LAYER, VideoResolution, ViewChoice};
@@ -1104,6 +1107,8 @@ enum LinkPath {
     /// The connection's own endpoint, for moving it to a new socket.
     endpoint: Endpoint<Client>,
     connection: Connection,
+    /// Media goes through its queue, which drops what a narrow uplink would deliver too late.
+    sender: QuicSender,
   },
   /// The WebSocket fallback. Its writer task isn't among the link's tasks: it stays to send the
   /// close, and ends with the socket.
@@ -1790,8 +1795,13 @@ impl Link {
       tokio::spawn(read_signaling(recv, connection.clone(), input_tx.clone())),
       tokio::spawn(read_datagrams(connection.clone(), input_tx)),
     ];
+    let sender = QuicSender::spawn(connection.clone(), SendQueueConfig::uplink());
     Ok(Self {
-      path: LinkPath::Quic { endpoint, connection },
+      path: LinkPath::Quic {
+        endpoint,
+        connection,
+        sender,
+      },
       signal_out,
       inputs,
       tasks,
@@ -1844,14 +1854,10 @@ impl Link {
     }
   }
 
-  /// Unreliable by design: a full send buffer or queue drops the datagram.
+  /// Unreliable by design: a queue drops the datagram when it waited too long or didn't fit.
   fn send_datagram(&self, bytes: &[u8]) {
     match &self.path {
-      LinkPath::Quic { connection, .. } => {
-        if let Err(error) = connection.send_datagram(bytes) {
-          debug!(%error, "datagram dropped");
-        }
-      },
+      LinkPath::Quic { sender, .. } => sender.send_datagram(bytes),
       LinkPath::Fallback { sender, .. } => sender.send_datagram(bytes),
     }
   }
@@ -1906,12 +1912,10 @@ async fn connect_to(
   } else {
     builder.with_server_certificate_hashes(certificate_hashes.iter().copied().map(Sha256Digest::new))
   };
-  let client_config = builder
-    .dns_resolver(PinnedResolver(address))
-    .keep_alive_interval(Some(resilience.keep_alive_interval))
-    .max_idle_timeout(Some(resilience.idle_timeout))
-    .map_err(|error| NativeCallError::Connect(error.to_string()))?
-    .build();
+  let mut client_config = builder.dns_resolver(PinnedResolver(address)).build();
+  client_config
+    .quic_config_mut()
+    .transport_config(Arc::new(transport_config(resilience)?));
   let endpoint =
     Endpoint::client(client_config).map_err(|error| NativeCallError::Connect(error.to_string()))?;
   let connection = endpoint
@@ -1919,6 +1923,19 @@ async fn connect_to(
     .await
     .map_err(|error| NativeCallError::Connect(error.to_string()))?;
   Ok((endpoint, connection))
+}
+
+/// QUIC's settings of a call connection: keep-alives for carrier NATs, the idle timeout, and the
+/// datagram buffer the uplink's queue fills while QUIC keeps up (`crate::quic_send`).
+fn transport_config(resilience: &ResilienceConfig) -> Result<TransportConfig, NativeCallError> {
+  let idle_timeout = IdleTimeout::try_from(resilience.idle_timeout)
+    .map_err(|error| NativeCallError::Connect(error.to_string()))?;
+  let mut transport = TransportConfig::default();
+  transport
+    .keep_alive_interval(Some(resilience.keep_alive_interval))
+    .max_idle_timeout(Some(idle_timeout));
+  set_datagram_send_buffer(&mut transport);
+  Ok(transport)
 }
 
 /// The certificates a connection accepts: the pinned one (development tools) and the ticket's,
@@ -2180,7 +2197,7 @@ impl Sinks {
           }
         },
         EngineOutput::Datagram(bytes) => {
-          // Unreliable by design: a full send buffer drops the frame.
+          // Unreliable by design: the send queue drops what waits too long.
           if let Some(link) = maybe_link {
             link.send_datagram(&bytes);
           }

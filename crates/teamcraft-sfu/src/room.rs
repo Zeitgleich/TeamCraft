@@ -27,6 +27,8 @@ use std::{
 use teamcraft_media::{
   datagram::{PADDING_STREAM, StreamId},
   dave::DaveEpoch,
+  quic_send::QuicSender,
+  send_queue::SendQueueConfig,
 };
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry, ConversationId,
@@ -221,6 +223,40 @@ pub enum RoomError {
   /// its signaling queue is full.
   #[error("participant {0:?} has no connection to move")]
   NotSwitchable(DeviceId),
+}
+
+/// A participant's QUIC connection with its media going through the queue of
+/// `teamcraft_media::quic_send` (#1218): after a sudden drop of the receiver's downlink, what it
+/// can't take in time is dropped here instead of being delivered seconds late.
+pub struct QuicLink {
+  connection: Connection,
+  sender: QuicSender,
+}
+
+impl QuicLink {
+  /// Starts the connection's sending task (on the current tokio runtime).
+  pub fn new(connection: Connection) -> Self {
+    let sender = QuicSender::spawn(connection.clone(), SendQueueConfig::downlink());
+    Self { connection, sender }
+  }
+}
+
+impl ParticipantLink for QuicLink {
+  fn send_datagram(&self, bytes: &[u8]) {
+    self.sender.send_datagram(bytes);
+  }
+
+  fn close(&self, code: u32, reason: &[u8]) {
+    ParticipantLink::close(&self.connection, code, reason);
+  }
+
+  fn close_gracefully<'a>(
+    &'a self,
+    code: u32,
+    reason: &'a [u8],
+  ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+    ParticipantLink::close_gracefully(&self.connection, code, reason)
+  }
 }
 
 impl ParticipantLink for Connection {
