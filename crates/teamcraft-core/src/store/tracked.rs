@@ -11,11 +11,14 @@
 //! With [`TrackedStore::with_message_cache`] it keeps the decoded messages of the conversations
 //! read last and a revision per conversation ([`MessageCache`], issue #1000).
 //!
-//! It also notes the image attachments whose message went away – deleted, withdrawn by its sender,
-//! or its conversation no longer listed for this user – so the host drops their renditions from the
-//! persistent media cache (#749, [`TrackedStore::take_removed_renditions`]).
+//! For a host with a persistent media cache ([`TrackedStore::with_media_cache`]) it also notes what
+//! goes from that cache (#749): the image attachments of a message deleted or withdrawn by its
+//! sender ([`TrackedStore::take_removed_renditions`]), and every picture of a conversation that is
+//! no longer listed for this user or whose history goes (purged, e2ee.md §4.6;
+//! [`TrackedStore::take_media_purges`]). The latter is a record in the same group of writes, so a
+//! purge interrupted by a crash is finished by the next start (#1161).
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
@@ -39,11 +42,16 @@ const SHARED_ACCOUNT_RECORDS: [&str; 2] = [
 ];
 /// The key prefix of a conversation's bookmarks in [`Table::Account`].
 const BOOKMARKS_PREFIX: &str = "bookmarks/";
-/// Removed renditions kept until the host takes them; a host that never does (one without a media
-/// cache) doesn't make them grow, the oldest go (the cache's age limit covers what is lost).
+/// Removed renditions kept until the host takes them; a host that doesn't take them for long
+/// doesn't make them grow, the oldest go (the cache's age limit covers what is lost). A whole
+/// conversation never goes through them ([`MEDIA_PURGE_PREFIX`]).
 const MAX_REMOVED_RENDITIONS: usize = 4096;
-/// Messages read per page when a conversation goes away.
-const REMOVED_CONVERSATION_PAGE: usize = 256;
+/// Records in [`Table::SyncState`], `media_purge/{conversation}`: the conversation's pictures are
+/// still to be dropped from the media cache. One per conversation, deleted once the host did.
+const MEDIA_PURGE_PREFIX: &str = "media_purge/";
+/// Most looks a purge the host failed is skipped before it is handed out again; the skips double
+/// with each failure up to this.
+const MAX_MEDIA_PURGE_SKIPS: u32 = 64;
 
 /// A [`LocalStore`] that notes what its writes changed. Clones share the notes.
 #[derive(Clone)]
@@ -52,6 +60,30 @@ pub struct TrackedStore<S> {
   changes: Arc<Mutex<StoreChanges>>,
   removed_renditions: Arc<Mutex<VecDeque<RemovedRendition>>>,
   messages: Arc<Mutex<MessageCache>>,
+  /// The host keeps a media cache: renditions of deleted messages are noted.
+  has_media_cache: bool,
+  /// The host keeps files of conversations (a media cache, drafts): conversations that went are
+  /// noted.
+  notes_conversation_purges: bool,
+  media_purges: Arc<Mutex<MediaPurges>>,
+}
+
+/// The host's work on [`MEDIA_PURGE_PREFIX`] records.
+#[derive(Debug)]
+struct MediaPurges {
+  /// Records may wait that aren't handed out: at start (left by an earlier run), after one was
+  /// written or a purge failed. Otherwise the host's look costs nothing.
+  is_due: bool,
+  /// Handed out, not yet confirmed or failed: not handed out again meanwhile.
+  in_flight: BTreeSet<ConversationId>,
+  /// Purges that failed, by how many looks they still sit out and how often they failed.
+  backoff: HashMap<ConversationId, Backoff>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Backoff {
+  failures: u32,
+  skips_left: u32,
 }
 
 /// An image attachment whose message went away: its cached rendition goes too. Identifies the entry
@@ -114,7 +146,28 @@ impl<S: LocalStore> TrackedStore<S> {
       changes: Arc::default(),
       removed_renditions: Arc::default(),
       messages: Arc::new(Mutex::new(MessageCache::new(max_size_bytes))),
+      has_media_cache: false,
+      notes_conversation_purges: false,
+      media_purges: Arc::new(Mutex::new(MediaPurges {
+        is_due: true,
+        in_flight: BTreeSet::new(),
+        backoff: HashMap::new(),
+      })),
     }
+  }
+
+  /// The host keeps a persistent media cache: notes what goes from it, for the host to take
+  /// ([`Self::take_removed_renditions`], [`Self::take_media_purges`]). Without it nothing is noted.
+  pub fn with_media_cache(mut self) -> Self {
+    self.has_media_cache = true;
+    self.with_conversation_purges()
+  }
+
+  /// The host keeps other files of conversations (the mobile apps' drafts): notes only which
+  /// conversations went ([`Self::take_media_purges`]).
+  pub fn with_conversation_purges(mut self) -> Self {
+    self.notes_conversation_purges = true;
+    self
   }
 
   /// The image attachments whose message went away since the last call.
@@ -124,6 +177,83 @@ impl<S: LocalStore> TrackedStore<S> {
       .lock()
       .unwrap_or_else(PoisonError::into_inner);
     removed.drain(..).collect()
+  }
+
+  /// The conversations whose pictures are to go from the media cache (or the host's other files of
+  /// a conversation), as a whole: purged or no longer listed. Each is handed out once until the
+  /// host reports it with [`Self::media_purged`] or [`Self::media_purge_failed`]; the record stays
+  /// until it is purged, also across a restart. Looks at the store only when something may wait.
+  pub fn take_media_purges(&self) -> Vec<ConversationId> {
+    if !self.notes_conversation_purges {
+      return Vec::new();
+    }
+    let mut purges = self.purges();
+    if !purges.is_due {
+      return Vec::new();
+    }
+    let records = match self.inner.list_prefix(Table::SyncState, MEDIA_PURGE_PREFIX) {
+      Ok(records) => records,
+      Err(error) => {
+        tracing::debug!(%error, "could not list the conversations to drop from the media cache");
+        return Vec::new();
+      },
+    };
+    let mut handed_out = Vec::new();
+    let mut is_waiting = false;
+    for conversation in records.iter().filter_map(|(key, _)| {
+      key
+        .strip_prefix(MEDIA_PURGE_PREFIX)?
+        .parse::<ConversationId>()
+        .ok()
+    }) {
+      if purges.in_flight.contains(&conversation) {
+        continue;
+      }
+      if let Some(backoff) = purges.backoff.get_mut(&conversation)
+        && backoff.skips_left > 0
+      {
+        backoff.skips_left -= 1;
+        is_waiting = true;
+        continue;
+      }
+      purges.in_flight.insert(conversation);
+      handed_out.push(conversation);
+    }
+    // In flight ones make it due again when they fail.
+    purges.is_due = is_waiting;
+    handed_out
+  }
+
+  /// The host dropped `conversation`'s pictures: its record goes.
+  pub fn media_purged(&self, conversation: ConversationId) -> Result<(), StoreError> {
+    let deleted = self
+      .inner
+      .delete(Table::SyncState, &media_purge_key(conversation));
+    let mut purges = self.purges();
+    purges.in_flight.remove(&conversation);
+    if deleted.is_ok() {
+      purges.backoff.remove(&conversation);
+    } else {
+      purges.is_due = true;
+    }
+    deleted
+  }
+
+  /// The host couldn't drop `conversation`'s pictures now: handed out again later, after a pause
+  /// that grows with each failure.
+  pub fn media_purge_failed(&self, conversation: ConversationId) {
+    let mut purges = self.purges();
+    purges.in_flight.remove(&conversation);
+    purges.is_due = true;
+    let backoff = purges.backoff.entry(conversation).or_insert(Backoff {
+      failures: 0,
+      skips_left: 0,
+    });
+    backoff.failures = backoff.failures.saturating_add(1);
+    backoff.skips_left = 1u32
+      .checked_shl(backoff.failures)
+      .unwrap_or(u32::MAX)
+      .min(MAX_MEDIA_PURGE_SKIPS);
   }
 
   /// The wrapped store (for what only it offers, like flushing to disk).
@@ -164,6 +294,9 @@ impl<S: LocalStore> TrackedStore<S> {
 
   /// Notes the image attachments of `messages`, which are going away.
   fn note_removed(&self, messages: impl IntoIterator<Item = StoredMessage>) {
+    if !self.has_media_cache {
+      return;
+    }
     let mut removed = self
       .removed_renditions
       .lock()
@@ -192,23 +325,17 @@ impl<S: LocalStore> TrackedStore<S> {
     }
   }
 
-  /// The messages with media of `conversation`, which went away for this user.
+  /// Every picture of `conversation`, which went away for this user: a record in the same group
+  /// of writes, so it is not lost to a crash before the host dropped them.
   fn note_removed_conversation(&self, conversation: ConversationId) -> Result<(), StoreError> {
-    let mut range = MediaRange::Older(None);
-    loop {
-      let page = self
-        .inner
-        .media_messages(conversation, range, REMOVED_CONVERSATION_PAGE)?;
-      let is_last = page.len() < REMOVED_CONVERSATION_PAGE;
-      let Some(oldest) = page.last().and_then(|message| message.maybe_server_id) else {
-        return Ok(());
-      };
-      self.note_removed(page);
-      if is_last {
-        return Ok(());
-      }
-      range = MediaRange::Older(Some(oldest));
+    if !self.notes_conversation_purges {
+      return Ok(());
     }
+    self
+      .inner
+      .put(Table::SyncState, &media_purge_key(conversation), &[])?;
+    self.purges().is_due = true;
+    Ok(())
   }
 
   /// Before the cache is read or patched: drops it if another process committed to the database.
@@ -221,6 +348,11 @@ impl<S: LocalStore> TrackedStore<S> {
   fn cache(&self) -> std::sync::MutexGuard<'_, MessageCache> {
     // Invariant-free data: at worst a conversation is read from the disk again.
     self.messages.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+
+  fn purges(&self) -> std::sync::MutexGuard<'_, MediaPurges> {
+    // Invariant-free data: at worst a purge is handed out again (dropping is idempotent).
+    self.media_purges.lock().unwrap_or_else(PoisonError::into_inner)
   }
 
   fn lock(&self) -> std::sync::MutexGuard<'_, StoreChanges> {
@@ -249,10 +381,8 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   fn delete(&self, table: Table, key: &str) -> Result<(), StoreError> {
     if table == Table::Conversations
       && let Ok(conversation) = key.parse::<ConversationId>()
-      && let Err(error) = self.note_removed_conversation(conversation)
     {
-      // Only the cache's cleanup is lost; its age limit still ends the renditions.
-      tracing::debug!(%error, "could not list the pictures of a conversation that went away");
+      self.note_removed_conversation(conversation)?;
     }
     if table == Table::Conversations {
       self.inner.delete(Table::EntryTallies, key)?;
@@ -445,7 +575,8 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   }
 
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
-    self.note_removed(self.inner.messages(conversation, MessageFilter::All)?);
+    // Not read message by message: a big channel would be held in memory whole.
+    self.note_removed_conversation(conversation)?;
     self.inner.delete_messages(conversation)?;
     self
       .inner
@@ -546,6 +677,10 @@ fn attachments(content: &MessageContent) -> &[AttachmentRef] {
     MessageContent::Text { meta, .. } => &meta.attachments,
     _ => &[],
   }
+}
+
+fn media_purge_key(conversation: ConversationId) -> String {
+  format!("{MEDIA_PURGE_PREFIX}{conversation}")
 }
 
 fn classify(table: Table, key: &str) -> Change {
@@ -670,7 +805,7 @@ mod tests {
 
     #[test]
     fn a_deleted_message_gives_up_its_pictures() {
-      let store = TrackedStore::new(MemoryStore::new());
+      let store = TrackedStore::new(MemoryStore::new()).with_media_cache();
       let picture = file_message(1, Some(10), "image/png");
       store.upsert_message(&picture).unwrap();
       store
@@ -692,7 +827,7 @@ mod tests {
 
     #[test]
     fn a_message_or_a_conversation_that_goes_away_gives_up_its_pictures() {
-      let store = TrackedStore::new(MemoryStore::new());
+      let store = TrackedStore::new(MemoryStore::new()).with_media_cache();
       store
         .upsert_message(&file_message(1, Some(10), "image/png"))
         .unwrap();
@@ -705,18 +840,20 @@ mod tests {
         .delete_message(id(7), ClientMessageId::from_bytes([1; 16]))
         .unwrap();
       assert_eq!(store.take_removed_renditions(), vec![removed(10)]);
+      assert!(store.take_media_purges().is_empty());
       store.put(Table::Conversations, "7", b"{}").unwrap();
       store.delete(Table::Conversations, "7").unwrap();
       assert_eq!(
-        store.take_removed_renditions(),
-        vec![removed(11)],
-        "no longer listed"
+        store.take_media_purges(),
+        vec![id(7)],
+        "no longer listed: all of it goes, sent or not"
       );
+      assert!(store.take_removed_renditions().is_empty(), "not one by one");
     }
 
     #[test]
     fn notes_nobody_takes_stay_bounded() {
-      let store = TrackedStore::new(MemoryStore::new());
+      let store = TrackedStore::new(MemoryStore::new()).with_media_cache();
       let extra = 10;
       store.note_removed(
         (0..MAX_REMOVED_RENDITIONS + extra).map(|n| file_message(1, Some(1_000 + n as i64), "image/png")),
@@ -724,6 +861,97 @@ mod tests {
       let kept = store.take_removed_renditions();
       assert_eq!(kept.len(), MAX_REMOVED_RENDITIONS);
       assert_eq!(kept[0].message, id(1_000 + extra as i64), "the oldest went");
+    }
+
+    #[test]
+    fn a_purge_notes_the_conversation_however_big_it_is() {
+      let store = TrackedStore::new(MemoryStore::new()).with_media_cache();
+      let many = MAX_REMOVED_RENDITIONS + 10;
+      for n in 0..many {
+        let mut message = file_message(1, Some(1_000 + n as i64), "image/png");
+        message.client_message_id = ClientMessageId::from_bytes((n as u128).to_be_bytes());
+        store.upsert_message(&message).unwrap();
+      }
+      store.delete_messages(id(7)).unwrap();
+      assert_eq!(store.take_media_purges(), vec![id(7)]);
+      assert!(store.take_removed_renditions().is_empty());
+    }
+
+    #[test]
+    fn a_purge_stays_due_until_the_host_confirms_it_also_across_a_restart() {
+      let disk = Arc::new(MemoryStore::new());
+      let store = TrackedStore::new(disk.clone()).with_media_cache();
+      store.begin_writes().unwrap();
+      store.delete_messages(id(7)).unwrap();
+      store.delete_messages(id(8)).unwrap();
+      store.end_writes().unwrap();
+      assert_eq!(store.take_media_purges(), vec![id(7), id(8)]);
+      assert!(store.take_media_purges().is_empty(), "in flight: once");
+      store.media_purged(id(7)).unwrap();
+      // The app ended before the cache dropped the second one.
+      drop(store);
+
+      let restarted = TrackedStore::new(disk).with_media_cache();
+      assert_eq!(restarted.take_media_purges(), vec![id(8)]);
+      restarted.media_purged(id(8)).unwrap();
+      assert!(restarted.take_media_purges().is_empty());
+      assert!(
+        restarted.take_media_purges().is_empty(),
+        "and the store isn't read again"
+      );
+    }
+
+    #[test]
+    fn a_failed_purge_comes_back_after_a_pause_that_grows() {
+      let store = TrackedStore::new(MemoryStore::new()).with_media_cache();
+      store.delete_messages(id(7)).unwrap();
+      assert_eq!(store.take_media_purges(), vec![id(7)]);
+      store.media_purge_failed(id(7));
+      assert_eq!(looks_until_handed_out(&store), 2);
+      store.media_purge_failed(id(7));
+      assert_eq!(looks_until_handed_out(&store), 4);
+      for _ in 0..10 {
+        store.media_purge_failed(id(7));
+        looks_until_handed_out(&store);
+      }
+      store.media_purge_failed(id(7));
+      assert_eq!(
+        looks_until_handed_out(&store),
+        MAX_MEDIA_PURGE_SKIPS as usize,
+        "capped"
+      );
+      store.media_purged(id(7)).unwrap();
+      assert!(store.take_media_purges().is_empty());
+    }
+
+    #[test]
+    fn without_a_media_cache_nothing_is_noted() {
+      let store = TrackedStore::new(MemoryStore::new());
+      let picture = file_message(1, Some(10), "image/png");
+      store.upsert_message(&picture).unwrap();
+      store
+        .upsert_message(&StoredMessage {
+          content: MessageContent::Deleted,
+          ..picture
+        })
+        .unwrap();
+      store.delete_messages(id(7)).unwrap();
+      assert!(store.take_removed_renditions().is_empty());
+      assert!(store.take_media_purges().is_empty());
+      assert!(
+        store
+          .list_prefix(Table::SyncState, MEDIA_PURGE_PREFIX)
+          .unwrap()
+          .is_empty(),
+        "no record that nobody would delete"
+      );
+    }
+
+    /// How many looks pass until the failed purge of conversation 7 is handed out again.
+    fn looks_until_handed_out(store: &TrackedStore<MemoryStore>) -> usize {
+      (0..1_000)
+        .find(|_| store.take_media_purges() == vec![id(7)])
+        .expect("handed out again")
     }
 
     fn removed(message: i64) -> RemovedRendition {

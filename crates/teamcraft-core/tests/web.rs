@@ -634,6 +634,69 @@ async fn a_group_a_panic_left_open_never_reaches_the_disk() {
   assert_eq!(other.get(Table::Users, "half of a group").unwrap(), None);
 }
 
+/// Issue #1161: a purge deletes the conversation's two key ranges in IndexedDB – every picture of
+/// it, however its messages are numbered – and nothing of another conversation or the shared
+/// group, whose keys sort right next to it. A download ending after the purge isn't kept.
+#[cfg(feature = "service-worker")]
+#[wasm_bindgen_test]
+async fn a_purge_drops_a_conversation_s_pictures_and_nothing_else() {
+  use teamcraft_core::media_cache::{BrowserMediaCache, CachePolicy, CachedMedia, MediaKey};
+
+  let name = database_name();
+  let cache = BrowserMediaCache::open(&name).await.unwrap();
+  let purged = id::<ConversationId>(1);
+  let rendition = |conversation: ConversationId, message: i64| MediaKey::Rendition {
+    conversation,
+    message: id(message),
+    attachment: id(message),
+    content_sha256: [1; 32],
+  };
+  let picture = || CachedMedia {
+    version: "v".to_owned(),
+    content_type: "image/png".to_owned(),
+    bytes: b"a picture".to_vec().into(),
+  };
+  let gone = [
+    rendition(purged, 1),
+    rendition(purged, i64::MAX),
+    MediaKey::ChannelImage(purged),
+  ];
+  let kept = [
+    rendition(id(2), 1),
+    MediaKey::ChannelImage(id(2)),
+    MediaKey::Avatar(id(1)),
+    MediaKey::SpaceImage(id(1)),
+  ];
+  for key in gone.iter().chain(&kept) {
+    cache.put(key, &picture(), CachePolicy::default()).await.unwrap();
+  }
+
+  cache.remove_conversation(purged).await.unwrap();
+  cache
+    .put(&rendition(purged, 5), &picture(), CachePolicy::default())
+    .await
+    .unwrap();
+
+  let max_age = Duration::from_secs(3600);
+  for key in gone.iter().chain([&rendition(purged, 5)]) {
+    assert!(cache.get(key, max_age).await.is_none(), "{key:?}");
+  }
+  for key in &kept {
+    assert!(cache.get(key, max_age).await.is_some(), "{key:?}");
+  }
+  cache.close();
+  drop(cache);
+  let reopened = BrowserMediaCache::open(&name).await.unwrap();
+  assert!(
+    reopened
+      .get(&MediaKey::ChannelImage(purged), max_age)
+      .await
+      .is_none()
+  );
+  assert!(reopened.get(&kept[0], max_age).await.is_some());
+  reopened.remove_conversation(purged).await.unwrap();
+}
+
 fn id<T: Id>(raw: i64) -> T {
   T::from_snowflake(Snowflake::new(raw).unwrap())
 }

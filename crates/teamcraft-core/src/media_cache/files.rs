@@ -1,6 +1,8 @@
-//! The media cache as files (desktop): one sealed file per entry in a directory per account, named
-//! by its lookup ID. A file's modification time is its last use, so the eviction order survives a
-//! restart without an index file that could disagree with the directory.
+//! The media cache as files (desktop): one sealed file per entry in a directory per account, in a
+//! folder per group (a conversation, or the pictures of people and spaces), both named by their
+//! lookup IDs: `{group}/{entry}`. A file's modification time is its last use, so the eviction order
+//! survives a restart without an index file that could disagree with the directory. A purged
+//! conversation's folder goes as a whole ([`FileMediaCache::remove_conversation`]).
 //!
 //! Blocking file I/O: callers on an async runtime run it on a blocking thread.
 
@@ -12,11 +14,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use teamcraft_crypto::local_store::LookupId;
 use teamcraft_crypto::secret::SymmetricKey;
+use teamcraft_proto::ConversationId;
 
 use super::entry::{hex_name, lookup_id_of};
 use super::{
-  CacheIndex, CachePolicy, CachedMedia, MAX_ENTRY_BYTES, MAX_SEALED_BYTES, MediaCacheError, MediaKey,
-  MediaSealer, is_too_old,
+  CacheIndex, CachePolicy, CachedMedia, EntryId, MAX_ENTRY_BYTES, MAX_SEALED_BYTES, MediaCacheError,
+  MediaKey, MediaSealer, is_too_old,
 };
 
 /// Suffix of a file being written; renamed into place when complete, deleted when found on opening.
@@ -64,16 +67,49 @@ impl FileMediaCache {
   }
 
   pub fn remove(&self, key: &MediaKey) -> Result<(), MediaCacheError> {
-    let id = self.sealer.lookup_id(key);
+    let id = self.sealer.entry_id(key);
     self.drop_entry(&id)
+  }
+
+  /// Drops every entry of `conversation` – its channel picture and the renditions of all its
+  /// messages, sent or not – however many there are (e2ee.md §4.6, §9.6). Nothing there is fine.
+  /// A picture of it still downloading isn't cached afterwards ([`CacheIndex::fence`]). Blocking
+  /// for as long as the folder takes to delete.
+  pub fn remove_conversation(&self, conversation: ConversationId) -> Result<(), MediaCacheError> {
+    self.remove_conversation_at(conversation, SystemTime::now())
   }
 
   pub fn used_bytes(&self) -> u64 {
     self.lock().used_bytes()
   }
 
+  fn remove_conversation_at(
+    &self,
+    conversation: ConversationId,
+    now: SystemTime,
+  ) -> Result<(), MediaCacheError> {
+    let group = self.sealer.conversation_group(conversation);
+    let folder = self.group_dir(&group);
+    self.lock().fence(group, millis(now));
+    let deleted = match fs::remove_dir_all(&folder) {
+      Err(error) if error.kind() != ErrorKind::NotFound => Err(error),
+      _ => Ok(()),
+    };
+    let mut index = self.lock();
+    let dropped = index.remove_group(&group);
+    if let Err(error) = deleted {
+      // What is left is counted against the limit again; the next purge finds it.
+      if let Err(scan_error) = scan_group(&folder, group, &mut index) {
+        tracing::debug!(error = %scan_error, "could not count what a purge left");
+      }
+      return Err(error.into());
+    }
+    tracing::debug!(conversation_id = %conversation, dropped, "dropped a conversation's cached pictures");
+    Ok(())
+  }
+
   fn get_at(&self, key: &MediaKey, max_age: Duration, now: SystemTime) -> Option<CachedMedia> {
-    let id = self.sealer.lookup_id(key);
+    let id = self.sealer.entry_id(key);
     let path = self.path(&id);
     let sealed = match read_bounded(&path) {
       Ok(Some(sealed)) => sealed,
@@ -131,9 +167,13 @@ impl FileMediaCache {
     if size_bytes > policy.budget_bytes {
       return self.remove(key);
     }
-    let id = self.sealer.lookup_id(key);
+    let id = self.sealer.entry_id(key);
+    if self.lock().is_fenced(&id.group, millis(now)) {
+      return Ok(());
+    }
     let path = self.path(&id);
     let partial = path.with_extension(PARTIAL_SUFFIX.trim_start_matches('.'));
+    fs::create_dir_all(self.group_dir(&id.group))?;
     fs::write(&partial, &sealed)?;
     if let Err(error) = File::options()
       .write(true)
@@ -145,6 +185,11 @@ impl FileMediaCache {
     fs::rename(&partial, &path)?;
     let evicted = {
       let mut index = self.lock();
+      // Purged while this was written: the purge may have missed the file.
+      if index.is_fenced(&id.group, millis(now)) {
+        drop(index);
+        return remove_file(&path);
+      }
       index.insert(id, size_bytes, millis(now));
       let mut evicted = index.take_expired(millis(now), policy.max_age_ms());
       evicted.extend(index.evict_to(policy.budget_bytes, Some(&id)));
@@ -158,19 +203,23 @@ impl FileMediaCache {
     Ok(())
   }
 
-  fn drop_entry(&self, id: &LookupId) -> Result<(), MediaCacheError> {
+  fn drop_entry(&self, id: &EntryId) -> Result<(), MediaCacheError> {
     self.lock().remove(id);
     remove_file(&self.path(id))
   }
 
-  fn drop_logged(&self, id: &LookupId) {
+  fn drop_logged(&self, id: &EntryId) {
     if let Err(error) = self.drop_entry(id) {
       tracing::warn!(%error, "could not delete a media cache entry");
     }
   }
 
-  fn path(&self, id: &LookupId) -> PathBuf {
-    self.dir.join(hex_name(id))
+  fn path(&self, id: &EntryId) -> PathBuf {
+    self.group_dir(&id.group).join(hex_name(&id.entry))
+  }
+
+  fn group_dir(&self, group: &LookupId) -> PathBuf {
+    self.dir.join(hex_name(group))
   }
 
   fn lock(&self) -> MutexGuard<'_, CacheIndex> {
@@ -179,30 +228,76 @@ impl FileMediaCache {
   }
 }
 
-/// The index of the entries in `dir`; files a write left behind are deleted, others ignored.
+/// The index of the entries in `dir`'s group folders. Files a write left behind are deleted, and so
+/// are entries of the layout before groups (#1161), directly in `dir`: no purge could find them.
+/// Anything else is ignored.
 fn scan(dir: &Path) -> Result<CacheIndex, MediaCacheError> {
   let mut index = CacheIndex::default();
   for item in fs::read_dir(dir)? {
     let item = item?;
-    let name = item.file_name();
-    let Some(name) = name.to_str() else {
+    let Some((name, kind)) = entry_name(&item)? else {
       continue;
     };
-    if name.ends_with(PARTIAL_SUFFIX) {
-      remove_file(&item.path())?;
-      continue;
+    match (lookup_id_of(&name), kind) {
+      (Some(group), Kind::Folder) => scan_group(&item.path(), group, &mut index)?,
+      (Some(_), Kind::File) => remove_file(&item.path())?,
+      (None, _) => {},
     }
-    let Some(id) = lookup_id_of(name) else {
+  }
+  Ok(index)
+}
+
+/// Notes the entries in the folder of `group`; an empty folder is removed.
+fn scan_group(folder: &Path, group: LookupId, index: &mut CacheIndex) -> Result<(), MediaCacheError> {
+  let mut is_empty = true;
+  for item in fs::read_dir(folder)? {
+    let item = item?;
+    let Some((name, Kind::File)) = entry_name(&item)? else {
+      is_empty = false;
+      continue;
+    };
+    let Some(entry) = lookup_id_of(&name) else {
+      is_empty = false;
       continue;
     };
     let metadata = item.metadata()?;
-    if !metadata.is_file() {
-      continue;
-    }
     let used = metadata.modified().unwrap_or(UNIX_EPOCH);
-    index.insert(id, metadata.len(), millis(used));
+    index.insert(EntryId { group, entry }, metadata.len(), millis(used));
+    is_empty = false;
   }
-  Ok(index)
+  if is_empty {
+    // Another process may be writing into it just now; it stays then, which is fine.
+    drop(fs::remove_dir(folder));
+  }
+  Ok(())
+}
+
+/// What a folder item is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+  File,
+  Folder,
+}
+
+/// The item's name and kind; `None` for a file a write left behind (deleted now) or a name that
+/// isn't UTF-8.
+fn entry_name(item: &fs::DirEntry) -> Result<Option<(String, Kind)>, MediaCacheError> {
+  let Ok(name) = item.file_name().into_string() else {
+    return Ok(None);
+  };
+  let file_type = item.file_type()?;
+  if file_type.is_file() && name.ends_with(PARTIAL_SUFFIX) {
+    remove_file(&item.path())?;
+    return Ok(None);
+  }
+  let kind = if file_type.is_dir() {
+    Kind::Folder
+  } else if file_type.is_file() {
+    Kind::File
+  } else {
+    return Ok(None);
+  };
+  Ok(Some((name, kind)))
 }
 
 /// The file's bytes, or `None` when it is larger than any entry can be (checked before reading, so a
@@ -247,14 +342,14 @@ mod tests {
       .expect("put");
     drop(cache);
 
-    for file in fs::read_dir(dir.path()).expect("list") {
-      let file = file.expect("file");
-      let name = file.file_name().into_string().expect("utf-8");
-      assert!(
-        lookup_id_of(&name).is_some(),
-        "named by a pseudorandom ID: {name}"
-      );
-      let bytes = fs::read(file.path()).expect("read");
+    let files = files_in(dir.path());
+    assert_eq!(files.len(), 1);
+    for file in files {
+      for name in [&file, file.parent().expect("a group folder")] {
+        let name = name.file_name().and_then(|name| name.to_str()).expect("utf-8");
+        assert!(lookup_id_of(name).is_some(), "named by a pseudorandom ID: {name}");
+      }
+      let bytes = fs::read(&file).expect("read");
       assert!(
         !bytes.windows(PICTURE.len()).any(|window| window == PICTURE),
         "no plaintext on disk"
@@ -286,7 +381,7 @@ mod tests {
     let key = MediaKey::Avatar(id::<UserId>(1));
     let cache = FileMediaCache::open(dir.path(), &database_key(1)).expect("open");
     cache.put(&key, &media("v1", PICTURE), policy()).expect("put");
-    let path = cache.path(&cache.sealer.lookup_id(&key));
+    let path = cache.path(&cache.sealer.entry_id(&key));
     let mut bytes = fs::read(&path).expect("read");
     if let Some(last) = bytes.last_mut() {
       *last ^= 1;
@@ -302,7 +397,8 @@ mod tests {
     let dir = TestDir::new("planted");
     let key = MediaKey::Avatar(id::<UserId>(1));
     let cache = FileMediaCache::open(dir.path(), &database_key(1)).expect("open");
-    let path = cache.path(&cache.sealer.lookup_id(&key));
+    let path = cache.path(&cache.sealer.entry_id(&key));
+    fs::create_dir_all(path.parent().expect("a group folder")).expect("create");
     let planted = File::create(&path).expect("create");
     planted.set_len(MAX_SEALED_BYTES + 1).expect("grow");
     assert!(cache.get(&key, DAY).is_none());
@@ -326,11 +422,7 @@ mod tests {
       (hit.version.as_str(), hit.bytes.expose_secret()),
       ("v2", &b"new picture"[..])
     );
-    assert_eq!(
-      fs::read_dir(dir.path()).expect("list").count(),
-      1,
-      "one file per key"
-    );
+    assert_eq!(files_in(dir.path()).len(), 1, "one file per key");
   }
 
   #[test]
@@ -396,7 +488,7 @@ mod tests {
     cache
       .put_at(&fresh, &media("r", PICTURE), policy(), later)
       .expect("put");
-    let old_path = cache.path(&cache.sealer.lookup_id(&old));
+    let old_path = cache.path(&cache.sealer.entry_id(&old));
     assert!(!old_path.exists(), "swept without being read");
     assert!(cache.get_at(&fresh, month, later).is_some());
   }
@@ -447,6 +539,165 @@ mod tests {
     assert!(fresh.get(&key, DAY).is_none());
   }
 
+  mod purge {
+    use super::*;
+
+    /// More renditions than the queue of removed ones held (`MAX_REMOVED_RENDITIONS`), through
+    /// which a purge used to go.
+    const MANY: i64 = 4_200;
+
+    #[test]
+    fn a_purge_drops_every_picture_of_the_conversation_and_keeps_the_others() {
+      let dir = TestDir::new("purge");
+      let cache = FileMediaCache::open(dir.path(), &database_key(1)).expect("open");
+      let purged = id::<ConversationId>(1);
+      let kept = id::<ConversationId>(2);
+      for n in 1..=MANY {
+        cache
+          .put(&rendition_in(purged, n), &media("r", PICTURE), big_policy())
+          .expect("put");
+      }
+      let others = [
+        rendition_in(kept, 1),
+        MediaKey::ChannelImage(kept),
+        MediaKey::Avatar(id(1)),
+        MediaKey::SpaceImage(id(1)),
+      ];
+      for key in [MediaKey::ChannelImage(purged)].iter().chain(&others) {
+        cache.put(key, &media("v", PICTURE), big_policy()).expect("put");
+      }
+      let kept_bytes = {
+        let other = FileMediaCache::open(TestDir::new("purge-size").path(), &database_key(1)).expect("open");
+        for key in &others {
+          other.put(key, &media("v", PICTURE), big_policy()).expect("put");
+        }
+        other.used_bytes()
+      };
+
+      cache.remove_conversation(purged).expect("purge");
+
+      assert!(
+        cache.get(&MediaKey::ChannelImage(purged), DAY).is_none(),
+        "its picture"
+      );
+      assert!(cache.get(&rendition_in(purged, 1), DAY).is_none());
+      assert!(cache.get(&rendition_in(purged, MANY), DAY).is_none());
+      assert_eq!(cache.used_bytes(), kept_bytes, "nothing of it is counted");
+      assert_eq!(files_in(dir.path()).len(), others.len(), "nothing of it on disk");
+      for key in &others {
+        assert!(cache.get(key, DAY).is_some(), "kept: {key:?}");
+      }
+      drop(cache);
+      let reopened = FileMediaCache::open(dir.path(), &database_key(1)).expect("reopen");
+      assert_eq!(reopened.used_bytes(), kept_bytes);
+      cache_has_none_of(&reopened, purged);
+    }
+
+    #[test]
+    fn a_purge_cut_short_is_finished_by_running_it_again_after_a_restart() {
+      let dir = TestDir::new("purge-crash");
+      let cache = FileMediaCache::open(dir.path(), &database_key(1)).expect("open");
+      let purged = id::<ConversationId>(1);
+      for n in 1..=20 {
+        cache
+          .put(&rendition_in(purged, n), &media("r", PICTURE), policy())
+          .expect("put");
+      }
+      cache
+        .put(&MediaKey::ChannelImage(purged), &media("v", PICTURE), policy())
+        .expect("put");
+      // The process died while deleting the folder: some files went, the rest are still there.
+      for file in files_in(dir.path()).into_iter().step_by(2) {
+        fs::remove_file(file).expect("delete");
+      }
+      drop(cache);
+
+      let reopened = FileMediaCache::open(dir.path(), &database_key(1)).expect("reopen");
+      assert!(reopened.used_bytes() > 0, "half of it is still there");
+      reopened.remove_conversation(purged).expect("purge again");
+      reopened
+        .remove_conversation(purged)
+        .expect("and once more is fine");
+      assert_eq!(reopened.used_bytes(), 0);
+      assert!(files_in(dir.path()).is_empty());
+      cache_has_none_of(&reopened, purged);
+    }
+
+    #[test]
+    fn a_download_ending_after_the_purge_is_not_cached_again() {
+      let dir = TestDir::new("purge-race");
+      let cache = FileMediaCache::open(dir.path(), &database_key(1)).expect("open");
+      let purged = id::<ConversationId>(1);
+      let other = rendition_in(id(2), 1);
+      cache.remove_conversation_at(purged, at(100)).expect("purge");
+      // The download started before the purge and ends a minute after it.
+      cache
+        .put_at(&rendition_in(purged, 1), &media("r", PICTURE), policy(), at(160))
+        .expect("refused quietly");
+      cache
+        .put_at(
+          &MediaKey::ChannelImage(purged),
+          &media("v", PICTURE),
+          policy(),
+          at(160),
+        )
+        .expect("refused quietly");
+      cache
+        .put_at(&other, &media("r", PICTURE), policy(), at(160))
+        .expect("put");
+      assert_eq!(files_in(dir.path()).len(), 1, "only the other conversation's");
+      assert!(cache.get_at(&other, DAY, at(161)).is_some());
+      // Long after (the conversation came back, say): cached as usual.
+      cache
+        .put_at(
+          &rendition_in(purged, 1),
+          &media("r", PICTURE),
+          policy(),
+          at(100 + 11 * 60),
+        )
+        .expect("put");
+      assert!(
+        cache
+          .get_at(&rendition_in(purged, 1), DAY, at(100 + 11 * 60))
+          .is_some()
+      );
+    }
+
+    #[test]
+    fn entries_of_the_layout_before_groups_go_on_opening() {
+      let dir = TestDir::new("legacy");
+      fs::create_dir_all(dir.path()).expect("create");
+      let legacy = dir.path().join("cd".repeat(32));
+      fs::write(&legacy, b"an entry no purge could find").expect("legacy");
+      let cache = FileMediaCache::open(dir.path(), &database_key(1)).expect("open");
+      assert!(!legacy.exists());
+      assert_eq!(cache.used_bytes(), 0);
+    }
+
+    fn cache_has_none_of(cache: &FileMediaCache, conversation: ConversationId) {
+      assert!(cache.get(&MediaKey::ChannelImage(conversation), DAY).is_none());
+      for n in [1, 2, 19, 20] {
+        assert!(cache.get(&rendition_in(conversation, n), DAY).is_none());
+      }
+    }
+
+    fn big_policy() -> CachePolicy {
+      CachePolicy {
+        budget_bytes: 64 * 1024 * 1024,
+        max_age: 30 * DAY,
+      }
+    }
+
+    fn rendition_in(conversation: ConversationId, n: i64) -> MediaKey {
+      MediaKey::Rendition {
+        conversation,
+        message: id(n),
+        attachment: id(n),
+        content_sha256: [1; 32],
+      }
+    }
+  }
+
   fn policy() -> CachePolicy {
     CachePolicy {
       budget_bytes: 1024 * 1024,
@@ -469,6 +720,23 @@ mod tests {
       content_type: "image/jpeg".to_owned(),
       bytes: SecretBytes::new(bytes.to_vec()),
     }
+  }
+
+  /// Every entry file in the group folders of `dir`.
+  fn files_in(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for group in fs::read_dir(dir).expect("list") {
+      let group = group.expect("group").path();
+      if group.is_dir() {
+        files.extend(
+          fs::read_dir(&group)
+            .expect("list")
+            .map(|file| file.expect("file").path()),
+        );
+      }
+    }
+    files.sort();
+    files
   }
 
   fn database_key(seed: u8) -> SymmetricKey {

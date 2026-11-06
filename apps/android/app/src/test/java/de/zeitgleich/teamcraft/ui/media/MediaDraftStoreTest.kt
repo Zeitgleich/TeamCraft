@@ -44,6 +44,29 @@ class MediaDraftStoreTest {
     assertFalse(captures.exists())
   }
 
+  @Test
+  fun aDroppedConversationsDraftsGoWithTheirCameraFilesAndOthersStay() {
+    val files = files()
+    File(files, "media-flow").mkdirs()
+    val dropped = listOf("draft-111-.sealed", "draft-111-.key", "draft-111-222.sealed")
+      .map { File(files, "media-flow/$it").apply { writeText("x") } }
+    // Another conversation whose ID starts with the same digits.
+    val other = File(files, "media-flow/draft-1112-.sealed").apply { writeText("x") }
+    val droppedCaptures = capture(files, "server-a", "account-1", "111-222")
+    val otherCaptures = capture(files, "server-a", "account-1", "1112-")
+    assertTrue(MediaDraftStore.dropConversation(files, "111"))
+    dropped.forEach { assertFalse(it.name, it.exists()) }
+    assertFalse(droppedCaptures.exists())
+    assertTrue(other.exists())
+    assertTrue(otherCaptures.exists())
+  }
+
+  @Test
+  fun aConversationWithoutDraftsIsDroppedAtOnce() {
+    assertTrue(MediaDraftStore.dropConversation(files(), "111"))
+    assertTrue(MediaDraftStore.dropConversation(files(), "not-an-id"))
+  }
+
   private fun files(): File = Files.createTempDirectory("media-draft").toFile().apply { deleteOnExit() }
 
   private fun capture(files: File, server: String, account: String, key: String): File =

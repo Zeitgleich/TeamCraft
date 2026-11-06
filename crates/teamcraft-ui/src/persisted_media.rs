@@ -181,6 +181,29 @@ pub fn drop_renditions(removed: Vec<teamcraft_core::store::RemovedRendition>) {
   }
 }
 
+/// Every picture of `conversations` (purged, or no longer listed; the core in the page notes them):
+/// out of the cache, however many there are. `on_done` hears of each: dropped, or why not (the
+/// cache isn't open, or its deletion failed).
+#[cfg(target_arch = "wasm32")]
+pub fn drop_conversations(
+  conversations: Vec<teamcraft_proto::ConversationId>,
+  on_done: impl Fn(teamcraft_proto::ConversationId, Result<(), String>) + 'static,
+) {
+  leptos::task::spawn_local(async move {
+    let maybe_cache = if is_demo() { None } else { browser_cache().await };
+    for conversation in conversations {
+      let outcome = match &maybe_cache {
+        Some(cache) => cache
+          .remove_conversation(conversation)
+          .await
+          .map_err(|error| error.to_string()),
+        None => Err("no media cache is open".to_owned()),
+      };
+      on_done(conversation, outcome);
+    }
+  });
+}
+
 /// The settings a write goes with.
 #[derive(Clone, Copy)]
 struct Policy {

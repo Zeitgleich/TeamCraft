@@ -303,6 +303,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     viewModelScope.launch(Dispatchers.IO) { MediaDraftStore.sweep(getApplication(), System.currentTimeMillis()) }
     viewModelScope.launch { graph.core.changeCount.collect { isStartCacheStale = true } }
+    viewModelScope.launch(Dispatchers.IO) { graph.core.changeCount.collect { dropDraftsOfDroppedConversations() } }
     ProcessLifecycleOwner.get().lifecycle.addObserver(startCacheOnLeave)
     refresh()
     retryServerWhenOnline()
@@ -618,6 +619,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     isStartCacheStale = false
     rememberStartCache()
     readAhead()
+  }
+
+  /**
+   * Media drafts and their camera shots of conversations the core purged or no longer lists
+   * (#1161): deleted, then reported back. The core hands each out once and remembers it across a
+   * restart until it is reported dropped.
+   */
+  private suspend fun dropDraftsOfDroppedConversations() {
+    val core = runCatching { graph.core.core() }.getOrNull() ?: return
+    val dropped = runCatching { core.droppedConversations() }.getOrNull().orEmpty()
+    for (conversation in dropped) {
+      val isDropped = MediaDraftStore.dropConversation(getApplication(), conversation)
+      runCatching {
+        if (isDropped) core.conversationFilesDropped(conversation) else core.conversationFilesKept(conversation)
+      }
+    }
   }
 
   /** What [conversationId] showed last or was read ahead with, to show before its first read. */
