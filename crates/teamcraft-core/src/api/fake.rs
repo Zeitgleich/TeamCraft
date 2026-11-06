@@ -2131,6 +2131,7 @@ impl ServerApi for FakeServerApi {
         maybe_username: user.maybe_username.clone(),
         display_name: user.display_name.clone(),
         role: Role::Member,
+        maybe_max_attachment_bytes: state.maybe_max_attachment_bytes,
       })
     })
   }

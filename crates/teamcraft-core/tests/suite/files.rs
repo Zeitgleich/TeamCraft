@@ -182,6 +182,29 @@ async fn uploads_resume_after_network_loss_and_respect_the_size_limit() {
   );
 }
 
+/// The composer shows the server's limit as a plain file size, and follows an admin's change.
+#[tokio::test]
+async fn the_composer_limit_follows_the_limit_the_server_publishes() {
+  let (server, mut alice, mut bob, _channel) = channel_with_two().await;
+  let alice_ui = backend_of(&alice);
+  assert_eq!(
+    alice_ui.max_upload_bytes(),
+    Some(teamcraft_core::client::DEFAULT_MAX_UPLOAD_BYTES),
+    "nothing published: the default"
+  );
+  server.publish_event(
+    &[alice.client.user_id()],
+    &teamcraft_proto::GatewayEvent::AttachmentLimitUpdate {
+      max_attachment_bytes: teamcraft_crypto::attachment::encrypted_len(
+        3000,
+        teamcraft_crypto::attachment::DEFAULT_CHUNK_SIZE,
+      ),
+    },
+  );
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(alice_ui.max_upload_bytes(), Some(3000));
+}
+
 /// Every app's loop retries through the same upkeep (the desktop app once skipped uploads).
 #[tokio::test]
 async fn the_periodic_upkeep_uploads_and_sends_what_waited_for_the_network() {

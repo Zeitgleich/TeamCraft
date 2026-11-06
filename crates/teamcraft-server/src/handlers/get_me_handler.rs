@@ -25,5 +25,6 @@ pub async fn get_me_handler(
     display_name: presented_name(&state.policy.get().directory, &caller.user),
     maybe_username: caller.user.maybe_username,
     role: caller.role,
+    maybe_max_attachment_bytes: Some(state.settings.get().max_attachment_bytes),
   }))
 }

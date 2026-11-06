@@ -14,8 +14,8 @@ use teamcraft_core::client::direct_uploads::{
 use teamcraft_core::client::files::UploadSource;
 use teamcraft_core::client::upload_parts::PART_CHUNKS;
 use teamcraft_core::store::{AttachmentRef, LocalStore, MessageContent, MessageFilter};
-use teamcraft_crypto::attachment::DEFAULT_CHUNK_SIZE;
-use teamcraft_proto::{Base64Bytes, ConversationId};
+use teamcraft_crypto::attachment::{DEFAULT_CHUNK_SIZE, encrypted_len};
+use teamcraft_proto::{Base64Bytes, ConversationId, GatewayEvent};
 
 /// Plaintext bytes per part.
 const PART: usize = PART_CHUNKS as usize * DEFAULT_CHUNK_SIZE as usize;
@@ -119,6 +119,162 @@ async fn a_file_over_the_server_limit_is_refused_before_anything_is_stored() {
   ));
   alice.client.abandon_direct_upload(&upload).await;
   assert_eq!(server.attachment_count(), 0);
+}
+
+/// The server publishes its limit; the client compares the encrypted size with it and refuses a
+/// file just over it, with nothing sent (the fake server itself has no limit here).
+#[tokio::test]
+async fn a_file_whose_ciphertext_is_just_over_the_published_limit_is_refused_before_upload() {
+  let (server, mut alice, _bob, channel) = channel_with_two().await;
+  let limit = encrypted_len(2000, DEFAULT_CHUNK_SIZE);
+  server.publish_event(
+    &[alice.client.user_id()],
+    &GatewayEvent::AttachmentLimitUpdate {
+      max_attachment_bytes: limit,
+    },
+  );
+  settle(&mut [&mut alice]).await;
+
+  let over = sample(2001);
+  let mut upload = direct(
+    channel,
+    bytes_source(&over),
+    "over.bin",
+    "application/octet-stream",
+    over.len(),
+  );
+  assert!(matches!(
+    alice.client.start_direct_upload(&mut upload).await,
+    Err(DirectUploadError::TooLarge)
+  ));
+  alice.client.abandon_direct_upload(&upload).await;
+  assert_eq!(server.attachment_count(), 0);
+
+  let fits = sample(2000);
+  let mut upload = direct(
+    channel,
+    bytes_source(&fits),
+    "fits.bin",
+    "application/octet-stream",
+    fits.len(),
+  );
+  upload_whole(&mut alice, &mut upload).await;
+  assert_eq!(server.attachment_count(), 1);
+}
+
+/// A client that missed the event reads the server's limit at its next full sync.
+#[tokio::test]
+async fn the_limit_also_comes_with_the_full_sync() {
+  let (server, mut alice, _bob, channel) = channel_with_two().await;
+  let limit = encrypted_len(1000, DEFAULT_CHUNK_SIZE);
+  server.set_max_attachment_bytes(limit);
+  alice.client.full_sync().await.unwrap();
+  let over = sample(1001);
+  let mut upload = direct(
+    channel,
+    bytes_source(&over),
+    "over.bin",
+    "application/octet-stream",
+    over.len(),
+  );
+  assert!(matches!(
+    alice.client.start_direct_upload(&mut upload).await,
+    Err(DirectUploadError::TooLarge)
+  ));
+  assert_eq!(
+    server.attachment_count(),
+    0,
+    "refused by the client, not by the server"
+  );
+}
+
+/// A host's explicit cap (the bridge's) holds besides the server's limit; without one the server's
+/// limit alone decides, also above 100 MiB.
+#[tokio::test]
+async fn an_explicit_client_cap_below_the_server_limit_still_applies() {
+  let server = FakeServer::new();
+  let settings = ClientSettings {
+    max_upload_bytes: Some(1000),
+    ..settings()
+  };
+  let mut alice = Peer::enroll_with_settings(&server, "Alice", settings).await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "ci")
+    .await
+    .unwrap();
+  server.publish_event(
+    &[alice.client.user_id()],
+    &GatewayEvent::AttachmentLimitUpdate {
+      max_attachment_bytes: encrypted_len(5000, DEFAULT_CHUNK_SIZE),
+    },
+  );
+  settle(&mut [&mut alice]).await;
+  let over = sample(1001);
+  let mut upload = direct(
+    channel,
+    bytes_source(&over),
+    "over.bin",
+    "application/octet-stream",
+    over.len(),
+  );
+  assert!(matches!(
+    alice.client.start_direct_upload(&mut upload).await,
+    Err(DirectUploadError::TooLarge)
+  ));
+  assert_eq!(
+    server.attachment_count(),
+    0,
+    "the client's cap, not the server's limit"
+  );
+  let fits = sample(1000);
+  let mut upload = direct(
+    channel,
+    bytes_source(&fits),
+    "fits.bin",
+    "application/octet-stream",
+    fits.len(),
+  );
+  upload_whole(&mut alice, &mut upload).await;
+  assert_eq!(server.attachment_count(), 1);
+}
+
+/// A server that publishes no limit (an older one) leaves an app on the 100 MiB default, compared
+/// with the plain size as before; a published limit replaces it.
+#[tokio::test]
+async fn without_a_published_limit_the_clients_default_applies() {
+  let (server, mut alice, _bob, channel) = channel_with_two().await;
+  // No cap of the host and nothing published: a small file is far below the default.
+  let small = sample(1001);
+  let mut upload = direct(
+    channel,
+    bytes_source(&small),
+    "small.bin",
+    "application/octet-stream",
+    small.len(),
+  );
+  upload_whole(&mut alice, &mut upload).await;
+  assert_eq!(server.attachment_count(), 1);
+
+  // Once the server publishes a smaller limit, that one decides.
+  server.publish_event(
+    &[alice.client.user_id()],
+    &GatewayEvent::AttachmentLimitUpdate {
+      max_attachment_bytes: encrypted_len(1000, DEFAULT_CHUNK_SIZE),
+    },
+  );
+  settle(&mut [&mut alice]).await;
+  let mut upload = direct(
+    channel,
+    bytes_source(&small),
+    "small.bin",
+    "application/octet-stream",
+    small.len(),
+  );
+  assert!(matches!(
+    alice.client.start_direct_upload(&mut upload).await,
+    Err(DirectUploadError::TooLarge)
+  ));
 }
 
 #[tokio::test]

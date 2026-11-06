@@ -79,7 +79,7 @@ pub async fn enroll_or_open<A: ServerApi, S: LocalStore>(
 /// pictures itself, off its loop and within its own limits (`file_hooks.rs`).
 fn client_settings(config: &BridgeConfig) -> ClientSettings {
   ClientSettings {
-    max_upload_bytes: config.files.max_file_bytes,
+    max_upload_bytes: Some(config.files.max_file_bytes),
     makes_thumbnails: false,
     ..ClientSettings::default()
   }

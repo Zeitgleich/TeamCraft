@@ -84,6 +84,15 @@ pub struct GetMeResponse {
   pub display_name: String,
   /// Highest instance role granted by the identity provider.
   pub role: Role,
+  /// Largest attachment the server takes, in bytes of the encrypted file (`max_attachment_bytes`,
+  /// which an admin can change; the gateway event `attachment_limit_update` carries changes).
+  /// Absent from older servers: clients keep their default.
+  #[serde(
+    rename = "max_attachment_bytes",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_max_attachment_bytes: Option<u64>,
 }
 
 #[cfg(test)]
@@ -143,11 +152,24 @@ mod tests {
       maybe_username: None,
       display_name: "Alice".into(),
       role: Role::Member,
+      maybe_max_attachment_bytes: None,
     };
     assert_eq!(
       serde_json::to_string(&me).unwrap(),
       r#"{"id":"42","display_name":"Alice","role":"member"}"#
     );
+    let limited = GetMeResponse {
+      maybe_max_attachment_bytes: Some(1024),
+      ..me.clone()
+    };
+    assert_eq!(
+      serde_json::to_string(&limited).unwrap(),
+      r#"{"id":"42","display_name":"Alice","role":"member","max_attachment_bytes":1024}"#
+    );
+    let parsed: GetMeResponse =
+      serde_json::from_str(r#"{"id":"42","display_name":"Alice","role":"member","max_attachment_bytes":7}"#)
+        .unwrap();
+    assert_eq!(parsed.maybe_max_attachment_bytes, Some(7));
     let parsed: GetMeResponse =
       serde_json::from_str(r#"{"id":"42","username":"alice","display_name":"Alice","role":"auditor"}"#)
         .unwrap();

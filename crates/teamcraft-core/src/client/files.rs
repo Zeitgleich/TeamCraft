@@ -5,7 +5,7 @@ use std::pin::Pin;
 
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use teamcraft_crypto::attachment::{AttachmentKey, DEFAULT_CHUNK_SIZE, encrypt_attachment};
+use teamcraft_crypto::attachment::{AttachmentKey, DEFAULT_CHUNK_SIZE, encrypt_attachment, encrypted_len};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_crypto::share_link::create_fragment;
@@ -767,13 +767,53 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// Whether the file is too large: its encrypted size against the limit the server published
+  /// (the plain size against the default for servers that don't), and its plain size against the
+  /// host's own cap, if it set one.
+  pub(super) fn is_too_large(&self, size_bytes: u64) -> bool {
+    let is_over_server = match self.server_attachment_limit() {
+      Some(limit) => encrypted_len(size_bytes, DEFAULT_CHUNK_SIZE) > limit,
+      None => size_bytes > super::DEFAULT_MAX_UPLOAD_BYTES,
+    };
+    is_over_server || self.settings.max_upload_bytes.is_some_and(|cap| size_bytes > cap)
+  }
+
+  /// The attachment limit the server published, if it does.
+  fn server_attachment_limit(&self) -> Option<u64> {
+    records::get_json::<Option<u64>>(&self.store, Table::Account, super::SERVER_ATTACHMENT_LIMIT_KEY)
+      .ok()
+      .flatten()
+      .flatten()
+  }
+
+  /// Keeps the attachment limit the server published (`None`: it doesn't, as older servers).
+  pub(super) fn store_attachment_limit(&self, maybe_limit: Option<u64>) -> Result<(), CoreError> {
+    let recorded =
+      records::get_json::<Option<u64>>(&self.store, Table::Account, super::SERVER_ATTACHMENT_LIMIT_KEY)?;
+    if recorded != Some(maybe_limit) {
+      records::put_json(
+        &self.store,
+        Table::Account,
+        super::SERVER_ATTACHMENT_LIMIT_KEY,
+        &maybe_limit,
+      )?;
+    }
+    Ok(())
+  }
+
+  /// Reads the server's attachment limit again (a full sync does).
+  pub(super) async fn refresh_attachment_limit(&self) -> Result<(), CoreError> {
+    let me = self.api.me().await?;
+    self.store_attachment_limit(me.maybe_max_attachment_bytes)
+  }
+
   /// Starts the file's next upload step: a large file's next part, any other file whole.
   pub(super) async fn start_file(
     &mut self,
     conversation: ConversationId,
     file: &mut PendingFile,
   ) -> Result<(UploadTarget, Option<BlobRequest>, TransferGuard), UploadError> {
-    if file.size_bytes > self.settings.max_upload_bytes {
+    if self.is_too_large(file.size_bytes) {
       return Err(UploadError::Failed(TransferFailure::TooLarge));
     }
     if is_multipart(file.size_bytes)

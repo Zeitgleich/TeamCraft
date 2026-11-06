@@ -462,12 +462,37 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.command(CoreCommand::ControlDownload { attachment, control });
   }
 
+  /// The largest file (plain size) this client uploads: what fits the limit the server
+  /// published, or the default for servers that don't, and no more than the host's own cap.
   pub(crate) fn ui_max_upload_bytes(&self) -> Option<u64> {
-    self.read(records::get_json(
-      self.store_ref(),
-      Table::Account,
-      crate::client::MAX_UPLOAD_KEY,
-    ))
+    let maybe_cap: Option<u64> = self
+      .read(records::get_json::<Option<u64>>(
+        self.store_ref(),
+        Table::Account,
+        crate::client::MAX_UPLOAD_KEY,
+      ))
+      .flatten();
+    let maybe_published: Option<u64> = self
+      .read(records::get_json::<Option<u64>>(
+        self.store_ref(),
+        Table::Account,
+        crate::client::SERVER_ATTACHMENT_LIMIT_KEY,
+      ))
+      .flatten();
+    let maybe_server = match maybe_published {
+      Some(limit) => Some(
+        teamcraft_crypto::attachment::max_plaintext_len(
+          limit,
+          teamcraft_crypto::attachment::DEFAULT_CHUNK_SIZE,
+        )
+        .unwrap_or(0),
+      ),
+      None => Some(crate::client::DEFAULT_MAX_UPLOAD_BYTES),
+    };
+    match (maybe_server, maybe_cap) {
+      (Some(server), Some(cap)) => Some(server.min(cap)),
+      (maybe_server, _) => maybe_server,
+    }
   }
 
   /// The attachment ID of one file of a message; `None` if the message has no such file.

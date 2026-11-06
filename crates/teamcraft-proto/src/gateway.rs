@@ -197,6 +197,12 @@ pub enum GatewayEvent {
   ScheduledMessagesUpdate,
   /// The announcement banner changed or ended. Clients fetch it again.
   AnnouncementUpdate,
+  /// An admin changed the largest attachment the server takes (`max_attachment_bytes`, bytes of
+  /// the encrypted file). Sent to everyone online; clients check files against it before they
+  /// queue an upload. Older clients skip the event.
+  AttachmentLimitUpdate {
+    max_attachment_bytes: u64,
+  },
   /// A health check raised an alert or one was resolved (docs/operations.md "Health and alerts").
   /// Sent to the admins and owners only; no payload, they fetch `GET /api/v1/admin/health`.
   HealthAlertUpdate,
@@ -634,6 +640,16 @@ mod tests {
       serde_json::from_str::<GatewayEvent>(json).unwrap(),
       GatewayEvent::HealthAlertUpdate
     );
+  }
+
+  #[test]
+  fn attachment_limit_update_has_a_stable_wire_format() {
+    let event = GatewayEvent::AttachmentLimitUpdate {
+      max_attachment_bytes: 1024,
+    };
+    let json = r#"{"type":"attachment_limit_update","max_attachment_bytes":1024}"#;
+    assert_eq!(serde_json::to_string(&event).unwrap(), json);
+    assert_eq!(serde_json::from_str::<GatewayEvent>(json).unwrap(), event);
   }
 
   #[test]
