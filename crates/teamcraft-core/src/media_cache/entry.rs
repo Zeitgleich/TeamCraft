@@ -6,16 +6,25 @@
 //! ([`LocalStoreKeys::derive_media_cache`]) under the lookup ID of the key's name, so the entry
 //! can't be moved to another key unnoticed. The name inside is checked again on opening; the time
 //! it was written bounds its age ([`super::CachePolicy::max_age`]).
+//!
+//! An entry is stored in a group ([`EntryId`]): the lookup ID of its conversation's name in a
+//! namespace of its own, or of the one group of pictures of people and spaces. The group names no
+//! conversation, but lets a purge find all of a conversation's entries (e2ee.md §9.6).
 
 use rand_core::OsRng;
 use teamcraft_crypto::local_store::{LOOKUP_ID_LEN, LocalStoreKeys, LookupId};
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
+use teamcraft_proto::ConversationId;
 use zeroize::Zeroizing;
 
-use super::{CachedMedia, MediaCacheError, MediaKey};
+use super::{CachedMedia, EntryId, MediaCacheError, MediaKey};
 
 /// Lookup namespace of the media cache, apart from the store's records (`store::sealed`).
 const NAMESPACE: &str = "media_cache";
+/// Lookup namespace of the groups entries are stored in.
+const GROUP_NAMESPACE: &str = "media_cache_group";
+/// The group's name of the pictures that belong to no conversation (avatars, space pictures).
+const SHARED_GROUP: &str = "shared";
 const FORMAT: u8 = 1;
 /// Longest name, version or content type an entry carries; they are short identifiers.
 const MAX_FIELD_BYTES: usize = 1024;
@@ -32,8 +41,28 @@ impl MediaSealer {
     }
   }
 
-  /// The pseudorandom ID the entry of `key` is stored under (a file or record name).
-  pub fn lookup_id(&self, key: &MediaKey) -> LookupId {
+  /// Where the entry of `key` is stored: its group and its own pseudorandom ID (a folder and file
+  /// name, or a record key).
+  pub fn entry_id(&self, key: &MediaKey) -> EntryId {
+    let group = match key.maybe_conversation() {
+      Some(conversation) => self.conversation_group(conversation),
+      None => self.keys.lookup_id(GROUP_NAMESPACE, SHARED_GROUP.as_bytes()),
+    };
+    EntryId {
+      group,
+      entry: self.lookup_id(key),
+    }
+  }
+
+  /// The group of `conversation`'s entries (its channel picture, the renditions of its messages).
+  pub fn conversation_group(&self, conversation: ConversationId) -> LookupId {
+    self
+      .keys
+      .lookup_id(GROUP_NAMESPACE, format!("conversation/{conversation}").as_bytes())
+  }
+
+  /// The pseudorandom ID of the entry of `key`; it seals the entry.
+  fn lookup_id(&self, key: &MediaKey) -> LookupId {
     self.keys.lookup_id(NAMESPACE, key.name().as_bytes())
   }
 
@@ -200,6 +229,37 @@ mod tests {
     assert_eq!(name.len(), 64);
     assert!(!name.contains("avatar"));
     assert_ne!(name, hex_name(&sealer(2).lookup_id(&key)));
+  }
+
+  #[test]
+  fn a_conversation_s_entries_share_a_group_that_names_no_conversation() {
+    let sealer = sealer(1);
+    let conversation = id::<ConversationId>(5);
+    let rendition = MediaKey::Rendition {
+      conversation,
+      message: id(6),
+      attachment: id(7),
+      content_sha256: [1; 32],
+    };
+    let group = sealer.conversation_group(conversation);
+    assert_eq!(sealer.entry_id(&rendition).group, group);
+    assert_eq!(
+      sealer.entry_id(&MediaKey::ChannelImage(conversation)).group,
+      group
+    );
+    assert_ne!(
+      sealer.entry_id(&MediaKey::ChannelImage(id(8))).group,
+      group,
+      "another conversation"
+    );
+    let avatar = sealer.entry_id(&MediaKey::Avatar(id::<UserId>(5)));
+    assert_ne!(avatar.group, group, "people's pictures are apart");
+    assert_eq!(avatar.group, sealer.entry_id(&MediaKey::SpaceImage(id(9))).group);
+    assert_ne!(
+      group,
+      self::sealer(2).conversation_group(conversation),
+      "keyed: without the database key, the group says nothing of the conversation"
+    );
   }
 
   #[test]

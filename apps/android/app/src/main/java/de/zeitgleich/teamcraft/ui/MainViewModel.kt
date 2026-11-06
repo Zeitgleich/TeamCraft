@@ -161,6 +161,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val feedSeeds = FeedSeeds()
   private var maybeReadAhead: Job? = null
   private var maybeStartCacheWrite: Job? = null
+  /** The conversations of the list read last, whose media drafts stay ([dropUnlistedDrafts]). */
+  private var lastListedConversations: Set<String> = emptySet()
 
   /**
    * The store changed since the list was read last: a message deleted, redacted or purged while
@@ -609,11 +611,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   suspend fun refreshChatList(myId: String) = chatListLock.withLock {
     val conversations = conversations()
     chatListState.update { it.copy(maybeConversations = conversations, runningCalls = runningCalls()) }
+    dropUnlistedDrafts(conversations)
     val previews = chatPreviews(conversations, myId)
     chatListState.update { it.copy(previews = previews) }
     isStartCacheStale = false
     rememberStartCache()
     readAhead()
+  }
+
+  /**
+   * Media drafts of conversations that went from the list (#1161); only when the list changed, and
+   * never on an empty one (a read that failed reads as empty).
+   */
+  private fun dropUnlistedDrafts(conversations: List<ConversationItem>) {
+    val listed = conversations.mapTo(HashSet()) { it.id }
+    if (listed.isEmpty() || listed == lastListedConversations) return
+    lastListedConversations = listed
+    viewModelScope.launch(Dispatchers.IO) { MediaDraftStore.dropUnlisted(getApplication(), listed) }
   }
 
   /** What [conversationId] showed last or was read ahead with, to show before its first read. */

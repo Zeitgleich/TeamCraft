@@ -44,6 +44,31 @@ class MediaDraftStoreTest {
     assertFalse(captures.exists())
   }
 
+  @Test
+  fun aDraftOfAConversationNoLongerListedGoesWithItsCameraFiles() {
+    val files = files()
+    File(files, "media-flow").mkdirs()
+    val purged = listOf("draft-111-.sealed", "draft-111-.key", "draft-111-222.sealed")
+      .map { File(files, "media-flow/$it").apply { writeText("x") } }
+    val listed = File(files, "media-flow/draft-333-.sealed").apply { writeText("x") }
+    val purgedCaptures = capture(files, "server-a", "account-1", "111-")
+    val listedCaptures = capture(files, "server-a", "account-1", "333-")
+    MediaDraftStore.dropUnlisted(files, setOf("333"))
+    purged.forEach { assertFalse(it.name, it.exists()) }
+    assertFalse(purgedCaptures.exists())
+    assertTrue(listed.exists())
+    assertTrue(listedCaptures.exists())
+  }
+
+  @Test
+  fun anEmptyListDropsNothing() {
+    val files = files()
+    File(files, "media-flow").mkdirs()
+    val draft = File(files, "media-flow/draft-111-.sealed").apply { writeText("x") }
+    MediaDraftStore.dropUnlisted(files, emptySet())
+    assertTrue(draft.exists())
+  }
+
   private fun files(): File = Files.createTempDirectory("media-draft").toFile().apply { deleteOnExit() }
 
   private fun capture(files: File, server: String, account: String, key: String): File =

@@ -1163,7 +1163,8 @@ impl Core {
         let store = TrackedStore::with_message_cache(
           Arc::new(SqlCipherStore::open(&path, &key).map_err(|error| open_error(error.into()))?),
           MESSAGE_CACHE_BYTES,
-        );
+        )
+        .with_media_cache();
         self.store = Some(store.clone());
         if let Some(database_key) = key.take() {
           self.media.open(&self.config.data_dir, self.user, &database_key);
@@ -2481,19 +2482,34 @@ impl Core {
     (self.on_change)();
   }
 
-  /// The renditions whose message went away (deleted, or its conversation gone): out of the media
-  /// cache (#749).
+  /// The renditions whose message went away (#749), and every picture of a conversation that was
+  /// purged or is no longer listed (#1161): out of the media cache. A conversation's record stays
+  /// until its pictures are gone, so a later change or the next start tries again.
   fn drop_removed_renditions(&self) {
     let Some(store) = &self.store else {
       return;
     };
     let removed = store.take_removed_renditions();
+    let purges = store.take_media_purges();
     let Some(cache) = self.media.get() else {
       return;
     };
     for rendition in removed {
       if let Err(error) = cache.remove(&rendition.into()) {
         tracing::debug!(%error, "could not drop a cached rendition");
+      }
+    }
+    for conversation in purges {
+      let dropped = cache
+        .remove_conversation(conversation)
+        .map_err(|error| error.to_string())
+        .and_then(|()| {
+          store
+            .media_purged(conversation)
+            .map_err(|error| error.to_string())
+        });
+      if let Err(error) = dropped {
+        tracing::warn!(conversation_id = %conversation, %error, "could not drop a conversation's cached pictures");
       }
     }
   }

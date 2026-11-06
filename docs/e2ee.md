@@ -4797,15 +4797,28 @@ start and remain visible while the server or its object storage is unavailable.
   they are can be read from the cache: files and records are named by the pseudorandom ID.
   Renditions are end-to-end encrypted content; avatars and space or channel pictures are directory
   data the server holds in plain text (§4.4), but follow the same rule.
+- **Grouped by conversation, under pseudorandom names (#1161).** Each entry is stored in a group:
+  the lookup ID of `conversation/{conversation}` in the namespace `media_cache_group` for a channel
+  picture or a rendition, of one shared name for avatars and space pictures. The desktop keeps a
+  folder per group (`{group}/{entry}`), the browser prefixes the record keys with it. The group names
+  no conversation; what it shows someone with the files but without the database key is which
+  entries belong to the same conversation, how many and how big they are. Entries stored before
+  groups are deleted when the cache opens.
 - **Renditions are bound to their message.** A cached rendition is only found for the message that
   shows it and the ciphertext hash that message names. A cached picture comes back without
   `fetch_decrypted`'s hash and key check, so a message of someone else that references the same
   attachment ID gets another key, misses, and downloads: the core then checks the file against the
   hash and key of that message.
 - **Renditions go with their message.** When a message with pictures is deleted (by its sender or
-  locally) or its conversation is no longer listed for the user, the store notes its image
-  attachments (`TrackedStore::take_removed_renditions`, bounded) and the host drops their renditions
-  from the cache.
+  locally), the store notes its image attachments (`TrackedStore::take_removed_renditions`,
+  bounded) and the host drops their renditions from the cache.
+- **A purged conversation leaves no pictures (#1161).** When a conversation's history goes (purge,
+  §4.6) or it is no longer listed for the user, the store writes a record `media_purge/{conversation}`
+  in the same group of writes (`TrackedStore::take_media_purges`). The host drops the
+  conversation's whole group – its channel picture and the renditions of all its messages, sent or
+  not, however many – and only then deletes the record, so a purge cut short by a crash or a cache
+  that isn't open yet is finished by a later change or the next start. Nothing reads the
+  conversation's messages for it.
 - **Desktop:** one sealed file per entry under the app's data directory, a folder per server and
   user beside the encrypted database, with keys derived from the SQLCipher key from the OS keystore.
   The shell opens it together with the store; the webview reads and fills it through the shell,
@@ -4839,8 +4852,10 @@ start and remain visible while the server or its object storage is unavailable.
   and hands the picture to the browser as a `data:` URL. Pictures go only with names: a
   notification the workspace policy or the device setting keeps to "New message" has none
   (notifications.md, "Desktop notifications").
-- The mobile apps don't use it: Android keeps avatars in its own file cache and opens pictures from
-  the decrypted downloads (§4.5).
+- The mobile apps don't use it: Android keeps avatars and space pictures in its own file caches
+  (by user and space, nothing of a conversation) and inline pictures only in memory. Its one file of
+  a conversation, an unfinished picture selection with its camera shots, goes once the conversation
+  is no longer listed.
 
 ### 9.7 Desktop: one keychain item, read once per start (issues #1150, #1223, implemented)
 

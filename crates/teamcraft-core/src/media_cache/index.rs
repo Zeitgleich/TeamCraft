@@ -5,11 +5,20 @@ use std::collections::HashMap;
 
 use teamcraft_crypto::local_store::LookupId;
 
-/// Entries by lookup ID with their size and last use, within a byte budget.
+/// Entries by ID with their size and last use, within a byte budget.
 #[derive(Debug, Default)]
 pub struct CacheIndex {
-  entries: HashMap<LookupId, IndexEntry>,
+  entries: HashMap<EntryId, IndexEntry>,
   used_bytes: u64,
+}
+
+/// Where an entry is stored: its group (the conversation it belongs to, or the group of pictures
+/// of people and spaces) and its own lookup ID, both pseudorandom ([`super::MediaSealer`]). A
+/// conversation's entries share the group, so its purge drops them all at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct EntryId {
+  pub group: LookupId,
+  pub entry: LookupId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,7 +31,7 @@ struct IndexEntry {
 
 impl CacheIndex {
   /// Notes an entry found on opening (or written now).
-  pub fn insert(&mut self, id: LookupId, size_bytes: u64, now_ms: u64) {
+  pub fn insert(&mut self, id: EntryId, size_bytes: u64, now_ms: u64) {
     self.remove(&id);
     self.entries.insert(
       id,
@@ -35,13 +44,13 @@ impl CacheIndex {
   }
 
   /// The entry was just read: it moves to the back of the eviction line.
-  pub fn touch(&mut self, id: &LookupId, now_ms: u64) {
+  pub fn touch(&mut self, id: &EntryId, now_ms: u64) {
     if let Some(entry) = self.entries.get_mut(id) {
       entry.last_used_ms = entry.last_used_ms.max(now_ms);
     }
   }
 
-  pub fn remove(&mut self, id: &LookupId) -> bool {
+  pub fn remove(&mut self, id: &EntryId) -> bool {
     match self.entries.remove(id) {
       Some(entry) => {
         self.used_bytes = self.used_bytes.saturating_sub(entry.size_bytes);
@@ -53,11 +62,11 @@ impl CacheIndex {
 
   /// Takes the least recently used entries out until the rest fits `budget_bytes`, except `keep`
   /// (the entry just written); returns them, oldest first, for the backend to delete.
-  pub fn evict_to(&mut self, budget_bytes: u64, keep: Option<&LookupId>) -> Vec<LookupId> {
+  pub fn evict_to(&mut self, budget_bytes: u64, keep: Option<&EntryId>) -> Vec<EntryId> {
     if self.used_bytes <= budget_bytes {
       return Vec::new();
     }
-    let mut by_age: Vec<(u64, LookupId)> = self
+    let mut by_age: Vec<(u64, EntryId)> = self
       .entries
       .iter()
       .filter(|(id, _)| Some(*id) != keep)
@@ -77,9 +86,9 @@ impl CacheIndex {
 
   /// Takes out the entries not used for `max_age_ms` (so also written longer ago); returns them for
   /// the backend to delete.
-  pub fn take_expired(&mut self, now_ms: u64, max_age_ms: u64) -> Vec<LookupId> {
+  pub fn take_expired(&mut self, now_ms: u64, max_age_ms: u64) -> Vec<EntryId> {
     let oldest_kept = now_ms.saturating_sub(max_age_ms);
-    let expired: Vec<LookupId> = self
+    let expired: Vec<EntryId> = self
       .entries
       .iter()
       .filter(|(_, entry)| entry.last_used_ms < oldest_kept)
@@ -91,7 +100,22 @@ impl CacheIndex {
     expired
   }
 
-  pub fn contains(&self, id: &LookupId) -> bool {
+  /// Takes out every entry of `group` (a conversation was purged); returns how many there were.
+  pub fn remove_group(&mut self, group: &LookupId) -> usize {
+    let before = self.entries.len();
+    let mut freed_bytes = 0u64;
+    self.entries.retain(|id, entry| {
+      let is_kept = id.group != *group;
+      if !is_kept {
+        freed_bytes = freed_bytes.saturating_add(entry.size_bytes);
+      }
+      is_kept
+    });
+    self.used_bytes = self.used_bytes.saturating_sub(freed_bytes);
+    before - self.entries.len()
+  }
+
+  pub fn contains(&self, id: &EntryId) -> bool {
     self.entries.contains_key(id)
   }
 
@@ -122,7 +146,7 @@ mod tests {
     assert_eq!(index.evict_to(80, None), vec![id(2)], "2 was used least recently");
     assert_eq!(index.used_bytes(), 80);
     assert!(index.contains(&id(1)) && index.contains(&id(3)));
-    assert_eq!(index.evict_to(80, None), Vec::<LookupId>::new(), "within budget");
+    assert_eq!(index.evict_to(80, None), Vec::<EntryId>::new(), "within budget");
   }
 
   #[test]
@@ -166,7 +190,27 @@ mod tests {
     assert_eq!(index.used_bytes(), 10);
   }
 
-  fn id(n: u8) -> LookupId {
-    LookupId([n; 32])
+  #[test]
+  fn a_group_goes_as_a_whole_and_others_stay() {
+    let mut index = CacheIndex::default();
+    for n in 0..5u8 {
+      index.insert(in_group(7, n), 10, 1);
+    }
+    index.insert(id(9), 25, 1);
+    assert_eq!(index.remove_group(&LookupId([7; 32])), 5);
+    assert_eq!((index.len(), index.used_bytes()), (1, 25));
+    assert!(index.contains(&id(9)));
+    assert_eq!(index.remove_group(&LookupId([7; 32])), 0, "nothing left of it");
+  }
+
+  fn id(n: u8) -> EntryId {
+    in_group(0, n)
+  }
+
+  fn in_group(group: u8, n: u8) -> EntryId {
+    EntryId {
+      group: LookupId([group; 32]),
+      entry: LookupId([n; 32]),
+    }
   }
 }

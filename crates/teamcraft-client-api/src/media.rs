@@ -52,6 +52,15 @@ impl MediaKey {
       ),
     }
   }
+
+  /// The conversation the entry belongs to, whose purge drops it (e2ee.md §9.6); `None` for
+  /// pictures of people and spaces.
+  pub fn maybe_conversation(&self) -> Option<ConversationId> {
+    match self {
+      Self::Avatar(_) | Self::SpaceImage(_) => None,
+      Self::ChannelImage(conversation) | Self::Rendition { conversation, .. } => Some(*conversation),
+    }
+  }
 }
 
 /// A SHA-256 as 64 lowercase hex digits (how [`crate::actions::FileInfo`] carries it).

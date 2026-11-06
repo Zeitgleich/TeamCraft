@@ -1589,7 +1589,7 @@ impl Core {
           Ok(opened) => opened,
           Err(error) => return unreadable_status(error.into()),
         };
-        let store = TrackedStore::with_message_cache(Rc::new(opened), MESSAGE_CACHE_BYTES);
+        let store = TrackedStore::with_message_cache(Rc::new(opened), MESSAGE_CACHE_BYTES).with_media_cache();
         self.store = Some(store.clone());
         watch_page_lifecycle(store.inner());
         store
@@ -2329,7 +2329,7 @@ impl Core {
     let (Some(backend), Some(store)) = (self.backend.as_ref(), self.store.as_ref()) else {
       return Err(not_set_up());
     };
-    crate::persisted_media::drop_renditions(store.take_removed_renditions());
+    drop_removed_media(store);
     Ok(
       self
         .snapshots
@@ -2343,7 +2343,7 @@ impl Core {
       return Err(not_set_up());
     };
     let changes = store.take_changes();
-    crate::persisted_media::drop_renditions(store.take_removed_renditions());
+    drop_removed_media(store);
     let mut maybe_security = None;
     let answer = self.snapshots.borrow_mut().changes_since(
       backend,
@@ -3185,6 +3185,23 @@ fn is_page_visible() -> bool {
   web_sys::window()
     .and_then(|window| window.document())
     .is_none_or(|document| document.visibility_state() == web_sys::VisibilityState::Visible)
+}
+
+/// The renditions whose message went away (#749) and every picture of a purged or no longer listed
+/// conversation (#1161): out of the media cache. A conversation's record in the store goes once its
+/// pictures did; until then later snapshots and the next start try again.
+fn drop_removed_media(store: &Store) {
+  crate::persisted_media::drop_renditions(store.take_removed_renditions());
+  let purges = store.take_media_purges();
+  if purges.is_empty() {
+    return;
+  }
+  let store = store.clone();
+  crate::persisted_media::drop_conversations(purges, move |conversation| {
+    if let Err(error) = store.media_purged(conversation) {
+      tracing::warn!(conversation_id = %conversation, %error, "could not note a conversation's pictures as dropped");
+    }
+  });
 }
 
 fn not_set_up() -> String {

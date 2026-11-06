@@ -181,6 +181,32 @@ pub fn drop_renditions(removed: Vec<teamcraft_core::store::RemovedRendition>) {
   }
 }
 
+/// Every picture of `conversations` (purged, or no longer listed; the core in the page notes them):
+/// out of the cache, however many there are. `on_dropped` is called for each one that went; one
+/// whose cache isn't open (yet) is left for the next call.
+#[cfg(target_arch = "wasm32")]
+pub fn drop_conversations(
+  conversations: Vec<teamcraft_proto::ConversationId>,
+  on_dropped: impl Fn(teamcraft_proto::ConversationId) + 'static,
+) {
+  if is_demo() {
+    return;
+  }
+  leptos::task::spawn_local(async move {
+    let Some(cache) = browser_cache().await else {
+      return;
+    };
+    for conversation in conversations {
+      match cache.remove_conversation(conversation).await {
+        Ok(()) => on_dropped(conversation),
+        Err(error) => {
+          tracing::debug!(conversation_id = %conversation, %error, "could not drop a conversation's cached pictures");
+        },
+      }
+    }
+  });
+}
+
 /// The settings a write goes with.
 #[derive(Clone, Copy)]
 struct Policy {

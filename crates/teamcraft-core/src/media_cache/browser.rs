@@ -3,21 +3,25 @@
 //! store's (e2ee.md §9.1). Deleting it never touches the store, and two tabs racing to create the
 //! key at most lose each other's entries, which are then misses.
 //!
-//! Records in the `records` object store: `d:{lookup ID}` holds the sealed entry, `m:{lookup ID}`
-//! its size and last use (`"size,millis"`), so opening reads only the small ones. Each tab keeps
-//! its own index; entries another tab wrote meanwhile are counted from its next start.
+//! Records in the `records` object store: `d:{group}/{entry}` holds the sealed entry,
+//! `m:{group}/{entry}` its size and last use (`"size,millis"`), so opening reads only the small
+//! ones. The group (a conversation, or the pictures of people and spaces) comes first, so a purged
+//! conversation's records go as two key ranges ([`BrowserMediaCache::remove_conversation`]). Records
+//! of the layout before groups (#1161) are deleted on opening. Each tab keeps its own index; entries
+//! another tab wrote meanwhile are counted from its next start.
 
 use std::cell::RefCell;
 
 use teamcraft_crypto::local_store::LookupId;
+use teamcraft_proto::ConversationId;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{IdbDatabase, IdbKeyRange, IdbObjectStore, IdbTransaction, IdbTransactionMode};
 
 use super::entry::{hex_name, lookup_id_of};
 use super::{
-  CacheIndex, CachePolicy, CachedMedia, MAX_ENTRY_BYTES, MAX_SEALED_BYTES, MediaCacheError, MediaKey,
-  MediaSealer, is_too_old,
+  CacheIndex, CachePolicy, CachedMedia, EntryId, MAX_ENTRY_BYTES, MAX_SEALED_BYTES, MediaCacheError,
+  MediaKey, MediaSealer, is_too_old,
 };
 use crate::store::browser::idb::{self, OpenMode, RECORDS};
 use crate::store::{StoreError, browser_database_key, browser_database_key_without_upgrade};
@@ -26,6 +30,9 @@ const DATA_PREFIX: &str = "d:";
 const META_PREFIX: &str = "m:";
 /// The key right after every `m:` key, the end of their range.
 const META_END: &str = "m;";
+/// Between a record's group and its entry; the character after it ends a group's key range.
+const GROUP_SEPARATOR: char = '/';
+const GROUP_END: char = '0';
 /// Every account's database is named this followed by the user ID.
 const DATABASE_PREFIX: &str = "teamcraft-media-";
 
@@ -105,7 +112,7 @@ impl BrowserMediaCache {
   /// The cached entry of `key`, whatever its version, unless it is older than `max_age`. An
   /// unreadable or too old entry is deleted and missing.
   pub async fn get(&self, key: &MediaKey, max_age: std::time::Duration) -> Option<CachedMedia> {
-    let id = self.sealer.lookup_id(key);
+    let id = self.sealer.entry_id(key);
     let sealed = match self.read(&id).await {
       Ok(Some(sealed)) if sealed.len() as u64 > MAX_SEALED_BYTES => {
         self.drop_logged(id).await;
@@ -144,7 +151,7 @@ impl BrowserMediaCache {
     }
   }
 
-  async fn drop_logged(&self, id: LookupId) {
+  async fn drop_logged(&self, id: EntryId) {
     if let Err(error) = self.delete_entries(&[id]).await {
       tracing::warn!(%error, "could not delete a media cache entry");
     }
@@ -160,7 +167,7 @@ impl BrowserMediaCache {
     policy: CachePolicy,
   ) -> Result<(), MediaCacheError> {
     let policy = policy.clamped();
-    let id = self.sealer.lookup_id(key);
+    let id = self.sealer.entry_id(key);
     if media.bytes.len() as u64 > MAX_ENTRY_BYTES.min(policy.budget_bytes) {
       return self.delete_entries(&[id]).await;
     }
@@ -192,10 +199,28 @@ impl BrowserMediaCache {
   }
 
   pub async fn remove(&self, key: &MediaKey) -> Result<(), MediaCacheError> {
-    self.delete_entries(&[self.sealer.lookup_id(key)]).await
+    self.delete_entries(&[self.sealer.entry_id(key)]).await
   }
 
-  async fn read(&self, id: &LookupId) -> Result<Option<Vec<u8>>, StoreError> {
+  /// Drops every entry of `conversation` – its channel picture and the renditions of all its
+  /// messages, sent or not – however many there are (e2ee.md §4.6, §9.6), in one transaction.
+  pub async fn remove_conversation(&self, conversation: ConversationId) -> Result<(), MediaCacheError> {
+    let group = self.sealer.conversation_group(conversation);
+    self.index.borrow_mut().remove_group(&group);
+    let (transaction, store) = self.transaction(IdbTransactionMode::Readwrite)?;
+    for prefix in [DATA_PREFIX, META_PREFIX] {
+      let start = format!("{prefix}{}{GROUP_SEPARATOR}", hex_name(&group));
+      let end = format!("{prefix}{}{GROUP_END}", hex_name(&group));
+      let range = IdbKeyRange::bound(&JsValue::from_str(&start), &JsValue::from_str(&end))
+        .map_err(|error| idb::js_error("range", &error))?;
+      store
+        .delete(&range)
+        .map_err(|error| idb::js_error("delete", &error))?;
+    }
+    Ok(idb::transaction_done(&transaction).await?)
+  }
+
+  async fn read(&self, id: &EntryId) -> Result<Option<Vec<u8>>, StoreError> {
     let (_transaction, store) = self
       .transaction(IdbTransactionMode::Readonly)
       .map_err(|error| StoreError::Database(error.to_string()))?;
@@ -211,7 +236,7 @@ impl BrowserMediaCache {
     )
   }
 
-  async fn write_meta(&self, id: &LookupId, size_bytes: u64, now: u64) -> Result<(), MediaCacheError> {
+  async fn write_meta(&self, id: &EntryId, size_bytes: u64, now: u64) -> Result<(), MediaCacheError> {
     let (transaction, store) = self.transaction(IdbTransactionMode::Readwrite)?;
     store
       .put_with_key(&meta_value(size_bytes, now), &meta_key(id))
@@ -219,7 +244,7 @@ impl BrowserMediaCache {
     Ok(idb::transaction_done(&transaction).await?)
   }
 
-  async fn delete_entries(&self, ids: &[LookupId]) -> Result<(), MediaCacheError> {
+  async fn delete_entries(&self, ids: &[EntryId]) -> Result<(), MediaCacheError> {
     {
       let mut index = self.index.borrow_mut();
       for id in ids {
@@ -274,19 +299,58 @@ async fn read_index(database: &IdbDatabase) -> Result<CacheIndex, MediaCacheErro
   let keys: js_sys::Array = idb::request_result(&keys_request).await?.unchecked_into();
   let values: js_sys::Array = idb::request_result(&values_request).await?.unchecked_into();
   let mut index = CacheIndex::default();
+  let mut ungrouped = Vec::new();
   for (key, value) in keys.iter().zip(values.iter()) {
-    let parsed = key
+    let Some(name) = key
       .as_string()
-      .and_then(|key| lookup_id_of(key.strip_prefix(META_PREFIX)?))
-      .zip(value.as_string().and_then(|value| parse_meta(&value)));
+      .and_then(|key| key.strip_prefix(META_PREFIX).map(str::to_owned))
+    else {
+      continue;
+    };
+    if let Some(id) = lookup_id_of(&name) {
+      ungrouped.push(id);
+      continue;
+    }
+    let parsed = entry_id_of(&name).zip(value.as_string().and_then(|value| parse_meta(&value)));
     if let Some((id, (size_bytes, last_used_ms))) = parsed {
       index.insert(id, size_bytes, last_used_ms);
     }
   }
+  drop(transaction);
+  if !ungrouped.is_empty() {
+    delete_ungrouped(database, &ungrouped).await?;
+  }
   Ok(index)
 }
 
-fn delete_in(store: &IdbObjectStore, id: &LookupId) -> Result<(), MediaCacheError> {
+/// Deletes records of the layout before groups: no purge could find them.
+async fn delete_ungrouped(database: &IdbDatabase, ids: &[LookupId]) -> Result<(), MediaCacheError> {
+  let transaction = database
+    .transaction_with_str_and_mode(RECORDS, IdbTransactionMode::Readwrite)
+    .map_err(|error| idb::js_error("transaction", &error))?;
+  let store = transaction
+    .object_store(RECORDS)
+    .map_err(|error| idb::js_error("object store", &error))?;
+  for id in ids {
+    for prefix in [DATA_PREFIX, META_PREFIX] {
+      store
+        .delete(&JsValue::from_str(&format!("{prefix}{}", hex_name(id))))
+        .map_err(|error| idb::js_error("delete", &error))?;
+    }
+  }
+  Ok(idb::transaction_done(&transaction).await?)
+}
+
+/// The entry a record is named after (`{group}/{entry}`), if it is named like one.
+fn entry_id_of(name: &str) -> Option<EntryId> {
+  let (group, entry) = name.split_once(GROUP_SEPARATOR)?;
+  Some(EntryId {
+    group: lookup_id_of(group)?,
+    entry: lookup_id_of(entry)?,
+  })
+}
+
+fn delete_in(store: &IdbObjectStore, id: &EntryId) -> Result<(), MediaCacheError> {
   for key in [data_key(id), meta_key(id)] {
     store
       .delete(&key)
@@ -295,12 +359,16 @@ fn delete_in(store: &IdbObjectStore, id: &LookupId) -> Result<(), MediaCacheErro
   Ok(())
 }
 
-fn data_key(id: &LookupId) -> JsValue {
-  JsValue::from_str(&format!("{DATA_PREFIX}{}", hex_name(id)))
+fn data_key(id: &EntryId) -> JsValue {
+  JsValue::from_str(&format!("{DATA_PREFIX}{}", record_name(id)))
 }
 
-fn meta_key(id: &LookupId) -> JsValue {
-  JsValue::from_str(&format!("{META_PREFIX}{}", hex_name(id)))
+fn meta_key(id: &EntryId) -> JsValue {
+  JsValue::from_str(&format!("{META_PREFIX}{}", record_name(id)))
+}
+
+fn record_name(id: &EntryId) -> String {
+  format!("{}{GROUP_SEPARATOR}{}", hex_name(&id.group), hex_name(&id.entry))
 }
 
 fn meta_value(size_bytes: u64, last_used_ms: u64) -> JsValue {

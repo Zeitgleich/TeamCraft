@@ -31,7 +31,7 @@ pub use browser::BrowserMediaCache;
 pub use entry::MediaSealer;
 #[cfg(not(target_arch = "wasm32"))]
 pub use files::FileMediaCache;
-pub use index::CacheIndex;
+pub use index::{CacheIndex, EntryId};
 
 pub use teamcraft_client_api::media::{
   DEFAULT_MEDIA_CACHE_BYTES, DEFAULT_MEDIA_MAX_AGE, MAX_MEDIA_CACHE_BYTES, MAX_MEDIA_MAX_AGE, MediaKey,

@@ -70,6 +70,13 @@ class MediaDraftStore(context: Context, private val capturesRoot: suspend () -> 
      * camera folders whose draft is gone. */
     fun sweep(context: Context, nowMillis: Long) = sweep(context.filesDir, nowMillis)
 
+    /**
+     * Drafts of conversations no longer listed – deleted here (e2ee.md §4.6), deleted elsewhere,
+     * or left – with their camera files: they could never be sent, and what they hold of the
+     * conversation goes with it (#1161). [listed] is the list just read, never empty.
+     */
+    fun dropUnlisted(context: Context, listed: Set<String>) = dropUnlisted(context.filesDir, listed)
+
     internal fun deleteAll(filesDir: File) {
       File(filesDir, DIRECTORY).deleteRecursively()
       captureFolders(filesDir).forEach { it.deleteRecursively() }
@@ -82,7 +89,23 @@ class MediaDraftStore(context: Context, private val capturesRoot: suspend () -> 
         val isUnsealed = file.name.endsWith(".json") || file.name.endsWith(".part") || file.isDirectory
         if (isOld || isUnsealed) file.deleteRecursively()
       }
-      // The core's sweep of its staging folder skips folders, so these are this store's to remove.
+      dropOrphanedCaptures(filesDir)
+    }
+
+    internal fun dropUnlisted(filesDir: File, listed: Set<String>) {
+      if (listed.isEmpty()) return
+      File(filesDir, DIRECTORY).listFiles()?.forEach { file ->
+        // `draft-{conversation}-{thread}.sealed` and its `.key` (keys as [MediaFlow] names them).
+        val conversation = file.name.removePrefix("draft-").substringBefore('-')
+        val isDraft = file.name.startsWith("draft-") && conversation.isNotEmpty() && conversation.all(Char::isDigit)
+        if (isDraft && conversation !in listed) file.delete()
+      }
+      dropOrphanedCaptures(filesDir)
+    }
+
+    /** The core's sweep of its staging folder skips folders, so these are this store's to remove. */
+    private fun dropOrphanedCaptures(filesDir: File) {
+      val drafts = File(filesDir, DIRECTORY)
       captureFolders(filesDir)
         .filter { folder -> !File(drafts, "draft-${folder.name.removePrefix("$CAPTURES-")}.sealed").exists() }
         .forEach { it.deleteRecursively() }
