@@ -21,6 +21,7 @@ use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::is_catching_up;
 use teamcraft_core::connection::{ConnectionState, ConnectionStatus, NetworkChanges};
 use teamcraft_core::read_state;
+use teamcraft_core::records::{Draft, enqueue_message};
 use teamcraft_core::runner::{RunnerCommand, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter, StoredMessage};
 use teamcraft_core::ui_backend::CoreCommand;
@@ -41,6 +42,8 @@ const DIRECT_COMPLETE: usize = DIRECT_NEWS + 2;
 /// Older messages of the direct chat on the phone, imported from another chat system: a long
 /// history is what makes work per message on every change show.
 const IMPORTED: usize = 70_000;
+/// How long the server keeps a session after its connection ended (its default).
+const RESUME_WINDOW: Duration = Duration::from_secs(120);
 /// How long the phone stays in its pocket: far past the server's resume window.
 const IN_THE_POCKET: Duration = Duration::from_secs(45 * 60);
 
@@ -59,10 +62,14 @@ async fn back_from_the_pocket_the_open_chat_shows_its_news_at_once_and_the_list_
   day.server.delay_member_lists(day.me, MEMBER_LIST_DELAY);
   // Picked up from the pocket: the app shows its cached list, the user taps the direct chat with
   // Ann at the top, and its reads name it to the core.
+  let connects_before = day.server.gateway_connect_count();
   let woke = day
     .phone
     .awake_until(Some(day.direct), Told::has_the_afternoon)
     .await;
+  // Away far longer than the server keeps sessions: no resume that can only be refused, one
+  // connection, not two.
+  assert_eq!(day.server.gateway_connect_count() - connects_before, 1);
 
   let told_connected = woke
     .first(|told| told.is_connected)
@@ -131,6 +138,65 @@ async fn after_a_sync_wake_up_everything_is_there_before_any_connection() {
   assert_eq!(first_frame.channels_marked, 0);
   day.phone.assert_everything_once(&day);
   assert_eq!(day.phone.unread(day.direct), 0, "read on the desktop");
+}
+
+/// The user answers in the chat they opened while the rest is still caught up: the reply goes out
+/// once that chat is current, not after every other conversation.
+#[tokio::test(start_paused = true)]
+async fn a_reply_right_after_opening_goes_out_before_the_catch_up_ends() {
+  let mut day = Day::begin().await;
+  day.phone.awake_until(None, Told::has_the_morning).await;
+
+  day.desktop_afternoon().await;
+  day.server.delay_member_lists(day.me, MEMBER_LIST_DELAY);
+  let (store, direct, me) = (day.phone.store.clone(), day.direct, day.me);
+  let sent = Arc::new(Mutex::new(None));
+  let sent_at = sent.clone();
+  day.phone.client().catch_up_focus().set(direct);
+  let woke = day
+    .phone
+    .awake_while(
+      async move {
+        let woke_at = Instant::now();
+        // Typed as soon as the chat shows Ann's news.
+        while texts(store.as_ref(), direct).len() < DIRECT_COMPLETE {
+          tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let draft = Draft {
+          conversation_id: direct,
+          maybe_thread_id: None,
+          content: MessageContent::text("on it", Vec::new()),
+        };
+        let reply = enqueue_message(store.as_ref(), me, 1_800_000_000_000, draft).unwrap();
+        let typed_at = woke_at.elapsed();
+        while store
+          .message(direct, reply)
+          .unwrap()
+          .and_then(|message| message.maybe_server_id)
+          .is_none()
+        {
+          tokio::time::sleep(Duration::from_millis(20)).await;
+          assert!(
+            woke_at.elapsed() < Duration::from_secs(60),
+            "the reply never went out"
+          );
+        }
+        *sent_at.lock().unwrap() = Some((typed_at, woke_at.elapsed()));
+      },
+      Told::has_the_afternoon_and_a_reply,
+    )
+    .await;
+
+  let (typed_at, sent_at) = sent.lock().unwrap().expect("sent");
+  let caught_up = woke.caught_up_at();
+  assert!(
+    sent_at < caught_up,
+    "typed at {typed_at:?}, sent at {sent_at:?}, the catch-up ended at {caught_up:?}"
+  );
+  assert!(
+    sent_at - typed_at <= MEMBER_LIST_DELAY * 2 + AT_ONCE,
+    "typed at {typed_at:?}, sent at {sent_at:?}"
+  );
 }
 
 /// Away for less than the resume window (a look at another app): the server replays what was
@@ -222,6 +288,7 @@ impl Day {
   /// Ann's channels with the user and a direct chat, read on the desktop; the phone linked to it.
   async fn begin() -> Self {
     let server = FakeServer::new();
+    server.announce_resume_window(RESUME_WINDOW);
     let mut ann = Peer::enroll(&server, "Ann").await;
     let mut desktop = Peer::enroll(&server, "Me").await;
     let me = desktop.client.user_id();
@@ -544,6 +611,14 @@ impl Told {
       && self.channels_marked == 0
       && self.direct_texts == 1
       && self.channel_texts.iter().all(|count| *count == 1)
+  }
+
+  /// [`Self::has_the_afternoon`], with the phone's own reply after it.
+  fn has_the_afternoon_and_a_reply(&self) -> bool {
+    self.is_connected
+      && self.channels_marked == 0
+      && self.direct_texts == DIRECT_COMPLETE + 1
+      && self.channels_complete == CHANNELS
   }
 
   /// Connected, and every message of the afternoon is there.

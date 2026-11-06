@@ -1923,6 +1923,12 @@ the network's and the core's waiting, not CPU.
   trip.
 - **A chat tapped during the catch-up** waited for its turn in the batch; it is taken next now, after
   the round trip on its way.
+- **A resume that can only be refused.** Back after more than the resume window, the phone first
+  opened a connection to resume, was told `session_invalid` and opened a second one (TLS, socket,
+  `hello`: several round trips on a mobile network). `ready` names the window now, the device keeps
+  when it last heard from the server, and identifies at once when that is longer ago: one connection.
+- **A reply typed right after opening** went out with the end of the catch-up (2 s here); it goes out
+  once its conversation is caught up now, which the open one is first.
 - Android shows a thin moving line under the top bar while the connection is set up or a
   conversation on screen is still caught up (`SyncingLine`), after 300 ms, so quick ones don't flash.
 
