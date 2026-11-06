@@ -8,6 +8,7 @@ use crate::common;
 use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use teamcraft_server::services::conversations::sweep_deleted;
 use teamcraft_server::services::scheduled_messages::run_due;
 use teamcraft_server::testing::{Reply, TestApp, TestUser};
 use time::{Duration as TimeDuration, OffsetDateTime};
@@ -118,6 +119,17 @@ async fn listed(app: &TestApp, user: &TestUser) -> Vec<Value> {
   let reply = app.get(user, "/me/scheduled-messages").await;
   assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
   reply.body["messages"].as_array().unwrap().clone()
+}
+
+/// Marks the scene's channel deleted without clearing it, the state between the deletion and the
+/// background work.
+async fn mark_deleted(app: &TestApp, scene: &Scene) {
+  let channel: i64 = scene.channel.parse().unwrap();
+  teamcraft_db::testing::sqlx::query("UPDATE conversations SET deleted_at = now() WHERE id = $1")
+    .bind(channel)
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
 }
 
 async fn hold_of_first(app: &TestApp, user: &TestUser) -> Option<String> {
@@ -539,27 +551,35 @@ mod must_not_go_out {
     );
   }
 
+  /// A deleted channel is marked first and cleared by background work that takes its scheduled
+  /// messages with it (`sweep_deleted`). The test marks it by hand, so that clearing can't run
+  /// between the deletion and the release and make the hold vanish at random.
   #[tokio::test]
   async fn a_deleted_conversation() {
     let app = app!();
     let s = scene(&app).await;
     schedule(&app, &s, 1).await;
-    let deleted = app
-      .delete(&s.carol, &format!("/conversations/{}", s.channel))
-      .await;
-    if deleted.status == StatusCode::FORBIDDEN {
-      let owner = owner();
-      let by_owner = app.delete(&owner, &format!("/conversations/{}", s.channel)).await;
-      assert_eq!(by_owner.status, StatusCode::NO_CONTENT, "{}", by_owner.body);
-    } else {
-      assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", deleted.body);
-    }
+    mark_deleted(&app, &s).await;
 
     run_due(&app.state, later(61)).await.unwrap();
     assert_eq!(
       hold_of_first(&app, &s.carol).await.as_deref(),
       Some("conversation_gone")
     );
+  }
+
+  /// Once the background work has cleared the channel, its scheduled messages are gone with it and
+  /// nothing is sent.
+  #[tokio::test]
+  async fn a_cleared_conversation_takes_its_messages_along() {
+    let app = app!();
+    let s = scene(&app).await;
+    schedule(&app, &s, 1).await;
+    mark_deleted(&app, &s).await;
+    sweep_deleted(&app.state).await.unwrap();
+
+    assert_eq!(run_due(&app.state, later(61)).await.unwrap(), 0);
+    assert!(listed(&app, &s.carol).await.is_empty());
   }
 
   #[tokio::test]
