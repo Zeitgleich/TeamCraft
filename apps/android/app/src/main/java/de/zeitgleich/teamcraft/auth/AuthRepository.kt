@@ -235,9 +235,11 @@ class AuthRepository(
       session.maybeLocal = null
       local
     }
+    // What the session left goes first: a kill between the two then still finds the session and
+    // signs out again, instead of a signed-out device keeping the account's start cache.
+    onSignedOut()
     session.file.delete()
     session.localFile.delete()
-    onSignedOut()
     if (maybeSession === session) signedIn.value = false
     // An expired token is already dead on the server; only a live one is worth a request.
     maybeLocal?.takeIf { it.isValid(System.currentTimeMillis()) }?.let { local ->

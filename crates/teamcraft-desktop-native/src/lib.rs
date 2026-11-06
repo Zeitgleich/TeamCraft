@@ -11,7 +11,13 @@
 //! | [`install_notification_delegate`]         | macOS    | `notification_delegate`   |
 //! | `notification_attachment`: a picture      | macOS    | `notification_attachment` |
 //! | `webkit_version`: the library in use      | Linux    | `webkit_version`          |
+//! | JNI: audio context for cpal (calls)       | Android  | `android_context`         |
+//!
+//! The Android entry is in here too, as the one crate that may hold `unsafe`; the mobile library
+//! (`teamcraft-ffi`) links this crate only on Android, for it.
 
+#[cfg(target_os = "android")]
+mod android_context;
 mod network;
 mod notification_attachment;
 mod notification_delegate;
@@ -24,6 +30,8 @@ pub use notification_attachment::AttachmentError;
 pub use notification_attachment::notification_attachment;
 pub use notification_delegate::{NotificationResponse, ResponseAction, install_notification_delegate};
 
+#[cfg(target_os = "android")]
+pub use android_context::Java_de_zeitgleich_teamcraft_calls_AudioContext_initialize;
 pub use network::{NetworkWatchError, watch_network_up};
 pub use resume::{ResumeWatchError, watch_resume};
 #[cfg(target_os = "linux")]

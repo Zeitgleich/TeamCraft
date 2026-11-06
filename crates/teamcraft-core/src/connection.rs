@@ -300,6 +300,18 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       return None;
     }
     self.set_state(ConnectionState::Connecting);
+    let is_slow = self
+      .maybe_round_trip_ms
+      .is_some_and(|round_trip| round_trip >= millis(self.settings.slow_round_trip));
+    let answered_state = if is_slow {
+      ConnectionState::Slow
+    } else {
+      ConnectionState::Connected
+    };
+    // The catch-up after the answer can take long (a big workspace after a long absence) while
+    // messages already arrive; until then the state would say "connecting" (shown as a banner).
+    let status = self.status.clone();
+    client.on_gateway_answered(Box::new(move || status.set(answered_state)));
     let timing = GatewayTiming {
       handshake_timeout: self.settings.handshake_timeout,
       max_heartbeat: self.settings.max_heartbeat,
@@ -326,14 +338,8 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
         self.maybe_probe_deadline_ms = None;
         self.maybe_unanswered_since_ms = None;
         self.maybe_refused_token = None;
-        let is_slow = self
-          .maybe_round_trip_ms
-          .is_some_and(|round_trip| round_trip >= millis(self.settings.slow_round_trip));
-        self.set_state(if is_slow {
-          ConnectionState::Slow
-        } else {
-          ConnectionState::Connected
-        });
+        // The hook already set it without telling the observer, which can't run on its thread.
+        self.announce_state(answered_state);
         Some(start.outcome)
       },
       Err(error) if error.is_sign_in_required() => {
@@ -722,6 +728,14 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   /// (robustness.md, "Hostile networks").
   fn round_trip_slack_ms(&self) -> i64 {
     self.maybe_round_trip_ms.unwrap_or(0).saturating_mul(2)
+  }
+
+  /// Sets the state and tells the observer even when it didn't change.
+  fn announce_state(&mut self, state: ConnectionState) {
+    self.status.set(state);
+    if let Some(observer) = &self.maybe_observer {
+      observer(state);
+    }
   }
 
   fn set_state(&mut self, state: ConnectionState) {

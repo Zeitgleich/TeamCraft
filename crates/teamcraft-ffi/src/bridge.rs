@@ -10,11 +10,12 @@ use teamcraft_client_api::remote::{
 };
 use teamcraft_core::api::ServerApi as _;
 use teamcraft_core::records;
+use teamcraft_core::ui_backend::FeedAnchor;
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::org_recovery::RecoveryRequestKey;
 use teamcraft_proto::{
-  AvatarContentType, AvatarResponse, Base64Bytes, CreateRecoveryRequest, DeviceActivity, ErrorCode,
-  RecoveryRequestId, RecoveryRequestResponse, RecoveryResultPayload,
+  AvatarContentType, AvatarResponse, Base64Bytes, ConversationId, CreateRecoveryRequest, DeviceActivity,
+  ErrorCode, RecoveryRequestId, RecoveryRequestResponse, RecoveryResultPayload,
 };
 
 use crate::engine::{Engine, feed_anchor, older_len, parse_id};
@@ -79,12 +80,27 @@ impl Reads {
   ) -> Result<String, TeamCraftError> {
     let conversation = parse_id(conversation_id)?;
     self.focus(conversation);
-    let backend = self.backend()?;
-    let tail = backend.feed_tail(
+    self.tail_of(
       conversation,
       feed_anchor(maybe_oldest_id, oldest_sent_at_ms)?,
       older_len(older),
-    );
+    )
+  }
+
+  /// The newest `len` messages, read ahead for a conversation the user may open next: unlike
+  /// [`Self::tail_json`] it leaves the catch-up focus where the user is.
+  pub(crate) fn tail_ahead_json(&self, conversation_id: &str, len: u32) -> Result<String, TeamCraftError> {
+    self.tail_of(parse_id(conversation_id)?, None, older_len(len))
+  }
+
+  fn tail_of(
+    &self,
+    conversation: ConversationId,
+    maybe_anchor: Option<FeedAnchor>,
+    older: usize,
+  ) -> Result<String, TeamCraftError> {
+    let backend = self.backend()?;
+    let tail = backend.feed_tail(conversation, maybe_anchor, older);
     to_json(&MessageTail {
       conversation,
       messages: tail.messages,

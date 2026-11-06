@@ -76,4 +76,6 @@
   </plurals>
   <string name="message_edit_label">Message</string>
   <string name="message_edit_empty">A message can\'t be empty. To remove it, delete it.</string>
+  <string name="search_start_title">Search every conversation</string>
+  <string name="search_start_text">Type a word, or narrow it down with the filters: a person, a conversation, a date, files or links.</string>
 </resources>

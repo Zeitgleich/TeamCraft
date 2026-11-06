@@ -11023,6 +11023,8 @@ name = "teamcraft-desktop-native"
 version = "1.0.21"
 dependencies = [
  "block2",
+ "jni-sys 0.3.1",
+ "ndk-context",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -11072,6 +11074,7 @@ dependencies = [
  "teamcraft-client-api",
  "teamcraft-core",
  "teamcraft-crypto",
+ "teamcraft-desktop-native",
  "teamcraft-media",
  "teamcraft-proto",
  "thiserror 2.0.21",

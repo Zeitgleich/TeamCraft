@@ -4,6 +4,12 @@ import androidx.compose.ui.semantics.heading
 import android.content.Context
 import android.text.format.DateUtils
 import androidx.activity.compose.BackHandler
+import androidx.compose.material.icons.filled.Call
+import androidx.activity.compose.ReportDrawnWhen
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -137,6 +143,7 @@ import de.zeitgleich.teamcraft.ui.tabBadge
 import de.zeitgleich.teamcraft.ui.toggled
 import de.zeitgleich.teamcraft.ui.selectionActions
 import de.zeitgleich.teamcraft.ui.UserAvatar
+import de.zeitgleich.teamcraft.ui.avatarColor
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import uniffi.teamcraft_ffi.FirstSyncItem
 import uniffi.teamcraft_ffi.ConversationItem
@@ -167,8 +174,9 @@ fun ChatListScreen(
   onNavigate: (String) -> Unit,
   maybeSelectedId: String? = null,
 ) {
-  var conversations by remember { mutableStateOf<List<ConversationItem>?>(null) }
-  var previews by remember { mutableStateOf<Map<String, ChatListEntry>>(emptyMap()) }
+  val kept by viewModel.chatList.collectAsState()
+  val conversations = kept.maybeConversations
+  val previews = kept.previews
   // Admins' requests to join channels the user owns: on top of Activity and on its badge.
   var joinRequests by remember { mutableStateOf<List<JoinRequestItem>>(emptyList()) }
   var expiringGuests by remember { mutableStateOf<List<ExpiringGuest>>(emptyList()) }
@@ -200,15 +208,15 @@ fun ChatListScreen(
     // Every read finishes before the next starts: while syncing, changes come faster than a full
     // pass over all conversations, and restarting on each would never show the previews.
     viewModel.changeCount.collect {
-      val loaded = viewModel.conversations()
-      conversations = loaded
+      viewModel.refreshChatList(accountUserId)
       maybeFirstSync = viewModel.firstSync()
       joinRequests = viewModel.joinRequests.list()
       expiringGuests = viewModel.readChat { query(ChatQueries.expiringGuests()).guests } ?: emptyList()
-      previews = viewModel.chatPreviews(loaded)
     }
   }
   val loaded = conversations
+  // The list is usable once its rows and their last lines are there (start-up measurements, Play vitals).
+  ReportDrawnWhen { conversations != null && (previews.isNotEmpty() || conversations.isEmpty()) }
   val maybeBrand by viewModel.loginBrand.collectAsState()
   val isDark = isSystemInDarkTheme()
   val maybeLogo = remember(maybeBrand, isDark) { viewModel.brandLogo(isDark)?.asImageBitmap() }
@@ -231,6 +239,7 @@ fun ChatListScreen(
     maybeConversations = loaded,
     list = ListState(
       previews = previews,
+      runningCalls = kept.runningCalls,
       maybeSelectedId = maybeSelectedId,
       selection = selection,
       actionsFor = { conversation, maybeEntry -> rowActions(viewModel, conversation, maybeEntry) },
@@ -322,6 +331,9 @@ internal fun MainScaffold(
   // The tab the Spaces layout left: Home has its channels now.
   val shownTab = if (isList && tab == ChatTab.Spaces) ChatTab.Home else tab
   val hasDirect = isList || maybeConversations.orEmpty().any { it.isDirect }
+  // Home's list: the button shrinks to its icon once the list scrolls, so it never covers a row's text.
+  val homeList = rememberLazyListState()
+  val isFabExpanded by remember { derivedStateOf { homeList.firstVisibleItemIndex == 0 } }
   Scaffold(
     contentWindowInsets = ScreenInsets,
     topBar = { maybeSelectionBar?.invoke() ?: BrandTopBar(brand, accountUserId, accountName, onSearch = onSearch, onAccount = onAccount) },
@@ -334,6 +346,7 @@ internal fun MainScaffold(
       if (maybeSelectionBar == null && shownTab == ChatTab.Home && hasDirect) {
         ExtendedFloatingActionButton(
           onClick = { onNavigate("browse?people=true") },
+          expanded = isFabExpanded,
           icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
           text = { Text(stringResource(R.string.dm_new)) },
         )
@@ -344,8 +357,8 @@ internal fun MainScaffold(
       banners()
       when {
         maybeConversations == null -> LoadingScreen()
-        isList && shownTab == ChatTab.Home -> ListTab(maybeConversations, list, onNavigate, canBrowse = !isGuest)
-        shownTab == ChatTab.Home -> HomeTab(maybeConversations, list, onNavigate)
+        isList && shownTab == ChatTab.Home -> ListTab(maybeConversations, list, homeList, onNavigate, canBrowse = !isGuest)
+        shownTab == ChatTab.Home -> HomeTab(maybeConversations, list, homeList, onNavigate)
         shownTab == ChatTab.Activity -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests, guestNoticeCount, guestNotices)
         else -> SpacesTab(maybeConversations, list, onNavigate, canBrowse = !isGuest)
       }
@@ -356,6 +369,8 @@ internal fun MainScaffold(
 /** What every tab's conversation rows need. */
 internal class ListState(
   val previews: Map<String, ChatListEntry>,
+  /** Conversations with a call running and how many are in it: their rows say so (issue #1352). */
+  val runningCalls: Map<String, Int> = emptyMap(),
   val maybeSelectedId: String?,
   val selection: List<String>,
   val actionsFor: (ConversationItem, ChatListEntry?) -> RowActions,
@@ -371,14 +386,16 @@ internal class ListState(
   val lastActivity: Map<String, Long> get() = previews.mapValues { it.value.preview.sentAt }
 }
 
-/** Home: the global entries, then the DMs (outside spaces) with their filters. */
+/**
+ * Home: the DMs (outside spaces) with their filters. The conversations start right below the bar;
+ * threads, saved items, drafts and meetings are on Activity, people behind the new-message button.
+ */
 @Composable
-private fun HomeTab(conversations: List<ConversationItem>, list: ListState, onNavigate: (String) -> Unit) {
+private fun HomeTab(conversations: List<ConversationItem>, list: ListState, listState: LazyListState, onNavigate: (String) -> Unit) {
   var dmFilter by rememberSaveable { mutableStateOf("") }
   var homeChip by rememberSaveable { mutableStateOf(HomeFilter.All) }
   if (conversations.none { it.isListedInHome }) {
     Column(Modifier.fillMaxSize()) {
-      HomeEntries(onNavigate)
       RemainingEmptyState(
         icon = Icons.Filled.Email,
         title = stringResource(R.string.dm_empty_title),
@@ -389,10 +406,12 @@ private fun HomeTab(conversations: List<ConversationItem>, list: ListState, onNa
     return
   }
   val sections = directSections(conversations, list.lastActivity, dmFilter, homeChip)
-  LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
-    item(key = "entries") { HomeEntries(onNavigate) }
-    item(key = "filter") { DirectFilter(dmFilter, onChange = { dmFilter = it }) }
-    item(key = "chips") { HomeChips(homeChip, onSelect = { homeChip = if (homeChip == it) HomeFilter.All else it }) }
+  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
+    item(key = "filter") {
+      FilterBar(dmFilter, onChange = { dmFilter = it }) {
+        HomeChips(homeChip, onSelect = { homeChip = if (homeChip == it) HomeFilter.All else it })
+      }
+    }
     if (sections.isEmpty()) item(key = "no-match") { EmptyHint(stringResource(R.string.dm_filter_empty)) }
     conversationRows(sections, list, showsSpace = true)
   }
@@ -404,17 +423,23 @@ private fun HomeTab(conversations: List<ConversationItem>, list: ListState, onNa
  * their menus and browsing for more are.
  */
 @Composable
-private fun ListTab(conversations: List<ConversationItem>, list: ListState, onNavigate: (String) -> Unit, canBrowse: Boolean) {
+private fun ListTab(
+  conversations: List<ConversationItem>,
+  list: ListState,
+  listState: LazyListState,
+  onNavigate: (String) -> Unit,
+  canBrowse: Boolean,
+) {
   var filter by rememberSaveable { mutableStateOf("") }
   var chip by rememberSaveable { mutableStateOf(HomeFilter.All) }
   val sections = listSections(conversations, list.lastActivity, filter, chip)
   val spaces = listedSpaces(conversations)
   val isFiltering = filter.isNotBlank() || chip != HomeFilter.All
-  LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
-    item(key = "entries") { HomeEntries(onNavigate) }
-    item(key = "filter") { DirectFilter(filter, onChange = { filter = it }) }
-    item(key = "chips") {
-      HomeChips(chip, showsChannels = true, onSelect = { chip = if (chip == it) HomeFilter.All else it })
+  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
+    item(key = "filter") {
+      FilterBar(filter, onChange = { filter = it }) {
+        HomeChips(chip, showsChannels = true, onSelect = { chip = if (chip == it) HomeFilter.All else it })
+      }
     }
     if (sections.isEmpty()) item(key = "no-match") { EmptyHint(stringResource(R.string.dm_filter_empty)) }
     conversationRows(sections, list, showsSpace = true)
@@ -463,6 +488,8 @@ private fun ActivityTab(
     EntryRow(Icons.Filled.Star, stringResource(R.string.saved_title)) { onNavigate("saved") }
     EntryRow(Icons.Filled.DateRange, stringResource(R.string.scheduled_title)) { onNavigate("scheduled") }
     EntryRow(Icons.Filled.Edit, stringResource(R.string.drafts_title)) { onNavigate("drafts") }
+    EntryRow(Icons.Filled.DateRange, stringResource(R.string.home_entry_scheduled)) { onNavigate("scheduled") }
+    EntryRow(Icons.Filled.DateRange, stringResource(R.string.home_entry_meetings)) { onNavigate("meetings") }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     if (waiting.isEmpty() && joinRequestCount == 0 && guestNoticeCount == 0) {
       RemainingEmptyState(
@@ -498,10 +525,11 @@ private fun SpacesTab(conversations: List<ConversationItem>, list: ListState, on
     return
   }
   LazyColumn(Modifier.fillMaxSize()) {
+    conversationRows(sections, list)
+    // After the channels: the list starts with what the user is in, finding more comes last.
     if (canBrowse) {
       item(key = "browse") { EntryRow(Icons.Filled.Add, stringResource(R.string.browse_channels)) { onNavigate("browse") } }
     }
-    conversationRows(sections, list)
   }
 }
 
@@ -523,6 +551,7 @@ private fun LazyListScope.conversationRows(
         isChecked = conversation.id in list.selection,
         isSelecting = list.selection.isNotEmpty(),
         showsSpace = showsSpace,
+        callCount = list.runningCalls[conversation.id] ?: 0,
         onClick = { list.onOpen(conversation.id) },
         onLongPress = { list.onLongPress(conversation.id) },
         menu = { isOpen, onDismiss -> list.conversationMenu(conversation, isOpen, onDismiss) },
@@ -677,45 +706,6 @@ private fun NavigationIcon(tab: ChatTab) {
   }
 }
 
-/** The global entries of Home (#237), in one row that never clips: each takes an equal share. */
-@Composable
-private fun HomeEntries(onNavigate: (String) -> Unit) {
-  Row(
-    Modifier.fillMaxWidth().padding(horizontal = Spacing.l, vertical = Spacing.s),
-    horizontalArrangement = Arrangement.spacedBy(Spacing.s),
-  ) {
-    for ((route, icon, label) in HOME_ENTRIES) {
-      EntryTile(icon, stringResource(label), Modifier.weight(1f)) { onNavigate(route) }
-    }
-  }
-}
-
-@Composable
-private fun EntryTile(icon: ImageVector, label: String, modifier: Modifier, onClick: () -> Unit) {
-  Surface(
-    onClick = onClick,
-    shape = MaterialTheme.shapes.medium,
-    color = MaterialTheme.colorScheme.surfaceContainer,
-    modifier = modifier,
-  ) {
-    Column(
-      Modifier.padding(vertical = Spacing.m, horizontal = Spacing.xs),
-      horizontalAlignment = Alignment.CenterHorizontally,
-      verticalArrangement = Arrangement.spacedBy(Spacing.xs),
-    ) {
-      Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-      Text(
-        label,
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.onSurface,
-        textAlign = TextAlign.Center,
-        maxLines = 2,
-        overflow = TextOverflow.Ellipsis,
-      )
-    }
-  }
-}
-
 /** One entry as a full-width row (Activity, Spaces). */
 @Composable
 private fun EntryRow(icon: ImageVector, label: String, onClick: () -> Unit) {
@@ -793,24 +783,21 @@ private fun HomeChips(selected: HomeFilter, showsChannels: Boolean = false, onSe
   }
 }
 
+/**
+ * Filtering the list: a compact field with the chips under it, about half the height the field and
+ * the entries above it took before, so the first conversations show without scrolling.
+ */
 @Composable
-private fun DirectFilter(value: String, onChange: (String) -> Unit) {
-  OutlinedTextField(
-    value = value,
-    onValueChange = onChange,
-    modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.l, vertical = Spacing.xs),
-    placeholder = { Text(stringResource(R.string.dm_filter)) },
-    leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-    trailingIcon = {
-      if (value.isNotEmpty()) {
-        IconButton(onClick = { onChange("") }) {
-          Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.clear))
-        }
-      }
-    },
-    shape = MaterialTheme.shapes.large,
-    singleLine = true,
-  )
+private fun FilterBar(value: String, onChange: (String) -> Unit, chips: @Composable () -> Unit) {
+  Column(Modifier.fillMaxWidth().padding(top = Spacing.xs, bottom = Spacing.xs), verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
+    CompactSearchField(
+      value = value,
+      onChange = onChange,
+      placeholder = stringResource(R.string.dm_filter),
+      modifier = Modifier.padding(horizontal = Spacing.l),
+    )
+    chips()
+  }
 }
 
 @Composable
@@ -865,6 +852,7 @@ private fun SwipeableConversationRow(
   isChecked: Boolean,
   isSelecting: Boolean,
   showsSpace: Boolean,
+  callCount: Int,
   onClick: () -> Unit,
   onLongPress: () -> Unit,
   menu: @Composable (Boolean, () -> Unit) -> Unit,
@@ -898,6 +886,7 @@ private fun SwipeableConversationRow(
         isSelected,
         isChecked,
         showsSpace,
+        callCount,
         onClick,
         onLongPress = { if (isSelecting) onLongPress() else isMenuOpen = true },
       )
@@ -968,6 +957,7 @@ private fun ConversationRow(
   isSelected: Boolean,
   isChecked: Boolean,
   showsSpace: Boolean,
+  callCount: Int,
   onClick: () -> Unit,
   onLongPress: () -> Unit,
 ) {
@@ -1000,20 +990,39 @@ private fun ConversationRow(
             CustomAccessibilityAction(favoriteLabel) { actions.toggleFavorite(); true },
           )
         }
-        .padding(horizontal = 16.dp, vertical = 10.dp),
+        .padding(horizontal = 16.dp, vertical = 8.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
       if (isChecked) CheckedAvatar() else ConversationAvatar(conversation)
       Column(Modifier.weight(1f).padding(start = 12.dp)) {
-        TitleLine(conversation, maybeEntry, maybeSpaceName = conversation.maybeSpaceName.takeIf { showsSpace })
+        TitleLine(conversation, maybeEntry, maybeSpaceName = conversation.maybeSpaceName.takeIf { showsSpace }, callCount = callCount)
         PreviewLine(conversation, maybeEntry)
       }
     }
   }
 }
 
+/** A call runs here: a green phone and how many are in it, before the unread count. */
 @Composable
-private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?, maybeSpaceName: String? = null) {
+private fun RunningCallMark(count: Int) {
+  val description = pluralStringResource(R.plurals.call_running_people, count, count)
+  Row(
+    Modifier
+      .padding(start = 8.dp)
+      .background(CALL_GREEN, CircleShape)
+      .padding(horizontal = 6.dp, vertical = 1.dp)
+      .semantics(mergeDescendants = true) { contentDescription = description },
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Icon(Icons.Filled.Call, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp))
+    Text(count.toString(), style = MaterialTheme.typography.labelSmall, color = Color.White, modifier = Modifier.padding(start = 2.dp))
+  }
+}
+
+private val CALL_GREEN = Color(0xFF2E9E5B)
+
+@Composable
+private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?, maybeSpaceName: String? = null, callCount: Int = 0) {
   val context = LocalContext.current
   val isUnread = conversation.unreadCount > 0u
   Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1047,6 +1056,7 @@ private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?
         modifier = Modifier.padding(start = 4.dp).size(14.dp),
       )
     }
+    if (callCount > 0) RunningCallMark(callCount)
     rowBadge(conversation.unreadCount, conversation.mentionCount, conversation.isMuted)?.let { badge ->
       RowCount(badge, conversation.isMuted)
     }
@@ -1123,14 +1133,18 @@ internal fun ConversationAvatar(conversation: ConversationItem) {
     return
   }
   val isPerson = conversation.kind == ConversationKind.DIRECT || conversation.kind == ConversationKind.GROUP
-  val label = if (isPerson || conversation.kind == ConversationKind.INTEGRATION) conversation.name.firstOrNull()?.uppercase() ?: "?" else prefix(conversation.kind)
+  if (conversation.kind == ConversationKind.PUBLIC || conversation.kind == ConversationKind.PRIVATE) {
+    ChannelAvatar(isPrivate = conversation.kind == ConversationKind.PRIVATE)
+    return
+  }
+  val label = conversation.name.firstOrNull()?.uppercase() ?: "?"
   Box {
     UserAvatar(conversation.maybePeerId, Modifier.size(AVATAR_SIZE)) {
       Box(
         Modifier
           .size(AVATAR_SIZE)
           .background(
-            if (isPerson) avatarColor(conversation.name) else MaterialTheme.colorScheme.surfaceVariant,
+            if (isPerson) avatarColor(conversation.maybePeerId, conversation.name) else MaterialTheme.colorScheme.surfaceVariant,
             CircleShape,
           ),
         contentAlignment = Alignment.Center,
@@ -1153,6 +1167,25 @@ internal fun ConversationAvatar(conversation: ConversationItem) {
           .background(presenceColor(presence), CircleShape)
           .semantics { contentDescription = description },
       )
+    }
+  }
+}
+
+/**
+ * A channel's marker: a rounded square, not a circle, so channels and people tell apart at a glance;
+ * `#` for a public channel, a lock for a private one (the sidebar's markers on desktop and web).
+ */
+@Composable
+private fun ChannelAvatar(isPrivate: Boolean) {
+  val colors = MaterialTheme.colorScheme
+  Box(
+    Modifier.size(AVATAR_SIZE).background(colors.surfaceContainerHighest, RoundedCornerShape(12.dp)),
+    contentAlignment = Alignment.Center,
+  ) {
+    if (isPrivate) {
+      Icon(Icons.Filled.Lock, contentDescription = null, tint = colors.onSurfaceVariant, modifier = Modifier.size(20.dp))
+    } else {
+      Text("#", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold), color = colors.onSurfaceVariant)
     }
   }
 }
@@ -1186,9 +1219,6 @@ private fun presenceLabel(presence: Presence): Int = when (presence) {
   Presence.OFFLINE -> R.string.presence_peer_offline
 }
 
-/** A stable hue per name, so people are recognizable at a glance. */
-private fun avatarColor(name: String): Color = Color.hsl(((name.hashCode() % 360 + 360) % 360).toFloat(), 0.45f, 0.45f)
-
 /**
  * The unread number next to a conversation's name (#897): count and tone come from the shared rule
  * (`rowBadge`), red for a conversation that notifies and for mentions, grey for a muted one. The
@@ -1214,25 +1244,6 @@ private fun RowCount(badge: RowBadge, isMuted: Boolean) {
     Text(badge.label, maxLines = 1, style = MaterialTheme.typography.labelSmall)
   }
 }
-
-/** The sidebar's markers: `#` public, lock-like `◆` private, `@` direct. */
-private fun prefix(kind: ConversationKind): String = when (kind) {
-  ConversationKind.PUBLIC -> "#"
-  ConversationKind.PRIVATE -> "◆"
-  ConversationKind.DIRECT -> "@"
-  ConversationKind.GROUP -> "@"
-  ConversationKind.INTEGRATION -> ""
-}
-
-/** The global entries of Home: route, icon, label. */
-private val HOME_ENTRIES = listOf(
-  Triple("threads", Icons.AutoMirrored.Filled.List, R.string.home_entry_threads),
-  Triple("saved", Icons.Filled.Star, R.string.home_entry_saved),
-  Triple("scheduled", Icons.Filled.DateRange, R.string.home_entry_scheduled),
-  Triple("drafts", Icons.Filled.Edit, R.string.home_entry_drafts),
-  Triple("meetings", Icons.Filled.DateRange, R.string.home_entry_meetings),
-  Triple("browse?people=true", Icons.Filled.Person, R.string.home_entry_people),
-)
 
 /** Instead of the title while conversations are selected: how many, and what to do with them. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1289,11 +1300,11 @@ private fun CheckedAvatar() {
   }
 }
 
-/** The user's own avatar: their picture, or the initial on the stable hue of the name, as for other people. */
+/** The user's own avatar: their picture, or the initial on their hue, as for other people. */
 @Composable
-private fun AccountAvatar(userId: String, name: String, size: Dp) {
+internal fun AccountAvatar(userId: String, name: String, size: Dp) {
   UserAvatar(userId, Modifier.size(size)) {
-    Box(Modifier.size(size).background(avatarColor(name), CircleShape), contentAlignment = Alignment.Center) {
+    Box(Modifier.size(size).background(avatarColor(userId, name), CircleShape), contentAlignment = Alignment.Center) {
       Text(
         name.firstOrNull()?.uppercase() ?: "?",
         style = MaterialTheme.typography.titleSmall,

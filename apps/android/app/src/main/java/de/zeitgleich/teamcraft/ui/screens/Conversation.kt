@@ -47,12 +47,24 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledIconButton
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.foundation.layout.offset
+import androidx.compose.material.icons.filled.Edit
+import de.zeitgleich.teamcraft.ui.PictureEdits
+import de.zeitgleich.teamcraft.ui.Pictures
+import androidx.compose.material3.Button
+import uniffi.teamcraft_ffi.CallPhase
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -127,10 +139,13 @@ import de.zeitgleich.teamcraft.ui.olderState
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.ConversationRights
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.media.MediaFlow
+import de.zeitgleich.teamcraft.ui.media.MediaFlowLaunch
 import de.zeitgleich.teamcraft.ui.MessageAction
 import de.zeitgleich.teamcraft.ui.VoiceOwner
 import de.zeitgleich.teamcraft.ui.messageActions
 import de.zeitgleich.teamcraft.ui.EmojiInput
+import de.zeitgleich.teamcraft.ui.FeedSeed
 import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.Mentions
 import de.zeitgleich.teamcraft.ui.PagedFeed
@@ -170,24 +185,28 @@ fun ConversationScreen(
   onOpenConversation: (String) -> Unit = {},
 ) {
   val changes by viewModel.changeCount.collectAsState()
-  var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
-  var messages by remember { mutableStateOf<List<Message>>(emptyList()) }
-  var extras by remember { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
-  var pinned by remember { mutableStateOf<List<Message>>(emptyList()) }
+  var snapshot by remember { mutableStateOf(viewModel.chat.maybeKeptSnapshot()) }
+  // What it showed last or was read ahead with: the messages are there in the first frame.
+  val maybeSeed = remember(conversationId) { viewModel.feedSeed(conversationId) }
+  var messages by remember(conversationId) { mutableStateOf(maybeSeed?.messages ?: emptyList()) }
+  var extras by remember(conversationId) { mutableStateOf(maybeSeed?.extras ?: emptyMap()) }
+  var pinned by remember(conversationId) { mutableStateOf<List<Message>>(emptyList()) }
   // Admins asking to join this channel, when the user owns it (admin.md §2.4.1).
   var joinRequests by remember { mutableStateOf<List<JoinRequestItem>>(emptyList()) }
-  var firstUnread by remember { mutableStateOf<FirstUnread>(FirstUnread.Loading) }
+  var firstUnread by remember(conversationId) { mutableStateOf(maybeSeed?.firstUnread ?: FirstUnread.Loading) }
   // Others' reactions to the user's messages not seen yet: the heart button (issue #1009).
   var unseenReactions by remember(conversationId) { mutableStateOf(UnseenReactions()) }
   // Counts sends from this screen's composer: each one brings the newest message into view.
   var sentCount by remember { mutableIntStateOf(0) }
   var maybeKeyCatchUp by remember { mutableStateOf<KeyCatchUpItem?>(null) }
+  // People in the call running here now; 0 without one (issue #1352).
+  var runningCallCount by remember(conversationId) { mutableIntStateOf(0) }
   // What the notification that opened it showed, until the store has it (issue #1065).
   var maybeNotified by remember(conversationId) { mutableStateOf<NotifiedConversation?>(null) }
   val feed = remember(conversationId) {
     PagedFeed(PAGE, PAGE_BACK) { maybeOldest, older -> viewModel.readChat { tail(conversationId, maybeOldest, older) } }
   }
-  var hasOlder by remember(conversationId) { mutableStateOf(false) }
+  var hasOlder by remember(conversationId) { mutableStateOf(maybeSeed?.hasOlder ?: false) }
   var isLoadingOlder by remember(conversationId) { mutableStateOf(false) }
   // Older history the store doesn't hold: read when the feed reaches the store's end.
   var serverHistory by remember(conversationId) { mutableStateOf(ServerHistory.COMPLETE) }
@@ -199,20 +218,29 @@ fun ConversationScreen(
     val maybeMessage = viewModel.readChat { query(ChatQueries.firstUnread(conversationId)).maybeMessage }
     firstUnread = maybeMessage?.let { FirstUnread.At(it) } ?: FirstUnread.None
   }
-  LaunchedEffect(changes, conversationId) {
-    snapshot = viewModel.readChat { snapshot() }
-    val maybeTail = feed.reread()
-    messages = maybeTail?.messages ?: emptyList()
-    hasOlder = maybeTail?.hasOlder ?: false
-    serverHistory = viewModel.readChat { query(ChatQueries.olderHistory(conversationId)).olderHistory } ?: serverHistory
-    isAskingServer = false
-    maybeKeyCatchUp = viewModel.keyCatchUp()
-    // After the messages: once the store has the notified one, the core no longer names it.
-    maybeNotified = viewModel.notifiedConversation(conversationId)
-    extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: emptyMap()
-    pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: emptyList()
-    unseenReactions = viewModel.readChat { query(ChatQueries.unseenReactions(conversationId)).unseen } ?: UnseenReactions()
-    joinRequests = requestsIn(conversationId, viewModel.joinRequests.list())
+  LaunchedEffect(conversationId) {
+    // One pass after another, each with the newest state: while syncing, changes come faster than a
+    // pass, and restarting on each would keep cancelling the reads behind the messages. The
+    // messages come first; the snapshot (names, the header) is shared with the other screens.
+    viewModel.changeCount.collect {
+      val maybeTail = feed.reread()
+      messages = maybeTail?.messages ?: emptyList()
+      hasOlder = maybeTail?.hasOlder ?: false
+      // Reactions, files and receipts belong to the bubbles: right after them.
+      extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras
+      // Read now: opened again, it starts at the end without an unread line.
+      viewModel.keepFeedSeed(conversationId, FeedSeed(messages, hasOlder, extras, FirstUnread.None))
+      snapshot = viewModel.readChat { snapshot() } ?: snapshot
+      serverHistory = viewModel.readChat { query(ChatQueries.olderHistory(conversationId)).olderHistory } ?: serverHistory
+      isAskingServer = false
+      maybeKeyCatchUp = viewModel.keyCatchUp()
+      // After the messages: once the store has the notified one, the core no longer names it.
+      maybeNotified = viewModel.notifiedConversation(conversationId)
+      pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: pinned
+      unseenReactions = viewModel.readChat { query(ChatQueries.unseenReactions(conversationId)).unseen } ?: unseenReactions
+      joinRequests = requestsIn(conversationId, viewModel.joinRequests.list())
+      runningCallCount = viewModel.runningCalls()[conversationId] ?: 0
+    }
   }
   FollowTransfers(extras) { extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras }
   LaunchedEffect(conversationId, messages.size) { viewModel.markRead(conversationId) }
@@ -242,6 +270,7 @@ fun ConversationScreen(
       }
     },
   ) {
+    RunningCallBanner(viewModel, conversationId, conversation?.name.orEmpty(), runningCallCount)
     if (pinned.isNotEmpty()) PinnedBanner(pinned.last())
     JoinRequestBanner(joinRequests, viewModel.joinRequests)
     // Messages here wait for their keys (a newly linked device, issue #888): they show as
@@ -320,17 +349,20 @@ fun ThreadScreen(
   onOpenPermalink: (String) -> Unit = {},
 ) {
   val changes by viewModel.changeCount.collectAsState()
-  var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
+  var snapshot by remember { mutableStateOf(viewModel.chat.maybeKeptSnapshot()) }
   var messages by remember { mutableStateOf<List<Message>>(emptyList()) }
   var extras by remember { mutableStateOf<Map<String, MessageExtras>>(emptyMap()) }
   var isFollowed by remember { mutableStateOf(false) }
   var sentCount by remember { mutableIntStateOf(0) }
   val rights = rememberRights(viewModel, conversationId, changes)
-  LaunchedEffect(changes, threadId) {
-    snapshot = viewModel.readChat { snapshot() }
-    messages = viewModel.readChat { query(ChatQueries.thread(conversationId, threadId)).messages } ?: emptyList()
-    extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: emptyMap()
-    isFollowed = viewModel.readChat { query(ChatQueries.isThreadFollowed(conversationId, threadId)).value } ?: false
+  LaunchedEffect(threadId) {
+    // As in the conversation: one pass after another, the messages first.
+    viewModel.changeCount.collect {
+      messages = viewModel.readChat { query(ChatQueries.thread(conversationId, threadId)).messages } ?: messages
+      snapshot = viewModel.readChat { snapshot() } ?: snapshot
+      extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras
+      isFollowed = viewModel.readChat { query(ChatQueries.isThreadFollowed(conversationId, threadId)).value } ?: isFollowed
+    }
   }
   FollowTransfers(extras) { extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras }
   LaunchedEffect(threadId, messages.size) { viewModel.act(ChatActions.markThreadRead(conversationId, threadId)) }
@@ -484,7 +516,8 @@ private fun ConversationMenu(
     val isNotetakerInCall by produceState(false, conversationId) {
       value = viewModel.isNotetakerInRunningCall(conversationId)
     }
-    PreJoinDialog(name, isNotetakerInCall, onDismiss = { isPreparingCall = false }) { options ->
+    val runningCount by produceState(0, conversationId) { value = viewModel.runningCalls()[conversationId] ?: 0 }
+    PreJoinDialog(name, isNotetakerInCall, runningCount, onDismiss = { isPreparingCall = false }) { options ->
       isPreparingCall = false
       viewModel.startCall(conversationId, name, options)
     }
@@ -1056,10 +1089,15 @@ internal fun Composer(
   var wantsAcknowledgement by rememberSaveable(conversationId) { mutableStateOf(false) }
   var isSilent by rememberSaveable(conversationId) { mutableStateOf(false) }
   var alsoToChannel by rememberSaveable(conversationId) { mutableStateOf(false) }
-  var isOptionsOpen by remember { mutableStateOf(false) }
+  var isAttachOpen by remember { mutableStateOf(false) }
+  // The picked picture being edited before it is sent.
+  var maybeEditing by remember { mutableStateOf<PickedFile?>(null) }
+  var isSendOptionsOpen by remember { mutableStateOf(false) }
   val replyTarget by ReplyTarget.current.collectAsState()
   val maybeReply = replyTarget?.takeIf { it.conversation == conversationId && maybeThread == null }
-  val pickers = rememberAttachmentPickers(viewModel) { picked -> files = files + picked }
+  // The camera, gallery and review flow (#1358); saved so it comes back after the app was killed.
+  var maybeMediaFlow by rememberSaveable(conversationId, maybeThread, stateSaver = MediaFlowLaunch.saver) { mutableStateOf<MediaFlowLaunch?>(null) }
+  val pickers = rememberAttachmentPickers(viewModel, onMediaFlow = { maybeMediaFlow = it }) { picked -> files = files + picked }
   val focus = remember { FocusRequester() }
   val isSendWithEnter = remember { ComposerPrefs.prefs(context).isSendWithEnter }
   val isSharingTyping = remember { ComposerPrefs.prefs(context).isSharingTyping }
@@ -1246,8 +1284,24 @@ internal fun Composer(
       }
     }
     if (files.isNotEmpty()) {
-      FlowRow(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+      FlowRow(
+        Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+      ) {
         for (file in files) {
+          if (PictureEdits.isEditable(file.mediaType)) {
+            // Pictures show as themselves: a tap opens the editor, the corner removes them.
+            PictureAttachment(
+              file = file,
+              onEdit = { maybeEditing = file },
+              onRemove = {
+                files = files - file
+                viewModel.discardFile(file)
+              },
+            )
+            continue
+          }
           val removeLabel = stringResource(R.string.composer_remove_file, file.fileName)
           InputChip(
             selected = false,
@@ -1271,7 +1325,13 @@ internal fun Composer(
       stringResource(R.string.option_also_to_channel).takeIf { alsoToChannel },
     )
     if (flags.isNotEmpty()) {
-      Text(flags.joinToString(" · "), style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 16.dp))
+      // What the next send carries, as a chip that opens the options again.
+      AssistChip(
+        onClick = { isSendOptionsOpen = true },
+        label = { Text(flags.joinToString(" · "), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        leadingIcon = { Icon(painterResource(R.drawable.ic_notification), contentDescription = null, modifier = Modifier.size(16.dp)) },
+        modifier = Modifier.padding(horizontal = 12.dp),
+      )
     }
     ComposerField(
       text = text,
@@ -1287,9 +1347,10 @@ internal fun Composer(
       canSend = canSend,
       isSendWithEnter = isSendWithEnter,
       focus = focus,
-      onAttach = { isOptionsOpen = true },
-      onCamera = pickers.takePhoto,
+      onAttach = { isAttachOpen = true },
+      onCamera = pickers.openCamera,
       onSend = ::trySend,
+      onSendOptions = { isSendOptionsOpen = true },
       maybeVoiceBar = if (voice.isActive) {
         { VoiceBar(viewModel, voice) }
       } else {
@@ -1302,8 +1363,38 @@ internal fun Composer(
       },
     )
   }
-  if (isOptionsOpen) {
-    AttachSheet(pickers, onDismiss = { isOptionsOpen = false }) {
+  if (isAttachOpen) AttachSheet(pickers, onDismiss = { isAttachOpen = false })
+  maybeMediaFlow?.let { launch ->
+    MediaFlow(
+      viewModel = viewModel,
+      key = "$conversationId-${maybeThread.orEmpty()}",
+      launch = launch,
+      conversationName = snapshot?.conversation(conversationId)?.name.orEmpty(),
+      initialCaption = text,
+      onClose = { maybeMediaFlow = null },
+      onSend = { picked, caption ->
+        maybeMediaFlow = null
+        // The caption is the message's text: it goes with the pictures as one message.
+        files = files + picked
+        text = caption
+        trySend()
+      },
+    )
+  }
+  maybeEditing?.let { editing ->
+    PictureEditor(
+      viewModel = viewModel,
+      file = editing,
+      onCancel = { maybeEditing = null },
+      onDone = { edited ->
+        files = files.map { if (it == editing) edited else it }
+        viewModel.discardFile(editing)
+        maybeEditing = null
+      },
+    )
+  }
+  if (isSendOptionsOpen) {
+    SendOptionsSheet(onDismiss = { isSendOptionsOpen = false }) {
       SendOptionsSection(
         priority = priority,
         onPriority = { priority = it },
@@ -1319,7 +1410,7 @@ internal fun Composer(
         canSchedule = text.isNotBlank() && files.isEmpty(),
         hasFiles = files.isNotEmpty(),
         onOpen = {
-          isOptionsOpen = false
+          isSendOptionsOpen = false
           isSendLaterOpen = true
         },
       )
@@ -1347,7 +1438,8 @@ internal fun Composer(
  * The message field as in the common messengers (#315, #704): a rounded pill with attach on the
  * left and the camera on the right inside it, and a round accent send button beside it. While there
  * is nothing to send, the button records a voice message (#204, [maybeTrailing]); a recording or
- * take shows in the pill instead of the field ([maybeVoiceBar]).
+ * take shows in the pill instead of the field ([maybeVoiceBar]). A long-press on send opens how the
+ * message is sent (priority, receipts, silent), as Telegram's and Signal's send buttons do.
  */
 @Composable
 private fun ComposerField(
@@ -1359,6 +1451,7 @@ private fun ComposerField(
   onAttach: () -> Unit,
   onCamera: () -> Unit,
   onSend: () -> Unit,
+  onSendOptions: () -> Unit,
   maybeVoiceBar: (@Composable () -> Unit)? = null,
   maybeTrailing: (@Composable (Modifier) -> Unit)? = null,
 ) {
@@ -1420,18 +1513,7 @@ private fun ComposerField(
       maybeTrailing(Modifier.padding(start = 6.dp, bottom = 4.dp))
       return@Row
     }
-    FilledIconButton(
-      onClick = onSend,
-      enabled = canSend,
-      shape = CircleShape,
-      colors = IconButtonDefaults.filledIconButtonColors(
-        disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-        disabledContentColor = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-      ),
-      modifier = Modifier.padding(start = 6.dp, bottom = 4.dp).size(SEND_BUTTON_SIZE),
-    ) {
-      Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.send))
-    }
+    SendButton(canSend, onSend, onSendOptions)
   }
 }
 
@@ -1462,7 +1544,97 @@ private fun EmojiSuggestions(text: String, onPick: (String) -> Unit) {
   }
 }
 
-/** Priority, read confirmation, silent and "also send to channel", in the composer's "+" sheet. */
+/** A picked picture in the composer: its thumbnail opens the editor, the corner button removes it. */
+@Composable
+private fun PictureAttachment(file: PickedFile, onEdit: () -> Unit, onRemove: () -> Unit) {
+  val maybePicture by produceState<ImageBitmap?>(null, file.path) { value = Pictures.file(file.path, ATTACHMENT_THUMB_PX) }
+  val editLabel = stringResource(R.string.composer_edit_picture, file.fileName)
+  Box(Modifier.size(ATTACHMENT_THUMB)) {
+    Box(
+      Modifier
+        .matchParentSize()
+        .clip(RoundedCornerShape(12.dp))
+        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+        .clickable(onClickLabel = editLabel, onClick = onEdit),
+    ) {
+      maybePicture?.let { Image(it, contentDescription = file.fileName, contentScale = ContentScale.Crop, modifier = Modifier.matchParentSize()) }
+      Icon(
+        Icons.Filled.Edit,
+        contentDescription = null,
+        tint = Color.White,
+        modifier = Modifier
+          .align(Alignment.BottomStart)
+          .padding(4.dp)
+          .background(Color.Black.copy(alpha = 0.5f), CircleShape)
+          .padding(3.dp)
+          .size(14.dp),
+      )
+    }
+    Box(
+      Modifier
+        .align(Alignment.TopEnd)
+        .offset(x = 6.dp, y = (-6).dp)
+        .size(24.dp)
+        .clip(CircleShape)
+        .background(MaterialTheme.colorScheme.inverseSurface)
+        .clickable(onClickLabel = stringResource(R.string.composer_remove_file, file.fileName), onClick = onRemove),
+      contentAlignment = Alignment.Center,
+    ) {
+      Icon(
+        Icons.Filled.Close,
+        contentDescription = stringResource(R.string.composer_remove_file, file.fileName),
+        tint = MaterialTheme.colorScheme.inverseOnSurface,
+        modifier = Modifier.size(16.dp),
+      )
+    }
+  }
+}
+
+private val ATTACHMENT_THUMB = 64.dp
+private const val ATTACHMENT_THUMB_PX = 256
+
+/** The round send button: tap sends, long-press (also with nothing typed yet) sets how. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SendButton(canSend: Boolean, onSend: () -> Unit, onSendOptions: () -> Unit) {
+  val haptics = LocalHapticFeedback.current
+  val scheme = MaterialTheme.colorScheme
+  Box(
+    Modifier
+      .padding(start = 6.dp, bottom = 4.dp)
+      .size(SEND_BUTTON_SIZE)
+      .clip(CircleShape)
+      .background(if (canSend) scheme.primary else scheme.surfaceContainerHigh)
+      .combinedClickable(
+        role = Role.Button,
+        onClickLabel = stringResource(R.string.send),
+        onLongClickLabel = stringResource(R.string.send_options),
+        onClick = { if (canSend) onSend() },
+        onLongClick = {
+          haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+          onSendOptions()
+        },
+      )
+      .semantics { if (!canSend) disabled() },
+    contentAlignment = Alignment.Center,
+  ) {
+    Icon(
+      Icons.AutoMirrored.Filled.Send,
+      contentDescription = stringResource(R.string.send),
+      tint = if (canSend) scheme.onPrimary else scheme.onSurfaceVariant.copy(alpha = 0.6f),
+    )
+  }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SendOptionsSheet(onDismiss: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+  ModalBottomSheet(onDismissRequest = onDismiss) {
+    Column(Modifier.padding(bottom = 24.dp), content = content)
+  }
+}
+
+/** Priority, read confirmation, silent and "also send to channel": the send button's long-press. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun SendOptionsSection(
@@ -1475,7 +1647,6 @@ private fun SendOptionsSection(
   maybeAlsoToChannel: Boolean?,
   onAlsoToChannel: (Boolean) -> Unit,
 ) {
-  HorizontalDivider(Modifier.padding(vertical = 8.dp))
   Text(
     stringResource(R.string.send_options),
     style = MaterialTheme.typography.titleSmall,
@@ -1516,6 +1687,7 @@ private val PRIORITIES = listOf(
 internal fun PreJoinDialog(
   name: String,
   isNotetakerInCall: Boolean,
+  runningCount: Int,
   onDismiss: () -> Unit,
   onJoin: (CallOptions) -> Unit,
 ) {
@@ -1523,9 +1695,17 @@ internal fun PreJoinDialog(
   var isMuted by rememberSaveable { mutableStateOf(false) }
   AlertDialog(
     onDismissRequest = onDismiss,
-    title = { Text(stringResource(R.string.call_prejoin_title, name)) },
+    // A call that runs already is joined, not started: the dialog says so, and who is in it.
+    title = { Text(stringResource(if (runningCount > 0) R.string.call_prejoin_join_title else R.string.call_prejoin_title, name)) },
     text = {
       Column {
+        if (runningCount > 0) {
+          Text(
+            pluralStringResource(R.plurals.call_running_people, runningCount, runningCount),
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(bottom = 8.dp),
+          )
+        }
         if (isNotetakerInCall) {
           Text(
             stringResource(R.string.call_prejoin_notetaker),
@@ -1550,6 +1730,34 @@ internal fun PreJoinDialog(
     },
     dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
   )
+}
+
+/**
+ * A call runs in this conversation: who is in it and a Join button, or "Back to the call" when
+ * this device is in it. Joining from here starts with the microphone on and the camera off.
+ */
+@Composable
+private fun RunningCallBanner(viewModel: MainViewModel, conversationId: String, name: String, count: Int) {
+  val calls = TeamCraftApplication.graph(LocalContext.current).calls
+  val maybeState by calls.callState.collectAsState()
+  val isHere = maybeState?.conversationId == conversationId && maybeState?.phase != CallPhase.ENDED
+  if (count == 0 && !isHere) return
+  Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
+    Row(Modifier.padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+      Icon(Icons.Filled.Call, contentDescription = null, tint = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.size(18.dp))
+      Text(
+        if (isHere) stringResource(R.string.call_in_this_call) else pluralStringResource(R.plurals.call_running_people, count, count),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSecondaryContainer,
+        modifier = Modifier.weight(1f).padding(start = 8.dp),
+      )
+      if (isHere) {
+        TextButton(onClick = { viewModel.showCall() }) { Text(stringResource(R.string.call_back_to)) }
+      } else {
+        Button(onClick = { viewModel.startCall(conversationId, name) }) { Text(stringResource(R.string.call_prejoin_join)) }
+      }
+    }
+  }
 }
 
 /** The composer pill's corner radius: fully round at one line, a soft box when it grows. */

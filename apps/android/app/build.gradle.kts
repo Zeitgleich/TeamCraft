@@ -92,11 +92,16 @@ android {
       buildConfigField("String", "FCM_APPLICATION_ID", "\"${setting("fcmApplicationId")}\"")
       buildConfigField("String", "FCM_API_KEY", "\"${setting("fcmApiKey")}\"")
       buildConfigField("String", "FCM_SENDER_ID", "\"${setting("fcmSenderId")}\"")
+      // Play's policy on photo and video access: the system photo picker only, no media library
+      // (no recent-photos strip, no albums). Its manifest removes the permissions.
+      buildConfigField("boolean", "READS_MEDIA_LIBRARY", "false")
     }
     // Builds without Google services (F-Droid style): UnifiedPush only.
     create("libre") {
       dimension = "push"
       applicationIdSuffix = ".libre"
+      // The recent-photos strip and the albums read the device's media library (libre manifest).
+      buildConfigField("boolean", "READS_MEDIA_LIBRARY", "true")
     }
   }
 
@@ -182,10 +187,15 @@ dependencies {
   implementation(libs.androidx.camera.camera2)
   implementation(libs.androidx.camera.lifecycle)
   implementation(libs.androidx.camera.view)
+  // The in-app camera's video recording (#1358).
+  implementation(libs.androidx.camera.video)
   // QR codes for device linking, shown and scanned (pure Java, Apache-2.0; no Play services).
   // The in-app video player (#200): the platform's decoders behind Media3's demuxers and controls.
   implementation(libs.androidx.media3.exoplayer)
   implementation(libs.androidx.media3.ui)
+  // Trim, mute and scale videos on the device before sending (#1358): Media3 Transformer, Apache-2.0.
+  implementation(libs.androidx.media3.transformer)
+  implementation(libs.androidx.media3.effect)
   implementation(libs.zxing.core)
   // Search segment prefetch on unmetered networks while charging.
   implementation(libs.androidx.work.runtime)

@@ -99,6 +99,9 @@ object Pictures {
     return if (bounds.outWidth > 0 && bounds.outHeight > 0) bounds.outWidth.toFloat() / bounds.outHeight else null
   }
 
+  /** A picture file decoded upright at about `maxSidePx`, not kept: for editing before sending. */
+  fun decodeUpright(path: String, maxSidePx: Int): Bitmap? = decodeFile(path, maxSidePx)
+
   private fun decodeBytes(bytes: ByteArray, maxSidePx: Int): Bitmap? =
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
       decodeSource(ImageDecoder.createSource(ByteBuffer.wrap(bytes)), maxSidePx)

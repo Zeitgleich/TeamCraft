@@ -17,10 +17,15 @@ import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import androidx.annotation.StringRes
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -30,6 +35,9 @@ import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.BuildConfig
 import de.zeitgleich.teamcraft.R
@@ -43,6 +51,7 @@ import de.zeitgleich.teamcraft.auth.isSsoOnly
 import de.zeitgleich.teamcraft.auth.localSignInErrorText
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatActions
+import de.zeitgleich.teamcraft.ui.media.MediaDraftStore
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.FileInfo
@@ -139,6 +148,28 @@ enum class LinkConfirmation { CONFIRMED, WRONG_CODE, ATTEMPT_ENDED, FAILED }
 class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val graph = TeamCraftApplication.graph(application)
   private val state = MutableStateFlow<AppState>(AppState.Starting)
+  // Above the `init` blocks: the first refresh fills it from the start cache before it suspends.
+  private val chatListState = MutableStateFlow(ChatListState())
+  private val chatListLock = Mutex()
+
+  /**
+   * The chat list's conversations and previews, kept here so that going back to the list shows it at
+   * once instead of loading it again; the list refreshes it on every change while it is shown.
+   */
+  val chatList: StateFlow<ChatListState> = chatListState
+  private val startCache = graph.startCache
+  private val feedSeeds = FeedSeeds()
+  private var maybeReadAhead: Job? = null
+  private var maybeStartCacheWrite: Job? = null
+
+  /**
+   * The store changed since the list was read last: a message deleted, redacted or purged while
+   * a conversation was on screen would stay in the start cache. Read again when the app leaves.
+   */
+  @Volatile private var isStartCacheStale = false
+  private val startCacheOnLeave = object : DefaultLifecycleObserver {
+    override fun onStop(owner: LifecycleOwner) = refreshStartCacheIfStale()
+  }
   private val busy = MutableStateFlow(false)
   private val shares = graph.shares
   private val shareState = MutableStateFlow<ShareState?>(null)
@@ -170,7 +201,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   val changeCount: StateFlow<Long> = graph.core.changeCount
 
   /** The chat features over the core's JSON bridge. */
-  val chat = ChatClient(::deletedUserName) { graph.core.core() }
+  val chat = ChatClient(
+    ::deletedUserName,
+    maybeChanges = { graph.core.changeCount.value },
+    generation = { graph.core.accountGeneration.value },
+  ) { graph.core.core() }
   private val failures = MutableStateFlow<Int?>(null)
 
   /** Files picked in a composer and not sent yet, by conversation and thread. */
@@ -257,6 +292,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   init {
+    // However the session ends (also an expired refresh token, which skips endSession), what it
+    // showed leaves memory; the auth callback deletes what it left on disk.
+    viewModelScope.launch {
+      var wasSignedIn = false
+      graph.auth.isSignedIn.collect { isSignedIn ->
+        if (wasSignedIn && !isSignedIn) forgetSession()
+        wasSignedIn = isSignedIn
+      }
+    }
+    viewModelScope.launch(Dispatchers.IO) { MediaDraftStore.sweep(getApplication(), System.currentTimeMillis()) }
+    viewModelScope.launch { graph.core.changeCount.collect { isStartCacheStale = true } }
+    ProcessLifecycleOwner.get().lifecycle.addObserver(startCacheOnLeave)
     refresh()
     retryServerWhenOnline()
     loadSignInPageWhenShown()
@@ -270,6 +317,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    * confirm, or the server entry. The managed configuration is read again every time.
    */
   fun refresh() = launchBusy {
+    val maybeShownAccount = if (state.value == AppState.Starting) showStartCache() else null
     val maybePreset = withContext(Dispatchers.IO) { graph.managedConfig.preset() }
     val lock = maybePreset?.takeIf { it.isLocked }?.let {
       ServerLock(it.address, withContext(Dispatchers.Default) { normalizedOrigin(it.address) })
@@ -279,6 +327,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // The first read opens the stored server and session: files and the core's checks.
     val maybeStored = withContext(Dispatchers.IO) { graph.auth.server }
     val start = decideServerStart(maybeStored?.address?.origin, maybePreset, lock)
+    val isSignedIn = graph.auth.isSignedIn.value
+    if (maybeShownAccount != null && (!isSignedIn || maybeShownAccount != accountKey())) {
+      // Another account than the one shown last, or none: its list goes before anything else shows.
+      chatListState.value = ChatListState()
+      state.value = AppState.Starting
+    }
+    if (!isSignedIn || (maybeShownAccount != null && maybeShownAccount != accountKey())) {
+      // A cache left by a sign-out that didn't finish (the app killed in between) goes too.
+      withContext(Dispatchers.IO) { startCache.delete() }
+    }
     when {
       maybeStored != null && start is ServerStart.UseStored -> {
         showServer(maybeStored)
@@ -547,22 +605,115 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Where a share can go (notes first, then by last activity), or null when it can't be read. */
   suspend fun shareTargets(): List<ConversationItem>? = read { shareTargets() }
 
+  /** Reads the conversations, shows them, then reads their previews. One refresh at a time. */
+  suspend fun refreshChatList(myId: String) = chatListLock.withLock {
+    val conversations = conversations()
+    chatListState.update { it.copy(maybeConversations = conversations, runningCalls = runningCalls()) }
+    val previews = chatPreviews(conversations, myId)
+    chatListState.update { it.copy(previews = previews) }
+    isStartCacheStale = false
+    rememberStartCache()
+    readAhead()
+  }
+
+  /** What [conversationId] showed last or was read ahead with, to show before its first read. */
+  fun feedSeed(conversationId: String): FeedSeed? = feedSeeds[conversationId]
+
+  /** Keeps what an open conversation shows, so opening it again shows it in the first frame. */
+  fun keepFeedSeed(conversationId: String, seed: FeedSeed) = feedSeeds.keep(conversationId, seed)
+
   /**
-   * The newest message of each conversation, for the chat list. Reads the local store only (one
-   * small window per conversation); names come from the snapshot.
+   * Reads the newest messages of the conversations at the top of the list ahead, so they open with
+   * their messages in the first frame. Only those whose newest message changed, one at a time on the
+   * read thread. A running pass isn't restarted (while syncing the list changes faster than a pass
+   * takes, and it would never finish): it looks at the list again when it is through.
    */
-  suspend fun chatPreviews(conversations: List<ConversationItem>): Map<String, ChatListEntry> {
-    val snapshot = readChat { snapshot() } ?: return emptyMap()
-    return conversations.mapNotNull { conversation ->
-      val latest = readChat { latest(conversation.id, 1).messages.lastOrNull() } ?: return@mapNotNull null
-      val preview = chatPreview(
-        message = latest,
-        myId = snapshot.me.id,
-        authorName = snapshot.name(latest.author),
-        isOneToOne = conversation.kind == ConversationKind.DIRECT,
-      )
-      conversation.id to ChatListEntry(preview, latest.id)
-    }.toMap()
+  private fun readAhead() {
+    if (maybeReadAhead?.isActive == true) return
+    maybeReadAhead = viewModelScope.launch {
+      // Twice at most: once, and once more for what changed meanwhile; later changes start another.
+      repeat(READ_AHEAD_PASSES) {
+        val ids = feedSeeds.toReadAhead(chatListState.value)
+        if (ids.isEmpty() || !readAhead(ids)) return@launch
+      }
+    }
+  }
+
+  /** `false` when a read failed (the store closed, say): the next list change tries again. */
+  private suspend fun readAhead(ids: List<String>): Boolean {
+    for (id in ids) {
+      val tail = readChat { tailAhead(id, FEED_SEED_MESSAGES) } ?: return false
+      val extras = readChat { extras(id, tail.messages.map { it.id }) } ?: emptyMap()
+      val maybeUnread = readChat { query(ChatQueries.firstUnread(id)).maybeMessage }
+      val firstUnread = maybeUnread?.let { FirstUnread.At(it) } ?: FirstUnread.None
+      feedSeeds.keep(id, FeedSeed(tail.messages, tail.hasOlder, extras, firstUnread))
+    }
+    return true
+  }
+
+  /**
+   * Shows the account and chat list of the last run at once, before the store is open; the real
+   * state replaces them when it is read. Read on the main thread on purpose: a few milliseconds
+   * that make the first frame the list instead of a loading screen. Returns the account it showed.
+   */
+  private fun showStartCache(): String? {
+    val cached = runCatching { startCache.read() }
+      .onFailure { Log.w(TAG, "start cache not read: ${it.javaClass.simpleName}") }
+      .getOrNull() ?: return null
+    chatListState.value = cached.listState()
+    state.value = cached.ready()
+    return cached.account
+  }
+
+  /** One list pass when the app leaves after changes the list didn't see; it rewrites the start cache. */
+  private fun refreshStartCacheIfStale() {
+    val ready = state.value as? AppState.Ready ?: return
+    if (!isStartCacheStale) return
+    viewModelScope.launch { refreshChatList(ready.userId) }
+  }
+
+  /** Drops what the session showed from memory: the list, read-ahead chats, the kept snapshot. */
+  private fun forgetSession() {
+    maybeStartCacheWrite?.cancel()
+    maybeReadAhead?.cancel()
+    chatListState.value = ChatListState()
+    feedSeeds.clear()
+    chat.forget()
+  }
+
+  /** Keeps the list for the next start, once changes have settled for a moment. */
+  private fun rememberStartCache() {
+    val ready = state.value as? AppState.Ready ?: return
+    val list = chatListState.value
+    maybeStartCacheWrite?.cancel()
+    maybeStartCacheWrite = viewModelScope.launch(Dispatchers.IO) {
+      delay(START_CACHE_SETTLE_MILLIS)
+      val account = accountKey() ?: return@launch
+      val cache = StartCache.of(account, ready, list) ?: return@launch
+      // Checked again under the store's lock: a sign-out may have deleted it since.
+      runCatching { startCache.write(cache) { isActive && accountKey() == account } }
+        .onFailure { Log.w(TAG, "start cache not written: ${it.javaClass.simpleName}") }
+    }
+  }
+
+  /** The signed-in account as the store is keyed (`CoreRepository`), or `null` when signed out. */
+  private fun accountKey(): String? {
+    val origin = graph.auth.server?.address?.origin ?: return null
+    val subject = graph.auth.account ?: return null
+    return "$origin $subject"
+  }
+
+  /**
+   * The line under each conversation of the chat list, in one read of the local store for the whole
+   * list (the newest message people wrote; joins and renames only when nothing was written nearby).
+   */
+  suspend fun chatPreviews(conversations: List<ConversationItem>, myId: String): Map<String, ChatListEntry> {
+    val isOneToOne = conversations.associate { it.id to (it.kind == ConversationKind.DIRECT) }
+    val items = read { chatPreviews(conversations.map { it.id }) } ?: return emptyMap()
+    return items.associate { item ->
+      val message = namedAuthor(item.message)
+      item.conversationId to ChatListEntry(chatPreview(message, myId, isOneToOne[item.conversationId] == true), message.id)
+    }
   }
 
   /**
@@ -810,7 +961,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return@withContext null
     val target = File(directory, "${System.nanoTime()}-${name.replace('/', '_')}")
     if (source.renameTo(target)) {
-      PickedFile(fileName = name, mediaType = file.mediaType, path = target.absolutePath)
+      withVideoPoster(PickedFile(fileName = name, mediaType = file.mediaType, path = target.absolutePath))
     } else {
       stage(name, file.mediaType) { source.inputStream() }
     }
@@ -857,9 +1008,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
-  /** A photo the camera wrote into the app's cache. */
-  suspend fun importPhoto(photo: File): PickedFile? = withContext(Dispatchers.IO) {
-    stage(photo.name, "image/jpeg") { photo.inputStream() }
+  /** An edited picture ([de.zeitgleich.teamcraft.ui.screens.PictureEditor]) staged like a picked file. */
+  suspend fun stageEditedPicture(name: String, mediaType: String, bytes: ByteArray): PickedFile? = withContext(Dispatchers.IO) {
+    stage(name, mediaType) { bytes.inputStream() }
+  }
+
+  /**
+   * A file the app made itself (an exported video, a camera recording) staged like a picked file:
+   * moved when it can be, else copied and deleted.
+   */
+  suspend fun stageMovedFile(name: String, mediaType: String, file: File): PickedFile? = withContext(Dispatchers.IO) {
+    val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return@withContext null
+    val target = File(directory, "${System.nanoTime()}-${cleanFileName(name).replace('/', '_')}")
+    if (file.length() <= MAX_IMPORT_BYTES && file.renameTo(target)) {
+      return@withContext withVideoPoster(PickedFile(fileName = name, mediaType = mediaType, path = target.absolutePath))
+    }
+    val maybeStaged = stage(name, mediaType) { file.inputStream() }
+    file.delete()
+    maybeStaged
   }
 
   /** Copies into the core's staging folder, at most [MAX_IMPORT_BYTES]. */
@@ -874,7 +1040,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       target.delete()
       return null
     }
-    return PickedFile(fileName = name, mediaType = type, path = target.absolutePath)
+    return withVideoPoster(PickedFile(fileName = name, mediaType = type, path = target.absolutePath))
   }
 
   /**
@@ -888,6 +1054,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }.getOrNull() ?: return false
     return maybePath.contains("/${app.packageName}/")
   }
+
+  /**
+   * Where the media flow's camera writes (`media-flow-captures-…` folders): the core's staging
+   * folder, wiped at sign-out with the other plaintext copies. `null` while no account is open.
+   */
+  suspend fun mediaCapturesRoot(): File? = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull()
+
+  /** Conversations with a call running now and how many people are in each (issue #1352). */
+  suspend fun runningCalls(): Map<String, Int> =
+    read { runningCalls() }?.associate { it.conversationId to it.participantUserIds.size } ?: emptyMap()
+
+  /** Brings the call screen of this device's call to the front. */
+  fun showCall() = graph.calls.bringToFront()
 
   /** Joins (or starts) a conversation's call, e.g. a meeting's. */
   fun startCall(conversationId: String, displayName: String, options: CallOptions = CallOptions()) =
@@ -1043,6 +1222,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // core can be opened any more to post new ones.
     graph.push.beginSignOut()
     linkRequestList.value = emptyList()
+    forgetSession()
+    withContext(Dispatchers.IO) { startCache.delete() }
     review.value = null
     // A recording and its take don't outlive the account on this device (#204).
     voicePlayer.stop()
@@ -1271,6 +1452,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // Also started on every foreground, which keeps trying and tells the user (issue #1142).
     runCatching { graph.core.core().start() }
       .onFailure { Log.w(TAG, "sync not started: ${it.javaClass.simpleName}") }
+    // The call listener too: right after the first setup nothing else starts it until the app
+    // comes to the foreground again, and calls in the meantime didn't ring.
+    runCatching { graph.calls.start() }
+      .onFailure { Log.w(TAG, "calls not started: ${it.javaClass.simpleName}") }
     graph.push.register()
     return AppState.Ready(ready.userId, ready.displayName, ready.identityFingerprint)
   }
@@ -1295,6 +1480,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** The core's logcat tag too (issue #1067): `adb logcat -s TeamCraft` shows both. */
     private const val TAG = "TeamCraft"
+
+    /** How long the chat list must stay unchanged before it is kept for the next start. */
+    private const val START_CACHE_SETTLE_MILLIS = 1_000L
+
+    /** Read-ahead passes in a row before it waits for the next list change. */
+    private const val READ_AHEAD_PASSES = 2
 
     /** A sign-in page this young (just fetched with the server check) is not asked for again. */
     private const val PAGE_REUSE_MILLIS = 10_000L
@@ -1324,6 +1515,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   override fun onCleared() {
+    ProcessLifecycleOwner.get().lifecycle.removeObserver(startCacheOnLeave)
     voice.close()
     voicePlayer.release()
     super.onCleared()

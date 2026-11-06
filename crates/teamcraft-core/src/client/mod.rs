@@ -407,6 +407,9 @@ pub struct Client<A, S> {
   /// Events of a resume replay still to come: the counters are read once it has drained, because
   /// `GET /unread` already counts the missed messages the replay delivers (issue #183).
   maybe_replay_left: Option<u64>,
+  /// Runs once the server answered the next connection's `identify` or `resume`, before the
+  /// catch-up: the connection works from then on ([`Self::on_gateway_answered`]).
+  maybe_on_answered: Option<Box<dyn FnOnce() + Send>>,
   /// Gateway events said the guest list changed, and it wasn't read since.
   are_expiring_guests_stale: bool,
   maybe_expiring_guests_read_ms: Option<i64>,
@@ -574,6 +577,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       mls_current: Default::default(),
       maybe_backlog_reads: None,
       maybe_replay_left: None,
+      maybe_on_answered: None,
       are_expiring_guests_stale: false,
       maybe_expiring_guests_read_ms: None,
       device_activity: DeviceActivity::Active,

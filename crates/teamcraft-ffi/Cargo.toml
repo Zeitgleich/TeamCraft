@@ -49,6 +49,8 @@ uniffi = "0.32.2"
 [target.'cfg(target_os = "android")'.dependencies]
 # Core tracing to logcat (liblog through ndk-sys), the maintained tracing layer for it.
 paranoid-android = "0.2.2"
+# The JNI entry that sets up the audio context calls need (re-exported below so the library keeps it).
+teamcraft-desktop-native = { path = "../teamcraft-desktop-native" }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 # Core tracing to os_log (Console.app, `log stream`), the maintained tracing layer for it.

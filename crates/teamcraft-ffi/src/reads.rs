@@ -15,7 +15,7 @@ use std::time::Instant;
 use teamcraft_client_api::backend::{ChatBackend as _, SearchBackend as _};
 use teamcraft_client_api::entry_rules::{channel_leave, space_leave};
 use teamcraft_client_api::model::{
-  FirstSyncStage, Message as MessageView, SpaceRole, SpaceRoster, is_pending,
+  FirstSyncStage, Message as MessageView, MessageKind, SpaceRole, SpaceRoster, is_pending,
 };
 use teamcraft_client_api::search::parse_query;
 use teamcraft_core::TypingState;
@@ -38,10 +38,15 @@ use crate::engine::{Job, Store, direct_peer, feed_anchor, older_len, parse_id};
 use crate::error::TeamCraftError;
 use crate::logging;
 use crate::types::{
-  AccountState, ConversationItem, FirstSyncItem, FirstSyncStageItem, KeyCatchUpItem, LeaveChoice,
-  MentionSettings, MessageItem, MessagePage, NotificationContentSettings, NotifiedConversation, Presence,
-  PushDiagnosticsInfo, SearchHitItem, SegmentPrefetchMode, SpaceMenuItem, share_targets,
+  AccountState, ChatPreviewItem, ConversationItem, FirstSyncItem, FirstSyncStageItem, KeyCatchUpItem,
+  LeaveChoice, MentionSettings, MessageItem, MessagePage, NotificationContentSettings, NotifiedConversation,
+  Presence, PushDiagnosticsInfo, SearchHitItem, SegmentPrefetchMode, SpaceMenuItem, share_targets,
 };
+
+/// How many of a conversation's newest rows a chat list preview looks through for a message people
+/// wrote, before it settles for the newest system line; a second look goes this many times further.
+const PREVIEW_ROWS: usize = 8;
+const PREVIEW_FURTHER: usize = 8;
 
 /// Work for the read thread.
 type ReadJob = Box<dyn FnOnce(&mut Reads) + Send>;
@@ -268,11 +273,10 @@ impl Reads {
       .into_iter()
       .map(|space| (space.id, (space.name, space.maybe_image_version)))
       .collect();
-    let mut conversations = Vec::new();
-    for space in spaces.keys() {
-      conversations.extend(backend.space_conversations(*space));
-    }
-    conversations.extend(backend.direct_conversations());
+    let space_ids = spaces.keys().copied().collect();
+    let mut conversations = backend.listed_conversations(&space_ids);
+    // Spaces in ID order, then the direct messages; the store's order within each.
+    conversations.sort_by_key(|conversation| (conversation.maybe_space.is_none(), conversation.maybe_space));
     let me = backend.me();
     Ok(
       conversations
@@ -343,6 +347,28 @@ impl Reads {
     // shift the window (issue #1060).
     let tail = backend.feed_tail(conversation, None, usize::try_from(limit).unwrap_or(usize::MAX));
     Ok(self.message_items(backend, &tail.messages))
+  }
+
+  /// [`crate::TeamCraft::chat_previews`]. IDs that aren't conversation IDs are skipped, so one bad
+  /// entry doesn't cost the list all its previews.
+  pub(crate) fn chat_previews(
+    &self,
+    conversation_ids: &[String],
+  ) -> Result<Vec<ChatPreviewItem>, TeamCraftError> {
+    let backend = self.backend()?;
+    Ok(
+      conversation_ids
+        .iter()
+        .filter_map(|id| {
+          let conversation: ConversationId = parse_id(id).ok()?;
+          let message = preview_message(backend, conversation)?;
+          Some(ChatPreviewItem {
+            conversation_id: id.clone(),
+            message: self.message_item(backend, &message),
+          })
+        })
+        .collect(),
+    )
   }
 
   pub(crate) fn messages_from(
@@ -563,5 +589,88 @@ impl Reads {
   fn message_item(&self, backend: &CoreChatBackend<Store>, message: &MessageView) -> MessageItem {
     let maybe_author = backend.user(message.author);
     MessageItem::from_view(message, maybe_author.as_ref(), is_pending(message.id))
+  }
+}
+
+/// The newest message people wrote among a conversation's newest rows, else the newest row (a
+/// system line); `None` for an empty conversation. Joins and renames in bulk (an import, a big
+/// channel) must not hide the last thing somebody said.
+fn preview_message(backend: &CoreChatBackend<Store>, conversation: ConversationId) -> Option<MessageView> {
+  let mut rows = PREVIEW_ROWS;
+  loop {
+    let tail = backend.feed_tail(conversation, None, rows);
+    if let Some(written) = newest_written(&tail.messages) {
+      return Some(written.clone());
+    }
+    if !tail.has_older || rows > PREVIEW_ROWS {
+      return tail.messages.last().cloned();
+    }
+    rows *= PREVIEW_FURTHER;
+  }
+}
+
+/// The newest row that isn't a system line (a join, a rename), of rows oldest first.
+fn newest_written(rows: &[MessageView]) -> Option<&MessageView> {
+  rows
+    .iter()
+    .rev()
+    .find(|message| !matches!(message.kind, MessageKind::System(_)))
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_client_api::model::{SystemEvent, id_from_raw};
+
+  use super::*;
+
+  #[test]
+  fn a_preview_skips_the_system_lines_after_the_last_written_message() {
+    let rows = [
+      row(1, MessageKind::User),
+      row(2, MessageKind::System(SystemEvent::Joined)),
+      row(3, MessageKind::System(SystemEvent::Left)),
+    ];
+    assert_eq!(
+      newest_written(&rows).map(|message| message.id),
+      Some(id_from_raw(1))
+    );
+  }
+
+  #[test]
+  fn a_preview_takes_the_newest_written_message() {
+    let rows = [
+      row(1, MessageKind::System(SystemEvent::Joined)),
+      row(2, MessageKind::User),
+      row(3, MessageKind::Change),
+    ];
+    assert_eq!(
+      newest_written(&rows).map(|message| message.id),
+      Some(id_from_raw(3))
+    );
+  }
+
+  #[test]
+  fn rows_of_system_lines_only_have_no_written_message() {
+    let rows = [row(1, MessageKind::System(SystemEvent::Joined))];
+    assert!(newest_written(&rows).is_none());
+    assert!(newest_written(&[]).is_none());
+  }
+
+  fn row(id: u64, kind: MessageKind) -> MessageView {
+    MessageView {
+      id: id_from_raw(id),
+      conversation: id_from_raw(5),
+      author: id_from_raw(3),
+      kind,
+      sent_at: i64::try_from(id).unwrap_or_default(),
+      body: "Hello".into(),
+      is_edited: false,
+      reactions: Vec::new(),
+      reply_count: 0,
+      maybe_thread: None,
+      maybe_imported: None,
+      maybe_source: None,
+      maybe_placeholder: None,
+    }
   }
 }

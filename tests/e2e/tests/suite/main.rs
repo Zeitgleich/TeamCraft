@@ -40,6 +40,7 @@ mod meetings;
 mod membership;
 mod messaging;
 mod mfa;
+mod mobile_workspace;
 mod moderator;
 mod network_conditions;
 #[cfg(feature = "browser")]
@@ -62,6 +63,7 @@ mod web_directory;
 mod web_feed_stability;
 #[cfg(feature = "browser")]
 mod web_mobile;
+#[cfg(feature = "browser")]
 mod web_single_image;
 #[cfg(feature = "browser")]
 mod web_split;

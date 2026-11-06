@@ -43,6 +43,8 @@ final class BubblesTests: XCTestCase {
   func testAPersonKeepsTheirColour() {
     XCTAssertEqual(personHue("1234"), personHue("1234"))
     XCTAssertTrue((0..<1).contains(personHue("98765")))
+    // The core's avatar hue (ID modulo 360), as desktop, web and Android show it.
+    XCTAssertEqual(personHue("361"), 1.0 / 360)
   }
 
   func testMarkupStylesRunsAndShortensBareLinks() {

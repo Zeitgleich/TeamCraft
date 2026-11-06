@@ -225,6 +225,7 @@ impl PendingEnrollment {
       mls_current: Default::default(),
       maybe_backlog_reads: None,
       maybe_replay_left: None,
+      maybe_on_answered: None,
       are_expiring_guests_stale: false,
       maybe_expiring_guests_read_ms: None,
       device_activity: DeviceActivity::Active,

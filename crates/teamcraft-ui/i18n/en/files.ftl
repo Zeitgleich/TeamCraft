@@ -331,6 +331,15 @@ share-into-failed = What you shared could not be received. Share it again.
 share-into-read-failed = What you shared could not be read. Share it again.
 share-into-other-account = Something shared before this sign-in was removed: it was kept for the person signed in before you.
 
+## Editing a picture before it is sent (#1354)
+picture-edit-title = Edit picture
+picture-edit = Edit { $name }
+picture-rotate = Rotate left
+picture-reset = Reset
+picture-edit-done = Done
+picture-edit-failed = This picture can't be edited. It is sent as it is.
+picture-crop-area = Crop frame: drag a corner or the frame, or use the arrow keys (Shift resizes)
+
 ## Voice messages (#204)
 voice-message = Voice message, { $length }
 voice-message-label = Voice message

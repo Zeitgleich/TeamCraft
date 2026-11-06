@@ -61,9 +61,13 @@ func shortLinkLabel(_ url: String, maxLength: Int = maxLinkLabelLength) -> Strin
   return shortened.count <= maxLength ? shortened : String(shortened.prefix(maxLength - 1)) + "…"
 }
 
-/// A stable hue (0..<1) for a person, so their name and avatar keep one colour on every device.
+/// A stable hue (0..<1) for a person, so their name and avatar keep one colour on every device: the
+/// core's `avatar_hue` (the user ID modulo 360), which desktop, web and Android show too.
 func personHue(_ userId: String) -> Double {
-  // FNV-1a over the ID: stable across launches, unlike `hashValue`.
+  if let id = UInt64(userId) {
+    return Double(id % 360) / 360
+  }
+  // Not a user ID (a group, an integration): FNV-1a over the text, stable across launches.
   var hash: UInt32 = 2_166_136_261
   for byte in userId.utf8 {
     hash = (hash ^ UInt32(byte)) &* 16_777_619

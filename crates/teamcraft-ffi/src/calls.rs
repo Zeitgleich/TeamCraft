@@ -9,7 +9,7 @@
 //! is [`CallPhase::Reconnecting`].
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures_util::StreamExt;
 use teamcraft_core::client::CallKeySigner;
@@ -293,7 +293,14 @@ pub(crate) struct CallPreparation {
 #[derive(Clone, Default)]
 pub(crate) struct CallHub {
   inner: Arc<Mutex<HubState>>,
+  running: RunningCalls,
 }
+
+/// The calls running in the user's conversations, as the gateway reports them, with the people in
+/// each: the lists and the conversation show them (issue #1352). Shared with the app's handle, so
+/// reading it never waits for the engine.
+#[derive(Clone, Default)]
+pub(crate) struct RunningCalls(Arc<Mutex<BTreeMap<ConversationId, Vec<UserId>>>>);
 
 #[derive(Default)]
 struct HubState {
@@ -470,8 +477,22 @@ impl CallHub {
     lock(&self.inner).maybe_listener = Some(listener);
   }
 
-  /// Rings from the gateway, for the core's call event sink.
-  pub(crate) fn on_gateway_event(&self, event: &GatewayEvent) {
+  /// A hub that records running calls in `running`.
+  pub(crate) fn with_running(running: RunningCalls) -> Self {
+    Self {
+      inner: Arc::default(),
+      running,
+    }
+  }
+
+  /// Rings from the gateway, for the core's call event sink; `true` when the running calls changed.
+  pub(crate) fn on_gateway_event(&self, event: &GatewayEvent) -> bool {
+    let has_changed = self.running.follow(event);
+    self.ring(event);
+    has_changed
+  }
+
+  fn ring(&self, event: &GatewayEvent) {
     let (maybe_listener, maybe_active) = {
       let state = lock(&self.inner);
       (state.maybe_listener.clone(), state.maybe_active)
@@ -1231,6 +1252,58 @@ fn lock_listener(listener: &SharedVideoListener) -> MutexGuard<'_, Option<Arc<dy
   listener.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+impl RunningCalls {
+  /// Follows a call event; `true` when what it holds changed.
+  pub(crate) fn follow(&self, event: &GatewayEvent) -> bool {
+    let mut running = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+    match event {
+      GatewayEvent::CallStart {
+        conversation_id,
+        participants,
+        ..
+      }
+      | GatewayEvent::CallUpdate {
+        conversation_id,
+        participants,
+        ..
+      } => {
+        let mut people: Vec<UserId> = participants
+          .iter()
+          .map(|participant| participant.user_id)
+          .collect();
+        people.sort_unstable();
+        people.dedup();
+        if people.is_empty() {
+          return running.remove(conversation_id).is_some();
+        }
+        running.insert(*conversation_id, people.clone()) != Some(people)
+      },
+      GatewayEvent::CallEnd { conversation_id, .. } => running.remove(conversation_id).is_some(),
+      _ => false,
+    }
+  }
+
+  /// The running calls, by conversation.
+  pub(crate) fn list(&self) -> Vec<RunningCallItem> {
+    let running = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+    running
+      .iter()
+      .map(|(conversation, people)| RunningCallItem {
+        conversation_id: conversation.to_string(),
+        participant_user_ids: people.iter().map(ToString::to_string).collect(),
+      })
+      .collect()
+  }
+}
+
+/// A call running in one of the user's conversations ([`crate::TeamCraft::running_calls`]).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RunningCallItem {
+  pub conversation_id: String,
+  /// The people in it, each once.
+  pub participant_user_ids: Vec<String>,
+}
+
 fn lock(state: &Mutex<HubState>) -> MutexGuard<'_, HubState> {
   // A panicking listener can't leave the hub inconsistent: each update is a single assignment.
   state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1241,6 +1314,60 @@ mod tests {
   use teamcraft_proto::{CallId, Id, Snowflake, VideoPublicationId, VideoTrack};
 
   use super::*;
+
+  mod running_calls {
+    use teamcraft_proto::{CallEndCause, CallRosterEntry, DeviceId, UserId};
+
+    use super::*;
+
+    #[test]
+    fn a_call_is_listed_with_its_people_until_it_ends() {
+      let running = RunningCalls::default();
+      assert!(running.follow(&update(&[3, 4, 3])));
+      assert_eq!(
+        running.list(),
+        vec![RunningCallItem {
+          conversation_id: "5".into(),
+          participant_user_ids: vec!["3".into(), "4".into()],
+        }]
+      );
+      // The same people again changes nothing (no extra change notification).
+      assert!(!running.follow(&update(&[4, 3])));
+      assert!(running.follow(&GatewayEvent::CallEnd {
+        conversation_id: id(5),
+        call_id: id(9),
+        cause: CallEndCause::default(),
+      }));
+      assert!(running.list().is_empty());
+    }
+
+    #[test]
+    fn an_update_without_people_ends_the_listing() {
+      let running = RunningCalls::default();
+      running.follow(&update(&[3]));
+      assert!(running.follow(&update(&[])));
+      assert!(running.list().is_empty());
+    }
+
+    fn update(users: &[i64]) -> GatewayEvent {
+      GatewayEvent::CallUpdate {
+        conversation_id: id(5),
+        call_id: id(9),
+        is_ringing: false,
+        participants: users
+          .iter()
+          .map(|user| CallRosterEntry {
+            user_id: id::<UserId>(*user),
+            device_id: id::<DeviceId>(user + 100),
+          })
+          .collect(),
+      }
+    }
+
+    fn id<T: Id>(raw: i64) -> T {
+      T::from_snowflake(Snowflake::new(raw).unwrap())
+    }
+  }
 
   #[test]
   fn a_lost_call_blames_the_call_server_only_while_the_chat_server_is_connected() {

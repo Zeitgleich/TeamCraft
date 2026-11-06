@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="picture_edit">Edit picture</string>
+  <string name="picture_rotate">Rotate left</string>
+  <string name="picture_reset">Reset</string>
+  <string name="picture_edit_done">Done</string>
+  <string name="picture_edit_failed">This picture can\'t be edited. It is sent as it is.</string>
+  <string name="picture_crop_area">Crop frame: drag a corner or the frame</string>
+  <string name="composer_edit_picture">Edit %1$s</string>
+</resources>

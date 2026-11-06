@@ -34,6 +34,7 @@ import de.zeitgleich.teamcraft.core.CoreRepository
 import uniffi.teamcraft_ffi.CallEndReason
 import uniffi.teamcraft_ffi.CallListener
 import uniffi.teamcraft_ffi.CallPhase
+import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.CallSession
 import uniffi.teamcraft_ffi.CallStateInfo
 import uniffi.teamcraft_ffi.CameraFrame
@@ -82,6 +83,9 @@ class CallController(
   private val failure = MutableStateFlow<JoinFailure?>(null)
   /** [CallActivity] is on screen; a failure it can't show goes to a notification. */
   @Volatile private var isCallScreenVisible = false
+  /** The call somebody else was in with this device: only then does being alone end it. */
+  @Volatile private var hadOthersIn: String? = null
+  @Volatile private var maybeAloneEnd: Job? = null
 
   /** "Add people" and following a move of the call into a meeting room. */
   val moves = CallMoves(
@@ -258,7 +262,12 @@ class CallController(
 
   /** Starts (or joins) the conversation's call, with the choices of the pre-join dialog. */
   fun startCall(conversationId: String, displayName: String, callOptions: CallOptions = CallOptions()) {
-    if (maybeSession != null || joining.value) return
+    if (maybeSession != null || joining.value) {
+      // Already in (or joining) a call: show it instead of doing nothing.
+      Log.i(TAG, "call: already in a call, showing it")
+      showCall()
+      return
+    }
     failure.value = null
     options = callOptions
     addTelecomCall(conversationId, displayName, CallAttributesCompat.DIRECTION_OUTGOING)
@@ -340,6 +349,7 @@ class CallController(
    */
   private fun addTelecomCall(conversationId: String, displayName: String, direction: Int, isJoinClaimed: Boolean = false) {
     if (maybeTelecomJob?.isActive == true) {
+      Log.w(TAG, "Telecom: the previous call is still being added or ended")
       if (isJoinClaimed) joining.value = false
       return
     }
@@ -368,6 +378,7 @@ class CallController(
             Log.i(TAG, "Telecom: disconnected by the system")
             if (joining.value) abandonJoin()
             leave()
+            maybeTelecomJob?.cancel()
           },
           onSetActive = {},
           onSetInactive = { maybeSession?.setMuted(true) },
@@ -404,10 +415,15 @@ class CallController(
     }
   }
 
-  /** Ends the Telecom call once the engine's call ended (left, removed, ended by the host). */
+  /**
+   * Ends the Telecom call once the engine's call ended (left, removed, ended by the host), and with
+   * it this call's job: its collectors never end on their own, and a job still running made the
+   * next call's button do nothing.
+   */
   private suspend fun endWithEngine(call: CallControlScope) {
     state.first { it?.phase == CallPhase.ENDED }
     call.disconnect(DisconnectCause(DisconnectCause.LOCAL))
+    maybeTelecomJob?.cancel()
   }
 
   /** Called by [CallActivity] with the answer to the microphone permission request. */
@@ -438,6 +454,7 @@ class CallController(
     }
     // Receiving video needs Cisco's OpenH264; without it the call is audio-only for this device.
     VideoCodecInstaller.ensure(context)
+    AudioContext.ensure(context)
     if (isJoinAbandoned) return false
     // Muted from the first frame (a muted call moving into a meeting room): no audio slips out.
     val isMuted = options.isMuted
@@ -531,9 +548,43 @@ class CallController(
   private suspend fun displayNameOf(conversationId: String): String =
     conversationNameOf(conversationId) ?: context.getString(R.string.app_name)
 
+  /**
+   * Ends a one-to-one call shortly after the other person hung up ([isLeftAlone]); somebody coming
+   * back in time keeps it.
+   */
+  private fun followOthers(state: CallStateInfo) {
+    if (state.phase != CallPhase.CONNECTED) return
+    val count = state.participantCount.toInt()
+    if (count > 0) {
+      hadOthersIn = state.conversationId
+      maybeAloneEnd?.cancel()
+      maybeAloneEnd = null
+      return
+    }
+    if (hadOthersIn != state.conversationId || maybeAloneEnd?.isActive == true) return
+    maybeAloneEnd = scope.launch {
+      val isOneToOne = runCatching {
+        core.core().conversations().firstOrNull { it.id == state.conversationId }?.kind == ConversationKind.DIRECT
+      }.getOrDefault(false)
+      if (!isOneToOne) return@launch
+      delay(ALONE_END_MS)
+      val now = this@CallController.state.value ?: return@launch
+      val hadOthers = hadOthersIn == now.conversationId
+      if (isLeftAlone(isOneToOne, hadOthers, now.participantCount.toInt(), now.reconnectingCount.toInt())) {
+        Log.i(TAG, "the other person left: ending the call")
+        hangUp()
+      }
+    }
+  }
+
   /** The name of a conversation this device knows; `null` for one it doesn't. */
   private suspend fun conversationNameOf(conversationId: String): String? =
     runCatching { core.core().conversations().firstOrNull { it.id == conversationId }?.name }.getOrNull()
+
+  /** The call screen of the running call, from a "Back to the call" outside it. */
+  fun bringToFront() {
+    if (maybeSession != null || joining.value) showCall()
+  }
 
   private fun showCall() {
     // The previous call's ended state would close the screen right away.
@@ -620,6 +671,7 @@ class CallController(
       // The DM's call this device left for a meeting room ends after the room's call began.
       if (state.conversationId == maybeLeftConversation) return
       this@CallController.state.value = state
+      followOthers(state)
       // The engine is the source of truth: once its call ended, the session, the service and its
       // notification go too, whether or not Telecom reports its disconnect back (endWithEngine
       // ends the Telecom call). Not on the engine's thread, which reports this.

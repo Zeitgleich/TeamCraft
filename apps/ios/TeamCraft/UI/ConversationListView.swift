@@ -12,6 +12,7 @@ struct ConversationListView: View {
   /// Guests can't: they find archived channels in the list instead. Offered until the core says.
   @State private var canBrowseChannels = true
   @State private var previews: [String: ChatPreview] = [:]
+  @State private var runningCalls: [String: Int] = [:]
   @State private var selection: String?
   @State private var isShowingDrafts = false
   @State private var query = ""
@@ -114,6 +115,7 @@ struct ConversationListView: View {
     }
     .task(id: model.changeCount) {
       conversations = await model.conversations()
+      runningCalls = await model.runningCalls()
       hasLoaded = true
       maybeFirstSync = await model.firstSync()
       previews = await model.chatPreviews(conversations, myId: account.userId)
@@ -223,7 +225,8 @@ struct ConversationListView: View {
           ) {
             ForEach(section.conversations, id: \.id) { conversation in
               ConversationRow(
-                conversation: conversation, maybePreview: previews[conversation.id], showsSpace: isHomeShown)
+                conversation: conversation, maybePreview: previews[conversation.id], showsSpace: isHomeShown,
+                callCount: runningCalls[conversation.id] ?? 0)
                 .tag(conversation.id)
                 .swipeActions(edge: .leading) { readButton(for: conversation) }
                 .swipeActions(edge: .trailing) { favoriteButton(for: conversation) }
@@ -571,6 +574,8 @@ struct ConversationRow: View {
   var maybePreview: ChatPreview?
   /// Names the space after a channel's name, where the list is not that space's own (#1152).
   var showsSpace = false
+  /// People in the call running here; 0 without one (issue #1352).
+  var callCount = 0
 
   private var isUnread: Bool { conversation.unreadCount > 0 }
 
@@ -605,6 +610,15 @@ struct ConversationRow: View {
               .accessibilityLabel(Text("chat_muted"))
           }
           Spacer()
+          if callCount > 0 {
+            Label("\(callCount)", systemImage: "phone.fill")
+              .font(.caption2.weight(.semibold))
+              .foregroundStyle(.white)
+              .padding(.horizontal, 6)
+              .padding(.vertical, 1)
+              .background(Color.green, in: Capsule())
+              .accessibilityLabel(Text("call_participants \(callCount)"))
+          }
           if let badge = rowBadge(
             unreadCount: conversation.unreadCount, mentionCount: conversation.mentionCount, isMuted: conversation.isMuted)
           {

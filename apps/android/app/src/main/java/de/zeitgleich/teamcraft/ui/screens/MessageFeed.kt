@@ -91,6 +91,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -131,6 +132,7 @@ import de.zeitgleich.teamcraft.core.ReplyAttachmentPreview
 import de.zeitgleich.teamcraft.core.ReplyPreview
 import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.core.UnseenReactions
+import de.zeitgleich.teamcraft.ui.avatarColorOfHue
 import de.zeitgleich.teamcraft.ui.OlderState
 import de.zeitgleich.teamcraft.ui.DividerOnScreen
 import de.zeitgleich.teamcraft.ui.FeedItem
@@ -989,6 +991,17 @@ private fun Bubble(
   val others = files - images.toSet() - videos.toSet()
   val isDeleted = maybeExtras?.isDeleted == true
   val hasText = !isDeleted && message.body.isNotBlank() && !isOnlyFileLabel(message.body, maybeExtras)
+  val hasTransfers = files.any { it.transfer.isCancellable || it.transfer.state == "upload_failed" }
+  val isPicturesOnly = images.isNotEmpty() && !isDeleted && !hasText && !showsName && others.isEmpty() && videos.isEmpty() &&
+    message.maybePlaceholder == null && !hasTransfers && maybeExtras?.maybeReply == null &&
+    maybeExtras?.maybeForwarded == null && maybeExtras?.maybeLinkPreview == null
+  if (isPicturesOnly) {
+    // Pictures alone need no coloured frame around them: the picture is the bubble, with the time on it.
+    PicturesOnly(images, look, maybeExtras, message, isMine, onOpenFile, onLongPressImage)
+    return
+  }
+  // Short text: the time sits on the text's line instead of a line of its own.
+  val isTextOnly = hasText && others.isEmpty() && maybeExtras?.maybeLinkPreview == null && !hasTransfers && message.maybePlaceholder == null
   Surface(color = colors.container, contentColor = colors.content, shape = shape) {
     Column(Modifier.padding(BUBBLE_MEDIA_PADDING)) {
       val textPadding = Modifier.padding(horizontal = BUBBLE_TEXT_PADDING_H - BUBBLE_MEDIA_PADDING)
@@ -1035,6 +1048,10 @@ private fun Bubble(
             fontStyle = FontStyle.Italic,
             color = colors.muted,
           )
+          isTextOnly && images.isEmpty() && videos.isEmpty() -> TextWithTime(
+            body = { MessageBody(message.body, colors.content, colors.markup, look.names, onOpenPermalink) },
+            time = { Footer(message, maybeExtras, colors, isMine) },
+          )
           hasText -> MessageBody(message.body, colors.content, colors.markup, look.names, onOpenPermalink)
         }
         if (!isDeleted) {
@@ -1046,11 +1063,81 @@ private fun Bubble(
         files.filter { it.transfer.isCancellable || it.transfer.state == "upload_failed" }.forEach { file ->
           UploadLine(viewModel, file, colors)
         }
-        Footer(message, maybeExtras, colors, isMine)
+        if (!(isTextOnly && images.isEmpty() && videos.isEmpty())) Footer(message, maybeExtras, colors, isMine, Modifier.align(Alignment.End))
       }
     }
   }
 }
+
+/**
+ * A one-line text with the time at the end of the same line, as in the common messengers; a text
+ * of several lines, or one the time doesn't fit next to, gets the time below it, at the end.
+ */
+@Composable
+private fun TextWithTime(body: @Composable () -> Unit, time: @Composable () -> Unit) {
+  val lineHeight = with(LocalDensity.current) { MaterialTheme.typography.bodyLarge.lineHeight.toPx() }
+  val gap = with(LocalDensity.current) { 8.dp.roundToPx() }
+  Layout(content = {
+    body()
+    time()
+  }) { measurables, constraints ->
+    val loose = constraints.copy(minWidth = 0)
+    val text = measurables[0].measure(loose)
+    val footer = measurables[1].measure(loose)
+    val isOneLine = text.height < lineHeight * 1.5f
+    val sideBySide = text.width + gap + footer.width
+    if (isOneLine && sideBySide <= constraints.maxWidth) {
+      val height = maxOf(text.height, footer.height)
+      layout(maxOf(sideBySide, constraints.minWidth), height) {
+        text.placeRelative(0, (height - text.height) / 2)
+        footer.placeRelative(sideBySide - footer.width, height - footer.height)
+      }
+    } else {
+      val width = maxOf(text.width, footer.width, constraints.minWidth)
+      layout(width, text.height + footer.height) {
+        text.placeRelative(0, 0)
+        footer.placeRelative(width - footer.width, text.height)
+      }
+    }
+  }
+}
+
+/** Pictures without text: no bubble around them, the time on a dark pill in the corner. */
+@Composable
+private fun PicturesOnly(
+  images: List<FileInfo>,
+  look: FeedLook,
+  maybeExtras: MessageExtras?,
+  message: Message,
+  isMine: Boolean,
+  onOpenFile: (FileInfo) -> Unit,
+  onLongPressImage: (FileInfo) -> Unit,
+) {
+  val onPicture = Color.White
+  val overlay = BubbleColors(
+    container = Color.Transparent,
+    content = onPicture,
+    muted = onPicture.copy(alpha = 0.85f),
+    accent = onPicture,
+    markup = MarkupColors(link = onPicture, mention = onPicture, mentionMe = onPicture, mentionMeBackground = Color.Transparent, codeBackground = Color.Transparent),
+  )
+  Box {
+    if (images.size >= 2) ImageGrid(images, look.bubbleMax, onOpenFile, onLongPressImage) else ImagePreview(images.first(), look.bubbleMax, onOpenFile)
+    Footer(
+      message,
+      maybeExtras,
+      overlay,
+      isMine,
+      Modifier
+        .align(Alignment.BottomEnd)
+        .padding(6.dp)
+        .background(Color.Black.copy(alpha = PICTURE_TIME_SCRIM), RoundedCornerShape(10.dp))
+        .padding(horizontal = 6.dp),
+    )
+  }
+}
+
+private const val PICTURE_TIME_SCRIM = 0.45f
 
 /**
  * What a placeholder bubble says (issue #888): waiting with a clock, not available with a lock,
@@ -1141,12 +1228,12 @@ private fun ReactionPill(emoji: String, count: Int, isMine: Boolean, isEnabled: 
 
 /** Bottom-right inside the bubble: markers, "edited", the time and, for own messages, the state. */
 @Composable
-private fun ColumnScope.Footer(message: Message, maybeExtras: MessageExtras?, colors: BubbleColors, isMine: Boolean) {
+private fun Footer(message: Message, maybeExtras: MessageExtras?, colors: BubbleColors, isMine: Boolean, modifier: Modifier = Modifier) {
   val context = LocalContext.current
   // A rejected message says "not sent" below instead of "sending…" forever.
   val isSending = message.isPending && maybeExtras?.isSendFailed != true
   Row(
-    Modifier.align(Alignment.End).padding(top = 2.dp, bottom = 2.dp),
+    modifier.padding(top = 2.dp, bottom = 2.dp),
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(4.dp),
   ) {
@@ -1212,11 +1299,10 @@ private fun nameColor(maybeUser: User?): Color {
 /** A round avatar: the sender's picture, or their initial on their hue. */
 @Composable
 private fun SenderAvatar(maybeUser: User?, name: String, message: Message) {
-  val hue = (maybeUser?.avatarHue ?: 0).mod(360).toFloat()
   val account: @Composable () -> Unit = {
     UserAvatar(maybeUser?.id, Modifier.size(AVATAR_SIZE)) {
       Box(
-        Modifier.size(AVATAR_SIZE).background(Color.hsl(hue, AVATAR_SATURATION, AVATAR_LIGHTNESS), CircleShape),
+        Modifier.size(AVATAR_SIZE).background(avatarColorOfHue(maybeUser?.avatarHue ?: 0), CircleShape),
         contentAlignment = Alignment.Center,
       ) {
         Text(
@@ -1239,8 +1325,6 @@ private fun SenderAvatar(maybeUser: User?, name: String, message: Message) {
 private const val NAME_SATURATION = 0.55f
 private const val NAME_LIGHTNESS_LIGHT = 0.38f
 private const val NAME_LIGHTNESS_DARK = 0.72f
-private const val AVATAR_SATURATION = 0.45f
-private const val AVATAR_LIGHTNESS = 0.45f
 
 /** Inner padding of a bubble: media sit close to its edge, text has room. */
 private val BUBBLE_MEDIA_PADDING = 3.dp
@@ -1297,6 +1381,16 @@ private fun UploadLine(viewModel: MainViewModel, file: FileInfo, colors: BubbleC
           CircularProgressIndicator(ring, color = colors.content, strokeWidth = 2.dp)
         } else {
           CircularProgressIndicator(progress = { maybeProgress }, modifier = ring, color = colors.content, strokeWidth = 2.dp)
+        }
+        // A failed attempt says so at once, not only after the core gives up (#1355): a ring that
+        // keeps turning without a word reads as stuck.
+        if (transfer.isRetrying) {
+          Text(
+            label,
+            color = colors.content,
+            style = MaterialTheme.typography.labelSmall,
+            modifier = Modifier.padding(start = 6.dp).weight(1f, fill = false),
+          )
         }
         TextButton(onClick = cancel) { Text(stringResource(R.string.file_cancel_upload), color = colors.content) }
       }

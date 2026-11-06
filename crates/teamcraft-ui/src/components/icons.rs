@@ -92,6 +92,8 @@ pub enum IconName {
   Forward,
   /// A circular arrow: turn an image a quarter clockwise.
   Rotate,
+  /// A circular arrow the other way: turn a picture a quarter counter-clockwise (the editor).
+  RotateLeft,
   /// A box with an arrow leaving it: open in a new window.
   External,
   /// Two overlapping sheets: copy to the clipboard.
@@ -159,6 +161,7 @@ impl IconName {
       Self::ZoomOut => "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z M21 21l-4.3-4.3 M8 11h6",
       Self::Forward => "M15 14l5-5-5-5 M20 9H10a6 6 0 0 0-6 6v3",
       Self::Rotate => "M21 12a9 9 0 1 1-2.6-6.4 M21 3v6h-6",
+      Self::RotateLeft => "M3 12a9 9 0 1 0 2.6-6.4 M3 3v6h6",
       Self::External => "M14 4h6v6 M20 4l-9 9 M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5",
       Self::Copy => "M9 9h11v11H9z M5 15H4V4h11v1",
       Self::Info => "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M12 11v6 M12 7.5h.01",

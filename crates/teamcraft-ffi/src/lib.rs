@@ -32,7 +32,8 @@ use std::time::{Duration, Instant};
 
 pub use calls::{
   CallEndReason, CallListener, CallMoveInfo, CallPhase, CallSession, CallStateInfo, EncodedVideoListener,
-  IncomingCallInfo, NotetakerCallInfo, RemoteVideoFrame, RemoteVideoTrack, VideoListener, VideoTrackInfo,
+  IncomingCallInfo, NotetakerCallInfo, RemoteVideoFrame, RemoteVideoTrack, RunningCallItem, VideoListener,
+  VideoTrackInfo,
 };
 pub use error::TeamCraftError;
 pub use http_fetch::{
@@ -62,16 +63,20 @@ use teamcraft_core::device_activity::ActivityReports;
 use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
-  AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem,
-  ConversationKind, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem, KeyCatchUpItem, LeaveChoice,
-  LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings, MessageItem, MessagePage, NetworkInterception,
-  NetworkProxy, NotificationAttachmentKind, NotificationContent, NotificationContentSettings,
-  NotificationGap, NotificationSuppression, NotifiedConversation, NotifiedMessage, OrgRecoveryStart,
-  PendingWorkItem, PlaceholderItem, Presence, PushDiagnosticsInfo, PushNotification, PushNotificationKind,
-  PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode, SegmentPrefetchResult, SpaceMenuItem,
-  StoreProblem, TestPushOutcome, TestPushResult,
+  AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ChatPreviewItem, ConnectionState,
+  ConversationItem, ConversationKind, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem, KeyCatchUpItem,
+  LeaveChoice, LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings, MessageItem, MessagePage,
+  NetworkInterception, NetworkProxy, NotificationAttachmentKind, NotificationContent,
+  NotificationContentSettings, NotificationGap, NotificationSuppression, NotifiedConversation,
+  NotifiedMessage, OrgRecoveryStart, PendingWorkItem, PlaceholderItem, Presence, PushDiagnosticsInfo,
+  PushNotification, PushNotificationKind, PushService, ReactionItem, SearchHitItem, SegmentPrefetchMode,
+  SegmentPrefetchResult, SpaceMenuItem, StoreProblem, TestPushOutcome, TestPushResult,
 };
 
+/// The JNI method that sets up the audio context calls need on Android (cpal through ndk-context):
+/// re-exported so the library keeps the symbol for the app to find.
+#[cfg(target_os = "android")]
+pub use teamcraft_desktop_native::Java_de_zeitgleich_teamcraft_calls_AudioContext_initialize;
 pub use video::{CameraFrame, VideoFrameRgba};
 pub use voice::{
   VoiceError, VoiceRecording, VoiceStop, VoiceTakeInfo, voice_clear_takes, voice_decode_to_wav,
@@ -100,6 +105,8 @@ pub struct TeamCraft {
   id_tokens: engine::IdTokens,
   /// What the app last reported about its use; input repeats at most every 30 s (issue #472).
   activity: Mutex<ActivityReports>,
+  /// The calls running in the user's conversations, read without the engine (issue #1352).
+  running_calls: calls::RunningCalls,
 }
 
 /// Supplies the current OIDC access token. The app owns login and refresh (AppAuth on Android);
@@ -463,6 +470,26 @@ impl TeamCraft {
     self.read(|reads| reads.key_catch_up()).await
   }
 
+  /// The line under each conversation of a chat list, in one read for the whole list: the newest
+  /// message people wrote, skipping system lines (joins, renames) where a written one is close by.
+  /// Conversations without messages are left out. Unlike [`Self::messages`] it doesn't move the
+  /// catch-up focus: listing a conversation isn't opening it.
+  pub async fn chat_previews(
+    &self,
+    conversation_ids: Vec<String>,
+  ) -> Result<Vec<ChatPreviewItem>, TeamCraftError> {
+    self
+      .read(move |reads| reads.chat_previews(&conversation_ids))
+      .await
+  }
+
+  /// The calls running in the user's conversations, with who is in them, as the gateway reported
+  /// them: the chat list marks those conversations and the conversation offers to join. Read
+  /// again after each change notification; never waits for the engine.
+  pub fn running_calls(&self) -> Vec<RunningCallItem> {
+    self.running_calls.list()
+  }
+
   /// The newest `limit` top-level messages, oldest first.
   pub async fn messages(
     &self,
@@ -822,6 +849,18 @@ impl TeamCraft {
           older,
         )
       })
+      .await
+  }
+
+  /// The newest `len` messages of a conversation as JSON (`MessageTail`), read ahead so that it
+  /// opens without waiting; it doesn't move the catch-up focus, as [`Self::message_tail`] does.
+  pub async fn message_tail_ahead(
+    &self,
+    conversation_id: String,
+    len: u32,
+  ) -> Result<String, TeamCraftError> {
+    self
+      .read(move |reads| reads.tail_ahead_json(&conversation_id, len))
       .await
   }
 
@@ -1305,11 +1344,13 @@ impl TeamCraft {
     let network = NetworkChanges::new();
     let connection = ConnectionStatus::new();
     let id_tokens = engine::IdTokens::default();
+    let running_calls = calls::RunningCalls::default();
     let signals = engine::SyncSignals {
       network: network.clone(),
       connection: connection.clone(),
       catch_up_focus: Default::default(),
       id_tokens: id_tokens.clone(),
+      running_calls: running_calls.clone(),
     };
     let start = engine::EngineStart::new(config, tokens, listener, signals)?;
     let recovery = Arc::new(Mutex::new(None));
@@ -1328,6 +1369,7 @@ impl TeamCraft {
       connection,
       id_tokens,
       activity: Mutex::default(),
+      running_calls,
     }))
   }
 

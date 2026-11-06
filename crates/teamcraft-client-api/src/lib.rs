@@ -38,6 +38,7 @@ pub mod notify;
 pub mod oidc_login;
 pub mod os_notify;
 pub mod page_calls;
+pub mod picture_edit;
 pub mod privacy;
 pub mod receipts;
 pub mod remote;

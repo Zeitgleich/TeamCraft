@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="attach_recent_allow">Show recent photos</string>
+  <string name="attach_recent_more">Choose more photos</string>
+  <string name="attach_recent_photo">Photo</string>
+  <string name="attach_recent_video">Video</string>
+  <plurals name="attach_recent_add">
+    <item quantity="one">Add %d</item>
+    <item quantity="other">Add %d</item>
+  </plurals>
+</resources>

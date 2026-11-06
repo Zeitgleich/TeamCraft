@@ -29,7 +29,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -61,6 +60,20 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Call
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import de.zeitgleich.teamcraft.ui.avatarColor
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.security.ScreenPrefs.Companion.prefs
@@ -81,12 +94,24 @@ private val ADD_PEOPLE_LIST_HEIGHT = 320.dp
 class CallActivity : ComponentActivity() {
   private val calls by lazy { TeamCraftApplication.graph(this).calls }
 
+  /**
+   * The conversation answered while the microphone was asked for: joining waits for the user's
+   * reply, since the join brings this screen to the front again, which would close the dialog and
+   * count as a refusal.
+   */
+  private var maybeAnswerAfterPermission: String? = null
+
   private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
     calls.onMicrophonePermission(it)
+    maybeAnswerAfterPermission?.let { conversationId ->
+      maybeAnswerAfterPermission = null
+      calls.answer(conversationId)
+    }
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    maybeAnswerAfterPermission = savedInstanceState?.getString(STATE_ANSWER_AFTER_PERMISSION)
     enableEdgeToEdge()
     if (prefs(this).isSecureScreen) window.setFlags(FLAG_SECURE, FLAG_SECURE)
     setShowWhenLocked(true)
@@ -111,10 +136,7 @@ class CallActivity : ComponentActivity() {
         if (ring != null && maybeState == null && !isJoining) {
           IncomingCallScreen(
             ring = ring,
-            onAnswer = {
-              requestMicrophoneIfMissing()
-              calls.answer(ring.conversationId)
-            },
+            onAnswer = { answerWithMicrophone(ring.conversationId) },
             onDecline = { calls.decline() },
           )
         } else if (failure != null && !isJoining) {
@@ -152,8 +174,23 @@ class CallActivity : ComponentActivity() {
       return
     }
     Log.i(TAG, "call screen: answer from the notification")
-    requestMicrophoneIfMissing()
-    calls.answer(conversationId)
+    answerWithMicrophone(conversationId)
+  }
+
+  override fun onSaveInstanceState(outState: Bundle) {
+    super.onSaveInstanceState(outState)
+    maybeAnswerAfterPermission?.let { outState.putString(STATE_ANSWER_AFTER_PERMISSION, it) }
+  }
+
+  /** Answers at once with the microphone allowed; otherwise asks first and answers with the reply. */
+  private fun answerWithMicrophone(conversationId: String) {
+    val microphone = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+    if (microphone == PackageManager.PERMISSION_GRANTED) {
+      calls.answer(conversationId)
+      return
+    }
+    maybeAnswerAfterPermission = conversationId
+    microphonePermission.launch(Manifest.permission.RECORD_AUDIO)
   }
 
   private fun requestMicrophoneIfMissing() {
@@ -168,6 +205,7 @@ class CallActivity : ComponentActivity() {
     const val ACTION_SHOW_INCOMING = "de.zeitgleich.teamcraft.calls.SHOW_INCOMING"
     const val ACTION_ANSWER = "de.zeitgleich.teamcraft.calls.ANSWER"
     const val EXTRA_CONVERSATION_ID = "conversation_id"
+    private const val STATE_ANSWER_AFTER_PERMISSION = "answer_after_permission"
     private const val TAG = "TeamCraftCalls"
   }
 }
@@ -188,30 +226,74 @@ private fun JoinFailedScreen(failure: JoinFailure, onClose: () -> Unit) {
   }
 }
 
-/** Who calls, with answer and decline (the ring's full-screen screen). */
+/**
+ * Who calls, with answer and decline (the ring's full-screen screen), laid out like the phone's own:
+ * the caller's initial and name in the middle, two round buttons in thumb reach at the bottom,
+ * red to decline on the left, green to answer on the right. Dark like the call itself.
+ */
 @Composable
 private fun IncomingCallScreen(ring: IncomingRing, onAnswer: () -> Unit, onDecline: () -> Unit) {
-  Surface(modifier = Modifier.fillMaxSize()) {
+  Box(Modifier.fillMaxSize().background(CALL_BACKGROUND).safeDrawingPadding()) {
     Column(
-      modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(32.dp),
-      verticalArrangement = Arrangement.SpaceBetween,
+      Modifier.align(Alignment.Center).padding(horizontal = 32.dp),
       horizontalAlignment = Alignment.CenterHorizontally,
+      verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-      Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(stringResource(R.string.call_incoming), style = MaterialTheme.typography.titleMedium)
-        Text(ring.displayName, style = MaterialTheme.typography.headlineMedium)
-        ring.maybeCallerName?.takeIf { it != ring.displayName }?.let { Text(it) }
+      Box(
+        Modifier.size(112.dp).background(avatarColor(null, ring.displayName), CircleShape),
+        contentAlignment = Alignment.Center,
+      ) {
+        Text(
+          ring.displayName.firstOrNull()?.uppercase().orEmpty(),
+          style = MaterialTheme.typography.displaySmall,
+          color = Color.White,
+          modifier = Modifier.clearAndSetSemantics {},
+        )
       }
-      Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-        Button(
-          onClick = onDecline,
-          colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-        ) { Text(stringResource(R.string.call_decline)) }
-        Button(onClick = onAnswer) { Text(stringResource(R.string.call_answer)) }
-      }
+      Text(
+        ring.displayName,
+        style = MaterialTheme.typography.headlineMedium,
+        color = Color.White,
+        textAlign = TextAlign.Center,
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+      )
+      Text(
+        ring.maybeCallerName?.takeIf { it != ring.displayName }?.let { stringResource(R.string.call_incoming_from, it) }
+          ?: stringResource(R.string.call_incoming),
+        style = MaterialTheme.typography.bodyLarge,
+        color = Color.White.copy(alpha = 0.7f),
+        textAlign = TextAlign.Center,
+      )
+    }
+    Row(
+      Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 48.dp, end = 48.dp, bottom = 56.dp),
+      horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+      RingButton(CallIcons.CallEnd, stringResource(R.string.call_decline), DECLINE_RED, onDecline)
+      RingButton(Icons.Filled.Call, stringResource(R.string.call_answer), ANSWER_GREEN, onAnswer)
     }
   }
 }
+
+/** A large round button with its label under it. */
+@Composable
+private fun RingButton(icon: ImageVector, label: String, color: Color, onClick: () -> Unit) {
+  Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    FilledIconButton(
+      onClick = onClick,
+      modifier = Modifier.size(72.dp),
+      colors = IconButtonDefaults.filledIconButtonColors(containerColor = color, contentColor = Color.White),
+    ) {
+      Icon(icon, contentDescription = label, modifier = Modifier.size(32.dp))
+    }
+    Text(label, style = MaterialTheme.typography.labelLarge, color = Color.White)
+  }
+}
+
+private val CALL_BACKGROUND = Color(0xFF11151B)
+private val DECLINE_RED = Color(0xFFD93A3A)
+private val ANSWER_GREEN = Color(0xFF2E9E5B)
 
 @Composable
 private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {

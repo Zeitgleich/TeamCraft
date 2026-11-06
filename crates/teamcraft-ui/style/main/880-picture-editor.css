@@ -1,0 +1,91 @@
+/* Editing a picture before it is sent (#1354): dark over the whole window like a photo viewer, the
+   crop frame dims what is cut away with its own shadow, corners large enough for a finger. */
+.picture-editor {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: var(--lightbox-bg);
+  color: var(--lightbox-text);
+}
+
+.picture-editor-stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.picture-editor-picture {
+  position: relative;
+  max-width: 100%;
+  max-height: 100%;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+}
+
+.picture-editor-image {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 140px);
+  pointer-events: none;
+}
+
+.picture-editor-frame {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid var(--on-fill);
+  box-shadow: 0 0 0 9999px rgb(0 0 0 / 55%);
+  cursor: move;
+  outline-offset: 3px;
+}
+
+.picture-editor-handle {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  border: 3px solid var(--on-fill);
+}
+
+.picture-editor-handle.is-top-left { top: -3px; left: -3px; border-right: 0; border-bottom: 0; cursor: nwse-resize; }
+.picture-editor-handle.is-top-right { top: -3px; right: -3px; border-left: 0; border-bottom: 0; cursor: nesw-resize; }
+.picture-editor-handle.is-bottom-left { bottom: -3px; left: -3px; border-right: 0; border-top: 0; cursor: nesw-resize; }
+.picture-editor-handle.is-bottom-right { bottom: -3px; right: -3px; border-left: 0; border-top: 0; cursor: nwse-resize; }
+
+.picture-editor-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+}
+
+.picture-editor-bar .btn:not(.btn-primary),
+.picture-editor-bar .icon-btn {
+  color: var(--lightbox-text);
+}
+
+.picture-editor-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.picture-editor-failed {
+  max-width: 32em;
+  text-align: center;
+}
+
+/* The chip of a picture opens the editor. */
+.chip-thumb-button {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}

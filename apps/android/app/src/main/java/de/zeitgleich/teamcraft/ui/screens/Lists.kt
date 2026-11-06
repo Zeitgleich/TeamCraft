@@ -31,6 +31,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextAlign
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ChatSnapshot
@@ -140,5 +141,12 @@ fun MessageLine(snapshot: ChatSnapshot?, message: Message) {
 
 @Composable
 fun EmptyText(text: Int) {
-  Text(stringResource(text), color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(16.dp))
+  // Centred with room around it, like the other empty states, not a stray line in the corner.
+  Text(
+    stringResource(text),
+    style = MaterialTheme.typography.bodyMedium,
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+    textAlign = TextAlign.Center,
+    modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 48.dp),
+  )
 }

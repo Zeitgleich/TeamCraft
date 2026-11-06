@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import de.zeitgleich.teamcraft.ui.media.MediaQuality
 import uniffi.teamcraft_ffi.OriginalDownload
 import uniffi.teamcraft_ffi.fetchesOriginalAutomatically
 
@@ -39,8 +40,19 @@ class MediaPrefs private constructor(private val context: Context) {
     return fetchesOriginalAutomatically(originalDownload, isMetered)
   }
 
+  /**
+   * The quality photos and videos are sent at unless changed while sending (#1358), Standard until
+   * set. Kept on this device, like the data plan it is about.
+   */
+  val sendQuality: MediaQuality get() = MediaQuality.entries.firstOrNull { it.name == prefs.getString(KEY_SEND_QUALITY, null) } ?: MediaQuality.Standard
+
+  fun setSendQuality(choice: MediaQuality) {
+    prefs.edit().putString(KEY_SEND_QUALITY, choice.name).apply()
+  }
+
   companion object {
     private const val FILE = "media_prefs"
+    private const val KEY_SEND_QUALITY = "send_quality"
     private const val KEY_ORIGINAL_DOWNLOAD = "original_download"
     private const val KEY_ANIMATED_IMAGES = "animated_images"
 

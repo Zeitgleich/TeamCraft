@@ -47,8 +47,6 @@ import de.zeitgleich.teamcraft.ui.ConnectionNotice
 import de.zeitgleich.teamcraft.ui.connectionNotice
 import de.zeitgleich.teamcraft.ui.isConnectionDown
 import de.zeitgleich.teamcraft.ui.rememberIsOnline
-import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
-import de.zeitgleich.teamcraft.ui.theme.darkStatusBarBackdrop
 
 /**
  * What content stays clear of (#309): system bars, the display cutout (landscape) and the keyboard.
@@ -62,7 +60,7 @@ val ScreenInsets: WindowInsets
 val TopBarInsets: WindowInsets
   @Composable get() = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
 
-/** The dark top bar of the desktop's chrome. */
+/** The top bar of the screens behind the main one: back, title and actions on the theme's surface. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChromeTopBar(
@@ -72,7 +70,6 @@ fun ChromeTopBar(
   actions: @Composable RowScope.() -> Unit = {},
   maybeIcon: (@Composable () -> Unit)? = null,
 ) {
-  val colors = LocalTeamCraftColors.current
   TopAppBar(
     title = {
       androidx.compose.foundation.layout.Row(
@@ -88,7 +85,7 @@ fun ChromeTopBar(
               maxLines = 1,
               overflow = TextOverflow.Ellipsis,
               style = MaterialTheme.typography.bodySmall,
-              color = colors.chromeMuted,
+              color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
           }
         }
@@ -103,14 +100,9 @@ fun ChromeTopBar(
     },
     actions = actions,
     windowInsets = TopBarInsets,
-    // Light status-bar icons over the dark chrome, also in light mode.
-    modifier = Modifier.darkStatusBarBackdrop(),
-    colors = TopAppBarDefaults.topAppBarColors(
-      containerColor = colors.chrome,
-      titleContentColor = colors.chromeText,
-      navigationIconContentColor = colors.chromeText,
-      actionIconContentColor = colors.chromeText,
-    ),
+    // The theme's surface, as on the main screen: one header style in light and dark (the status
+    // bar icons follow the theme).
+    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
   )
 }
 

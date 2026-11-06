@@ -106,6 +106,28 @@ async fn a_slow_link_keeps_its_connection_and_says_it_is_slow() {
     .await;
 }
 
+/// The catch-up after a long absence can take long while messages already arrive: the state is
+/// connected once the server answered, not "connecting" until the whole catch-up is done (which
+/// showed a "Connecting" banner for half a minute on a big workspace).
+#[tokio::test(start_paused = true)]
+async fn a_long_catch_up_shows_connected_once_the_server_answered() {
+  let rig = Rig::start("Lou").await;
+  rig
+    .server
+    .delay_conversation_list(rig.user, Duration::from_secs(60));
+  rig
+    .drive(|rig| async move {
+      rig.wait_for(is_connected, Duration::from_secs(5)).await;
+      rig.stay(is_connected, Duration::from_secs(70)).await;
+      assert_eq!(
+        rig.server.gateway_connect_count(),
+        1,
+        "the connection was replaced"
+      );
+    })
+    .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_network_change_replaces_a_dead_connection_within_five_seconds() {
   let rig = Rig::start("Carol").await;
