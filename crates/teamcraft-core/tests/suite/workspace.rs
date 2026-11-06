@@ -1303,9 +1303,10 @@ mod attestation {
   const ISSUER: &str = "https://id.example.com/realms/company";
 
   #[tokio::test]
-  async fn only_attested_identity_keys_are_pinned_when_required() {
-    // Security review A1: with attestation required, the server can't hand out an identity key
-    // the identity provider didn't attest.
+  async fn without_signed_accounts_required_attestation_locks_nobody_out() {
+    // Security review A1 / #1279: a token's claim is the person's own word, so it confirms a key only
+    // for the account the owners signed for them. Nobody here has one: keys are pinned on first use,
+    // also where attestation is required, and nobody is shut out.
     let server = FakeServer::new();
     let provider = Arc::new(SigningKey::random(&mut rand_core::OsRng));
     let mut alice = enroll_attested(&server, "Alice", &provider, true).await;
@@ -1324,13 +1325,7 @@ mod attestation {
       .unwrap();
 
     alice.add_member(channel, bob.user_id()).await.unwrap();
-    // Carol's key has no attestation: it isn't pinned, so she can't be added.
-    assert!(matches!(
-      alice.add_member(channel, carol.user_id()).await,
-      Err(teamcraft_core::CoreError::Mls(
-        teamcraft_crypto::mls::MlsError::UnknownUser(_)
-      ))
-    ));
+    alice.add_member(channel, carol.user_id()).await.unwrap();
   }
 
   async fn enroll_attested(

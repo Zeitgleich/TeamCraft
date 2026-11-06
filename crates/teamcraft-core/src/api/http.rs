@@ -1411,6 +1411,15 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn put_identity_key_attestation(
+    &self,
+    request: &teamcraft_proto::PutIdentityKeyAttestationRequest,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response(Method::PUT, "/me/identity-key/attestation", Some(request))
+      .await
+  }
+
   async fn list_role_evidence(&self) -> Result<teamcraft_proto::ListRoleEvidenceResponse, ApiError> {
     self.get("/role-evidence").await
   }

@@ -225,3 +225,113 @@ async fn device_keys_come_with_their_cross_signatures() {
   );
   app.stop().await;
 }
+
+mod attestation_of_a_published_key {
+  use base64::Engine as _;
+  use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+  use teamcraft_crypto::attestation::attestation_claim;
+  use teamcraft_crypto::identity::IdentityPublicKey;
+  use teamcraft_server::testing::TestUser;
+
+  use super::*;
+
+  const PUBLIC_KEY: [u8; 32] = [7; 32];
+
+  #[tokio::test]
+  async fn a_token_naming_the_caller_and_their_key_is_stored_with_it() {
+    let app = app!();
+    let (carol, dave) = (member("carol"), member("dave"));
+    let carol_id = enroll(&app, &carol).await;
+    let token = token(&carol, &claim(&carol_id, PUBLIC_KEY));
+
+    let stored = app
+      .put(&carol, "/me/identity-key/attestation", json!({"token": token}))
+      .await;
+
+    assert_eq!(stored.status, StatusCode::NO_CONTENT, "{}", stored.body);
+    let served = app.get(&dave, &format!("/users/{carol_id}/identity-key")).await;
+    assert_eq!(served.body["attestation"], token);
+    assert_eq!(served.body["public_key"], STANDARD.encode(PUBLIC_KEY));
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_token_of_somebody_else_is_refused() {
+    let app = app!();
+    let (carol, dave) = (member("carol"), member("dave"));
+    let carol_id = enroll(&app, &carol).await;
+    user_id(&app, &dave).await;
+
+    let refused = app
+      .put(
+        &carol,
+        "/me/identity-key/attestation",
+        json!({"token": token(&dave, &claim(&carol_id, PUBLIC_KEY))}),
+      )
+      .await;
+
+    assert_eq!(refused.status, StatusCode::FORBIDDEN, "{}", refused.body);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_token_for_another_key_or_no_token_is_refused() {
+    let app = app!();
+    let carol = member("carol");
+    let carol_id = enroll(&app, &carol).await;
+
+    for body in [
+      json!({"token": token(&carol, &claim(&carol_id, [8; 32]))}),
+      json!({"token": "not-a-token"}),
+      json!({"token": "x".repeat(17 * 1024)}),
+    ] {
+      let refused = app.put(&carol, "/me/identity-key/attestation", body).await;
+      assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{}", refused.body);
+    }
+    let served = app.get(&carol, &format!("/users/{carol_id}/identity-key")).await;
+    assert!(served.body.get("attestation").is_none());
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn without_a_published_key_there_is_nothing_to_attest() {
+    let app = app!();
+    let carol = member("carol");
+    let carol_id = user_id(&app, &carol).await;
+
+    let refused = app
+      .put(
+        &carol,
+        "/me/identity-key/attestation",
+        json!({"token": token(&carol, &claim(&carol_id, PUBLIC_KEY))}),
+      )
+      .await;
+
+    assert_eq!(refused.error_code(), "identity_key_not_found");
+    app.stop().await;
+  }
+
+  async fn enroll(app: &TestApp, user: &TestUser) -> String {
+    let id = user_id(app, user).await;
+    let mut body = key(&STANDARD.encode(PUBLIC_KEY));
+    body.as_object_mut().unwrap().remove("attestation");
+    let stored = app.put(user, "/me/identity-key", body).await;
+    assert_eq!(stored.status, StatusCode::OK, "{}", stored.body);
+    id
+  }
+
+  fn claim(user_id: &str, public_key: [u8; 32]) -> String {
+    attestation_claim(
+      teamcraft_crypto::ids::UserId::new(user_id.parse().unwrap()),
+      &IdentityPublicKey::from_bytes(public_key),
+    )
+  }
+
+  /// Unsigned: the server doesn't verify tokens, the apps do.
+  fn token(user: &TestUser, claim: &str) -> String {
+    let payload = URL_SAFE_NO_PAD.encode(
+      serde_json::to_vec(&json!({"sub": user.subject, "iat": 100, "tc_identity_key": claim})).unwrap(),
+    );
+    format!("header.{payload}.signature")
+  }
+}

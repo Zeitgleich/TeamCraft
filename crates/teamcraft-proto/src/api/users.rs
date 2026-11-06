@@ -257,6 +257,14 @@ pub struct InitialKeyBag {
   pub wrapped_backup_keys: Base64Bytes,
 }
 
+/// `PUT /api/v1/me/identity-key/attestation`: the identity provider's ID token naming the caller's
+/// current identity key (claim `tc_identity_key`, e2ee.md §3.1), for a key published without one.
+/// The server only checks it names the caller and their key; clients verify it themselves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PutIdentityKeyAttestationRequest {
+  pub token: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct IdentityKeyResponse {
   pub user_id: UserId,

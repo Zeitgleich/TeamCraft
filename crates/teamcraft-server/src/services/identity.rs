@@ -4,10 +4,12 @@
 //! A new identity key comes with its first key bag and both are stored in one transaction
 //! (e2ee.md §3.2): an interrupted enrollment can't leave an identity nobody can recover.
 
+use teamcraft_crypto::attestation::{attestation_claim, unverified_claims};
+use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_db::{IdentityKey, IdentityKeyOutcome, InitialKeyBag, NewIdentityKey};
 use teamcraft_proto::{
-  Base64Bytes, DeviceResponse, GatewayEvent, IdentityKeyResponse, ListDevicesResponse,
-  UploadIdentityKeyRequest, UserEnrollmentResponse, UserId,
+  Base64Bytes, DeviceResponse, GatewayEvent, Id as _, IdentityKeyResponse, ListDevicesResponse,
+  PutIdentityKeyAttestationRequest, UploadIdentityKeyRequest, UserEnrollmentResponse, UserId,
 };
 
 use super::convert::{device_response, unix_millis};
@@ -90,6 +92,59 @@ pub async fn put_identity_key(
   let mut response = get_identity_key(state, caller, caller.user.id).await?;
   response.maybe_key_bag_version = Some(key_bag_version);
   Ok(response)
+}
+
+/// Stores the caller's attestation for the identity key they already published (e2ee.md §3.1): keys
+/// enrolled before their app attested them get one this way, without a reset. Like the key itself, the
+/// server judges nothing; it keeps out junk and tokens that name somebody else or another key.
+pub async fn put_identity_key_attestation(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  request: PutIdentityKeyAttestationRequest,
+) -> Result<(), ApiError> {
+  if request.token.chars().count() > MAX_ATTESTATION_CHARS {
+    return Err(ApiError::InvalidRequest("attestation is too long".into()));
+  }
+  let not_a_token = || ApiError::InvalidRequest("this is not an identity provider token".into());
+  let subject = super::role_evidence::token_subject(&request.token).ok_or_else(not_a_token)?;
+  let claims = unverified_claims(&request.token).map_err(|_| not_a_token())?;
+  let issuer = state.validator.issuer().to_owned();
+  let maybe_owner = state
+    .database
+    .find_user_by_oidc_subject(&issuer, &subject)
+    .await?;
+  if maybe_owner != Some(caller.user.id) {
+    return Err(ApiError::Forbidden("this token belongs to somebody else".into()));
+  }
+  let key = state
+    .database
+    .get_identity_key(caller.user.id)
+    .await?
+    .ok_or(ApiError::identity_key_not_found())?;
+  if claims.maybe_key_claim.as_deref() != expected_claim(caller.user.id, &key.public_key).as_deref() {
+    return Err(ApiError::InvalidRequest(
+      "the token doesn't name the current identity key".into(),
+    ));
+  }
+  let is_stored = state
+    .database
+    .set_identity_key_attestation(caller.user.id, &key.public_key, &request.token)
+    .await?;
+  if !is_stored {
+    // The key was reset in between: this token names the old one.
+    return Err(ApiError::Conflict("the identity key changed".into()));
+  }
+  Ok(())
+}
+
+/// The claim an attestation of `public_key` carries; `None` for a stored key of the wrong size.
+fn expected_claim(user: UserId, public_key: &[u8]) -> Option<String> {
+  let key = <[u8; 32]>::try_from(public_key).ok()?;
+  let raw = u64::try_from(user.snowflake().get()).ok()?;
+  Some(attestation_claim(
+    teamcraft_crypto::ids::UserId::new(raw),
+    &IdentityPublicKey::from_bytes(key),
+  ))
 }
 
 pub async fn get_identity_key(

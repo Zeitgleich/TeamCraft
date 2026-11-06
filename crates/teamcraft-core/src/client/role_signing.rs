@@ -1,8 +1,9 @@
 //! Owners and admins never sign roles by hand (e2ee.md §3.1.3, issue #1276). Two duties, both on the
 //! upkeep path and with no request while nothing changed:
 //!
-//! - **Every app of somebody with a provider role** makes sure the provider's ID token names its
-//!   identity key, and publishes that token when the roster doesn't say the same yet.
+//! - **Every app** makes sure the provider's ID token names its identity key and publishes that token
+//!   once as the key's attestation (e2ee.md §3.1); **an app of somebody with a provider role** also
+//!   publishes it when the roster doesn't say the same yet.
 //! - **An owner's app** verifies such tokens against the provider, directly, and signs the next roster,
 //!   with nobody asked. The first owner's app signs the first roster the same way, itself alone.
 //!
@@ -17,10 +18,12 @@ use teamcraft_crypto::attestation::{
   unverified_client_roles, verify_role_evidence, verify_role_loss,
 };
 use teamcraft_crypto::identity::IdentityPublicKey;
-use teamcraft_proto::{Base64Bytes, PutRoleEvidenceRequest, RoleProvider, RoleSigningPolicy, UserId};
+use teamcraft_proto::{
+  Base64Bytes, PutIdentityKeyAttestationRequest, PutRoleEvidenceRequest, RoleProvider, RoleSigningPolicy,
+  UserId,
+};
 
 use super::Client;
-use super::attested::http_jwks_source;
 use crate::api::{ApiError, ProviderTokens, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
@@ -59,6 +62,10 @@ pub struct RoleSigningRecord {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_last_report_removal: Option<i64>,
+  /// The attestation claim of the identity key this device published a token for (e2ee.md §3.1):
+  /// another key (after a reset) needs another one.
+  #[serde(rename = "attested_key", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_attested_key: Option<String>,
 }
 
 /// The token this device published last.
@@ -114,6 +121,12 @@ pub(crate) struct RoleSigningRun {
   /// The attribute was written, and the time of the token this device held then: a refresh brings
   /// a token with it, and a later token without it means the realm doesn't map it.
   maybe_written: Option<WrittenAttribute>,
+  /// The provider showed it doesn't take or map the attribute: somebody with no role doesn't ask it
+  /// again until the app starts anew.
+  is_attribute_unavailable: bool,
+  /// The attestation this device made sure the server holds since the app started, or the server
+  /// refused (e.g. an older server without the endpoint): not asked again until the app starts anew.
+  maybe_attestation_settled: Option<String>,
 }
 
 #[derive(Debug)]
@@ -201,6 +214,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // What this device signed in at before: signing in at the same provider after a reset is no move.
     let maybe_previous_issuer = self.role_signing_record()?.maybe_seen_provider;
     self.remember_provider(&claims)?;
+    // Every member's key, role or not: what colleagues' apps check before pinning it (e2ee.md §3.1).
+    let expected = self.identity_attestation_claim();
+    let has_key_claim = claims.maybe_key_claim.as_deref() == Some(expected.as_str());
+    if has_key_claim {
+      self.publish_identity_attestation(tokens, &expected).await?;
+    }
     // Before anything else, mapper or not: without a pin, a server could later announce another issuer.
     if self.is_verified_owner(&state)
       && state
@@ -244,14 +263,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       {
         tracing::debug!(%error, "the server refused this token, as it should for no role");
       }
-      return Ok(false);
+      return self
+        .attest_as_member(tokens, &claims, &expected, has_key_claim)
+        .await;
     }
     let concerns_me = matches!(role, ProviderRole::Owner | ProviderRole::Admin) || my_entry.is_some();
     if !concerns_me {
-      return Ok(false);
+      return self
+        .attest_as_member(tokens, &claims, &expected, has_key_claim)
+        .await;
     }
-    let expected = self.identity_attestation_claim();
-    if claims.maybe_key_claim.as_deref() != Some(expected.as_str()) {
+    if !has_key_claim {
       return self.write_identity_attribute(tokens, &claims, &expected).await;
     }
     self.publish_own_evidence(tokens, &claims, &state, role).await?;
@@ -325,6 +347,65 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
+  /// Publishes the token as the attestation of this device's identity key, once per key. A failure
+  /// fails the round, which retries it with backoff.
+  async fn publish_identity_attestation(
+    &mut self,
+    tokens: &ProviderTokens,
+    claim: &str,
+  ) -> Result<(), CoreError> {
+    if self.role_signing.maybe_attestation_settled.as_deref() == Some(claim) {
+      return Ok(());
+    }
+    let mut record = self.role_signing_record()?;
+    // Published before: once per start, look whether the server still holds it (a restored database
+    // loses it, and colleagues then take this key on first use).
+    if record.maybe_attested_key.as_deref() == Some(claim) && self.is_attestation_on_the_server().await? {
+      self.role_signing.maybe_attestation_settled = Some(claim.to_owned());
+      return Ok(());
+    }
+    let request = PutIdentityKeyAttestationRequest {
+      token: tokens.id_token.clone(),
+    };
+    match self.api.put_identity_key_attestation(&request).await {
+      Ok(()) => {},
+      // A refusal is no reason to stop the round: the owner's duties come after this (an older server
+      // doesn't know the endpoint, or the key changed meanwhile). Asked again after a restart.
+      Err(error) if is_permanent_refusal(&error) => {
+        tracing::warn!(%error, "the server refused this device's key attestation");
+        self.role_signing.maybe_attestation_settled = Some(claim.to_owned());
+        return Ok(());
+      },
+      Err(error) => return Err(error.into()),
+    }
+    self.role_signing.maybe_attestation_settled = Some(claim.to_owned());
+    record.maybe_attested_key = Some(claim.to_owned());
+    records::put_json(&self.store, Table::Workspace, ROLE_SIGNING_KEY, &record)
+  }
+
+  async fn is_attestation_on_the_server(&self) -> Result<bool, CoreError> {
+    let maybe_key = self.api.identity_key(self.account.user_id).await?;
+    Ok(maybe_key.is_some_and(|key| {
+      key.public_key.as_slice() == self.identity_public_key().as_bytes() && key.maybe_attestation.is_some()
+    }))
+  }
+
+  /// Somebody with no role: their token only attests their identity key, so the attribute is written
+  /// if the token doesn't name it yet. Not again on a realm that showed it doesn't take it, where
+  /// colleagues pin the key on first use as before.
+  async fn attest_as_member(
+    &mut self,
+    tokens: &ProviderTokens,
+    claims: &UnverifiedClaims,
+    expected: &str,
+    has_key_claim: bool,
+  ) -> Result<bool, CoreError> {
+    if has_key_claim || self.role_signing.is_attribute_unavailable {
+      return Ok(false);
+    }
+    self.write_identity_attribute(tokens, claims, expected).await
+  }
+
   /// The ID token doesn't name this identity key yet: write the attribute, and the next token will.
   async fn write_identity_attribute(
     &mut self,
@@ -349,6 +430,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           "the identity provider's ID tokens don't carry the identity key, so role changes can't be \
            signed by themselves (docs/operations.md, \"Role signing\")"
         );
+        self.role_signing.is_attribute_unavailable = true;
         self.set_problem(Some(RoleSigningProblem::NoKeyClaim))?;
         return Ok(true);
       } else {
@@ -385,6 +467,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           "the identity provider doesn't take the identity key attribute, so role changes can't be \
            signed by themselves (docs/operations.md, \"Role signing\")"
         );
+        self.role_signing.is_attribute_unavailable = true;
         self.set_problem(Some(RoleSigningProblem::NoKeyClaim))?;
         Ok(true)
       },
@@ -668,14 +751,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.publish_policy(policy).await
   }
 
-  /// The provider's signing keys, from the provider, never through the server.
-  async fn provider_keys(&self, issuer: &str) -> Option<Vec<u8>> {
-    match &self.maybe_jwks_source {
-      Some(source) => source.fetch().await,
-      None => http_jwks_source(issuer).fetch().await,
-    }
-  }
-
   /// Says at most one thing: what needs a look first, then who is about to go on a report.
   fn note_what_people_should_know(
     &self,
@@ -823,4 +898,10 @@ fn verified_statement(
     issued_at: evidence.issued_at,
     role: provider_role(evidence.maybe_roles.as_deref(), anchor),
   })
+}
+
+/// A `4xx` the same request would get again; `408` and `429` pass with time, so they fail the round
+/// and are retried like a network error.
+fn is_permanent_refusal(error: &ApiError) -> bool {
+  matches!(error, ApiError::Status { status, .. } if (400..500).contains(status) && !matches!(status, 408 | 429))
 }

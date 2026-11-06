@@ -809,6 +809,7 @@ impl SecurityBackend for MockBackend {
     ContactVerification {
       safety_number: demo_safety_number(me, raw_id(user)),
       is_verified: self.ops.borrow().verified_contacts.contains(&user),
+      is_attested: true,
     }
   }
 

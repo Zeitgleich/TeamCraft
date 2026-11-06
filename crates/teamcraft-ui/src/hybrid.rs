@@ -1974,6 +1974,7 @@ impl<C: ChatBackend> SecurityBackend for Hybrid<C> {
     crate::security::ContactVerification {
       safety_number: crate::security::safety_number(&keys.my_fingerprint, &contact.fingerprint),
       is_verified: load_string(&verified_key(user)).as_deref() == Some(contact.fingerprint.as_str()),
+      is_attested: contact.is_attested,
     }
   }
 

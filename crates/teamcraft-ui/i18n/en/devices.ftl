@@ -61,6 +61,8 @@ contact-verify-body = Compare this number with the one { $name } sees in their o
 contact-verified = Verified: you compared this number.
 contact-not-verified = Not verified yet.
 contact-unmark = Remove verification
+contact-attested = Your organization's sign-in confirmed this key belongs to them.
+contact-not-attested = Your organization's sign-in hasn't confirmed this key. This app took it as the server handed it out; compare the number to be sure.
 
 ## Settings: display, sidebar, language, privacy, devices, calls
 contact-verified-short = Verified

@@ -752,7 +752,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     users: &[UserId],
     may_go_by_snapshot: bool,
   ) -> Result<BTreeMap<UserId, RoleKeyEvidence>, CoreError> {
-    if self.settings.maybe_attestation.is_some() {
+    if self.attestation_settings().is_some() {
       self.pin_identities(users.iter().copied()).await?;
     }
     let in_group: BTreeSet<UserId> = if self.has_group(conversation)? {

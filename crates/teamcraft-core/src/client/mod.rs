@@ -294,8 +294,13 @@ pub struct ClientSettings {
   pub role_signing_retry: std::time::Duration,
   /// How long before `workspace_max_age` runs out the admin console warns that no owner signed.
   pub workspace_expiry_warning: std::time::Duration,
-  /// The identity provider that attests identity keys; `None`: trust on first use.
+  /// The identity provider that attests identity keys; `None`: the one the owners pinned in the
+  /// signed policy, if any, else trust on first use.
   pub maybe_attestation: Option<AttestationSettings>,
+  /// How long a colleague's key pinned without an attestation stays unchecked before this device
+  /// looks again whether one was published for it since (e2ee.md §3.1). Checked only when the key is
+  /// needed, never on a timer.
+  pub attestation_recheck: std::time::Duration,
   /// Show messages from before senders signed them (their sender is only "some member"). Off by
   /// default: a removed member could otherwise keep writing in anyone's name (security review A10).
   pub accept_unsigned_messages: bool,
@@ -501,6 +506,7 @@ impl Default for ClientSettings {
       role_signing_retry: std::time::Duration::from_secs(60),
       workspace_expiry_warning: std::time::Duration::from_secs(7 * 24 * 60 * 60),
       maybe_attestation: None,
+      attestation_recheck: std::time::Duration::from_secs(24 * 60 * 60),
       accept_unsigned_messages: false,
       max_announced_presence: 5_000,
       pending_actions: PendingActionSettings::default(),
@@ -550,7 +556,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let sync = records::load_sync_state(&store)?;
     let maybe_preview_fetcher = previews::default_fetcher(&settings.link_previews);
-    let maybe_jwks_source = attested::default_jwks_source(settings.maybe_attestation.as_ref());
     let mut client = Self {
       api,
       store,
@@ -572,7 +577,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       call_ids: HashMap::new(),
       heard_calls: HashMap::new(),
       maybe_preview_fetcher,
-      maybe_jwks_source,
+      maybe_jwks_source: None,
       role_signing: Default::default(),
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
@@ -911,13 +916,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         let entry = PinnedIdentity {
           public_key,
           maybe_changed_to: None,
-          // Checked (or not) by the device that pinned it.
+          // Checked (or not) by the device that pinned it; this one checks it again.
           is_attested: false,
+          maybe_attestation_checked_at_ms: None,
         };
         records::pin_identity(&self.store, user, &entry)?;
         slot.insert(entry);
       }
     }
+    let mut maybe_check = self.attestation_settings().map(attested::AttestationCheck::new);
+    let now_ms = self.now_ms();
+    let recheck_ms = i64::try_from(self.settings.attestation_recheck.as_millis()).unwrap_or(i64::MAX);
+    // A key pinned on first use is checked again now and then: once its owner's app attested it, it
+    // counts as attested (e2ee.md §3.1). Never the other way round, and never for another key.
+    let is_checking = maybe_check.is_some();
+    let is_recheck_due = |identity: &PinnedIdentity| {
+      is_checking
+        && !identity.is_attested
+        && identity
+          .maybe_attestation_checked_at_ms
+          .is_none_or(|checked_at| now_ms.saturating_sub(checked_at) >= recheck_ms)
+    };
     for user in users.iter().copied() {
       if user == self.account.user_id {
         if let std::collections::btree_map::Entry::Vacant(slot) = pinned.entry(user) {
@@ -925,6 +944,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             public_key: *self.account.identity_public_key().as_bytes(),
             maybe_changed_to: None,
             is_attested: true,
+            maybe_attestation_checked_at_ms: None,
           };
           records::pin_identity(&self.store, user, &own)?;
           slot.insert(own);
@@ -933,7 +953,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
       if pinned
         .get(&user)
-        .is_some_and(|identity| identity.maybe_changed_to.is_none())
+        .is_some_and(|identity| identity.maybe_changed_to.is_none() && !is_recheck_due(identity))
       {
         continue;
       }
@@ -943,12 +963,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       };
       let public_key = <[u8; 32]>::try_from(response.public_key.as_slice())
         .map_err(|_| CoreError::Corrupt(format!("identity key of {user} has the wrong size")))?;
+      let maybe_token = response.maybe_attestation.as_deref();
       let entry = match pinned.get(&user) {
         None => {
           // A first pin: checked against the identity provider's attestation (security review A1).
-          let check = self
-            .check_attestation(user, &public_key, response.maybe_attestation.as_deref())
-            .await;
+          let check = match maybe_check.as_mut() {
+            Some(check) => check.check(self, user, &public_key, maybe_token).await,
+            None => attested::PinCheck::TrustOnFirstUse,
+          };
           if check == attested::PinCheck::Refused {
             continue;
           }
@@ -956,11 +978,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             public_key,
             maybe_changed_to: None,
             is_attested: check == attested::PinCheck::Attested,
+            maybe_attestation_checked_at_ms: maybe_check
+              .as_ref()
+              .map(|check| check.checked_at_ms(now_ms, recheck_ms)),
           }
         },
-        Some(existing) if existing.public_key == public_key => PinnedIdentity {
-          maybe_changed_to: None,
-          ..existing.clone()
+        Some(existing) if existing.public_key == public_key => {
+          let is_due = is_recheck_due(existing);
+          let mut entry = PinnedIdentity {
+            maybe_changed_to: None,
+            ..existing.clone()
+          };
+          if is_due && let Some(check) = maybe_check.as_mut() {
+            // Kept whatever the answer, also where attestation is required: a key pinned before
+            // never locks anybody out (e2ee.md §3.1).
+            entry.is_attested =
+              check.check(self, user, &public_key, maybe_token).await == attested::PinCheck::Attested;
+            entry.maybe_attestation_checked_at_ms = Some(check.checked_at_ms(now_ms, recheck_ms));
+          }
+          entry
         },
         Some(existing) => {
           tracing::warn!(user_id = %user, "identity key changed on the server; keeping the pinned key");
@@ -970,7 +1006,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           }
         },
       };
-      records::pin_identity(&self.store, user, &entry)?;
+      if pinned.get(&user) != Some(&entry) {
+        records::pin_identity(&self.store, user, &entry)?;
+      }
       pinned.insert(user, entry);
     }
     let directory = PinnedDirectory::new(&pinned, &self.workspace()?.roster_identities())

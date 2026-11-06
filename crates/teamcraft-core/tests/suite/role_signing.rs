@@ -1401,6 +1401,361 @@ mod manual {
   }
 }
 
+mod key_attestation {
+  //! Identity keys attested by the provider the owners pinned (e2ee.md §3.1, issue #1279).
+  use teamcraft_core::ClientSettings;
+  use teamcraft_core::api::ServerApi as _;
+  use teamcraft_core::records::{PinnedIdentity, pinned_identities};
+  use teamcraft_proto::{ConversationId, Id as _, KeyAttestationMode};
+
+  use super::*;
+
+  #[tokio::test]
+  async fn every_members_app_publishes_its_keys_attestation_once() {
+    let world = World::new();
+    let (_alice, mut bob) = world.owner_and_peer("Bob").await;
+    world.give_token(&bob, &[], T0);
+
+    bob.client.run_role_signing().await.unwrap();
+
+    let token = world
+      .server
+      .identity_attestation_of(bob.client.user_id())
+      .unwrap();
+    let claims = teamcraft_crypto::attestation::unverified_claims(&token).unwrap();
+    assert_eq!(
+      claims.maybe_key_claim.unwrap(),
+      bob.client.identity_attestation_claim()
+    );
+    let uploads = world.server.attestation_uploads();
+    world.give_token(&bob, &[], T0 + 60);
+    bob.client.run_role_signing().await.unwrap();
+    assert_eq!(world.server.attestation_uploads(), uploads, "once per key");
+  }
+
+  #[tokio::test]
+  async fn an_admins_attested_key_is_pinned_as_attested() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    make_admin(&world, &mut alice, &mut bob).await;
+
+    add_to_new_channel(&mut alice, bob.client.user_id())
+      .await
+      .unwrap();
+
+    assert!(pin_of(&alice, bob.client.user_id()).is_attested);
+  }
+
+  #[tokio::test]
+  async fn a_members_attestation_confirms_nothing_without_a_signed_account() {
+    // Their claim is their own word; nobody signed which account is theirs (e2ee.md §3.1).
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    world.give_token(&bob, &[], T0);
+    bob.client.run_role_signing().await.unwrap();
+    assert!(
+      world
+        .server
+        .identity_attestation_of(bob.client.user_id())
+        .is_some()
+    );
+
+    add_to_new_channel(&mut alice, bob.client.user_id())
+      .await
+      .unwrap();
+
+    assert!(!pin_of(&alice, bob.client.user_id()).is_attested);
+  }
+
+  #[tokio::test]
+  async fn another_account_naming_somebody_in_its_claim_is_refused() {
+    // Mallory writes "<Bob's user ID>:<a key>" into her own profile attribute and gets a genuine token
+    // for it; a server hands it out as Bob's attestation.
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    make_admin(&world, &mut alice, &mut bob).await;
+    let mallorys = world
+      .provider
+      .token(&base_claims(&bob.client.identity_attestation_claim(), T0).with("sub", json!("sub-of-Mallory")));
+    world
+      .server
+      .set_identity_attestation(bob.client.user_id(), Some(mallorys));
+
+    add_to_new_channel(&mut alice, bob.client.user_id())
+      .await
+      .unwrap();
+    assert!(!pin_of(&alice, bob.client.user_id()).is_attested);
+
+    // Where it is required, a colleague who never pinned Bob doesn't pin it either; the key the owners
+    // signed in the roster is the one that counts for an admin.
+    let mut erin = world.peer("Erin").await;
+    require_attestation(&mut alice).await;
+    settle(&mut [&mut alice, &mut erin]).await;
+    add_to_new_channel(&mut erin, bob.client.user_id()).await.unwrap();
+    assert!(
+      !pinned_identities(&*erin.store)
+        .unwrap()
+        .contains_key(&bob.client.user_id())
+    );
+  }
+
+  #[tokio::test]
+  async fn a_forged_or_missing_attestation_is_trust_on_first_use_when_optional() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let mut carol = world.peer("Carol").await;
+    make_admin(&world, &mut alice, &mut bob).await;
+    make_admin(&world, &mut alice, &mut carol).await;
+    world
+      .server
+      .set_identity_attestation(carol.client.user_id(), None);
+    let impostor = Provider::new();
+    let forged = impostor.token(&base_claims(&bob.client.identity_attestation_claim(), T0));
+    world
+      .server
+      .set_identity_attestation(bob.client.user_id(), Some(forged));
+
+    for user in [bob.client.user_id(), carol.client.user_id()] {
+      add_to_new_channel(&mut alice, user).await.unwrap();
+      assert!(!pin_of(&alice, user).is_attested);
+    }
+  }
+
+  #[tokio::test]
+  async fn an_attestation_of_another_persons_key_is_not_taken() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let carol = world.peer("Carol").await;
+    make_admin(&world, &mut alice, &mut bob).await;
+    // Validly signed, but for Carol's key: the server hands it out as Bob's.
+    let carols = world
+      .provider
+      .token(&base_claims(&carol.client.identity_attestation_claim(), T0));
+    world
+      .server
+      .set_identity_attestation(bob.client.user_id(), Some(carols));
+
+    add_to_new_channel(&mut alice, bob.client.user_id())
+      .await
+      .unwrap();
+
+    assert!(!pin_of(&alice, bob.client.user_id()).is_attested);
+  }
+
+  #[tokio::test]
+  async fn required_by_the_signed_policy_only_a_signed_accounts_key_needs_attestation() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let mut carol = world.peer("Carol").await;
+    let dora = world.peer("Dora").await;
+    make_admin(&world, &mut alice, &mut bob).await;
+    make_admin(&world, &mut alice, &mut carol).await;
+    world
+      .server
+      .set_identity_attestation(carol.client.user_id(), None);
+    require_attestation(&mut alice).await;
+
+    add_to_new_channel(&mut alice, bob.client.user_id())
+      .await
+      .unwrap();
+    // Not pinned; the roster's key, which the owners signed, is used for her.
+    add_to_new_channel(&mut alice, carol.client.user_id())
+      .await
+      .unwrap();
+    // Somebody whose account nobody signed is pinned on first use, required or not.
+    add_to_new_channel(&mut alice, dora.client.user_id())
+      .await
+      .unwrap();
+    let pinned = pinned_identities(&*alice.store).unwrap();
+    assert!(pinned[&bob.client.user_id()].is_attested);
+    assert!(!pinned.contains_key(&carol.client.user_id()));
+    assert!(!pinned[&dora.client.user_id()].is_attested);
+  }
+
+  #[tokio::test]
+  async fn keys_pinned_before_stay_pinned_when_attestation_becomes_required() {
+    // Existing instances: turning it on locks nobody out.
+    let world = World::new();
+    let (mut alice, bob) = world.owner_and_peer("Bob").await;
+    add_to_new_channel(&mut alice, bob.client.user_id())
+      .await
+      .unwrap();
+    assert!(!pin_of(&alice, bob.client.user_id()).is_attested);
+
+    require_attestation(&mut alice).await;
+
+    add_to_new_channel(&mut alice, bob.client.user_id())
+      .await
+      .unwrap();
+    assert!(!pin_of(&alice, bob.client.user_id()).is_attested);
+  }
+
+  #[tokio::test]
+  async fn a_key_pinned_on_first_use_counts_as_attested_once_its_owner_attests_it() {
+    let world = World::new();
+    let mut alice = world
+      .peer_with(
+        "Alice",
+        ClientSettings {
+          attestation_recheck: std::time::Duration::ZERO,
+          ..crate::common::settings()
+        },
+      )
+      .await;
+    world.give_token(&alice, &["owner"], T0);
+    alice.client.run_role_signing().await.unwrap();
+    let mut bob = world.peer("Bob").await;
+    settle(&mut [&mut alice, &mut bob]).await;
+    add_to_new_channel(&mut alice, bob.client.user_id())
+      .await
+      .unwrap();
+    assert!(!pin_of(&alice, bob.client.user_id()).is_attested);
+
+    make_admin(&world, &mut alice, &mut bob).await;
+    add_to_new_channel(&mut alice, bob.client.user_id())
+      .await
+      .unwrap();
+
+    let pin = pin_of(&alice, bob.client.user_id());
+    assert!(pin.is_attested);
+    assert_eq!(pin.public_key, bob.client.identity_public_key_bytes());
+  }
+
+  #[tokio::test]
+  async fn an_attested_new_key_is_a_key_change_not_a_silent_swap() {
+    let world = World::new();
+    let mut alice = world
+      .peer_with(
+        "Alice",
+        ClientSettings {
+          attestation_recheck: std::time::Duration::ZERO,
+          ..crate::common::settings()
+        },
+      )
+      .await;
+    world.give_token(&alice, &["owner"], T0);
+    alice.client.run_role_signing().await.unwrap();
+    let mut bob = world.peer("Bob").await;
+    settle(&mut [&mut alice, &mut bob]).await;
+    add_to_new_channel(&mut alice, bob.client.user_id())
+      .await
+      .unwrap();
+    let pinned_key = pin_of(&alice, bob.client.user_id()).public_key;
+    // The server swaps in another key, with a valid attestation of it.
+    let other_key = teamcraft_crypto::identity::IdentityKeyPair::generate(&mut rand_core::OsRng).public_key();
+    let claim = teamcraft_crypto::attestation::attestation_claim(
+      teamcraft_crypto::ids::UserId::new(u64::try_from(bob.client.user_id().snowflake().get()).unwrap()),
+      &other_key,
+    );
+    world
+      .server
+      .replace_identity_key(bob.client.user_id(), other_key.as_bytes().to_vec());
+    world.server.set_identity_attestation(
+      bob.client.user_id(),
+      Some(world.provider.token(&base_claims(&claim, T0))),
+    );
+
+    let _ = add_to_new_channel(&mut alice, bob.client.user_id()).await;
+
+    let pin = pin_of(&alice, bob.client.user_id());
+    assert_eq!(pin.public_key, pinned_key);
+    assert_eq!(pin.maybe_changed_to, Some(*other_key.as_bytes()));
+    assert!(!pin.is_attested);
+  }
+
+  #[tokio::test]
+  async fn a_server_without_the_endpoint_doesnt_stop_owners_from_signing() {
+    let world = World::new();
+    world.server.lack_attestation_endpoint(true);
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    world.give_token(&bob, &["admin"], T0);
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    world.give_token(&alice, &["owner"], T0 + 60);
+    alice.client.note_role_evidence_update();
+
+    alice.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+
+    assert_eq!(role_of(&alice, bob.client.user_id()), Some(RosterRole::Admin));
+    assert_eq!(world.server.attestation_uploads(), 0);
+  }
+
+  #[tokio::test]
+  async fn an_attestation_the_server_lost_is_published_again_after_a_restart() {
+    let world = World::new();
+    let (_alice, mut bob) = world.owner_and_peer("Bob").await;
+    world.give_token(&bob, &[], T0);
+    bob.client.run_role_signing().await.unwrap();
+    let uploads = world.server.attestation_uploads();
+    // A database restored from before it.
+    world.server.set_identity_attestation(bob.client.user_id(), None);
+
+    restart(&world, &mut bob);
+    world.give_token(&bob, &[], T0 + 60);
+    bob.client.run_role_signing().await.unwrap();
+
+    assert_eq!(world.server.attestation_uploads(), uploads + 1);
+    assert!(
+      world
+        .server
+        .identity_attestation_of(bob.client.user_id())
+        .is_some()
+    );
+  }
+
+  /// The provider makes `peer` an admin; their app publishes its token and attestation, the owner's app
+  /// signs them with their account.
+  async fn make_admin(world: &World, owner: &mut Peer, peer: &mut Peer) {
+    world.give_token(peer, &["admin"], T0);
+    peer.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut *owner, &mut *peer]).await;
+    world.give_token(owner, &["owner"], T0 + 60);
+    owner.client.note_role_evidence_update();
+    owner.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut *owner, &mut *peer]).await;
+    assert_eq!(role_of(owner, peer.client.user_id()), Some(RosterRole::Admin));
+  }
+
+  async fn require_attestation(owner: &mut Peer) {
+    let mut policy = owner.client.workspace().unwrap().policy;
+    policy.maybe_role_signing = Some(Box::new(RoleSigningPolicy {
+      maybe_key_attestation: Some(KeyAttestationMode::Required),
+      ..*policy.maybe_role_signing.unwrap()
+    }));
+    owner.client.publish_policy(policy).await.unwrap();
+  }
+
+  async fn add_to_new_channel(
+    peer: &mut Peer,
+    user: UserId,
+  ) -> Result<ConversationId, teamcraft_core::CoreError> {
+    let space = peer.api.list_spaces().await.unwrap().spaces[0].id;
+    let channel = peer.client.create_channel(space, "attested").await?;
+    peer.client.add_member(channel, user).await?;
+    Ok(channel)
+  }
+
+  /// The app is started again on the same store.
+  fn restart(world: &World, peer: &mut Peer) {
+    peer.client = teamcraft_core::Client::open(
+      peer.api.clone(),
+      peer.store.clone(),
+      crate::common::clock(),
+      crate::common::settings(),
+    )
+    .unwrap()
+    .unwrap();
+    peer
+      .client
+      .set_jwks_source(Box::new(Jwks(world.provider.clone())));
+  }
+
+  fn pin_of(peer: &Peer, user: UserId) -> PinnedIdentity {
+    pinned_identities(&*peer.store).unwrap().remove(&user).unwrap()
+  }
+}
+
 /// A server, a provider and how they meet the apps.
 struct World {
   server: FakeServer,
@@ -1416,7 +1771,11 @@ impl World {
   }
 
   async fn peer(&self, name: &str) -> Peer {
-    let mut peer = Peer::enroll(&self.server, name).await;
+    self.peer_with(name, crate::common::settings()).await
+  }
+
+  async fn peer_with(&self, name: &str, settings: teamcraft_core::ClientSettings) -> Peer {
+    let mut peer = Peer::enroll_with_settings(&self.server, name, settings).await;
     peer.client.set_jwks_source(Box::new(Jwks(self.provider.clone())));
     peer
   }

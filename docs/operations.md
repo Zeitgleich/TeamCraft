@@ -655,6 +655,13 @@ provider before the move` once.
 **To check** a realm: `python3 dev/verify-realm.py` shows the checks against the dev realm; a token of your own decoded with any
 JWT tool should show `resource_access.<client>.roles` and `tc_identity_key` in the ID token.
 
+**Identity key attestation** (e2ee.md §3.1) uses the same two rows for the identity key: with them, every member's app
+publishes its key's attestation by itself. Users may edit the attribute, so a token only confirms a key for the account
+the owners signed for that person: today owners and admins (their accounts are in the signed roster). Everybody else's
+key is pinned on first use, as before, whatever the setting. Administration → Security → "Colleagues' keys" can require
+confirmed keys for those signed accounts. Keys apps pinned before stay trusted either way. The web app fetches the
+provider's signing keys from the browser: add the web app's origin to the client's web origins.
+
 **Manual instead of automatic:** Administration → Security → "Who signs role changes". Whoever controls the provider can appoint
 admins under the automatic default (e2ee.md §3.1.3); manual gives every change to an owner's hand.
 

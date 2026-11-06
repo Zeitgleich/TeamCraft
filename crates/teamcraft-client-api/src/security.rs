@@ -38,6 +38,9 @@ pub struct ContactVerification {
   /// Twelve groups of five digits, identical on both sides.
   pub safety_number: String,
   pub is_verified: bool,
+  /// The identity provider confirmed the key belongs to this person (e2ee.md §3.1); otherwise it
+  /// was taken on first use, as the server handed it out.
+  pub is_attested: bool,
 }
 
 /// The key backup as this device knows it (e2ee.md §6), for Settings > Security & privacy (issue

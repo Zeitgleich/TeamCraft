@@ -136,6 +136,10 @@ struct State {
   forged_role_evidence: Vec<teamcraft_proto::RoleEvidenceEntry>,
   withdrawn_roles: Vec<teamcraft_proto::WithdrawnRole>,
   role_losses: Vec<teamcraft_proto::RoleLossEntry>,
+  /// How often an app attached an attestation to its published identity key.
+  attestation_uploads: usize,
+  /// An older server: `PUT /me/identity-key/attestation` answers 404.
+  lacks_attestation_endpoint: bool,
   next_id: i64,
   /// See [`FakeServer::challenge_first_frames`].
   first_frame_challenges: usize,
@@ -931,6 +935,32 @@ impl FakeServer {
   /// What `user` published last.
   pub fn role_evidence_of(&self, user: UserId) -> Option<String> {
     self.lock().role_evidence.get(&user).cloned()
+  }
+
+  /// The attestation the server holds for `user`'s identity key.
+  pub fn identity_attestation_of(&self, user: UserId) -> Option<String> {
+    self
+      .lock()
+      .identity_keys
+      .get(&user)
+      .and_then(|key| key.maybe_attestation.clone())
+  }
+
+  /// Hands out `maybe_token` as the attestation of `user`'s identity key: what a hostile server can do.
+  pub fn set_identity_attestation(&self, user: UserId, maybe_token: Option<String>) {
+    if let Some(key) = self.lock().identity_keys.get_mut(&user) {
+      key.maybe_attestation = maybe_token;
+    }
+  }
+
+  /// Answers `PUT /me/identity-key/attestation` with 404, like a server from before it.
+  pub fn lack_attestation_endpoint(&self, is_lacking: bool) {
+    self.lock().lacks_attestation_endpoint = is_lacking;
+  }
+
+  /// How often apps attached an attestation to their identity key.
+  pub fn attestation_uploads(&self) -> usize {
+    self.lock().attestation_uploads
   }
 
   /// Puts a token in the owners' list as if `user` had published it, with this key: what a hostile
@@ -5036,6 +5066,28 @@ impl ServerApi for FakeServerApi {
       state.role_evidence.insert(user, request.token.clone());
       let everyone: Vec<UserId> = state.users.keys().copied().collect();
       state.publish(everyone, &GatewayEvent::RoleEvidenceUpdate);
+      Ok(())
+    })
+  }
+
+  async fn put_identity_key_attestation(
+    &self,
+    request: &teamcraft_proto::PutIdentityKeyAttestationRequest,
+  ) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      if state.lacks_attestation_endpoint {
+        return Err(ApiError::Status {
+          status: 404,
+          maybe_body: None,
+          maybe_retry_after: None,
+        });
+      }
+      let key = state
+        .identity_keys
+        .get_mut(&me)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::IdentityKeyNotFound, "no identity key"))?;
+      key.maybe_attestation = Some(request.token.clone());
+      state.attestation_uploads += 1;
       Ok(())
     })
   }

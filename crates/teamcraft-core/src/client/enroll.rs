@@ -196,7 +196,6 @@ impl PendingEnrollment {
       ..SyncState::default()
     };
     let maybe_preview_fetcher = super::previews::default_fetcher(&settings.link_previews);
-    let maybe_jwks_source = super::attested::default_jwks_source(settings.maybe_attestation.as_ref());
     let mut client = Client {
       api,
       store,
@@ -219,7 +218,7 @@ impl PendingEnrollment {
       call_ids: HashMap::new(),
       heard_calls: HashMap::new(),
       maybe_preview_fetcher,
-      maybe_jwks_source,
+      maybe_jwks_source: None,
       role_signing: Default::default(),
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),

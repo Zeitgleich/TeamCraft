@@ -3,7 +3,7 @@
 //! (admin.md §2.3, issue #188).
 
 use leptos::prelude::*;
-use teamcraft_proto::{RoleSigningMode, RoleSigningPolicy};
+use teamcraft_proto::{KeyAttestationMode, RoleSigningMode, RoleSigningPolicy};
 
 use crate::admin::{
   OwnerRosterStatus, OwnerWarning, RoleSigningIssue, RosterChange, RosterEntry, RosterRoleChoice,
@@ -87,6 +87,12 @@ fn RoleSigningSettings(policy: PolicyDraft) -> impl IntoView {
       ("manual".to_owned(), i18n.t("policy-role-signing-manual")),
     ]
   });
+  let attestation_options = Signal::derive(move || {
+    vec![
+      ("optional".to_owned(), i18n.t("policy-key-attestation-optional")),
+      ("required".to_owned(), i18n.t("policy-key-attestation-required")),
+    ]
+  });
   let edit = move |change: &dyn Fn(&mut RoleSigningPolicy)| {
     policy.edit(|p| {
       let mut signing = p.maybe_role_signing.take().unwrap_or_default();
@@ -107,6 +113,18 @@ fn RoleSigningSettings(policy: PolicyDraft) -> impl IntoView {
       }
     />
     <p class="muted-text small">{move || i18n.t("policy-role-signing-hint")}</p>
+    <SelectRow
+      id="policy-key-attestation"
+      label=Signal::derive(move || i18n.t("policy-key-attestation"))
+      options=attestation_options
+      selected=Signal::derive(move || {
+        signing.get().maybe_key_attestation.unwrap_or(KeyAttestationMode::Optional).as_str().to_owned()
+      })
+      on_select=move |value: String| {
+        edit(&|signing| signing.maybe_key_attestation = Some(KeyAttestationMode::from(value.clone())));
+      }
+    />
+    <p class="muted-text small">{move || i18n.t("policy-key-attestation-hint")}</p>
     <details class="roster-by-hand">
       <summary>{move || i18n.t("policy-role-provider-details")}</summary>
       <div class="field">

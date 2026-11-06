@@ -98,9 +98,16 @@ pub struct PinnedIdentity {
   pub public_key: [u8; 32],
   #[serde(rename = "changed_to", default, skip_serializing_if = "Option::is_none")]
   pub maybe_changed_to: Option<[u8; 32]>,
-  /// The identity provider attested the key when it was pinned (otherwise trust on first use).
+  /// The identity provider attested the key (otherwise trust on first use).
   #[serde(default)]
   pub is_attested: bool,
+  /// When this device last looked for an attestation of a key pinned without one (milliseconds).
+  #[serde(
+    rename = "attestation_checked_at",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_attestation_checked_at_ms: Option<i64>,
 }
 
 /// A device key pair an unfinished enrollment registers (or is about to): stored before the

@@ -91,6 +91,25 @@ impl Database {
     })
   }
 
+  /// Stores `attestation` with the user's current identity key, if that is still `public_key`.
+  /// Returns whether it was stored: a key reset in between leaves the new key alone.
+  pub async fn set_identity_key_attestation(
+    &self,
+    user: UserId,
+    public_key: &[u8],
+    attestation: &str,
+  ) -> Result<bool, DbError> {
+    let updated = sqlx::query!(
+      "UPDATE identity_keys SET attestation = $1 WHERE user_id = $2 AND public_key = $3 AND revoked_at IS NULL",
+      attestation,
+      to_db(user),
+      public_key,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(updated.rows_affected() > 0)
+  }
+
   pub async fn get_identity_key(&self, user: UserId) -> Result<Option<IdentityKey>, DbError> {
     let row = sqlx::query!(
       r#"SELECT user_id, public_key, signature, attestation, created_at FROM identity_keys

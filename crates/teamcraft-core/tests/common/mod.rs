@@ -45,6 +45,7 @@ impl Peer {
           public_key,
           maybe_changed_to: None,
           is_attested: true,
+          maybe_attestation_checked_at_ms: None,
         },
       )
       .unwrap();
