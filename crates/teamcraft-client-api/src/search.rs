@@ -400,6 +400,10 @@ fn find_all_ci(haystack: &str, needle: &str) -> Vec<(usize, usize)> {
 pub struct SearchHit {
   pub message: Message,
   pub conversation_name: String,
+  /// The hit is in the user's notes to themself: its `conversation_name` is empty, the apps name
+  /// it in the user's language.
+  #[serde(default)]
+  pub is_notes_to_self: bool,
   pub maybe_space_name: Option<String>,
   pub snippet: Vec<SnippetPart>,
 }

@@ -174,6 +174,17 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(people.users?.map(\.id), ["2"])
   }
 
+  /// Issue #1041: a search hit in the notes (empty name) is called "Notes" like the conversation.
+  func testASearchHitInTheNotesIsNamedLikeTheNotes() {
+    let message = MessageItem(
+      id: "7", conversationId: "5", authorId: "4", authorName: "Sam", sentAtMs: 0, body: "Hello",
+      isEdited: false, isPending: false, replyCount: 0, maybeThreadId: nil, reactions: [], isAuthorDeleted: false)
+    let notes = SearchHitItem(message: message, conversationName: "", isNotesToSelf: true, maybeSpaceName: nil)
+    XCTAssertEqual(notes.listName, String(localized: "notes_title"))
+    let general = SearchHitItem(message: message, conversationName: "general", isNotesToSelf: false, maybeSpaceName: nil)
+    XCTAssertEqual(general.listName, "general")
+  }
+
   func testADeletedAuthorGetsTheAppsName() {
     let message = MessageItem(
       id: "7", conversationId: "5", authorId: "4", authorName: "Tombstone", sentAtMs: 0, body: "Hello",

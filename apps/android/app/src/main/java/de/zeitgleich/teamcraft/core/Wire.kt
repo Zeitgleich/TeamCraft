@@ -426,6 +426,7 @@ data class ThreadSummary(
 data class SavedItem(
   val message: Message,
   @SerialName("conversation_name") val conversationName: String,
+  @SerialName("is_notes_to_self") val isNotesToSelf: Boolean = false,
   @SerialName("saved_at") val savedAt: Long,
 )
 
@@ -500,6 +501,7 @@ data class PermalinkTarget(
 data class SearchHit(
   val message: Message,
   @SerialName("conversation_name") val conversationName: String = "",
+  @SerialName("is_notes_to_self") val isNotesToSelf: Boolean = false,
 )
 
 @Serializable

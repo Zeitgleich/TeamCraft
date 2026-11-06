@@ -40,6 +40,7 @@ import de.zeitgleich.teamcraft.core.SavedItem
 import de.zeitgleich.teamcraft.core.SearchHit
 import de.zeitgleich.teamcraft.core.ThreadSummary
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.conversationListName
 
 /** Followed threads, newest reply first, with unread replies. */
 @Composable
@@ -105,7 +106,7 @@ fun SavedScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -
           if (saved.isEmpty()) item { EmptyText(R.string.saved_empty) }
           items(saved, key = { it.message.id }) { item ->
             Column(Modifier.fillMaxWidth().clickable { onOpen(item.message.conversation) }.padding(16.dp)) {
-              Text(item.conversationName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+              Text(conversationListName(item.conversationName, item.isNotesToSelf, stringResource(R.string.notes_title)), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
               MessageLine(snapshot, item.message)
             }
             HorizontalDivider()
@@ -114,7 +115,7 @@ fun SavedScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -
           if (mentions.isEmpty()) item { EmptyText(R.string.mentions_empty) }
           items(mentions, key = { it.message.id }) { hit ->
             Column(Modifier.fillMaxWidth().clickable { onOpen(hit.message.conversation) }.padding(16.dp)) {
-              Text(hit.conversationName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+              Text(conversationListName(hit.conversationName, hit.isNotesToSelf, stringResource(R.string.notes_title)), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
               MessageLine(snapshot, hit.message)
             }
             HorizontalDivider()

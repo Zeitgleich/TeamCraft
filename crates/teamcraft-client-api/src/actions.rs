@@ -463,6 +463,10 @@ pub struct LinkPreview {
 pub struct SavedItem {
   pub message: Message,
   pub conversation_name: String,
+  /// The message is in the user's notes to themself: `conversation_name` is empty, the apps name
+  /// it in the user's language.
+  #[serde(default)]
+  pub is_notes_to_self: bool,
   pub saved_at: TimestampMs,
 }
 

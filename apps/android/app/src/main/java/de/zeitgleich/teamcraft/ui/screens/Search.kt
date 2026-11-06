@@ -50,6 +50,7 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.SearchFilters
+import de.zeitgleich.teamcraft.ui.hitLocation
 import uniffi.teamcraft_ffi.SearchHitItem
 
 private const val TYPING_PAUSE_MS = 250L
@@ -91,7 +92,7 @@ fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
         items(hits, key = { it.message.id }) { hit ->
           Column(Modifier.fillMaxWidth().clickable { onOpen(hit.message.conversationId) }) {
             Text(
-              listOfNotNull(hit.maybeSpaceName, hit.conversationName).joinToString(" › "),
+              hitLocation(hit.maybeSpaceName, hit.conversationName, hit.isNotesToSelf, stringResource(R.string.notes_title)),
               style = MaterialTheme.typography.labelMedium,
               color = MaterialTheme.colorScheme.primary,
               modifier = Modifier.padding(start = 16.dp, top = 8.dp),
