@@ -47,9 +47,9 @@ import uniffi.teamcraft_ffi.PushNotification
  * or more conversations show, with "reply" and "mark as read" actions that work without opening the
  * app (Android Auto and Wear OS need them). A message is posted once, after its wake-up was opened;
  * every later change replaces the notification under the same ID without alerting again, so a watch
- * sees one notification per message (issue #739). A message not read yet is a placeholder on the
- * phone only, and its alert waits a moment for the text (notifications.md, "Watches, bands and
- * Android Auto"). What it shows is [MessageNotificationSpecs]; the lines survive a process restart
+ * sees one notification per message (issue #739). A message not read yet is posted only once its
+ * text is read, or as a placeholder on the phone only when that takes too long (notifications.md,
+ * "Watches, bands and Android Auto"). What it shows is [MessageNotificationSpecs]; the lines survive a process restart
  * ([NotificationStore]).
  */
 class MessageNotifier(
@@ -83,14 +83,12 @@ class MessageNotifier(
 
   /**
    * Adds a pushed message to its conversation's notification (see [PushDecision.ShowMessage]). A
-   * placeholder that should alert posts silently first: its alert waits for the text ([endHold] ends
-   * the wait); not an urgent one, which alerts at once. `payload` is kept with a placeholder to read
-   * it later. Returns whether a notification for it is up; a repeat of a wake-up whose line went
-   * (read, swiped away) doesn't bring it back.
+   * placeholder comes only after the wait for the text ([PushRetry.SETTLE_BOUND_MS]) and alerts at
+   * once; `payload` is kept with it to read it later. Returns whether a notification for it is up; a
+   * repeat of a wake-up whose line went (read, swiped away) doesn't bring it back.
    */
   fun show(notification: PushNotification, isAlerting: Boolean, payload: ByteArray? = null): Boolean {
-    val holdsAlert = isAlerting && PushRetry.isPlaceholder(notification) && !notification.isUrgent
-    val line = line(notification, payload).copy(isAlertHeld = holdsAlert)
+    val line = line(notification, payload)
     synchronized(lock) {
       val shown = shown()
       val previous = shown.conversations[notification.conversationId]
@@ -99,7 +97,7 @@ class MessageNotifier(
       val badge = notification.maybeBadge?.toInt() ?: shown.maybeBadge
       update(shown.copy(conversations = shown.conversations + (entry.conversationId to entry), maybeBadge = badge))
       val alerting = MessageNotificationSpecs.alerting(
-        isAlerting = isAlerting && !holdsAlert,
+        isAlerting = isAlerting,
         maybePrevious = previous,
         entry = entry,
         nowMs = elapsedNow(),
@@ -482,6 +480,7 @@ class MessageNotifier(
       maybeAttachmentKind = notification.maybeAttachmentKind,
       isDirect = notification.isDirect,
       labels = labels(),
+      isAddedYou = notification.maybeGap == NotificationGap.ADDED_YOU,
     )
 
   private fun shown(): ShownNotifications =
@@ -644,6 +643,7 @@ class MessageNotifier(
   private fun labels() = NotificationText.Labels(
     appName = context.getString(R.string.app_name),
     newMessage = context.getString(R.string.notification_new_message),
+    addedYou = context.getString(R.string.notification_added_you),
     newMessageFrom = { context.getString(R.string.notification_new_message_from, it) },
     newMessagesFrom = { count, names ->
       context.resources.getQuantityString(R.plurals.notification_new_messages_from, count, count, names)

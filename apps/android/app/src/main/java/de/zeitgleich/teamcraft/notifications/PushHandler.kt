@@ -11,6 +11,7 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.calls.CallController
 import de.zeitgleich.teamcraft.calls.IncomingRing
 import de.zeitgleich.teamcraft.push.RetryTarget
+import de.zeitgleich.teamcraft.push.WakeUpRetries
 import uniffi.teamcraft_ffi.PushNotification
 
 /** Carries out what a wake-up asks for ([PushDecision]): messages, rings, dismissals, tests. */
@@ -124,6 +125,11 @@ class PushHandler(
   override fun isPlaceholderShowing(notification: PushNotification): Boolean = notifier.isPlaceholderShowing(notification)
 
   override fun hasPlaceholderFor(payload: ByteArray): Boolean = notifier.hasPlaceholderFor(payload)
+
+  /** A message the first try didn't read was read before anything was posted ([WakeUpRetries.settle]). */
+  fun recordSettled() {
+    stats.record(PushPath.FILLED_HOLD)
+  }
 
   /** The last try for a placeholder failed; it stays until the sync brings the message. */
   override fun recordGaveUp() {

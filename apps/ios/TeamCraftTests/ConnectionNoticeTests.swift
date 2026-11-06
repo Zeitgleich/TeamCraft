@@ -49,6 +49,10 @@ final class ConnectionNoticeTests: XCTestCase {
     XCTAssertEqual(notice(isOnline: true, .signInRequired, ConnectionGrace(), at: 0), .signInRequired)
   }
 
+  func testALostLastRoleShowsAtOnce() {
+    XCTAssertEqual(notice(isOnline: true, .noRoleLeft, ConnectionGrace(), at: 0), .noRoleLeft)
+  }
+
   func testComingBackStartsTheGracePeriodAgain() {
     var grace = ConnectionGrace()
     grace.observe(isDown: true, now: start)

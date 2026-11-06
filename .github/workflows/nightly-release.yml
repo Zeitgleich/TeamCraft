@@ -1,5 +1,6 @@
-# Nightly release (docs/release.md, "Nightly releases"): every night at 03:00 (Berlin) the state of
-# `main` is released if it changed since the last release.
+# Nightly release (docs/release.md, "Nightly releases"): every night the state of `main` is released
+# if it changed since the last release. Scheduled at 22:00 (Berlin) because GitHub starts scheduled
+# runs hours late; the release usually lands between 03:00 and 06:00.
 #
 # - No commit since the last release tag, or only docs: nothing happens.
 # - CI of main must be green for the newest code change; else the run fails and nothing is tagged.
@@ -17,7 +18,7 @@ name: Nightly release
 
 on:
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "0 22 * * *"
       timezone: Europe/Berlin
   workflow_dispatch:
     inputs:

@@ -14,8 +14,8 @@ use teamcraft_core::prefetch::SegmentPrefetch;
 use teamcraft_core::push_guard::{PushDiagnostics, Suppression};
 use teamcraft_core::push_preview::{AttachmentKind, PreviewContent, PreviewGap, PushPreview};
 use teamcraft_proto::{
-  DeviceLinkPlatform, Id, PushContentMode, PushKind, PushProvider, TestPushOutcome as TestPushOutcomeProto,
-  TestPushResponse,
+  DeviceLinkPlatform, Id, PushContentMode, PushKind, PushProvider, SignInReason,
+  TestPushOutcome as TestPushOutcomeProto, TestPushResponse,
 };
 
 /// Where the app keeps an account's data.
@@ -92,6 +92,9 @@ pub enum ConnectionState {
   },
   /// The server refused the access token: the user has to sign in again.
   SignInRequired,
+  /// The identity provider lists no TeamCraft role for the account any more. Nothing works until
+  /// an admin gives one back; then signing in again does.
+  NoRoleLeft,
 }
 
 /// An HTTP proxy the platform reports (see `set_network_proxy`).
@@ -513,6 +516,9 @@ pub enum NotificationGap {
   /// A reaction, edit, delete or another change to the conversation: no message to announce. Added
   /// with #1249; a client that ignores it shows "New message" as it did before.
   Hidden,
+  /// This user was added to the conversation: the app says so ("added you") instead of "New
+  /// message". Added with #1249; a client that ignores it shows "New message" as before.
+  AddedYou,
   /// The workspace policy shows less.
   WorkspacePolicy,
   /// This device's setting shows less.
@@ -907,6 +913,7 @@ impl From<PreviewGap> for NotificationGap {
       PreviewGap::TimedOut => Self::TimedOut,
       PreviewGap::NotShowable => Self::NotShowable,
       PreviewGap::Hidden => Self::Hidden,
+      PreviewGap::AddedYou => Self::AddedYou,
       PreviewGap::WorkspacePolicy => Self::WorkspacePolicy,
       PreviewGap::DeviceSetting => Self::DeviceSetting,
     }
@@ -1116,6 +1123,9 @@ impl From<teamcraft_core::connection::ConnectionState> for ConnectionState {
           Interception::ProofRefused => None,
         }),
       },
+      Core::SignInRequired {
+        reason: SignInReason::NoTeamcraftRole,
+      } => Self::NoRoleLeft,
       Core::SignInRequired { .. } => Self::SignInRequired,
     }
   }

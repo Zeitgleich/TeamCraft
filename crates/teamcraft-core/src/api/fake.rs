@@ -212,6 +212,9 @@ struct State {
   unavailable_connects: u64,
   /// Users whose access token the server rejects (401), as after an expired session.
   signed_out_users: HashSet<UserId>,
+  /// Users the identity provider lists no role for any more: REST 403 and a refused handshake,
+  /// both `no_teamcraft_role` (`set_without_role`).
+  roleless_users: HashSet<UserId>,
   /// Users whose REST calls a captive portal answers (`set_behind_captive_portal`).
   portal_users: HashSet<UserId>,
   /// Heartbeats received, to check that a busy client keeps sending them.
@@ -596,6 +599,17 @@ impl FakeServer {
       state.signed_out_users.insert(user);
     } else {
       state.signed_out_users.remove(&user);
+    }
+  }
+
+  /// While set, the server answers this user's REST calls with 403 and refuses the gateway
+  /// handshake, both `no_teamcraft_role`: the last role was taken away in the identity provider.
+  pub fn set_without_role(&self, user: UserId, is_without_role: bool) {
+    let mut state = self.lock();
+    if is_without_role {
+      state.roleless_users.insert(user);
+    } else {
+      state.roleless_users.remove(&user);
     }
   }
 
@@ -1930,6 +1944,13 @@ impl FakeServerApi {
     }
     if state.signed_out_users.contains(&self.user) {
       return Err(ApiError::status(401, ErrorCode::Unauthorized, "token expired"));
+    }
+    if state.roleless_users.contains(&self.user) {
+      return Err(ApiError::status(
+        403,
+        ErrorCode::NoTeamcraftRole,
+        "no TeamCraft role",
+      ));
     }
     if state.portal_users.contains(&self.user) {
       return Err(ApiError::Intercepted {
@@ -6117,6 +6138,14 @@ impl GatewayConnection for FakeGateway {
       state.sessions.remove(&pending_session(self.connection));
       let _ = sender.unbounded_send(GatewayServerMessage::Error {
         error: ErrorBody::new(ErrorCode::InvalidToken, "invalid token: token expired"),
+      });
+      return Ok(());
+    }
+    if is_handshake && state.roleless_users.contains(&self.user) {
+      state.gateway_refusals += 1;
+      state.sessions.remove(&pending_session(self.connection));
+      let _ = sender.unbounded_send(GatewayServerMessage::Error {
+        error: ErrorBody::new(ErrorCode::NoTeamcraftRole, "the account has no TeamCraft role"),
       });
       return Ok(());
     }

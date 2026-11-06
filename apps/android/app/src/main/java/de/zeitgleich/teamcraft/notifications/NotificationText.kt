@@ -16,6 +16,8 @@ data class NotificationText(
   data class Labels(
     val appName: String,
     val newMessage: String,
+    /** "Added you to the conversation": being added, the one change its subject hears of. */
+    val addedYou: String,
     /** "New message from Alice". */
     val newMessageFrom: (String) -> String,
     /** "3 new messages from Alice, Bob" (count, names). */
@@ -35,12 +37,14 @@ data class NotificationText(
       maybeAttachmentKind: NotificationAttachmentKind?,
       isDirect: Boolean,
       labels: Labels,
+      isAddedYou: Boolean = false,
     ): NotificationText {
       val sender = maybeSenderName?.takeIf { it.isNotBlank() } ?: maybeConversationName ?: labels.appName
       val text = when {
         !maybeText.isNullOrBlank() -> maybeText
         !maybeFileName.isNullOrBlank() ->
           labels.attachment(maybeAttachmentKind ?: NotificationAttachmentKind.FILE, maybeFileName)
+        isAddedYou -> labels.addedYou
         else -> labels.newMessage
       }
       val title = maybeConversationName?.takeIf { !isDirect && it.isNotBlank() }

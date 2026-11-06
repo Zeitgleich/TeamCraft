@@ -103,7 +103,7 @@ cargo deny check
   wait: `gh pr merge --disable-auto <number>`.
 - `main` only receives **squash merges** of reviewed branches; the squash commit message summarizes
   the feature (subject ≤ 72 chars, body explains what and why).
-- **Releases are nightly** (03:00 Berlin, `nightly-release.yml`, [docs/release.md](docs/release.md)):
+- **Releases are nightly** (scheduled 22:00 Berlin, runs start hours late, `nightly-release.yml`, [docs/release.md](docs/release.md)):
   finished PRs go to `main` as soon as they are done; PR titles become the release highlights, so write them for readers, and label them (`feature`, `bug`, `security`,
   `breaking`) so the release notes group them. Don't bump the version or tag by hand for a patch.
 - **Merging:** `main` requires one check, `ci-gate` (`ci.yml`). With the `ci` label it passes only

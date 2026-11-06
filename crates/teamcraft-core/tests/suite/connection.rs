@@ -19,7 +19,7 @@ use teamcraft_core::connection::{
 };
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::MemoryStore;
-use teamcraft_proto::{GatewayEvent, GatewayServerMessage, UserId};
+use teamcraft_proto::{GatewayEvent, GatewayServerMessage, SignInReason, UserId};
 use tokio::time::Instant;
 
 /// Steps in which the tests look at the state.
@@ -285,6 +285,39 @@ async fn a_refused_token_asks_to_sign_in_and_stops_retrying() {
       );
       // Signed in again; the network change (or a new token) tries once more.
       rig.server.set_signed_out(rig.user, false);
+      rig.network.notify();
+      rig.wait_for(is_connected, Duration::from_secs(5)).await;
+    })
+    .await;
+}
+
+/// Somebody loses their last role in the identity provider while the app is open: the connection
+/// says so (not "session expired", not "unreachable"), stops retrying, and a role given back
+/// recovers without a restart.
+#[tokio::test(start_paused = true)]
+async fn a_lost_last_role_is_named_stops_retrying_and_recovers_when_given_back() {
+  let rig = Rig::start("Mallory").await;
+  rig.server.set_without_role(rig.user, true);
+  rig
+    .drive(|rig| async move {
+      rig
+        .wait_for(
+          |state| {
+            state
+              == ConnectionState::SignInRequired {
+                reason: SignInReason::NoTeamcraftRole,
+              }
+          },
+          Duration::from_secs(5),
+        )
+        .await;
+      tokio::time::sleep(Duration::from_secs(10 * 60)).await;
+      assert_eq!(
+        rig.server.gateway_refusal_count(),
+        1,
+        "a refusal for a missing role is not retried as a network problem"
+      );
+      rig.server.set_without_role(rig.user, false);
       rig.network.notify();
       rig.wait_for(is_connected, Duration::from_secs(5)).await;
     })

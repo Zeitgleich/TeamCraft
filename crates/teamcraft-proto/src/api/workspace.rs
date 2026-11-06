@@ -726,6 +726,11 @@ pub struct RoleSigningPolicy {
   /// Absent means optional: keys without one are pinned on first use and shown as not confirmed.
   #[serde(rename = "key_attestation", default, skip_serializing_if = "Option::is_none")]
   pub maybe_key_attestation: Option<KeyAttestationMode>,
+  /// How many times owners moved to another provider. The accounts (`sub`) the roster noted belong to
+  /// the provider of one move; when this is higher, an owner's app forgets them and notes the new
+  /// provider's. Only the signed policy raises it, so the server can't make anybody's account unknown.
+  #[serde(default, skip_serializing_if = "is_zero")]
+  pub provider_moves: u64,
 }
 
 wire_enum! {
@@ -760,6 +765,11 @@ fn default_admin_role() -> String {
   DEFAULT_ADMIN_ROLE.to_owned()
 }
 
+/// For `skip_serializing_if` on counts that start at zero.
+pub fn is_zero(value: &u64) -> bool {
+  *value == 0
+}
+
 impl Default for RoleSigningPolicy {
   fn default() -> Self {
     Self {
@@ -769,6 +779,7 @@ impl Default for RoleSigningPolicy {
       maybe_provider: None,
       accepts_new_provider: false,
       maybe_key_attestation: None,
+      provider_moves: 0,
     }
   }
 }

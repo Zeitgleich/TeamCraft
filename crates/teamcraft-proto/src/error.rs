@@ -153,6 +153,10 @@ pub enum SignInReason {
   /// The token is bound to a key this device doesn't have any more (its local data was cleared or
   /// damaged). The app says so itself; no server sends it.
   DeviceKeyLost,
+  /// The identity provider no longer lists a TeamCraft role for the account (`no_teamcraft_role`):
+  /// somebody took the last one away while the app was open. Signing in again helps once a role is
+  /// given back.
+  NoTeamcraftRole,
   /// The token was refused without a reason (expired, invalid), or by an older server.
   #[default]
   #[serde(other)]
@@ -165,6 +169,7 @@ impl SignInReason {
       ErrorCode::SessionEnded => Self::SessionEnded,
       ErrorCode::SessionTimedOut => Self::SessionTimedOut,
       ErrorCode::DpopRequired => Self::DeviceBindingRequired,
+      ErrorCode::NoTeamcraftRole => Self::NoTeamcraftRole,
       _ => Self::Unknown,
     }
   }
@@ -270,6 +275,10 @@ mod tests {
     assert_eq!(
       SignInReason::from_error_code(&ErrorCode::SessionTimedOut),
       SignInReason::SessionTimedOut
+    );
+    assert_eq!(
+      SignInReason::from_error_code(&ErrorCode::NoTeamcraftRole),
+      SignInReason::NoTeamcraftRole
     );
     assert_eq!(
       SignInReason::from_error_code(&ErrorCode::InvalidToken),

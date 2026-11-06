@@ -300,7 +300,8 @@ private fun kindText(kind: PushNotificationKind): Int = when (kind) {
 
 @StringRes
 private fun gapText(maybeGap: NotificationGap?): Int = when (maybeGap) {
-  null -> R.string.diagnostics_preview_full
+  // Being added has no text of its own: the notification showed all there is.
+  null, NotificationGap.ADDED_YOU -> R.string.diagnostics_preview_full
   NotificationGap.NO_SESSION -> R.string.diagnostics_preview_no_session
   NotificationGap.NOT_DECRYPTED -> R.string.diagnostics_preview_not_decrypted
   NotificationGap.TIMED_OUT -> R.string.diagnostics_preview_timed_out
@@ -311,7 +312,11 @@ private fun gapText(maybeGap: NotificationGap?): Int = when (maybeGap) {
 
 /** Shown less on purpose (a setting or policy, or nothing to show): not a fault. */
 private fun NotificationGap.isChosen(): Boolean =
-  this == NotificationGap.WORKSPACE_POLICY || this == NotificationGap.DEVICE_SETTING || this == NotificationGap.NOT_SHOWABLE || this == NotificationGap.HIDDEN
+  this == NotificationGap.WORKSPACE_POLICY ||
+    this == NotificationGap.DEVICE_SETTING ||
+    this == NotificationGap.NOT_SHOWABLE ||
+    this == NotificationGap.HIDDEN ||
+    this == NotificationGap.ADDED_YOU
 
 @StringRes
 private fun outcomeText(outcome: TestPushOutcome): Int = when (outcome) {

@@ -1169,8 +1169,10 @@ fn commit_rank(candidates: &[(DeviceId, bool)], own: DeviceId, new_device: Devic
   u32::try_from(ahead).unwrap_or(u32::MAX)
 }
 
-/// Marks only move forward, also past what an older owner's app left out of its last entry.
+/// Marks only move forward, also past what an older owner's app left out of its last entry, and so
+/// does the provider move they belong to.
 fn keep_newer_marks(document: &mut RosterDocument, state: &WorkspaceState) {
+  document.provider_moves = document.provider_moves.max(state.provider_moves);
   for (user, mark) in &state.provider_marks {
     let is_newer = document
       .provider_marks

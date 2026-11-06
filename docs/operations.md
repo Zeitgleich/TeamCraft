@@ -643,6 +643,15 @@ without `[oidc.sync]` nobody does: another owner removes them by hand. Keep two 
 while the old owner still holds a client role, for example `member`: their app signs the successor. If they hold no role any more, the
 server refuses them and nobody can sign; give them `member` for a moment.
 
+**Moving to another identity provider** (a new realm or a new provider): set up the new one as above, then an owner
+chooses "Trust the provider I sign in with next" under Administration → Security (the role signing details) and saves. The next owner's app that signs in
+at the new provider pins it, and the roster forgets the accounts (`sub`) noted at the old one, also for people an owner
+edited by hand; each person's account is noted again from their first token at the new provider, with nobody asked.
+Nobody has to be edited by hand. Until somebody's first token counts, the new provider can't take their role away, so
+have everybody sign in once. People listed as contradictory after a move from before this version: reset once more and
+sign in again; that counts the move and clears them. The apps log `forgetting the accounts noted at the identity
+provider before the move` once.
+
 **To check** a realm: `python3 dev/verify-realm.py` shows the checks against the dev realm; a token of your own decoded with any
 JWT tool should show `resource_access.<client>.roles` and `tc_identity_key` in the ID token.
 
