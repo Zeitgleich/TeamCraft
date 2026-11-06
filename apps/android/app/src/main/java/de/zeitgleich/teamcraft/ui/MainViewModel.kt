@@ -23,6 +23,9 @@ import kotlinx.coroutines.withContext
 import androidx.annotation.StringRes
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
@@ -48,6 +51,7 @@ import de.zeitgleich.teamcraft.auth.isSsoOnly
 import de.zeitgleich.teamcraft.auth.localSignInErrorText
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatActions
+import de.zeitgleich.teamcraft.ui.media.MediaDraftStore
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.FileInfo
@@ -157,6 +161,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val feedSeeds = FeedSeeds()
   private var maybeReadAhead: Job? = null
   private var maybeStartCacheWrite: Job? = null
+
+  /**
+   * The store changed since the list was read last: a message deleted, redacted or purged while
+   * a conversation was on screen would stay in the start cache. Read again when the app leaves.
+   */
+  @Volatile private var isStartCacheStale = false
+  private val startCacheOnLeave = object : DefaultLifecycleObserver {
+    override fun onStop(owner: LifecycleOwner) = refreshStartCacheIfStale()
+  }
   private val busy = MutableStateFlow(false)
   private val shares = graph.shares
   private val shareState = MutableStateFlow<ShareState?>(null)
@@ -188,7 +201,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   val changeCount: StateFlow<Long> = graph.core.changeCount
 
   /** The chat features over the core's JSON bridge. */
-  val chat = ChatClient(::deletedUserName, maybeChanges = { graph.core.changeCount.value }) { graph.core.core() }
+  val chat = ChatClient(
+    ::deletedUserName,
+    maybeChanges = { graph.core.changeCount.value },
+    generation = { graph.core.accountGeneration.value },
+  ) { graph.core.core() }
   private val failures = MutableStateFlow<Int?>(null)
 
   /** Files picked in a composer and not sent yet, by conversation and thread. */
@@ -275,6 +292,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   init {
+    // However the session ends (also an expired refresh token, which skips endSession), what it
+    // showed leaves memory; the auth callback deletes what it left on disk.
+    viewModelScope.launch {
+      var wasSignedIn = false
+      graph.auth.isSignedIn.collect { isSignedIn ->
+        if (wasSignedIn && !isSignedIn) forgetSession()
+        wasSignedIn = isSignedIn
+      }
+    }
+    viewModelScope.launch(Dispatchers.IO) { MediaDraftStore.sweep(getApplication(), System.currentTimeMillis()) }
+    viewModelScope.launch { graph.core.changeCount.collect { isStartCacheStale = true } }
+    ProcessLifecycleOwner.get().lifecycle.addObserver(startCacheOnLeave)
     refresh()
     retryServerWhenOnline()
     loadSignInPageWhenShown()
@@ -577,6 +606,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     chatListState.update { it.copy(maybeConversations = conversations, runningCalls = runningCalls()) }
     val previews = chatPreviews(conversations, myId)
     chatListState.update { it.copy(previews = previews) }
+    isStartCacheStale = false
     rememberStartCache()
     readAhead()
   }
@@ -628,6 +658,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     chatListState.value = cached.listState()
     state.value = cached.ready()
     return cached.account
+  }
+
+  /** One list pass when the app leaves after changes the list didn't see; it rewrites the start cache. */
+  private fun refreshStartCacheIfStale() {
+    val ready = state.value as? AppState.Ready ?: return
+    if (!isStartCacheStale) return
+    viewModelScope.launch { refreshChatList(ready.userId) }
+  }
+
+  /** Drops what the session showed from memory: the list, read-ahead chats, the kept snapshot. */
+  private fun forgetSession() {
+    maybeStartCacheWrite?.cancel()
+    maybeReadAhead?.cancel()
+    chatListState.value = ChatListState()
+    feedSeeds.clear()
+    chat.forget()
   }
 
   /** Keeps the list for the next start, once changes have settled for a moment. */
@@ -1004,6 +1050,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     return maybePath.contains("/${app.packageName}/")
   }
 
+  /**
+   * Where the media flow's camera writes (`media-flow-captures-…` folders): the core's staging
+   * folder, wiped at sign-out with the other plaintext copies. `null` while no account is open.
+   */
+  suspend fun mediaCapturesRoot(): File? = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull()
+
   /** Conversations with a call running now and how many people are in each (issue #1352). */
   suspend fun runningCalls(): Map<String, Int> =
     read { runningCalls() }?.associate { it.conversationId to it.participantUserIds.size } ?: emptyMap()
@@ -1165,10 +1217,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // core can be opened any more to post new ones.
     graph.push.beginSignOut()
     linkRequestList.value = emptyList()
-    chatListState.value = ChatListState()
-    maybeStartCacheWrite?.cancel()
-    maybeReadAhead?.cancel()
-    feedSeeds.clear()
+    forgetSession()
     withContext(Dispatchers.IO) { synchronized(startCache) { startCache.delete() } }
     review.value = null
     // A recording and its take don't outlive the account on this device (#204).
@@ -1461,6 +1510,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   override fun onCleared() {
+    ProcessLifecycleOwner.get().lifecycle.removeObserver(startCacheOnLeave)
     voice.close()
     voicePlayer.release()
     super.onCleared()

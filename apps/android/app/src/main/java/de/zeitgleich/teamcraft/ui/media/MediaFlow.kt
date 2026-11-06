@@ -19,6 +19,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.Saver
@@ -93,7 +94,8 @@ fun MediaFlow(
   onSend: (List<PickedFile>, String) -> Unit,
 ) {
   val context = LocalContext.current
-  val store = remember { MediaDraftStore(context) }
+  val store = remember { MediaDraftStore(context) { viewModel.mediaCapturesRoot() } }
+  val maybeCaptures by produceState<File?>(null, key) { value = store.capturesDirectory(key) }
   var maybeDraft by remember { mutableStateOf<MediaDraft?>(null) }
   var isSending by remember { mutableStateOf(false) }
   var isConfirmingDiscard by remember { mutableStateOf(false) }
@@ -155,14 +157,17 @@ fun MediaFlow(
     Box(Modifier.fillMaxSize()) {
       if (draft == null) return@Box
       when (draft.stage) {
-        MediaStage.Camera -> CameraScreen(
-          capturesDirectory = store.capturesDirectory(key),
-          selectedCount = draft.items.size,
-          onCaptured = { item -> update(draft.added(listOf(item)).copy(stage = MediaStage.Review, origin = MediaStage.Camera)) },
-          onGallery = { update(draft.copy(stage = MediaStage.Gallery)) },
-          onReview = { update(draft.copy(stage = MediaStage.Review)) },
-          onClose = ::back,
-        )
+        // Shown once the account's staging folder is known: the camera writes there.
+        MediaStage.Camera -> maybeCaptures?.let { captures ->
+          CameraScreen(
+            capturesDirectory = captures,
+            selectedCount = draft.items.size,
+            onCaptured = { item -> update(draft.added(listOf(item)).copy(stage = MediaStage.Review, origin = MediaStage.Camera)) },
+            onGallery = { update(draft.copy(stage = MediaStage.Gallery)) },
+            onReview = { update(draft.copy(stage = MediaStage.Review)) },
+            onClose = ::back,
+          )
+        }
         MediaStage.Gallery -> GalleryScreen(
           draft = draft,
           onAlbum = { update(draft.copy(maybeAlbum = it)) },
@@ -302,10 +307,17 @@ private suspend fun prepareItem(context: Context, viewModel: MainViewModel, item
     return viewModel.stageEditedPicture("${name.substringBeforeLast('.', name)}.$ending", rendered.mediaType, rendered.bytes)
   }
   val facts = VideoEditing.facts(context, uri)
-  if (VideoEditing.needsExport(facts, item.video, quality)) {
+  val isEdited = VideoEditing.needsExport(facts, item.video, quality)
+  // A video from the gallery is packed again even unedited (no re-encoding): that drops where it
+  // was taken and the camera's details. The app's own camera records none.
+  if (isEdited || !item.isCaptured) {
     val target = File(context.cacheDir, "export-${System.nanoTime()}.mp4")
-    if (!VideoEditing.export(context, uri, item.video, facts, quality, target)) return null
-    return viewModel.stageMovedFile("${name.substringBeforeLast('.', name)}.mp4", "video/mp4", target)
+    if (VideoEditing.export(context, uri, item.video, facts, quality, target)) {
+      return viewModel.stageMovedFile("${name.substringBeforeLast('.', name)}.mp4", "video/mp4", target)
+    }
+    // An edit the device can't do fails the send; an unedited video it can't repack goes as it
+    // is, as before (docs/e2ee.md §9.2 says so).
+    if (isEdited) return null
   }
   return if (item.isCaptured) {
     val file = uri.path?.let(::File) ?: return null

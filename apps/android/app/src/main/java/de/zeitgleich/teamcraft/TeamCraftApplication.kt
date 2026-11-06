@@ -1,6 +1,8 @@
 package de.zeitgleich.teamcraft
 
 import de.zeitgleich.teamcraft.ui.ShareReceiver
+import de.zeitgleich.teamcraft.ui.StartCacheStore
+import de.zeitgleich.teamcraft.ui.media.MediaDraftStore
 import de.zeitgleich.teamcraft.ui.MAX_IMPORT_BYTES
 import android.app.Application
 import android.content.Context
@@ -62,6 +64,10 @@ class AppGraph(context: Context) {
   val auth: AuthRepository = AuthRepository(context, servers, onSignedOut = {
     avatars.clear()
     spacePictures.clear()
+    // On every end of a session, also an expired refresh token: what the account showed last and
+    // an unsent media flow don't stay for whoever signs in next (e2ee.md §9.2).
+    StartCacheStore(context.filesDir).delete()
+    MediaDraftStore.deleteAll(context)
   })
   // Decrypted pictures leave memory with the account they belong to.
   val core: CoreRepository = CoreRepository(context, auth, onAccountClosed = {

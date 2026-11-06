@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
+import androidx.media3.container.Mp4OrientationData
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.Presentation
 import androidx.media3.transformer.Composition
@@ -59,6 +60,7 @@ import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.InAppMp4Muxer
 import androidx.media3.transformer.Transformer
 import androidx.media3.transformer.VideoEncoderSettings
 import java.io.File
@@ -141,6 +143,8 @@ object VideoEditing {
       val edited = EditedMediaItem.Builder(item).setRemoveAudio(edit.isMuted).setEffects(effects).build()
       suspendCancellableCoroutine { continuation ->
         val builder = Transformer.Builder(context)
+          // Only how to turn the video goes along: no place, no XMP, no camera details.
+          .setMuxerFactory(InAppMp4Muxer.Factory { entries -> entries.retainAll { it is Mp4OrientationData } })
           .addListener(object : Transformer.Listener {
             override fun onCompleted(composition: Composition, exportResult: ExportResult) {
               if (continuation.isActive) continuation.resume(true)

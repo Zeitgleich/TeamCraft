@@ -19,12 +19,16 @@ object AudioContext {
       runCatching {
         System.loadLibrary(LIBRARY)
         initialize(context.applicationContext)
-      }.onSuccess { isReady = true }
-        .onFailure { Log.w(TAG, "audio context not set up: ${it.javaClass.simpleName}") }
+      }.onSuccess { isSetUp ->
+        // Not set up: the next call tries again (the core keeps no half-done state).
+        isReady = isSetUp
+        if (!isSetUp) Log.w(TAG, "audio context not set up")
+      }.onFailure { Log.w(TAG, "audio context not set up: ${it.javaClass.simpleName}") }
     }
   }
 
-  @JvmStatic private external fun initialize(context: Context)
+  /** `true` once the core has the context, by this call or an earlier one. */
+  @JvmStatic private external fun initialize(context: Context): Boolean
 
   private const val LIBRARY = "teamcraft_ffi"
   private const val TAG = "TeamCraftCalls"

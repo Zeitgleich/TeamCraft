@@ -4490,7 +4490,19 @@ Sealed outside the store: the chat list as it was shown last (conversation names
 each conversation's last line, the same as the notifications show), so the next start shows it in
 its first frame instead of waiting for the store to open. It is AES-256-GCM in the app with a random
 key that the Keystore key wraps like the database key (`SealedCache`), excluded from backups like the
-rest of the app's files, replaced by the real list once that is read, and deleted at sign-out.
+rest of the app's files, replaced by the real list once that is read, and deleted on every end of a
+session (sign-out, an expired refresh token, a server change). Changes the list didn't see (a
+message deleted or purged while a conversation was open) make the app read the list again when it
+goes to the background, which rewrites the cache; one that arrives while the app isn't running stays
+in the sealed cache until the next start reads the list.
+
+The media flow (camera, gallery, editors) keeps its open state for a killed app: the selection, the
+caption and the drawn text, sealed the same way (`MediaDraftStore`), deleted when the flow ends, at
+every end of a session, and after a week without coming back. Photos and videos taken with the
+app's camera wait in the core's staging folder, which sign-out wipes. Pictures are drawn again
+before they are sent, without their metadata; videos are packed again (no re-encoding unless
+edited) with only their orientation, so no location or camera details go along. A video the device
+can't pack again, unedited, goes as it is, as a file sent from the file picker does.
 
 **App lock (Android and iOS, optional).** A biometric or device-passcode gate in front of the app, and
 the app switcher shows a cover instead of the chats while it is on. It is a gate in the user interface

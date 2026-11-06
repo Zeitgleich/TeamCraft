@@ -38,10 +38,17 @@ class CoreRepository(
   @Volatile private var maybeCore: TeamCraft? = null
   private var maybeAccount: String? = null
   private val changes = MutableStateFlow(0L)
+  private val generation = MutableStateFlow(0L)
   private val connection = MutableStateFlow<ConnectionState?>(null)
 
   /** Increments whenever the local store changed; screens re-read on every value. */
   val changeCount: StateFlow<Long> = changes
+
+  /**
+   * A new value every time a core opens or closes: what was read from one account's store is never
+   * taken for another's ([KeptValue]), even when no change came in between.
+   */
+  val accountGeneration: StateFlow<Long> = generation
 
   /** Where the core's gateway connection stands (`null`: no core open); the banner follows it. */
   val connectionState: StateFlow<ConnectionState?> = connection
@@ -95,6 +102,7 @@ class CoreRepository(
     core.noteIdToken(auth.idToken())
     maybeCore = core
     maybeAccount = account
+    newGeneration()
     connection.value = core.connectionState()
     core
   }
@@ -107,7 +115,14 @@ class CoreRepository(
     onAccountClosed()
     maybeCore = null
     maybeAccount = null
+    newGeneration()
     connection.value = null
+  }
+
+  /** Another account (or none) from now on; the screens re-read, as after a change. */
+  private fun newGeneration() {
+    generation.update { it + 1 }
+    changes.update { it + 1 }
   }
 
   /** The token source of the open core, so it stops talking to that core when it closes. */

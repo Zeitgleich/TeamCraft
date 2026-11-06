@@ -124,6 +124,8 @@ struct ChatPane: View {
     .fullScreenCover(item: $maybeEditingPicture) { file in
       PictureEditorView(file: file) { edited in
         attachments = attachments.map { $0.id == file.id ? edited : $0 }
+        // The unedited copy in the staging folder goes, as on Android: it is no longer sent.
+        if edited.path != file.path { try? FileManager.default.removeItem(atPath: file.path) }
       }
     }
     .sheet(item: $maybeForwarding) { target in

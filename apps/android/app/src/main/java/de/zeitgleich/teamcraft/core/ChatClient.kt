@@ -20,14 +20,16 @@ class ChatClient(
   /** The app's "Deleted user" in the user's language; `null` for readers that show no old messages. */
   private val deletedUserName: (() -> String)? = null,
   /**
-   * The store's change counter ([CoreRepository.changeCount]), when the reader has one: the snapshot
-   * is then read and decoded once per change and shared by every screen that asks.
+   * The store's change counter ([CoreRepository.changeCount]) and the account's generation
+   * ([CoreRepository.accountGeneration]), when the reader has them: the snapshot is then read and
+   * decoded once per change and shared by every screen that asks, never across accounts.
    */
   private val maybeChanges: (() -> Long)? = null,
+  private val generation: () -> Long = { 0L },
   private val core: suspend () -> TeamCraft,
 ) {
   private val snapshotLock = Mutex()
-  private var maybeKept: Pair<Long, ChatSnapshot>? = null
+  private val kept = KeptValue<ChatSnapshot>()
 
   /**
    * The whole workspace (users, spaces, conversations). Decoding it takes hundreds of milliseconds
@@ -37,9 +39,9 @@ class ChatClient(
     val changes = maybeChanges ?: return readSnapshot()
     return snapshotLock.withLock {
       // Read before the snapshot: a change while it is read makes the next caller read again.
+      val account = generation()
       val version = changes()
-      maybeKept?.takeIf { it.first == version }?.second
-        ?: readSnapshot().also { maybeKept = version to it }
+      kept.at(account, version) ?: readSnapshot().also { kept.keep(account, version, it) }
     }
   }
 
@@ -47,7 +49,10 @@ class ChatClient(
    * The snapshot read last, maybe from before the newest change, or `null` before the first read: a
    * screen shows names and which messages are the user's own with it at once, then reads afresh.
    */
-  fun maybeKeptSnapshot(): ChatSnapshot? = maybeKept?.second
+  fun maybeKeptSnapshot(): ChatSnapshot? = kept.latest(generation())
+
+  /** Drops the kept snapshot: the session ended, its account's data leaves memory. */
+  fun forget() = kept.clear()
 
   private suspend fun readSnapshot(): ChatSnapshot {
     val snapshot = WireJson.decodeFromString(ChatSnapshot.serializer(), core().snapshot())
