@@ -29,8 +29,11 @@ pub mod openh264_library;
 pub mod picture_check;
 #[cfg(all(feature = "gstreamer", not(target_os = "android")))]
 pub mod playback_gstreamer;
+#[cfg(feature = "quic-send")]
+pub mod quic_send;
 pub mod ringtone;
 pub mod rtp;
+pub mod send_queue;
 #[cfg(feature = "sound-files")]
 pub mod sound_file;
 pub mod uplink_layers;

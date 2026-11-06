@@ -24,11 +24,14 @@ dave = [
 ]
 # Native clients: Opus via libopus (C, built with cmake), audio device I/O via cpal (ALSA on Linux
 # needs libasound2-dev) and the WebTransport call driver. Browsers use WebCodecs and Web Audio.
-native = ["dave", "dep:webpki-roots", "dep:ndk", "dep:openh264", "dep:bzip2", "dep:zune-jpeg", "dep:jpeg-encoder", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:socket2", "dep:teamcraft-net", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow", "dep:url", "fallback-socket"]
+native = ["dave", "dep:webpki-roots", "dep:ndk", "dep:openh264", "dep:bzip2", "dep:zune-jpeg", "dep:jpeg-encoder", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:socket2", "dep:teamcraft-net", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow", "dep:url", "fallback-socket", "quic-send"]
 
 # The writer of a call's WebSocket fallback (ARCHITECTURE.md §6.6), shared by the SFU and the native
 # clients.
 fallback-socket = ["dep:tokio", "dep:tokio-tungstenite", "dep:futures-util"]
+# Media datagrams on a call's QUIC connection through the queue that drops what went stale (#1218),
+# shared by the SFU and the native clients.
+quic-send = ["dep:tokio", "dep:wtransport"]
 
 # OpenH264 built from source into the binary: development and tests only. Release builds load
 # Cisco's binary at runtime instead (openh264_library.rs explains why).

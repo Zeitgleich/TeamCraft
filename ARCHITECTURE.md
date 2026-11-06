@@ -718,11 +718,45 @@ Settings → Chats).
   sudden drop stalls a little longer than before: the top layer keeps its share for the hold
   until the estimator's cut to what got through. While a limit stays, the next layer is tried
   now and then (the probe: 4 s apart at first, then up to 32 s), which can hold the picture up
-  for up to a second. Not yet: QUIC's send buffer (client and SFU, up to 1 MiB of datagrams)
-  and its congestion window, which collapses after the loss of a sudden drop, deliver the old
-  layer's queue before the lower one (seconds of it on a loaded machine); browsers' cameras
-  don't adapt their bitrate (WebCodecs would need a reconfigured encoder per change); the shares
-  aren't told to the SFU, which allocates by the layers' full bitrates.
+  for up to a second. Not yet: browsers' cameras don't adapt their bitrate (WebCodecs would need
+  a reconfigured encoder per change); the shares aren't told to the SFU, which allocates by the
+  layers' full bitrates.
+
+  *Send queue* (#1218, `teamcraft_media::send_queue`, client uplinks and the SFU's link to each
+  receiver): QUIC keeps what its congestion window doesn't let out in its datagram buffer, oldest
+  first, and sends it whatever comes after. After a sudden drop that buffer (quinn's 1 MiB,
+  seconds at the new rate) could fill with the old layer, and the lower layer's keyframe went out
+  behind it. Now QUIC gets a datagram only while what it holds takes it less than 50 ms at its
+  current rate (congestion window per round trip), at least 4 KiB (`quic_send`): a keyframe's
+  burst on a fast link goes to QUIC at once as before, a collapsed window on a narrow link holds a
+  few packets. The rest waits in a queue in front of it: audio first; a frame whose start waited
+  250 ms is dropped whole, a frame that started is sent to its end (a narrow link's keyframe takes
+  longer); a keyframe drops what waits of its chain before it (its layer on the uplink, its whole
+  stream on a receiver's downlink, where the SFU switches layers); 1 MiB at most. A drop leaves a
+  gap in the transport sequence numbers like a loss. A fixed small QUIC buffer instead (4 KiB),
+  or 20 ms, starved a 1440p share's 450 KB keyframes on a loaded machine: handed over a few
+  packets at a time, they looked like a queue to the presenter's estimator, which cut the share's
+  sharp layer.
+  How old the limited viewer's picture gets after the drop to 500 kbit/s, until the lower layer
+  shows (`bandwidth_limits`, eight runs in parallel on a laptop, 14 to 16 drops each; medians in
+  brackets):
+
+  | Build and link    | Before             | After              |
+  |-------------------|--------------------|--------------------|
+  | Release, uplink   | 0.9–1.8 s (1.1 s)  | 0.95–1.9 s (1.1 s) |
+  | Release, downlink | 0.85–1.7 s (1.1 s) | 0.85–1.7 s (1.0 s) |
+  | Debug, both       | 0.8–2.1 s (1.2 s)  | 0.9–1.7 s (1.0 s)  |
+
+  On these links QUIC's window mostly keeps up and the bottleneck (the test's 250 ms queue) holds
+  the old layer instead, so the queue changes little here; it bounds what QUIC holds where the
+  window collapses below the link (loss on a real path), as the deterministic model in its tests
+  shows (the lower layer 0.12 s after the switch instead of 1.3 s). What is left:
+  about half a second until the estimator cuts, then the bottleneck's queue, which the old layer
+  filled (QUIC's window still has the old rate for a few round trips). The lower layer's first
+  keyframe waits behind it or is lost there, and the next one comes up to a second later (the
+  keyframe request intervals). Asking again at once after a switch doesn't help: the queue
+  hasn't drained yet, and the interval is used up (tried: up to 2.2 s). On the uplink the layers
+  after the cut take about 90 % of the link, so its queue drains slowly.
 - Large frames: a frame of more than 255 fragments (a 1440p keyframe of text is about 450 KB)
   carries the fragment extension's long form (16-bit index and count, up to 4096 fragments); the
   short form stays for every other frame. Before, such keyframes could not be sent, and the top

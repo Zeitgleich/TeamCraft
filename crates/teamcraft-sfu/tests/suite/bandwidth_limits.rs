@@ -13,6 +13,9 @@
 //! - Downlink: one of two viewers gets 500 kbit/s, then no limit. The SFU gives it a lower layer
 //!   and the top one again once the limit is lifted; the other viewer keeps 720p throughout.
 //!
+//! The first limit is a sudden drop (#1218): the limited viewer's picture, stalled or late, gets
+//! no older than [`MAX_PICTURE_AGE_AFTER_DROP`] until the lower layer shows.
+//!
 //! Each run starts once every viewer has the top layer (seconds on a laptop, about ten on a CI
 //! runner). The thresholds leave room for slow CI runners (debug builds, other tests in
 //! parallel): the measurements on a laptop (ARCHITECTURE.md §6.5) are well within them. Where a
@@ -73,11 +76,18 @@ const WARM_UP_DEADLINE: Duration = Duration::from_secs(60);
 const MAX_STALL: Duration = Duration::from_secs(2);
 /// The longest the picture behind a limited link may stand still, also when the limit sets in:
 /// under 1 s on a laptop (2.2 to 3.4 s before #939), up to 4 s with eight copies of the suite in
-/// parallel. There QUIC's congestion window collapses after the loss, and its send buffer (1 MiB
-/// of datagrams) delivers seconds of the old layer before the new one.
+/// parallel. There QUIC's congestion window collapses after the loss (and before #1218 its send
+/// buffer, 1 MiB of datagrams, delivered seconds of the old layer before the new one).
 const MAX_STALL_LIMITED: Duration = Duration::from_secs(5);
 /// How long after a limit sets in the layers may still be settling.
 const SETTLE: Duration = Duration::from_secs(3);
+/// How old the limited viewer's picture may get after the sudden drop to the first limit (from
+/// about 2.3 Mbit/s of the three layers), until the lower layer shows (#1218): a stall and pictures
+/// that come late both count. With eight copies of both tests in parallel on a laptop, 0.9–1.7 s
+/// in a debug build (0.8–2.1 s before the send queue of `teamcraft_media::quic_send`), most of it
+/// the estimators' reaction (about half a second) and the bottleneck's queue; more than twice that
+/// is left for a slow CI runner.
+const MAX_PICTURE_AGE_AFTER_DROP: Duration = Duration::from_secs(4);
 /// The last stretch of a run, by when the top layer has to be back (judged by what the presenter
 /// sends and the SFU asks for: on a loaded machine the viewer's pictures come late out of QUIC's
 /// send buffer and its decoder's queue).
@@ -99,6 +109,7 @@ async fn a_camera_follows_a_limited_uplink_down_and_back_up() {
     "the top layer never reached the viewer before the limit:\n{summary}"
   );
   timeline.assert_no_stall(viewer, MAX_STALL_LIMITED, &summary);
+  timeline.assert_recovers_from_the_drop(viewer, &summary);
   // Down, but not to the smallest layer: the top sent layer gives up bitrate first. Judged by
   // what the presenter sent: on a laptop the viewer gets the middle layer throughout, but on a
   // loaded machine QUIC's send buffer may deliver the old top layer's pictures for seconds.
@@ -147,6 +158,7 @@ async fn a_limited_viewer_gets_a_lower_layer_and_the_other_viewer_keeps_the_top_
     );
   }
   timeline.assert_no_stall(limited_viewer, MAX_STALL_LIMITED, &summary);
+  timeline.assert_recovers_from_the_drop(limited_viewer, &summary);
   timeline.assert_no_stall(other_viewer, MAX_STALL, &summary);
   // The SFU moved the limited viewer to a lower layer (judged by what it asked the presenter
   // for: the viewer's pictures may come late out of QUIC's send buffer on a loaded machine).
@@ -221,6 +233,8 @@ enum Heard {
 #[derive(Debug, Clone, Copy)]
 struct Decoded {
   at: Duration,
+  /// When the camera delivered the picture.
+  captured: Duration,
   resolution: VideoResolution,
   /// Luma PSNR against the camera's picture at its size (a lower layer scaled up), for every
   /// fifth picture.
@@ -416,6 +430,7 @@ async fn watch_as_viewer(
           });
           sink.lock().unwrap().push(Decoded {
             at,
+            captured: Duration::from_micros(frame.timestamp_us()),
             resolution,
             maybe_psnr_db,
           });
@@ -532,6 +547,45 @@ impl Timeline {
     );
   }
 
+  /// How old the picture on `viewer`'s screen got from `from` to `to` at most (now less when the
+  /// camera delivered it), and when: a stall and pictures that come late both count. It is
+  /// oldest just before the next picture is decoded, or at `to`.
+  fn oldest_picture(&self, viewer: usize, from: Duration, to: Duration) -> (Duration, Duration) {
+    let decoded = &self.decoded[viewer];
+    let mut oldest = (Duration::ZERO, from);
+    let mut maybe_shown: Option<&Decoded> = decoded.iter().take_while(|picture| picture.at <= from).last();
+    for picture in decoded
+      .iter()
+      .filter(|picture| picture.at > from && picture.at <= to)
+    {
+      if let Some(shown) = maybe_shown {
+        let age = picture.at.saturating_sub(shown.captured);
+        if age > oldest.0 {
+          oldest = (age, picture.at);
+        }
+      }
+      maybe_shown = Some(picture);
+    }
+    if let Some(shown) = maybe_shown {
+      let age = to.saturating_sub(shown.captured);
+      if age > oldest.0 {
+        oldest = (age, to);
+      }
+    }
+    oldest
+  }
+
+  /// `viewer`'s picture got no older than [`MAX_PICTURE_AGE_AFTER_DROP`] after the sudden drop
+  /// to the first limit, while the layers settle.
+  fn assert_recovers_from_the_drop(&self, viewer: usize, summary: &str) {
+    let dropped = self.steps.get(1).map_or(Duration::ZERO, |(at, _)| *at);
+    let (oldest, at) = self.oldest_picture(viewer, dropped, dropped + SETTLE);
+    assert!(
+      oldest <= MAX_PICTURE_AGE_AFTER_DROP,
+      "viewer {viewer}'s picture got {oldest:?} old until {at:?} after the drop at {dropped:?}:\n{summary}"
+    );
+  }
+
   /// Whether the presenter was last asked for the top layer only, after `from`: every viewer
   /// gets it.
   fn is_only_top_layer_needed_at_the_end(&self, from: Duration) -> bool {
@@ -577,7 +631,7 @@ impl Timeline {
           .unwrap_or(0),
       );
     let mut out = String::from(
-      "  s  limit  link kbit/s (dropped) | viewers: pictures size PSNR, longest gap ms | encoded kbit/s per layer width (keyframes) | layers sent, uplink estimate kbit/s\n",
+      "  s  limit  link kbit/s (dropped) | viewers: pictures size PSNR, longest gap ms, oldest picture ms | encoded kbit/s per layer width (keyframes) | layers sent, uplink estimate kbit/s\n",
     );
     for second in 0..=seconds {
       let maybe_limit = self
@@ -664,7 +718,7 @@ fn viewer_second(decoded: &[Decoded], second: u64) -> String {
     .filter(|(_, picture)| picture.at.as_secs() == second)
     .collect();
   if in_second.is_empty() {
-    return format!("{:<30}", "none");
+    return format!("{:<36}", "none");
   }
   let mut sizes: Vec<String> = Vec::new();
   for (_, picture) in &in_second {
@@ -688,13 +742,21 @@ fn viewer_second(decoded: &[Decoded], second: u64) -> String {
     .map(|(index, picture)| picture.at.saturating_sub(decoded[index - 1].at))
     .max()
     .unwrap_or_default();
+  // The oldest the picture on screen got before each of these pictures replaced it.
+  let oldest = in_second
+    .iter()
+    .filter(|(index, _)| *index > 0)
+    .map(|(index, picture)| picture.at.saturating_sub(decoded[index - 1].captured))
+    .max()
+    .unwrap_or_default();
   format!(
-    "{:<30}",
+    "{:<36}",
     format!(
-      "{:2} {} {psnr} {}",
+      "{:2} {} {psnr} {} a{}",
       in_second.len(),
       sizes.join("+"),
-      longest_gap.as_millis()
+      longest_gap.as_millis(),
+      oldest.as_millis()
     )
   )
 }
