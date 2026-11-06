@@ -1,84 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The camera, gallery, review and editors for sending photos and videos (#1358). -->
 <resources>
-  <string name="media_close">Close</string>
-  <string name="media_back">Back</string>
-  <string name="media_camera_denied">TeamCraft needs the camera to take photos and videos. You can still send them from the gallery.</string>
-  <string name="media_open_gallery">Open the gallery</string>
-  <string name="media_camera_flip">Switch camera</string>
-  <string name="media_flash_off">Flash off</string>
-  <string name="media_flash_auto">Flash automatic</string>
-  <string name="media_flash_on">Flash on</string>
-  <string name="media_zoom">Zoom %1$s×</string>
-  <string name="media_shutter_photo">Take photo</string>
-  <string name="media_shutter_video">Record video</string>
-  <string name="media_shutter_hold">Hold to record a video</string>
-  <string name="media_mode_photo">Photo</string>
-  <string name="media_mode_video">Video</string>
-  <string name="media_gallery">Gallery</string>
-  <string name="media_gallery_access">Allow TeamCraft to show your photos and videos here, or pick some with the system picker.</string>
-  <string name="media_gallery_allow">Allow access</string>
-  <string name="media_gallery_picker">Pick with the system picker</string>
-  <string name="media_gallery_empty">No photos or videos on this device.</string>
-  <string name="media_album_camera">Camera</string>
-  <string name="media_album_all">All media</string>
-  <string name="media_album_untitled">Untitled</string>
-  <plurals name="media_next">
-    <item quantity="one">Next with %d item</item>
-    <item quantity="other">Next with %d items</item>
+  <!-- Image viewer and previews (#315) -->
+  <string name="image_loading">Loading the full image</string>
+  <string name="image_position">%1$d of %2$d</string>
+  <!-- Image viewer: albums, originals, forwarding (#240) -->
+  <string name="image_load_original">Load original (%1$s)</string>
+  <string name="image_original_failed">The original couldn\'t be loaded.</string>
+  <string name="image_try_again">Try again</string>
+  <string name="image_scope_message">This message</string>
+  <string name="image_scope_conversation">Whole chat</string>
+  <string name="image_reply">Reply to this image</string>
+  <string name="image_forward_one">Forward this image</string>
+  <string name="file_gone">This file is no longer available.</string>
+  <plurals name="album_more_pictures">
+    <item quantity="one">%d more picture</item>
+    <item quantity="other">%d more pictures</item>
   </plurals>
-  <string name="media_position">%1$d of %2$d</string>
-  <string name="media_tool_crop">Crop and rotate</string>
-  <string name="media_tool_draw">Draw</string>
-  <string name="media_mute">Send without sound</string>
-  <string name="media_unmute">Send with sound</string>
-  <string name="media_muted_note">Sent without sound</string>
-  <string name="media_quality_standard">Quality: Standard. Switch to High</string>
-  <string name="media_quality_high">Quality: High. Switch to Standard</string>
-  <string name="media_save">Save to device</string>
-  <string name="media_saved">Saved to the device</string>
-  <string name="media_save_failed">Couldn\'t save it to the device.</string>
-  <string name="media_add_more">Add more</string>
-  <string name="media_remove_item">Remove from this message</string>
-  <string name="media_caption">Add a message</string>
-  <string name="media_send_failed">Couldn\'t prepare the photos and videos. Nothing was sent; try again.</string>
-  <plurals name="media_discard">
-    <item quantity="one">Discard the chosen photo or video?</item>
-    <item quantity="other">Discard the %d chosen photos and videos?</item>
-  </plurals>
-  <string name="media_discard_confirm">Discard</string>
-  <string name="media_undo">Undo</string>
-  <string name="media_redo">Redo</string>
-  <string name="media_reset_all">Reset all</string>
-  <string name="media_mirror">Mirror</string>
-  <string name="media_aspect_lock">Keep the frame\'s shape</string>
-  <string name="media_straighten">Straighten</string>
-  <string name="media_degrees">%1$d°</string>
-  <string name="media_tool_pen">Pen</string>
-  <string name="media_tool_highlighter">Highlighter</string>
-  <string name="media_tool_text">Text</string>
-  <string name="media_tool_sticker">Stickers</string>
-  <string name="media_tool_blur">Blur</string>
-  <string name="media_size">Size</string>
-  <string name="media_color">Colour</string>
-  <string name="media_draw_area">Picture: draw with a finger</string>
-  <string name="media_blur_faces">Blur faces</string>
-  <string name="media_blur_faces_finding">Looking for faces on this device…</string>
-  <string name="media_blur_faces_none">No faces found. Blur by hand with the brush.</string>
-  <string name="media_blur_hint">Faces are found on this device. Or blur with the brush.</string>
-  <string name="media_remove_mark">Remove</string>
-  <string name="media_sticker_arrow">Arrow</string>
-  <string name="media_sticker_circle">Circle</string>
-  <string name="media_sticker_square">Square</string>
-  <string name="media_sticker_check">Check mark</string>
-  <string name="media_sticker_star">Star</string>
-  <string name="media_sticker_heart">Heart</string>
-  <string name="media_sticker_question">Question mark</string>
-  <string name="media_trim_start">Start of the video</string>
-  <string name="media_trim_end">End of the video</string>
-  <string name="media_video_length">%1$s · about %2$s</string>
-  <string name="send_quality_title">Photo and video quality when sending</string>
-  <string name="send_quality_standard">Standard</string>
-  <string name="send_quality_high">High</string>
-  <string name="send_quality_hint">Standard is smaller and faster to send; High keeps more detail. Each send can change it.</string>
+  <string name="animated_images_title">Animated images</string>
+  <string name="animated_images_autoplay">Automatic</string>
+  <string name="animated_images_tap">On tap</string>
+  <string name="animated_images_hint">GIFs and other moving pictures. Automatic fetches them like original images (see above). With animations removed in the system settings, they don\'t start by themselves.</string>
+  <string name="animation_play">Play animation</string>
+  <string name="animation_pause">Pause animation</string>
+  <string name="animation_state_playing">Animated image, playing</string>
+  <string name="animation_state_paused">Animated image, paused</string>
+  <string name="animation_failed">Didn\'t load</string>
+  <string name="original_download_title">Download original images automatically</string>
+  <string name="original_download_always">Always</string>
+  <string name="original_download_unmetered">On Wi-Fi only</string>
+  <string name="original_download_never">Never</string>
+  <string name="original_download_hint">An opened picture shows its preview at once. Otherwise its original loads when you tap \u201cLoad original\u201d. Mobile data and hotspots don\'t count as Wi-Fi.</string>
+  <string name="message_pinned">Pinned</string>
+  <!-- Composer -->
+  <string name="composer_remove_file">Remove %1$s</string>
+  <!-- Calls -->
 </resources>
