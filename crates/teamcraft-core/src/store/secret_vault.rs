@@ -1,21 +1,23 @@
-//! A desktop's local secrets in one sealed file (e2ee.md §9): refresh tokens, local sessions, DPoP
-//! keys and copies of the database and backup keys, under one key that the OS keychain holds.
+//! A desktop's local secrets in one sealed file (e2ee.md §9.7): refresh tokens, local sessions, DPoP
+//! keys and the database and backup keys, under one key that the OS keychain holds.
 //!
-//! Every keychain access can raise a dialog on macOS, so the keychain is read once per start, for
-//! the file's key, and not touched while the app runs. What is in the file is served from memory.
+//! Every keychain access can raise a dialog on macOS, and an ad hoc signed update is a stranger to
+//! the entries of the build before it, so the keychain holds one item, the file's key (#1223). It is
+//! read once per start and not touched while the app runs. What is in the file is served from memory.
 //!
 //! - **Tokens and sessions** live only in the file. Their old keychain entries are moved over once,
 //!   per entry, the first time each is asked for, and deleted.
-//! - **Database and backup keys** stay in the keychain too: the file is a copy that saves the read.
-//!   So a damaged file costs a sign-in, never the database. A backup key the keychain refused is
-//!   marked and written at a later start, until it is there.
+//! - **Database and backup keys** live in the file and in a second sealed file of their own, written
+//!   only when a key is new or changed, so a damaged secrets file costs a sign-in, never the
+//!   database. Their old keychain entries are read once where the files lack the key and deleted once
+//!   both files hold it.
 //! - **A failed keychain call** (locked, denied, no keychain) wipes nothing and is remembered for
 //!   [`RETRY_AFTER_FAILURE`], because the UI asks for the core's status again and again and each
 //!   attempt would raise another dialog. The user asking again ([`SecretVault::allow_retry`]) ends
 //!   that at once.
 //! - **Signing out** ([`SecretVault::purge_after_sign_out`]) also deletes what normally nobody looks
-//!   at: a set-aside file, and old keychain entries an older version of the app may have written
-//!   after the move.
+//!   at: set-aside files, and old token entries an older version of the app may have written after
+//!   the move.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -38,15 +40,40 @@ use super::{KeySourceError, StoreError, StoreLock, run_outside_runtime};
 /// Keychain service of the file's key and of the tokens kept before the file existed.
 const VAULT_SERVICE: &str = "de.zeitgleich.teamcraft";
 const VAULT_KEY_ACCOUNT: &str = "secrets-file-key";
+/// Where versions before #1223 kept the database keys; only read and deleted now.
 const DATABASE_KEY_SERVICE: &str = "de.zeitgleich.teamcraft.db";
-/// e2ee.md §6.5.6; the account name is the database key's.
+/// e2ee.md §6.5.6; the account name is the database key's. Only read and deleted now, as above.
 const BACKUP_KEY_SERVICE: &str = "de.zeitgleich.teamcraft.backup-key";
 const VAULT_FILE: &str = "secrets.sealed";
 const TEMPORARY_FILE: &str = "secrets.sealed.tmp";
 /// A file that could not be opened, kept for a look but never read again.
 const SET_ASIDE_FILE: &str = "secrets.sealed.damaged";
+const KEYS_FILE: &str = "keys.sealed";
+const KEYS_TEMPORARY_FILE: &str = "keys.sealed.tmp";
+const KEYS_SET_ASIDE_FILE: &str = "keys.sealed.damaged";
+/// Everything, rewritten at every token refresh.
+const SECRETS: SealedFile = SealedFile {
+  name: VAULT_FILE,
+  temporary: TEMPORARY_FILE,
+  set_aside: SET_ASIDE_FILE,
+};
+/// The second copy of the database and backup keys, rewritten only when a key is new or changed:
+/// what the keychain entries were for a damaged secrets file before #1223.
+const KEYS: SealedFile = SealedFile {
+  name: KEYS_FILE,
+  temporary: KEYS_TEMPORARY_FILE,
+  set_aside: KEYS_SET_ASIDE_FILE,
+};
 const DATABASE_KEY_KIND: &str = "database-key";
 const BACKUP_KEY_KIND: &str = "backup-key";
+/// The old keychain entries of an account's keys, deleted once the files hold the keys.
+const OLD_KEY_ENTRIES: [(&str, &str); 2] = [
+  (DATABASE_KEY_KIND, DATABASE_KEY_SERVICE),
+  (BACKUP_KEY_KIND, BACKUP_KEY_SERVICE),
+];
+/// Starts that try to delete an old key entry before it is left in place. The entry holds a key the
+/// files have, as before #1223; asking at every start would bring a dialog back after a "Deny".
+const MAX_DELETE_ATTEMPTS: u32 = 3;
 /// How long a failed keychain call stands before the keychain is asked again. Long enough that
 /// polling raises no stream of dialogs, short enough that "try again" works after a mistaken "deny".
 const RETRY_AFTER_FAILURE: Duration = Duration::from_secs(60);
@@ -131,10 +158,19 @@ struct State {
   /// The contents changed and the file doesn't have that yet. Stays set when a write fails, so the
   /// next call writes again instead of finding nothing to do.
   is_dirty: bool,
+  /// The same for the keys file: its keys are not those of the contents yet.
+  are_keys_dirty: bool,
   maybe_blocked: Option<Blocked>,
   /// Keychain clean-ups tried this run. One that fails is retried at the next start, not on every
   /// token refresh.
   tried_this_run: BTreeSet<String>,
+}
+
+/// One of the two sealed files, with the names of its temporary and set-aside copies.
+struct SealedFile {
+  name: &'static str,
+  temporary: &'static str,
+  set_aside: &'static str,
 }
 
 /// The last keychain failure, standing until `until`.
@@ -143,18 +179,23 @@ struct Blocked {
   message: String,
 }
 
-/// What the file holds, by item name.
+/// What a file holds, by item name. The keys file holds only the keys' `secrets`.
+///
+/// The versions since 1.0.18, which kept copies of the keys in the keychain, read the same layout
+/// and find the keys under the same names, so going back to one of them keeps the database. Their
+/// field `missing_from_keychain` is ignored.
 #[derive(Default, Serialize, Deserialize)]
 struct Contents {
   /// Tokens as they are, keys in base64.
   #[serde(default)]
   secrets: BTreeMap<String, String>,
-  /// Tokens whose old keychain entry is known to be gone, so nothing looks there again.
+  /// Items whose old keychain entry is known to be gone, so nothing looks there again; also an old
+  /// key entry left in place after [`MAX_DELETE_ATTEMPTS`].
   #[serde(default)]
   moved: BTreeSet<String>,
-  /// Backup keys the keychain doesn't have yet.
+  /// Starts that failed to delete an old key entry, by item name.
   #[serde(default)]
-  missing_from_keychain: BTreeSet<String>,
+  failed_deletes: BTreeMap<String, u32>,
 }
 
 /// A growing buffer that wipes every buffer it leaves behind, for what is about to be sealed.
@@ -274,16 +315,17 @@ impl SecretVault {
     flush(&mut state)
   }
 
-  /// The user signed out of `server` or left it: deletes what the file doesn't speak for. A set-aside
-  /// file may hold old tokens and keys. An older version of the app, run after the move, may have
-  /// written the old entries again, and nothing looks at them on a normal start. Deleting an entry
-  /// that isn't there raises no dialog. The user asked for this, so a failure still standing doesn't
-  /// hold it back; a failure now is reported.
+  /// The user signed out of `server` or left it: deletes what the files don't speak for. A set-aside
+  /// file may hold old tokens and keys; nothing opens it again. An older version of the app, run
+  /// after the move, may have written the old token entries again, and nothing looks at them on a
+  /// normal start. Deleting an entry that isn't there raises no dialog. The user asked for this, so
+  /// a failure still standing doesn't hold it back; a failure now is reported.
   pub fn purge_after_sign_out(&self, token_servers: &[(TokenKind, &str)]) -> Result<(), KeySourceError> {
     let mut state = self.lock();
     state.maybe_blocked = None;
     if let Some(directory) = &state.maybe_directory {
-      remove_if_there(&directory.join(SET_ASIDE_FILE));
+      remove_if_there(&directory.join(SECRETS.set_aside));
+      remove_if_there(&directory.join(KEYS.set_aside));
     }
     let mut outcome = Ok(());
     for (kind, server) in token_servers {
@@ -295,41 +337,32 @@ impl SecretVault {
     outcome
   }
 
-  /// The database key of `account`, creating it on first use. The first time on this file it comes
-  /// from the keychain; a new key goes into the keychain too, as the copy a damaged file can't take
-  /// away.
+  /// The database key of `account`, creating it on first use. It lives in the sealed files; an
+  /// install from before #1223 has it in the keychain, where it is read once and then deleted.
   pub fn database_key(&self, account: &str) -> Result<SymmetricKey, KeySourceError> {
     let mut state = self.lock();
     self.ensure_open(&mut state)?;
     let name = item_name(DATABASE_KEY_KIND, account);
     if let Some(key) = stored_key(contents_of(&mut state)?, &name)? {
+      self.retire_old_entries(&mut state, account);
       return Ok(key);
     }
+    // Not in the files: an install from before the move, a new account, or a key both files lost.
     let found = self.call(&mut state, |keystore| {
       keystore.read_secret(DATABASE_KEY_SERVICE, account)
     })?;
-    let key = match found {
-      Some(bytes) => SymmetricKey::from_slice(&bytes).ok_or(KeySourceError::InvalidKey(bytes.len()))?,
-      None => {
-        let key = SymmetricKey::generate(&mut OsRng);
-        self.call(&mut state, |keystore| {
-          keystore.write_secret(DATABASE_KEY_SERVICE, account, key.expose_secret())
-        })?;
-        key
+    match found {
+      Some(bytes) => {
+        let key = SymmetricKey::from_slice(&bytes).ok_or(KeySourceError::InvalidKey(bytes.len()))?;
+        self.take_old_key(&mut state, account, &name, &key)?;
+        Ok(key)
       },
-    };
-    replace_secret(contents_of(&mut state)?, &name, encode_key(&key));
-    state.is_dirty = true;
-    // The keychain has the key, so a file that can't be written only costs a read next time.
-    if let Err(error) = flush(&mut state) {
-      tracing::warn!(%error, "could not keep the database key in the secrets file");
+      None => create_database_key(&mut state, &name),
     }
-    Ok(key)
   }
 
-  /// Keeps the account's backup key (e2ee.md §6.5.6); a start with the same key touches nothing.
-  /// The file takes it first and marks it as missing from the keychain until the keychain has it,
-  /// so a keychain that refuses is asked again at the next start, not again and again in this one.
+  /// Keeps the account's backup key (e2ee.md §6.5.6) in both files; a start with the same key writes
+  /// nothing. An error means a file doesn't have it yet, and the next call writes again.
   pub fn keep_backup_key(&self, account: &str, key: &SymmetricKey) -> Result<(), KeySourceError> {
     let mut state = self.lock();
     self.ensure_open(&mut state)?;
@@ -338,28 +371,18 @@ impl SecretVault {
     let is_kept = matches!(stored_key(contents, &name), Ok(Some(kept)) if kept.is_same_key(key));
     if !is_kept {
       replace_secret(contents, &name, encode_key(key));
-      contents.missing_from_keychain.insert(name.clone());
       state.is_dirty = true;
+      state.are_keys_dirty = true;
     }
-    flush(&mut state)?;
-    let is_missing = contents_of(&mut state)?.missing_from_keychain.contains(&name);
-    if !is_missing {
-      return Ok(());
-    }
-    // A new key is always tried; the same one once per run.
-    if !state.tried_this_run.insert(name.clone()) && is_kept {
-      return Ok(());
-    }
-    self.call(&mut state, |keystore| {
-      keystore.write_secret(BACKUP_KEY_SERVICE, account, key.expose_secret())
-    })?;
-    contents_of(&mut state)?.missing_from_keychain.remove(&name);
-    state.is_dirty = true;
-    flush(&mut state)
+    flush_all(&mut state)?;
+    // An entry from before the move holds this key or the one before it: it goes either way.
+    self.retire_old_entries(&mut state, account);
+    Ok(())
   }
 
   /// The kept backup key of `account`, `None` when there is none. Looks in the keychain only when
-  /// the file has none, which is on the setup screen and not on a normal start.
+  /// the files have none, which is on the setup screen and not on a normal start: an install from
+  /// before #1223 may keep it only there.
   pub fn kept_backup_key(&self, account: &str) -> Result<Option<SymmetricKey>, KeySourceError> {
     let mut state = self.lock();
     self.ensure_open(&mut state)?;
@@ -374,11 +397,7 @@ impl SecretVault {
       return Ok(None);
     };
     let key = SymmetricKey::from_slice(&bytes).ok_or(KeySourceError::InvalidKey(bytes.len()))?;
-    replace_secret(contents_of(&mut state)?, &name, encode_key(&key));
-    state.is_dirty = true;
-    if let Err(error) = flush(&mut state) {
-      tracing::warn!(%error, "could not keep the backup key in the secrets file");
-    }
+    self.take_old_key(&mut state, account, &name, &key)?;
     Ok(Some(key))
   }
 
@@ -386,8 +405,8 @@ impl SecretVault {
     self.state.lock().unwrap_or_else(PoisonError::into_inner)
   }
 
-  /// Reads the file's key once per run, then the file. Only a keychain that says the entry doesn't
-  /// exist makes a new key: any other answer leaves the file alone.
+  /// Reads the files' key once per run, then the files. Only a keychain that says the entry doesn't
+  /// exist makes a new key: any other answer leaves the files alone.
   fn ensure_open(&self, state: &mut State) -> Result<(), KeySourceError> {
     if state.maybe_contents.is_some() {
       return Ok(());
@@ -399,8 +418,8 @@ impl SecretVault {
     self.ensure_locked(state, &directory)?;
     if state.maybe_key.is_none() {
       let mut found = self.read_file_key(state)?;
-      if found.is_none() && directory.join(VAULT_FILE).exists() {
-        // The file says a key exists. Overwriting it is final, so give a keychain that is still
+      if found.is_none() && has_sealed_files(&directory) {
+        // A file says a key exists. Overwriting it is final, so give a keychain that is still
         // starting a moment; this path costs a read only when the key really looks gone.
         (self.pause)(MISSING_KEY_RECHECK);
         found = self.read_file_key(state)?;
@@ -417,10 +436,18 @@ impl SecretVault {
         None => self.create_key(state, &directory)?,
       });
     }
-    let contents = match &state.maybe_key {
-      Some(key) => read_file(key, &directory)?,
+    let (mut contents, kept_keys) = match &state.maybe_key {
+      Some(key) => (
+        read_file(key, &directory, &SECRETS)?,
+        read_file(key, &directory, &KEYS)?,
+      ),
       None => return Err(KeySourceError::SecretsFile("no key for the file".to_owned())),
     };
+    if recover_keys(&mut contents, &kept_keys) {
+      tracing::warn!("took keys the secrets file had lost from the keys file");
+      state.is_dirty = true;
+    }
+    state.are_keys_dirty |= !has_same_keys(&contents, &kept_keys);
     state.maybe_contents = Some(contents);
     Ok(())
   }
@@ -461,17 +488,79 @@ impl SecretVault {
     Ok(())
   }
 
-  /// A new key for the file. A file already there was sealed under a key that is gone.
+  /// A new key for the files. Files already there were sealed under a key that is gone, and with it
+  /// the tokens and the keys of local databases that no old keychain entry still holds.
   fn create_key(&self, state: &mut State, directory: &Path) -> Result<SymmetricKey, KeySourceError> {
     let key = SymmetricKey::generate(&mut OsRng);
     self.call(state, |keystore| {
       keystore.write_secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT, key.expose_secret())
     })?;
-    if directory.join(VAULT_FILE).exists() {
+    if directory.join(SECRETS.name).exists() {
       tracing::warn!("the key of the secrets file is gone; signing in again is needed");
-      set_aside(directory);
+      set_aside(directory, &SECRETS);
+    }
+    if directory.join(KEYS.name).exists() {
+      tracing::warn!("the key of the keys file is gone; local databases need setting up again");
+      set_aside(directory, &KEYS);
     }
     Ok(key)
+  }
+
+  /// Keeps a key found in an old keychain entry. The entry goes once both files have the key; until
+  /// then it stays, so a file that can't be written costs a read at the next start, not the key.
+  fn take_old_key(
+    &self,
+    state: &mut State,
+    account: &str,
+    name: &str,
+    key: &SymmetricKey,
+  ) -> Result<(), KeySourceError> {
+    replace_secret(contents_of(state)?, name, encode_key(key));
+    state.is_dirty = true;
+    state.are_keys_dirty = true;
+    self.retire_old_entries(state, account);
+    Ok(())
+  }
+
+  /// Deletes the old keychain entries of the account's keys once both files hold the keys (#1223):
+  /// then the files' key is the one item a start reads, also after an update with a new signature.
+  /// First the files take the keys, then the entry goes, then the file records that it went; a
+  /// crash in between deletes again, and deleting an entry that isn't there raises no dialog.
+  ///
+  /// Tried once per run, never while a keychain failure stands (no dialog in the middle of a run),
+  /// and left in place after [`MAX_DELETE_ATTEMPTS`] failed starts. The caller has the key either
+  /// way, so nothing here fails the call.
+  fn retire_old_entries(&self, state: &mut State, account: &str) {
+    if let Err(error) = flush_all(state) {
+      tracing::warn!(%error, "could not write the secrets files; old keychain entries stay for now");
+      return;
+    }
+    for (kind, service) in OLD_KEY_ENTRIES {
+      let name = item_name(kind, account);
+      let was_tried = state.tried_this_run.contains(&name);
+      let Ok(contents) = contents_of(state) else {
+        return;
+      };
+      // Only a usable key in the files lets its entry go.
+      let has_key = matches!(stored_key(contents, &name), Ok(Some(_)));
+      let is_due = has_key && !contents.moved.contains(&name);
+      if !is_due || was_tried {
+        continue;
+      }
+      state.tried_this_run.insert(name.clone());
+      if self.is_blocked(state) {
+        continue;
+      }
+      let outcome = self.call(state, |keystore| keystore.delete(service, account));
+      let Ok(contents) = contents_of(state) else {
+        return;
+      };
+      record_delete(contents, name, outcome);
+      state.is_dirty = true;
+    }
+    if let Err(error) = flush(state) {
+      tracing::warn!(%error, "could not record the cleaned-up keychain entries");
+    }
   }
 
   /// Moves a token's old keychain entry into the file, once per entry: first the file takes the
@@ -535,6 +624,14 @@ impl SecretVault {
       self.block(state, error);
     }
     outcome
+  }
+
+  /// A keychain failure still stands, so a call now would only repeat it.
+  fn is_blocked(&self, state: &State) -> bool {
+    state
+      .maybe_blocked
+      .as_ref()
+      .is_some_and(|blocked| (self.now)() < blocked.until)
   }
 
   fn block(&self, state: &mut State, error: &KeySourceError) {
@@ -645,11 +742,45 @@ fn item_name(kind: &str, scope: &str) -> String {
   format!("{kind}@{scope}")
 }
 
+/// A new database key. It counts only once both files have it: a database whose key is only in
+/// memory can't be opened after a restart, so a failed write fails the call and keeps nothing.
+fn create_database_key(state: &mut State, name: &str) -> Result<SymmetricKey, KeySourceError> {
+  let key = SymmetricKey::generate(&mut OsRng);
+  let contents = contents_of(state)?;
+  replace_secret(contents, name, encode_key(&key));
+  // The keychain just said it has no entry: nothing to clean up there.
+  contents.moved.insert(name.to_owned());
+  state.is_dirty = true;
+  state.are_keys_dirty = true;
+  if let Err(error) = flush_all(state) {
+    forget_secret(contents_of(state)?, name);
+    // The secrets file may have it already; the next write takes it out again.
+    state.is_dirty = true;
+    return Err(error);
+  }
+  Ok(key)
+}
+
+/// Notes how deleting an old key entry went: gone, to try at the next start, or left in place.
+fn record_delete(contents: &mut Contents, name: String, outcome: Result<(), KeySourceError>) {
+  let Err(error) = outcome else {
+    contents.failed_deletes.remove(&name);
+    contents.moved.insert(name);
+    return;
+  };
+  let attempts = contents.failed_deletes.entry(name.clone()).or_insert(0);
+  *attempts += 1;
+  if *attempts < MAX_DELETE_ATTEMPTS {
+    tracing::info!(%error, "could not delete an old keychain entry; trying at the next start");
+    return;
+  }
+  tracing::info!(%error, "left an old keychain entry in place; the secrets files hold its key");
+  contents.failed_deletes.remove(&name);
+  contents.moved.insert(name);
+}
+
 fn contents_of(state: &mut State) -> Result<&mut Contents, KeySourceError> {
-  state
-    .maybe_contents
-    .as_mut()
-    .ok_or_else(|| KeySourceError::SecretsFile("the file is not open".to_owned()))
+  state.maybe_contents.as_mut().ok_or_else(not_open)
 }
 
 fn replace_secret(contents: &mut Contents, name: &str, secret: String) {
@@ -671,7 +802,7 @@ fn encode_key(key: &SymmetricKey) -> String {
   URL_SAFE_NO_PAD.encode(key.expose_secret())
 }
 
-/// A key in the file; one that doesn't decode counts as not there, the keychain still has it.
+/// A key in the files; one that doesn't decode counts as not there.
 fn stored_key(contents: &Contents, name: &str) -> Result<Option<SymmetricKey>, KeySourceError> {
   let Some(encoded) = contents.secrets.get(name) else {
     return Ok(None);
@@ -683,16 +814,63 @@ fn stored_key(contents: &Contents, name: &str) -> Result<Option<SymmetricKey>, K
   Ok(SymmetricKey::from_slice(&bytes))
 }
 
-/// The file's contents. A missing one is empty; one that doesn't open is set aside, which costs a
-/// sign-in. A file that can't be read at all (a disk error) stays where it is and fails the call.
-fn read_file(key: &SymmetricKey, directory: &Path) -> Result<Contents, KeySourceError> {
-  let file = match fs::File::open(directory.join(VAULT_FILE)) {
-    Ok(file) => file,
+/// Whether an item is a database or backup key, which the keys file holds as well.
+fn is_key_item(name: &str) -> bool {
+  [DATABASE_KEY_KIND, BACKUP_KEY_KIND].into_iter().any(|kind| {
+    name
+      .strip_prefix(kind)
+      .is_some_and(|scope| scope.starts_with('@'))
+  })
+}
+
+fn key_items(contents: &Contents) -> impl Iterator<Item = (&String, &String)> {
+  contents.secrets.iter().filter(|(name, _)| is_key_item(name))
+}
+
+/// What the keys file holds: the keys of `contents` and nothing else.
+fn kept_keys_of(contents: &Contents) -> Contents {
+  let mut kept = Contents::default();
+  kept.secrets = key_items(contents)
+    .map(|(name, key)| (name.clone(), key.clone()))
+    .collect();
+  kept
+}
+
+/// Takes the keys the secrets file lost (a damaged file, set aside) from the keys file. Where both
+/// have a usable key the secrets file wins: it is written last. Says whether it took any.
+fn recover_keys(contents: &mut Contents, kept: &Contents) -> bool {
+  let mut has_taken = false;
+  for (name, key) in key_items(kept) {
+    let is_usable = matches!(stored_key(contents, name), Ok(Some(_)));
+    if !is_usable && matches!(stored_key(kept, name), Ok(Some(_))) {
+      replace_secret(contents, name, key.clone());
+      has_taken = true;
+    }
+  }
+  has_taken
+}
+
+fn has_same_keys(contents: &Contents, kept: &Contents) -> bool {
+  key_items(contents).eq(key_items(kept))
+}
+
+fn has_sealed_files(directory: &Path) -> bool {
+  [&SECRETS, &KEYS]
+    .into_iter()
+    .any(|file| directory.join(file.name).exists())
+}
+
+/// A file's contents. A missing one is empty; one that doesn't open is set aside: the secrets file
+/// costs a sign-in, the keys file a second copy until the next write. A file that can't be read at
+/// all (a disk error) stays where it is and fails the call.
+fn read_file(key: &SymmetricKey, directory: &Path, file: &SealedFile) -> Result<Contents, KeySourceError> {
+  let handle = match fs::File::open(directory.join(file.name)) {
+    Ok(handle) => handle,
     Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Contents::default()),
     Err(error) => return Err(KeySourceError::SecretsFile(error.to_string())),
   };
   let mut sealed = Vec::new();
-  file
+  handle
     .take(MAX_FILE_BYTES + 1)
     .read_to_end(&mut sealed)
     .map_err(|error| KeySourceError::SecretsFile(error.to_string()))?;
@@ -703,17 +881,20 @@ fn read_file(key: &SymmetricKey, directory: &Path) -> Result<Contents, KeySource
   match parsed {
     Some(contents) => Ok(contents),
     None => {
-      tracing::warn!("the secrets file is damaged; signing in again is needed");
-      set_aside(directory);
+      tracing::warn!(
+        file = file.name,
+        "a sealed file of local secrets is damaged and set aside"
+      );
+      set_aside(directory, file);
       Ok(Contents::default())
     },
   }
 }
 
-fn set_aside(directory: &Path) {
-  if let Err(error) = fs::rename(directory.join(VAULT_FILE), directory.join(SET_ASIDE_FILE)) {
+fn set_aside(directory: &Path, file: &SealedFile) {
+  if let Err(error) = fs::rename(directory.join(file.name), directory.join(file.set_aside)) {
     // The next write replaces the file, which nothing can read anyway.
-    tracing::warn!(%error, "could not set the secrets file aside");
+    tracing::warn!(%error, file = file.name, "could not set a sealed file aside");
   }
 }
 
@@ -726,27 +907,42 @@ fn remove_if_there(path: &Path) {
   }
 }
 
-/// Writes changed contents. A failed write stays due: see [`State::is_dirty`].
+/// Writes changed contents to the secrets file. A failed write stays due: see [`State::is_dirty`].
 fn flush(state: &mut State) -> Result<(), KeySourceError> {
   if !state.is_dirty {
     return Ok(());
   }
-  write_file(state)?;
+  let contents = state.maybe_contents.as_ref().ok_or_else(not_open)?;
+  write_file(state, &SECRETS, contents)?;
   state.is_dirty = false;
   Ok(())
 }
 
-/// Seals the contents and replaces the file in one step, so a crash leaves the old file or the new
-/// one and never half of either.
-fn write_file(state: &State) -> Result<(), KeySourceError> {
-  let not_open = || KeySourceError::SecretsFile("the file is not open".to_owned());
+/// Writes both files where they are behind; the keys file is written only when a key changed.
+fn flush_all(state: &mut State) -> Result<(), KeySourceError> {
+  flush(state)?;
+  if !state.are_keys_dirty {
+    return Ok(());
+  }
+  let keys = kept_keys_of(state.maybe_contents.as_ref().ok_or_else(not_open)?);
+  write_file(state, &KEYS, &keys)?;
+  state.are_keys_dirty = false;
+  Ok(())
+}
+
+/// Seals `contents` and replaces the file in one step, so a crash leaves the old file or the new one
+/// and never half of either.
+fn write_file(state: &State, file: &SealedFile, contents: &Contents) -> Result<(), KeySourceError> {
   let directory = state.maybe_directory.as_ref().ok_or_else(not_open)?;
   let key = state.maybe_key.as_ref().ok_or_else(not_open)?;
-  let contents = state.maybe_contents.as_ref().ok_or_else(not_open)?;
   let plaintext = serialize(contents)?;
   let sealed = secret_file::seal(key, &plaintext, &mut OsRng)
     .map_err(|error| KeySourceError::SecretsFile(error.to_string()))?;
-  replace_file(directory, &sealed).map_err(|error| KeySourceError::SecretsFile(error.to_string()))
+  replace_file(directory, file, &sealed).map_err(|error| KeySourceError::SecretsFile(error.to_string()))
+}
+
+fn not_open() -> KeySourceError {
+  KeySourceError::SecretsFile("the file is not open".to_owned())
 }
 
 /// The contents as JSON, with no copy of a secret left behind on the heap: `serde_json::to_vec`
@@ -763,9 +959,9 @@ fn serialize(contents: &Contents) -> Result<Zeroizing<Vec<u8>>, KeySourceError> 
   Ok(writer.0)
 }
 
-fn replace_file(directory: &Path, sealed: &[u8]) -> io::Result<()> {
+fn replace_file(directory: &Path, file: &SealedFile, sealed: &[u8]) -> io::Result<()> {
   fs::create_dir_all(directory)?;
-  let temporary = directory.join(TEMPORARY_FILE);
+  let temporary = directory.join(file.temporary);
   // Left by a crash; created anew below, so its permissions are certainly ours.
   match fs::remove_file(&temporary) {
     Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
@@ -778,11 +974,11 @@ fn replace_file(directory: &Path, sealed: &[u8]) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     options.mode(0o600);
   }
-  let mut file = options.open(&temporary)?;
-  file.write_all(sealed)?;
-  file.sync_all()?;
-  drop(file);
-  fs::rename(&temporary, directory.join(VAULT_FILE))?;
+  let mut handle = options.open(&temporary)?;
+  handle.write_all(sealed)?;
+  handle.sync_all()?;
+  drop(handle);
+  fs::rename(&temporary, directory.join(file.name))?;
   sync_directory(directory);
   Ok(())
 }
@@ -839,6 +1035,11 @@ mod tests {
           deletes: 0
         }
       );
+      assert_eq!(
+        fake.dialogs(),
+        1,
+        "after an update with a new signature: one dialog"
+      );
     }
 
     /// What a start reads for the cached account comes from the file that is open anyway (issue
@@ -894,7 +1095,8 @@ mod tests {
       );
     }
 
-    /// Everything an existing install has, all at once; the counts are what the PR reports.
+    /// Everything an install from before 1.0.18 has, all at once; the counts are what the PR
+    /// reports. Afterwards the keychain holds the file's key and nothing else (#1223).
     #[test]
     fn the_migration_happens_once() {
       let fake = Fake::new();
@@ -907,15 +1109,17 @@ mod tests {
       let vault = start(&fake, &directory);
 
       // Reads: the file's key (none yet), session, refresh token, database key. Writes: the file's
-      // key, the backup key's copy. Deletes: the origin-only token, session, refresh token.
+      // key. Deletes: the origin-only token, session, refresh token, database and backup keys.
       assert_eq!(
         fake.counts(),
         Counts {
           reads: 4,
-          writes: 2,
-          deletes: 3
+          writes: 1,
+          deletes: 5
         }
       );
+      // Each existing entry is read and deleted once, the backup key's only deleted.
+      assert_eq!(fake.dialogs(), 7);
       assert_eq!(
         vault
           .load_token(TokenKind::RefreshToken, SERVER_A)
@@ -934,12 +1138,56 @@ mod tests {
         "old-session"
       );
       assert_eq!(vault.database_key(ACCOUNT_A).unwrap().expose_secret(), &[3; 32]);
-      assert!(!fake.has(VAULT_SERVICE, OLD_REFRESH_A), "old entries are gone");
-      assert!(!fake.has(VAULT_SERVICE, OLD_SESSION_A), "old entries are gone");
-      assert!(
-        fake.has(DATABASE_KEY_SERVICE, ACCOUNT_A),
-        "the database key stays"
+      assert_eq!(
+        fake.entries(),
+        vec![(VAULT_SERVICE.to_owned(), VAULT_KEY_ACCOUNT.to_owned())]
       );
+      drop(vault);
+
+      fake.reset_counts();
+      let vault = start(&fake, &directory);
+      assert_eq!(
+        fake.counts(),
+        Counts {
+          reads: 1,
+          writes: 0,
+          deletes: 0
+        }
+      );
+      assert_eq!(vault.database_key(ACCOUNT_A).unwrap().expose_secret(), &[3; 32]);
+      assert_eq!(
+        vault.kept_backup_key(ACCOUNT_A).unwrap().unwrap().expose_secret(),
+        &[4; 32]
+      );
+    }
+
+    /// An install of 1.0.18 to 1.0.21: the file has the tokens and copies of the keys, whose entries
+    /// are in the keychain too. Its first start deletes them, once, and reads nothing more.
+    #[test]
+    fn the_keychain_copies_of_the_keys_go_once() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      write_file_of_1_0_18(&fake, &directory);
+      fake.put_secret(DATABASE_KEY_SERVICE, ACCOUNT_A, &[3; 32]);
+      fake.put_secret(BACKUP_KEY_SERVICE, ACCOUNT_A, &[4; 32]);
+      fake.reset_counts();
+
+      let vault = start(&fake, &directory);
+
+      assert_eq!(
+        fake.counts(),
+        Counts {
+          reads: 1,
+          writes: 0,
+          deletes: 2
+        }
+      );
+      assert_eq!(fake.dialogs(), 3, "the file's key, then two deletes, once");
+      assert_eq!(
+        fake.entries(),
+        vec![(VAULT_SERVICE.to_owned(), VAULT_KEY_ACCOUNT.to_owned())]
+      );
+      assert_eq!(vault.database_key(ACCOUNT_A).unwrap().expose_secret(), &[3; 32]);
       drop(vault);
 
       fake.reset_counts();
@@ -952,10 +1200,22 @@ mod tests {
           deletes: 0
         }
       );
+      assert_eq!(fake.dialogs(), 1);
+      fs::remove_file(directory.path().join(VAULT_FILE)).unwrap();
+      let vault = reopen(&fake, &directory);
+      assert_eq!(
+        vault.database_key(ACCOUNT_A).unwrap().expose_secret(),
+        &[3; 32],
+        "the keys file had them before the entries went"
+      );
+      assert_eq!(
+        vault.kept_backup_key(ACCOUNT_A).unwrap().unwrap().expose_secret(),
+        &[4; 32]
+      );
     }
 
     #[test]
-    fn a_second_account_and_server_cost_one_read_once() {
+    fn a_second_account_from_before_the_move_costs_one_read_and_one_delete_once() {
       let fake = Fake::new();
       fake.put_secret(DATABASE_KEY_SERVICE, ACCOUNT_B, &[5; 32]);
       let directory = TestDir::new();
@@ -969,9 +1229,10 @@ mod tests {
         Counts {
           reads: 1,
           writes: 0,
-          deletes: 0
+          deletes: 1
         }
       );
+      assert!(!fake.has(DATABASE_KEY_SERVICE, ACCOUNT_B));
 
       fake.reset_counts();
       vault.database_key(ACCOUNT_B).unwrap();
@@ -1050,6 +1311,85 @@ mod tests {
           .load_token(TokenKind::RefreshToken, SERVER_A)
           .unwrap()
           .is_none()
+      );
+    }
+
+    /// A crash after the files took a key from the keychain and before its entry went: the next
+    /// start finishes the deletion, and the key is never only in the keychain or only in memory.
+    #[test]
+    fn a_crash_before_an_old_key_entry_is_deleted_finishes_the_next_time() {
+      let fake = Fake::new();
+      fake.put_secret(DATABASE_KEY_SERVICE, ACCOUNT_A, &[3; 32]);
+      let directory = TestDir::new();
+      fake.fail_deletes(true);
+      let vault = reopen(&fake, &directory);
+      assert_eq!(vault.database_key(ACCOUNT_A).unwrap().expose_secret(), &[3; 32]);
+      assert!(fake.has(DATABASE_KEY_SERVICE, ACCOUNT_A));
+      drop(vault);
+
+      fake.fail_deletes(false);
+      reopen(&fake, &directory).database_key(ACCOUNT_A).unwrap();
+      assert!(
+        !fake.has(DATABASE_KEY_SERVICE, ACCOUNT_A),
+        "the next start deletes it"
+      );
+      fs::remove_file(directory.path().join(VAULT_FILE)).unwrap();
+      assert_eq!(
+        reopen(&fake, &directory)
+          .database_key(ACCOUNT_A)
+          .unwrap()
+          .expose_secret(),
+        &[3; 32],
+        "both files had it before anything was deleted"
+      );
+    }
+
+    /// A refused delete (the user clicked "Deny") is asked again at the next starts, not in the same
+    /// run, and after three starts the entry is left: it holds a key the files have.
+    #[test]
+    fn an_old_key_entry_that_will_not_go_is_left_after_three_starts() {
+      let fake = Fake::new();
+      fake.put_secret(DATABASE_KEY_SERVICE, ACCOUNT_A, &[3; 32]);
+      fake.put_secret(BACKUP_KEY_SERVICE, ACCOUNT_A, &[4; 32]);
+      fake.fail_deletes(true);
+      let directory = TestDir::new();
+      let backup_key = SymmetricKey::from_bytes([4; 32]);
+      for _ in 0..MAX_DELETE_ATTEMPTS {
+        fake.reset_counts();
+        let vault = reopen(&fake, &directory);
+        vault.database_key(ACCOUNT_A).unwrap();
+        vault.keep_backup_key(ACCOUNT_A, &backup_key).unwrap();
+        vault.database_key(ACCOUNT_A).unwrap();
+        assert_eq!(
+          fake.counts().deletes,
+          1,
+          "one refusal stands for the rest of the run"
+        );
+      }
+
+      // The backup key's entry had its turns while the database key's refusal stood.
+      for _ in 0..MAX_DELETE_ATTEMPTS {
+        reopen(&fake, &directory)
+          .keep_backup_key(ACCOUNT_A, &backup_key)
+          .unwrap();
+      }
+      fake.reset_counts();
+      let vault = reopen(&fake, &directory);
+      vault.database_key(ACCOUNT_A).unwrap();
+      vault.keep_backup_key(ACCOUNT_A, &backup_key).unwrap();
+      assert_eq!(fake.counts().deletes, 0, "left in place");
+      assert!(fake.has(DATABASE_KEY_SERVICE, ACCOUNT_A));
+      drop(vault);
+
+      // A left entry is still a way back for a key both files lost.
+      fs::remove_file(directory.path().join(VAULT_FILE)).unwrap();
+      fs::remove_file(directory.path().join(KEYS_FILE)).unwrap();
+      assert_eq!(
+        reopen(&fake, &directory)
+          .database_key(ACCOUNT_A)
+          .unwrap()
+          .expose_secret(),
+        &[3; 32]
       );
     }
 
@@ -1160,79 +1500,57 @@ mod tests {
       assert_eq!(fake.secret(DATABASE_KEY_SERVICE, ACCOUNT_A).unwrap(), vec![3; 32]);
     }
 
-    /// The keychain copy is what survives a damaged file, so a refusal is asked again, once per
-    /// start, until the keychain has it.
+    /// Keeping a backup key needs no keychain any more: a keychain that refuses once the file is
+    /// open changes nothing.
     #[test]
-    fn a_refused_backup_key_is_written_at_a_later_start() {
+    fn a_backup_key_is_kept_while_the_keychain_refuses() {
       let fake = Fake::new();
       let directory = TestDir::new();
       let vault = reopen(&fake, &directory);
-      let key = SymmetricKey::from_bytes([4; 32]);
       vault.load_token(TokenKind::LocalSession, SERVER_A).unwrap();
       fake.deny(true);
-      assert!(vault.keep_backup_key(ACCOUNT_A, &key).is_err());
-      fake.reset_counts();
-      for _ in 0..5 {
-        vault.keep_backup_key(ACCOUNT_A, &key).unwrap();
-      }
-      assert_eq!(fake.counts(), Counts::default(), "not again in this run");
-      assert!(
-        vault.kept_backup_key(ACCOUNT_A).unwrap().is_some(),
-        "the file has it"
-      );
-      drop(vault);
-      fake.deny(false);
-      assert!(!fake.has(BACKUP_KEY_SERVICE, ACCOUNT_A));
-
-      fake.reset_counts();
-      let vault = reopen(&fake, &directory);
+      let key = SymmetricKey::from_bytes([4; 32]);
       vault.keep_backup_key(ACCOUNT_A, &key).unwrap();
-      assert_eq!(
-        fake.counts(),
-        Counts {
-          reads: 1,
-          writes: 1,
-          deletes: 0
-        }
+      assert!(
+        vault
+          .kept_backup_key(ACCOUNT_A)
+          .unwrap()
+          .unwrap()
+          .is_same_key(&key)
       );
-      assert_eq!(fake.secret(BACKUP_KEY_SERVICE, ACCOUNT_A).unwrap(), vec![4; 32]);
-      drop(vault);
-
-      fake.reset_counts();
-      reopen(&fake, &directory)
-        .keep_backup_key(ACCOUNT_A, &key)
-        .unwrap();
-      assert_eq!(
-        fake.counts(),
-        Counts {
-          reads: 1,
-          writes: 0,
-          deletes: 0
-        }
-      );
+      assert!(!fake.has(BACKUP_KEY_SERVICE, ACCOUNT_A));
     }
 
+    /// A refused clean-up of an old token entry stands for a minute: the old key entries wait for
+    /// the next start instead of raising more dialogs now, and nothing fails meanwhile.
     #[test]
-    fn an_unrelated_failure_only_delays_the_backup_key() {
+    fn a_standing_failure_only_delays_the_clean_up() {
       let fake = Fake::new();
       fake.put_text(VAULT_SERVICE, OLD_REFRESH_A, "old-refresh");
+      fake.put_secret(BACKUP_KEY_SERVICE, ACCOUNT_A, &[1; 32]);
       fake.fail_deletes(true);
       let directory = TestDir::new();
       let vault = reopen(&fake, &directory);
       vault.load_token(TokenKind::RefreshToken, SERVER_A).unwrap();
+      fake.reset_counts();
       let key = SymmetricKey::from_bytes([4; 32]);
-      assert!(
-        vault.keep_backup_key(ACCOUNT_A, &key).is_err(),
-        "the failed delete stands"
-      );
-      assert!(!fake.has(BACKUP_KEY_SERVICE, ACCOUNT_A));
+      vault.keep_backup_key(ACCOUNT_A, &key).unwrap();
+      assert_eq!(fake.counts(), Counts::default());
+      assert!(fake.has(BACKUP_KEY_SERVICE, ACCOUNT_A));
       drop(vault);
 
       fake.fail_deletes(false);
-      reopen(&fake, &directory)
-        .keep_backup_key(ACCOUNT_A, &key)
-        .unwrap();
-      assert!(fake.has(BACKUP_KEY_SERVICE, ACCOUNT_A));
+      let vault = reopen(&fake, &directory);
+      vault.keep_backup_key(ACCOUNT_A, &key).unwrap();
+      assert!(!fake.has(BACKUP_KEY_SERVICE, ACCOUNT_A));
+      assert!(
+        vault
+          .kept_backup_key(ACCOUNT_A)
+          .unwrap()
+          .unwrap()
+          .is_same_key(&key),
+        "the old entry's older key never wins"
+      );
     }
 
     #[test]
@@ -1326,9 +1644,20 @@ mod tests {
 
       allow_writes(&directory);
       vault.keep_backup_key(ACCOUNT_A, &key).unwrap();
-      assert!(fake.has(BACKUP_KEY_SERVICE, ACCOUNT_A));
+      drop(vault);
+      fs::remove_file(directory.path().join(VAULT_FILE)).unwrap();
+      assert!(
+        reopen(&fake, &directory)
+          .kept_backup_key(ACCOUNT_A)
+          .unwrap()
+          .unwrap()
+          .is_same_key(&key),
+        "the keys file has it too"
+      );
     }
 
+    /// A key from an old keychain entry works while the files can't be written; the entry stays
+    /// until they have it.
     #[test]
     fn a_database_key_works_without_the_file_and_is_kept_later() {
       let fake = Fake::new();
@@ -1338,13 +1667,53 @@ mod tests {
       vault.load_token(TokenKind::LocalSession, SERVER_A).unwrap();
       block_writes(&directory);
       assert_eq!(vault.database_key(ACCOUNT_A).unwrap().expose_secret(), &[3; 32]);
+      assert!(fake.has(DATABASE_KEY_SERVICE, ACCOUNT_A), "not deleted yet");
       allow_writes(&directory);
       vault.save_token(TokenKind::LocalSession, SERVER_A, "s").unwrap();
       drop(vault);
       fake.reset_counts();
       let vault = reopen(&fake, &directory);
       assert_eq!(vault.database_key(ACCOUNT_A).unwrap().expose_secret(), &[3; 32]);
-      assert_eq!(fake.counts().reads, 1, "only the file's key");
+      assert_eq!(
+        fake.counts(),
+        Counts {
+          reads: 1,
+          writes: 0,
+          deletes: 1
+        },
+        "the file's key, then the entry goes"
+      );
+      assert!(!fake.has(DATABASE_KEY_SERVICE, ACCOUNT_A));
+    }
+
+    /// A database made with a key only memory has would be lost at the next start.
+    #[test]
+    fn a_new_database_key_is_handed_out_only_once_both_files_have_it() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = reopen(&fake, &directory);
+      vault.load_token(TokenKind::LocalSession, SERVER_A).unwrap();
+      for temporary in [TEMPORARY_FILE, KEYS_TEMPORARY_FILE] {
+        block_write_of(&directory, temporary);
+        assert!(
+          vault.database_key(ACCOUNT_A).is_err(),
+          "{temporary} is in the way"
+        );
+        assert!(
+          vault.database_key(ACCOUNT_A).is_err(),
+          "and nothing is kept meanwhile"
+        );
+        allow_write_of(&directory, temporary);
+      }
+      let key = vault.database_key(ACCOUNT_A).unwrap();
+      drop(vault);
+      fs::remove_file(directory.path().join(VAULT_FILE)).unwrap();
+      assert!(
+        reopen(&fake, &directory)
+          .database_key(ACCOUNT_A)
+          .unwrap()
+          .is_same_key(&key)
+      );
     }
   }
 
@@ -1394,9 +1763,16 @@ mod tests {
       vault.load_token(TokenKind::LocalSession, SERVER_A).unwrap();
       assert!(directory.path().join(SET_ASIDE_FILE).exists());
 
+      fs::write(directory.path().join(KEYS_SET_ASIDE_FILE), b"set aside").unwrap();
+
       vault.purge_after_sign_out(&ITEMS).unwrap();
 
       assert!(!directory.path().join(SET_ASIDE_FILE).exists());
+      assert!(!directory.path().join(KEYS_SET_ASIDE_FILE).exists());
+      assert!(
+        directory.path().join(KEYS_FILE).exists(),
+        "the keys stay, like the database"
+      );
     }
 
     #[test]
@@ -1436,6 +1812,8 @@ mod tests {
   mod damaged_file {
     use super::*;
 
+    /// What the keychain copies were for before #1223: a damaged secrets file costs a sign-in,
+    /// never the database, and now no keychain dialog either.
     #[test]
     fn a_damaged_file_means_signing_in_and_keeps_the_keys() {
       let fake = Fake::new();
@@ -1444,6 +1822,7 @@ mod tests {
       let database_key = vault.database_key(ACCOUNT_A).unwrap();
       fs::write(directory.path().join(VAULT_FILE), b"not a sealed file").unwrap();
       drop(vault);
+      fake.reset_counts();
 
       let vault = reopen(&fake, &directory);
       assert!(
@@ -1455,7 +1834,7 @@ mod tests {
       );
       assert!(
         vault.database_key(ACCOUNT_A).unwrap().is_same_key(&database_key),
-        "the database key comes back from the keychain"
+        "the database key comes back from the keys file"
       );
       assert!(
         vault
@@ -1464,11 +1843,86 @@ mod tests {
           .is_some_and(|key| key.expose_secret() == &[4; 32]),
         "and so does the backup key"
       );
+      // The lost record of moved entries costs looks at entries that aren't there, which raise
+      // no dialog; the files' key is the only entry touched.
+      assert_eq!(fake.counts().writes, 0);
+      assert_eq!(fake.dialogs(), 1);
       assert_eq!(
         fs::read(directory.path().join(SET_ASIDE_FILE)).unwrap(),
         b"not a sealed file",
         "nothing is wiped"
       );
+      drop(vault);
+      fs::remove_file(directory.path().join(KEYS_FILE)).unwrap();
+      assert!(
+        reopen(&fake, &directory)
+          .database_key(ACCOUNT_A)
+          .unwrap()
+          .is_same_key(&database_key),
+        "and the secrets file has them again"
+      );
+    }
+
+    #[test]
+    fn a_damaged_keys_file_is_written_again() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let database_key = start(&fake, &directory).database_key(ACCOUNT_A).unwrap();
+      fs::write(directory.path().join(KEYS_FILE), b"not a sealed file").unwrap();
+
+      reopen(&fake, &directory).database_key(ACCOUNT_A).unwrap();
+
+      assert!(directory.path().join(KEYS_SET_ASIDE_FILE).exists());
+      fs::remove_file(directory.path().join(VAULT_FILE)).unwrap();
+      assert!(
+        reopen(&fake, &directory)
+          .database_key(ACCOUNT_A)
+          .unwrap()
+          .is_same_key(&database_key)
+      );
+    }
+
+    /// Where both files have a key, the secrets file is the newer word: the keys file follows it.
+    #[test]
+    fn the_secrets_file_wins_over_the_keys_file() {
+      let mut contents = Contents::default();
+      replace_secret(
+        &mut contents,
+        "database-key@a",
+        encode_key(&SymmetricKey::from_bytes([1; 32])),
+      );
+      replace_secret(&mut contents, "oidc-refresh-token@a", "token".to_owned());
+      let mut kept = Contents::default();
+      replace_secret(
+        &mut kept,
+        "database-key@a",
+        encode_key(&SymmetricKey::from_bytes([2; 32])),
+      );
+      replace_secret(
+        &mut kept,
+        "backup-key@b",
+        encode_key(&SymmetricKey::from_bytes([3; 32])),
+      );
+      replace_secret(&mut kept, "database-key@c", "not a key".to_owned());
+
+      assert!(recover_keys(&mut contents, &kept));
+
+      let key = |name| {
+        stored_key(&contents, name)
+          .unwrap()
+          .map(|key| key.expose_secret()[0])
+      };
+      assert_eq!(key("database-key@a"), Some(1));
+      assert_eq!(key("backup-key@b"), Some(3));
+      assert_eq!(key("database-key@c"), None, "an unusable key is not taken");
+      assert!(!has_same_keys(&contents, &kept));
+      let written = kept_keys_of(&contents);
+      assert_eq!(
+        written.secrets.keys().collect::<Vec<_>>(),
+        ["backup-key@b", "database-key@a"],
+        "the keys file holds keys only"
+      );
+      assert!(has_same_keys(&contents, &written));
     }
 
     #[test]
@@ -1525,12 +1979,17 @@ mod tests {
       assert!(!directory.path().join(SET_ASIDE_FILE).exists());
     }
 
+    /// The cost of one keychain item (#1223): the keys go with the files' key. Both files are set
+    /// aside, not deleted, and an old keychain entry not yet deleted still brings its key back.
     #[test]
-    fn a_file_whose_key_is_gone_is_set_aside() {
+    fn a_files_key_that_is_gone_sets_both_files_aside() {
       let fake = Fake::new();
       let directory = TestDir::new();
       let vault = start(&fake, &directory);
       let database_key = vault.database_key(ACCOUNT_A).unwrap();
+      fake.put_secret(DATABASE_KEY_SERVICE, ACCOUNT_B, &[5; 32]);
+      fake.fail_deletes(true);
+      vault.database_key(ACCOUNT_B).unwrap();
       fake.remove(VAULT_SERVICE, VAULT_KEY_ACCOUNT);
       drop(vault);
 
@@ -1542,7 +2001,9 @@ mod tests {
           .is_none()
       );
       assert!(directory.path().join(SET_ASIDE_FILE).exists());
-      assert!(vault.database_key(ACCOUNT_A).unwrap().is_same_key(&database_key));
+      assert!(directory.path().join(KEYS_SET_ASIDE_FILE).exists());
+      assert!(!vault.database_key(ACCOUNT_A).unwrap().is_same_key(&database_key));
+      assert_eq!(vault.database_key(ACCOUNT_B).unwrap().expose_secret(), &[5; 32]);
     }
   }
 
@@ -1557,10 +2018,14 @@ mod tests {
       vault
         .save_token(TokenKind::RefreshToken, SERVER_A, "plain-token-text")
         .unwrap();
-      let bytes = fs::read(directory.path().join(VAULT_FILE)).unwrap();
-      let text = String::from_utf8_lossy(&bytes);
-      assert!(!text.contains("plain-token-text"));
-      assert!(!text.contains("example.com"));
+      vault.database_key(ACCOUNT_A).unwrap();
+      for file in [VAULT_FILE, KEYS_FILE] {
+        let bytes = fs::read(directory.path().join(file)).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains("plain-token-text"));
+        assert!(!text.contains("example.com"));
+        assert!(!text.contains("database-key"));
+      }
     }
 
     #[cfg(unix)]
@@ -1572,11 +2037,14 @@ mod tests {
       let directory = TestDir::new();
       let vault = reopen(&fake, &directory);
       vault.save_token(TokenKind::RefreshToken, SERVER_A, "t").unwrap();
-      let mode = fs::metadata(directory.path().join(VAULT_FILE))
-        .unwrap()
-        .permissions()
-        .mode();
-      assert_eq!(mode & 0o777, 0o600);
+      vault.database_key(ACCOUNT_A).unwrap();
+      for file in [VAULT_FILE, KEYS_FILE] {
+        let mode = fs::metadata(directory.path().join(file))
+          .unwrap()
+          .permissions()
+          .mode();
+        assert_eq!(mode & 0o777, 0o600, "{file}");
+      }
     }
 
     /// A crash after writing the temporary file: the old file is whole, the leftover is ignored and
@@ -1715,15 +2183,16 @@ mod tests {
       );
     }
 
+    /// The keychain holds the files' key and nothing else (#1223).
     #[test]
-    fn a_new_database_key_goes_to_the_keychain_too() {
+    fn a_new_database_key_stays_out_of_the_keychain() {
       let fake = Fake::new();
       let directory = TestDir::new();
       let vault = reopen(&fake, &directory);
       let key = vault.database_key(ACCOUNT_A).unwrap();
       assert_eq!(
-        fake.secret(DATABASE_KEY_SERVICE, ACCOUNT_A).unwrap(),
-        key.expose_secret().to_vec()
+        fake.entries(),
+        vec![(VAULT_SERVICE.to_owned(), VAULT_KEY_ACCOUNT.to_owned())]
       );
       drop(vault);
       assert!(
@@ -1742,14 +2211,30 @@ mod tests {
       let first = SymmetricKey::from_bytes([1; 32]);
       let second = SymmetricKey::from_bytes([2; 32]);
       vault.keep_backup_key(ACCOUNT_A, &first).unwrap();
+      fake.reset_counts();
       vault.keep_backup_key(ACCOUNT_A, &second).unwrap();
-      assert_eq!(fake.secret(BACKUP_KEY_SERVICE, ACCOUNT_A).unwrap(), vec![2; 32]);
+      assert_eq!(
+        fake.counts(),
+        Counts::default(),
+        "a changed key touches no keychain"
+      );
+      assert!(!fake.has(BACKUP_KEY_SERVICE, ACCOUNT_A));
       assert!(
         vault
           .kept_backup_key(ACCOUNT_A)
           .unwrap()
           .unwrap()
           .is_same_key(&second)
+      );
+      drop(vault);
+      fs::remove_file(directory.path().join(VAULT_FILE)).unwrap();
+      assert!(
+        reopen(&fake, &directory)
+          .kept_backup_key(ACCOUNT_A)
+          .unwrap()
+          .unwrap()
+          .is_same_key(&second),
+        "the keys file follows"
       );
     }
 
@@ -1903,6 +2388,9 @@ mod tests {
   struct FakeInner {
     entries: HashMap<(String, String), Vec<u8>>,
     counts: Counts,
+    /// Accesses to an entry that exists: what can raise a dialog on macOS when the app's signature
+    /// changed. Creating an entry or looking for one that isn't there raises none.
+    dialogs: u32,
     is_denied: bool,
     are_deletes_failing: bool,
     is_next_read_hidden: bool,
@@ -1922,7 +2410,14 @@ mod tests {
     }
 
     fn reset_counts(&self) {
-      self.with(|inner| inner.counts = Counts::default());
+      self.with(|inner| {
+        inner.counts = Counts::default();
+        inner.dialogs = 0;
+      });
+    }
+
+    fn dialogs(&self) -> u32 {
+      self.with(|inner| inner.dialogs)
     }
 
     fn deny(&self, is_denied: bool) {
@@ -1965,6 +2460,24 @@ mod tests {
     fn remove(&self, service: &str, account: &str) {
       self.with(|inner| inner.entries.remove(&(service.to_owned(), account.to_owned())));
     }
+
+    /// Every entry's service and account, sorted.
+    fn entries(&self) -> Vec<(String, String)> {
+      let mut entries = self.with(|inner| inner.entries.keys().cloned().collect::<Vec<_>>());
+      entries.sort();
+      entries
+    }
+  }
+
+  impl FakeInner {
+    fn count_dialog(&mut self, service: &str, account: &str) {
+      if self
+        .entries
+        .contains_key(&(service.to_owned(), account.to_owned()))
+      {
+        self.dialogs += 1;
+      }
+    }
   }
 
   impl Keystore for Fake {
@@ -1975,6 +2488,7 @@ mod tests {
     ) -> Result<Option<Zeroizing<Vec<u8>>>, KeySourceError> {
       self.with(|inner| {
         inner.counts.reads += 1;
+        inner.count_dialog(service, account);
         if inner.is_denied {
           return Err(denied());
         }
@@ -2001,6 +2515,7 @@ mod tests {
     fn write_secret(&self, service: &str, account: &str, secret: &[u8]) -> Result<(), KeySourceError> {
       self.with(|inner| {
         inner.counts.writes += 1;
+        inner.count_dialog(service, account);
         if inner.is_denied {
           return Err(denied());
         }
@@ -2014,6 +2529,7 @@ mod tests {
     fn delete(&self, service: &str, account: &str) -> Result<(), KeySourceError> {
       self.with(|inner| {
         inner.counts.deletes += 1;
+        inner.count_dialog(service, account);
         if inner.is_denied || inner.are_deletes_failing {
           return Err(denied());
         }
@@ -2053,16 +2569,47 @@ mod tests {
     vault
   }
 
-  /// Makes every write of the file fail until [`allow_writes`]: a directory stands where the
-  /// temporary file has to go. The vault must have opened the file before.
+  /// The secrets file as versions 1.0.18 to 1.0.21 left it for one server and account: tokens moved
+  /// out of the keychain, and copies of the keys, whose entries the test puts in the keychain.
+  fn write_file_of_1_0_18(fake: &Fake, directory: &TestDir) {
+    let file_key = SymmetricKey::from_bytes([7; 32]);
+    fake.put_secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT, file_key.expose_secret());
+    let refresh = token_name(TokenKind::RefreshToken, SERVER_A);
+    let session = token_name(TokenKind::LocalSession, SERVER_A);
+    let origin_only = token_name(TokenKind::RefreshToken, "https://origin-only.example.com");
+    let layout = serde_json::json!({
+      "secrets": {
+        refresh.clone(): "refresh-a",
+        item_name(DATABASE_KEY_KIND, ACCOUNT_A): encode_key(&SymmetricKey::from_bytes([3; 32])),
+        item_name(BACKUP_KEY_KIND, ACCOUNT_A): encode_key(&SymmetricKey::from_bytes([4; 32])),
+      },
+      "moved": [refresh, session, origin_only],
+      "missing_from_keychain": [],
+    });
+    let sealed = secret_file::seal(&file_key, layout.to_string().as_bytes(), &mut OsRng).unwrap();
+    fs::write(directory.path().join(VAULT_FILE), sealed).unwrap();
+  }
+
+  /// Makes every write of the files fail until [`allow_writes`]: a directory stands where the
+  /// temporary files have to go. The vault must have opened the files before.
   fn block_writes(directory: &TestDir) {
-    let temporary = directory.path().join(TEMPORARY_FILE);
-    drop(fs::remove_file(&temporary));
-    fs::create_dir(&temporary).unwrap();
+    block_write_of(directory, TEMPORARY_FILE);
+    block_write_of(directory, KEYS_TEMPORARY_FILE);
   }
 
   fn allow_writes(directory: &TestDir) {
-    fs::remove_dir(directory.path().join(TEMPORARY_FILE)).unwrap();
+    allow_write_of(directory, TEMPORARY_FILE);
+    allow_write_of(directory, KEYS_TEMPORARY_FILE);
+  }
+
+  fn block_write_of(directory: &TestDir, temporary: &str) {
+    let path = directory.path().join(temporary);
+    drop(fs::remove_file(&path));
+    fs::create_dir(&path).unwrap();
+  }
+
+  fn allow_write_of(directory: &TestDir, temporary: &str) {
+    fs::remove_dir(directory.path().join(temporary)).unwrap();
   }
 
   /// An injected clock for the time a failure stands.

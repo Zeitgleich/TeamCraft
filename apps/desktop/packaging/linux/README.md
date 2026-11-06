@@ -184,7 +184,7 @@ warm-up drops the workspace crates from the cargo target before saving, like rus
 | `--device=dri`                               | GPU: WebKit, the effects shaders, VA-API encoding                        |
 | `--socket=pulseaudio`                        | Microphone and speakers (PipeWire serves the PulseAudio protocol)        |
 | `--filesystem=xdg-run/pipewire-0`            | Screen shares with sound (see below)                                     |
-| `--talk-name=org.freedesktop.secrets`        | The secrets file key and the database keys in the desktop keyring       |
+| `--talk-name=org.freedesktop.secrets`        | The key of the sealed secrets files in the desktop keyring              |
 | `--talk-name=org.freedesktop.Notifications`  | Mention and direct-message notifications                                 |
 
 No home directory, no `--device=all`: the camera, screen sharing, push-to-talk, file dialogs and

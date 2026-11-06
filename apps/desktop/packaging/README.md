@@ -26,8 +26,8 @@ cargo tauri build --no-bundle                     # just target/release/teamcraf
 Package metadata (name, description, license, category) comes from `tauri.conf.json`. The package is
 called `team-craft` on Debian and Fedora because the Tauri bundler derives it from the product name.
 Both `.deb` and `.rpm` pull in WebKitGTK and GTK automatically and recommend a keyring service
-(`gnome-keyring`) because the key of the sealed file of local secrets and the database keys are
-stored there.
+(`gnome-keyring`) because the key of the sealed files of local secrets, which hold the tokens and
+the database keys, is stored there.
 
 ## Updates
 
