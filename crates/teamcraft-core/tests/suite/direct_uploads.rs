@@ -188,13 +188,13 @@ async fn the_limit_also_comes_with_the_full_sync() {
   );
 }
 
-/// A server that publishes no limit (an older one) leaves the client's default, compared with the
-/// plain size as before; a published limit replaces it.
+/// A host's explicit cap (the bridge's) holds besides the server's limit; without one the server's
+/// limit alone decides, also above 100 MiB.
 #[tokio::test]
-async fn without_a_published_limit_the_clients_default_applies() {
+async fn an_explicit_client_cap_below_the_server_limit_still_applies() {
   let server = FakeServer::new();
   let settings = ClientSettings {
-    max_upload_bytes: 1000,
+    max_upload_bytes: Some(1000),
     ..settings()
   };
   let mut alice = Peer::enroll_with_settings(&server, "Alice", settings).await;
@@ -203,6 +203,13 @@ async fn without_a_published_limit_the_clients_default_applies() {
     .create_channel(alice.space().await, "ci")
     .await
     .unwrap();
+  server.publish_event(
+    &[alice.client.user_id()],
+    &GatewayEvent::AttachmentLimitUpdate {
+      max_attachment_bytes: encrypted_len(5000, DEFAULT_CHUNK_SIZE),
+    },
+  );
+  settle(&mut [&mut alice]).await;
   let over = sample(1001);
   let mut upload = direct(
     channel,
@@ -215,25 +222,59 @@ async fn without_a_published_limit_the_clients_default_applies() {
     alice.client.start_direct_upload(&mut upload).await,
     Err(DirectUploadError::TooLarge)
   ));
-  alice.client.abandon_direct_upload(&upload).await;
+  assert_eq!(
+    server.attachment_count(),
+    0,
+    "the client's cap, not the server's limit"
+  );
+  let fits = sample(1000);
+  let mut upload = direct(
+    channel,
+    bytes_source(&fits),
+    "fits.bin",
+    "application/octet-stream",
+    fits.len(),
+  );
+  upload_whole(&mut alice, &mut upload).await;
+  assert_eq!(server.attachment_count(), 1);
+}
 
-  // Now the server publishes a limit that takes the file: the default no longer applies.
+/// A server that publishes no limit (an older one) leaves an app on the 100 MiB default, compared
+/// with the plain size as before; a published limit replaces it.
+#[tokio::test]
+async fn without_a_published_limit_the_clients_default_applies() {
+  let (server, mut alice, _bob, channel) = channel_with_two().await;
+  // No cap of the host and nothing published: a small file is far below the default.
+  let small = sample(1001);
+  let mut upload = direct(
+    channel,
+    bytes_source(&small),
+    "small.bin",
+    "application/octet-stream",
+    small.len(),
+  );
+  upload_whole(&mut alice, &mut upload).await;
+  assert_eq!(server.attachment_count(), 1);
+
+  // Once the server publishes a smaller limit, that one decides.
   server.publish_event(
     &[alice.client.user_id()],
     &GatewayEvent::AttachmentLimitUpdate {
-      max_attachment_bytes: encrypted_len(5000, DEFAULT_CHUNK_SIZE),
+      max_attachment_bytes: encrypted_len(1000, DEFAULT_CHUNK_SIZE),
     },
   );
   settle(&mut [&mut alice]).await;
   let mut upload = direct(
     channel,
-    bytes_source(&over),
-    "over.bin",
+    bytes_source(&small),
+    "small.bin",
     "application/octet-stream",
-    over.len(),
+    small.len(),
   );
-  upload_whole(&mut alice, &mut upload).await;
-  assert_eq!(server.attachment_count(), 1);
+  assert!(matches!(
+    alice.client.start_direct_upload(&mut upload).await,
+    Err(DirectUploadError::TooLarge)
+  ));
 }
 
 #[tokio::test]

@@ -78,6 +78,8 @@ pub use devices::OwnDeviceCheck;
 pub(crate) use enroll::{WRAPPED_KEYS_KEY, decode_wrapped_keys};
 /// Where the engine records its upload limit for the UI.
 pub const MAX_UPLOAD_KEY: &str = "max_upload_bytes";
+/// What a client assumes as the largest upload while the server publishes no limit.
+pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 /// Account record: the largest attachment the server takes (bytes of the encrypted file), as the
 /// server published it; absent for servers that don't.
 pub const SERVER_ATTACHMENT_LIMIT_KEY: &str = "server_max_attachment_bytes";
@@ -172,10 +174,10 @@ pub struct ClientSettings {
   /// Delay per rank before a member commits a colleague's new device, and between retries while
   /// the device has no key package yet.
   pub device_add_stagger: std::time::Duration,
-  /// Largest file this client uploads while it doesn't know the server's limit (the server's
-  /// default limit; it rejects larger ones too). Servers publish their own
-  /// (`max_attachment_bytes`, bytes of the encrypted file): that replaces this.
-  pub max_upload_bytes: u64,
+  /// A cap on the plain size of files this client uploads, set by hosts that want one (the
+  /// bridge's operator config); it holds besides the server's limit. `None` (apps): the server's
+  /// published limit decides, and servers that publish none get [`DEFAULT_MAX_UPLOAD_BYTES`].
+  pub max_upload_bytes: Option<u64>,
   /// This process is short of memory (the iOS notification extension): it doesn't move a version
   /// before 1.0.9's MLS record (the client doesn't open, [`CoreError::MlsStateNotMoved`]) or tidy
   /// the MLS records up; the app does when it opens.
@@ -493,7 +495,7 @@ impl Default for ClientSettings {
       suspect_deletion_window: std::time::Duration::from_secs(60 * 60),
       max_group_info_bytes: 256 * 1024,
       max_missed_keys: 512,
-      max_upload_bytes: 100 * 1024 * 1024,
+      max_upload_bytes: None,
       leaves_mls_upkeep_to_app: false,
       // A month: long enough to notice and ask.
       mls_set_aside_grace: std::time::Duration::from_secs(30 * 24 * 60 * 60),
@@ -554,7 +556,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     // The UI shows the upload limit before sending. Only when it changed: a commit here on every
     // open (the iOS notification extension's too) is a commit for nothing.
-    let maybe_recorded: Option<u64> =
+    let maybe_recorded: Option<Option<u64>> =
       records::get_json(&store, Table::Account, MAX_UPLOAD_KEY).unwrap_or(None);
     if maybe_recorded != Some(settings.max_upload_bytes) {
       records::put_json(&store, Table::Account, MAX_UPLOAD_KEY, &settings.max_upload_bytes)?;

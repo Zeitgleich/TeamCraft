@@ -767,14 +767,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// Whether the server would refuse a file of `size_bytes`: its encrypted size against the limit
-  /// the server published, or the plaintext size against the client's default for servers that
-  /// don't.
+  /// Whether the file is too large: its encrypted size against the limit the server published
+  /// (the plain size against the default for servers that don't), and its plain size against the
+  /// host's own cap, if it set one.
   pub(super) fn is_too_large(&self, size_bytes: u64) -> bool {
-    match self.server_attachment_limit() {
+    let is_over_server = match self.server_attachment_limit() {
       Some(limit) => encrypted_len(size_bytes, DEFAULT_CHUNK_SIZE) > limit,
-      None => size_bytes > self.settings.max_upload_bytes,
-    }
+      None => size_bytes > super::DEFAULT_MAX_UPLOAD_BYTES,
+    };
+    is_over_server || self.settings.max_upload_bytes.is_some_and(|cap| size_bytes > cap)
   }
 
   /// The attachment limit the server published, if it does.

@@ -34,7 +34,7 @@ pub fn client_settings() -> ClientSettings {
     pending_addition_expiry: Duration::MAX,
     makes_thumbnails: false,
     creates_notes_to_self: false,
-    max_upload_bytes: u64::MAX,
+    max_upload_bytes: None,
     ..ClientSettings::default()
   }
 }

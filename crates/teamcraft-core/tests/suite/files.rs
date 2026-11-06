@@ -187,9 +187,11 @@ async fn uploads_resume_after_network_loss_and_respect_the_size_limit() {
 async fn the_composer_limit_follows_the_limit_the_server_publishes() {
   let (server, mut alice, mut bob, _channel) = channel_with_two().await;
   let alice_ui = backend_of(&alice);
-  // Nothing published and the default not recorded yet (a freshly enrolled client has not been
-  // opened from its store): no limit to show.
-  assert_eq!(alice_ui.max_upload_bytes(), None);
+  assert_eq!(
+    alice_ui.max_upload_bytes(),
+    Some(teamcraft_core::client::DEFAULT_MAX_UPLOAD_BYTES),
+    "nothing published: the default"
+  );
   server.publish_event(
     &[alice.client.user_id()],
     &teamcraft_proto::GatewayEvent::AttachmentLimitUpdate {
