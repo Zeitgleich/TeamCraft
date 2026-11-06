@@ -98,12 +98,15 @@ enum class PushPath {
   PLACEHOLDER_NOT_DECRYPTED,
   PLACEHOLDER_TIMED_OUT,
 
-  /** How a placeholder got its text: the try right away, a later retry, the sync. */
+  /**
+   * How a message got its text when the first try didn't read it: a try before the post (no
+   * placeholder went out), a later retry, the sync.
+   */
   FILLED_HOLD,
   FILLED_RETRY,
   FILLED_STORE,
 
-  /** The hold ended without the text: the phone alerted for the placeholder. */
+  /** A hold of an earlier version ended without the text: the phone alerted for the placeholder. */
   ALERT_RELEASED,
 
   /** The last retry did not read it either; what the sync brings can still fill it. */

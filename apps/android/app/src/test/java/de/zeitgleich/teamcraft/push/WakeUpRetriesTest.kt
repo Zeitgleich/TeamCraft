@@ -1,7 +1,6 @@
 package de.zeitgleich.teamcraft.push
 
 import kotlin.coroutines.cancellation.CancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -179,37 +178,78 @@ class WakeUpRetriesTest {
     assertEquals(listOf(PushPath.FILLED_STORE), world.filled)
   }
 
-  /** Muted during the hold: the try right away doesn't alert for it. */
+  /** The radio wakes a moment after the push: the message is read before anything is posted. */
   @Test
-  fun theTryRightAwayRespectsAMute() = runBlocking {
-    world.hold()
-    world.openAgain = { placeholder.copy(maybeSuppression = NotificationSuppression.MUTED) }
-
-    world.retries.readSoon(PAYLOAD, placeholder)
-
-    assertEquals(listOf(HoldEnd.SILENT), world.holdEnds)
-    assertEquals(listOf(1), world.enqueued)
-    assertEquals(1, world.holdEndJobs)
-  }
-
-  /**
-   * A slow link: the read position costs up to 4 s more, which the try right away hasn't got, and a
-   * text read must not be thrown away for it. So that try never asks; the later ones do.
-   */
-  @Test
-  fun theTryRightAwayKeepsATextReadOnASlowLink() = runBlocking {
-    world.hold()
+  fun theWaitReadsTheTextOnceTheNetworkIsBack() = runBlocking {
+    var tries = 0
     world.openAgain = {
-      delay(SLOW_FETCH_MS)
-      text
+      tries += 1
+      if (tries < 3) placeholder else text
     }
 
-    world.retries.readSoon(PAYLOAD, placeholder)
+    val settled = world.retries.settle(PAYLOAD, placeholder)
 
-    assertEquals(listOf(PushPath.FILLED_HOLD), world.filled)
-    assertEquals(1, world.openedSoon)
+    assertEquals(text, settled)
+    assertEquals(3, world.openedSoon)
     assertEquals(0, world.opened)
-    assertTrue(world.holdEnds.isEmpty())
+    assertTrue(world.now - NOW < PushRetry.SETTLE_BOUND_MS)
+  }
+
+  /** Should the process die during the wait, a quiet later look shows the message; after it, that look goes. */
+  @Test
+  fun theWaitKeepsALookInCaseTheProcessDies() = runBlocking {
+    world.openAgain = { text }
+
+    world.retries.settle(PAYLOAD, placeholder)
+
+    // Its first attempt waits longer than the wait itself, so the two never overlap.
+    assertEquals(listOf(3), world.enqueued)
+    assertTrue(PushRetry.delayMs(3) > PushRetry.SETTLE_BOUND_MS)
+    assertEquals(listOf(RetryOf.UNOPENED_QUIET), world.enqueuedFor)
+    assertEquals(listOf(3), world.cancelled)
+  }
+
+  @Test
+  fun withoutANetworkTheWaitEndsAtItsBoundWithoutTrying() = runBlocking {
+    world.isOnline = false
+    world.openAgain = { error("no fetch without a network") }
+
+    val settled = world.retries.settle(PAYLOAD, placeholder)
+
+    assertEquals(placeholder, settled)
+    assertEquals(0, world.openedSoon)
+    assertTrue(world.now - NOW <= PushRetry.SETTLE_BOUND_MS)
+  }
+
+  /** Every try fails at once (as on the phone, 16 ms apart): the tries are spread over the wait, not spent at once. */
+  @Test
+  fun failingTriesAreSpreadOverTheWaitAndEndAtItsBound() = runBlocking {
+    world.openAgain = { throw IllegalArgumentException("network unreachable") }
+
+    val settled = world.retries.settle(PAYLOAD, placeholder)
+
+    assertEquals(placeholder, settled)
+    assertTrue(world.openedSoon in 20..40)
+    assertTrue(world.pauses.zipWithNext().all { (before, after) -> after >= before })
+    assertTrue(world.now - NOW <= PushRetry.SETTLE_BOUND_MS)
+  }
+
+  @Test
+  fun aTextOnTheFirstTryNeedsNoWait() = runBlocking {
+    world.openAgain = { error("no second try expected") }
+
+    val settled = world.retries.settle(PAYLOAD, text)
+
+    assertEquals(text, settled)
+    assertTrue(world.pauses.isEmpty())
+  }
+
+  @Test
+  fun aPlaceholderThatWentOutGetsItsRetries() {
+    world.retries.afterPlaceholder(PAYLOAD)
+
+    assertEquals(listOf(1), world.enqueued)
+    assertEquals(listOf(RetryOf.PLACEHOLDER), world.enqueuedFor)
   }
 
   @Test
@@ -221,20 +261,6 @@ class WakeUpRetriesTest {
 
     assertEquals(1, world.opened)
     assertEquals(0, world.openedSoon)
-  }
-
-  @Test
-  fun theTryRightAwayReleasesAfterAFailureButNotInACar() = runBlocking {
-    world.hold()
-    world.openAgain = { throw IllegalArgumentException("busy store") }
-    world.retries.readSoon(PAYLOAD, placeholder)
-    assertEquals(listOf(HoldEnd.ALERT), world.holdEnds)
-
-    world.hold()
-    world.isInCar = true
-    world.holdEnds.clear()
-    world.retries.readSoon(PAYLOAD, placeholder)
-    assertTrue(world.holdEnds.isEmpty())
   }
 
   @Test
@@ -273,6 +299,10 @@ class WakeUpRetriesTest {
     var fromStore: suspend () -> PushNotification = { throw IllegalStateException("no core") }
     val holdEnds = mutableListOf<HoldEnd>()
     val enqueued = mutableListOf<Int>()
+    val enqueuedFor = mutableListOf<RetryOf>()
+    val pauses = mutableListOf<Long>()
+    var isOnline = true
+    val cancelled = mutableListOf<Int>()
     val filled = mutableListOf<PushPath>()
     val openedLate = mutableListOf<Boolean>()
     var isInCar = false
@@ -284,7 +314,6 @@ class WakeUpRetriesTest {
     var openedSoon = 0
     var gaveUp = 0
     var capped = 0
-    var holdEndJobs = 0
     private var held = listOf<HeldLine>()
 
     /** A placeholder of [PAYLOAD] shows, with its alert held. */
@@ -341,10 +370,11 @@ class WakeUpRetriesTest {
       scheduler = object : RetryScheduler {
         override fun enqueueRetry(payload: ByteArray, attempt: Int, retryOf: RetryOf, arrivedAtMs: Long) {
           enqueued += attempt
+          enqueuedFor += retryOf
         }
 
-        override fun scheduleHoldEnd(delayMs: Long) {
-          holdEndJobs += 1
+        override fun cancelRetry(payload: ByteArray, attempt: Int) {
+          cancelled += attempt
         }
 
         override fun pendingChains() = pending
@@ -355,13 +385,20 @@ class WakeUpRetriesTest {
       isAppVisible = { isAppVisible },
       isSigningOut = { false },
       elapsedNow = { now },
+      awaitNetwork = { timeoutMs ->
+        if (!isOnline) now += timeoutMs
+        isOnline
+      },
       log = {},
+      pause = { pauseMs ->
+        pauses += pauseMs
+        now += pauseMs
+      },
     )
   }
 
   private companion object {
     const val NOW = 1_000_000L
-    const val SLOW_FETCH_MS = 50L
     val PAYLOAD = byteArrayOf(1, 2, 3)
   }
 }

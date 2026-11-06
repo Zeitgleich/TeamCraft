@@ -22,6 +22,12 @@
 //! pass `adb reverse`; `adb reverse` the fallback's port, `ss -ltnp` shows it), and `call dm 60` or
 //! `call channel 60` in the control file starts a call with a test tone in the direct message or
 //! the first channel.
+//!
+//! Commands for the push tests of the phone (issue #1249), each followed by a message the device is
+//! told about: `newchannel` (Alice opens a channel with Bob and the device's user, which the device
+//! learns of only through the push or a sync), `rekey` (Alice takes Bob out of the first channel and
+//! back in: two commits the device hasn't seen) and `newdevice` (Bob links another device, which the
+//! apps add to every group).
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -30,7 +36,7 @@ use teamcraft_core::client::OutgoingFile;
 use teamcraft_e2e::call::{hold_call, join_call};
 use teamcraft_e2e::scenario::space_with;
 use teamcraft_e2e::{Peer, Stack};
-use teamcraft_proto::{ConversationId, UserId};
+use teamcraft_proto::{ConversationId, SpaceId, UserId};
 
 const PORT: u16 = 8091;
 /// The web client's policy: the dev realm's sign-in page on :8080 and the dev storage on :3900
@@ -85,7 +91,8 @@ async fn serve_a_large_workspace_to_a_device() {
   let mut alice = Peer::enroll(&stack, "alice").await;
   let mut bob = Peer::enroll(&stack, "bob").await;
   let device_user = wait_for_device(&stack, &alice, &user).await;
-  let channels = seed(&stack, &mut alice, &mut bob, device_user, size).await;
+  let (channels, space) = seed(&stack, &mut alice, &mut bob, device_user, size).await;
+  let mut bob_devices = Vec::new();
   let control = burst_file();
   eprintln!(
     "WORKSPACE: ready, {} conversations; write a number to {} to send that many more, or \
@@ -135,6 +142,35 @@ async fn serve_a_large_workspace_to_a_device() {
             tokio::join!(hold_call(alice_call, duration), hold_call(bob_call, duration));
           eprintln!("WORKSPACE: call ended: {alice_stats:?} {bob_stats:?}");
         }
+      },
+      Some(Command::NewChannel) => {
+        let name = format!("late-{sent}");
+        let channel = alice.client.create_channel(space, &name).await.unwrap();
+        alice.client.add_member(channel, bob.user_id()).await.unwrap();
+        alice.client.add_member(channel, device_user).await.unwrap();
+        send(&mut alice, channel, sent).await;
+        sent += 1;
+        eprintln!("WORKSPACE: new channel {channel} with a message");
+      },
+      Some(Command::Rekey) => {
+        let channel = channels[0];
+        alice.client.remove_member(channel, bob.user_id()).await.unwrap();
+        alice.client.add_member(channel, bob.user_id()).await.unwrap();
+        send(&mut alice, channel, sent).await;
+        sent += 1;
+        eprintln!("WORKSPACE: rekeyed {channel} and sent a message");
+      },
+      Some(Command::NewDevice) => {
+        let index = bob_devices.len();
+        bob_devices.push(Peer::enroll_device(&stack, "bob", &format!("bob-{index}")).await);
+        // Alice's app adds the new device to her groups, as an app left open does.
+        for _ in 0..10 {
+          alice.pump_reconnecting().await;
+          tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        send(&mut alice, channels[0], sent).await;
+        sent += 1;
+        eprintln!("WORKSPACE: Bob linked device {index}; sent a message");
       },
       None => {},
     }
@@ -212,9 +248,10 @@ async fn seed(
   bob: &mut Peer,
   device_user: UserId,
   size: Size,
-) -> Vec<ConversationId> {
+) -> (Vec<ConversationId>, SpaceId) {
   let started = Instant::now();
   let mut channels = Vec::new();
+  let mut maybe_space = None;
   for space_index in 0..size.spaces {
     let space = space_with(
       stack,
@@ -223,6 +260,7 @@ async fn seed(
       &[(&*bob, "member")],
     )
     .await;
+    maybe_space.get_or_insert(space);
     stack
       .add_space_member(
         &alice.tokens,
@@ -321,7 +359,7 @@ async fn seed(
   eprintln!("WORKSPACE: seeded in {:?}", started.elapsed());
   let mut conversations = channels;
   conversations.push(alice_dm);
-  conversations
+  (conversations, maybe_space.expect("at least one space"))
 }
 
 async fn send(writer: &mut Peer, conversation: ConversationId, index: usize) {
@@ -349,6 +387,9 @@ fn port() -> u16 {
 enum Command {
   Send(usize),
   Call { is_direct: bool, duration: Duration },
+  NewChannel,
+  Rekey,
+  NewDevice,
 }
 
 /// The command written to the control file, which is then removed.
@@ -357,6 +398,9 @@ fn take_command(path: &PathBuf) -> Option<Command> {
   let _ = std::fs::remove_file(path);
   let words: Vec<&str> = text.split_whitespace().collect();
   match words.as_slice() {
+    ["newchannel"] => Some(Command::NewChannel),
+    ["rekey"] => Some(Command::Rekey),
+    ["newdevice"] => Some(Command::NewDevice),
     [count] => count.parse().ok().map(Command::Send),
     ["call", kind, seconds] => Some(Command::Call {
       is_direct: *kind == "dm",
