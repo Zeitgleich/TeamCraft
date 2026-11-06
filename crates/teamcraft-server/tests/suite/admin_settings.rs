@@ -638,7 +638,7 @@ mod mail_settings {
   #[tokio::test]
   async fn a_test_mail_reaches_the_dev_mail_catcher() {
     if !is_reachable(&format!("127.0.0.1:{MAILPIT_PORT}")).await {
-      eprintln!("skipping: no mail catcher on port {MAILPIT_PORT}");
+      teamcraft_server::testing::skip_or_fail(&format!("no mail catcher on port {MAILPIT_PORT}"));
       return;
     }
     let app = app!(TestApp::start());
@@ -763,7 +763,7 @@ mod calendar_settings {
       .send()
       .await;
     if !probe.is_ok_and(|response| response.status().is_success()) {
-      eprintln!("skipping: no CalCraft account at {CALCRAFT_URL}");
+      teamcraft_server::testing::skip_or_fail(&format!("no CalCraft account at {CALCRAFT_URL}"));
       return;
     }
     let app = app!(with_meetings());

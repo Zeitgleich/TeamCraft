@@ -60,13 +60,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-step "Dev stack (Postgres, Keycloak, Garage, Mailpit)"
-"${compose[@]}" up -d postgres keycloak garage mailpit
+step "Dev stack (Postgres, Keycloak, Garage, Mailpit, CalCraft)"
+# CalCraft is built from source on the first run (several minutes); the integration tests of the
+# server (caldav_calcraft, admin_settings) need it.
+"${compose[@]}" up -d postgres keycloak garage mailpit calcraft
 wait_until "Postgres" 120 "${compose[@]}" exec -T postgres pg_isready -U teamcraft -d teamcraft
 wait_until "Keycloak" 240 curl -sf http://127.0.0.1:8080/realms/teamcraft-dev/.well-known/openid-configuration
 wait_until "Garage" 120 curl -s -o /dev/null http://127.0.0.1:3900
 wait_until "Mailpit" 60 curl -sf http://127.0.0.1:8025/api/v1/info
 ./dev/init-garage.sh
+wait_until "CalCraft" 600 curl -s -o /dev/null http://127.0.0.1:5232
+./dev/init-calcraft.sh
 
 step "Server, SFU and bridge"
 SQLX_OFFLINE=true cargo build -p teamcraft-server -p teamcraft-sfu -p teamcraft-bridge
@@ -91,3 +95,21 @@ drop_test_databases
 # #1203). Memory is only reserved, not used.
 RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}" E2E_REQUIRED=1 SQLX_OFFLINE=true \
   cargo test -p teamcraft-e2e --features "$features" --test suite -- ${test_args[@]+"${test_args[@]}"}
+
+# The integration tests that need the dev stack and skip themselves without it (#1284): the server's
+# S3, Mailpit and CalCraft tests, and the `dev_stack` tests of core and ffi against a running server.
+# TEST_SERVICES_REQUIRED: a missing service fails a test instead of skipping it.
+step "Integration tests against the dev stack"
+dev_server_log="$(mktemp "${TMPDIR:-/tmp}/teamcraft-e2e-dev-server.XXXXXX")"
+dev_server_pid=""
+stop_dev_server() { [ -z "$dev_server_pid" ] || kill "$dev_server_pid" 2>/dev/null || true; }
+trap 'stop_dev_server; cleanup' EXIT
+TEAMCRAFT_SERVER__LISTEN_ADDR="[::]:8081" "${CARGO_TARGET_DIR:-target}/debug/teamcraft-server" \
+  --config teamcraft.example.toml >"$dev_server_log" 2>&1 &
+dev_server_pid=$!
+wait_until "the dev server" 60 curl -sf http://127.0.0.1:8081/healthz || { cat "$dev_server_log" >&2; exit 1; }
+RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}" TEST_SERVICES_REQUIRED=1 TEST_DATABASE_REQUIRED=1 \
+  DATABASE_URL="postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/teamcraft" \
+  TEAMCRAFT_TEST_SERVER_URL="http://127.0.0.1:8081" SQLX_OFFLINE=true \
+  cargo test -p teamcraft-server -p teamcraft-core -p teamcraft-ffi --features teamcraft-server/integration,teamcraft-core/integration,teamcraft-ffi/integration \
+  -- caldav_calcraft admin_settings meeting_mail dev_stack

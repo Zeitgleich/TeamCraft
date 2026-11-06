@@ -264,7 +264,7 @@ impl TestApp {
       .await
       .is_ok();
     if !reachable {
-      eprintln!("skipping: no S3 storage at {endpoint}");
+      skip_or_fail(&format!("no S3 storage at {endpoint}"));
       return None;
     }
     let storage = StorageConfig {
@@ -845,6 +845,21 @@ impl JwkSource for StaticKeys {
 }
 
 /// An empty gateway hub as a process starting with `settings` has it.
+/// Name of the variable CI sets so that a missing service fails a test instead of skipping it. Not
+/// `TEAMCRAFT_...`: the server's configuration refuses variables with that prefix it doesn't know.
+const SERVICES_REQUIRED: &str = "TEST_SERVICES_REQUIRED";
+
+/// A test whose dependency (S3, Mailpit, CalCraft) is not running skips itself with a note, unless
+/// `TEST_SERVICES_REQUIRED` is set (CI): then it fails, because a skipped suite looks like a passed
+/// one (#1284). Call it, then return, where the test would skip.
+pub fn skip_or_fail(reason: &str) {
+  assert!(
+    std::env::var_os(SERVICES_REQUIRED).is_none(),
+    "{SERVICES_REQUIRED} is set, so this test may not skip, but: {reason}"
+  );
+  eprintln!("skipping: {reason}");
+}
+
 fn new_hub(settings: &Settings) -> Hub {
   Hub::new(HubOptions {
     resume_window: Duration::from_secs(settings.gateway.resume_window_secs),

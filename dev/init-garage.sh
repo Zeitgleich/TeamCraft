@@ -12,7 +12,15 @@ KEY_NAME="teamcraft-dev"
 KEY_ID="GKdeadbeef0000000000000000"
 KEY_SECRET="deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 
-garage() { "${COMPOSE[@]}" exec -T garage /garage "$@"; }
+# CI has no Docker Compose: GARAGE_BIN names a Garage binary already running with GARAGE_CONFIG
+# (default dev/garage/garage.toml), and the same commands go to it directly.
+garage() {
+  if [ -n "${GARAGE_BIN:-}" ]; then
+    "$GARAGE_BIN" -c "${GARAGE_CONFIG:-dev/garage/garage.toml}" "$@"
+  else
+    "${COMPOSE[@]}" exec -T garage /garage "$@"
+  fi
+}
 
 echo "Waiting for Garage..."
 for _ in $(seq 1 30); do

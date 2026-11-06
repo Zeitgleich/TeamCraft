@@ -37,7 +37,7 @@ type DevClient = Client<HttpServerApi<StaticToken>, Arc<MemoryStore>>;
 #[tokio::test]
 async fn two_dev_users_exchange_encrypted_messages() {
   if server_url().is_none() {
-    eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
+    skip_or_fail();
     return;
   }
   let (alice_token, bob_token) = (dev_token("alice"), dev_token("bob"));
@@ -81,7 +81,7 @@ async fn two_dev_users_exchange_encrypted_messages() {
 #[tokio::test]
 async fn owner_signed_policy_reaches_other_clients() {
   if server_url().is_none() {
-    eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
+    skip_or_fail();
     return;
   }
   let (alice_token, bob_token) = (dev_token("alice"), dev_token("bob"));
@@ -108,7 +108,7 @@ async fn owner_signed_policy_reaches_other_clients() {
 #[tokio::test]
 async fn files_and_push_registration_work_against_the_server() {
   if server_url().is_none() {
-    eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
+    skip_or_fail();
     return;
   }
   let (alice_token, bob_token) = (dev_token("alice"), dev_token("bob"));
@@ -155,7 +155,7 @@ async fn files_and_push_registration_work_against_the_server() {
 #[tokio::test]
 async fn a_second_device_is_linked_through_the_relay() {
   if server_url().is_none() {
-    eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
+    skip_or_fail();
     return;
   }
   let alice_token = dev_token("alice");
@@ -203,7 +203,7 @@ async fn a_second_device_is_linked_through_the_relay() {
 #[tokio::test]
 async fn thread_updates_and_new_devices_follow_server_events() {
   if server_url().is_none() {
-    eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
+    skip_or_fail();
     return;
   }
   let (alice_token, bob_token) = (dev_token("alice"), dev_token("bob"));
@@ -298,7 +298,7 @@ async fn thread_updates_and_new_devices_follow_server_events() {
 #[tokio::test]
 async fn identity_attribute_can_be_attested_or_reports_why_not() {
   if server_url().is_none() {
-    eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
+    skip_or_fail();
     return;
   }
   let token = dev_token("carol");
@@ -385,6 +385,17 @@ async fn create_open_space(owner_token: &str, member_token: &str) -> SpaceId {
     .error_for_status()
     .unwrap();
   space.id
+}
+
+/// Skips the test, or fails it when CI requires the dev stack: a skipped suite looks like a passed
+/// one (#1284).
+#[allow(clippy::print_stderr)]
+fn skip_or_fail() {
+  assert!(
+    std::env::var_os("TEST_SERVICES_REQUIRED").is_none(),
+    "TEST_SERVICES_REQUIRED is set, so this test may not skip, but TEAMCRAFT_TEST_SERVER_URL is not set"
+  );
+  eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
 }
 
 /// The server under test; `None` skips the tests.
