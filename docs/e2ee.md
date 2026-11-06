@@ -4512,12 +4512,36 @@ edited) with only their orientation, so no location or camera details go along. 
 can't pack again, unedited, goes as it is, as a file sent from the file picker does.
 
 **App lock (Android and iOS, optional).** A biometric or device-passcode gate in front of the app, and
-the app switcher shows a cover instead of the chats while it is on. It is a gate in the user interface
-only: the database key is protected the same way with or without it (it must open for push wake-ups
+the app switcher shows a cover instead of the chats while it is on. It is a gate, not storage
+encryption: the database key is protected the same way with or without it (it must open for push wake-ups
 while the phone is locked), so it protects against someone holding the unlocked phone, not against
 anyone who can read the app's storage. On iOS, while it is on, notifications say only that something
 arrived (no sender, no text; calls still ring); Android always shows a generic version on the lock
 screen. Switching it off or lengthening its delay asks again (iOS).
+
+On Android 11 and later the unlock is tied to a key operation (#1200): a non-exportable AES key in the
+Android Keystore (`AppLockKey`) that may be used only right after the system prompt checked strong
+biometrics or the screen lock, once per prompt. The prompt gets a cipher of that key; the app opens
+only when that same cipher then encrypts, which the Keystore (outside the app's process) refuses
+without the authentication. So a forged "success" callback, the way a hooking tool on a rooted phone
+would fake it, no longer opens the app. Weak biometrics (some face unlocks) can't authorize a key, so
+there the prompt asks for the screen lock. The key guards no data; it only proves the prompt:
+
+| Situation                               | What happens                                                          |
+|-----------------------------------------|-----------------------------------------------------------------------|
+| No key yet (first unlock, update)       | Created before the prompt                                             |
+| Screen lock removed                     | The device invalidates the key; the app opens and drops it            |
+| Screen lock set again or changed        | The invalidated key is replaced before the prompt                     |
+| Fingerprint added                       | Key kept (the screen lock opens it anyway)                            |
+| Keystore fails to create or use the key | The prompt alone decides (logged), so nobody is locked out            |
+| App lock turned off                     | Key deleted                                                           |
+| Android 8 to 10                         | The prompt alone decides: it can't combine the screen lock with a key |
+
+What it doesn't protect against: an attacker who already runs code inside the app's process on a
+rooted phone can skip the gate in other ways (fake "no screen lock", or read what the open app
+shows), and the database key stays unbound to the app lock because push wake-ups need it while the
+phone is locked. Binding the store to the prompt would break notifications; the binding above raises
+the bar from hooking one callback, it is not storage encryption.
 
 ### 9.3 Web client integrity (implemented)
 
