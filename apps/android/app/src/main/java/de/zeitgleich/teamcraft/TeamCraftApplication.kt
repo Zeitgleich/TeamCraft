@@ -61,12 +61,14 @@ class AppGraph(context: Context) {
   val avatars = AvatarCache(context) { core.core() }
   /** Pictures of spaces on screen, kept by version (issue #284). */
   val spacePictures = SpacePictureCache(context) { core.core() }
+  /** The chat list shown last, for the next start's first frame (e2ee.md §9.2). */
+  val startCache = StartCacheStore(context.filesDir)
   val auth: AuthRepository = AuthRepository(context, servers, onSignedOut = {
     avatars.clear()
     spacePictures.clear()
     // On every end of a session, also an expired refresh token: what the account showed last and
     // an unsent media flow don't stay for whoever signs in next (e2ee.md §9.2).
-    StartCacheStore(context.filesDir).delete()
+    startCache.delete()
     MediaDraftStore.deleteAll(context)
   })
   // Decrypted pictures leave memory with the account they belong to.

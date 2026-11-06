@@ -168,7 +168,11 @@ data class CachedEntry(
   }
 }
 
-/** Where [StartCache] lives: one per device, the account's own is checked by [StartCache.account]. */
+/**
+ * Where [StartCache] lives: one per device, the account's own is checked by [StartCache.account].
+ * One instance for the app (`AppGraph.startCache`); every access holds its lock, so a sign-out's
+ * delete and a write never cross.
+ */
 class StartCacheStore(filesDir: File) {
   private val sealed = SealedCache(
     File(filesDir, FILE_NAME),
@@ -176,12 +180,18 @@ class StartCacheStore(filesDir: File) {
   )
 
   /** `null` when there is none, or it can't be read (written by another version, or damaged). */
+  @Synchronized
   fun read(): StartCache? = sealed.read()?.let { bytes ->
     runCatching { json.decodeFromString<StartCache>(bytes.decodeToString()) }.getOrNull()
   }
 
-  fun write(cache: StartCache) = sealed.write(json.encodeToString(cache).encodeToByteArray())
+  /** Writes [cache] if [isStillWanted] holds, checked under the lock (the session may just have ended). */
+  @Synchronized
+  fun write(cache: StartCache, isStillWanted: () -> Boolean) {
+    if (isStillWanted()) sealed.write(json.encodeToString(cache).encodeToByteArray())
+  }
 
+  @Synchronized
   fun delete() = sealed.delete()
 
   private companion object {

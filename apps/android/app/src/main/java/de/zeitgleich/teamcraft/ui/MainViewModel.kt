@@ -157,7 +157,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    * once instead of loading it again; the list refreshes it on every change while it is shown.
    */
   val chatList: StateFlow<ChatListState> = chatListState
-  private val startCache = StartCacheStore(application.filesDir)
+  private val startCache = graph.startCache
   private val feedSeeds = FeedSeeds()
   private var maybeReadAhead: Job? = null
   private var maybeStartCacheWrite: Job? = null
@@ -327,10 +327,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // The first read opens the stored server and session: files and the core's checks.
     val maybeStored = withContext(Dispatchers.IO) { graph.auth.server }
     val start = decideServerStart(maybeStored?.address?.origin, maybePreset, lock)
-    if (maybeShownAccount != null && maybeShownAccount != accountKey()) {
-      // Another account than the one shown last: its list goes before anything else shows.
+    val isSignedIn = graph.auth.isSignedIn.value
+    if (maybeShownAccount != null && (!isSignedIn || maybeShownAccount != accountKey())) {
+      // Another account than the one shown last, or none: its list goes before anything else shows.
       chatListState.value = ChatListState()
       state.value = AppState.Starting
+    }
+    if (!isSignedIn || (maybeShownAccount != null && maybeShownAccount != accountKey())) {
+      // A cache left by a sign-out that didn't finish (the app killed in between) goes too.
+      withContext(Dispatchers.IO) { startCache.delete() }
     }
     when {
       maybeStored != null && start is ServerStart.UseStored -> {
@@ -685,8 +690,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       delay(START_CACHE_SETTLE_MILLIS)
       val account = accountKey() ?: return@launch
       val cache = StartCache.of(account, ready, list) ?: return@launch
-      // Under the store's lock, so a sign-out's delete can't come before a write already running.
-      runCatching { synchronized(startCache) { if (isActive) startCache.write(cache) } }
+      // Checked again under the store's lock: a sign-out may have deleted it since.
+      runCatching { startCache.write(cache) { isActive && accountKey() == account } }
         .onFailure { Log.w(TAG, "start cache not written: ${it.javaClass.simpleName}") }
     }
   }
@@ -1218,7 +1223,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     graph.push.beginSignOut()
     linkRequestList.value = emptyList()
     forgetSession()
-    withContext(Dispatchers.IO) { synchronized(startCache) { startCache.delete() } }
+    withContext(Dispatchers.IO) { startCache.delete() }
     review.value = null
     // A recording and its take don't outlive the account on this device (#204).
     voicePlayer.stop()

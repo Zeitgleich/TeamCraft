@@ -52,22 +52,46 @@ class MediaDraftStore(context: Context, private val capturesRoot: suspend () -> 
     private const val CAPTURES = "media-flow-captures"
     private const val KEY_ALIAS = "teamcraft_media_draft"
 
+    /** `StoragePaths.storeDir` and the core's `UPLOAD_STAGING_DIR`. */
+    private const val STORES = "store"
+    private const val OUTGOING = "outgoing"
+
     /** A draft nobody came back to for this long is dropped at the next start. */
     private const val ABANDONED_MILLIS = 7L * 24 * 60 * 60 * 1000
     private val json = Json { ignoreUnknownKeys = true }
 
-    /** Every draft of the device: the session ended. The captures go with the core's staging folder. */
-    fun deleteAll(context: Context) {
-      File(context.filesDir, DIRECTORY).deleteRecursively()
+    /**
+     * Every draft of the device and the camera's files of every account: the session ended. Also
+     * on an expired or revoked token, where the core's own wipe of its staging folder doesn't run.
+     */
+    fun deleteAll(context: Context) = deleteAll(context.filesDir)
+
+    /** Drafts left for a week (a flow the app never came back to), those of older versions, and
+     * camera folders whose draft is gone. */
+    fun sweep(context: Context, nowMillis: Long) = sweep(context.filesDir, nowMillis)
+
+    internal fun deleteAll(filesDir: File) {
+      File(filesDir, DIRECTORY).deleteRecursively()
+      captureFolders(filesDir).forEach { it.deleteRecursively() }
     }
 
-    /** Drafts left for a week (a flow the app never came back to), and those of older versions. */
-    fun sweep(context: Context, nowMillis: Long) {
-      File(context.filesDir, DIRECTORY).listFiles()?.forEach { file ->
+    internal fun sweep(filesDir: File, nowMillis: Long) {
+      val drafts = File(filesDir, DIRECTORY)
+      drafts.listFiles()?.forEach { file ->
         val isOld = nowMillis - file.lastModified() > ABANDONED_MILLIS
         val isUnsealed = file.name.endsWith(".json") || file.name.endsWith(".part") || file.isDirectory
         if (isOld || isUnsealed) file.deleteRecursively()
       }
+      // The core's sweep of its staging folder skips folders, so these are this store's to remove.
+      captureFolders(filesDir)
+        .filter { folder -> !File(drafts, "draft-${folder.name.removePrefix("$CAPTURES-")}.sealed").exists() }
+        .forEach { it.deleteRecursively() }
     }
+
+    /** `store/<server>/outgoing/<account>/media-flow-captures-<key>`: the core's staging folders. */
+    private fun captureFolders(filesDir: File): List<File> =
+      File(filesDir, STORES).listFiles().orEmpty()
+        .flatMap { server -> File(server, OUTGOING).listFiles().orEmpty().toList() }
+        .flatMap { account -> account.listFiles { file -> file.isDirectory && file.name.startsWith("$CAPTURES-") }.orEmpty().toList() }
   }
 }
