@@ -151,6 +151,8 @@ fun OfflineBanner(onSignInAgain: () -> Unit) {
     }
     ConnectionNotice.SignInRequired ->
       stringResource(R.string.connection_sign_in) to (stringResource(R.string.connection_sign_in_action) to onSignInAgain)
+    ConnectionNotice.NoRoleLeft ->
+      stringResource(R.string.connection_no_role_left) to (stringResource(R.string.connection_sign_in_action) to onSignInAgain)
   }
   // Slow is no failure: the neutral colour, not the error one.
   val isSlow = notice == ConnectionNotice.Slow

@@ -209,6 +209,7 @@ fn ConnectionNotice(notice: Notice, maybe_session: Option<SessionControl>) -> im
       SignInReason::SessionTimedOut => "connection-banner-session-timed-out",
       SignInReason::DeviceBindingRequired => "connection-banner-device-binding-required",
       SignInReason::DeviceKeyLost => "connection-banner-device-key-lost",
+      SignInReason::NoTeamcraftRole => "connection-banner-no-role-left",
       SignInReason::SignInExpired | SignInReason::Unknown => "connection-banner-sign-in",
     }),
   };
@@ -463,6 +464,26 @@ mod tests {
         0
       ),
       Some(Notice::SignInRequired(SignInReason::SessionEnded))
+    );
+  }
+
+  #[test]
+  fn a_lost_last_role_is_named_not_shown_as_an_expired_session() {
+    let notice = notice_for(
+      true,
+      Some(CoreConnection::SignInRequired {
+        reason: SignInReason::NoTeamcraftRole,
+      }),
+      Unsettled::default(),
+      0,
+    );
+    assert_eq!(
+      notice,
+      Some(Notice::SignInRequired(SignInReason::NoTeamcraftRole))
+    );
+    assert_eq!(
+      notice.map(|notice| prominence_of(notice, Unsettled::default(), 0)),
+      Some(Prominence::Notice)
     );
   }
 
