@@ -15,6 +15,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
@@ -35,7 +38,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -273,16 +275,15 @@ private fun SelectionBar(draft: MediaDraft, onNext: () -> Unit) {
       }
       val count = draft.items.size
       val label = pluralStringResource(R.plurals.media_next, count, count)
-      FilledIconButton(onClick = onNext, modifier = Modifier.padding(start = 12.dp).size(52.dp).semantics { contentDescription = label }) {
-        Box(contentAlignment = Alignment.Center) {
-          Icon(painterResource(R.drawable.ic_arrow_forward), contentDescription = null)
-          Text(
-            count.toString(),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onPrimary,
-            modifier = Modifier.align(Alignment.TopEnd).padding(top = 2.dp, end = 2.dp),
-          )
-        }
+      // The count beside the arrow, not on it: squeezed into the round button it covered the arrow.
+      Button(
+        onClick = onNext,
+        contentPadding = PaddingValues(horizontal = 16.dp),
+        modifier = Modifier.padding(start = 12.dp).height(48.dp).semantics(mergeDescendants = true) { contentDescription = label },
+      ) {
+        Text(count.toString(), style = MaterialTheme.typography.labelLarge)
+        Spacer(Modifier.width(6.dp))
+        Icon(painterResource(R.drawable.ic_arrow_forward), contentDescription = null, modifier = Modifier.size(20.dp))
       }
     }
   }

@@ -12,6 +12,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.systemGestureExclusion
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -266,18 +267,22 @@ fun VideoTrimBar(uri: Uri, facts: VideoFacts, edit: VideoEdit, quality: MediaQua
 
 @Composable
 private fun TrimHandle(offsetPx: Float, label: String, valueMs: Long, durationMs: Long, onSet: (Long) -> Unit, onDrag: (Float) -> Unit) {
+  val currentOnDrag by rememberUpdatedState(onDrag)
   Box(
     Modifier
       .offset { IntOffset(offsetPx.roundToInt(), 0) }
       .width(HANDLE_WIDTH)
       .fillMaxHeight()
+      // At the screen's edges the handles sit where the system's back gesture starts: without
+      // this, dragging one went back to the camera and dropped the video.
+      .systemGestureExclusion()
       .background(HANDLE_COLOR, RoundedCornerShape(6.dp))
       .semantics {
         contentDescription = label
         progressBarRangeInfo = ProgressBarRangeInfo(valueMs.toFloat(), 0f..durationMs.toFloat())
         setProgress { target -> onSet(target.toLong()); true }
       }
-      .pointerInput(Unit) { detectHorizontalDragGestures { change, amount -> change.consume(); onDrag(amount) } },
+      .pointerInput(Unit) { detectHorizontalDragGestures { change, amount -> change.consume(); currentOnDrag(amount) } },
     contentAlignment = Alignment.Center,
   ) {
     Box(Modifier.width(3.dp).height(18.dp).background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(2.dp)))

@@ -897,7 +897,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return@withContext null
     val target = File(directory, "${System.nanoTime()}-${name.replace('/', '_')}")
     if (source.renameTo(target)) {
-      PickedFile(fileName = name, mediaType = file.mediaType, path = target.absolutePath)
+      withVideoPoster(PickedFile(fileName = name, mediaType = file.mediaType, path = target.absolutePath))
     } else {
       stage(name, file.mediaType) { source.inputStream() }
     }
@@ -957,7 +957,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return@withContext null
     val target = File(directory, "${System.nanoTime()}-${cleanFileName(name).replace('/', '_')}")
     if (file.length() <= MAX_IMPORT_BYTES && file.renameTo(target)) {
-      return@withContext PickedFile(fileName = name, mediaType = mediaType, path = target.absolutePath)
+      return@withContext withVideoPoster(PickedFile(fileName = name, mediaType = mediaType, path = target.absolutePath))
     }
     val maybeStaged = stage(name, mediaType) { file.inputStream() }
     file.delete()
@@ -976,7 +976,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       target.delete()
       return null
     }
-    return PickedFile(fileName = name, mediaType = type, path = target.absolutePath)
+    return withVideoPoster(PickedFile(fileName = name, mediaType = type, path = target.absolutePath))
   }
 
   /**

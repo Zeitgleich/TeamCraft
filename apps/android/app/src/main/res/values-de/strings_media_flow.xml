@@ -29,6 +29,7 @@
   <string name="media_position">%1$d von %2$d</string>
   <string name="media_tool_crop">Zuschneiden und drehen</string>
   <string name="media_tool_draw">Zeichnen</string>
+  <string name="media_tool_trim">Kürzen</string>
   <string name="media_mute">Ohne Ton senden</string>
   <string name="media_unmute">Mit Ton senden</string>
   <string name="media_muted_note">Wird ohne Ton gesendet</string>

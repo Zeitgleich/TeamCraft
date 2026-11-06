@@ -47,6 +47,7 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -71,6 +72,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -107,7 +109,14 @@ private enum class CameraMode { Photo, Video }
  * a tap starts and stops. Photos and videos stay in the app's own folder until they are sent.
  */
 @Composable
-fun CameraScreen(capturesDirectory: File, onCaptured: (MediaDraftItem) -> Unit, onGallery: () -> Unit, onClose: () -> Unit) {
+fun CameraScreen(
+  capturesDirectory: File,
+  selectedCount: Int,
+  onCaptured: (MediaDraftItem) -> Unit,
+  onGallery: () -> Unit,
+  onReview: () -> Unit,
+  onClose: () -> Unit,
+) {
   val context = LocalContext.current
   var hasCamera by remember { mutableStateOf(isGranted(context, Manifest.permission.CAMERA)) }
   var isAsked by rememberSaveable { mutableStateOf(false) }
@@ -121,7 +130,7 @@ fun CameraScreen(capturesDirectory: File, onCaptured: (MediaDraftItem) -> Unit, 
   }
   Box(Modifier.fillMaxSize().background(Color.Black)) {
     if (hasCamera) {
-      CameraContent(capturesDirectory, onCaptured, onGallery, onClose)
+      CameraContent(capturesDirectory, selectedCount, onCaptured, onGallery, onReview, onClose)
     } else {
       Column(
         Modifier.align(Alignment.Center).padding(32.dp),
@@ -139,7 +148,14 @@ fun CameraScreen(capturesDirectory: File, onCaptured: (MediaDraftItem) -> Unit, 
 }
 
 @Composable
-private fun CameraContent(capturesDirectory: File, onCaptured: (MediaDraftItem) -> Unit, onGallery: () -> Unit, onClose: () -> Unit) {
+private fun CameraContent(
+  capturesDirectory: File,
+  selectedCount: Int,
+  onCaptured: (MediaDraftItem) -> Unit,
+  onGallery: () -> Unit,
+  onReview: () -> Unit,
+  onClose: () -> Unit,
+) {
   val context = LocalContext.current
   val view = LocalView.current
   val lifecycleOwner = LocalLifecycleOwner.current
@@ -291,8 +307,34 @@ private fun CameraContent(capturesDirectory: File, onCaptured: (MediaDraftItem) 
           Icon(painterResource(R.drawable.ic_cameraswitch), contentDescription = stringResource(R.string.media_camera_flip), tint = Color.White)
         }
       }
-      ModeSwitch(mode, isEnabled = maybeRecording == null, onMode = { mode = it }, modifier = Modifier.align(Alignment.CenterHorizontally).padding(vertical = 16.dp))
+      Box(Modifier.fillMaxWidth().padding(vertical = 16.dp, horizontal = 24.dp)) {
+        ModeSwitch(mode, isEnabled = maybeRecording == null, onMode = { mode = it }, modifier = Modifier.align(Alignment.Center))
+        // Back to what is picked already: without it, the camera reached from the review could
+        // only take another one or discard them all.
+        if (selectedCount > 0 && maybeRecording == null) {
+          SelectedButton(selectedCount, onReview, Modifier.align(Alignment.CenterEnd))
+        }
+      }
     }
+  }
+}
+
+/** How many are picked, and the way back to them. */
+@Composable
+private fun SelectedButton(count: Int, onClick: () -> Unit, modifier: Modifier) {
+  val label = pluralStringResource(R.plurals.media_next, count, count)
+  Row(
+    modifier
+      .clip(RoundedCornerShape(50))
+      .background(Color.White)
+      .clickable(onClickLabel = label, onClick = onClick)
+      .semantics(mergeDescendants = true) { contentDescription = label }
+      .padding(horizontal = 12.dp, vertical = 8.dp),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(4.dp),
+  ) {
+    Text(count.toString(), color = Color.Black, style = MaterialTheme.typography.labelLarge)
+    Icon(painterResource(R.drawable.ic_arrow_forward), contentDescription = null, tint = Color.Black, modifier = Modifier.size(18.dp))
   }
 }
 

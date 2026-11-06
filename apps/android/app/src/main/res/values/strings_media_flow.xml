@@ -30,6 +30,7 @@
   <string name="media_position">%1$d of %2$d</string>
   <string name="media_tool_crop">Crop and rotate</string>
   <string name="media_tool_draw">Draw</string>
+  <string name="media_tool_trim">Trim</string>
   <string name="media_mute">Send without sound</string>
   <string name="media_unmute">Send with sound</string>
   <string name="media_muted_note">Sent without sound</string>

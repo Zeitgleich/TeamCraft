@@ -41,8 +41,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -96,6 +98,8 @@ fun ReviewScreen(
     if (draft.currentIndex in items.indices && pager.currentPage != draft.currentIndex) pager.animateScrollToPage(draft.currentIndex)
   }
   val maybeCurrent = draft.maybeCurrent
+  // The trim bar shows on demand, as in the common messengers.
+  var trimmingId by remember { mutableStateOf<String?>(null) }
   Column(Modifier.fillMaxSize().background(Color.Black).windowInsetsPadding(WindowInsets.safeDrawing).imePadding()) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
       IconButton(onClick = onBack) {
@@ -111,7 +115,7 @@ fun ReviewScreen(
     HorizontalPager(pager, modifier = Modifier.weight(1f).fillMaxWidth(), key = { items.getOrNull(it)?.id ?: it }) { page ->
       val item = items.getOrNull(page) ?: return@HorizontalPager
       if (item.isVideo) {
-        VideoPage(item, isCurrent = page == pager.currentPage, quality = draft.quality, onEdit = { edit -> onDraft(draft.updated(item.id) { it.copy(video = edit) }) })
+        VideoPage(item, isCurrent = page == pager.currentPage, isTrimming = trimmingId == item.id, quality = draft.quality, onEdit = { edit -> onDraft(draft.updated(item.id) { it.copy(video = edit) }) })
       } else {
         PicturePage(item)
       }
@@ -123,6 +127,13 @@ fun ReviewScreen(
         ToolButton(R.drawable.ic_draw, R.string.media_tool_draw, onClick = onDraw)
       }
       if (maybeCurrent != null && maybeCurrent.isVideo) {
+        ToolButton(
+          R.drawable.ic_content_cut,
+          R.string.media_tool_trim,
+          // Lit while open, and while the video is shortened.
+          isActive = trimmingId == maybeCurrent.id || maybeCurrent.video.startMs > 0 || maybeCurrent.video.maybeEndMs != null,
+          onClick = { trimmingId = if (trimmingId == maybeCurrent.id) null else maybeCurrent.id },
+        )
         val isMuted = maybeCurrent.video.isMuted
         ToolButton(
           if (isMuted) R.drawable.ic_volume_off else R.drawable.ic_volume_up,
@@ -172,7 +183,7 @@ private fun PicturePage(item: MediaDraftItem) {
 /** A video playing the part that will be sent (silent when muted), with the trim bar under it. */
 @OptIn(UnstableApi::class)
 @Composable
-private fun VideoPage(item: MediaDraftItem, isCurrent: Boolean, quality: MediaQuality, onEdit: (VideoEdit) -> Unit) {
+private fun VideoPage(item: MediaDraftItem, isCurrent: Boolean, isTrimming: Boolean, quality: MediaQuality, onEdit: (VideoEdit) -> Unit) {
   val context = LocalContext.current
   val uri = remember(item.uri) { Uri.parse(item.uri) }
   val maybeFacts by produceState<VideoFacts?>(null, uri) { value = VideoEditing.facts(context, uri) }
@@ -196,7 +207,7 @@ private fun VideoPage(item: MediaDraftItem, isCurrent: Boolean, quality: MediaQu
         )
       }
     }
-    maybeFacts?.let { facts ->
+    maybeFacts?.takeIf { isTrimming }?.let { facts ->
       VideoTrimBar(uri, facts, item.video, quality, onEdit, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp))
     }
   }

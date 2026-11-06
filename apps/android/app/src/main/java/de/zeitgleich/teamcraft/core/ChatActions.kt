@@ -4,12 +4,20 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /** A file picked for sending, already copied to a path the core can read. */
-data class PickedFile(val fileName: String, val mediaType: String, val path: String)
+data class PickedFile(
+  val fileName: String,
+  val mediaType: String,
+  val path: String,
+  /** A video's poster frame (JPEG), made by the app: the core can't decode videos. */
+  val maybeThumbnail: ByteArray? = null,
+  val maybeDurationMs: Long? = null,
+)
 
 /** What the composer sends besides the text. */
 data class SendOptions(
@@ -72,6 +80,8 @@ object ChatActions {
               put("file_name", file.fileName)
               put("media_type", file.mediaType)
               put("source", buildJsonObject { put("kind", "path"); put("path", file.path) })
+              file.maybeThumbnail?.let { bytes -> put("thumbnail", buildJsonArray { bytes.forEach { add(it.toInt() and 0xFF) } }) }
+              file.maybeDurationMs?.let { put("duration_ms", it) }
             },
           )
         }

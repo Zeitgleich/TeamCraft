@@ -157,8 +157,10 @@ fun MediaFlow(
       when (draft.stage) {
         MediaStage.Camera -> CameraScreen(
           capturesDirectory = store.capturesDirectory(key),
+          selectedCount = draft.items.size,
           onCaptured = { item -> update(draft.added(listOf(item)).copy(stage = MediaStage.Review, origin = MediaStage.Camera)) },
           onGallery = { update(draft.copy(stage = MediaStage.Gallery)) },
+          onReview = { update(draft.copy(stage = MediaStage.Review)) },
           onClose = ::back,
         )
         MediaStage.Gallery -> GalleryScreen(

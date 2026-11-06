@@ -36,6 +36,16 @@ class ChatActionsTest {
   }
 
   @Test
+  fun aVideoCarriesItsPosterAndLength() {
+    val video = PickedFile("v.mp4", "video/mp4", "/cache/v.mp4", maybeThumbnail = byteArrayOf(1, -1), maybeDurationMs = 2_500)
+    val message = Json.parseToJsonElement(ChatActions.send("7", "", SendOptions(files = listOf(video)))).jsonObject["message"]!!.jsonObject
+    val file = message["files"]!!.jsonArray[0].jsonObject
+    // serde reads a `Vec<u8>` as an array of numbers 0..255.
+    assertEquals(listOf("1", "255"), file["thumbnail"]!!.jsonArray.map { it.jsonPrimitive.content })
+    assertEquals("2500", file["duration_ms"]!!.jsonPrimitive.content)
+  }
+
+  @Test
   fun theViewerDownloadsOneFileOfAMessage() {
     assertEquals(
       """{"action":"download_attachment","conversation":"7","message":"9","file_id":"12"}""",

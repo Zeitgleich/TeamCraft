@@ -50,6 +50,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.toArgb
@@ -74,6 +75,10 @@ private val CANVAS_MARGIN = 12.dp
 
 /** A point is added to a stroke once the finger moved this far: smooth lines, small drafts. */
 private val POINT_STEP = 2.dp
+
+/** The size slider's track: as wide as the thickest stroke reads at the top, a line at the bottom. */
+private val WEDGE_TOP = 14.dp
+private val WEDGE_BOTTOM = 2.dp
 
 /** The colour slider: white, the hues, black. */
 private val PALETTE = listOf(
@@ -147,16 +152,19 @@ fun DrawScreen(uri: String, initial: PictureEdit, onCancel: () -> Unit, onDone: 
         onCancel = onCancel,
       )
       Row(Modifier.weight(1f).fillMaxWidth()) {
+        // Thick at the top, thin at the bottom, as the wedge of its track shows.
         VerticalSlider(
-          value = sizePosition,
+          value = 1f - sizePosition,
           label = stringResource(R.string.media_size),
-          onValue = { position ->
+          onValue = { slider ->
+            val position = 1f - slider
             sizePosition = position
             // The selected text or sticker follows the size slider.
             selectedMark?.let { mark -> history.value = history.value.copy(marks = history.value.marks.toMutableList().also { it[selected] = resized(mark, position, maybePicture, edit) }) }
           },
           onStart = { if (selectedMark != null) history.record() },
-          track = { Brush.verticalGradient(listOf(Color.White, Color.White.copy(alpha = 0.3f))) },
+          track = { SolidColor(Color.White.copy(alpha = 0.8f)) },
+          isWedge = true,
           modifier = Modifier.width(40.dp).fillMaxHeight().padding(vertical = 24.dp),
         )
         Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
@@ -263,7 +271,13 @@ private fun DrawCanvas(
   val margin = with(density) { CANVAS_MARGIN.toPx() }
   val description = stringResource(R.string.media_draw_area)
   BoxWithConstraints(Modifier.fillMaxSize()) {
-    val fit = PictureFit.of(picture, edit.crop, isFramed = true, constraints.maxWidth.toFloat(), constraints.maxHeight.toFloat(), margin)
+    // Remembered: a new one on every stroke point would restart the gestures keyed on it, and a
+    // stroke would end after its first point.
+    val width = constraints.maxWidth.toFloat()
+    val height = constraints.maxHeight.toFloat()
+    val fit = remember(picture, edit.crop, width, height, margin) {
+      PictureFit.of(picture, edit.crop, isFramed = true, width, height, margin)
+    }
     val current by rememberUpdatedState(edit)
     val currentTool by rememberUpdatedState(tool)
     val currentColor by rememberUpdatedState(color)
@@ -383,7 +397,8 @@ private fun TextEntry(initial: String, color: Color, onDone: (String) -> Unit) {
   var text by remember { mutableStateOf(initial) }
   val focus = remember { FocusRequester() }
   LaunchedEffect(Unit) { focus.requestFocus() }
-  Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.6f)).windowInsetsPadding(WindowInsets.safeDrawing).imePadding()) {
+  // Dark enough that the editor's own top bar behind it doesn't read through its Done button.
+  Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.85f)).windowInsetsPadding(WindowInsets.safeDrawing).imePadding()) {
     TextButton(onClick = { onDone(text) }, modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)) {
       Text(stringResource(R.string.picture_edit_done), color = Color.White)
     }
@@ -407,8 +422,12 @@ private fun VerticalSlider(
   track: () -> Brush,
   modifier: Modifier,
   thumbColor: Color = Color.White,
+  isWedge: Boolean = false,
 ) {
   val current by rememberUpdatedState(value)
+  // The gestures are set up once: they call the newest callbacks, not those of the first frame.
+  val currentOnValue by rememberUpdatedState(onValue)
+  val currentOnStart by rememberUpdatedState(onStart)
   Box(
     modifier
       .semantics {
@@ -421,17 +440,38 @@ private fun VerticalSlider(
         }
       }
       .pointerInput(Unit) {
+        detectTapGestures { at ->
+          currentOnStart()
+          currentOnValue((at.y / size.height).coerceIn(0f, 1f))
+        }
+      }
+      .pointerInput(Unit) {
         detectVerticalDragGestures(onDragStart = { at ->
-          onStart()
-          onValue((at.y / size.height).coerceIn(0f, 1f))
+          currentOnStart()
+          currentOnValue((at.y / size.height).coerceIn(0f, 1f))
         }) { change, amount ->
           change.consume()
-          onValue((current + amount / size.height).coerceIn(0f, 1f))
+          currentOnValue((current + amount / size.height).coerceIn(0f, 1f))
         }
       },
     contentAlignment = Alignment.TopCenter,
   ) {
-    Box(Modifier.width(6.dp).fillMaxHeight().background(track(), RoundedCornerShape(3.dp)))
+    if (isWedge) {
+      Canvas(Modifier.width(WEDGE_TOP).fillMaxHeight()) {
+        val top = size.width
+        val bottom = WEDGE_BOTTOM.toPx()
+        val wedge = Path().apply {
+          moveTo(size.width / 2 - top / 2, 0f)
+          lineTo(size.width / 2 + top / 2, 0f)
+          lineTo(size.width / 2 + bottom / 2, size.height)
+          lineTo(size.width / 2 - bottom / 2, size.height)
+          close()
+        }
+        drawPath(wedge, track())
+      }
+    } else {
+      Box(Modifier.width(6.dp).fillMaxHeight().background(track(), RoundedCornerShape(3.dp)))
+    }
     Canvas(Modifier.fillMaxSize()) {
       val y = value * size.height
       drawCircle(Color.White, radius = 12.dp.toPx(), center = Offset(size.width / 2, y))
