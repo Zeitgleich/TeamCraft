@@ -4861,7 +4861,7 @@ start and remain visible while the server or its object storage is unavailable.
 - The mobile apps don't use it: Android keeps avatars in its own file cache and opens pictures from
   the decrypted downloads (§4.5).
 
-### 9.7 Desktop: one keychain item, read once per start (issues #1150, #1223, implemented)
+### 9.7 Desktop: one keychain item, read once per start (issues #1150, #1223, #1155, implemented)
 
 Every keychain access can raise a password dialog on macOS, and an ad hoc signed build has no
 identity the keychain could remember across updates: after an update the app is a stranger to the
@@ -4881,10 +4881,31 @@ runs. Linux (also in the Flatpak) and Windows use the same code.
   decrypted contents.
 - **Tokens and sessions live only in `secrets.sealed`.** A token refresh writes the file and doesn't
   touch the keychain. Sign-out and leaving a server delete them from it; as with the keychain entry
-  before, the database and its keys stay, so signing in again finds the local data. They also delete
-  set-aside files and the old token entries, which an older version of the app, run after the move,
-  may have written again and which a normal start doesn't look at. Deleting an entry that isn't
-  there raises no dialog.
+  before, the database and its keys stay, so signing in again finds the local data. They also give
+  the files a new key (below) and delete set-aside files and the old token entries, which an older
+  version of the app, run after the move, may have written again and which a normal start doesn't
+  look at. Deleting an entry that isn't there raises no dialog.
+- **New key at sign-out (#1155).** Sign-out and leaving a server seal both files under a new random
+  key and write it over `secrets-file-key`: same item, same 32-byte value, so a normal start still
+  reads one item once and versions from 1.0.18 still open the files. A copy of either file from
+  before the sign-out no longer opens and is set aside like a damaged file, so it brings no token
+  back. It is local, so it works the same offline, when the provider never heard of the sign-out.
+  The steps never leave the keychain with a key that opens neither file: both files are first
+  written, sealed under the new key, to `secrets.sealed.next` and `keys.sealed.next`; then the
+  keychain takes the key; then the staged files are renamed over the current ones. A start that
+  finds a staged file keeps whichever of the two opens under the keychain's key and deletes the
+  other: a crash before the keychain write keeps the old key and files, after it the staged files
+  take over. Either way the tokens were already cleared from the file before. A staged file never
+  wins over a current file that opens, so one left over or put back can't undo a later sign-in. A
+  keychain that refuses the write keeps the old key, the staged files are deleted and the sign-out
+  reports the failure; one that reports a failure but stored the key anyway is caught by reading
+  the item back once, on that path only. When that read fails too (a Secret Service that hangs),
+  the keychain may have either key: the staged files stay, and until the next sign-out or start
+  settles it every write seals the file under the old key and its staged copy under the new one,
+  so nothing written meanwhile is lost whichever key the keychain has. The key changes before the
+  old token entries are deleted, so a keychain that refuses deletes doesn't keep it from changing,
+  and before the provider is told of the sign-out, so quitting while that hangs offline doesn't
+  skip it.
 - **Database and backup keys live in both files.** `secrets.sealed` is rewritten at every token
   refresh; `keys.sealed` only when a key is new or changed, so it is rarely in the middle of a
   write. A new database key is handed out only once both files have it on disk: a database whose
@@ -4931,7 +4952,9 @@ runs. Linux (also in the Flatpak) and Windows use the same code.
 - **Going back.** Versions from 1.0.18 find the keys in `secrets.sealed` under the same names and
   ignore `keys.sealed`, so going back keeps the database, unless `secrets.sealed` was damaged in the
   meantime. Versions before 1.0.18 read only the keychain: they find no database key and make a new
-  one, which doesn't open the database (§9.5).
+  one, which doesn't open the database (§9.5). Older versions don't know the staged files of a
+  key change: going back right after a crash in the middle of a sign-out's key change, before a
+  start of this version finished it, makes them set the files aside.
 
 What a start costs in dialogs on macOS after an update with a new ad hoc signature (from the
 counting fake keychain; an access to an entry that doesn't exist raises none; whether a delete
@@ -4943,6 +4966,7 @@ raises one depends on the entry's access list and wasn't checked on a Mac):
 | The first start after 1.0.18 to 1.0.21, once | 1, and a delete of the database and the backup key entry per account         |
 | The first start after an older version, once | each old token and key entry read once and deleted once                      |
 | A damaged `secrets.sealed`                   | 1                                                                            |
+| Signing out or leaving a server              | 1 per server signed out of or left, for the files' new key                   |
 
 What it costs, and what it gains:
 
@@ -4961,17 +4985,16 @@ What it costs, and what it gains:
   every item cost the database before as well. The two-second recheck keeps a keychain service that
   is still starting from causing this.
 - **Rollback and forced sign-in (#1155).** A process running as the user can't read the files
-  without the key, but it can write them. It can put an older copy back, which brings back older
-  tokens: a token of a signed-out session comes back unless the provider revoked it (sign-out asks
-  it to), and a rotated one is refused by the provider. It can also corrupt or delete the files,
-  which forces a sign-in; deleting both now also takes the database's key, which is no more than
-  deleting the database itself, as it can anyway. An older copy of `keys.sealed` brings nothing
-  back: keys are never removed from it, an older backup key no longer opens the key bag (§6.5.6),
-  and `secrets.sealed` wins where both have a key. The files have no protection against this; a
-  counter in the keychain per refresh is what this design removes. For #1155: a key rotation at
-  sign-out now has to seal `keys.sealed` again as well, and must never leave the keychain with a key
-  that opens neither file (new key under a new account name, both files sealed again, then the old
-  item deleted); a counter in the keychain leaves the key and the files alone.
+  without the key, but it can write them. A copy from before the last sign-out no longer opens (new
+  key at sign-out, above), so a signed-out session's token doesn't come back, even after a sign-out
+  while offline. Between two sign-outs the key stays, so an older copy from the same signed-in
+  period still opens and brings back an older token of that session; the provider refuses a rotated
+  one, and a counter in the keychain per refresh is what this design removes. Putting back a copy
+  from before a sign-out, or corrupting or deleting the files, forces a sign-in; putting back or
+  deleting both files also takes the database's key, which is no more than deleting the database
+  itself, as it can anyway. An older copy of `keys.sealed` brings nothing back: keys are never
+  removed from it, an older backup key no longer opens the key bag (§6.5.6), and `secrets.sealed`
+  wins where both have a key.
 - **Better for the keychain's other readers.** On Linux any application with access to the Secret
   Service can read all its items, including other Flatpak apps with
   `--talk-name=org.freedesktop.secrets`. Tokens and the database and backup keys were readable there

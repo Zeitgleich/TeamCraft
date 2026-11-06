@@ -854,15 +854,17 @@ impl<S: TokenStore> AuthService<S> {
     }
     *self.confirmed_user() = None;
     self.forget_cached_account().await;
+    // Before the provider is asked, which can take long offline or behind a captive portal: a quit
+    // in the meantime must not skip the files' new key (e2ee.md §9.7, #1155).
+    let purged = self
+      .store
+      .purge_after_sign_out(&server.token_key(), &server.server_url)
+      .await;
     if let (Some(refresh), Some(discovery)) = (refresh, discovery) {
       self
         .end_provider_session(&server, &discovery, &refresh, maybe_end_session_prover)
         .await;
     }
-    let purged = self
-      .store
-      .purge_after_sign_out(&server.token_key(), &server.server_url)
-      .await;
     local.and(cleared).and(purged)
   }
 
