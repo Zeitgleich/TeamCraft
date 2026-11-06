@@ -1869,6 +1869,23 @@ What cost the time:
   read last.
 - **The read thread** is one queue: the conversation's reads waited 450-600 ms behind the list's.
 
+**No loading screens (second pass).** On a smaller workspace (33 conversations, 4,000 messages,
+same phone), starting showed the animated loading mark at about 280 ms and the list at 690-790 ms;
+opening a chat showed an empty screen for 120-170 ms, then its messages. Now:
+
+| What                                          | Before                            | After                                    |
+|-----------------------------------------------|-----------------------------------|------------------------------------------|
+| Cold start until the list shows               | 690-790 ms, loading mark first    | 600-650 ms, the list is the first frame  |
+| Start cache read (sealed, on the main thread) | –                                 | 25-40 ms                                 |
+| Open a chat at the top of the list            | empty screen, messages 150-230 ms | messages in the first frame (180-250 ms) |
+
+- The app keeps the chat list it showed last, sealed like the database key (e2ee.md §9.2), and
+  shows it in its first frame; the real list replaces it when it is read.
+- The newest messages of the chats at the top of the list (direct messages first) are read ahead,
+  through a read that leaves the catch-up focus alone, and every chat keeps what it showed.
+- What is left is the first composition of a screen on this phone (about 300 ms for the whole app
+  at start, 150-200 ms for a conversation), not waiting for data.
+
 Coming back after a long absence: the core reported `Connecting` until the whole catch-up was done
 (13 s for 8,000 new messages here, longer on a mobile network), so the "connecting" banner could
 show while new messages were already arriving. It reports connected once the server answers
