@@ -2004,6 +2004,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.verified_policy().screen_share
   }
 
+  fn voice_message_policy(&self) -> teamcraft_proto::VoiceMessagePolicy {
+    self.verified_policy().voice_messages
+  }
+
   fn set_custom_status(&self, maybe_status: Option<CustomStatus>) {
     self.command(CoreCommand::SetCustomStatus { maybe_status });
   }
@@ -5173,6 +5177,7 @@ mod tests {
             maybe_thumbnail: None,
             maybe_dimensions: None,
             maybe_duration_ms: None,
+            maybe_waveform: None,
           });
         }
         stored

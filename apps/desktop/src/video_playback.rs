@@ -145,19 +145,19 @@ fn opened_name(file_name: &str, extension: &str) -> String {
 }
 
 #[cfg(unix)]
-fn create_private_dir(folder: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(folder: &Path) -> std::io::Result<()> {
   use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
   fs::DirBuilder::new().recursive(true).mode(0o700).create(folder)?;
   fs::set_permissions(folder, fs::Permissions::from_mode(0o700))
 }
 
 #[cfg(not(unix))]
-fn create_private_dir(folder: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(folder: &Path) -> std::io::Result<()> {
   fs::create_dir_all(folder)
 }
 
 /// Writes `bytes` readable by the user only.
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
   let mut options = fs::OpenOptions::new();
   options.write(true).create(true).truncate(true);
   #[cfg(unix)]

@@ -153,7 +153,24 @@ data class SecuritySnapshot(
   val contacts: List<ContactKeys> = emptyList(),
   /** The key backup as this device knows it (issue #410); absent before the first key bag sync. */
   val backup: KeyBackup? = null,
+  /** Voice messages under the verified workspace policy (#204); absent: on, up to 10 minutes. */
+  @SerialName("voice_message_policy") val voiceMessagePolicy: VoiceMessagePolicy = VoiceMessagePolicy(),
 )
+
+/** Whether voice messages may be recorded and how long (#204). Not a security boundary. */
+@Serializable
+data class VoiceMessagePolicy(
+  val enabled: Boolean = true,
+  @SerialName("max_minutes") val maxMinutes: Int = DEFAULT_MINUTES,
+) {
+  /** The longest recording, with a stored value outside 1..60 minutes clamped. */
+  val maxSeconds: Int get() = maxMinutes.coerceIn(1, MAX_MINUTES) * 60
+
+  companion object {
+    const val DEFAULT_MINUTES = 10
+    const val MAX_MINUTES = 60
+  }
+}
 
 /** Facts about the key backup; the settings put them into words. */
 @Serializable
@@ -305,10 +322,16 @@ data class FileInfo(
   @SerialName("maybe_sent_at") val maybeSentAt: Long? = null,
   /** Who wrote an imported message when that is nobody with an account here. */
   @SerialName("imported_author") val maybeImportedAuthor: ImportedAuthor? = null,
-  /** How long a video plays, from the sender. */
+  /** How long a video or voice message plays, from the sender. */
   @SerialName("maybe_duration_ms") val maybeDurationMs: Long? = null,
+  /** A voice message's waveform from the sender (#204), one loudness byte (0-255) per bar; checked by the core. */
+  @SerialName("maybe_waveform") val maybeWaveform: List<Int>? = null,
 ) {
   val isImage: Boolean get() = mediaType.startsWith("image/")
+
+  /** A voice message (#204): audio with the sender's waveform, on the server or here, not still going up. */
+  val isVoice: Boolean
+    get() = mediaType.startsWith("audio/") && !maybeWaveform.isNullOrEmpty() && transfer.state in setOf("local", "remote", "downloading", "failed")
   val isVideo: Boolean get() = mediaType.startsWith("video/")
 
   /** A video that opens in the player: on the server or here, not one still going up. */

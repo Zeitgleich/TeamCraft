@@ -33,6 +33,9 @@ COPY --from=build /out/teamcraft-sfu /usr/local/bin/teamcraft-sfu
 # production mounts a real certificate and sets TEAMCRAFT_SFU_JOIN_TOKEN_PUBLIC_KEY and
 # TEAMCRAFT_SFU_JOIN_TOKEN_ISSUER (see crates/teamcraft-sfu/src/main.rs).
 USER 65532:65532
+# The fallback listens on every address for a proxy in another container (list it in
+# TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES, never publish 8082). With host networking set
+# TEAMCRAFT_SFU_FALLBACK_BIND=127.0.0.1:8082 instead (docs/operations.md, "Call fallback through the proxy").
 ENV TEAMCRAFT_SFU_BIND=[::]:4433 \
     TEAMCRAFT_SFU_HEALTH_BIND=[::]:8081 \
     TEAMCRAFT_SFU_FALLBACK_BIND=[::]:8082

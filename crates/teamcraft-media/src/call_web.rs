@@ -30,6 +30,13 @@
 //! while rejoining makes the next attempt due at once. When the page goes away (closed, reloaded),
 //! the driver closes its sessions in the `pagehide` handler itself: the SFU frees the slot at
 //! once instead of the others seeing "reconnecting" until the grace period ends.
+//!
+//! A call that had to take the WebSocket fallback tries QUIC again now and then where the browser
+//! has WebTransport (#1338, as native clients do since #1309). A QUIC session that opens asks the
+//! SFU to move the call's session over (`switch`, with the secret of its `joined`); once the SFU
+//! says `switched`, everything goes out on QUIC, and the fallback is read up to its close before
+//! the new session's signals reach the engine, so the engine sees one event sequence without a gap
+//! (`switch_back`). The call keeps its slot and its DAVE group, and the others notice nothing.
 
 mod cadence;
 #[cfg(feature = "effects")]
@@ -44,6 +51,7 @@ mod screen_sound;
 #[cfg(feature = "effects")]
 mod segmentation_worker;
 mod session_watch;
+mod switch_back;
 mod video;
 
 #[cfg(feature = "effects")]
@@ -71,8 +79,8 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::{Either, select};
 use js_sys::{Array, Float32Array, Function, Object, Promise, Reflect, Uint8Array};
 use teamcraft_proto::{
-  CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, VideoCodec,
-  VideoPublicationId, VideoTrack, VideoTrackKind,
+  CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE,
+  SFU_SWITCHED_CLOSE_CODE, VideoCodec, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
@@ -91,6 +99,7 @@ use self::cadence::Cadence;
 pub use self::meter::MicrophoneMeter;
 use self::screen_sound::ScreenSound;
 use self::session_watch::{NetworkVerdict, PacketCount, PathVerdict, Reading, SessionWatch, may_hurry};
+use self::switch_back::{Answer, Due, Held, Moved, SwitchBack};
 use self::video::{EncoderGaveUp, FrameDecoder, Publication, TrackSender, VideoView};
 
 use crate::audio_frame::{
@@ -339,6 +348,17 @@ enum Input {
   },
   /// Rejoining took longer than the SFU keeps the slot.
   ReconnectExpired,
+  /// A QUIC try's session opened and asked the SFU to take the call's session over (#1338); its
+  /// signals and datagrams carry `generation`.
+  SwitchAsked {
+    transport: Transport,
+    generation: u64,
+  },
+  /// A QUIC try's session didn't connect.
+  SwitchFailed {
+    generation: u64,
+    error: WebCallError,
+  },
   /// The trusted roster as the page's core knows it now ([`WebTrustSource`]).
   Trust(Result<Vec<DeviceId>, String>),
   /// A datagram of the session with this generation.
@@ -454,6 +474,9 @@ enum SessionEnd {
   /// The SFU is shutting down (a restart, a deploy): rejoin after a random part of a short spread,
   /// so the restarted SFU doesn't get every client at once.
   GoingAway,
+  /// The SFU moved the session to another one (#1338): everything queued for this one came before
+  /// the close. The call goes on on the session it moved to; without one, it is lost.
+  Switched,
 }
 
 /// The sessions the call holds open: the current one, lost ones until the call is back (closing
@@ -1059,6 +1082,8 @@ async fn run_call(
       maybe_fallback_url: config.maybe_fallback_url.clone(),
     },
     call_transport: transport_kind,
+    switch: SwitchBack::new(),
+    has_webtransport: has_global(QUIC_GLOBAL),
     quic_jitter: config.jitter,
     resilience: config.resilience,
     maybe_ticket_source: config.maybe_ticket_source.clone(),
@@ -1200,6 +1225,10 @@ struct CallState<'a> {
   /// What the current (or last) session went over: a rejoin needn't wait for QUIC if that was the
   /// fallback.
   call_transport: CallTransport,
+  /// Back to QUIC without a rejoin while on the fallback (#1338).
+  switch: SwitchBack<Transport>,
+  /// Safari before 26.4 has no WebTransport: a call there stays on the fallback.
+  has_webtransport: bool,
   encoder: OpusEncoder,
   /// The running screen share's sound, while it is sent.
   maybe_screen_sound: Option<ScreenSound>,
@@ -1258,25 +1287,19 @@ impl CallState<'_> {
     match input {
       Input::Signal { generation, message } => {
         if self.watch.is_current(generation) {
-          let now = Instant::now();
-          if let CallServerMessage::Pong { id } = message {
-            self.watch.on_pong(id, now);
-          } else {
-            self.watch.on_heard(now);
-            engine.handle_signal(message, now)?;
-            if let Some(retry_after) = engine.take_join_refusal() {
-              // Joined this call too often (#1227): this session is of no use, the next attempt
-              // waits as asked, and the call goes on.
-              info!(?retry_after, "the SFU asks to join again later");
-              self.maybe_refused_retry_after = Some(retry_after);
-              return Ok(self.on_session_lost(engine, SessionEnd::Lost));
-            }
-          }
+          return self.on_signal(engine, message);
         }
+        self.on_other_signal(engine, generation, message);
       },
       Input::SessionEnded { generation, end } => {
         if self.watch.is_current(generation) {
-          return Ok(self.on_session_lost(engine, end));
+          return self.on_session_ended(engine, end);
+        }
+        if let Some(transport) = self
+          .switch
+          .on_ended(generation, end, Instant::now(), &self.resilience)
+        {
+          self.sessions.close(&transport.session);
         }
       },
       Input::PathPackets { reading, count } => return Ok(self.on_path_packets(engine, reading, count)),
@@ -1307,10 +1330,23 @@ impl CallState<'_> {
         self.is_ending_lost = true;
         self.cues.play(CallCue::ConnectionLost);
       },
+      Input::SwitchAsked {
+        transport,
+        generation,
+      } => self.on_switch_asked(transport, generation),
+      Input::SwitchFailed { generation, error } => {
+        debug!(%error, "QUIC try failed");
+        self
+          .switch
+          .failed_to_open(generation, Instant::now(), &self.resilience);
+      },
       Input::Datagram { generation, bytes } => {
+        let now = Instant::now();
         if self.watch.is_current(generation) {
-          let now = Instant::now();
           self.watch.on_heard(now);
+          engine.handle_datagram(&bytes, now);
+        } else if let Some(bytes) = self.switch.on_datagram(generation, bytes) {
+          // The session the call moves to: its media plays at once.
           engine.handle_datagram(&bytes, now);
         }
       },
@@ -1476,6 +1512,7 @@ impl CallState<'_> {
     self.sessions.close_all();
     self.maybe_transport = None;
     self.lost_transports.clear();
+    drop(self.switch.stop());
     self.is_muted = true;
     self.is_hanging_up = true;
     self.cues.play(CallCue::HungUp);
@@ -1530,7 +1567,10 @@ impl CallState<'_> {
     if let Some(id) = tick.maybe_ping {
       self.send_ping(id)?;
     }
-    Ok(self.on_path_verdict(engine, tick.verdict))
+    if let Flow::Leave = self.on_path_verdict(engine, tick.verdict) {
+      return Ok(Flow::Leave);
+    }
+    Ok(self.on_switch_tick(engine, now))
   }
 
   /// Asks for the layer a watched track's tile size calls for, when it changed.
@@ -1555,12 +1595,12 @@ impl CallState<'_> {
       match output {
         // While rejoining there is no session; the engine renews what matters when it is back.
         EngineOutput::Signal(message) => {
-          if let Some(transport) = &self.maybe_transport {
+          if let Some(transport) = self.sending_transport() {
             transport.send_signal(&message)?;
           }
         },
         EngineOutput::Datagram(bytes) => {
-          if let Some(transport) = &self.maybe_transport {
+          if let Some(transport) = self.sending_transport() {
             transport.send_datagram(&bytes);
           }
         },
@@ -1653,10 +1693,14 @@ impl CallState<'_> {
     match end {
       SessionEnd::Lost => warn!("lost the connection to the call, rejoining"),
       SessionEnd::GoingAway => info!("the SFU is going away, rejoining"),
+      SessionEnd::Switched => warn!("the SFU moved the call to a session this page gave up on, rejoining"),
     }
     if let Some(transport) = self.maybe_transport.take() {
       self.lost_transports.push(transport);
     }
+    // A session the SFU may have moved the call's to holds the slot as well: kept open like the lost
+    // one (#1338). A try still connecting is kept when it opens (`on_switch_asked`).
+    self.lost_transports.extend(self.switch.stop());
     if !engine.is_in_call() {
       self.lost_before_joining += 1;
     }
@@ -1682,6 +1726,173 @@ impl CallState<'_> {
     self.maybe_hurry = Some(hurry);
     self.spawn_reconnect(schedule, hurry_rx, generation);
     Flow::Continue
+  }
+
+  /// A signal of the current session.
+  fn on_signal(&mut self, engine: &mut CallEngine, message: CallServerMessage) -> Result<Flow, WebCallError> {
+    let now = Instant::now();
+    if let CallServerMessage::Pong { id } = message {
+      self.watch.on_pong(id, now);
+      return Ok(Flow::Continue);
+    }
+    self.watch.on_heard(now);
+    engine.handle_signal(message, now)?;
+    if let Some(retry_after) = engine.take_join_refusal() {
+      // Joined this call too often (#1227): this session is of no use, the next attempt waits as
+      // asked, and the call goes on.
+      info!(?retry_after, "the SFU asks to join again later");
+      self.maybe_refused_retry_after = Some(retry_after);
+      return Ok(self.on_session_lost(engine, SessionEnd::Lost));
+    }
+    Ok(Flow::Continue)
+  }
+
+  /// A signal of another session than the current one: a QUIC try's answer, or the session the call
+  /// moves to (held back until the old one closed). Others' are stale: a session taken for lost may
+  /// still be alive and hear `connection_replaced` for this device.
+  fn on_other_signal(&mut self, engine: &mut CallEngine, generation: u64, message: CallServerMessage) {
+    let now = Instant::now();
+    match self.switch.on_signal(generation, message, now, &self.resilience) {
+      Answer::Stale | Answer::Held => {},
+      // The engine's output goes to the new session from now on (`sending_transport`).
+      Answer::Switched { early } => {
+        for bytes in early {
+          engine.handle_datagram(&bytes, now);
+        }
+      },
+      Answer::Refused(transport) => self.sessions.close(&transport.session),
+    }
+  }
+
+  /// The current session ended: the call goes on on the session the SFU moved it to, or rejoins.
+  fn on_session_ended(&mut self, engine: &mut CallEngine, end: SessionEnd) -> Result<Flow, WebCallError> {
+    if end == SessionEnd::Switched
+      && let Some(moved) = self.switch.finish()
+    {
+      return self.move_to(engine, moved);
+    }
+    Ok(self.on_session_lost(engine, end))
+  }
+
+  /// The old session brought everything queued for it and closed: the same session goes on over QUIC
+  /// (#1338), without a rejoin. What the new one brought meanwhile follows, in order.
+  fn move_to(&mut self, engine: &mut CallEngine, moved: Moved<Transport>) -> Result<Flow, WebCallError> {
+    let now = Instant::now();
+    self.watch.moved(moved.generation, now);
+    if let Some(old) = self.maybe_transport.replace(moved.transport) {
+      // The SFU reads it until this, for what was sent on it before the move.
+      self.sessions.close(&old.session);
+    }
+    self.use_transport(CallTransport::Quic);
+    engine.moved_to_another_path();
+    info!("the call moved to QUIC");
+    for bytes in moved.early {
+      engine.handle_datagram(&bytes, now);
+    }
+    for held in moved.held {
+      let flow = match held {
+        Held::Signal(message) => self.on_signal(engine, message)?,
+        Held::Ended(end) => self.on_session_lost(engine, end),
+      };
+      if self.maybe_transport.is_none() || matches!(flow, Flow::Leave) {
+        // Lost (or over) on the new session too: the rest is stale.
+        return Ok(flow);
+      }
+    }
+    Ok(Flow::Continue)
+  }
+
+  /// Keeps QUIC tries planned while the call is on the fallback, and starts the one that is due;
+  /// a move whose old session doesn't close in time is a loss.
+  fn on_switch_tick(&mut self, engine: &mut CallEngine, now: Instant) -> Flow {
+    let may_try = self.has_webtransport
+      && self.call_transport == CallTransport::Fallback
+      && self.maybe_transport.is_some()
+      && engine.maybe_switch_secret().is_some();
+    match self.switch.on_tick(may_try, now, &self.resilience) {
+      Due::Nothing => Flow::Continue,
+      Due::Try => {
+        self.start_switch(engine);
+        Flow::Continue
+      },
+      Due::DrainTimedOut => {
+        warn!("the fallback didn't bring what was queued for it after the move to QUIC");
+        self.on_session_lost(engine, SessionEnd::Lost)
+      },
+    }
+  }
+
+  /// A QUIC try (#1338): a session to the ticket's SFU whose first message asks to take the call's
+  /// session over. It reports back as [`Input::SwitchAsked`] or [`Input::SwitchFailed`].
+  fn start_switch(&mut self, engine: &CallEngine) {
+    let Some(secret) = engine.maybe_switch_secret().cloned() else {
+      return;
+    };
+    let generation = self.watch.candidate();
+    if let Some(overdue) = self.switch.start(generation) {
+      self.sessions.close(&overdue.session);
+    }
+    debug!("trying QUIC again");
+    let (inputs, sessions) = (self.inputs.clone(), self.sessions.clone());
+    let (sfu_url, hashes) = (
+      self.ticket.sfu_url.clone(),
+      self.ticket.certificate_hashes.clone(),
+    );
+    // A network that still swallows UDP may leave the handshake hanging.
+    let connect_timeout = self.resilience.idle_timeout;
+    spawn_local(async move {
+      let connect = Transport::connect(&sfu_url, &hashes, &sessions, &inputs, generation);
+      let input = match select(pin!(connect), pin!(sleep(connect_timeout))).await {
+        Either::Left((Ok(transport), _)) => {
+          match transport.send_signal(&CallClientMessage::Switch { secret }) {
+            Ok(()) => Input::SwitchAsked {
+              transport,
+              generation,
+            },
+            Err(error) => {
+              sessions.close(&transport.session);
+              Input::SwitchFailed { generation, error }
+            },
+          }
+        },
+        Either::Left((Err(error), _)) => Input::SwitchFailed { generation, error },
+        // Dropping the attempt closes its session.
+        Either::Right(_) => Input::SwitchFailed {
+          generation,
+          error: WebCallError::Browser {
+            context: "WebTransport connect",
+            message: "timed out".into(),
+          },
+        },
+      };
+      if let Err(unsent) = inputs.unbounded_send(input)
+        && let Input::SwitchAsked { transport, .. } = unsent.into_inner()
+      {
+        // The call ended while this session connected: it must not linger.
+        sessions.close(&transport.session);
+      }
+    });
+  }
+
+  /// A QUIC try's session opened and asked to take the call's session over.
+  fn on_switch_asked(&mut self, transport: Transport, generation: u64) {
+    let Err(transport) = self.switch.asked(generation, transport, Instant::now()) else {
+      return;
+    };
+    if self.maybe_lost_at.is_some() {
+      // The call lost its session while this one connected: the SFU may have moved it here in that
+      // moment, so it holds the slot as well. Kept open like the lost one until the call is back
+      // (#1338): closing it would read as a leave, and the rejoin would be a fresh join.
+      self.lost_transports.push(transport);
+    } else {
+      self.sessions.close(&transport.session);
+    }
+  }
+
+  /// Where the engine's output goes: the session the call moves to as soon as the SFU said so,
+  /// while the old one is still read up to its close.
+  fn sending_transport(&self) -> Option<&Transport> {
+    self.switch.maybe_moving_to().or(self.maybe_transport.as_ref())
   }
 
   /// A packet count arrived: a path silent for too long, or after a network change, is lost.
@@ -2529,10 +2740,10 @@ async fn session_end_of(closed: Promise) -> SessionEnd {
 
 /// What a session closed with this code (none: it broke) means for rejoining.
 fn session_end(maybe_close_code: Option<u32>) -> SessionEnd {
-  if maybe_close_code == Some(SFU_GOING_AWAY_CLOSE_CODE) {
-    SessionEnd::GoingAway
-  } else {
-    SessionEnd::Lost
+  match maybe_close_code {
+    Some(SFU_GOING_AWAY_CLOSE_CODE) => SessionEnd::GoingAway,
+    Some(SFU_SWITCHED_CLOSE_CODE) => SessionEnd::Switched,
+    _ => SessionEnd::Lost,
   }
 }
 
@@ -3502,6 +3713,13 @@ mod tests {
       for maybe_code in [None, Some(0), Some(0x4801), Some(0x4804)] {
         assert_eq!(session_end(maybe_code), SessionEnd::Lost, "{maybe_code:?}");
       }
+    }
+
+    /// The SFU moved the session to another one (#1338): neither the end of the call nor a loss by
+    /// itself, on QUIC and on the fallback alike (whose close frame carries the same code).
+    #[test]
+    fn a_moved_session_closes_with_its_own_code() {
+      assert_eq!(session_end(Some(SFU_SWITCHED_CLOSE_CODE)), SessionEnd::Switched);
     }
 
     #[test]

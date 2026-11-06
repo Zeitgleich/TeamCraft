@@ -914,6 +914,17 @@ banner of e2ee.md §4.10 instead; elsewhere it is an ordinary admin account.
 (docs/bridge.md, "Sources"; their tokens are not carried over). Once nobody is missing the import
 account has left everywhere; then end the import (above) and deactivate the account.
 
+### 3.9 Voice messages
+
+Voice messages (#204) are part of the signed workspace policy (`voice_messages`, §2.3): `enabled`
+(default on) and `max_minutes`, the longest recording (default 10, 1 to 60; the console offers 1, 2,
+5, 10, 30 and 60 minutes). Off, the composer has no record button; audio files can still be attached.
+A recording stops at the maximum and waits for the user to send or discard it.
+
+- **Enforcement:** member clients apply it, like `screen_share`; a voice message is an encrypted audio
+  file, so the server can't tell one apart and doesn't check. A policy signed before the setting
+  reads as the defaults.
+
 ## 4. Audit log
 
 Every admin action, recovery, device change and role change is logged with actor, target and time.

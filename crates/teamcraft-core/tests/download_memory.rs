@@ -67,6 +67,7 @@ async fn a_large_file_comes_down_a_piece_at_a_time() {
       },
       maybe_thumbnail: None,
       maybe_duration_ms: None,
+      maybe_waveform: None,
     }],
   });
   ui.drain_commands();

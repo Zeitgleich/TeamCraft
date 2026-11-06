@@ -174,11 +174,15 @@ struct SendRequest: Equatable {
       "wants_acknowledgement": false,
       "is_silent": false,
       "also_send_to_channel": false,
-      "files": files.map { file in
-        [
+      "files": files.map { file -> [String: Any] in
+        var object: [String: Any] = [
           "file_name": file.fileName, "media_type": file.mediaType,
           "source": ["kind": "path", "path": file.path],
-        ] as [String: Any]
+        ]
+        // A voice message (#204): its length and waveform travel inside the encrypted message.
+        if let duration = file.maybeDurationMs { object["duration_ms"] = duration }
+        if let waveform = file.maybeWaveform { object["waveform"] = waveform.map { Int($0) } }
+        return object
       },
     ]
   }
@@ -189,6 +193,10 @@ struct PickedFile: Equatable, Identifiable {
   let fileName: String
   let mediaType: String
   let path: String
+  /// A recorded voice message's length (#204).
+  var maybeDurationMs: Int64?
+  /// A recorded voice message's waveform, one byte per bar (#204).
+  var maybeWaveform: [UInt8]?
 
   var id: String { path }
 }

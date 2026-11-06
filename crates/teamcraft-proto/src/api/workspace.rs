@@ -539,6 +539,38 @@ impl Default for ScreenSharePolicy {
   }
 }
 
+/// The longest voice message of a new workspace, in minutes.
+pub const DEFAULT_VOICE_MESSAGE_MINUTES: u16 = 10;
+/// The longest a workspace may allow a voice message to be, in minutes. Longer recordings are
+/// files: a voice message is downloaded whole before it plays.
+pub const MAX_VOICE_MESSAGE_MINUTES: u16 = 60;
+
+/// Voice messages (#204). Clients apply it: the record button is there only when they are on, and
+/// a recording stops at the maximum length. Not a security boundary (a voice message is an audio
+/// file, and audio files stay allowed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct VoiceMessagePolicy {
+  pub enabled: bool,
+  /// 1 to [`MAX_VOICE_MESSAGE_MINUTES`]; clients clamp a stored value outside.
+  pub max_minutes: u16,
+}
+
+impl Default for VoiceMessagePolicy {
+  fn default() -> Self {
+    Self {
+      enabled: true,
+      max_minutes: DEFAULT_VOICE_MESSAGE_MINUTES,
+    }
+  }
+}
+
+impl VoiceMessagePolicy {
+  /// The longest recording, in seconds, with the stored value clamped to the allowed range.
+  pub fn max_seconds(&self) -> u32 {
+    u32::from(self.max_minutes.clamp(1, MAX_VOICE_MESSAGE_MINUTES)) * 60
+  }
+}
+
 /// Default for [`OwnerPolicy::recommended_minimum`].
 pub const DEFAULT_RECOMMENDED_OWNERS: u8 = 2;
 
@@ -643,6 +675,9 @@ pub struct WorkspacePolicy {
   pub recovery: RecoveryPolicy,
   #[serde(default)]
   pub screen_share: ScreenSharePolicy,
+  /// Voice messages (#204); on, up to 10 minutes, when absent.
+  #[serde(default)]
+  pub voice_messages: VoiceMessagePolicy,
   /// The AI notetaker of calls (e2ee.md §8.2); off when absent.
   #[serde(default)]
   pub notetaker: NotetakerPolicy,
@@ -825,6 +860,7 @@ impl Default for WorkspacePolicy {
       owners: OwnerPolicy::default(),
       recovery: RecoveryPolicy::default(),
       screen_share: ScreenSharePolicy::default(),
+      voice_messages: VoiceMessagePolicy::default(),
       notetaker: NotetakerPolicy::default(),
       import: crate::ImportPolicy::default(),
       scheduled_messages: ScheduledMessagePolicy::default(),
@@ -1024,6 +1060,28 @@ mod tests {
     let older: PresencePolicy =
       serde_json::from_str(r#"{"statuses_enabled":true,"custom_status_enabled":true}"#).unwrap();
     assert_eq!(older.maybe_away_timeout_minutes, None);
+  }
+
+  #[test]
+  fn voice_messages_are_on_by_default_and_older_policies_still_parse() {
+    let mut value = serde_json::to_value(WorkspacePolicy::default()).unwrap();
+    assert_eq!(
+      value["voice_messages"],
+      serde_json::json!({ "enabled": true, "max_minutes": 10 })
+    );
+    value.as_object_mut().unwrap().remove("voice_messages");
+    let older: WorkspacePolicy = serde_json::from_value(value).unwrap();
+    assert_eq!(older.voice_messages, VoiceMessagePolicy::default());
+    let out_of_range = VoiceMessagePolicy {
+      enabled: true,
+      max_minutes: 0,
+    };
+    assert_eq!(out_of_range.max_seconds(), 60);
+    let too_long = VoiceMessagePolicy {
+      enabled: true,
+      max_minutes: 900,
+    };
+    assert_eq!(too_long.max_seconds(), 3_600);
   }
 
   #[test]

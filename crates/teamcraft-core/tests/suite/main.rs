@@ -74,5 +74,6 @@ mod sync_heads;
 mod unseen_reactions;
 mod upkeep;
 mod upload_parts;
+mod voice_messages;
 mod workspace;
 mod workspace_admin;

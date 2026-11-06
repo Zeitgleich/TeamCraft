@@ -72,6 +72,10 @@ pub struct OutgoingFile {
   /// How long a video plays, read by the app from the file (the core has no video decoder).
   #[serde(rename = "duration_ms", default, skip_serializing_if = "Option::is_none")]
   pub maybe_duration_ms: Option<u64>,
+  /// A voice message's waveform (#204), measured by the app while recording
+  /// ([`crate::voice::Waveform`]); it makes the audio file a voice message.
+  #[serde(rename = "waveform", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_waveform: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,9 +245,13 @@ pub struct FileInfo {
   /// Width and height of a picture, from the sender; reserves its space before anything loads.
   #[serde(default)]
   pub maybe_dimensions: Option<PixelSize>,
-  /// How long a video plays, from the sender.
+  /// How long a video or voice message plays, from the sender.
   #[serde(default)]
   pub maybe_duration_ms: Option<u64>,
+  /// A voice message's waveform from the sender (#204): one byte per bar, checked by
+  /// [`crate::voice::Waveform::checked`]. Present only on voice messages.
+  #[serde(default)]
+  pub maybe_waveform: Option<Vec<u8>>,
   /// SHA-256 of the file's ciphertext as the message names it (64 hex digits); keys the persistent
   /// cache of its rendition (`media::MediaKey::Rendition`). Absent for files still going up.
   #[serde(rename = "content_sha256", default, skip_serializing_if = "Option::is_none")]

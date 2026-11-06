@@ -153,5 +153,7 @@ pub mod update_notice;
 pub mod video_player;
 pub mod video_quality;
 pub mod video_stats;
+pub mod voice_bar;
+pub mod voice_card;
 pub mod window_controls;
 pub mod workspace_dialogs;

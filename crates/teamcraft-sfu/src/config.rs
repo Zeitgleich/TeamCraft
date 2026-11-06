@@ -122,6 +122,18 @@ impl FallbackConfig {
   pub fn is_trusted_proxy(&self, peer: IpAddr) -> bool {
     self.trusted_proxies.iter().any(|proxy| proxy.contains(&peer))
   }
+
+  /// Whether a listener on `addr` is open to every network the machine is on while only a proxy on
+  /// the machine itself is trusted. Then it either has no proxy that may name its clients (the proxy
+  /// is in another container, not listed), or it needs none and is reachable from outside for nothing
+  /// (host networking, the proxy on this machine): plain HTTP that should be on loopback (#1226).
+  pub fn listens_wider_than_its_proxies(&self, addr: SocketAddr) -> bool {
+    addr.ip().is_unspecified()
+      && self
+        .trusted_proxies
+        .iter()
+        .all(|proxy| proxy.network().is_loopback() && proxy.broadcast().is_loopback())
+  }
 }
 
 /// `TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES`: addresses or networks, comma-separated; `None` for
@@ -240,5 +252,29 @@ mod tests {
     assert!(config.is_trusted_proxy(Ipv4Addr::LOCALHOST.into()));
     assert!(config.is_trusted_proxy(Ipv6Addr::LOCALHOST.into()));
     assert!(!config.is_trusted_proxy("192.0.2.1".parse().unwrap()));
+  }
+
+  #[test]
+  fn every_address_with_only_a_local_proxy_is_wider_than_needed() {
+    let everywhere: SocketAddr = "[::]:8082".parse().unwrap();
+    let everywhere_v4: SocketAddr = "0.0.0.0:8082".parse().unwrap();
+    let mut config = FallbackConfig::default();
+    assert!(config.listens_wider_than_its_proxies(everywhere));
+    assert!(config.listens_wider_than_its_proxies(everywhere_v4));
+    // The default listener, and one on the proxy's network.
+    for addr in ["127.0.0.1:8082", "[::1]:8082", "172.18.0.5:8082"] {
+      assert!(
+        !config.listens_wider_than_its_proxies(addr.parse().unwrap()),
+        "{addr}"
+      );
+    }
+    config.trusted_proxies = parse_trusted_proxies("127.0.0.0/8, ::1").unwrap();
+    assert!(config.listens_wider_than_its_proxies(everywhere));
+    // A proxy in another container, listed.
+    config.trusted_proxies = parse_trusted_proxies("172.18.0.0/16").unwrap();
+    assert!(!config.listens_wider_than_its_proxies(everywhere));
+    // Trusting nobody behind a listener on every address: no proxy can name its clients.
+    config.trusted_proxies = Vec::new();
+    assert!(config.listens_wider_than_its_proxies(everywhere));
   }
 }

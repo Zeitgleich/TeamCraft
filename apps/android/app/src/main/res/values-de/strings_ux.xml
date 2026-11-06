@@ -178,4 +178,34 @@
   <string name="app_link_meeting">Die App zeigt die Meetings, zu denen du eingeladen bist. Ist dieses nicht dabei, kann der Browser die Hosts bitten, dich einzulassen.</string>
   <string name="app_link_my_meetings">Meine Meetings</string>
   <string name="app_link_conversation_unavailable">Diese Unterhaltung ist auf diesem Gerät nicht verfügbar.</string>
+  <!-- Voice messages (#204). -->
+  <string name="voice_record">Sprachnachricht aufnehmen</string>
+  <string name="voice_send">Sprachnachricht senden</string>
+  <string name="voice_discard">Sprachnachricht verwerfen</string>
+  <string name="voice_stop">Aufnahme beenden</string>
+  <string name="voice_starting">Mikrofon wird gestartet …</string>
+  <string name="voice_finishing">Wird abgeschlossen …</string>
+  <string name="voice_hold_hint">Loslassen zum Senden · nach links wischen zum Abbrechen · nach oben wischen zum Weiteraufnehmen</string>
+  <string name="voice_take">Sprachnachricht, %1$s</string>
+  <string name="voice_send_failed">Die Sprachnachricht konnte nicht zum Senden vorbereitet werden. Versuche es erneut.</string>
+  <string name="voice_stop_limit">Die Aufnahme hat die maximale Länge einer Sprachnachricht erreicht. Sende oder verwirf sie.</string>
+  <string name="voice_stop_call">Die Aufnahme wurde für einen Anruf beendet. Sende oder verwirf sie.</string>
+  <string name="voice_stop_background">Die Aufnahme wurde beendet, als die App in den Hintergrund ging. Sende oder verwirf sie.</string>
+  <string name="voice_stop_microphone">Das Mikrofon hat aufgehört. Sende das Aufgenommene oder verwirf es.</string>
+  <string name="voice_stop_left">Die Aufnahme wurde beendet, als du die Unterhaltung verlassen hast. Sende oder verwirf sie.</string>
+  <string name="voice_permission_title">Mikrofon</string>
+  <string name="voice_permission_text">Um eine Sprachnachricht aufzunehmen, braucht TeamCraft das Mikrofon. Es wird nur während der Aufnahme genutzt, und die Nachricht ist Ende-zu-Ende-verschlüsselt.</string>
+  <string name="voice_permission_continue">Weiter</string>
+  <string name="voice_permission_blocked">TeamCraft darf das Mikrofon nicht verwenden. Um Sprachnachrichten aufzunehmen, öffne die App-Einstellungen, wähle Berechtigungen und erlaube das Mikrofon.</string>
+  <string name="voice_open_settings">Einstellungen öffnen</string>
+  <string name="voice_refused_microphone">Das Mikrofon konnte nicht geöffnet werden. Prüfe, ob eine andere App es verwendet.</string>
+  <string name="voice_refused_busy">Während eines Anrufs kannst du nicht aufnehmen.</string>
+  <string name="voice_refused_failed">Die Aufnahme konnte nicht starten. Versuche es erneut.</string>
+  <string name="voice_play">Sprachnachricht abspielen</string>
+  <string name="voice_pause">Sprachnachricht pausieren</string>
+  <string name="voice_position">%1$s von %2$s</string>
+  <string name="voice_message">Sprachnachricht</string>
+  <string name="voice_seek">Springen zu</string>
+  <string name="voice_speed">Wiedergabegeschwindigkeit %1$s</string>
+  <string name="voice_unplayable">Diese Sprachnachricht kann auf diesem Gerät nicht abgespielt werden.</string>
 </resources>

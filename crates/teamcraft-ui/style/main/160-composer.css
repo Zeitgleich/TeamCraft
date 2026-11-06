@@ -433,3 +433,18 @@ ol.md-list {
   white-space: nowrap;
 }
 
+
+/* Recording a voice message (#204): a strip above the input while recording or reviewing. */
+.voice-record-btn { touch-action: none; user-select: none; -webkit-user-select: none; }
+.voice-record-btn.is-holding { background: var(--danger-soft); color: var(--danger); }
+.voice-record-btn[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+.voice-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 6px; padding: 6px 8px; border-radius: var(--radius); background: var(--surface-2); }
+.voice-strip .voice-text { flex: 1 1 220px; margin: 0; font-size: var(--text-sm); }
+.voice-strip .voice-live { flex: 1 1 120px; display: flex; align-items: center; gap: 2px; height: 24px; min-width: 0; overflow: hidden; }
+.voice-strip .voice-hint { flex: 1 1 100%; order: 10; color: var(--text-muted); font-size: var(--text-xs); }
+.voice-strip .send-btn { flex: none; }
+.voice-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--danger); animation: voice-pulse 1.2s var(--ease-standard) infinite alternate; }
+@keyframes voice-pulse { from { opacity: 1; } to { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) {
+  .voice-dot { animation: none; }
+}

@@ -26,7 +26,7 @@ teamcraft-client-api = { path = "../../crates/teamcraft-client-api" }
 teamcraft-crypto = { path = "../../crates/teamcraft-crypto" }
 # Call media: WebTransport to the SFU, microphone and speakers, Opus, DAVE; the message sounds and
 # the user's own sound file (#800).
-teamcraft-media = { path = "../../crates/teamcraft-media", features = ["native", "call-view", "segmentation", "photo-backgrounds", "sound-files"] }
+teamcraft-media = { path = "../../crates/teamcraft-media", features = ["native", "call-view", "segmentation", "photo-backgrounds", "sound-files", "voice"] }
 # Blocks on the effects pipeline's GPU setup on a blocking thread.
 pollster = "1.0.1"
 teamcraft-proto.workspace = true

@@ -616,7 +616,9 @@ pub async fn core_reset_store(host: State<'_, CoreHost>) -> Result<(), CommandEr
 
 /// Stops the core, e.g. on sign-out. The encrypted database stays on disk.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn core_stop(host: State<'_, CoreHost>) -> Result<(), CommandError> {
+pub async fn core_stop(app: AppHandle, host: State<'_, CoreHost>) -> Result<(), CommandError> {
+  // A recording and its takes don't outlive the session (#204).
+  crate::voice::stop_for_sign_out(&app);
   // Signing out of a device that isn't set up yet leaves no keys of the attempt behind (#168).
   if let Ok(runtime) = host.current() {
     runtime.forget_unfinished_setup().await;

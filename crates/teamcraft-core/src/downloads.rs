@@ -559,6 +559,7 @@ mod tests {
       maybe_thumbnail: None,
       maybe_dimensions: None,
       maybe_duration_ms: None,
+      maybe_waveform: None,
     }
   }
 

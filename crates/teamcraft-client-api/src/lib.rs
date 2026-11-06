@@ -57,4 +57,5 @@ pub mod tray_menu;
 pub mod updates;
 pub mod video_playback;
 pub mod video_stats;
+pub mod voice;
 pub mod window_chrome;

@@ -186,6 +186,7 @@ impl Reads {
       },
       maybe_presence_policy: teamcraft_core::workspace::presence_policy(&self.store),
       maybe_screen_share_policy: teamcraft_core::workspace::screen_share_policy(&self.store),
+      maybe_voice_message_policy: teamcraft_core::workspace::voice_message_policy(&self.store),
       maybe_notetaker: teamcraft_core::notetaker::notetaker_policy(&self.store),
       maybe_backup: teamcraft_core::ui_snapshot::key_backup_state(&self.store).unwrap_or_else(|error| {
         // The app then shows the backup as unknown; the rest of the snapshot still counts.

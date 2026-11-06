@@ -184,4 +184,34 @@
   <string name="app_link_meeting">The app shows the meetings you are invited to. If this one isn\'t among them, the browser can ask its hosts to let you in.</string>
   <string name="app_link_my_meetings">My meetings</string>
   <string name="app_link_conversation_unavailable">That conversation isn\'t available on this device.</string>
+  <!-- Voice messages (#204). -->
+  <string name="voice_record">Record a voice message</string>
+  <string name="voice_send">Send voice message</string>
+  <string name="voice_discard">Discard voice message</string>
+  <string name="voice_stop">Stop recording</string>
+  <string name="voice_starting">Starting the microphone…</string>
+  <string name="voice_finishing">Finishing…</string>
+  <string name="voice_hold_hint">Let go to send · slide left to cancel · slide up to keep recording</string>
+  <string name="voice_take">Voice message, %1$s</string>
+  <string name="voice_send_failed">The voice message couldn\'t be prepared for sending. Try again.</string>
+  <string name="voice_stop_limit">The recording reached the longest a voice message may be. Send it or discard it.</string>
+  <string name="voice_stop_call">The recording stopped for a call. Send it or discard it.</string>
+  <string name="voice_stop_background">The recording stopped when the app went to the background. Send it or discard it.</string>
+  <string name="voice_stop_microphone">The microphone stopped. Send what was recorded or discard it.</string>
+  <string name="voice_stop_left">The recording stopped when you left the conversation. Send it or discard it.</string>
+  <string name="voice_permission_title">Microphone</string>
+  <string name="voice_permission_text">To record a voice message, TeamCraft needs the microphone. It is only used while you record, and the message is end-to-end encrypted.</string>
+  <string name="voice_permission_continue">Continue</string>
+  <string name="voice_permission_blocked">TeamCraft isn\'t allowed to use the microphone. To record voice messages, open the app\'s settings, choose Permissions and allow the microphone.</string>
+  <string name="voice_open_settings">Open settings</string>
+  <string name="voice_refused_microphone">The microphone couldn\'t be opened. Check that no other app is using it.</string>
+  <string name="voice_refused_busy">You can\'t record during a call.</string>
+  <string name="voice_refused_failed">The recording couldn\'t start. Try again.</string>
+  <string name="voice_play">Play voice message</string>
+  <string name="voice_pause">Pause voice message</string>
+  <string name="voice_position">%1$s of %2$s</string>
+  <string name="voice_message">Voice message</string>
+  <string name="voice_seek">Move to</string>
+  <string name="voice_speed">Playback speed %1$s</string>
+  <string name="voice_unplayable">This voice message can\'t be played on this device.</string>
 </resources>

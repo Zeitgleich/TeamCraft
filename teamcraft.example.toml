@@ -638,7 +638,8 @@ is_enabled = true
 # Offers clients the SFU's WebSocket fallback, used only when QUIC doesn't connect (networks that
 # block UDP). Needs the reverse proxy to pass this URL to the SFU's fallback listener
 # (TEAMCRAFT_SFU_FALLBACK_BIND, default 127.0.0.1:8082; a proxy elsewhere also goes into
-# TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES on the SFU, see docs/operations.md).
+# TEAMCRAFT_SFU_FALLBACK_TRUSTED_PROXIES on the SFU; docs/operations.md, "Call fallback through the
+# proxy", has the route for Caddy and nginx and the order of the rollout).
 # sfu_fallback_enabled = true
 # Its URL; the default is sfu_url's host on port 443.
 # sfu_fallback_url = "wss://sfu.example.com/call/fallback"

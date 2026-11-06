@@ -5,6 +5,7 @@ use wasm_bindgen::JsCast;
 use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, OutgoingMessage};
 use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::scheduled::ScheduleCheck;
+use teamcraft_client_api::voice::RecordingStop;
 use teamcraft_proto::ClientMessageId;
 use wasm_bindgen_futures::JsFuture;
 
@@ -25,6 +26,7 @@ use crate::components::picture_editor::PictureEditor;
 use crate::components::scheduled_view::refusal_text;
 use crate::components::sheet::MenuSurface;
 use crate::components::typing_indicator::should_notify_typing;
+use crate::components::voice_bar::{VoiceBar, VoiceButton};
 use crate::composer_focus::{self, FocusSituation};
 use crate::editor_doc::{BlockFormat, InlineStyle};
 use crate::emoji_catalog::{self, SkinTone};
@@ -52,6 +54,7 @@ use crate::state::{Overlay, SidePanel, use_app_state};
 use crate::tab_handover::PERSIST_DRAFTS_EVENT;
 use crate::unread_divider::DividerEvent;
 use crate::viewport::is_touch_primary;
+use crate::voice_recorder::{ComposerKey, VoiceRecorder};
 
 /// How long typing pauses before the draft is stored.
 const DRAFT_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
@@ -519,6 +522,7 @@ pub fn Composer(
           source: FileSource::Bytes { bytes },
           maybe_thumbnail: file.maybe_thumbnail,
           maybe_duration_ms: file.maybe_duration_ms,
+          maybe_waveform: None,
         }),
         FileContent::Large(picked) => large.push((
           file.name,
@@ -568,6 +572,7 @@ pub fn Composer(
               source,
               maybe_thumbnail,
               maybe_duration_ms,
+              maybe_waveform: None,
             }),
             Err(error) => {
               tracing::warn!(%error, "a large file could not be handed to the core");
@@ -700,6 +705,65 @@ pub fn Composer(
         )));
       },
     );
+  };
+
+  // Voice messages (#204): the take goes out as a message of its own, with the reply and the
+  // send options the composer holds; the text in the input stays.
+  let voice_key = ComposerKey {
+    conversation,
+    maybe_thread,
+  };
+  let voice_policy = state.read(|backend| backend.voice_message_policy());
+  let can_record = voice_policy.enabled && VoiceRecorder::is_supported();
+  let voice_max_seconds = voice_policy.max_seconds();
+  // A thread panel that closes takes its recording's microphone along; the take stays.
+  on_cleanup(move || state.voice.interrupt_for(voice_key, RecordingStop::Left));
+  let send_voice = move || {
+    let maybe_reply = state
+      .reply_target
+      .get_untracked()
+      .filter(|target| target.conversation == conversation);
+    let maybe_reply_attachment = maybe_reply
+      .as_ref()
+      .and_then(|target| target.maybe_image.as_ref())
+      .map(|image| image.attachment);
+    let mut message = OutgoingMessage {
+      maybe_client_message_id: None,
+      conversation,
+      maybe_thread,
+      body: String::new(),
+      maybe_reply_to: maybe_reply.map(|target| target.message),
+      maybe_reply_attachment,
+      priority: priority.get_untracked(),
+      wants_acknowledgement: wants_acknowledgement.get_untracked(),
+      is_silent: is_silent.get_untracked(),
+      also_send_to_channel: maybe_thread.is_some()
+        && maybe_channel_name().is_some()
+        && also_send_to_channel.get_untracked(),
+      files: Vec::new(),
+    };
+    leptos::task::spawn_local(async move {
+      match state.voice.take_file().await {
+        Ok(None) => {},
+        Ok(Some(file)) => {
+          message.files.push(file);
+          state.reply_target.try_set(None);
+          priority.try_set(MessagePriority::Normal);
+          is_silent.try_set(false);
+          wants_acknowledgement.try_set(false);
+          state.try_write(|backend| backend.send_message(message));
+          if maybe_thread.is_none() {
+            state.jump_to_latest.try_update(|value| *value += 1);
+            state.mark_read_on_send(conversation);
+          }
+          state.divider_event(conversation, DividerEvent::Sent);
+        },
+        Err(error) => {
+          tracing::warn!(%error, "a voice message was not handed to the core");
+          upload_error.set_if_alive(Some(i18n.t("voice-send-failed")));
+        },
+      }
+    });
   };
 
   // The picker under the input: people and user groups after `@`, commands after a leading `/`. It
@@ -1462,6 +1526,7 @@ pub fn Composer(
               }
             })
         }}
+        {can_record.then(|| view! { <VoiceBar key=voice_key max_seconds=voice_max_seconds on_send=Callback::new(move |()| send_voice()) /> })}
         {move || {
           notice.get().map(|shown| match shown {
             Notice::Text(message) => view! { <p class="composer-notice" role="status">{message}</p> }.into_any(),
@@ -1757,6 +1822,7 @@ pub fn Composer(
             <span class="send-flags" aria-live="polite">
               {move || send_flags().into_iter().map(|flag| view! { <span class="send-flag">{flag}</span> }).collect_view()}
             </span>
+            {can_record.then(|| view! { <VoiceButton key=voice_key max_seconds=voice_max_seconds on_send=Callback::new(move |()| send_voice()) /> })}
             <div class="send-group composer-menu-wrap">
               <button
                 class="send-btn"

@@ -123,6 +123,7 @@ impl DirectUpload {
         maybe_thumbnail: None,
         maybe_dimensions: None,
         maybe_duration_ms: None,
+        maybe_waveform: None,
         maybe_parts: None,
       },
       announced: Vec::new(),
@@ -306,6 +307,7 @@ pub fn estimated_message_bytes(body: &str, mention_count: usize, files: &[(&str,
       height: u32::MAX,
     }),
     maybe_duration_ms: None,
+    maybe_waveform: None,
   };
   let content = MessageContent::Text {
     body: body.to_owned(),
@@ -418,6 +420,7 @@ mod tests {
       maybe_thumbnail: Some(Base64Bytes::new(vec![0; size])),
       maybe_dimensions: None,
       maybe_duration_ms: None,
+      maybe_waveform: None,
     }
   }
 }

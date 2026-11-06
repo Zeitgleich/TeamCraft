@@ -24,6 +24,7 @@ mod row_badge;
 mod server_entry;
 mod types;
 mod video;
+mod voice;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -77,6 +78,10 @@ pub use types::{
 #[cfg(target_os = "android")]
 pub use teamcraft_desktop_native::Java_de_zeitgleich_teamcraft_calls_AudioContext_initialize;
 pub use video::{CameraFrame, VideoFrameRgba};
+pub use voice::{
+  VoiceError, VoiceRecording, VoiceStop, VoiceTakeInfo, voice_clear_takes, voice_decode_to_wav,
+  voice_file_name, voice_waveform_heights,
+};
 
 use crate::engine::{Engine, EngineThreads, Job, PushOpening, PushReader};
 use crate::logging::{LifecycleStep, outcome};
