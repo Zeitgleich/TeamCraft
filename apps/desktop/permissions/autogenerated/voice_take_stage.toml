@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-take-stage"
+description = "Enables the voice_take_stage command without any pre-configured scope."
+commands.allow = ["voice_take_stage"]
+
+[[permission]]
+identifier = "deny-voice-take-stage"
+description = "Denies the voice_take_stage command without any pre-configured scope."
+commands.deny = ["voice_take_stage"]

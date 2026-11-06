@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-playback-prepare"
+description = "Enables the voice_playback_prepare command without any pre-configured scope."
+commands.allow = ["voice_playback_prepare"]
+
+[[permission]]
+identifier = "deny-voice-playback-prepare"
+description = "Denies the voice_playback_prepare command without any pre-configured scope."
+commands.deny = ["voice_playback_prepare"]

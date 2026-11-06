@@ -219,6 +219,7 @@ fn with_file(conversation: ConversationId, name: &str, bytes: &[u8]) -> Outgoing
       },
       maybe_thumbnail: None,
       maybe_duration_ms: None,
+      maybe_waveform: None,
     }],
     ..text(conversation, "")
   }

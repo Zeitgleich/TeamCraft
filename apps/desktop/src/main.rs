@@ -38,6 +38,7 @@ mod startup_env;
 mod tray;
 mod updates;
 mod video_playback;
+mod voice;
 mod webview_downloads;
 #[cfg(target_os = "linux")]
 mod webview_memory;
@@ -136,6 +137,7 @@ fn main() -> anyhow::Result<()> {
     .manage(message_sound::MessageSoundState::default())
     .manage(calls::push_to_talk::PushToTalkState::default())
     .manage(mute_shortcut::MuteShortcutState::default())
+    .manage(voice::VoiceState::default())
     .manage(CoreHost::new(tokens))
     .manage(Arc::new(DroppedFilesState::default()))
     .setup(move |app| {
@@ -189,6 +191,7 @@ fn main() -> anyhow::Result<()> {
       }
       create_main_window(app)?;
       video_playback::clear_opened_videos(app.handle());
+      voice::clear_voice_folders(app.handle());
       // Logs once whether GStreamer can play phone videos (#804), off the start-up path.
       tauri::async_runtime::spawn(video_playback::video_playback());
       match app.path().app_cache_dir() {
@@ -213,6 +216,10 @@ fn main() -> anyhow::Result<()> {
       Ok(())
     })
     .on_page_load(|webview, payload| {
+      if payload.event() == PageLoadEvent::Started {
+        // What the old page recorded or decoded is unreachable now (#204).
+        voice::page_started(webview.app_handle(), webview.label());
+      }
       if webview.label() == tray::MAIN_WINDOW && payload.event() == PageLoadEvent::Started {
         webview_recovery::page_started(webview.app_handle());
       }
@@ -361,6 +368,15 @@ fn main() -> anyhow::Result<()> {
       updates::update_dismiss,
       video_playback::video_playback,
       video_playback::open_video_externally,
+      voice::voice_record_start,
+      voice::voice_record_status,
+      voice::voice_record_finish,
+      voice::voice_record_cancel,
+      voice::voice_take_stage,
+      voice::voice_take_discard,
+      voice::voice_playback_prepare,
+      voice::voice_playback_read,
+      voice::voice_playback_release,
       webview_recovery::webview_video_mode,
       webview_recovery::webview_codec_probe_begin,
       webview_recovery::webview_codec_probe_end,

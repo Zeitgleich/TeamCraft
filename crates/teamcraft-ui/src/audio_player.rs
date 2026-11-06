@@ -13,6 +13,8 @@
 //! - A failed download says so and can be tried again; a format the webview can't play says so and
 //!   offers the download (#322). A load that finishes after the user moved on is dropped.
 //! - In the desktop app, playback pauses when the window goes to the tray or is minimized.
+//! - A voice message (#204) plays at the speed its card asks for; one in Opus that the webview
+//!   can't play (the macOS webview reads neither Ogg nor WebM) is decoded to WAV by the shell.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -54,6 +56,10 @@ struct Parts {
   generation: StoredValue<u64>,
   /// Cards on screen per attachment: the player lets go of a file once none shows it.
   shown: StoredValue<HashMap<MediaKey, usize>>,
+  /// What the last press asked for: its speed, and whether the shell's decoding is worth a try.
+  maybe_request: StoredValue<Option<AudioRequest>>,
+  /// The shell's decoding was tried for the attachment held: it isn't tried twice.
+  has_tried_decoding: StoredValue<bool>,
   /// Made on the first press on play.
   element: StoredValue<Option<Element>, LocalStorage>,
   /// The decrypted file the element plays; dropping it revokes the URL.
@@ -66,6 +72,10 @@ pub struct AudioRequest {
   pub conversation: ConversationId,
   pub key: MediaKey,
   pub format: AudioFormat,
+  /// The playback rate: 1.0, or a voice message's chosen speed.
+  pub rate: f64,
+  /// A voice message (#204): Opus the shell can decode where the webview can't play it.
+  pub is_voice: bool,
 }
 
 /// The `<audio>` element and the listeners it needs kept alive.
@@ -84,6 +94,8 @@ impl Parts {
       volume: RwSignal::new(1.0),
       is_muted: RwSignal::new(false),
       generation: StoredValue::new(0),
+      maybe_request: StoredValue::new(None),
+      has_tried_decoding: StoredValue::new(false),
       shown: StoredValue::new(HashMap::new()),
       element: StoredValue::new_local(None),
       url: StoredValue::new_local(None),
@@ -192,6 +204,21 @@ impl Parts {
     }
   }
 
+  /// Plays `key` at `rate` from now on, if the player holds it.
+  pub fn set_rate(self, key: MediaKey, rate: f64) {
+    if self.track.try_get_untracked().flatten() != Some(key) {
+      return;
+    }
+    self.maybe_request.try_update_value(|maybe_request| {
+      if let Some(request) = maybe_request {
+        request.rate = rate;
+      }
+    });
+    if let Some(audio) = self.audio() {
+      apply_rate(&audio, rate);
+    }
+  }
+
   /// A card of `key` is on screen until the current scope ends. Once no card shows the attachment
   /// the player holds (its row left the list, the message was deleted, the conversation closed),
   /// the player stops and frees the file. A row drawn anew drops its old card and makes a new one
@@ -238,10 +265,14 @@ impl Parts {
     let generation = self.generation.try_get_value().unwrap_or_default();
     self.track.try_set(Some(request.key));
     self.phase.try_set(AudioPhase::Loading);
+    self.maybe_request.try_set_value(Some(request));
+    self.has_tried_decoding.try_set_value(false);
     let AudioRequest {
       conversation,
       key,
       format,
+      rate,
+      ..
     } = request;
     spawn_local(async move {
       let result = fetch(conversation, key, format).await;
@@ -252,6 +283,7 @@ impl Parts {
       match result {
         Ok(url) => {
           audio.set_src(url.as_str());
+          apply_rate(&audio, rate);
           self.url.try_set_value(Some(url));
           self.phase.try_set(AudioPhase::Paused);
           self.resume();
@@ -293,8 +325,57 @@ impl Parts {
     });
   }
 
-  /// The webview can't play the file: it is let go, the card says so and offers the download.
+  /// The webview can't play the file: a voice message is decoded by the desktop app's shell once;
+  /// otherwise it is let go, the card says so and offers the download.
   fn fail_unplayable(self) {
+    let maybe_request = self.maybe_request.try_get_value().flatten();
+    let has_tried = self.has_tried_decoding.try_get_value().unwrap_or(true);
+    if let Some(request) = maybe_request
+      && request.is_voice
+      && !has_tried
+      && crate::auth::tauri::is_available()
+    {
+      self.has_tried_decoding.try_set_value(true);
+      self.play_decoded(request);
+      return;
+    }
+    self.give_up_unplayable();
+  }
+
+  /// Plays the shell's WAV of a voice message instead of its Opus.
+  fn play_decoded(self, request: AudioRequest) {
+    let generation = self.generation.try_get_value().unwrap_or_default();
+    self.phase.try_set(AudioPhase::Loading);
+    spawn_local(async move {
+      let result = decoded_wav(request.conversation, request.key).await;
+      if self.generation.try_get_value() != Some(generation) {
+        return;
+      }
+      let Some(audio) = self.audio() else {
+        return;
+      };
+      match result {
+        Ok(url) => {
+          audio.set_src(url.as_str());
+          let rate = self
+            .maybe_request
+            .try_get_value()
+            .flatten()
+            .map_or(request.rate, |current| current.rate);
+          apply_rate(&audio, rate);
+          self.url.try_set_value(Some(url));
+          self.phase.try_set(AudioPhase::Paused);
+          self.resume();
+        },
+        Err(error) => {
+          tracing::debug!(%error, conversation_id = %request.conversation, "voice message not decoded");
+          self.give_up_unplayable();
+        },
+      }
+    });
+  }
+
+  fn give_up_unplayable(self) {
     if let Some(audio) = self.audio() {
       drop(audio.remove_attribute("src"));
       audio.load();
@@ -408,6 +489,13 @@ impl AudioPlayer {
     }
   }
 
+  /// Plays `key` at `rate` from now on, if the player holds it.
+  pub fn set_rate(self, key: MediaKey, rate: f64) {
+    if let Some(parts) = self.parts() {
+      parts.set_rate(key, rate);
+    }
+  }
+
   /// A card of `key` is on screen until the current scope ends; see [`Parts::show`].
   pub fn show(self, key: MediaKey) {
     if let Some(parts) = self.parts() {
@@ -481,6 +569,62 @@ pub fn stop_when_leaving(state: AppState) {
     }
     view
   });
+}
+
+/// Sets the rate, also as the default a new source starts with.
+fn apply_rate(audio: &web_sys::HtmlMediaElement, rate: f64) {
+  audio.set_default_playback_rate(rate);
+  audio.set_playback_rate(rate);
+}
+
+/// A voice message decoded to WAV by the desktop app's shell, as a URL.
+async fn decoded_wav(conversation: ConversationId, key: MediaKey) -> Result<ObjectUrl, String> {
+  #[derive(serde::Deserialize)]
+  struct Decoded {
+    token: String,
+    size_bytes: u64,
+  }
+  let args = serde_json::json!({
+    "conversation": conversation,
+    "message": key.message,
+    "file_id": key.attachment.to_string(),
+  });
+  let decoded = crate::auth::tauri::call::<Decoded>("voice_playback_prepare", &args).await?;
+  let read = read_decoded(&decoded.token, decoded.size_bytes).await;
+  let release = serde_json::json!({ "token": decoded.token });
+  if let Err(error) = crate::auth::tauri::call::<()>("voice_playback_release", &release).await {
+    tracing::debug!(%error, "a decoded voice message was not deleted");
+  }
+  let parts = read?;
+  let bag = web_sys::BlobPropertyBag::new();
+  bag.set_type("audio/wav");
+  let blob = web_sys::Blob::new_with_u8_array_sequence_and_options(&parts, &bag)
+    .map_err(|_| "the decoded voice message could not be put together".to_owned())?;
+  ObjectUrl::from_blob(&blob).ok_or_else(|| "no URL for the decoded voice message".to_owned())
+}
+
+/// Reads a decoded voice message from the shell in parts (no single huge IPC message).
+async fn read_decoded(token: &str, size_bytes: u64) -> Result<js_sys::Array, String> {
+  let parts = js_sys::Array::new();
+  let mut offset = 0u64;
+  while offset < size_bytes {
+    let args = serde_json::json!({ "token": token, "offset": offset });
+    let js_args =
+      js_sys::JSON::parse(&args.to_string()).map_err(|_| "could not encode the arguments".to_owned())?;
+    let answer = crate::auth::tauri::invoke("voice_playback_read", js_args)
+      .await
+      .map_err(|error| error.to_string())?;
+    if !answer.is_instance_of::<js_sys::ArrayBuffer>() {
+      return Err("unreadable answer of voice_playback_read".to_owned());
+    }
+    let chunk = js_sys::Uint8Array::new(&answer);
+    if chunk.length() == 0 {
+      break;
+    }
+    offset += u64::from(chunk.length());
+    parts.push(&chunk);
+  }
+  Ok(parts)
 }
 
 /// The decrypted file as a URL of its audio type.

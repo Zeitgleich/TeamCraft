@@ -510,6 +510,7 @@ mod tests {
       maybe_thumbnail: Some(Base64Bytes::from(vec![u8::try_from(number).unwrap()])),
       maybe_dimensions: None,
       maybe_duration_ms: None,
+      maybe_waveform: None,
     }
   }
 }

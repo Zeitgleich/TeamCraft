@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 engine=${CONTAINER_ENGINE:-podman}
 seconds=${2:-180}
-targets=(proto_requests proto_gateway call_fallback_frame bridge_ingest bridge_multipart thumbnail imip workspace_log crypto_decoders dpop_proof app_link)
+targets=(proto_requests proto_gateway call_fallback_frame bridge_ingest bridge_multipart thumbnail imip workspace_log crypto_decoders dpop_proof app_link voice_decode)
 
 if [ "${1:-}" = list ]; then printf '%s\n' "${targets[@]}"; exit 0; fi
 if [ -n "${1:-}" ] && [ "$1" != all ]; then targets=("$1"); fi
@@ -25,6 +25,7 @@ for target in "${targets[@]}"; do
   case "$target" in
     bridge_multipart) extra=(-max_len=65536 -len_control=10) ;;
     thumbnail) extra=(-max_len=262144 -len_control=10) ;;
+    voice_decode) extra=(-max_len=65536 -len_control=10) ;;
     *) extra=() ;;
   esac
   echo "== fuzzing $target for ${seconds}s"

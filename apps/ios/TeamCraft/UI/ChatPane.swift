@@ -67,6 +67,8 @@ struct ChatPane: View {
   /// A call about to be joined whose running call has the notetaker in it: the user confirms
   /// after the notice (`true`: with video).
   @State private var maybeNotetakerCall: Bool?
+  /// Whether voice messages may be recorded here and how long (#204).
+  @State private var voicePolicy = VoiceMessagePolicy.fallback
   @AppStorage("share_typing") private var isSharingTyping = true
   @FocusState private var isComposerFocused: Bool
 
@@ -85,6 +87,7 @@ struct ChatPane: View {
     .task {
       mentionNames = await model.mentionNames()
       displayNames = await model.displayNames()
+      voicePolicy = await model.voiceMessagePolicy()
     }
     // The composer lives in the core's drafts, so text typed before the app was killed is back
     // (issue #158), also from the user's other devices.
@@ -135,6 +138,8 @@ struct ChatPane: View {
     .onAppear { model.visibleConversationId = conversation.id }
     .onDisappear {
       if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
+      // A recording stops when the user leaves; the take waits here for their return (#204).
+      VoiceRecorder.shared.interrupt(.left, owner: draftKey)
     }
   }
 
@@ -440,58 +445,10 @@ struct ChatPane: View {
         }
         EmojiSuggestionBar(text: draft) { emoji in draft = completeEmoji(in: draft, with: emoji) }
         if !attachments.isEmpty { attachmentChips }
-        HStack(alignment: .bottom, spacing: 8) {
-          HStack(alignment: .bottom, spacing: 0) {
-            if maybeEditing != nil {
-              Button { cancelEditing() } label: { composerIcon("xmark") }
-                .accessibilityLabel(Text("cancel"))
-            } else {
-              Menu {
-                Button("attach_photo", systemImage: "photo.on.rectangle") { isPickingPhoto = true }
-                if CameraPicker.isAvailable {
-                  Button("attach_camera", systemImage: "camera") { isTakingPhoto = true }
-                }
-                Button("attach_file", systemImage: "doc") { isPickingDocument = true }
-                if isSchedulingAllowed {
-                  Divider()
-                  // Text waits in the account data; with files or nothing to send there is nothing it can keep.
-                  Button("schedule_heading", systemImage: "clock") { isSchedulingSend = true }
-                    .disabled(!canSchedule)
-                }
-              } label: {
-                composerIcon("paperclip")
-              }
-              .accessibilityLabel(Text("attach"))
-            }
-            TextField("composer_hint", text: $draft, axis: .vertical)
-              .focused($isComposerFocused)
-              .onChange(of: draft) { _, text in
-                announceTyping(text)
-                // Another text is another message, also if the same words come back later.
-                if let attempt = maybeScheduleAttempt, attempt.body != text { maybeScheduleAttempt = nil }
-              }
-              .lineLimit(1...6)
-              .padding(.vertical, 10)
-            // While typing the field needs the room; the camera comes back when it is empty.
-            if draft.isEmpty && maybeEditing == nil && CameraPicker.isAvailable {
-              Button { isTakingPhoto = true } label: { composerIcon("camera") }
-                .accessibilityLabel(Text("attach_camera"))
-            }
-          }
-          .padding(.horizontal, 4)
-          .background(Theme.surface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-          .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(Theme.border))
-          Button { Task { await submit() } } label: {
-            Image(systemName: maybeEditing == nil ? "arrow.up" : "checkmark")
-              .font(.body.weight(.semibold))
-              .foregroundStyle(canSubmit ? Theme.onAccent : Theme.textMuted)
-              .frame(width: 44, height: 44)
-              .background(canSubmit ? Theme.accent : Theme.surface, in: Circle())
-              .overlay(Circle().stroke(canSubmit ? Color.clear : Theme.border))
-          }
-          .buttonStyle(.plain)
-          .disabled(!canSubmit)
-          .accessibilityLabel(Text("send"))
+        if VoiceRecorder.shared.showsBar(for: draftKey) {
+          VoiceRecorderBar(owner: draftKey) { Task { await sendVoice() } }
+        } else {
+          composerRow
         }
       }
       .padding(.horizontal, 10)
@@ -500,6 +457,90 @@ struct ChatPane: View {
     } else {
       Text(LocalizedStringKey(conversation.isArchived ? "read_only_archived" : "read_only_channel")).font(.footnote).foregroundStyle(Theme.textMuted).padding()
     }
+  }
+
+  /// The field and the send button; while there is nothing to send and voice messages are on, the
+  /// record button takes the send button's place (#204). A held recording shows in place of the
+  /// field, so the button the finger holds stays where it is.
+  private var composerRow: some View {
+    HStack(alignment: .bottom, spacing: 8) {
+      if VoiceRecorder.shared.isHeld(by: draftKey) {
+        VoiceHoldHint(owner: draftKey)
+      } else {
+        messageField
+      }
+      if showsRecordButton {
+        VoiceRecordButton(
+          owner: draftKey, maxSeconds: voicePolicy.maxSeconds,
+          isDisabled: VoiceRecorder.shared.isBusy(elsewhereThan: draftKey) || model.calls.activeCall != nil
+        ) {
+          Task { await sendVoice() }
+        }
+      } else {
+        Button { Task { await submit() } } label: {
+          Image(systemName: maybeEditing == nil ? "arrow.up" : "checkmark")
+            .font(.body.weight(.semibold))
+            .foregroundStyle(canSubmit ? Theme.onAccent : Theme.textMuted)
+            .frame(width: 44, height: 44)
+            .background(canSubmit ? Theme.accent : Theme.surface, in: Circle())
+            .overlay(Circle().stroke(canSubmit ? Color.clear : Theme.border))
+        }
+        .buttonStyle(.plain)
+        .disabled(!canSubmit)
+        .accessibilityLabel(Text("send"))
+      }
+    }
+  }
+
+  /// The rounded field with attach on the leading side and the camera on the trailing side.
+  private var messageField: some View {
+    HStack(alignment: .bottom, spacing: 0) {
+      if maybeEditing != nil {
+        Button { cancelEditing() } label: { composerIcon("xmark") }
+          .accessibilityLabel(Text("cancel"))
+      } else {
+        Menu {
+          Button("attach_photo", systemImage: "photo.on.rectangle") { isPickingPhoto = true }
+          if CameraPicker.isAvailable {
+            Button("attach_camera", systemImage: "camera") { isTakingPhoto = true }
+          }
+          Button("attach_file", systemImage: "doc") { isPickingDocument = true }
+          if isSchedulingAllowed {
+            Divider()
+            // Text waits in the account data; with files or nothing to send there is nothing it can keep.
+            Button("schedule_heading", systemImage: "clock") { isSchedulingSend = true }
+              .disabled(!canSchedule)
+          }
+        } label: {
+          composerIcon("paperclip")
+        }
+        .accessibilityLabel(Text("attach"))
+      }
+      TextField("composer_hint", text: $draft, axis: .vertical)
+        .focused($isComposerFocused)
+        .onChange(of: draft) { _, text in
+          announceTyping(text)
+          // Another text is another message, also if the same words come back later.
+          if let attempt = maybeScheduleAttempt, attempt.body != text { maybeScheduleAttempt = nil }
+        }
+        .lineLimit(1...6)
+        .padding(.vertical, 10)
+      // While typing the field needs the room; the camera comes back when it is empty.
+      if draft.isEmpty && maybeEditing == nil && CameraPicker.isAvailable {
+        Button { isTakingPhoto = true } label: { composerIcon("camera") }
+          .accessibilityLabel(Text("attach_camera"))
+      }
+    }
+    .padding(.horizontal, 4)
+    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(Theme.border))
+  }
+
+  /// Nothing typed or attached, no edit, and the workspace allows voice messages. Stays while a
+  /// held recording runs (the field is empty then).
+  private var showsRecordButton: Bool {
+    voicePolicy.enabled && maybeEditing == nil && attachments.isEmpty
+      && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
   /// An icon button inside the composer field: 44 pt to tap, in the muted colour.
@@ -889,6 +930,35 @@ struct ChatPane: View {
         maybeReplyingImage = replyingImage
         if files.isEmpty { isSendFailed = true } else { attachmentError = .sendFailed }
       }
+    }
+    await reload()
+  }
+
+  /// Sends the recorded take of this composer as a voice message, with the reply it answers.
+  private func sendVoice() async {
+    let importer = await model.attachmentImporter()
+    let file: PickedFile
+    do {
+      guard let take = try await VoiceRecorder.shared.takeForSending(owner: draftKey, importer: importer) else { return }
+      file = take
+    } catch let error as AttachmentError {
+      attachmentError = error
+      return
+    } catch {
+      attachmentError = .unreadable
+      return
+    }
+    let replying = maybeReplying
+    let replyingImage = maybeReplyingImage
+    maybeReplying = nil
+    maybeReplyingImage = nil
+    let request = SendRequest(
+      conversationId: conversation.id, maybeThreadId: threadId, body: "", files: [file],
+      maybeReplyToId: replyingImage?.message ?? replying?.id, maybeReplyAttachmentId: replyingImage?.fileId)
+    if !(await model.performChecked(.sendMessage(request))) {
+      maybeReplying = replying
+      maybeReplyingImage = replyingImage
+      attachmentError = .sendFailed
     }
     await reload()
   }

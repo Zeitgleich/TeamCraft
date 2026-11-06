@@ -8,8 +8,17 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
-/** A file picked for sending, already copied to a path the core can read. */
-data class PickedFile(val fileName: String, val mediaType: String, val path: String)
+/**
+ * A file picked for sending, already copied to a path the core can read. A recorded voice message
+ * (#204) also carries its length and waveform, which travel inside the encrypted message.
+ */
+data class PickedFile(
+  val fileName: String,
+  val mediaType: String,
+  val path: String,
+  val maybeDurationMs: Long? = null,
+  val maybeWaveform: List<Int>? = null,
+)
 
 /** What the composer sends besides the text. */
 data class SendOptions(
@@ -72,6 +81,8 @@ object ChatActions {
               put("file_name", file.fileName)
               put("media_type", file.mediaType)
               put("source", buildJsonObject { put("kind", "path"); put("path", file.path) })
+              file.maybeDurationMs?.let { put("duration_ms", it) }
+              file.maybeWaveform?.let { waveform -> put("waveform", buildJsonArray { waveform.forEach { add(JsonPrimitive(it)) } }) }
             },
           )
         }

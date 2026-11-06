@@ -238,6 +238,7 @@ fn with_file(conversation: ConversationId, name: &str, source: FileSource) -> Ou
       source,
       maybe_thumbnail: None,
       maybe_duration_ms: None,
+      maybe_waveform: None,
     }],
   }
 }

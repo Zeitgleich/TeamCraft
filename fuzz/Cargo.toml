@@ -18,6 +18,7 @@ teamcraft-bridge = { path = "../crates/teamcraft-bridge" }
 teamcraft-client-api = { path = "../crates/teamcraft-client-api" }
 teamcraft-core = { path = "../crates/teamcraft-core" }
 teamcraft-crypto = { path = "../crates/teamcraft-crypto" }
+teamcraft-media = { path = "../crates/teamcraft-media", default-features = false, features = ["voice-decode"] }
 teamcraft-proto = { path = "../crates/teamcraft-proto" }
 teamcraft-server = { path = "../crates/teamcraft-server" }
 
@@ -104,6 +105,13 @@ bench = false
 [[bin]]
 name = "crypto_decoders"
 path = "fuzz_targets/crypto_decoders.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "voice_decode"
+path = "fuzz_targets/voice_decode.rs"
 test = false
 doc = false
 bench = false

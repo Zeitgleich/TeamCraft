@@ -7,6 +7,7 @@ use teamcraft_client_api::actions::{
   ShareLink, ShareLinkOptions,
 };
 use teamcraft_client_api::model::{ConversationId, MessageId, ThreadId, UserId};
+use teamcraft_client_api::voice::Waveform;
 use teamcraft_proto::{AttachmentId, Base64Bytes, ClientMessageId};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -66,6 +67,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
             height: size.height,
           }),
           maybe_duration_ms: file.maybe_duration_ms,
+          maybe_waveform: waveform_view(file.maybe_waveform.as_ref()),
           maybe_content_sha256: None,
         })
         .collect();
@@ -94,6 +96,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
         maybe_imported_author: maybe_imported_author.clone(),
         maybe_dimensions: None,
         maybe_duration_ms: file.maybe_duration_ms,
+        maybe_waveform: waveform_view(file.maybe_waveform.as_ref()),
         maybe_content_sha256: None,
       });
     attachments_of(&stored.content)
@@ -141,6 +144,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           height: size.height,
         }),
         maybe_duration_ms: attachment.maybe_duration_ms,
+        maybe_waveform: waveform_view(attachment.maybe_waveform.as_ref()),
         maybe_content_sha256: <&[u8; 32]>::try_from(attachment.ciphertext_sha256.as_slice())
           .ok()
           .map(teamcraft_client_api::media::to_hex),
@@ -517,6 +521,10 @@ fn pending_file(file: OutgoingFile) -> PendingFile {
     maybe_thumbnail: file.maybe_thumbnail.map(Base64Bytes::new),
     maybe_dimensions,
     maybe_duration_ms: file.maybe_duration_ms,
+    maybe_waveform: file
+      .maybe_waveform
+      .and_then(|bytes| Waveform::checked(&bytes))
+      .map(|waveform| Base64Bytes::new(waveform.into_bytes())),
   }
 }
 
@@ -618,4 +626,12 @@ fn failure_view(reason: TransferFailure) -> FileFailure {
     TransferFailure::Missing => FileFailure::Missing,
     TransferFailure::Intercepted => FileFailure::Intercepted,
   }
+}
+
+/// A voice message's waveform for the app: only one that passes the checks, else the file is a
+/// plain audio file (a sender's malformed waveform doesn't reach the UI).
+fn waveform_view(maybe_waveform: Option<&Base64Bytes>) -> Option<Vec<u8>> {
+  maybe_waveform
+    .and_then(|bytes| Waveform::checked(bytes.as_slice()))
+    .map(Waveform::into_bytes)
 }

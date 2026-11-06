@@ -19,6 +19,7 @@ use crate::audio_player::{AudioPlayer, AudioRequest};
 use crate::components::attachment_menu;
 use crate::components::file_views::{FileActions, FileMenu, TransferRing, transfer_status};
 use crate::components::icons::{Icon, IconName};
+use crate::components::voice_card::{self, VoiceCard};
 use crate::i18n::use_i18n;
 use crate::lightbox::MediaKey;
 use crate::settings::AudioLimit;
@@ -38,6 +39,10 @@ pub fn is_audio_card(file: &FileInfo) -> bool {
 /// One audio attachment; see the module.
 #[component]
 pub fn AudioCard(file: FileInfo) -> impl IntoView {
+  // A voice message (#204) is a card of its own; one too large to play here stays this card.
+  if voice_card::is_voice(&file) && AudioLimit::load().allows(file.size_bytes) {
+    return view! { <VoiceCard file=file /> }.into_any();
+  }
   let state = use_app_state();
   let i18n = use_i18n();
   let player = state.audio;
@@ -53,6 +58,8 @@ pub fn AudioCard(file: FileInfo) -> impl IntoView {
     conversation: file.conversation,
     key,
     format,
+    rate: 1.0,
+    is_voice: false,
   };
   let fits = AudioLimit::load().allows(file.size_bytes);
   let actions = FileActions::new(state, &file);

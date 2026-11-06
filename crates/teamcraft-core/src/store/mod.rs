@@ -545,6 +545,11 @@ pub struct AttachmentRef {
   /// How long a video plays, read by the sender's app; older clients ignore it.
   #[serde(rename = "duration_ms", default, skip_serializing_if = "Option::is_none")]
   pub maybe_duration_ms: Option<u64>,
+  /// A voice message's waveform (#204): one loudness byte per bar, made by the sender while
+  /// recording. Inside the encrypted message like everything here; older clients ignore it and
+  /// show the plain audio file.
+  #[serde(rename = "waveform", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_waveform: Option<teamcraft_proto::Base64Bytes>,
 }
 
 /// The size of a picture in pixels.

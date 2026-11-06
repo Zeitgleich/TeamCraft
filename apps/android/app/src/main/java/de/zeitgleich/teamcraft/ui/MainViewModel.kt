@@ -176,6 +176,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Files picked in a composer and not sent yet, by conversation and thread. */
   val pickedFiles = mutableStateMapOf<String, List<PickedFile>>()
 
+  /** The app is in a call, or one rings: no voice recording then, and none plays (#204). */
+  val isInCall: StateFlow<Boolean> = inCallFlow(graph.calls.callState, graph.calls.incomingRing, viewModelScope)
+
+  /** The one voice recording of the app (#204). */
+  val voice = VoiceRecorderModel(application, viewModelScope, isInCall) {
+    runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull()
+  }
+
+  /** The one player of voice messages (#204). */
+  val voicePlayer = VoicePlayer(application, viewModelScope).also { player ->
+    viewModelScope.launch { isInCall.collect { inCall -> if (inCall) player.pause() } }
+  }
+
   /** The last action that failed, as a message to show once. */
   val lastFailure: StateFlow<Int?> = failures
 
@@ -1031,6 +1044,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     graph.push.beginSignOut()
     linkRequestList.value = emptyList()
     review.value = null
+    // A recording and its take don't outlive the account on this device (#204).
+    voicePlayer.stop()
+    voice.forgetAll()
     graph.calls.hangUp()
     graph.push.unregister()
     // A setup given up on leaves no keys behind, and its device is revoked (issue #415).
@@ -1305,6 +1321,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       is TeamCraftException.LinkCodeExpired -> R.string.link_code_expired
       else -> R.string.error_generic
     }
+  }
+
+  override fun onCleared() {
+    voice.close()
+    voicePlayer.release()
+    super.onCleared()
   }
 }
 

@@ -54,13 +54,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "TeamCraft uses the microphone for calls."
+            "value": "TeamCraft uses the microphone for calls and for voice messages you record."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "TeamCraft verwendet das Mikrofon für Anrufe."
+            "value": "TeamCraft verwendet das Mikrofon für Anrufe und für Sprachnachrichten, die du aufnimmst."
           }
         }
       }
