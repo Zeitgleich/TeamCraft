@@ -161,6 +161,10 @@ struct State {
   /// Kept apart from the contents: a file that can't be read right now doesn't cost another
   /// keychain read when it is tried again.
   maybe_key: Option<SymmetricKey>,
+  /// A sign-out's new key that the keychain may or may not have taken: it failed the write and
+  /// couldn't be read back. Until that is settled every write seals the file under `maybe_key`
+  /// and its staged copy under this one, so the files open under whichever key the keychain has.
+  maybe_pending_key: Option<SymmetricKey>,
   maybe_contents: Option<Contents>,
   /// The contents changed and the file doesn't have that yet. Stays set when a write fails, so the
   /// next call writes again instead of finding nothing to do.
@@ -188,6 +192,15 @@ enum Sealed {
   Opened(Contents),
   /// Doesn't open: damaged, too big, or sealed under another key.
   Unreadable,
+}
+
+/// How the keychain took the files' new key at a sign-out.
+enum KeyWrite {
+  Taken,
+  /// It has the old key (or none): the staged files would never open.
+  Refused(KeySourceError),
+  /// It failed the write and couldn't be read back: it may have either key.
+  Unsure(KeySourceError),
 }
 
 /// The last keychain failure, standing until `until`.
@@ -350,6 +363,8 @@ impl SecretVault {
       remove_if_there(&directory.join(KEYS.set_aside));
     }
     let mut outcome = self.change_file_key(&mut state);
+    // A refused key doesn't hold back the deletes: the user asked for them too.
+    state.maybe_blocked = None;
     for (kind, server) in token_servers {
       let name = token_name(*kind, server);
       if let Err(error) = self.call(&mut state, |keystore| keystore.delete(VAULT_SERVICE, &name)) {
@@ -537,8 +552,11 @@ impl SecretVault {
   /// replace the current ones. A start finds each file's staged copy where a crash left one, and
   /// keeps whichever of the two opens under the key the keychain gave (see [`take_staged`]). A
   /// crash before the keychain took the key leaves the old key and files, signed out all the same.
+  /// A keychain that fails the write and can't be read back may have either key: then both copies
+  /// are kept current until the next sign-out or start settles it ([`State::maybe_pending_key`]).
   fn change_file_key(&self, state: &mut State) -> Result<(), KeySourceError> {
     self.ensure_open(state)?;
+    self.settle_pending_key(state)?;
     let directory = state.maybe_directory.clone().ok_or_else(not_open)?;
     let key = SymmetricKey::generate(&mut OsRng);
     let contents = state.maybe_contents.as_ref().ok_or_else(not_open)?;
@@ -548,9 +566,17 @@ impl SecretVault {
       discard_staged(&directory);
       return Err(error);
     }
-    if let Err(error) = self.put_file_key(state, &key) {
-      discard_staged(&directory);
-      return Err(error);
+    match self.put_file_key(state, &key) {
+      KeyWrite::Taken => {},
+      KeyWrite::Refused(error) => {
+        discard_staged(&directory);
+        return Err(error);
+      },
+      KeyWrite::Unsure(error) => {
+        // Discarding the staged files could lock the files out; keeping only them could too.
+        state.maybe_pending_key = Some(key);
+        return Err(error);
+      },
     }
     state.maybe_key = Some(key);
     // Whatever was due is in the staged files now.
@@ -569,24 +595,54 @@ impl SecretVault {
   }
 
   /// Writes the files' new key to the keychain. A keychain may report a failure and still have
-  /// taken it; then only the staged files open, so one read on that path says which it was.
-  fn put_file_key(&self, state: &mut State, key: &SymmetricKey) -> Result<(), KeySourceError> {
+  /// taken it (a Secret Service that timed out); then only the staged files open, so one read on
+  /// that path says which it was, or that it can't say either.
+  fn put_file_key(&self, state: &mut State, key: &SymmetricKey) -> KeyWrite {
     let Err(error) = self.call(state, |keystore| {
       keystore.write_secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT, key.expose_secret())
     }) else {
-      return Ok(());
+      return KeyWrite::Taken;
     };
     // Not through `call`: the failure just now stands, and this is the one read that settles it.
-    let is_taken = matches!(
-      self.keystore.read_secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT),
-      Ok(Some(bytes)) if SymmetricKey::from_slice(&bytes).is_some_and(|kept| kept.is_same_key(key))
-    );
-    if is_taken {
-      tracing::info!("the keychain reported a failure but took the files' new key");
-      state.maybe_blocked = None;
-      return Ok(());
+    match self.keystore.read_secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT) {
+      Ok(Some(bytes)) if is_key(&bytes, key) => {
+        tracing::info!("the keychain reported a failure but took the files' new key");
+        state.maybe_blocked = None;
+        KeyWrite::Taken
+      },
+      Ok(_) => KeyWrite::Refused(error),
+      Err(read_error) => {
+        tracing::warn!(%read_error, "can't tell whether the keychain took the files' new key");
+        KeyWrite::Unsure(error)
+      },
     }
-    Err(error)
+  }
+
+  /// Settles a key change the keychain left unsure ([`State::maybe_pending_key`]) before the next
+  /// one: one read says which key it has, and the files are sealed under that key alone. A start
+  /// settles it as well, by which file opens ([`take_staged`]).
+  fn settle_pending_key(&self, state: &mut State) -> Result<(), KeySourceError> {
+    let Some(pending) = state.maybe_pending_key.take() else {
+      return Ok(());
+    };
+    let found = match self.read_file_key(state) {
+      Ok(found) => found,
+      Err(error) => {
+        state.maybe_pending_key = Some(pending);
+        return Err(error);
+      },
+    };
+    if found.is_some_and(|bytes| is_key(&bytes, &pending)) {
+      state.maybe_key = Some(pending);
+      state.is_dirty = true;
+      state.are_keys_dirty = true;
+      // Seals both files under the key the keychain has and deletes the staged copies.
+      return flush_all(state);
+    }
+    if let Some(directory) = &state.maybe_directory {
+      discard_staged(directory);
+    }
+    Ok(())
   }
 
   /// Keeps a key found in an old keychain entry. The entry goes once both files have the key; until
@@ -825,6 +881,11 @@ fn item_name(kind: &str, scope: &str) -> String {
   format!("{kind}@{scope}")
 }
 
+/// Whether keychain bytes are `key`, compared in constant time.
+fn is_key(bytes: &[u8], key: &SymmetricKey) -> bool {
+  SymmetricKey::from_slice(bytes).is_some_and(|found| found.is_same_key(key))
+}
+
 /// A new database key. It counts only once both files have it: a database whose key is only in
 /// memory can't be opened after a restart, so a failed write fails the call and keeps nothing.
 fn create_database_key(state: &mut State, name: &str) -> Result<SymmetricKey, KeySourceError> {
@@ -989,11 +1050,15 @@ fn take_staged(
       Ok(current)
     },
     Sealed::Opened(contents) => {
-      promote_staged(directory, file)?;
-      tracing::info!(
-        file = file.name,
-        "finished a change of the files' key that a crash had stopped"
-      );
+      match promote_staged(directory, file) {
+        Ok(()) => tracing::info!(
+          file = file.name,
+          "finished a change of the files' key that a crash had stopped"
+        ),
+        // The staged copy is the file for now: the next write replaces the current one and
+        // deletes it, and until then each start takes it again.
+        Err(error) => tracing::warn!(%error, file = file.name, "could not put a staged file in place"),
+      }
       Ok(Sealed::Opened(contents))
     },
   }
@@ -1088,14 +1153,21 @@ fn flush_all(state: &mut State) -> Result<(), KeySourceError> {
 /// Seals `contents` and replaces the file in one step, so a crash leaves the old file or the new one
 /// and never half of either.
 /// A staged copy left by a key change whose promotion failed is stale once the file is written.
+/// While the keychain's answer to a key change is unsure, the staged copy is written as well, under
+/// the new key (see [`State::maybe_pending_key`]).
 fn write_file(state: &State, file: &SealedFile, contents: &Contents) -> Result<(), KeySourceError> {
   let directory = state.maybe_directory.as_ref().ok_or_else(not_open)?;
   let key = state.maybe_key.as_ref().ok_or_else(not_open)?;
   let sealed = seal(key, contents)?;
   replace_file(directory, file.temporary, file.name, &sealed)
     .map_err(|error| KeySourceError::SecretsFile(error.to_string()))?;
-  remove_if_there(&directory.join(file.staged));
-  Ok(())
+  match &state.maybe_pending_key {
+    Some(pending) => write_staged(directory, file, pending, contents),
+    None => {
+      remove_if_there(&directory.join(file.staged));
+      Ok(())
+    },
+  }
 }
 
 fn seal(key: &SymmetricKey, contents: &Contents) -> Result<Vec<u8>, KeySourceError> {
@@ -2188,18 +2260,17 @@ mod tests {
     }
 
     #[test]
-    fn a_denied_keychain_keeps_the_old_key_and_says_so() {
+    fn a_refused_key_keeps_the_old_one_and_says_so() {
       let fake = Fake::new();
       let directory = TestDir::new();
       let vault = start(&fake, &directory);
       let database_key = vault.database_key(ACCOUNT_A).unwrap();
       clear_tokens(&vault);
       let old_key = fake.secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT).unwrap();
-      fake.deny(true);
+      fake.refuse_next_write();
 
       assert!(vault.purge_after_sign_out(&SIGN_OUT_ITEMS).is_err());
 
-      fake.deny(false);
       assert_eq!(fake.secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT).unwrap(), old_key);
       assert!(!has_staged_files(&directory));
       drop(vault);
@@ -2221,6 +2292,79 @@ mod tests {
       drop(vault);
       assert_finished(&fake, &directory, &database_key);
       assert_opens_under_the_keychains_key(&fake, &directory);
+    }
+
+    /// The keychain failed the write and the read-back (a Secret Service that hangs): it may have
+    /// either key. A start finds the files under both, with what was written since.
+    #[test]
+    fn an_unsure_keychain_keeps_the_files_open_under_either_key() {
+      for keeps_new_key in [true, false] {
+        let fake = Fake::new();
+        let directory = TestDir::new();
+        let vault = start(&fake, &directory);
+        let database_key = vault.database_key(ACCOUNT_A).unwrap();
+        clear_tokens(&vault);
+        let old_key = fake.secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT).unwrap();
+        fake.lose_next_write_answer();
+        fake.fail_next_read();
+
+        assert!(vault.purge_after_sign_out(&SIGN_OUT_ITEMS).is_err());
+        vault
+          .save_token(TokenKind::RefreshToken, SERVER_A, "signed-in-again")
+          .unwrap();
+        drop(vault);
+        if !keeps_new_key {
+          fake.put_secret(VAULT_SERVICE, VAULT_KEY_ACCOUNT, &old_key);
+        }
+
+        let vault = reopen(&fake, &directory);
+        assert_eq!(
+          vault
+            .load_token(TokenKind::RefreshToken, SERVER_A)
+            .unwrap()
+            .unwrap()
+            .as_str(),
+          "signed-in-again",
+          "the keychain kept the new key: {keeps_new_key}"
+        );
+        assert!(vault.database_key(ACCOUNT_A).unwrap().is_same_key(&database_key));
+        assert!(!has_staged_files(&directory));
+      }
+    }
+
+    #[test]
+    fn the_next_sign_out_settles_an_unsure_key_change() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let database_key = vault.database_key(ACCOUNT_A).unwrap();
+      clear_tokens(&vault);
+      fake.lose_next_write_answer();
+      fake.fail_next_read();
+      assert!(vault.purge_after_sign_out(&SIGN_OUT_ITEMS).is_err());
+
+      vault.purge_after_sign_out(&SIGN_OUT_ITEMS).unwrap();
+
+      assert!(!has_staged_files(&directory));
+      assert_opens_under_the_keychains_key(&fake, &directory);
+      drop(vault);
+      assert_finished(&fake, &directory, &database_key);
+    }
+
+    /// A failed key change doesn't keep the old token entries from going.
+    #[test]
+    fn a_failed_key_change_still_lets_the_old_entries_go() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      fake.put_text(VAULT_SERVICE, OLD_REFRESH_A, "from-an-older-app");
+      clear_tokens(&vault);
+      fake.lose_next_write_answer();
+      fake.fail_next_read();
+
+      assert!(vault.purge_after_sign_out(&SIGN_OUT_ITEMS).is_err());
+
+      assert!(!fake.has(VAULT_SERVICE, OLD_REFRESH_A));
     }
 
     /// The staged file couldn't take the file's place while running: the next write or start does.
@@ -2904,6 +3048,9 @@ mod tests {
     is_next_read_hidden: bool,
     /// The next write is stored, but reported as failed.
     is_next_write_answer_lost: bool,
+    is_next_read_failing: bool,
+    /// The next write is refused and stores nothing; reads still work.
+    is_next_write_refused: bool,
   }
 
   impl Fake {
@@ -2944,6 +3091,14 @@ mod tests {
 
     fn lose_next_write_answer(&self) {
       self.with(|inner| inner.is_next_write_answer_lost = true);
+    }
+
+    fn refuse_next_write(&self) {
+      self.with(|inner| inner.is_next_write_refused = true);
+    }
+
+    fn fail_next_read(&self) {
+      self.with(|inner| inner.is_next_read_failing = true);
     }
 
     fn put_text(&self, service: &str, account: &str, text: &str) {
@@ -3003,7 +3158,7 @@ mod tests {
       self.with(|inner| {
         inner.counts.reads += 1;
         inner.count_dialog(service, account);
-        if inner.is_denied {
+        if inner.is_denied || std::mem::take(&mut inner.is_next_read_failing) {
           return Err(denied());
         }
         if std::mem::take(&mut inner.is_next_read_hidden) {
@@ -3030,7 +3185,7 @@ mod tests {
       self.with(|inner| {
         inner.counts.writes += 1;
         inner.count_dialog(service, account);
-        if inner.is_denied {
+        if inner.is_denied || std::mem::take(&mut inner.is_next_write_refused) {
           return Err(denied());
         }
         inner

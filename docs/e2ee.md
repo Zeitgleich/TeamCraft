@@ -4880,8 +4880,13 @@ runs. Linux (also in the Flatpak) and Windows use the same code.
   wins over a current file that opens, so one left over or put back can't undo a later sign-in. A
   keychain that refuses the write keeps the old key, the staged files are deleted and the sign-out
   reports the failure; one that reports a failure but stored the key anyway is caught by reading
-  the item back once, on that path only. The key goes before the old token entries are deleted, so
-  a keychain that refuses deletes doesn't keep it from changing.
+  the item back once, on that path only. When that read fails too (a Secret Service that hangs),
+  the keychain may have either key: the staged files stay, and until the next sign-out or start
+  settles it every write seals the file under the old key and its staged copy under the new one,
+  so nothing written meanwhile is lost whichever key the keychain has. The key changes before the
+  old token entries are deleted, so a keychain that refuses deletes doesn't keep it from changing,
+  and before the provider is told of the sign-out, so quitting while that hangs offline doesn't
+  skip it.
 - **Database and backup keys live in both files.** `secrets.sealed` is rewritten at every token
   refresh; `keys.sealed` only when a key is new or changed, so it is rarely in the middle of a
   write. A new database key is handed out only once both files have it on disk: a database whose
@@ -4942,7 +4947,7 @@ raises one depends on the entry's access list and wasn't checked on a Mac):
 | The first start after 1.0.18 to 1.0.21, once | 1, and a delete of the database and the backup key entry per account         |
 | The first start after an older version, once | each old token and key entry read once and deleted once                      |
 | A damaged `secrets.sealed`                   | 1                                                                            |
-| Signing out or leaving a server              | 1, the write of the files' new key (and deletes of old token entries)        |
+| Signing out or leaving a server              | 1 per server signed out of or left, for the files' new key                   |
 
 What it costs, and what it gains:
 
