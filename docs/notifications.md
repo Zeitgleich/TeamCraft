@@ -250,6 +250,8 @@ remembers per process which devices show what (for withdrawals and rings) and th
 | `push.test_interval_secs`                         | 10          | Shortest time between two test pushes to one device                             |
 | `push.max_rings_per_minute`                       | 10          | Rings one caller may push per minute (further rings reach open apps only)       |
 | `push.dismiss_coalesce_ms`                        | 3000        | Withdrawals for one conversation within this time go out as one                 |
+| `push.sync_wake_coalesce_ms`                      | 30000       | New messages within this time make one sync wake-up                             |
+| `push.sync_wake_min_interval_secs`                | 300         | At most one sync wake-up per user within this time; `0`: none                   |
 
 Held pushes sit in one queue per user (at most `max_held_pushes_per_user`), worked off by one task per
 user that the hub wakes only for that user. A held push goes out early when the desktop stops being
@@ -262,6 +264,33 @@ what that instance pushed.
 The device checks again (`teamcraft_core::push_guard`): a message shown before is not shown again
 (urgent repeats are), a conversation muted or DND active on the device keeps the push silent, and the
 diagnostics record when the last push arrived and how long it took.
+
+### Sync wake-ups: the messages are there before the user looks
+
+A phone gets a visible push only for what should alert (rules above), and none while the user is at a
+desktop: held pushes are dropped once the desktop read them. That is right for the user's attention
+and wrong for the phone's store: everything it wasn't pushed for, it fetches when the app opens, while
+the user waits (docs/performance.md, "Coming back to the phone with the desktop open"). Signal and
+Threema wake their apps for every message and fetch in the background; this does the same without
+alerting.
+
+- **When.** A message whose recipient gets no visible push now (muted, DND, mentions only, at the
+  desktop, held for the grace delay) queues a `sync` wake-up for that user. New messages within
+  `push.sync_wake_coalesce_ms` make one, and there is at most one per user within
+  `push.sync_wake_min_interval_secs`; a message in that time waits for its end instead of being lost.
+  `0` turns them off.
+- **To whom.** The user's devices whose push service delivers silent pushes (APNs, FCM, UnifiedPush;
+  never Web Push, where every push must show something) and that have no live connection then.
+- **What.** A sealed wake-up of kind `sync` naming no conversation, message or sender. Silent: FCM
+  normal priority (Doze delivers it in its next maintenance window, never wakes a dozing phone for it),
+  APNs background push (iOS may defer or drop it), the TTL of a withdrawal. Through a push gateway only
+  if its `/v1/info` lists the kind (push-gateway.md, "The contract").
+- **On the device.** The app runs its sync loop until the connection is up and caught up, at most a few
+  minutes (Android: WorkManager, needs a network; iOS: the background push's time), then stops it
+  unless the app is open (`TeamCraft::catch_up_in_background`). It shows nothing.
+- **Cost.** At most 12 wake-ups an hour per user while messages arrive and the phone is idle, each a
+  catch-up of what came since the last (a few conversations, round trips in parallel). The visible
+  push for the same message is unchanged.
 
 ### Clients
 

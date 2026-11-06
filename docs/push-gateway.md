@@ -120,7 +120,8 @@ cost a server its devices.
 
 ## 5. The contract and its tests
 
-A server sends a kind newer than the gateway's first version (`scheduled_seal`, docs/scheduled-messages.md)
+A server sends a kind newer than the gateway's first version (`scheduled_seal`, docs/scheduled-messages.md;
+`sync`, notifications.md "Sync wake-ups": silent, FCM normal priority and APNs background like `dismiss`)
 only if the gateway's `GET /v1/info` lists it, read at most hourly. A gateway without it means no such wake
 for store apps, not a refused request for each.
 
