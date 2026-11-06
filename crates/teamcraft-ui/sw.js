@@ -53,9 +53,9 @@ const PENDING_STATE = '/pending';
 const PUSH_CONFIG_CACHE = 'teamcraft-push-config';
 const PUSH_WASM = '__PUSH_WASM__';
 
-// Sharing into the installed app (#208). The manifest offers this only from a later release on
-// (#1324), once workers with this handling are out; until then only a form on some site can post
-// here, which is why waiting shares are capped and the picker shows what came in. The content stays in
+// Sharing into the installed app (#208). The manifest declares this as a share target
+// (share_target in the web manifest, brand.rs), so the share sheet posts here; so can a form on
+// some site, which is why waiting shares are capped and the picker shows what came in. The content stays in
 // this browser in a cache of its own until the signed-in page takes it (share_into.rs); nothing goes
 // to the server. File bodies are the browser's blobs on disk, not held in memory.
 const SHARE_PATH = '/share-target';
