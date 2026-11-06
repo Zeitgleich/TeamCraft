@@ -763,7 +763,7 @@ mod calendar_settings {
       .send()
       .await;
     if !probe.is_ok_and(|response| response.status().is_success()) {
-      teamcraft_server::testing::skip_or_fail(&format!("no CalCraft account at {CALCRAFT_URL}"));
+      teamcraft_server::testing::skip_or_fail_calcraft(&format!("no CalCraft account at {CALCRAFT_URL}"));
       return;
     }
     let app = app!(with_meetings());

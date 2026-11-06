@@ -108,7 +108,7 @@ TEAMCRAFT_SERVER__LISTEN_ADDR="[::]:8081" "${CARGO_TARGET_DIR:-target}/debug/tea
   --config teamcraft.example.toml >"$dev_server_log" 2>&1 &
 dev_server_pid=$!
 wait_until "the dev server" 60 curl -sf http://127.0.0.1:8081/healthz || { cat "$dev_server_log" >&2; exit 1; }
-RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}" TEST_SERVICES_REQUIRED=1 TEST_DATABASE_REQUIRED=1 \
+RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}" TEST_SERVICES_REQUIRED=1 TEST_CALCRAFT_REQUIRED=1 TEST_DATABASE_REQUIRED=1 \
   DATABASE_URL="postgres://teamcraft:teamcraft-dev-only@127.0.0.1:5432/teamcraft" \
   TEAMCRAFT_TEST_SERVER_URL="http://127.0.0.1:8081" SQLX_OFFLINE=true \
   cargo test -p teamcraft-server -p teamcraft-core -p teamcraft-ffi --features teamcraft-server/integration,teamcraft-core/integration,teamcraft-ffi/integration \

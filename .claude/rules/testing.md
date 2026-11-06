@@ -15,7 +15,7 @@
 - The `test` job also starts Garage (S3) and Mailpit as processes, and sets `TEST_SERVICES_REQUIRED`:
   a test that finds its service missing calls `teamcraft_server::testing::skip_or_fail`, which fails
   instead of skipping (#1284). CalCraft and the `dev_stack` tests of core and ffi (a running server
-  with Keycloak) run nightly in `e2e.yml` through `scripts/e2e.sh`, with the same variable.
+  with Keycloak) run nightly in `e2e.yml` through `scripts/e2e.sh`, with `TEST_CALCRAFT_REQUIRED` as well.
 
 ## Test module layout
 

@@ -845,17 +845,28 @@ impl JwkSource for StaticKeys {
 }
 
 /// An empty gateway hub as a process starting with `settings` has it.
-/// Name of the variable CI sets so that a missing service fails a test instead of skipping it. Not
+/// Names of the variables CI sets so that a missing service fails a test instead of skipping it. Not
 /// `TEAMCRAFT_...`: the server's configuration refuses variables with that prefix it doesn't know.
 const SERVICES_REQUIRED: &str = "TEST_SERVICES_REQUIRED";
+/// CalCraft is built from source and only runs in the nightly e2e job, so it has a flag of its own.
+const CALCRAFT_REQUIRED: &str = "TEST_CALCRAFT_REQUIRED";
 
-/// A test whose dependency (S3, Mailpit, CalCraft) is not running skips itself with a note, unless
+/// A test whose dependency (S3, Mailpit) is not running skips itself with a note, unless
 /// `TEST_SERVICES_REQUIRED` is set (CI): then it fails, because a skipped suite looks like a passed
 /// one (#1284). Call it, then return, where the test would skip.
 pub fn skip_or_fail(reason: &str) {
+  skip_unless_required(SERVICES_REQUIRED, reason);
+}
+
+/// Like [`skip_or_fail`] for the tests that need CalCraft (`TEST_CALCRAFT_REQUIRED`).
+pub fn skip_or_fail_calcraft(reason: &str) {
+  skip_unless_required(CALCRAFT_REQUIRED, reason);
+}
+
+fn skip_unless_required(variable: &str, reason: &str) {
   assert!(
-    std::env::var_os(SERVICES_REQUIRED).is_none(),
-    "{SERVICES_REQUIRED} is set, so this test may not skip, but: {reason}"
+    std::env::var_os(variable).is_none(),
+    "{variable} is set, so this test may not skip, but: {reason}"
   );
   eprintln!("skipping: {reason}");
 }
