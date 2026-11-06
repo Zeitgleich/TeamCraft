@@ -93,6 +93,9 @@ enum class PushPath {
   /** A reaction, an edit or another change: says nothing. */
   HIDDEN,
 
+  /** This user was added to the conversation: says so. */
+  ADDED_YOU,
+
   /** Placeholders by why the first try could not read the message. */
   PLACEHOLDER_NO_SESSION,
   PLACEHOLDER_NOT_DECRYPTED,
@@ -137,6 +140,7 @@ enum class PushPath {
       NotificationGap.TIMED_OUT -> PLACEHOLDER_TIMED_OUT
       NotificationGap.NOT_SHOWABLE -> NOT_SHOWABLE
       NotificationGap.HIDDEN -> HIDDEN
+      NotificationGap.ADDED_YOU -> ADDED_YOU
       NotificationGap.WORKSPACE_POLICY, NotificationGap.DEVICE_SETTING -> LIMITED
     }
   }

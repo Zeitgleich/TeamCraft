@@ -365,8 +365,9 @@ notes, search index segments, edits of a channel's notes page and other changes 
 other, so the server can't tell them apart and wakes the device for them too (routing only knows the
 recipient's settings). Once the device has read one, the core names it (`maybe_gap` hidden) and Android
 announces nothing: it updates the conversation's notification silently, or takes away a placeholder
-that stood for it. Being added to a conversation is the one change that still says "New message", to
-the person added only, as far as routing wakes them at all (a channel on the default "mentions" level
+that stood for it. Being added to a conversation is the one change that is announced, to the person
+added only, as "<name>: Added you to the conversation" (`maybe_gap` added-you; the text is the app's,
+the event carries none), never "New message", as far as routing wakes them at all (a channel on the default "mentions" level
 doesn't, as before; the channel shows on the next sync). Requests to join a channel don't go through
 this path: they come over the gateway (`JoinRequestWatcher`), not as messages. Pictures and files without a caption are a text message with an empty body: they
 show their label like a single file. A kind only a newer client knows may be a message, so it
@@ -513,6 +514,8 @@ buzzing out of step, but off the road Android Auto isn't told; a message nobody 
 that must re-link) is never announced in the car and shows only on the phone; an older line that stays
 a placeholder under a newer message with text does travel with the conversation's MessagingStyle. A
 filled-in notification is posted without `setOnlyAlertOnce`, because bridges skip updates that carry it.
+Android Auto logs "No semantic reply action" for the group summary, which has no conversation; it
+skips it and shows the conversations' notifications (checked with its head unit).
 
 **FCM's rule for what shows nothing.** [FCM](https://firebase.google.com/docs/cloud-messaging/android-message-priority)
 may deprioritise an app's high-priority messages "if FCM detects a pattern" of them not leading to

@@ -552,7 +552,8 @@ async fn being_added_still_shows_while_others_being_added_does_not() {
   let preview = push_preview(carol.store.as_ref(), Some(&carol.api), &sealed)
     .await
     .unwrap();
-  assert_eq!(preview.maybe_gap, Some(PreviewGap::NotShowable));
+  assert_eq!(preview.maybe_gap, Some(PreviewGap::AddedYou));
+  assert!(preview.is_conversation_verified);
 
   bob.client.catch_up_for_push(channel).await.unwrap();
   assert_hidden(&bob, &wake_up_for(&server, &bob, &alice, channel, added)).await;

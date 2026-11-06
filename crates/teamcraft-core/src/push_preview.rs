@@ -67,6 +67,9 @@ pub enum PreviewGap {
   /// to announce. The server can't tell these from messages (they are encrypted) and wakes the
   /// device for them too, so only the device can keep them from reading as "New message".
   Hidden,
+  /// This user was added to the conversation: no text of its own, the apps say so in their language
+  /// instead of "New message".
+  AddedYou,
   /// The workspace policy lets notifications show less.
   WorkspacePolicy,
   /// This device's own setting lets notifications show less.
@@ -335,8 +338,13 @@ fn readable_preview(
   sender: UserId,
   content: &MessageContent,
 ) -> (Result<PreviewContent, PreviewGap>, bool, bool, Option<String>) {
-  if is_hidden_change(content) && !adds_this_user(store, content) {
-    return (Err(PreviewGap::Hidden), false, true, None);
+  if is_hidden_change(content) {
+    let gap = if adds_this_user(store, content) {
+      PreviewGap::AddedYou
+    } else {
+      PreviewGap::Hidden
+    };
+    return (Err(gap), false, true, None);
   }
   (
     Ok(content_preview(content)),
@@ -376,8 +384,8 @@ fn is_hidden_change(content: &MessageContent) -> bool {
   }
 }
 
-/// Being added to a conversation is the one change the person it concerns should hear of: it stays
-/// a "New message" (no event text exists outside the app's own strings).
+/// Being added to a conversation is the one change the person it concerns should hear of: the apps
+/// say "added you" ([`PreviewGap::AddedYou`]; the text is in their own strings).
 fn adds_this_user(store: &impl LocalStore, content: &MessageContent) -> bool {
   let MessageContent::Event {
     event: ConversationEvent::MemberAdded { user, .. },

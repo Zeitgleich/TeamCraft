@@ -35,6 +35,14 @@ class NotificationTextTest {
     assertEquals("App", describe(conversation = null, sender = null).senderName)
   }
 
+  /** Being added has no text of its own: it says so instead of "New message" (issue #1249). */
+  @Test
+  fun beingAddedSaysSo() {
+    val text = describe(body = null, isAddedYou = true)
+    assertEquals("Added you", text.text)
+    assertEquals("Alice", text.senderName)
+  }
+
   @Test
   fun senderOnlyNamesWhoWroteNotWhat() {
     assertEquals("from Alice", NotificationText.senderOnly(listOf(line("Alice", 1)), LABELS))
@@ -51,6 +59,7 @@ class NotificationTextTest {
     fileName: String? = null,
     kind: NotificationAttachmentKind? = null,
     isDirect: Boolean = false,
+    isAddedYou: Boolean = false,
   ) = NotificationText.from(
     maybeConversationName = conversation,
     maybeSenderName = sender,
@@ -59,6 +68,7 @@ class NotificationTextTest {
     maybeAttachmentKind = kind,
     isDirect = isDirect,
     labels = LABELS,
+    isAddedYou = isAddedYou,
   )
 
   private fun line(sender: String, sentAtMs: Long) = NotificationLine(
@@ -75,6 +85,7 @@ class NotificationTextTest {
     val LABELS = NotificationText.Labels(
       appName = "App",
       newMessage = "New message",
+      addedYou = "Added you",
       newMessageFrom = { "from $it" },
       newMessagesFrom = { count, names -> "$count from $names" },
       newMessages = { count -> "$count new" },

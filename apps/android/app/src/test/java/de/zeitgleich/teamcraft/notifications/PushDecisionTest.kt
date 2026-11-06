@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.notifications
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import uniffi.teamcraft_ffi.NotificationGap
 import uniffi.teamcraft_ffi.NotificationSuppression
@@ -28,6 +29,14 @@ class PushDecisionTest {
   fun aHiddenChangeAnnouncesNothing() {
     val wakeUp = push(PushNotificationKind.MESSAGE).copy(maybeGap = NotificationGap.HIDDEN)
     assertEquals(PushDecision.HiddenChange(wakeUp), PushDecision.of(wakeUp))
+  }
+
+  /** Being added is the one change its subject hears of: announced, and never a placeholder to retry. */
+  @Test
+  fun beingAddedIsAnnounced() {
+    val wakeUp = push(PushNotificationKind.MESSAGE).copy(maybeGap = NotificationGap.ADDED_YOU, maybeText = null)
+    assertEquals(PushDecision.ShowMessage(wakeUp, isAlerting = true), PushDecision.of(wakeUp))
+    assertFalse(PushRetry.isPlaceholder(wakeUp))
   }
 
   @Test

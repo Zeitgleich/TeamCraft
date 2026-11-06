@@ -480,6 +480,7 @@ class MessageNotifier(
       maybeAttachmentKind = notification.maybeAttachmentKind,
       isDirect = notification.isDirect,
       labels = labels(),
+      isAddedYou = notification.maybeGap == NotificationGap.ADDED_YOU,
     )
 
   private fun shown(): ShownNotifications =
@@ -642,6 +643,7 @@ class MessageNotifier(
   private fun labels() = NotificationText.Labels(
     appName = context.getString(R.string.app_name),
     newMessage = context.getString(R.string.notification_new_message),
+    addedYou = context.getString(R.string.notification_added_you),
     newMessageFrom = { context.getString(R.string.notification_new_message_from, it) },
     newMessagesFrom = { count, names ->
       context.resources.getQuantityString(R.plurals.notification_new_messages_from, count, count, names)
