@@ -1,6 +1,5 @@
 package de.zeitgleich.teamcraft.ui.screens
 
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -12,44 +11,48 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.core.Message
+import de.zeitgleich.teamcraft.core.MessageSource
 import uniffi.teamcraft_ffi.NotifiedConversation
 
 /**
- * The message the notification showed, below the feed while the store doesn't have it yet, and a
- * quiet loading line while the conversation's messages are on their way (issue #1065). Opening a
- * conversation from a notification shows what the device already knows, never an empty screen.
+ * A quiet loading line below the feed while the conversation's messages are on their way after a
+ * notification opened it (issue #1065). The message the notification showed is in the feed itself
+ * ([withNotified]), drawn like every other message.
  */
 @Composable
 fun NotifiedMessageRow(maybeNotified: NotifiedConversation?, isLoading: Boolean) {
-  val notified = maybeNotified ?: return
-  // A reply in a thread isn't part of the conversation's own feed.
-  val maybeMessage = notified.maybeMessage?.takeIf { it.maybeThreadId == null }
-  val maybeBody = maybeMessage?.let { it.maybeText ?: it.maybeFileName }
-  Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-    if (maybeMessage != null && maybeBody != null) {
-      maybeMessage.maybeSenderName?.let { sender ->
-        Text(
-          // A source's name always says it's a bot.
-          if (maybeMessage.isSenderSource) stringResource(R.string.source_sender, sender) else sender,
-          style = MaterialTheme.typography.labelLarge,
-          fontWeight = FontWeight.SemiBold,
-        )
-      }
-      Text(maybeBody, style = MaterialTheme.typography.bodyLarge)
-    }
-    if (isLoading) {
-      Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-        Text(
-          stringResource(R.string.messages_loading),
-          style = MaterialTheme.typography.bodySmall,
-          color = MaterialTheme.colorScheme.onSurfaceVariant,
-          modifier = Modifier.padding(start = 8.dp),
-        )
-      }
-    }
+  if (maybeNotified == null || !isLoading) return
+  Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+    Text(
+      stringResource(R.string.messages_loading),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      modifier = Modifier.padding(start = 8.dp),
+    )
   }
+}
+
+/**
+ * The feed with the message the notification showed, while the store doesn't have it yet: a message
+ * like the others, with its sender, bubble and time, so it isn't a bare line that turns into a bubble
+ * once the sync brings it (#1371). It has the stored message's ID, which takes its place without a
+ * jump. A reply in a thread isn't part of the conversation's own feed.
+ */
+fun withNotified(messages: List<Message>, maybeNotified: NotifiedConversation?): List<Message> {
+  val notified = maybeNotified?.maybeMessage?.takeIf { it.maybeThreadId == null } ?: return messages
+  val body = notified.maybeText ?: notified.maybeFileName ?: return messages
+  if (messages.any { it.id == notified.messageId }) return messages
+  val message = Message(
+    id = notified.messageId,
+    conversation = maybeNotified.conversationId,
+    author = notified.maybeSenderId.orEmpty(),
+    sentAt = notified.sentAtMs,
+    body = body,
+    maybeSource = notified.maybeSenderName?.takeIf { notified.isSenderSource }?.let { MessageSource(name = it) },
+  )
+  return (messages + message).sortedBy { it.sentAt }
 }

@@ -290,7 +290,7 @@ fun ConversationScreen(
       viewModel = viewModel,
       conversationId = conversationId,
       snapshot = snapshot,
-      messages = messages,
+      messages = withNotified(messages, maybeNotified),
       extras = extras,
       firstUnread = firstUnread,
       sentCount = sentCount,
