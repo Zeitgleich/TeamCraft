@@ -728,6 +728,12 @@ pub struct ActiveCall {
   /// over to its call (docs/meetings.md, "A call becomes a meeting").
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub maybe_moved_to: Option<ConversationId>,
+  /// When this device joined the call (wall clock), as the media layer keeps it: a page showing a
+  /// call it didn't join itself (the desktop shell kept the call over a reload, #824) counts the
+  /// call's duration from here. A call that moved into a meeting room keeps the start of the call it
+  /// came from. Absent from older shells.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_joined_at: Option<TimestampMs>,
 }
 
 /// The sound of a screen share (the computer's playback without the call itself).

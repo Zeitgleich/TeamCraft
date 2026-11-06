@@ -518,6 +518,12 @@ impl Host {
 
   /// Connects to the conversation's call, leaving a running call first.
   async fn connect(self: &Rc<Self>, request: CallRequest, is_muted: bool) -> Result<(), ActionFailure> {
+    // Read before leaving: a call that moved into this one keeps its start (#1329).
+    let joined_at = self
+      .state
+      .borrow()
+      .view
+      .start_for(request.conversation, js_sys::Date::now() as i64);
     self.leave().await;
     let prepared = self.prepare(request.conversation).await?;
     let (microphone, speakers, sounds) = {
@@ -577,7 +583,7 @@ impl Host {
         user_id: prepared.user_id,
         device_id: own_device,
       });
-      view.start_active(request, BackgroundEffect::None);
+      view.start_active(request, BackgroundEffect::None, joined_at);
       view.set_ends_when_one_side_leaves(ends_when_one_side_leaves);
       if let Some(active) = view.maybe_active.as_mut() {
         active.is_muted = is_muted_at_start;

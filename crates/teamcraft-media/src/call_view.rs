@@ -319,6 +319,7 @@ mod transport_tests {
         kind: CallKind::Group,
       },
       BackgroundEffect::default(),
+      0,
     );
     let is_limited = |view: &CallView| view.maybe_active.as_ref().unwrap().is_on_limited_network;
     assert!(!is_limited(&view));
@@ -597,7 +598,7 @@ mod tests {
 
   fn active_view() -> CallView {
     let mut view = CallView::default();
-    view.start_active(request(), BackgroundEffect::None);
+    view.start_active(request(), BackgroundEffect::None, 0);
     view
   }
 

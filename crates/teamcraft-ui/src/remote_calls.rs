@@ -618,6 +618,7 @@ mod tests {
         reconnecting: Vec::new(),
         is_on_limited_network: false,
         maybe_moved_to: None,
+        maybe_joined_at: None,
       }),
       incoming: Vec::new(),
       running: vec![RunningCall {

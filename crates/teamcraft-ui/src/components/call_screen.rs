@@ -28,7 +28,6 @@ use crate::state::{Overlay, use_app_state};
 use crate::video_stats::StatsTarget;
 
 const SPEAKER_ROTATE_MS: u64 = 2400;
-const CLOCK_TICK_MS: u64 = 1000;
 
 /// Everything a tile needs, for remote participants and for the user.
 #[derive(Clone, Debug, PartialEq)]
@@ -169,9 +168,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       speaking.set(candidates.get(rotation.get() % candidates.len()).copied());
     }
   });
-  let elapsed = RwSignal::new(0_u32);
-  use_interval(CLOCK_TICK_MS, move || elapsed.update(|seconds| *seconds += 1));
-  let clock = move || format!("{:02}:{:02}", elapsed.get() / 60, elapsed.get() % 60);
+  // The call's own count (#1329): it goes on over a minimized call screen and a reload, and the
+  // tray's call header reads the same.
+  let clock = move || crate::calls::call_clock(call.elapsed_ms.get().unwrap_or(0));
 
   let effects_open = RwSignal::new(false);
   let share_open = RwSignal::new(false);

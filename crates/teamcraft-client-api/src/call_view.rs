@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{CallEndCause, CallRosterEntry, ConversationId, GatewayEvent, MediaStreamId, UserId};
 
+use crate::model::TimestampMs;
+
 use crate::calls::{
   ActiveCall, BackgroundEffect, CallEndReason, CallRequest, IncomingCall, RemoteVideoTrack, RunningCall,
   ScreenShareSound,
@@ -115,9 +117,10 @@ impl CallSignal {
 }
 
 impl CallView {
-  /// This device joined the conversation's call: it shows as active, no longer ringing, and the end
-  /// reason of the previous call is gone.
-  pub fn start_active(&mut self, request: CallRequest, background: BackgroundEffect) {
+  /// This device joined the conversation's call at `joined_at` (wall clock, see
+  /// [`CallView::start_for`]): it shows as active, no longer ringing, and the end reason of the
+  /// previous call is gone.
+  pub fn start_active(&mut self, request: CallRequest, background: BackgroundEffect, joined_at: TimestampMs) {
     self.incoming.remove(&request.conversation);
     self.maybe_active = Some(ActiveCall {
       conversation: request.conversation,
@@ -137,8 +140,21 @@ impl CallView {
       reconnecting: Vec::new(),
       is_on_limited_network: false,
       maybe_moved_to: None,
+      maybe_joined_at: Some(joined_at),
     });
     self.maybe_end_reason = None;
+  }
+
+  /// When a call about to be joined in `conversation` starts for this device, at `now_ms`: the
+  /// active call moved into that conversation (it became a meeting) keeps its own start, as the call
+  /// screen keeps its count; anything else starts now. Read before the previous call is left.
+  pub fn start_for(&self, conversation: ConversationId, now_ms: TimestampMs) -> TimestampMs {
+    self
+      .maybe_active
+      .as_ref()
+      .filter(|active| active.maybe_moved_to == Some(conversation))
+      .and_then(|active| active.maybe_joined_at)
+      .unwrap_or(now_ms)
   }
 
   /// This device's roster entry, as the join token named it.
@@ -388,6 +404,7 @@ mod tests {
           kind: CallKind::Group,
         },
         BackgroundEffect::None,
+        view.start_for(conversation(6), JOINED_AT + 60_000),
       );
       assert_eq!(
         view
@@ -395,6 +412,14 @@ mod tests {
           .as_ref()
           .and_then(|active| active.maybe_moved_to),
         None
+      );
+      // It keeps counting from the DM call's start.
+      assert_eq!(
+        view
+          .maybe_active
+          .as_ref()
+          .and_then(|active| active.maybe_joined_at),
+        Some(JOINED_AT)
       );
     }
 
@@ -415,6 +440,7 @@ mod tests {
           kind: CallKind::Direct,
         },
         BackgroundEffect::None,
+        JOINED_AT,
       );
       assert!(!elsewhere.apply_gateway_event(&event));
       assert_eq!(
@@ -509,6 +535,7 @@ mod tests {
           kind: CallKind::Direct,
         },
         BackgroundEffect::None,
+        JOINED_AT,
       );
       view.set_ends_when_one_side_leaves(true);
       view.apply_gateway_event(&GatewayEvent::CallUpdate {
@@ -550,7 +577,7 @@ mod tests {
       from_user_id: user(1),
     });
     view.maybe_end_reason = Some(CallEndReason::ConnectionLost);
-    view.start_active(request(), BackgroundEffect::BlurLight);
+    view.start_active(request(), BackgroundEffect::BlurLight, JOINED_AT);
     assert!(view.incoming.is_empty());
     assert!(view.maybe_end_reason.is_none());
     assert_eq!(
@@ -559,9 +586,42 @@ mod tests {
     );
   }
 
+  /// #1329: the media layer keeps when this device joined, so a page that shows the call later
+  /// (a reload) counts from there.
+  #[test]
+  fn the_active_call_keeps_when_this_device_joined() {
+    let view = active_view();
+    assert_eq!(
+      view
+        .maybe_active
+        .as_ref()
+        .and_then(|active| active.maybe_joined_at),
+      Some(JOINED_AT)
+    );
+    // Another call (not one this call moved into) starts when it is joined.
+    assert_eq!(
+      view.start_for(conversation(6), JOINED_AT + 5_000),
+      JOINED_AT + 5_000
+    );
+    assert_eq!(
+      view.start_for(conversation(5), JOINED_AT + 5_000),
+      JOINED_AT + 5_000
+    );
+    assert_eq!(CallView::default().start_for(conversation(5), 7), 7);
+    // Older shells leave it out; it stays out of their JSON too.
+    let mut active = view.maybe_active.clone().unwrap();
+    active.maybe_joined_at = None;
+    let json = serde_json::to_string(&active).unwrap();
+    assert!(!json.contains("maybe_joined_at"));
+    assert_eq!(serde_json::from_str::<ActiveCall>(&json).unwrap(), active);
+  }
+
+  /// When [`active_view`]'s device joined.
+  const JOINED_AT: TimestampMs = 1_800_000_000_000;
+
   fn active_view() -> CallView {
     let mut view = CallView::default();
-    view.start_active(request(), BackgroundEffect::None);
+    view.start_active(request(), BackgroundEffect::None, JOINED_AT);
     view
   }
 
