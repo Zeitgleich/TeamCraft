@@ -14,7 +14,7 @@ const API: &str = "http://127.0.0.1:8025/api/v1";
 async fn an_invitation_reaches_the_mail_catcher_with_the_calendar_part_and_attachment() {
   let client = reqwest::Client::new();
   if client.get(format!("{API}/info")).send().await.is_err() {
-    eprintln!("skipping: no Mailpit at {API}");
+    teamcraft_server::testing::skip_or_fail(&format!("no Mailpit at {API}"));
     return;
   }
   let mailer = SmtpMailer::new(&SmtpConfig {

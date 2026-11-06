@@ -29,7 +29,7 @@ const PASSPHRASE: &str = "dev-stack integration passphrase";
 #[tokio::test]
 async fn mobile_client_receives_and_answers_a_message() {
   let Some(server_url) = std::env::var("TEAMCRAFT_TEST_SERVER_URL").ok() else {
-    eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
+    skip_or_fail();
     return;
   };
   let (alice_token, bob_token) = (dev_token("alice"), dev_token("bob"));
@@ -190,7 +190,7 @@ async fn mobile_client_receives_and_answers_a_message() {
 #[tokio::test]
 async fn push_upkeep_leaves_the_gateway_connection_open() {
   let Some(server_url) = std::env::var("TEAMCRAFT_TEST_SERVER_URL").ok() else {
-    eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
+    skip_or_fail();
     return;
   };
   let (proxy_url, connections) = counting_proxy(&server_url).await;
@@ -356,4 +356,15 @@ async fn counting_proxy(server_url: &str) -> (String, Arc<AtomicU32>) {
     }
   });
   (url, connections)
+}
+
+/// Skips the test, or fails it when CI requires the dev stack: a skipped suite looks like a passed
+/// one (#1284).
+#[allow(clippy::print_stderr)]
+fn skip_or_fail() {
+  assert!(
+    std::env::var_os("TEST_SERVICES_REQUIRED").is_none(),
+    "TEST_SERVICES_REQUIRED is set, so this test may not skip, but TEAMCRAFT_TEST_SERVER_URL is not set"
+  );
+  eprintln!("skipping: TEAMCRAFT_TEST_SERVER_URL is not set");
 }

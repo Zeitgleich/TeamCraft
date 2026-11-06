@@ -23,7 +23,7 @@ async fn an_event_we_render_is_accepted_stored_updated_and_deleted_by_calcraft()
     .send()
     .await;
   if probe.is_err() {
-    eprintln!("skipping: no CalCraft at {CALENDAR_URL}");
+    teamcraft_server::testing::skip_or_fail_calcraft(&format!("no CalCraft at {CALENDAR_URL}"));
     return;
   }
   let store = CalDavStore::new(&CalDavConfig {
