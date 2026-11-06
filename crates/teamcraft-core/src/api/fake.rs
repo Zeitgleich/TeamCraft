@@ -138,6 +138,8 @@ struct State {
   role_losses: Vec<teamcraft_proto::RoleLossEntry>,
   /// How often an app attached an attestation to its published identity key.
   attestation_uploads: usize,
+  /// An older server: `PUT /me/identity-key/attestation` answers 404.
+  lacks_attestation_endpoint: bool,
   next_id: i64,
   /// See [`FakeServer::challenge_first_frames`].
   first_frame_challenges: usize,
@@ -935,6 +937,11 @@ impl FakeServer {
     if let Some(key) = self.lock().identity_keys.get_mut(&user) {
       key.maybe_attestation = maybe_token;
     }
+  }
+
+  /// Answers `PUT /me/identity-key/attestation` with 404, like a server from before it.
+  pub fn lack_attestation_endpoint(&self, is_lacking: bool) {
+    self.lock().lacks_attestation_endpoint = is_lacking;
   }
 
   /// How often apps attached an attestation to their identity key.
@@ -5047,6 +5054,13 @@ impl ServerApi for FakeServerApi {
     request: &teamcraft_proto::PutIdentityKeyAttestationRequest,
   ) -> Result<(), ApiError> {
     self.with(|state, me| {
+      if state.lacks_attestation_endpoint {
+        return Err(ApiError::Status {
+          status: 404,
+          maybe_body: None,
+          maybe_retry_after: None,
+        });
+      }
       let key = state
         .identity_keys
         .get_mut(&me)

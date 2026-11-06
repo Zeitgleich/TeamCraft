@@ -4,6 +4,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use teamcraft_crypto::attestation::{AttestationExpectations, verify_attestation};
 use teamcraft_crypto::identity::IdentityPublicKey;
@@ -13,6 +14,9 @@ use super::Client;
 use crate::api::ServerApi;
 use crate::convert;
 use crate::store::LocalStore;
+
+/// How soon keys pinned on first use are checked again after the provider's keys couldn't be fetched.
+const PROVIDER_RETRY: Duration = Duration::from_secs(60 * 60);
 
 /// Which identity provider attests identity keys. Configurable per deployment; without it the
 /// provider the owners pinned in the signed policy does, and without that pins are trust on first use.
@@ -98,6 +102,20 @@ impl AttestationCheck {
       settings,
       keys: ProviderKeys::NotFetched,
     }
+  }
+
+  /// When the next check of a key pinned on first use is due, counted from `now_ms`: after
+  /// `recheck_ms`, or after [`PROVIDER_RETRY`] when the provider's keys couldn't be fetched, so an
+  /// outage doesn't put off an upgrade for a whole recheck interval.
+  pub(crate) fn checked_at_ms(&self, now_ms: i64, recheck_ms: i64) -> i64 {
+    if !matches!(self.keys, ProviderKeys::Unavailable) {
+      return now_ms;
+    }
+    let retry_ms = i64::try_from(PROVIDER_RETRY.as_millis()).unwrap_or(i64::MAX);
+    now_ms
+      .saturating_sub(recheck_ms)
+      .saturating_add(retry_ms)
+      .min(now_ms)
   }
 
   /// Decides whether `user`'s identity key may be pinned, from the attestation the server passed

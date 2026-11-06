@@ -95,6 +95,8 @@ pub enum AttestationError {
   WrongType(String),
   #[error("the token doesn't say when it was issued")]
   NoIssueTime,
+  #[error("the token names no subject")]
+  NoSubject,
 }
 
 /// The claim value for `user`'s identity key.
@@ -126,11 +128,6 @@ pub fn verify_role_evidence(
 ) -> Result<RoleEvidence, AttestationError> {
   let claims = verified_claims(token, jwks_json)?;
   let verified = check_claims(&claims, expected, user, identity)?;
-  if let Some(kind) = claims.get("typ").and_then(Value::as_str)
-    && !kind.eq_ignore_ascii_case("ID")
-  {
-    return Err(AttestationError::WrongType(kind.to_string()));
-  }
   let issued_at = claims
     .get("iat")
     .and_then(Value::as_i64)
@@ -295,16 +292,22 @@ fn check_claims(
   if !is_for_us {
     return Err(AttestationError::WrongAudience);
   }
+  if let Some(kind) = claims.get("typ").and_then(Value::as_str)
+    && !kind.eq_ignore_ascii_case("ID")
+  {
+    return Err(AttestationError::WrongType(kind.to_string()));
+  }
   if key_claim(claims) != Some(attestation_claim(user, identity).as_str()) {
     return Err(AttestationError::WrongClaim);
   }
-  Ok(VerifiedAttestation {
-    subject: claims
-      .get("sub")
-      .and_then(Value::as_str)
-      .unwrap_or_default()
-      .to_string(),
-  })
+  // The claim is the person's own word (an attribute they may edit): only the subject ties it to an
+  // account, so a token without one attests nothing.
+  match claims.get("sub").and_then(Value::as_str) {
+    Some(subject) if !subject.is_empty() => Ok(VerifiedAttestation {
+      subject: subject.to_string(),
+    }),
+    _ => Err(AttestationError::NoSubject),
+  }
 }
 
 fn key_claim(claims: &Value) -> Option<&str> {
@@ -420,6 +423,28 @@ mod tests {
     }));
     let verified = verify_attestation(&token, &provider.jwks(), &expectations(), ALICE, &identity).unwrap();
     assert_eq!(verified.subject, "abc");
+  }
+
+  #[test]
+  fn only_an_id_token_naming_its_subject_attests() {
+    let provider = Provider::new();
+    let identity = IdentityKeyPair::generate(&mut OsRng).public_key();
+    let jwks = provider.jwks();
+    let check =
+      |claims: Value| verify_attestation(&provider.token(claims), &jwks, &expectations(), ALICE, &identity);
+    let claim = attestation_claim(ALICE, &identity);
+    assert!(matches!(
+      check(json!({ "iss": ISSUER, "aud": CLIENT, "sub": "abc", "typ": "Bearer", ATTESTATION_CLAIM: claim })),
+      Err(AttestationError::WrongType(_))
+    ));
+    assert!(matches!(
+      check(json!({ "iss": ISSUER, "aud": CLIENT, ATTESTATION_CLAIM: claim })),
+      Err(AttestationError::NoSubject)
+    ));
+    assert!(matches!(
+      check(json!({ "iss": ISSUER, "aud": CLIENT, "sub": "", ATTESTATION_CLAIM: claim })),
+      Err(AttestationError::NoSubject)
+    ));
   }
 
   mod role_evidence {

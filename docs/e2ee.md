@@ -140,6 +140,11 @@ That makes it a second, independent trust anchor:
   accounts, the integration bridge and other service accounts, meeting guests from outside the
   realm): for those, first contact is trust on first use and the safety number is the check. Guests
   in the company realm get the attestation like members.
+- **Known limit, old attestations:** an attestation doesn't expire and isn't compared with newer
+  ones. After a key reset (a lost or stolen device), a VPS that also holds the old key can still hand
+  out the old key with its old, genuine attestation to somebody who never pinned the new one. Whoever
+  pinned the new key sees the old one as a key change. A maximum attestation age with republishing is
+  a possible follow-up.
 - Requires an OIDC provider that lets users write a profile attribute and emits it as a claim
   (Keycloak does).
 

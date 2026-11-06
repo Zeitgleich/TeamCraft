@@ -978,7 +978,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             public_key,
             maybe_changed_to: None,
             is_attested: check == attested::PinCheck::Attested,
-            maybe_attestation_checked_at_ms: maybe_check.as_ref().map(|_| now_ms),
+            maybe_attestation_checked_at_ms: maybe_check
+              .as_ref()
+              .map(|check| check.checked_at_ms(now_ms, recheck_ms)),
           }
         },
         Some(existing) if existing.public_key == public_key => {
@@ -992,7 +994,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             // never locks anybody out (e2ee.md §3.1).
             entry.is_attested =
               check.check(self, user, &public_key, maybe_token).await == attested::PinCheck::Attested;
-            entry.maybe_attestation_checked_at_ms = Some(now_ms);
+            entry.maybe_attestation_checked_at_ms = Some(check.checked_at_ms(now_ms, recheck_ms));
           }
           entry
         },

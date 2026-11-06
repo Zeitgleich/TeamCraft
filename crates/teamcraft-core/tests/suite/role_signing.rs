@@ -1385,6 +1385,47 @@ mod key_attestation {
     assert!(!pin.is_attested);
   }
 
+  #[tokio::test]
+  async fn a_server_without_the_endpoint_doesnt_stop_owners_from_signing() {
+    let world = World::new();
+    world.server.lack_attestation_endpoint(true);
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    world.give_token(&bob, &["admin"], T0);
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    world.give_token(&alice, &["owner"], T0 + 60);
+    alice.client.note_role_evidence_update();
+
+    alice.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+
+    assert_eq!(role_of(&alice, bob.client.user_id()), Some(RosterRole::Admin));
+    assert_eq!(world.server.attestation_uploads(), 0);
+  }
+
+  #[tokio::test]
+  async fn an_attestation_the_server_lost_is_published_again_after_a_restart() {
+    let world = World::new();
+    let (_alice, mut bob) = world.owner_and_peer("Bob").await;
+    world.give_token(&bob, &[], T0);
+    bob.client.run_role_signing().await.unwrap();
+    let uploads = world.server.attestation_uploads();
+    // A database restored from before it.
+    world.server.set_identity_attestation(bob.client.user_id(), None);
+
+    restart(&world, &mut bob);
+    world.give_token(&bob, &[], T0 + 60);
+    bob.client.run_role_signing().await.unwrap();
+
+    assert_eq!(world.server.attestation_uploads(), uploads + 1);
+    assert!(
+      world
+        .server
+        .identity_attestation_of(bob.client.user_id())
+        .is_some()
+    );
+  }
+
   async fn require_attestation(owner: &mut Peer) {
     let mut policy = owner.client.workspace().unwrap().policy;
     policy.maybe_role_signing = Some(Box::new(RoleSigningPolicy {
@@ -1402,6 +1443,21 @@ mod key_attestation {
     let channel = peer.client.create_channel(space, "attested").await?;
     peer.client.add_member(channel, user).await?;
     Ok(channel)
+  }
+
+  /// The app is started again on the same store.
+  fn restart(world: &World, peer: &mut Peer) {
+    peer.client = teamcraft_core::Client::open(
+      peer.api.clone(),
+      peer.store.clone(),
+      crate::common::clock(),
+      crate::common::settings(),
+    )
+    .unwrap()
+    .unwrap();
+    peer
+      .client
+      .set_jwks_source(Box::new(Jwks(world.provider.clone())));
   }
 
   fn pin_of(peer: &Peer, user: UserId) -> PinnedIdentity {

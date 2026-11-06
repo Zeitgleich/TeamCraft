@@ -123,6 +123,9 @@ pub(crate) struct RoleSigningRun {
   /// The provider showed it doesn't take or map the attribute: somebody with no role doesn't ask it
   /// again until the app starts anew.
   is_attribute_unavailable: bool,
+  /// The attestation this device made sure the server holds since the app started, or the server
+  /// refused (e.g. an older server without the endpoint): not asked again until the app starts anew.
+  maybe_attestation_settled: Option<String>,
 }
 
 #[derive(Debug)]
@@ -341,18 +344,40 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     tokens: &ProviderTokens,
     claim: &str,
   ) -> Result<(), CoreError> {
-    let mut record = self.role_signing_record()?;
-    if record.maybe_attested_key.as_deref() == Some(claim) {
+    if self.role_signing.maybe_attestation_settled.as_deref() == Some(claim) {
       return Ok(());
     }
-    self
-      .api
-      .put_identity_key_attestation(&PutIdentityKeyAttestationRequest {
-        token: tokens.id_token.clone(),
-      })
-      .await?;
+    let mut record = self.role_signing_record()?;
+    // Published before: once per start, look whether the server still holds it (a restored database
+    // loses it, and colleagues then take this key on first use).
+    if record.maybe_attested_key.as_deref() == Some(claim) && self.is_attestation_on_the_server().await? {
+      self.role_signing.maybe_attestation_settled = Some(claim.to_owned());
+      return Ok(());
+    }
+    let request = PutIdentityKeyAttestationRequest {
+      token: tokens.id_token.clone(),
+    };
+    match self.api.put_identity_key_attestation(&request).await {
+      Ok(()) => {},
+      // A refusal is no reason to stop the round: the owner's duties come after this (an older server
+      // doesn't know the endpoint, or the key changed meanwhile). Asked again after a restart.
+      Err(error) if is_permanent_refusal(&error) => {
+        tracing::warn!(%error, "the server refused this device's key attestation");
+        self.role_signing.maybe_attestation_settled = Some(claim.to_owned());
+        return Ok(());
+      },
+      Err(error) => return Err(error.into()),
+    }
+    self.role_signing.maybe_attestation_settled = Some(claim.to_owned());
     record.maybe_attested_key = Some(claim.to_owned());
     records::put_json(&self.store, Table::Workspace, ROLE_SIGNING_KEY, &record)
+  }
+
+  async fn is_attestation_on_the_server(&self) -> Result<bool, CoreError> {
+    let maybe_key = self.api.identity_key(self.account.user_id).await?;
+    Ok(maybe_key.is_some_and(|key| {
+      key.public_key.as_slice() == self.identity_public_key().as_bytes() && key.maybe_attestation.is_some()
+    }))
   }
 
   /// Somebody with no role: their token only attests their identity key, so the attribute is written
@@ -834,4 +859,10 @@ fn verified_statement(
     issued_at: evidence.issued_at,
     role: provider_role(evidence.maybe_roles.as_deref(), anchor),
   })
+}
+
+/// A `4xx` the same request would get again; `408` and `429` pass with time, so they fail the round
+/// and are retried like a network error.
+fn is_permanent_refusal(error: &ApiError) -> bool {
+  matches!(error, ApiError::Status { status, .. } if (400..500).contains(status) && !matches!(status, 408 | 429))
 }
