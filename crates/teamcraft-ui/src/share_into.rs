@@ -1,6 +1,6 @@
 //! Sharing into the app from outside it (#208): the file manager's "Send to" on the desktop, and the
-//! service worker's cache in the browser, which no share sheet offers until the manifest declares the
-//! share target (#1324).
+//! service worker's cache in the browser, which share sheets offer through the manifest's
+//! `share_target`.
 //!
 //! What was shared waits outside the signed-in app (the shell's list of paths, the service worker's
 //! cache in `sw.js`), so it survives the sign-in and, in the browser, a closed tab. Once signed in

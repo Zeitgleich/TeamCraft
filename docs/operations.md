@@ -275,7 +275,8 @@ the server itself is down.
 
   Sharing into the installed web app posts plaintext to that path, and only the client's service
   worker may see it (docs/e2ee.md §9.3). The server answers the same way without reading the body, as
-  a fallback. The web app doesn't offer itself as a share target yet (#1324).
+  a fallback. The web manifest declares `/share-target` as the web app's share target, so the proxy
+  line must be in place.
 - Never expose `/api/internal/` to the internet: it is for the SFU and the mail inbox handler, and is
   protected by bearer tokens, but there is no reason to publish it.
 - Everything facing the network is dual stack (IPv4 and IPv6). The SFU needs UDP `3478` reachable

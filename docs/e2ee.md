@@ -4668,9 +4668,9 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   auditors a signed list of what a release is. People who need more use the desktop and mobile apps,
   which do not take their code from the server.
 
-**Shares from other apps (#208).** Not active on the web yet: the manifest has no `share_target` until
-a release after the service workers that handle it (#1324), so no browser offers the web app as a
-share target. With the field, the browser POSTs what was shared to `/share-target`. A service worker
+**Shares from other apps (#208).** The manifest declares a `share_target` (#1324), a release after the
+service workers that handle it, so browsers offer the web app as a share target and POST what was
+shared to `/share-target`. A service worker
 that knows the path answers that itself and keeps the content in a cache of its own, in the clear like
 any picked file, until the user picked a conversation (at most 7 days, at most 5 shares and 4 GiB;
 wiped at sign-out, when the account can't stay on the device, and when somebody else signs in after a

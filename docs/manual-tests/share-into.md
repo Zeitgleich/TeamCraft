@@ -53,9 +53,7 @@ Needs a signed build: the extension and the app talk through the App Group.
 
 ## Web (installed app, Chrome or Edge on Android, ChromeOS or Windows)
 
-The share target isn't active yet: the manifest declares it a release after the service workers that
-handle it (#1324), and these steps apply from then on. Until then, no share sheet offers the web app.
-Safari has no share target at all.
+The manifest declares the share target (#1324). Safari has no share target at all.
 
 - [ ] Install the app, reopen it once so the new service worker runs, then share a picture from
       another app: TeamCraft is offered, opens, and shows the picker with the file's name and size.

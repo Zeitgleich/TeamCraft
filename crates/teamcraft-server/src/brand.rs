@@ -958,10 +958,9 @@ fn theme_css(colors: &BrandColors) -> String {
 /// The web app manifest: the brand's name, its top bar color and its icon (the client's own icons
 /// without one). Everything in it was validated or is fixed; the host is never part of it.
 ///
-/// No `share_target` yet (#1324): the browser would POST what is shared to `/share-target`, and
-/// only a service worker of this release or later keeps that in the browser. An older worker lets the
-/// plaintext through to the proxy and this server (docs/e2ee.md §9.3), so the field follows a release
-/// after the workers.
+/// `share_target` makes the browser POST what is shared to `/share-target`. Only a service worker
+/// that knows the path keeps that in the browser; with none, the plaintext reaches the proxy and this
+/// server (docs/e2ee.md §9.3), which refuse it unread.
 fn web_manifest(display_name: &str, colors: &BrandColors, assets: &HashMap<String, BrandAsset>) -> String {
   let chrome = colors
     .light
@@ -992,6 +991,17 @@ fn web_manifest(display_name: &str, colors: &BrandColors, assets: &HashMap<Strin
     "theme_color": chrome,
     "background_color": chrome,
     "icons": icons,
+    "share_target": {
+      "action": "/share-target",
+      "method": "POST",
+      "enctype": "multipart/form-data",
+      "params": {
+        "title": "title",
+        "text": "text",
+        "url": "url",
+        "files": [{ "name": "files", "accept": ["*/*"] }],
+      },
+    },
   })
   .to_string()
 }
@@ -1430,8 +1440,15 @@ mod tests {
       assert_eq!(manifest["display"], "standalone");
       assert_eq!(manifest["start_url"], "/");
       assert_eq!(manifest["theme_color"], "#202a3c");
-      // Not before the service workers that keep shares in the browser are out (#1324).
-      assert!(manifest.get("share_target").is_none());
+      let share = &manifest["share_target"];
+      assert_eq!(share["action"], "/share-target");
+      assert_eq!(share["method"], "POST");
+      assert_eq!(share["enctype"], "multipart/form-data");
+      assert_eq!(share["params"]["title"], "title");
+      assert_eq!(share["params"]["text"], "text");
+      assert_eq!(share["params"]["url"], "url");
+      assert_eq!(share["params"]["files"][0]["name"], "files");
+      assert_eq!(share["params"]["files"][0]["accept"][0], "*/*");
       let other: serde_json::Value =
         serde_json::from_str(&registry.by_id("b").unwrap().web_manifest).unwrap();
       assert_eq!(other["theme_color"], DEFAULT_CHROME_COLOR);
