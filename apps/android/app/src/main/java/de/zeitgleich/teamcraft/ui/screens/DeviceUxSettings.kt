@@ -32,6 +32,7 @@ import de.zeitgleich.teamcraft.security.LockAfter
 import de.zeitgleich.teamcraft.ui.AnimatedImagesMode
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MediaPrefs
+import de.zeitgleich.teamcraft.ui.media.MediaQuality
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 import de.zeitgleich.teamcraft.ui.theme.ChatListLayout
 import uniffi.teamcraft_ffi.CallStatusSounds
@@ -145,6 +146,35 @@ fun OriginalDownloadSetting() {
     }
     Text(
       stringResource(R.string.original_download_hint),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
+}
+
+/** The quality photos and videos are sent at unless changed while sending (#1358). */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun SendQualitySetting() {
+  val context = LocalContext.current
+  val prefs = remember { MediaPrefs.prefs(context) }
+  var choice by remember { mutableStateOf(prefs.sendQuality) }
+  Column {
+    Text(stringResource(R.string.send_quality_title))
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      for ((option, label) in listOf(MediaQuality.Standard to R.string.send_quality_standard, MediaQuality.High to R.string.send_quality_high)) {
+        FilterChip(
+          selected = choice == option,
+          onClick = {
+            choice = option
+            prefs.setSendQuality(option)
+          },
+          label = { Text(stringResource(label)) },
+        )
+      }
+    }
+    Text(
+      stringResource(R.string.send_quality_hint),
       style = MaterialTheme.typography.bodySmall,
       color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

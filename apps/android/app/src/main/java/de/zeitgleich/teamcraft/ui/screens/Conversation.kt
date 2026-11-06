@@ -138,6 +138,8 @@ import de.zeitgleich.teamcraft.ui.olderState
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.ConversationRights
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.media.MediaFlow
+import de.zeitgleich.teamcraft.ui.media.MediaFlowLaunch
 import de.zeitgleich.teamcraft.ui.MessageAction
 import de.zeitgleich.teamcraft.ui.messageActions
 import de.zeitgleich.teamcraft.ui.EmojiInput
@@ -1086,7 +1088,9 @@ internal fun Composer(
   var isSendOptionsOpen by remember { mutableStateOf(false) }
   val replyTarget by ReplyTarget.current.collectAsState()
   val maybeReply = replyTarget?.takeIf { it.conversation == conversationId && maybeThread == null }
-  val pickers = rememberAttachmentPickers(viewModel) { picked -> files = files + picked }
+  // The camera, gallery and review flow (#1358); saved so it comes back after the app was killed.
+  var maybeMediaFlow by rememberSaveable(conversationId, maybeThread, stateSaver = MediaFlowLaunch.saver) { mutableStateOf<MediaFlowLaunch?>(null) }
+  val pickers = rememberAttachmentPickers(viewModel, onMediaFlow = { maybeMediaFlow = it }) { picked -> files = files + picked }
   val focus = remember { FocusRequester() }
   val isSendWithEnter = remember { ComposerPrefs.prefs(context).isSendWithEnter }
   val isSharingTyping = remember { ComposerPrefs.prefs(context).isSharingTyping }
@@ -1317,12 +1321,29 @@ internal fun Composer(
       isSendWithEnter = isSendWithEnter,
       focus = focus,
       onAttach = { isAttachOpen = true },
-      onCamera = pickers.takePhoto,
+      onCamera = pickers.openCamera,
       onSend = ::trySend,
       onSendOptions = { isSendOptionsOpen = true },
     )
   }
   if (isAttachOpen) AttachSheet(pickers, onDismiss = { isAttachOpen = false })
+  maybeMediaFlow?.let { launch ->
+    MediaFlow(
+      viewModel = viewModel,
+      key = "$conversationId-${maybeThread.orEmpty()}",
+      launch = launch,
+      conversationName = snapshot?.conversation(conversationId)?.name.orEmpty(),
+      initialCaption = text,
+      onClose = { maybeMediaFlow = null },
+      onSend = { picked, caption ->
+        maybeMediaFlow = null
+        // The caption is the message's text: it goes with the pictures as one message.
+        files = files + picked
+        text = caption
+        trySend()
+      },
+    )
+  }
   maybeEditing?.let { editing ->
     PictureEditor(
       viewModel = viewModel,
