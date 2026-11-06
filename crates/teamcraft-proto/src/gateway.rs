@@ -82,6 +82,10 @@ pub enum GatewayServerMessage {
   Ready {
     session_id: String,
     user: UserSummary,
+    /// How long the server keeps the session after its connection ends: a client away for longer
+    /// identifies at once instead of trying to resume. Absent from servers before 1.0.24.
+    #[serde(rename = "resume_window_ms", default, skip_serializing_if = "Option::is_none")]
+    maybe_resume_window_ms: Option<u64>,
   },
   Resumed {
     replayed: u64,
@@ -416,6 +420,30 @@ mod tests {
         ..
       }
     ));
+  }
+
+  /// The resume window is one more field: a ready from an older server has none.
+  #[test]
+  fn ready_names_the_resume_window_and_reads_without() {
+    let old = r#"{"type":"ready","session_id":"s","user":{"id":"2","display_name":"Ann","kind":"member"}}"#;
+    let GatewayServerMessage::Ready {
+      maybe_resume_window_ms,
+      ref user,
+      ..
+    } = serde_json::from_str(old).unwrap()
+    else {
+      panic!("not a ready");
+    };
+    assert_eq!(maybe_resume_window_ms, None);
+    let ready = GatewayServerMessage::Ready {
+      session_id: "s".into(),
+      user: user.clone(),
+      maybe_resume_window_ms: Some(120_000),
+    };
+    assert_eq!(
+      serde_json::to_string(&ready).unwrap(),
+      r#"{"type":"ready","session_id":"s","user":{"id":"2","display_name":"Ann","kind":"member"},"resume_window_ms":120000}"#
+    );
   }
 
   #[test]

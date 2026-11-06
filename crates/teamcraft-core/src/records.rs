@@ -71,6 +71,13 @@ pub struct SyncState {
 pub struct GatewaySession {
   pub session_id: String,
   pub last_seq: u64,
+  /// How long the server keeps the session after its connection ends, as it said in `ready`.
+  #[serde(rename = "resume_window_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_resume_window_ms: Option<u64>,
+  /// When this device last heard from the server on the session (device clock), kept with the
+  /// events and when the sync stops: a device away for longer than the window identifies at once.
+  #[serde(rename = "heard_at_ms", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_heard_at_ms: Option<i64>,
 }
 
 /// A message waiting to be sent; the content is the stored message with the same IDs.

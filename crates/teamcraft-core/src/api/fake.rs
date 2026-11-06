@@ -324,6 +324,9 @@ struct State {
   clock_offset_ms: i64,
   /// Users whose conversation list answers only after this long (a slow server in a big sync).
   conversation_list_delays: HashMap<UserId, std::time::Duration>,
+  /// The resume window `ready` names; `None` like a server before 1.0.24. Sessions still expire
+  /// only through [`FakeServer::expire_sessions`].
+  maybe_resume_window: Option<std::time::Duration>,
   /// Users whose member lists answer only after this long.
   member_list_delays: HashMap<UserId, std::time::Duration>,
   /// Users whose reads of a user's registered devices answer only after this long.
@@ -1843,6 +1846,11 @@ impl FakeServer {
       .values()
       .filter_map(|attachment| attachment.maybe_blob.clone())
       .collect()
+  }
+
+  /// From now on `ready` names this resume window, as a current server does.
+  pub fn announce_resume_window(&self, window: std::time::Duration) {
+    self.lock().maybe_resume_window = Some(window);
   }
 
   /// Forgets all sessions, so resuming fails with `session_invalid` (e.g. after a server restart).
@@ -6074,7 +6082,14 @@ impl GatewayConnection for FakeGateway {
           },
         );
         let user = state.user(self.user)?.clone();
-        let _ = sender.unbounded_send(GatewayServerMessage::Ready { session_id, user });
+        let maybe_resume_window_ms = state
+          .maybe_resume_window
+          .and_then(|window| u64::try_from(window.as_millis()).ok());
+        let _ = sender.unbounded_send(GatewayServerMessage::Ready {
+          session_id,
+          user,
+          maybe_resume_window_ms,
+        });
       },
       GatewayClientMessage::Resume {
         session_id, last_seq, ..

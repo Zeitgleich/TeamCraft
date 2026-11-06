@@ -200,7 +200,12 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       self.start_upload().await;
       self.start_downloads().await;
       match self.next_wake().await {
-        Wake::Command(None | Some(RunnerCommand::Stop)) => return self.client,
+        Wake::Command(None | Some(RunnerCommand::Stop)) => {
+          if self.connection.is_connected() {
+            self.client.note_gateway_closing();
+          }
+          return self.client;
+        },
         Wake::Command(Some(command)) => self.on_command(command).await,
         Wake::Frame(maybe_frame) => self.on_frame(maybe_frame).await,
         Wake::NetworkChanged => {
