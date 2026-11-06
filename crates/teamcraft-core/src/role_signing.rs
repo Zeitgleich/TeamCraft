@@ -23,6 +23,9 @@
 //!   it (e2ee.md §3.1.3).
 //! - An owner's edit by hand stands until the provider agrees with it once; after that the provider
 //!   leads again.
+//! - After a move to another provider that the owners signed (`provider_moves` in the policy), the
+//!   accounts noted at the old one are forgotten, edits by hand included, and the new provider's are
+//!   noted as for anybody's first token. Only the signed policy starts this.
 
 use std::collections::BTreeMap;
 
@@ -245,6 +248,39 @@ pub fn role_loss_statement(
     issued_at,
     role,
   })
+}
+
+/// The provider move the signed policy names, if the roster's marks don't follow it yet: their
+/// accounts were noted at the provider before (`settled` is the move they belong to). Only once the
+/// policy names the new provider, so they are noted again at the one the owners' apps pinned. An older
+/// policy, or one an older app signed without the count, says nothing.
+pub fn unsettled_provider_move(maybe_policy: Option<&RoleSigningPolicy>, settled: u64) -> Option<u64> {
+  let policy = maybe_policy?;
+  (policy.maybe_provider.is_some() && policy.provider_moves > settled).then_some(policy.provider_moves)
+}
+
+/// `marks` without the accounts they noted, for a roster that follows a provider move: what an owner
+/// set by hand, and each person's floor, stay.
+pub fn forget_accounts(marks: &BTreeMap<UserId, ProviderMark>) -> BTreeMap<UserId, ProviderMark> {
+  marks
+    .iter()
+    .map(|(user, mark)| {
+      let forgotten = ProviderMark {
+        maybe_subject: None,
+        ..mark.clone()
+      };
+      (*user, forgotten)
+    })
+    .collect()
+}
+
+/// Counts an owner's move to another provider into `signing`, the verified policy about to pin the new
+/// one: only a policy an owner signed to take a new provider (`accepts_new_provider`) is a move. Higher
+/// than any move this device saw, also one an older owner's app signed the count away from (`settled`).
+pub fn count_provider_move(signing: &mut RoleSigningPolicy, settled: u64) {
+  if signing.accepts_new_provider {
+    signing.provider_moves = signing.provider_moves.max(settled).saturating_add(1);
+  }
 }
 
 /// The next roster and marks. Applied in the same way by every owner's app, so several of them
@@ -1198,6 +1234,72 @@ mod tests {
       );
       assert_eq!(role_of(&plan, bob()), None);
       assert_eq!(plan.contradicted, vec![bob()]);
+    }
+  }
+
+  mod provider_move {
+    use teamcraft_proto::RoleProvider;
+
+    use super::*;
+
+    #[test]
+    fn only_a_higher_count_under_a_named_provider_is_unsettled() {
+      let mut policy = RoleSigningPolicy {
+        provider_moves: 2,
+        ..RoleSigningPolicy::default()
+      };
+      assert_eq!(unsettled_provider_move(None, 0), None);
+      assert_eq!(unsettled_provider_move(Some(&policy), 0), None, "not pinned yet");
+      policy.maybe_provider = Some(RoleProvider {
+        issuer: "https://new.example".to_owned(),
+        client_id: "teamcraft".to_owned(),
+      });
+      assert_eq!(unsettled_provider_move(Some(&policy), 1), Some(2));
+      assert_eq!(unsettled_provider_move(Some(&policy), 2), None);
+      assert_eq!(unsettled_provider_move(Some(&policy), 3), None, "an older policy");
+    }
+
+    #[test]
+    fn only_a_signed_move_counts_and_above_everything_seen() {
+      let mut signing = RoleSigningPolicy::default();
+      count_provider_move(&mut signing, 4);
+      assert_eq!(signing.provider_moves, 0, "no move");
+      signing.accepts_new_provider = true;
+      count_provider_move(&mut signing, 4);
+      assert_eq!(signing.provider_moves, 5, "an older app signed the count away");
+    }
+
+    #[test]
+    fn forgetting_keeps_the_floor_and_the_edit_by_hand() {
+      let marks = BTreeMap::from([(
+        bob(),
+        ProviderMark {
+          maybe_subject: Some("sub-b".to_owned()),
+          issued_at: NOW,
+          maybe_by_hand: Some(HandRole::Owner),
+        },
+      )]);
+
+      let forgotten = forget_accounts(&marks);
+
+      let mark = &forgotten[&bob()];
+      assert_eq!(mark.maybe_subject, None);
+      assert_eq!(mark.issued_at, NOW);
+      assert_eq!(mark.maybe_by_hand, Some(HandRole::Owner));
+    }
+
+    #[test]
+    fn after_forgetting_a_new_account_is_noted_without_a_contradiction() {
+      let mut roster = roster();
+      roster.members.push(member(bob(), RosterRole::Admin));
+      let marks = forget_accounts(&marked(bob(), "sub-b", NOW - 10));
+      let mut moved = statement(bob(), ProviderRole::Admin, NOW);
+      moved.subject = "new-sub-b".to_owned();
+
+      let plan = planned(&roster, &marks, &[moved], &[]);
+
+      assert!(plan.contradicted.is_empty());
+      assert_eq!(plan.marks[&bob()].maybe_subject.as_deref(), Some("new-sub-b"));
     }
   }
 

@@ -722,6 +722,11 @@ pub struct RoleSigningPolicy {
   /// also if it differs from the one that device used before.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub accepts_new_provider: bool,
+  /// How many times owners moved to another provider. The accounts (`sub`) the roster noted belong to
+  /// the provider of one move; when this is higher, an owner's app forgets them and notes the new
+  /// provider's. Only the signed policy raises it, so the server can't make anybody's account unknown.
+  #[serde(default, skip_serializing_if = "is_zero")]
+  pub provider_moves: u64,
 }
 
 /// The identity provider whose tokens can change the admin roster.
@@ -746,6 +751,10 @@ fn default_admin_role() -> String {
   DEFAULT_ADMIN_ROLE.to_owned()
 }
 
+fn is_zero(value: &u64) -> bool {
+  *value == 0
+}
+
 impl Default for RoleSigningPolicy {
   fn default() -> Self {
     Self {
@@ -754,6 +763,7 @@ impl Default for RoleSigningPolicy {
       admin_role: default_admin_role(),
       maybe_provider: None,
       accepts_new_provider: false,
+      provider_moves: 0,
     }
   }
 }

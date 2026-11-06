@@ -27,7 +27,8 @@ use crate::error::CoreError;
 use crate::records;
 use crate::role_signing::{
   AutomaticBasis, AutomaticChange, AutomaticChangeKind, ProviderMark, ProviderRole, ProviderStatement,
-  RoleProviderAnchor, RosterPlanInput, plan_roster, provider_role, role_loss_statement,
+  RoleProviderAnchor, RosterPlanInput, count_provider_move, forget_accounts, plan_roster, provider_role,
+  role_loss_statement, unsettled_provider_move,
 };
 use crate::store::{LocalStore, Table};
 use crate::workspace::{RosterDocument, RosterMember, RosterRole, WorkspaceState};
@@ -252,7 +253,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.publish_own_evidence(tokens, &claims, &state, role).await?;
     self.clear_transient_problem()?;
     let is_role_news = self.role_signing.maybe_seen_role != Some(role);
-    if !needs_evidence && !is_role_news {
+    // A move the owners signed waits for an owner's app to sign the roster that follows it.
+    let is_move_unsettled =
+      unsettled_provider_move(state.policy.maybe_role_signing.as_deref(), state.provider_moves).is_some();
+    if !needs_evidence && !is_role_news && !is_move_unsettled {
       return Ok(false);
     }
     let is_changed = self.sign_what_the_provider_says(tokens, &anchor, role).await?;
@@ -289,6 +293,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(());
     }
     record.maybe_seen_provider = Some(claims.issuer.clone());
+    // A token of the provider before says nothing to the owners' apps now: the next one goes out.
+    record.maybe_published = None;
     records::put_json(&self.store, Table::Workspace, ROLE_SIGNING_KEY, &record)
   }
 
@@ -550,6 +556,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     anchor: &RoleProviderAnchor,
   ) -> Result<bool, CoreError> {
     let listed = self.api.list_role_evidence().await?;
+    // After a move the owners signed, the accounts noted at the provider before name nobody at this one.
+    let maybe_move =
+      unsettled_provider_move(state.policy.maybe_role_signing.as_deref(), state.provider_moves);
+    let marks = match maybe_move {
+      Some(_) => forget_accounts(&state.provider_marks),
+      None => state.provider_marks.clone(),
+    };
     let mut statements = vec![own.clone()];
     for entry in &listed.entries {
       if entry.user_id == self.account.user_id {
@@ -573,7 +586,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let mut record = self.role_signing_record()?;
     let plan = plan_roster(RosterPlanInput {
       roster: &state.roster,
-      marks: &state.provider_marks,
+      marks: &marks,
       statements: &statements,
       withdrawn: &listed.withdrawn,
       me: self.account.user_id,
@@ -589,8 +602,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     record.maybe_last_report_removal = plan.maybe_last_report_removal;
     records::put_json(&self.store, Table::Workspace, ROLE_SIGNING_KEY, &record)?;
     self.note_what_people_should_know(&plan.contradicted, &plan.reported)?;
-    let has_changes = plan.has_changes();
+    let has_changes = plan.has_changes() || maybe_move.is_some();
     if has_changes {
+      if let Some(moves) = maybe_move {
+        tracing::info!(
+          provider_moves = moves,
+          "forgetting the accounts noted at the identity provider before the move"
+        );
+      }
       for change in &plan.changes {
         tracing::info!(
           user_id = %change.user_id,
@@ -602,6 +621,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let mut document = state.roster.clone();
       document.members = plan.members;
       document.provider_marks = plan.marks;
+      if let Some(moves) = maybe_move {
+        document.provider_moves = moves;
+      }
       self.append_roster_automatically(document, plan.changes).await?;
     }
     // The owner before signed themselves off and couldn't sign the policy under this roster: until
@@ -618,8 +640,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// it. On an instance that updated this is the moment it is pinned: from the token this device got
   /// itself, not from anything the server says.
   async fn pin_provider(&mut self, anchor: &RoleProviderAnchor) -> Result<(), CoreError> {
-    let mut policy = self.workspace()?.policy;
+    let state = self.workspace()?;
+    let mut policy = state.policy;
     let mut signing = policy.maybe_role_signing.take().unwrap_or_default();
+    // A move the owners signed: the roster's accounts belong to the provider before (e2ee.md §3.1.3).
+    count_provider_move(&mut signing, state.provider_moves);
     signing.maybe_provider = Some(RoleProvider {
       issuer: anchor.issuer.clone(),
       client_id: anchor.client_id.clone(),

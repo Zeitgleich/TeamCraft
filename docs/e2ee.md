@@ -216,6 +216,20 @@ provider (issuer and client ID).
   the realm has the mappers, from the token this device got from its own token endpoint. Every device also remembers the
   issuer it used, so one that announces another before anything is pinned stops it. From then on another issuer stops the
   owners' apps and an owner hears of it. A real move to a new provider is an owner's explicit choice in the console, signed.
+- **A provider move** (issue #1282) is that signed choice: a policy that names no provider and has `accepts_new_provider`.
+  The next owner's app pins the provider it signs in with and, in the same signed policy, raises `provider_moves`. The
+  accounts noted in the marks belong to the provider before, so the roster records which move its marks follow
+  (`provider_moves` in the roster). While the policy's count is higher, an owner's app signs a roster that forgets every
+  noted account, edits by hand included, and keeps each mark's `iat` floor and `by_hand`; the new provider's tokens then
+  note the accounts again under the rules above (a token naming the key the roster has for that person). Without this the
+  new provider's `sub` would contradict the old one for everybody, and an edit by hand would keep the old `sub` too.
+  What a hostile server can't do with it: the count is only raised in a policy an owner signed that accepts a new provider,
+  and an owner's app only forgets accounts when the policy it verified has a higher count than the roster, under a pinned
+  provider. A forged or unsigned policy or roster stops the chain like any other; an old signed move replayed into the log
+  doesn't verify at another version, and a lower count never forgets anything. Every device keeps the highest count it
+  verified, as it keeps the marks, so a roster an older owner's app signs without the count doesn't bring old accounts
+  back. The cost: until each person's first token from the new provider counts, nobody's account is noted, which is the
+  window described under "Why the account is noted", and a role report or a lost-role token takes nobody off meanwhile.
 
 **The first roster.** The first owner's app signs it itself, from its own token, with nobody asked: that owner
 alone, then the provider pinned. Everybody else follows from their own tokens. A hostile server can't steer this:

@@ -25,7 +25,7 @@ use teamcraft_proto::{
 
 use crate::convert;
 use crate::records;
-use crate::role_signing::{AutomaticChange, ProviderMark};
+use crate::role_signing::{AutomaticChange, ProviderMark, forget_accounts};
 use crate::store::{LocalStore, Table};
 
 /// Admin tenures a device keeps. Far beyond any instance's turnover; past it the oldest go and the
@@ -52,6 +52,9 @@ pub struct RosterDocument {
   /// longer listed, so an old token can't bring them back on any owner's device.
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub provider_marks: BTreeMap<UserId, ProviderMark>,
+  /// The provider move (the signed policy's `provider_moves`) the marks' accounts belong to.
+  #[serde(default, skip_serializing_if = "is_zero")]
+  pub provider_moves: u64,
   /// What an owner's app changed in this version by itself and why: the audit line.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub automatic: Vec<AutomaticChange>,
@@ -131,6 +134,9 @@ pub struct WorkspaceState {
   /// owner's app signs a roster that leaves them out.
   #[serde(default)]
   pub provider_marks: BTreeMap<UserId, ProviderMark>,
+  /// [`RosterDocument::provider_moves`], kept the same way: an older owner's app signs it away.
+  #[serde(default)]
+  pub provider_moves: u64,
 }
 
 /// Every stretch somebody was an owner or admin of the verified roster, from this device's own
@@ -573,8 +579,13 @@ impl WorkspaceState {
     Ok(())
   }
 
-  /// Takes over the marks of a verified roster; each only ever moves forward.
+  /// Takes over the marks of a verified roster; each only ever moves forward. A roster that follows a
+  /// provider move forgets the accounts noted at the old one, also those it leaves out.
   fn keep_provider_marks(&mut self, roster: &RosterDocument) {
+    if roster.provider_moves > self.provider_moves {
+      self.provider_marks = forget_accounts(&self.provider_marks);
+      self.provider_moves = roster.provider_moves;
+    }
     for (user, mark) in &roster.provider_marks {
       let is_newer = self
         .provider_marks
@@ -974,6 +985,10 @@ pub fn verified_client_update_policy(store: &impl LocalStore) -> Option<ClientUp
     .map(|state| state.policy.client_updates)
 }
 
+fn is_zero(value: &u64) -> bool {
+  *value == 0
+}
+
 #[cfg(test)]
 mod tests {
   use rand_core::OsRng;
@@ -1061,6 +1076,39 @@ mod tests {
         .unwrap();
 
       assert_eq!(state.provider_marks[&alice.user_id].issued_at, 100);
+    }
+
+    #[test]
+    fn a_roster_after_a_provider_move_forgets_the_accounts_and_an_older_clients_does_not_undo_it() {
+      let alice = Owner::new(1);
+      let bob = UserId::from_snowflake(Snowflake::new(2).unwrap());
+      let mut state = WorkspaceState::default();
+      let mut first = roster(1, &[&alice], None, &state);
+      first.provider_marks.insert(alice.user_id, mark("sub-a", 100));
+      first.provider_marks.insert(bob, mark("sub-b", 100));
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 1, &first)])
+        .unwrap();
+
+      // It names only Alice's mark: Bob's old account goes all the same.
+      let mut moved = roster(2, &[&alice], None, &state);
+      moved.provider_moves = 1;
+      moved.provider_marks.insert(alice.user_id, mark("new-sub-a", 200));
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 2, &moved)])
+        .unwrap();
+      let older = roster(3, &[&alice], None, &state);
+      state
+        .apply_entries(vec![alice.sign(WorkspaceLogKind::Roster, 3, &older)])
+        .unwrap();
+
+      assert_eq!(state.provider_moves, 1);
+      assert_eq!(state.provider_marks[&bob].maybe_subject, None);
+      assert_eq!(state.provider_marks[&bob].issued_at, 100);
+      assert_eq!(
+        state.provider_marks[&alice.user_id].maybe_subject.as_deref(),
+        Some("new-sub-a")
+      );
     }
 
     #[test]

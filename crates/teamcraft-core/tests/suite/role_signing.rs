@@ -25,6 +25,8 @@ use crate::common::{Peer, settle};
 
 const ISSUER: &str = "https://id.example.com/realms/company";
 const CLIENT: &str = "teamcraft";
+/// The provider the owners moved to.
+const MOVED_ISSUER: &str = "https://new.example";
 /// The provider's clock in these tests (seconds).
 const T0: i64 = 1_000_000;
 const WEEK: i64 = 7 * 24 * 60 * 60;
@@ -666,6 +668,193 @@ mod the_pin {
   }
 }
 
+mod provider_move {
+  use teamcraft_core::api::ServerApi;
+  use teamcraft_core::workspace::ChainedPolicyDocument;
+  use teamcraft_proto::ListWorkspaceLogQuery;
+
+  use super::*;
+
+  #[tokio::test]
+  async fn the_accounts_noted_before_give_way_to_the_new_providers_also_after_an_edit_by_hand() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+    note_admin(&world, &mut alice, &mut bob).await;
+    // By hand, Bob becomes an owner too: his mark keeps the old account.
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (bob_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    assert_eq!(subject_of(&alice, bob_id).as_deref(), Some("sub-of-Bob"));
+
+    let moved = move_provider(&world, &mut alice, &mut bob).await;
+    assert_eq!(alice.client.workspace().unwrap().roster.provider_moves, 1);
+    assert_eq!(subject_of(&alice, bob_id), None, "the old account is forgotten");
+    world.give_moved_token(&moved, &bob, &["owner"], T0 + 11);
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+
+    assert_eq!(role_of(&alice, bob_id), Some(RosterRole::Owner));
+    assert_eq!(subject_of(&alice, bob_id).as_deref(), Some("new-sub-of-Bob"));
+    assert_eq!(subject_of(&alice, alice_id).as_deref(), Some("new-sub-of-Alice"));
+    let state = alice.client.workspace().unwrap();
+    assert_eq!(
+      state.provider_marks[&bob_id].maybe_by_hand, None,
+      "the new provider agreed"
+    );
+    assert!(!matches!(
+      alice.client.role_signing_record().unwrap().maybe_note,
+      Some(RoleSigningProblem::Contradictory { .. })
+    ));
+    assert_eq!(bob.client.workspace().unwrap().provider_moves, 1);
+  }
+
+  #[tokio::test]
+  async fn a_server_can_not_forget_anybodys_account_without_the_owners() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let bob_id = bob.client.user_id();
+    note_admin(&world, &mut alice, &mut bob).await;
+    let state = bob.client.workspace().unwrap();
+
+    // An unsigned policy that counts a move, and an unsigned roster that forgets the accounts.
+    let mut policy = state.policy.clone();
+    let mut signing = policy.maybe_role_signing.take().unwrap();
+    signing.provider_moves = 7;
+    policy.maybe_role_signing = Some(signing);
+    let forged_policy = ChainedPolicyDocument {
+      version: state.policy_version + 1,
+      policy,
+      roster_version: state.roster.version,
+      maybe_prev_hash: state.heads.maybe_policy_hash.clone(),
+      maybe_signed_at_ms: None,
+    };
+    world.server.inject_workspace_entry(
+      WorkspaceLogKind::Policy,
+      serde_json::to_vec(&forged_policy).unwrap(),
+      vec![1; 64],
+    );
+    let mut forged_roster = state.roster.clone();
+    forged_roster.version += 1;
+    forged_roster.maybe_prev_hash = state.heads.maybe_roster_hash.clone();
+    forged_roster.provider_moves = 7;
+    for mark in forged_roster.provider_marks.values_mut() {
+      mark.maybe_subject = None;
+    }
+    world.server.inject_workspace_entry(
+      WorkspaceLogKind::Roster,
+      serde_json::to_vec(&forged_roster).unwrap(),
+      vec![1; 64],
+    );
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice.client.note_role_evidence_update();
+    // The chain stops at the forged entries; what the round says about that doesn't matter here.
+    let _ = alice.client.run_role_signing().await;
+
+    for peer in [&alice, &bob] {
+      let state = peer.client.workspace().unwrap();
+      assert_eq!(state.provider_moves, 0, "{}", peer.name);
+      assert_eq!(
+        subject_of(peer, bob_id).as_deref(),
+        Some("sub-of-Bob"),
+        "{}",
+        peer.name
+      );
+    }
+  }
+
+  #[tokio::test]
+  async fn a_replayed_move_forgets_nothing_again() {
+    let world = World::new();
+    let (mut alice, mut bob) = world.owner_and_peer("Bob").await;
+    let bob_id = bob.client.user_id();
+    note_admin(&world, &mut alice, &mut bob).await;
+    let moved = move_provider(&world, &mut alice, &mut bob).await;
+    world.give_moved_token(&moved, &bob, &["admin"], T0 + 11);
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    assert_eq!(subject_of(&alice, bob_id).as_deref(), Some("new-sub-of-Bob"));
+
+    // The server appends the owner's signed move once more.
+    let log = alice
+      .api
+      .list_workspace_log(&WorkspaceLogKind::Policy, &ListWorkspaceLogQuery::default())
+      .await
+      .unwrap();
+    let signed_move = log
+      .entries
+      .iter()
+      .find(|entry| {
+        let document: ChainedPolicyDocument = serde_json::from_slice(entry.payload.as_slice()).unwrap();
+        document
+          .policy
+          .maybe_role_signing
+          .is_some_and(|signing| signing.accepts_new_provider)
+      })
+      .unwrap()
+      .clone();
+    world.server.inject_workspace_entry(
+      WorkspaceLogKind::Policy,
+      signed_move.payload.as_slice().to_vec(),
+      signed_move.signature.as_slice().to_vec(),
+    );
+    settle(&mut [&mut alice, &mut bob]).await;
+    alice.client.note_role_evidence_update();
+    let _ = alice.client.run_role_signing().await;
+
+    let state = alice.client.workspace().unwrap();
+    assert_eq!(state.provider_moves, 1);
+    let signing = state.policy.maybe_role_signing.unwrap();
+    assert_eq!(signing.maybe_provider.unwrap().issuer, MOVED_ISSUER);
+    assert_eq!(subject_of(&alice, bob_id).as_deref(), Some("new-sub-of-Bob"));
+  }
+
+  /// Bob holds the admin role at the first provider, and Alice's app noted his account there.
+  async fn note_admin(world: &World, alice: &mut Peer, bob: &mut Peer) {
+    world.give_token(bob, &["admin"], T0);
+    bob.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut *alice, &mut *bob]).await;
+    alice.client.note_role_evidence_update();
+    alice.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut *alice, &mut *bob]).await;
+    assert_eq!(
+      subject_of(alice, bob.client.user_id()).as_deref(),
+      Some("sub-of-Bob")
+    );
+  }
+
+  /// Alice signs the move to another provider and signs in there; her app pins it.
+  async fn move_provider(world: &World, alice: &mut Peer, bob: &mut Peer) -> Arc<Provider> {
+    let mut policy = alice.client.workspace().unwrap().policy;
+    let mut signing = policy.maybe_role_signing.take().unwrap();
+    signing.maybe_provider = None;
+    signing.accepts_new_provider = true;
+    policy.maybe_role_signing = Some(signing);
+    alice.client.publish_policy(policy).await.unwrap();
+    let moved = Arc::new(Provider::new());
+    alice.client.set_jwks_source(Box::new(Jwks(moved.clone())));
+    bob.client.set_jwks_source(Box::new(Jwks(moved.clone())));
+    world.give_moved_token(&moved, alice, &["owner"], T0 + 10);
+    alice.client.run_role_signing().await.unwrap();
+    settle(&mut [&mut *alice, &mut *bob]).await;
+    moved
+  }
+
+  fn subject_of(peer: &Peer, user: UserId) -> Option<String> {
+    let state = peer.client.workspace().unwrap();
+    state.provider_marks.get(&user)?.maybe_subject.clone()
+  }
+}
+
 mod by_hand {
   use super::*;
 
@@ -1216,6 +1405,17 @@ impl World {
     let mut other = self.peer(name).await;
     settle(&mut [&mut owner, &mut other]).await;
     (owner, other)
+  }
+
+  /// `peer`'s app has just got this ID token from `moved`, the provider the owners moved to.
+  fn give_moved_token(&self, moved: &Provider, peer: &Peer, roles: &[&str], issued_at: i64) {
+    let claim = peer.client.identity_attestation_claim();
+    let claims = with_roles(&claim, roles, issued_at)
+      .with("iss", json!(MOVED_ISSUER))
+      .with("sub", json!(format!("new-sub-of-{}", peer.name)));
+    self
+      .server
+      .set_provider_token(peer.client.user_id(), moved.token(&claims));
   }
 
   /// `peer`'s app has just got this ID token from the provider.
