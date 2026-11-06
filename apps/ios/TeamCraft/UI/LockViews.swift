@@ -141,7 +141,7 @@ struct OfflineBanner: View {
         case .unreachable:
           Button("connection_retry") { model.networkChanged() }
             .font(.footnote.weight(.semibold))
-        case .signInRequired:
+        case .signInRequired, .noRoleLeft:
           Button("connection_sign_in_action") { Task { await model.signOut() } }
             .font(.footnote.weight(.semibold))
         case .deviceOffline, .connecting, .slow:
@@ -170,6 +170,8 @@ struct OfflineBanner: View {
       }
     case .signInRequired:
       return Text("connection_sign_in")
+    case .noRoleLeft:
+      return Text("connection_no_role_left")
     }
   }
 }
