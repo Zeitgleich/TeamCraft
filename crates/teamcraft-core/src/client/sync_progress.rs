@@ -93,6 +93,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
 #[cfg(test)]
 mod tests {
+  #[cfg(not(target_arch = "wasm32"))]
   use std::cell::Cell;
 
   use futures_util::FutureExt;
@@ -108,6 +109,7 @@ mod tests {
     assert_eq!(signal.changed_since(1).now_or_never(), None);
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
   #[tokio::test(start_paused = true)]
   async fn the_host_hears_of_progress_during_the_work_at_most_once_per_interval() {
     let signal = SyncProgressSignal::default();
