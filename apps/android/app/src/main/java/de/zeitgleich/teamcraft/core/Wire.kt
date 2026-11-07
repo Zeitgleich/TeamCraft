@@ -573,12 +573,22 @@ data class ChatAnswer(
   val value: Boolean = false,
   val threads: List<ThreadSummary> = emptyList(),
   val users: List<String> = emptyList(),
+  /** [ChatQueries.typingNow]: everyone typing anywhere right now. */
+  val typing: List<TypingPlace> = emptyList(),
   val unseen: UnseenReactions? = null,
   @SerialName("older_history") val olderHistory: String? = null,
   val calls: List<CallHistoryItem> = emptyList(),
   val roster: SpaceRoster? = null,
   val overview: ScheduledOverview? = null,
   val load: ListLoadWire? = null,
+)
+
+/** Others typing in one place right now (#882): a conversation itself, or with a thread a reply in it. */
+@Serializable
+data class TypingPlace(
+  val conversation: String,
+  @SerialName("maybe_thread") val maybeThread: String? = null,
+  val users: List<String> = emptyList(),
 )
 
 /**

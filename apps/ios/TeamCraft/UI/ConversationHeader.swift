@@ -4,6 +4,8 @@ import SwiftUI
 /// presence in a direct message), the name and one quiet status line (presence or topic).
 struct ConversationHeader: View {
   let conversation: ConversationItem
+  /// Who types in this conversation itself right now (#882); in a direct message the status gives way.
+  var typingNames: [String] = []
 
   var body: some View {
     HStack(spacing: 8) {
@@ -12,7 +14,15 @@ struct ConversationHeader: View {
         Text(conversation.listName)
           .font(.headline)
           .lineLimit(1)
-        if let subtitle {
+        if conversation.kind == .direct, !typingNames.isEmpty {
+          HStack(spacing: 6) {
+            TypingDots()
+            Text("typing_direct").italic()
+          }
+          .font(.caption)
+          .foregroundStyle(Theme.accent)
+          .lineLimit(1)
+        } else if let subtitle {
           subtitle
             .font(.caption)
             .foregroundStyle(Theme.textMuted)

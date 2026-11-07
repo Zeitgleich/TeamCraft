@@ -40,6 +40,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.launch
@@ -64,6 +65,7 @@ import de.zeitgleich.teamcraft.core.NetworkTrust
 import de.zeitgleich.teamcraft.core.OwnProfile
 import de.zeitgleich.teamcraft.core.PermalinkTarget
 import de.zeitgleich.teamcraft.core.PickedFile
+import de.zeitgleich.teamcraft.core.TypingPlace
 import de.zeitgleich.teamcraft.push.UnifiedPushBackend
 import de.zeitgleich.teamcraft.push.UnifiedPushStatus
 import de.zeitgleich.teamcraft.server.ServerInfoAnswer
@@ -166,6 +168,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    * once instead of loading it again; the list refreshes it on every change while it is shown.
    */
   val chatList: StateFlow<ChatListState> = chatListState
+
+  private val typingPlacesState = MutableStateFlow<List<TypingPlace>>(emptyList())
+  private val typingNamesState = MutableStateFlow<Map<String, List<String>>>(emptyMap())
+
+  /**
+   * Everyone typing anywhere right now (#882), thread replies apart: a thread's line reads its own
+   * place. Read on every change and, while someone types, every couple of seconds, since an
+   * indicator runs out without an event.
+   */
+  val typingPlaces: StateFlow<List<TypingPlace>> = typingPlacesState
+
+  /**
+   * The names of those typing in each conversation itself (not in its threads): the chat list's
+   * rows and the header read this. Equal maps don't emit, and a row compares only its own names.
+   */
+  val typingNames: StateFlow<Map<String, List<String>>> = typingNamesState
   private val startCache = graph.startCache
   private val feedSeeds = FeedSeeds()
   private var maybeReadAhead: Job? = null
@@ -334,6 +352,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     viewModelScope.launch(Dispatchers.IO) { MediaDraftStore.sweep(getApplication(), System.currentTimeMillis()) }
     viewModelScope.launch { graph.core.changeCount.collect { isStartCacheStale = true } }
+    viewModelScope.launch {
+      graph.core.changeCount.collectLatest {
+        while (true) {
+          refreshTyping()
+          if (typingPlacesState.value.isEmpty()) break
+          delay(TYPING_POLL_MS)
+        }
+      }
+    }
     viewModelScope.launch(Dispatchers.IO) { graph.core.changeCount.collect { dropDraftsOfDroppedConversations() } }
     ProcessLifecycleOwner.get().lifecycle.addObserver(startCacheOnLeave)
     refresh()
@@ -645,6 +672,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   /** The user asked to read the chat list again: it shows as loading until the read ends. */
   fun retryChatList() = chatListState.update { it.copy(maybeReadFailure = null) }
+
+  private suspend fun refreshTyping() {
+    val places = readChat { query(ChatQueries.typingNow()).typing }.orEmpty().filter { it.users.isNotEmpty() }
+    typingPlacesState.value = places
+    val inConversations = places.filter { it.maybeThread == null }
+    if (inConversations.isEmpty()) {
+      typingNamesState.value = emptyMap()
+      return
+    }
+    // The kept snapshot has the names unless someone new is typing: then it is read afresh.
+    val ids = inConversations.flatMap { it.users }
+    var snapshot = chat.maybeKeptSnapshot()
+    if (snapshot == null || ids.any { snapshot?.user(it) == null }) snapshot = readChat { snapshot() } ?: snapshot
+    typingNamesState.value = typingNamesByConversation(places) { snapshot?.name(it).orEmpty() }
+  }
 
   suspend fun refreshChatList(myId: String) = chatListLock.withLock {
     val conversations = read { conversations() }

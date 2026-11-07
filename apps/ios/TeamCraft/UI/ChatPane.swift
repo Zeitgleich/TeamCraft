@@ -52,7 +52,6 @@ struct ChatPane: View {
   @State private var mentionNames: (usernames: Set<String>, me: String) = ([], "")
   @State private var maybeHighlighted: String?
   @State private var isPermalinkMissing = false
-  @State private var typingNames: [String] = []
   @State private var displayNames: [String: String] = [:]
   @State private var maybeForwarding: MessageTarget?
   @State private var maybeViewing: PictureTarget?
@@ -156,7 +155,6 @@ struct ChatPane: View {
     .sheet(item: $maybeShowingEdits) { target in
       EditHistorySheet(edits: extras[target.message.id]?.edits ?? [], current: target.message.body)
     }
-    .task(id: model.changeCount) { await followTyping() }
     // Receipts sent while this device was offline never arrive as events: they are read when the
     // conversation opens and whenever the connection comes back (#769). Channels have none, so the
     // core doesn't ask for theirs.
@@ -202,7 +200,7 @@ struct ChatPane: View {
           ImageActions(
             maybeReply: canReply ? startImageReply : nil,
             forward: { file in maybeForwardingImage = file }))
-      if let line = typingText(typingNames) {
+      if let line = typingText(typingNames(in: model.typingNow, conversation: conversation.id, thread: threadId)) {
         Text(line)
           .font(.caption.italic())
           .foregroundStyle(Theme.textMuted)
@@ -781,7 +779,9 @@ struct ChatPane: View {
   @ToolbarContentBuilder
   private var toolbarItems: some ToolbarContent {
     ToolbarItem(placement: .principal) {
-      ConversationHeader(conversation: conversation)
+      ConversationHeader(
+        conversation: conversation,
+        typingNames: typingNames(in: model.typingNow, conversation: conversation.id, thread: nil))
     }
     ToolbarItemGroup(placement: .topBarTrailing) {
       if conversation.kind != .integration {
@@ -847,23 +847,12 @@ struct ChatPane: View {
     }
   }
 
-  /// Re-reads who types on every change (a typing frame is one) and every couple of seconds while
-  /// someone types, since indicators run out without an event.
-  private func followTyping() async {
-    typingNames = await model.typingNames(conversationId: conversation.id)
-    while !typingNames.isEmpty {
-      try? await Task.sleep(for: .seconds(2))
-      if Task.isCancelled { return }
-      typingNames = await model.typingNames(conversationId: conversation.id)
-    }
-  }
-
   /// Tells the others that the user types, at most every few seconds and only if they share it.
   private func announceTyping(_ text: String) {
     guard isSharingTyping, maybeEditing == nil, shouldNotifyTyping(text, now: .now, lastNotified: maybeLastTypingNotified)
     else { return }
     maybeLastTypingNotified = .now
-    Task { await model.perform(.typing(conversationId: conversation.id)) }
+    Task { await model.perform(.typing(conversationId: conversation.id, maybeThreadId: threadId)) }
   }
 
   /// Goes where "Drafts & sent" asked (#1220): into the thread, whose own pane then takes the rest,
