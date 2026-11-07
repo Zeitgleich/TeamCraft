@@ -13296,6 +13296,54 @@
           }
         }
       }
+    },
+    "composer_draft_file_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not uploaded"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht hochgeladen"
+          }
+        }
+      }
+    },
+    "composer_draft_file_expired": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Expired"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Abgelaufen"
+          }
+        }
+      }
+    },
+    "composer_draft_files_expired": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A file in this draft was kept too long and is gone. Remove it, or attach it again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eine Datei in diesem Entwurf wurde zu lange aufbewahrt und ist weg. Entferne sie oder hänge sie neu an."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

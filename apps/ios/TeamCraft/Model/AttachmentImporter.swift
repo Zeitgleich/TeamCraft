@@ -8,6 +8,8 @@ enum AttachmentError: Error, Equatable {
   case unreadable
   /// The core refused the message with its files.
   case sendFailed
+  /// A file of the draft was held by the server too long and is gone (#1220): nothing is sent.
+  case draftFilesExpired
 }
 
 /// Copies files the user picked (photo library, Files app) into the app's uploads folder, so the

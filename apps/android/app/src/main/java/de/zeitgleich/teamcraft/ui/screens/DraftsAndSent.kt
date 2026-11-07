@@ -107,7 +107,8 @@ fun DraftsAndSentScreen(
       title = { Text(stringResource(R.string.drafts_delete_question)) },
       confirmButton = {
         TextButton(onClick = {
-          viewModel.act(ChatActions.setDraft(draft.conversation, draft.maybeThread, ""))
+          // The text and the files, on every device of the user (#1220).
+          viewModel.act(ChatActions.discardDraft(draft.conversation, draft.maybeThread))
           maybeDeleting = null
         }) { Text(stringResource(R.string.drafts_delete)) }
       },
@@ -130,7 +131,8 @@ private fun DraftRow(draft: DraftItem, onOpen: () -> Unit, onDelete: () -> Unit)
           overflow = TextOverflow.Ellipsis,
         )
       }
-      Text(draft.body, maxLines = 3, overflow = TextOverflow.Ellipsis)
+      if (draft.body.isNotEmpty()) Text(draft.body, maxLines = 3, overflow = TextOverflow.Ellipsis)
+      if (draft.fileCount > 0) FileCount(draft.fileCount)
     }
     IconButton(onClick = onDelete) {
       Icon(Icons.Filled.Delete, contentDescription = stringResource(R.string.drafts_delete))
@@ -150,14 +152,18 @@ private fun SentRow(item: SentItem, onOpen: () -> Unit) {
       )
     }
     if (item.excerpt.isNotEmpty()) Text(item.excerpt, maxLines = 3, overflow = TextOverflow.Ellipsis)
-    if (item.fileCount > 0) {
-      Text(
-        pluralStringResource(R.plurals.sent_files, item.fileCount, item.fileCount),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
-    }
+    if (item.fileCount > 0) FileCount(item.fileCount)
   }
+}
+
+/** How many files a draft holds or a message carried. */
+@Composable
+private fun FileCount(count: Int) {
+  Text(
+    pluralStringResource(R.plurals.sent_files, count, count),
+    style = MaterialTheme.typography.bodySmall,
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+  )
 }
 
 @Composable

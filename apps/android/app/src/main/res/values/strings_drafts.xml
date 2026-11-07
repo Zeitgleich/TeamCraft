@@ -17,4 +17,7 @@
     <item quantity="one">%1$d file</item>
     <item quantity="other">%1$d files</item>
   </plurals>
+  <string name="composer_draft_file_failed">Not uploaded</string>
+  <string name="composer_draft_file_expired">Expired</string>
+  <string name="composer_draft_files_expired">A file in this draft was kept too long and is gone. Remove it, or attach it again.</string>
 </resources>

@@ -93,6 +93,10 @@ class ChatClient(
 
   suspend fun act(action: String) = core().act(action)
 
+  /** The files of a draft (#1220), in the order they were attached. */
+  suspend fun draftFiles(conversation: String, maybeThread: String?): List<DraftFileItem> =
+    decodeDraftFiles(core().query(ChatQueries.draftFiles(conversation, maybeThread)))
+
   suspend fun extras(conversation: String, messages: List<String>): Map<String, MessageExtras> =
     if (messages.isEmpty()) {
       emptyMap()

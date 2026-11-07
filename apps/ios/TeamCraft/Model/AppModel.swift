@@ -852,6 +852,13 @@ final class AppModel {
     await answer(.drafts)?.drafts ?? []
   }
 
+  /// The files of a draft (#1220), in the order they were attached; nil while the core can't say.
+  func draftFiles(conversationId: String, threadId: String?) async -> [DraftFileItem]? {
+    let query = ChatQuery.draftFiles(conversationId: conversationId, maybeThreadId: threadId)
+    guard let json = try? await core().query(queryJson: query.json) else { return nil }
+    return Wire.decode(DraftFilesAnswer.self, from: json)?.files
+  }
+
   func sentMessages() async -> [SentItem] {
     await answer(.sentMessages)?.sent ?? []
   }
