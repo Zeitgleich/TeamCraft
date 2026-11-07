@@ -58,6 +58,18 @@ struct SavedItem: Decodable, Equatable, Identifiable, Sendable {
 
   var listName: String { conversationListName(conversationName, isNotesToSelf: isNotesToSelf) }
   var id: String { message.id }
+
+  private enum CodingKeys: String, CodingKey {
+    case message, conversationName, isNotesToSelf
+  }
+
+  // A synthesized decoder needs every key, default value or not: an older core omits this one.
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    message = try container.decode(SavedMessage.self, forKey: .message)
+    conversationName = try container.decode(String.self, forKey: .conversationName)
+    isNotesToSelf = try container.decodeIfPresent(Bool.self, forKey: .isNotesToSelf) ?? false
+  }
 }
 
 /// A space the user can open the views of.
