@@ -238,6 +238,7 @@ pub fn settings() -> ClientSettings {
   ClientSettings {
     key_package_target: 3,
     key_package_low_water: 2,
+    #[cfg(not(target_arch = "wasm32"))]
     maybe_upload_staging_dir: Some(staging_dir()),
     ..ClientSettings::default()
   }
@@ -246,6 +247,7 @@ pub fn settings() -> ClientSettings {
 /// A staging directory of its own for each client. Every fake server hands out the same attachment
 /// IDs, so tests running at the same time (threads or nextest's processes) would otherwise share
 /// partial downloads in the shared fallback directory and overwrite each other's.
+#[cfg(not(target_arch = "wasm32"))]
 fn staging_dir() -> std::path::PathBuf {
   static NEXT: AtomicU64 = AtomicU64::new(0);
   let number = NEXT.fetch_add(1, Ordering::Relaxed);
