@@ -233,6 +233,11 @@ pub enum JoinRequestRefusal {
   /// admin or a workspace admin signs the role first.
   #[error("this user's owner role in the channel isn't signed")]
   OwnerRoleNotSigned,
+  /// Signed entries prove the server shows members different role logs of the channel: the owner
+  /// may have been demoted without being told. Refused until a workspace admin's reviewed list
+  /// (e2ee.md §4.6.3, D3).
+  #[error("signed entries show the server gives members different role logs of this channel")]
+  RolesDisputed,
 }
 
 impl CoreError {
@@ -303,6 +308,7 @@ impl CoreError {
         FailureKind::Server(teamcraft_proto::ErrorCode::RecoveryPassphraseNotAllowed)
       },
       Self::RoleChangeNotConfirmed => FailureKind::RoleChangeNotConfirmed,
+      Self::JoinRequestNotApprovable(JoinRequestRefusal::RolesDisputed) => FailureKind::ChannelRolesDisputed,
       _ => FailureKind::Other,
     };
     ActionFailure::new(kind, self.to_string())

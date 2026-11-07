@@ -135,6 +135,11 @@ impl RoleKeyEvidence {
 /// Hashes of refused entries a device remembers, to tell an entry built on one (it missed
 /// something) from one built on a head nobody was shown (a fork or junk).
 const MAX_SKIPPED_HASHES: usize = 64;
+/// Entries from messages a device waits for the log to show; beyond this the oldest is dropped
+/// unchecked. Honest signers send one per role change, and the next read confirms them.
+const MAX_UNCONFIRMED: usize = 64;
+/// Signers a device remembers for the purge's time limit, the most recent ones.
+const MAX_RECENT_SIGNERS: usize = 16;
 
 /// What this device verified of one channel's role log.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -194,6 +199,48 @@ pub struct ChannelRoleState {
   /// ([`ChannelRolesDocument::has_server_listed_roles`]), until a workspace admin's reviewed list.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub has_server_listed_roles: bool,
+  /// Whether `maybe_alarm` rests on signed entries, not on a member's word: an entry from a
+  /// member's message the log doesn't show, or two valid entries for one version. Only such an
+  /// alarm refuses approvals (e2ee.md §4.6.3, D3); a workspace admin's reviewed list ends it.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_alarm_proven: bool,
+  /// Heads of entries accepted from members' messages that a read of the log hasn't shown yet: the
+  /// next read compares them (e2ee.md §4.6.3, part 1). Oldest first.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub unconfirmed: Vec<ChannelRolesHead>,
+  /// Who signed entries this device accepted, and since when each counts, for the time limit on a
+  /// channel admin's purge (e2ee.md §4.6.3, part 3). Empty for a state from before this was
+  /// recorded: such a device takes the retention.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub recent_signers: Vec<RecentSigner>,
+  /// The state before the last accepted entry, to tell whether a second entry for the same version
+  /// is valid (a fork) or junk. Without anything of its own nested.
+  #[serde(rename = "before_head", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_before_head: Option<Box<ChannelRoleState>>,
+}
+
+/// Somebody who signed an entry this device accepted. `from_ms` is the entry's signing time, capped
+/// at this device's clock when it accepted it: never the server's time, which a withholding server
+/// would set.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentSigner {
+  pub user_id: UserId,
+  pub from_ms: i64,
+}
+
+/// What became of a signed entry a member sent in the channel (e2ee.md §4.6.3, part 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageEntry {
+  /// The next version, valid: accepted, also if the log doesn't show it.
+  Accepted,
+  /// The entry this device accepted already.
+  Known,
+  /// Valid, and for a version this device holds another entry of: a proven alarm.
+  Fork,
+  /// Further on than this device can verify: a newer head, to read the log for.
+  Ahead,
+  /// Old, a founding, or not valid here: nothing changes, and no alarm.
+  Ignored,
 }
 
 /// The accepted head of a channel's role log; sent along inside the channel's encrypted messages.
@@ -485,6 +532,98 @@ impl ChannelRoleState {
     }
   }
 
+  /// Takes a signed entry a member sent in the channel, `entry.created_at` being the message's
+  /// server time (e2ee.md §4.6.3, part 1). It is checked exactly as from the log; nothing that
+  /// fails changes anything, so a member can't push this device past a real entry with junk.
+  /// Foundings stay out: a server can get a second one signed on its own, so a fork of them would
+  /// be no proof.
+  pub fn take_message_entry<D: IdentityDirectory>(
+    &mut self,
+    entry: &ChannelRoleLogEntryResponse,
+    verifier: &RoleVerifier<'_, D>,
+  ) -> MessageEntry {
+    let Some(head) = head_of(entry) else {
+      return MessageEntry::Ignored;
+    };
+    if entry.version <= self.cursor {
+      if entry.version != self.version || !self.is_signed() {
+        return MessageEntry::Ignored;
+      }
+      if self.maybe_head_hash.as_ref() == Some(&head.hash) {
+        return MessageEntry::Known;
+      }
+      if !self.is_valid_beside_head(entry, verifier) {
+        return MessageEntry::Ignored;
+      }
+      self.prove_alarm(format!(
+        "two valid entries {} of this channel's roles: the server shows members different logs",
+        entry.version
+      ));
+      return MessageEntry::Fork;
+    }
+    if entry.version > self.cursor.saturating_add(1) {
+      self.note_head(&head);
+      return MessageEntry::Ahead;
+    }
+    if !self.is_signed() {
+      return MessageEntry::Ignored;
+    }
+    let mut next = self.clone();
+    next.cursor = entry.version;
+    if next.apply_entry(entry, verifier).is_err() {
+      return MessageEntry::Ignored;
+    }
+    next.unconfirmed.push(head);
+    if next.unconfirmed.len() > MAX_UNCONFIRMED {
+      next.unconfirmed.remove(0);
+    }
+    *self = next;
+    MessageEntry::Accepted
+  }
+
+  /// Where the next read of the log starts: after the cursor, or before the oldest entry taken from
+  /// a message, so the read shows what the log has at its version.
+  pub fn log_read_from(&self) -> u64 {
+    self
+      .unconfirmed
+      .iter()
+      .map(|head| head.version.saturating_sub(1))
+      .fold(self.cursor, u64::min)
+  }
+
+  /// Compares the entries taken from messages with what a read of the log from
+  /// [`Self::log_read_from`] shows. Another entry at that version, or none in a log read to its
+  /// end, is a proven alarm: somebody allowed to sign signed it, and the server leaves it out.
+  pub fn compare_log(&mut self, entries: &[ChannelRoleLogEntryResponse], is_read_to_end: bool) {
+    for head in std::mem::take(&mut self.unconfirmed) {
+      let maybe_logged = entries
+        .iter()
+        .find(|entry| entry.version == head.version)
+        .and_then(head_of);
+      match maybe_logged {
+        Some(logged) if logged.hash == head.hash => {},
+        Some(_) => self.prove_alarm(format!(
+          "the log shows another entry {} of this channel's roles than a member sent in the channel",
+          head.version
+        )),
+        None if is_read_to_end => self.prove_alarm(format!(
+          "the log leaves out entry {} of this channel's roles, which a member sent in the channel",
+          head.version
+        )),
+        None => self.unconfirmed.push(head),
+      }
+    }
+  }
+
+  /// Whether somebody other than `signer` signed an entry this device accepted, counting from no
+  /// earlier than `since_ms` (e2ee.md §4.6.3, part 3).
+  pub fn has_other_signer_since(&self, signer: UserId, since_ms: i64) -> bool {
+    self
+      .recent_signers
+      .iter()
+      .any(|recent| recent.user_id != signer && recent.from_ms >= since_ms)
+  }
+
   /// On what authorities `signer` could sign the next entry now (`now_ms`: the time the roster's
   /// freshness is judged at), in the order members try them. Empty: an entry of theirs would be
   /// refused by every member.
@@ -710,6 +849,10 @@ impl ChannelRoleState {
       }
     }
     outcome?;
+    self.keep_before_head();
+    if let Some((signer, _)) = maybe_signer {
+      self.note_signer(signer, document.signed_at_ms.min(verifier.now_ms));
+    }
     let maybe_appointer = match (maybe_signer, maybe_workspace_signer) {
       (Some((_, SignerAuthority::Founder)), Some(workspace)) => Some(workspace),
       (accepted, _) => accepted,
@@ -749,6 +892,7 @@ impl ChannelRoleState {
       // Somebody who can look looked: what the members disagreed about is settled by this list.
       if was_reviewed {
         self.maybe_alarm = None;
+        self.is_alarm_proven = false;
       }
     } else if matches!(maybe_authority, Some(SignerAuthority::FormerWorkspace { .. })) {
       self.has_former_admin_entry = true;
@@ -1020,6 +1164,59 @@ impl ChannelRoleState {
     Ok(())
   }
 
+  /// Whether `entry`, for the version this device holds another entry of, would have been accepted
+  /// in its place. Not for a founding: the server can get a second one signed by itself.
+  fn is_valid_beside_head<D: IdentityDirectory>(
+    &self,
+    entry: &ChannelRoleLogEntryResponse,
+    verifier: &RoleVerifier<'_, D>,
+  ) -> bool {
+    let Some(before) = &self.maybe_before_head else {
+      return false;
+    };
+    if !before.is_signed() {
+      return false;
+    }
+    let mut other = (**before).clone();
+    other.cursor = entry.version;
+    other.apply_entry(entry, verifier).is_ok()
+  }
+
+  fn prove_alarm(&mut self, reason: String) {
+    self.maybe_alarm = Some(reason);
+    self.is_alarm_proven = true;
+  }
+
+  /// Keeps the state as it was before the entry being accepted, for [`Self::is_valid_beside_head`].
+  fn keep_before_head(&mut self) {
+    let mut before = self.clone();
+    before.maybe_before_head = None;
+    before.unconfirmed.clear();
+    before.recent_signers.clear();
+    before.skipped_hashes.clear();
+    self.maybe_before_head = Some(Box::new(before));
+  }
+
+  fn note_signer(&mut self, signer: UserId, from_ms: i64) {
+    match self
+      .recent_signers
+      .iter_mut()
+      .find(|recent| recent.user_id == signer)
+    {
+      Some(recent) => recent.from_ms = recent.from_ms.max(from_ms),
+      None => self.recent_signers.push(RecentSigner {
+        user_id: signer,
+        from_ms,
+      }),
+    }
+    if self.recent_signers.len() > MAX_RECENT_SIGNERS {
+      self
+        .recent_signers
+        .sort_by_key(|recent| std::cmp::Reverse(recent.from_ms));
+      self.recent_signers.truncate(MAX_RECENT_SIGNERS);
+    }
+  }
+
   fn remember_skipped(&mut self, hash: &[u8; HASH_BYTES]) {
     self.skipped_hashes.push(Base64Bytes::new(hash.to_vec()));
     if self.skipped_hashes.len() > MAX_SKIPPED_HASHES {
@@ -1053,6 +1250,21 @@ fn names_another_key_than_pinned<D: IdentityDirectory>(document: &ChannelRolesDo
     pinned
       .pinned_identity(convert::user(assignment.user_id))
       .is_some_and(|key| key.as_bytes().as_slice() != assignment.identity_key.as_slice())
+  })
+}
+
+/// The head an entry would make: its version and hash.
+fn head_of(entry: &ChannelRoleLogEntryResponse) -> Option<ChannelRolesHead> {
+  let hash = log_entry_hash(
+    WorkspaceLog::ChannelRoles,
+    entry.version,
+    entry.payload.as_slice(),
+    entry.signature.as_slice(),
+  )
+  .ok()?;
+  Some(ChannelRolesHead {
+    version: entry.version,
+    hash: Base64Bytes::new(hash.to_vec()),
   })
 }
 
@@ -1923,6 +2135,263 @@ mod tests {
       assert!(state.maybe_alarm.is_none());
       state.check_ahead();
       assert!(state.maybe_alarm.is_some(), "entries this device isn't shown");
+    }
+  }
+
+  /// Entries members send in the channel (e2ee.md §4.6.3, part 1): a demotion the log leaves out
+  /// still reaches the members, and the log leaving it out is proof.
+  mod entries_in_messages {
+    use super::*;
+
+    #[test]
+    fn a_withheld_demotion_applies_and_the_log_leaving_it_out_is_a_proven_alarm() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let world = World::new(&[&alice, &bob], &[]);
+      let mut state = founded(&world, &alice, &[(&bob, ChannelRole::Admin)]);
+      let demotion = alice.entry(&state, &[(&alice, ChannelRole::Admin)]);
+      assert_eq!(world.take(&mut state, &demotion), MessageEntry::Accepted);
+      assert_eq!(state.role_of(bob.user_id), ChannelRole::Member);
+      assert_eq!(state.maybe_alarm, None, "nothing is wrong yet");
+      assert_eq!(state.log_read_from(), 1, "the next read shows version 2 again");
+      // The server's log, read to its end, stops at the founding.
+      state.compare_log(&[], true);
+      assert!(state.is_alarm_proven);
+      assert!(state.maybe_alarm.is_some());
+      assert_eq!(
+        state.role_of(bob.user_id),
+        ChannelRole::Member,
+        "the demotion holds"
+      );
+    }
+
+    #[test]
+    fn a_log_showing_the_same_entry_confirms_it() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let world = World::new(&[&alice, &bob], &[]);
+      let mut state = founded(&world, &alice, &[(&bob, ChannelRole::Admin)]);
+      let demotion = alice.entry(&state, &[(&alice, ChannelRole::Admin)]);
+      assert_eq!(world.take(&mut state, &demotion), MessageEntry::Accepted);
+      // A log not read to its end yet says nothing.
+      state.compare_log(&[], false);
+      assert_eq!(state.unconfirmed.len(), 1);
+      state.compare_log(std::slice::from_ref(&demotion), true);
+      assert!(state.unconfirmed.is_empty());
+      assert_eq!(
+        (state.maybe_alarm.as_deref(), state.is_alarm_proven),
+        (None, false)
+      );
+      // The read applies nothing twice.
+      assert!(world.apply(&mut state, demotion).is_empty());
+      assert_eq!(state.version, 2);
+    }
+
+    #[test]
+    fn a_log_showing_another_entry_at_that_version_is_a_proven_alarm() {
+      let (alice, bob, carol) = (Person::new(1), Person::new(2), Person::new(3));
+      let world = World::new(&[&alice, &bob, &carol], &[]);
+      let mut state = founded(&world, &alice, &[(&bob, ChannelRole::Admin)]);
+      let demotion = alice.entry(&state, &[(&alice, ChannelRole::Admin)]);
+      let bobs = bob.entry(
+        &state,
+        &[
+          (&alice, ChannelRole::Admin),
+          (&bob, ChannelRole::Admin),
+          (&carol, ChannelRole::Admin),
+        ],
+      );
+      assert_eq!(world.take(&mut state, &demotion), MessageEntry::Accepted);
+      state.compare_log(&[bobs], true);
+      assert!(state.is_alarm_proven);
+      assert_eq!(
+        state.role_of(carol.user_id),
+        ChannelRole::Member,
+        "the first one seen stays"
+      );
+    }
+
+    /// The server shows this device Bob's entry and the members' messages carry Alice's demotion of
+    /// him, both valid for version 2.
+    #[test]
+    fn two_valid_entries_for_one_version_are_a_proven_alarm_and_the_first_stays() {
+      let (alice, bob, carol) = (Person::new(1), Person::new(2), Person::new(3));
+      let world = World::new(&[&alice, &bob, &carol], &[]);
+      let mut state = founded(&world, &alice, &[(&bob, ChannelRole::Admin)]);
+      let demotion = alice.entry(&state, &[(&alice, ChannelRole::Admin)]);
+      let bobs = bob.entry(
+        &state,
+        &[
+          (&alice, ChannelRole::Admin),
+          (&bob, ChannelRole::Admin),
+          (&carol, ChannelRole::Admin),
+        ],
+      );
+      assert!(world.apply(&mut state, bobs.clone()).is_empty());
+      assert_eq!(world.take(&mut state, &demotion), MessageEntry::Fork);
+      assert!(state.is_alarm_proven);
+      assert_eq!(state.head().unwrap().hash, entry_hash(&bobs));
+      assert_eq!(state.role_of(carol.user_id), ChannelRole::Admin);
+      assert_eq!(world.take(&mut state, &bobs), MessageEntry::Known);
+    }
+
+    /// Anything a member could make up changes nothing and raises nothing, so the real entry at that
+    /// version still applies from the log.
+    #[test]
+    fn forged_unsigned_and_unentitled_entries_change_nothing() {
+      let (alice, bob, mallory) = (Person::new(1), Person::new(2), Person::new(3));
+      let world = World::new(&[&alice, &bob, &mallory], &[]);
+      let mut state = founded(&world, &alice, &[(&bob, ChannelRole::Admin)]);
+      let before = state.clone();
+      let by_a_member = mallory.entry(&state, &[(&mallory, ChannelRole::Admin)]);
+      let mut tampered = alice.entry(&state, &[(&alice, ChannelRole::Admin)]);
+      let mut document: ChannelRolesDocument = serde_json::from_slice(tampered.payload.as_slice()).unwrap();
+      document.assignments[0].user_id = mallory.user_id;
+      tampered.payload = Base64Bytes::new(serde_json::to_vec(&document).unwrap());
+      let mut unsigned = alice.entry(&state, &[(&alice, ChannelRole::Admin)]);
+      unsigned.signature = Base64Bytes::new(vec![0; 64]);
+      let elsewhere = alice.entry_in(CHANNEL + 1, &state, &[(&alice, ChannelRole::Admin)]);
+      for entry in [&by_a_member, &tampered, &unsigned, &elsewhere] {
+        assert_eq!(world.take(&mut state, entry), MessageEntry::Ignored);
+        assert_eq!(state, before);
+      }
+      // A forged entry for the version this device holds isn't a fork either.
+      let promote = alice.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Moderator)],
+      );
+      assert!(world.apply(&mut state, promote).is_empty());
+      let accepted = state.clone();
+      let mut forged = mallory.entry(&before, &[(&mallory, ChannelRole::Admin)]);
+      forged.version = state.version;
+      assert_eq!(world.take(&mut state, &forged), MessageEntry::Ignored);
+      assert_eq!(state, accepted);
+    }
+
+    #[test]
+    fn an_older_entry_again_is_ignored() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let world = World::new(&[&alice, &bob], &[]);
+      let mut state = founded(&world, &alice, &[]);
+      let promote = alice.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, promote.clone()).is_empty());
+      let demote = alice.entry(&state, &[(&alice, ChannelRole::Admin)]);
+      assert!(world.apply(&mut state, demote).is_empty());
+      let before = state.clone();
+      assert_eq!(world.take(&mut state, &promote), MessageEntry::Ignored);
+      assert_eq!(state, before);
+      assert_eq!(state.role_of(bob.user_id), ChannelRole::Member);
+    }
+
+    /// A device offline for weeks reads a later entry first: it reads the log, without an alarm.
+    #[test]
+    fn a_device_behind_reads_the_log_and_catches_up_quietly() {
+      let (alice, bob, carol) = (Person::new(1), Person::new(2), Person::new(3));
+      let world = World::new(&[&alice, &bob, &carol], &[]);
+      let behind = founded(&world, &alice, &[]);
+      let mut ahead = behind.clone();
+      let promote = alice.entry(
+        &ahead,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut ahead, promote.clone()).is_empty());
+      let carol_too = alice.entry(
+        &ahead,
+        &[
+          (&alice, ChannelRole::Admin),
+          (&bob, ChannelRole::Admin),
+          (&carol, ChannelRole::Moderator),
+        ],
+      );
+      let mut state = behind;
+      assert_eq!(world.take(&mut state, &carol_too), MessageEntry::Ahead);
+      assert!(state.maybe_ahead.is_some());
+      assert_eq!(state.maybe_alarm, None);
+      let mut read = state.clone();
+      assert!(world.apply_all(&mut read, vec![promote, carol_too]).is_empty());
+      read.check_ahead();
+      assert_eq!((read.maybe_alarm.as_deref(), read.version), (None, 3));
+      assert_eq!(read.role_of(carol.user_id), ChannelRole::Moderator);
+    }
+
+    /// A server can get a second founding signed by itself: foundings never travel in messages.
+    #[test]
+    fn foundings_are_skipped_without_an_alarm() {
+      let (alice, dave) = (Person::new(1), Person::new(4));
+      let world = World::new(&[&alice, &dave], &[]);
+      let mut unsigned = ChannelRoleState::default();
+      let founding = alice.entry(&unsigned, &[(&alice, ChannelRole::Admin)]);
+      assert_eq!(world.take(&mut unsigned, &founding), MessageEntry::Ignored);
+      assert!(unsigned.is_unfounded());
+      let mut state = founded(&world, &alice, &[]);
+      let mut other = dave.document(&ChannelRoleState::default(), &[(&dave, ChannelRole::Admin)]);
+      other.has_server_listed_roles = true;
+      let second = dave.signed(other);
+      assert_eq!(world.take(&mut state, &second), MessageEntry::Ignored);
+      assert_eq!(
+        (state.maybe_alarm.as_deref(), state.is_alarm_proven),
+        (None, false)
+      );
+    }
+
+    /// A member's head is their word: it raises the line, never a proven alarm.
+    #[test]
+    fn a_claimed_head_is_no_proof() {
+      let alice = Person::new(1);
+      let world = World::new(&[&alice], &[]);
+      let mut state = founded(&world, &alice, &[]);
+      state.note_head(&ChannelRolesHead {
+        version: state.version,
+        hash: Base64Bytes::new(vec![1; 32]),
+      });
+      assert!(state.maybe_alarm.is_some());
+      assert!(!state.is_alarm_proven);
+    }
+
+    #[test]
+    fn only_a_workspace_admins_reviewed_list_ends_a_proven_alarm() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = World::new(&[&alice, &bob], &[&admin]);
+      let mut state = founded(&world, &alice, &[(&bob, ChannelRole::Admin)]);
+      let demotion = alice.entry(&state, &[(&alice, ChannelRole::Admin)]);
+      assert_eq!(world.take(&mut state, &demotion), MessageEntry::Accepted);
+      state.compare_log(&[], true);
+      assert!(state.is_alarm_proven);
+      let ordinary = alice.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Moderator)],
+      );
+      assert!(world.apply(&mut state, ordinary).is_empty());
+      assert!(state.is_alarm_proven, "an ordinary entry doesn't end it");
+      let reviewed = admin.reviewed(&state, &[(&alice, ChannelRole::Admin)]);
+      assert!(world.apply(&mut state, reviewed).is_empty());
+      assert_eq!(
+        (state.maybe_alarm.as_deref(), state.is_alarm_proven),
+        (None, false)
+      );
+    }
+
+    /// The start of the purge's limit: the signer's time, never later than this device's.
+    #[test]
+    fn signers_are_recorded_from_their_signing_time_capped_at_this_devices() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let mut world = World::new(&[&alice, &bob], &[]);
+      let mut state = founded(&world, &alice, &[(&bob, ChannelRole::Admin)]);
+      world.now_ms = NOW_MS - DAY_MS;
+      let mut document = bob.document(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      document.signed_at_ms = NOW_MS + 5 * DAY_MS;
+      assert!(world.apply(&mut state, bob.signed(document)).is_empty());
+      assert!(state.has_other_signer_since(alice.user_id, NOW_MS - DAY_MS));
+      assert!(!state.has_other_signer_since(alice.user_id, NOW_MS - DAY_MS + 1));
+      assert!(
+        state.has_other_signer_since(bob.user_id, NOW_MS),
+        "Alice founded it"
+      );
+      assert!(!state.has_other_signer_since(bob.user_id, NOW_MS + 1));
     }
   }
 
@@ -3328,15 +3797,31 @@ mod tests {
       state: &mut ChannelRoleState,
       entry: ChannelRoleLogEntryResponse,
     ) -> Vec<ChannelRoleError> {
-      let verifier = RoleVerifier {
+      self.apply_all(state, vec![entry])
+    }
+
+    fn apply_all(
+      &self,
+      state: &mut ChannelRoleState,
+      entries: Vec<ChannelRoleLogEntryResponse>,
+    ) -> Vec<ChannelRoleError> {
+      state.apply_entries(entries, &self.verifier())
+    }
+
+    /// `entry` as a member's message carries it.
+    fn take(&self, state: &mut ChannelRoleState, entry: &ChannelRoleLogEntryResponse) -> MessageEntry {
+      state.take_message_entry(entry, &self.verifier())
+    }
+
+    fn verifier(&self) -> RoleVerifier<'_, KeyDirectory> {
+      RoleVerifier {
         conversation: conversation(CHANNEL),
         workspace: &self.workspace,
         roster_max_age_ms: MAX_AGE_MS,
         now_ms: self.now_ms,
         tenure_clock_skew_ms: SKEW_MS,
         pinned: &self.pinned,
-      };
-      state.apply_entries(vec![entry], &verifier)
+      }
     }
   }
 

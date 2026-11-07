@@ -294,6 +294,8 @@ fn join_request_item(
       Standing::Approvable => JoinRequestStanding::Approvable,
       Standing::NotAnAdmin => JoinRequestStanding::NotAnAdmin,
       Standing::OwnerRoleNotSigned => JoinRequestStanding::OwnerRoleNotSigned,
+      // Decline only, as for an unsigned role: the apps word it so until they learn this case.
+      Standing::RolesDisputed => JoinRequestStanding::OwnerRoleNotSigned,
     },
     notification_tag: join_request_alerts::tag(request).as_str().to_owned(),
   }

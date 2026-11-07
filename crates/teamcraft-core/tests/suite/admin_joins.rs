@@ -541,6 +541,71 @@ async fn an_owner_only_the_server_lists_cannot_approve_until_a_signed_admin_sets
   assert_eq!(lines(&carol, channel), vec![(bob_id, By::Approved(dave_id))]);
 }
 
+/// A server holds back Dave's demotion from his device (e2ee.md §4.6.3): the entry reaches him in the
+/// channel all the same, and the log leaving it out is proof, so his app refuses to approve until a
+/// workspace admin looked. A founding travels in no message.
+#[tokio::test]
+async fn a_withheld_demotion_reaches_the_former_owner_and_refuses_approvals() {
+  let (server, mut alice, mut bob, mut carol, mut dave, channel) = setup(AdminSelfJoin::OwnerApproval).await;
+  let (bob_id, dave_id) = (bob.client.user_id(), dave.client.user_id());
+  assert_eq!(
+    role_entries_in(&dave, channel),
+    0,
+    "the founding stays in the log"
+  );
+  carol
+    .client
+    .set_channel_role(channel, dave_id, ChannelRole::Admin)
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  dave.client.sync_channel_roles(channel).await.unwrap();
+  let shown = dave.client.channel_role_state(channel).unwrap().version;
+  server.withhold_role_log(dave_id, channel, shown);
+
+  carol
+    .client
+    .set_channel_role(channel, dave_id, ChannelRole::Member)
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  assert_eq!(role_entries_in(&dave, channel), 2);
+  assert_eq!(
+    dave.client.verified_channel_role(channel, dave_id).unwrap(),
+    ChannelRole::Member,
+    "the demotion holds although the log leaves it out"
+  );
+  // The upkeep reads the log: it doesn't show what Carol sent.
+  dave.client.check_channel_roles_heads().await.unwrap();
+  let state = dave.client.channel_role_state(channel).unwrap();
+  assert!(state.is_alarm_proven, "{:?}", state.maybe_alarm);
+  // Carol's device is shown the whole log: nothing to tell.
+  carol.client.check_channel_roles_heads().await.unwrap();
+  assert!(
+    carol
+      .client
+      .channel_role_state(channel)
+      .unwrap()
+      .maybe_alarm
+      .is_none()
+  );
+
+  bob.client.request_admin_join(channel).await.unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  let refused = dave.client.approve_admin_join(channel, bob_id).await;
+  assert!(
+    matches!(
+      refused,
+      Err(CoreError::JoinRequestNotApprovable(
+        JoinRequestRefusal::RolesDisputed
+      ))
+    ),
+    "{refused:?}"
+  );
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  assert!(!bob.client.has_group(channel).unwrap());
+}
+
 /// Migration: a channel from before signed roles has no signed admin. The admin the server lists
 /// approves all the same, nobody asks them for anything: their app founds the log on the way, and the
 /// other members take the add in.
@@ -679,6 +744,17 @@ fn line_message(peer: &Peer, channel: ConversationId) -> StoredMessage {
 }
 
 /// How many "admin joined" messages (not lines) `peer` has in `channel`.
+/// The signed role entries members sent in the channel, as `peer` holds them.
+fn role_entries_in(peer: &Peer, channel: ConversationId) -> usize {
+  peer
+    .store
+    .messages(channel, MessageFilter::All)
+    .unwrap()
+    .into_iter()
+    .filter(|message| matches!(message.content, MessageContent::ChannelRolesEntry { .. }))
+    .count()
+}
+
 fn announcements(peer: &Peer, channel: ConversationId) -> usize {
   peer
     .store

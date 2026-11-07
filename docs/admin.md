@@ -235,7 +235,8 @@ reads "Request access again" and is gone once the admin is in. That is allowed, 
   under `owner_approval` doesn't hold against a modified client either; the design that closes these
   per channel is e2ee.md §4.6.2 (issue #878), not implemented. Nor against a former owner whose demotion
   the server withholds: unlike the roster, channel roles have no freshness window, for the reasons in
-  e2ee.md §4.6.3 (issue #876, design).
+  e2ee.md §4.6.3 (issue #876). The demotion reaches the members in the channel too, and once signed
+  entries prove the server leaves it out, their apps refuse approvals until a workspace admin looked.
 - **Members on older versions.** Clients before 1.0.9 still commit another admin's addition of an
   admin whatever the setting says. A member on 1.0.9 or later refuses that commit like any it
   can't verify, falls out of the group, asks to be added back and is added back into it, with the
