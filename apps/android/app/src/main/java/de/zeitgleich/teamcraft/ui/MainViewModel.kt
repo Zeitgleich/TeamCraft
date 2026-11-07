@@ -31,6 +31,9 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.StateFlow
@@ -267,6 +270,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** The organization fixed the server (managed configuration): no "Change server". */
   val isServerLocked: StateFlow<Boolean> = serverLocked
 
+  /** The start read the stored server and the managed lock; the start cache may show the list before. */
+  private val serverKnown = MutableStateFlow(false)
+
+  /**
+   * The server a link is judged against, in one value so a frame never sees a fresh "known" with a
+   * stale server; nothing until the start read it.
+   */
+  val linkServer: StateFlow<LinkServer?> = combine(activeServer, serverLocked, serverKnown) { server, isLocked, isKnown ->
+    linkServerOf(server?.address?.origin, isLocked, isKnown)
+  }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
   private val serverFromLink = MutableStateFlow(false)
 
   /** The server being confirmed came from a link, not from the user (docs/app-links.md). */
@@ -343,6 +357,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // The first read opens the stored server and session: files and the core's checks.
     val maybeStored = withContext(Dispatchers.IO) { graph.auth.server }
     val start = decideServerStart(maybeStored?.address?.origin, maybePreset, lock)
+    if (maybeStored != null && start is ServerStart.UseStored) showServer(maybeStored)
+    serverKnown.value = true
     val isSignedIn = graph.auth.isSignedIn.value
     if (maybeShownAccount != null && (!isSignedIn || maybeShownAccount != accountKey())) {
       // Another account than the one shown last, or none: its list goes before anything else shows.
@@ -355,7 +371,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     when {
       maybeStored != null && start is ServerStart.UseStored -> {
-        showServer(maybeStored)
         state.value = if (!graph.auth.isSignedIn.value) AppState.SignedOut() else loadAccountState()
       }
       maybeStored != null && start is ServerStart.ReplaceStored -> {
