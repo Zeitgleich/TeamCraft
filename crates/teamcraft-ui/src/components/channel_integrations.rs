@@ -612,7 +612,7 @@ fn SourcePicture(conversation: ConversationId, source: SourceId, has_picture: bo
   };
   let apply = Callback::new(move |png: Vec<u8>| -> CropUpload {
     Box::pin(async move {
-      let Some(picture) = fit_source_picture(&png, CROPPED_SOURCE_PICTURE_PX) else {
+      let Some(picture) = fit_source_picture(&png, CROPPED_SOURCE_PICTURE_PX).await else {
         maybe_error.set_if_alive(Some("channel-sources-picture-too-large"));
         picked.set_if_alive(None);
         return Err(ActionFailure::new(

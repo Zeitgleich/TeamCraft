@@ -2154,6 +2154,11 @@ it, and moved out:
   only; a test checks it reads the same sizes as before), and in the browser the engine makes
   thumbnails through `make_thumbnail`, which the web app answers from the `images` chunk the first
   time a picture needs one (`web_core.rs`). Natively nothing changed.
+  Since #135 the web app has no image codecs at all: the engine's `PictureCodec` is the browser's
+  (teamcraft-core `thumbnail/browser.rs`: an off-page `<img>` decodes, a canvas scales and
+  encodes, with the native contract's sizes, steps and pixel limit), `image_dimensions` reads headers with
+  `image_header.rs`, and the crop dialog crops in a canvas. The `images` chunk is gone; `image` is
+  a native-only dependency of teamcraft-core.
 - **`lazy_area`'s own views** were generic over each caller's closure, so every split point copied
   the placeholder and the error view into the signed-in app (about 0.25 MB before wasm-opt for the
   34 callers on `a6323ac5`, more with every new area). They are built once now; a caller only boxes
@@ -2248,7 +2253,7 @@ Where the app's code goes (`twiggy top` on an unstripped build, before wasm-opt,
 | teamcraft-core, -client-api, -proto, -crypto | 18 %  | the client engine and the wire types              |
 | data (`.rodata`)                             | 8.5 % | strings, the two Fluent files (210 kB)            |
 | openmls, hpke-rs, p384, k256, curve25519     | 5 %   | MLS with every ciphersuite of openmls_rust_crypto |
-| image, zune-jpeg, image-webp, png, fdeflate  | 3 %   | attachment thumbnails (`thumbnail.rs`)            |
+| image, zune-jpeg, image-webp, png, fdeflate  | 3 %   | attachment thumbnails (`thumbnail.rs`); gone since #135 |
 
 What was tried, app wasm after wasm-opt:
 

@@ -147,7 +147,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     report: teamcraft_client_api::bug_report::BugReport,
   ) -> Result<(), CoreError> {
-    let files = report_files(&report)?;
+    let files = report_files(&report).await?;
     let queued = QueuedBugReport {
       id: report.id,
       description: report.description.trim().to_owned(),
@@ -292,7 +292,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 /// screenshot is encoded again without its metadata (EXIF, GPS) and named by its type, so neither
 /// where it was taken nor its file name travel.
 #[cfg(feature = "ui")]
-fn report_files(report: &teamcraft_client_api::bug_report::BugReport) -> Result<Vec<ReportFile>, CoreError> {
+async fn report_files(
+  report: &teamcraft_client_api::bug_report::BugReport,
+) -> Result<Vec<ReportFile>, CoreError> {
   use teamcraft_client_api::bug_report::{REPORT_MEDIA_TYPE, check_fields, report_file_name};
 
   let maybe_screenshot = report.maybe_screenshot.as_ref().map(|screenshot| {
@@ -325,7 +327,8 @@ fn report_files(report: &teamcraft_client_api::bug_report::BugReport) -> Result<
     bytes: Base64Bytes::new(report.report_text.clone().into_bytes()),
   }];
   if let Some(screenshot) = &report.maybe_screenshot {
-    let (bytes, media_type) = crate::thumbnail::without_metadata(screenshot.bytes.as_slice())
+    let (bytes, media_type) = crate::thumbnail::make_without_metadata(screenshot.bytes.as_slice())
+      .await
       .ok_or(BugReportError::Invalid("the screenshot is no readable picture"))?;
     let extension = if media_type == "image/jpeg" { "jpg" } else { "png" };
     files.push(ReportFile {

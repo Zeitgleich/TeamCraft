@@ -1,24 +1,8 @@
-//! Thumbnails of image attachments. Made by the sender's client and sent encrypted inside the
-//! message, so receivers show a preview before (or without) downloading the file.
-//!
-//! A thumbnail is a JPEG, or a PNG when the picture has transparency. Receivers read the format
-//! from the bytes (older clients made PNGs only), so either works everywhere.
-//!
-//! In the browser the image codecs are a large part of the web app that a first visit doesn't need
-//! (docs/performance.md, "Web bundle size"): the engine makes thumbnails through
-//! [`make_thumbnail`], which there hands the work to the app's `Thumbnailer`, and the app loads
-//! the codecs the first time a picture needs one. [`image_dimensions`] reads headers only, so it
-//! stays small enough for every page.
+//! The `image` crate's side of [`super::PictureCodec`]: what desktop, mobile and the integration
+//! bridge make thumbnails and screenshots with. The browser has its own (teamcraft-ui
+//! `picture_codec.rs`) and never links this.
 
-#[cfg(target_arch = "wasm32")]
-use std::cell::RefCell;
-#[cfg(target_arch = "wasm32")]
-use std::future::Future;
 use std::io::Cursor;
-#[cfg(target_arch = "wasm32")]
-use std::pin::Pin;
-#[cfg(target_arch = "wasm32")]
-use std::rc::Rc;
 
 use image::codecs::bmp::BmpDecoder;
 use image::codecs::gif::GifDecoder;
@@ -29,44 +13,30 @@ use image::codecs::webp::WebPDecoder;
 use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 
-/// Longest side of a thumbnail in pixels: sharp at the ~300 dp a phone shows it at on a 2–3×
-/// screen, and at 360 CSS pixels on a HiDPI desktop.
-pub const THUMBNAIL_SIZE: u32 = 640;
-/// Side of a space picture in pixels (the rail shows it at up to 48 CSS pixels, ×4 for dense screens
-/// and the settings preview).
-pub const SPACE_IMAGE_SIZE: u32 = 256;
-/// Side of an avatar in pixels (shown at up to 64 CSS pixels in profiles, ×4 for dense screens and
-/// the profile card).
-pub const AVATAR_IMAGE_SIZE: u32 = 512;
-/// Longest side of the crop dialog's copy of a picture: plenty for a 512 px result even when zoomed
-/// in, and a 40 MP photo still fits in a few MB of memory.
-pub const EDITOR_IMAGE_MAX_SIDE: u32 = 2048;
-/// A thumbnail travels inside the message, which the server caps (1 MiB of ciphertext by default)
-/// for every file of the message together; larger ones are made smaller or lower in quality.
-pub const MAX_THUMBNAIL_BYTES: usize = 96 * 1024;
-/// Sizes and JPEG qualities tried in turn until a thumbnail fits [`MAX_THUMBNAIL_BYTES`].
-const JPEG_STEPS: [(u32, u8); 4] = [(THUMBNAIL_SIZE, 80), (THUMBNAIL_SIZE, 65), (480, 65), (320, 60)];
-/// Sizes tried in turn for pictures with transparency (PNG has no quality to lower).
-const PNG_STEPS: [u32; 3] = [THUMBNAIL_SIZE, 480, 320];
-/// Images larger than this many pixels aren't decoded (decompression bombs).
-const MAX_PIXELS: u64 = 40_000_000;
+use super::{
+  CodecFuture, JPEG_STEPS, MAX_PIXELS, MAX_THUMBNAIL_BYTES, PNG_STEPS, PictureCodec, SCREENSHOT_JPEG_QUALITY,
+  essence,
+};
+
 /// Memory the decoder may allocate.
 const MAX_DECODER_BYTES: u64 = 256 * 1024 * 1024;
 
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-  /// The browser's thumbnailer, installed by the web app (see [`set_thumbnailer`]).
-  static THUMBNAILER: RefCell<Option<Thumbnailer>> = const { RefCell::new(None) };
+/// The [`PictureCodec`] of the native platforms: [`thumbnail`] and [`without_metadata`], done
+/// right away.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NativeCodec;
+
+impl PictureCodec for NativeCodec {
+  fn thumbnail<'a>(&'a self, bytes: &'a [u8], media_type: &'a str) -> CodecFuture<'a, Option<Vec<u8>>> {
+    Box::pin(std::future::ready(thumbnail(bytes, media_type)))
+  }
+
+  fn without_metadata<'a>(&'a self, bytes: &'a [u8]) -> CodecFuture<'a, Option<(Vec<u8>, &'static str)>> {
+    Box::pin(std::future::ready(without_metadata(bytes)))
+  }
 }
 
-/// Makes [`thumbnail`]s in the browser: the web app's, which loads the image codecs when first
-/// needed (see [`make_thumbnail`]).
-#[cfg(target_arch = "wasm32")]
-pub type Thumbnailer =
-  Rc<dyn for<'a> Fn(&'a [u8], &'a str) -> Pin<Box<dyn Future<Output = Option<Vec<u8>>> + 'a>>>;
-
-/// A thumbnail of an image file, upright and at most [`THUMBNAIL_SIZE`] pixels on its longer side,
-/// or `None` for anything that isn't a decodable image (or can't be made small enough).
+/// A thumbnail of an image file, as [`PictureCodec::thumbnail`] describes it.
 pub fn thumbnail(bytes: &[u8], media_type: &str) -> Option<Vec<u8>> {
   thumbnail_within(bytes, media_type, MAX_PIXELS)
 }
@@ -97,54 +67,13 @@ pub fn thumbnail_within(bytes: &[u8], media_type: &str, max_pixels: u64) -> Opti
   }
 }
 
-/// [`thumbnail`] as the platform makes it: right here natively; in the browser by the
-/// `Thumbnailer` the web app installed (`set_thumbnailer`), so the codecs load only once a picture
-/// needs them. Without one a picture gets no thumbnail, like a file that isn't a picture.
-pub async fn make_thumbnail(bytes: &[u8], media_type: &str) -> Option<Vec<u8>> {
-  #[cfg(target_arch = "wasm32")]
-  {
-    // Not a picture: no reason to load the codecs.
-    if !essence(media_type).starts_with("image/") {
-      return None;
-    }
-    let thumbnailer = THUMBNAILER.with(|slot| slot.borrow().clone())?;
-    thumbnailer(bytes, media_type).await
-  }
-  #[cfg(not(target_arch = "wasm32"))]
-  {
-    thumbnail(bytes, media_type)
-  }
-}
-
-/// Installs the browser's [`Thumbnailer`] for [`make_thumbnail`]; the web app does when it starts.
-#[cfg(target_arch = "wasm32")]
-pub fn set_thumbnailer(thumbnailer: Thumbnailer) {
-  THUMBNAILER.with(|slot| *slot.borrow_mut() = Some(thumbnailer));
-}
-
-/// A media type without parameters, trimmed and lowercase: senders write whatever they like.
-fn essence(media_type: &str) -> String {
-  media_type
-    .split(';')
-    .next()
-    .unwrap_or_default()
-    .trim()
-    .to_ascii_lowercase()
-}
-
-/// SVG is drawn, not decoded: `resvg` on native platforms; the browser makes its own (`teamcraft-ui`).
+/// SVG is drawn, not decoded: `resvg` (the browser draws its own, `teamcraft-ui`).
 /// A PNG (an SVG may be transparent) at the largest of [`PNG_STEPS`] that fits.
-#[cfg(not(target_arch = "wasm32"))]
 fn svg_thumbnail(bytes: &[u8]) -> Option<Vec<u8>> {
   PNG_STEPS
     .iter()
     .filter_map(|&side| crate::svg_thumbnail::svg_thumbnail_png(bytes, side))
     .find(|png| png.len() <= MAX_THUMBNAIL_BYTES)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn svg_thumbnail(_bytes: &[u8]) -> Option<Vec<u8>> {
-  None
 }
 
 /// Decodes within the limits and turns the picture as its EXIF orientation says: phone cameras
@@ -193,53 +122,8 @@ fn encode_png(image: &DynamicImage) -> Option<Vec<u8>> {
   Some(out.into_inner())
 }
 
-/// The editor's copy of a picked picture (crop dialog, issue #323): upright (EXIF orientation
-/// applied), scaled to at most [`EDITOR_IMAGE_MAX_SIDE`] pixels per side, as a quickly encoded PNG.
-/// The dialog shows it and crops from it, so a huge photo is decoded once and never held in full.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EditorImage {
-  pub png: Vec<u8>,
-  pub width: u32,
-  pub height: u32,
-}
-
-/// The square a user chose in the crop dialog, in pixels of the [`EditorImage`] after turning it
-/// clockwise by `quarter_turns` × 90°.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SquareCrop {
-  pub quarter_turns: u8,
-  pub x: u32,
-  pub y: u32,
-  pub side: u32,
-}
-
-/// The editor's copy of a picked image file; `None` for anything that isn't a decodable image.
-pub fn editor_image(bytes: &[u8]) -> Option<EditorImage> {
-  let image = decode_upright(bytes, MAX_PIXELS)?;
-  let image = if image.width().max(image.height()) > EDITOR_IMAGE_MAX_SIDE {
-    image.resize(
-      EDITOR_IMAGE_MAX_SIDE,
-      EDITOR_IMAGE_MAX_SIDE,
-      image::imageops::FilterType::Triangle,
-    )
-  } else {
-    image
-  };
-  let mut out = Vec::new();
-  // Fast compression: the PNG only travels to a `blob:` URL and back into `cropped_square_png`.
-  let encoder = PngEncoder::new_with_quality(&mut out, CompressionType::Fast, PngFilter::Adaptive);
-  image.write_with_encoder(encoder).ok()?;
-  Some(EditorImage {
-    png: out,
-    width: image.width(),
-    height: image.height(),
-  })
-}
-
-/// A picture encoded again from its pixels, upright, without its metadata (EXIF with the camera,
-/// time and GPS position, text chunks): what a problem report sends of a screenshot
-/// (docs/bug-reports.md). A JPEG stays a JPEG (quality 90), anything else becomes a PNG. `None`
-/// for anything that isn't a decodable picture within the decoder's limits.
+/// A picture encoded again from its pixels without its metadata, as
+/// [`PictureCodec::without_metadata`] describes it.
 pub fn without_metadata(bytes: &[u8]) -> Option<(Vec<u8>, &'static str)> {
   let is_jpeg = image::guess_format(bytes).ok()? == ImageFormat::Jpeg;
   let image = decode_upright(bytes, MAX_PIXELS)?;
@@ -247,7 +131,7 @@ pub fn without_metadata(bytes: &[u8]) -> Option<(Vec<u8>, &'static str)> {
   if is_jpeg {
     image
       .to_rgb8()
-      .write_with_encoder(JpegEncoder::new_with_quality(&mut out, 90))
+      .write_with_encoder(JpegEncoder::new_with_quality(&mut out, SCREENSHOT_JPEG_QUALITY))
       .ok()?;
     Some((out, "image/jpeg"))
   } else {
@@ -257,37 +141,8 @@ pub fn without_metadata(bytes: &[u8]) -> Option<(Vec<u8>, &'static str)> {
   }
 }
 
-/// Cuts `crop` out of an editor image (see [`editor_image`]) and scales it to at most `size`
-/// pixels per side, as PNG; a smaller square is not scaled up. The rectangle is clamped to the
-/// picture. The server re-encodes the upload again (it trusts no client); this keeps it small.
-pub fn cropped_square_png(editor_png: &[u8], crop: SquareCrop, size: u32) -> Option<Vec<u8>> {
-  let image = decode_bounded(editor_png)?;
-  let image = match crop.quarter_turns % 4 {
-    1 => image.rotate90(),
-    2 => image.rotate180(),
-    3 => image.rotate270(),
-    _ => image,
-  };
-  let side = crop.side.min(image.width()).min(image.height()).max(1);
-  let x = crop.x.min(image.width() - side);
-  let y = crop.y.min(image.height() - side);
-  let square = image.crop_imm(x, y, side, side);
-  let small = if side > size {
-    square.resize_exact(size, size, image::imageops::FilterType::Lanczos3)
-  } else {
-    square
-  };
-  let mut out = Cursor::new(Vec::new());
-  small.write_to(&mut out, ImageFormat::Png).ok()?;
-  Some(out.into_inner())
-}
-
-/// Width and height of an image from its header, without decoding it; `None` for anything else.
-/// Turned upright like the thumbnail: a portrait photo stored sideways reports portrait dimensions.
-pub fn image_dimensions(bytes: &[u8], media_type: &str) -> Option<(u32, u32)> {
-  if !essence(media_type).starts_with("image/") {
-    return None;
-  }
+/// [`super::image_dimensions`] of a picture's bytes.
+pub(super) fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
   // The format's decoder called directly, as `ImageReader::into_decoder` makes it (the same
   // decoders, limits and orientation): that one is a `dyn ImageDecoder`, which would link every
   // decoder's whole decoding into each page of the browser, where only the thumbnails need it.
@@ -323,11 +178,6 @@ fn upright_size(mut decoder: impl ImageDecoder) -> Option<(u32, u32)> {
   (width > 0 && height > 0).then_some((width, height))
 }
 
-/// Decodes an image within [`MAX_PIXELS`] and [`MAX_DECODER_BYTES`].
-fn decode_bounded(bytes: &[u8]) -> Option<DynamicImage> {
-  bounded_reader(bytes, MAX_PIXELS)?.decode().ok()
-}
-
 /// A reader for an image whose header is within `max_pixels`, with the decoder's memory capped.
 fn bounded_reader(bytes: &[u8], max_pixels: u64) -> Option<ImageReader<Cursor<&[u8]>>> {
   let reader = || {
@@ -349,6 +199,7 @@ mod tests {
   use image::{ImageBuffer, Rgb, Rgba};
 
   use super::*;
+  use crate::thumbnail::{THUMBNAIL_SIZE, image_dimensions, make_thumbnail, make_without_metadata};
 
   #[test]
   fn metadata_is_dropped_from_a_screenshot() {
@@ -477,6 +328,27 @@ mod tests {
   }
 
   #[test]
+  fn the_native_codec_is_the_image_crate_right_here() {
+    use futures_util::FutureExt;
+    let picture = ImageBuffer::from_fn(1000, 500, |x, _| Rgb([(x % 256) as u8, 40, 80]));
+    let jpeg = encoded(&picture, ImageFormat::Jpeg);
+    let codec: &dyn PictureCodec = &NativeCodec;
+    assert_eq!(
+      codec.thumbnail(&jpeg, "image/jpeg").now_or_never(),
+      Some(thumbnail(&jpeg, "image/jpeg"))
+    );
+    assert_eq!(
+      codec.without_metadata(&jpeg).now_or_never(),
+      Some(without_metadata(&jpeg))
+    );
+    assert_eq!(
+      make_without_metadata(&jpeg).now_or_never(),
+      Some(without_metadata(&jpeg))
+    );
+    assert_eq!(make_without_metadata(b"%PDF-1.7").now_or_never(), Some(None));
+  }
+
+  #[test]
   fn natively_the_engine_makes_thumbnails_right_here() {
     use futures_util::FutureExt;
     let picture = ImageBuffer::from_fn(1000, 500, |x, _| Rgb([(x % 256) as u8, 40, 80]));
@@ -488,6 +360,86 @@ mod tests {
       make_thumbnail(b"%PDF-1.7", "application/pdf").now_or_never(),
       Some(None)
     );
+  }
+
+  /// The browser scales to [`fitted_size`]; it is the size `image` gives a thumbnail.
+  #[test]
+  fn the_fitted_size_is_the_one_image_makes() {
+    for (width, height) in [
+      (1000, 500),
+      (641, 3),
+      (3, 641),
+      (1999, 1001),
+      (640, 640),
+      (12, 7),
+      (20_000, 1),
+    ] {
+      let picture = DynamicImage::new_rgb8(width, height);
+      let made = fitted(&picture, THUMBNAIL_SIZE);
+      assert_eq!(
+        crate::thumbnail::fitted_size(width, height, THUMBNAIL_SIZE),
+        (made.width(), made.height()),
+        "{width} × {height}"
+      );
+    }
+  }
+
+  /// The header reader the browser uses (`image_header.rs`) reads what `image` reads, for every
+  /// format, orientation and junk; for a truncated file it may give up earlier, never read another
+  /// size.
+  #[test]
+  fn the_browsers_header_reader_reads_what_image_reads() {
+    let opaque = ImageBuffer::from_fn(30, 20, |x, y| Rgb([x as u8, y as u8, 7]));
+    let translucent = ImageBuffer::from_fn(30, 20, |x, _| Rgba([x as u8, 9, 9, 128]));
+    let big = ImageBuffer::from_fn(256, 3, |x, _| Rgba([x as u8, 9, 9, 255]));
+    let mut samples = vec![
+      encoded(&translucent, ImageFormat::Png),
+      encoded(&opaque, ImageFormat::Png),
+      encoded(&opaque, ImageFormat::Jpeg),
+      encoded(&translucent, ImageFormat::Gif),
+      encoded(&translucent, ImageFormat::WebP),
+      encoded(&opaque, ImageFormat::WebP),
+      encoded(&opaque, ImageFormat::Bmp),
+      encoded(&translucent, ImageFormat::Bmp),
+      encoded(&translucent, ImageFormat::Ico),
+      encoded(&big, ImageFormat::Ico),
+      with_png_size(&encoded(&halves(4, 4), ImageFormat::Png), 20_000, 20_000),
+    ];
+    for orientation in 1..=8 {
+      samples.push(with_exif_orientation(
+        &encoded(&opaque, ImageFormat::Jpeg),
+        orientation,
+      ));
+      samples.push(with_png_exif_orientation(
+        &encoded(&opaque, ImageFormat::Png),
+        orientation,
+      ));
+    }
+    samples.push(b"not really a png".to_vec());
+    samples.push(Vec::new());
+    for (index, bytes) in samples.iter().enumerate() {
+      let expected = generic_dimensions(bytes);
+      assert_eq!(
+        crate::image_header::upright_size(bytes),
+        expected,
+        "sample {index}"
+      );
+      if !bytes.is_empty() {
+        assert!(
+          expected.is_some() || index >= samples.len() - 2,
+          "sample {index} is a picture"
+        );
+      }
+      for end in 0..bytes.len() {
+        let prefix = &bytes[..end];
+        if let Some(read) = crate::image_header::upright_size(prefix) {
+          assert_eq!(Some(read), expected, "sample {index} cut at {end}");
+        }
+      }
+    }
+    // Sideways orientations turn the size.
+    let sideways = with_png_exif_orientation(&encoded(&opaque, ImageFormat::Png), 6);
+    assert_eq!(crate::image_header::upright_size(&sideways), Some((20, 30)));
   }
 
   /// The decoders called directly read the same sizes as `ImageReader::into_decoder` (what this
@@ -525,122 +477,6 @@ mod tests {
     assert_eq!(generic_dimensions(&png), Some((30, 20)));
   }
 
-  #[test]
-  fn the_editor_copy_is_bounded_and_unreadable_files_have_none() {
-    let big = encode(ImageBuffer::from_fn(4096, 1024, |x, _| {
-      Rgb([(x % 256) as u8, 1, 2])
-    }));
-    let editor = editor_image(&big).unwrap();
-    assert_eq!((editor.width, editor.height), (EDITOR_IMAGE_MAX_SIDE, 512));
-    let decoded = image::load_from_memory(&editor.png).unwrap();
-    assert_eq!((decoded.width(), decoded.height()), (editor.width, editor.height));
-
-    let small = encode(ImageBuffer::from_fn(40, 30, |_, _| Rgb([1u8, 2, 3])));
-    let editor = editor_image(&small).unwrap();
-    assert_eq!((editor.width, editor.height), (40, 30));
-
-    assert_eq!(editor_image(b"<svg></svg>"), None);
-    assert_eq!(editor_image(b""), None);
-  }
-
-  #[test]
-  fn the_chosen_square_is_cut_and_scaled() {
-    // Left half red, right half blue.
-    let picture = encode(halves(1000, 500));
-    let editor = editor_image(&picture).unwrap();
-    let left = crop(
-      &editor.png,
-      SquareCrop {
-        quarter_turns: 0,
-        x: 0,
-        y: 0,
-        side: 500,
-      },
-      256,
-    );
-    assert_eq!(left.dimensions(), (256, 256));
-    assert_eq!(left.get_pixel(250, 128).0, [255, 0, 0]);
-    let right = crop(
-      &editor.png,
-      SquareCrop {
-        quarter_turns: 0,
-        x: 500,
-        y: 0,
-        side: 500,
-      },
-      256,
-    );
-    assert_eq!(right.get_pixel(5, 128).0, [0, 0, 255]);
-
-    // A small square is not scaled up.
-    let small = crop(
-      &editor.png,
-      SquareCrop {
-        quarter_turns: 0,
-        x: 10,
-        y: 10,
-        side: 100,
-      },
-      256,
-    );
-    assert_eq!(small.dimensions(), (100, 100));
-  }
-
-  #[test]
-  fn the_crop_follows_the_rotation_and_stays_inside() {
-    // Turned clockwise, the red left half is on top: 500 wide, 1000 high.
-    let editor = editor_image(&encode(halves(1000, 500))).unwrap();
-    let top = crop(
-      &editor.png,
-      SquareCrop {
-        quarter_turns: 1,
-        x: 0,
-        y: 0,
-        side: 500,
-      },
-      500,
-    );
-    assert_eq!(top.get_pixel(250, 250).0, [255, 0, 0]);
-    let bottom = crop(
-      &editor.png,
-      SquareCrop {
-        quarter_turns: 1,
-        x: 0,
-        y: 500,
-        side: 500,
-      },
-      500,
-    );
-    assert_eq!(bottom.get_pixel(250, 250).0, [0, 0, 255]);
-
-    // Out-of-range rectangles are clamped, not refused.
-    let clamped = crop(
-      &editor.png,
-      SquareCrop {
-        quarter_turns: 0,
-        x: 9000,
-        y: 9000,
-        side: 9000,
-      },
-      600,
-    );
-    assert_eq!(clamped.dimensions(), (500, 500));
-    assert_eq!(clamped.get_pixel(499, 0).0, [0, 0, 255]);
-    assert_eq!(
-      cropped_square_png(
-        b"nope",
-        SquareCrop {
-          quarter_turns: 0,
-          x: 0,
-          y: 0,
-          side: 1
-        },
-        1
-      ),
-      None
-    );
-  }
-
   fn halves(width: u32, height: u32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     ImageBuffer::from_fn(width, height, |x, _| {
       if x < width / 2 {
@@ -649,18 +485,6 @@ mod tests {
         Rgb([0, 0, 255])
       }
     })
-  }
-
-  fn encode(picture: ImageBuffer<Rgb<u8>, Vec<u8>>) -> Vec<u8> {
-    let mut png = Cursor::new(Vec::new());
-    picture.write_to(&mut png, ImageFormat::Png).unwrap();
-    png.into_inner()
-  }
-
-  fn crop(editor_png: &[u8], square: SquareCrop, size: u32) -> image::RgbImage {
-    image::load_from_memory(&cropped_square_png(editor_png, square, size).unwrap())
-      .unwrap()
-      .to_rgb8()
   }
 
   fn encoded<P, C>(picture: &ImageBuffer<P, C>, format: ImageFormat) -> Vec<u8>
@@ -734,6 +558,33 @@ mod tests {
   fn dimensions(bytes: &[u8]) -> (u32, u32) {
     let decoded = image::load_from_memory(bytes).unwrap();
     (decoded.width(), decoded.height())
+  }
+
+  /// The PNG with an `eXIf` chunk holding only the orientation tag, right after its header.
+  fn with_png_exif_orientation(png: &[u8], orientation: u16) -> Vec<u8> {
+    let tiff = orientation_tiff(orientation);
+    let mut chunk = (tiff.len() as u32).to_be_bytes().to_vec();
+    chunk.extend_from_slice(b"eXIf");
+    chunk.extend_from_slice(&tiff);
+    let crc = crc32(&chunk[4..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    let mut out = png[..33].to_vec();
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&png[33..]);
+    out
+  }
+
+  /// A TIFF header and one directory with only the orientation tag (big-endian, unlike the JPEG's).
+  fn orientation_tiff(orientation: u16) -> Vec<u8> {
+    let mut tiff = b"MM\0*\0\0\0\x08".to_vec();
+    tiff.extend_from_slice(&1u16.to_be_bytes());
+    tiff.extend_from_slice(&0x0112u16.to_be_bytes());
+    tiff.extend_from_slice(&3u16.to_be_bytes());
+    tiff.extend_from_slice(&1u32.to_be_bytes());
+    tiff.extend_from_slice(&orientation.to_be_bytes());
+    tiff.extend_from_slice(&[0, 0]);
+    tiff.extend_from_slice(&0u32.to_be_bytes());
+    tiff
   }
 
   /// The JPEG with an EXIF segment holding only the orientation tag, right after its start marker.

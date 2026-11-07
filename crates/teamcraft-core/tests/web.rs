@@ -877,3 +877,90 @@ async fn database_version(name: &str) -> f64 {
 fn database_name() -> String {
   format!("teamcraft-test-{}", OsRng.next_u64())
 }
+
+/// The browser's picture codec (`thumbnail/browser.rs`, #135) keeps the native one's contract:
+/// size, format by transparency, the pixel limit read from the header, junk.
+mod pictures {
+  use teamcraft_core::image_header::{media_type, upright_size};
+  use teamcraft_core::thumbnail::browser::{Encoding, canvas, encode};
+  use teamcraft_core::thumbnail::{BrowserCodec, MAX_THUMBNAIL_BYTES, PictureCodec, THUMBNAIL_SIZE};
+  use wasm_bindgen_test::wasm_bindgen_test;
+
+  /// A `width` × `height` PNG drawn by the browser: red, its left half transparent when asked.
+  async fn png(width: u32, height: u32, is_half_transparent: bool) -> Vec<u8> {
+    let (canvas, context) = canvas(width, height).unwrap();
+    context.set_fill_style_str("#c00");
+    let left = if is_half_transparent {
+      f64::from(width) / 2.0
+    } else {
+      0.0
+    };
+    context.fill_rect(left, 0.0, f64::from(width) - left, f64::from(height));
+    encode(&canvas, Encoding::Png, usize::MAX).await.unwrap()
+  }
+
+  #[wasm_bindgen_test]
+  async fn an_opaque_picture_becomes_a_jpeg_of_the_thumbnail_size() {
+    let picture = png(1000, 500, false).await;
+    let made = BrowserCodec.thumbnail(&picture, "image/png").await.unwrap();
+    assert_eq!(media_type(&made), Some("image/jpeg"));
+    assert_eq!(upright_size(&made), Some((THUMBNAIL_SIZE, THUMBNAIL_SIZE / 2)));
+    assert!(made.len() <= MAX_THUMBNAIL_BYTES);
+    // The engine's entry point is the same codec in the browser.
+    let through_engine = teamcraft_core::thumbnail::make_thumbnail(&picture, "Image/PNG; x=y").await;
+    assert_eq!(
+      through_engine.as_deref().map(media_type),
+      Some(Some("image/jpeg"))
+    );
+  }
+
+  #[wasm_bindgen_test]
+  async fn a_transparent_picture_stays_a_png_and_small_ones_keep_their_size() {
+    let picture = png(200, 100, true).await;
+    let made = BrowserCodec.thumbnail(&picture, "image/png").await.unwrap();
+    assert_eq!(media_type(&made), Some("image/png"));
+    assert_eq!(upright_size(&made), Some((200, 100)));
+  }
+
+  #[wasm_bindgen_test]
+  async fn junk_and_pictures_over_the_pixel_limit_have_no_thumbnail() {
+    assert_eq!(
+      BrowserCodec.thumbnail(b"not really a png", "image/png").await,
+      None
+    );
+    assert_eq!(BrowserCodec.thumbnail(b"", "image/png").await, None);
+    let picture = png(10, 10, false).await;
+    assert_eq!(BrowserCodec.thumbnail(&picture, "application/pdf").await, None);
+    // The header says 20000 × 20000: refused before the browser decodes it.
+    let mut bomb = picture.clone();
+    bomb[16..20].copy_from_slice(&20_000u32.to_be_bytes());
+    bomb[20..24].copy_from_slice(&20_000u32.to_be_bytes());
+    let crc = crc32(&bomb[12..29]);
+    bomb[29..33].copy_from_slice(&crc.to_be_bytes());
+    assert_eq!(upright_size(&bomb), Some((20_000, 20_000)));
+    assert_eq!(BrowserCodec.thumbnail(&bomb, "image/png").await, None);
+  }
+
+  #[wasm_bindgen_test]
+  async fn a_screenshot_is_encoded_again_at_its_size() {
+    let picture = png(64, 32, false).await;
+    let (clean, made_type) = BrowserCodec.without_metadata(&picture).await.unwrap();
+    assert_eq!((made_type, upright_size(&clean)), ("image/png", Some((64, 32))));
+    assert_eq!(BrowserCodec.without_metadata(b"%PDF-1.7").await, None);
+  }
+
+  fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = u32::MAX;
+    for byte in bytes {
+      crc ^= u32::from(*byte);
+      for _ in 0..8 {
+        crc = if crc & 1 == 1 {
+          (crc >> 1) ^ 0xEDB8_8320
+        } else {
+          crc >> 1
+        };
+      }
+    }
+    !crc
+  }
+}
