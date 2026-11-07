@@ -96,7 +96,7 @@ object EditablePictures {
   fun cached(uri: String): EditablePicture? = cache.get(uri)
 
   suspend fun load(context: Context, uri: String): EditablePicture? = cached(uri) ?: withContext(Dispatchers.IO) {
-    PictureRenderer.decodeUpright(context.contentResolver, Uri.parse(uri), EDIT_PREVIEW_SIDE_PX)
+    PictureRenderer.decodeUpright(context, Uri.parse(uri), EDIT_PREVIEW_SIDE_PX)
       ?.let(EditablePicture::of)
       ?.also { cache.put(uri, it) }
   }

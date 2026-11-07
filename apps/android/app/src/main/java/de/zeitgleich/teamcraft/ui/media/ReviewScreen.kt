@@ -63,7 +63,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.flow.distinctUntilChanged
 import de.zeitgleich.teamcraft.R
@@ -190,7 +192,11 @@ private fun VideoPage(item: MediaDraftItem, isCurrent: Boolean, isTrimming: Bool
   Column(Modifier.fillMaxSize()) {
     Box(Modifier.weight(1f).fillMaxWidth()) {
       if (isCurrent) {
-        val player = remember(uri) { ExoPlayer.Builder(context).build().apply { repeatMode = Player.REPEAT_MODE_ALL } }
+        val player = remember(uri) {
+          // The camera's videos are sealed: played from the sealed file, decrypted as it reads.
+          val sources = DefaultMediaSourceFactory(SealedCaptures.Factory(context, DefaultDataSource.Factory(context)))
+          ExoPlayer.Builder(context).setMediaSourceFactory(sources).build().apply { repeatMode = Player.REPEAT_MODE_ALL }
+        }
         DisposableEffect(player) { onDispose { player.release() } }
         val start = item.video.startMs
         val maybeEnd = item.video.maybeEndMs

@@ -323,7 +323,7 @@ private suspend fun loadThumbnail(context: Context, item: RecentMediaItem, sideP
     if (item.isVideo) {
       videoFrame(context, item.uri, 0L, sidePx)?.asImageBitmap()
     } else {
-      kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { PictureRenderer.decodeUpright(context.contentResolver, item.uri, sidePx)?.asImageBitmap() }
+      kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { PictureRenderer.decodeUpright(context, item.uri, sidePx)?.asImageBitmap() }
     }
   } else {
     recentMediaThumbnail(context, item, sidePx)?.asImageBitmap()
