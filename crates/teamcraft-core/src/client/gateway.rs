@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::pin;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures_util::FutureExt;
@@ -15,6 +16,7 @@ use teamcraft_proto::{
 
 use super::Client;
 use super::groups::MlsProgress;
+use super::live_catch_up::LiveDuringCatchUp;
 use crate::api::{ApiError, GatewayConnection, ServerApi};
 use crate::error::CoreError;
 use crate::platform;
@@ -142,6 +144,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.are_welcomes_synced = false;
     // A replay cut short by the drop is not waited for; this connection brings its own.
     self.maybe_replay_left = None;
+    // An earlier connection's catch-up that was dropped half way leaves nothing behind.
+    self.maybe_live_catch_up = None;
     self.drop_read_ahead();
     self.trace_start();
     let outcome = match self.start_gateway_traced(timing).await {
@@ -337,17 +341,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           )));
         },
       };
-    let mut held = HeldFrames::default();
     let heartbeat = heartbeat_interval.min(timing.max_heartbeat);
-    keep_alive(
+    // What arrives meanwhile is held, and the catch-up applies what it may between its steps
+    // (issue #1021): a message to a conversation already caught up shows now, not at the end.
+    let shared = Arc::new(Mutex::new(HeldFrames::default()));
+    self.maybe_live_catch_up = Some(LiveDuringCatchUp::new(shared.clone()));
+    let synced = keep_alive_shared(
       &mut connection,
       heartbeat,
       heartbeat,
       timing.held_limits,
-      &mut held,
+      &shared,
       self.sync_fresh_session(session_id, maybe_resume_window_ms),
     )
-    .await?;
+    .await;
+    if let Some(live) = self.maybe_live_catch_up.take()
+      && live.applied > 0
+    {
+      tracing::info!(applied = live.applied, "live events applied during the catch-up");
+    }
+    synced?;
+    let held = std::mem::take(&mut *shared.lock().unwrap_or_else(PoisonError::into_inner));
     self.refresh_link_requests().await;
     self.trace_lap("link requests");
     self.refresh_admin_join_requests_after_connect().await;
@@ -371,9 +385,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<(), CoreError> {
     // Boxed: this future is large, and it would sit in everything that connects, up to the app's tasks.
     Box::pin(self.full_sync()).await?;
+    // Events the catch-up applied early were part of this session: a resume starts after them.
+    let last_seq = self.maybe_live_catch_up.as_ref().map_or(0, |live| live.max_seq);
     self.sync.maybe_gateway_session = Some(GatewaySession {
       session_id,
-      last_seq: 0,
+      last_seq,
       maybe_resume_window_ms,
       maybe_heard_at_ms: Some(self.now_ms()),
     });
@@ -588,7 +604,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  async fn handle_event(&mut self, event: GatewayEvent) -> Result<(), CoreError> {
+  pub(super) async fn handle_event(&mut self, event: GatewayEvent) -> Result<(), CoreError> {
     match event {
       GatewayEvent::MessageCreate { message } => {
         self.clear_typing(message.conversation_id, message.sender_user_id);
@@ -858,6 +874,11 @@ impl HeldFrames {
     self.frames.is_empty()
   }
 
+  /// The oldest held frame, left held.
+  pub(super) fn front(&self) -> Option<&Option<Result<GatewayServerMessage, ApiError>>> {
+    self.frames.front()
+  }
+
   /// Heartbeats sent and whether the server was heard since the last call.
   pub fn take_kept_alive(&mut self) -> KeptAlive {
     let kept = KeptAlive {
@@ -906,11 +927,28 @@ pub async fn keep_alive<G: GatewayConnection, T>(
   held: &mut HeldFrames,
   work: impl Future<Output = T>,
 ) -> T {
+  let shared = Mutex::new(std::mem::take(held));
+  let output = keep_alive_shared(connection, first_heartbeat_in, heartbeat, limits, &shared, work).await;
+  *held = shared.into_inner().unwrap_or_else(PoisonError::into_inner);
+  output
+}
+
+/// [`keep_alive`] with the held frames shared: `work` may take the oldest of them while it runs
+/// (the catch-up of a fresh session applies live events between its steps, issue #1021). The lock
+/// is never held across an await.
+pub(super) async fn keep_alive_shared<G: GatewayConnection, T>(
+  connection: &mut G,
+  first_heartbeat_in: Duration,
+  heartbeat: Duration,
+  limits: HeldLimits,
+  held: &Mutex<HeldFrames>,
+  work: impl Future<Output = T>,
+) -> T {
   let mut work = pin!(work);
   let mut timer = Box::pin(platform::sleep(first_heartbeat_in));
   loop {
     let step = {
-      let is_reading = held.is_reading(limits);
+      let is_reading = held.lock().is_ok_and(|held| held.is_reading(limits));
       let read = async {
         if is_reading {
           connection.receive().await
@@ -925,13 +963,24 @@ pub async fn keep_alive<G: GatewayConnection, T>(
       }
     };
     match step {
-      KeepAliveStep::Read(maybe_frame) => held.hold(maybe_frame),
+      KeepAliveStep::Read(maybe_frame) => {
+        if let Ok(mut held) = held.lock() {
+          held.hold(maybe_frame);
+        }
+      },
       KeepAliveStep::Heartbeat => {
         // A closed connection gets no more heartbeats; the caller replaces it afterwards.
-        if !held.is_closed {
-          match connection.send(&GatewayClientMessage::Heartbeat).await {
-            Ok(()) => held.heartbeats_sent = held.heartbeats_sent.saturating_add(1),
-            Err(error) => held.hold(Some(Err(error))),
+        let is_closed = match held.lock() {
+          Ok(held) => held.is_closed,
+          Err(_) => true,
+        };
+        if !is_closed {
+          let sent = connection.send(&GatewayClientMessage::Heartbeat).await;
+          if let Ok(mut held) = held.lock() {
+            match sent {
+              Ok(()) => held.heartbeats_sent = held.heartbeats_sent.saturating_add(1),
+              Err(error) => held.hold(Some(Err(error))),
+            }
           }
         }
         timer = Box::pin(platform::sleep(heartbeat));
