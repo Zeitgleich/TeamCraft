@@ -231,14 +231,18 @@ fun ConversationScreen(
     // pass, and restarting on each would keep cancelling the reads behind the messages. The
     // messages come first; the snapshot (names, the header) is shared with the other screens.
     viewModel.changeCount.collect {
+      // The messages, their reactions, files and receipts, and the names are read first and shown
+      // together (issue #1425): one of them alone draws bubbles that change height, and the feed jumps.
       val maybeTail = feed.reread()
-      messages = maybeTail?.messages ?: emptyList()
+      val tail = maybeTail?.messages ?: emptyList()
+      val maybeExtras = viewModel.readChat { extras(conversationId, tail.map { it.id }) }
+      val maybeSnapshot = viewModel.readChat { snapshot() }
+      messages = tail
       hasOlder = maybeTail?.hasOlder ?: false
-      // Reactions, files and receipts belong to the bubbles: right after them.
-      extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras
+      extras = maybeExtras ?: extras
+      snapshot = maybeSnapshot ?: snapshot
       // Read now: opened again, it starts at the end without an unread line.
       viewModel.keepFeedSeed(conversationId, FeedSeed(messages, hasOlder, extras, FirstUnread.None))
-      snapshot = viewModel.readChat { snapshot() } ?: snapshot
       serverHistory = viewModel.readChat { query(ChatQueries.olderHistory(conversationId)).olderHistory } ?: serverHistory
       isAskingServer = false
       maybeKeyCatchUp = viewModel.keyCatchUp()
@@ -261,6 +265,8 @@ fun ConversationScreen(
     if (isConnected) viewModel.readChat { act(ChatActions.refreshReadReceipts(conversationId)) }
   }
   val conversation = snapshot?.conversation(conversationId)
+  // The chat list's row (kept from the last run): the header's name until the snapshot is read.
+  val maybeListed = remember(conversationId) { viewModel.chatList.value.maybeConversations?.firstOrNull { it.id == conversationId } }
   // Deleted or left elsewhere while open: back to the list, not a screen that keeps loading.
   var wasKnown by remember(conversationId) { mutableStateOf(false) }
   LaunchedEffect(conversationId, conversation != null, snapshot != null) {
@@ -273,7 +279,7 @@ fun ConversationScreen(
   ChatScaffold(
     viewModel = viewModel,
     topBar = {
-      ConversationTopBar(snapshot, conversation, maybeNotified, onBack) {
+      ConversationTopBar(snapshot, conversation, maybeNotified, maybeListed, onBack) {
         ConversationMenu(viewModel, conversationId, conversation, rights, onOpenFiles)
       }
     },
@@ -298,7 +304,7 @@ fun ConversationScreen(
       viewModel = viewModel,
       conversationId = conversationId,
       snapshot = snapshot,
-      messages = withNotified(messages, maybeNotified),
+      messages = drawnMessages(messages, maybeNotified, snapshot),
       extras = extras,
       firstUnread = firstUnread,
       sentCount = sentCount,
@@ -365,11 +371,14 @@ fun ThreadScreen(
   var sentCount by remember { mutableIntStateOf(0) }
   val rights = rememberRights(viewModel, conversationId, changes)
   LaunchedEffect(threadId) {
-    // As in the conversation: one pass after another, the messages first.
+    // As in the conversation: one pass after another, the messages shown with their extras and names.
     viewModel.changeCount.collect {
-      messages = viewModel.readChat { query(ChatQueries.thread(conversationId, threadId)).messages } ?: messages
-      snapshot = viewModel.readChat { snapshot() } ?: snapshot
-      extras = viewModel.readChat { extras(conversationId, messages.map { it.id }) } ?: extras
+      val read = viewModel.readChat { query(ChatQueries.thread(conversationId, threadId)).messages } ?: messages
+      val maybeExtras = viewModel.readChat { extras(conversationId, read.map { it.id }) }
+      val maybeSnapshot = viewModel.readChat { snapshot() }
+      messages = read
+      extras = maybeExtras ?: extras
+      snapshot = maybeSnapshot ?: snapshot
       isFollowed = viewModel.readChat { query(ChatQueries.isThreadFollowed(conversationId, threadId)).value } ?: isFollowed
     }
   }
@@ -390,7 +399,7 @@ fun ThreadScreen(
       viewModel = viewModel,
       conversationId = conversationId,
       snapshot = snapshot,
-      messages = messages,
+      messages = drawnMessages(messages, maybeNotified = null, snapshot),
       extras = extras,
       firstUnread = FirstUnread.None,
       sentCount = sentCount,

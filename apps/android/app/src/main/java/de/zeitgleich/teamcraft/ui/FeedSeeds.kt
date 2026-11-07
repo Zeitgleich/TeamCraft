@@ -47,6 +47,11 @@ class FeedSeeds(private val capacity: Int = FEED_SEED_CAPACITY) {
   }
 
   @Synchronized
+  fun forget(conversationId: String) {
+    seeds.remove(conversationId)
+  }
+
+  @Synchronized
   fun clear() = seeds.clear()
 
   /**

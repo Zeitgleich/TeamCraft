@@ -38,6 +38,8 @@ import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.ui.avatarColorOfHue
 import de.zeitgleich.teamcraft.ui.avatarColor
 import de.zeitgleich.teamcraft.ui.UserAvatar
+import uniffi.teamcraft_ffi.ConversationItem
+import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.NotifiedConversation
 
 /**
@@ -51,6 +53,8 @@ fun ConversationTopBar(
   snapshot: ChatSnapshot?,
   maybeConversation: Conversation?,
   maybeNotified: NotifiedConversation?,
+  /** The chat list's row: name and kind until the snapshot is read (issue #1425). */
+  maybeListed: ConversationItem?,
   onBack: () -> Unit,
   actions: @Composable RowScope.() -> Unit,
 ) {
@@ -58,10 +62,12 @@ fun ConversationTopBar(
     conversation.memberIds.firstOrNull { it != snapshot?.me?.id }?.let { snapshot?.user(it) }
   }
   // Not stored yet (opened from a notification, issue #1065): the name the notification showed.
-  val name = maybeConversation?.name ?: maybeNotified?.maybeName.orEmpty()
-  val maybeKind = maybeConversation?.kind ?: maybeNotified?.let { if (it.isDirect) "Direct" else null }
+  val name = maybeConversation?.name ?: maybeListed?.name ?: maybeNotified?.maybeName.orEmpty()
+  val maybeKind = maybeConversation?.kind ?: maybeListed?.let { wireKind(it.kind) } ?: maybeNotified?.let { if (it.isDirect) "Direct" else null }
   val subtitle = when {
     maybePeer != null -> peerStatus(maybePeer)
+    // Not read yet: no loading line for what the store has, it shows in a moment.
+    snapshot == null -> maybeListed?.topic.orEmpty()
     maybeConversation == null -> stringResource(R.string.conversation_loading)
     maybeConversation.topic.isNotBlank() -> maybeConversation.topic
     maybeConversation.memberIds.isNotEmpty() ->
@@ -169,6 +175,15 @@ private fun presenceDotColor(presence: String): Color = when (presence) {
   "Away" -> Color(0xFFE0A030)
   "DoNotDisturb" -> Color(0xFFD0453A)
   else -> Color(0xFF8A8F98)
+}
+
+/** The snapshot's name of a [ConversationKind], as [Conversation.kind] holds it. */
+private fun wireKind(kind: ConversationKind): String? = when (kind) {
+  ConversationKind.PUBLIC -> "Public"
+  ConversationKind.PRIVATE -> "Private"
+  ConversationKind.DIRECT -> "Direct"
+  ConversationKind.GROUP -> "Group"
+  ConversationKind.INTEGRATION -> null
 }
 
 private val HEADER_AVATAR = 36.dp

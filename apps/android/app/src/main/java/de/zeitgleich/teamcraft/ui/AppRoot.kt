@@ -272,6 +272,9 @@ private fun ReadyNavigation(
   }
   LaunchedEffect(maybeConversationToOpen) {
     maybeConversationToOpen?.let {
+      // A notification opened it: it has news the kept feed lacks, so the feed opens with its first
+      // read, at the unread line, not at the end it showed last (issue #1425).
+      viewModel.forgetFeedSeed(it)
       navigation.navigate("conversation/$it")
       onConversationOpened()
     }

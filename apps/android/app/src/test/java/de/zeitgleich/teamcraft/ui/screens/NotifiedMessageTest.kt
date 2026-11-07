@@ -3,8 +3,11 @@ package de.zeitgleich.teamcraft.ui.screens
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.Message
+import de.zeitgleich.teamcraft.core.User
 import uniffi.teamcraft_ffi.NotifiedConversation
 import uniffi.teamcraft_ffi.NotifiedMessage
 
@@ -43,6 +46,15 @@ class NotifiedMessageTest {
     assertSame(feed, withNotified(feed, notified("2", sentAt = 200, text = null)))
     // A thread reply isn't in the conversation's feed.
     assertSame(feed, withNotified(feed, notified("2", sentAt = 200, thread = "9")))
+  }
+
+  /** Without the snapshot the feed draws nothing, not bubbles without names (#1425). */
+  @Test
+  fun theFeedWaitsForTheSnapshot() {
+    val feed = listOf(stored("1", sentAt = 100))
+    assertTrue(drawnMessages(feed, notified("2", sentAt = 200), maybeSnapshot = null).isEmpty())
+    val snapshot = ChatSnapshot(me = User(id = "user-1", username = "ann", displayName = "Ann"))
+    assertEquals(listOf("1", "2"), drawnMessages(feed, notified("2", sentAt = 200), snapshot).map { it.id })
   }
 
   private fun stored(id: String, sentAt: Long) = Message(id = id, conversation = CONVERSATION, author = "user-7", sentAt = sentAt, body = "text $id")

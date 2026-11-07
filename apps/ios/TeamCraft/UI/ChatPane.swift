@@ -101,7 +101,6 @@ struct ChatPane: View {
     }
     .task {
       mentionNames = await model.mentionNames()
-      displayNames = await model.displayNames()
       voicePolicy = await model.voiceMessagePolicy()
     }
     // The composer lives in the core's drafts, so text typed before the app was killed is back
@@ -1191,12 +1190,21 @@ struct ChatPane: View {
   }
 
   private func reload() async {
+    // The messages are shown together with their extras and the senders' names (issue #1425): one
+    // of them alone draws bubbles that change height once the rest arrives, and the feed jumps.
     if let threadId {
-      messages = await model.thread(conversationId: conversation.id, threadId: threadId)
+      let read = await model.thread(conversationId: conversation.id, threadId: threadId)
+      let readExtras = await model.extras(conversationId: conversation.id, messageIds: read.map(\.id))
+      await loadDisplayNamesOnce()
+      messages = read
+      extras = readExtras
     } else {
       // A failed read keeps what is shown; the next change reads again.
       guard let page = await pagedFeed().reread() else { return }
+      let readExtras = await model.extras(conversationId: conversation.id, messageIds: page.messages.map(\.id))
+      await loadDisplayNamesOnce()
       messages = page.messages
+      extras = readExtras
       hasOlder = page.hasOlder
       if let history = await model.olderHistory(conversationId: conversation.id) { serverHistory = history }
       pageBackIfNearOldest()
@@ -1207,7 +1215,12 @@ struct ChatPane: View {
       unseenReactions = await model.unseenReactions(conversationId: conversation.id)
       reportSeenReactions()
     }
-    await reloadExtras()
+  }
+
+  /// The senders' names, read once with the first messages so no bubble shows without its sender.
+  private func loadDisplayNamesOnce() async {
+    guard displayNames.isEmpty else { return }
+    displayNames = await model.displayNames()
   }
 
   /// The window of this conversation the feed shows, read again when the pane shows another one.
@@ -1237,9 +1250,10 @@ struct ChatPane: View {
     defer { isLoadingOlder = false }
     // A failed read keeps what is shown; the trigger row asks again when it scrolls back in.
     guard let page = await pagedFeed().older() else { return }
+    let readExtras = await model.extras(conversationId: conversation.id, messageIds: page.messages.map(\.id))
     messages = page.messages
+    extras = readExtras
     hasOlder = page.hasOlder
-    await reloadExtras()
   }
 
   private func reloadExtras() async {

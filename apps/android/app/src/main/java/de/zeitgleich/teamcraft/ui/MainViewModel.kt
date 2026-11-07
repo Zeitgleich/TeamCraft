@@ -666,6 +666,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Keeps what an open conversation shows, so opening it again shows it in the first frame. */
   fun keepFeedSeed(conversationId: String, seed: FeedSeed) = feedSeeds.keep(conversationId, seed)
 
+  /** Drops what [conversationId] showed last: it is older than what is about to open it. */
+  fun forgetFeedSeed(conversationId: String) = feedSeeds.forget(conversationId)
+
   /**
    * Reads the newest messages of the conversations at the top of the list ahead, so they open with
    * their messages in the first frame. Only those whose newest message changed, one at a time on the
