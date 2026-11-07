@@ -40,7 +40,9 @@ env:
 #
 # The build output is cached by Swatinem/rust-cache, one key per job and architecture. Only runs
 # on main save it; pull requests restore main's cache (a cache per pull request would push the
-# release caches out of the repository's 10 GB budget).
+# release caches out of the repository's 10 GB budget). A cache restored on a full key match is not
+# saved again, so a change that rebuilds every crate (a profile setting in Cargo.toml; the Rust
+# version is already in the key) bumps `prefix-key`, or main keeps restoring stale output.
 
 jobs:
   # Decides what this run does from the pull request's labels as they are now, not from the event's
@@ -121,6 +123,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          prefix-key: v1-rust
           key: check-${{ matrix.arch }}
           # arm64 compiles the same sources as x86_64; its caches (2.3 GB for check and test) don't
           # fit the repository's 10 GB budget next to the others, so it starts cold on main.
@@ -245,6 +248,7 @@ jobs:
           curl -sf http://127.0.0.1:8025/api/v1/info > /dev/null
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          prefix-key: v1-rust
           key: test-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' && matrix.arch == 'x86_64' }}
           cache-bin: "false"
@@ -281,6 +285,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          prefix-key: v1-rust
           key: browser-tests
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-bin: "false"
@@ -321,6 +326,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          prefix-key: v1-rust
           key: audio-processing
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-bin: "false"
@@ -352,6 +358,7 @@ jobs:
           targets: aarch64-pc-windows-msvc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          prefix-key: v1-rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # OpenH264 (tests) and OpenSSL for SQLCipher (built from source) need NASM; Perl comes with the image.
       - uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
@@ -446,6 +453,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          prefix-key: v1-rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # The desktop shell links GStreamer (VideoToolbox encoding); same pinned packages as the release.
       # The packages are big and their server is flaky. The cache only saves the download: the
@@ -554,6 +562,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          prefix-key: v1-rust
           key: vendored-and-fuzz
           workspaces: |
             crates/vendor/davey

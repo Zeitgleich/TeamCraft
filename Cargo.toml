@@ -128,8 +128,11 @@ debug = "line-tables-only"
 # Incremental caches are the largest part of target/; disk matters more than rebuild speed here.
 incremental = false
 
+# Dependencies are built optimized: debug builds of the crypto crates (openmls, RustCrypto) made the
+# crash tests in teamcraft-core take a minute each instead of two seconds. Built once, then cached.
 [profile.dev.package."*"]
 debug = false
+opt-level = 2
 
 # The web client's wasm (crates/teamcraft-ui and teamcraft-web-sw, built by trunk; index.html selects
 # it): the download is what users wait for, so size wins over speed. Measured in the PR that added it.
