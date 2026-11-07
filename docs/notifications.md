@@ -401,7 +401,9 @@ so a dozing phone may run them only in its next window, which on a phone left al
 away (seen: a placeholder still unfilled after 3 min of Doze, #1249); that is why the wait comes
 before the post. A placeholder that went meanwhile costs no fetch. At most
 32 chains wait at a time (managed configuration `max_push_retry_chains`), so a broken store can't pile
-up jobs. Independently, while a placeholder shows, every change of the store and every start of the
+up jobs. A wake-up that didn't open, showed nothing (it may be a withdrawal) and finds the 32 taken
+gets the generic "New message" once instead (one fixed notification, however many are refused), so
+it isn't unknown until the sync (#1256). Independently, while a placeholder shows, every change of the store and every start of the
 process look in the store (`notification_from_store`, no network): whatever the sync brought fills it
 in, however late. The sealed wake-up stays with the placeholder's line for this, so it survives a
 restart, and it goes with the line. A notification read or swiped away is not brought back, also not
