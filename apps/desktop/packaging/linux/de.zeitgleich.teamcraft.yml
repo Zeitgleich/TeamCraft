@@ -39,9 +39,19 @@ finish-args:
   - --talk-name=org.freedesktop.secrets
   # Mention and direct-message notifications.
   - --talk-name=org.freedesktop.Notifications
+  # "Send to TeamCraft" in the file managers' menus (file_manager_entries.rs, a setting that is on by
+  # default): the app writes its own entry files into these folders of the host, nothing else. The
+  # menus run `flatpak run --file-forwarding`, which hands the files over through the document portal.
+  # `:create` makes the folder where the file manager has none yet; Thunar keeps all its custom
+  # actions in one file, which the app only merges its own action into.
+  - --filesystem=xdg-data/kio/servicemenus:create
+  - --filesystem=xdg-data/nautilus/scripts:create
+  - --filesystem=xdg-data/nemo/actions:create
+  - --filesystem=xdg-config/caja/scripts:create
+  - --filesystem=xdg-config/Thunar:create
   # No tray icon: the GNOME runtime has no libayatana-appindicator, and the app runs without one
   # (closing quits, "start minimized" minimizes to the taskbar).
-  # Nothing else: no home directory, no devices besides the GPU. Screen sharing (ScreenCast),
+  # Nothing else besides these folders: no home directory, no devices besides the GPU. Screen sharing (ScreenCast),
   # the camera (Camera), push-to-talk on Wayland (GlobalShortcuts), opening the login page
   # (OpenURI) and file dialogs (FileChooser) all go through portals, which need no permission
   # here; the desktop asks the user.
@@ -106,7 +116,6 @@ modules:
       # Tauri's resource directory for an executable in /app/bin is /app/lib/<productName>.
       - install -Dm644 selfie_segmentation_landscape.onnx /app/lib/TeamCraft/models/selfie_segmentation_landscape.onnx
       - install -Dm644 apps/desktop/packaging/linux/de.zeitgleich.teamcraft.desktop /app/share/applications/de.zeitgleich.teamcraft.desktop
-      - install -Dm644 apps/desktop/packaging/linux/de.zeitgleich.teamcraft.share.desktop /app/share/applications/de.zeitgleich.teamcraft.share.desktop
       - install -Dm644 apps/desktop/packaging/linux/de.zeitgleich.teamcraft.metainfo.xml /app/share/metainfo/de.zeitgleich.teamcraft.metainfo.xml
       # Small sizes are the glyph (scripts/brand/icons.py); the scalable icon is the full mark.
       - install -Dm644 apps/desktop/icons/32x32.png /app/share/icons/hicolor/32x32/apps/de.zeitgleich.teamcraft.png

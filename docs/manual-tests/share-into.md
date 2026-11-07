@@ -39,8 +39,19 @@ Needs a signed build: the extension and the app talk through the App Group.
 
 - [ ] Linux: drag a file over 1 GB from the file manager onto a conversation: it attaches at once,
       memory of the webview stays flat, and it sends.
-- [ ] Linux: "Open with" > TeamCraft in the file manager with several files selected and the app
-      running: the window comes forward with the picker. No file type's default app changed.
+- [ ] Linux: TeamCraft is not listed under "Open with" in the file manager, and the task bar shows its
+      own icon.
+- [ ] Linux, Dolphin: right click on several files > "Send to TeamCraft": the window comes forward with
+      the picker. Same on a file with spaces and quotes in its name, and with the app closed.
+- [ ] Linux, Files (Scripts), Nemo, Caja, Thunar (after a restart): the same entry does the same.
+      Thunar's other custom actions are unchanged.
+- [ ] Linux: Settings > Preferences > "Show "Send to TeamCraft" in the file manager" off: every entry
+      is gone from the menus and the folders (`grep -rl X-TeamCraft-Generated ~/.local/share ~/.config`
+      finds nothing); a file of your own with the same name is still there. On again: back.
+- [ ] Linux: change the language (`LANG=de_DE.UTF-8`), start the app: the Nautilus/Caja script is called
+      "An TeamCraft senden" and the old one is gone.
+- [ ] Linux, AppImage: move the file, start it: the entries run the new path. Flatpak: the entry
+      works with a file in the home folder (the document portal).
 - [ ] `teamcraft-desktop --share -- a.pdf b.png` from a terminal, app closed: the app starts and offers
       the picker after the sign-in. With "start minimized" on, the window shows.
 - [ ] Windows (NSIS): Explorer > Send to > TeamCraft with several files. The entry goes with the

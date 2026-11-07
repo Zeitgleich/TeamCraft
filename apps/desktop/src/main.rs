@@ -23,6 +23,7 @@ mod desktop_entry;
 mod draft_flush;
 mod dropped_files;
 mod external_links;
+mod file_manager_entries;
 #[cfg(target_os = "linux")]
 mod freedesktop;
 mod message_sound;
@@ -214,6 +215,7 @@ fn main() -> anyhow::Result<()> {
       watch_native_network(app.handle());
       deep_links::collect(app.handle());
       shared_files::collect(app.handle());
+      file_manager_entries::repair(app.handle());
       Ok(())
     })
     .on_page_load(|webview, payload| {
@@ -359,6 +361,8 @@ fn main() -> anyhow::Result<()> {
       attention::os_attention,
       autostart::autostart_get,
       autostart::autostart_set,
+      file_manager_entries::file_manager_entries_get,
+      file_manager_entries::file_manager_entries_set,
       shell_prefs::shell_prefs_get,
       shell_prefs::shell_prefs_set,
       tray::tray_update,

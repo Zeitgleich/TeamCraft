@@ -130,7 +130,7 @@ mod platform {
 
 /// The XDG autostart entry (Linux outside Flatpak).
 #[cfg(target_os = "linux")]
-mod xdg {
+pub(crate) mod xdg {
   use std::fs;
   use std::io;
   use std::path::{Path, PathBuf};

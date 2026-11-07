@@ -65,6 +65,7 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::Preferences, "settings-preview-limit"),
   (SettingsTab::Preferences, "settings-audio-limit"),
   (SettingsTab::Preferences, "settings-autostart"),
+  (SettingsTab::Preferences, "settings-send-to"),
   (SettingsTab::Preferences, "settings-close-to-tray"),
   (SettingsTab::Preferences, "settings-start-minimized"),
   (SettingsTab::Preferences, "settings-system-title-bar"),
@@ -106,6 +107,7 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
 const DESKTOP_APP_ONLY: &[&str] = &[
   "settings-zoom",
   "settings-autostart",
+  "settings-send-to",
   "settings-close-to-tray",
   "settings-start-minimized",
   "settings-system-title-bar",

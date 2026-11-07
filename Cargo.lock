@@ -10982,6 +10982,7 @@ dependencies = [
  "objc2-user-notifications",
  "pollster",
  "reqwest",
+ "roxmltree",
  "rust-ini",
  "secrecy",
  "serde",
