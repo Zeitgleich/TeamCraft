@@ -429,19 +429,19 @@ mod routing {
   }
 
   #[tokio::test]
-  async fn an_active_device_suppresses_pushes_an_idle_one_does_not_and_connected_devices_are_skipped() {
+  async fn an_active_phone_suppresses_pushes_and_one_in_the_background_is_pushed_while_still_connected() {
     let recorder = Recorder::default();
     let Some(app) = start(&recorder).await else { return };
     let s = scene(&app).await;
     set_level(&app, &s.carol, &s.channel, "all").await;
-    let desktop = register_push_device(&app, &s.carol, "unifiedpush").await;
+    let phone = register_push_device(&app, &s.carol, "unifiedpush").await;
 
     let (mut socket, _) = tokio_tungstenite::connect_async(&app.ws_url).await.unwrap();
     socket.next().await;
     let identify = GatewayClientMessage::Identify {
       maybe_dpop_proof: None,
       token: app.token(&s.carol),
-      device_id: serde_json::from_value(json!(desktop)).unwrap(),
+      device_id: serde_json::from_value(json!(phone)).unwrap(),
       activity: DeviceActivity::Active,
     };
     socket
@@ -453,7 +453,7 @@ mod routing {
     send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
     assert!(
       recorder.wait_for(0).await.is_empty(),
-      "carol is active on her desktop"
+      "carol has the app in front on her phone"
     );
 
     let idle = GatewayClientMessage::SetActivity {
@@ -465,12 +465,18 @@ mod routing {
       .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     send(&app, &s.alice, &s.channel, &s.alice_device, 2).await;
-    let pushes = recorder.wait_for(1).await;
-    // Only the phone: the desktop has a live connection and gets the event directly.
-    assert_eq!(
-      pushes.iter().map(|p| p.device.clone()).collect::<Vec<_>>(),
-      vec![s.carol_push_device.clone()]
-    );
+    let mut pushed: Vec<String> = recorder
+      .wait_for(2)
+      .await
+      .iter()
+      .map(|p| p.device.clone())
+      .collect();
+    pushed.sort();
+    // Both phones: the one that went to the background keeps its connection for a while, but shows
+    // nothing for what arrives over it.
+    let mut expected = vec![s.carol_push_device.clone(), phone];
+    expected.sort();
+    assert_eq!(pushed, expected);
     app.stop().await;
   }
 
