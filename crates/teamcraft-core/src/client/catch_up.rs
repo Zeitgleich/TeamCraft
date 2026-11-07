@@ -237,6 +237,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           None => self.read_focus_pages(conversation).await?.1,
         };
         self.catch_up_one(conversation, first, phases).await?;
+        self.apply_live_during_catch_up().await?;
       }
     }
     Ok(())
@@ -303,6 +304,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.store.delete(Table::SyncState, &marker_key(conversation))?;
     self.note_first_sync_caught_up(conversation)?;
+    self.note_live_caught_up(conversation);
     // Its newest messages show in the list now, not once every conversation is through.
     self.note_sync_progress();
     if self.catch_up_focus.get() == Some(conversation) {
@@ -395,6 +397,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     ahead: &mut AheadOfTheRest,
     phases: &PhaseTimer,
   ) -> Result<(), CoreError> {
+    // Between two steps of the rest: what arrived live for conversations already through shows now.
+    self.apply_live_during_catch_up().await?;
     let Some(focus) = self.catch_up_focus.get() else {
       return Ok(());
     };
@@ -419,10 +423,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.store.delete(Table::SyncState, &marker_key(focus))?;
     self.note_first_sync_caught_up(focus)?;
+    self.note_live_caught_up(focus);
     ahead.done.insert(focus);
     self.catch_up_focus.note_caught_up();
     self.note_sync_progress();
     self.send_while_catching_up().await;
+    self.apply_live_during_catch_up().await?;
     tracing::info!(
       ms = self.now_ms().saturating_sub(phases.started_ms),
       "catch-up: the focused conversation is caught up ahead of the rest"

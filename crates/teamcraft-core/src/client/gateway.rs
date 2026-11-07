@@ -4,6 +4,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::pin;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures_util::FutureExt;
@@ -15,6 +16,7 @@ use teamcraft_proto::{
 
 use super::Client;
 use super::groups::MlsProgress;
+use super::live_catch_up::LiveDuringCatchUp;
 use crate::api::{ApiError, GatewayConnection, ServerApi};
 use crate::error::CoreError;
 use crate::platform;
@@ -142,6 +144,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.are_welcomes_synced = false;
     // A replay cut short by the drop is not waited for; this connection brings its own.
     self.maybe_replay_left = None;
+    // An earlier connection's catch-up that was dropped half way leaves nothing behind.
+    self.maybe_live_catch_up = None;
     self.drop_read_ahead();
     self.trace_start();
     let outcome = match self.start_gateway_traced(timing).await {
@@ -337,17 +341,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           )));
         },
       };
-    let mut held = HeldFrames::default();
     let heartbeat = heartbeat_interval.min(timing.max_heartbeat);
-    keep_alive(
+    // What arrives meanwhile is held, and the catch-up applies what it may between its steps
+    // (issue #1021): a message to a conversation already caught up shows now, not at the end.
+    let shared = Arc::new(Mutex::new(HeldFrames::default()));
+    self.maybe_live_catch_up = Some(LiveDuringCatchUp::new(shared.clone()));
+    let synced = keep_alive(
       &mut connection,
       heartbeat,
       heartbeat,
       timing.held_limits,
-      &mut held,
+      &*shared,
       self.sync_fresh_session(session_id, maybe_resume_window_ms),
     )
-    .await?;
+    .await;
+    if let Some(live) = self.maybe_live_catch_up.take()
+      && live.applied > 0
+    {
+      tracing::info!(applied = live.applied, "live events applied during the catch-up");
+    }
+    synced?;
+    let held = std::mem::take(&mut *shared.lock().unwrap_or_else(PoisonError::into_inner));
     self.refresh_link_requests().await;
     self.trace_lap("link requests");
     self.refresh_admin_join_requests_after_connect().await;
@@ -371,9 +385,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<(), CoreError> {
     // Boxed: this future is large, and it would sit in everything that connects, up to the app's tasks.
     Box::pin(self.full_sync()).await?;
+    // Events the catch-up applied early were part of this session: a resume starts after them.
+    let last_seq = self.maybe_live_catch_up.as_ref().map_or(0, |live| live.max_seq);
     self.sync.maybe_gateway_session = Some(GatewaySession {
       session_id,
-      last_seq: 0,
+      last_seq,
       maybe_resume_window_ms,
       maybe_heard_at_ms: Some(self.now_ms()),
     });
@@ -588,7 +604,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
-  async fn handle_event(&mut self, event: GatewayEvent) -> Result<(), CoreError> {
+  pub(super) async fn handle_event(&mut self, event: GatewayEvent) -> Result<(), CoreError> {
     match event {
       GatewayEvent::MessageCreate { message } => {
         self.clear_typing(message.conversation_id, message.sender_user_id);
@@ -858,6 +874,11 @@ impl HeldFrames {
     self.frames.is_empty()
   }
 
+  /// The oldest held frame, left held.
+  pub(super) fn front(&self) -> Option<&Option<Result<GatewayServerMessage, ApiError>>> {
+    self.frames.front()
+  }
+
   /// Heartbeats sent and whether the server was heard since the last call.
   pub fn take_kept_alive(&mut self) -> KeptAlive {
     let kept = KeptAlive {
@@ -892,25 +913,47 @@ impl HeldFrames {
   }
 }
 
+/// Where [`keep_alive`] puts what arrives: [`HeldFrames`] owned by the caller, or behind a
+/// [`Mutex`] when the work takes frames off it while it runs (the catch-up of a fresh session,
+/// issue #1021). One `keep_alive` for both, so the work's future is stored once, not again in a
+/// wrapper (the runner's future and the stacks of the threads that poll it).
+pub trait HoldFrames {
+  /// Runs `use_held` on the frames; `None` if they can't be reached (a poisoned lock).
+  fn with_held<R>(&mut self, use_held: impl FnOnce(&mut HeldFrames) -> R) -> Option<R>;
+}
+
+impl HoldFrames for &mut HeldFrames {
+  fn with_held<R>(&mut self, use_held: impl FnOnce(&mut HeldFrames) -> R) -> Option<R> {
+    Some(use_held(self))
+  }
+}
+
+impl HoldFrames for &Mutex<HeldFrames> {
+  fn with_held<R>(&mut self, use_held: impl FnOnce(&mut HeldFrames) -> R) -> Option<R> {
+    // Never held across an await: each use is one synchronous step.
+    self.lock().ok().map(|mut held| use_held(&mut held))
+  }
+}
+
 /// Runs `work` while keeping `connection` alive (issue #325): a heartbeat after `first_heartbeat_in`
 /// and then every `heartbeat`, and
 /// what arrives meanwhile is read into `held` (within `limits`), so neither the server's
 /// heartbeat timeout nor its slow-reader limit drops the connection while a long sync or command
 /// holds the loop. Frames are only held, never applied: they come after what `work` does, in their
-/// order, once the caller takes them.
+/// order, once the caller takes them (or `work` takes the oldest itself, through a shared `held`).
 pub async fn keep_alive<G: GatewayConnection, T>(
   connection: &mut G,
   first_heartbeat_in: Duration,
   heartbeat: Duration,
   limits: HeldLimits,
-  held: &mut HeldFrames,
+  mut held: impl HoldFrames,
   work: impl Future<Output = T>,
 ) -> T {
   let mut work = pin!(work);
   let mut timer = Box::pin(platform::sleep(first_heartbeat_in));
   loop {
     let step = {
-      let is_reading = held.is_reading(limits);
+      let is_reading = held.with_held(|held| held.is_reading(limits)).unwrap_or(false);
       let read = async {
         if is_reading {
           connection.receive().await
@@ -925,14 +968,17 @@ pub async fn keep_alive<G: GatewayConnection, T>(
       }
     };
     match step {
-      KeepAliveStep::Read(maybe_frame) => held.hold(maybe_frame),
+      KeepAliveStep::Read(maybe_frame) => {
+        held.with_held(|held| held.hold(maybe_frame));
+      },
       KeepAliveStep::Heartbeat => {
         // A closed connection gets no more heartbeats; the caller replaces it afterwards.
-        if !held.is_closed {
-          match connection.send(&GatewayClientMessage::Heartbeat).await {
+        if !held.with_held(|held| held.is_closed).unwrap_or(true) {
+          let sent = connection.send(&GatewayClientMessage::Heartbeat).await;
+          held.with_held(|held| match sent {
             Ok(()) => held.heartbeats_sent = held.heartbeats_sent.saturating_add(1),
             Err(error) => held.hold(Some(Err(error))),
-          }
+          });
         }
         timer = Box::pin(platform::sleep(heartbeat));
       },

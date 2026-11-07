@@ -199,6 +199,117 @@ async fn a_reply_right_after_opening_goes_out_before_the_catch_up_ends() {
   );
 }
 
+/// Ann writes to the open chat while the phone still catches up the rest (issue #1021): the gateway
+/// is connected and the chat is through, so her message shows now, not once every other
+/// conversation is, and it is there once, after everything before it.
+#[tokio::test(start_paused = true)]
+async fn a_message_to_the_open_chat_during_the_catch_up_shows_before_it_ends() {
+  let mut day = Day::begin().await;
+  day.phone.awake_until(None, Told::has_the_morning).await;
+
+  day.desktop_afternoon().await;
+  day.server.delay_member_lists(day.me, MEMBER_LIST_DELAY);
+  let (store, direct) = (day.phone.store.clone(), day.direct);
+  let sent = Arc::new(Mutex::new(None));
+  let sent_at = sent.clone();
+  day.phone.client().catch_up_focus().set(direct);
+  let Day { ann, phone, .. } = &mut day;
+  let woke = phone
+    .awake_while(
+      async move {
+        let woke_at = Instant::now();
+        // The open chat shows Ann's news; the other conversations are still on their way.
+        while texts(store.as_ref(), direct).len() < DIRECT_COMPLETE {
+          tokio::time::sleep(Duration::from_millis(20)).await;
+          assert!(
+            woke_at.elapsed() < Duration::from_secs(60),
+            "the open chat never caught up"
+          );
+        }
+        ann.client.send_text(direct, None, "live").await.unwrap();
+        *sent_at.lock().unwrap() = Some(woke_at.elapsed());
+      },
+      Told::has_the_afternoon_and_a_reply,
+    )
+    .await;
+
+  let sent_at = sent.lock().unwrap().expect("sent");
+  let shown = woke
+    .first(|told| told.direct_texts == DIRECT_COMPLETE + 1)
+    .expect("the live message never showed");
+  let caught_up = woke.caught_up_at();
+  assert!(
+    sent_at < caught_up,
+    "sent at {sent_at:?}, after the catch-up ({caught_up:?}): the test proves nothing"
+  );
+  assert!(
+    shown.at < caught_up,
+    "sent at {sent_at:?}, shown at {:?}, the catch-up ended at {caught_up:?}",
+    shown.at
+  );
+  // The next step of the catch-up: one batch of member lists at most.
+  assert!(
+    shown.at - sent_at <= MEMBER_LIST_DELAY * 2 + AT_ONCE,
+    "sent at {sent_at:?}, shown at {:?}",
+    shown.at
+  );
+  let direct_texts = texts(day.phone.store.as_ref(), day.direct);
+  assert_eq!(direct_texts.last().map(String::as_str), Some("live"));
+  assert_eq!(direct_texts.iter().filter(|text| *text == "live").count(), 1);
+  assert_eq!(direct_texts.len(), DIRECT_COMPLETE + 1);
+  for (index, channel) in day.channels.iter().enumerate() {
+    assert_eq!(
+      texts(day.phone.store.as_ref(), *channel).len(),
+      NEWS_PER_CHANNEL + 1,
+      "channel {index}"
+    );
+  }
+}
+
+/// A channel already caught up changes epoch while the rest is still caught up: Ann writes, adds
+/// Bob (a commit), and writes again in the new epoch. The first message may go ahead; the membership
+/// change waits for the end of the catch-up, and so does what comes after it, so the group follows
+/// the commits in their order and every message is readable, once.
+#[tokio::test(start_paused = true)]
+async fn an_epoch_change_in_a_caught_up_channel_during_the_catch_up_keeps_its_order() {
+  let mut day = Day::begin().await;
+  let bob = Peer::enroll(&day.server, "Bob").await;
+  let bob_id = bob.client.user_id();
+  day.phone.awake_until(None, Told::has_the_morning).await;
+
+  day.desktop_afternoon().await;
+  day.server.delay_member_lists(day.me, MEMBER_LIST_DELAY);
+  let channel = day.channels[0];
+  let store = day.phone.store.clone();
+  day.phone.client().catch_up_focus().set(channel);
+  let Day { ann, phone, .. } = &mut day;
+  phone
+    .awake_while(
+      async move {
+        let woke_at = Instant::now();
+        while texts(store.as_ref(), channel).len() < NEWS_PER_CHANNEL + 1 {
+          tokio::time::sleep(Duration::from_millis(20)).await;
+          assert!(
+            woke_at.elapsed() < Duration::from_secs(60),
+            "the channel never caught up"
+          );
+        }
+        ann.client.send_text(channel, None, "before Bob").await.unwrap();
+        ann.client.add_member(channel, bob_id).await.unwrap();
+        ann.client.send_text(channel, None, "with Bob").await.unwrap();
+      },
+      Told::has_the_afternoon_and_bob,
+    )
+    .await;
+  let channel_texts = texts(day.phone.store.as_ref(), channel);
+  let mut expected = vec!["hello 0".to_owned()];
+  expected.extend((0..NEWS_PER_CHANNEL).map(|news| format!("news {news} in 0")));
+  expected.push("before Bob".into());
+  expected.push("with Bob".into());
+  assert_eq!(channel_texts, expected);
+  assert!(!is_catching_up(day.phone.store.as_ref(), channel).unwrap());
+}
+
 /// Away for less than the resume window (a look at another app): the server replays what was
 /// missed, and the open chat has it within the network's time, without a catch-up.
 #[tokio::test(start_paused = true)]
@@ -525,6 +636,8 @@ impl Phone {
     self.network.notify();
     let (store, status) = (self.store.clone(), self.status.clone());
     let (channels, direct) = (self.channels.clone(), (self.direct, self.imported));
+    // Boxed: a steer that sends (a peer's client) is a large future beside the runner's.
+    let steer = Box::pin(steer);
     let user = async move {
       steer.await;
       while !is_done(&Told::read(
@@ -619,6 +732,15 @@ impl Told {
       && self.channels_marked == 0
       && self.direct_texts == DIRECT_COMPLETE + 1
       && self.channels_complete == CHANNELS
+  }
+
+  /// [`Self::has_the_afternoon`], with Ann's two messages around adding Bob in the first channel.
+  fn has_the_afternoon_and_bob(&self) -> bool {
+    self.is_connected
+      && self.channels_marked == 0
+      && self.direct_texts == DIRECT_COMPLETE
+      && self.channel_texts[0] == NEWS_PER_CHANNEL + 3
+      && self.channels_complete == CHANNELS - 1
   }
 
   /// Connected, and every message of the afternoon is there.

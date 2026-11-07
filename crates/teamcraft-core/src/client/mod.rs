@@ -37,6 +37,7 @@ mod key_packages;
 mod linking;
 #[cfg(feature = "ui")]
 pub(crate) mod list_outcomes;
+mod live_catch_up;
 mod member_device;
 mod messaging;
 mod missing_keys;
@@ -103,8 +104,8 @@ pub use enroll::{
 };
 pub use first_sync::{FirstSyncProgress, FirstSyncStage, HistoryBackfill, first_sync_progress};
 pub use gateway::{
-  DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, KeptAlive,
-  keep_alive,
+  DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, HoldFrames,
+  KeptAlive, keep_alive,
 };
 pub use group_health::{
   RemovalStatus, all_group_leftovers, group_leftovers, is_queue_refused, pending_removals,
@@ -428,6 +429,9 @@ pub struct Client<A, S> {
   /// Runs once the server answered the next connection's `identify` or `resume`, before the
   /// catch-up: the connection works from then on ([`Self::on_gateway_answered`]).
   maybe_on_answered: Option<Box<dyn FnOnce() + Send>>,
+  /// While a fresh session's catch-up runs: what the connection holds meanwhile, and what of it the
+  /// catch-up may apply between its steps (issue #1021).
+  maybe_live_catch_up: Option<live_catch_up::LiveDuringCatchUp>,
   /// Gateway events said the guest list changed, and it wasn't read since.
   are_expiring_guests_stale: bool,
   maybe_expiring_guests_read_ms: Option<i64>,
@@ -599,6 +603,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_backlog_reads: None,
       maybe_replay_left: None,
       maybe_on_answered: None,
+      maybe_live_catch_up: None,
       are_expiring_guests_stale: false,
       maybe_expiring_guests_read_ms: None,
       device_activity: DeviceActivity::Active,

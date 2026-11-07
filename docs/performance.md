@@ -1727,8 +1727,21 @@ focus (once the whole backlog is in), 0.6 s with it.
 A silently dead link (no signal from the OS) was found only after two heartbeat intervals without a
 frame plus the probe slack, 53 s in which the app showed "connected". Every heartbeat now has to be
 answered within 10 s (`heartbeat_answer_timeout`): at most one interval plus that, 36 s in the unit
-test on a paused clock; the run above found it after 45 s, which is not yet explained. The gateway still connects after the catch-up;
-with the focused conversation caught up first (0.6 s above) that is no longer what users wait for.
+test on a paused clock; the run above found it after 45 s, which is not yet explained.
+
+**Live events during the catch-up** (issue #1021). The gateway connects before the catch-up of a
+fresh session (`identify` is answered first, and the banner goes then), but what arrived on it
+waited for the end of the catch-up: a message to the open chat, caught up within a second, showed
+only once every other conversation was through. The catch-up now applies the oldest held events
+between two of its steps, in their order, while each concerns a conversation it has finished
+(messages, MLS messages other than welcomes, receipts) or no conversation (typing, presence); the
+first that has to wait (a welcome, a membership change, an event of a conversation still to come)
+holds back everything after it, so the order stays the server's. `coming_back.rs`, 24 channels with
+400 ms member lists: Ann's message to the open chat during the catch-up shows at the next step,
+within one batch of member lists, before the catch-up ends (before: at its end). An epoch change in
+a finished channel during the catch-up keeps its order, every message readable once. Not yet: a cap
+on the backlog after a long absence ("jump to latest" with the gap marker of #155), see the
+follow-up of #1021; the e2e measurement (`long_absence.rs`) wasn't rerun for this change.
 
 ### Local store: opening and reading a large account (issue #155)
 
