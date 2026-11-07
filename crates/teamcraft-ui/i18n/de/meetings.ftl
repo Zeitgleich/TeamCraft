@@ -16,6 +16,8 @@ meetings-edit = Meeting bearbeiten
 meetings-cancel = Meeting absagen
 meetings-cancelled = Abgesagt
 meetings-restore = Wiederherstellen
+meetings-holiday = Feiertag
+meetings-restore-holiday = Trotzdem treffen
 meetings-remove = Aus der Liste entfernen
 meetings-cancel-title = Dieses Meeting absagen?
 meetings-cancel-title-series = Welche Meetings möchtest du absagen?
@@ -92,6 +94,8 @@ schedule-unit-meetings = { $count ->
    *[other] Meetings
 }
 schedule-on-days = An
+schedule-skip-holidays = Feiertage überspringen
+schedule-skip-holidays-hint = Meetings an Feiertagen der Region, die deine Admins eingestellt haben, fallen aus. Einzelne kannst du trotzdem stattfinden lassen.
 schedule-ends = Endet
 schedule-ends-never = Nie
 schedule-ends-count = Nach

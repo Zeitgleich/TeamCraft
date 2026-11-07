@@ -28,12 +28,15 @@ use tracing::warn;
 
 use super::access::is_guest;
 use super::convert::{offset_date_time, presented_name, unix_millis};
-use super::meeting_occurrences::{is_occurrence_start, occurrences_in, weekday_index};
+use super::meeting_occurrences::{
+  Occurrence, holiday_starts, is_occurrence_start, occurrences_in, weekday_index,
+};
 use super::{validate_name, validate_text};
 use crate::auth::{AuthError, AuthenticatedUser};
 use crate::brand::Brand;
 use crate::config::MailTexts;
 use crate::error::ApiError;
+use crate::holidays::{self, HolidaySource};
 use crate::meetings::MeetingService;
 use crate::meetings::ical::{self, EventAttendee, EventData, EventPerson, EventStatus, Method};
 use crate::meetings::mailer::OutgoingMail;
@@ -52,6 +55,9 @@ const DEFAULT_LIST_LIMIT: i64 = 100;
 const MAX_LIST_LIMIT: i64 = 500;
 /// How far ahead a list without an end shows the occurrences of repeating meetings.
 const SERIES_LIST_HORIZON: Duration = Duration::days(90);
+/// How far ahead the calendar event of a series that skips public holidays has them as `EXDATE`;
+/// every change of the meeting writes the event anew (docs/meetings.md, "Holidays").
+const CALENDAR_HOLIDAY_HORIZON: Duration = Duration::days(2 * 365);
 /// "Meet now" meetings stay open this long.
 const INSTANT_MEETING_DURATION: Duration = Duration::hours(8);
 const DEFAULT_INSTANT_TITLE: &str = "Instant meeting";
@@ -101,6 +107,10 @@ pub async fn create_meeting(
     starts_at,
     ends_at,
     maybe_recurrence_rule: maybe_rule.as_deref(),
+    skips_holidays: request
+      .maybe_recurrence
+      .as_ref()
+      .is_some_and(|recurrence| recurrence.skips_holidays),
     kind: MeetingKind::Scheduled.as_str(),
     has_lobby: request.has_lobby,
     attendees: &attendees,
@@ -176,6 +186,7 @@ pub async fn create_instant_meeting(
       starts_at: now,
       ends_at: now + INSTANT_MEETING_DURATION,
       maybe_recurrence_rule: None,
+      skips_holidays: false,
       kind: MeetingKind::Instant.as_str(),
       has_lobby: true,
       attendees: &attendees,
@@ -250,6 +261,8 @@ pub async fn list_meetings(
     .map(|meeting| meeting.id)
     .collect();
   let cancelled = state.database.cancelled_occurrences(&series).await?;
+  let kept = state.database.kept_holidays(&series).await?;
+  let maybe_holidays = holidays::source_of(&state.settings.get().holidays);
   let (from_ms, horizon_ms) = (
     unix_millis(from).0,
     unix_millis(maybe_to.unwrap_or(from + SERIES_LIST_HORIZON)).0,
@@ -307,11 +320,22 @@ pub async fn list_meetings(
       .get(&meeting.id)
       .map(|starts| starts.iter().map(|start| unix_millis(*start).0).collect())
       .unwrap_or_default();
-    for occurrence in occurrences_in(first, last - first, &recurrence, zone, from_ms, horizon_ms) {
+    let occurrences = occurrences_in(first, last - first, &recurrence, zone, from_ms, horizon_ms);
+    let on_holidays = holiday_skips(
+      meeting,
+      &occurrences,
+      zone,
+      maybe_holidays.as_deref(),
+      kept.get(&meeting.id).map_or(&[][..], Vec::as_slice),
+    );
+    for occurrence in occurrences {
       let mut listed = at_occurrence(&response, occurrence.starts_at_ms, occurrence.ends_at_ms);
-      if skipped.contains(&occurrence.starts_at_ms) {
+      let is_cancelled = skipped.contains(&occurrence.starts_at_ms);
+      if is_cancelled || on_holidays.contains(&occurrence.starts_at_ms) {
         listed.status = MeetingStatus::Cancelled;
         listed.is_occurrence_cancelled = true;
+        // A cancellation says more than the holiday: restoring takes it back first.
+        listed.is_occurrence_holiday = !is_cancelled;
         listed.can_host_lobby = false;
       }
       meetings.push(listed);
@@ -377,6 +401,10 @@ pub async fn update_meeting(
         maybe_ends_at: request.maybe_ends_at.map(|_| ends_at),
         maybe_has_lobby: request.maybe_has_lobby,
         maybe_recurrence_rule: maybe_rule.as_deref(),
+        maybe_skips_holidays: request
+          .maybe_recurrence
+          .as_ref()
+          .map(|recurrence| recurrence.skips_holidays),
       },
     )
     .await?
@@ -495,6 +523,11 @@ async fn cancel_occurrence(
   at: UnixMillis,
 ) -> Result<MeetingResponse, ApiError> {
   let starts_at = time_from_millis(at)?;
+  if is_skipped_holiday(state, meeting, at).await? {
+    return Err(ApiError::Conflict(
+      "the occurrence is left out as a public holiday already".into(),
+    ));
+  }
   let already = state.database.cancelled_occurrences(&[meeting.id]).await?;
   if already.get(&meeting.id).map_or(0, Vec::len) >= MAX_CANCELLED_OCCURRENCES {
     return Err(ApiError::InvalidRequest(format!(
@@ -579,11 +612,20 @@ pub async fn restore_meeting(
       if meeting.status != MeetingStatus::Scheduled.as_str() {
         return Err(ApiError::Conflict("the meeting is not scheduled".into()));
       }
-      if !state
-        .database
-        .restore_occurrence(id, time_from_millis(at)?)
-        .await?
-      {
+      let starts_at = time_from_millis(at)?;
+      let was_cancelled = state.database.restore_occurrence(id, starts_at).await?;
+      // On a public holiday the series skips, restoring keeps the meeting on that day.
+      let was_holiday = is_skipped_holiday(state, &meeting, at).await?;
+      if was_holiday {
+        let kept = state.database.kept_holidays(&[id]).await?;
+        if kept.get(&id).map_or(0, Vec::len) >= MAX_CANCELLED_OCCURRENCES {
+          return Err(ApiError::InvalidRequest(format!(
+            "at most {MAX_CANCELLED_OCCURRENCES} holidays can be kept one by one"
+          )));
+        }
+        state.database.keep_holiday(id, starts_at).await?;
+      }
+      if !was_cancelled && !was_holiday {
         return Err(ApiError::Conflict("the occurrence is not cancelled".into()));
       }
     },
@@ -715,17 +757,89 @@ async fn has_occurrence_around(
     .iter()
     .map(|start| unix_millis(*start).0)
     .collect();
+  let occurrences = occurrences_in(
+    first,
+    last - first,
+    &recurrence,
+    zone,
+    now_ms,
+    now_ms.saturating_add(lead_ms) + 1,
+  );
+  let on_holidays = series_holiday_skips(state, meeting, &occurrences, zone).await?;
+  Ok(occurrences.iter().any(|occurrence| {
+    !cancelled.contains(&occurrence.starts_at_ms) && !on_holidays.contains(&occurrence.starts_at_ms)
+  }))
+}
+
+/// The starts among `occurrences` the series leaves out as public holidays: none unless it skips
+/// them and the instance has holidays; the ones the organizer kept stay.
+fn holiday_skips(
+  meeting: &StoredMeeting,
+  occurrences: &[Occurrence],
+  zone: Tz,
+  maybe_holidays: Option<&dyn HolidaySource>,
+  kept: &[OffsetDateTime],
+) -> HashSet<i64> {
+  let Some(source) = maybe_holidays.filter(|_| meeting.skips_holidays) else {
+    return HashSet::new();
+  };
+  let mut skipped = holiday_starts(occurrences, zone, source);
+  for start in kept {
+    skipped.remove(&unix_millis(*start).0);
+  }
+  skipped
+}
+
+/// [`holiday_skips`] of one series, with the instance's holidays and the kept ones looked up.
+async fn series_holiday_skips(
+  state: &AppState,
+  meeting: &StoredMeeting,
+  occurrences: &[Occurrence],
+  zone: Tz,
+) -> Result<HashSet<i64>, ApiError> {
+  if !meeting.skips_holidays {
+    return Ok(HashSet::new());
+  }
+  let Some(source) = holidays::source_of(&state.settings.get().holidays) else {
+    return Ok(HashSet::new());
+  };
+  let kept = state
+    .database
+    .kept_holidays(&[meeting.id])
+    .await?
+    .remove(&meeting.id)
+    .unwrap_or_default();
+  Ok(holiday_skips(
+    meeting,
+    occurrences,
+    zone,
+    Some(source.as_ref()),
+    &kept,
+  ))
+}
+
+/// Whether the series has an occurrence starting at `at` that it leaves out as a public holiday.
+async fn is_skipped_holiday(
+  state: &AppState,
+  meeting: &StoredMeeting,
+  at: UnixMillis,
+) -> Result<bool, ApiError> {
+  let Some(recurrence) = series_rule(meeting).filter(|_| meeting.skips_holidays) else {
+    return Ok(false);
+  };
+  let zone = organizer_zone(state, meeting.organizer).await?;
+  let first = unix_millis(meeting.starts_at).0;
+  if !is_occurrence_start(first, &recurrence, zone, at.0) {
+    return Ok(false);
+  }
+  let occurrence = Occurrence {
+    starts_at_ms: at.0,
+    ends_at_ms: at.0.saturating_add(unix_millis(meeting.ends_at).0 - first),
+  };
   Ok(
-    occurrences_in(
-      first,
-      last - first,
-      &recurrence,
-      zone,
-      now_ms,
-      now_ms.saturating_add(lead_ms) + 1,
-    )
-    .iter()
-    .any(|occurrence| !cancelled.contains(&occurrence.starts_at_ms)),
+    series_holiday_skips(state, meeting, &[occurrence], zone)
+      .await?
+      .contains(&at.0),
   )
 }
 
@@ -966,11 +1080,16 @@ async fn event_for(
   let (maybe_rule, excluded_starts) = match &meeting.maybe_recurrence_rule {
     Some(rule) => {
       let zone = organizer_zone(state, meeting.organizer).await?;
-      let mut excluded = state.database.cancelled_occurrences(&[meeting.id]).await?;
-      (
-        Some(calendar_rule(rule, meeting.starts_at, zone)),
-        excluded.remove(&meeting.id).unwrap_or_default(),
-      )
+      let mut excluded = state
+        .database
+        .cancelled_occurrences(&[meeting.id])
+        .await?
+        .remove(&meeting.id)
+        .unwrap_or_default();
+      excluded.extend(calendar_holidays(state, meeting, zone).await?);
+      excluded.sort_unstable();
+      excluded.dedup();
+      (Some(calendar_rule(rule, meeting.starts_at, zone)), excluded)
     },
     None => (None, Vec::new()),
   };
@@ -983,6 +1102,30 @@ async fn event_for(
     organizer,
     attendees,
   })
+}
+
+/// The starts the calendar event leaves out as public holidays: from the first occurrence up to
+/// [`CALENDAR_HOLIDAY_HORIZON`] from now (or from the first occurrence, when that is later).
+async fn calendar_holidays(
+  state: &AppState,
+  meeting: &StoredMeeting,
+  zone: Tz,
+) -> Result<Vec<OffsetDateTime>, ApiError> {
+  let Some(recurrence) = series_rule(meeting).filter(|_| meeting.skips_holidays) else {
+    return Ok(Vec::new());
+  };
+  let (first, last) = (unix_millis(meeting.starts_at).0, unix_millis(meeting.ends_at).0);
+  let horizon_ms = unix_millis(OffsetDateTime::now_utc().max(meeting.starts_at) + CALENDAR_HOLIDAY_HORIZON).0;
+  let occurrences = occurrences_in(first, last - first, &recurrence, zone, first, horizon_ms);
+  let mut starts: Vec<i64> = series_holiday_skips(state, meeting, &occurrences, zone)
+    .await?
+    .into_iter()
+    .collect();
+  starts.sort_unstable();
+  starts
+    .into_iter()
+    .map(|start| time_from_millis(UnixMillis(start)))
+    .collect()
 }
 
 /// Which e-mail template and iMIP method an invitation uses.
@@ -1697,11 +1840,12 @@ async fn respond_with_link(
     conversation_id: meeting.conversation,
     maybe_space: meeting.maybe_space,
     join_url,
-    maybe_recurrence: meeting
-      .maybe_recurrence_rule
-      .as_deref()
-      .and_then(parse_recurrence_rule),
+    maybe_recurrence: series_rule(meeting).map(|recurrence| MeetingRecurrence {
+      skips_holidays: meeting.skips_holidays,
+      ..recurrence
+    }),
     is_occurrence_cancelled: false,
+    is_occurrence_holiday: false,
     can_host_lobby: false,
     attendees: attendees
       .iter()
@@ -1765,6 +1909,8 @@ fn parse_recurrence_rule(rule: &str) -> Option<MeetingRecurrence> {
     weekdays,
     maybe_count,
     maybe_until,
+    // Not part of the rule: the meeting's own column.
+    skips_holidays: false,
   })
 }
 
@@ -1913,6 +2059,7 @@ mod tests {
         weekdays: Vec::new(),
         maybe_count: None,
         maybe_until: None,
+        skips_holidays: false,
       }
     }
 

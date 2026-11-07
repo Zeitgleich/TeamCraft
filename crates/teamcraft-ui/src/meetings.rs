@@ -770,6 +770,8 @@ pub struct ScheduleForm {
   pub count: u32,
   /// Value of the `date` input of a series that ends on a date (`2026-12-31`), local time.
   pub until: String,
+  /// The series leaves out public holidays (#1053).
+  pub skips_holidays: bool,
   pub has_lobby: bool,
   /// The notetaker's account when "Notetaker joins the calls" is ticked (e2ee.md §8.2): invited like
   /// a member, so it is in the chat's group before any call.
@@ -794,6 +796,7 @@ impl ScheduleForm {
       ends: SeriesEnd::Never,
       count: 10,
       until: String::new(),
+      skips_holidays: false,
       has_lobby: true,
       maybe_notetaker: None,
       maybe_idempotency_key: Some(IdempotencyKey::random()),
@@ -813,6 +816,7 @@ impl ScheduleForm {
     if let Some(recurrence) = &meeting.maybe_recurrence {
       form.set_repeat(Repeat::of(&recurrence.frequency));
       form.interval = recurrence.interval;
+      form.skips_holidays = recurrence.skips_holidays;
       if !recurrence.weekdays.is_empty() {
         form.weekdays = WEEKDAYS.map(|day| recurrence.weekdays.contains(&day));
       }
@@ -1016,6 +1020,7 @@ impl ScheduleForm {
       weekdays,
       maybe_count,
       maybe_until,
+      skips_holidays: self.skips_holidays,
     })
   }
 
@@ -1648,6 +1653,7 @@ mod tests {
       join_url: String::new(),
       maybe_recurrence: None,
       is_occurrence_cancelled: false,
+      is_occurrence_holiday: false,
       can_host_lobby: false,
       attendees: Vec::new(),
       undelivered_invitations: Vec::new(),
@@ -1805,6 +1811,7 @@ mod tests {
       join_url: String::new(),
       maybe_recurrence: None,
       is_occurrence_cancelled: false,
+      is_occurrence_holiday: false,
       can_host_lobby: false,
       attendees: Vec::new(),
       undelivered_invitations: Vec::new(),

@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT meeting_id, starts_at FROM meeting_kept_holidays\n         WHERE meeting_id = ANY($1) ORDER BY meeting_id, starts_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "meeting_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "meeting_kept_holidays",
+            "name": "meeting_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "starts_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "meeting_kept_holidays",
+            "name": "starts_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "ef3ff65737da6c0061828d7112b4d54b186930aad49e12c762e4b72dc871ec3a"
+}

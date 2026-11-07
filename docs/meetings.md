@@ -218,8 +218,30 @@ organizer can restore it there or take it off everybody's lists at once (`POST
 rule ends it. Ending the call of a series for everyone (host controls) ends that call, not the
 series.
 
-Public holidays: a single meeting on a holiday is cancelled like any other; a holiday calendar
-that skips them by itself is a follow-up (v1.1).
+### Holidays
+
+"Skip public holidays" in the repeat section (`recurrence.skips_holidays`, stored in
+`meetings.skips_holidays`) leaves out the meetings of a series that start on a public holiday, on
+the organizer's wall clock (#1053). The holidays come from a `HolidaySource`
+(`crates/teamcraft-server/src/holidays`): today the bundled table, picked by the region admins set
+in the console (`holidays.region`, admin.md §6.3): `DE` for Germany's nationwide holidays, `DE-BY`
+and the other federal states for theirs. Movable feasts are computed from Easter, so the table
+needs no network and no yearly update. Holidays only parts of a state keep are left out. Without a
+region nothing is skipped.
+
+A skipped meeting is listed like a cancelled one (`is_occurrence_cancelled`), marked
+`is_occurrence_holiday` ("Holiday"); the calendar event and the invitations have it as `EXDATE`
+(for the series' past and the next two years; every change of the meeting writes them anew), and
+it doesn't ring. Restoring it keeps that meeting (`meeting_kept_holidays`, at most 1000 per series);
+cancelling it is refused with 409, it is off already. Like `EXDATE`, skipped meetings count
+towards `COUNT`.
+
+| Condition                              | What happens                                                                                       |
+|----------------------------------------|----------------------------------------------------------------------------------------------------|
+| No region set, or the region changes   | Lists and ringing follow at once; calendar events follow on the next change of each meeting        |
+| A source that fetches is down (later)  | The trait answers from what it holds, never waiting: listing and ringing don't stop                |
+| A holiday is also cancelled            | Listed as cancelled; restoring takes the cancellation back and keeps the meeting on the holiday    |
+| Old clients                            | They see a skipped meeting as cancelled and can restore it; changing the rule there turns skipping off |
 
 | Condition                        | What happens                                                                                                          |
 |----------------------------------|-----------------------------------------------------------------------------------------------------------------------|
@@ -366,7 +388,7 @@ fake calendar and mailer; one test sends through the real SMTP sender to Mailpit
 ## Not done yet
 
 - "In a meeting" presence from the calendar (PLAN.md §9), moving a single meeting of a series (only
-  cancelling one), a holiday calendar, host controls (mute all, remove, lock, end for everyone) and
+  cancelling one), holidays from an iCalendar feed and per organizer, host controls (mute all, remove, lock, end for everyone) and
   meetings created in other CalDAV clients.
 - Per-organizer calendars (see above).
 - Meeting links: member clients reacting to `lobby_decision` instead of asking; making the link

@@ -28,6 +28,8 @@ pub struct StoredMeeting {
   pub starts_at: OffsetDateTime,
   pub ends_at: OffsetDateTime,
   pub maybe_recurrence_rule: Option<String>,
+  /// The series leaves out its occurrences on public holidays (#1053).
+  pub skips_holidays: bool,
   pub kind: String,
   pub status: String,
   pub has_lobby: bool,
@@ -60,6 +62,7 @@ pub struct NewMeeting<'a> {
   pub starts_at: OffsetDateTime,
   pub ends_at: OffsetDateTime,
   pub maybe_recurrence_rule: Option<&'a str>,
+  pub skips_holidays: bool,
   pub kind: &'a str,
   pub has_lobby: bool,
   pub attendees: &'a [NewAttendee],
@@ -85,6 +88,8 @@ pub struct MeetingChanges<'a> {
   pub maybe_has_lobby: Option<bool>,
   /// A new RRULE value (a series is never turned back into a single meeting).
   pub maybe_recurrence_rule: Option<&'a str>,
+  /// Whether the series skips public holidays; set together with a new rule.
+  pub maybe_skips_holidays: Option<bool>,
 }
 
 /// A join link of a meeting: a personal one-time link, or the meeting's shared guest link.
@@ -162,8 +167,8 @@ impl Database {
     insert_membership(&mut tx, new.conversation.id, new.organizer, ChannelRole::Admin).await?;
     sqlx::query!(
       r#"INSERT INTO meetings (id, uid, organizer_user_id, conversation_id, title, description, starts_at,
-                               ends_at, recurrence_rule, kind, has_lobby, space_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+                               ends_at, recurrence_rule, kind, has_lobby, space_id, skips_holidays)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
       to_db(new.id),
       new.uid,
       to_db(new.organizer),
@@ -176,6 +181,7 @@ impl Database {
       new.kind,
       new.has_lobby,
       new.maybe_space.map(to_db),
+      new.skips_holidays,
     )
     .execute(&mut *tx)
     .await?;
@@ -195,7 +201,7 @@ impl Database {
   pub async fn get_meeting(&self, id: MeetingId) -> Result<Option<StoredMeeting>, DbError> {
     let row = sqlx::query!(
       r#"SELECT id, uid, organizer_user_id, conversation_id, title, description, starts_at, ends_at,
-                recurrence_rule, kind, status, has_lobby, sequence, cancelled_at, space_id
+                recurrence_rule, kind, status, has_lobby, sequence, cancelled_at, space_id, skips_holidays
          FROM meetings WHERE id = $1"#,
       to_db(id),
     )
@@ -214,6 +220,7 @@ impl Database {
           starts_at: row.starts_at,
           ends_at: row.ends_at,
           maybe_recurrence_rule: row.recurrence_rule,
+          skips_holidays: row.skips_holidays,
           kind: row.kind,
           status: row.status,
           has_lobby: row.has_lobby,
@@ -336,6 +343,7 @@ impl Database {
            ends_at = COALESCE($5, ends_at),
            has_lobby = COALESCE($6, has_lobby),
            recurrence_rule = COALESCE($7, recurrence_rule),
+           skips_holidays = COALESCE($8, skips_holidays),
            sequence = sequence + 1
          WHERE id = $1"#,
       to_db(id),
@@ -345,6 +353,7 @@ impl Database {
       changes.maybe_ends_at,
       changes.maybe_has_lobby,
       changes.maybe_recurrence_rule,
+      changes.maybe_skips_holidays,
     )
     .execute(self.pool())
     .await?;
@@ -572,6 +581,50 @@ impl Database {
     let raw: Vec<i64> = meetings.iter().map(|meeting| to_db(*meeting)).collect();
     let rows = sqlx::query!(
       r#"SELECT meeting_id, starts_at FROM meeting_cancelled_occurrences
+         WHERE meeting_id = ANY($1) ORDER BY meeting_id, starts_at"#,
+      &raw,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    let mut found: HashMap<MeetingId, Vec<OffsetDateTime>> = HashMap::new();
+    for row in rows {
+      found
+        .entry(from_db(row.meeting_id)?)
+        .or_default()
+        .push(row.starts_at);
+    }
+    Ok(found)
+  }
+
+  /// Keeps one occurrence of a series on a public holiday (by its start in the series), which the
+  /// series would skip, and increases the iCalendar sequence. `false` if it was kept already.
+  pub async fn keep_holiday(&self, meeting: MeetingId, starts_at: OffsetDateTime) -> Result<bool, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let result = sqlx::query!(
+      r#"INSERT INTO meeting_kept_holidays (meeting_id, starts_at) VALUES ($1, $2)
+         ON CONFLICT DO NOTHING"#,
+      to_db(meeting),
+      starts_at,
+    )
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+      return Ok(false);
+    }
+    bump_sequence(&mut tx, meeting).await?;
+    tx.commit().await?;
+    Ok(true)
+  }
+
+  /// The occurrences on public holidays the organizers of the meetings keep, soonest first per
+  /// meeting.
+  pub async fn kept_holidays(
+    &self,
+    meetings: &[MeetingId],
+  ) -> Result<HashMap<MeetingId, Vec<OffsetDateTime>>, DbError> {
+    let raw: Vec<i64> = meetings.iter().map(|meeting| to_db(*meeting)).collect();
+    let rows = sqlx::query!(
+      r#"SELECT meeting_id, starts_at FROM meeting_kept_holidays
          WHERE meeting_id = ANY($1) ORDER BY meeting_id, starts_at"#,
       &raw,
     )

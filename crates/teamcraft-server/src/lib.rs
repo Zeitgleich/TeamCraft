@@ -12,6 +12,7 @@ pub mod extract;
 pub mod gateway;
 pub mod handlers;
 pub mod health;
+pub mod holidays;
 pub mod listener;
 pub mod logging;
 pub mod meetings;

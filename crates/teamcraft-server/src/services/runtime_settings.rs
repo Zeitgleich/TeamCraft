@@ -5,9 +5,9 @@
 use serde_json::json;
 use teamcraft_db::StoredSetting;
 use teamcraft_proto::{
-  AppLinkSettings, DpopPolicy, EmailDigestSettings, GatewayEvent, HealthAlertSettings, IntegrationSettings,
-  LimitSettings, LocalAccountSettings, MailTextSettings, MeetingMailSettings, NotificationLevel,
-  NotificationRuntimeSettings, Permission, RuntimeSettingsKey, RuntimeSettingsResponse,
+  AppLinkSettings, DpopPolicy, EmailDigestSettings, GatewayEvent, HealthAlertSettings, HolidaySettings,
+  IntegrationSettings, LimitSettings, LocalAccountSettings, MailTextSettings, MeetingMailSettings,
+  NotificationLevel, NotificationRuntimeSettings, Permission, RuntimeSettingsKey, RuntimeSettingsResponse,
   RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource, ShareSettings,
   SignInMethod, SignInPageSettings, Target,
 };
@@ -18,11 +18,12 @@ use super::audit;
 use super::convert::unix_millis;
 use crate::auth::{AuthenticatedUser, public_origins};
 use crate::error::ApiError;
+use crate::holidays::HolidayRegion;
 use crate::state::{AppState, Settings};
 
 /// Prefix of the rows in `server_settings`.
 const NAME_PREFIX: &str = "settings.";
-const ALL_KEYS: [RuntimeSettingsKey; 13] = [
+const ALL_KEYS: [RuntimeSettingsKey; 14] = [
   RuntimeSettingsKey::ServerRules,
   RuntimeSettingsKey::Notifications,
   RuntimeSettingsKey::EmailDigest,
@@ -36,6 +37,7 @@ const ALL_KEYS: [RuntimeSettingsKey; 13] = [
   RuntimeSettingsKey::TokenBinding,
   RuntimeSettingsKey::AppLinks,
   RuntimeSettingsKey::HealthAlerts,
+  RuntimeSettingsKey::Holidays,
 ];
 const MAX_TEXT_CHARS: usize = 5000;
 /// Longest help text of the sign-in page, per language.
@@ -223,6 +225,7 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
     RuntimeSettingsSection::TokenBinding(values) => settings.token_binding = values.clone(),
     RuntimeSettingsSection::AppLinks(values) => settings.app_links = values.clone(),
     RuntimeSettingsSection::HealthAlerts(values) => settings.health_alerts = values.clone(),
+    RuntimeSettingsSection::Holidays(values) => settings.holidays = values.clone(),
     RuntimeSettingsSection::ServerRules(rules) => {
       settings.policy.invites_require_verified_email = rules.invites_require_verified_email;
       settings.policy.default_spaces.clone_from(&rules.default_spaces);
@@ -334,6 +337,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
     token_binding: settings.token_binding.clone(),
     app_links: settings.app_links.clone(),
     health_alerts: settings.health_alerts.clone(),
+    holidays: settings.holidays.clone(),
     server_rules: ServerRulesSettings {
       invites_require_verified_email: settings.policy.invites_require_verified_email,
       default_spaces: settings.policy.default_spaces.clone(),
@@ -446,6 +450,7 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
   match section {
     RuntimeSettingsSection::AppLinks(values) => check_app_links(values),
     RuntimeSettingsSection::HealthAlerts(values) => check_health_alerts(values),
+    RuntimeSettingsSection::Holidays(values) => check_holidays(values),
     RuntimeSettingsSection::TokenBinding(values) => {
       if matches!(values.dpop_policy, DpopPolicy::Unknown(_)) {
         return Err(ApiError::InvalidRequest(
@@ -654,6 +659,16 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
 }
 
 /// A hold and a clear time long enough not to flap, thresholds that can be met.
+/// No region, or one of the bundled table.
+fn check_holidays(values: &HolidaySettings) -> Result<(), ApiError> {
+  if values.region.is_empty() || HolidayRegion::from_code(&values.region).is_some() {
+    return Ok(());
+  }
+  Err(ApiError::InvalidRequest(
+    "region must be empty or a region of the holiday table, like DE or DE-BY".into(),
+  ))
+}
+
 fn check_health_alerts(values: &HealthAlertSettings) -> Result<(), ApiError> {
   check_range(
     "hold_secs",
@@ -849,6 +864,7 @@ mod tests {
       RuntimeSettingsSection::TokenBinding(original.token_binding.clone()),
       RuntimeSettingsSection::AppLinks(original.app_links.clone()),
       RuntimeSettingsSection::HealthAlerts(original.health_alerts.clone()),
+      RuntimeSettingsSection::Holidays(original.holidays.clone()),
     ];
     assert_eq!(sections.len(), ALL_KEYS.len());
     let mut applied = Settings::default();
@@ -875,6 +891,17 @@ mod tests {
   }
 
   #[test]
+  fn the_holiday_region_is_none_or_one_of_the_table() {
+    let region = |code: &str| HolidaySettings { region: code.into() };
+    for good in ["", "DE", "DE-BY", "DE-TH"] {
+      assert!(check_holidays(&region(good)).is_ok(), "{good}");
+    }
+    for bad in ["de-by", "DE-XX", "Bavaria", " DE"] {
+      assert!(check_holidays(&region(bad)).is_err(), "{bad}");
+    }
+  }
+
+  #[test]
   fn defaults_of_the_configuration_pass_validation() {
     let settings = Settings {
       max_attachment_bytes: 100 << 20,
@@ -893,6 +920,7 @@ mod tests {
       RuntimeSettingsSection::MeetingMail(defaults.meeting_mail),
       RuntimeSettingsSection::AppLinks(defaults.app_links),
       RuntimeSettingsSection::HealthAlerts(defaults.health_alerts),
+      RuntimeSettingsSection::Holidays(defaults.holidays),
     ] {
       assert!(validate(&section).is_ok(), "{}", section.key());
     }
