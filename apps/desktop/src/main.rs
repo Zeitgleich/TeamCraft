@@ -508,6 +508,22 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
       tracing::warn!(%error, "could not set up the webview's memory caches, scrolling, menus and file drops");
     }
   }
+  // WebView2 reports a dead page with `ProcessFailed`, which neither wry nor Tauri hand on (#1214).
+  #[cfg(windows)]
+  {
+    let page = window.clone();
+    let configured = window.with_webview(move |webview| {
+      let watched = teamcraft_desktop_native::watch_process_failed(&webview.controller(), move |failure| {
+        webview_recovery::on_process_failed(&page, failure);
+      });
+      if let Err(error) = watched {
+        tracing::warn!(%error, "a dead page will not load again by itself");
+      }
+    });
+    if let Err(error) = configured {
+      tracing::warn!(%error, "a dead page will not load again by itself");
+    }
+  }
   tray::reveal_without_host(app.handle());
   if is_start_minimized
     && !has_tray
