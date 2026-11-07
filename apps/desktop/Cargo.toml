@@ -75,7 +75,7 @@ base64.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 # Not used directly: tauri-plugin-deep-link 2.6 asks for `rust-ini = "0.21"` but builds only against
 # 0.21.1 (0.21.2 and later added public fields it doesn't set). Drop this once the plugin is fixed.
-rust-ini = "=0.21.1"
+rust-ini = "=0.21.3"
 # Merges the "Send to TeamCraft" action into Thunar's uca.xml without rewriting the user's other
 # actions (file_manager_entries); a parser only, already in the tree through the SVG renderer.
 roxmltree = "0.21"
