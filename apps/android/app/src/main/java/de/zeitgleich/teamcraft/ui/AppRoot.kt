@@ -85,6 +85,7 @@ fun AppRoot(
   val maybeServer by viewModel.server.collectAsState()
   val isServerLocked by viewModel.isServerLocked.collectAsState()
   val isServerFromLink by viewModel.isServerFromLink.collectAsState()
+  val maybeLinkServer by viewModel.linkServer.collectAsState()
   val maybeSignInPage by viewModel.signInPage.collectAsState()
   val maybeSsoIcon by viewModel.ssoIcon.collectAsState()
   val isDark = isSystemInDarkTheme()
@@ -93,17 +94,18 @@ fun AppRoot(
   // What the core makes of a link, with the server in use; a question doesn't come back after "Sign in
   // there", while the user is on the way to the account it asked about.
   var isSigningInForLink by remember(maybeAppLink) { mutableStateOf(false) }
-  val maybeOpenedLink = remember(maybeAppLink, maybeServer, isServerLocked) {
-    maybeAppLink?.let { openAppLink(it, maybeServer?.address?.origin, isServerLocked) }
+  val maybeOpenedLink = remember(maybeAppLink, maybeLinkServer) {
+    maybeLinkServer?.let { server -> maybeAppLink?.let { openAppLink(it, server.maybeOrigin, server.isLocked) } }
   }
   // The question being read stays until it is answered: a link arriving meanwhile doesn't swap it, so
   // what the user answers is what they read.
   var maybeQuestion by remember { mutableStateOf<OpenedAppLink?>(null) }
   LaunchedEffect(maybeAppLink, maybeOpenedLink, state == AppState.Starting, isSigningInForLink) {
     // Not a link after all: nothing to do, nothing to say.
-    if (maybeAppLink != null && maybeOpenedLink == null) onAppLinkHandled()
-    val isAsking = maybeOpenedLink != null && maybeOpenedLink.step != OpenedAppLinkStep.Navigate
-    if (isAsking && maybeQuestion == null && state != AppState.Starting && !isSigningInForLink) maybeQuestion = maybeOpenedLink
+    if (maybeAppLink != null && maybeLinkServer != null && maybeOpenedLink == null) onAppLinkHandled()
+    if (maybeQuestion == null) {
+      maybeQuestion = dueLinkQuestion(maybeOpenedLink, state == AppState.Starting, isSigningInForLink)
+    }
   }
   Box(Modifier.fillMaxSize()) {
     maybeQuestion?.let { question ->

@@ -45,6 +45,20 @@ fun openInBrowser(context: Context, url: String): Boolean {
   }
 }
 
+/** The server in use and whether the organization fixed it: what a link is judged against. */
+data class LinkServer(val maybeOrigin: String?, val isLocked: Boolean)
+
+/**
+ * Nothing before the start read the stored server: the start cache shows the list earlier, and a
+ * link to the signed-in server would read as one to a server this app has no account on.
+ */
+fun linkServerOf(maybeOrigin: String?, isLocked: Boolean, isKnown: Boolean): LinkServer? =
+  LinkServer(maybeOrigin, isLocked).takeIf { isKnown }
+
+/** The question [maybeLink] asks now, or nothing: not while the app starts or signs in where a link led. */
+fun dueLinkQuestion(maybeLink: OpenedAppLink?, isStarting: Boolean, isSigningInForLink: Boolean): OpenedAppLink? =
+  maybeLink?.takeIf { it.step != OpenedAppLinkStep.Navigate && !isStarting && !isSigningInForLink }
+
 /**
  * The question a link asks before anything happens: never opened silently. The end of the host that
  * says who owns it comes first and large, then the whole host, wrapped, so a long name can't hide it.
