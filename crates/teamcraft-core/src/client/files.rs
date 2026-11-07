@@ -847,9 +847,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// Reads the server's attachment limit and whether it holds drafts' files again (a full sync does).
-  pub(super) async fn refresh_attachment_limit(&self) -> Result<(), CoreError> {
-    let me = self.api.me().await?;
+  /// Reads the server's attachment limit and whether it holds drafts' files again (a full sync
+  /// does), from the first reads when they have it: one more round trip there costs every start.
+  pub(super) async fn refresh_attachment_limit(&mut self) -> Result<(), CoreError> {
+    let me = match self.read_ahead.me.take() {
+      Some(read) => read?,
+      None => self.api.me().await?,
+    };
     self.store_draft_limits(me.maybe_draft_file_retention_days, me.maybe_max_key_bag_bytes)?;
     self.store_attachment_limit(me.maybe_max_attachment_bytes)
   }
