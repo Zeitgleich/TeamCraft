@@ -46,6 +46,10 @@ pub const CORE_FAILED_EVENT: &str = "core-failed";
 /// Event name the host emits whenever call state changed (ringing, roster, media).
 pub const CALL_CHANGED_EVENT: &str = "call-changed";
 
+/// Event name the desktop shell emits when the window goes to the background or closes: the
+/// composers store a draft still waiting for the typing pause now (#1220).
+pub const PERSIST_DRAFTS_SHELL_EVENT: &str = "persist-drafts";
+
 /// The operating system handed the desktop app a `teamcraft:` link. No payload: every window gets
 /// events, so the UI takes the link with `deep_link_take` (docs/app-links.md).
 pub const DEEP_LINK_EVENT: &str = "teamcraft://deep-link";

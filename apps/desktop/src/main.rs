@@ -20,6 +20,7 @@ mod core;
 mod deep_links;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
+mod draft_flush;
 mod dropped_files;
 mod external_links;
 #[cfg(target_os = "linux")]
@@ -240,16 +241,22 @@ fn main() -> anyhow::Result<()> {
       {
         tracing::debug!(%error, "could not save the window's size and place");
       }
+      if matches!(event, WindowEvent::Focused(false)) && window.label() == tray::MAIN_WINDOW {
+        draft_flush::persist(window);
+      }
       // Closing keeps the app running in the tray (notifications keep coming) when the user wants it.
-      // Without a tray icon it closes as usual, which quits the app.
+      // Without a tray icon it closes as usual, which quits the app, once the drafts are stored.
       if let WindowEvent::CloseRequested { api, .. } = event
         && window.label() == tray::MAIN_WINDOW
-        && window.state::<ShellPrefsState>().get().is_close_to_tray
-        && tray::has_tray(window.app_handle())
       {
-        api.prevent_close();
-        if let Err(error) = window.hide() {
-          tracing::debug!(%error, "could not hide the window");
+        if window.state::<ShellPrefsState>().get().is_close_to_tray && tray::has_tray(window.app_handle()) {
+          api.prevent_close();
+          draft_flush::persist(window);
+          if let Err(error) = window.hide() {
+            tracing::debug!(%error, "could not hide the window");
+          }
+        } else if draft_flush::hold_close(window) {
+          api.prevent_close();
         }
       }
     })

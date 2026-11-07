@@ -365,7 +365,7 @@ pub fn Composer(
   // Drafts sync across devices: restore once the stored one arrives, store while typing. A draft
   // that arrives after the user typed, sent or cleared here is older than the editor (#977).
   let draft_restore = StoredValue::new(DraftRestore::Waiting);
-  let draft_generation = RwSignal::new(0_u32);
+  let draft_save = StoredValue::new(DraftSave::default());
   // Once per editor: the editing commands make the browser lay out the page, so not on every change
   // of the backend (#1050, each page of messages scrolled to was one).
   Effect::new(move |_| {
@@ -398,30 +398,32 @@ pub fn Composer(
   };
   let save_draft = move || {
     draft_restore.set_value(DraftRestore::Settled);
-    draft_generation.update(|generation| *generation += 1);
-    let generation = draft_generation.get_untracked();
+    let Some(edit) = draft_save.try_update_value(DraftSave::edit) else {
+      return;
+    };
     set_timeout(
       move || {
-        // The composer may be gone by then (another channel opened); `try_*` then skips the save.
-        if draft_generation.try_get_untracked() != Some(generation) {
-          return;
+        // The composer may be gone by then: its cleanup stored the draft, `try_*` skips this.
+        if draft_save.try_update_value(|save| save.take_due(edit)) == Some(true) {
+          store_draft_now();
         }
-        store_draft_now();
       },
       DRAFT_SAVE_DELAY,
     );
   };
-  // Another tab takes the app over (#744): a draft still waiting for the typing pause is stored
-  // now, before this composer goes away with the app.
-  let on_persist = window_event_listener_untyped(PERSIST_DRAFTS_EVENT, move |_| {
-    if draft_generation
-      .try_update(|generation| *generation += 1)
-      .is_some()
-    {
+  // A draft still waiting for the typing pause is stored now when the page goes (hidden, closed,
+  // another tab takes over, #744) or this composer does (another conversation, the thread closes),
+  // or the last words typed would be lost (#1220). Nothing is written when nothing waits.
+  let flush_draft = move || {
+    if draft_save.try_update_value(DraftSave::take_pending) == Some(true) {
       store_draft_now();
     }
+  };
+  let on_persist = window_event_listener_untyped(PERSIST_DRAFTS_EVENT, move |_| flush_draft());
+  on_cleanup(move || {
+    on_persist.remove();
+    flush_draft();
   });
-  on_cleanup(move || on_persist.remove());
   let refresh_formats = move || {
     if !show_formatting.get_untracked() {
       return;
@@ -447,7 +449,7 @@ pub fn Composer(
     is_empty.set(true);
     active_formats.set(ActiveFormats::default());
     draft_restore.set_value(DraftRestore::Settled);
-    draft_generation.update(|generation| *generation += 1);
+    draft_save.update_value(DraftSave::settle);
     state.write(|backend| backend.set_draft(conversation, maybe_thread, ""));
   };
 
@@ -1906,6 +1908,45 @@ impl DraftRestore {
   }
 }
 
+/// Whether an edit waits for the typing pause before the draft is stored. Each edit restarts the
+/// pause; the timer of an earlier edit then stores nothing. A flush (the composer or the page goes)
+/// stores a waiting draft at once and makes its timer a no-op, so one edit is written once (#1220).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DraftSave {
+  /// Counts the edits; a timer carries the count of the edit that started it.
+  edits: u32,
+  is_pending: bool,
+}
+
+impl DraftSave {
+  /// An edit was made: the draft waits. Returns what the edit's timer hands to [`Self::take_due`].
+  fn edit(&mut self) -> u32 {
+    self.edits = self.edits.wrapping_add(1);
+    self.is_pending = true;
+    self.edits
+  }
+
+  /// The typing pause after `edit` is over: whether the draft is to be stored now. Not when a later
+  /// edit restarted the pause or a flush already stored it.
+  fn take_due(&mut self, edit: u32) -> bool {
+    let is_due = self.is_pending && self.edits == edit;
+    if is_due {
+      self.is_pending = false;
+    }
+    is_due
+  }
+
+  /// The composer or the page goes: whether a waiting draft is to be stored now.
+  fn take_pending(&mut self) -> bool {
+    std::mem::take(&mut self.is_pending)
+  }
+
+  /// The editor was cleared and the empty draft stored: nothing waits any more.
+  fn settle(&mut self) {
+    self.is_pending = false;
+  }
+}
+
 /// The chip's preview of a picked picture. An SVG shows its drawn thumbnail, never itself: a `blob:`
 /// URL of an SVG would run its scripts if opened in a tab (see `crate::raster`).
 fn chip_preview_url(
@@ -2071,6 +2112,44 @@ mod tests {
       // composer; a draft from another device does not overwrite the editor either.
       assert_eq!(DraftRestore::Settled.take(Some("sent already".into())), None);
       assert_eq!(DraftRestore::Settled.take(None), None);
+    }
+  }
+
+  mod draft_save {
+    use super::*;
+
+    #[test]
+    fn leaving_within_the_typing_pause_stores_the_text() {
+      // #1220: typed, then another conversation opened before the pause was over.
+      let mut save = DraftSave::default();
+      let edit = save.edit();
+      assert!(save.take_pending(), "the flush stores the waiting draft");
+      assert!(
+        !save.take_due(edit),
+        "its timer, if it still fires, writes nothing more"
+      );
+    }
+
+    #[test]
+    fn nothing_is_written_when_nothing_waits() {
+      let mut save = DraftSave::default();
+      assert!(!save.take_pending(), "never typed");
+      let edit = save.edit();
+      assert!(save.take_due(edit), "the pause stores the draft");
+      assert!(!save.take_pending(), "already stored: leaving writes nothing");
+      save.edit();
+      save.settle();
+      assert!(!save.take_pending(), "cleared and stored empty");
+    }
+
+    #[test]
+    fn only_the_last_edit_s_pause_stores() {
+      let mut save = DraftSave::default();
+      let first = save.edit();
+      let second = save.edit();
+      assert!(!save.take_due(first), "a later edit restarted the pause");
+      assert!(save.take_due(second));
+      assert!(!save.take_due(second), "stored once");
     }
   }
 
