@@ -93,6 +93,22 @@ pub struct GetMeResponse {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_max_attachment_bytes: Option<u64>,
+  /// How long the server holds the files of an unsent draft (#1220, `is_draft` uploads), in days.
+  /// Absent from older servers: clients keep a draft's files on the device until it is sent.
+  #[serde(
+    rename = "draft_file_retention_days",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_draft_file_retention_days: Option<u32>,
+  /// The largest key bag the server stores (`limits.max_key_bag_bytes`): clients keep what they put
+  /// into the account data (drafts' files, #1220) well below it. Absent from older servers.
+  #[serde(
+    rename = "max_key_bag_bytes",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_max_key_bag_bytes: Option<u64>,
 }
 
 #[cfg(test)]
@@ -153,6 +169,8 @@ mod tests {
       display_name: "Alice".into(),
       role: Role::Member,
       maybe_max_attachment_bytes: None,
+      maybe_draft_file_retention_days: None,
+      maybe_max_key_bag_bytes: None,
     };
     assert_eq!(
       serde_json::to_string(&me).unwrap(),
@@ -170,6 +188,14 @@ mod tests {
       serde_json::from_str(r#"{"id":"42","display_name":"Alice","role":"member","max_attachment_bytes":7}"#)
         .unwrap();
     assert_eq!(parsed.maybe_max_attachment_bytes, Some(7));
+    let holding = GetMeResponse {
+      maybe_draft_file_retention_days: Some(30),
+      ..me.clone()
+    };
+    assert_eq!(
+      serde_json::to_string(&holding).unwrap(),
+      r#"{"id":"42","display_name":"Alice","role":"member","draft_file_retention_days":30}"#
+    );
     let parsed: GetMeResponse =
       serde_json::from_str(r#"{"id":"42","username":"alice","display_name":"Alice","role":"auditor"}"#)
         .unwrap();

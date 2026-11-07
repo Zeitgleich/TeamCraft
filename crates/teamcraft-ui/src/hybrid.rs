@@ -674,6 +674,31 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.set_draft(conversation, maybe_thread, body);
   }
 
+  fn attach_draft_files(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+    files: Vec<teamcraft_client_api::actions::OutgoingFile>,
+  ) {
+    self.chat.attach_draft_files(conversation, maybe_thread, files);
+  }
+
+  fn draft_files(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+  ) -> Vec<teamcraft_client_api::drafts::DraftFileItem> {
+    self.chat.draft_files(conversation, maybe_thread)
+  }
+
+  fn remove_draft_file(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, id: &str) {
+    self.chat.remove_draft_file(conversation, maybe_thread, id);
+  }
+
+  fn discard_draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
+    self.chat.discard_draft(conversation, maybe_thread);
+  }
+
   fn scheduled_overview(&self) -> ScheduledOverview {
     self.chat.scheduled_overview()
   }

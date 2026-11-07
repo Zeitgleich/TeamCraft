@@ -121,6 +121,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         maybe_thread,
         body,
       } => self.update_account_data(|data, now| data.set_draft(conversation, maybe_thread, &body, now)),
+      CoreCommand::TakeDraftFiles { ids } => self.take_draft_files(&ids),
+      CoreCommand::RemoveDraftFile { id } => {
+        self.remove_draft_file(&id)?;
+        // Gives it up at the server now.
+        self.upload_pending().await.map(|_| ())
+      },
       // On the heap: sealing catches the group up, a big future that would otherwise sit in the frame
       // of every caller of this dispatch (the desktop core thread, 1 MiB on Windows).
       CoreCommand::ScheduleMessage { message, due_at_ms } => {

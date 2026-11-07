@@ -11,6 +11,12 @@ pub struct CreateAttachmentRequest {
   pub conversation_id: ConversationId,
   /// Size of the encrypted blob in bytes; the upload URL only accepts exactly this size.
   pub size_bytes: u64,
+  /// A file of an unsent draft (#1220): the server holds it for `draft_file_retention_days` and
+  /// removes it then, unless the uploader keeps it (`POST /attachments/{id}/keep`) as they send it.
+  /// Only the uploader may download it meanwhile. Older servers ignore it (and publish no
+  /// `draft_file_retention_days` in `GET /me`, so clients don't upload drafts' files there).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_draft: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -93,6 +99,28 @@ mod tests {
   use serde_json::json;
 
   use super::*;
+  use crate::{Id, Snowflake};
+
+  #[test]
+  fn a_draft_upload_says_so_and_a_plain_one_stays_as_it_was() {
+    let mut request = CreateAttachmentRequest {
+      conversation_id: ConversationId::from_snowflake(Snowflake::new(7).unwrap()),
+      size_bytes: 9,
+      is_draft: false,
+    };
+    assert_eq!(
+      serde_json::to_value(&request).unwrap(),
+      json!({ "conversation_id": "7", "size_bytes": 9 })
+    );
+    request.is_draft = true;
+    assert_eq!(
+      serde_json::to_value(&request).unwrap(),
+      json!({ "conversation_id": "7", "size_bytes": 9, "is_draft": true })
+    );
+    let older: CreateAttachmentRequest =
+      serde_json::from_value(json!({ "conversation_id": "7", "size_bytes": 9 })).unwrap();
+    assert!(!older.is_draft);
+  }
 
   #[test]
   fn multipart_wire_format_is_stable() {

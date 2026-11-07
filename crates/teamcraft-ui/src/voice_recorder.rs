@@ -310,6 +310,7 @@ impl VoiceRecorder {
           maybe_thumbnail: None,
           maybe_duration_ms: Some(info.duration_ms),
           maybe_waveform: Some(info.waveform),
+          maybe_draft_id: None,
         }))
       },
       Err(error) => {

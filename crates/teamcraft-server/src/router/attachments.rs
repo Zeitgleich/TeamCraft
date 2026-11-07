@@ -12,6 +12,7 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     .routes(routes!(handlers::create_multipart_attachment_handler))
     .routes(routes!(handlers::abandon_attachment_handler))
     .routes(routes!(handlers::complete_attachment_handler))
+    .routes(routes!(handlers::keep_attachment_handler))
     .routes(routes!(handlers::download_attachment_handler))
     .routes(routes!(handlers::complete_multipart_attachment_handler))
     .routes(routes!(handlers::presign_attachment_part_handler))

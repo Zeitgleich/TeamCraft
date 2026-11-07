@@ -433,6 +433,10 @@ ol.md-list {
   white-space: nowrap;
 }
 
+/* A draft's file that could not go up (#1220): marked, so the user removes it and attaches it again. */
+.chip.chip-failed { border-color: var(--danger); }
+.chip-status { color: var(--danger); font-size: var(--text-xs); white-space: nowrap; }
+
 
 /* Recording a voice message (#204): a strip above the input while recording or reviewing. */
 .voice-record-btn { touch-action: none; user-select: none; -webkit-user-select: none; }

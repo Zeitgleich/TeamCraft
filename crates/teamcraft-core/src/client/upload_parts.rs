@@ -277,6 +277,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let request = CreateAttachmentRequest {
       conversation_id: conversation,
       size_bytes,
+      is_draft: file.is_held,
     };
     let created = match self.api.create_multipart_attachment(&request).await {
       Ok(created) => created,

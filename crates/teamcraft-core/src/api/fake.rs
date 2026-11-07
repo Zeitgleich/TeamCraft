@@ -293,10 +293,16 @@ struct State {
   policy_log: Vec<WorkspaceLogEntryResponse>,
   /// Larger attachments are refused like the server's `max_attachment_bytes`; `None`: no limit.
   maybe_max_attachment_bytes: Option<u64>,
+  /// What the fake publishes in `GET /me`: `None` like an older server.
+  maybe_draft_file_retention_days: Option<u32>,
   /// Parts stored by uploads in parts, counted over the whole run.
   part_uploads: u64,
   /// Unfinished uploads the clients gave up (`abandon_attachment`).
   abandoned_attachments: Vec<AttachmentId>,
+  /// Drafts' files the clients kept as they sent them, in order.
+  kept_attachments: Vec<AttachmentId>,
+  /// While set, keeping a draft's file fails with a server error.
+  is_failing_keeps: bool,
   /// Uploads in parts keep only the parts' sizes, not their bytes (memory tests with large files).
   is_discarding_parts: bool,
   share_links: HashMap<String, AttachmentId>,
@@ -440,6 +446,8 @@ struct FakeAttachment {
   is_complete: bool,
   /// An upload in parts: the parts stored so far, by part number.
   maybe_parts: Option<BTreeMap<u16, FakePart>>,
+  /// A file of an unsent draft not kept yet (#1220).
+  is_held: bool,
 }
 
 struct FakePart {
@@ -1786,6 +1794,37 @@ impl FakeServer {
     self.lock().abandoned_attachments.clone()
   }
 
+  /// Drafts' files the clients kept as they sent them, in order.
+  pub fn kept_attachments(&self) -> Vec<AttachmentId> {
+    self.lock().kept_attachments.clone()
+  }
+
+  /// Every attachment the server has, in the order of their IDs.
+  pub fn attachment_ids(&self) -> Vec<AttachmentId> {
+    let mut ids: Vec<AttachmentId> = self.lock().attachments.keys().copied().collect();
+    ids.sort();
+    ids
+  }
+
+  /// While set, keeping a draft's file fails with a server error (500).
+  pub fn fail_keeps(&self, is_failing: bool) {
+    self.lock().is_failing_keeps = is_failing;
+  }
+
+  /// Whether the server holds the attachment as an unsent draft's file.
+  pub fn is_held(&self, attachment: AttachmentId) -> bool {
+    self
+      .lock()
+      .attachments
+      .get(&attachment)
+      .is_some_and(|entry| entry.is_held)
+  }
+
+  /// Removes an attachment as the server's sweeper does with a draft's file not sent in time.
+  pub fn sweep_attachment(&self, attachment: AttachmentId) {
+    self.lock().attachments.remove(&attachment);
+  }
+
   /// While set, uploads in parts keep only the parts' sizes: a test of a large file then measures
   /// the client's memory, not the fake storage's.
   pub fn discard_parts(&self, is_discarding: bool) {
@@ -1794,6 +1833,11 @@ impl FakeServer {
 
   pub fn set_max_attachment_bytes(&self, limit: u64) {
     self.lock().maybe_max_attachment_bytes = Some(limit);
+  }
+
+  /// Publishes how long drafts' files are held, as a server that holds them does (#1220).
+  pub fn set_draft_file_retention_days(&self, days: u32) {
+    self.lock().maybe_draft_file_retention_days = Some(days);
   }
 
   /// What the public download page of a share link serves: the ciphertext, no account needed.
@@ -2132,6 +2176,8 @@ impl ServerApi for FakeServerApi {
         display_name: user.display_name.clone(),
         role: Role::Member,
         maybe_max_attachment_bytes: state.maybe_max_attachment_bytes,
+        maybe_draft_file_retention_days: state.maybe_draft_file_retention_days,
+        maybe_max_key_bag_bytes: None,
       })
     })
   }
@@ -5348,6 +5394,7 @@ impl ServerApi for FakeServerApi {
           maybe_blob: None,
           is_complete: false,
           maybe_parts: None,
+          is_held: request.is_draft,
         },
       );
       Ok(CreateAttachmentResponse {
@@ -5526,12 +5573,28 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn keep_attachment(&self, attachment: AttachmentId) -> Result<(), ApiError> {
+    self.with(|state, _| {
+      if state.is_failing_keeps {
+        return Err(ApiError::status(500, ErrorCode::Internal, "keeping failed"));
+      }
+      let entry = state
+        .attachments
+        .get_mut(&attachment)
+        .filter(|entry| entry.is_complete)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::AttachmentNotFound, "no such attachment"))?;
+      entry.is_held = false;
+      state.kept_attachments.push(attachment);
+      Ok(())
+    })
+  }
+
   async fn abandon_attachment(&self, attachment: AttachmentId) -> Result<(), ApiError> {
     self.with(|state, _| {
       if state
         .attachments
         .get(&attachment)
-        .is_some_and(|entry| entry.is_complete)
+        .is_some_and(|entry| entry.is_complete && !entry.is_held)
       {
         return Err(ApiError::status(409, ErrorCode::Conflict, "completed"));
       }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, uploader_user_id, conversation_id, size_bytes, s3_key, created_at, multipart_upload_id,\n                completed_at IS NOT NULL AS \"is_complete!\"\n         FROM attachments WHERE id = $1",
+  "query": "SELECT id, uploader_user_id, conversation_id, size_bytes, s3_key, created_at, multipart_upload_id,\n                draft_until, completed_at IS NOT NULL AS \"is_complete!\"\n         FROM attachments WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -82,6 +82,17 @@
       },
       {
         "ordinal": 7,
+        "name": "draft_until",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "attachments",
+            "name": "draft_until"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
         "name": "is_complete!",
         "type_info": "Bool",
         "origin": "Expression"
@@ -100,8 +111,9 @@
       false,
       false,
       true,
+      true,
       null
     ]
   },
-  "hash": "475a3d8b9281426b5db99101b1b4bf5bda548f4f79ab9be5daae34ac3a29cd6b"
+  "hash": "9db0a77f9e57405ca34a68e5f82464f02629db5baf62588753a9f4ba35b2d264"
 }

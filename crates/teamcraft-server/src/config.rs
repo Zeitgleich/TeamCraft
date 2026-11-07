@@ -338,6 +338,11 @@ pub struct LimitsConfig {
   pub max_pending_attachments_per_user: usize,
   /// Bytes of attachments one user may have stored or announced in total.
   pub max_attachment_bytes_per_user: u64,
+  /// How long files of an unsent draft are held (#1220): a draft's file the user hasn't sent by
+  /// then is removed. Published to clients in `GET /me`.
+  pub draft_file_retention_days: u32,
+  /// Files of unsent drafts one user may hold at a time.
+  pub max_draft_files_per_user: usize,
   /// E-mails one person's meetings (invitations, updates, cancellations; the rest of the invitees
   /// are told in the app only) and space invitations may send per hour. At 0, invitations go without
   /// mail and can't be resent.
@@ -1482,6 +1487,22 @@ impl Default for PolicyConfig {
   }
 }
 
+/// Longest `limits.draft_file_retention_days` taken: ten years, far beyond any useful draft.
+const MAX_DRAFT_FILE_RETENTION_DAYS: u32 = 3650;
+
+impl LimitsConfig {
+  /// Rejects limits that would delete drafts' files while they go up, or overflow a date.
+  pub fn validate(&self) -> Result<(), String> {
+    if !(1..=MAX_DRAFT_FILE_RETENTION_DAYS).contains(&self.draft_file_retention_days) {
+      return Err(format!(
+        "limits.draft_file_retention_days must be 1 to {MAX_DRAFT_FILE_RETENTION_DAYS}, is {}",
+        self.draft_file_retention_days
+      ));
+    }
+    Ok(())
+  }
+}
+
 impl Default for LimitsConfig {
   fn default() -> Self {
     Self {
@@ -1524,6 +1545,8 @@ impl Default for LimitsConfig {
       max_devices_per_user: 20,
       max_pending_attachments_per_user: 20,
       max_attachment_bytes_per_user: 20 * 1024 * 1024 * 1024,
+      draft_file_retention_days: 30,
+      max_draft_files_per_user: 200,
       max_meeting_mails_per_user_per_hour: 200,
     }
   }
@@ -1907,6 +1930,14 @@ mod tests {
       ..SecurityConfig::default()
     };
     assert!(SecurityConfig::default().validate().is_ok());
+    assert!(LimitsConfig::default().validate().is_ok());
+    for days in [0, MAX_DRAFT_FILE_RETENTION_DAYS + 1] {
+      let limits = LimitsConfig {
+        draft_file_retention_days: days,
+        ..LimitsConfig::default()
+      };
+      assert!(limits.validate().is_err(), "{days} days");
+    }
     assert!(with("https://chat.example.com:8443").validate().is_ok());
     assert!(with("chat.example.com").validate().is_err());
     assert!(with("https://chat.example.com/app").validate().is_err());

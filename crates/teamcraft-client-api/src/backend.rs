@@ -18,7 +18,7 @@ use teamcraft_proto::{
 
 use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MediaAnchor, MediaPage,
-  MessageExtras, NewChannel, NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
+  MessageExtras, NewChannel, NewSpace, OutgoingFile, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
   ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use crate::activity::ActivityFeed;
@@ -34,7 +34,7 @@ use crate::calls::{
 use crate::calls::{
   CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
 };
-use crate::drafts::{DraftItem, SentItem};
+use crate::drafts::{DraftFileItem, DraftItem, SentItem};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, FirstSync, KeyCatchUp, MembershipIssue, Message,
@@ -545,6 +545,32 @@ pub trait ChatBackend {
   }
   /// Stores the draft; an empty body removes it. Call debounced while typing.
   fn set_draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>, _body: &str) {}
+  /// Attaches files to the draft (#1220): they go up at once, so they travel with the draft to the
+  /// user's other devices. Sending them names them with [`crate::actions::FileSource::Draft`].
+  fn attach_draft_files(
+    &self,
+    _conversation: ConversationId,
+    _maybe_thread: Option<ThreadId>,
+    _files: Vec<OutgoingFile>,
+  ) {
+  }
+  /// The files attached to the draft, in the order they were attached.
+  fn draft_files(
+    &self,
+    _conversation: ConversationId,
+    _maybe_thread: Option<ThreadId>,
+  ) -> Vec<DraftFileItem> {
+    Vec::new()
+  }
+  /// Takes a file out of the draft on every device of the user; the server deletes it.
+  fn remove_draft_file(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>, _id: &str) {}
+  /// Deletes the draft with its files, on every device of the user.
+  fn discard_draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
+    self.set_draft(conversation, maybe_thread, "");
+    for file in self.draft_files(conversation, maybe_thread) {
+      self.remove_draft_file(conversation, maybe_thread, &file.id);
+    }
+  }
   /// The messages waiting for their time, and the rule that applies (docs/scheduled-messages.md).
   /// A backend that can't keep them answers with scheduling off, so nothing offers it.
   fn scheduled_overview(&self) -> ScheduledOverview {

@@ -29,6 +29,7 @@ mod direct_uploads;
 mod disk_downloads;
 mod dm_setup;
 mod dpop;
+mod draft_files;
 mod enrollment;
 mod files;
 mod first_add_back;

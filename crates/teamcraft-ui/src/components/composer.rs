@@ -4,6 +4,7 @@ use wasm_bindgen::JsCast;
 
 use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, OutgoingMessage};
 use teamcraft_client_api::admin::format_bytes;
+use teamcraft_client_api::drafts::{DraftFileItem, DraftFileState};
 use teamcraft_client_api::scheduled::ScheduleCheck;
 use teamcraft_client_api::voice::RecordingStop;
 use teamcraft_proto::ClientMessageId;
@@ -88,6 +89,11 @@ struct PendingFile {
   maybe_thumbnail: Option<Vec<u8>>,
   /// How long a video plays, read by the browser along with its poster frame.
   maybe_duration_ms: Option<u64>,
+  /// The file's ID in the draft (#1220): it goes up as it is attached and follows the draft to the
+  /// user's other devices.
+  draft_id: String,
+  /// Where the core reads a large file from, once it was handed over for the draft.
+  maybe_staged: Option<FileSource>,
 }
 
 /// A small file is read into memory at once; a large one stays the browser's `File` until it is sent
@@ -340,6 +346,74 @@ pub fn Composer(
     current
   });
 
+  // Files go up with the draft as they are attached (#1220): the draft keeps them after this
+  // composer closes and on the user's other devices. One removed here leaves the draft; one sent
+  // was taken by its message. `gone_ids` keeps both from showing again while the core catches up.
+  let gone_ids = StoredValue::new(Vec::<String>::new());
+  let attach_to_draft = move |file: PendingFile| {
+    if let Some(upload) = draft_upload(&file) {
+      state.write(|backend| backend.attach_draft_files(conversation, maybe_thread, vec![upload]));
+      return;
+    }
+    let FileContent::Large(picked) = file.content.clone() else {
+      return;
+    };
+    leptos::task::spawn_local(async move {
+      let source = match large_files::source_of(&picked).await {
+        Ok(source) => source,
+        // Sent as before then: the send hands the file over itself.
+        Err(error) => return tracing::warn!(%error, "a large file could not be handed over for the draft"),
+      };
+      let mut staged = file;
+      staged.maybe_staged = Some(source);
+      // Removed or sent meanwhile: the draft doesn't take it.
+      let is_waiting = attachments.try_update(|list| {
+        let found = list
+          .iter_mut()
+          .find(|waiting| waiting.draft_id == staged.draft_id);
+        found
+          .map(|waiting| waiting.maybe_staged.clone_from(&staged.maybe_staged))
+          .is_some()
+      });
+      if is_waiting == Some(true)
+        && let Some(upload) = draft_upload(&staged)
+      {
+        state.try_write(|backend| backend.attach_draft_files(conversation, maybe_thread, vec![upload]));
+      }
+    });
+  };
+  Effect::new(move |previous: Option<Vec<String>>| {
+    let current: Vec<PendingFile> = attachments.get();
+    let known = previous.unwrap_or_default();
+    for id in known
+      .iter()
+      .filter(|id| !current.iter().any(|file| &file.draft_id == *id))
+    {
+      if !gone_ids.with_value(|gone| gone.contains(id)) {
+        gone_ids.update_value(|gone| gone.push(id.clone()));
+        state.write(|backend| backend.remove_draft_file(conversation, maybe_thread, id));
+      }
+    }
+    for file in current.iter().filter(|file| !known.contains(&file.draft_id)) {
+      untrack(|| attach_to_draft(file.clone()));
+    }
+    current.into_iter().map(|file| file.draft_id).collect()
+  });
+  // The draft's files as the core has them: those attached on another device, or before this
+  // composer opened, show beside the ones picked here.
+  let draft_files = Memo::new(move |_| state.read(|backend| backend.draft_files(conversation, maybe_thread)));
+  let other_files = Memo::new(move |_| {
+    draft_files
+      .get()
+      .into_iter()
+      .filter(|item| !attachments.with(|list| list.iter().any(|file| file.draft_id == item.id)))
+      .filter(|item| !gone_ids.with_value(|gone| gone.contains(&item.id)))
+      .collect::<Vec<DraftFileItem>>()
+  });
+  let has_files =
+    move || !attachments.with(Vec::is_empty) || other_files.with(|files| files.iter().any(is_sendable));
+  let has_files_untracked = move || untrack(has_files);
+
   // Opening a conversation (or a thread) lets the user type at once, with mouse and keyboard only
   // (#722). Once, when the editor is in the page; nothing reactive is tracked.
   let has_tried_focus = StoredValue::new(false);
@@ -460,11 +534,16 @@ pub fn Composer(
       return;
     };
     let mut text = composer_editor::markdown(&element);
-    if text.trim().is_empty() && attachments.with_untracked(Vec::is_empty) {
+    if text.trim().is_empty() && !has_files_untracked() {
+      return;
+    }
+    // A file the server held too long is gone: the user decides, nothing goes out without it unsaid.
+    if other_files.with_untracked(|files| files.iter().any(|item| item.state == DraftFileState::Expired)) {
+      upload_error.set(Some(i18n.t("composer-draft-files-expired")));
       return;
     }
     // Slash commands run on the client; a command that sends something falls through to the send.
-    if attachments.with_untracked(Vec::is_empty) {
+    if !has_files_untracked() {
       match slash::parse(&text) {
         Parsed::Invalid(error) => {
           notice.set(Some(Notice::Text(composer_commands::explain_error(i18n, &error))));
@@ -516,25 +595,32 @@ pub fn Composer(
     pending_confirm.set(None);
     let mut files = Vec::new();
     let mut large = Vec::new();
-    for file in attachments.get_untracked() {
-      match file.content {
-        FileContent::Read(bytes) => files.push(OutgoingFile {
-          file_name: file.name,
-          media_type: file.media_type,
-          source: FileSource::Bytes { bytes },
-          maybe_thumbnail: file.maybe_thumbnail,
-          maybe_duration_ms: file.maybe_duration_ms,
-          maybe_waveform: None,
-        }),
-        FileContent::Large(picked) => large.push((
+    let local = attachments.get_untracked();
+    let others: Vec<DraftFileItem> = other_files
+      .get_untracked()
+      .into_iter()
+      .filter(is_sendable)
+      .collect();
+    gone_ids.update_value(|gone| {
+      gone.extend(local.iter().map(|file| file.draft_id.clone()));
+      gone.extend(others.iter().map(|item| item.id.clone()));
+    });
+    // The core takes the draft's upload where it has one, and reads the file named here otherwise.
+    for file in local {
+      if let Some(upload) = draft_upload(&file) {
+        files.push(upload);
+      } else if let FileContent::Large(picked) = file.content {
+        large.push((
           file.name,
           file.media_type,
           picked,
           file.maybe_thumbnail,
           file.maybe_duration_ms,
-        )),
+          file.draft_id,
+        ));
       }
     }
+    files.extend(others.iter().map(from_draft));
     let body = text;
     let maybe_reply = state
       .reply_target
@@ -566,7 +652,7 @@ pub fn Composer(
     } else {
       // Large files are handed to the core first (staged or registered); the message follows.
       leptos::task::spawn_local(async move {
-        for (file_name, media_type, picked, maybe_thumbnail, maybe_duration_ms) in large {
+        for (file_name, media_type, picked, maybe_thumbnail, maybe_duration_ms, draft_id) in large {
           match large_files::source_of(&picked).await {
             Ok(source) => message.files.push(OutgoingFile {
               file_name,
@@ -575,6 +661,7 @@ pub fn Composer(
               maybe_thumbnail,
               maybe_duration_ms,
               maybe_waveform: None,
+              maybe_draft_id: Some(draft_id),
             }),
             Err(error) => {
               tracing::warn!(%error, "a large file could not be handed to the core");
@@ -1042,7 +1129,7 @@ pub fn Composer(
     if ev.key() == "ArrowUp"
       && !has_modifier
       && is_empty.get_untracked()
-      && attachments.with_untracked(Vec::is_empty)
+      && !has_files_untracked()
       && edit_last_message()
     {
       ev.prevent_default();
@@ -1185,6 +1272,8 @@ pub fn Composer(
               maybe_preview_url,
               maybe_thumbnail,
               maybe_duration_ms,
+              draft_id: new_draft_id(),
+              maybe_staged: None,
             };
             if let Some(PendingFile {
               maybe_preview_url: Some(url),
@@ -1426,7 +1515,7 @@ pub fn Composer(
           view! { <p class="composer-readonly">{move || i18n.t(if is_archived { "composer-archived" } else { "composer-readonly" })}</p> }
         }
       >
-        <Show when=move || !attachments.with(Vec::is_empty) fallback=|| ()>
+        <Show when=move || !attachments.with(Vec::is_empty) || !other_files.with(Vec::is_empty) fallback=|| ()>
           <ul class="attachment-chips" aria-label=move || i18n.t("composer-attachments")>
             <For each=attachment_list key=|(i, name, url, _)| (*i, name.clone(), url.clone()) let:item>
               {
@@ -1463,6 +1552,38 @@ pub fn Composer(
                 }
               }
             </For>
+            <For
+              each=move || other_files.get()
+              key=|item| (item.id.clone(), status_key(&item.state), item.maybe_thumbnail.is_some())
+              let:item
+            >
+              {
+                let id = item.id.clone();
+                let maybe_status = status_key(&item.state);
+                let is_failed = maybe_status.is_some();
+                let leading = match &item.maybe_thumbnail {
+                  Some(bytes) => view! { <img class="chip-thumb" src=thumbnail_data_url(bytes) alt="" /> }.into_any(),
+                  None => view! { <Icon name=IconName::File /> }.into_any(),
+                };
+                view! {
+                  <li class="chip" class:chip-failed=is_failed>
+                    {leading}
+                    <span class="chip-name">{item.file_name.clone()}</span>
+                    {maybe_status.map(|key| view! { <span class="chip-status">{move || i18n.t(key)}</span> })}
+                    <button
+                      class="icon-btn icon-btn-small"
+                      aria-label=move || i18n.t("composer-remove-attachment")
+                      on:click=move |_| {
+                        gone_ids.update_value(|gone| gone.push(id.clone()));
+                        state.write(|backend| backend.remove_draft_file(conversation, maybe_thread, &id));
+                      }
+                    >
+                      <Icon name=IconName::Close />
+                    </button>
+                  </li>
+                }
+              }
+            </For>
           </ul>
         </Show>
         {move || {
@@ -1478,6 +1599,9 @@ pub fn Composer(
                 target.content = FileContent::Read(edited);
                 target.maybe_preview_url = maybe_url;
                 target.maybe_thumbnail = None;
+                // The edited picture replaces the one in the draft.
+                target.draft_id = new_draft_id();
+                target.maybe_staged = None;
               }
             });
             editing.set(None);
@@ -1828,7 +1952,7 @@ pub fn Composer(
             <div class="send-group composer-menu-wrap">
               <button
                 class="send-btn"
-                disabled=move || is_empty.get() && attachments.with(Vec::is_empty)
+                disabled=move || is_empty.get() && !has_files()
                 aria-label=move || i18n.t("composer-send")
                 title=move || i18n.t("composer-send")
                 on:click=move |_| send()
@@ -1851,9 +1975,9 @@ pub fn Composer(
                   priority=priority
                   is_silent=is_silent
                   wants_acknowledgement=wants_acknowledgement
-                  can_schedule=Signal::derive(move || !is_empty.get() && attachments.with(Vec::is_empty))
+                  can_schedule=Signal::derive(move || !is_empty.get() && !has_files())
                   maybe_schedule_hint=Signal::derive(move || {
-                    if !attachments.with(Vec::is_empty) {
+                    if has_files() {
                       Some(i18n.t("schedule-no-files"))
                     } else if is_empty.get() {
                       Some(i18n.t("schedule-write-first"))
@@ -2033,6 +2157,72 @@ fn pending_file_in_shell(file: ShellFile) -> PendingFile {
     maybe_preview_url: None,
     maybe_thumbnail: None,
     maybe_duration_ms: None,
+    draft_id: new_draft_id(),
+    maybe_staged: None,
+  }
+}
+
+/// Whether a draft's file goes out with the message: not one that failed or expired.
+fn is_sendable(item: &DraftFileItem) -> bool {
+  matches!(
+    item.state,
+    DraftFileState::Ready | DraftFileState::Uploading | DraftFileState::OnThisDevice
+  )
+}
+
+/// What a draft's file's chip says about it, for one that won't go out.
+fn status_key(state: &DraftFileState) -> Option<&'static str> {
+  match state {
+    DraftFileState::Failed | DraftFileState::Unknown => Some("composer-draft-file-failed"),
+    DraftFileState::Expired => Some("composer-draft-file-expired"),
+    DraftFileState::Ready | DraftFileState::Uploading | DraftFileState::OnThisDevice => None,
+  }
+}
+
+/// A fresh ID for a file attached to the draft (the core's draft file IDs are of this form).
+fn new_draft_id() -> String {
+  ClientMessageId::random().to_hex()
+}
+
+/// A `data:` URL of a draft's file's thumbnail (small, sent by the core; nothing to revoke).
+fn thumbnail_data_url(bytes: &[u8]) -> String {
+  use base64::Engine as _;
+  format!(
+    "data:{};base64,{}",
+    thumbnail_type(bytes),
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+  )
+}
+
+/// What the core reads a file of the draft from, as it is attached (`None`: a large file that is
+/// handed over first).
+fn draft_upload(file: &PendingFile) -> Option<OutgoingFile> {
+  let source = match (&file.content, &file.maybe_staged) {
+    (FileContent::Read(bytes), _) => FileSource::Bytes { bytes: bytes.clone() },
+    (FileContent::Large(_), Some(staged)) => staged.clone(),
+    (FileContent::Large(_), None) => return None,
+  };
+  Some(OutgoingFile {
+    file_name: file.name.clone(),
+    media_type: file.media_type.clone(),
+    source,
+    maybe_thumbnail: file.maybe_thumbnail.clone(),
+    maybe_duration_ms: file.maybe_duration_ms,
+    maybe_waveform: None,
+    maybe_draft_id: Some(file.draft_id.clone()),
+  })
+}
+
+/// A file attached on another device (or before this composer opened), sent from the draft.
+fn from_draft(item: &DraftFileItem) -> OutgoingFile {
+  OutgoingFile {
+    file_name: item.file_name.clone(),
+    media_type: item.media_type.clone(),
+    source: FileSource::Draft { id: item.id.clone() },
+    maybe_thumbnail: None,
+    maybe_duration_ms: None,
+    maybe_waveform: None,
+    maybe_draft_id: None,
   }
 }
 
@@ -2171,6 +2361,8 @@ mod tests {
       maybe_preview_url: None,
       maybe_thumbnail: None,
       maybe_duration_ms: None,
+      draft_id: name.into(),
+      maybe_staged: None,
     }
   }
 }

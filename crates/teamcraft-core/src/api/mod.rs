@@ -690,8 +690,12 @@ pub trait ServerApi {
     attachment: AttachmentId,
     request: &CompleteMultipartAttachmentRequest,
   ) -> impl Future<Output = Result<AttachmentResponse, ApiError>>;
-  /// Gives up an unfinished upload (cancelled): the server frees its parts or object.
+  /// Gives up an unfinished upload (cancelled) or a file of an unsent draft (removed from it): the
+  /// server frees its parts or object.
   fn abandon_attachment(&self, attachment: AttachmentId) -> impl Future<Output = Result<(), ApiError>>;
+  /// Keeps a file of the user's unsent draft as it is sent (#1220): the server no longer deletes it
+  /// with the draft. 404 when the server no longer has it.
+  fn keep_attachment(&self, attachment: AttachmentId) -> impl Future<Output = Result<(), ApiError>>;
   fn download_attachment(
     &self,
     attachment: AttachmentId,

@@ -105,6 +105,14 @@ pub enum CoreCommand {
     maybe_thread: Option<ThreadId>,
     body: String,
   },
+  /// A message took these uploaded files out of their drafts (#1220).
+  TakeDraftFiles {
+    ids: Vec<String>,
+  },
+  /// The user removed an uploaded file from its draft (#1220).
+  RemoveDraftFile {
+    id: String,
+  },
   /// "Send later" (docs/scheduled-messages.md): sealed here, held by the server.
   ScheduleMessage {
     message: OutgoingMessage,
@@ -2096,6 +2104,27 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       maybe_thread,
       body: body.to_string(),
     });
+  }
+
+  fn attach_draft_files(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+    files: Vec<teamcraft_client_api::actions::OutgoingFile>,
+  ) {
+    self.ui_attach_draft_files(conversation, maybe_thread, files);
+  }
+
+  fn draft_files(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+  ) -> Vec<teamcraft_client_api::drafts::DraftFileItem> {
+    self.ui_draft_files(conversation, maybe_thread)
+  }
+
+  fn remove_draft_file(&self, conversation: ConversationId, _maybe_thread: Option<ThreadId>, id: &str) {
+    self.ui_remove_draft_file(conversation, id);
   }
 
   fn scheduled_overview(&self) -> ScheduledOverview {

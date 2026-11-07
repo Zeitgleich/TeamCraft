@@ -534,3 +534,203 @@ mod multipart {
     app.stop().await;
   }
 }
+
+/// Files of unsent drafts (#1220): held for the uploader, kept as they are sent, swept otherwise.
+mod drafts {
+  use super::*;
+
+  /// Announces, uploads and completes a file of `user`'s draft; returns its ID.
+  async fn draft_file(app: &TestApp, user: &TestUser, channel: &str) -> String {
+    let reply = app
+      .post(
+        user,
+        "/attachments",
+        json!({"conversation_id": channel, "size_bytes": BLOB.len(), "is_draft": true}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert_eq!(
+      upload(app, reply.body["upload_url"].as_str().unwrap(), BLOB).await,
+      StatusCode::OK
+    );
+    let id = reply.body["id"].as_str().unwrap().to_owned();
+    let completed = app
+      .post(user, &format!("/attachments/{id}/complete"), json!({}))
+      .await;
+    assert_eq!(completed.status, StatusCode::OK, "{}", completed.body);
+    id
+  }
+
+  #[tokio::test]
+  async fn a_drafts_file_is_the_uploaders_until_they_keep_it() {
+    let app = app!();
+    let (carol, dave) = (member("carol"), member("dave"));
+    let channel = channel_with(&app, &[&carol, &dave]).await;
+    assert_eq!(app.get(&carol, "/me").await.body["draft_file_retention_days"], 30);
+    let id = draft_file(&app, &carol, &channel).await;
+
+    let download = format!("/attachments/{id}/download");
+    assert_eq!(app.get(&carol, &download).await.status, StatusCode::OK);
+    assert_eq!(
+      app.get(&dave, &download).await.error_code(),
+      "attachment_not_found"
+    );
+    assert_eq!(
+      app
+        .post(&dave, &format!("/attachments/{id}/keep"), json!({}))
+        .await
+        .error_code(),
+      "attachment_not_found"
+    );
+
+    let keep = format!("/attachments/{id}/keep");
+    assert_eq!(
+      app.post(&carol, &keep, json!({})).await.status,
+      StatusCode::NO_CONTENT
+    );
+    // Kept again after a lost answer: harmless.
+    assert_eq!(
+      app.post(&carol, &keep, json!({})).await.status,
+      StatusCode::NO_CONTENT
+    );
+    assert_eq!(app.get(&dave, &download).await.status, StatusCode::OK);
+    // Removing it from the draft on another device can't take it out of the sent message.
+    assert_eq!(
+      app.delete(&carol, &format!("/attachments/{id}")).await.status,
+      StatusCode::CONFLICT
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_drafts_file_of_a_conversation_the_uploader_left_is_not_kept() {
+    let app = app!();
+    let (carol, dave) = (member("carol"), member("dave"));
+    let channel = channel_with(&app, &[&carol, &dave]).await;
+    let id = draft_file(&app, &carol, &channel).await;
+    let carol_id = user_id(&app, &carol).await;
+    let left = app
+      .delete(&carol, &format!("/conversations/{channel}/members/{carol_id}"))
+      .await;
+    assert!(left.status.is_success(), "{}", left.body);
+    assert_eq!(
+      app
+        .post(&carol, &format!("/attachments/{id}/keep"), json!({}))
+        .await
+        .error_code(),
+      "attachment_not_found",
+      "it stays held, and the sweeper removes it"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_file_removed_from_the_draft_is_gone_and_cant_be_kept() {
+    let app = app!();
+    let carol = member("carol");
+    let channel = channel_with(&app, &[&carol]).await;
+    let id = draft_file(&app, &carol, &channel).await;
+    let record = app
+      .state
+      .database
+      .get_attachment(id.parse().unwrap())
+      .await
+      .unwrap()
+      .unwrap();
+
+    assert_eq!(
+      app.delete(&carol, &format!("/attachments/{id}")).await.status,
+      StatusCode::NO_CONTENT
+    );
+    let store = app.state.maybe_blob_store.clone().unwrap();
+    assert!(store.object_size(&record.s3_key).await.unwrap().is_none());
+    // Another device sends the draft meanwhile: the file is not found, so it goes without.
+    assert_eq!(
+      app
+        .post(&carol, &format!("/attachments/{id}/keep"), json!({}))
+        .await
+        .error_code(),
+      "attachment_not_found"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn files_of_drafts_not_sent_in_time_are_swept_and_kept_ones_stay() {
+    let Some(app) =
+      TestApp::start_with_storage(|settings| settings.limits.draft_file_retention_days = 0).await
+    else {
+      return;
+    };
+    let carol = member("carol");
+    let channel = channel_with(&app, &[&carol]).await;
+    let unsent = draft_file(&app, &carol, &channel).await;
+    let sent = draft_file(&app, &carol, &channel).await;
+    app
+      .post(&carol, &format!("/attachments/{sent}/keep"), json!({}))
+      .await;
+
+    let unsent_id = unsent.parse().unwrap();
+    let record = app
+      .state
+      .database
+      .get_attachment(unsent_id)
+      .await
+      .unwrap()
+      .unwrap();
+    let held_until = record.maybe_draft_until.expect("held for the draft");
+    // Just after this file's hold, so drafts' files of tests running in parallel stay.
+    let swept = teamcraft_server::services::attachments::sweep_expired_drafts(
+      &app.state,
+      held_until + time::Duration::milliseconds(1),
+    )
+    .await
+    .unwrap();
+    assert!(swept >= 1);
+    assert!(
+      app
+        .state
+        .database
+        .get_attachment(unsent_id)
+        .await
+        .unwrap()
+        .is_none()
+    );
+    let store = app.state.maybe_blob_store.clone().unwrap();
+    assert!(store.object_size(&record.s3_key).await.unwrap().is_none());
+    let kept = app
+      .state
+      .database
+      .get_attachment(sent.parse().unwrap())
+      .await
+      .unwrap();
+    assert!(kept.is_some_and(|kept| kept.maybe_draft_until.is_none()));
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_user_holds_a_limited_number_of_drafts_files() {
+    let Some(app) =
+      TestApp::start_with_storage(|settings| settings.limits.max_draft_files_per_user = 1).await
+    else {
+      return;
+    };
+    // A fresh user per run: the test database is shared and outlives the run.
+    let nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
+    let erin = member(&format!("erin-{nanos}"));
+    let channel = channel_with(&app, &[&erin]).await;
+    draft_file(&app, &erin, &channel).await;
+
+    let refused = app
+      .post(
+        &erin,
+        "/attachments",
+        json!({"conversation_id": channel, "size_bytes": BLOB.len(), "is_draft": true}),
+      )
+      .await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+    // Files sent right away don't count.
+    announce(&app, &erin, &channel, BLOB.len()).await;
+    app.stop().await;
+  }
+}

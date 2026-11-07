@@ -12,10 +12,11 @@ use teamcraft_proto::{AttachmentId, Base64Bytes, ClientMessageId};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::client::disk_downloads::{DownloadRecord, DownloadStatus, download_records};
+use crate::client::draft_files::note_sent_draft_file;
 use crate::client::files::{
-  PendingFile, PendingUpload, RetryCause, TransferFailure, TransferState, UploadRetry, UploadSource,
-  attachments_of, cancel_pending_file, failed_uploads, pending_upload, save_pending_upload, share_links,
-  transfer_state,
+  PendingFile, PendingUpload, RetryCause, TransferFailure, TransferState, UploadPurpose, UploadRetry,
+  UploadSource, attachments_of, cancel_pending_file, failed_uploads, pending_upload, save_pending_upload,
+  share_links, transfer_state,
 };
 use crate::error::CoreError;
 use crate::imported::Authorship;
@@ -25,6 +26,7 @@ use crate::store::{
 };
 use crate::transfers::Transfers;
 use crate::ui_backend::{CoreChatBackend, CoreCommand, RedactedText, imported_author_view, ui_message_id};
+use crate::ui_draft_files::TakenDraftFile;
 
 impl<S: LocalStore> CoreChatBackend<S> {
   /// Files attached to a message, with where their bytes are; `maybe_importer` is
@@ -179,14 +181,59 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let Some(id) = self.enqueue_as(conversation, maybe_thread, content, maybe_id) else {
       return;
     };
+    // Files of the draft (#1220) are up or going up already; the rest are read now.
+    let data = self.read(crate::client::stored_account_data(self.store_ref()));
+    let mut taken = Vec::new();
+    let mut pending = Vec::with_capacity(files.len());
+    for file in files {
+      let maybe_draft_id = match &file.source {
+        FileSource::Draft { id } => Some(id.clone()),
+        _ => file.maybe_draft_id.clone(),
+      };
+      let Some(id) = maybe_draft_id else {
+        pending.extend(pending_file(file));
+        continue;
+      };
+      let is_from_draft_only = matches!(file.source, FileSource::Draft { .. });
+      match self.take_draft_file(&data, conversation, maybe_thread, &id) {
+        Some(TakenDraftFile::OnDevice(taken_file)) => pending.push(taken_file),
+        Some(TakenDraftFile::Uploaded(taken_file)) => {
+          taken.push(id);
+          pending.push(taken_file);
+        },
+        // The server's copy is gone or about to be: out of the draft, and sent from the file the
+        // app still has if it picked it here (the composer marks it otherwise, so it isn't sent).
+        Some(TakenDraftFile::Expired) => {
+          taken.push(id);
+          if !is_from_draft_only {
+            pending.extend(pending_file(file));
+          }
+        },
+        // Removed on another device meanwhile: the message goes without it.
+        None if is_from_draft_only => {
+          tracing::debug!(conversation_id = %conversation, "a draft's file to send is gone");
+        },
+        // Its attachment hasn't reached the core yet: read it now, and don't attach it later.
+        None => {
+          if let Err(error) = note_sent_draft_file(self.store_ref(), &id) {
+            tracing::warn!(%error, "a sent draft's file was not noted");
+          }
+          pending.extend(pending_file(file));
+        },
+      }
+    }
     let upload = PendingUpload {
       conversation_id: conversation,
       client_message_id: id,
-      files: files.into_iter().map(pending_file).collect(),
+      files: pending,
+      purpose: UploadPurpose::Message,
     };
     if let Err(error) = save_pending_upload(self.store_ref(), &upload) {
       tracing::error!(%error, "could not store the files to upload");
       return;
+    }
+    if !taken.is_empty() {
+      self.command(CoreCommand::TakeDraftFiles { ids: taken });
     }
     self.queue_link_preview(conversation, id, body);
     self.command(CoreCommand::UploadFiles);
@@ -510,7 +557,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 }
 
-fn pending_file(file: OutgoingFile) -> PendingFile {
+/// A file the app hands over, to upload; `None` for a draft's file, which is uploaded already
+/// ([`CoreChatBackend::take_draft_file`]).
+pub(crate) fn pending_file(file: OutgoingFile) -> Option<PendingFile> {
   let (source, size_bytes) = match file.source {
     FileSource::Bytes { bytes } => {
       let size = bytes.len() as u64;
@@ -526,6 +575,7 @@ fn pending_file(file: OutgoingFile) -> PendingFile {
       (UploadSource::Path { path }, size)
     },
     FileSource::Picked { handle, size_bytes } => (UploadSource::Picked { handle }, size_bytes),
+    FileSource::Draft { .. } => return None,
   };
   // Read from the header only: the pending message reserves the picture's space at once.
   let maybe_dimensions = match &source {
@@ -533,7 +583,7 @@ fn pending_file(file: OutgoingFile) -> PendingFile {
       .map(|(width, height)| ImageDimensions { width, height }),
     UploadSource::Path { .. } | UploadSource::Picked { .. } => None,
   };
-  PendingFile {
+  Some(PendingFile {
     file_name: file.file_name,
     media_type: file.media_type,
     source,
@@ -550,7 +600,8 @@ fn pending_file(file: OutgoingFile) -> PendingFile {
       .maybe_waveform
       .and_then(|bytes| Waveform::checked(&bytes))
       .map(|waveform| Base64Bytes::new(waveform.into_bytes())),
-  }
+    is_held: false,
+  })
 }
 
 #[cfg(not(target_arch = "wasm32"))]

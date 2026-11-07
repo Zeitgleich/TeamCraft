@@ -283,6 +283,12 @@ impl Upkeep {
     self.has_failed = true;
     if let Err(error) = client.sync_account_data().await {
       if error.is_key_bag_refused() {
+        // Drafts' thumbnails go first; the next round tries again without them.
+        match client.shed_draft_thumbnails() {
+          Ok(true) => return false,
+          Ok(false) => {},
+          Err(error) => tracing::warn!(%error, "drafts' thumbnails were not dropped"),
+        }
         tracing::warn!("the server refuses the key bag as too large: keys and account data aren't backed up");
         let is_news = !std::mem::replace(&mut self.has_reported_refusal, true);
         if is_news {

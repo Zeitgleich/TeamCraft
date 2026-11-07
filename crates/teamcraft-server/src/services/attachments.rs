@@ -88,6 +88,7 @@ pub async fn create_attachment(
       size_bytes: request.size_bytes,
       s3_key: &key,
       maybe_multipart_upload_id: None,
+      maybe_draft_until: draft_until(state, &request),
     })
     .await?;
   Ok(CreateAttachmentResponse {
@@ -118,6 +119,7 @@ pub async fn create_multipart_attachment(
       size_bytes: request.size_bytes,
       s3_key: &key,
       maybe_multipart_upload_id: Some(&upload_id),
+      maybe_draft_until: draft_until(state, &request),
     })
     .await;
   if let Err(error) = created {
@@ -206,9 +208,10 @@ pub async fn complete_multipart_attachment(
   attachment_response(&attachment)
 }
 
-/// The uploader gives up on an unfinished upload (cancelled): its parts or object are freed and it
-/// no longer counts against the unfinished uploads. A completed attachment stays (its message may
-/// carry it); one that is gone counts as given up.
+/// The uploader gives up on an unfinished upload (cancelled) or on a file of an unsent draft (#1220,
+/// removed from the draft): its parts or object are freed and it no longer counts against the
+/// unfinished uploads. A completed attachment that was sent stays (its message carries it); one
+/// that is gone counts as given up.
 pub async fn abandon_attachment(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -231,6 +234,58 @@ pub async fn abandon_attachment(
       _ => Ok(()),
     },
   }
+}
+
+/// The uploader sends a file of their draft (#1220): it is no longer held for the draft and stays
+/// like any sent attachment. A file the sweeper or another device of the uploader removed meanwhile
+/// is not found; the client then sends without it and says so. So is one of a conversation the
+/// uploader may no longer post in: it stays held, and the sweeper removes it with the draft.
+pub async fn keep_attachment(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: AttachmentId,
+) -> Result<(), ApiError> {
+  let maybe_conversation = state
+    .database
+    .get_attachment(id)
+    .await?
+    .filter(|attachment| attachment.maybe_uploader == Some(caller.user.id))
+    .and_then(|attachment| attachment.maybe_conversation);
+  let Some(conversation) = maybe_conversation else {
+    return Err(ApiError::attachment_not_found());
+  };
+  let access = load_conversation(state, caller, conversation)
+    .await
+    .map_err(|_| ApiError::attachment_not_found())?;
+  require(state, caller, Permission::CreatePost, &access.target())
+    .map_err(|_| ApiError::attachment_not_found())?;
+  if state.database.keep_attachment(id, caller.user.id).await? {
+    Ok(())
+  } else {
+    match state.database.get_attachment(id).await? {
+      Some(attachment) if attachment.maybe_uploader == Some(caller.user.id) => {
+        Err(ApiError::Conflict("the upload has not been completed".into()))
+      },
+      _ => Err(ApiError::attachment_not_found()),
+    }
+  }
+}
+
+/// Removes the files of drafts that were not sent within `draft_file_retention_days`, with their
+/// objects. Runs with the sweep of unfinished uploads.
+pub async fn sweep_expired_drafts(state: &AppState, now: OffsetDateTime) -> Result<usize, ApiError> {
+  let Some(store) = state.maybe_blob_store.as_ref() else {
+    return Ok(0);
+  };
+  if store.check_available().is_err() {
+    warn!("the storage is down; sweeping drafts' files later");
+    return Ok(0);
+  }
+  let removed = state.database.sweep_expired_draft_attachments(now).await?;
+  for attachment in &removed {
+    free_storage(store, attachment).await;
+  }
+  Ok(removed.len())
 }
 
 /// Confirms the upload: the stored object must have exactly the announced size.
@@ -295,6 +350,10 @@ pub async fn readable_attachment(
   if !attachment.is_complete {
     return Err(ApiError::Conflict("the upload has not been completed".into()));
   }
+  // A file of an unsent draft is its uploader's until they send it (#1220).
+  if attachment.maybe_draft_until.is_some() && attachment.maybe_uploader != Some(caller.user.id) {
+    return Err(ApiError::attachment_not_found());
+  }
   Ok((attachment, access))
 }
 
@@ -333,7 +392,26 @@ async fn check_announcement(
       "your attachment storage is full".into(),
     ));
   }
+  if request.is_draft
+    && state.database.draft_attachment_count(caller.user.id).await? >= limits.max_draft_files_per_user as u64
+  {
+    return Err(ApiError::Conflict(
+      "too many files in unsent drafts; send or remove some first".into(),
+    ));
+  }
   Ok(())
+}
+
+/// Until when a draft's file is held, for an announcement that says it is one.
+fn draft_until(state: &AppState, request: &CreateAttachmentRequest) -> Option<OffsetDateTime> {
+  // `limits.validate` keeps the days in range; a sum past the calendar holds as long as it can.
+  request.is_draft.then(|| {
+    let days = state.settings.get().limits.draft_file_retention_days.max(1);
+    let now = OffsetDateTime::now_utc();
+    now
+      .checked_add(time::Duration::days(i64::from(days)))
+      .unwrap_or(time::PrimitiveDateTime::MAX.assume_utc())
+  })
 }
 
 /// An attachment the caller uploads (anyone else's is "not found").

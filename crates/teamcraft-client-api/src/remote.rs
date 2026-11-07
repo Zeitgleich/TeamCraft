@@ -13,7 +13,7 @@ use teamcraft_proto::{
 
 use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MediaAnchor, MediaPage,
-  MessageExtras, NewChannel, NewSpace, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
+  MessageExtras, NewChannel, NewSpace, OutgoingFile, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
   ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use crate::activity::ActivityFeed;
@@ -25,7 +25,7 @@ use crate::calls::{
   OrgBackgroundRule, OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall,
   ScreenContentMode, ScreenShareResolution, VideoQuality,
 };
-use crate::drafts::{DraftItem, SentItem};
+use crate::drafts::{DraftFileItem, DraftItem, SentItem};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::live::LiveSnapshot;
 use crate::model::{
@@ -846,6 +846,23 @@ pub enum ChatAction {
     maybe_thread: Option<ThreadId>,
     body: String,
   },
+  AttachDraftFiles {
+    conversation: ConversationId,
+    #[serde(default)]
+    maybe_thread: Option<ThreadId>,
+    files: Vec<OutgoingFile>,
+  },
+  RemoveDraftFile {
+    conversation: ConversationId,
+    #[serde(default)]
+    maybe_thread: Option<ThreadId>,
+    id: String,
+  },
+  DiscardDraft {
+    conversation: ConversationId,
+    #[serde(default)]
+    maybe_thread: Option<ThreadId>,
+  },
   /// Keeps the message for `due_at` (server time, docs/scheduled-messages.md); it can't have files.
   ScheduleMessage {
     message: OutgoingMessage,
@@ -1300,6 +1317,20 @@ impl ChatAction {
         maybe_thread,
         body,
       } => backend.set_draft(conversation, maybe_thread, &body),
+      Self::AttachDraftFiles {
+        conversation,
+        maybe_thread,
+        files,
+      } => backend.attach_draft_files(conversation, maybe_thread, files),
+      Self::RemoveDraftFile {
+        conversation,
+        maybe_thread,
+        id,
+      } => backend.remove_draft_file(conversation, maybe_thread, &id),
+      Self::DiscardDraft {
+        conversation,
+        maybe_thread,
+      } => backend.discard_draft(conversation, maybe_thread),
       Self::ScheduleMessage { message, due_at } => backend.schedule_message(message, due_at),
       Self::UpdateScheduled { id, body, due_at } => backend.update_scheduled(id, &body, due_at),
       Self::CancelScheduled { id } => backend.cancel_scheduled(id),
@@ -1591,6 +1622,12 @@ pub enum ChatQuery {
     #[serde(default)]
     maybe_thread: Option<ThreadId>,
   },
+  /// The files attached to one draft.
+  DraftFiles {
+    conversation: ConversationId,
+    #[serde(default)]
+    maybe_thread: Option<ThreadId>,
+  },
   /// Every draft of one space or (`None`) of all conversations.
   Drafts {
     #[serde(default)]
@@ -1763,6 +1800,9 @@ pub enum ChatAnswer {
   },
   Draft {
     maybe_body: Option<String>,
+  },
+  DraftFiles {
+    files: Vec<DraftFileItem>,
   },
   Drafts {
     drafts: Vec<DraftItem>,
@@ -1986,6 +2026,12 @@ impl ChatQuery {
         maybe_thread,
       } => ChatAnswer::Draft {
         maybe_body: backend.draft(conversation, maybe_thread),
+      },
+      Self::DraftFiles {
+        conversation,
+        maybe_thread,
+      } => ChatAnswer::DraftFiles {
+        files: backend.draft_files(conversation, maybe_thread),
       },
       Self::Drafts { maybe_space } => ChatAnswer::Drafts {
         drafts: backend.drafts(maybe_space),

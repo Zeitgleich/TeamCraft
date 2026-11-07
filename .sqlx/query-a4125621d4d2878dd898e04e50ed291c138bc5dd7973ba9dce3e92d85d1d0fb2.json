@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attachments SET draft_until = NULL\n       WHERE id = $1 AND uploader_user_id = $2 AND completed_at IS NOT NULL\n       RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "attachments",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a4125621d4d2878dd898e04e50ed291c138bc5dd7973ba9dce3e92d85d1d0fb2"
+}

@@ -971,6 +971,23 @@ copy, so a sender can't put another picture under someone else's name. A forward
 that attachment's reference (key and hash) and nothing else of the message, neither the other files nor
 the text; like every forward it reuses the blob, encrypted inside a new message for the target.
 
+**Files of drafts** (#1220). A file attached to an unsent draft goes up as it is attached, encrypted like
+any attachment with a fresh key, and announced as a draft's file (`is_draft`). The server holds it for the
+uploader only (nobody else may download it) and deletes it after `limits.draft_file_retention_days`
+(default 30) unless the uploader keeps it (`POST /attachments/{id}/keep`) as the message goes out;
+removing it from the draft deletes it (`DELETE /attachments/{id}`). Once up, the file's reference (its
+key, hash, name, type, size and a thumbnail of at most 6 KiB) moves into the account data (§6.4), so the
+user's other devices show it in the draft and send it without uploading it again; a larger thumbnail
+stays on the device that made it. Sending keeps the file first: one the server no longer has (removed on
+another device, or held too long) fails, and the message goes without it. Clients count a file as
+expired a day before its hold would end by the attaching device's clock: the composer marks it and
+won't send until the user removes it, and the device that picked it uploads it again from the file it
+still has. Keeping is refused for a conversation the uploader can no longer post in; the file stays
+held and is swept. The server learns what it learns of any upload (a size, a conversation, when), and
+in addition, through `is_draft`, that a file was attached to a draft and not (yet) sent, and through
+the keep when it was sent; not the draft's text, nor which message carried the file. Servers that publish no `draft_file_retention_days`
+in `GET /me` hold none: there a draft's files wait on the device and go up with the message.
+
 #### 4.5.0 Previews of files
 
 A received `.md`, `.html` or `.pdf` file, or a text file (`.txt`, `.log`, `.json`, `.csv`, `.yaml`, `.toml`,
@@ -3528,6 +3545,16 @@ restored together with them on a new device.
   gateway event announces a new version.
 - A draft's last edit is the time of its record (`Stamped`), so the "Drafts & sent" view (#1220) adds
   nothing to the format; the sent list is read from the local store. The view asks the server nothing.
+- **Files of drafts** (#1220) are entries of their own (`draft_files`, keyed by the file's ID): the
+  conversation and thread, when the file was attached, and the file's reference with its key (§4.5).
+  Sending or removing a file leaves a tombstone, so another device's older copy doesn't bring it back.
+  At most 30 travel (`MAX_DRAFT_FILES`), with thumbnails of at most 6 KiB, and together they take at
+  most a quarter of the key bag limit the server publishes in `GET /me` (`max_key_bag_bytes`); a file
+  that doesn't fit travels without its thumbnail, or not at all and waits on the device it was picked
+  on. Should the server still refuse the key bag as too large (its limit was lowered), the drafts'
+  thumbnails are dropped first, so keys, drafts' text and trust decisions sync again. An older app drops the
+  field on upload, and the next newer device puts it back (its tombstones too, unless they were dropped
+  meanwhile: a file removed then may come back to that device's draft and fail when sent).
 - The server sees that the key bag changed and its size, not what changed. Drafts make the key bag
   change while typing; clients upload at most once per sync round.
 - **Trust decisions travel too.** The identity keys the user's devices pinned and the workspace root

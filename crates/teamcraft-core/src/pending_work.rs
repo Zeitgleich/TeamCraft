@@ -34,6 +34,8 @@ impl PendingWork {
       .count();
     let uploads = records::list_json::<PendingUpload>(store, Table::PendingUploads)?
       .iter()
+      // A draft's file that waits for its message is no work waiting for the server.
+      .filter(|upload| upload.purpose.is_message() || upload.is_traveling())
       .filter(|upload| {
         upload
           .files

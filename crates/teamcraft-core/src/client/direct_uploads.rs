@@ -125,6 +125,7 @@ impl DirectUpload {
         maybe_duration_ms: None,
         maybe_waveform: None,
         maybe_parts: None,
+        is_held: false,
       },
       announced: Vec::new(),
       maybe_sent: None,
