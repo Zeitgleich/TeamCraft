@@ -1,6 +1,6 @@
 //! The first reads of a gateway connection, all at once (issue #714). A full sync used to ask one
-//! thing after the other: roster, policy, welcomes, threads, counts, settings, key packages, key
-//! bag, device list, presence, link requests, each a round trip. None of these reads needs another's
+//! thing after the other: roster, policy, welcomes, threads, counts, settings, the attachment limit,
+//! key packages, key bag, device list, presence, link requests, each a round trip. None of these reads needs another's
 //! answer, so they go out together right after the handshake, and each step takes its answer from
 //! here instead of asking again. What arrives after the handshake comes as gateway events either
 //! way, so an answer read a moment earlier misses nothing.
@@ -10,10 +10,11 @@
 //! connection is caught up.
 
 use teamcraft_proto::{
-  DeviceLinkRequest, DeviceListResponse, KeyBagResponse, KeyPackageStatusResponse, ListConversationsResponse,
-  ListMlsMessagesQuery, ListMlsMessagesResponse, ListPresenceResponse, ListSpacesResponse, ListThreadsQuery,
-  ListThreadsResponse, ListWorkspaceLogQuery, ListWorkspaceLogResponse, MlsMessageId, NotificationSettings,
-  SyncHeadsResponse, UnreadResponse, UserId, UserSummary, WorkspaceLogKind,
+  DeviceLinkRequest, DeviceListResponse, GetMeResponse, KeyBagResponse, KeyPackageStatusResponse,
+  ListConversationsResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListPresenceResponse,
+  ListSpacesResponse, ListThreadsQuery, ListThreadsResponse, ListWorkspaceLogQuery, ListWorkspaceLogResponse,
+  MlsMessageId, NotificationSettings, SyncHeadsResponse, UnreadResponse, UserId, UserSummary,
+  WorkspaceLogKind,
 };
 
 use super::Client;
@@ -48,6 +49,8 @@ pub(super) struct ReadAhead {
     Result<UnreadResponse, ApiError>,
   )>,
   pub(super) notification_settings: Read<NotificationSettings>,
+  /// `GET /me`, for the attachment limit the server publishes.
+  pub(super) me: Read<GetMeResponse>,
   pub(super) key_packages: Read<KeyPackageStatusResponse>,
   pub(super) key_bag: Read<KeyBagResponse>,
   pub(super) own_device_list: Read<Option<DeviceListResponse>>,
@@ -87,13 +90,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let roster_query = log_query(roster_after);
     let policy_query = log_query(policy_after);
     let (
-      (heads, spaces, conversations),
+      (heads, spaces, conversations, me_answer),
       (own, roster, policy, welcomes),
       (threads, unread, settings, key_packages),
       (key_bag, device_list, links, presence),
     ) = Box::pin(async {
       futures_util::join!(
-        async { futures_util::join!(api.sync_heads(), api.list_spaces(), api.list_conversations()) },
+        async {
+          futures_util::join!(
+            api.sync_heads(),
+            api.list_spaces(),
+            api.list_conversations(),
+            api.me(),
+          )
+        },
         async {
           futures_util::join!(
             api.user(me),
@@ -128,6 +138,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       welcomes: Some((welcomes_after, welcomes)),
       read_state: Some((threads, unread)),
       notification_settings: Some(settings),
+      me: Some(me_answer),
       key_packages: Some(key_packages),
       key_bag: Some(key_bag),
       own_device_list: Some(device_list),

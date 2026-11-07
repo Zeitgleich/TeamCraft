@@ -634,6 +634,9 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     roles.track();
     state.read(|backend| backend.channel_roles_review(conversation))
   });
+  // Only whether there is a review decides the panel: one re-created whenever the review changes
+  // (members loaded, a key checked) would close the list the admin just opened.
+  let has_roles_review = Memo::new(move |_| roles_review.with(Option::is_some));
   let has_role_alarm = Memo::new(move |_| {
     state
       .read(|backend| backend.channel_role_alarms())
@@ -654,9 +657,9 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     <Show when=move || has_role_alarm.get() fallback=|| ()>
       <p class="hint" role="status">{move || i18n.t("channel-roles-alarm")}</p>
     </Show>
-    {move || roles_review.get().is_some().then(|| view! {
+    <Show when=move || has_roles_review.get() fallback=|| ()>
       <ChannelRolesReviewPanel conversation=conversation roles=roles users=members review=roles_review />
-    })}
+    </Show>
     <ChannelJoinRequests conversation=conversation />
     <ul class="settings-member-list">
       <For each=move || members.get() key=|user| user.id let:user>
