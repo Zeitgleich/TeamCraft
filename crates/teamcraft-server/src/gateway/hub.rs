@@ -750,12 +750,27 @@ impl Hub {
 
   /// `true` if the device has a live gateway connection (it gets events directly, no push needed).
   pub fn is_device_connected(&self, user: UserId, device: DeviceId) -> bool {
+    self.has_connected_session(user, device, |_| true)
+  }
+
+  /// `true` if the device has a live gateway connection and didn't report itself idle. A phone whose
+  /// app went to the background keeps its connection until it stops syncing, about half a minute
+  /// later, but shows nothing for what arrives over it: it still needs its pushes.
+  pub fn is_device_in_use(&self, user: UserId, device: DeviceId) -> bool {
+    self.has_connected_session(user, device, |session| session.activity != SessionActivity::Idle)
+  }
+
+  fn has_connected_session(
+    &self,
+    user: UserId,
+    device: DeviceId,
+    is_counted: impl Fn(&Session) -> bool,
+  ) -> bool {
     let inner = self.lock();
     inner.by_user.get(&user).into_iter().flatten().any(|id| {
-      inner
-        .sessions
-        .get(id)
-        .is_some_and(|session| session.device == device && session.maybe_connection.is_some())
+      inner.sessions.get(id).is_some_and(|session| {
+        session.device == device && session.maybe_connection.is_some() && is_counted(session)
+      })
     })
   }
 
@@ -1513,6 +1528,23 @@ mod tests {
       hub.set_activity(&web.session_id, DeviceActivity::Unknown("dozing".into()));
       assert_eq!(hub.device_aggregate(user(1)), DeviceAggregate::Idle);
     }
+  }
+
+  #[tokio::test(start_paused = true)]
+  async fn a_device_that_went_idle_is_connected_but_not_in_use() {
+    let hub = Hub::new(OPTIONS);
+    let phone = hub.open_session(user(1), device(1), DeviceActivity::Active);
+    assert!(hub.is_device_in_use(user(1), device(1)));
+
+    // The app went to the background; its connection stays until it stops syncing.
+    hub.set_activity(&phone.session_id, DeviceActivity::Idle);
+    assert!(hub.is_device_connected(user(1), device(1)));
+    assert!(!hub.is_device_in_use(user(1), device(1)));
+
+    hub.set_activity(&phone.session_id, DeviceActivity::Active);
+    assert!(hub.is_device_in_use(user(1), device(1)));
+    hub.detach(&phone.session_id, phone.connection_id);
+    assert!(!hub.is_device_in_use(user(1), device(1)));
   }
 
   mod attention {

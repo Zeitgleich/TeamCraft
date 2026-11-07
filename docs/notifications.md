@@ -169,7 +169,9 @@ without the filtering entitlement cannot suppress a notification.
 ## Push routing
 
 For each recipient without a live connection the server decides from metadata it has anyway
-(`push::routing`). In order:
+(`push::routing`). A phone whose app reported going to the background counts as without one: it
+keeps its gateway connection until it stops syncing, about half a minute later, but raises no
+notification for what arrives over it. In order:
 
 1. **Muted** (level `none`, or muted until a later time, own or inherited from the space): never pushes.
 2. **Do not disturb** (manual, timed, or the weekly schedule): suppresses the push unless an override

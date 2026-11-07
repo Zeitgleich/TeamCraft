@@ -678,10 +678,21 @@ fn send_to_offline_devices(
   wake_up: &PushWakeUp,
 ) {
   for device in devices {
-    if state.hub.is_device_connected(user, device.device) {
+    if is_reached_live(state, user, &device) {
       continue;
     }
     delivery::spawn(state.clone(), user, device, wake_up.clone());
+  }
+}
+
+/// Whether the device gets the message over its gateway connection, so a push would be a duplicate.
+/// A phone only while its app is in use: in the background it keeps the connection for a while but
+/// raises no notification for what arrives over it.
+fn is_reached_live(state: &AppState, user: UserId, device: &PushDeviceRow) -> bool {
+  if is_mobile(&device.provider) {
+    state.hub.is_device_in_use(user, device.device)
+  } else {
+    state.hub.is_device_connected(user, device.device)
   }
 }
 
@@ -694,10 +705,7 @@ async fn send_dismissal(state: &AppState, user: UserId, devices: &HashSet<Device
     },
   };
   for row in rows {
-    if devices.contains(&row.device)
-      && can_dismiss(&row.provider)
-      && !state.hub.is_device_connected(user, row.device)
-    {
+    if devices.contains(&row.device) && can_dismiss(&row.provider) && !is_reached_live(state, user, &row) {
       delivery::spawn(state.clone(), user, row, wake_up.clone());
     }
   }
