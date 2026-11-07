@@ -685,6 +685,24 @@ pub async fn set_autostart(is_enabled: bool) -> Result<bool, String> {
   call::<bool>("autostart_set", &serde_json::json!({ "enabled": is_enabled })).await
 }
 
+/// "Send to TeamCraft" in the file manager (Linux): `Ok(None)` outside the desktop app and on other
+/// systems (the switch is hidden then), an error when the state couldn't be read.
+pub async fn file_manager_entries() -> Result<Option<bool>, String> {
+  if !is_available() {
+    return Ok(None);
+  }
+  call::<Option<bool>>("file_manager_entries_get", &serde_json::json!({})).await
+}
+
+/// Turns the file manager entries on or off; answers the state afterwards.
+pub async fn set_file_manager_entries(is_enabled: bool) -> Result<bool, String> {
+  call::<bool>(
+    "file_manager_entries_set",
+    &serde_json::json!({ "enabled": is_enabled }),
+  )
+  .await
+}
+
 /// Desktop only: where the update machinery is (docs/updates.md §4). `None` in the browser.
 pub async fn update_status() -> Option<teamcraft_client_api::updates::UpdateStatus> {
   if !is_available() {

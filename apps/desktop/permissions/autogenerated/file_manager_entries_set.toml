@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-file-manager-entries-set"
+description = "Enables the file_manager_entries_set command without any pre-configured scope."
+commands.allow = ["file_manager_entries_set"]
+
+[[permission]]
+identifier = "deny-file-manager-entries-set"
+description = "Denies the file_manager_entries_set command without any pre-configured scope."
+commands.deny = ["file_manager_entries_set"]

@@ -106,6 +106,8 @@
     "allow-os-attention",
     "allow-autostart-get",
     "allow-autostart-set",
+    "allow-file-manager-entries-get",
+    "allow-file-manager-entries-set",
     "allow-shell-prefs-get",
     "allow-shell-prefs-set",
     "allow-tray-update",

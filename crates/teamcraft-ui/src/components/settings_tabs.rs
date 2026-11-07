@@ -452,6 +452,9 @@ fn DesktopCard() -> impl IntoView {
   let has_tray_icon_style = RwSignal::new(false);
   let saving_prefs = PendingAction::new();
   let saving_autostart = PendingAction::new();
+  // "Send to TeamCraft" in the file manager exists on Linux only; shown where the shell answers.
+  let send_to = RwSignal::new(None::<bool>);
+  let saving_send_to = PendingAction::new();
   leptos::task::spawn_local(async move {
     prefs.set_if_alive(tauri::shell_prefs().await);
     let is_mac = tauri::window_chrome()
@@ -462,6 +465,10 @@ fn DesktopCard() -> impl IntoView {
       Ok(Some(is_on)) => autostart.set_if_alive(Some(is_on)),
       Ok(None) => is_autostart_supported.set_if_alive(false),
       // The switch stays disabled; the toast says why.
+      Err(error) => report_failure(ActionFailure::new(FailureKind::Other, error)),
+    }
+    match tauri::file_manager_entries().await {
+      Ok(maybe_on) => send_to.set_if_alive(maybe_on),
       Err(error) => report_failure(ActionFailure::new(FailureKind::Other, error)),
     }
   });
@@ -499,6 +506,22 @@ fn DesktopCard() -> impl IntoView {
       }
     });
   };
+  let set_send_to = move |on: bool| {
+    send_to.set(Some(on));
+    saving_send_to.spawn(async move {
+      match tauri::set_file_manager_entries(on).await {
+        Ok(is_on) => {
+          send_to.set_if_alive(Some(is_on));
+          Ok(())
+        },
+        // Written files may be half there; the switch goes back and the toast says why.
+        Err(error) => {
+          send_to.set_if_alive(Some(!on));
+          Err(ActionFailure::new(FailureKind::Other, error))
+        },
+      }
+    });
+  };
   let is_busy = Signal::derive(move || prefs.get().is_none() || saving_prefs.is_pending());
   let current = move || prefs.get().unwrap_or_default();
 
@@ -510,6 +533,15 @@ fn DesktopCard() -> impl IntoView {
           is_disabled=Signal::derive(move || autostart.get().is_none() || saving_autostart.is_pending())
           value=Signal::derive(move || autostart.get().unwrap_or(false))
           on_change=Callback::new(set_autostart)
+        />
+      </Show>
+      <Show when=move || send_to.get().is_some()>
+        <SwitchRow
+          label="settings-send-to"
+          hint="settings-send-to-hint"
+          is_disabled=Signal::derive(move || saving_send_to.is_pending())
+          value=Signal::derive(move || send_to.get().unwrap_or(false))
+          on_change=Callback::new(set_send_to)
         />
       </Show>
       <SwitchRow
