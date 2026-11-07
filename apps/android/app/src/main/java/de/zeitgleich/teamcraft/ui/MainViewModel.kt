@@ -71,6 +71,8 @@ import de.zeitgleich.teamcraft.server.isServerAllowed
 import de.zeitgleich.teamcraft.server.serverEntryErrorText
 import de.zeitgleich.teamcraft.server.transportErrorText
 import uniffi.teamcraft_ffi.AccountState
+import uniffi.teamcraft_ffi.ChannelMembersInfo
+import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CheckedServer
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
@@ -88,6 +90,7 @@ import uniffi.teamcraft_ffi.SpaceMenuItem
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushDiagnosticsInfo
 import uniffi.teamcraft_ffi.PushService
+import uniffi.teamcraft_ffi.ReviewedRolesOutcome
 import uniffi.teamcraft_ffi.SearchHitItem
 import uniffi.teamcraft_ffi.ServerEntryException
 import uniffi.teamcraft_ffi.SignInPageInfo
@@ -806,6 +809,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     readChat { leaveChoice(conversationId) } ?: LeaveChoice.HIDDEN
 
   suspend fun spaceMenu(spaceId: String): SpaceMenuItem? = readChat { spaceMenu(spaceId) }
+
+  /** A channel's members section (#1262); `null` when the core can't answer. */
+  suspend fun channelMembers(conversationId: String): ChannelMembersInfo? = readChat { channelMembers(conversationId) }
+
+  /** The members section opened: the members and signed roles are read afresh, as on desktop and web. */
+  fun refreshChannelMembers(conversationId: String) = viewModelScope.launch {
+    reportFailure { chat.refreshChannelMembers(conversationId) }
+  }
+
+  /** Confirms the roles a workspace admin looked at; `null` after a failure, shown as [lastFailure]. */
+  suspend fun signReviewedChannelRoles(conversationId: String, review: ChannelRolesReviewItem): ReviewedRolesOutcome? =
+    try {
+      chat.signReviewedChannelRoles(conversationId, review)
+    } catch (failure: TeamCraftException) {
+      failures.value = errorText(failure)
+      null
+    }
 
   fun markSpaceRead(spaceId: String) = viewModelScope.launch {
     reportFailure { graph.core.core().markSpaceRead(spaceId) }

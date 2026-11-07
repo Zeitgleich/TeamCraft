@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- A channel's members section (issue #1262), worded as channels.ftl on desktop and web -->
+  <string name="members_title">Mitglieder</string>
+  <string name="channel_role_admin">Kanal-Admin</string>
+  <string name="channel_role_moderator">Moderator</string>
+  <string name="channel_roles_alarm">Dieses Gerät und das eines anderen Mitglieds sehen unterschiedliche Rollen für diesen Kanal: Der Server zeigt den Leuten vielleicht verschiedene Listen. Der Chat ist davon nicht betroffen, und das Löschen dieses Kanals dauert auf diesem Gerät bis zum Ablauf der Aufbewahrungsfrist. Sag einem Workspace-Admin Bescheid, der die Rollen hier prüfen kann.</string>
+  <string name="channel_roles_review_title">Rollen dieses Kanals prüfen</string>
+  <string name="channel_roles_review_hint">Dieses Gerät kann nicht für jede Rolle hier einstehen, oder die Mitgliederliste zeigt eine, die niemand bestätigt hat. Du kannst sie prüfen, wenn du möchtest: Was du bestätigst, gilt auf den Geräten aller Mitglieder. Der Chat ist davon nicht betroffen.</string>
+  <string name="channel_roles_review_hint_quiet">Du kannst die Rollen dieses Kanals prüfen, wenn du möchtest: Was du bestätigst, gilt auf den Geräten aller Mitglieder.</string>
+  <string name="channel_roles_review_action">Rollen prüfen</string>
+  <string name="channel_roles_review_confirm">Genau diese Rollen bestätigen</string>
+  <string name="channel_roles_review_new">Neu</string>
+  <string name="channel_roles_review_new_hint">Neu: Nur der Server sagt, dass diese Person diese Rolle hat. Stelle sicher, dass es stimmt und dass der Name die Person ist, die du meinst.</string>
+  <string name="channel_roles_review_knows_none">Dieses Gerät kennt keine signierten Rollen für diesen Kanal. Wer anderswo eine hat und nicht auf dieser Liste steht, verliert sie und kann hier nicht genannt werden.</string>
+  <string name="channel_roles_review_key_changed">Schlüssel geändert</string>
+  <string name="channel_roles_review_key_changed_hint">Schlüssel geändert: Dieses Gerät hat für diese Person einen anderen Sicherheitsschlüssel gesehen, als die signierten Rollen nennen. Das ist normal, wenn sie ihr Konto neu eingerichtet hat. Falls nicht, frage sie, bevor du bestätigst.</string>
+  <string name="channel_roles_review_key_uncheckable">Nicht prüfbar</string>
+  <string name="channel_roles_review_uncheckable_refused">Dieses Gerät kann nicht prüfen, ob der Sicherheitsschlüssel einer hier markierten Person wirklich ihrer ist: Das sagt nur der Server. Ein Workspace-Admin, der in diesem Kanal ist, kann diese Rollen bestätigen, sobald die Person in seiner Verschlüsselungsgruppe ist.</string>
+  <string name="channel_roles_review_dropped">Mit der Bestätigung verlieren ihre Rolle oder werden herabgestuft: %1$s. Das sagt nur die Liste des Servers, prüfe also, ob es stimmt.</string>
+  <string name="channel_roles_review_unknown">Unbekannte Person</string>
+  <string name="channel_roles_review_unknown_refused">Die Mitgliederliste sagt nicht, wer jemand hier ist, darum lassen sich diese Rollen nicht bestätigen. Versuche es noch einmal, sobald die Liste geladen ist.</string>
+  <string name="channel_roles_review_changed">Die Rollen des Kanals haben sich geändert, während du sie angesehen hast, und nichts wurde bestätigt. Prüfe sie noch einmal.</string>
+  <string name="channel_roles_review_no_admin">Ein Kanal braucht einen Admin. Gib zuerst jemandem die Admin-Rolle.</string>
+</resources>

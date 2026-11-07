@@ -13296,6 +13296,342 @@
           }
         }
       }
+    },
+    "members_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Members"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mitglieder"
+          }
+        }
+      }
+    },
+    "channel_role_admin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Channel admin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kanal-Admin"
+          }
+        }
+      }
+    },
+    "channel_role_moderator": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Moderator"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Moderator"
+          }
+        }
+      }
+    },
+    "channel_roles_alarm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device and another member's see different roles for this channel: the server may be showing people different lists. Chat isn't affected, and deleting this channel takes the retention on this device. Tell a workspace admin, who can check the roles here."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät und das eines anderen Mitglieds sehen unterschiedliche Rollen für diesen Kanal: Der Server zeigt den Leuten vielleicht verschiedene Listen. Der Chat ist davon nicht betroffen, und das Löschen dieses Kanals dauert auf diesem Gerät bis zum Ablauf der Aufbewahrungsfrist. Sag einem Workspace-Admin Bescheid, der die Rollen hier prüfen kann."
+          }
+        }
+      }
+    },
+    "channel_roles_review_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check this channel's roles"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rollen dieses Kanals prüfen"
+          }
+        }
+      }
+    },
+    "channel_roles_review_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device can't vouch for every role here, or the member list shows one nobody confirmed. You can check them if you want to: what you confirm counts on every member's device. Chat isn't affected."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät kann nicht für jede Rolle hier einstehen, oder die Mitgliederliste zeigt eine, die niemand bestätigt hat. Du kannst sie prüfen, wenn du möchtest: Was du bestätigst, gilt auf den Geräten aller Mitglieder. Der Chat ist davon nicht betroffen."
+          }
+        }
+      }
+    },
+    "channel_roles_review_hint_quiet": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can check this channel's roles if you want to: what you confirm counts on every member's device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du kannst die Rollen dieses Kanals prüfen, wenn du möchtest: Was du bestätigst, gilt auf den Geräten aller Mitglieder."
+          }
+        }
+      }
+    },
+    "channel_roles_review_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check roles"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rollen prüfen"
+          }
+        }
+      }
+    },
+    "channel_roles_review_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm exactly these roles"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Genau diese Rollen bestätigen"
+          }
+        }
+      }
+    },
+    "channel_roles_review_new": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neu"
+          }
+        }
+      }
+    },
+    "channel_roles_review_new_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New: only the server says this person has this role. Make sure it's right, and that the name is who you think it is."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neu: Nur der Server sagt, dass diese Person diese Rolle hat. Stelle sicher, dass es stimmt und dass der Name die Person ist, die du meinst."
+          }
+        }
+      }
+    },
+    "channel_roles_review_knows_none": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device knows no signed roles for this channel. Anybody who holds one elsewhere and isn't on this list would lose it, and can't be named here."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät kennt keine signierten Rollen für diesen Kanal. Wer anderswo eine hat und nicht auf dieser Liste steht, verliert sie und kann hier nicht genannt werden."
+          }
+        }
+      }
+    },
+    "channel_roles_review_key_changed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Key changed"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schlüssel geändert"
+          }
+        }
+      }
+    },
+    "channel_roles_review_key_changed_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Key changed: this device saw another security key for this person than the signed roles name. That's normal after they set up their account again; if they didn't, ask them before you confirm."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schlüssel geändert: Dieses Gerät hat für diese Person einen anderen Sicherheitsschlüssel gesehen, als die signierten Rollen nennen. Das ist normal, wenn sie ihr Konto neu eingerichtet hat. Falls nicht, frage sie, bevor du bestätigst."
+          }
+        }
+      }
+    },
+    "channel_roles_review_key_uncheckable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Can't check"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht prüfbar"
+          }
+        }
+      }
+    },
+    "channel_roles_review_uncheckable_refused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device can't check that the security key of somebody marked here is really theirs: only the server says so. A workspace admin who is in this channel can confirm these roles, once that person is in its encryption group."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät kann nicht prüfen, ob der Sicherheitsschlüssel einer hier markierten Person wirklich ihrer ist: Das sagt nur der Server. Ein Workspace-Admin, der in diesem Kanal ist, kann diese Rollen bestätigen, sobald die Person in seiner Verschlüsselungsgruppe ist."
+          }
+        }
+      }
+    },
+    "channel_roles_review_dropped": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirming takes a role from or lowers the role of: %@. Only the server's list says so, so make sure that's right."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mit der Bestätigung verlieren ihre Rolle oder werden herabgestuft: %@. Das sagt nur die Liste des Servers, prüfe also, ob es stimmt."
+          }
+        }
+      }
+    },
+    "channel_roles_review_unknown": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unknown person"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unbekannte Person"
+          }
+        }
+      }
+    },
+    "channel_roles_review_unknown_refused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The member list doesn't say who somebody here is, so these roles can't be confirmed. Try again once the list has loaded."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Mitgliederliste sagt nicht, wer jemand hier ist, darum lassen sich diese Rollen nicht bestätigen. Versuche es noch einmal, sobald die Liste geladen ist."
+          }
+        }
+      }
+    },
+    "channel_roles_review_changed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The channel's roles changed while you were looking, and nothing was confirmed. Check them again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Rollen des Kanals haben sich geändert, während du sie angesehen hast, und nichts wurde bestätigt. Prüfe sie noch einmal."
+          }
+        }
+      }
+    },
+    "channel_roles_review_no_admin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A channel needs an admin. Give somebody the admin role first."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ein Kanal braucht einen Admin. Gib zuerst jemandem die Admin-Rolle."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

@@ -7,7 +7,10 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import uniffi.teamcraft_ffi.ChannelMembersInfo
+import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.LeaveChoice
+import uniffi.teamcraft_ffi.ReviewedRolesOutcome
 import uniffi.teamcraft_ffi.SpaceMenuItem
 import uniffi.teamcraft_ffi.TeamCraft
 
@@ -140,6 +143,16 @@ class ChatClient(
     uniffi.teamcraft_ffi.conversationLink(origin, conversation)
 
   suspend fun spaceMenu(space: String): SpaceMenuItem? = core().spaceMenu(space)
+
+  /** The channel's members section: members with roles, the alarm line, a workspace admin's look (#1262). */
+  suspend fun channelMembers(conversation: String): ChannelMembersInfo = core().channelMembers(conversation)
+
+  /** Reads the channel's members and signed roles afresh; the change arrives as a store update. */
+  suspend fun refreshChannelMembers(conversation: String) = core().refreshChannelMembers(conversation)
+
+  /** Confirms exactly the roles of [review] as the admin opened it; nothing is signed if the log moved. */
+  suspend fun signReviewedChannelRoles(conversation: String, review: ChannelRolesReviewItem): ReviewedRolesOutcome =
+    core().signReviewedChannelRoles(conversation, review.rows, review.logCursor)
 
   /** How many conversations the server just claimed deleted at once, if suspect; told once. */
   suspend fun takeSuspectDeletions(): UInt = core().takeSuspectDeletions()

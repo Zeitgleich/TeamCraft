@@ -11,6 +11,7 @@
 mod app_link;
 mod bridge;
 mod calls;
+mod channel_roles;
 mod engine;
 mod error;
 mod http_fetch;
@@ -34,6 +35,11 @@ pub use calls::{
   CallEndReason, CallListener, CallMoveInfo, CallPhase, CallSession, CallStateInfo, EncodedVideoListener,
   IncomingCallInfo, NotetakerCallInfo, RemoteVideoFrame, RemoteVideoTrack, RunningCallItem, VideoListener,
   VideoTrackInfo,
+};
+pub use channel_roles::{
+  ChannelMemberItem, ChannelMemberRole, ChannelMembersInfo, ChannelRolesReviewItem, ReviewedRolesOutcome,
+  RoleKeyMarkItem, RoleReviewRefusalItem, RoleReviewRowItem, channel_roles_review_has_changed,
+  channel_roles_review_has_new,
 };
 pub use error::TeamCraftError;
 pub use http_fetch::{
