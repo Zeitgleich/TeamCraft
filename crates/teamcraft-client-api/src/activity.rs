@@ -75,6 +75,9 @@ pub enum JoinRequestStanding {
   /// members would refuse the add. A signed admin or a workspace admin signs it first ("Sign
   /// role" in the channel's members); until then the request can only be declined.
   OwnerRoleNotSigned,
+  /// Signed entries prove the server shows members different role logs of the channel: approving
+  /// is refused until a workspace admin looked at its roles (e2ee.md §4.6.3, D3). Decline only.
+  RolesDisputed,
   /// Only the server calls the person an admin (or the roster is too old to trust): the request
   /// can only be declined (admin.md §2.3).
   #[serde(other)]

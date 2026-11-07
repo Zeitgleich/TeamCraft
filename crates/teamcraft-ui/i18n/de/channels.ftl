@@ -299,6 +299,7 @@ join-request-hint-history = Wenn du zustimmst, kann die Person auch den bisherig
 join-request-share-history = Auch den bisherigen Verlauf teilen
 join-request-not-admin = Die signierte Rollenliste auf diesem Gerät führt die Person nicht als Workspace-Admin, du kannst nur ablehnen.
 join-request-owner-not-signed = Andere Mitglieder würden einen von dir zugelassenen Admin nicht annehmen: Dieses Gerät kann deine Eigentümerrolle in diesem Kanal nicht bestätigen. Ein anderer Kanaleigentümer oder ein Workspace-Admin kann zustimmen oder deine Rolle neu setzen. Bis dahin kannst du nur ablehnen.
+join-request-roles-disputed = Die Apps der Mitglieder zeigen für diesen Kanal unterschiedliche Rollen, und signierte Einträge belegen das: Deine eigene Rolle hat sich vielleicht geändert, ohne dass dieses Gerät davon erfahren hat. Zustimmen geht erst wieder, wenn ein Workspace-Admin die Rollen hier geprüft hat. Bis dahin kannst du nur ablehnen.
 join-request-approve = Zustimmen
 join-request-decline = Ablehnen
 

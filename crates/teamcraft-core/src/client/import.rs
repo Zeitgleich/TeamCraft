@@ -222,14 +222,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<bool, CoreError> {
     let state = self.workspace()?;
     let policy = &state.policy.import;
-    let newest_server_ms = self
-      .sync
-      .mls_cursors
-      .values()
-      .map(|cursor| cursor.snowflake().unix_millis())
-      .max()
-      .unwrap_or(i64::MIN);
-    let now_ms = self.now_ms().max(newest_server_ms);
+    let now_ms = self.now_ms().max(self.newest_server_ms());
     let max_age_ms = i64::try_from(self.settings.workspace_max_age.as_millis()).unwrap_or(i64::MAX);
     if !policy.allows(self.account.user_id, now_ms)
       || state.maybe_alarm.is_some()
