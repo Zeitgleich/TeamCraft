@@ -30,8 +30,10 @@ class NetworkWatcher(context: Context, private val onChange: () -> Unit) {
 
   val isOnline: StateFlow<Boolean> = online
 
+  /** The default network's properties now; its proxy goes to the core before it connects (NetworkTrust). */
+  fun currentLinkProperties(): LinkProperties? = manager.getLinkProperties(manager.activeNetwork)
+
   fun start() {
-    NetworkTrust.reportProxy(manager.getLinkProperties(manager.activeNetwork))
     manager.registerDefaultNetworkCallback(
       object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {

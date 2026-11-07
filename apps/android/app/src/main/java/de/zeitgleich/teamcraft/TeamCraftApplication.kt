@@ -11,6 +11,7 @@ import java.io.File
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.work.Configuration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -98,18 +99,22 @@ class AppGraph(context: Context) {
   val connectionGrace = ConnectionGrace(scope, core.connectionState, network.isOnline, isSyncStartFailing)
 }
 
-class TeamCraftApplication : Application() {
+class TeamCraftApplication : Application(), Configuration.Provider {
   lateinit var graph: AppGraph
     private set
 
   override fun onCreate() {
     super.onCreate()
-    // DM titles, members and notifications name deleted accounts in the user's language (#1066).
-    setDeletedUserName(getString(R.string.user_deleted_name))
     graph = AppGraph(this)
+    // DM titles, members and notifications name deleted accounts in the user's language (#1066).
+    // Off the main thread: the first call loads the core's native library, which is not needed
+    // for the first frame. The core sets it again before it opens (CoreRepository.core).
+    val deletedName = getString(R.string.user_deleted_name)
+    graph.scope.launch { setDeletedUserName(deletedName) }
     // The core waits for these before it opens (issue #157).
-    NetworkTrust.startInstalling(this, graph.scope)
-    graph.segmentPrefetch.schedule()
+    NetworkTrust.startInstalling(this, graph.scope, graph.network::currentLinkProperties)
+    // The first use starts WorkManager (its database), which needn't hold up the first frame.
+    graph.scope.launch(Dispatchers.IO) { graph.segmentPrefetch.schedule() }
     graph.carProjection.start { graph.scope.launch { graph.push.endHolds(isForced = true) } }
     graph.readWatcher.start()
     graph.placeholderWatcher.start()
@@ -120,6 +125,10 @@ class TeamCraftApplication : Application() {
     ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundSync(this, graph))
     ProcessLifecycleOwner.get().lifecycle.addObserver(ActivityReports(graph.core))
   }
+
+  /** WorkManager starts on first use instead of at process start (AndroidManifest.xml). */
+  override val workManagerConfiguration: Configuration
+    get() = Configuration.Builder().build()
 
   /**
    * Syncs live (gateway) while the app is visible; in the background the push service wakes it.
