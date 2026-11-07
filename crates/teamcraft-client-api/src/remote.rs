@@ -301,6 +301,10 @@ pub struct SecuritySnapshot {
   /// verified (or from an older shell), which shows no notetaker controls.
   #[serde(rename = "notetaker", default, skip_serializing_if = "Option::is_none")]
   pub maybe_notetaker: Option<teamcraft_proto::NotetakerPolicy>,
+  /// Who this user's problem reports go to under the verified policy (docs/bug-reports.md), for
+  /// the report dialog; empty before a policy was verified, or from an older shell.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub bug_report_recipients: Vec<teamcraft_proto::UserId>,
   /// The key backup as this device knows it (issue #410); `None` from an older shell.
   #[serde(rename = "backup", default, skip_serializing_if = "Option::is_none")]
   pub maybe_backup: Option<crate::security::KeyBackupState>,

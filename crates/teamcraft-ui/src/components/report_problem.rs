@@ -113,6 +113,9 @@ pub fn ReportProblemDialog() -> impl IntoView {
     <Dialog title_key="report-title" class="report-dialog">
       <form id=FORM_ID on:submit=|ev| ev.prevent_default()>
         <p class="muted-text small">{move || i18n.t("report-intro")}</p>
+        {move || recipient_names(state).map(|names| view! {
+          <p class="report-recipients small">{i18n.t_with("report-recipients", &[("names", &names)])}</p>
+        })}
         <label for=DESCRIPTION_ID>{move || i18n.t("report-description")}</label>
         <textarea
           id=DESCRIPTION_ID
@@ -200,6 +203,20 @@ pub fn ReportProblemDialog() -> impl IntoView {
       </form>
     </Dialog>
   }
+}
+
+/// "Alex Example, Sam Example": who the report goes to, as far as this device knows the people.
+fn recipient_names(state: AppState) -> Option<String> {
+  let names: Vec<String> = state.read(|backend| {
+    let me = backend.me().id;
+    backend
+      .bug_report_recipients()
+      .into_iter()
+      .filter(|user| *user != me)
+      .filter_map(|user| backend.user(user).map(|found| found.display_name))
+      .collect()
+  });
+  (!names.is_empty()).then(|| names.join(", "))
 }
 
 /// The errors of the description and the screenshot, in their order.

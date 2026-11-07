@@ -1620,6 +1620,16 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::SendBugReport { report });
   }
 
+  fn bug_report_recipients(&self) -> Vec<UserId> {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .security
+      .bug_report_recipients
+      .clone()
+  }
+
   fn acknowledge(&self, conversation: ConversationId, message: MessageId) {
     self.act(ChatAction::Acknowledge {
       conversation,

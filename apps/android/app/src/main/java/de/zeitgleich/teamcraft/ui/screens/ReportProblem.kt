@@ -33,6 +33,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -83,9 +84,9 @@ fun ReportProblemScreen(viewModel: MainViewModel, account: AppState.Ready, onBac
   val context = LocalContext.current
   val scope = rememberCoroutineScope()
   val isOnline = rememberIsOnline()
-  // One ID and one moment per opened screen: a retried send is the same report.
-  val id = remember { UUID.randomUUID().toString().replace("-", "") }
-  val createdAtMs = remember { System.currentTimeMillis() }
+  // One ID and one moment per opened screen, kept over rotation: a retried send is the same report.
+  val id = rememberSaveable { UUID.randomUUID().toString().replace("-", "") }
+  val createdAtMs = rememberSaveable { System.currentTimeMillis() }
   val reportText = remember {
     bugReportText(
       platform = "android",
@@ -96,7 +97,7 @@ fun ReportProblemScreen(viewModel: MainViewModel, account: AppState.Ready, onBac
       createdAtMs = createdAtMs,
     )
   }
-  var description by remember { mutableStateOf("") }
+  var description by rememberSaveable { mutableStateOf("") }
   var maybeScreenshot by remember { mutableStateOf<PickedScreenshot?>(null) }
   var errors by remember { mutableStateOf(FieldErrors.of<ReportField>()) }
   var wasRefused by remember { mutableStateOf(false) }

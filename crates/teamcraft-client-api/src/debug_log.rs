@@ -31,23 +31,35 @@ const OWN_TARGET: &str = "teamcraft";
 const SECRET_FIELDS: &[&str] = &[
   "authorization",
   "body",
+  "caption",
   "code",
+  "comment",
   "content",
   "cookie",
+  "description",
+  "draft",
   "email",
   "file_name",
   "filename",
   "key",
+  "label",
   "name",
+  "note",
   "passphrase",
   "password",
+  "path",
   "payload",
+  "preview",
   "query",
+  "quote",
   "secret",
   "signature",
+  "subject",
+  "summary",
   "text",
   "title",
   "token",
+  "topic",
   "url",
 ];
 /// Field name endings that name content or secrets (`access_token`, `display_name`, …).
@@ -65,6 +77,47 @@ const SECRET_FIELD_SUFFIXES: &[&str] = &[
   "_token",
   "_url",
 ];
+
+/// Field names whose text values are kept (after [`redact`]): IDs, errors and the words of the
+/// app's own state. Any other text field is written as `[redacted]`; numbers and flags are always
+/// kept. An allowlist, so a field added later with content in it doesn't leak by default.
+const PLAIN_FIELDS: &[&str] = &[
+  "attempt",
+  "attempts",
+  "cause",
+  "codec",
+  "direction",
+  "error",
+  "error_code",
+  "event",
+  "interception",
+  "job",
+  "kind",
+  "layer",
+  "level",
+  "location",
+  "method",
+  "mode",
+  "network",
+  "outcome",
+  "phase",
+  "platform",
+  "policy",
+  "reason",
+  "resolution",
+  "role",
+  "state",
+  "status",
+  "step",
+  "version",
+];
+/// Field name endings whose text values are kept (`conversation_id`, `waited_ms`, `error_kind`).
+const PLAIN_FIELD_SUFFIXES: &[&str] = &[
+  "_bytes", "_count", "_error", "_id", "_ids", "_kind", "_mode", "_ms", "_secs", "_state", "_status",
+];
+/// Path beginnings that may follow a separator inside a value; the path runs to the closing quote,
+/// or to the end of the value, so names with spaces go as a whole.
+const PATH_STARTS: &[&str] = &["file://", "content://", "~/", "~\\", "\\\\"];
 
 /// How large the ring is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -190,10 +243,10 @@ impl LineVisitor<'_> {
     let name = field.name();
     if name == "message" {
       let _ = write!(self.0, " {}", redact(value));
-    } else if is_secret_field(name) {
-      let _ = write!(self.0, " {name}={REDACTED}");
-    } else {
+    } else if is_plain_field(name) && !is_secret_field(name) {
       let _ = write!(self.0, " {name}={}", redact(value));
+    } else {
+      let _ = write!(self.0, " {name}={REDACTED}");
     }
   }
 }
@@ -231,9 +284,102 @@ pub fn is_secret_field(name: &str) -> bool {
   SECRET_FIELDS.contains(&name.as_str()) || SECRET_FIELD_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
 }
 
+/// Whether a text field's value may be kept (redacted by shape): see [`PLAIN_FIELDS`].
+pub fn is_plain_field(name: &str) -> bool {
+  let name = name.to_ascii_lowercase();
+  PLAIN_FIELDS.contains(&name.as_str()) || PLAIN_FIELD_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
+}
+
 /// `text` with everything that looks like a secret, an address or a path replaced; see the module
 /// docs and docs/bug-reports.md, "Redaction".
 pub fn redact(text: &str) -> String {
+  redact_words(&redact_spans(text))
+}
+
+/// Spans that may hold spaces, before the text is cut into words: a quoted value after a secret
+/// key (`body: "meet me at …"` in a `Debug` struct) and a path (`/home/x/My Documents/a b.pdf`).
+fn redact_spans(text: &str) -> String {
+  let mut out = String::with_capacity(text.len());
+  let mut index = 0;
+  while index < text.len() {
+    let rest = &text[index..];
+    let previous = text[..index].chars().next_back();
+    if let Some((kept, skipped)) = quoted_secret(&text[..index], rest) {
+      out.push_str(kept);
+      out.push_str(REDACTED);
+      out.push('"');
+      index += skipped;
+      continue;
+    }
+    if starts_path(rest, previous) {
+      let end = match previous {
+        Some(quote @ ('"' | '\'')) => rest.find(quote).unwrap_or(rest.len()),
+        _ => rest.len(),
+      };
+      out.push_str("[path]");
+      index += end;
+      continue;
+    }
+    // Invariant: `index` is inside `text`, so there is a next char.
+    let Some(c) = rest.chars().next() else { break };
+    out.push(c);
+    index += c.len_utf8();
+  }
+  out
+}
+
+/// At an opening `"` whose key before it is secret (`body: "`, `token="`): what to write before
+/// the redaction (the quote) and how many bytes the quoted value takes, closing quote included.
+fn quoted_secret<'a>(before: &str, rest: &'a str) -> Option<(&'a str, usize)> {
+  if !rest.starts_with('"') {
+    return None;
+  }
+  let key_end = before.trim_end_matches([' ', ':', '=']);
+  if key_end.len() == before.len() {
+    return None;
+  }
+  let key_start = key_end
+    .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+    .map_or(0, |at| at + 1);
+  if !is_secret_field(&key_end[key_start..]) {
+    return None;
+  }
+  // The closing quote, skipping escaped ones.
+  let mut is_escaped = false;
+  for (at, c) in rest.char_indices().skip(1) {
+    match c {
+      '\\' if !is_escaped => is_escaped = true,
+      '"' if !is_escaped => return Some((&rest[..1], at + 1)),
+      _ => is_escaped = false,
+    }
+  }
+  Some((&rest[..1], rest.len()))
+}
+
+/// Whether a path begins here: after a separator (not inside a word or a URL).
+fn starts_path(rest: &str, previous: Option<char>) -> bool {
+  let is_boundary =
+    previous.is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\'' | '(' | '[' | '{' | '=' | ','));
+  if !is_boundary {
+    return false;
+  }
+  if PATH_STARTS.iter().any(|start| rest.starts_with(start)) {
+    return true;
+  }
+  let bytes = rest.as_bytes();
+  let is_windows = bytes.len() > 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+  let is_absolute = rest.starts_with('/')
+    && rest[1..].starts_with(|c: char| c.is_alphanumeric() || c == '.' || c == '_')
+    && rest[1..]
+      .split(char::is_whitespace)
+      .next()
+      .is_some_and(|word| word.contains('/'))
+    && !rest.starts_with("/api/");
+  is_windows || is_absolute
+}
+
+/// The word pass: URLs, e-mail addresses, tokens and `key=value` pairs, word by word.
+fn redact_words(text: &str) -> String {
   let mut out = String::with_capacity(text.len());
   let mut redacts_next = false;
   for piece in split_keep_whitespace(text) {
@@ -277,8 +423,9 @@ fn redact_word(word: &str) -> String {
   if looks_like_jwt(core) {
     return format!("{lead}{REDACTED}{trail}");
   }
-  if let Some((name, _value)) = core.split_once(['=', ':'])
+  if let Some((name, value)) = core.split_once(['=', ':'])
     && !name.is_empty()
+    && !value.is_empty()
     && is_secret_field(name.trim_matches(|c: char| !c.is_alphanumeric() && c != '_'))
   {
     let separator = &core[name.len()..=name.len()];
@@ -287,8 +434,15 @@ fn redact_word(word: &str) -> String {
   format!("{lead}{}{trail}", redact_secret_runs(core))
 }
 
-/// Keeps scheme, host and path; drops user info, query and fragment.
+/// Keeps scheme, host and path; drops user info, query and fragment. A file or content URL names
+/// a file on the device: its path goes too.
 fn redact_url(word: &str, scheme_at: usize) -> String {
+  let scheme_start = word[..scheme_at]
+    .rfind(|c: char| !c.is_ascii_alphanumeric())
+    .map_or(0, |at| at + 1);
+  if matches!(&word[scheme_start..scheme_at], "file" | "content") {
+    return format!("{}[path]", &word[..scheme_start]);
+  }
   let (_, _, trail) = split_punctuation(word);
   let body = &word[..word.len() - trail.len()];
   let authority_start = scheme_at + 3;
@@ -653,6 +807,70 @@ mod tests {
     }
 
     #[test]
+    fn debug_structs_lose_whole_quoted_values() {
+      #[derive(Debug)]
+      #[allow(dead_code)]
+      struct Draft {
+        body: &'static str,
+        conversation_id: u64,
+      }
+      let draft = Draft {
+        body: "meet me at the \"old\" harbour",
+        conversation_id: 7,
+      };
+      let lines = logged(|| tracing::warn!(target: "teamcraft_core", error = ?draft, "send failed"));
+      assert_absent(&lines, &["meet", "harbour", "old"]);
+      assert!(lines[0].contains("conversation_id: 7"), "{lines:?}");
+    }
+
+    #[test]
+    fn paths_with_spaces_go_as_a_whole() {
+      let lines = logged(|| {
+        tracing::warn!(target: "teamcraft_core", "could not read /home/x/My Documents/salary 2026.xlsx");
+        tracing::warn!(target: "teamcraft_core", error = ?"C:\\Users\\Alex Example\\plan b.docx", "open failed");
+        tracing::warn!(target: "teamcraft_core", error = %"io error at \"/data/user/0/app/files/Holiday Plans.pdf\": denied", "save failed");
+      });
+      assert_absent(
+        &lines,
+        &[
+          "salary",
+          "2026.xlsx",
+          "Alex",
+          "Example",
+          "plan b",
+          "Holiday",
+          "Plans",
+        ],
+      );
+      assert!(
+        lines[2].ends_with("save failed error=io error at \"[path]\": denied"),
+        "{lines:?}"
+      );
+    }
+
+    #[test]
+    fn file_and_content_urls_lose_their_path() {
+      let lines = logged(|| {
+        tracing::warn!(target: "teamcraft_core", "picked file:///home/alex/Pictures/beach%20day.png");
+        tracing::warn!(target: "teamcraft_core", error = %"no access to content://com.android.providers.media.documents/document/image%3A12%2Fname.pdf", "pick failed");
+      });
+      assert_absent(&lines, &["alex", "beach", "name.pdf", "image%3A12"]);
+    }
+
+    #[test]
+    fn unknown_text_fields_are_never_kept() {
+      let lines = logged(|| {
+        tracing::warn!(target: "teamcraft_core", topic = "salary talks", subject = "layoffs", channel = "board", "changed");
+        tracing::warn!(target: "teamcraft_core", panic = "index out of range: secret plan", "panicked");
+      });
+      assert_absent(&lines, &["salary", "layoffs", "board", "secret plan"]);
+      assert!(
+        lines[0].ends_with("changed topic=[redacted] subject=[redacted] channel=[redacted]"),
+        "{lines:?}"
+      );
+    }
+
+    #[test]
     fn ordinary_words_ids_and_api_paths_stay() {
       let text =
         "GET /api/v1/conversations/7346012345678/messages failed: 503 service_unavailable (attempt 3)";
@@ -671,6 +889,10 @@ mod tests {
       assert!(!is_secret_field("conversation_id"));
       assert!(!is_secret_field("error"));
       assert!(!is_secret_field("error_kind"));
+      assert!(is_plain_field("conversation_id"));
+      assert!(is_plain_field("Error"));
+      assert!(!is_plain_field("topic"));
+      assert!(!is_plain_field("panic"));
     }
 
     fn logged(events: impl FnOnce()) -> Vec<String> {

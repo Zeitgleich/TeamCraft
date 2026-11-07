@@ -2383,6 +2383,11 @@ impl Core {
       maybe_screen_share_policy: teamcraft_core::workspace::screen_share_policy(client.store()),
       maybe_voice_message_policy: teamcraft_core::workspace::voice_message_policy(client.store()),
       maybe_notetaker: teamcraft_core::notetaker::notetaker_policy(client.store()),
+      bug_report_recipients: teamcraft_core::client::bug_reports::recipients(
+        client.store(),
+        client.user_id(),
+      )
+      .unwrap_or_default(),
       maybe_backup: teamcraft_core::ui_snapshot::key_backup_state(client.store()).unwrap_or_else(|error| {
         // The settings then show the backup as unknown; the rest of the snapshot still counts.
         tracing::warn!(%error, "the key backup state is unreadable");

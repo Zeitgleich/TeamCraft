@@ -430,7 +430,11 @@ mod tests {
 
   #[test]
   fn bug_report_failures_round_trip() {
-    for blocker in [BugReportBlocker::NoRecipients, BugReportBlocker::QueueFull] {
+    for blocker in [
+      BugReportBlocker::NoRecipients,
+      BugReportBlocker::QueueFull,
+      BugReportBlocker::WrongConversation,
+    ] {
       let failure = ActionFailure::new(FailureKind::BugReport(blocker), "problem report: nobody");
       assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
     }

@@ -44,7 +44,8 @@ async fn a_report_reaches_the_owners_encrypted_with_its_files() {
     .unwrap();
   let opened = alice.client.open_attachment(&reference).await.unwrap();
   assert_eq!(opened.expose_secret(), REPORT_TEXT.as_bytes());
-  assert_eq!(files[1].file_name, "screen.png");
+  // Named by its type, encoded again without metadata: the picked file's name doesn't travel.
+  assert_eq!(files[1].file_name, "screenshot.png");
 
   // The server holds ciphertext only: neither the description nor the report text.
   for stored in server
@@ -94,6 +95,76 @@ async fn a_report_made_offline_waits_and_arrives_once() {
   assert_eq!(alice.texts(dm), [DESCRIPTION], "delivered once");
 }
 
+/// A hostile server answers "the recipients' group DM" with a conversation of its choosing: a
+/// channel, or a group DM with someone who isn't a recipient. Nothing goes there; the report waits
+/// and the reporter is told.
+mod hostile_server {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_channel_named_for_the_dm_gets_nothing() {
+    let (server, mut alice, mut bob, mut carol) = workspace(false).await;
+    let channel = alice
+      .client
+      .create_channel(alice.space().await, "general")
+      .await
+      .unwrap();
+    for member in [bob.client.user_id(), carol.client.user_id()] {
+      alice.client.add_member(channel, member).await.unwrap();
+    }
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    server.redirect_group_dms_to(channel);
+
+    bob.client.queue_bug_report(report(20, false)).await.unwrap();
+    upkeep::flush(&mut bob.client).await;
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    assert_nothing_sent_to(&carol, channel);
+    assert_waits_and_tells(&mut bob);
+  }
+
+  #[tokio::test]
+  async fn a_group_dm_with_someone_else_gets_nothing() {
+    let (server, mut alice, mut bob, mut carol) = workspace(false).await;
+    // Bob's own group DM with Carol, who receives no reports (Alice, the owner, does).
+    let other_dm = bob.client.open_group_dm(&[carol.client.user_id()]).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    server.redirect_group_dms_to(other_dm);
+
+    bob.client.queue_bug_report(report(21, false)).await.unwrap();
+    upkeep::flush(&mut bob.client).await;
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    assert_nothing_sent_to(&carol, other_dm);
+    assert_waits_and_tells(&mut bob);
+  }
+
+  fn assert_nothing_sent_to(peer: &Peer, conversation: ConversationId) {
+    assert!(
+      !peer
+        .texts(conversation)
+        .iter()
+        .any(|text| text.contains(DESCRIPTION)),
+      "the report reached a conversation the server named"
+    );
+  }
+
+  fn assert_waits_and_tells(reporter: &mut Peer) {
+    assert_eq!(
+      queued_reports(reporter.store.as_ref()).unwrap().len(),
+      1,
+      "it waits"
+    );
+    let failures = reporter.client.take_background_failures();
+    assert!(
+      failures
+        .iter()
+        .any(|failure| matches!(failure, CoreError::BugReport(BugReportError::WrongConversation))),
+      "{failures:?}"
+    );
+  }
+}
+
 #[tokio::test]
 async fn nobody_to_receive_it_refuses_the_report() {
   let (_server, mut alice, _bob, _carol) = workspace(false).await;
@@ -104,6 +175,26 @@ async fn nobody_to_receive_it_refuses_the_report() {
     "{error:?}"
   );
   assert!(queued_reports(alice.store.as_ref()).unwrap().is_empty());
+}
+
+/// The report crossed IPC or FFI: the core checks it again and refuses a malformed one.
+#[tokio::test]
+async fn a_malformed_report_is_refused() {
+  let (_server, _alice, mut bob, _carol) = workspace(false).await;
+  let mut empty = report(30, false);
+  empty.description = "  ".to_owned();
+  let mut not_a_picture = report(31, true);
+  if let Some(screenshot) = not_a_picture.maybe_screenshot.as_mut() {
+    screenshot.bytes = Base64Bytes::new(b"%PDF-1.7".to_vec());
+  }
+  for bad in [empty, not_a_picture] {
+    let error = bob.client.queue_bug_report(bad).await.unwrap_err();
+    assert!(
+      matches!(error, CoreError::BugReport(BugReportError::Invalid(_))),
+      "{error:?}"
+    );
+  }
+  assert!(queued_reports(bob.store.as_ref()).unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -164,9 +255,9 @@ fn report(seed: u8, has_screenshot: bool) -> BugReport {
     report_text: REPORT_TEXT.to_owned(),
     file_name: "teamcraft-report-2026-11-07T12-00-00Z.txt".to_owned(),
     maybe_screenshot: has_screenshot.then(|| ReportScreenshot {
-      file_name: "screen.png".to_owned(),
+      file_name: "holiday at home.png".to_owned(),
       media_type: "image/png".to_owned(),
-      bytes: Base64Bytes::new(vec![0x89, b'P', b'N', b'G']),
+      bytes: Base64Bytes::new(png()),
     }),
   }
 }
@@ -180,6 +271,13 @@ fn only_dm(peer: &Peer, with: UserId) -> ConversationId {
     .collect();
   assert_eq!(dms.len(), 1, "{dms:?}");
   dms[0].id
+}
+
+fn png() -> Vec<u8> {
+  let picture = image::RgbImage::from_fn(8, 4, |x, _| image::Rgb([(x * 30) as u8, 10, 10]));
+  let mut out = std::io::Cursor::new(Vec::new());
+  picture.write_to(&mut out, image::ImageFormat::Png).unwrap();
+  out.into_inner()
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {

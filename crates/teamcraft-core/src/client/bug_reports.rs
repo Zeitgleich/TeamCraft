@@ -7,7 +7,7 @@
 //! answer) that runs again finds the message in the store and doesn't send it twice.
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{Base64Bytes, ClientMessageId, UserId};
+use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationKind, MAX_BUG_REPORT_RECIPIENTS, UserId};
 
 use super::Client;
 use super::files::{
@@ -19,6 +19,8 @@ use crate::records::{self, Draft};
 use crate::store::{LocalStore, MessageContent, Table};
 use crate::workspace::{RosterRole, WorkspaceState};
 
+/// The largest report text the core takes: the log's bound with room for the header.
+const MAX_REPORT_TEXT_BYTES: usize = 2 * 1024 * 1024;
 /// Reports that may wait on a device at once.
 pub const MAX_QUEUED_REPORTS: usize = 5;
 /// A report that couldn't be delivered for this long is dropped.
@@ -57,6 +59,31 @@ pub enum BugReportError {
   NoRecipients,
   #[error("{MAX_QUEUED_REPORTS} problem reports are waiting to be sent already")]
   QueueFull,
+  /// The server answered the request for the recipients' group DM with a conversation whose
+  /// verified members aren't the reporter and recipients (a channel, someone else's DM): a
+  /// hostile or broken server. Nothing is sent there.
+  #[error("the server named a conversation that isn't the report's group DM")]
+  WrongConversation,
+  /// The group DM's encryption group isn't on this device yet (its welcome is still to come).
+  #[error("the report's group DM isn't set up on this device yet")]
+  GroupNotReady,
+  /// The report the app handed over is malformed or too large (it crossed IPC or FFI).
+  #[error("the problem report is invalid: {0}")]
+  Invalid(&'static str),
+}
+
+#[cfg(feature = "ui")]
+impl BugReportError {
+  /// How the UI words it; `None` for what it words as a generic failure.
+  pub fn blocker(&self) -> Option<teamcraft_client_api::bug_report::BugReportBlocker> {
+    use teamcraft_client_api::bug_report::BugReportBlocker;
+    match self {
+      Self::NoRecipients => Some(BugReportBlocker::NoRecipients),
+      Self::QueueFull => Some(BugReportBlocker::QueueFull),
+      Self::WrongConversation => Some(BugReportBlocker::WrongConversation),
+      Self::GroupNotReady | Self::Invalid(_) => None,
+    }
+  }
 }
 
 /// Who a report goes to: the verified policy's recipients, or the verified roster's owners and
@@ -120,18 +147,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     report: teamcraft_client_api::bug_report::BugReport,
   ) -> Result<(), CoreError> {
-    let mut files = vec![ReportFile {
-      file_name: report.file_name,
-      media_type: teamcraft_client_api::bug_report::REPORT_MEDIA_TYPE.to_owned(),
-      bytes: Base64Bytes::new(report.report_text.into_bytes()),
-    }];
-    if let Some(screenshot) = report.maybe_screenshot {
-      files.push(ReportFile {
-        file_name: screenshot.file_name,
-        media_type: screenshot.media_type,
-        bytes: screenshot.bytes,
-      });
-    }
+    let files = report_files(&report)?;
     let queued = QueuedBugReport {
       id: report.id,
       description: report.description.trim().to_owned(),
@@ -175,8 +191,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           tracing::debug!(%error, "problem reports wait for the server");
           break;
         },
+        Err(CoreError::BugReport(BugReportError::GroupNotReady)) => {
+          tracing::debug!("a problem report waits for its group DM");
+          self.back_off_report(report, now_ms)?;
+        },
         Err(error) => {
           tracing::warn!(%error, attempts = report.attempts, "a problem report could not be delivered; retried later");
+          // A conversation that isn't the report's says something is wrong with the server: the
+          // person hears of it (issue #322), the report stays here and nothing goes there.
+          if matches!(error, CoreError::BugReport(BugReportError::WrongConversation)) {
+            self.background_failures.push(error);
+          }
           self.back_off_report(report, now_ms)?;
         },
       }
@@ -191,7 +216,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Err(BugReportError::NoRecipients.into());
     }
     // Recipients read now, not when queued: a policy changed meanwhile names the current ones.
-    let conversation = self.open_group_dm(&recipients).await?;
+    let conversation = match self.open_group_dm(&recipients).await {
+      Err(CoreError::NotADirectConversation(_)) => return Err(BugReportError::WrongConversation.into()),
+      other => other?,
+    };
+    self.check_report_conversation(conversation, reporter, &recipients)?;
     if self.store.message(conversation, report.id)?.is_none() {
       // The files first: a crash before the message is written leaves an upload nobody sends,
       // which the next delivery writes again under the same key.
@@ -216,6 +245,35 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// The server names the conversation, so it is checked before anything goes there: a DM or
+  /// group DM whose encryption group, as this device verified it, holds the reporter and nobody
+  /// but the recipients. A recipient not in it yet (no device to add) only receives less.
+  fn check_report_conversation(
+    &mut self,
+    conversation: teamcraft_proto::ConversationId,
+    reporter: UserId,
+    recipients: &[UserId],
+  ) -> Result<(), CoreError> {
+    let is_direct = self
+      .cached_conversations()?
+      .get(&conversation)
+      .is_some_and(|response| matches!(response.kind, ConversationKind::Dm | ConversationKind::Group));
+    if !is_direct {
+      return Err(BugReportError::WrongConversation.into());
+    }
+    if !self.has_group(conversation)? {
+      return Err(BugReportError::GroupNotReady.into());
+    }
+    let members = self.group_users(conversation)?;
+    let is_only_ours = members
+      .iter()
+      .all(|member| *member == reporter || recipients.contains(member));
+    if !members.contains(&reporter) || !is_only_ours {
+      return Err(BugReportError::WrongConversation.into());
+    }
+    Ok(())
+  }
+
   fn back_off_report(&self, report: QueuedBugReport, now_ms: i64) -> Result<(), CoreError> {
     let attempts = report.attempts.saturating_add(1);
     let wait_ms = FIRST_RETRY_MS
@@ -228,6 +286,55 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     records::put_json(&self.store, Table::SyncState, &report_key(retried.id), &retried)
   }
+}
+
+/// The files of a report, checked again here: the report crossed IPC or FFI from an app. The
+/// screenshot is encoded again without its metadata (EXIF, GPS) and named by its type, so neither
+/// where it was taken nor its file name travel.
+#[cfg(feature = "ui")]
+fn report_files(report: &teamcraft_client_api::bug_report::BugReport) -> Result<Vec<ReportFile>, CoreError> {
+  use teamcraft_client_api::bug_report::{REPORT_MEDIA_TYPE, check_fields, report_file_name};
+
+  let maybe_screenshot = report.maybe_screenshot.as_ref().map(|screenshot| {
+    (
+      screenshot.media_type.as_str(),
+      screenshot.bytes.as_slice().len() as u64,
+    )
+  });
+  if !check_fields(&report.description, maybe_screenshot).is_empty() {
+    return Err(BugReportError::Invalid("description or screenshot").into());
+  }
+  if report.report_text.len() > MAX_REPORT_TEXT_BYTES {
+    return Err(BugReportError::Invalid("report text too large").into());
+  }
+  // The app's name for the file only if it is the one this version makes.
+  let is_report_name = report.file_name.starts_with("teamcraft-report-")
+    && report.file_name.ends_with(".txt")
+    && report
+      .file_name
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.'));
+  let file_name = if is_report_name {
+    report.file_name.clone()
+  } else {
+    report_file_name(0)
+  };
+  let mut files = vec![ReportFile {
+    file_name,
+    media_type: REPORT_MEDIA_TYPE.to_owned(),
+    bytes: Base64Bytes::new(report.report_text.clone().into_bytes()),
+  }];
+  if let Some(screenshot) = &report.maybe_screenshot {
+    let (bytes, media_type) = crate::thumbnail::without_metadata(screenshot.bytes.as_slice())
+      .ok_or(BugReportError::Invalid("the screenshot is no readable picture"))?;
+    let extension = if media_type == "image/jpeg" { "jpg" } else { "png" };
+    files.push(ReportFile {
+      file_name: format!("screenshot.{extension}"),
+      media_type: media_type.to_owned(),
+      bytes: Base64Bytes::new(bytes),
+    });
+  }
+  Ok(files)
 }
 
 fn choose_recipients(
@@ -246,6 +353,8 @@ fn choose_recipients(
       found.push(*user);
     }
   }
+  // A group DM stays small; a policy naming more (signed by an older or careless owner) is cut.
+  found.truncate(MAX_BUG_REPORT_RECIPIENTS);
   found
 }
 
@@ -285,6 +394,15 @@ mod tests {
     assert_eq!(
       choose_recipients(&[user(3), user(3), user(4)], &admins, user(9)),
       [user(3), user(4)]
+    );
+  }
+
+  #[test]
+  fn a_group_dm_stays_small() {
+    let many: Vec<UserId> = (1..=40).map(user).collect();
+    assert_eq!(
+      choose_recipients(&many, &[], user(99)).len(),
+      MAX_BUG_REPORT_RECIPIENTS
     );
   }
 

@@ -90,6 +90,9 @@ pub enum BugReportBlocker {
   NoRecipients,
   /// As many reports as a device keeps wait to be delivered already.
   QueueFull,
+  /// The server named a conversation for the report that isn't the recipients' group DM; the
+  /// report waits and nothing is sent there.
+  WrongConversation,
 }
 
 impl BugReportBlocker {
@@ -98,11 +101,12 @@ impl BugReportBlocker {
     match self {
       Self::NoRecipients => "no_recipients",
       Self::QueueFull => "queue_full",
+      Self::WrongConversation => "wrong_conversation",
     }
   }
 
   pub(crate) fn from_wire(name: &str) -> Option<Self> {
-    [Self::NoRecipients, Self::QueueFull]
+    [Self::NoRecipients, Self::QueueFull, Self::WrongConversation]
       .into_iter()
       .find(|blocker| blocker.as_str() == name)
   }

@@ -236,6 +236,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// the other; if both try at once, the loser joins the winner's group (first commit wins).
   pub async fn open_dm(&mut self, user: UserId) -> Result<ConversationId, CoreError> {
     let conversation = self.api.create_dm(&CreateDmRequest { user_id: user }).await?;
+    check_direct(&conversation)?;
     self.found_participants_group(conversation, &[user]).await
   }
 
@@ -267,6 +268,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         user_ids: users.to_vec(),
       })
       .await?;
+    check_direct(&conversation)?;
     let me = self.user_id();
     let others: Vec<UserId> = conversation_members(users, me);
     self.found_participants_group(conversation, &others).await
@@ -3746,6 +3748,15 @@ impl BacklogReads {
       maybe_members: None,
       device_lists_read: std::collections::HashSet::new(),
     }
+  }
+}
+
+/// The server names the conversation it answers a DM request with: only a DM or group DM is taken,
+/// so it can't turn "write to these people" into a post in a channel.
+fn check_direct(conversation: &teamcraft_proto::ConversationResponse) -> Result<(), CoreError> {
+  match conversation.kind {
+    ConversationKind::Dm | ConversationKind::Group => Ok(()),
+    _ => Err(CoreError::NotADirectConversation(conversation.id)),
   }
 }
 

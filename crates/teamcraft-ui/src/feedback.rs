@@ -123,6 +123,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
     FailureKind::BugReport(blocker) => match blocker {
       BugReportBlocker::NoRecipients => "report-error-no-recipients",
       BugReportBlocker::QueueFull => "report-error-queue-full",
+      BugReportBlocker::WrongConversation => "report-error-wrong-conversation",
     },
     FailureKind::Link(failure) => match failure {
       LinkFailure::CodeInvalid => "error-link-code-invalid",

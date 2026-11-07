@@ -236,6 +236,27 @@ pub fn editor_image(bytes: &[u8]) -> Option<EditorImage> {
   })
 }
 
+/// A picture encoded again from its pixels, upright, without its metadata (EXIF with the camera,
+/// time and GPS position, text chunks): what a problem report sends of a screenshot
+/// (docs/bug-reports.md). A JPEG stays a JPEG (quality 90), anything else becomes a PNG. `None`
+/// for anything that isn't a decodable picture within the decoder's limits.
+pub fn without_metadata(bytes: &[u8]) -> Option<(Vec<u8>, &'static str)> {
+  let is_jpeg = image::guess_format(bytes).ok()? == ImageFormat::Jpeg;
+  let image = decode_upright(bytes, MAX_PIXELS)?;
+  let mut out = Vec::new();
+  if is_jpeg {
+    image
+      .to_rgb8()
+      .write_with_encoder(JpegEncoder::new_with_quality(&mut out, 90))
+      .ok()?;
+    Some((out, "image/jpeg"))
+  } else {
+    let encoder = PngEncoder::new_with_quality(&mut out, CompressionType::Default, PngFilter::Adaptive);
+    image.write_with_encoder(encoder).ok()?;
+    Some((out, "image/png"))
+  }
+}
+
 /// Cuts `crop` out of an editor image (see [`editor_image`]) and scales it to at most `size`
 /// pixels per side, as PNG; a smaller square is not scaled up. The rectangle is clamped to the
 /// picture. The server re-encodes the upload again (it trusts no client); this keeps it small.
@@ -328,6 +349,30 @@ mod tests {
   use image::{ImageBuffer, Rgb, Rgba};
 
   use super::*;
+
+  #[test]
+  fn metadata_is_dropped_from_a_screenshot() {
+    let picture = ImageBuffer::from_fn(64, 32, |x, _| Rgb([(x * 4) as u8, 40, 80]));
+    let jpeg = encoded(&picture, ImageFormat::Jpeg);
+    // An APP1 (EXIF) segment right after the start marker, as cameras write it.
+    let exif = b"Exif\0\0GPS 52.5200N 13.4050E";
+    let length = u16::try_from(exif.len() + 2).unwrap().to_be_bytes();
+    let mut tagged = jpeg[..2].to_vec();
+    tagged.extend_from_slice(&[0xFF, 0xE1, length[0], length[1]]);
+    tagged.extend_from_slice(exif);
+    tagged.extend_from_slice(&jpeg[2..]);
+    assert!(tagged.windows(4).any(|window| window == b"52.5"));
+
+    let (clean, media_type) = without_metadata(&tagged).unwrap();
+    assert_eq!(media_type, "image/jpeg");
+    assert!(!clean.windows(4).any(|window| window == b"52.5"));
+    assert!(!clean.windows(4).any(|window| window == b"Exif"));
+    assert_eq!(dimensions(&clean), (64, 32));
+
+    let (png, media_type) = without_metadata(&encoded(&picture, ImageFormat::Png)).unwrap();
+    assert_eq!((media_type, dimensions(&png)), ("image/png", (64, 32)));
+    assert_eq!(without_metadata(b"%PDF-1.7"), None);
+  }
 
   #[test]
   fn photos_shrink_to_a_jpeg_and_other_files_have_none() {

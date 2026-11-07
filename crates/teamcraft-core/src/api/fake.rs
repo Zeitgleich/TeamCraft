@@ -229,6 +229,8 @@ struct State {
   maybe_forced_device_id: Option<DeviceId>,
   /// A malicious server: the next message gets this ID instead of a fresh one.
   maybe_forced_message_id: Option<MessageId>,
+  /// A malicious server: every group DM asked for is answered with this conversation instead.
+  maybe_redirected_group_dm: Option<ConversationId>,
   /// A network cut armed per user: after the given number of calls, the next one fails.
   network_cuts: HashMap<UserId, (u32, NetworkCut)>,
   /// Users whose gateway connections stay open but carry nothing either way: no `hello`, no
@@ -895,6 +897,11 @@ impl FakeServer {
   /// server might.
   pub fn force_next_message_id(&self, id: MessageId) {
     self.lock().maybe_forced_message_id = Some(id);
+  }
+
+  /// A malicious server: answers every request for a group DM with `conversation` instead.
+  pub fn redirect_group_dms_to(&self, conversation: ConversationId) {
+    self.lock().maybe_redirected_group_dm = Some(conversation);
   }
 
   /// The next `count` binary frames sent over any relay are lost.
@@ -2922,6 +2929,9 @@ impl ServerApi for FakeServerApi {
       participants.dedup();
       for user in &participants {
         state.user(*user)?;
+      }
+      if let Some(redirected) = state.maybe_redirected_group_dm {
+        return Ok(state.conversation(redirected)?.view(me));
       }
       let existing = state.conversations.values().find(|conversation| {
         conversation.response.kind == ConversationKind::Group

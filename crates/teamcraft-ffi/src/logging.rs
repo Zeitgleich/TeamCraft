@@ -56,14 +56,28 @@ pub(crate) fn install() {
   });
 }
 
-/// Rust's panic output goes nowhere on Android: panics of any thread (their message and location)
-/// go to the system log, and with it the diagnostics export (issue #1142).
+/// Rust's panic output goes nowhere on Android: panics of any thread go to the system log, and
+/// with it the diagnostics export and problem reports (issue #1142). Only where it panicked and
+/// how long its message was: a panic message can carry data (an index, a value, a name).
 fn install_panic_log() {
   let previous = std::panic::take_hook();
   std::panic::set_hook(Box::new(move |info| {
-    tracing::error!(target: LIFECYCLE, panic = %info, "panicked");
+    let location = info.location().map_or_else(
+      || "unknown".to_owned(),
+      |at| format!("{}:{}", at.file(), at.line()),
+    );
+    let message_chars = panic_message(info).map_or(0, |message| message.chars().count());
+    tracing::error!(target: LIFECYCLE, location = %location, message_chars, "panicked");
     previous(info);
   }));
+}
+
+fn panic_message<'a>(info: &'a std::panic::PanicHookInfo<'_>) -> Option<&'a str> {
+  let payload = info.payload();
+  payload
+    .downcast_ref::<&str>()
+    .copied()
+    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
 }
 
 /// Logs an engine job that held the engine thread, or waited for it, for long. Everything the apps

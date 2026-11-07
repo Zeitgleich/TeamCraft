@@ -2162,6 +2162,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.command(CoreCommand::QueueBugReport { report });
   }
 
+  fn bug_report_recipients(&self) -> Vec<UserId> {
+    self.read(crate::client::bug_reports::recipients(&self.store, self.me))
+  }
+
   fn drafts(&self, maybe_space: Option<SpaceId>) -> Vec<teamcraft_client_api::drafts::DraftItem> {
     self.ui_drafts(maybe_space)
   }

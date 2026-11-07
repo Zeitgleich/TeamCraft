@@ -168,6 +168,10 @@ pub enum CoreError {
   CallEncryptionPending(ConversationId),
   #[error("conversation {0} is not a meeting chat")]
   NotAMeetingChat(ConversationId),
+  /// Asked for a DM or group DM, the server answered with another kind of conversation (a
+  /// channel, a meeting chat): a hostile or broken server. Nothing is set up or sent there.
+  #[error("conversation {0} is no DM or group DM")]
+  NotADirectConversation(ConversationId),
   /// Letting a guest into a meeting chat's group failed a check of the guest link (e2ee.md §4.6,
   /// "Meeting guests"): nothing was added.
   #[error("the guest cannot be let in: {0}")]
@@ -305,14 +309,10 @@ impl CoreError {
         FailureKind::Server(teamcraft_proto::ErrorCode::RecoveryPassphraseNotAllowed)
       },
       Self::RoleChangeNotConfirmed => FailureKind::RoleChangeNotConfirmed,
-      Self::BugReport(error) => FailureKind::BugReport(match error {
-        crate::client::BugReportError::NoRecipients => {
-          teamcraft_client_api::bug_report::BugReportBlocker::NoRecipients
-        },
-        crate::client::BugReportError::QueueFull => {
-          teamcraft_client_api::bug_report::BugReportBlocker::QueueFull
-        },
-      }),
+      Self::BugReport(error) => match error.blocker() {
+        Some(blocker) => FailureKind::BugReport(blocker),
+        None => FailureKind::Other,
+      },
       _ => FailureKind::Other,
     };
     ActionFailure::new(kind, self.to_string())
