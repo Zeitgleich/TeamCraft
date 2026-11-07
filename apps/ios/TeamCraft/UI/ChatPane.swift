@@ -33,6 +33,8 @@ struct ChatPane: View {
   @State private var isTakingPhoto = false
   @State private var photoSelection: [PhotosPickerItem] = []
   @State private var isShowingFiles = false
+  /// A channel's members with their roles (#1262); DMs and group DMs have no roles.
+  @State private var isShowingMembers = false
   @State private var maybeReplying: MessageItem?
   /// The one picture of an album being answered, instead of a whole message (#241).
   @State private var maybeReplyingImage: FileInfo?
@@ -128,6 +130,7 @@ struct ChatPane: View {
         if edited.path != file.path { try? FileManager.default.removeItem(atPath: file.path) }
       }
     }
+    .sheet(isPresented: $isShowingMembers) { ChannelMembersView(conversationId: conversation.id) }
     .sheet(item: $maybeForwarding) { target in
       ForwardSheet(fromConversationId: conversation.id, messageId: target.message.id)
     }
@@ -758,6 +761,9 @@ struct ChatPane: View {
         }
         ConversationMuteMenu(conversationId: conversation.id)
         Button("files_title", systemImage: "folder") { isShowingFiles = true }
+        if conversation.kind == .public || conversation.kind == .private {
+          Button("members_title", systemImage: "person.2") { isShowingMembers = true }
+        }
       } label: {
         Image(systemName: "ellipsis.circle")
       }

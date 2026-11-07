@@ -2274,8 +2274,9 @@ workspace roster (admin.md §2.3):
     (`sign_reviewed_channel_roles`), and only on the log they saw: if it moved since, or another admin gets there first,
     nothing is signed and the panel says the roles changed and shows them anew. It is a checkpoint on every device: the entry names no head, so the role rules that bind one role change don't bind it, as for any
     checkpoint today. A device nobody is looking at (an import) has nobody to ask: it signs nothing, its server changes
-    stand unsigned and it logs that. Phones can't review yet (#1262), so a workspace admin in this state signs from
-    desktop or web.
+    stand unsigned and it logs that. The Android and iOS apps have the same look in a channel's members (#1262):
+    the rows, marks, names and refusals come from the same rule (`teamcraft_client_api::role_review`) over FFI, and
+    confirming is the same `sign_reviewed_channel_roles` on the log they saw.
   - **What the server's date says first:** dated outside every tenure, or against a roster that ended the tenure without
     a signing time (which proves no tenure over), the entry is an ordinary junk entry, skipped with no other effect, on
     every device alike. A server that postdates a real entry gains what withholding it gives.
@@ -2290,10 +2291,10 @@ workspace roster (admin.md §2.3):
     that accepted nothing yet: **it does not drop to "unsigned", where every member may act**. Under `owner_approval` an
     admin's addition is then refused on this device whoever commits it (it falls out and is added back, §4.6), and nobody
     here approves or signs but a workspace admin who reviewed. A workspace admin's deletion still purges, and chat isn't
-    touched. Only a workspace admin's members section says so, as above; a refused action says why in words. A list a
-    workspace admin looked at, on a fresh roster, ends it and anchors the channel; an ordinary entry doesn't, as the
-    stretch took the anchor away. Mobile apps have the refusals through the core
-    but not the look at the roles yet (issue #1262).
+    touched. Only a workspace admin's members section says so, as above, on desktop, web and the phones alike; a
+    refused action says why in words. A list a workspace admin looked at, on a fresh roster, ends it and anchors the
+    channel; an ordinary entry doesn't, as the stretch took the anchor away. The phones' members section also shows
+    every member the line for a channel where this device and a member's see different roles (issue #1262).
   - **After a removal** each device reads every channel's log it knows, a few per upkeep pass, so an entry the server shows
     later can't pass for one from before: it closes the window below for devices online then. A failed read waits five
     minutes, doubling up to six hours, and holds up no other channel. A local read while nothing is due, which is nearly

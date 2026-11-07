@@ -45,6 +45,7 @@ pub mod remote;
 pub mod scheduled;
 /// Shared with the core, which verifies signed channel roles with the same rules (issue #380).
 pub use teamcraft_proto::role_rules;
+pub mod role_review;
 pub mod search;
 pub mod security;
 pub mod server_entry;
