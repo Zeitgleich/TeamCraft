@@ -99,11 +99,15 @@ object VideoEditing {
     runCatching {
       val retriever = MediaMetadataRetriever()
       try {
-        retriever.setDataSource(context, uri)
+        SealedCaptures.setDataSource(retriever, context, uri)
         fun number(key: Int) = retriever.extractMetadata(key)?.toLongOrNull() ?: 0L
         val width = number(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH).toInt()
         val height = number(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT).toInt()
-        val size = context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: 0L
+        val size = if (SealedCaptures.isSealed(uri)) {
+          SealedCaptures.size(context, uri)
+        } else {
+          context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: 0L
+        }
         VideoFacts(number(MediaMetadataRetriever.METADATA_KEY_DURATION), minOf(width, height), number(MediaMetadataRetriever.METADATA_KEY_BITRATE).toInt(), size)
       } finally {
         retriever.release()
@@ -129,7 +133,11 @@ object VideoEditing {
     }
   }
 
-  /** Exports the edited video into `target`; `false` when the device can't (the user is told). */
+  /**
+   * Exports the edited video into `target`; `false` when the device can't (the user is told).
+   * Transformer reads files only: a sealed camera video is passed as a plain copy
+   * ([SealedCaptures.openToFile]).
+   */
   @OptIn(UnstableApi::class)
   suspend fun export(context: Context, uri: Uri, edit: VideoEdit, facts: VideoFacts?, quality: MediaQuality, target: File): Boolean =
     withContext(Dispatchers.Main) {
@@ -184,7 +192,7 @@ suspend fun videoFrame(context: Context, uri: Uri, timeMs: Long, sidePx: Int): B
   runCatching {
     val retriever = MediaMetadataRetriever()
     try {
-      retriever.setDataSource(context, uri)
+      SealedCaptures.setDataSource(retriever, context, uri)
       val timeUs = timeMs * 1000
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
         retriever.getScaledFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, sidePx, sidePx)

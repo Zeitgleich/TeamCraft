@@ -2,6 +2,8 @@ package de.zeitgleich.teamcraft.ui.media
 
 import java.io.File
 import java.nio.file.Files
+import de.zeitgleich.teamcraft.security.SealedMedia
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -180,6 +182,70 @@ class MediaDraftStoreTest {
     assertEquals(gallery, draft.items[0])
     assertEquals("file://${File(moved, "photo.jpg").absolutePath}", draft.items[1].uri)
     assertEquals(lost, draft.items[2])
+  }
+
+  @Test
+  fun aLoadedDraftsPlainCameraFilesAreSealedAndWhatItDoesNotNameGoes() {
+    val files = files()
+    val captures = capture(files, "server-a", "account-1", nameOf("111", null))
+    val key = names.captureKey()
+    val plain = File(captures, "photo.jpg")
+    val sealedAlready = File(captures, "video-1.mp4.sealed").apply { SealedMedia.sealTo(this, key, "video".encodeToByteArray()) }
+    val leftover = File(captures, "video-2.mp4").apply { writeText("a recording a kill cut off") }
+    val opened = File(captures, "open-1.mp4").apply { writeText("plain copy") }
+    val gallery = MediaDraftItem(id = "a", uri = "content://media/1", isVideo = false)
+    val shot = MediaDraftItem(id = "b", uri = "file://${plain.absolutePath}", isVideo = false, isCaptured = true)
+    val video = MediaDraftItem(id = "c", uri = "file://${sealedAlready.absolutePath}", isVideo = true, isCaptured = true)
+    val draft = MediaDraftStore.sealPlainCaptures(MediaDraft(items = listOf(gallery, shot, video)), captures, key)
+    val sealedShot = File(captures, "photo.jpg.sealed")
+    assertEquals(listOf(gallery.uri, "file://${sealedShot.absolutePath}", video.uri), draft.items.map { it.uri })
+    assertFalse(plain.exists())
+    assertArrayEquals("picture".encodeToByteArray(), SealedMedia.readAll(sealedShot, key))
+    assertTrue(sealedAlready.exists())
+    assertFalse(leftover.exists())
+    assertFalse(opened.exists())
+    // Loading again changes nothing.
+    assertEquals(draft, MediaDraftStore.sealPlainCaptures(draft, captures, key))
+    assertTrue(sealedShot.exists())
+  }
+
+  @Test
+  fun aSealKilledBeforeThePlainFileWentIsFinished() {
+    val files = files()
+    val captures = capture(files, "server-a", "account-1", nameOf("111", null))
+    val key = names.captureKey()
+    val plain = File(captures, "photo.jpg")
+    // Sealed and renamed, then killed: the draft still names the plain file, which is gone.
+    SealedMedia.sealTo(File(captures, "photo.jpg.sealed"), key, plain)
+    plain.delete()
+    val shot = MediaDraftItem(id = "b", uri = "file://${plain.absolutePath}", isVideo = false, isCaptured = true)
+    val draft = MediaDraftStore.sealPlainCaptures(MediaDraft(items = listOf(shot)), captures, key)
+    assertEquals("file://${File(captures, "photo.jpg.sealed").absolutePath}", draft.items.single().uri)
+  }
+
+  @Test
+  fun theCameraKeyIsTheDevicesAndNotAName() {
+    val key = names.captureKey()
+    assertEquals(32, key.size)
+    assertArrayEquals(key, MediaDraftNames(ByteArray(32) { it.toByte() }).captureKey())
+    assertNotEquals(key.toList(), MediaDraftNames(ByteArray(32) { 1 }).captureKey().toList())
+  }
+
+  @Test
+  fun theSweepTakesPlainCopiesAndUnfinishedSealsAKillLeft() {
+    val files = files()
+    val name = nameOf("111", null)
+    val captures = capture(files, "server-a", "account-1", name)
+    draft(files, "$name.sealed")
+    val now = System.currentTimeMillis()
+    val old = File(captures, "open-1.mp4").apply { writeText("plain"); setLastModified(now - 2 * 60 * 60 * 1000) }
+    val unfinished = File(captures, "photo-1.jpg.sealed.tmp").apply { writeText("half"); setLastModified(now - 2 * 60 * 60 * 1000) }
+    val inUse = File(captures, "open-2.mp4").apply { writeText("being sent") }
+    MediaDraftStore.sweep(files, nowMillis = now, names)
+    assertFalse(old.exists())
+    assertFalse(unfinished.exists())
+    assertTrue(inUse.exists())
+    assertTrue(File(captures, "photo.jpg").exists())
   }
 
   private fun nameOf(conversation: String, maybeThread: String?): String = names.name(MediaDraftKey(conversation, maybeThread))

@@ -4597,9 +4597,24 @@ drafts are found by their group, without an index; what the names show someone w
 without the Keystore is which drafts belong to the same conversation. Drafts and camera folders of
 older versions (`draft-{conversation}-{thread}`) are renamed when the app first opens the drafts,
 one atomic rename per file, so a kill in between leaves files the next start renames. The camera's
-photos and videos themselves are plain files in that folder (as the files to send in
-`outgoing/<account>` are), readable with the app's data directory until the flow ends, sign-out,
-or the week-old sweep; sealing them is a follow-up (#1388). Pictures are drawn again
+photos and videos are sealed in that folder (#1388, `SealedMedia`): AES-256-GCM in 64 KiB segments,
+each with its own tag, under a per-file key `HMAC-SHA256(capture key, label || random salt)`; the
+capture key is an HMAC of the naming secret under its own label, so it goes with `names.key` at
+sign-out and a Keystore that lost its key loses both. A segment's nonce is its index and whether it
+is the last one, and the header (format, segment size, salt) is the associated data of every
+segment, so changed, reordered, dropped, appended or cut segments fail to open (the STREAM
+construction). A photo is taken into memory (`OnImageCapturedCallback`), not into a file, and sealed
+before it is written; its EXIF is replaced by one that holds only the orientation (no camera make,
+model or time). The recorder writes a seekable MP4 to a file, so a video is plain while it is
+recorded and is sealed as soon as the recording ends, the plain file then deleted (a delete, not a
+wipe of the flash). The review, the editors and the thumbnails read the plaintext through the
+sealed file (photos decrypted in memory; videos through a decrypting Media3 `DataSource` for
+ExoPlayer and a `MediaDataSource` for the frame and length reads). Transformer and the upload read
+plain files only, so sending or saving a camera video opens it into a plain copy beside it for that
+long (`open-*`, the sent copy is plain like every file to send in `outgoing/<account>`); copies and
+unfinished seals a kill left go at the next start once they are an hour old. Opening a draft seals
+camera files of older versions (or of a recording a kill interrupted) and deletes what the draft
+doesn't name, such as a recording a kill cut off. Pictures are drawn again
 before they are sent, without their metadata; videos are packed again (no re-encoding unless
 edited) with only their orientation, so no location or camera details go along. A video the device
 can't pack again, unedited, goes as it is, as a file sent from the file picker does.
@@ -4980,7 +4995,7 @@ start and remain visible while the server or its object storage is unavailable.
   (notifications.md, "Desktop notifications").
 - The mobile apps don't use it: Android keeps avatars and space pictures in its own file caches
   (by user and space, nothing of a conversation) and inline pictures only in memory. Its one file of
-  a conversation, an unfinished picture selection with its camera shots (named by keyed group,
+  a conversation, an unfinished picture selection with its camera shots (named by keyed group and sealed,
   §9.2), goes with the
   conversation: the core hands the app the same records (`dropped_conversations`), and the app
   reports each back once the files are gone.

@@ -1,6 +1,5 @@
 package de.zeitgleich.teamcraft.ui.media
 
-import android.content.ContentResolver
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -19,7 +18,10 @@ import android.net.Uri
 import android.os.Build
 import androidx.annotation.DrawableRes
 import androidx.core.content.ContextCompat
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.nio.ByteBuffer
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import kotlinx.coroutines.Dispatchers
@@ -123,7 +125,7 @@ object PictureRenderer {
   suspend fun render(context: Context, uri: Uri, edit: PictureEdit, quality: MediaQuality): RenderedPicture? =
     withContext(Dispatchers.Default) {
       val maxSide = maxSidePx(quality)
-      val source = decodeUpright(context.contentResolver, uri, maxSide) ?: return@withContext null
+      val source = decodeUpright(context, uri, maxSide) ?: return@withContext null
       val picture = EditablePicture.of(source)
       val (outWidth, outHeight) = PictureGeometry.outputSize(picture.width, picture.height, edit.crop)
       val scale = PictureGeometry.downscale(outWidth, outHeight, maxSide)
@@ -166,29 +168,45 @@ object PictureRenderer {
     }
   }
 
-  /** A picture from the gallery or the camera, upright, at about `maxSidePx`, in software memory to draw on. */
-  fun decodeUpright(resolver: ContentResolver, uri: Uri, maxSidePx: Int): Bitmap? = runCatching {
+  /**
+   * A picture from the gallery or the camera, upright, at about `maxSidePx`, in software memory to
+   * draw on. The camera's sealed photos ([SealedCaptures]) are opened in memory.
+   */
+  fun decodeUpright(context: Context, uri: Uri, maxSidePx: Int): Bitmap? = runCatching {
+    val resolver = context.contentResolver
+    val maybeSealed = if (SealedCaptures.isSealed(uri)) SealedCaptures.readAll(context, uri) else null
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
       // ImageDecoder applies the EXIF orientation itself.
-      ImageDecoder.decodeBitmap(ImageDecoder.createSource(resolver, uri)) { decoder, info, _ ->
+      val source = maybeSealed?.let { ImageDecoder.createSource(ByteBuffer.wrap(it)) } ?: ImageDecoder.createSource(resolver, uri)
+      ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
         decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
         decoder.setTargetSampleSize(sampleSize(info.size.width, info.size.height, maxSidePx))
       }
     } else {
+      fun open(): InputStream? = maybeSealed?.let(::ByteArrayInputStream) ?: resolver.openInputStream(uri)
       val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-      resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+      open()?.use { BitmapFactory.decodeStream(it, null, bounds) }
       val options = BitmapFactory.Options().apply { inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, maxSidePx) }
-      val decoded = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) } ?: return null
-      val orientation = resolver.openInputStream(uri)?.use {
+      val decoded = open()?.use { BitmapFactory.decodeStream(it, null, options) } ?: return null
+      val orientation = open()?.use {
         ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
       } ?: ExifInterface.ORIENTATION_NORMAL
-      val degrees = when (orientation) {
-        ExifInterface.ORIENTATION_ROTATE_90 -> 90f
-        ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-        ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+      // Turned clockwise, then mirrored (the camera's front photos are, CapturedJpeg).
+      val (degrees, isMirrored) = when (orientation) {
+        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> 0f to true
+        ExifInterface.ORIENTATION_ROTATE_180 -> 180f to false
+        ExifInterface.ORIENTATION_FLIP_VERTICAL -> 180f to true
+        ExifInterface.ORIENTATION_TRANSPOSE -> 90f to true
+        ExifInterface.ORIENTATION_ROTATE_90 -> 90f to false
+        ExifInterface.ORIENTATION_TRANSVERSE -> 270f to true
+        ExifInterface.ORIENTATION_ROTATE_270 -> 270f to false
         else -> return decoded
       }
-      Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, Matrix().apply { postRotate(degrees) }, true)
+      val matrix = Matrix().apply {
+        postRotate(degrees)
+        if (isMirrored) postScale(-1f, 1f)
+      }
+      Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
     }
   }.getOrNull()
 

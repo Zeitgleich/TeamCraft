@@ -10,6 +10,7 @@ import kotlinx.serialization.json.Json
 import de.zeitgleich.teamcraft.security.KeystoreBox
 import de.zeitgleich.teamcraft.security.SealedCache
 import de.zeitgleich.teamcraft.security.SealedFile
+import de.zeitgleich.teamcraft.security.SealedMedia
 
 /** Which conversation (and thread) a media flow sends to: one draft each. */
 data class MediaDraftKey(val conversation: String, val maybeThread: String?)
@@ -19,7 +20,8 @@ data class MediaDraftKey(val conversation: String, val maybeThread: String?)
  * (robustness.md, "Lifecycle"). A file and not the saved instance state: drawings can be larger
  * than a bundle may be. The draft holds the caption and the drawn text, so it is sealed like the
  * database key (e2ee.md §9.2). Photos and videos taken with the app's camera wait in the core's
- * staging folder ([capturesRoot]), which sign-out wipes, and go when the flow ends.
+ * staging folder ([capturesRoot]), which sign-out wipes, and go when the flow ends. They are sealed
+ * there ([SealedCaptures], #1388) with a key derived from the naming secret ([captureKey]).
  *
  * Files and camera folders are named by a keyed derivation ([MediaDraftNames], #1377), so their
  * names show no conversation or thread. The name starts with a group per conversation, which is
@@ -40,8 +42,12 @@ class MediaDraftStore(context: Context, private val capturesRoot: suspend () -> 
     val bytes = runCatching { sealedOf(name).read() }.getOrNull() ?: return@withContext null
     val draft = runCatching { json.decodeFromString(MediaDraft.serializer(), bytes.decodeToString()) }.getOrNull()
       ?: return@withContext null
-    // A draft from before #1377 names its camera files in the folder they had then.
-    capturesRoot()?.let { relocated(draft, File(it, "$CAPTURES-$name")) } ?: draft
+    val captures = capturesRoot()?.let { File(it, "$CAPTURES-$name") } ?: return@withContext draft
+    // A draft from before #1377 names its camera files in the folder they had then, one from
+    // before #1388 has them in plain files.
+    val relocated = relocated(draft, captures)
+    val maybeKey = names(filesDir)?.captureKey()
+    if (maybeKey == null) relocated else sealPlainCaptures(relocated, captures, maybeKey)
   }
 
   suspend fun save(key: MediaDraftKey, draft: MediaDraft) = withContext(Dispatchers.IO) {
@@ -88,6 +94,16 @@ class MediaDraftStore(context: Context, private val capturesRoot: suspend () -> 
 
     @Volatile
     private var maybeCachedNames: Pair<File, MediaDraftNames>? = null
+
+    /** Plain copies of camera files ([SealedCaptures.openToFile]) and unfinished seals left this long are a kill's. */
+    private const val LEFTOVER_MILLIS = 60L * 60 * 1000
+
+    /**
+     * The key of this device's camera files ([SealedCaptures]), derived from the naming secret: it
+     * goes with it at sign-out, and a Keystore that lost its key loses both. `null` when the
+     * Keystore can't give it.
+     */
+    fun captureKey(context: Context): ByteArray? = names(context.filesDir)?.captureKey()
 
     /**
      * Every draft of the device and the camera's files of every account: the session ended. Also
@@ -147,6 +163,7 @@ class MediaDraftStore(context: Context, private val capturesRoot: suspend () -> 
         if (isOld || isUnsealed) file.deleteRecursively()
       }
       dropOrphanedCaptures(filesDir)
+      dropLeftovers(filesDir, nowMillis)
     }
 
     internal fun dropConversation(filesDir: File, conversation: String, maybeNames: MediaDraftNames?): Boolean = synchronized(lock) {
@@ -211,6 +228,42 @@ class MediaDraftStore(context: Context, private val capturesRoot: suspend () -> 
 
     private const val FILE_SCHEME = "file://"
 
+    /**
+     * The draft's camera files sealed (#1388): a plain one (from before, or a recording a kill
+     * interrupted the sealing of) is sealed beside and then removed, and the draft names the sealed
+     * file. What the draft doesn't name (a recording a kill cut off, plain copies, unfinished seals)
+     * goes. Each step leaves files the next load finishes: a sealed file is written beside and
+     * renamed, and the plain one goes only after.
+     */
+    internal fun sealPlainCaptures(draft: MediaDraft, captures: File, key: ByteArray): MediaDraft {
+      val sealed = draft.copy(
+        items = draft.items.map { item ->
+          if (!item.isCaptured || !item.uri.startsWith(FILE_SCHEME) || item.uri.endsWith(SealedCaptures.SUFFIX)) return@map item
+          val plain = File(item.uri.removePrefix(FILE_SCHEME))
+          if (plain.parentFile?.absolutePath != captures.absolutePath) return@map item
+          val target = File(captures, "${plain.name}${SealedCaptures.SUFFIX}")
+          val isSealed = runCatching {
+            if (plain.exists()) SealedMedia.sealTo(target, key, plain)
+            target.exists()
+          }.getOrDefault(false)
+          if (!isSealed) return@map item
+          plain.delete()
+          item.copy(uri = "$FILE_SCHEME${target.absolutePath}")
+        },
+      )
+      val named = sealed.items.filter { it.isCaptured && it.uri.startsWith(FILE_SCHEME) }.map { File(it.uri.removePrefix(FILE_SCHEME)).name }.toSet()
+      captures.listFiles().orEmpty().forEach { file -> if (file.name !in named) file.deleteRecursively() }
+      return sealed
+    }
+
+    /** Plain copies and unfinished seals in camera folders that a kill left. */
+    private fun dropLeftovers(filesDir: File, nowMillis: Long) {
+      captureFolders(filesDir).flatMap { it.listFiles().orEmpty().toList() }
+        .filter { it.name.startsWith(SealedCaptures.OPENED_PREFIX) || it.name.endsWith(".tmp") }
+        .filter { nowMillis - it.lastModified() > LEFTOVER_MILLIS }
+        .forEach { it.deleteRecursively() }
+    }
+
     /** The core's sweep of its staging folder skips folders, so these are this store's to remove. */
     private fun dropOrphanedCaptures(filesDir: File) {
       val drafts = File(filesDir, DIRECTORY)
@@ -242,6 +295,12 @@ internal class MediaDraftNames(secret: ByteArray) {
 
   fun name(key: MediaDraftKey): String =
     "${groupPrefix(key.conversation)}${mac("draft", key.conversation, key.maybeThread.orEmpty())}"
+
+  /** The key of the camera files ([SealedCaptures]): a MAC of its own label, so independent of the names. */
+  fun captureKey(): ByteArray = Mac.getInstance(ALGORITHM).run {
+    init(secretKey)
+    doFinal("teamcraft media-flow capture key v1".encodeToByteArray())
+  }
 
   /** What the names of [conversation]'s drafts start with. */
   fun groupPrefix(conversation: String): String = "$PREFIX${mac("group", conversation)}-"

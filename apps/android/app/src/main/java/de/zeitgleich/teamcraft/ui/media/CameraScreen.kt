@@ -4,6 +4,8 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.ImageFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.text.format.DateUtils
@@ -13,6 +15,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.ZoomState
 import androidx.camera.video.FileOutputOptions
 import androidx.camera.video.Recording
@@ -57,6 +60,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -87,9 +91,13 @@ import androidx.lifecycle.Observer
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.io.File
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.security.SealedMedia
 import de.zeitgleich.teamcraft.ui.MediaAccess
 import de.zeitgleich.teamcraft.ui.recentMediaThumbnail
 
@@ -106,7 +114,9 @@ private enum class CameraMode { Photo, Video }
  * The app's own camera, as in the common messengers (#1358): full screen, close top left, flash top
  * right, zoom pills above the shutter, the newest gallery picture bottom left, flip on the right,
  * Photo / Video below. A tap takes a photo, holding records a video until released; in Video mode
- * a tap starts and stops. Photos and videos stay in the app's own folder until they are sent.
+ * a tap starts and stops. Photos and videos stay in the app's own folder until they are sent,
+ * sealed ([SealedCaptures]): a photo is taken into memory and sealed before it is written, a video
+ * is sealed as soon as its recording ends.
  */
 @Composable
 fun CameraScreen(
@@ -176,6 +186,7 @@ private fun CameraContent(
   var recordingStartedAt by remember { mutableLongStateOf(0L) }
   var isBusy by remember { mutableStateOf(false) }
   val currentOnCaptured by rememberUpdatedState(onCaptured)
+  val scope = rememberCoroutineScope()
   var zoom by remember { mutableStateOf<ZoomState?>(null) }
   DisposableEffect(controller, lifecycleOwner) {
     val observer = Observer<ZoomState> { zoom = it }
@@ -195,21 +206,31 @@ private fun CameraContent(
   fun takePhoto() {
     if (isBusy) return
     isBusy = true
-    val file = File(capturesDirectory, "photo-${System.currentTimeMillis()}.jpg")
-    val options = ImageCapture.OutputFileOptions.Builder(file).build()
+    val file = File(capturesDirectory, "photo-${System.currentTimeMillis()}.jpg${SealedCaptures.SUFFIX}")
+    // The front camera's photo is mirrored, as its preview shows it (CameraX does so for files).
+    val isMirrored = isFront
     view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
     controller.takePicture(
-      options,
       ContextCompat.getMainExecutor(context),
-      object : ImageCapture.OnImageSavedCallback {
-        override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-          isBusy = false
-          currentOnCaptured(MediaDraftItem(id = UUID.randomUUID().toString(), uri = Uri.fromFile(file).toString(), isVideo = false, isCaptured = true))
+      object : ImageCapture.OnImageCapturedCallback() {
+        override fun onCaptureSuccess(image: ImageProxy) {
+          // Copied out before the image goes back to the camera; it never touches the disk plain.
+          val maybeCaptured = runCatching { image.use(::capturedImage) }.getOrNull()
+          scope.launch {
+            val isSealed = maybeCaptured != null && withContext(Dispatchers.IO) {
+              runCatching { SealedMedia.sealTo(file, SealedCaptures.key(context), maybeCaptured.jpeg(isMirrored)) }.isSuccess
+            }
+            isBusy = false
+            if (isSealed) {
+              currentOnCaptured(MediaDraftItem(id = UUID.randomUUID().toString(), uri = Uri.fromFile(file).toString(), isVideo = false, isCaptured = true))
+            } else {
+              file.delete()
+            }
+          }
         }
 
         override fun onError(exception: ImageCaptureException) {
           isBusy = false
-          file.delete()
         }
       },
     )
@@ -230,15 +251,13 @@ private fun CameraContent(
           if ((event.hasError() && event.error != VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE) || !file.exists() || file.length() == 0L) {
             file.delete()
           } else {
-            currentOnCaptured(
-              MediaDraftItem(
-                id = UUID.randomUUID().toString(),
-                uri = Uri.fromFile(file).toString(),
-                isVideo = true,
-                durationMs = videoDuration(file),
-                isCaptured = true,
-              ),
-            )
+            // The recorder writes a seekable file, so the video is sealed once it is complete.
+            isBusy = true
+            scope.launch {
+              val (durationMs, kept) = withContext(Dispatchers.IO) { videoDuration(file) to sealRecording(context, file) }
+              isBusy = false
+              currentOnCaptured(MediaDraftItem(id = UUID.randomUUID().toString(), uri = Uri.fromFile(kept).toString(), isVideo = true, durationMs = durationMs, isCaptured = true))
+            }
           }
         }
       }
@@ -490,6 +509,39 @@ private fun ModeSwitch(mode: CameraMode, isEnabled: Boolean, onMode: (CameraMode
 
 private fun isGranted(context: Context, permission: String): Boolean =
   ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+
+/** A photo as it came from the camera: still to be turned and mirrored. */
+private class CapturedImage(private val maybeJpeg: ByteArray?, private val maybeBitmap: Bitmap?, private val rotationDegrees: Int) {
+  /** The JPEG to seal, told how to show it ([CapturedJpeg]). */
+  fun jpeg(isMirrored: Boolean): ByteArray {
+    val plain = maybeJpeg ?: java.io.ByteArrayOutputStream().use { out ->
+      requireNotNull(maybeBitmap).compress(Bitmap.CompressFormat.JPEG, CAPTURE_JPEG_QUALITY, out)
+      out.toByteArray()
+    }
+    return CapturedJpeg.withOrientation(plain, rotationDegrees, isMirrored)
+  }
+}
+
+private const val CAPTURE_JPEG_QUALITY = 95
+
+private fun capturedImage(image: ImageProxy): CapturedImage {
+  val rotation = image.imageInfo.rotationDegrees
+  if (image.format != ImageFormat.JPEG) return CapturedImage(null, image.toBitmap(), rotation)
+  val buffer = image.planes[0].buffer.duplicate().apply { rewind() }
+  return CapturedImage(ByteArray(buffer.remaining()).also(buffer::get), null, rotation)
+}
+
+/**
+ * The recording sealed beside and the plain file removed; the plain file itself when it can't be
+ * sealed (no key): it is sealed again when the draft is next opened, or goes with the flow.
+ */
+private fun sealRecording(context: Context, plain: File): File {
+  val target = File(plain.parentFile, "${plain.name}${SealedCaptures.SUFFIX}")
+  val isSealed = runCatching { SealedMedia.sealTo(target, SealedCaptures.key(context), plain) }.isSuccess
+  if (!isSealed) return plain
+  plain.delete()
+  return target
+}
 
 /** A recorded video's length; 0 when the file can't be read (it then shows no length). */
 internal fun videoDuration(file: File): Long = runCatching {
