@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import pathlib
+import struct
 import tempfile
 import unittest
 
@@ -222,6 +223,27 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn(' style="', html)
         self.assertEqual(page.check_links(self.site, SITE_URL), [])
 
+    def test_social_preview_card_is_published_and_the_meta_tags_point_at_it(self):
+        self.add_release("prerelease", "v1.0.0-rc.1")
+        html = self.render()
+        image = f"{SITE_URL}/og-card.png"
+        for tag in (f'<meta property="og:image" content="{image}">', f'<meta name="twitter:image" content="{image}">',
+                    f'<meta property="og:url" content="{SITE_URL}/">', '<meta property="og:type" content="website">',
+                    '<meta property="og:image:width" content="1200">', '<meta property="og:image:height" content="630">',
+                    '<meta name="twitter:card" content="summary_large_image">'):
+            self.assertIn(tag, html)
+        for name in ("og:title", "og:description", "og:image:alt", "twitter:image:alt"):
+            self.assertIn(f'"{name}" content="', html.replace("property=", "").replace("name=", ""))
+        card = self.site / "og-card.png"
+        self.assertTrue(card.is_file())
+        data = card.read_bytes()
+        self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(struct.unpack(">II", data[16:24]), (1200, 630))
+        self.assertLess(len(data), 200_000)
+        # The page keeps its policy: the card is fetched by crawlers, never by the page.
+        self.assertIn(page.CSP, html)
+        self.assertEqual(page.check_links(self.site, SITE_URL), [])
+
     def test_app_store_tile_follows_the_environment(self):
         self.add_release("prerelease", "v1.0.0-rc.1")
         self.assertIn("Coming soon", self.render())
@@ -289,6 +311,13 @@ class CheckLinksTest(unittest.TestCase):
         (self.site / "style.css").write_text('@font-face { src: url("fonts/missing.woff2"); }\n'
                                              'a { background: url(key.asc); }', encoding="utf-8")
         self.assertEqual(page.check_links(self.site, SITE_URL), [("style.css", "fonts/missing.woff2")])
+
+    def test_missing_meta_image_on_the_site_fails_other_meta_content_is_ignored(self):
+        self.write_page(f'<meta property="og:image" content="{SITE_URL}/og-card.png">'
+                        '<meta property="og:title" content="TeamCraft"><meta name="x" content="https://example.com/y.png">')
+        self.assertEqual(page.check_links(self.site, SITE_URL), [("index.html", f"{SITE_URL}/og-card.png")])
+        (self.site / "og-card.png").write_bytes(b"png")
+        self.assertEqual(page.check_links(self.site, SITE_URL), [])
 
     def test_directory_link_without_index_fails(self):
         self.write_page('<a href="apt/">apt</a>')
