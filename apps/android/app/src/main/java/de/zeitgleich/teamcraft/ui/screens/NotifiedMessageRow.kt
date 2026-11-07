@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageSource
 import uniffi.teamcraft_ffi.NotifiedConversation
@@ -56,3 +57,10 @@ fun withNotified(messages: List<Message>, maybeNotified: NotifiedConversation?):
   )
   return (messages + message).sortedBy { it.sentAt }
 }
+
+/**
+ * What the feed draws: nothing until the snapshot is there (issue #1425). Without it every sender is
+ * a "?" and system lines have no actor, and the bubbles change height once the names arrive.
+ */
+fun drawnMessages(messages: List<Message>, maybeNotified: NotifiedConversation?, maybeSnapshot: ChatSnapshot?): List<Message> =
+  if (maybeSnapshot == null) emptyList() else withNotified(messages, maybeNotified)

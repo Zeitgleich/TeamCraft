@@ -47,6 +47,17 @@ class FeedSeedsTest {
     assertEquals("1", seeds["a"]?.messages?.single()?.id)
   }
 
+  /** Opened from a notification, a conversation doesn't show what it showed last (#1425). */
+  @Test
+  fun aForgottenSeedIsGoneAndTheOthersStay() {
+    val seeds = FeedSeeds()
+    seeds.keep("a", seed(listOf("1")))
+    seeds.keep("b", seed(listOf("2")))
+    seeds.forget("a")
+    assertNull(seeds["a"])
+    assertEquals("2", seeds["b"]?.messages?.single()?.id)
+  }
+
   private fun seed(ids: List<String>, hasOlder: Boolean = false) =
     FeedSeed(ids.map(::message), hasOlder, emptyMap(), FirstUnread.None)
 

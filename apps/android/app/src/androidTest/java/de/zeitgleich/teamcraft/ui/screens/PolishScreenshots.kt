@@ -86,7 +86,7 @@ class PolishScreenshots {
   private fun Sample(viewModel: MainViewModel, textOnly: Boolean) {
     Scaffold(
       topBar = {
-        ConversationTopBar(SNAPSHOT, SNAPSHOT.conversations.first(), null, onBack = {}, actions = {})
+        ConversationTopBar(SNAPSHOT, SNAPSHOT.conversations.first(), null, null, onBack = {}, actions = {})
       },
       contentWindowInsets = ScreenInsets,
     ) { padding ->
