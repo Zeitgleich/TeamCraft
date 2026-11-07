@@ -17,6 +17,7 @@ admin-metadata-detail = Admins manage rooms without being able to read them: no 
 admin-soon = Not available yet
 admin-search = Search
 admin-search-placeholder = Search by name…
+admin-show-more = Show more
 admin-filter = Filter
 admin-empty = Nothing matches.
 admin-detail-label = Details

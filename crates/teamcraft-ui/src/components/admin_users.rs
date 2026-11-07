@@ -1,9 +1,9 @@
 use leptos::prelude::*;
 use teamcraft_proto::Role;
 
-use crate::admin::{AdminUser, DeviceInfo};
+use crate::admin::{AdminUser, AdminUserQuery, DeviceInfo};
 use crate::clock::{format_relative, now_ms};
-use crate::components::admin_console::{ListCutNotice, SectionHeader};
+use crate::components::admin_console::{ListMore, SectionHeader};
 use crate::components::admin_guests::GuestsOverview;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
@@ -13,8 +13,11 @@ use crate::components::workspace_dialogs::Dialog;
 use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
 use crate::model::{DeviceId, UserId};
-use crate::reactive::{items_by_key, keyed_item};
+use crate::reactive::{items_by_key, keyed_item, use_debounced};
 use crate::state::{Overlay, use_app_state};
+
+/// The wait after the last key before the search asks the server.
+const SEARCH_DEBOUNCE_MS: u64 = 250;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserTab {
@@ -30,6 +33,15 @@ pub fn UsersSection() -> impl IntoView {
   let tab = RwSignal::new(UserTab::Users);
   let selected = RwSignal::new(None::<UserId>);
   let now = now_ms();
+  // The server lists and searches accounts page by page (issue #1241).
+  let search = RwSignal::new(state.read(|backend| backend.admin_user_query()).text);
+  let debounced = use_debounced(search, SEARCH_DEBOUNCE_MS);
+  Effect::new(move |_| {
+    let asked = AdminUserQuery {
+      text: debounced.get(),
+    };
+    state.write(|backend| backend.admin_set_user_query(asked));
+  });
   let users = Memo::new(move |_| state.read(|backend| backend.admin_users()));
   let shown = users;
   let selected_user = Memo::new(move |_| {
@@ -78,6 +90,20 @@ pub fn UsersSection() -> impl IntoView {
           {move || i18n.t("admin-tab-guests")}
         </button>
       </div>
+      <Show when=move || tab.get() == UserTab::Users fallback=|| ()>
+        <label class="visually-hidden" for="admin-user-search">{move || i18n.t("admin-search")}</label>
+        <input
+          id="admin-user-search"
+          class="input"
+          type="search"
+          name="q"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder=move || i18n.t("admin-search-placeholder")
+          prop:value=move || search.get()
+          on:input=move |ev| search.set(event_target_value(&ev))
+        />
+      </Show>
       <span class="grow"></span>
       <button class="btn" disabled title=move || i18n.t("admin-soon")>
         <Icon name=IconName::Plus />
@@ -108,7 +134,10 @@ pub fn UsersSection() -> impl IntoView {
         <Show when=move || shown.get().is_empty() fallback=|| ()>
           <p class="empty-state">{move || i18n.t("admin-empty")}</p>
         </Show>
-        <ListCutNotice is_cut=Signal::derive(move || state.read(|backend| backend.admin_users_truncated())) />
+        <ListMore
+          has_more=Signal::derive(move || state.read(|backend| backend.admin_users_have_more()))
+          on_more=Callback::new(move |()| state.write(|backend| backend.admin_load_more_users()))
+        />
       </div>
       <aside class="detail-pane" aria-label=move || i18n.t("admin-detail-label")>
         {move || match detail_key.with(Option::is_some).then(|| selected_user.get_untracked()).flatten() {
@@ -160,7 +189,9 @@ fn UserRow(entry: AdminUser, selected: RwSignal<Option<UserId>>, now: i64) -> im
       <td><span class="badge">{move || i18n.t(role)}</span></td>
       <td class="num">{entry.device_count}</td>
       <td>{seen}</td>
-      <td translate="no">{entry.space_names.join(", ")}</td>
+      <td translate="no">
+        {if entry.space_names.is_empty() { entry.space_count.to_string() } else { entry.space_names.join(", ") }}
+      </td>
     </tr>
   }
 }

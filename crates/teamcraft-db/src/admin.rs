@@ -33,6 +33,8 @@ pub struct AdminConversationFilter {
   pub maybe_member: Option<UserId>,
   /// `Some(true)`: only channels without an active channel admin; `Some(false)`: only the others.
   pub maybe_is_orphaned: Option<bool>,
+  /// Part of the channel's or its space's name, any case.
+  pub maybe_query: Option<String>,
   pub limit: i64,
 }
 
@@ -161,6 +163,12 @@ impl Database {
     &self,
     filter: &AdminConversationFilter,
   ) -> Result<Vec<AdminConversationRow>, DbError> {
+    let maybe_pattern = filter
+      .maybe_query
+      .as_deref()
+      .map(str::trim)
+      .filter(|query| !query.is_empty())
+      .map(like_pattern);
     let rows = sqlx::query!(
       r#"SELECT t.id AS "id!", t.space_id, t.name, t.visibility AS "visibility!", t.is_archived AS "is_archived!",
                 t.created_at AS "created_at!", t.member_count AS "member_count!", t.guest_count AS "guest_count!",
@@ -192,6 +200,8 @@ impl Database {
              AND ($3::bigint IS NULL OR c.id > $3)
              AND ($10::bigint IS NULL OR EXISTS (
                    SELECT 1 FROM memberships m WHERE m.conversation_id = c.id AND m.user_id = $10))
+             AND ($11::text IS NULL OR c.name ILIKE $11 OR EXISTS (
+                   SELECT 1 FROM spaces sp WHERE sp.id = c.space_id AND sp.name ILIKE $11))
          ) t
          WHERE ($4::boolean IS NULL OR (t.guest_count > 0) = $4)
            AND ($5::bigint IS NULL OR t.member_count >= $5)
@@ -212,6 +222,7 @@ impl Database {
       filter.maybe_is_orphaned,
       filter.limit + 1,
       filter.maybe_member.map(to_db),
+      maybe_pattern,
     )
     .fetch_all(self.pool())
     .await?;
@@ -250,16 +261,11 @@ impl Database {
     &self,
     query: &str,
     status: UserStatusFilter,
+    maybe_role: Option<&str>,
     maybe_after: Option<UserId>,
     limit: i64,
   ) -> Result<Vec<AdminUserRow>, DbError> {
-    let pattern = format!(
-      "%{}%",
-      query
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-    );
+    let pattern = like_pattern(query);
     let status_text = match status {
       UserStatusFilter::Active => "active",
       UserStatusFilter::Deactivated => "deactivated",
@@ -281,11 +287,13 @@ impl Database {
          WHERE (u.display_name ILIKE $1 OR u.username ILIKE $1)
            AND ($2 = 'all' OR ($2 = 'active') = (u.deactivated_at IS NULL))
            AND ($3::bigint IS NULL OR u.id > $3)
+           AND ($5::text IS NULL OR u.oidc_role = $5)
          ORDER BY u.id LIMIT $4"#,
       pattern,
       status_text,
       maybe_after.map(to_db),
       limit + 1,
+      maybe_role,
     )
     .fetch_all(self.pool())
     .await?;
@@ -552,5 +560,24 @@ impl Database {
       attachment_bytes: u64::try_from(attachments.bytes).unwrap_or(0),
       index_segment_bytes: u64::try_from(segments.bytes).unwrap_or(0),
     })
+  }
+}
+
+/// `%text%` for `ILIKE`, with the wildcards of `text` taken literally.
+fn like_pattern(text: &str) -> String {
+  format!(
+    "%{}%",
+    text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+  )
+}
+
+#[cfg(test)]
+mod like_tests {
+  use super::like_pattern;
+
+  #[test]
+  fn wildcards_in_the_search_text_are_literal() {
+    assert_eq!(like_pattern("a_b%c\\d"), "%a\\_b\\%c\\\\d%");
+    assert_eq!(like_pattern(""), "%%");
   }
 }
