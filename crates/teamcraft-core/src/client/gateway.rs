@@ -346,12 +346,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // (issue #1021): a message to a conversation already caught up shows now, not at the end.
     let shared = Arc::new(Mutex::new(HeldFrames::default()));
     self.maybe_live_catch_up = Some(LiveDuringCatchUp::new(shared.clone()));
-    let synced = keep_alive_shared(
+    let synced = keep_alive(
       &mut connection,
       heartbeat,
       heartbeat,
       timing.held_limits,
-      &shared,
+      &*shared,
       self.sync_fresh_session(session_id, maybe_resume_window_ms),
     )
     .await;
@@ -913,42 +913,47 @@ impl HeldFrames {
   }
 }
 
+/// Where [`keep_alive`] puts what arrives: [`HeldFrames`] owned by the caller, or behind a
+/// [`Mutex`] when the work takes frames off it while it runs (the catch-up of a fresh session,
+/// issue #1021). One `keep_alive` for both, so the work's future is stored once, not again in a
+/// wrapper (the runner's future and the stacks of the threads that poll it).
+pub trait HoldFrames {
+  /// Runs `use_held` on the frames; `None` if they can't be reached (a poisoned lock).
+  fn with_held<R>(&mut self, use_held: impl FnOnce(&mut HeldFrames) -> R) -> Option<R>;
+}
+
+impl HoldFrames for &mut HeldFrames {
+  fn with_held<R>(&mut self, use_held: impl FnOnce(&mut HeldFrames) -> R) -> Option<R> {
+    Some(use_held(self))
+  }
+}
+
+impl HoldFrames for &Mutex<HeldFrames> {
+  fn with_held<R>(&mut self, use_held: impl FnOnce(&mut HeldFrames) -> R) -> Option<R> {
+    // Never held across an await: each use is one synchronous step.
+    self.lock().ok().map(|mut held| use_held(&mut held))
+  }
+}
+
 /// Runs `work` while keeping `connection` alive (issue #325): a heartbeat after `first_heartbeat_in`
 /// and then every `heartbeat`, and
 /// what arrives meanwhile is read into `held` (within `limits`), so neither the server's
 /// heartbeat timeout nor its slow-reader limit drops the connection while a long sync or command
 /// holds the loop. Frames are only held, never applied: they come after what `work` does, in their
-/// order, once the caller takes them.
+/// order, once the caller takes them (or `work` takes the oldest itself, through a shared `held`).
 pub async fn keep_alive<G: GatewayConnection, T>(
   connection: &mut G,
   first_heartbeat_in: Duration,
   heartbeat: Duration,
   limits: HeldLimits,
-  held: &mut HeldFrames,
-  work: impl Future<Output = T>,
-) -> T {
-  let shared = Mutex::new(std::mem::take(held));
-  let output = keep_alive_shared(connection, first_heartbeat_in, heartbeat, limits, &shared, work).await;
-  *held = shared.into_inner().unwrap_or_else(PoisonError::into_inner);
-  output
-}
-
-/// [`keep_alive`] with the held frames shared: `work` may take the oldest of them while it runs
-/// (the catch-up of a fresh session applies live events between its steps, issue #1021). The lock
-/// is never held across an await.
-pub(super) async fn keep_alive_shared<G: GatewayConnection, T>(
-  connection: &mut G,
-  first_heartbeat_in: Duration,
-  heartbeat: Duration,
-  limits: HeldLimits,
-  held: &Mutex<HeldFrames>,
+  mut held: impl HoldFrames,
   work: impl Future<Output = T>,
 ) -> T {
   let mut work = pin!(work);
   let mut timer = Box::pin(platform::sleep(first_heartbeat_in));
   loop {
     let step = {
-      let is_reading = held.lock().is_ok_and(|held| held.is_reading(limits));
+      let is_reading = held.with_held(|held| held.is_reading(limits)).unwrap_or(false);
       let read = async {
         if is_reading {
           connection.receive().await
@@ -964,24 +969,16 @@ pub(super) async fn keep_alive_shared<G: GatewayConnection, T>(
     };
     match step {
       KeepAliveStep::Read(maybe_frame) => {
-        if let Ok(mut held) = held.lock() {
-          held.hold(maybe_frame);
-        }
+        held.with_held(|held| held.hold(maybe_frame));
       },
       KeepAliveStep::Heartbeat => {
         // A closed connection gets no more heartbeats; the caller replaces it afterwards.
-        let is_closed = match held.lock() {
-          Ok(held) => held.is_closed,
-          Err(_) => true,
-        };
-        if !is_closed {
+        if !held.with_held(|held| held.is_closed).unwrap_or(true) {
           let sent = connection.send(&GatewayClientMessage::Heartbeat).await;
-          if let Ok(mut held) = held.lock() {
-            match sent {
-              Ok(()) => held.heartbeats_sent = held.heartbeats_sent.saturating_add(1),
-              Err(error) => held.hold(Some(Err(error))),
-            }
-          }
+          held.with_held(|held| match sent {
+            Ok(()) => held.heartbeats_sent = held.heartbeats_sent.saturating_add(1),
+            Err(error) => held.hold(Some(Err(error))),
+          });
         }
         timer = Box::pin(platform::sleep(heartbeat));
       },

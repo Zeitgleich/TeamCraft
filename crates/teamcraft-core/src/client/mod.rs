@@ -104,8 +104,8 @@ pub use enroll::{
 };
 pub use first_sync::{FirstSyncProgress, FirstSyncStage, HistoryBackfill, first_sync_progress};
 pub use gateway::{
-  DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, KeptAlive,
-  keep_alive,
+  DEFAULT_HANDSHAKE_TIMEOUT, GatewayOutcome, GatewayStart, GatewayTiming, HeldFrames, HeldLimits, HoldFrames,
+  KeptAlive, keep_alive,
 };
 pub use group_health::{
   RemovalStatus, all_group_leftovers, group_leftovers, is_queue_refused, pending_removals,
