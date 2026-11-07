@@ -17,7 +17,9 @@ use super::{
   ApiBytes, ApiMethod, ApiResponse, AuthError, Authenticator, BinaryBody, LocalFuture, SignInLook,
 };
 use teamcraft_client_api::call_window::CallWindow;
-use teamcraft_client_api::os_notify::{NotificationSound, NotificationTag, OsNotification, TagTarget};
+use teamcraft_client_api::os_notify::{
+  DesktopNotifyState, NotificationSound, NotificationTag, OsNotification, TagTarget,
+};
 use teamcraft_proto::GetMeResponse;
 
 use crate::clock::now_ms;
@@ -449,6 +451,29 @@ pub async fn try_show_notification(notification: &OsNotification) -> Result<(), 
   }
   let args = serde_json::json!({ "notification": notification });
   call::<()>("notify_user", &args)
+    .await
+    .map_err(|error| ActionFailure::from_wire(&error))
+}
+
+/// Whether the system lets the desktop app notify (#895); `None` in the browser, and where the
+/// shell can't say (a development bridge without the command), which shows no banner and no error.
+pub async fn desktop_notify_state() -> Option<DesktopNotifyState> {
+  if !is_available() {
+    return None;
+  }
+  match call::<DesktopNotifyState>("notification_state", &serde_json::json!({})).await {
+    Ok(state) => Some(state),
+    Err(error) => {
+      tracing::debug!(%error, "could not read whether notifications are allowed");
+      None
+    },
+  }
+}
+
+/// Asks the system for permission where it has a prompt (macOS), from the user's click, and
+/// answers with the state after it.
+pub async fn desktop_notify_allow() -> Result<DesktopNotifyState, ActionFailure> {
+  call::<DesktopNotifyState>("notification_allow", &serde_json::json!({}))
     .await
     .map_err(|error| ActionFailure::from_wire(&error))
 }

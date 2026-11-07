@@ -307,6 +307,15 @@ notif-prompt-blocked = Benachrichtigungen sind in diesem Browser blockiert. Erla
 notif-prompt-no-prompt = Dein Browser hat nicht nachgefragt. Suche in der Adressleiste nach einem Glocken- oder Schloss-Symbol, erlaube dort Benachrichtigungen und versuche es erneut.
 notif-prompt-refused = Dein Browser hat abgelehnt, ohne nachzufragen. In privaten Fenstern gibt es keine Benachrichtigungen; öffne TeamCraft in einem normalen Fenster, um sie zu aktivieren.
 notif-prompt-close = Schließen
+notif-desktop-prompt-text = Aktiviere Benachrichtigungen, um neue Nachrichten zu sehen, während die App im Hintergrund ist.
+notif-desktop-allowed = TeamCraft zeigt neue Nachrichten in den Benachrichtigungen deines Systems.
+notif-desktop-not-asked = Benachrichtigungen sind auf diesem Computer aus, bis du sie aktivierst. Bis dahin erscheinen neue Nachrichten nur als Kennzeichen am App-Symbol und im Infobereich.
+notif-desktop-unavailable = Auf diesem Computer gibt es keinen Benachrichtigungsdienst, deshalb erscheinen neue Nachrichten nur als Kennzeichen am App-Symbol und im Infobereich.
+notif-desktop-blocked-mac = Benachrichtigungen für { $app } sind in macOS ausgeschaltet. Schalte sie in den Systemeinstellungen > Mitteilungen > { $app } ein. Bis dahin erscheinen neue Nachrichten nur als Kennzeichen im Dock.
+notif-desktop-blocked-windows = Benachrichtigungen für { $app } sind in Windows ausgeschaltet. Schalte sie in Einstellungen > System > Benachrichtigungen > { $app } ein. Bis dahin erscheinen neue Nachrichten nur in der Taskleiste und im Infobereich.
+notif-desktop-blocked-linux = Benachrichtigungen für { $app } sind ausgeschaltet. Schalte sie in den Benachrichtigungseinstellungen deines Desktops unter { $app } ein. Bis dahin erscheinen neue Nachrichten nur im Infobereich.
+notif-desktop-test-shown-windows = Eine Testbenachrichtigung ist unterwegs. Falls sie nicht erschienen ist, erlaube { $app } in Einstellungen > System > Benachrichtigungen.
+notif-desktop-test-shown-linux = Eine Testbenachrichtigung ist unterwegs. Falls sie nicht erschienen ist, erlaube { $app } in den Benachrichtigungseinstellungen deines Desktops.
 
 # Composer: mentions, slash commands, formatting
 settings-composer = Schreiben

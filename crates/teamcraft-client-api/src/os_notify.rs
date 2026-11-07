@@ -163,6 +163,43 @@ pub struct NotificationActionEvent {
   pub maybe_text: Option<String>,
 }
 
+/// Whether the system lets the desktop app notify (#895), as the shell reads it from the OS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyPermission {
+  /// The system shows the app's notifications (on Linux: a notification service answers; the
+  /// desktop's own settings can still hide them unseen).
+  Allowed,
+  /// Turned off for the app in the system's settings.
+  Blocked,
+  /// The system has not asked the user yet (macOS before the permission prompt).
+  NotAsked,
+  /// No notifications here: an unbundled macOS build, no notification service on Linux.
+  Unavailable,
+  #[serde(other)]
+  Unknown,
+}
+
+/// The desktop system the app runs on, for where its notification settings are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotifyPlatform {
+  MacOs,
+  Windows,
+  Linux,
+  #[serde(other)]
+  Other,
+}
+
+/// What `notification_state` and `notification_allow` answer: the permission, the system and the
+/// app's name as the system's settings list it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopNotifyState {
+  pub permission: NotifyPermission,
+  pub platform: NotifyPlatform,
+  pub app_name: String,
+}
+
 /// What a tag points at.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TagTarget {
@@ -445,5 +482,25 @@ mod tests {
     let unknown: NotificationActionEvent =
       serde_json::from_value(serde_json::json!({ "tag": "5", "action": "snooze" })).unwrap();
     assert_eq!(unknown.action, NotificationAction::Unknown);
+  }
+
+  #[test]
+  fn the_desktop_notify_state_has_a_stable_wire_form() {
+    let state = DesktopNotifyState {
+      permission: NotifyPermission::NotAsked,
+      platform: NotifyPlatform::MacOs,
+      app_name: "TeamCraft".to_owned(),
+    };
+    let json = serde_json::to_value(&state).unwrap();
+    assert_eq!(
+      json,
+      serde_json::json!({ "permission": "not_asked", "platform": "mac_os", "app_name": "TeamCraft" })
+    );
+    let newer: DesktopNotifyState = serde_json::from_value(
+      serde_json::json!({ "permission": "provisional", "platform": "haiku", "app_name": "TeamCraft" }),
+    )
+    .unwrap();
+    assert_eq!(newer.permission, NotifyPermission::Unknown);
+    assert_eq!(newer.platform, NotifyPlatform::Other);
   }
 }

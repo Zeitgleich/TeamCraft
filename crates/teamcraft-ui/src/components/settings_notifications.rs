@@ -10,14 +10,11 @@ use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::message_sound::{
   BuiltInSound, MessageSound, OwnSoundLimits, OwnSoundPick, OwnSoundRefusal, OwnSoundStatus,
 };
-use teamcraft_client_api::os_notify::{NotificationTag, OsNotification, OsNotificationKind};
 use teamcraft_proto::DndWindow;
 
 use crate::auth::tauri;
-use crate::call_alerts::may_name_names;
 use crate::clock::local_time_zone;
 use crate::components::icons::{Icon, IconName};
-use crate::components::notification_prompt;
 use crate::components::pending_button::PendingButton;
 use crate::components::people_picker::PeoplePicker;
 use crate::components::settings_account::WeekdayChips;
@@ -25,12 +22,11 @@ use crate::components::settings_rows::{
   ListFilter, MAX_LIST_ENTRIES, SelectRow, SettingRow, SettingsCard, SwitchRow, matches_filter, row_id,
   slug_options,
 };
+use crate::components::{desktop_notify, notification_prompt};
 use crate::feedback::PendingAction;
 use crate::i18n::{I18n, use_i18n};
 use crate::message_sounds::MessageSounds;
 use crate::model::{Conversation, User, UserId};
-use crate::notification_pictures::picture_of;
-use crate::notifier::PictureSubject;
 use crate::notify_sync::{
   MAX_DND_ALLOWED_USERS, MAX_DND_WINDOWS, format_minutes, is_valid_window, parse_minutes,
 };
@@ -40,8 +36,6 @@ use crate::prefs::{
 use crate::reactive::{SetIfAlive, UpdateIfAlive};
 use crate::state::use_app_state;
 
-/// The tag of the test notification; a newer test replaces the last one.
-const TEST_TAG: &str = "settings-test";
 /// What the page's file picker offers for an own sound (the desktop shell's dialog has its own list).
 const SOUND_FILE_TYPES: &str = "audio/*,.mp3,.ogg,.oga,.wav,.flac";
 
@@ -257,13 +251,16 @@ pub fn NotificationsSection() -> impl IntoView {
   }
 }
 
-/// Whether this device shows notifications, and a test notification to check it.
+/// Whether this device shows notifications, and a test notification to check it. On the desktop
+/// the system's real answer (#895): allowed, blocked in the system's settings (and where to change
+/// it), or off, read again when the window comes to the front.
 #[component]
 fn ThisDeviceCard() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let is_desktop = tauri::is_available();
   let page_permission = RwSignal::new(tauri::notification_permission());
+  let device = desktop_notify::use_desktop_notify_state();
   let me = state.me().id;
   let is_push_on = RwSignal::new(notification_prompt::is_push_on(me));
   let allowing = PendingAction::new();
@@ -272,12 +269,38 @@ fn ThisDeviceCard() -> impl IntoView {
   // What the last click on "Turn on" came to, where the permission alone doesn't say it: no
   // prompt shown, or refused without one (a private window).
   let maybe_outcome = RwSignal::new(None::<notification_prompt::AllowOutcome>);
-  let is_granted = move || is_desktop || page_permission.get().as_deref() == Some("granted");
+  let is_granted = move || {
+    if is_desktop {
+      desktop_notify::can_test(device.get().as_ref())
+    } else {
+      page_permission.get().as_deref() == Some("granted")
+    }
+  };
+  let can_allow = move || {
+    if is_desktop {
+      desktop_notify::can_turn_on(device.get().as_ref())
+    } else {
+      !is_push_on.get()
+        && matches!(
+          page_permission.get().as_deref(),
+          Some("default") | Some("granted")
+        )
+    }
+  };
 
   // Read here, inside the reactive owner: the spawned future has no context to find it in.
   let maybe_session = crate::session::use_session();
   // Allowing notifications also subscribes to Web Push, so they arrive with no page open.
   let allow = move |_| {
+    if is_desktop {
+      let test = desktop_notify::test_notification(state, i18n);
+      allowing.spawn(async move {
+        let (_, after) = desktop_notify::turn_on_from_click(me, test).await?;
+        device.set_if_alive(Some(after));
+        Ok(())
+      });
+      return;
+    }
     // Started inside the click: the browser only prompts for a request made in this task (#893).
     let request = tauri::request_notification_permission();
     allowing.spawn(async move {
@@ -292,22 +315,7 @@ fn ThisDeviceCard() -> impl IntoView {
     });
   };
   let send_test = move |_| {
-    // The user's own picture, as a direct message shows its sender's (#543), where names may show.
-    let maybe_picture = state.read(|backend| {
-      may_name_names(&backend.push_content_mode())
-        .then(|| picture_of(backend, PictureSubject::Person(backend.me().id)))
-        .flatten()
-    });
-    let notification = OsNotification {
-      tag: NotificationTag::reminder(TEST_TAG),
-      kind: OsNotificationKind::Reminder,
-      title: i18n.t("notif-test-title"),
-      maybe_body: Some(i18n.t("notif-test-body")),
-      actions: Vec::new(),
-      maybe_reply: None,
-      maybe_picture,
-      sound: Default::default(),
-    };
+    let notification = desktop_notify::test_notification(state, i18n);
     testing.spawn(async move {
       tauri::try_show_notification(&notification).await?;
       has_tested.set_if_alive(true);
@@ -316,7 +324,12 @@ fn ThisDeviceCard() -> impl IntoView {
   };
   let status = Signal::derive(move || {
     let text = if is_desktop {
-      i18n.t("notif-device-desktop")
+      let maybe_state = device.get();
+      desktop_notify::text_with_app(
+        i18n,
+        desktop_notify::device_status_key(maybe_state.as_ref()),
+        maybe_state.as_ref(),
+      )
     } else {
       match page_permission.get().as_deref() {
         Some("granted") if is_push_on.get() => i18n.t("notif-browser-background"),
@@ -343,7 +356,7 @@ fn ThisDeviceCard() -> impl IntoView {
   view! {
     <SettingsCard heading="notif-this-device">
       <SettingRow label=if is_desktop { "notif-device-system" } else { "notif-browser" } live_hint=status>
-        <Show when=move || !is_desktop && !is_push_on.get() && matches!(page_permission.get().as_deref(), Some("default") | Some("granted")) fallback=|| ()>
+        <Show when=can_allow fallback=|| ()>
           <PendingButton pending=allowing class="btn btn-small btn-primary" on_click=allow>
             {move || i18n.t("notif-browser-allow")}
           </PendingButton>

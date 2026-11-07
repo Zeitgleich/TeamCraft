@@ -24,6 +24,7 @@ use crate::components::announcement_banner::AnnouncementBanner;
 use crate::components::bottom_nav::BottomNav;
 use crate::components::bundle_banner::{BundleBanner, ReleaseBanner};
 use crate::components::channel_view::ChannelView;
+use crate::components::desktop_notify::DesktopNotificationPrompt;
 use crate::components::edge_swipe::EdgeSwipeBack;
 use crate::components::file_drop;
 use crate::components::first_sync_bar::FirstSyncBar;
@@ -306,6 +307,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <StorageBanner />
         <RosterBanner />
         <NotificationPrompt />
+        <DesktopNotificationPrompt />
         <AnnouncementBanner />
         <GuestNotice />
         <UpdateNotice />

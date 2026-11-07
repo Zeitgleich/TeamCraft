@@ -307,6 +307,15 @@ notif-prompt-blocked = Notifications are blocked in this browser. Allow them in 
 notif-prompt-no-prompt = Your browser didn't ask. Look for a bell or lock icon in the address bar and allow notifications there, then try again.
 notif-prompt-refused = Your browser declined without asking. Private windows have no notifications; open TeamCraft in a normal window to turn them on.
 notif-prompt-close = Close
+notif-desktop-prompt-text = Turn on notifications to see new messages when the app is in the background.
+notif-desktop-allowed = TeamCraft shows new messages in your system's notifications.
+notif-desktop-not-asked = Notifications are off on this computer until you turn them on. Until then, new messages show only on the app icon's badge and in the tray.
+notif-desktop-unavailable = This computer has no notification service, so new messages show only on the app icon's badge and in the tray.
+notif-desktop-blocked-mac = Notifications for { $app } are turned off in macOS. Turn them on in System Settings > Notifications > { $app }. Until then, new messages show only on the Dock badge.
+notif-desktop-blocked-windows = Notifications for { $app } are turned off in Windows. Turn them on in Settings > System > Notifications > { $app }. Until then, new messages show only on the taskbar and in the tray.
+notif-desktop-blocked-linux = Notifications for { $app } are turned off. Turn them on in your desktop's notification settings under { $app }. Until then, new messages show only in the tray.
+notif-desktop-test-shown-windows = A test notification is on its way. If it didn't appear, allow { $app } in Settings > System > Notifications.
+notif-desktop-test-shown-linux = A test notification is on its way. If it didn't appear, allow { $app } in your desktop's notification settings.
 
 # Composer: mentions, slash commands, formatting
 settings-composer = Writing

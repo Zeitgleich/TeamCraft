@@ -93,6 +93,8 @@
     "allow-notify-user",
     "allow-withdraw-notifications",
     "allow-request-attention",
+    "allow-notification-state",
+    "allow-notification-allow",
     "allow-call-window-show",
     "allow-call-window-close",
     "allow-call-window-info",
