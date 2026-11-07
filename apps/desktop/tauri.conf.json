@@ -80,9 +80,6 @@
     "linux": {
       "deb": {
         "desktopTemplate": "packaging/linux/TeamCraft.desktop.hbs",
-        "files": {
-          "/usr/share/kio/servicemenus/de.zeitgleich.teamcraft.send-to.desktop": "packaging/linux/de.zeitgleich.teamcraft.send-to.desktop"
-        },
         "section": "net",
         "priority": "optional",
         "depends": [
@@ -99,9 +96,6 @@
       },
       "rpm": {
         "desktopTemplate": "packaging/linux/TeamCraft.desktop.hbs",
-        "files": {
-          "/usr/share/kio/servicemenus/de.zeitgleich.teamcraft.send-to.desktop": "packaging/linux/de.zeitgleich.teamcraft.send-to.desktop"
-        },
         "release": "1",
         "postInstallScript": "packaging/linux/rpm-post-install.sh",
         "depends": [

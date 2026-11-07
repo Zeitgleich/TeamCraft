@@ -273,12 +273,8 @@ the session bus, so a panel that starts later is picked up.
 
 `teamcraft-desktop --share -- <paths>` hands files to the running app, which asks for a conversation.
 
-- **KDE (deb, rpm):** the Dolphin service menu `de.zeitgleich.teamcraft.send-to.desktop` in
-  `/usr/share/kio/servicemenus/` adds "Send to TeamCraft" to the context menu of files.
-- **Other file managers:** Thunar custom actions and Nautilus scripts can run the same command.
-- **Flatpak, AppImage:** no menu entry (a Flatpak can't install service menus on the host); run
-  `flatpak run de.zeitgleich.teamcraft --share -- %F`, or the AppImage's path with `--share -- %F`,
-  from a custom action.
+- **Thunar, Nautilus:** custom actions and scripts can run the command (`flatpak run
+  de.zeitgleich.teamcraft --share -- %F` for the Flatpak, the AppImage's path for the AppImage).
 
 TeamCraft deliberately registers no `.desktop` entry with file MIME types: that put it under "Open
 with" for every file, which is opening, not sharing. KDE's "Share" menu (Purpose) only takes compiled
