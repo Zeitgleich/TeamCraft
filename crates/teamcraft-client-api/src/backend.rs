@@ -583,6 +583,9 @@ pub trait ChatBackend {
   fn cancel_scheduled(&self, _id: ScheduledMessageId) {}
   /// Sends a waiting message now, whatever its time and status: the user decided.
   fn send_scheduled_now(&self, _id: ScheduledMessageId) {}
+  /// "Report a problem" (docs/bug-reports.md): queued on the device, then sent encrypted to the
+  /// recipients the verified policy names.
+  fn send_bug_report(&self, _report: crate::bug_report::BugReport) {}
   /// Every draft of the user, of one space or (`None`) of all conversations, last edited first.
   fn drafts(&self, _maybe_space: Option<SpaceId>) -> Vec<DraftItem> {
     Vec::new()

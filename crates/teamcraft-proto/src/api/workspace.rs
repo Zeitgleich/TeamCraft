@@ -539,6 +539,20 @@ impl Default for ScreenSharePolicy {
   }
 }
 
+/// Who receives "Report a problem" reports (docs/bug-reports.md). Signed, so a hostile server
+/// can't redirect reports to an account of its choosing. Clients apply it when they deliver a
+/// report: it goes as an encrypted group DM to these people.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct BugReportPolicy {
+  /// The people reports go to. Empty (the default) means the owners and admins of the verified
+  /// roster, so a new workspace needs no setup.
+  #[serde(default)]
+  pub recipients: Vec<crate::UserId>,
+}
+
+/// The most recipients a workspace may name for problem reports: a group DM stays small.
+pub const MAX_BUG_REPORT_RECIPIENTS: usize = 20;
+
 /// The longest voice message of a new workspace, in minutes.
 pub const DEFAULT_VOICE_MESSAGE_MINUTES: u16 = 10;
 /// The longest a workspace may allow a voice message to be, in minutes. Longer recordings are
@@ -687,6 +701,9 @@ pub struct WorkspacePolicy {
   /// "Send later" (docs/scheduled-messages.md); allowed with the defaults when absent.
   #[serde(default)]
   pub scheduled_messages: ScheduledMessagePolicy,
+  /// Who receives problem reports (docs/bug-reports.md); owners and admins when absent.
+  #[serde(default)]
+  pub bug_reports: BugReportPolicy,
   /// How the admin roster follows the identity provider (e2ee.md §3.1.3). Absent means automatic.
   /// A policy that doesn't name it doesn't change it: an older owner's app re-signs without it, so
   /// clients keep the last one they verified. Boxed: every client future that holds a policy holds this.
@@ -898,6 +915,7 @@ impl Default for WorkspacePolicy {
       notetaker: NotetakerPolicy::default(),
       import: crate::ImportPolicy::default(),
       scheduled_messages: ScheduledMessagePolicy::default(),
+      bug_reports: BugReportPolicy::default(),
     }
   }
 }
@@ -1130,6 +1148,18 @@ mod tests {
     assert_eq!(older.screen_share, ScreenSharePolicy::default());
     let limited: ScreenSharePolicy = serde_json::from_str(r#"{"max_resolution":"standard"}"#).unwrap();
     assert_eq!(limited.max_resolution, ScreenShareResolution::Standard);
+  }
+
+  #[test]
+  fn bug_reports_go_to_admins_by_default_and_older_policies_still_parse() {
+    let mut value = serde_json::to_value(WorkspacePolicy::default()).unwrap();
+    assert_eq!(value["bug_reports"], serde_json::json!({"recipients": []}));
+    value.as_object_mut().unwrap().remove("bug_reports");
+    let older: WorkspacePolicy = serde_json::from_value(value).unwrap();
+    assert!(older.bug_reports.recipients.is_empty());
+    let named: BugReportPolicy = serde_json::from_str(r#"{"recipients":["7","9"]}"#).unwrap();
+    let ids: Vec<String> = named.recipients.iter().map(ToString::to_string).collect();
+    assert_eq!(ids, ["7", "9"]);
   }
 
   #[test]

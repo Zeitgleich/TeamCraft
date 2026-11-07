@@ -12,6 +12,7 @@ mod admin_add_policy;
 mod admin_joins;
 mod background_work;
 mod backgrounds;
+mod bug_reports;
 mod calls;
 mod canvas;
 mod catch_up;

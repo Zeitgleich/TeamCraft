@@ -220,6 +220,7 @@ pub(crate) fn needs_client(action: &ChatAction) -> bool {
       | ChatAction::UpdateScheduled { .. }
       | ChatAction::CancelScheduled { .. }
       | ChatAction::SendScheduledNow { .. }
+      | ChatAction::SendBugReport { .. }
   )
 }
 
@@ -240,6 +241,11 @@ impl Engine {
       ChatAction::CancelScheduled { id } => {
         self
           .with_client(|client| Box::pin(async move { client.drop_scheduled(id).await }))
+          .await
+      },
+      ChatAction::SendBugReport { report } => {
+        self
+          .with_client(|client| Box::pin(async move { client.queue_bug_report(report).await }))
           .await
       },
       ChatAction::SendScheduledNow { id } => {
