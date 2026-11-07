@@ -11,6 +11,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import de.zeitgleich.teamcraft.BuildConfig
+import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.security.KeystoreBox
 import de.zeitgleich.teamcraft.security.SealedFile
@@ -21,6 +22,7 @@ import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.EventListener
 import uniffi.teamcraft_ffi.TeamCraft
 import uniffi.teamcraft_ffi.TokenProvider
+import uniffi.teamcraft_ffi.setDeletedUserName
 
 /**
  * Owns the Rust client core ([TeamCraft]) of the signed-in account on the active server. The
@@ -82,6 +84,9 @@ class CoreRepository(
     }
     val tokens = Tokens(auth)
     val core = withContext(Dispatchers.IO) {
+      // The application sets it off the main thread at start; here too, so no core can name a
+      // deleted account before it is set (#1066).
+      setDeletedUserName(context.getString(R.string.user_deleted_name))
       TeamCraft(
         AppConfig(
           serverUrl = server.address.origin,

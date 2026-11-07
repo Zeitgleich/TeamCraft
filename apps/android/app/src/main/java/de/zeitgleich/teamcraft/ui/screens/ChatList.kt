@@ -832,6 +832,7 @@ private fun FilterBar(value: String, onChange: (String) -> Unit, chips: @Composa
       onChange = onChange,
       placeholder = stringResource(R.string.dm_filter),
       modifier = Modifier.padding(horizontal = Spacing.l),
+      isFieldDeferred = true,
     )
     chips()
   }

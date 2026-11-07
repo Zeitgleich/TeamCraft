@@ -57,12 +57,14 @@ object NetworkTrust {
   private val installed = CompletableDeferred<Unit>()
 
   /**
-   * Reads the CAs off the main thread ([installTrustedCertificates]); the core's connections wait
-   * for it with [awaitTrustedCertificates], what it reads from its store doesn't.
+   * Reads the CAs and reports the proxy of the [currentNetwork] off the main thread (both load the
+   * core's native library, which the first frame doesn't need); the core's connections wait for it
+   * with [awaitTrustedCertificates], what it reads from its store doesn't.
    */
-  fun startInstalling(context: Context, scope: CoroutineScope) {
+  fun startInstalling(context: Context, scope: CoroutineScope, currentNetwork: () -> LinkProperties?) {
     scope.launch(Dispatchers.IO) {
       try {
+        reportProxy(currentNetwork())
         installTrustedCertificates(context)
       } finally {
         installed.complete(Unit)

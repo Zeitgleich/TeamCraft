@@ -24,6 +24,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.fragment.app.FragmentActivity
 import java.time.Duration
 import java.time.Instant
+import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.notifications.LaunchToken
@@ -72,7 +73,9 @@ class MainActivity : FragmentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     // A language change recreates the activity: the core names deleted accounts in the new one.
-    setDeletedUserName(getString(R.string.user_deleted_name))
+    // Off the main thread, like at start (TeamCraftApplication).
+    val deletedName = getString(R.string.user_deleted_name)
+    TeamCraftApplication.graph(this).scope.launch { setDeletedUserName(deletedName) }
     enableEdgeToEdge()
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) handOverFromSplash()
     // Upright from the first frame while setting up (a recreated activity may be past that).

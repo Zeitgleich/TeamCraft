@@ -325,7 +325,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // showed leaves memory; the auth callback deletes what it left on disk.
     viewModelScope.launch {
       var wasSignedIn = false
-      graph.auth.isSignedIn.collect { isSignedIn ->
+      // The first read opens the stored session (a keystore decryption): not on the main thread.
+      val signedIn = withContext(Dispatchers.IO) { graph.auth.isSignedIn }
+      signedIn.collect { isSignedIn ->
         if (wasSignedIn && !isSignedIn) forgetSession()
         wasSignedIn = isSignedIn
       }

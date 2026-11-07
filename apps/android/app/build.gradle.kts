@@ -155,6 +155,10 @@ androidComponents.onVariants { variant ->
     manifest.set(layout.buildDirectory.file("generated/appLinks/${variant.name}/AndroidManifest.xml"))
   }
   variant.sources.manifests.addGeneratedManifestFile(task, AppLinksManifestTask::manifest)
+  // A debug build installed with adb runs from the APK, without dexopt: compressed, its 60 MB of
+  // unminified dex were inflated at every start (0.85 s on a mid-range phone). Stored, they are
+  // mapped. Release builds stay compressed: they are minified and the installer compiles them.
+  if (variant.buildType == "debug") variant.packaging.dex.useLegacyPackaging.set(false)
 }
 
 kotlin {
