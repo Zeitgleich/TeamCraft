@@ -15,12 +15,21 @@ use teamcraft_proto::{
   BackgroundId, Base64Bytes, ClientMessageId, ConversationId, MessageId, ThreadId, UserId,
 };
 
+use crate::store::AttachmentRef;
+
 /// Tombstones older than this are dropped when merging (every device has synced by then).
 pub const TOMBSTONE_LIFETIME_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 /// How far the activity read mark may lie ahead of this device's clock.
 const MAX_ACTIVITY_CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
 /// Characters of a draft the conversation lists carry (#1220).
 const DRAFT_PREVIEW_CHARS: usize = 80;
+/// Files of unsent drafts the account data carries (#1220). Each is a few hundred bytes and its
+/// thumbnail; more stay on the device they were picked on until they are sent.
+pub const MAX_DRAFT_FILES: usize = 30;
+/// Largest thumbnail of a draft's file in the account data: with [`MAX_DRAFT_FILES`] they fill at
+/// most about a quarter of the key bag (`limits.max_key_bag_bytes`, 1 MiB by default). A larger one
+/// stays on the device that made it; the others show the file without a picture.
+pub const MAX_DRAFT_THUMBNAIL_BYTES: usize = 6 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountData {
@@ -30,6 +39,11 @@ pub struct AccountData {
   /// Unsent text per conversation or thread, keyed by [`draft_key`]; an empty body is "no draft".
   #[serde(default)]
   pub drafts: BTreeMap<String, Stamped<Draft>>,
+  /// Uploaded files of unsent drafts (#1220), keyed by their ID (`DraftFile::id`): the per-file key
+  /// lives only here and in the message once sent. An older app drops the field on upload, and the
+  /// next newer device puts it back.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub draft_files: BTreeMap<String, Stamped<DraftFile>>,
   /// Saved searches, keyed by their ID (random, so devices don't collide).
   #[serde(default)]
   pub saved_searches: BTreeMap<u64, Stamped<SavedSearchEntry>>,
@@ -167,6 +181,19 @@ pub struct Draft {
   pub body: String,
 }
 
+/// A file of an unsent draft, uploaded and held by the server for the draft (#1220): another device
+/// of the user shows it in the composer and sends it without uploading it again.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftFile {
+  pub conversation_id: ConversationId,
+  #[serde(rename = "thread_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_thread_id: Option<ThreadId>,
+  /// When it was attached (the attaching device's clock): the composer lists the files in order.
+  pub added_at_ms: i64,
+  /// The uploaded file with its key; its thumbnail only up to [`MAX_DRAFT_THUMBNAIL_BYTES`].
+  pub attachment: AttachmentRef,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnreadMark {
   pub conversation_id: ConversationId,
@@ -209,6 +236,7 @@ impl AccountData {
   pub fn merge(&mut self, other: &Self, now_ms: i64) {
     merge_map(&mut self.saved, &other.saved);
     merge_map(&mut self.drafts, &other.drafts);
+    merge_map(&mut self.draft_files, &other.draft_files);
     merge_map(&mut self.saved_searches, &other.saved_searches);
     merge_map(&mut self.marked_unread, &other.marked_unread);
     merge_map(&mut self.pins, &other.pins);
@@ -269,6 +297,9 @@ impl AccountData {
       .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
     self
       .drafts
+      .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
+    self
+      .draft_files
       .retain(|_, entry| is_fresh(entry.is_removed, entry.updated_at_ms));
     self
       .saved_searches
@@ -551,16 +582,35 @@ impl AccountData {
       .map(|entry| entry.value.body.as_str())
   }
 
-  /// The drafts with something written in them, each with when it was last edited, newest first
-  /// (#1220). The edit time is the entry's stamp: it changes with the text only, and older clients
-  /// keep it when they rewrite the record, which they wouldn't do for a new field of [`Draft`].
-  pub fn drafts_by_edit(&self) -> Vec<(&Draft, i64)> {
-    let mut drafts: Vec<(&Draft, i64)> = self
+  /// The drafts with something written or attached in them, each with when it was last edited,
+  /// newest first (#1220). The edit time is the entry's stamp: it changes with the text only, and
+  /// older clients keep it when they rewrite the record, which they wouldn't do for a new field of
+  /// [`Draft`]. A draft of files only counts from its newest file.
+  pub fn drafts_by_edit(&self) -> Vec<(Draft, i64)> {
+    let mut drafts: BTreeMap<String, (Draft, i64)> = self
       .drafts
-      .values()
-      .filter(|entry| !entry.is_removed && !entry.value.body.trim().is_empty())
-      .map(|entry| (&entry.value, entry.updated_at_ms))
+      .iter()
+      .filter(|(_, entry)| !entry.is_removed && !entry.value.body.trim().is_empty())
+      .map(|(key, entry)| (key.clone(), (entry.value.clone(), entry.updated_at_ms)))
       .collect();
+    let mut file_only: BTreeMap<String, (Draft, i64)> = BTreeMap::new();
+    for (_, file) in self.live_draft_files() {
+      let key = draft_key(file.conversation_id, file.maybe_thread_id);
+      if drafts.contains_key(&key) {
+        continue;
+      }
+      let entry = file_only.entry(key).or_insert_with(|| {
+        let draft = Draft {
+          conversation_id: file.conversation_id,
+          maybe_thread_id: file.maybe_thread_id,
+          body: String::new(),
+        };
+        (draft, file.added_at_ms)
+      });
+      entry.1 = entry.1.max(file.added_at_ms);
+    }
+    drafts.extend(file_only);
+    let mut drafts: Vec<(Draft, i64)> = drafts.into_values().collect();
     drafts.sort_by_key(|(_, edited_at)| std::cmp::Reverse(*edited_at));
     drafts
   }
@@ -604,6 +654,67 @@ impl AccountData {
       },
     );
     true
+  }
+
+  /// The uploaded files of the draft, in the order they were attached, with their IDs.
+  pub fn draft_files(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+  ) -> Vec<(&str, &DraftFile)> {
+    let mut files: Vec<(&str, &DraftFile)> = self
+      .live_draft_files()
+      .filter(|(_, file)| file.conversation_id == conversation && file.maybe_thread_id == maybe_thread)
+      .collect();
+    files.sort_by_key(|(id, file)| (file.added_at_ms, *id));
+    files
+  }
+
+  /// Files of all drafts, for the limit ([`MAX_DRAFT_FILES`]) and the drafts list.
+  pub fn live_draft_files(&self) -> impl Iterator<Item = (&str, &DraftFile)> {
+    self
+      .draft_files
+      .iter()
+      .filter(|(_, entry)| !entry.is_removed)
+      .map(|(id, entry)| (id.as_str(), &entry.value))
+  }
+
+  /// Adds an uploaded file to its draft; its thumbnail travels only when small enough. Returns
+  /// whether it was added: not when the drafts already carry [`MAX_DRAFT_FILES`] (the file then stays
+  /// on this device), nor when it was removed meanwhile (a tombstone that is newer).
+  pub fn add_draft_file(&mut self, id: &str, mut file: DraftFile, now_ms: i64) -> bool {
+    if self.draft_files.get(id).is_some_and(|entry| entry.is_removed) {
+      return false;
+    }
+    if !self.draft_files.contains_key(id) && self.live_draft_files().count() >= MAX_DRAFT_FILES {
+      return false;
+    }
+    if file
+      .attachment
+      .maybe_thumbnail
+      .as_ref()
+      .is_some_and(|thumbnail| thumbnail.as_slice().len() > MAX_DRAFT_THUMBNAIL_BYTES)
+    {
+      file.attachment.maybe_thumbnail = None;
+    }
+    self.draft_files.insert(
+      id.to_owned(),
+      Stamped {
+        value: file,
+        updated_at_ms: now_ms,
+        is_removed: false,
+      },
+    );
+    true
+  }
+
+  /// Takes a file out of its draft (removed, or sent): returns it if it was there. The tombstone
+  /// keeps another device's older copy from bringing it back.
+  pub fn take_draft_file(&mut self, id: &str, now_ms: i64) -> Option<DraftFile> {
+    let entry = self.draft_files.get_mut(id).filter(|entry| !entry.is_removed)?;
+    entry.is_removed = true;
+    entry.updated_at_ms = now_ms;
+    Some(entry.value.clone())
   }
 
   pub fn saved_searches(&self) -> Vec<(u64, &SavedSearchEntry)> {
@@ -1042,14 +1153,14 @@ mod tests {
     data.set_draft(second, Some(thread), "newer", 20);
     data.set_draft(third, None, "   \n ", 30);
     data.set_draft(first, None, "older", 40);
-    let listed: Vec<(&str, i64)> = data
+    let listed: Vec<(String, i64)> = data
       .drafts_by_edit()
       .into_iter()
-      .map(|(draft, edited_at)| (draft.body.as_str(), edited_at))
+      .map(|(draft, edited_at)| (draft.body, edited_at))
       .collect();
     assert_eq!(
       listed,
-      [("newer", 20), ("older", 10)],
+      [("newer".to_owned(), 20), ("older".to_owned(), 10)],
       "saving the same text is no edit"
     );
     data.set_draft(second, Some(thread), "", 50);
@@ -1085,6 +1196,101 @@ mod tests {
     assert_eq!(data.drafts_by_edit()[0].1, 77);
     let rewritten = AccountData::from_bytes(&data.to_bytes().unwrap()).unwrap();
     assert_eq!(rewritten, data, "the format did not change");
+  }
+
+  mod draft_files {
+    use super::*;
+
+    #[test]
+    fn a_drafts_files_list_in_order_and_a_draft_of_files_only_is_a_draft() {
+      let mut data = AccountData::default();
+      let conversation = id(1);
+      assert!(data.add_draft_file("b", draft_file(conversation, 20, 10), 100));
+      assert!(data.add_draft_file("a", draft_file(conversation, 30, 10), 100));
+      let order: Vec<&str> = data
+        .draft_files(conversation, None)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+      assert_eq!(order, ["b", "a"], "by when they were attached");
+      assert!(
+        data.draft_files(conversation, Some(id(5))).is_empty(),
+        "the thread's draft is another"
+      );
+      let listed = data.drafts_by_edit();
+      assert_eq!(listed.len(), 1);
+      assert_eq!(
+        (listed[0].0.body.as_str(), listed[0].1),
+        ("", 30),
+        "edited with its newest file"
+      );
+    }
+
+    #[test]
+    fn the_drafts_carry_a_bounded_number_of_files_and_only_small_thumbnails() {
+      let mut data = AccountData::default();
+      for index in 0..MAX_DRAFT_FILES {
+        assert!(data.add_draft_file(&index.to_string(), draft_file(id(1), 1, 10), 100));
+      }
+      assert!(!data.add_draft_file("one more", draft_file(id(1), 1, 10), 100));
+      data.take_draft_file("0", 200);
+      assert!(data.add_draft_file(
+        "one more",
+        draft_file(id(1), 1, MAX_DRAFT_THUMBNAIL_BYTES + 1),
+        300
+      ));
+      let (_, added) = data
+        .draft_files(id(1), None)
+        .into_iter()
+        .find(|(id, _)| *id == "one more")
+        .unwrap();
+      assert_eq!(added.attachment.maybe_thumbnail, None, "too large to travel");
+    }
+
+    #[test]
+    fn a_file_taken_out_on_one_device_stays_out_after_merging() {
+      let mut phone = AccountData::default();
+      phone.add_draft_file("f", draft_file(id(1), 1, 10), 100);
+      let mut laptop = phone.clone();
+      assert!(phone.take_draft_file("f", 200).is_some());
+      assert!(phone.take_draft_file("f", 210).is_none(), "taken once");
+      laptop.merge(&phone, 300);
+      assert!(laptop.draft_files(id(1), None).is_empty());
+      assert!(
+        !laptop.add_draft_file("f", draft_file(id(1), 1, 10), 400),
+        "a late upload doesn't bring it back"
+      );
+    }
+
+    #[test]
+    fn account_data_without_drafts_files_keeps_its_format() {
+      let data = AccountData::default();
+      assert!(
+        !String::from_utf8(data.to_bytes().unwrap())
+          .unwrap()
+          .contains("draft_files")
+      );
+    }
+
+    fn draft_file(conversation: ConversationId, added_at_ms: i64, thumbnail_bytes: usize) -> DraftFile {
+      DraftFile {
+        conversation_id: conversation,
+        maybe_thread_id: None,
+        added_at_ms,
+        attachment: AttachmentRef {
+          attachment_id: id(77),
+          key: Base64Bytes::new(vec![1; 32]),
+          ciphertext_sha256: Base64Bytes::new(vec![2; 32]),
+          file_name: "notes.txt".into(),
+          media_type: "text/plain".into(),
+          size_bytes: 4,
+          maybe_thumbnail: Some(Base64Bytes::new(vec![3; thumbnail_bytes])),
+          maybe_dimensions: None,
+          maybe_duration_ms: None,
+          maybe_waveform: None,
+        },
+      }
+    }
   }
 
   #[test]

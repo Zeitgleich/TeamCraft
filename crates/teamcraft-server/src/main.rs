@@ -448,7 +448,7 @@ fn is_transient(error: &anyhow::Error) -> bool {
 }
 
 /// Removes deleted and abandoned call backgrounds and unfinished attachments once their upload URLs
-/// have expired.
+/// have expired, and files of drafts that were not sent in time (#1220).
 fn spawn_background_sweeper(state: AppState) {
   tokio::spawn(async move {
     let mut interval = tokio::time::interval(BACKGROUND_SWEEP_INTERVAL);
@@ -464,6 +464,11 @@ fn spawn_background_sweeper(state: AppState) {
         Ok(0) => {},
         Ok(swept) => info!(swept, "swept unfinished attachments"),
         Err(error) => warn!(%error, "sweeping unfinished attachments failed"),
+      }
+      match attachments::sweep_expired_drafts(&state, time::OffsetDateTime::now_utc()).await {
+        Ok(0) => {},
+        Ok(swept) => info!(swept, "swept files of drafts that were not sent"),
+        Err(error) => warn!(%error, "sweeping drafts' files failed"),
       }
       match meeting_guests::sweep_expired_guests(&state).await {
         Ok(0) => {},

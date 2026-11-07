@@ -42,7 +42,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
     drafts
       .into_iter()
       // A draft of a conversation the user left stays in the account data: rejoining finds it.
-      .filter_map(|(draft, edited_at)| Some((draft, edited_at, responses.get(&draft.conversation_id)?)))
+      .filter_map(|(draft, edited_at)| {
+        let response = responses.get(&draft.conversation_id)?;
+        Some((draft, edited_at, response))
+      })
       .filter(|(_, _, response)| maybe_space.is_none() || response.maybe_space_id == maybe_space)
       .take(MAX_DRAFTS)
       .map(|(draft, edited_at, response)| DraftItem {
@@ -54,7 +57,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
         maybe_thread_root: draft
           .maybe_thread_id
           .and_then(|thread| self.thread_root_excerpt(draft.conversation_id, thread)),
-        body: draft.body.clone(),
+        file_count: u32::try_from(data.draft_files(draft.conversation_id, draft.maybe_thread_id).len())
+          .unwrap_or(u32::MAX),
+        body: draft.body,
         edited_at,
       })
       .collect()

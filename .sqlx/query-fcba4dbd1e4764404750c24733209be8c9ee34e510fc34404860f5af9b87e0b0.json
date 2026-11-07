@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "DELETE FROM attachments WHERE id = $1 AND uploader_user_id = $2 AND completed_at IS NULL\n       RETURNING s3_key, multipart_upload_id",
+  "query": "DELETE FROM attachments\n       WHERE id = $1 AND uploader_user_id = $2 AND (completed_at IS NULL OR draft_until IS NOT NULL)\n       RETURNING s3_key, multipart_upload_id",
   "describe": {
     "columns": [
       {
@@ -37,5 +37,5 @@
       true
     ]
   },
-  "hash": "37c41d223db1149edc7352243eff3745fac83ba0c48a1961c2a5d08c91194b12"
+  "hash": "fcba4dbd1e4764404750c24733209be8c9ee34e510fc34404860f5af9b87e0b0"
 }

@@ -1525,6 +1525,12 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn keep_attachment(&self, attachment: AttachmentId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::POST, &format!("/attachments/{attachment}/keep"), None)
+      .await
+  }
+
   async fn download_attachment(
     &self,
     attachment: AttachmentId,

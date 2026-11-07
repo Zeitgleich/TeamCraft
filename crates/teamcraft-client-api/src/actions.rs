@@ -94,6 +94,11 @@ pub enum FileSource {
     handle: String,
     size_bytes: u64,
   },
+  /// A file attached to the draft beforehand ([`crate::drafts::DraftFileItem::id`]): uploaded
+  /// already or going up, it is not read again.
+  Draft {
+    id: String,
+  },
 }
 
 /// Everything about a message that [`Message`] doesn't carry.

@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM attachments WHERE draft_until < $1 RETURNING s3_key, multipart_upload_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "s3_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attachments",
+            "name": "s3_key"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "multipart_upload_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attachments",
+            "name": "multipart_upload_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "267c3523171ca50a8f220dbe8a576321d639263e415ea19b39608de33fa9cd53"
+}

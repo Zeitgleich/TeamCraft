@@ -114,6 +114,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .create_attachment(&CreateAttachmentRequest {
         conversation_id: conversation,
         size_bytes: encrypted.ciphertext.len() as u64,
+        is_draft: false,
       })
       .await?;
     self

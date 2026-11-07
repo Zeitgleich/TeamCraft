@@ -11,7 +11,7 @@ use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_crypto::share_link::create_fragment;
 use teamcraft_proto::{
   AttachmentId, Base64Bytes, ClientMessageId, ConversationId, CreateAttachmentRequest,
-  CreateShareLinkRequest, ErrorCode,
+  CreateShareLinkRequest, ErrorCode, ThreadId,
 };
 
 use super::Client;
@@ -35,12 +35,36 @@ const SHARE_LINK_ARGON2: Argon2Settings = Argon2Settings {
   parallelism: 1,
 };
 
-/// Files of an outbox message that aren't uploaded yet; the message waits until they are.
+/// Files of an outbox message that aren't uploaded yet; the message waits until they are. A file
+/// attached to a draft (#1220) waits here too, under its own ID, until it is up.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingUpload {
   pub conversation_id: ConversationId,
+  /// The message's ID, or for a draft's file the file's ID.
   pub client_message_id: ClientMessageId,
   pub files: Vec<PendingFile>,
+  #[serde(default, skip_serializing_if = "UploadPurpose::is_message")]
+  pub purpose: UploadPurpose,
+}
+
+/// What an upload is for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum UploadPurpose {
+  /// The files of a message in the outbox.
+  #[default]
+  Message,
+  /// One file attached to a draft (#1220). Once up it moves into the account data, so the draft's
+  /// other devices have it; until then (or for good, see `is_local`) it is this device's.
+  Draft {
+    #[serde(rename = "thread_id", default, skip_serializing_if = "Option::is_none")]
+    maybe_thread: Option<ThreadId>,
+    added_at_ms: i64,
+    /// Stays on this device until it is sent: the drafts already carried as many files as travel
+    /// (`account_data::MAX_DRAFT_FILES`) when it was attached.
+    #[serde(default)]
+    is_local: bool,
+  },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +102,10 @@ pub struct PendingFile {
   /// A large file's upload in parts once announced: a restart continues at its next part.
   #[serde(rename = "parts", default, skip_serializing_if = "Option::is_none")]
   pub maybe_parts: Option<PartsUpload>,
+  /// Announced as a draft's file (#1220): the server holds it for the draft, and deletes it later
+  /// unless it is kept. A message keeps its held files before it goes out.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_held: bool,
 }
 
 /// One file's encrypted bytes on their way to storage. The client prepares it
@@ -394,8 +422,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           maybe_dimensions: None,
           maybe_duration_ms: None,
           maybe_waveform: None,
+          is_held: false,
         })
         .collect(),
+      purpose: UploadPurpose::Message,
     };
     save_pending_upload(&self.store, &pending)?;
     self.upload_pending().await?;
@@ -446,7 +476,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn start_upload(&mut self) -> Result<Option<BlobUpload>, CoreError> {
     self.abandon_cancelled_uploads().await;
     let pending: Vec<PendingUpload> = records::list_json(&self.store, Table::PendingUploads)?;
+    let can_hold_drafts = self.draft_file_retention_days().is_some();
     for mut upload in pending {
+      match upload.purpose {
+        // Goes up with its message, when it is sent.
+        UploadPurpose::Draft { is_local: true, .. } => continue,
+        UploadPurpose::Draft { .. } if !can_hold_drafts => continue,
+        UploadPurpose::Draft { .. } => upload.files.iter_mut().for_each(|file| file.is_held = true),
+        UploadPurpose::Message => self.keep_held_files(&mut upload).await?,
+      }
       while let Some(index) = next_due_file(&upload, self.now_ms()) {
         match self
           .start_file(upload.conversation_id, &mut upload.files[index])
@@ -801,9 +839,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// Reads the server's attachment limit again (a full sync does).
+  /// Reads the server's attachment limit and whether it holds drafts' files again (a full sync does).
   pub(super) async fn refresh_attachment_limit(&self) -> Result<(), CoreError> {
     let me = self.api.me().await?;
+    self.store_draft_file_retention(me.maybe_draft_file_retention_days)?;
     self.store_attachment_limit(me.maybe_max_attachment_bytes)
   }
 
@@ -870,7 +909,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let size_bytes = encrypted.ciphertext.len() as u64;
     let slot = match file.maybe_slot.take() {
       Some(slot) if slot.size_bytes == size_bytes => slot,
-      _ => self.announce_upload(conversation, size_bytes).await?,
+      _ => {
+        self
+          .announce_upload(conversation, size_bytes, file.is_held)
+          .await?
+      },
     };
     let progress = self.transfers.start(slot.attachment_id, size_bytes);
     let blob = self
@@ -966,10 +1009,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &self,
     conversation: ConversationId,
     size_bytes: u64,
+    is_draft: bool,
   ) -> Result<UploadSlot, UploadError> {
     let request = CreateAttachmentRequest {
       conversation_id: conversation,
       size_bytes,
+      is_draft,
     };
     match self.api.create_attachment(&request).await {
       Ok(created) => Ok(UploadSlot {
@@ -983,6 +1028,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       Err(error) => Err(UploadError::Retry(CoreError::Api(error))),
     }
+  }
+
+  /// Keeps the drafts' files of a message at the server before it goes out (#1220), so they aren't
+  /// deleted with the draft later. A file the server no longer has (removed from the draft on
+  /// another device, or not sent in time) fails, and the message goes without it.
+  async fn keep_held_files(&mut self, upload: &mut PendingUpload) -> Result<(), CoreError> {
+    let mut is_changed = false;
+    let mut outcome = Ok(());
+    for file in upload.files.iter_mut().filter(|file| file.is_held) {
+      let Some(attachment) = file.maybe_done.as_ref().map(|done| done.attachment_id) else {
+        continue;
+      };
+      match self.api.keep_attachment(attachment).await {
+        Ok(()) => file.is_held = false,
+        Err(error) if is_status(&error, 404) => {
+          file.is_held = false;
+          file.maybe_done = None;
+          file.maybe_failure = Some(TransferFailure::Missing);
+        },
+        Err(error) => {
+          outcome = Err(CoreError::Api(error));
+          break;
+        },
+      }
+      is_changed = true;
+    }
+    if is_changed {
+      save_pending_upload(&self.store, upload)?;
+    }
+    outcome
   }
 
   /// Gives up the uploads the user cancelled at the server; what doesn't get through (offline) is
@@ -1061,6 +1136,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if !is_finished(upload) {
       return Ok(());
     }
+    if let UploadPurpose::Draft {
+      maybe_thread,
+      added_at_ms,
+      ..
+    } = upload.purpose
+    {
+      return self.complete_draft_file(upload, maybe_thread, added_at_ms);
+    }
     let key = records::outbox_key(upload.conversation_id, upload.client_message_id);
     if let Some(mut stored) = self
       .store
@@ -1100,6 +1183,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.store.delete(Table::PendingUploads, &key)?;
     Ok(())
+  }
+}
+
+impl UploadPurpose {
+  pub fn is_message(&self) -> bool {
+    matches!(self, Self::Message)
   }
 }
 
@@ -1460,11 +1549,13 @@ fn find_attachment(
 }
 
 /// Every file of the upload went up or failed for good.
+/// Whether every file is up or failed. A message's file held for a draft is up only once it is kept.
 fn is_finished(upload: &PendingUpload) -> bool {
+  let is_message = upload.purpose.is_message();
   upload
     .files
     .iter()
-    .all(|file| file.maybe_done.is_some() || file.maybe_failure.is_some())
+    .all(|file| (file.maybe_done.is_some() && !(is_message && file.is_held)) || file.maybe_failure.is_some())
 }
 
 /// Deletes the staged plaintext copies in `staging` that no pending upload refers to: files taken
@@ -1909,7 +2000,9 @@ mod tests {
         maybe_dimensions: None,
         maybe_duration_ms: None,
         maybe_waveform: None,
+        is_held: false,
       }],
+      purpose: UploadPurpose::Message,
     };
     save_pending_upload(&store, &upload).unwrap();
 
@@ -2111,6 +2204,7 @@ mod tests {
         maybe_dimensions: None,
         maybe_duration_ms: None,
         maybe_waveform: None,
+        is_held: false,
       };
       let json = serde_json::to_value(&file).unwrap();
       assert!(json.get("retry").is_none() && json.get("slot").is_none());

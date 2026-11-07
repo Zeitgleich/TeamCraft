@@ -18,6 +18,7 @@ mod custom_status;
 pub mod devices;
 pub mod direct_uploads;
 pub mod disk_downloads;
+pub mod draft_files;
 mod enroll;
 pub mod files;
 mod first_sync;

@@ -338,6 +338,11 @@ pub struct LimitsConfig {
   pub max_pending_attachments_per_user: usize,
   /// Bytes of attachments one user may have stored or announced in total.
   pub max_attachment_bytes_per_user: u64,
+  /// How long files of an unsent draft are held (#1220): a draft's file the user hasn't sent by
+  /// then is removed. Published to clients in `GET /me`.
+  pub draft_file_retention_days: u32,
+  /// Files of unsent drafts one user may hold at a time.
+  pub max_draft_files_per_user: usize,
   /// E-mails one person's meetings (invitations, updates, cancellations; the rest of the invitees
   /// are told in the app only) and space invitations may send per hour. At 0, invitations go without
   /// mail and can't be resent.
@@ -1524,6 +1529,8 @@ impl Default for LimitsConfig {
       max_devices_per_user: 20,
       max_pending_attachments_per_user: 20,
       max_attachment_bytes_per_user: 20 * 1024 * 1024 * 1024,
+      draft_file_retention_days: 30,
+      max_draft_files_per_user: 200,
       max_meeting_mails_per_user_per_hour: 200,
     }
   }

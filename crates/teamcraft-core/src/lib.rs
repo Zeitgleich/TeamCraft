@@ -60,6 +60,8 @@ pub mod ui_activity;
 #[cfg(feature = "ui")]
 pub mod ui_backend;
 #[cfg(feature = "ui")]
+mod ui_draft_files;
+#[cfg(feature = "ui")]
 mod ui_drafts;
 #[cfg(feature = "ui")]
 mod ui_files;
