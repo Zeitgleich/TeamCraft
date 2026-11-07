@@ -13,9 +13,9 @@
 //! `setGstElementGLContext`. No page can catch that, so the shell keeps the page from asking where
 //! it is known to happen, and remembers a crash during the question for this WebKitGTK and
 //! GStreamer version where it isn't.
-
-// Nothing on Windows reports a dead web process yet (`ProcessFailed`, #1214).
-#![cfg_attr(windows, allow(dead_code))]
+//!
+//! Each webview reports a dead page its own way: WebKitGTK's `web-process-terminated`, WKWebView's
+//! content process termination, WebView2's `ProcessFailed` (#1214, [`on_process_failed`]).
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -258,16 +258,86 @@ pub fn watch(webview: &webkit2gtk::WebView, app: AppHandle) {
   });
 }
 
-/// macOS kills web content processes it needs the memory of, and they die like any others. The
-/// Windows counterpart (`ProcessFailed`) is #1214.
+/// macOS kills web content processes it needs the memory of, and they die like any others.
 #[cfg(target_os = "macos")]
 pub fn on_process_terminated(webview: &tauri::Webview) {
-  let handle = webview.app_handle().clone();
-  let reload = recover(&handle);
+  let reload = recover(webview.app_handle());
   tracing::warn!(?reload, "the webview's web process ended; loading the page again");
   let webview = webview.clone();
+  reload_page(reload, move || webview.reload());
+}
+
+/// What a failed WebView2 process means for the page.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Failure {
+  /// The page is gone: it loads again, and the crash counts like one on Linux and macOS.
+  PageLost,
+  /// The webview itself is gone; a reload would only talk to a dead browser process.
+  WebviewLost,
+  /// The page still runs: a subframe or a helper process that WebView2 starts again by itself.
+  PageRuns,
+}
+
+/// A hung main page is as dead as a crashed one for whoever looks at it, and WebView2 reports it
+/// only once someone tried to use it; reloading gives it a new render process. A dead frame leaves
+/// the page running (its frame shows an error), and a helper process (GPU, utility, ...) comes back
+/// on its own.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn failure(kind: teamcraft_desktop_native::WebviewProcessKind) -> Failure {
+  use teamcraft_desktop_native::WebviewProcessKind;
+  match kind {
+    WebviewProcessKind::Render | WebviewProcessKind::RenderUnresponsive => Failure::PageLost,
+    WebviewProcessKind::Browser => Failure::WebviewLost,
+    WebviewProcessKind::FrameRender | WebviewProcessKind::Helper(_) => Failure::PageRuns,
+  }
+}
+
+/// WebView2 reports a failed process (on the UI thread): a lost page loads again like on Linux and
+/// macOS.
+#[cfg(windows)]
+pub fn on_process_failed(
+  window: &tauri::WebviewWindow,
+  failure_report: teamcraft_desktop_native::WebviewProcessFailure,
+) {
+  let teamcraft_desktop_native::WebviewProcessFailure {
+    kind,
+    maybe_reason,
+    maybe_exit_code,
+  } = failure_report;
+  match failure(kind) {
+    Failure::PageLost => {
+      let reload = recover(window.app_handle());
+      tracing::warn!(
+        ?kind,
+        ?maybe_reason,
+        ?maybe_exit_code,
+        ?reload,
+        "the webview's web process failed; loading the page again"
+      );
+      let window = window.clone();
+      reload_page(reload, move || window.reload());
+    },
+    // Only a new window would bring it back (follow-up of #1214); the call goes on in the shell.
+    Failure::WebviewLost => tracing::error!(
+      ?maybe_reason,
+      ?maybe_exit_code,
+      "the webview's browser process ended; the window stays empty until the app restarts"
+    ),
+    Failure::PageRuns => tracing::info!(
+      ?kind,
+      ?maybe_reason,
+      ?maybe_exit_code,
+      "a webview helper process ended; the page goes on"
+    ),
+  }
+}
+
+/// Loads the page again now or after the delay of a crash loop.
+#[cfg(any(target_os = "macos", windows))]
+fn reload_page(reload: Reload, load: impl FnOnce() -> tauri::Result<()> + Send + 'static) {
   let load = move || {
-    if let Err(error) = webview.reload() {
+    if let Err(error) = load() {
       tracing::warn!(%error, "could not load the page again");
     }
   };
@@ -283,7 +353,7 @@ pub fn on_process_terminated(webview: &tauri::Webview) {
 }
 
 /// The dead page's watchers go, and the state says what the next page may do.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn recover(app: &AppHandle) -> Reload {
   app.state::<Arc<CallHost>>().forget_page_watchers();
   app
@@ -486,6 +556,31 @@ mod tests {
       assert!(recovery.begin_probe());
       assert_eq!(recovery.process_terminated(Instant::now()), Reload::Now);
       assert_eq!(recovery.mode(), WebviewVideoMode::Images);
+    }
+  }
+
+  mod webview2 {
+    use teamcraft_desktop_native::WebviewProcessKind;
+
+    use super::*;
+
+    #[test]
+    fn a_dead_or_hung_page_loads_again() {
+      assert_eq!(failure(WebviewProcessKind::Render), Failure::PageLost);
+      assert_eq!(failure(WebviewProcessKind::RenderUnresponsive), Failure::PageLost);
+    }
+
+    #[test]
+    fn a_dead_browser_process_cannot_be_reloaded() {
+      assert_eq!(failure(WebviewProcessKind::Browser), Failure::WebviewLost);
+    }
+
+    #[test]
+    fn frames_and_helpers_leave_the_page_alone() {
+      assert_eq!(failure(WebviewProcessKind::FrameRender), Failure::PageRuns);
+      for raw in [4, 5, 6, 7, 8, 9, 42] {
+        assert_eq!(failure(WebviewProcessKind::from_raw(raw)), Failure::PageRuns);
+      }
     }
   }
 

@@ -11,6 +11,7 @@
 //! | [`install_notification_delegate`]         | macOS    | `notification_delegate`   |
 //! | `notification_attachment`: a picture      | macOS    | `notification_attachment` |
 //! | `webkit_version`: the library in use      | Linux    | `webkit_version`          |
+//! | `watch_process_failed`: page process died | Windows  | `webview2_process`        |
 //! | JNI: audio context for cpal (calls)       | Android  | `android_context`         |
 //!
 //! The Android entry is in here too, as the one crate that may hold `unsafe`; the mobile library
@@ -24,6 +25,7 @@ mod notification_delegate;
 mod resume;
 #[cfg(target_os = "linux")]
 mod webkit_version;
+mod webview2_process;
 
 pub use notification_attachment::AttachmentError;
 #[cfg(target_os = "macos")]
@@ -36,3 +38,6 @@ pub use network::{NetworkWatchError, watch_network_up};
 pub use resume::{ResumeWatchError, watch_resume};
 #[cfg(target_os = "linux")]
 pub use webkit_version::webkit_version;
+#[cfg(windows)]
+pub use webview2_process::{ProcessFailedWatchError, watch_process_failed};
+pub use webview2_process::{WebviewProcessFailure, WebviewProcessKind};
