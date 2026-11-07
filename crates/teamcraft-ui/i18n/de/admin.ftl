@@ -976,3 +976,12 @@ admin-guests-skipped = { $count ->
     [one] Einer davon läuft nie ab und wird beim Verlängern ausgelassen.
    *[other] { $count } davon laufen nie ab und werden beim Verlängern ausgelassen.
 }
+
+## Problemmeldungen (docs/bug-reports.md)
+policy-bug-reports = Problemmeldungen
+policy-bug-reports-hint = „Problem melden“ sendet die Beschreibung einer Person, ein optionales Bildschirmfoto und das aktuelle Protokoll der App Ende-zu-Ende-verschlüsselt als Direktnachricht. Wähle, wer sie erhält.
+policy-bug-reports-admins = Eigentümer und Admins
+policy-bug-reports-admins-hint = Alle mit einer Rolle in der signierten Admin-Liste des Arbeitsbereichs. Nichts einzurichten.
+policy-bug-reports-named = Diese Personen
+policy-bug-reports-named-hint = Zum Beispiel die Personen, die TeamCraft betreuen. Solange du niemanden wählst, gehen Meldungen an Eigentümer und Admins.
+policy-bug-reports-chosen = Empfänger von Problemmeldungen

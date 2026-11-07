@@ -464,6 +464,13 @@ pub fn preview_level() -> f32 {
     .unwrap_or(0.0)
 }
 
+/// The module's recent log lines, oldest first and redacted, for "Report a problem"
+/// (docs/bug-reports.md): call errors are logged here, not in the page.
+#[wasm_bindgen]
+pub fn recent_log() -> Vec<String> {
+  teamcraft_client_api::debug_log::recent_lines()
+}
+
 /// The page's core saw the network come back or change, or the page woke up: a running call checks
 /// its session, or retries a rejoin at once.
 #[wasm_bindgen]
@@ -2055,5 +2062,9 @@ fn init_logging() {
     .with_writer(tracing_web::MakeWebConsoleWriter::new())
     .with_filter(LevelFilter::INFO);
   // Another dispatcher only exists if the page initialized this module twice; keep that one.
-  let _ = tracing_subscriber::registry().with(fmt_layer).try_init();
+  let _ = tracing_subscriber::registry()
+    .with(fmt_layer)
+    // The recent log for "Report a problem" (docs/bug-reports.md), redacted, in memory only.
+    .with(teamcraft_client_api::debug_log::layer())
+    .try_init();
 }

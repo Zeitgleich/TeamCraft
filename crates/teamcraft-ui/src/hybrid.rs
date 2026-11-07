@@ -719,6 +719,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.send_scheduled_now(id);
   }
 
+  fn send_bug_report(&self, report: teamcraft_client_api::bug_report::BugReport) {
+    self.chat.send_bug_report(report);
+  }
+
   fn drafts(&self, maybe_space: Option<SpaceId>) -> Vec<teamcraft_client_api::drafts::DraftItem> {
     self.chat.drafts(maybe_space)
   }

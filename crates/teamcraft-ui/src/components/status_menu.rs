@@ -267,6 +267,13 @@ pub fn StatusMenu() -> impl IntoView {
         <Icon name=IconName::Keyboard />
         <span class="menu-label">{move || i18n.t("shortcuts-title")}</span>
       </button>
+      // Every member can report; guests share no DM with the organization's admins.
+      <Show when=move || !state.me().is_guest fallback=|| ()>
+        <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.overlay.set(Overlay::ReportProblem)>
+          <Icon name=IconName::Flag />
+          <span class="menu-label">{move || i18n.t("report-menu")}</span>
+        </button>
+      </Show>
       <button class="menu-item" role="menuitem" tabindex="-1" disabled title=move || i18n.t("admin-soon")>
         <Icon name=IconName::Users />
         <span class="menu-label">{move || i18n.t("menu-switch-account")}</span>

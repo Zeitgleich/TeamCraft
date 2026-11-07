@@ -42,9 +42,6 @@ base64 = "0.23.1"
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-# The recent log as a layer for "Report a problem" (src/debug_log.rs); the registry only, as the
-# shells already use.
-tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 # Randomness for client message IDs and keys; same version as teamcraft-crypto.
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 zeroize = "1.9.1"

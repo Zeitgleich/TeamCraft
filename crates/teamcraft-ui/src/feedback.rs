@@ -17,6 +17,7 @@ use std::rc::Rc;
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
+use teamcraft_client_api::bug_report::BugReportBlocker;
 use teamcraft_proto::ErrorCode;
 
 pub use teamcraft_client_api::failure::{
@@ -119,6 +120,10 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
     FailureKind::UntrustedCertificate => "error-untrusted-certificate",
     FailureKind::Other => "error-generic",
     FailureKind::RoleChangeNotConfirmed => "error-role-change-not-confirmed",
+    FailureKind::BugReport(blocker) => match blocker {
+      BugReportBlocker::NoRecipients => "report-error-no-recipients",
+      BugReportBlocker::QueueFull => "report-error-queue-full",
+    },
     FailureKind::Link(failure) => match failure {
       LinkFailure::CodeInvalid => "error-link-code-invalid",
       LinkFailure::OtherVersion => "error-link-other-version",

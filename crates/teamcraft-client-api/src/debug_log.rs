@@ -11,9 +11,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use tracing::field::{Field, Visit};
 use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::filter::{Filtered, Targets};
 use tracing_subscriber::layer::{Context, Layer};
-
-use crate::clock::{Clock, SystemClock};
+use tracing_subscriber::registry::LookupSpan;
 
 /// Lines the ring keeps unless the shell asks for another size; older ones drop out.
 pub const DEFAULT_MAX_LINES: usize = 500;
@@ -102,6 +102,22 @@ pub fn recent_lines() -> Vec<String> {
   global().lines()
 }
 
+/// The process's ring as the layer shells add to their subscriber, with its own filter: events it
+/// doesn't keep are never built for it, and the other layers keep their own levels.
+pub fn layer<S>() -> Filtered<DebugLog, Targets, S>
+where
+  S: Subscriber + for<'span> LookupSpan<'span>,
+{
+  global().clone().with_filter(kept_targets())
+}
+
+/// [`DebugLog::is_kept`] as a filter.
+fn kept_targets() -> Targets {
+  Targets::new()
+    .with_default(Level::WARN)
+    .with_target(OWN_TARGET, Level::INFO)
+}
+
 impl DebugLog {
   pub fn new(settings: DebugLogSettings) -> Self {
     Self {
@@ -147,10 +163,8 @@ impl DebugLog {
 }
 
 impl<S: Subscriber> Layer<S> for DebugLog {
-  fn enabled(&self, metadata: &tracing::Metadata<'_>, _ctx: Context<'_, S>) -> bool {
-    Self::is_kept(metadata.target(), metadata.level())
-  }
-
+  // No `enabled`: a layer's `false` there would silence the event for the console and the other
+  // layers too. Events are judged in `on_event`.
   fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
     let metadata = event.metadata();
     if !Self::is_kept(metadata.target(), metadata.level()) {
@@ -158,7 +172,7 @@ impl<S: Subscriber> Layer<S> for DebugLog {
     }
     let mut line = format!(
       "{} {:>5} {}:",
-      timestamp(SystemClock.now_ms()),
+      timestamp(now_ms()),
       metadata.level(),
       metadata.target()
     );
@@ -398,6 +412,22 @@ fn truncate(line: String, max_chars: usize) -> String {
   }
 }
 
+/// Milliseconds since the Unix epoch on this device's clock (`Date.now()` in the browser, where
+/// `SystemTime` isn't available).
+#[cfg(not(target_arch = "wasm32"))]
+fn now_ms() -> i64 {
+  let since_epoch = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap_or_default();
+  i64::try_from(since_epoch.as_millis()).unwrap_or(i64::MAX)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_ms() -> i64 {
+  // Whole milliseconds since the epoch fit an f64 exactly.
+  js_sys::Date::now() as i64
+}
+
 /// `2026-11-01T12:00:00Z` (UTC, whole seconds).
 pub fn timestamp(now_ms: i64) -> String {
   let seconds = now_ms.max(0) / 1000;
@@ -491,6 +521,24 @@ mod tests {
       assert_eq!(lines.len(), 2, "{lines:?}");
       assert!(lines[0].contains("INFO teamcraft_core::sync: connected"));
       assert!(lines[1].contains("WARN rustls::conn: odd certificate"));
+    }
+
+    #[test]
+    fn the_shells_filter_keeps_what_the_ring_keeps() {
+      let filter = kept_targets();
+      for (target, level) in [
+        ("teamcraft_core::sync", Level::INFO),
+        ("teamcraft_core::sync", Level::DEBUG),
+        ("teamcraft_lifecycle", Level::INFO),
+        ("hyper::client", Level::INFO),
+        ("rustls::conn", Level::WARN),
+      ] {
+        assert_eq!(
+          filter.would_enable(target, &level),
+          DebugLog::is_kept(target, &level),
+          "{target} {level}"
+        );
+      }
     }
 
     #[test]

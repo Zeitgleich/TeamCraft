@@ -33,6 +33,14 @@ base64.workspace = true
 # A channel's shared page (src/canvas.rs, e2ee.md §4.11): the Yjs CRDT. Only the page's editor links
 # it (its own wasm chunk on the web); the core keeps the updates as opaque bytes.
 yrs = "0.28"
+# The recent log for "Report a problem" (src/debug_log.rs): a layer on the registry the shells and
+# the web calls module already use.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# The log's wall clock in the browser (`Date.now()`); already in the tree through the web client.
+js-sys = "0.3.83"
 
 
 [dev-dependencies]

@@ -53,14 +53,16 @@ Names of participants, conversation names and message content are never part of 
 ## The debug log
 
 Every app keeps the recent `tracing` events of its own process in a **bounded ring in memory**
-(`teamcraft_core::debug_log`), never on disk:
+(`teamcraft_client_api::debug_log`), never on disk:
 
 - **What:** `info` and above from TeamCraft's own crates, `warn` and above from dependencies. Each
   line is a UTC time, the level, the module and the event's message with its fields.
 - **Bounds:** 500 lines by default (`DebugLogSettings::max_lines`), each cut at 1024 characters, so the
   ring holds at most about 0.5 MB. Older lines drop out. A restart starts empty.
-- **Where:** desktop: the shell process (core, calls) plus the page; web: the page; Android and iOS:
-  the core in the app (the same ring the diagnostics export of #1094 shares).
+- **Where:** desktop: the shell process (core, calls) plus the page; web: the page plus the call
+  module, a wasm instance with a log of its own (`recent_log` export); Android and iOS: the core in
+  the app (the same ring the diagnostics export of #1094 shares, which is redacted now as well).
+  The lines of the logs are merged by time.
 
 ### Redaction
 
@@ -98,8 +100,12 @@ decline.
   lost answer) runs again and finds the message already in the outbox; the server deduplicates the
   send on the same ID. Opening the group DM is idempotent on the server (same members, same DM).
 - **Bounded.** At most 5 reports wait at once (a sixth is refused in the dialog); a report that can't
-  be delivered for 7 days is dropped with a log line. Sizes: description 4000 characters, log 500
-  lines, screenshot 10 MiB and the server's upload limit.
+  be delivered backs off (1 minute, doubling up to an hour) and is dropped after 7 days with a log
+  line. Sizes: description 4000 characters, log 500 lines per process (1000 merged), screenshot
+  10 MiB and the server's upload limit.
+- **Errors reach the person.** Field errors sit at their field; "nobody to receive it" and "queue
+  full" show next to the send button (and as a toast). After the report is in the outbox, a send
+  the server refuses shows as a failed message with "Try again" in the DM, like any message.
 - **Offline, restart, process death:** the queue lives in the store, so a report taken offline goes
   out on the next start or connection, like any message.
 - **Recipients change while queued:** delivery reads the recipients when it runs, so a report
@@ -109,15 +115,18 @@ decline.
 
 ## Who can report
 
-Every signed-in member, from the account menu ("Report a problem…") and from the call's overflow
-menu. Guests of meetings can't: they share no DM with the organization's admins, and their meeting
-host can be asked directly.
+Every signed-in member: from the account menu ("Report a problem…") on desktop and web, from
+Settings on Android. During a call the report carries the call's state, so the menu works from a
+call too. Guests can't: they share no DM with the organization's admins, and their meeting host
+can be asked directly.
 
 ## Platforms
 
 | Platform | State                                                                                  |
 |----------|----------------------------------------------------------------------------------------|
-| Desktop  | Dialog with preview, log of shell and page, screenshot picked from a file              |
-| Web      | Dialog with preview, log of the page, screenshot picked from a file                    |
-| Android  | Screen with preview from Settings → Help, log of the core, screenshot from the gallery |
-| iOS      | Core and FFI ready (`send_bug_report`, `bug_report_text`); the screen is a follow-up   |
+| Desktop  | Dialog with preview, log of shell and page, call state, screenshot picked from a file  |
+| Web      | Dialog with preview, log of page and call module, call state, screenshot from a file   |
+| Android  | Screen with preview from Settings, log of the core, screenshot from the photo picker   |
+| iOS      | Core and FFI ready (`send_bug_report` action, `bug_report_text`); the screen follows   |
+
+Android's report carries no call state yet: the FFI has no call snapshot for it.

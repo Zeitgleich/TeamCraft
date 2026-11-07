@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId, UserId};
 
 use crate::calls::{ActiveCall, CallKind};
+use crate::debug_log::timestamp;
 
 /// Longest description, in characters.
 pub const MAX_DESCRIPTION_CHARS: usize = 4000;
@@ -141,7 +142,7 @@ impl ReportContext {
     line(
       &mut text,
       "Created",
-      &format!("{} (device clock)", utc(self.created_at_ms)),
+      &format!("{} (device clock)", timestamp(self.created_at_ms)),
     );
     line(&mut text, "App version", &self.app_version);
     line(&mut text, "Platform", &self.platform);
@@ -195,7 +196,10 @@ pub fn check_fields(description: &str, maybe_screenshot: Option<(&str, u64)>) ->
 
 /// `teamcraft-report-2026-11-07T12-00-00Z.txt`.
 pub fn report_file_name(created_at_ms: i64) -> String {
-  format!("teamcraft-report-{}.txt", utc(created_at_ms).replace(':', "-"))
+  format!(
+    "teamcraft-report-{}.txt",
+    timestamp(created_at_ms).replace(':', "-")
+  )
 }
 
 fn line(text: &mut String, label: &str, value: &str) {
@@ -218,32 +222,6 @@ fn ids(users: &[UserId]) -> String {
     .map(ToString::to_string)
     .collect::<Vec<_>>()
     .join(", ")
-}
-
-/// `2026-11-01T12:00:00Z` (UTC, whole seconds).
-fn utc(now_ms: i64) -> String {
-  let seconds = now_ms.max(0) / 1000;
-  let (days, rest) = (seconds / 86_400, seconds % 86_400);
-  // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
-  let shifted = days + 719_468;
-  let era = shifted.div_euclid(146_097);
-  let day_of_era = shifted.rem_euclid(146_097);
-  let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-  let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-  let month_index = (5 * day_of_year + 2) / 153;
-  let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-  let month = if month_index < 10 {
-    month_index + 3
-  } else {
-    month_index - 9
-  };
-  let year = year_of_era + era * 400 + i64::from(month <= 2);
-  format!(
-    "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-    rest / 3_600,
-    rest % 3_600 / 60,
-    rest % 60
-  )
 }
 
 #[cfg(test)]

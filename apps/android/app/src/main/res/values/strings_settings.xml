@@ -30,4 +30,25 @@
   <string name="export_diagnostics_summary">Share the app and system version and recent log lines with support. Nothing is sent until you pick an app.</string>
   <string name="export_diagnostics_share_title">TeamCraft diagnostics</string>
   <string name="export_diagnostics_failed">Could not export the diagnostics.</string>
+  <!-- Report a problem (docs/bug-reports.md) -->
+  <string name="report_title">Report a problem</string>
+  <string name="report_summary">Describe what went wrong. Your report goes end-to-end encrypted to the people who look after TeamCraft in your organization.</string>
+  <string name="report_intro">Your report goes end-to-end encrypted to the people who look after TeamCraft in your organization. It never leaves your organization by itself.</string>
+  <string name="report_description">What happened?</string>
+  <string name="report_description_hint">What you did, what you expected and what happened instead.</string>
+  <string name="report_screenshot">Screenshot (optional)</string>
+  <string name="report_screenshot_add">Add screenshot</string>
+  <string name="report_screenshot_remove">Remove</string>
+  <string name="report_screenshot_hint">A PNG, JPEG or WebP picture of up to 10 MB. Check that it shows nothing you don\'t want to share.</string>
+  <string name="report_preview">What will be sent</string>
+  <string name="report_preview_hint">Besides your description and the screenshot, your report carries this text: app and system versions and the recent log of this app. Log lines never contain messages, file names, keys or passwords.</string>
+  <string name="report_send">Send report</string>
+  <string name="report_queued">Report saved. It is sent now, or as soon as you are online.</string>
+  <string name="report_error_description">Describe what happened.</string>
+  <string name="report_error_description_long">Shorten the description to 4,000 characters.</string>
+  <string name="report_error_screenshot_type">Pick a PNG, JPEG or WebP picture.</string>
+  <string name="report_error_screenshot_size">Pick a picture of up to 10 MB.</string>
+  <string name="report_error_screenshot_read">The picture could not be read. Pick it again or remove it.</string>
+  <string name="report_error_no_recipients">Nobody is set up to receive problem reports. Ask an owner to choose recipients in the administration on a computer.</string>
+  <string name="report_error_queue_full">Five reports are still waiting to be sent. Try again once you are online.</string>
 </resources>

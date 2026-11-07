@@ -21,6 +21,10 @@ fn main() {
     .without_time()
     .with_writer(console_layer)
     .with_filter(PAGE_LEVEL);
-  tracing_subscriber::registry().with(fmt_layer).init();
+  tracing_subscriber::registry()
+    .with(fmt_layer)
+    // The recent log for "Report a problem" (docs/bug-reports.md), redacted, in memory only.
+    .with(teamcraft_client_api::debug_log::layer())
+    .init();
   teamcraft_ui::mount();
 }
