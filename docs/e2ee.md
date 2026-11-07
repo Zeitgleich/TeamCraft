@@ -4561,7 +4561,18 @@ in the sealed cache until the next start reads the list.
 The media flow (camera, gallery, editors) keeps its open state for a killed app: the selection, the
 caption and the drawn text, sealed the same way (`MediaDraftStore`), deleted when the flow ends, at
 every end of a session, and after a week without coming back. Photos and videos taken with the
-app's camera wait in the core's staging folder, which sign-out wipes. Pictures are drawn again
+app's camera wait in the core's staging folder, which sign-out wipes. Neither the draft's files nor
+the camera's folder name the conversation or thread (#1377): they are named `d-{group}-{draft}`,
+both parts HMAC-SHA256 under a random secret of the device that the Keystore key seals like the
+drafts' own keys (`media-flow/names.key`), the group of the conversation and the draft of the
+conversation and thread, the way the media cache names its groups (§9.6). A dropped conversation's
+drafts are found by their group, without an index; what the names show someone with the files but
+without the Keystore is which drafts belong to the same conversation. Drafts and camera folders of
+older versions (`draft-{conversation}-{thread}`) are renamed when the app first opens the drafts,
+one atomic rename per file, so a kill in between leaves files the next start renames. The camera's
+photos and videos themselves are plain files in that folder (as the files to send in
+`outgoing/<account>` are), readable with the app's data directory until the flow ends, sign-out,
+or the week-old sweep; sealing them is a follow-up (#1388). Pictures are drawn again
 before they are sent, without their metadata; videos are packed again (no re-encoding unless
 edited) with only their orientation, so no location or camera details go along. A video the device
 can't pack again, unedited, goes as it is, as a file sent from the file picker does.
@@ -4942,7 +4953,8 @@ start and remain visible while the server or its object storage is unavailable.
   (notifications.md, "Desktop notifications").
 - The mobile apps don't use it: Android keeps avatars and space pictures in its own file caches
   (by user and space, nothing of a conversation) and inline pictures only in memory. Its one file of
-  a conversation, an unfinished picture selection with its camera shots, goes with the
+  a conversation, an unfinished picture selection with its camera shots (named by keyed group,
+  §9.2), goes with the
   conversation: the core hands the app the same records (`dropped_conversations`), and the app
   reports each back once the files are gone.
 
