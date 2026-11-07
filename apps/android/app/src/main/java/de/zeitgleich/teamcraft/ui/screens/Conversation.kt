@@ -78,6 +78,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -1085,6 +1086,7 @@ internal fun Composer(
   val context = LocalContext.current
   var text by rememberSaveable(conversationId, maybeThread) { mutableStateOf("") }
   var isDraftLoaded by remember(conversationId, maybeThread) { mutableStateOf(false) }
+  val draftSave = remember(conversationId, maybeThread) { DraftSave() }
   // Kept in the view model: picked files survive looking at another conversation (until sent).
   var files by viewModel.pickedFiles.entry("$conversationId/${maybeThread.orEmpty()}", emptyList())
   var priority by rememberSaveable(conversationId) { mutableStateOf("normal") }
@@ -1110,7 +1112,9 @@ internal fun Composer(
   }
   LaunchedEffect(conversationId, maybeThread) {
     // A draft from this or another device of the user.
-    if (text.isEmpty()) text = viewModel.readChat { query(ChatQueries.draft(conversationId, maybeThread)).maybeBody }.orEmpty()
+    val stored = viewModel.readChat { query(ChatQueries.draft(conversationId, maybeThread)).maybeBody }.orEmpty()
+    if (text.isEmpty()) text = stored
+    draftSave.stored(stored)
     isDraftLoaded = true
     // Opened from "Drafts & sent" to go on writing (#1220).
     if (OpenedDraft.current.value == OpenedDraft.Target(conversationId, maybeThread)) {
@@ -1131,6 +1135,7 @@ internal fun Composer(
     files = files + imported
     // At once: when files failed the picker comes back right now, and the draft's pause never ends.
     viewModel.act(ChatActions.setDraft(conversationId, maybeThread, text))
+    draftSave.stored(text)
     val failedCount = failed.size
     if (failedCount > 0) {
       val failed = context.resources.getQuantityString(R.plurals.share_import_failed, failedCount, failedCount)
@@ -1144,12 +1149,19 @@ internal fun Composer(
   }
   LaunchedEffect(text) {
     if (!isDraftLoaded) return@LaunchedEffect
+    val edit = draftSave.edit(text)
     delay(DRAFT_SAVE_DELAY_MS)
-    viewModel.act(ChatActions.setDraft(conversationId, maybeThread, text))
+    draftSave.takeDue(edit)?.let { viewModel.act(ChatActions.setDraft(conversationId, maybeThread, it)) }
   }
   // Leaving the app saves at once: the process may be killed before the pause is over (#158).
   LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
-    if (isDraftLoaded) viewModel.act(ChatActions.setDraft(conversationId, maybeThread, text))
+    draftSave.takePending()?.let { viewModel.act(ChatActions.setDraft(conversationId, maybeThread, it)) }
+  }
+  // So does leaving the conversation or closing the thread: the pause's wait goes with it (#1220).
+  DisposableEffect(draftSave) {
+    val conversation = conversationId
+    val thread = maybeThread
+    onDispose { draftSave.takePending()?.let { viewModel.act(ChatActions.setDraft(conversation, thread, it)) } }
   }
   val maybeQuery = Mentions.activeQuery(text)
   val members = snapshot?.conversation(conversationId)?.memberIds?.mapNotNull { snapshot.user(it) } ?: emptyList()
@@ -1182,6 +1194,7 @@ internal fun Composer(
     // `:)` and `:tada:` become emoji, as on desktop.
     viewModel.act(ChatActions.send(conversationId, emojiConvert(text.trim()), sendOptions(files)))
     viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
+    draftSave.stored("")
     text = ""
     files = emptyList()
     priority = "normal"
@@ -1217,6 +1230,7 @@ internal fun Composer(
       maybeScheduleAttempt = body to id
     }
     viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
+    draftSave.stored("")
     text = ""
     priority = "normal"
     wantsAcknowledgement = false

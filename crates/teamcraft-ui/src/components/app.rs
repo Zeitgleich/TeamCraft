@@ -62,6 +62,7 @@ use crate::sections::badge_count;
 use crate::settings::{Settings, Theme};
 use crate::share_into::{ShareInbox, ShareNotice};
 use crate::state::{AppState, MainView, Overlay, RailEntry, SidePanel, ToastAction, ToastTone};
+use crate::tab_handover::PERSIST_DRAFTS_EVENT;
 use crate::toast_motion::{Swipe, use_flip_stack};
 use crate::toast_timer::Hold;
 use crate::viewport::{CompactDepth, CompactPane, PaneStep};
@@ -155,6 +156,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   });
   focus_new_compact_pane(state);
   hold_toasts_while_hidden(state);
+  persist_drafts_when_leaving();
   // Backends that load in the background (the desktop core) say so through this hook.
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
   // A failed action is never silent (issue #322).
@@ -505,6 +507,57 @@ fn hold_toasts_while_hidden(state: AppState) {
   let is_visible = crate::reactive::use_page_visible();
   Effect::new(move |_| state.hold_toasts(Hold::Hidden, !is_visible.get()));
   end_timed_toasts_when_the_page_goes(state);
+}
+
+/// Text typed during the composers' typing pause is stored when the page is hidden, closed, frozen
+/// or discarded, and when the desktop window goes to the background or closes (#1220). Capturing on
+/// the window runs this before the browser core writes its store on the same events
+/// (`web_core.rs`), so the draft is in it. The page listens once; every shell follows the desktop.
+fn persist_drafts_when_leaving() {
+  thread_local! {
+    static IS_LISTENING: Cell<bool> = const { Cell::new(false) };
+  }
+  if tauri::is_available() {
+    tauri::listen(
+      teamcraft_client_api::remote::PERSIST_DRAFTS_SHELL_EVENT,
+      ask_composers_for_drafts,
+    );
+  }
+  if IS_LISTENING.with(|is_listening| is_listening.replace(true)) {
+    return;
+  }
+  let Some(window) = web_sys::window() else {
+    return;
+  };
+  let listener = Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
+    let is_shown = event.type_() == "visibilitychange"
+      && web_sys::window()
+        .and_then(|window| window.document())
+        .is_some_and(|document| document.visibility_state() == web_sys::VisibilityState::Visible);
+    if !is_shown {
+      ask_composers_for_drafts();
+    }
+  });
+  for kind in ["visibilitychange", "pagehide", "freeze"] {
+    if window
+      .add_event_listener_with_callback_and_bool(kind, listener.as_ref().unchecked_ref(), true)
+      .is_err()
+    {
+      tracing::debug!(kind, "could not watch the page lifecycle");
+    }
+  }
+  // Lives as long as the page.
+  listener.forget();
+}
+
+/// The composers store their pending drafts while this runs (the event is dispatched synchronously).
+fn ask_composers_for_drafts() {
+  if let Some(window) = web_sys::window()
+    && let Ok(event) = web_sys::Event::new(PERSIST_DRAFTS_EVENT)
+    && window.dispatch_event(&event).is_err()
+  {
+    tracing::debug!("could not ask the composers for their drafts");
+  }
 }
 
 /// A page that is closed, navigated away, frozen or about to be discarded does what its Undo toasts
