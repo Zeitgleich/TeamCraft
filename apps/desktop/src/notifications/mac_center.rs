@@ -20,10 +20,9 @@ use objc2::rc::Retained;
 use objc2::runtime::Bool;
 use objc2_foundation::{NSArray, NSBundle, NSError, NSSet, NSString};
 use objc2_user_notifications::{
-  UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationAction,
-  UNNotificationActionOptions, UNNotificationCategory, UNNotificationCategoryOptions,
-  UNNotificationInterruptionLevel, UNNotificationRequest, UNNotificationSound,
-  UNTextInputNotificationAction, UNUserNotificationCenter,
+  UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationAction, UNNotificationActionOptions,
+  UNNotificationCategory, UNNotificationCategoryOptions, UNNotificationInterruptionLevel,
+  UNNotificationRequest, UNNotificationSound, UNTextInputNotificationAction, UNUserNotificationCenter,
 };
 use teamcraft_client_api::os_notify::{NotificationAction, NotifyPermission, OsNotification, TagTarget};
 
@@ -57,6 +56,15 @@ pub fn is_available() -> bool {
 /// click on "Turn on", never at start-up. macOS shows its prompt only while the user has not
 /// answered; afterwards it answers at once with the earlier choice. `Err` where macOS failed.
 pub async fn request_permission() -> Result<bool, String> {
+  let receiver = ask_permission();
+  receiver
+    .await
+    .unwrap_or_else(|_| Err("macOS did not answer the permission request".to_owned()))
+}
+
+/// Starts the request; the answer comes through the receiver. Kept apart from the `async` caller,
+/// which must stay `Send` and so holds no block or Objective-C object across its `await`.
+fn ask_permission() -> tokio::sync::oneshot::Receiver<Result<bool, String>> {
   let (sender, receiver) = tokio::sync::oneshot::channel();
   let sender = Mutex::new(Some(sender));
   let done = RcBlock::new(move |is_granted: Bool, error: *mut NSError| {
@@ -84,8 +92,6 @@ pub async fn request_permission() -> Result<bool, String> {
     &done,
   );
   receiver
-    .await
-    .unwrap_or_else(|_| Err("macOS did not answer the permission request".to_owned()))
 }
 
 /// What macOS says about the app's notifications now (the user may have changed it in System
@@ -94,7 +100,8 @@ pub async fn permission() -> NotifyPermission {
   use teamcraft_desktop_native::NotificationAuthorization;
   let (sender, receiver) = tokio::sync::oneshot::channel();
   teamcraft_desktop_native::notification_authorization(move |authorization| {
-    drop(sender.send(authorization));
+    // A caller that went away no longer needs the answer.
+    let _ = sender.send(authorization);
   });
   match receiver.await {
     Ok(NotificationAuthorization::NotDetermined) => NotifyPermission::NotAsked,
