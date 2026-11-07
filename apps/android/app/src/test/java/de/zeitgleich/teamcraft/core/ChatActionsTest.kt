@@ -104,4 +104,27 @@ class ChatActionsTest {
     ).jsonObject["message"]!!.jsonObject
     assertEquals("4", message["maybe_reply_attachment"]!!.jsonPrimitive.content)
   }
+
+  @Test
+  fun listStatusAndRetryUseTheCoresNames() {
+    assertEquals(
+      """{"kind":"list_load","list":{"name":"call_history"}}""",
+      ChatQueries.listLoad(LoadingList.CALL_HISTORY),
+    )
+    assertEquals(
+      """{"action":"retry_list","list":{"name":"activity"}}""",
+      ChatActions.retryList(LoadingList.ACTIVITY),
+    )
+  }
+
+  @Test
+  fun theListStatusAnswerReadsAllStatesAndUnknownCauses() {
+    fun load(text: String) = decodeAnswer("""{"answer":"list_load","load":$text}""").load!!.toLoad()
+    assertEquals(ListLoad.Loading, load("""{"state":"loading"}"""))
+    assertEquals(ListLoad.Ready, load("""{"state":"ready"}"""))
+    assertEquals(ListLoad.Failed(LoadFailure.TIMED_OUT), load("""{"state":"failed","failure":"timed_out"}"""))
+    assertEquals(ListLoad.Failed(LoadFailure.OTHER), load("""{"state":"failed","failure":"from_the_future"}"""))
+    // A state of a newer core is not waited for.
+    assertEquals(ListLoad.Ready, load("""{"state":"paused"}"""))
+  }
 }

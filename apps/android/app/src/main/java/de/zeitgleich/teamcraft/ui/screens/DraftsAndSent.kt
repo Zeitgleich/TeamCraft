@@ -70,19 +70,11 @@ fun DraftsAndSentScreen(
   onOpenSent: (SentItem) -> Unit,
   onBack: () -> Unit,
 ) {
-  val changes by viewModel.changeCount.collectAsState()
   var tab by rememberSaveable { mutableIntStateOf(0) }
-  var maybeDrafts by remember { mutableStateOf<List<DraftItem>?>(null) }
-  var maybeSent by remember { mutableStateOf<List<SentItem>?>(null) }
-  var maybeDeleting by remember { mutableStateOf<DraftItem?>(null) }
+  val drafts = rememberRead(viewModel, enabled = tab == 0) { query(ChatQueries.drafts()).drafts }
   // The sent list is only read once it is looked at.
-  LaunchedEffect(changes, tab) {
-    if (tab == 0) {
-      maybeDrafts = viewModel.readChat { query(ChatQueries.drafts()).drafts }
-    } else {
-      maybeSent = viewModel.readChat { query(ChatQueries.sentMessages()).sent }
-    }
-  }
+  val sent = rememberRead(viewModel, enabled = tab == 1) { query(ChatQueries.sentMessages()).sent }
+  var maybeDeleting by remember { mutableStateOf<DraftItem?>(null) }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.drafts_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
       PrimaryTabRow(selectedTabIndex = tab) {
@@ -91,20 +83,19 @@ fun DraftsAndSentScreen(
       }
       LazyColumn(Modifier.fillMaxSize()) {
         if (tab == 0) {
-          val drafts = maybeDrafts.orEmpty()
-          if (maybeDrafts != null && drafts.isEmpty()) item { EmptyText(R.string.drafts_empty) }
-          items(drafts, key = { it.conversation + "/" + it.maybeThread.orEmpty() }) { draft ->
+          placeholderItem(drafts.phase { it }, drafts.retry) { EmptyText(R.string.drafts_empty) }
+          items(drafts.maybeValue.orEmpty(), key = { it.conversation + "/" + it.maybeThread.orEmpty() }) { draft ->
             DraftRow(draft, onOpen = { onOpenDraft(draft) }, onDelete = { maybeDeleting = draft })
             HorizontalDivider()
           }
         } else {
-          val sent = maybeSent.orEmpty()
-          if (maybeSent != null && sent.isEmpty()) item { EmptyText(R.string.sent_empty) }
-          items(sent, key = { it.conversation + "/" + it.message }) { item ->
+          val sentItems = sent.maybeValue.orEmpty()
+          placeholderItem(sent.phase { it }, sent.retry) { EmptyText(R.string.sent_empty) }
+          items(sentItems, key = { it.conversation + "/" + it.message }) { item ->
             SentRow(item, onOpen = { onOpenSent(item) })
             HorizontalDivider()
           }
-          if (sent.isNotEmpty()) item { EmptyText(R.string.sent_note) }
+          if (sentItems.isNotEmpty()) item { EmptyText(R.string.sent_note) }
         }
       }
     }

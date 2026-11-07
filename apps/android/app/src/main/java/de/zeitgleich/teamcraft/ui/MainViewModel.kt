@@ -78,6 +78,7 @@ import uniffi.teamcraft_ffi.LeaveChoice
 import uniffi.teamcraft_ffi.LinkPlatform
 import uniffi.teamcraft_ffi.LinkRequestItem
 import uniffi.teamcraft_ffi.LoginBrand
+import de.zeitgleich.teamcraft.core.LoadFailure
 import uniffi.teamcraft_ffi.FirstSyncItem
 import uniffi.teamcraft_ffi.KeyCatchUpItem
 import uniffi.teamcraft_ffi.MessageItem
@@ -611,9 +612,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    * that fails (the store still opening) keeps what is shown: an empty list would say "No direct
    * messages yet" (#1371); the next change reads again.
    */
+  /** The user asked to read the chat list again: it shows as loading until the read ends. */
+  fun retryChatList() = chatListState.update { it.copy(maybeReadFailure = null) }
+
   suspend fun refreshChatList(myId: String) = chatListLock.withLock {
-    val conversations = read { conversations() } ?: return@withLock
-    chatListState.update { it.copy(maybeConversations = conversations, runningCalls = runningCalls()) }
+    val conversations = read { conversations() }
+    if (conversations == null) {
+      // Cached rows stay; with none, the list says it could not be read instead of loading for ever.
+      chatListState.update { if (it.maybeConversations == null) it.copy(maybeReadFailure = LoadFailure.OTHER) else it }
+      return@withLock
+    }
+    chatListState.update { it.copy(maybeConversations = conversations, maybeReadFailure = null, runningCalls = runningCalls()) }
     val previews = chatPreviews(conversations, myId)
     chatListState.update { it.copy(previews = previews) }
     isStartCacheStale = false
@@ -756,11 +765,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   suspend fun thread(conversationId: String, threadId: String): List<MessageItem> =
     read { thread(conversationId, threadId) }?.map(::namedAuthor) ?: emptyList()
 
-  suspend fun search(query: String): List<SearchHitItem> =
+  /** The hits for [query]; `null` when the search could not run, which is not "no hits" (#297). */
+  suspend fun search(query: String): List<SearchHitItem>? =
     if (query.isBlank()) {
       emptyList()
     } else {
-      read { search(query) }?.map { it.copy(message = namedAuthor(it.message)) } ?: emptyList()
+      read { search(query) }?.map { it.copy(message = namedAuthor(it.message)) }
     }
 
   /** The app's own "Deleted user" in the user's language (issue #751). */

@@ -35,6 +35,7 @@ import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -48,6 +49,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.material.icons.filled.Search
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatSnapshot
+import de.zeitgleich.teamcraft.core.LoadFailure
+import de.zeitgleich.teamcraft.ui.Read
+import de.zeitgleich.teamcraft.ui.listPhase
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.SearchFilters
 import de.zeitgleich.teamcraft.ui.hitLocation
@@ -58,13 +62,20 @@ private const val TYPING_PAUSE_MS = 250L
 @Composable
 fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -> Unit) {
   var query by rememberSaveable { mutableStateOf("") }
-  var hits by remember { mutableStateOf<List<SearchHitItem>>(emptyList()) }
+  var read by remember { mutableStateOf<Read<List<SearchHitItem>>>(Read.Loaded(emptyList())) }
+  var attempt by remember { mutableIntStateOf(0) }
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
+  // Results come from this device's history, which the first sync is still filling (#297).
+  val isSyncing = rememberHistorySyncing(viewModel)
   LaunchedEffect(Unit) { snapshot = viewModel.readChat { snapshot() } }
-  LaunchedEffect(query) {
+  LaunchedEffect(query, attempt) {
+    // Hits of the last query stay until the new ones come; an empty list is no answer to a new query.
+    if (query.isNotBlank() && (read as? Read.Loaded)?.value.isNullOrEmpty()) read = Read.Loading
     delay(TYPING_PAUSE_MS)
-    hits = viewModel.search(query)
+    val answer = viewModel.search(query)
+    read = if (answer != null) Read.Loaded(answer) else Read.Failed(LoadFailure.OTHER)
   }
+  val hits = (read as? Read.Loaded)?.value.orEmpty()
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.search), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
       // Opening search is for typing: the keyboard comes up with it.
@@ -85,8 +96,25 @@ fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
           text = stringResource(R.string.search_start_text),
           maybeAction = null,
         )
-      } else if (hits.isEmpty()) {
-        EmptyHint(stringResource(R.string.search_empty))
+      } else {
+        ListPlaceholder(
+          listPhase(read),
+          onRetry = {
+            read = Read.Loading
+            attempt += 1
+          },
+        ) {
+          // While history syncs, nothing found only means nothing found yet.
+          EmptyHint(stringResource(if (isSyncing) R.string.search_incomplete else R.string.search_empty))
+        }
+        if (hits.isNotEmpty() && isSyncing) {
+          Text(
+            stringResource(R.string.search_incomplete),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+          )
+        }
       }
       LazyColumn {
         items(hits, key = { it.message.id }) { hit ->

@@ -534,6 +534,7 @@ data class ChatAnswer(
   val calls: List<CallHistoryItem> = emptyList(),
   val roster: SpaceRoster? = null,
   val overview: ScheduledOverview? = null,
+  val load: ListLoadWire? = null,
 )
 
 /**
@@ -622,4 +623,50 @@ class OwnProfile(private val raw: JsonObject) {
 
     fun parse(json: String): OwnProfile = OwnProfile(WireJson.parseToJsonElement(json).jsonObject)
   }
+}
+
+/** Why a list could not be read (`LoadFailure` of the core); a cause of a newer core reads as [OTHER]. */
+@Serializable(with = LoadFailureSerializer::class)
+enum class LoadFailure(val wire: String) {
+  NETWORK("network"),
+  SERVER("server"),
+  TIMED_OUT("timed_out"),
+  OTHER("other"),
+}
+
+object LoadFailureSerializer : kotlinx.serialization.KSerializer<LoadFailure> {
+  override val descriptor = kotlinx.serialization.descriptors.PrimitiveSerialDescriptor(
+    "LoadFailure",
+    kotlinx.serialization.descriptors.PrimitiveKind.STRING,
+  )
+
+  override fun deserialize(decoder: kotlinx.serialization.encoding.Decoder): LoadFailure {
+    val wire = decoder.decodeString()
+    return LoadFailure.entries.firstOrNull { it.wire == wire } ?: LoadFailure.OTHER
+  }
+
+  override fun serialize(encoder: kotlinx.serialization.encoding.Encoder, value: LoadFailure) =
+    encoder.encodeString(value.wire)
+}
+
+/** How far a list is, as the core knows it (`ListLoad`, tagged by `state`). */
+@Serializable
+data class ListLoadWire(
+  val state: String = "loading",
+  val failure: LoadFailure = LoadFailure.OTHER,
+) {
+  /** An unknown state of a newer core is not waited for. */
+  fun toLoad(): ListLoad = when (state) {
+    "loading" -> ListLoad.Loading
+    "failed" -> ListLoad.Failed(failure)
+    else -> ListLoad.Ready
+  }
+}
+
+sealed interface ListLoad {
+  data object Loading : ListLoad
+
+  data object Ready : ListLoad
+
+  data class Failed(val failure: LoadFailure) : ListLoad
 }

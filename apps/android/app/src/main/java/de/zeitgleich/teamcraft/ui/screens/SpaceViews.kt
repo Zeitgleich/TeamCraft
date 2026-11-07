@@ -43,11 +43,16 @@ import de.zeitgleich.teamcraft.core.CallHistoryItem
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ChatSnapshot
+import de.zeitgleich.teamcraft.core.ListLoad
+import de.zeitgleich.teamcraft.core.LoadFailure
+import de.zeitgleich.teamcraft.core.LoadingList
 import de.zeitgleich.teamcraft.core.Meeting
-import de.zeitgleich.teamcraft.core.SavedItem
 import de.zeitgleich.teamcraft.core.Space
 import de.zeitgleich.teamcraft.core.SpaceRoster
+import de.zeitgleich.teamcraft.ui.ListPhase
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.Read
+import de.zeitgleich.teamcraft.ui.listPhase
 import de.zeitgleich.teamcraft.ui.SpacePicture
 import kotlinx.coroutines.delay
 
@@ -151,16 +156,15 @@ private fun SpacePeople(viewModel: MainViewModel, spaceId: String) {
   when {
     roster == null || roster.state == "loading" ->
       if (isOverdue) {
-        Column(Modifier.padding(16.dp)) {
-          EmptyHint(stringResource(R.string.space_people_failed))
-          TextButton(onClick = { attempt += 1 }) { Text(stringResource(R.string.retry)) }
-        }
+        ListFailed(ListPhase.Failed(LoadFailure.TIMED_OUT), onRetry = { attempt += 1 })
+      } else {
+        ListSkeleton()
       }
     roster.state == "hidden" -> EmptyHint(stringResource(R.string.space_people_hidden))
     else -> {
       val people = peopleOfRoster(roster)
-      if (people.isEmpty()) EmptyHint(stringResource(R.string.space_people_empty))
       LazyColumn(Modifier.fillMaxSize()) {
+        if (people.isEmpty()) item { EmptyHint(stringResource(R.string.space_people_empty)) }
         items(people, key = { it.user }) { member ->
           Column(Modifier.fillMaxWidth().padding(16.dp)) {
             Text(member.displayName)
@@ -181,14 +185,23 @@ private fun SpacePeople(viewModel: MainViewModel, spaceId: String) {
 
 @Composable
 private fun SpaceCalls(viewModel: MainViewModel, spaceId: String, snapshot: ChatSnapshot?) {
-  val changes by viewModel.changeCount.collectAsState()
   val context = LocalContext.current
-  var maybeCalls by remember(spaceId) { mutableStateOf<List<CallHistoryItem>?>(null) }
+  val read = rememberRead(viewModel, spaceId) { query(ChatQueries.spaceCallHistory(spaceId)).calls }
+  // The call history comes from the server: the core says whether that answer is here (#297).
+  val load = rememberRead(viewModel) { query(ChatQueries.listLoad(LoadingList.CALL_HISTORY)).load?.toLoad() }
   LaunchedEffect(Unit) { viewModel.act(ChatActions.refreshCallHistory()) }
-  LaunchedEffect(changes, spaceId) { maybeCalls = viewModel.readChat { query(ChatQueries.spaceCallHistory(spaceId)).calls } }
-  val calls = maybeCalls ?: return
-  if (calls.isEmpty()) EmptyHint(stringResource(R.string.space_calls_empty))
+  val calls = read.maybeValue.orEmpty()
+  val phase = when (read.read) {
+    is Read.Loaded -> listPhase(load.maybeValue ?: ListLoad.Ready, calls.isEmpty())
+    else -> read.phase { it }
+  }
+  val retry = {
+    viewModel.act(ChatActions.retryList(LoadingList.CALL_HISTORY))
+    load.retry()
+    read.retry()
+  }
   LazyColumn(Modifier.fillMaxSize()) {
+    placeholderItem(phase, retry) { EmptyHint(stringResource(R.string.space_calls_empty)) }
     items(calls, key = { it.id }) { call ->
       val name = snapshot?.conversation(call.conversation)?.name.orEmpty()
       Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -216,12 +229,10 @@ private fun callDirectionLabel(direction: String): Int = when (direction) {
 
 @Composable
 private fun SpaceMeetings(viewModel: MainViewModel, spaceId: String) {
-  val changes by viewModel.changeCount.collectAsState()
-  var maybeMeetings by remember { mutableStateOf<List<Meeting>?>(null) }
-  LaunchedEffect(changes) { maybeMeetings = viewModel.readChat { meetings() } }
-  val meetings = meetingsOfSpace(maybeMeetings ?: return, spaceId)
-  if (meetings.isEmpty()) EmptyHint(stringResource(R.string.space_meetings_empty))
+  val read = rememberRead(viewModel) { meetings() }
+  val meetings = meetingsOfSpace(read.maybeValue.orEmpty(), spaceId)
   LazyColumn(Modifier.fillMaxSize()) {
+    placeholderItem(read.phase { meetingsOfSpace(it, spaceId) }, read.retry) { EmptyHint(stringResource(R.string.space_meetings_empty)) }
     items(meetings, key = { "${it.id}-${it.startsAt}" }) { meeting ->
       MeetingRow(viewModel, meeting)
       HorizontalDivider()
@@ -231,13 +242,10 @@ private fun SpaceMeetings(viewModel: MainViewModel, spaceId: String) {
 
 @Composable
 private fun SpaceSaved(viewModel: MainViewModel, spaceId: String, snapshot: ChatSnapshot?, onOpen: (String) -> Unit) {
-  val changes by viewModel.changeCount.collectAsState()
-  var maybeSaved by remember(spaceId) { mutableStateOf<List<SavedItem>?>(null) }
-  LaunchedEffect(changes, spaceId) { maybeSaved = viewModel.readChat { query(ChatQueries.spaceSavedItems(spaceId)).items } }
-  val saved = maybeSaved ?: return
-  if (saved.isEmpty()) EmptyHint(stringResource(R.string.space_saved_empty))
+  val saved = rememberRead(viewModel, spaceId) { query(ChatQueries.spaceSavedItems(spaceId)).items }
   LazyColumn(Modifier.fillMaxSize()) {
-    items(saved, key = { it.message.id }) { item ->
+    placeholderItem(saved.phase { it }, saved.retry) { EmptyHint(stringResource(R.string.space_saved_empty)) }
+    items(saved.maybeValue.orEmpty(), key = { it.message.id }) { item ->
       Column(Modifier.fillMaxWidth().clickable { onOpen(item.message.conversation) }.padding(16.dp)) {
         Text(item.conversationName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
         MessageLine(snapshot, item.message)
@@ -249,7 +257,6 @@ private fun SpaceSaved(viewModel: MainViewModel, spaceId: String, snapshot: Chat
 
 @Composable
 private fun SpaceFiles(viewModel: MainViewModel, spaceId: String) {
-  val maybeFiles = rememberFiles(viewModel, ChatQueries.spaceFiles(spaceId))
-  if (maybeFiles?.isEmpty() == true) EmptyHint(stringResource(R.string.space_files_empty))
-  FilesGrid(viewModel, maybeFiles.orEmpty(), Modifier.fillMaxSize())
+  val files = rememberFiles(viewModel, ChatQueries.spaceFiles(spaceId))
+  FilesContent(viewModel, files, R.string.space_files_empty, Modifier.fillMaxSize())
 }

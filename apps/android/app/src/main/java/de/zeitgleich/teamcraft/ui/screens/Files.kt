@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
 import android.text.format.Formatter
+import androidx.annotation.StringRes
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -44,6 +45,7 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.FileInfo
+import de.zeitgleich.teamcraft.ui.ListPhase
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.PictureTarget
 import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
@@ -55,26 +57,31 @@ import de.zeitgleich.teamcraft.ui.thumbnailKey
 fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> Unit) {
   val files = rememberFiles(viewModel, ChatQueries.files(conversationId))
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.files_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
-    if (files?.isEmpty() == true) {
-      EmptyText(R.string.files_empty)
-    }
-    FilesGrid(viewModel, files.orEmpty(), Modifier.fillMaxSize().padding(padding))
+    FilesContent(viewModel, files, R.string.files_empty, Modifier.fillMaxSize().padding(padding))
   }
 }
 
-/** The answer of a files query, kept fresh; `null` until the first one. */
+/** The files grid, or the placeholder, failure or empty state of a list that has no files to show. */
 @Composable
-internal fun rememberFiles(viewModel: MainViewModel, request: String): List<FileInfo>? {
-  val changes by viewModel.changeCount.collectAsState()
-  var files by remember(request) { mutableStateOf<List<FileInfo>?>(null) }
-  LaunchedEffect(changes, request) {
-    files = viewModel.readChat { query(request).files }
+internal fun FilesContent(viewModel: MainViewModel, files: ReadState<List<FileInfo>>, @StringRes emptyText: Int, modifier: Modifier) {
+  val phase = files.phase { it }
+  if (phase == ListPhase.Rows) {
+    FilesGrid(viewModel, files.maybeValue.orEmpty(), modifier)
+  } else {
+    Column(modifier) { ListPlaceholder(phase, files.retry) { EmptyText(emptyText) } }
   }
-  LaunchedEffect(files) {
+}
+
+/** The answer of a files query, kept fresh. */
+@Composable
+internal fun rememberFiles(viewModel: MainViewModel, request: String): ReadState<List<FileInfo>> {
+  val files = rememberRead(viewModel, request) { query(request).files }
+  val current = files.maybeValue
+  LaunchedEffect(current) {
     // Downloads report their end in the store, not every chunk: follow them while they run.
-    if (files.orEmpty().any { it.transfer.isMoving }) {
+    if (current.orEmpty().any { it.transfer.isMoving }) {
       delay(1000)
-      files = viewModel.readChat { query(request).files } ?: files
+      files.refresh()
     }
   }
   return files

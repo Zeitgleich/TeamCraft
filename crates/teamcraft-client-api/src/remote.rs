@@ -2170,6 +2170,50 @@ mod tests {
     }
   }
 
+  /// The Android app writes the list status query and the retry by hand and reads the answer (#297).
+  #[test]
+  fn the_list_status_has_the_wire_form_the_android_app_uses() {
+    use crate::list_load::{ListLoad, LoadFailure, LoadingList};
+
+    let query: ChatQuery =
+      serde_json::from_str(r#"{"kind":"list_load","list":{"name":"call_history"}}"#).unwrap();
+    assert!(matches!(
+      query,
+      ChatQuery::ListLoad {
+        list: LoadingList::CallHistory
+      }
+    ));
+    let action: ChatAction =
+      serde_json::from_str(r#"{"action":"retry_list","list":{"name":"activity"}}"#).unwrap();
+    assert!(matches!(
+      action,
+      ChatAction::RetryList {
+        list: LoadingList::Activity
+      }
+    ));
+    for (load, json) in [
+      (
+        ListLoad::Loading,
+        r#"{"answer":"list_load","load":{"state":"loading"}}"#,
+      ),
+      (
+        ListLoad::Ready,
+        r#"{"answer":"list_load","load":{"state":"ready"}}"#,
+      ),
+      (
+        ListLoad::Failed {
+          failure: LoadFailure::TimedOut,
+        },
+        r#"{"answer":"list_load","load":{"state":"failed","failure":"timed_out"}}"#,
+      ),
+    ] {
+      assert_eq!(
+        serde_json::to_string(&ChatAnswer::ListLoad { load }).unwrap(),
+        json
+      );
+    }
+  }
+
   #[test]
   fn changes_that_live_in_the_outbox_answer_before_the_network() {
     let (conversation, message) = (id_from_raw(7), id_from_raw(70));

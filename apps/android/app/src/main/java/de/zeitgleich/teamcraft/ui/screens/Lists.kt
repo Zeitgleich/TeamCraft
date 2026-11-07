@@ -36,9 +36,6 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.Message
-import de.zeitgleich.teamcraft.core.SavedItem
-import de.zeitgleich.teamcraft.core.SearchHit
-import de.zeitgleich.teamcraft.core.ThreadSummary
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.conversationListName
 
@@ -47,20 +44,20 @@ import de.zeitgleich.teamcraft.ui.conversationListName
 fun ThreadsScreen(viewModel: MainViewModel, onOpenThread: (String, String) -> Unit, onBack: () -> Unit) {
   val changes by viewModel.changeCount.collectAsState()
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
-  var threads by remember { mutableStateOf<List<ThreadSummary>?>(null) }
+  val threads = rememberRead(viewModel) { query(ChatQueries.followedThreads()).threads }
+  // The inbox is built from what the first sync brings: empty is no answer before that is here.
+  val isSyncing = rememberNewestSyncing(viewModel)
   var draftThreads by remember { mutableStateOf<Set<Pair<String, String>>>(emptySet()) }
   LaunchedEffect(changes) {
     snapshot = viewModel.readChat { snapshot() }
-    threads = viewModel.readChat { query(ChatQueries.followedThreads()).threads }
     draftThreads = viewModel.readChat { query(ChatQueries.drafts()).drafts }.orEmpty()
       .mapNotNull { draft -> draft.maybeThread?.let { draft.conversation to it } }
       .toSet()
   }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.threads_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-      val list = threads.orEmpty()
-      if (threads != null && list.isEmpty()) item { EmptyText(R.string.threads_empty) }
-      items(list, key = { it.conversation + "/" + it.root.id }) { thread ->
+      placeholderItem(threads.phase(isSyncing) { it }, threads.retry) { EmptyText(R.string.threads_empty) }
+      items(threads.maybeValue.orEmpty(), key = { it.conversation + "/" + it.root.id }) { thread ->
         Column(Modifier.fillMaxWidth().clickable { onOpenThread(thread.conversation, thread.root.id) }.padding(16.dp)) {
           Text(
             snapshot?.conversation(thread.conversation)?.name.orEmpty(),
@@ -88,13 +85,10 @@ fun SavedScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -
   val changes by viewModel.changeCount.collectAsState()
   var tab by rememberSaveable { mutableIntStateOf(0) }
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
-  var saved by remember { mutableStateOf<List<SavedItem>>(emptyList()) }
-  var mentions by remember { mutableStateOf<List<SearchHit>>(emptyList()) }
-  LaunchedEffect(changes) {
-    snapshot = viewModel.readChat { snapshot() }
-    saved = viewModel.readChat { query(ChatQueries.savedItems()).items } ?: emptyList()
-    mentions = viewModel.readChat { query(ChatQueries.recentMentions()).hits } ?: emptyList()
-  }
+  val saved = rememberRead(viewModel) { query(ChatQueries.savedItems()).items }
+  val mentions = rememberRead(viewModel) { query(ChatQueries.recentMentions()).hits }
+  val isSyncing = rememberNewestSyncing(viewModel)
+  LaunchedEffect(changes) { snapshot = viewModel.readChat { snapshot() } }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.saved_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     Column(Modifier.fillMaxSize().padding(padding)) {
       PrimaryTabRow(selectedTabIndex = tab) {
@@ -103,8 +97,9 @@ fun SavedScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -
       }
       LazyColumn(Modifier.fillMaxSize()) {
         if (tab == 0) {
-          if (saved.isEmpty()) item { EmptyText(R.string.saved_empty) }
-          items(saved, key = { it.message.id }) { item ->
+          // Saved items are the user's own, kept on this device: only a failed read is no answer.
+          placeholderItem(saved.phase { it }, saved.retry) { EmptyText(R.string.saved_empty) }
+          items(saved.maybeValue.orEmpty(), key = { it.message.id }) { item ->
             Column(Modifier.fillMaxWidth().clickable { onOpen(item.message.conversation) }.padding(16.dp)) {
               Text(conversationListName(item.conversationName, item.isNotesToSelf, stringResource(R.string.notes_title)), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
               MessageLine(snapshot, item.message)
@@ -112,8 +107,8 @@ fun SavedScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -
             HorizontalDivider()
           }
         } else {
-          if (mentions.isEmpty()) item { EmptyText(R.string.mentions_empty) }
-          items(mentions, key = { it.message.id }) { hit ->
+          placeholderItem(mentions.phase(isSyncing) { it }, mentions.retry) { EmptyText(R.string.mentions_empty) }
+          items(mentions.maybeValue.orEmpty(), key = { it.message.id }) { hit ->
             Column(Modifier.fillMaxWidth().clickable { onOpen(hit.message.conversation) }.padding(16.dp)) {
               Text(conversationListName(hit.conversationName, hit.isNotesToSelf, stringResource(R.string.notes_title)), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
               MessageLine(snapshot, hit.message)

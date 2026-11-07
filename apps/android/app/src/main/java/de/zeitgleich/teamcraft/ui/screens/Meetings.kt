@@ -32,13 +32,11 @@ import de.zeitgleich.teamcraft.ui.MainViewModel
 /** Upcoming and running meetings; joining one joins its conversation's call. */
 @Composable
 fun MeetingsScreen(viewModel: MainViewModel, onBack: () -> Unit) {
-  val changes by viewModel.changeCount.collectAsState()
-  var meetings by remember { mutableStateOf<List<Meeting>?>(null) }
-  LaunchedEffect(changes) { meetings = viewModel.readChat { meetings() } }
+  val read = rememberRead(viewModel) { meetings() }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.meetings_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
     LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-      val list = upcomingMeetings(meetings.orEmpty())
-      if (meetings != null && list.isEmpty()) item { EmptyText(R.string.meetings_empty) }
+      val list = upcomingMeetings(read.maybeValue.orEmpty())
+      placeholderItem(read.phase { upcomingMeetings(it) }, read.retry) { EmptyText(R.string.meetings_empty) }
       // A repeating meeting is listed once per occurrence, all with the series' ID.
       items(list, key = { "${it.id}-${it.startsAt}" }) { meeting ->
         MeetingRow(viewModel, meeting)

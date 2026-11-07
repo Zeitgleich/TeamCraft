@@ -75,7 +75,8 @@ private fun rememberScheduledOverview(viewModel: MainViewModel): ScheduledOvervi
 /** Everything waiting to be sent, soonest first, each with what happens next. */
 @Composable
 fun ScheduledScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -> Unit) {
-  val maybeOverview = rememberScheduledOverview(viewModel)
+  val overview = rememberRead(viewModel) { query(ChatQueries.scheduledMessages()).overview }
+  val maybeOverview = overview.maybeValue
   var maybeEditing by remember { mutableStateOf<ScheduledMessage?>(null) }
   var maybeCancelling by remember { mutableStateOf<ScheduledMessage?>(null) }
   Scaffold(
@@ -92,7 +93,7 @@ fun ScheduledScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: 
         )
       }
       val messages = maybeOverview?.messages.orEmpty()
-      if (messages.isEmpty()) item { EmptyText(R.string.scheduled_empty) }
+      placeholderItem(overview.phase { it.messages }, overview.retry) { EmptyText(R.string.scheduled_empty) }
       items(messages, key = { it.id }) { message ->
         ScheduledRow(
           message = message,
