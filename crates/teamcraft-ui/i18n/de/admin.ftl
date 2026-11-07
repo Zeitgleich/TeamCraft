@@ -17,6 +17,7 @@ admin-metadata-detail = Admins verwalten Räume, ohne sie lesen zu können: Nach
 admin-soon = Noch nicht verfügbar
 admin-search = Suchen
 admin-search-placeholder = Nach Namen suchen …
+admin-show-more = Mehr anzeigen
 admin-filter = Filter
 admin-empty = Keine Treffer.
 admin-detail-label = Details

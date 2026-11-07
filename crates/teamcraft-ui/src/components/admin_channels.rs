@@ -2,10 +2,12 @@ use leptos::prelude::*;
 
 use teamcraft_proto::{ChannelModeration, HistoryPolicy, Permission};
 
-use crate::admin::{AdminChannel, AdminLoad, SelfJoinOutcome, format_bytes};
+use crate::admin::{
+  AdminChannel, AdminChannelFilter, AdminChannelQuery, AdminLoad, SelfJoinOutcome, format_bytes,
+};
 use crate::channel_access::ChannelAccess;
 use crate::clock::{format_relative, now_ms};
-use crate::components::admin_console::{ListCutNotice, SectionHeader};
+use crate::components::admin_console::{ListMore, SectionHeader};
 use crate::components::admin_spaces::{LoadNotice, SpacesPanel};
 use crate::components::channel_view::UnconfirmedRemovalActions;
 use crate::components::icons::{Icon, IconName};
@@ -15,47 +17,27 @@ use crate::components::workspace_dialogs::DeleteChannelSection;
 use crate::feedback::PendingAction;
 use crate::i18n::{I18n, use_i18n};
 use crate::model::{ConversationId, ConversationKind, MembershipIssue, UserId};
+use crate::reactive::use_debounced;
 use crate::state::{AppState, use_app_state};
 
-const INACTIVE_AFTER_DAYS: i64 = 30;
-const DAY_MS: i64 = 86_400_000;
+/// The wait after the last key before the search asks the server.
+const SEARCH_DEBOUNCE_MS: u64 = 250;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ChannelFilter {
-  All,
-  Private,
-  WithGuests,
-  Inactive,
-  Orphaned,
-}
+const CHANNEL_FILTERS: [AdminChannelFilter; 5] = [
+  AdminChannelFilter::All,
+  AdminChannelFilter::Private,
+  AdminChannelFilter::WithGuests,
+  AdminChannelFilter::Inactive,
+  AdminChannelFilter::Orphaned,
+];
 
-impl ChannelFilter {
-  const ALL: [ChannelFilter; 5] = [
-    Self::All,
-    Self::Private,
-    Self::WithGuests,
-    Self::Inactive,
-    Self::Orphaned,
-  ];
-
-  fn slug(self) -> &'static str {
-    match self {
-      Self::All => "all",
-      Self::Private => "private",
-      Self::WithGuests => "guests",
-      Self::Inactive => "inactive",
-      Self::Orphaned => "orphaned",
-    }
-  }
-
-  fn matches(self, channel: &AdminChannel, now: i64) -> bool {
-    match self {
-      Self::All => true,
-      Self::Private => channel.kind == ConversationKind::Private,
-      Self::WithGuests => channel.guest_count > 0,
-      Self::Inactive => now - channel.last_activity > INACTIVE_AFTER_DAYS * DAY_MS,
-      Self::Orphaned => channel.maybe_owner.is_none(),
-    }
+fn filter_slug(filter: AdminChannelFilter) -> &'static str {
+  match filter {
+    AdminChannelFilter::All => "all",
+    AdminChannelFilter::Private => "private",
+    AdminChannelFilter::WithGuests => "guests",
+    AdminChannelFilter::Inactive => "inactive",
+    AdminChannelFilter::Orphaned => "orphaned",
   }
 }
 
@@ -212,7 +194,7 @@ fn LeftoverRow(
 fn leftover_name(state: AppState, i18n: I18n, user: UserId) -> String {
   let maybe_account = state.read(|backend| {
     backend
-      .admin_users()
+      .admin_known_users()
       .into_iter()
       .find(|entry| entry.user.id == user)
   });
@@ -279,28 +261,26 @@ fn conversation_label(
 pub fn ChannelsSection() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let query = RwSignal::new(String::new());
-  let filter = RwSignal::new(ChannelFilter::All);
+  // The list is the server's: it filters and searches, and the next pages load on request
+  // (issue #1241). The page comes back to what it was asked last.
+  let asked = state.read(|backend| backend.admin_channel_query());
+  let query = RwSignal::new(asked.text);
+  let filter = RwSignal::new(asked.filter);
+  let debounced = use_debounced(query, SEARCH_DEBOUNCE_MS);
+  Effect::new(move |_| {
+    let asked = AdminChannelQuery {
+      text: debounced.get(),
+      filter: filter.get(),
+    };
+    state.write(|backend| backend.admin_set_channel_query(asked));
+  });
   let selected = RwSignal::new(None::<ConversationId>);
   let tab = RwSignal::new(ListTab::Channels);
   let now = now_ms();
 
   let load = Memo::new(move |_| state.read(|backend| backend.admin_load()));
   let channels = Memo::new(move |_| state.read(|backend| backend.admin_channels()));
-  let visible = Memo::new(move |_| {
-    let needle = query.get().trim().to_lowercase();
-    let active = filter.get();
-    channels
-      .get()
-      .into_iter()
-      .filter(|channel| active.matches(channel, now))
-      .filter(|channel| {
-        needle.is_empty()
-          || channel.name.to_lowercase().contains(&needle)
-          || channel.space_name.to_lowercase().contains(&needle)
-      })
-      .collect::<Vec<_>>()
-  });
+  let visible = channels;
   let selected_channel = Memo::new(move |_| {
     selected
       .get()
@@ -348,12 +328,12 @@ pub fn ChannelsSection() -> impl IntoView {
       <Show when=move || tab.get() == ListTab::Channels fallback=|| ()>
       <div class="segmented" role="group" aria-label=move || i18n.t("admin-filter")>
         <SlidingIndicator />
-        {ChannelFilter::ALL
+        {CHANNEL_FILTERS
           .into_iter()
           .map(|option| {
             view! {
               <button aria-pressed=move || (filter.get() == option).to_string() on:click=move |_| filter.set(option)>
-                {move || i18n.t(&format!("admin-filter-{}", option.slug()))}
+                {move || i18n.t(&format!("admin-filter-{}", filter_slug(option)))}
               </button>
             }
           })
@@ -389,7 +369,10 @@ pub fn ChannelsSection() -> impl IntoView {
         <Show when=move || visible.get().is_empty() fallback=|| ()>
           <p class="empty-state">{move || i18n.t("admin-empty")}</p>
         </Show>
-        <ListCutNotice is_cut=Signal::derive(move || state.read(|backend| backend.admin_channels_truncated())) />
+        <ListMore
+          has_more=Signal::derive(move || state.read(|backend| backend.admin_channels_have_more()))
+          on_more=Callback::new(move |()| state.write(|backend| backend.admin_load_more_channels()))
+        />
         </Show>
       </div>
       <aside class="detail-pane" aria-label=move || i18n.t("admin-detail-label")>

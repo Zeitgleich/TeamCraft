@@ -226,7 +226,7 @@ fn OwnerList(status: OwnerRosterStatus) -> impl IntoView {
         .read(|backend| {
           backend.user(owner.user).or_else(|| {
             backend
-              .admin_users()
+              .admin_known_users()
               .into_iter()
               .map(|found| found.user)
               .find(|user| user.id == owner.user)

@@ -52,6 +52,9 @@ pub struct ListAdminConversationsQuery {
   /// it deactivates the user (security-review A8).
   #[serde(rename = "user_id", default, skip_serializing_if = "Option::is_none")]
   pub maybe_user_id: Option<UserId>,
+  /// Only channels whose name or space name contains this text (case-insensitive).
+  #[serde(rename = "query", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_query: Option<String>,
   /// Continue after this channel (ascending IDs).
   #[serde(rename = "after", default, skip_serializing_if = "Option::is_none")]
   pub maybe_after: Option<ConversationId>,
@@ -126,6 +129,11 @@ pub struct ListAdminUsersQuery {
   pub query: String,
   #[serde(rename = "status", default, skip_serializing_if = "Option::is_none")]
   pub maybe_status: Option<AdminUserStatus>,
+  /// Only accounts with this role according to the last token the identity provider issued
+  /// (`owner`, `admin`, ...): the roster proposals need the owners and admins without reading
+  /// every account.
+  #[serde(rename = "role", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_role: Option<String>,
   #[serde(rename = "after", default, skip_serializing_if = "Option::is_none")]
   pub maybe_after: Option<UserId>,
   #[serde(rename = "limit", default, skip_serializing_if = "Option::is_none")]

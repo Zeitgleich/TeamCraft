@@ -5,6 +5,67 @@ use teamcraft_proto::{HistoryPolicy, JoinPolicy, Role};
 
 use crate::model::{ConversationId, ConversationKind, DeviceId, SpaceId, TimestampMs, User, UserId};
 
+/// A channel counts as inactive after this many days without a message (the Channels page's
+/// "Inactive" filter, asked of the server as `inactive_days`).
+pub const INACTIVE_AFTER_DAYS: u32 = 30;
+
+/// Which channels the Channels and Retention pages list: the server filters them (issue #1241), so
+/// a list of any length can be searched without reading it all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdminChannelQuery {
+  /// Part of the channel's or its space's name, any case.
+  pub text: String,
+  pub filter: AdminChannelFilter,
+}
+
+/// The Channels page's quick filters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AdminChannelFilter {
+  #[default]
+  All,
+  Private,
+  WithGuests,
+  Inactive,
+  Orphaned,
+}
+
+impl AdminChannelQuery {
+  /// Whether `channel` is one the query lists; for backends without a server to ask.
+  pub fn matches(&self, channel: &AdminChannel, now: i64) -> bool {
+    let needle = self.text.trim().to_lowercase();
+    let is_named = needle.is_empty()
+      || channel.name.to_lowercase().contains(&needle)
+      || channel.space_name.to_lowercase().contains(&needle);
+    is_named
+      && match self.filter {
+        AdminChannelFilter::All => true,
+        AdminChannelFilter::Private => channel.kind == ConversationKind::Private,
+        AdminChannelFilter::WithGuests => channel.guest_count > 0,
+        AdminChannelFilter::Inactive => {
+          now - channel.last_activity > i64::from(INACTIVE_AFTER_DAYS) * 86_400_000
+        },
+        AdminChannelFilter::Orphaned => channel.maybe_owner.is_none(),
+      }
+  }
+}
+
+/// Which accounts the Users page lists.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdminUserQuery {
+  /// Part of the display name or user name, any case.
+  pub text: String,
+}
+
+impl AdminUserQuery {
+  /// Whether `user` is one the query lists; for backends without a server to ask.
+  pub fn matches(&self, user: &AdminUser) -> bool {
+    let needle = self.text.trim().to_lowercase();
+    needle.is_empty()
+      || user.user.display_name.to_lowercase().contains(&needle)
+      || user.user.username.to_lowercase().contains(&needle)
+  }
+}
+
 /// Retention of one channel: whichever limit is stricter wins; `None` keeps everything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Retention {
@@ -101,7 +162,9 @@ pub struct AdminUser {
   /// Empty until loaded; `device_count` says whether that means none.
   pub devices: Vec<DeviceInfo>,
   pub last_seen: TimestampMs,
+  /// The spaces by name, where a backend knows them; the server's list carries only the count.
   pub space_names: Vec<String>,
+  pub space_count: u32,
   pub is_active: bool,
   /// Still in a conversation or space, or still with a device: a deactivated user like this can
   /// be removed from all chats.
@@ -787,6 +850,57 @@ mod tests {
   use super::*;
 
   #[test]
+  fn a_channel_query_matches_names_of_channel_and_space_and_the_quick_filters() {
+    use crate::model::Id;
+    const NOW: i64 = 100 * 86_400_000;
+    let channel = |name: &str, kind, guests, owner: Option<UserId>, last_activity| AdminChannel {
+      id: ConversationId::from_snowflake(crate::model::Snowflake::new(1).unwrap()),
+      space_name: "Sales".into(),
+      name: name.into(),
+      kind,
+      member_count: 3,
+      guest_count: guests,
+      maybe_owner: owner,
+      last_activity,
+      message_count: 0,
+      storage_bytes: 0,
+      retention: Retention {
+        maybe_days: None,
+        maybe_max_messages: None,
+        keeps_pinned: true,
+      },
+      history: HistoryPolicy::FromJoin,
+      is_archived: false,
+    };
+    let owner = Some(UserId::from_snowflake(crate::model::Snowflake::new(2).unwrap()));
+    let public = channel("Launch", ConversationKind::Public, 0, owner, NOW);
+    let private = channel("leads", ConversationKind::Private, 2, None, NOW - 40 * 86_400_000);
+    let query = |text: &str, filter| AdminChannelQuery {
+      text: text.into(),
+      filter,
+    };
+
+    assert!(AdminChannelQuery::default().matches(&public, NOW));
+    assert!(query(" LAUN ", AdminChannelFilter::All).matches(&public, NOW));
+    assert!(
+      query("sale", AdminChannelFilter::All).matches(&public, NOW),
+      "the space's name"
+    );
+    assert!(!query("zzz", AdminChannelFilter::All).matches(&public, NOW));
+    assert!(query("", AdminChannelFilter::Private).matches(&private, NOW));
+    assert!(!query("", AdminChannelFilter::Private).matches(&public, NOW));
+    assert!(query("", AdminChannelFilter::WithGuests).matches(&private, NOW));
+    assert!(query("", AdminChannelFilter::Orphaned).matches(&private, NOW));
+    assert!(!query("", AdminChannelFilter::Orphaned).matches(&public, NOW));
+    assert!(query("", AdminChannelFilter::Inactive).matches(&private, NOW));
+    assert!(!query("", AdminChannelFilter::Inactive).matches(&public, NOW));
+    assert!(
+      !query("launch", AdminChannelFilter::Private).matches(&public, NOW),
+      "both must hold"
+    );
+  }
+
+  #[test]
   fn policy_values_round_trip_through_slugs() {
     for value in AdminSelfJoin::ALL {
       assert_eq!(AdminSelfJoin::from_slug(value.slug()), Some(value));
@@ -1153,6 +1267,7 @@ mod tests {
         devices: Vec::new(),
         last_seen: 0,
         space_names: Vec::new(),
+        space_count: 0,
         is_active,
         is_in_chats: false,
         maybe_guest: None,

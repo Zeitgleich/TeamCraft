@@ -45,6 +45,8 @@ pub(super) struct OpsState {
   audit_filter: AuditFilter,
   channels: Vec<AdminChannel>,
   users: Vec<AdminUser>,
+  channel_query: teamcraft_client_api::admin::AdminChannelQuery,
+  user_query: teamcraft_client_api::admin::AdminUserQuery,
   audit: Vec<AuditEntry>,
   next_audit_id: u64,
   acknowledged_key_changes: Vec<ConversationId>,
@@ -65,6 +67,8 @@ impl OpsState {
       audit_filter: AuditFilter::default(),
       channels: demo_channels(now),
       users: demo_admin_users(now, users),
+      channel_query: Default::default(),
+      user_query: Default::default(),
       audit: demo_audit(now),
       next_audit_id: 1000,
       acknowledged_key_changes: Vec::new(),
@@ -158,11 +162,43 @@ impl AdminBackend for MockBackend {
   }
 
   fn admin_channels(&self) -> Vec<AdminChannel> {
-    self.ops.borrow().channels.clone()
+    let ops = self.ops.borrow();
+    ops
+      .channels
+      .iter()
+      .filter(|channel| ops.channel_query.matches(channel, self.now))
+      .cloned()
+      .collect()
   }
 
   fn admin_users(&self) -> Vec<AdminUser> {
+    let ops = self.ops.borrow();
+    ops
+      .users
+      .iter()
+      .filter(|user| ops.user_query.matches(user))
+      .cloned()
+      .collect()
+  }
+
+  fn admin_known_users(&self) -> Vec<AdminUser> {
     self.ops.borrow().users.clone()
+  }
+
+  fn admin_channel_query(&self) -> teamcraft_client_api::admin::AdminChannelQuery {
+    self.ops.borrow().channel_query.clone()
+  }
+
+  fn admin_set_channel_query(&self, query: teamcraft_client_api::admin::AdminChannelQuery) {
+    self.ops.borrow_mut().channel_query = query;
+  }
+
+  fn admin_user_query(&self) -> teamcraft_client_api::admin::AdminUserQuery {
+    self.ops.borrow().user_query.clone()
+  }
+
+  fn admin_set_user_query(&self, query: teamcraft_client_api::admin::AdminUserQuery) {
+    self.ops.borrow_mut().user_query = query;
   }
 
   fn workspace_policy(&self) -> (u64, WorkspacePolicy) {
@@ -667,6 +703,7 @@ impl AdminBackend for MockBackend {
     entry.is_in_chats = false;
     entry.devices.clear();
     entry.space_names.clear();
+    entry.space_count = 0;
     let target = entry.user.display_name.clone();
     ops.record(self.now, AuditAction::UserRemovedFromChats, &target, "");
   }
@@ -1145,6 +1182,7 @@ fn demo_admin_users(now: TimestampMs, users: &[crate::model::User]) -> Vec<Admin
         } else {
           vec!["Project A".into(), "Project B".into()]
         },
+        space_count: if n == 9 { 1 } else { 2 },
         is_active: n != 8,
         is_in_chats: true,
         maybe_guest: (n == 9).then(|| GuestInfo {

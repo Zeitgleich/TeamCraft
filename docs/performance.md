@@ -1532,14 +1532,19 @@ What changed:
   spaces, channels and the policy (3 lists, 6 requests with the second page), the audit log is read
   on the Audit page only. The whole console loads once when it opens and after the admin's own
   changes.
-- Devices load when a user's details open. Lists are read in pages of 200, up to 1,000 entries, and
-  say so when they are cut (follow-up: #1241).
+- Devices load when a user's details open. Lists were read in pages of 200, up to 1,000 entries,
+  and said so when they were cut; since #1241 the Channels, Retention and Users pages load a page of
+  100 and the next one on request, search through the server, and the timer reads at most the first
+  three pages of what is loaded (see below).
 - A 429 stops the console's reads until `Retry-After` (the body's `retry_after_secs`) has passed.
 
 The unit tests (`admin_live.rs`, `mod requests`) hold the cap against a fake server with 450 channels
-and 300 users: opening reads 26 requests (10 lists, 3 further pages, the audit log, 12 spaces'
-members), and no section's refresh exceeds 8, so at most 16 a minute; none is per channel or per
-user. The browser test asserts at most 80 requests when opening and 30 a minute while open.
+and 300 users: opening reads at most 15 requests (11 lists and settings, the audit log, the guests,
+the owners and admins by role), whatever the numbers of channels, users and spaces (since #1241:
+no request per space, one page of each list), and no section's refresh exceeds 8, so at most 16 a
+minute; none is per channel or per user. A refresh re-reads at most 3 pages of a list (100 each),
+however far the admin scrolled; pages loaded beyond stay as they were read. The browser test
+asserts at most 80 requests when opening and 30 a minute while open.
 
 ### Desktop on Linux: idle (issue #399)
 

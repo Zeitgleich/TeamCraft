@@ -497,7 +497,13 @@ independent of the size of the instance:
   console. The whole console loads once when it opens and after the admin's own changes.
 - The devices of a user load when their details open, not for every user on every refresh
   (`device_count` in the list is the count shown in the table).
-- Lists are read page by page (`after`) up to 1000 entries; a longer list says it is cut.
+- The Channels, Retention and Users pages load a page of 100 (`after`) when they open and the next
+  one when the admin asks ("Show more"). They search and filter through the server
+  (`GET /admin/conversations?query=&visibility=&has_guests=&inactive_days=&orphaned=`,
+  `GET /admin/users?query=`), asked 250 ms after the last key. `query` matches the channel's or its
+  space's name; `GET /admin/users?role=` lists the accounts of one role (the roster proposals read
+  the active owners and admins that way). The timer reads again the first pages of what is loaded
+  (3 at most), never the whole list.
 - A 429 is honoured: the console reads nothing until `Retry-After` has passed (`retry_after_secs`
   in the body, for browsers behind proxies that strip headers), then reads once more.
 

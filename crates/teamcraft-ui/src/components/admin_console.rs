@@ -163,6 +163,30 @@ pub fn SectionHeader(
   }
 }
 
+/// The foot of a list that loads page by page (issue #1241): "Show more" while the instance has
+/// more entries than the list holds.
+#[component]
+pub fn ListMore(#[prop(into)] has_more: Signal<bool>, #[prop(into)] on_more: Callback<()>) -> impl IntoView {
+  let i18n = use_i18n();
+  let state = use_app_state();
+  let is_loading = Memo::new(move |_| state.read(|backend| backend.admin_is_loading_more()));
+  view! {
+    <Show when=move || has_more.get() fallback=|| ()>
+      <div class="admin-more">
+        <button
+          type="button"
+          class="btn"
+          prop:disabled=move || is_loading.get()
+          aria-busy=move || is_loading.get().then_some("true")
+          on:click=move |_| on_more.run(())
+        >
+          {move || i18n.t("admin-show-more")}
+        </button>
+      </div>
+    </Show>
+  }
+}
+
 /// Says that a list ends before the instance's last entry: the console reads a bounded number of
 /// pages, and an admin must not take the end of the list for the end of the instance.
 #[component]
