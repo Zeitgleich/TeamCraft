@@ -8,7 +8,7 @@
             assets that exist are linked.
     package-site-page.py check --site <site> --site-url <url>
             Fails when a page of the site links a file of the site that doesn't exist (href, src,
-            url() in its style sheets, and site URLs in the setup snippets).
+            url() in its style sheets, site URLs in the setup snippets and in meta tags such as og:image).
 
 Environment for render (all optional):
     GPG_KEY_ID      fingerprint of the repository key, shown for verification
@@ -46,6 +46,9 @@ ICONS = {
     "apps/desktop/icons/32x32.png": "favicon.png",
     "crates/teamcraft-ui/icons/apple-touch-icon.png": "apple-touch-icon.png",
 }
+# The social preview card (scripts/brand/og_card.py), 1200x630, published next to the page.
+OG_IMAGE = "og-card.png"
+OG_IMAGE_SIZE = (1200, 630)
 DEPLOY_REPO = "Zeitgleich/teamcraft-deploy"
 DEFAULT_PACKAGE = "team-craft"
 CSP = (
@@ -255,7 +258,8 @@ def render_page(channels, site, site_url, repo, env):
         render_footer(channels, site, repo_url, has_linux_repositories=bool(linux_repositories),
                       has_fdroid=bool(fdroid)),
     ])
-    return PAGE.format(csp=CSP, body=body)
+    return PAGE.format(csp=CSP, body=body, site_url=esc(site_url), og_image=esc(f"{site_url}/{OG_IMAGE}"),
+                       og_width=OG_IMAGE_SIZE[0], og_height=OG_IMAGE_SIZE[1])
 
 
 def render_header(repo_url):
@@ -994,6 +998,8 @@ def check_links(site, site_url):
         targets = [(t, False) for t in collector.links]
         # Site URLs in snippets (apt URIs, repo files, keys); a base URL like .../apt may be a directory.
         targets += [(t, True) for t in re.findall(re.escape(site_url) + r"/[^\s'\"<>\\]*", collector.text)]
+        # Absolute site URLs in meta tags (og:image, og:url); other content values are no links.
+        targets += [(t, True) for t in collector.meta_contents if t == site_url or t.startswith(site_url + "/")]
         broken += broken_targets(page, targets, site, site_url)
     for sheet in sorted(site.rglob("*.css")):
         urls = re.findall(r"url\(\s*['\"]?([^'\")]+)['\"]?\s*\)", sheet.read_text(encoding="utf-8"))
@@ -1033,6 +1039,7 @@ class LinkCollector(HTMLParser):
     def __init__(self):
         super().__init__()
         self.links = []
+        self.meta_contents = []
         self.text_parts = []
 
     @property
@@ -1043,6 +1050,8 @@ class LinkCollector(HTMLParser):
         for name, value in attrs:
             if name in ("href", "src") and value:
                 self.links.append(value)
+            elif tag == "meta" and name == "content" and value:
+                self.meta_contents.append(value)
 
     def handle_data(self, data):
         self.text_parts.append(data)
@@ -1085,6 +1094,21 @@ PAGE = """<!doctype html>
 <meta name="theme-color" content="#0b0f16" media="(prefers-color-scheme: dark)">
 <meta name="description" content="TeamCraft: self-hosted, end-to-end encrypted team chat, calls and meetings. Downloads for Windows, macOS, Linux and Android.">
 <title>TeamCraft – encrypted team chat, calls and meetings</title>
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="TeamCraft">
+<meta property="og:title" content="TeamCraft – encrypted team chat, calls and meetings">
+<meta property="og:description" content="Team chat your server can&rsquo;t read. Self-hosted, end-to-end encrypted chat, calls and meetings. Downloads for Windows, macOS, Linux and Android.">
+<meta property="og:url" content="{site_url}/">
+<meta property="og:image" content="{og_image}">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="{og_width}">
+<meta property="og:image:height" content="{og_height}">
+<meta property="og:image:alt" content="TeamCraft: team chat your server can&rsquo;t read, shown with the desktop and phone apps.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="TeamCraft – encrypted team chat, calls and meetings">
+<meta name="twitter:description" content="Team chat your server can&rsquo;t read. Self-hosted, end-to-end encrypted chat, calls and meetings.">
+<meta name="twitter:image" content="{og_image}">
+<meta name="twitter:image:alt" content="TeamCraft: team chat your server can&rsquo;t read, shown with the desktop and phone apps.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="icon" href="favicon.png" type="image/png" sizes="32x32">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
