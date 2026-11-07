@@ -276,3 +276,8 @@ under "Open with" for files, and runs `teamcraft-desktop --share -- %F`: the fil
 which asks for a conversation. File managers with their own "Send to" menus (Dolphin service menus,
 Thunar custom actions, Nautilus scripts) can run the same command. The AppImage installs no entry;
 the command works with its path.
+
+deb and rpm install it from `TeamCraft.share.desktop`, whose icon is the packages' `teamcraft-desktop`
+(the Flatpak file names the Flatpak's `de.zeitgleich.teamcraft` icon). Neither entry has a
+`StartupWMClass`: the main window belongs to the main entry, and a desktop that matched it to this one
+showed the generic Wayland icon in the task bar.

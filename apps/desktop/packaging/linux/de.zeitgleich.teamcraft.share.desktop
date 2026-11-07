@@ -8,5 +8,4 @@ Icon=de.zeitgleich.teamcraft
 Terminal=false
 NoDisplay=true
 Categories=Network;Chat;InstantMessaging;
-StartupWMClass=teamcraft-desktop
 MimeType=application/octet-stream;application/*;audio/*;image/*;text/*;video/*;
