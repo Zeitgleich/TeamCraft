@@ -13,6 +13,21 @@ final class DraftsAndSentTests: XCTestCase {
     XCTAssertEqual(draft?.editedDate, Date(timeIntervalSince1970: 2))
   }
 
+  func testDraftsAndSentInTheNotesAreNamedLikeTheNotes() {
+    let draft = Wire.decode(
+      DraftItem.self,
+      from: #"{"conversation":"7","conversation_name":"","is_notes_to_self":true,"body":"x","edited_at":1}"#)
+    XCTAssertEqual(draft?.listName, String(localized: "notes_title"))
+    let sent = Wire.decode(
+      SentItem.self,
+      from: #"{"conversation":"7","conversation_name":"","is_notes_to_self":true,"message":"1","excerpt":"","sent_at":1}"#)
+    XCTAssertEqual(sent?.listName, String(localized: "notes_title"))
+    let plain = Wire.decode(
+      SentItem.self,
+      from: #"{"conversation":"7","conversation_name":"general","message":"1","excerpt":"","sent_at":1}"#)
+    XCTAssertEqual(plain?.listName, "general")
+  }
+
   func testAConversationsOwnDraftHasNoThread() {
     let draft = Wire.decode(
       DraftItem.self, from: #"{"conversation":"7","conversation_name":"general","body":"x","edited_at":1}"#)

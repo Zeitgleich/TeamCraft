@@ -186,6 +186,55 @@ mod drafts_and_sent {
   }
 
   #[tokio::test]
+  async fn drafts_and_sent_in_the_notes_are_marked_for_the_apps_to_name() {
+    let server = FakeServer::new();
+    let mut alice =
+      Peer::enroll_with_settings(&server, "Alice", common::settings().with_notes_to_self()).await;
+    let notes = alice.client.open_dm(alice.client.user_id()).await.unwrap();
+    let channel = alice
+      .client
+      .create_channel(alice.space().await, "work")
+      .await
+      .unwrap();
+    alice.client.send_text(notes, None, "buy milk").await.unwrap();
+    alice.client.send_text(channel, None, "ship it").await.unwrap();
+    for conversation in [notes, channel] {
+      alice
+        .client
+        .run_ui_command(set_draft(conversation, None, "later"))
+        .await
+        .unwrap();
+    }
+    alice.client.sync_account_data().await.unwrap();
+
+    let ui = ui_of(&alice);
+    let drafts = ui.drafts(None);
+    assert_eq!(drafts.len(), 2);
+    let draft = |conversation| {
+      drafts
+        .iter()
+        .find(|item| item.conversation == conversation)
+        .unwrap()
+    };
+    assert!(draft(notes).is_notes_to_self);
+    assert!(draft(notes).conversation_name.is_empty());
+    assert!(!draft(channel).is_notes_to_self);
+    assert_eq!(draft(channel).conversation_name, "work");
+
+    let sent = ui.sent_messages(None);
+    assert_eq!(sent.len(), 2);
+    let item = |conversation| {
+      sent
+        .iter()
+        .find(|item| item.conversation == conversation)
+        .unwrap()
+    };
+    assert!(item(notes).is_notes_to_self);
+    assert!(!item(channel).is_notes_to_self);
+    assert_eq!(item(channel).conversation_name, "work");
+  }
+
+  #[tokio::test]
   async fn sent_keeps_to_its_limit_and_follows_a_new_message() {
     let server = FakeServer::new();
     let mut alice = Peer::enroll(&server, "Alice").await;

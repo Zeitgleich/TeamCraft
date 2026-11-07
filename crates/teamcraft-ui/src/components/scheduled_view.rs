@@ -240,7 +240,12 @@ fn ScheduledCard(message: ScheduledMessage, overview: Memo<ScheduledOverview>) -
       "scheduled-cancel-confirm",
     )
   };
-  let (name, body) = (message.conversation_name.clone(), message.body.clone());
+  let name = if message.is_notes_to_self {
+    i18n.t("notes-title")
+  } else {
+    message.conversation_name.clone()
+  };
+  let body = message.body.clone();
   let edit_body = body.clone();
   view! {
     <li class="page-card saved-card scheduled-card">

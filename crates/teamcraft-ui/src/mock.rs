@@ -1131,6 +1131,7 @@ impl ChatBackend for MockBackend {
           conversation: *conversation,
           maybe_thread: *maybe_thread,
           conversation_name: found.name.clone(),
+          is_notes_to_self: found.is_notes_to_self,
           maybe_thread_root: None,
           body: body.clone(),
           edited_at: *edited_at,
@@ -1159,6 +1160,7 @@ impl ChatBackend for MockBackend {
       .map(|(conv, message)| SentItem {
         conversation: conv.id,
         conversation_name: conv.name.clone(),
+        is_notes_to_self: conv.is_notes_to_self,
         message: message.id,
         maybe_thread: message.maybe_thread,
         excerpt: message.body.clone(),

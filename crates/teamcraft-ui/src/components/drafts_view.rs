@@ -13,8 +13,18 @@ use crate::components::page::ScopedSpaceName;
 use crate::components::rich_text::RichText;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
-use crate::i18n::use_i18n;
+use crate::i18n::{I18n, use_i18n};
 use crate::state::use_app_state;
+
+/// What a row calls its conversation: the notes have no name of their own, so they get the one in
+/// the user's language (#1385).
+fn conversation_label(i18n: I18n, name: &str, is_notes_to_self: bool) -> String {
+  if is_notes_to_self {
+    i18n.t("notes-title")
+  } else {
+    name.to_owned()
+  }
+}
 
 const DRAFTS_PANEL_ID: &str = "drafts-panel";
 /// Sent messages shown at first and added by "Show more": their text is rendered as rich text, and
@@ -131,7 +141,7 @@ fn DraftCard(draft: DraftItem) -> impl IntoView {
   view! {
     <li class="page-card saved-card">
       <div class="saved-meta">
-        <span class="saved-author" translate="no">{draft.conversation_name.clone()}</span>
+        <span class="saved-author" translate="no">{conversation_label(i18n, &draft.conversation_name, draft.is_notes_to_self)}</span>
         {where_it_is.map(|text| view! { <span class="saved-where" translate="no">{text}</span> })}
         <time class="saved-time">{format_date_time(draft.edited_at, locale)}</time>
       </div>
@@ -226,7 +236,7 @@ fn SentCard(item: SentItem) -> impl IntoView {
   view! {
     <li class="page-card saved-card">
       <div class="saved-meta">
-        <span class="saved-author" translate="no">{item.conversation_name.clone()}</span>
+        <span class="saved-author" translate="no">{conversation_label(i18n, &item.conversation_name, item.is_notes_to_self)}</span>
         {maybe_thread.map(|_| view! { <span class="saved-where">{move || i18n.t("sent-in-thread")}</span> })}
         <time class="saved-time">{format_date_time(item.sent_at, locale)}</time>
       </div>

@@ -436,6 +436,7 @@ data class DraftItem(
   val conversation: String,
   @SerialName("maybe_thread") val maybeThread: String? = null,
   @SerialName("conversation_name") val conversationName: String,
+  @SerialName("is_notes_to_self") val isNotesToSelf: Boolean = false,
   @SerialName("maybe_thread_root") val maybeThreadRoot: String? = null,
   val body: String,
   @SerialName("edited_at") val editedAt: Long,
@@ -446,6 +447,7 @@ data class DraftItem(
 data class SentItem(
   val conversation: String,
   @SerialName("conversation_name") val conversationName: String,
+  @SerialName("is_notes_to_self") val isNotesToSelf: Boolean = false,
   val message: String,
   @SerialName("maybe_thread") val maybeThread: String? = null,
   val excerpt: String = "",

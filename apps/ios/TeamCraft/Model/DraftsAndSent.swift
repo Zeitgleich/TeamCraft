@@ -5,11 +5,14 @@ struct DraftItem: Decodable, Equatable, Identifiable, Sendable {
   let conversation: String
   var maybeThread: String?
   let conversationName: String
+  /// The conversation is the user's notes: `conversationName` is empty (#1385). Absent from older cores.
+  var isNotesToSelf: Bool?
   var maybeThreadRoot: String?
   let body: String
   /// Unix milliseconds.
   let editedAt: Int64
 
+  var listName: String { conversationListName(conversationName, isNotesToSelf: isNotesToSelf == true) }
   var id: String { "\(conversation)/\(maybeThread ?? "")" }
   var editedDate: Date { Date(timeIntervalSince1970: TimeInterval(editedAt) / 1000) }
 }
@@ -18,6 +21,8 @@ struct DraftItem: Decodable, Equatable, Identifiable, Sendable {
 struct SentItem: Decodable, Equatable, Identifiable, Sendable {
   let conversation: String
   let conversationName: String
+  /// The conversation is the user's notes: `conversationName` is empty (#1385). Absent from older cores.
+  var isNotesToSelf: Bool?
   let message: String
   var maybeThread: String?
   let excerpt: String
@@ -25,6 +30,7 @@ struct SentItem: Decodable, Equatable, Identifiable, Sendable {
   /// Unix milliseconds.
   let sentAt: Int64
 
+  var listName: String { conversationListName(conversationName, isNotesToSelf: isNotesToSelf == true) }
   var id: String { message }
   var sentDate: Date { Date(timeIntervalSince1970: TimeInterval(sentAt) / 1000) }
 }

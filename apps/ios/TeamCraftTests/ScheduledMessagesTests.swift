@@ -67,6 +67,17 @@ final class ScheduledMessagesTests: XCTestCase {
     XCTAssertEqual(overview.serverNow, 3)
   }
 
+  func testAMessageToTheNotesIsNamedLikeTheNotes() {
+    let notes = Wire.decode(
+      ScheduledMessage.self,
+      from: #"{"id":"ab","conversation":"7","conversation_name":"","is_notes_to_self":true,"body":"x","due_at":1,"status":"waiting"}"#)
+    XCTAssertEqual(notes?.listName, String(localized: "notes_title"))
+    let unknown = ScheduledMessage(id: "ab", conversation: "7", conversationName: "", body: "x", dueAt: 1, status: .waiting)
+    XCTAssertNil(unknown.listName)
+    let general = ScheduledMessage(id: "ab", conversation: "7", conversationName: "general", body: "x", dueAt: 1, status: .waiting)
+    XCTAssertEqual(general.listName, "general")
+  }
+
   func testOnlyWhatWaitsForTheUserAsksForAttention() {
     func message(_ status: ScheduledStatus) -> ScheduledMessage {
       ScheduledMessage(id: "ab", conversation: "7", conversationName: nil, body: "later", dueAt: 10, status: status)

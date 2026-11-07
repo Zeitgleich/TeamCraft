@@ -19,6 +19,15 @@ struct ScheduledMessage: Decodable, Equatable, Identifiable, Sendable {
   let status: ScheduledStatus
   /// When the server removes a hold nothing can solve any more.
   var maybeRemovesAt: Int64? = nil
+  /// The conversation is the user's notes: `conversationName` is empty (#1385). Absent from older cores.
+  var isNotesToSelf: Bool? = nil
+
+  /// What the row calls the conversation; `nil` when this device doesn't know it.
+  var listName: String? {
+    if isNotesToSelf == true { return conversationListName("", isNotesToSelf: true) }
+    guard let name = conversationName, !name.isEmpty else { return nil }
+    return name
+  }
 
   /// Gone from the server: only the text is left on the device, until the user removes it.
   var isRemoved: Bool { status == .removedByServer }

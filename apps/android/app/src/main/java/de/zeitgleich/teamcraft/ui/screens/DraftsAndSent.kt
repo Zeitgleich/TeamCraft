@@ -47,6 +47,7 @@ import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.DraftItem
 import de.zeitgleich.teamcraft.core.SentItem
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.conversationListName
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
@@ -119,7 +120,7 @@ fun DraftsAndSentScreen(
 private fun DraftRow(draft: DraftItem, onOpen: () -> Unit, onDelete: () -> Unit) {
   Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(start = 16.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
     Column(Modifier.weight(1f)) {
-      RowHeading(draft.conversationName, draft.editedAt)
+      RowHeading(conversationListName(draft.conversationName, draft.isNotesToSelf, stringResource(R.string.notes_title)), draft.editedAt)
       draft.maybeThread?.let {
         Text(
           draft.maybeThreadRoot?.let { root -> stringResource(R.string.drafts_in_thread, root) } ?: stringResource(R.string.sent_in_thread),
@@ -140,7 +141,7 @@ private fun DraftRow(draft: DraftItem, onOpen: () -> Unit, onDelete: () -> Unit)
 @Composable
 private fun SentRow(item: SentItem, onOpen: () -> Unit) {
   Column(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(16.dp)) {
-    RowHeading(item.conversationName, item.sentAt)
+    RowHeading(conversationListName(item.conversationName, item.isNotesToSelf, stringResource(R.string.notes_title)), item.sentAt)
     if (item.maybeThread != null) {
       Text(
         stringResource(R.string.sent_in_thread),

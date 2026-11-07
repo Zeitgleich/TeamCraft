@@ -146,7 +146,11 @@ private fun ScheduledRow(
   val context = LocalContext.current
   Column(Modifier.fillMaxWidth().padding(16.dp)) {
     Text(
-      message.conversationName.ifEmpty { stringResource(R.string.scheduled_unknown_conversation) },
+      if (message.isNotesToSelf) {
+        stringResource(R.string.notes_title)
+      } else {
+        message.conversationName.ifEmpty { stringResource(R.string.scheduled_unknown_conversation) }
+      },
       style = MaterialTheme.typography.labelMedium,
       color = MaterialTheme.colorScheme.primary,
     )
