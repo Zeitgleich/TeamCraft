@@ -48,19 +48,21 @@ impl<S: LocalStore> CoreChatBackend<S> {
       })
       .filter(|(_, _, response)| maybe_space.is_none() || response.maybe_space_id == maybe_space)
       .take(MAX_DRAFTS)
-      .map(|(draft, edited_at, response)| DraftItem {
-        conversation: draft.conversation_id,
-        maybe_thread: draft.maybe_thread_id,
-        conversation_name: self
-          .conversation_view(response, &users, UnreadCounts::default())
-          .name,
-        maybe_thread_root: draft
-          .maybe_thread_id
-          .and_then(|thread| self.thread_root_excerpt(draft.conversation_id, thread)),
-        file_count: u32::try_from(data.draft_files(draft.conversation_id, draft.maybe_thread_id).len())
-          .unwrap_or(u32::MAX),
-        body: draft.body,
-        edited_at,
+      .map(|(draft, edited_at, response)| {
+        let named = self.conversation_view(response, &users, UnreadCounts::default());
+        DraftItem {
+          conversation: draft.conversation_id,
+          maybe_thread: draft.maybe_thread_id,
+          conversation_name: named.name,
+          is_notes_to_self: named.is_notes_to_self,
+          maybe_thread_root: draft
+            .maybe_thread_id
+            .and_then(|thread| self.thread_root_excerpt(draft.conversation_id, thread)),
+          file_count: u32::try_from(data.draft_files(draft.conversation_id, draft.maybe_thread_id).len())
+            .unwrap_or(u32::MAX),
+          body: draft.body,
+          edited_at,
+        }
       })
       .collect()
   }
@@ -139,18 +141,17 @@ impl<S: LocalStore> CoreChatBackend<S> {
     responses: &[ConversationResponse],
   ) -> Vec<SentItem> {
     let users = self.summaries();
-    let mut names: HashMap<ConversationId, String> = HashMap::new();
+    let mut names: HashMap<ConversationId, (String, bool)> = HashMap::new();
     for item in &mut items {
       if !names.contains_key(&item.conversation)
         && let Some(response) = responses.iter().find(|response| response.id == item.conversation)
       {
-        let name = self
-          .conversation_view(response, &users, UnreadCounts::default())
-          .name;
-        names.insert(item.conversation, name);
+        let named = self.conversation_view(response, &users, UnreadCounts::default());
+        names.insert(item.conversation, (named.name, named.is_notes_to_self));
       }
-      if let Some(name) = names.get(&item.conversation) {
+      if let Some((name, is_notes_to_self)) = names.get(&item.conversation) {
         item.conversation_name.clone_from(name);
+        item.is_notes_to_self = *is_notes_to_self;
       }
     }
     items
@@ -183,6 +184,7 @@ fn sent_item(me: UserId, conversation: ConversationId, stored: &StoredMessage) -
   Some(SentItem {
     conversation,
     conversation_name: String::new(),
+    is_notes_to_self: false,
     message,
     maybe_thread: stored.maybe_thread_id,
     excerpt,

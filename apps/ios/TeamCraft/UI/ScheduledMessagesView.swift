@@ -48,7 +48,7 @@ struct ScheduledMessagesView: View {
 
   private func row(_ message: ScheduledMessage) -> some View {
     VStack(alignment: .leading, spacing: 4) {
-      if let name = message.conversationName, !name.isEmpty {
+      if let name = message.listName {
         Text(verbatim: name).font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
       } else {
         Text("scheduled_unknown_conversation").font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)

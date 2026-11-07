@@ -13,6 +13,10 @@ pub struct DraftItem {
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub maybe_thread: Option<ThreadId>,
   pub conversation_name: String,
+  /// The conversation is the user's notes to themself: `conversation_name` is empty, the apps name
+  /// it in the user's language (#1385).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_notes_to_self: bool,
   /// The start of the message the thread hangs on, where this device can read it.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub maybe_thread_root: Option<String>,
@@ -66,6 +70,10 @@ pub enum DraftFileState {
 pub struct SentItem {
   pub conversation: ConversationId,
   pub conversation_name: String,
+  /// The conversation is the user's notes to themself: `conversation_name` is empty, the apps name
+  /// it in the user's language (#1385).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_notes_to_self: bool,
   pub message: MessageId,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub maybe_thread: Option<ThreadId>,
@@ -78,4 +86,32 @@ pub struct SentItem {
 
 fn is_zero(count: &u32) -> bool {
   *count == 0
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn the_notes_flag_is_new_for_older_data_and_left_out_when_false() {
+    let older: SentItem = serde_json::from_str(
+      r#"{"conversation":"7","conversation_name":"general","message":"10","excerpt":"hi","sent_at":900}"#,
+    )
+    .unwrap();
+    assert!(!older.is_notes_to_self);
+    assert!(
+      !serde_json::to_string(&older)
+        .unwrap()
+        .contains("is_notes_to_self")
+    );
+
+    let notes = SentItem {
+      is_notes_to_self: true,
+      conversation_name: String::new(),
+      ..older
+    };
+    let json = serde_json::to_string(&notes).unwrap();
+    assert!(json.contains(r#""is_notes_to_self":true"#));
+    assert_eq!(serde_json::from_str::<SentItem>(&json).unwrap(), notes);
+  }
 }

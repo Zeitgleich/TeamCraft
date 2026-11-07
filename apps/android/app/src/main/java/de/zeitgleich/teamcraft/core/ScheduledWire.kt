@@ -17,6 +17,7 @@ data class ScheduledMessage(
   val id: String,
   val conversation: String,
   @SerialName("conversation_name") val conversationName: String = "",
+  @SerialName("is_notes_to_self") val isNotesToSelf: Boolean = false,
   val body: String = "",
   @SerialName("due_at") val dueAt: Long,
   val status: String = "unknown",

@@ -31,6 +31,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.CoreRepository
+import de.zeitgleich.teamcraft.ui.listName
 import uniffi.teamcraft_ffi.CallEndReason
 import uniffi.teamcraft_ffi.CallListener
 import uniffi.teamcraft_ffi.CallPhase
@@ -577,9 +578,11 @@ class CallController(
     }
   }
 
-  /** The name of a conversation this device knows; `null` for one it doesn't. */
+  /** The name of a conversation this device knows (the notes by their title); `null` for one it doesn't. */
   private suspend fun conversationNameOf(conversationId: String): String? =
-    runCatching { core.core().conversations().firstOrNull { it.id == conversationId }?.name }.getOrNull()
+    runCatching {
+      core.core().conversations().firstOrNull { it.id == conversationId }?.listName(context.getString(R.string.notes_title))
+    }.getOrNull()
 
   /** The call screen of the running call, from a "Back to the call" outside it. */
   fun bringToFront() {

@@ -103,6 +103,59 @@ async fn cancel_and_send_now_reach_the_server() {
 }
 
 #[tokio::test]
+async fn a_message_to_the_notes_is_marked_as_one_for_the_apps_to_name() {
+  let server = FakeServer::new();
+  let clock = Arc::new(ManualClock::new(server.server_now_ms()));
+  let mut alice = Peer::enroll_on_clock(
+    server.add_user("Alice"),
+    "Alice",
+    settings().with_notes_to_self(),
+    Box::new(Arc::clone(&clock)),
+  )
+  .await;
+  let notes = alice.client.open_dm(alice.client.user_id()).await.unwrap();
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "work")
+    .await
+    .unwrap();
+  alice.client.full_sync().await.unwrap();
+  let due_at_ms = server.server_now_ms() + MINUTE_MS;
+  for (conversation, body) in [(notes, "buy milk"), (channel, "ship it")] {
+    let message = OutgoingMessage {
+      conversation,
+      maybe_client_message_id: None,
+      maybe_thread: None,
+      body: body.to_owned(),
+      maybe_reply_to: None,
+      maybe_reply_attachment: None,
+      priority: MessagePriority::Normal,
+      wants_acknowledgement: false,
+      is_silent: false,
+      also_send_to_channel: false,
+      files: Vec::new(),
+    };
+    alice
+      .client
+      .run_ui_command(CoreCommand::ScheduleMessage { message, due_at_ms })
+      .await
+      .unwrap();
+  }
+  let backend = CoreChatBackend::new(
+    alice.store.clone(),
+    alice.client.user_id(),
+    Box::new(Arc::clone(&clock)),
+  );
+  let shown = backend.scheduled_overview().messages;
+  let in_notes = shown.iter().find(|message| message.body == "buy milk").unwrap();
+  assert!(in_notes.is_notes_to_self, "the apps name the notes themselves");
+  assert!(in_notes.conversation_name.is_empty());
+  let in_channel = shown.iter().find(|message| message.body == "ship it").unwrap();
+  assert!(!in_channel.is_notes_to_self);
+  assert_eq!(in_channel.conversation_name, "work");
+}
+
+#[tokio::test]
 async fn it_keeps_what_the_composer_set() {
   let mut world = World::new().await;
   let message = OutgoingMessage {

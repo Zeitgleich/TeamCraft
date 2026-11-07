@@ -109,14 +109,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
     let users = self.summaries();
     let preferences = self.mention_preferences();
-    let names: std::collections::BTreeMap<ConversationId, String> = self
+    let names: std::collections::BTreeMap<ConversationId, (String, bool)> = self
       .conversations_raw()
       .iter()
       .map(|conversation| {
-        (
-          conversation.id,
-          self.to_conversation(conversation, &users, &preferences).name,
-        )
+        let named = self.to_conversation(conversation, &users, &preferences);
+        (conversation.id, (named.name, named.is_notes_to_self))
       })
       .collect();
     let messages = list
@@ -128,10 +126,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
           Some(MessageContent::Text { body, meta, .. }) => (body.clone(), Some(meta)),
           _ => (String::new(), None),
         };
+        let (conversation_name, is_notes_to_self) =
+          names.get(&response.conversation_id).cloned().unwrap_or_default();
         ScheduledMessage {
           id: response.id,
           conversation: response.conversation_id,
-          conversation_name: names.get(&response.conversation_id).cloned().unwrap_or_default(),
+          conversation_name,
+          is_notes_to_self,
           maybe_thread: response.maybe_thread_id,
           body,
           due_at: response.due_at.0,

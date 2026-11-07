@@ -125,7 +125,7 @@ private struct DraftRow: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 4) {
       HStack {
-        Text(verbatim: draft.conversationName).font(.caption).foregroundStyle(Theme.accent).lineLimit(1)
+        Text(verbatim: draft.listName).font(.caption).foregroundStyle(Theme.accent).lineLimit(1)
         Spacer()
         Text(draft.editedDate, style: .relative).font(.caption).foregroundStyle(Theme.textMuted)
       }
@@ -152,7 +152,7 @@ private struct SentRow: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 4) {
       HStack {
-        Text(verbatim: item.conversationName).font(.caption).foregroundStyle(Theme.accent).lineLimit(1)
+        Text(verbatim: item.listName).font(.caption).foregroundStyle(Theme.accent).lineLimit(1)
         Spacer()
         Text(item.sentDate, style: .relative).font(.caption).foregroundStyle(Theme.textMuted)
       }

@@ -213,6 +213,26 @@ class WireTest {
     assertEquals("The plan", answer.drafts[0].maybeThreadRoot)
     assertEquals(null, answer.drafts[1].maybeThread)
     assertEquals(1000L, answer.drafts[1].editedAt)
+    assertEquals(false, answer.drafts[1].isNotesToSelf)
+  }
+
+  @Test
+  fun draftsSentAndScheduledInTheNotesCarryTheNotesFlag() {
+    val drafts = WireJson.decodeFromString(
+      ChatAnswer.serializer(),
+      """{"answer":"drafts","drafts":[{"conversation":"7","conversation_name":"","is_notes_to_self":true,"body":"x","edited_at":1}]}""",
+    )
+    assertEquals(true, drafts.drafts[0].isNotesToSelf)
+    val sent = WireJson.decodeFromString(
+      ChatAnswer.serializer(),
+      """{"answer":"sent_messages","sent":[{"conversation":"7","conversation_name":"","is_notes_to_self":true,"message":"1","sent_at":1}]}""",
+    )
+    assertEquals(true, sent.sent[0].isNotesToSelf)
+    val scheduled = WireJson.decodeFromString<ScheduledMessage>(
+      """{"id":"ab","conversation":"7","conversation_name":"","is_notes_to_self":true,"body":"later","due_at":1,"status":"waiting"}""",
+    )
+    assertEquals(true, scheduled.isNotesToSelf)
+    assertEquals(false, WireJson.decodeFromString<ScheduledMessage>("""{"id":"ab","conversation":"7","due_at":1}""").isNotesToSelf)
   }
 
   @Test

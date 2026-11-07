@@ -19,6 +19,10 @@ pub struct ScheduledMessage {
   /// Empty when this device doesn't know the conversation.
   #[serde(default)]
   pub conversation_name: String,
+  /// The conversation is the user's notes to themself: `conversation_name` is empty, the apps name
+  /// it in the user's language (#1385).
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_notes_to_self: bool,
   #[serde(default)]
   pub maybe_thread: Option<ThreadId>,
   /// Empty when this device can't read it yet ([`ScheduledStatus::Unreadable`]).
