@@ -33,7 +33,6 @@ const STATE_OFF: &str = "off";
 const EN_SOURCE: &str = include_str!("../../../../crates/teamcraft-ui/i18n/en/shell.ftl");
 const DE_SOURCE: &str = include_str!("../../../../crates/teamcraft-ui/i18n/de/shell.ftl");
 
-
 pub(super) fn is_enabled(app: &AppHandle) -> Option<bool> {
   Some(is_on(&state_path(app)?))
 }
@@ -149,7 +148,11 @@ impl Language {
       .map(|value| value.to_string_lossy().to_ascii_lowercase())
       .find(|value| !value.is_empty() && value != "c" && value != "posix")
       .map_or(Self::En, |value| {
-        if value.starts_with("de") { Self::De } else { Self::En }
+        if value.starts_with("de") {
+          Self::De
+        } else {
+          Self::En
+        }
       })
   }
 
@@ -198,7 +201,7 @@ impl Launcher {
 }
 
 impl Plan {
-    fn detect(app: &AppHandle) -> Self {
+  fn detect(app: &AppHandle) -> Self {
     let variable = |name: &str| std::env::var_os(name);
     let is_flatpak = xdg::is_flatpak();
     let (data_home, config_home) = home_directories(variable, is_flatpak);
@@ -255,6 +258,8 @@ impl Plan {
     format!(
       "[Desktop Entry]\n\
        Type=Service\n\
+       Name={name}\n\
+       Name[de]={name_de}\n\
        X-KDE-ServiceTypes=KonqPopupMenu/Plugin\n\
        MimeType=all/allfiles;\n\
        X-KDE-Protocols=file\n\
@@ -369,7 +374,11 @@ fn sync(plan: &Plan, is_enabled: bool) -> Result<(), FileManagerEntriesError> {
 
 fn sync_directory(plan: &Plan, manager: FileManager, is_wanted: bool) -> io::Result<()> {
   let directory = manager.directory(plan);
-  let wanted = if is_wanted { plan.entries(manager) } else { Vec::new() };
+  let wanted = if is_wanted {
+    plan.entries(manager)
+  } else {
+    Vec::new()
+  };
   // Ours but not wanted any more: a changed language renames a script, a manager was uninstalled.
   for stale in ours_in(&directory)? {
     if !wanted.iter().any(|entry| entry.file_name == stale) {
@@ -483,9 +492,9 @@ fn merge_uca(existing: Option<&str>, action: Option<&str>) -> Result<Option<Stri
   }
   let ours = root.children().find(|node| {
     node.has_tag_name("action")
-      && node.children().any(|child| {
-        child.has_tag_name("unique-id") && child.text().map(str::trim) == Some(THUNAR_ACTION_ID)
-      })
+      && node
+        .children()
+        .any(|child| child.has_tag_name("unique-id") && child.text().map(str::trim) == Some(THUNAR_ACTION_ID))
   });
   let mut merged = text.to_owned();
   match (ours, action) {
@@ -501,7 +510,11 @@ fn merge_uca(existing: Option<&str>, action: Option<&str>) -> Result<Option<Stri
       let range = node.range();
       // The line goes, not only the element: the indentation before it and the line break after.
       let start = text[..range.start].trim_end_matches([' ', '\t']).len();
-      let end = if text[range.end..].starts_with('\n') { range.end + 1 } else { range.end };
+      let end = if text[range.end..].starts_with('\n') {
+        range.end + 1
+      } else {
+        range.end
+      };
       merged.replace_range(start..end, "");
     },
     (None, Some(action)) => {
@@ -519,12 +532,16 @@ fn merge_uca(existing: Option<&str>, action: Option<&str>) -> Result<Option<Stri
 }
 
 fn is_ours(head: &str) -> bool {
-  head.lines().any(|line| line.trim_start_matches('#').trim() == MARKER)
+  head
+    .lines()
+    .any(|line| line.trim_start_matches('#').trim() == MARKER)
 }
 
 fn read_head(path: &Path) -> io::Result<String> {
   let mut bytes = Vec::new();
-  fs::File::open(path)?.take(MARKER_SCAN_BYTES).read_to_end(&mut bytes)?;
+  fs::File::open(path)?
+    .take(MARKER_SCAN_BYTES)
+    .read_to_end(&mut bytes)?;
   Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -533,7 +550,11 @@ fn read_head(path: &Path) -> io::Result<String> {
 fn home_directories(variable: impl Fn(&str) -> Option<OsString>, is_flatpak: bool) -> (PathBuf, PathBuf) {
   let home = variable("HOME").map(PathBuf::from).unwrap_or_default();
   let directory = |name: &str, fallback: &str| {
-    let name = if is_flatpak { format!("HOST_{name}") } else { name.to_owned() };
+    let name = if is_flatpak {
+      format!("HOST_{name}")
+    } else {
+      name.to_owned()
+    };
     variable(&name)
       .map(PathBuf::from)
       .filter(|path| path.is_absolute())
@@ -563,7 +584,10 @@ fn detect_launcher(
     return Launcher::Installed;
   };
   let on_path = find_on_path(INSTALLED_COMMAND, maybe_path.as_deref());
-  match (on_path.and_then(|path| fs::canonicalize(path).ok()), fs::canonicalize(&exe)) {
+  match (
+    on_path.and_then(|path| fs::canonicalize(path).ok()),
+    fs::canonicalize(&exe),
+  ) {
     (Some(installed), Ok(running)) if installed == running => Launcher::Installed,
     _ => Launcher::Path(exe),
   }
@@ -653,6 +677,8 @@ mod tests {
 
   const SERVICE_MENU: &str = "[Desktop Entry]
 Type=Service
+Name=Send to TeamCraft
+Name[de]=An TeamCraft senden
 X-KDE-ServiceTypes=KonqPopupMenu/Plugin
 MimeType=all/allfiles;
 X-KDE-Protocols=file
@@ -721,7 +747,11 @@ X-TeamCraft-Generated=true
     fn the_script_passes_each_selected_path_as_one_argument() {
       let directory = temporary_directory("script-run");
       let program = directory.join("print args");
-      fs::write(&program, "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done\n").unwrap();
+      fs::write(
+        &program,
+        "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done\n",
+      )
+      .unwrap();
       fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
       let script = plan(Launcher::Path(program)).script(directory.clone(), "run", "SELECTED");
       let path = directory.join("run");
@@ -735,8 +765,15 @@ X-TeamCraft-Generated=true
         String::from_utf8_lossy(&output.stdout),
         "[--share][--][/a b/c.txt][/it's \"q\"/$HOME.pdf]"
       );
-      let none = std::process::Command::new("/bin/sh").arg(&path).env("SELECTED", "").output().unwrap();
-      assert!(none.status.success() && none.stdout.is_empty(), "nothing selected, nothing started");
+      let none = std::process::Command::new("/bin/sh")
+        .arg(&path)
+        .env("SELECTED", "")
+        .output()
+        .unwrap();
+      assert!(
+        none.status.success() && none.stdout.is_empty(),
+        "nothing selected, nothing started"
+      );
       fs::remove_dir_all(directory).unwrap();
     }
 
@@ -744,7 +781,10 @@ X-TeamCraft-Generated=true
     fn the_script_is_named_in_the_users_language() {
       let mut german = plan(Launcher::Installed);
       german.language = Language::De;
-      assert_eq!(german.entries(FileManager::Nautilus)[0].file_name, "An TeamCraft senden");
+      assert_eq!(
+        german.entries(FileManager::Nautilus)[0].file_name,
+        "An TeamCraft senden"
+      );
     }
 
     #[test]
@@ -786,12 +826,16 @@ X-TeamCraft-Generated=true
     #[test]
     fn the_flatpak_forwards_the_files_through_the_document_portal() {
       let plan = plan(Launcher::Flatpak);
-      assert!(plan.service_menu().contains(
-        "Exec=flatpak run --file-forwarding de.zeitgleich.teamcraft --share -- @@ %F @@\n"
-      ));
-      assert!(plan.entries(FileManager::Caja)[0].content.ends_with(
-        "exec flatpak run --file-forwarding de.zeitgleich.teamcraft --share -- @@ \"$@\" @@\n"
-      ));
+      assert!(
+        plan
+          .service_menu()
+          .contains("Exec=flatpak run --file-forwarding de.zeitgleich.teamcraft --share -- @@ %F @@\n")
+      );
+      assert!(
+        plan.entries(FileManager::Caja)[0]
+          .content
+          .ends_with("exec flatpak run --file-forwarding de.zeitgleich.teamcraft --share -- @@ \"$@\" @@\n")
+      );
       assert!(plan.thunar_action().contains(
         "<command>flatpak run --file-forwarding de.zeitgleich.teamcraft --share -- @@ %F @@</command>"
       ));
@@ -799,16 +843,24 @@ X-TeamCraft-Generated=true
 
     #[test]
     fn an_appimage_path_with_spaces_is_quoted_for_each_format() {
-      let plan = plan(Launcher::Path(PathBuf::from("/home/a b/Apps/Team'Craft.AppImage")));
-      assert!(plan.service_menu().contains(
-        "Exec=\"/home/a b/Apps/Team'Craft.AppImage\" --share -- %F\n"
-      ));
-      assert!(plan.entries(FileManager::Nautilus)[0].content.ends_with(
-        "exec '/home/a b/Apps/Team'\\''Craft.AppImage' --share -- \"$@\"\n"
-      ));
-      assert!(plan.thunar_action().contains(
-        "<command>'/home/a b/Apps/Team'\\''Craft.AppImage' --share -- %F</command>"
-      ));
+      let plan = plan(Launcher::Path(PathBuf::from(
+        "/home/a b/Apps/Team'Craft.AppImage",
+      )));
+      assert!(
+        plan
+          .service_menu()
+          .contains("Exec=\"/home/a b/Apps/Team'Craft.AppImage\" --share -- %F\n")
+      );
+      assert!(
+        plan.entries(FileManager::Nautilus)[0]
+          .content
+          .ends_with("exec '/home/a b/Apps/Team'\\''Craft.AppImage' --share -- \"$@\"\n")
+      );
+      assert!(
+        plan
+          .thunar_action()
+          .contains("<command>'/home/a b/Apps/Team'\\''Craft.AppImage' --share -- %F</command>")
+      );
     }
 
     #[test]
@@ -831,10 +883,18 @@ X-TeamCraft-Generated=true
       );
       let appimage = PathBuf::from("/home/u/TeamCraft.AppImage");
       assert_eq!(
-        detect_launcher(Some(appimage.clone()), Some(installed.clone()), false, path.clone()),
+        detect_launcher(
+          Some(appimage.clone()),
+          Some(installed.clone()),
+          false,
+          path.clone()
+        ),
         Launcher::Path(appimage)
       );
-      assert_eq!(detect_launcher(None, Some(installed), true, path), Launcher::Flatpak);
+      assert_eq!(
+        detect_launcher(None, Some(installed), true, path),
+        Launcher::Flatpak
+      );
       fs::remove_dir_all(directory).unwrap();
     }
   }
@@ -846,12 +906,18 @@ X-TeamCraft-Generated=true
     fn the_language_follows_the_usual_variables() {
       let with = |pairs: &'static [(&str, &str)]| {
         Language::from_environment(|name| {
-          pairs.iter().find(|(key, _)| *key == name).map(|(_, value)| OsString::from(value))
+          pairs
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| OsString::from(value))
         })
       };
       assert_eq!(with(&[("LANG", "de_DE.UTF-8")]), Language::De);
       assert_eq!(with(&[("LANG", "en_US.UTF-8")]), Language::En);
-      assert_eq!(with(&[("LC_ALL", "en_US.UTF-8"), ("LANG", "de_DE.UTF-8")]), Language::En);
+      assert_eq!(
+        with(&[("LC_ALL", "en_US.UTF-8"), ("LANG", "de_DE.UTF-8")]),
+        Language::En
+      );
       assert_eq!(with(&[("LC_ALL", "C"), ("LANG", "de_DE.UTF-8")]), Language::De);
       assert_eq!(with(&[]), Language::En);
     }
@@ -869,7 +935,10 @@ X-TeamCraft-Generated=true
       };
       assert_eq!(
         home_directories(variable, true),
-        (PathBuf::from("/home/u/.local/share"), PathBuf::from("/home/u/cfg"))
+        (
+          PathBuf::from("/home/u/.local/share"),
+          PathBuf::from("/home/u/cfg")
+        )
       );
       assert_eq!(
         home_directories(variable, false),
@@ -896,11 +965,17 @@ X-TeamCraft-Generated=true
       sync(&plan, true).unwrap();
       let service_menu = directory.join("data/kio/servicemenus/de.zeitgleich.teamcraft.send-to.desktop");
       assert_eq!(fs::read_to_string(&service_menu).unwrap(), SERVICE_MENU);
-      assert_eq!(fs::metadata(&service_menu).unwrap().permissions().mode() & 0o777, 0o755);
+      assert_eq!(
+        fs::metadata(&service_menu).unwrap().permissions().mode() & 0o777,
+        0o755
+      );
       let script = directory.join("data/nautilus/scripts/Send to TeamCraft");
       assert_eq!(fs::read_to_string(&script).unwrap(), NAUTILUS_SCRIPT);
       assert_eq!(fs::metadata(&script).unwrap().permissions().mode() & 0o777, 0o755);
-      assert!(!directory.join("data/nemo").exists(), "no directory for a manager that isn't there");
+      assert!(
+        !directory.join("data/nemo").exists(),
+        "no directory for a manager that isn't there"
+      );
       assert!(!directory.join("config").exists());
 
       sync(&plan, false).unwrap();
@@ -917,11 +992,23 @@ X-TeamCraft-Generated=true
       let path = directory.join("data/nemo/actions/de.zeitgleich.teamcraft.send-to.nemo_action");
       let modified = fs::metadata(&path).unwrap().modified().unwrap();
       sync(&plan, true).unwrap();
-      assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified, "not rewritten");
+      assert_eq!(
+        fs::metadata(&path).unwrap().modified().unwrap(),
+        modified,
+        "not rewritten"
+      );
       plan.launcher = Launcher::Path(PathBuf::from("/opt/moved/TeamCraft.AppImage"));
       sync(&plan, true).unwrap();
-      assert!(fs::read_to_string(&path).unwrap().contains("Exec=/opt/moved/TeamCraft.AppImage --share -- %F"));
-      assert!(!directory.join("data/nemo/actions/.de.zeitgleich.teamcraft.send-to.nemo_action.tmp").exists());
+      assert!(
+        fs::read_to_string(&path)
+          .unwrap()
+          .contains("Exec=/opt/moved/TeamCraft.AppImage --share -- %F")
+      );
+      assert!(
+        !directory
+          .join("data/nemo/actions/.de.zeitgleich.teamcraft.send-to.nemo_action.tmp")
+          .exists()
+      );
       fs::remove_dir_all(directory).unwrap();
     }
 
@@ -952,12 +1039,19 @@ X-TeamCraft-Generated=true
       let users = scripts.join("Send to TeamCraft");
       fs::write(&users, "#!/bin/sh\necho mine\n").unwrap();
       let other = scripts.join("Other");
-      fs::write(&other, "#!/bin/sh\n# see X-TeamCraft-Generated=true in the docs\n").unwrap();
+      fs::write(
+        &other,
+        "#!/bin/sh\n# see X-TeamCraft-Generated=true in the docs\n",
+      )
+      .unwrap();
       fs::create_dir(scripts.join("sub")).unwrap();
 
       sync(&plan, true).unwrap();
       sync(&plan, false).unwrap();
-      assert_eq!(fs::read_to_string(&same_name).unwrap(), "[Desktop Entry]\nName=Mine\n");
+      assert_eq!(
+        fs::read_to_string(&same_name).unwrap(),
+        "[Desktop Entry]\nName=Mine\n"
+      );
       assert_eq!(fs::read_to_string(&users).unwrap(), "#!/bin/sh\necho mine\n");
       assert!(other.exists());
       assert!(scripts.join("sub").is_dir());
@@ -972,7 +1066,11 @@ X-TeamCraft-Generated=true
       fs::write(directory.join("data/kio/servicemenus"), "").unwrap();
       let error = sync(&plan, true).unwrap_err();
       assert!(error.0.contains("Dolphin"), "{}", error.0);
-      assert!(directory.join("data/nemo/actions/de.zeitgleich.teamcraft.send-to.nemo_action").exists());
+      assert!(
+        directory
+          .join("data/nemo/actions/de.zeitgleich.teamcraft.send-to.nemo_action")
+          .exists()
+      );
       fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1022,7 +1120,11 @@ X-TeamCraft-Generated=true
       let added = merge_uca(Some(USERS), Some(&action)).unwrap().unwrap();
       assert!(added.starts_with(&USERS[..USERS.len() - "</actions>\n".len()]));
       assert!(roxmltree::Document::parse(&added).is_ok());
-      assert_eq!(merge_uca(Some(&added), Some(&action)).unwrap(), None, "idempotent");
+      assert_eq!(
+        merge_uca(Some(&added), Some(&action)).unwrap(),
+        None,
+        "idempotent"
+      );
       let removed = merge_uca(Some(&added), None).unwrap().unwrap();
       assert_eq!(removed, USERS);
     }

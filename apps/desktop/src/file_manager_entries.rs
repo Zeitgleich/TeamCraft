@@ -44,7 +44,10 @@ pub async fn file_manager_entries_get(app: AppHandle) -> Result<Option<bool>, Fi
 
 /// Switches the entries on or off and answers the state afterwards.
 #[tauri::command(rename_all = "snake_case")]
-pub async fn file_manager_entries_set(app: AppHandle, enabled: bool) -> Result<bool, FileManagerEntriesError> {
+pub async fn file_manager_entries_set(
+  app: AppHandle,
+  enabled: bool,
+) -> Result<bool, FileManagerEntriesError> {
   platform::set_enabled(&app, enabled).await?;
   Ok(enabled)
 }
