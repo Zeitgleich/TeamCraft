@@ -25,7 +25,7 @@ use crate::components::people_picker::PeoplePicker;
 use crate::entry_actions::MenuEntry;
 use crate::i18n::use_i18n;
 use crate::model::{Conversation, ConversationKind, Space, SpaceId, User, UserId};
-use crate::prefs::DmSort;
+use crate::prefs::{DmSort, ListGrouping};
 use crate::reactive::{items_by_key, keyed_item};
 use crate::sections::{DirectList, DirectSectionKind, HomeFilter, ListOptions, build_direct, build_list};
 use crate::state::{MainView, Overlay, use_app_state};
@@ -58,6 +58,7 @@ pub fn HomeSidebar(#[prop(optional)] is_list: bool) -> impl IntoView {
       .prefs
       .with(|prefs| (prefs.sidebar.dm_sort, prefs.sidebar.dm_limit as usize));
     if is_list {
+      let maybe_space_order = state.list_space_order();
       let options = ListOptions {
         sort,
         show_unreads_group: state
@@ -68,6 +69,7 @@ pub fn HomeSidebar(#[prop(optional)] is_list: bool) -> impl IntoView {
         filter: &query.get(),
         chip: chip.get(),
         max_rows: list_pages.get() * LIST_PAGE_ROWS,
+        maybe_space_order: maybe_space_order.as_deref(),
       };
       return build_list(state.list_entries(), &options);
     }
@@ -300,6 +302,30 @@ fn DirectOptions(is_list: bool) -> impl IntoView {
           })
           .collect_view()}
       </select>
+      // Next to the order, whether the list keeps the channels of a space together (#1345).
+      {is_list.then(|| view! {
+        <label for="dm-grouping">{move || i18n.t("settings-list-grouping")}</label>
+        <select
+          id="dm-grouping"
+          class="input"
+          on:change=move |ev| {
+            if let Some(grouping) = ListGrouping::from_slug(&event_target_value(&ev)) {
+              prefs.update(|all| all.sidebar.list_grouping = grouping);
+            }
+          }
+        >
+          {ListGrouping::ALL
+            .into_iter()
+            .map(|grouping| {
+              view! {
+                <option value=grouping.slug() selected=move || prefs.with(|all| all.sidebar.list_grouping == grouping)>
+                  {move || i18n.t(&format!("settings-list-grouping-{}", grouping.slug()))}
+                </option>
+              }
+            })
+            .collect_view()}
+        </select>
+      })}
       // The list layout pages through everything by itself; the limit is about the DMs of Chats.
       {(!is_list).then(|| view! {
         <label for="dm-limit">{move || i18n.t("settings-dm-limit")}</label>
@@ -334,14 +360,14 @@ fn DirectOptions(is_list: bool) -> impl IntoView {
 fn DirectSections(list: Memo<DirectList>, on_show_more: Callback<()>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  // One lookup for all channel rows; it changes only when a space does.
-  let space_names = Memo::new(move |_| {
+  // One lookup for all channel rows and space headings; it changes only when a space does.
+  let spaces = Memo::new(move |_| {
     state.read(|backend| {
       backend
         .spaces()
         .into_iter()
-        .map(|space| (space.id, space.name))
-        .collect::<HashMap<SpaceId, String>>()
+        .map(|space| (space.id, space))
+        .collect::<HashMap<SpaceId, Space>>()
     })
   });
   let hidden = Memo::new(move |_| list.with(|list| list.hidden_count));
@@ -358,6 +384,35 @@ fn DirectSections(list: Memo<DirectList>, on_show_more: Callback<()>) -> impl In
         let labelled_by = heading_id.clone();
         // The pinned notes need no heading of their own: the row says what it is.
         let is_notes = kind == DirectSectionKind::Notes;
+        // A space's group (#1345): its rows don't repeat the space the heading names.
+        let maybe_group_space = match kind {
+          DirectSectionKind::Space(space) => Some(space),
+          _ => None,
+        };
+        let heading = match maybe_group_space {
+          Some(space) => {
+            let maybe_space = Memo::new(move |_| spaces.with(|spaces| spaces.get(&space).cloned()));
+            view! {
+              <h3 id=heading_id class="sb-section-title sb-list-space-title">
+                // A new name, color or picture draws the heading again, as on the rail.
+                {move || {
+                  maybe_space.get().map(|space| {
+                    let name = space.name.clone();
+                    view! {
+                      <SpaceTile space=space />
+                      <span translate="no">{name}</span>
+                    }
+                  })
+                }}
+              </h3>
+            }
+            .into_any()
+          },
+          None => view! {
+            <h3 id=heading_id class="sb-section-title" class:visually-hidden=is_notes>{move || i18n.t(kind.title_key())}</h3>
+          }
+          .into_any(),
+        };
         let conversations = Memo::new(move |previous: Option<&Vec<Conversation>>| {
           list
             .with(|list| {
@@ -373,7 +428,7 @@ fn DirectSections(list: Memo<DirectList>, on_show_more: Callback<()>) -> impl In
         let by_id = items_by_key(conversations.into(), |conv: &Conversation| conv.id);
         view! {
           <section class="sb-section" aria-labelledby=labelled_by>
-            <h3 id=heading_id class="sb-section-title" class:visually-hidden=is_notes>{move || i18n.t(kind.title_key())}</h3>
+            {heading}
             <ul>
               <For each=move || conversations.get() key=|conv| conv.id let:conv>
                 <li>
@@ -381,6 +436,8 @@ fn DirectSections(list: Memo<DirectList>, on_show_more: Callback<()>) -> impl In
                     let item = keyed_item(by_id, conv.id, conv.clone());
                     if conv.kind.is_direct_like() {
                       view! { <DirectItem conversation=item /> }.into_any()
+                    } else if maybe_group_space.is_some() {
+                      view! { <SidebarItem conversation=item /> }.into_any()
                     } else {
                       // A starred channel of a space (#1152): the row of the space's own list, and
                       // the space under its name.
@@ -388,7 +445,7 @@ fn DirectSections(list: Memo<DirectList>, on_show_more: Callback<()>) -> impl In
                         item.with(|conv| {
                           conv
                             .maybe_space
-                            .and_then(|space| space_names.with(|names| names.get(&space).cloned()))
+                            .and_then(|space| spaces.with(|spaces| spaces.get(&space).map(|space| space.name.clone())))
                             .unwrap_or_default()
                         })
                       });
@@ -416,14 +473,15 @@ fn DirectSections(list: Memo<DirectList>, on_show_more: Callback<()>) -> impl In
   }
 }
 
-fn section_slug(kind: DirectSectionKind) -> &'static str {
+fn section_slug(kind: DirectSectionKind) -> String {
   match kind {
-    DirectSectionKind::Notes => "notes",
-    DirectSectionKind::Unreads => "unreads",
-    DirectSectionKind::Favorites => "favorites",
-    DirectSectionKind::Conversations => "conversations",
-    DirectSectionKind::Everything => "everything",
-    DirectSectionKind::Deactivated => "deactivated",
+    DirectSectionKind::Notes => "notes".into(),
+    DirectSectionKind::Unreads => "unreads".into(),
+    DirectSectionKind::Favorites => "favorites".into(),
+    DirectSectionKind::Conversations => "conversations".into(),
+    DirectSectionKind::Everything => "everything".into(),
+    DirectSectionKind::Space(space) => format!("space-{space}"),
+    DirectSectionKind::Deactivated => "deactivated".into(),
   }
 }
 
@@ -646,6 +704,11 @@ mod tests {
       .iter()
       .map(|sort| format!("dm-sort-{}", sort.slug()))
       .collect();
+    keys.extend(
+      ListGrouping::ALL
+        .iter()
+        .map(|grouping| format!("settings-list-grouping-{}", grouping.slug())),
+    );
     keys.extend(
       LIMIT_OPTIONS
         .iter()

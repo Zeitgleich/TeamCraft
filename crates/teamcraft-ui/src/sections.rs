@@ -1,7 +1,7 @@
 //! Pure grouping of conversations into sidebar sections: the channels of a space, and the
 //! Home (DMs and group DMs live outside spaces).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use teamcraft_client_api::activity::{ActivityItem, ActivityKind};
 
@@ -153,8 +153,12 @@ pub enum DirectSectionKind {
   Unreads,
   Favorites,
   Conversations,
-  /// The list layout's conversations that are in no section above ([`build_list`]).
+  /// The list layout's conversations that are in no section above ([`build_list`]). Grouped by
+  /// space, the channels of a space the list doesn't know.
   Everything,
+  /// The list layout grouped by space (#1345): the channels of one space that are in no section
+  /// above, under the space's name.
+  Space(SpaceId),
   /// DMs whose other people are all deactivated (issue #698): after the active ones, never cut
   /// off, so their history stays a click away.
   Deactivated,
@@ -169,6 +173,8 @@ impl DirectSectionKind {
       Self::Favorites => "sidebar-favorites",
       Self::Conversations => "sidebar-direct-messages",
       Self::Everything => "sidebar-conversations",
+      // The heading is the space's own name; this one stands in while the space is unknown.
+      Self::Space(_) => "sidebar-channels",
       Self::Deactivated => "sidebar-deactivated-accounts",
     }
   }
@@ -303,30 +309,48 @@ pub struct ListOptions<'a> {
   /// The most rows to hand out, 0 for all: the page the sidebar has come to. The list is cut here
   /// whatever the filters, so what gets rendered doesn't follow the size of the workspace.
   pub max_rows: usize,
+  /// Grouped by space (#1345): the spaces in the order of their groups. `None` keeps direct
+  /// messages and channels together.
+  pub maybe_space_order: Option<&'a [SpaceId]>,
 }
 
 /// The one list of the list layout (#1151), for direct messages and the channels of all spaces: the
 /// notes, unread ones when the setting wants them apart, favorites, everything else, and last the
 /// DMs of deactivated accounts. Each section in `sort` order. Every conversation is one row.
+///
+/// Grouped by space (#1345, [`ListOptions::maybe_space_order`]), "everything else" becomes the
+/// direct messages, then one section per space in that order, each holding the space's channels
+/// that are in no section above. Unreads and favorites stay above the groups, across spaces, as in
+/// the grouped sidebar of the spaces layout ([`build_grouped`]). A space without such channels has
+/// no section.
 pub fn build_list(
   conversations: Vec<(Conversation, Option<TimestampMs>)>,
   options: &ListOptions,
 ) -> DirectList {
   let list = matching_in_order(conversations, options.sort, options.filter, options.chip);
   let total = list.len();
-  let mut sections: Vec<DirectSection> = [
+  let mut kinds = vec![
     DirectSectionKind::Notes,
     DirectSectionKind::Unreads,
     DirectSectionKind::Favorites,
-    DirectSectionKind::Everything,
-    DirectSectionKind::Deactivated,
-  ]
-  .into_iter()
-  .map(|kind| DirectSection {
-    kind,
-    conversations: Vec::new(),
-  })
-  .collect();
+  ];
+  if let Some(order) = options.maybe_space_order {
+    kinds.push(DirectSectionKind::Conversations);
+    kinds.extend(order.iter().map(|space| DirectSectionKind::Space(*space)));
+  }
+  kinds.extend([DirectSectionKind::Everything, DirectSectionKind::Deactivated]);
+  // A space named twice in the order keeps its first place.
+  let mut place: HashMap<DirectSectionKind, usize> = HashMap::with_capacity(kinds.len());
+  let mut sections: Vec<DirectSection> = Vec::with_capacity(kinds.len());
+  for kind in kinds {
+    if let std::collections::hash_map::Entry::Vacant(slot) = place.entry(kind) {
+      slot.insert(sections.len());
+      sections.push(DirectSection {
+        kind,
+        conversations: Vec::new(),
+      });
+    }
+  }
   for conversation in list {
     let is_waiting =
       HomeFilter::Unread.matches(&conversation) || options.maybe_held_open == Some(conversation.id);
@@ -338,11 +362,19 @@ pub fn build_list(
       DirectSectionKind::Unreads
     } else if conversation.is_favorite {
       DirectSectionKind::Favorites
-    } else {
+    } else if options.maybe_space_order.is_none() {
       DirectSectionKind::Everything
+    } else if conversation.kind.is_direct_like() {
+      DirectSectionKind::Conversations
+    } else {
+      conversation
+        .maybe_space
+        .map(DirectSectionKind::Space)
+        .filter(|kind| place.contains_key(kind))
+        .unwrap_or(DirectSectionKind::Everything)
     };
-    if let Some(section) = sections.iter_mut().find(|section| section.kind == kind) {
-      section.conversations.push(conversation);
+    if let Some(index) = place.get(&kind) {
+      sections[*index].conversations.push(conversation);
     }
   }
   let mut room = if options.max_rows == 0 {
@@ -911,6 +943,7 @@ mod tests {
         filter: "",
         chip: HomeFilter::All,
         max_rows: 0,
+        maybe_space_order: None,
       }
     }
 
@@ -1081,6 +1114,171 @@ mod tests {
     fn the_layout_stays_spaces_for_preferences_from_before_it() {
       let stored = crate::prefs::Preferences::from_json(r#"{"sidebar":{"sort":"default"}}"#);
       assert_eq!(stored.sidebar.layout, crate::prefs::SidebarLayout::Spaces);
+    }
+
+    /// #1345: the list keeps the channels of a space together.
+    mod by_space {
+      use super::*;
+
+      fn space(raw: u64) -> SpaceId {
+        id_from_raw(raw)
+      }
+
+      fn grouped(order: &[SpaceId]) -> ListOptions<'_> {
+        ListOptions {
+          maybe_space_order: Some(order),
+          ..options()
+        }
+      }
+
+      #[test]
+      fn direct_messages_then_each_space_in_the_given_order_each_in_the_list_order() {
+        let order = [space(8), space(7)];
+        let list = build_list(
+          vec![
+            direct(1, 0, Some(20)),
+            (channel(2, 7), Some(30)),
+            (channel(3, 8), Some(10)),
+            (channel(4, 7), Some(40)),
+            direct(5, 0, Some(50)),
+          ],
+          &grouped(&order),
+        );
+        assert_eq!(
+          rows(&list),
+          [
+            (DirectSectionKind::Conversations, 5),
+            (DirectSectionKind::Conversations, 1),
+            (DirectSectionKind::Space(space(8)), 3),
+            (DirectSectionKind::Space(space(7)), 4),
+            (DirectSectionKind::Space(space(7)), 2),
+          ]
+        );
+      }
+
+      #[test]
+      fn a_space_without_channels_in_the_list_has_no_section() {
+        let order = [space(7), space(8), space(9)];
+        let mut starred = channel(3, 8);
+        starred.is_favorite = true;
+        let list = build_list(vec![(channel(2, 7), None), (starred, None)], &grouped(&order));
+        let kinds: Vec<_> = list.sections.iter().map(|section| section.kind).collect();
+        assert_eq!(
+          kinds,
+          [DirectSectionKind::Favorites, DirectSectionKind::Space(space(7))],
+          "space 8's only channel is a favorite, space 9 has none"
+        );
+      }
+
+      #[test]
+      fn notes_unreads_and_favorites_stay_above_the_groups_and_deactivated_last() {
+        let order = [space(7)];
+        let mut notes = direct(1, 0, None);
+        notes.0.is_notes_to_self = true;
+        let mut unread = channel(2, 7);
+        unread.unread_count = 1;
+        let mut starred = channel(3, 7);
+        starred.is_favorite = true;
+        let mut gone = direct(4, 0, Some(99));
+        gone.0.has_only_deactivated_others = true;
+        let options = ListOptions {
+          show_unreads_group: true,
+          ..grouped(&order)
+        };
+        let list = build_list(
+          vec![
+            gone,
+            (channel(5, 7), None),
+            (starred, None),
+            (unread, None),
+            notes,
+            direct(6, 0, None),
+          ],
+          &options,
+        );
+        assert_eq!(
+          rows(&list),
+          [
+            (DirectSectionKind::Notes, 1),
+            (DirectSectionKind::Unreads, 2),
+            (DirectSectionKind::Favorites, 3),
+            (DirectSectionKind::Conversations, 6),
+            (DirectSectionKind::Space(space(7)), 5),
+            (DirectSectionKind::Deactivated, 4),
+          ]
+        );
+      }
+
+      #[test]
+      fn a_channel_of_a_space_not_in_the_order_goes_after_the_groups() {
+        let order = [space(7), space(7)];
+        let list = build_list(
+          vec![(channel(2, 9), Some(5)), (channel(3, 7), None)],
+          &grouped(&order),
+        );
+        assert_eq!(
+          rows(&list),
+          [
+            (DirectSectionKind::Space(space(7)), 3),
+            (DirectSectionKind::Everything, 2)
+          ],
+          "and a space named twice is one group"
+        );
+      }
+
+      #[test]
+      fn filters_keep_the_groups() {
+        let order = [space(7), space(8)];
+        let channels = ListOptions {
+          chip: HomeFilter::Channels,
+          ..grouped(&order)
+        };
+        let list = build_list(
+          vec![direct(1, 0, None), (channel(2, 7), None), (channel(3, 8), None)],
+          &channels,
+        );
+        assert_eq!(
+          rows(&list),
+          [
+            (DirectSectionKind::Space(space(7)), 2),
+            (DirectSectionKind::Space(space(8)), 3)
+          ]
+        );
+      }
+
+      /// Grouping doesn't lift the page: the groups are cut in order like any section.
+      #[test]
+      fn a_big_workspace_still_hands_out_one_page() {
+        let order: Vec<SpaceId> = (0..40).map(space).collect();
+        let entries: Vec<_> = (0..5000)
+          .map(|id| (channel(id, id % 40), Some(id as TimestampMs)))
+          .collect();
+        let paged = ListOptions {
+          max_rows: 100,
+          ..grouped(&order)
+        };
+        let list = build_list(entries, &paged);
+        assert_eq!(rows(&list).len(), 100);
+        assert_eq!(list.hidden_count, 4900);
+        assert!(
+          rows(&list)
+            .iter()
+            .all(|(kind, _)| *kind == DirectSectionKind::Space(space(0))),
+          "the first page is the first space's"
+        );
+      }
+
+      #[test]
+      fn the_grouping_is_mixed_for_preferences_from_before_it() {
+        let stored = crate::prefs::Preferences::from_json(r#"{"sidebar":{"layout":"list"}}"#);
+        assert_eq!(stored.sidebar.list_grouping, crate::prefs::ListGrouping::Mixed);
+        for grouping in crate::prefs::ListGrouping::ALL {
+          assert_eq!(
+            crate::prefs::ListGrouping::from_slug(grouping.slug()),
+            Some(grouping)
+          );
+        }
+      }
     }
   }
 

@@ -14,6 +14,15 @@ enum class ChatListLayout {
   List,
 }
 
+/** How the list layout orders its channels (#1345). */
+enum class ChatListGrouping {
+  /** DMs and channels together, the most recent first. */
+  Mixed,
+
+  /** The DMs, then the channels of each space under its name. */
+  BySpace,
+}
+
 /**
  * "Use the colors of the wallpaper" (Material You, Android 12+) instead of the TeamCraft colors.
  * A device setting, off by default so the app looks like desktop and web. The layout of the
@@ -26,6 +35,18 @@ class AppearancePrefs private constructor(context: Context) {
   private val layout = sharedLayout ?: MutableStateFlow(
     ChatListLayout.entries.firstOrNull { it.name == prefs.getString(KEY_LAYOUT, null) } ?: ChatListLayout.Spaces,
   ).also { sharedLayout = it }
+
+  private val grouping = sharedGrouping ?: MutableStateFlow(
+    ChatListGrouping.entries.firstOrNull { it.name == prefs.getString(KEY_GROUPING, null) } ?: ChatListGrouping.Mixed,
+  ).also { sharedGrouping = it }
+
+  /** Live, like [chatListLayout]. */
+  val chatListGrouping: StateFlow<ChatListGrouping> = grouping
+
+  fun setChatListGrouping(choice: ChatListGrouping) {
+    prefs.edit().putString(KEY_GROUPING, choice.name).apply()
+    grouping.value = choice
+  }
 
   /** Live, so the main screen switches as soon as the setting changes. */
   val chatListLayout: StateFlow<ChatListLayout> = layout
@@ -47,10 +68,12 @@ class AppearancePrefs private constructor(context: Context) {
     private const val FILE = "appearance_prefs"
     private const val KEY_DYNAMIC = "dynamic_color"
     private const val KEY_LAYOUT = "chat_list_layout"
+    private const val KEY_GROUPING = "chat_list_grouping"
 
     /** One flow per process: every screen and the theme see the same value. */
     private var shared: MutableStateFlow<Boolean>? = null
     private var sharedLayout: MutableStateFlow<ChatListLayout>? = null
+    private var sharedGrouping: MutableStateFlow<ChatListGrouping>? = null
 
     val isSupported: Boolean get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 

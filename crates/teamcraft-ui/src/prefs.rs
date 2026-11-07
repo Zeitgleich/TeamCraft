@@ -716,6 +716,32 @@ impl SidebarLayout {
   }
 }
 
+/// How the list layout orders its channels (#1345).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListGrouping {
+  /// Direct messages and channels of all spaces together, in the list's order.
+  #[default]
+  Mixed,
+  /// The direct messages, then the channels of each space under its name.
+  BySpace,
+}
+
+impl ListGrouping {
+  pub const ALL: [ListGrouping; 2] = [Self::Mixed, Self::BySpace];
+
+  pub fn slug(self) -> &'static str {
+    match self {
+      Self::Mixed => "mixed",
+      Self::BySpace => "by-space",
+    }
+  }
+
+  pub fn from_slug(slug: &str) -> Option<Self> {
+    Self::ALL.into_iter().find(|value| value.slug() == slug)
+  }
+}
+
 /// How Home orders its conversations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -746,6 +772,8 @@ impl DmSort {
 pub struct SidebarPrefs {
   /// Spaces or one list; the list replaces the grouping below while it is on.
   pub layout: SidebarLayout,
+  /// Whether the list layout keeps the channels of a space together (#1345).
+  pub list_grouping: ListGrouping,
   /// Order of the channels in a space.
   pub sort: SidebarSort,
   /// Order of Home.
@@ -768,6 +796,7 @@ impl Default for SidebarPrefs {
   fn default() -> Self {
     Self {
       layout: SidebarLayout::Spaces,
+      list_grouping: ListGrouping::Mixed,
       sort: SidebarSort::Default,
       dm_sort: DmSort::Recent,
       dm_limit: 0,

@@ -29,6 +29,7 @@ struct ConversationListView: View {
   @State private var homeChip: HomeFilter = .all
   /// Takes effect at once: the view follows the stored value (#1151).
   @AppStorage(ChatListLayout.key) private var layoutRaw = ChatListLayout.spaces.rawValue
+  @AppStorage(ChatListGrouping.key) private var groupingRaw = ChatListGrouping.mixed.rawValue
   @State private var dmFilter = ""
   /// A mute from the long-press menu the server didn't take (#903).
   @State private var isMuteFailed = false
@@ -225,7 +226,9 @@ struct ConversationListView: View {
           ) {
             ForEach(section.conversations, id: \.id) { conversation in
               ConversationRow(
-                conversation: conversation, maybePreview: previews[conversation.id], showsSpace: isHomeShown,
+                conversation: conversation, maybePreview: previews[conversation.id],
+                // A space's section names it in its header, so its rows don't (#1345).
+                showsSpace: isHomeShown && !section.isSpace,
                 callCount: runningCalls[conversation.id] ?? 0)
                 .tag(conversation.id)
                 .swipeActions(edge: .leading) { readButton(for: conversation) }
@@ -274,7 +277,8 @@ struct ConversationListView: View {
   private var shownSections: [ConversationSection] {
     if isList {
       return listSections(
-        conversations, lastActivity: previews.mapValues(\.sentDate), filter: dmFilter, chip: homeChip)
+        conversations, lastActivity: previews.mapValues(\.sentDate), filter: dmFilter, chip: homeChip,
+        bySpace: groupingRaw == ChatListGrouping.bySpace.rawValue)
     }
     switch tab {
     case .spaces: return channelSections(conversations, listsArchived: !canBrowseChannels)
