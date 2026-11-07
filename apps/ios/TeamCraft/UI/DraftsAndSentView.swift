@@ -113,7 +113,8 @@ struct DraftsAndSentView: View {
   }
 
   private func delete(_ draft: DraftItem) async {
-    await model.perform(.setDraft(conversationId: draft.conversation, maybeThreadId: draft.maybeThread, body: ""))
+    // The text and the files, on every device of the user.
+    await model.perform(.discardDraft(conversationId: draft.conversation, maybeThreadId: draft.maybeThread))
     maybeDeleting = nil
     maybeDrafts = await model.drafts()
   }
@@ -141,7 +142,10 @@ private struct DraftRow: View {
         .foregroundStyle(Theme.textMuted)
         .lineLimit(1)
       }
-      Text(verbatim: draft.body).lineLimit(3)
+      if !draft.body.isEmpty {
+        Text(verbatim: draft.body).lineLimit(3)
+      }
+      if let files = draft.fileCount, files > 0 { FileCountLabel(count: files) }
     }
   }
 }
@@ -162,15 +166,22 @@ private struct SentRow: View {
       if !item.excerpt.isEmpty {
         Text(verbatim: item.excerpt).lineLimit(3)
       }
-      if let files = item.fileCount, files > 0 {
-        Label {
-          Text("sent_files \(files)")
-        } icon: {
-          Image(systemName: "paperclip")
-        }
-        .font(.caption)
-        .foregroundStyle(Theme.textMuted)
-      }
+      if let files = item.fileCount, files > 0 { FileCountLabel(count: files) }
     }
+  }
+}
+
+/// How many files a draft holds or a message carried.
+private struct FileCountLabel: View {
+  let count: Int
+
+  var body: some View {
+    Label {
+      Text("sent_files \(count)")
+    } icon: {
+      Image(systemName: "paperclip")
+    }
+    .font(.caption)
+    .foregroundStyle(Theme.textMuted)
   }
 }

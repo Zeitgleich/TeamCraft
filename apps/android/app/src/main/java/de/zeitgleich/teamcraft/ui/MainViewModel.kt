@@ -21,6 +21,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import androidx.annotation.StringRes
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.DefaultLifecycleObserver
@@ -51,6 +52,7 @@ import de.zeitgleich.teamcraft.auth.isSsoOnly
 import de.zeitgleich.teamcraft.auth.localSignInErrorText
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatActions
+import de.zeitgleich.teamcraft.core.DraftFiles
 import de.zeitgleich.teamcraft.ui.media.MediaDraftStore
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.ChatQueries
@@ -212,8 +214,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   ) { graph.core.core() }
   private val failures = MutableStateFlow<Int?>(null)
 
-  /** Files picked in a composer and not sent yet, by conversation and thread. */
+  /** Files picked in a composer and not sent yet, by conversation and thread ([pickedKey]). */
   val pickedFiles = mutableStateMapOf<String, List<PickedFile>>()
+
+  /**
+   * Draft files the composers removed or sent (#1220): they don't show again while the core
+   * catches up. IDs are random and few; the oldest go past [MAX_GONE_DRAFT_FILES].
+   */
+  val goneDraftFiles = mutableStateListOf<String>()
+
+  /** Staged files whose draft copy is being made, so a second call doesn't attach them twice. */
+  private val draftAttaching = mutableSetOf<String>()
 
   /** The app is in a call, or one rings: no voice recording then, and none plays (#204). */
   val isInCall: StateFlow<Boolean> = inCallFlow(graph.calls.callState, graph.calls.incomingRing, viewModelScope)
@@ -952,16 +963,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       null
     }
 
+  fun pickedKey(conversation: String, maybeThread: String?) = "$conversation/${maybeThread.orEmpty()}"
+
+  /**
+   * Attaches the composer's picked files that aren't in its draft yet (#1220): they go up at once
+   * and travel with the draft. Runs in the view model's scope, so leaving the conversation doesn't
+   * stop it halfway; a file sent or removed meanwhile is not attached.
+   */
+  fun attachPickedToDraft(conversation: String, maybeThread: String?) = viewModelScope.launch {
+    val key = pickedKey(conversation, maybeThread)
+    val fresh = pickedFiles[key].orEmpty().filter { it.maybeDraft == null && draftAttaching.add(it.path) }
+    if (fresh.isEmpty()) return@launch
+    try {
+      val maybeStaging = withContext(Dispatchers.IO) { runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() }
+      val staging = maybeStaging ?: return@launch
+      val prepared = withContext(Dispatchers.IO) { fresh.map { it to DraftFiles.copyFor(it, staging) } }
+      // Back on the main thread: the composer may have sent or removed some meanwhile.
+      val merged = DraftFiles.merge(pickedFiles[key].orEmpty(), prepared)
+      if (merged.attached.isNotEmpty()) pickedFiles[key] = merged.files
+      if (merged.dropped.isNotEmpty()) {
+        withContext(Dispatchers.IO) { merged.dropped.forEach { deleteStaged(it.path) } }
+      }
+      if (merged.attached.isNotEmpty()) act(ChatActions.attachDraftFiles(conversation, maybeThread, merged.attached))
+    } finally {
+      fresh.forEach { draftAttaching.remove(it.path) }
+    }
+  }
+
+  /** A picked file taken out of the composer: out of the draft too, and its staged copies go. */
+  fun removePicked(conversation: String, maybeThread: String?, file: PickedFile) {
+    file.maybeDraft?.let { removeDraftFile(conversation, maybeThread, it.id) }
+    viewModelScope.launch(Dispatchers.IO) { DraftFiles.pathsOfRemoved(file).forEach { deleteStaged(it) } }
+  }
+
+  /** Takes a file out of the draft on every device; it doesn't show again meanwhile. */
+  fun removeDraftFile(conversation: String, maybeThread: String?, id: String) {
+    forgetDraftFiles(listOf(id))
+    act(ChatActions.removeDraftFile(conversation, maybeThread, id))
+  }
+
+  /**
+   * The composer's files went with a message: the draft's files don't show again while the core
+   * catches up, and the composer's own names of those that went from the draft's copy go.
+   */
+  fun pickedSent(sent: List<PickedFile>, draftIds: List<String>) {
+    forgetDraftFiles(sent.mapNotNull { it.maybeDraft?.id } + draftIds)
+    val left = DraftFiles.leftAfterSend(sent)
+    if (left.isNotEmpty()) viewModelScope.launch(Dispatchers.IO) { left.forEach { deleteStaged(it) } }
+  }
+
+  private fun forgetDraftFiles(ids: List<String>) {
+    goneDraftFiles.addAll(ids.filter { it !in goneDraftFiles })
+    while (goneDraftFiles.size > MAX_GONE_DRAFT_FILES) goneDraftFiles.removeAt(0)
+  }
+
+  /** Deletes a staged copy; only files in the account's staging folder are the app's to delete. */
+  private suspend fun deleteStaged(path: String) {
+    val directory = runCatching { File(graph.core.core().uploadStagingDir()).canonicalFile }.getOrNull() ?: return
+    val staged = File(path).canonicalFile
+    if (staged.parentFile == directory) staged.delete()
+  }
+
   /**
    * Deletes the staged copy of a file taken out of the composer before sending. Only files in the
    * account's staging folder; anything else is not the app's to delete.
    */
-  fun discardFile(file: PickedFile) = viewModelScope.launch(Dispatchers.IO) {
-    val directory = runCatching { File(graph.core.core().uploadStagingDir()).canonicalFile }.getOrNull()
-      ?: return@launch
-    val staged = File(file.path).canonicalFile
-    if (staged.parentFile == directory) staged.delete()
-  }
+  fun discardFile(file: PickedFile) = viewModelScope.launch(Dispatchers.IO) { deleteStaged(file.path) }
 
   /** Copies a picked document into the account's staging folder so the core can read and encrypt it. */
   suspend fun importFile(uri: Uri): PickedFile? = withContext(Dispatchers.IO) {
@@ -1605,4 +1672,7 @@ internal fun cleanFileName(name: String): String =
   name.filterNot { it.isISOControl() || it in BIDI_CONTROLS }.trim().take(MAX_FILE_NAME_CHARS)
 
 private const val MAX_FILE_NAME_CHARS = 255
+
+/** How many removed or sent draft files the composers keep hidden ([MainViewModel.goneDraftFiles]). */
+private const val MAX_GONE_DRAFT_FILES = 256
 private const val BIDI_CONTROLS = "\u061C\u200E\u200F\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069"

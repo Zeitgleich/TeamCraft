@@ -47,6 +47,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.foundation.layout.offset
@@ -66,6 +67,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.InputChip
+import androidx.compose.material3.InputChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -131,10 +133,14 @@ import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.Conversation
 import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
+import de.zeitgleich.teamcraft.core.DraftFileItem
+import de.zeitgleich.teamcraft.core.DraftFileState
+import de.zeitgleich.teamcraft.core.DraftFiles
 import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.core.SendOptions
 import de.zeitgleich.teamcraft.core.UnseenReactions
 import de.zeitgleich.teamcraft.core.VoiceMessagePolicy
+import de.zeitgleich.teamcraft.ui.rememberThumbnail
 import de.zeitgleich.teamcraft.ui.ServerHistory
 import de.zeitgleich.teamcraft.ui.olderState
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
@@ -1100,7 +1106,17 @@ internal fun Composer(
   var isDraftLoaded by remember(conversationId, maybeThread) { mutableStateOf(false) }
   val draftSave = remember(conversationId, maybeThread) { DraftSave() }
   // Kept in the view model: picked files survive looking at another conversation (until sent).
-  var files by viewModel.pickedFiles.entry("$conversationId/${maybeThread.orEmpty()}", emptyList())
+  var files by viewModel.pickedFiles.entry(viewModel.pickedKey(conversationId, maybeThread), emptyList())
+  // Picked files go up with the draft as they come in (#1220): it keeps them after the app was
+  // killed, and the user's other devices show and send them.
+  LaunchedEffect(files) {
+    if (files.any { it.maybeDraft == null }) viewModel.attachPickedToDraft(conversationId, maybeThread)
+  }
+  // The draft's files that weren't picked in this composer: from another device, or from before the
+  // app last started.
+  val draftRead = rememberRead(viewModel, key = conversationId to maybeThread) { draftFiles(conversationId, maybeThread) }
+  val otherFiles = DraftFiles.others(draftRead.maybeValue.orEmpty(), files, viewModel.goneDraftFiles)
+  val sendableDraftFiles = otherFiles.filter { it.isSendable }
   var priority by rememberSaveable(conversationId) { mutableStateOf("normal") }
   var wantsAcknowledgement by rememberSaveable(conversationId) { mutableStateOf(false) }
   var isSilent by rememberSaveable(conversationId) { mutableStateOf(false) }
@@ -1177,7 +1193,7 @@ internal fun Composer(
   }
   val maybeQuery = Mentions.activeQuery(text)
   val members = snapshot?.conversation(conversationId)?.memberIds?.mapNotNull { snapshot.user(it) } ?: emptyList()
-  fun sendOptions(sending: List<PickedFile>) = SendOptions(
+  fun sendOptions(sending: List<PickedFile>, fromDraft: List<DraftFileItem> = emptyList()) = SendOptions(
     maybeThread = maybeThread,
     maybeReplyTo = maybeReply?.messageId,
     maybeReplyAttachment = maybeReply?.maybeImage?.fileId,
@@ -1186,6 +1202,7 @@ internal fun Composer(
     isSilent = isSilent,
     alsoSendToChannel = alsoToChannel,
     files = sending,
+    draftFiles = fromDraft,
   )
 
   fun resetOptions() {
@@ -1203,8 +1220,14 @@ internal fun Composer(
   }
 
   fun send() {
+    // A file the server held too long is gone: the user decides, nothing goes out without it unsaid.
+    if (otherFiles.any { it.state == DraftFileState.EXPIRED }) {
+      viewModel.showFailure(R.string.composer_draft_files_expired)
+      return
+    }
     // `:)` and `:tada:` become emoji, as on desktop.
-    viewModel.act(ChatActions.send(conversationId, emojiConvert(text.trim()), sendOptions(files)))
+    viewModel.act(ChatActions.send(conversationId, emojiConvert(text.trim()), sendOptions(files, sendableDraftFiles)))
+    viewModel.pickedSent(files, sendableDraftFiles.map { it.id })
     viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
     draftSave.stored("")
     text = ""
@@ -1272,7 +1295,7 @@ internal fun Composer(
       },
     )
   }
-  val canSend = text.isNotBlank() || files.isNotEmpty()
+  val canSend = text.isNotBlank() || files.isNotEmpty() || sendableDraftFiles.isNotEmpty()
   val voice = rememberVoiceControls(viewModel, VoiceOwner(conversationId, maybeThread))
   val voicePolicy = snapshot?.security?.voiceMessagePolicy ?: VoiceMessagePolicy()
   // The record button stands in for the send button while there is nothing to send; a recording
@@ -1311,7 +1334,7 @@ internal fun Composer(
         }
       }
     }
-    if (files.isNotEmpty()) {
+    if (files.isNotEmpty() || otherFiles.isNotEmpty()) {
       FlowRow(
         Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1325,7 +1348,7 @@ internal fun Composer(
               onEdit = { maybeEditing = file },
               onRemove = {
                 files = files - file
-                viewModel.discardFile(file)
+                viewModel.removePicked(conversationId, maybeThread, file)
               },
             )
             continue
@@ -1335,13 +1358,16 @@ internal fun Composer(
             selected = false,
             onClick = {
               files = files - file
-              viewModel.discardFile(file)
+              viewModel.removePicked(conversationId, maybeThread, file)
             },
             label = { Text(file.fileName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
             leadingIcon = { Icon(painterResource(R.drawable.ic_attach_file), contentDescription = null, modifier = Modifier.size(18.dp)) },
             trailingIcon = { Icon(Icons.Filled.Close, contentDescription = removeLabel, modifier = Modifier.size(18.dp)) },
             modifier = Modifier.widthIn(max = 240.dp),
           )
+        }
+        for (item in otherFiles) {
+          DraftFileAttachment(item, onRemove = { viewModel.removeDraftFile(conversationId, maybeThread, item.id) })
         }
       }
     }
@@ -1415,8 +1441,10 @@ internal fun Composer(
       file = editing,
       onCancel = { maybeEditing = null },
       onDone = { edited ->
-        files = files.map { if (it == editing) edited else it }
-        viewModel.discardFile(editing)
+        // The edited picture replaces the one in the draft, which may have joined it meanwhile.
+        val replaced = files.firstOrNull { it.path == editing.path } ?: editing
+        files = files.map { if (it.path == editing.path) edited else it }
+        viewModel.removePicked(conversationId, maybeThread, replaced)
         maybeEditing = null
       },
     )
@@ -1435,8 +1463,8 @@ internal fun Composer(
       )
       SendLaterRow(
         viewModel = viewModel,
-        canSchedule = text.isNotBlank() && files.isEmpty(),
-        hasFiles = files.isNotEmpty(),
+        canSchedule = text.isNotBlank() && files.isEmpty() && sendableDraftFiles.isEmpty(),
+        hasFiles = files.isNotEmpty() || sendableDraftFiles.isNotEmpty(),
         onOpen = {
           isSendOptionsOpen = false
           isSendLaterOpen = true
@@ -1616,6 +1644,48 @@ private fun PictureAttachment(file: PickedFile, onEdit: () -> Unit, onRemove: ()
       )
     }
   }
+}
+
+/**
+ * A file of the draft that wasn't picked here (#1220): attached on another device, or before the app
+ * last started. A tap removes it, as with the picked files; one that won't go out says why.
+ */
+@Composable
+private fun DraftFileAttachment(item: DraftFileItem, onRemove: () -> Unit) {
+  val maybeStatus = when (item.state) {
+    DraftFileState.FAILED, DraftFileState.UNKNOWN -> R.string.composer_draft_file_failed
+    DraftFileState.EXPIRED -> R.string.composer_draft_file_expired
+    DraftFileState.UPLOADING, DraftFileState.READY, DraftFileState.ON_THIS_DEVICE -> null
+  }
+  val maybePicture by rememberThumbnail("draft:${item.id}", item.maybeThumbnail?.bytes, ATTACHMENT_THUMB_PX)
+  val removeLabel = stringResource(R.string.composer_remove_file, item.fileName)
+  InputChip(
+    selected = false,
+    onClick = onRemove,
+    label = {
+      Column {
+        Text(item.fileName, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        maybeStatus?.let {
+          Text(stringResource(it), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, maxLines = 1)
+        }
+      }
+    },
+    leadingIcon = {
+      val picture = maybePicture
+      if (picture != null) {
+        Image(picture, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(24.dp).clip(RoundedCornerShape(4.dp)))
+      } else {
+        Icon(painterResource(R.drawable.ic_attach_file), contentDescription = null, modifier = Modifier.size(18.dp))
+      }
+    },
+    trailingIcon = { Icon(Icons.Filled.Close, contentDescription = removeLabel, modifier = Modifier.size(18.dp)) },
+    border = if (maybeStatus != null) {
+      BorderStroke(1.dp, MaterialTheme.colorScheme.error)
+    } else {
+      InputChipDefaults.inputChipBorder(enabled = true, selected = false)
+    },
+    modifier = Modifier.widthIn(max = 240.dp),
+  )
 }
 
 private val ATTACHMENT_THUMB = 64.dp

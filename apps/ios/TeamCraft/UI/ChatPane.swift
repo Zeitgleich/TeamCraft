@@ -23,6 +23,10 @@ struct ChatPane: View {
   @State private var maybeThread: ThreadTarget?
   @State private var extras: [String: MessageExtras] = [:]
   @State private var attachments: [PickedFile] = []
+  /// The draft's files as the core has them (#1220): those not picked here show beside the picks.
+  @State private var draftFileItems: [DraftFileItem] = []
+  /// Draft files removed or sent here, hidden while the core catches up.
+  @State private var goneDraftIds: Set<String> = []
   @State private var attachmentError: AttachmentError?
   @State private var isPickingPhoto = false
   @State private var isPickingDocument = false
@@ -91,6 +95,7 @@ struct ChatPane: View {
     }
     .task(id: model.changeCount) {
       await reload()
+      await reloadDraftFiles()
       runningCallCount = await model.runningCalls()[conversation.id] ?? 0
       await followTransfers()
     }
@@ -106,13 +111,14 @@ struct ChatPane: View {
       let stored = await model.draft(conversationId: conversation.id, threadId: threadId)
       if draft.isEmpty { draft = stored }
       isDraftLoaded = true
+      await reloadDraftFiles()
       takeOpenedPlace()
     }
     // What another app shared, once the stored draft is in the composer: the user sends it (#208).
     .task(id: "\(model.shareHandover?.share.id ?? "")/\(isDraftLoaded)") {
       guard isDraftLoaded, threadId == nil, let shared = await model.takeShare(for: conversation.id) else { return }
       if !shared.text.isEmpty { draft = draft.isEmpty ? shared.text : draft + "\n" + shared.text }
-      attachments.append(contentsOf: shared.files)
+      await attach(shared.files)
     }
     .task(id: draft) {
       // Saved after a pause in typing; a new keystroke cancels the wait.
@@ -125,9 +131,15 @@ struct ChatPane: View {
     }
     .fullScreenCover(item: $maybeEditingPicture) { file in
       PictureEditorView(file: file) { edited in
-        attachments = attachments.map { $0.id == file.id ? edited : $0 }
+        guard edited.path != file.path else { return }
+        // The edited picture replaces the one in the draft (#1220).
+        var replacement = edited
+        replacement.maybeDraftId = PickedFile.newDraftId()
+        attachments = attachments.map { $0.id == file.id ? replacement : $0 }
+        if let id = file.maybeDraftId { removeDraftFile(id) }
+        Task { await attachToDraft([replacement]) }
         // The unedited copy in the staging folder goes, as on Android: it is no longer sent.
-        if edited.path != file.path { try? FileManager.default.removeItem(atPath: file.path) }
+        try? FileManager.default.removeItem(atPath: file.path)
       }
     }
     .sheet(isPresented: $isShowingMembers) { ChannelMembersView(conversationId: conversation.id) }
@@ -273,6 +285,7 @@ struct ChatPane: View {
       case .tooLarge(let limit): Text("attachment_too_large \(FileSizeText.format(limit))")
       case .unreadable: Text("attachment_unreadable")
       case .sendFailed: Text("attachment_send_failed")
+      case .draftFilesExpired: Text("composer_draft_files_expired")
       }
     }
   }
@@ -462,7 +475,7 @@ struct ChatPane: View {
           replyBar(replying)
         }
         EmojiSuggestionBar(text: draft) { emoji in draft = completeEmoji(in: draft, with: emoji) }
-        if !attachments.isEmpty { attachmentChips }
+        if !attachments.isEmpty || !otherFiles.isEmpty { attachmentChips }
         if VoiceRecorder.shared.showsBar(for: draftKey) {
           VoiceRecorderBar(owner: draftKey) { Task { await sendVoice() } }
         } else {
@@ -557,7 +570,7 @@ struct ChatPane: View {
   /// Nothing typed or attached, no edit, and the workspace allows voice messages. Stays while a
   /// held recording runs (the field is empty then).
   private var showsRecordButton: Bool {
-    voicePolicy.enabled && maybeEditing == nil && attachments.isEmpty
+    voicePolicy.enabled && maybeEditing == nil && attachments.isEmpty && sendableOtherFiles.isEmpty
       && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
@@ -645,6 +658,7 @@ struct ChatPane: View {
             fileChip(file)
           }
         }
+        ForEach(otherFiles) { item in draftFileChip(item) }
       }
     }
   }
@@ -663,7 +677,7 @@ struct ChatPane: View {
     .buttonStyle(.plain)
     .accessibilityLabel(Text("composer_edit_picture \(file.fileName)"))
     .overlay(alignment: .topTrailing) {
-      Button { attachments.removeAll { $0.id == file.id } } label: {
+      Button { removeAttachment(file) } label: {
         Image(systemName: "xmark.circle.fill").symbolRenderingMode(.palette)
           .foregroundStyle(.white, .black.opacity(0.6))
       }
@@ -674,7 +688,7 @@ struct ChatPane: View {
   }
 
   private func fileChip(_ file: PickedFile) -> some View {
-    Button { attachments.removeAll { $0.id == file.id } } label: {
+    Button { removeAttachment(file) } label: {
       Label(file.fileName, systemImage: "xmark.circle.fill")
         .labelStyle(.titleAndIcon).font(.caption).lineLimit(1)
         .padding(.horizontal, 10).padding(.vertical, 6)
@@ -684,8 +698,41 @@ struct ChatPane: View {
     .accessibilityLabel(Text(file.fileName))
   }
 
+  /// A file of the draft not picked here (#1220): from another device, or from before the composer
+  /// last opened. The cross removes it; one that won't go out says why.
+  private func draftFileChip(_ item: DraftFileItem) -> some View {
+    let maybeStatus = item.fileState.maybeStatusKey
+    return Button { removeDraftFile(item.id) } label: {
+      HStack(spacing: 6) {
+        if let data = item.thumbnailData, let image = UIImage(data: data) {
+          Image(uiImage: image).resizable().scaledToFill()
+            .frame(width: 24, height: 24)
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        }
+        VStack(alignment: .leading, spacing: 0) {
+          Text(verbatim: item.fileName).lineLimit(1)
+          if let status = maybeStatus {
+            Text(LocalizedStringKey(status)).foregroundStyle(Theme.danger)
+          }
+        }
+        Image(systemName: "xmark.circle.fill")
+      }
+      .font(.caption)
+      .padding(.horizontal, 10).padding(.vertical, 6)
+      .background(Theme.accentSoft).clipShape(Capsule())
+      .overlay(Capsule().stroke(maybeStatus == nil ? Color.clear : Theme.danger))
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(Text("composer_remove_file \(item.fileName)"))
+  }
+
+  /// The draft's files not picked here, and those of them that go out with the next send.
+  private var otherFiles: [DraftFileItem] { otherDraftFiles(draftFileItems, local: attachments, gone: goneDraftIds) }
+  private var sendableOtherFiles: [DraftFileItem] { otherFiles.filter(\.isSendable) }
+
   private var canSubmit: Bool {
-    !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (maybeEditing == nil && !attachments.isEmpty)
+    !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      || (maybeEditing == nil && (!attachments.isEmpty || !sendableOtherFiles.isEmpty))
   }
 
   private var notetakerCallBinding: Binding<Bool> {
@@ -935,7 +982,8 @@ struct ChatPane: View {
 
   /// Whether the composer holds what can wait: text, without files.
   private var canSchedule: Bool {
-    attachments.isEmpty && maybeEditing == nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    attachments.isEmpty && sendableOtherFiles.isEmpty && maybeEditing == nil
+      && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
   /// A client message ID as the core reads it: 32 lowercase hex digits.
@@ -974,7 +1022,11 @@ struct ChatPane: View {
       draft = ""
       maybeEditing = nil
       await model.perform(.editMessage(conversationId: conversation.id, messageId: editing.id, body: body))
-    } else if attachments.isEmpty && maybeReplying == nil && maybeReplyingImage == nil {
+    } else if otherFiles.contains(where: { $0.fileState == .expired }) {
+      // A file the server held too long is gone: the user decides, nothing goes out without it unsaid.
+      attachmentError = .draftFilesExpired
+      return
+    } else if attachments.isEmpty && sendableOtherFiles.isEmpty && maybeReplying == nil && maybeReplyingImage == nil {
       guard !body.isEmpty else { return }
       draft = ""
       if !(await model.send(conversationId: conversation.id, threadId: threadId, body: body)) {
@@ -984,20 +1036,27 @@ struct ChatPane: View {
       }
     } else {
       let files = attachments
+      let fromDraft = sendableOtherFiles
+      // The draft's files go with the message; they don't show again while the core catches up.
+      let sentIds = Set(files.compactMap(\.maybeDraftId) + fromDraft.map(\.id))
       let replying = maybeReplying
       let replyingImage = maybeReplyingImage
       draft = ""
       attachments = []
+      goneDraftIds.formUnion(sentIds)
       maybeReplying = nil
       maybeReplyingImage = nil
       let request = SendRequest(
-        conversationId: conversation.id, maybeThreadId: threadId, body: body, files: files,
+        conversationId: conversation.id, maybeThreadId: threadId, body: body, files: files, draftFiles: fromDraft,
         maybeReplyToId: replyingImage?.message ?? replying?.id, maybeReplyAttachmentId: replyingImage?.fileId)
       if !(await model.performChecked(.sendMessage(request))) {
+        // Nothing was sent: the text and the files stay for another try.
         draft = body
+        attachments = files + attachments
+        goneDraftIds.subtract(sentIds)
         maybeReplying = replying
         maybeReplyingImage = replyingImage
-        if files.isEmpty { isSendFailed = true } else { attachmentError = .sendFailed }
+        if files.isEmpty && fromDraft.isEmpty { isSendFailed = true } else { attachmentError = .sendFailed }
       }
     }
     await reload()
@@ -1037,7 +1096,8 @@ struct ChatPane: View {
     for item in items {
       do {
         guard let media = try await item.loadTransferable(type: PickedMedia.self) else { continue }
-        attachments.append(try importer.importPickedMedia(media))
+        let file = try importer.importPickedMedia(media)
+        await attach([file])
       } catch let error as AttachmentError {
         attachmentError = error
       } catch {
@@ -1059,7 +1119,8 @@ struct ChatPane: View {
       try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
       try data.write(to: file)
       let importer = await model.attachmentImporter()
-      attachments.append(try importer.importPickedMedia(PickedMedia(url: file)))
+      let picked = try importer.importPickedMedia(PickedMedia(url: file))
+      await attach([picked])
     } catch let error as AttachmentError {
       attachmentError = error
     } catch {
@@ -1072,7 +1133,8 @@ struct ChatPane: View {
     let importer = await model.attachmentImporter()
     for url in urls {
       do {
-        attachments.append(try importer.importDocument(at: url))
+        let file = try importer.importDocument(at: url)
+        await attach([file])
       } catch let error as AttachmentError {
         attachmentError = error
       } catch {
@@ -1082,6 +1144,40 @@ struct ChatPane: View {
   }
 
   private var draftKey: String { "\(conversation.id)/\(threadId ?? "")" }
+
+  /// Picked files join the composer and go up with its draft at once (#1220): the draft keeps them
+  /// after the app was killed, and the user's other devices show and send them.
+  private func attach(_ files: [PickedFile]) async {
+    let inDraft = files.map { file in
+      var file = file
+      file.maybeDraftId = PickedFile.newDraftId()
+      return file
+    }
+    attachments.append(contentsOf: inDraft)
+    await attachToDraft(inDraft)
+  }
+
+  private func attachToDraft(_ files: [PickedFile]) async {
+    guard !files.isEmpty else { return }
+    await model.perform(.attachDraftFiles(conversationId: conversation.id, maybeThreadId: threadId, files: files))
+  }
+
+  /// A picked file taken out of the composer leaves the draft too.
+  private func removeAttachment(_ file: PickedFile) {
+    attachments.removeAll { $0.id == file.id }
+    if let id = file.maybeDraftId { removeDraftFile(id) }
+  }
+
+  /// Takes a file out of the draft on every device of the user; it doesn't show again meanwhile.
+  private func removeDraftFile(_ id: String) {
+    goneDraftIds.insert(id)
+    Task { await model.perform(.removeDraftFile(conversationId: conversation.id, maybeThreadId: threadId, id: id)) }
+  }
+
+  private func reloadDraftFiles() async {
+    guard let files = await model.draftFiles(conversationId: conversation.id, threadId: threadId) else { return }
+    if files != draftFileItems { draftFileItems = files }
+  }
 
   /// Keeps the composer text in the core; an edit of a sent message is no draft.
   private func saveDraft() async {
