@@ -17,6 +17,12 @@ struct ConversationSection: Identifiable {
   let conversations: [ConversationItem]
 
   var id: SectionTitle { title }
+
+  /// The channels of one space, under its name.
+  var isSpace: Bool {
+    if case .space = title { return true }
+    return false
+  }
 }
 
 /// How the chats screen lists conversations (#1151). A setting of this device.
@@ -27,6 +33,16 @@ enum ChatListLayout: String, CaseIterable {
   case list
 
   static let key = "chat_list_layout"
+}
+
+/// How the list layout orders its channels (#1345). A setting of this device, like the layout.
+enum ChatListGrouping: String, CaseIterable {
+  /// DMs and channels together, the most recent first.
+  case mixed
+  /// The DMs, then the channels of each space under its name.
+  case bySpace
+
+  static let key = "chat_list_grouping"
 }
 
 /// The two lists of the chats screen: Home (the DMs, outside spaces) and the channels by space.
@@ -150,9 +166,13 @@ func directSections(
 /// The list layout's one list (#1151): favorites, then every other DM and channel, each the most
 /// recent first. Only conversations `chip` lets through whose names contain `filter` (any case) are
 /// kept. Empty sections are left out.
+///
+/// `bySpace` (#1345): after the favorites, the DMs, then the other channels of each space under its
+/// name (spaces by name, as in the Spaces tab), each still the most recent first. Favorites stay on
+/// top, across spaces; a space whose channels are all favorites has no section. Same as Android.
 func listSections(
   _ conversations: [ConversationItem], lastActivity: [String: Date] = [:], filter: String = "",
-  chip: HomeFilter = .all
+  chip: HomeFilter = .all, bySpace: Bool = false
 ) -> [ConversationSection] {
   let needle = filter.trimmingCharacters(in: .whitespaces)
   func byRecency(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {
@@ -169,7 +189,22 @@ func listSections(
   let rest = shown.filter { !$0.isFavorite }
   var sections: [ConversationSection] = []
   if !favorites.isEmpty { sections.append(ConversationSection(title: .favorites, conversations: favorites)) }
-  if !rest.isEmpty { sections.append(ConversationSection(title: .everything, conversations: rest)) }
+  guard bySpace else {
+    if !rest.isEmpty { sections.append(ConversationSection(title: .everything, conversations: rest)) }
+    return sections
+  }
+  let direct = rest.filter(\.isDirect)
+  if !direct.isEmpty { sections.append(ConversationSection(title: .directMessages, conversations: direct)) }
+  // Grouping keeps the recency order inside each space.
+  let channels = rest.filter { !$0.isDirect }
+  let bySpaceName = Dictionary(grouping: channels, by: \.maybeSpaceName)
+  let names = bySpaceName.keys.compactMap { $0 }.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+  for name in names {
+    sections.append(ConversationSection(title: .space(name), conversations: bySpaceName[name] ?? []))
+  }
+  if let homeless = bySpaceName[nil], !homeless.isEmpty {
+    sections.append(ConversationSection(title: .channels, conversations: homeless))
+  }
   return sections
 }
 

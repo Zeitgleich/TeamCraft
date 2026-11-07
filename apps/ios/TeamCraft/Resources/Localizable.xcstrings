@@ -8241,6 +8241,70 @@
         }
       }
     },
+    "chat_list_grouping": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Channels"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kanäle"
+          }
+        }
+      }
+    },
+    "chat_list_grouping_by_space": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Grouped by space"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nach Spaces gruppiert"
+          }
+        }
+      }
+    },
+    "chat_list_grouping_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Grouped by space puts the channels of each space together under its name, after the direct messages. Favorites stay on top."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nach Spaces gruppiert stellt die Kanäle jedes Space unter seinem Namen zusammen, nach den Direktnachrichten. Favoriten bleiben oben."
+          }
+        }
+      }
+    },
+    "chat_list_grouping_mixed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mixed with chats"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mit den Chats gemischt"
+          }
+        }
+      }
+    },
     "chat_list_layout_hint": {
       "localizations": {
         "en": {

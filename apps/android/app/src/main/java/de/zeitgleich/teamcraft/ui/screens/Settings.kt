@@ -223,6 +223,7 @@ private fun ChatsPage(viewModel: MainViewModel) {
   DynamicColorSetting()
   HorizontalDivider()
   ChatListLayoutSetting()
+  ChatListGroupingSetting()
   HorizontalDivider()
   CallStatusSoundsSetting()
   HorizontalDivider()

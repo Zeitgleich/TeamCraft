@@ -253,6 +253,7 @@ private struct ChatsSettingsPage: View {
   @Environment(AppModel.self) private var model
   @AppStorage("share_typing") private var isSharingTyping = true
   @AppStorage(ChatListLayout.key) private var chatListLayout = ChatListLayout.spaces.rawValue
+  @AppStorage(ChatListGrouping.key) private var chatListGrouping = ChatListGrouping.mixed.rawValue
   @AppStorage(CallStatusSoundsSetting.key) private var statusSounds = CallStatusSoundsSetting.all.rawValue
   @AppStorage(OriginalDownloadSetting.key) private var originalDownload = OriginalDownloadSetting.fallback.rawValue
   @AppStorage(AnimatedImagesSetting.key) private var animatedImages = AnimatedImagesSetting.fallback.rawValue
@@ -271,6 +272,17 @@ private struct ChatsSettingsPage: View {
         }
       } footer: {
         Text("chat_list_layout_hint")
+      }
+      // Only the list has this order to choose (#1345).
+      if chatListLayout == ChatListLayout.list.rawValue {
+        Section {
+          Picker("chat_list_grouping", selection: $chatListGrouping) {
+            Text("chat_list_grouping_mixed").tag(ChatListGrouping.mixed.rawValue)
+            Text("chat_list_grouping_by_space").tag(ChatListGrouping.bySpace.rawValue)
+          }
+        } footer: {
+          Text("chat_list_grouping_hint")
+        }
       }
       Section {
         Picker("call_status_sounds", selection: $statusSounds) {

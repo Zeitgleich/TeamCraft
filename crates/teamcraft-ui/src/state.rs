@@ -17,7 +17,7 @@ use crate::model::{
   id_from_raw,
 };
 use crate::navigation::{Step, divider_index, next_unread};
-use crate::prefs::{SidebarLayout, SidebarSort};
+use crate::prefs::{ListGrouping, SidebarLayout, SidebarSort};
 use crate::reactive::{SetIfAlive, get_if_observed};
 use crate::route::{HistoryReach, Route};
 use crate::sections::{
@@ -945,12 +945,21 @@ impl AppState {
     })
   }
 
+  /// The spaces in the order of the list layout's groups, the rail's, while the list keeps the
+  /// channels of a space together (#1345); `None` while it mixes them.
+  pub fn list_space_order(&self) -> Option<Vec<SpaceId>> {
+    let grouping = self.settings.prefs.with(|prefs| prefs.sidebar.list_grouping);
+    (grouping == ListGrouping::BySpace)
+      .then(|| self.read(|backend| backend.spaces().into_iter().map(|space| space.id).collect()))
+  }
+
   /// [`Self::list_entries`] as the list layout shows them, unfiltered and whole.
   fn list_order(&self) -> Vec<Conversation> {
     let (sort, show_unreads_group) = self
       .settings
       .prefs
       .with(|prefs| (prefs.sidebar.dm_sort, prefs.sidebar.shows_unreads_section));
+    let maybe_space_order = self.list_space_order();
     let options = ListOptions {
       sort,
       show_unreads_group,
@@ -958,6 +967,7 @@ impl AppState {
       filter: "",
       chip: HomeFilter::All,
       max_rows: 0,
+      maybe_space_order: maybe_space_order.as_deref(),
     };
     build_list(self.list_entries(), &options)
       .sections

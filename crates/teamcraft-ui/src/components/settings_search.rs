@@ -57,6 +57,7 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::Preferences, "settings-show-formatting"),
   (SettingsTab::Preferences, "settings-unreads-group"),
   (SettingsTab::Appearance, "settings-sidebar-layout"),
+  (SettingsTab::Appearance, "settings-list-grouping"),
   (SettingsTab::Preferences, "settings-sidebar-grouped"),
   (SettingsTab::Preferences, "settings-reopen-last"),
   (SettingsTab::Preferences, "settings-sidebar-sort"),

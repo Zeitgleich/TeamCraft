@@ -35,6 +35,7 @@ import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MediaPrefs
 import de.zeitgleich.teamcraft.ui.media.MediaQuality
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
+import de.zeitgleich.teamcraft.ui.theme.ChatListGrouping
 import de.zeitgleich.teamcraft.ui.theme.ChatListLayout
 import uniffi.teamcraft_ffi.CallStatusSounds
 import uniffi.teamcraft_ffi.OriginalDownload
@@ -235,6 +236,35 @@ fun ChatListLayoutSetting() {
   }
 }
 
+/** In the list layout: DMs and channels together, or the channels grouped by space (#1345). */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun ChatListGroupingSetting() {
+  val context = LocalContext.current
+  val prefs = remember { AppearancePrefs.prefs(context) }
+  val layout by prefs.chatListLayout.collectAsState()
+  val grouping by prefs.chatListGrouping.collectAsState()
+  // Only the list has this order to choose.
+  if (layout != ChatListLayout.List) return
+  Column {
+    Text(stringResource(R.string.chat_list_grouping))
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      for ((choice, label) in CHAT_LIST_GROUPING_CHOICES) {
+        FilterChip(
+          selected = grouping == choice,
+          onClick = { prefs.setChatListGrouping(choice) },
+          label = { Text(stringResource(label)) },
+        )
+      }
+    }
+    Text(
+      stringResource(R.string.chat_list_grouping_hint),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
+}
+
 /** The wallpaper's colors instead of TeamCraft's (Android 12+). */
 @Composable
 fun DynamicColorSetting() {
@@ -260,6 +290,11 @@ fun SendWithEnterSetting() {
 private val CHAT_LIST_LAYOUT_CHOICES = listOf(
   ChatListLayout.Spaces to R.string.nav_spaces,
   ChatListLayout.List to R.string.chat_list_layout_list,
+)
+
+private val CHAT_LIST_GROUPING_CHOICES = listOf(
+  ChatListGrouping.Mixed to R.string.chat_list_grouping_mixed,
+  ChatListGrouping.BySpace to R.string.chat_list_grouping_by_space,
 )
 
 private val STATUS_SOUND_CHOICES = listOf(
