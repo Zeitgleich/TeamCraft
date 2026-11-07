@@ -16,6 +16,8 @@ meetings-edit = Edit meeting
 meetings-cancel = Cancel meeting
 meetings-cancelled = Cancelled
 meetings-restore = Restore
+meetings-holiday = Holiday
+meetings-restore-holiday = Meet anyway
 meetings-remove = Remove from list
 meetings-cancel-title = Cancel this meeting?
 meetings-cancel-title-series = Which meetings do you want to cancel?
@@ -92,6 +94,8 @@ schedule-unit-meetings = { $count ->
    *[other] meetings
 }
 schedule-on-days = On
+schedule-skip-holidays = Skip public holidays
+schedule-skip-holidays-hint = Meetings on a public holiday of the region your admin set are left out. You can still keep one.
 schedule-ends = Ends
 schedule-ends-never = Never
 schedule-ends-count = After

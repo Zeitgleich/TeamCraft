@@ -80,6 +80,11 @@ pub struct MeetingRecurrence {
   /// No occurrence starts after this time.
   #[serde(rename = "until", default, skip_serializing_if = "Option::is_none")]
   pub maybe_until: Option<UnixMillis>,
+  /// Occurrences on a public holiday of the instance's region are left out (#1053), like cancelled
+  /// ones: listed as `is_occurrence_holiday`, `EXDATE` in the calendar, and the organizer can keep
+  /// one by restoring it. Absent from older clients and servers: nothing is skipped.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub skips_holidays: bool,
 }
 
 /// Somebody invited to a meeting.
@@ -224,6 +229,11 @@ pub struct MeetingResponse {
   /// series goes on.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_occurrence_cancelled: bool,
+  /// The occurrence is left out because it falls on a public holiday (the series skips holidays);
+  /// `is_occurrence_cancelled` is set too, so older clients show it as cancelled. Restoring it keeps
+  /// the meeting on that day.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_occurrence_holiday: bool,
   /// The caller hosts the meeting's lobby, as `ListLobbyResponse::is_host` would say: organizer or
   /// chat admin, in the meeting chat, meeting scheduled. Set in the meeting list only, so devices
   /// ask for the lobby of the meetings a chat admin hosts too (#1305); absent from older servers.

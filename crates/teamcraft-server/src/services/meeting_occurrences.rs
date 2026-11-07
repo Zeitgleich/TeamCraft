@@ -6,12 +6,18 @@
 //! time across a daylight-saving change, so the UTC instant moves by an hour. The first occurrence is
 //! always the stored start (RFC 5545: DTSTART is the first instance), also when it falls on a day the
 //! rule doesn't name; `count` includes it.
+//!
+//! A series that skips public holidays (#1053) leaves out the occurrences whose start falls on a
+//! holiday, on the same wall clock. Like `EXDATE` they still count towards `count`.
 
+use std::collections::HashSet;
 use std::iter;
 
 use chrono::{Datelike, Duration, LocalResult, Months, NaiveDate, NaiveDateTime, TimeZone};
 use chrono_tz::Tz;
 use teamcraft_proto::{MeetingRecurrence, RecurrenceFrequency, Weekday};
+
+use crate::holidays::HolidaySource;
 
 /// Occurrences looked at per series at most, whatever the range: an open-ended daily series asked
 /// for ten years stops here instead of looping on.
@@ -55,6 +61,30 @@ pub fn is_occurrence_start(
   series_starts(first_start_ms, recurrence, zone)
     .take_while(|starts_at_ms| *starts_at_ms <= at_ms)
     .any(|starts_at_ms| starts_at_ms == at_ms)
+}
+
+/// The starts among `occurrences` that fall on one of `holidays` on the wall clock of `zone`. One
+/// question to the source for the whole span.
+pub fn holiday_starts(occurrences: &[Occurrence], zone: Tz, holidays: &dyn HolidaySource) -> HashSet<i64> {
+  let dated: Vec<(i64, NaiveDate)> = occurrences
+    .iter()
+    .filter_map(|occurrence| {
+      let start = zone.timestamp_millis_opt(occurrence.starts_at_ms).single()?;
+      Some((occurrence.starts_at_ms, start.date_naive()))
+    })
+    .collect();
+  let (Some(first), Some(last)) = (
+    dated.iter().map(|(_, date)| *date).min(),
+    dated.iter().map(|(_, date)| *date).max(),
+  ) else {
+    return HashSet::new();
+  };
+  let on_holidays = holidays.holidays_between(first, last);
+  dated
+    .into_iter()
+    .filter(|(_, date)| on_holidays.contains(date))
+    .map(|(starts_at_ms, _)| starts_at_ms)
+    .collect()
 }
 
 /// The day of the week as the wire names it, Monday first; `None` for one this version doesn't know.
@@ -407,6 +437,86 @@ mod tests {
     }
   }
 
+  mod holidays {
+    use std::collections::BTreeSet;
+
+    use super::*;
+    use crate::holidays::{BundledHolidays, HolidayRegion};
+
+    /// A fixed list of holidays.
+    struct Listed(Vec<NaiveDate>);
+
+    impl HolidaySource for Listed {
+      fn holidays_between(&self, from: NaiveDate, to: NaiveDate) -> BTreeSet<NaiveDate> {
+        self
+          .0
+          .iter()
+          .copied()
+          .filter(|date| (from..=to).contains(date))
+          .collect()
+      }
+    }
+
+    #[test]
+    fn a_work_day_series_leaves_out_the_holidays_of_its_region() {
+      // Thursday 2026-12-24, work days, in Bavaria: Christmas, New Year's Day and Epiphany fall out
+      // (Boxing Day is a Saturday anyway).
+      let zone = Tz::Europe__Berlin;
+      let first = zone
+        .with_ymd_and_hms(2026, 12, 24, 9, 0, 0)
+        .unwrap()
+        .timestamp_millis();
+      let mut daily = series(RecurrenceFrequency::Daily, 1, Some(10));
+      daily.weekdays = WORK_WEEK.to_vec();
+      let found = occurrences_in(first, HOUR, &daily, zone, 0, i64::MAX);
+      let skipped = holiday_starts(&found, zone, &BundledHolidays::new(HolidayRegion::Bavaria));
+      let kept: Vec<(u32, u32)> = found
+        .iter()
+        .filter(|occurrence| !skipped.contains(&occurrence.starts_at_ms))
+        .map(|occurrence| {
+          let local = zone.timestamp_millis_opt(occurrence.starts_at_ms).unwrap();
+          (local.month(), local.day())
+        })
+        .collect();
+      // The count includes the skipped ones, as with EXDATE.
+      assert_eq!(found.len(), 10);
+      assert_eq!(skipped.len(), 3);
+      assert_eq!(
+        kept,
+        vec![(12, 24), (12, 28), (12, 29), (12, 30), (12, 31), (1, 4), (1, 5)]
+      );
+    }
+
+    #[test]
+    fn the_holiday_is_the_organizers_day_not_utc() {
+      // 00:30 on New Year's Day in Berlin is still 31 December in UTC.
+      let zone = Tz::Europe__Berlin;
+      let first = zone
+        .with_ymd_and_hms(2026, 12, 31, 0, 30, 0)
+        .unwrap()
+        .timestamp_millis();
+      let found = occurrences_in(
+        first,
+        HOUR,
+        &series(RecurrenceFrequency::Daily, 1, Some(2)),
+        zone,
+        0,
+        i64::MAX,
+      );
+      let new_year = Listed(vec![NaiveDate::from_ymd_opt(2027, 1, 1).unwrap()]);
+      assert_eq!(
+        holiday_starts(&found, zone, &new_year),
+        HashSet::from([found[1].starts_at_ms])
+      );
+      assert!(holiday_starts(&found, Tz::UTC, &new_year).is_empty());
+    }
+
+    #[test]
+    fn no_occurrences_ask_nothing() {
+      assert!(holiday_starts(&[], Tz::UTC, &Listed(Vec::new())).is_empty());
+    }
+  }
+
   fn series(frequency: RecurrenceFrequency, interval: u32, maybe_count: Option<u32>) -> MeetingRecurrence {
     MeetingRecurrence {
       frequency,
@@ -414,6 +524,7 @@ mod tests {
       weekdays: Vec::new(),
       maybe_count,
       maybe_until: None,
+      skips_holidays: false,
     }
   }
 

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO meeting_kept_holidays (meeting_id, starts_at) VALUES ($1, $2)\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "113fc3537525215473402e178a312f2efef748e1a9f828212d108d6516dbfdf0"
+}

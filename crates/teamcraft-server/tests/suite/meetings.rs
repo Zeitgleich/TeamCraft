@@ -522,6 +522,93 @@ mod series {
   }
 
   #[tokio::test]
+  async fn a_series_skips_public_holidays_and_keeps_one_when_restored() {
+    let (app, calendar) = app!();
+    let (alice, bob) = (owner(), admin());
+    let region = app
+      .put(
+        &bob,
+        "/admin/settings",
+        json!({"section": "holidays", "values": {"region": "DE"}}),
+      )
+      .await;
+    assert_eq!(region.status, StatusCode::OK, "{}", region.body);
+    // Daily from New Year's Day 2030, in UTC (the organizer has no time zone).
+    let id = daily(
+      &app,
+      &alice,
+      json!({"frequency": "daily", "interval": 1, "count": 3, "skips_holidays": true}),
+    )
+    .await;
+
+    let shown = app.get(&alice, &format!("/meetings/{id}")).await;
+    assert_eq!(shown.body["recurrence"]["skips_holidays"], true, "{}", shown.body);
+    let path = format!("/meetings?from={}&to={}", STARTS_AT - 1, STARTS_AT + 5 * DAY);
+    let list = app.get(&alice, &path).await.body["meetings"].clone();
+    let holiday = &list[0];
+    assert_eq!(holiday["starts_at"], STARTS_AT);
+    assert_eq!(holiday["status"], "cancelled");
+    assert_eq!(holiday["is_occurrence_cancelled"], true);
+    assert_eq!(holiday["is_occurrence_holiday"], true);
+    assert_eq!(list[1]["status"], "scheduled");
+    assert!(list[1].get("is_occurrence_holiday").is_none());
+    let ics = unfolded(&calendar.event(&id).unwrap());
+    assert!(ics.contains("EXDATE:20300101T090000Z"), "{ics}");
+    // It is off already.
+    let cancel = app
+      .delete(
+        &alice,
+        &format!("/meetings/{id}?scope=occurrence&occurrence={STARTS_AT}"),
+      )
+      .await;
+    assert_eq!(cancel.status, StatusCode::CONFLICT);
+
+    let kept = app
+      .post(
+        &alice,
+        &format!("/meetings/{id}/restore"),
+        json!({"occurrence": STARTS_AT}),
+      )
+      .await;
+    assert_eq!(kept.status, StatusCode::OK, "{}", kept.body);
+    assert!(
+      listed(&app, &alice, 5)
+        .await
+        .iter()
+        .all(|entry| entry.1 == "scheduled")
+    );
+    assert!(!unfolded(&calendar.event(&id).unwrap()).contains("EXDATE"));
+    let again = app
+      .post(
+        &alice,
+        &format!("/meetings/{id}/restore"),
+        json!({"occurrence": STARTS_AT}),
+      )
+      .await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn without_a_region_nothing_is_skipped() {
+    let (app, _calendar) = app!();
+    let alice = owner();
+    daily(
+      &app,
+      &alice,
+      json!({"frequency": "daily", "interval": 1, "count": 3, "skips_holidays": true}),
+    )
+    .await;
+    assert!(
+      listed(&app, &alice, 5)
+        .await
+        .iter()
+        .all(|entry| entry.1 == "scheduled")
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn one_occurrence_is_cancelled_and_restored_without_the_series() {
     let Some((app, calendar, mailer)) = start_with_mail().await else {
       return;

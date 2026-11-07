@@ -293,6 +293,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
   let has_lobby = hosts_lobby(&meeting, me);
   let starts_at = meeting.starts_at;
   let is_occurrence_cancelled = meeting.is_occurrence_cancelled;
+  let is_holiday = meeting.is_occurrence_holiday;
   // A cancellation can be taken back while what it cancelled is still to come.
   let can_restore = is_host && is_cancelled && meeting.ends_at.0 > now;
   // The organizer starts the meeting itself, also early (issue #1006): its invitees are rung.
@@ -340,7 +341,11 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
         <h3 class="meeting-title" translate="no">{meeting.title.clone()}</h3>
         {is_live.then(|| view! { <span class="badge badge-live">{move || i18n.t("meetings-live")}</span> })}
         {has_recurrence.then(|| view! { <span class="meeting-flag" title=move || i18n.t("meetings-recurring")><Icon name=IconName::Rotate /></span> })}
-        {is_cancelled.then(|| view! { <span class="badge badge-cancelled">{move || i18n.t("meetings-cancelled")}</span> })}
+        {is_cancelled
+          .then(|| {
+            let key = if is_holiday { "meetings-holiday" } else { "meetings-cancelled" };
+            view! { <span class="badge badge-cancelled">{move || i18n.t(key)}</span> }
+          })}
       </div>
       <p class="meeting-meta" translate="no">
         {move || i18n.t_with("meetings-organizer", &[("name", &organizer)])}
@@ -412,7 +417,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
           .then(|| {
             view! {
               <PendingButton pending=restoring class="btn" on_click=restore>
-                {move || i18n.t("meetings-restore")}
+                {move || i18n.t(if is_holiday { "meetings-restore-holiday" } else { "meetings-restore" })}
               </PendingButton>
             }
           })}
@@ -1751,6 +1756,15 @@ fn RepeatFields(
           </div>
           <FieldError errors=errors field=FormField::Weekdays />
         </Show>
+        <label class="checkbox">
+          <input
+            type="checkbox"
+            prop:checked=move || form.with(|form| form.skips_holidays)
+            on:change=move |ev| form.update(|form| form.skips_holidays = event_target_checked(&ev))
+          />
+          <span>{move || i18n.t("schedule-skip-holidays")}</span>
+        </label>
+        <p class="muted-text small">{move || i18n.t("schedule-skip-holidays-hint")}</p>
         <fieldset class="radio-group repeat-ends">
           <legend>{move || i18n.t("schedule-ends")}</legend>
           {SeriesEnd::ALL
@@ -2007,6 +2021,7 @@ mod tests {
       join_url: String::new(),
       maybe_recurrence: None,
       is_occurrence_cancelled: false,
+      is_occurrence_holiday: false,
       can_host_lobby: false,
       attendees: Vec::new(),
       undelivered_invitations: Vec::new(),

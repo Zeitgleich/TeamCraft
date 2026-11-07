@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use leptos::prelude::*;
 use serde_json::{Map, Value, json};
 use teamcraft_proto::{
-  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SettingSource, Snowflake,
+  HOLIDAY_REGIONS, RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SettingSource,
+  Snowflake,
 };
 
 use crate::components::admin_console::SectionHeader;
@@ -21,7 +22,7 @@ const MINUTE: u64 = 60;
 type Values = BTreeMap<&'static str, String>;
 
 /// Groups in the order of the page.
-const GROUPS: [&str; 13] = [
+const GROUPS: [&str; 14] = [
   "server_rules",
   "notifications",
   "email_digest",
@@ -35,6 +36,7 @@ const GROUPS: [&str; 13] = [
   "token_binding",
   "app_links",
   "health_alerts",
+  "holidays",
 ];
 /// The sign-in methods an admin can choose, as the form's values: comma-separated, in order.
 const METHOD_CHOICES: [&str; 4] = ["sso,local", "local,sso", "sso", "local"];
@@ -71,6 +73,8 @@ enum Kind {
   Level,
   /// A policy for binding tokens to devices, one of [`DPOP_POLICY_CHOICES`].
   DpopPolicy,
+  /// The region of the holiday table, one of [`HOLIDAY_REGIONS`]; empty means none.
+  HolidayRegion,
   /// One language's entry of a text map (`help_text.de`); empty means none.
   MapText,
   /// An https link that may be empty (none).
@@ -252,6 +256,10 @@ const HEALTH_ALERTS: &[FieldDef] = &[
     "settings-error-health-percent",
   ),
 ];
+const HOLIDAYS: &[FieldDef] = &[FieldDef {
+  id: "region",
+  kind: Kind::HolidayRegion,
+}];
 const NOTIFICATIONS: &[FieldDef] = &[
   flag("read_receipts_default"),
   FieldDef {
@@ -572,6 +580,30 @@ fn FieldRow(
       }
       .into_any()
     },
+    Kind::HolidayRegion => {
+      let i18n = use_i18n();
+      let dom_id = leak_key(dom_id);
+      view! {
+        <div class="field">
+          <label for=dom_id>{move || i18n.t(label)}</label>
+          <select
+            id=dom_id
+            class="input"
+            prop:value=move || value.get()
+            on:change=move |ev| on_input.run(event_target_value(&ev))
+          >
+            {std::iter::once("")
+              .chain(HOLIDAY_REGIONS)
+              .map(|choice| {
+                let key = leak_key(holiday_region_key(choice));
+                view! { <option value=choice selected=move || value.get() == choice>{move || i18n.t(key)}</option> }
+              })
+              .collect_view()}
+          </select>
+        </div>
+      }
+      .into_any()
+    },
     Kind::IdList | Kind::TextList => view! {
       <TextAreaField
         id=leak_key(dom_id)
@@ -619,6 +651,14 @@ fn dpop_policy_choice_key(choice: &str) -> &'static str {
   }
 }
 
+/// The i18n key that names a region of the holiday table (`settings-holiday-de-by`), or none.
+fn holiday_region_key(code: &str) -> String {
+  match code {
+    "" => "settings-holiday-none".to_owned(),
+    code => format!("settings-holiday-{}", code.to_lowercase()),
+  }
+}
+
 /// The i18n key or DOM id of a field, which components take as `&'static str`. The set is the
 /// fixed field tables above, so the few bytes leaked per field row are bounded.
 fn leak_key(text: String) -> &'static str {
@@ -645,6 +685,7 @@ fn fields_of(slug: &str) -> &'static [FieldDef] {
     "token_binding" => TOKEN_BINDING,
     "app_links" => APP_LINKS,
     "health_alerts" => HEALTH_ALERTS,
+    "holidays" => HOLIDAYS,
     _ => &[],
   }
 }
@@ -665,6 +706,7 @@ fn group_json(key: &RuntimeSettingsKey, response: &RuntimeSettingsResponse) -> O
     RuntimeSettingsKey::TokenBinding => serde_json::to_value(&response.token_binding),
     RuntimeSettingsKey::AppLinks => serde_json::to_value(&response.app_links),
     RuntimeSettingsKey::HealthAlerts => serde_json::to_value(&response.health_alerts),
+    RuntimeSettingsKey::Holidays => serde_json::to_value(&response.holidays),
     _ => return None,
   };
   value.ok()
@@ -697,9 +739,13 @@ fn value_text(kind: Kind, maybe_value: Option<&Value>) -> String {
       .as_u64()
       .map(|raw| format_scaled(raw, scale))
       .unwrap_or_default(),
-    Kind::Text | Kind::Area | Kind::MapText | Kind::Link | Kind::Level | Kind::DpopPolicy => {
-      value.as_str().unwrap_or_default().to_owned()
-    },
+    Kind::Text
+    | Kind::Area
+    | Kind::MapText
+    | Kind::Link
+    | Kind::Level
+    | Kind::DpopPolicy
+    | Kind::HolidayRegion => value.as_str().unwrap_or_default().to_owned(),
     Kind::Methods => value
       .as_array()
       .map(|methods| {
@@ -806,6 +852,12 @@ fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
         .unwrap_or(DPOP_POLICY_CHOICES[0]);
       Ok(json!(choice))
     },
+    Kind::HolidayRegion => Ok(
+      HOLIDAY_REGIONS
+        .into_iter()
+        .find(|code| *code == typed)
+        .map_or(Value::Null, |code| json!(code)),
+    ),
     Kind::TextList => Ok(json!(parse_list(typed))),
     Kind::IdList => {
       let items = parse_list(typed);

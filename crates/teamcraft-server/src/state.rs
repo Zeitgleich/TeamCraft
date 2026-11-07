@@ -6,7 +6,7 @@ use crate::auth::{DpopGuard, Revocations, TokenValidator};
 use secrecy::SecretString;
 
 use teamcraft_crypto::server_secret::SettingsSealingKey;
-use teamcraft_proto::{AppLinkSettings, HealthAlertSettings, TokenBindingSettings};
+use teamcraft_proto::{AppLinkSettings, HealthAlertSettings, HolidaySettings, TokenBindingSettings};
 
 use crate::brand::BrandStore;
 use crate::config::{
@@ -123,6 +123,9 @@ pub struct Settings {
   pub app_links: AppLinkSettings,
   /// When health checks raise alerts; only ever changed in the admin console.
   pub health_alerts: HealthAlertSettings,
+  /// The region whose public holidays repeating meetings can skip; only ever changed in the admin
+  /// console.
+  pub holidays: HolidaySettings,
   /// Meeting invitations: most invitees and the mail texts.
   pub meeting_mail: MeetingMailConfig,
   /// The mail server of the configuration file (`[mail.smtp]`, else `[meetings.smtp]`).

@@ -81,6 +81,7 @@ wire_enum! {
     TokenBinding => "token_binding",
     AppLinks => "app_links",
     HealthAlerts => "health_alerts",
+    Holidays => "holidays",
   }
 }
 
@@ -354,6 +355,9 @@ pub struct RuntimeSettingsResponse {
   /// Absent from older servers: the defaults.
   #[serde(default)]
   pub health_alerts: HealthAlertSettings,
+  /// Absent from older servers: no region, nothing is skipped.
+  #[serde(default)]
+  pub holidays: HolidaySettings,
   /// One entry per group.
   pub sources: Vec<RuntimeSettingsState>,
 }
@@ -383,6 +387,7 @@ pub enum RuntimeSettingsSection {
   TokenBinding(TokenBindingSettings),
   AppLinks(AppLinkSettings),
   HealthAlerts(HealthAlertSettings),
+  Holidays(HolidaySettings),
 }
 
 /// Which installed apps may open this server's links (docs/app-links.md): what
@@ -626,6 +631,22 @@ pub struct MailTextSettings {
   pub activation_body: String,
 }
 
+/// The regions of the bundled holiday table (ISO 3166-2): Germany's nationwide holidays and those
+/// of each federal state.
+pub const HOLIDAY_REGIONS: [&str; 17] = [
+  "DE", "DE-BW", "DE-BY", "DE-BE", "DE-BB", "DE-HB", "DE-HH", "DE-HE", "DE-MV", "DE-NI", "DE-NW", "DE-RP",
+  "DE-SL", "DE-SN", "DE-ST", "DE-SH", "DE-TH",
+];
+
+/// The public holidays repeating meetings can skip (#1053): "Skip public holidays" in a series
+/// leaves out its occurrences on these days, on the organizer's wall clock.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct HolidaySettings {
+  /// One of [`HOLIDAY_REGIONS`]; empty: no holidays, nothing is skipped.
+  #[serde(default)]
+  pub region: String,
+}
+
 /// Meeting invitations. Placeholders: `{title}` `{organizer}` `{start}` `{end}` `{description}`
 /// `{join_url}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -673,6 +694,7 @@ impl RuntimeSettingsSection {
       Self::TokenBinding(_) => RuntimeSettingsKey::TokenBinding,
       Self::AppLinks(_) => RuntimeSettingsKey::AppLinks,
       Self::HealthAlerts(_) => RuntimeSettingsKey::HealthAlerts,
+      Self::Holidays(_) => RuntimeSettingsKey::Holidays,
     }
   }
 }

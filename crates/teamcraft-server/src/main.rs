@@ -250,6 +250,7 @@ async fn run() -> anyhow::Result<()> {
       token_binding: teamcraft_proto::TokenBindingSettings::default(),
       app_links: teamcraft_proto::AppLinkSettings::default(),
       health_alerts: teamcraft_proto::HealthAlertSettings::default(),
+      holidays: teamcraft_proto::HolidaySettings::default(),
       max_attachment_bytes: config
         .storage
         .as_ref()
