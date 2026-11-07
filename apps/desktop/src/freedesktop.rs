@@ -258,6 +258,24 @@ impl Buses {
     }
   }
 
+  /// Whether a notification service answers now (#895). Asked afresh each time: a desktop can start
+  /// or replace its service while the app runs.
+  pub async fn has_notification_server(&self) -> bool {
+    let Some(session) = self.session().await else {
+      return false;
+    };
+    call::<Vec<String>, _>(
+      session,
+      NOTIFICATIONS,
+      NOTIFICATIONS_PATH,
+      NOTIFICATIONS,
+      "GetCapabilities",
+      &(),
+    )
+    .await
+    .is_some()
+  }
+
   /// Whether the desktop's own do-not-disturb is on: the notification server's `Inhibited`
   /// property (KDE Plasma and others), or GNOME's "show banners" switch.
   pub async fn is_do_not_disturb(&self) -> bool {

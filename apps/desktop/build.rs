@@ -95,6 +95,8 @@ const COMMANDS: &[&str] = &[
   "notify_user",
   "withdraw_notifications",
   "request_attention",
+  "notification_state",
+  "notification_allow",
   "call_window_show",
   "call_window_close",
   "call_window_info",

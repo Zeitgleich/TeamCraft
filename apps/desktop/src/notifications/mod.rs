@@ -17,6 +17,7 @@
 pub(crate) mod mac_center;
 #[cfg(any(target_os = "macos", test))]
 mod mac_response;
+pub(crate) mod permission;
 pub(crate) mod pictures;
 #[cfg(any(windows, test))]
 mod toast_xml;
@@ -184,8 +185,9 @@ pub fn request_attention(app: AppHandle, is_wanted: bool) {
   }
 }
 
-/// macOS asks the user once whether the app may notify and hears what the user does with the
-/// notifications; elsewhere there is nothing to prepare.
+/// macOS hears what the user does with the notifications; elsewhere there is nothing to prepare.
+/// Permission is asked for later, from the user's click on "Turn on" ([`permission`], #895), so
+/// no system prompt comes up at start-up before the user has signed in.
 #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
 pub fn prepare(app: &AppHandle) {
   #[cfg(target_os = "macos")]
@@ -196,7 +198,6 @@ pub fn prepare(app: &AppHandle) {
         report(&reporter, event);
       }
     });
-    mac_center::request_permission();
   }
 }
 

@@ -348,6 +348,8 @@ fn main() -> anyhow::Result<()> {
       notifications::notify_user,
       notifications::withdraw_notifications,
       notifications::request_attention,
+      notifications::permission::notification_state,
+      notifications::permission::notification_allow,
       call_window::call_window_show,
       call_window::call_window_close,
       call_window::call_window_info,

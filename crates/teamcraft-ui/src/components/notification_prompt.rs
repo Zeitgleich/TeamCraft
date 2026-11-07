@@ -4,7 +4,7 @@
 //! request always runs from a button, never on load, and is started inside the click handler itself
 //! (before any `await`), or Safari and Chrome refuse it without a prompt (#893). The banner always
 //! says what came of it, including the refusal without a prompt of a private window. The desktop
-//! app has OS notifications and never shows the banner.
+//! app shows its own banner (`desktop_notify`, #895).
 
 use leptos::prelude::*;
 
@@ -23,9 +23,9 @@ use crate::state::use_app_state;
 /// Storage key prefix of "this browser is subscribed to Web Push"; the user ID follows.
 const PUSH_KEY_PREFIX: &str = "teamcraft.web_push.";
 /// Storage key prefix of when the user last said "Not now"; the user ID follows.
-const SNOOZED_KEY_PREFIX: &str = "teamcraft.notification_prompt.";
+pub(crate) const SNOOZED_KEY_PREFIX: &str = "teamcraft.notification_prompt.";
 /// How long "Not now" hides the banner before it asks once more.
-const SNOOZE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+pub(crate) const SNOOZE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// How long the confirmation "Notifications are on" stays before the banner goes.
 const CONFIRMATION_MS: u64 = 4_000;
 /// A `denied` faster than this came from the browser itself, not from a person reading a prompt:
@@ -195,9 +195,13 @@ fn is_offered(
   maybe_snoozed_at: Option<i64>,
   now: i64,
 ) -> bool {
-  maybe_permission == Some("default")
-    && has_web_push
-    && maybe_snoozed_at.is_none_or(|snoozed_at| now.saturating_sub(snoozed_at) >= SNOOZE_MS)
+  maybe_permission == Some("default") && has_web_push && !is_snoozed(maybe_snoozed_at, now)
+}
+
+/// Whether "Not now" at `maybe_snoozed_at` is younger than [`SNOOZE_MS`] (one from a clock that was
+/// ahead counts as young).
+pub(crate) fn is_snoozed(maybe_snoozed_at: Option<i64>, now: i64) -> bool {
+  maybe_snoozed_at.is_some_and(|snoozed_at| now.saturating_sub(snoozed_at) < SNOOZE_MS)
 }
 
 #[cfg(test)]

@@ -20,11 +20,12 @@ use objc2::rc::Retained;
 use objc2::runtime::Bool;
 use objc2_foundation::{NSArray, NSBundle, NSError, NSSet, NSString};
 use objc2_user_notifications::{
-  UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationAction, UNNotificationActionOptions,
-  UNNotificationCategory, UNNotificationCategoryOptions, UNNotificationInterruptionLevel,
-  UNNotificationRequest, UNNotificationSound, UNTextInputNotificationAction, UNUserNotificationCenter,
+  UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationAction,
+  UNNotificationActionOptions, UNNotificationCategory, UNNotificationCategoryOptions,
+  UNNotificationInterruptionLevel, UNNotificationRequest, UNNotificationSound,
+  UNTextInputNotificationAction, UNUserNotificationCenter,
 };
-use teamcraft_client_api::os_notify::{NotificationAction, OsNotification, TagTarget};
+use teamcraft_client_api::os_notify::{NotificationAction, NotifyPermission, OsNotification, TagTarget};
 
 /// Categories kept registered: one per combination of buttons and labels, which changes with the
 /// language only.
@@ -52,20 +53,55 @@ pub fn is_available() -> bool {
   NSBundle::mainBundle().bundleIdentifier().is_some()
 }
 
-/// Asks once for permission to show alerts and play sounds; macOS remembers the answer.
-pub fn request_permission() {
-  let center = UNUserNotificationCenter::currentNotificationCenter();
-  let done = RcBlock::new(|is_granted: Bool, _error: *mut NSError| {
-    if is_granted.as_bool() {
-      apply_badge(WANTED_BADGE.load(Ordering::Relaxed));
+/// Asks for permission to show alerts, play sounds and badge the Dock icon (#895): from the user's
+/// click on "Turn on", never at start-up. macOS shows its prompt only while the user has not
+/// answered; afterwards it answers at once with the earlier choice. `Err` where macOS failed.
+pub async fn request_permission() -> Result<bool, String> {
+  let (sender, receiver) = tokio::sync::oneshot::channel();
+  let sender = Mutex::new(Some(sender));
+  let done = RcBlock::new(move |is_granted: Bool, error: *mut NSError| {
+    let is_granted = is_granted.as_bool();
+    // An error comes with a refusal only where macOS could not ask (its text needs `unsafe` to
+    // read; the log of the system has it).
+    let result = if is_granted || error.is_null() {
+      Ok(is_granted)
     } else {
-      tracing::info!("notifications are not allowed for this app, so there is no dock badge");
+      Err("macOS could not ask for permission to notify".to_owned())
+    };
+    if is_granted {
+      apply_badge(WANTED_BADGE.load(Ordering::Relaxed));
+    }
+    if let Some(sender) = sender
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .take()
+    {
+      drop(sender.send(result));
     }
   });
-  center.requestAuthorizationWithOptions_completionHandler(
+  UNUserNotificationCenter::currentNotificationCenter().requestAuthorizationWithOptions_completionHandler(
     UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound | UNAuthorizationOptions::Badge,
     &done,
   );
+  receiver
+    .await
+    .unwrap_or_else(|_| Err("macOS did not answer the permission request".to_owned()))
+}
+
+/// What macOS says about the app's notifications now (the user may have changed it in System
+/// Settings since).
+pub async fn permission() -> NotifyPermission {
+  use teamcraft_desktop_native::NotificationAuthorization;
+  let (sender, receiver) = tokio::sync::oneshot::channel();
+  teamcraft_desktop_native::notification_authorization(move |authorization| {
+    drop(sender.send(authorization));
+  });
+  match receiver.await {
+    Ok(NotificationAuthorization::NotDetermined) => NotifyPermission::NotAsked,
+    Ok(NotificationAuthorization::Denied) => NotifyPermission::Blocked,
+    Ok(NotificationAuthorization::Authorized) => NotifyPermission::Allowed,
+    Err(_) => NotifyPermission::Unknown,
+  }
 }
 
 /// Shows the unread count on the Dock icon (0 removes it). Since macOS 13 the badge belongs to the

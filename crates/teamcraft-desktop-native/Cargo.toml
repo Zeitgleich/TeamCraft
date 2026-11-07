@@ -54,7 +54,7 @@ tracing.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
 objc2 = "0.6.2"
-objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationAttachment", "UNNotificationRequest", "UNNotificationResponse", "UNUserNotificationCenter"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationAttachment", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNUserNotificationCenter"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWorkspace"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "block2", "NSError", "NSNotification", "NSObject", "NSOperation", "NSString", "NSURL"] }
 
