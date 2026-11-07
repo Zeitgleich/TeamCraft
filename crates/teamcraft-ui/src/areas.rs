@@ -81,7 +81,9 @@ use crate::settings::Settings;
 use crate::share_into::ShareDialog;
 use crate::state::AppState;
 use crate::tab_handover::TabState;
+use teamcraft_client_api::app_link::{AppLink, AppLinkStep, next_step};
 use teamcraft_client_api::remote::LinkRequestView;
+use teamcraft_client_api::server_entry::ServerOrigin;
 use teamcraft_proto::{AttachmentId, MeetingId};
 
 /// Where an area shows: how its placeholder and its error sit in the page.
@@ -268,6 +270,20 @@ pub fn message_sound(
   sound: teamcraft_client_api::message_sound::BuiltInSound,
 ) -> Result<Vec<f32>, SplitLoaderError> {
   Ok(teamcraft_media::message_sounds::synthesize(sound))
+}
+
+/// What to do with a link from outside the app (`app_link::next_step`), which names who owns a
+/// host from the Public Suffix List (`psl`: about 0.9 MB before wasm-opt, 0.26 MB gzip after).
+/// Only the desktop app receives such links, so the list loads with the first one instead of with
+/// every page (#1148). A module of its own: in `dialogs` every member's first emoji picker or
+/// profile would load it too, and it shares almost nothing with the other modules.
+#[wasm_split(links, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub fn app_link_step(
+  link: &AppLink,
+  maybe_active: Option<&ServerOrigin>,
+  is_server_locked: bool,
+) -> Result<AppLinkStep, SplitLoaderError> {
+  Ok(next_step(link, maybe_active, is_server_locked))
 }
 
 /// Reading the administration console's data (`admin_live.rs`): the lists, their details and the

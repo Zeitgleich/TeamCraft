@@ -2002,16 +2002,16 @@ runs `scripts/check-web-size.py`. The script prints uncompressed, gzip -9 and (w
 module is installed) brotli -11 sizes, the gzip delta to `main` and a guest's first visit, and lists
 the chunks that load later. The limit:
 
-| Limit                                | Value        | Above it                        |
-|--------------------------------------|--------------|---------------------------------|
-| A guest in a meeting: gzip -9 total  | 10,000,000 B | fails; warns from 95 % (9.5 MB) |
-| Signed-in first visit: gzip -9 total | 10,000,000 B | fails; warns from 95 % (9.5 MB) |
-| The call module: gzip -9             | 1,000,000 B  | fails                           |
+| Limit                                | Value        | Above it                         |
+|--------------------------------------|--------------|----------------------------------|
+| A guest in a meeting: gzip -9 total  | 6,800,000 B  | fails; warns from 95 % (6.46 MB) |
+| Signed-in first visit: gzip -9 total | 6,200,000 B  | fails; warns from 95 % (5.89 MB) |
+| The call module: gzip -9             | 1,000,000 B  | fails                            |
 
-Both budgets are temporarily 10 MB, until #1148 brings them back down; before that they were 5.7 and
-5.2 MB. The rest of this paragraph describes those.
-
-The guest budget is the guest's meeting measured below plus about 4 %, the signed-in ceiling the
+Both budgets are the sizes measured below (#1148) plus about 6 %, so they warn only after real
+growth. For a while they were 10 MB, because the guest's meeting had reached its budget of the time
+(5.7 MB) and blocked unrelated pull requests; at 10 MB the check caught nothing. Before that the
+guest budget was the guest's meeting of 2026-10-31 plus about 4 %, the signed-in ceiling the
 signed-in first visit on `main` 8d653d3c plus about 10 %. The single budget before (4,700,000 B,
 the signed-in first visit on `main` c55b2e58 plus about 10 %) only counted what a guest's lobby and a
 member's first screen load; a guest who was let in then loaded the whole signed-in app, uncounted. gzip -9 is the measure
@@ -2020,6 +2020,43 @@ information. The uncompressed size is printed but not limited: what a user waits
 transfer. The earlier growth ratchet on it (11.85 MB) was dropped with the split (#334): main had
 outgrown it anyway, and the split moves code between files without changing what matters. Raising
 the budget is a decision, not a fix.
+
+#### Back down from 10 MB (#1148, 2026-11-07)
+
+While the budgets stood at 10 MB, a guest's meeting grew from 5.69 MB (CI, when they were raised) to
+6.69 MB and a signed-in first visit from 5.06 to 6.12 MB; most of it is the app, which every page
+loads (3.3 MB gzip). By the split's own list of what goes where (`wasm_split_cli_support` with
+`verbose` and tracing at `TRACE`, function bodies before wasm-opt), the largest single part of the
+app that neither a guest nor a member's first screen uses was the Public Suffix List (`psl`,
+0.92 MB of the app's 9.2 MB of code): `app_link::next_step` names the owner of a host with it when a
+link from outside the app asks before opening another instance (#1190). Only the desktop app
+receives such links, but `AppLinks` is set up on every page, so the list was linked into the app.
+That decision now runs through `areas::app_link_step`, in a module of its own (`links`, loaded
+with the first such link): in `dialogs`, every member's first emoji picker or profile would have
+loaded it too. It shares almost nothing with the other modules, so it adds two files, not new
+combinations of shared chunks.
+
+Release `trunk build` on macOS (trunk 0.22.0, wasm-opt 131, the CI job's commands), `main`
+e978c1ef, gzip -9:
+
+| Download                                      | Before      | After       | Delta      |
+|-----------------------------------------------|-------------|-------------|------------|
+| A guest in a meeting (lobby, meeting, calls)  | 6,693,694 B | 6,430,159 B | −263,535 B |
+| Signed-in first visit                         | 6,124,592 B | 5,861,242 B | −263,350 B |
+| The app (in both)                             | 3,299,902 B | 3,036,323 B | −263,579 B |
+| `links` (with the first link from outside)    | –           | 264,157 B   |            |
+
+Still in a guest's download, and the next candidates (#1148's follow-up):
+
+- **The client engine in the app** (`teamcraft_core::client` 1.5 MB, `teamcraft_client_api::remote`
+  0.73 MB, `teamcraft_proto::api` 0.5 MB before wasm-opt): a guest uses the meeting chat's part of
+  it, but all of it is in the lobby. Splitting it means splitting the engine's own types, not views.
+- **The translations** (both languages, 0.56 MB of Fluent text, in the app's data, which the split
+  doesn't divide): the admin console's alone are 0.13 MB.
+- **The image codecs `image_dimensions` reads headers with** (0.11 MB before wasm-opt), still in the
+  app since 1.0.8.
+- **What the `calls` module brings that a guest may not use**: it also holds the "add to call"
+  dialog; the shared chunks `calls` imports and `guest` doesn't are 0.16 MB gzip.
 
 #### A guest's meeting (2026-10-31)
 
@@ -2058,7 +2095,8 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
   sounds (`sounds`, #800), with the first sound, the administration console's data layer (with the
   console, `admin`), a conversation's huddle bar (`calls`), and the formatting toolbar, the emoji
   picker, the date pills' menu, the prompt of a device asking to be linked, the desktop app's update
-  banner and the "open in another tab" page (`dialogs`; below). `lazy_area` shows a spinner when a
+  banner and the "open in another tab" page (`dialogs`; below); since 1.0.25 the decision about a
+  link from outside the desktop app, with the Public Suffix List (`links`, #1148). `lazy_area` shows a spinner when a
   chunk takes a moment and an error with a retry when it can't load.
 - Code several modules share goes into shared chunks (one per combination of modules), so each file
   is downloaded once.

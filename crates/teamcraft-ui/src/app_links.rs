@@ -10,7 +10,7 @@
 //! host when it is built), so it offers the scheme form and leaves the choice to the reader.
 
 use leptos::prelude::*;
-use teamcraft_client_api::app_link::{AppLink, AppLinkStep, AppLinkTarget, next_step, parse_app_link};
+use teamcraft_client_api::app_link::{AppLink, AppLinkStep, AppLinkTarget, parse_app_link};
 use teamcraft_client_api::remote::DEEP_LINK_EVENT;
 use teamcraft_client_api::server_entry::{HttpPolicy, ServerOrigin};
 
@@ -105,7 +105,17 @@ impl AppLinks {
       ),
       Err(_) => (None, true),
     };
-    match next_step(&link, maybe_active.as_ref(), is_locked) {
+    // The decision names who owns a host from the Public Suffix List, a large part of the app that
+    // only these links need: it loads with the first one (`areas::app_link_step`).
+    let step = match crate::areas::app_link_step(&link, maybe_active.as_ref(), is_locked).await {
+      Ok(step) => step,
+      // Dropped like a link arriving while a question is open: a real one can be opened again.
+      Err(error) => {
+        tracing::warn!(%error, "could not load what decides about a link from outside the app");
+        return;
+      },
+    };
+    match step {
       AppLinkStep::Navigate => self.maybe_place.set_if_alive(place_of(&link)),
       AppLinkStep::AskForeignServer {
         host,
