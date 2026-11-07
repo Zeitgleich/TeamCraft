@@ -162,6 +162,8 @@ struct State {
   failing_workspace_log: Option<WorkspaceLogFailure>,
   /// Reads of role logs of these channels answer 503.
   failing_role_logs: HashSet<ConversationId>,
+  /// Per reader and channel, the last role log version the server shows them: a withheld entry.
+  withheld_role_logs: HashMap<(UserId, ConversationId), u64>,
   role_log_reads: HashMap<ConversationId, usize>,
   /// The next append to a role log answers 409, as if another admin got there first.
   is_next_role_append_in_conflict: bool,
@@ -723,6 +725,15 @@ impl FakeServer {
     } else {
       state.failing_role_logs.remove(&conversation);
     }
+  }
+
+  /// Shows `reader` the channel's role log only up to `last_shown`, as a server holding back a
+  /// demotion from them would (e2ee.md §4.6.3).
+  pub fn withhold_role_log(&self, reader: UserId, conversation: ConversationId, last_shown: u64) {
+    self
+      .lock()
+      .withheld_role_logs
+      .insert((reader, conversation), last_shown);
   }
 
   /// The next append to a role log answers 409, as if another admin got there first.
@@ -5286,15 +5297,20 @@ impl ServerApi for FakeServerApi {
           has_more: false,
         });
       }
-      let entry = state.actor_conversation_mut(conversation, me)?;
       let limit = query
         .maybe_limit
         .map_or(PAGE_SIZE, |limit| limit as usize)
         .clamp(1, PAGE_SIZE);
+      let last_shown = state
+        .withheld_role_logs
+        .get(&(me, conversation))
+        .copied()
+        .unwrap_or(u64::MAX);
+      let entry = state.actor_conversation_mut(conversation, me)?;
       let mut entries: Vec<_> = entry
         .role_log
         .iter()
-        .filter(|entry| entry.version > after)
+        .filter(|entry| entry.version > after && entry.version <= last_shown)
         .cloned()
         .collect();
       let has_more = entries.len() > limit;

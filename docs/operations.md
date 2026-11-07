@@ -544,6 +544,10 @@ Notes:
   `/readyz` and a login.
 - Retention deletes rows (and drops emptied partitions) permanently. A backup is the only way back,
   which is also why a backup must be deleted when the retention promise says so.
+- A restore loses the channel role entries signed after the backup, while members' devices still hold
+  them: their apps raise the alarm that the server shows different role logs, in every channel with a
+  role change since, and channel owners can't approve admins there. A workspace admin looks at each
+  channel's roles once ("Check this channel's roles" in its members section) to end it (docs/e2ee.md §4.6.3).
 
 ### S3
 

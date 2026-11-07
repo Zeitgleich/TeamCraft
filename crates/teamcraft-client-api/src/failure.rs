@@ -18,6 +18,8 @@ const CAPTIVE_PORTAL_PREFIX: &str = "captive_portal";
 const UNTRUSTED_CERTIFICATE_PREFIX: &str = "untrusted_certificate";
 /// What marks a role change the server took and this device couldn't confirm.
 const ROLE_CHANGE_NOT_CONFIRMED_PREFIX: &str = "role_change_not_confirmed";
+/// What marks an approval refused while the channel's role logs are proven to differ.
+const CHANNEL_ROLES_DISPUTED_PREFIX: &str = "channel_roles_disputed";
 /// Prefix of a system notification that could not be shown on this device: `notification_<failure>`.
 const NOTIFICATION_PREFIX: &str = "notification_";
 /// Prefix of a device link that failed ([`LinkFailure`]): `link_<failure>`.
@@ -42,6 +44,9 @@ pub enum FailureKind {
   Network,
   /// A role changed on the server, but this device can't confirm it for the channel's members.
   RoleChangeNotConfirmed,
+  /// An approval refused: signed entries prove the server shows members different role logs of
+  /// the channel, until a workspace admin's reviewed list (e2ee.md §4.6.3, D3).
+  ChannelRolesDisputed,
   /// A call could not use this device's microphone, camera or screen, or the browser lacks what
   /// calls need.
   Call(CallFailure),
@@ -355,6 +360,7 @@ impl ActionFailure {
       CAPTIVE_PORTAL_PREFIX => Some(FailureKind::CaptivePortal),
       UNTRUSTED_CERTIFICATE_PREFIX => Some(FailureKind::UntrustedCertificate),
       ROLE_CHANGE_NOT_CONFIRMED_PREFIX => Some(FailureKind::RoleChangeNotConfirmed),
+      CHANNEL_ROLES_DISPUTED_PREFIX => Some(FailureKind::ChannelRolesDisputed),
       _ => None,
     };
     if let Some(kind) = maybe_kind {
@@ -398,6 +404,7 @@ impl ActionFailure {
       FailureKind::CaptivePortal => format!("{CAPTIVE_PORTAL_PREFIX}: {}", self.detail),
       FailureKind::UntrustedCertificate => format!("{UNTRUSTED_CERTIFICATE_PREFIX}: {}", self.detail),
       FailureKind::RoleChangeNotConfirmed => format!("{ROLE_CHANGE_NOT_CONFIRMED_PREFIX}: {}", self.detail),
+      FailureKind::ChannelRolesDisputed => format!("{CHANNEL_ROLES_DISPUTED_PREFIX}: {}", self.detail),
       FailureKind::Other => self.detail.clone(),
     }
   }
@@ -438,6 +445,12 @@ mod tests {
       let failure = ActionFailure::new(FailureKind::BugReport(blocker), "problem report: nobody");
       assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
     }
+  }
+
+  #[test]
+  fn a_disputed_approval_round_trips() {
+    let failure = ActionFailure::new(FailureKind::ChannelRolesDisputed, "proven alarm");
+    assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
   }
 
   #[test]

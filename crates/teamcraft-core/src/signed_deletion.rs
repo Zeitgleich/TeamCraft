@@ -11,7 +11,9 @@
 //! - **An admin of the signed snapshot** this device accepted last, verified against the key that
 //!   snapshot names, who is still in this device's group, if that snapshot goes back to a workspace
 //!   admin's entry. A snapshot that goes back only to a founder's claim doesn't count: a member and
-//!   the server together can make one up, and that may not cost everybody's history at once.
+//!   the server together can make one up, and that may not cost everybody's history at once. And
+//!   only if somebody else signed an entry this device accepted within `channel_roles_max_age`: a
+//!   server could hold back the signer's demotion, and refusing costs only speed (e2ee.md §4.6.3).
 //!
 //! The signing device must be on its user's signed device list, which the caller checks
 //! ([`VerifiedDeletion::device`]): the certificate alone outlives a device's removal, and it has no
@@ -52,6 +54,11 @@ pub struct DeletionVerifier<'a> {
   pub clock_skew_ms: i64,
   /// This device's time.
   pub now_ms: i64,
+  /// How long ago somebody other than a channel admin who signs a deletion must have signed one of
+  /// the channel's role entries for the deletion to purge at once (e2ee.md §4.6.3, part 3).
+  pub channel_roles_max_age_ms: i64,
+  /// The newest server time this device saw; a time ahead of `now_ms` can only refuse.
+  pub newest_server_ms: i64,
 }
 
 /// What this device's MLS group says.
@@ -91,6 +98,8 @@ pub enum SignedDeletionError {
   Alarm,
   #[error("the signature doesn't verify for anybody allowed to delete this channel")]
   Unauthorized,
+  #[error("nobody but the deleting channel admin signed this channel's roles lately")]
+  NoRecentOtherSigner,
 }
 
 /// Checks a signed deletion against what this device verified.
@@ -124,9 +133,15 @@ pub fn verify_signed_deletion(
   {
     return Err(SignedDeletionError::Alarm);
   }
-  verified_by_workspace_admin(signed, &document, verifier)
-    .or_else(|| verified_by_channel_admin(signed, &document, verifier, group))
-    .ok_or(SignedDeletionError::Unauthorized)
+  if let Some(verified) = verified_by_workspace_admin(signed, &document, verifier) {
+    return Ok(verified);
+  }
+  let verified =
+    verified_by_channel_admin(signed, &document, verifier, group).ok_or(SignedDeletionError::Unauthorized)?;
+  if !is_vouched_for_lately(&verified, &document, verifier) {
+    return Err(SignedDeletionError::NoRecentOtherSigner);
+  }
+  Ok(verified)
 }
 
 /// The signed deletion of `conversation` for the group's `epoch`. Who may sign is up to the members'
@@ -213,6 +228,24 @@ fn verified_by_channel_admin(
   group.users.contains(&verified.signer).then_some(verified)
 }
 
+/// Whether somebody other than the deleting channel admin signed a role entry this device accepted
+/// within `channel_roles_max_age` (e2ee.md §4.6.3, part 3). Each device judges by itself: the end is
+/// the latest of its clock, the deletion's signing time and the newest server time it saw, so each
+/// of them being ahead can only refuse. A demotion the server holds back then purges for at most that
+/// long; past it, the deletion takes the retention.
+fn is_vouched_for_lately(
+  verified: &VerifiedDeletion,
+  document: &ChannelDeletionDocument,
+  verifier: &DeletionVerifier<'_>,
+) -> bool {
+  let end_ms = verifier
+    .now_ms
+    .max(document.signed_at_ms)
+    .max(verifier.newest_server_ms);
+  let since_ms = end_ms.saturating_sub(verifier.channel_roles_max_age_ms);
+  verifier.roles.has_other_signer_since(verified.signer, since_ms)
+}
+
 fn verified_signer(
   signed: &SignedChannelDeletion,
   document: &ChannelDeletionDocument,
@@ -253,7 +286,7 @@ mod tests {
   use teamcraft_proto::{ChannelRoleAssignment, Id, Snowflake};
 
   use super::*;
-  use crate::channel_roles::ChannelRolesHead;
+  use crate::channel_roles::{ChannelRolesHead, RecentSigner};
   use crate::workspace::{LogHeads, RosterDocument, RosterMember};
 
   const CHANNEL: i64 = 900;
@@ -262,6 +295,9 @@ mod tests {
   const MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
   const MAX_SIGNATURE_AGE_MS: i64 = 14 * 24 * 60 * 60 * 1000;
   const CLOCK_SKEW_MS: i64 = 60 * 60 * 1000;
+  const ROLES_MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+  /// Who signed the entry that made the channel admin one, in the test worlds.
+  const APPOINTER: i64 = 9;
 
   mod accepted {
     use super::*;
@@ -591,6 +627,92 @@ mod tests {
     assert!(!is_told_epoch_plausible(5, 4), "below what this device merged");
   }
 
+  /// The time limit on a channel admin's purge (e2ee.md §4.6.3, part 3): a demotion the server holds
+  /// back purges for at most `channel_roles_max_age` after somebody else last signed.
+  mod time_limit {
+    use super::*;
+
+    #[test]
+    fn somebody_elses_entry_within_the_limit_purges() {
+      let (admin, mut world) = world_with_channel_admin();
+      world.roles.recent_signers = vec![appointed_at(NOW_MS - ROLES_MAX_AGE_MS)];
+      assert!(world.verify(&admin.deletion(EPOCH)).is_ok());
+    }
+
+    /// The admin's own signature says nothing about whether they are still one.
+    #[test]
+    fn only_the_deleting_admins_own_entries_take_the_retention() {
+      let (admin, mut world) = world_with_channel_admin();
+      world.roles.recent_signers = vec![RecentSigner {
+        user_id: admin.user_id,
+        from_ms: NOW_MS,
+      }];
+      assert_eq!(
+        world.verify(&admin.deletion(EPOCH)).map(|_| ()),
+        Err(SignedDeletionError::NoRecentOtherSigner)
+      );
+    }
+
+    /// A quiet channel, or another admin away for longer than the limit.
+    #[test]
+    fn a_stale_other_signature_takes_the_retention() {
+      let (admin, mut world) = world_with_channel_admin();
+      world.roles.recent_signers = vec![appointed_at(NOW_MS - ROLES_MAX_AGE_MS - 1)];
+      assert_eq!(
+        world.verify(&admin.deletion(EPOCH)).map(|_| ()),
+        Err(SignedDeletionError::NoRecentOtherSigner)
+      );
+    }
+
+    /// A state from before signers were recorded.
+    #[test]
+    fn no_record_takes_the_retention() {
+      let (admin, mut world) = world_with_channel_admin();
+      world.roles.recent_signers.clear();
+      assert_eq!(
+        world.verify(&admin.deletion(EPOCH)).map(|_| ()),
+        Err(SignedDeletionError::NoRecentOtherSigner)
+      );
+    }
+
+    /// Each of the three times being ahead can only refuse.
+    #[test]
+    fn each_clock_ahead_refuses() {
+      let edge = appointed_at(NOW_MS - ROLES_MAX_AGE_MS);
+      let (admin, mut world) = world_with_channel_admin();
+      world.roles.recent_signers = vec![edge.clone()];
+      world.now_ms = NOW_MS + 1;
+      assert!(
+        world.verify(&admin.deletion(EPOCH)).is_err(),
+        "this device's clock"
+      );
+      let (admin, mut world) = world_with_channel_admin();
+      world.roles.recent_signers = vec![edge.clone()];
+      assert!(
+        world.verify(&admin.deletion_at(EPOCH, NOW_MS + 1)).is_err(),
+        "the deletion's signing time"
+      );
+      let (admin, mut world) = world_with_channel_admin();
+      world.roles.recent_signers = vec![edge];
+      world.newest_server_ms = NOW_MS + 1;
+      assert!(world.verify(&admin.deletion(EPOCH)).is_err(), "the server's time");
+      // A server holding its time back gains nothing.
+      let (admin, mut world) = world_with_channel_admin();
+      world.roles.recent_signers = vec![appointed_at(NOW_MS - ROLES_MAX_AGE_MS - 1)];
+      world.newest_server_ms = NOW_MS - ROLES_MAX_AGE_MS;
+      assert!(world.verify(&admin.deletion(EPOCH)).is_err());
+    }
+
+    /// A workspace admin's signature stays under the roster's window only.
+    #[test]
+    fn a_workspace_admin_needs_no_other_signer() {
+      let workspace_admin = Person::new(8);
+      let mut world = World::default();
+      world.roster_admin(&workspace_admin, RosterRole::Admin);
+      assert!(world.verify(&workspace_admin.deletion(EPOCH)).is_ok());
+    }
+  }
+
   #[test]
   fn only_an_authority_every_member_checks_may_sign() {
     assert!(!can_sign_deletion(&[]));
@@ -604,12 +726,21 @@ mod tests {
     }]));
   }
 
+  /// The record of the appointer's entry, accepted at `from_ms`.
+  fn appointed_at(from_ms: i64) -> RecentSigner {
+    RecentSigner {
+      user_id: user_id(APPOINTER),
+      from_ms,
+    }
+  }
+
   fn world_with_channel_admin() -> (Person, World) {
     let admin = Person::new(1);
     let mut world = World::default();
     world.roles.version = 1;
     world.roles.is_workspace_anchored = true;
     world.roles.assignments = vec![admin.assignment(ChannelRole::Admin)];
+    world.roles.recent_signers = vec![appointed_at(NOW_MS)];
     world.group_users = vec![admin.user_id, user_id(2)];
     (admin, world)
   }
@@ -622,6 +753,7 @@ mod tests {
     has_group: bool,
     is_channel: bool,
     now_ms: i64,
+    newest_server_ms: i64,
   }
 
   impl Default for World {
@@ -640,6 +772,7 @@ mod tests {
         has_group: true,
         is_channel: true,
         now_ms: NOW_MS,
+        newest_server_ms: i64::MIN,
       }
     }
   }
@@ -650,6 +783,7 @@ mod tests {
       world.roles.version = 1;
       world.roles.is_workspace_anchored = true;
       world.roles.assignments = vec![admin.assignment(ChannelRole::Admin)];
+      world.roles.recent_signers = like.roles.recent_signers.clone();
       world.group_users = like.group_users.clone();
       world
     }
@@ -682,6 +816,8 @@ mod tests {
           max_age_ms: MAX_SIGNATURE_AGE_MS,
           clock_skew_ms: CLOCK_SKEW_MS,
           now_ms: self.now_ms,
+          channel_roles_max_age_ms: ROLES_MAX_AGE_MS,
+          newest_server_ms: self.newest_server_ms,
         },
       )
     }

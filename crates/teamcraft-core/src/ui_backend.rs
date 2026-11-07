@@ -1281,6 +1281,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       | MessageContent::IndexSegment { .. }
       | MessageContent::IntegrationSource { .. }
       | MessageContent::Notetaker { .. }
+      | MessageContent::ChannelRolesEntry { .. }
       | MessageContent::Unknown => String::new(),
     };
     // Shown with its original author and time only from the import account (e2ee.md §4.10).

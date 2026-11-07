@@ -299,6 +299,7 @@ join-request-hint-history = Approving lets them read the earlier history too. Ev
 join-request-share-history = Also share the earlier history
 join-request-not-admin = The signed roster on this device doesn't list them as a workspace admin, so you can only decline.
 join-request-owner-not-signed = Other members wouldn't accept an admin you let in: this device can't confirm your owner role in this channel. Another channel owner or a workspace admin can approve, or set your role again. Until then you can only decline.
+join-request-roles-disputed = Members' apps show different roles for this channel, and signed entries prove it: your own role may have changed without this device being told. Approving waits until a workspace admin has checked the roles here. Until then you can only decline.
 join-request-approve = Approve
 join-request-decline = Decline
 

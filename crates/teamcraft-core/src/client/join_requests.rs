@@ -104,6 +104,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Members take in an admin's addition only from a signed channel admin (e2ee.md §4.6.1), never
     // from an owner only the server lists: read the log first, then judge by what is signed.
     self.sync_channel_roles(conversation).await?;
+    // Signed entries show the server holds something back: this owner may be demoted already
+    // (e2ee.md §4.6.3, D3). A claimed head alone doesn't refuse, or any member could block this.
+    if self.channel_role_state(conversation)?.is_alarm_proven {
+      return Err(CoreError::JoinRequestNotApprovable(
+        JoinRequestRefusal::RolesDisputed,
+      ));
+    }
     if self.verified_channel_role(conversation, self.user_id())? != ChannelRole::Admin {
       self.found_at_first_sight(conversation).await?;
     }

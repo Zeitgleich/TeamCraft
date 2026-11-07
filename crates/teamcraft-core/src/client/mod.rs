@@ -141,7 +141,7 @@ pub use sync_progress::{SyncProgressSignal, notify_sync_progress_during};
 pub use sync_trace::SyncPhase;
 use teamcraft_crypto::membership::ChangeId;
 use teamcraft_crypto::mls::{ChangeHistory, ConversationGroup, PendingCommit, StoredGroupState};
-use teamcraft_proto::{Base64Bytes, ConversationId, ConversationResponse, DeviceActivity, UserId};
+use teamcraft_proto::{Base64Bytes, ConversationId, ConversationResponse, DeviceActivity, Id, UserId};
 
 use crate::api::ServerApi;
 use crate::clock::Clock;
@@ -288,6 +288,10 @@ pub struct ClientSettings {
   /// (a server holding back a demotion gets at most this long, security review A6). Owners'
   /// clients re-sign the roster after half of it.
   pub workspace_max_age: std::time::Duration,
+  /// How recently somebody other than a channel admin who signs a channel's deletion must have
+  /// signed one of its role entries for the deletion to purge at once; otherwise it takes the
+  /// retention (e2ee.md §4.6.3, part 3). Only bounds a demotion the server holds back.
+  pub channel_roles_max_age: std::time::Duration,
   /// A token older than this, by the provider's own clock, puts nobody on the admin roster (e2ee.md
   /// §3.1.3): the most an old token can be good for on a log a server holds back.
   pub role_evidence_max_age: std::time::Duration,
@@ -509,6 +513,7 @@ impl Default for ClientSettings {
       link_previews: previews::LinkPreviewSettings::default(),
       device_add_max_rank: 3,
       workspace_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
+      channel_roles_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       role_evidence_max_age: std::time::Duration::from_secs(30 * 24 * 60 * 60),
       role_evidence_refresh: std::time::Duration::from_secs(24 * 60 * 60),
       role_report_grace: std::time::Duration::from_secs(7 * 24 * 60 * 60),
@@ -1074,6 +1079,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   pub(crate) fn now_ms(&self) -> i64 {
     self.clock.now_ms()
+  }
+
+  /// The newest server time this device saw, from its MLS cursors; `i64::MIN` before any. A limit
+  /// judged at the later of this and [`Self::now_ms`] can't be stretched by a clock running behind.
+  pub(crate) fn newest_server_ms(&self) -> i64 {
+    self
+      .sync
+      .mls_cursors
+      .values()
+      .map(|cursor| cursor.snowflake().unix_millis())
+      .max()
+      .unwrap_or(i64::MIN)
   }
 
   /// Runs `writes` as one group of store writes (issue #160): after a crash or a failed write, the

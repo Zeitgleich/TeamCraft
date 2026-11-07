@@ -125,6 +125,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       BugReportBlocker::QueueFull => "report-error-queue-full",
       BugReportBlocker::WrongConversation => "report-error-wrong-conversation",
     },
+    FailureKind::ChannelRolesDisputed => "error-channel-roles-disputed",
     FailureKind::Link(failure) => match failure {
       LinkFailure::CodeInvalid => "error-link-code-invalid",
       LinkFailure::OtherVersion => "error-link-other-version",
