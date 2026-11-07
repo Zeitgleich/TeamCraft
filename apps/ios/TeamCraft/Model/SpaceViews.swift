@@ -53,7 +53,10 @@ struct SavedItem: Decodable, Equatable, Identifiable, Sendable {
 
   let message: SavedMessage
   let conversationName: String
+  /// In the user's notes to themself: the name is empty and lists call it "Notes" (#1041).
+  var isNotesToSelf: Bool = false
 
+  var listName: String { conversationListName(conversationName, isNotesToSelf: isNotesToSelf) }
   var id: String { message.id }
 }
 

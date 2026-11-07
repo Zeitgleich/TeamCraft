@@ -532,10 +532,9 @@ impl Reads {
       results
         .hits
         .into_iter()
-        .map(|hit| SearchHitItem {
-          message: self.message_item(backend, &hit.message),
-          conversation_name: hit.conversation_name,
-          maybe_space_name: hit.maybe_space_name,
+        .map(|hit| {
+          let message = self.message_item(backend, &hit.message);
+          SearchHitItem::from_hit(hit, message)
         })
         .collect(),
     )

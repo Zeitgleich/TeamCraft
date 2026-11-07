@@ -68,14 +68,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let data = self.read(stored_account_data(self.store_ref()));
     let users = self.summaries();
     let preferences = self.mention_preferences();
-    let names: std::collections::BTreeMap<ConversationId, String> = self
+    let names: std::collections::BTreeMap<ConversationId, (String, bool)> = self
       .conversations_raw()
       .iter()
       .map(|conversation| {
-        (
-          conversation.id,
-          self.to_conversation(conversation, &users, &preferences).name,
-        )
+        let named = self.to_conversation(conversation, &users, &preferences);
+        (conversation.id, (named.name, named.is_notes_to_self))
       })
       .collect();
     data
@@ -86,9 +84,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
         let stored = all
           .iter()
           .find(|stored| stored.client_message_id == item.client_message_id)?;
+        let (conversation_name, is_notes_to_self) =
+          names.get(&item.conversation_id).cloned().unwrap_or_default();
         Some(SavedItem {
           message: self.to_message(stored, &all),
-          conversation_name: names.get(&item.conversation_id).cloned().unwrap_or_default(),
+          conversation_name,
+          is_notes_to_self,
           saved_at,
         })
       })

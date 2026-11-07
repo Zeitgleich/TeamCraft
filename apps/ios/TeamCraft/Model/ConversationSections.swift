@@ -72,7 +72,18 @@ extension ConversationItem {
   /// The name lists and titles show: the notes to self have none of their own (they are named
   /// after the other people, and there are none), so they are called "Notes" in the user's
   /// language, like the web and desktop (`notes-title`, issue #829).
-  var listName: String { isNotesToSelf ? String(localized: "notes_title") : name }
+  var listName: String { conversationListName(name, isNotesToSelf: isNotesToSelf) }
+}
+
+/// The name of a conversation as lists show it: the notes to self have an empty name of their
+/// own, so they are called "Notes" in the user's language (`notes-title`, issue #1041).
+func conversationListName(_ name: String, isNotesToSelf: Bool) -> String {
+  isNotesToSelf ? String(localized: "notes_title") : name
+}
+
+extension SearchHitItem {
+  /// The conversation name a search hit row shows (same rule as `ConversationItem.listName`).
+  var listName: String { conversationListName(conversationName, isNotesToSelf: isNotesToSelf) }
 }
 
 private func byName(_ lhs: ConversationItem, _ rhs: ConversationItem) -> Bool {

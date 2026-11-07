@@ -442,7 +442,22 @@ pub struct ReactionItem {
 pub struct SearchHitItem {
   pub message: MessageItem,
   pub conversation_name: String,
+  /// The hit is in the user's notes to themself: `conversation_name` is empty, the apps name it
+  /// in the user's language (as for [`ConversationItem::is_notes_to_self`]).
+  #[uniffi(default = false)]
+  pub is_notes_to_self: bool,
   pub maybe_space_name: Option<String>,
+}
+
+impl SearchHitItem {
+  pub(crate) fn from_hit(hit: teamcraft_client_api::search::SearchHit, message: MessageItem) -> Self {
+    Self {
+      message,
+      conversation_name: hit.conversation_name,
+      is_notes_to_self: hit.is_notes_to_self,
+      maybe_space_name: hit.maybe_space_name,
+    }
+  }
 }
 
 /// What a wake-up asks the app to do (notifications.md, "Mobile push delivery").
@@ -1387,6 +1402,21 @@ mod tests {
     let unknown = MessageItem::from_view(&message, None, false);
     assert!(!unknown.is_author_deleted);
     assert_eq!(unknown.author_name, "");
+  }
+
+  /// Issue #1041: a search hit in the notes carries the mark too (its conversation name is empty).
+  #[test]
+  fn a_search_hit_in_the_notes_is_marked() {
+    let hit = |is_notes_to_self| teamcraft_client_api::search::SearchHit {
+      message: message(),
+      conversation_name: String::new(),
+      is_notes_to_self,
+      maybe_space_name: None,
+      snippet: Vec::new(),
+    };
+    let item = |hit| SearchHitItem::from_hit(hit, MessageItem::from_view(&message(), None, false));
+    assert!(item(hit(true)).is_notes_to_self);
+    assert!(!item(hit(false)).is_notes_to_self);
   }
 
   /// Issue #829: the notes reach the apps marked as such (their name is empty).

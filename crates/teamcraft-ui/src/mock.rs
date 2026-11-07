@@ -1111,6 +1111,9 @@ impl ChatBackend for MockBackend {
           .conversation(conversation)
           .map(|found| found.name)
           .unwrap_or_default(),
+        is_notes_to_self: self
+          .conversation(conversation)
+          .is_some_and(|found| found.is_notes_to_self),
         saved_at: message.sent_at,
       })
       .collect()

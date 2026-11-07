@@ -1104,6 +1104,7 @@ mod tests {
     SearchHit {
       message: message(id, conversation, body),
       conversation_name: "design".into(),
+      is_notes_to_self: false,
       maybe_space_name: None,
       snippet: Vec::new(),
     }

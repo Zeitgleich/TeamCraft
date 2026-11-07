@@ -247,7 +247,7 @@ private struct SpaceSavedList: View {
               onOpen(item.message.conversation)
             } label: {
               VStack(alignment: .leading, spacing: 4) {
-                Text(item.conversationName).font(.caption).foregroundStyle(Theme.accent)
+                Text(item.listName).font(.caption).foregroundStyle(Theme.accent)
                 Text(item.message.body).lineLimit(3)
               }
             }

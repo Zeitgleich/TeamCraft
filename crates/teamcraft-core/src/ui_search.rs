@@ -258,6 +258,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       snippet: make_snippet(&message.body, &query.terms()),
       message,
       conversation_name: conversation.name,
+      is_notes_to_self: conversation.is_notes_to_self,
       maybe_space_name,
     })
   }

@@ -25,6 +25,14 @@ class ConversationSectionsTest {
   }
 
   @Test
+  fun aSearchHitInTheNotesIsNamedByTheNotesTitle() {
+    assertEquals("Notes", conversationListName("", isNotesToSelf = true, notesTitle = "Notes"))
+    assertEquals("general", conversationListName("general", isNotesToSelf = false, notesTitle = "Notes"))
+    assertEquals("Notes", hitLocation(null, "", true, "Notes"))
+    assertEquals("Project A › general", hitLocation("Project A", "general", false, "Notes"))
+  }
+
+  @Test
   fun archivedChannelsLeaveTheLists() {
     val archived = item("1", "old", ConversationKind.PUBLIC, space = "Project A", isFavorite = true).copy(isArchived = true)
     assertEquals(emptyList<Section>(), channelSections(listOf(archived)))

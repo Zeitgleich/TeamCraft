@@ -72,7 +72,15 @@ enum class HomeFilter {
  * The name lists show: the notes have none of their own (they are named after the other people,
  * and there are none), so they are called [notesTitle] in the user's language.
  */
-fun ConversationItem.listName(notesTitle: String): String = if (isNotesToSelf) notesTitle else name
+fun ConversationItem.listName(notesTitle: String): String = conversationListName(name, isNotesToSelf, notesTitle)
+
+/** The same rule for a plain conversation name, such as the one of a search hit (#1041). */
+fun conversationListName(name: String, isNotesToSelf: Boolean, notesTitle: String): String =
+  if (isNotesToSelf) notesTitle else name
+
+/** What a search hit row shows above the message: the space and the conversation, the notes by their title. */
+fun hitLocation(maybeSpaceName: String?, name: String, isNotesToSelf: Boolean, notesTitle: String): String =
+  listOfNotNull(maybeSpaceName, conversationListName(name, isNotesToSelf, notesTitle)).joinToString(" › ")
 
 /** DMs and group DMs live outside spaces and have their own tab. */
 val ConversationItem.isDirect: Boolean

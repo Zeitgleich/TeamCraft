@@ -92,6 +92,7 @@ impl MockBackend {
         Some(SearchHit {
           snippet: make_snippet(&message.body, &terms),
           conversation_name: info.name.clone(),
+          is_notes_to_self: info.is_notes_to_self,
           maybe_space_name,
           message,
         })

@@ -702,7 +702,7 @@ struct SearchResultsView: View {
       List(hits, id: \.message.id) { hit in
         Button { onSelect(hit) } label: {
           VStack(alignment: .leading, spacing: 2) {
-            Text(hit.conversationName).font(.caption).foregroundStyle(Theme.textMuted)
+            Text(hit.listName).font(.caption).foregroundStyle(Theme.textMuted)
             Text(verbatim: hit.message.shownAuthorName).font(.subheadline.weight(.semibold))
             Text(hit.message.body).lineLimit(3)
           }
