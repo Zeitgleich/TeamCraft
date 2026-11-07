@@ -217,6 +217,9 @@ pub struct ChannelRoleState {
   /// is valid (a fork) or junk. Without anything of its own nested.
   #[serde(rename = "before_head", default, skip_serializing_if = "Option::is_none")]
   pub maybe_before_head: Option<Box<ChannelRoleState>>,
+  /// Who signed the last accepted entry, to name both signers of a fork.
+  #[serde(rename = "head_signer", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_head_signer: Option<UserId>,
 }
 
 /// Somebody who signed an entry this device accepted. `from_ms` is the entry's signing time, capped
@@ -552,11 +555,16 @@ impl ChannelRoleState {
       if self.maybe_head_hash.as_ref() == Some(&head.hash) {
         return MessageEntry::Known;
       }
-      if !self.is_valid_beside_head(entry, verifier) {
+      let Some(other_signer) = self.signer_beside_head(entry, verifier) else {
         return MessageEntry::Ignored;
-      }
+      };
+      // Named, so whoever reviews the roles sees who signed both: a demoted admin can sign an
+      // entry on the head they were still an admin at, and that looks like a real fork.
+      let head_signer = self
+        .maybe_head_signer
+        .map_or_else(|| "unknown".to_owned(), |user| user.to_string());
       self.prove_alarm(format!(
-        "two valid entries {} of this channel's roles: the server shows members different logs",
+        "two valid entries {} of this channel's roles, signed by users {head_signer} and {other_signer}: the server shows members different logs",
         entry.version
       ));
       return MessageEntry::Fork;
@@ -602,10 +610,17 @@ impl ChannelRoleState {
         .and_then(head_of);
       match maybe_logged {
         Some(logged) if logged.hash == head.hash => {},
-        Some(_) => self.prove_alarm(format!(
-          "the log shows another entry {} of this channel's roles than a member sent in the channel",
-          head.version
-        )),
+        Some(_) => {
+          let claimed = entries
+            .iter()
+            .find(|entry| entry.version == head.version)
+            .and_then(|entry| claimed_signer(entry.signature.as_slice()).ok())
+            .map_or_else(|| "unknown".to_owned(), |user| user.to_string());
+          self.prove_alarm(format!(
+            "the log shows another entry {} of this channel's roles (claimed by user {claimed}) than a member sent in the channel",
+            head.version
+          ));
+        },
         None if is_read_to_end => self.prove_alarm(format!(
           "the log leaves out entry {} of this channel's roles, which a member sent in the channel",
           head.version
@@ -616,12 +631,37 @@ impl ChannelRoleState {
   }
 
   /// Whether somebody other than `signer` signed an entry this device accepted, counting from no
-  /// earlier than `since_ms` (e2ee.md §4.6.3, part 3).
+  /// earlier than `since_ms` (e2ee.md §4.6.3, part 3). Nobody whose role goes back to `signer`
+  /// counts: a demoted admin on a withheld branch could otherwise keep the limit open through an
+  /// account they promoted (review of #1416).
   pub fn has_other_signer_since(&self, signer: UserId, since_ms: i64) -> bool {
-    self
-      .recent_signers
-      .iter()
-      .any(|recent| recent.user_id != signer && recent.from_ms >= since_ms)
+    self.recent_signers.iter().any(|recent| {
+      recent.user_id != signer && recent.from_ms >= since_ms && !self.is_appointed_by(recent.user_id, signer)
+    })
+  }
+
+  /// Whether `user`'s role in the accepted snapshot goes back to `appointer`, directly or through
+  /// people they appointed, as this device recorded the appointments.
+  fn is_appointed_by(&self, user: UserId, appointer: UserId) -> bool {
+    let mut current = user;
+    // Each step names another person of the snapshot; more steps than that is a cycle.
+    for _ in 0..=self.appointments.len() {
+      let Some(appointment) = self
+        .appointments
+        .iter()
+        .find(|appointment| appointment.user_id == current)
+      else {
+        return false;
+      };
+      if appointment.by == appointer {
+        return true;
+      }
+      if appointment.by == current {
+        return false;
+      }
+      current = appointment.by;
+    }
+    false
   }
 
   /// On what authorities `signer` could sign the next entry now (`now_ms`: the time the roster's
@@ -850,6 +890,7 @@ impl ChannelRoleState {
     }
     outcome?;
     self.keep_before_head();
+    self.maybe_head_signer = maybe_signer.map(|(signer, _)| signer);
     if let Some((signer, _)) = maybe_signer {
       self.note_signer(signer, document.signed_at_ms.min(verifier.now_ms));
     }
@@ -1164,22 +1205,21 @@ impl ChannelRoleState {
     Ok(())
   }
 
-  /// Whether `entry`, for the version this device holds another entry of, would have been accepted
-  /// in its place. Not for a founding: the server can get a second one signed by itself.
-  fn is_valid_beside_head<D: IdentityDirectory>(
+  /// Who signed `entry`, for the version this device holds another entry of, if it would have been
+  /// accepted in its place. Not for a founding: the server can get a second one signed by itself.
+  fn signer_beside_head<D: IdentityDirectory>(
     &self,
     entry: &ChannelRoleLogEntryResponse,
     verifier: &RoleVerifier<'_, D>,
-  ) -> bool {
-    let Some(before) = &self.maybe_before_head else {
-      return false;
-    };
+  ) -> Option<UserId> {
+    let before = self.maybe_before_head.as_ref()?;
     if !before.is_signed() {
-      return false;
+      return None;
     }
     let mut other = (**before).clone();
     other.cursor = entry.version;
-    other.apply_entry(entry, verifier).is_ok()
+    other.apply_entry(entry, verifier).ok()?;
+    other.maybe_head_signer
   }
 
   fn prove_alarm(&mut self, reason: String) {
@@ -1187,13 +1227,18 @@ impl ChannelRoleState {
     self.is_alarm_proven = true;
   }
 
-  /// Keeps the state as it was before the entry being accepted, for [`Self::is_valid_beside_head`].
+  /// Keeps the state as it was before the entry being accepted, for [`Self::signer_beside_head`].
+  /// The lists the check doesn't read are set aside rather than cloned: this runs for every
+  /// accepted entry of a long log.
   fn keep_before_head(&mut self) {
-    let mut before = self.clone();
-    before.maybe_before_head = None;
-    before.unconfirmed.clear();
-    before.recent_signers.clear();
-    before.skipped_hashes.clear();
+    self.maybe_before_head = None;
+    let unconfirmed = std::mem::take(&mut self.unconfirmed);
+    let recent_signers = std::mem::take(&mut self.recent_signers);
+    let skipped_hashes = std::mem::take(&mut self.skipped_hashes);
+    let before = self.clone();
+    self.unconfirmed = unconfirmed;
+    self.recent_signers = recent_signers;
+    self.skipped_hashes = skipped_hashes;
     self.maybe_before_head = Some(Box::new(before));
   }
 
@@ -2228,6 +2273,11 @@ mod tests {
       assert!(world.apply(&mut state, bobs.clone()).is_empty());
       assert_eq!(world.take(&mut state, &demotion), MessageEntry::Fork);
       assert!(state.is_alarm_proven);
+      let alarm = state.maybe_alarm.clone().unwrap();
+      assert!(
+        alarm.contains(&alice.user_id.to_string()) && alarm.contains(&bob.user_id.to_string()),
+        "the reviewer sees who signed both: {alarm}"
+      );
       assert_eq!(state.head().unwrap().hash, entry_hash(&bobs));
       assert_eq!(state.role_of(carol.user_id), ChannelRole::Admin);
       assert_eq!(world.take(&mut state, &bobs), MessageEntry::Known);
@@ -2372,6 +2422,62 @@ mod tests {
       );
     }
 
+    /// A demoted admin on a withheld branch can't keep the purge's limit open through somebody
+    /// they appointed, directly or through others (review of #1416).
+    #[test]
+    fn signers_whose_role_goes_back_to_the_deleter_dont_count() {
+      let (alice, mallory, eve, frank, admin) = (
+        Person::new(1),
+        Person::new(2),
+        Person::new(5),
+        Person::new(6),
+        Person::new(9),
+      );
+      let world = World::new(&[&alice, &mallory, &eve, &frank], &[&admin]);
+      let mut state = ChannelRoleState::default();
+      let founding = admin.reviewed(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&mallory, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, founding).is_empty());
+      let eve_by_mallory = mallory.entry(
+        &state,
+        &[
+          (&alice, ChannelRole::Admin),
+          (&mallory, ChannelRole::Admin),
+          (&eve, ChannelRole::Admin),
+        ],
+      );
+      assert!(world.apply(&mut state, eve_by_mallory).is_empty());
+      let frank_by_eve = eve.entry(
+        &state,
+        &[
+          (&alice, ChannelRole::Admin),
+          (&mallory, ChannelRole::Admin),
+          (&eve, ChannelRole::Admin),
+          (&frank, ChannelRole::Admin),
+        ],
+      );
+      assert!(world.apply(&mut state, frank_by_eve).is_empty());
+      state.recent_signers = [&eve, &frank]
+        .iter()
+        .map(|person| RecentSigner {
+          user_id: person.user_id,
+          from_ms: NOW_MS,
+        })
+        .collect();
+      assert!(!state.has_other_signer_since(mallory.user_id, NOW_MS));
+      assert!(
+        state.has_other_signer_since(alice.user_id, NOW_MS),
+        "not Alice's appointees"
+      );
+      state.recent_signers.push(RecentSigner {
+        user_id: admin.user_id,
+        from_ms: NOW_MS,
+      });
+      assert!(state.has_other_signer_since(mallory.user_id, NOW_MS));
+    }
+
     /// The start of the purge's limit: the signer's time, never later than this device's.
     #[test]
     fn signers_are_recorded_from_their_signing_time_capped_at_this_devices() {
@@ -2385,13 +2491,18 @@ mod tests {
       );
       document.signed_at_ms = NOW_MS + 5 * DAY_MS;
       assert!(world.apply(&mut state, bob.signed(document)).is_empty());
-      assert!(state.has_other_signer_since(alice.user_id, NOW_MS - DAY_MS));
-      assert!(!state.has_other_signer_since(alice.user_id, NOW_MS - DAY_MS + 1));
       assert!(
         state.has_other_signer_since(bob.user_id, NOW_MS),
         "Alice founded it"
       );
       assert!(!state.has_other_signer_since(bob.user_id, NOW_MS + 1));
+      // Somebody else deleting: Bob's entry counts from this device's clock, not his date.
+      let other = user(7);
+      state
+        .recent_signers
+        .retain(|recent| recent.user_id == bob.user_id);
+      assert!(state.has_other_signer_since(other, NOW_MS - DAY_MS));
+      assert!(!state.has_other_signer_since(other, NOW_MS - DAY_MS + 1));
     }
   }
 

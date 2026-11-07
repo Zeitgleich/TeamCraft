@@ -353,10 +353,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // travels only in the log (e2ee.md §4.6.3, "Foundings stay out").
       let is_founding = !self.channel_role_state(conversation)?.is_signed();
       match self.api.append_channel_role_log(conversation, &request).await {
-        Ok(_) => {
+        Ok(_) if is_founding => {
           self.sync_channel_roles(conversation).await?;
-          if !is_founding {
-            self.send_channel_roles_entry(conversation, &request).await?;
+          return Ok(RoleSigning::Signed);
+        },
+        // Taken here and queued for the members before the log is read again: what the log shows
+        // afterwards can neither stop the copy nor hide that it leaves the entry out (review of
+        // #1416). A failed read only means the next one compares.
+        Ok(response) => {
+          // What this device signed, not what the server says it stored; only its time is the
+          // server's, as in the log.
+          let appended = ChannelRoleLogEntryResponse {
+            version: request.expected_version + 1,
+            payload: request.payload.clone(),
+            signature: request.signature.clone(),
+            maybe_signer_device_id: Some(request.signer_device_id),
+            created_at: response.created_at,
+          };
+          self.take_channel_roles_entry(conversation, &appended)?;
+          self.send_channel_roles_entry(conversation, &appended).await?;
+          if let Err(error) = self.sync_channel_roles(conversation).await {
+            tracing::warn!(conversation_id = %conversation, %error, "could not read the channel roles after signing");
           }
           return Ok(RoleSigning::Signed);
         },
@@ -502,22 +519,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Sends the entry this device just appended to the channel's members as a hidden message, so it
-  /// reaches them even if the log leaves it out (e2ee.md §4.6.3, part 1). Through the outbox: it
-  /// goes once the device is online again. Only from inside the group, and only an entry this
-  /// device accepted itself.
+  /// reaches them even if the log leaves it out (e2ee.md §4.6.3, part 1). Through the outbox: it is
+  /// kept and goes once the device is online again. Only from inside the group; whatever the log
+  /// shows afterwards.
   async fn send_channel_roles_entry(
     &mut self,
     conversation: ConversationId,
-    request: &AppendChannelRoleLogRequest,
+    appended: &ChannelRoleLogEntryResponse,
   ) -> Result<(), CoreError> {
-    let version = request.expected_version + 1;
-    if !self.has_group(conversation)? || self.channel_role_state(conversation)?.version != version {
+    if !self.has_group(conversation)? {
       return Ok(());
     }
     let content = MessageContent::ChannelRolesEntry {
-      version,
-      payload: request.payload.clone(),
-      signature: request.signature.clone(),
+      version: appended.version,
+      payload: appended.payload.clone(),
+      signature: appended.signature.clone(),
     };
     self.enqueue(conversation, None, content)?;
     // Queued: a failure here only means it goes with the next flush.
@@ -575,14 +591,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if ahead.is_empty() {
       return Ok(());
     }
+    let mut still_open = BTreeSet::new();
     for conversation in &ahead {
       self.sync_channel_roles(*conversation).await?;
+      // A log too long for one read hasn't shown the entries members sent yet: read on next time.
+      if !self.channel_role_state(*conversation)?.unconfirmed.is_empty() {
+        still_open.insert(*conversation);
+      }
     }
     records::put_json(
       &self.store,
       Table::Workspace,
       CHANNEL_ROLES_AHEAD_KEY,
-      &BTreeSet::<ConversationId>::new(),
+      &still_open,
     )
   }
 

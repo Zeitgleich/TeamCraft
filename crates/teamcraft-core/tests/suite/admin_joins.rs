@@ -606,6 +606,39 @@ async fn a_withheld_demotion_reaches_the_former_owner_and_refuses_approvals() {
   assert!(!bob.client.has_group(channel).unwrap());
 }
 
+/// The server takes Carol's demotion of Dave and then leaves it out of the log it shows Carol
+/// herself: the copy goes to the members all the same, and her own device has the proof (review of
+/// #1416).
+#[tokio::test]
+async fn a_log_withheld_from_the_signer_stops_neither_the_copy_nor_the_alarm() {
+  let (server, mut alice, mut bob, mut carol, mut dave, channel) = setup(AdminSelfJoin::OwnerApproval).await;
+  let (carol_id, dave_id) = (carol.client.user_id(), dave.client.user_id());
+  carol
+    .client
+    .set_channel_role(channel, dave_id, ChannelRole::Admin)
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  let shown = carol.client.channel_role_state(channel).unwrap().version;
+  server.withhold_role_log(carol_id, channel, shown);
+  server.withhold_role_log(dave_id, channel, shown);
+
+  carol
+    .client
+    .set_channel_role(channel, dave_id, ChannelRole::Member)
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+  let own = carol.client.channel_role_state(channel).unwrap();
+  assert!(own.is_alarm_proven, "{:?}", own.maybe_alarm);
+  assert_eq!(own.role_of(dave_id), ChannelRole::Member);
+  assert_eq!(role_entries_in(&dave, channel), 2);
+  assert_eq!(
+    dave.client.verified_channel_role(channel, dave_id).unwrap(),
+    ChannelRole::Member
+  );
+}
+
 /// Migration: a channel from before signed roles has no signed admin. The admin the server lists
 /// approves all the same, nobody asks them for anything: their app founds the log on the way, and the
 /// other members take the add in.

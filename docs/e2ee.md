@@ -2750,6 +2750,8 @@ refusing costs only speed.
 | A signer signs two entries for one version | The same. The person who can do this holds a signing key, and it shows                                                |
 | A device offline for weeks comes back      | It reads the hidden messages, sees newer versions and reads the log. No alarm unless the log leaves them out          |
 | The server drops one message by accident   | The signer's next text message carries the head, as today, and the log has the entry                                  |
+| A demoted admin signs on their old head    | Valid against the state before the demotion, so a proven alarm, approvals refused until a workspace admin looks. Can't be told from a real fork; the alarm names both signers' user IDs, so the reviewer sees who caused it |
+| The server is restored from a backup       | Role entries after the backup are gone from the log, while devices took them: proven alarms in every channel with a role change since. A workspace admin reviews each (docs/operations.md, "Backup and restore") |
 
 **What stays undetectable.**
 
@@ -2761,8 +2763,11 @@ refusing costs only speed.
   a limit.
 - **Use inside the window.** A demoted admin with that server can purge for up to 30 days after the last signature
   by somebody else. The limit ends this; it doesn't prevent it.
-- **Other signers on the same old log.** A second admin's real role change, or a member the demoted admin promoted,
-  counts as "somebody else" (tried, below). It shows in the member list and leaves entries a later head exposes.
+- **Other signers on the same old log.** A second admin's real role change counts as "somebody else" (tried,
+  below). Somebody the demoted admin appointed, directly or through people they appointed, doesn't, as this device
+  recorded the appointments; but a colluding account another admin appointed, or one whose role somebody else set
+  again later, does, and keeps the limit open while it signs. It shows in the member list and leaves entries a
+  later head exposes.
 - **A demotion by a workspace admin who isn't in the group.** They can't send the message. The first member who
   accepts the entry doesn't send it on, so the gap of today stays for this case until a member writes.
 - **`owner_approval` outside strict channels:** merges stay as they are. Noticing is all there is.
@@ -2784,8 +2789,10 @@ Older signers' entries reach the others through the log and heads as before.
 **How it is built.**
 
 - **The message.** `MessageContent::ChannelRolesEntry` carries the entry's version, payload and signature, hidden
-  like any control message. The signer's app queues it in the outbox right after a successful append, only from
-  inside the group and only for an entry its own device then accepted. It sends none for a founding, meaning any
+  like any control message. Right after a successful append, before reading the log again, the signer's app takes
+  the entry it signed as if from a message (so it waits in `unconfirmed` there too) and queues the message in the
+  outbox, only from inside the group. What the log shows afterwards, or a failed read, stops neither: a log that
+  leaves the entry out raises the proven alarm on the signer's own device as well. It sends none for a founding, meaning any
   entry its device appended while it had accepted nothing signed: the creator's founding and a founding at first
   sight alike, since both are what a server can get signed twice.
 - **Receiving** (`ChannelRoleState::take_message_entry`) needs no network: it checks against the stored roster
@@ -2804,8 +2811,8 @@ Older signers' entries reach the others through the log and heads as before.
   nothing.
 - **Who signed lately.** `recent_signers` keeps, per signer, the latest start of an accepted entry: its
   `signed_at_ms`, capped at this device's clock when it accepted it (at most 16 signers, the most recent).
-  `verify_signed_deletion` refuses a channel admin's deletion with `NoRecentOtherSigner` unless somebody else
-  has a start at or after the end minus `channel_roles_max_age`; the end is the latest of the device's clock,
+  `verify_signed_deletion` refuses a channel admin's deletion with `NoRecentOtherSigner` unless somebody else,
+  whose role doesn't go back to the deleter through the recorded appointments, has a start at or after the end minus `channel_roles_max_age`; the end is the latest of the device's clock,
   the deletion's `signed_at_ms` and the newest server time it saw (`Client::newest_server_ms`). A state from
   before this has no record and takes the retention.
 - **The refusal.** `approve_admin_join` reads the log, then refuses with `JoinRequestRefusal::RolesDisputed`
