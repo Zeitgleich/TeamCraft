@@ -211,4 +211,10 @@
   <string name="voice_seek">Springen zu</string>
   <string name="voice_speed">Wiedergabegeschwindigkeit %1$s</string>
   <string name="voice_unplayable">Diese Sprachnachricht kann auf diesem Gerät nicht abgespielt werden.</string>
+  <string name="list_loading">Lädt</string>
+  <string name="list_failed_network">Das konnte nicht geladen werden. Prüfe deine Verbindung.</string>
+  <string name="list_failed_server">Der Server konnte das nicht laden.</string>
+  <string name="list_failed_timeout">Keine Antwort rechtzeitig erhalten.</string>
+  <string name="list_failed_other">Das konnte nicht geladen werden.</string>
+  <string name="search_incomplete">Der Verlauf wird noch synchronisiert, die Ergebnisse können unvollständig sein.</string>
 </resources>

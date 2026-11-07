@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui
 
+import de.zeitgleich.teamcraft.core.LoadFailure
 import de.zeitgleich.teamcraft.core.Message
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.MessageItem
@@ -14,6 +15,8 @@ data class ChatPreview(val sender: PreviewSender, val content: PreviewContent, v
 /** What the chat list shows: `null` conversations until the first read. */
 data class ChatListState(
   val maybeConversations: List<ConversationItem>? = null,
+  /** Set while there are no conversations and the read failed: a retry, not a spinner (#297). */
+  val maybeReadFailure: LoadFailure? = null,
   val previews: Map<String, ChatListEntry> = emptyMap(),
   /** Conversations with a call running now, and how many people are in it (issue #1352). */
   val runningCalls: Map<String, Int> = emptyMap(),

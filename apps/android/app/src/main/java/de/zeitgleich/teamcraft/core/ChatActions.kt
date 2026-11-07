@@ -138,6 +138,11 @@ object ChatActions {
 
   fun refreshCallHistory() = action("refresh_call_history") {}
 
+  /** The user pressed "Try again" on a list that could not be read ([ChatQueries.listLoad]). */
+  fun retryList(list: LoadingList) = action("retry_list") {
+    put("list", buildJsonObject { put("name", list.wire) })
+  }
+
   /** The reactions to these own messages were on screen (or jumped to): seen, on every device. */
   fun markReactionsSeen(conversation: String, messages: List<String>) = action("mark_reactions_seen") {
     put("conversation", conversation)
@@ -275,6 +280,12 @@ object ChatActions {
     }.toString()
 }
 
+/** The lists whose status the core tracks (`LoadingList`); the others are read from the store. */
+enum class LoadingList(val wire: String) {
+  CALL_HISTORY("call_history"),
+  ACTIVITY("activity"),
+}
+
 /** Builds the core's `ChatQuery` messages (tagged by `kind`). */
 object ChatQueries {
   fun messageExtras(conversation: String, messages: List<String>) = query("message_extras") {
@@ -293,6 +304,11 @@ object ChatQueries {
   }
 
   fun followedThreads() = query("followed_threads") {}
+
+  /** How far a list is (`ListLoad`): loading, ready or failed. */
+  fun listLoad(list: LoadingList) = query("list_load") {
+    put("list", buildJsonObject { put("name", list.wire) })
+  }
 
   fun pinned(conversation: String) = query("pinned_messages") { put("conversation", conversation) }
 

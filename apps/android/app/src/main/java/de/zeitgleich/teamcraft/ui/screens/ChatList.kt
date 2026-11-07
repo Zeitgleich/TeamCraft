@@ -122,6 +122,8 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ExpiringGuest
+import de.zeitgleich.teamcraft.core.LoadFailure
+import de.zeitgleich.teamcraft.ui.ListPhase
 import de.zeitgleich.teamcraft.ui.ChatListEntry
 import de.zeitgleich.teamcraft.ui.ChatPreview
 import de.zeitgleich.teamcraft.ui.MainViewModel
@@ -175,6 +177,7 @@ fun ChatListScreen(
   maybeSelectedId: String? = null,
 ) {
   val kept by viewModel.chatList.collectAsState()
+  val scope = rememberCoroutineScope()
   val conversations = kept.maybeConversations
   val previews = kept.previews
   // Admins' requests to join channels the user owns: on top of Activity and on its badge.
@@ -237,6 +240,12 @@ fun ChatListScreen(
     tab = tab,
     onTab = { tab = it },
     maybeConversations = loaded,
+    isSyncing = maybeFirstSync != null,
+    maybeReadFailure = kept.maybeReadFailure,
+    onRetry = {
+      viewModel.retryChatList()
+      scope.launch { viewModel.refreshChatList(accountUserId) }
+    },
     list = ListState(
       previews = previews,
       runningCalls = kept.runningCalls,
@@ -324,6 +333,11 @@ internal fun MainScaffold(
   onAccount: () -> Unit,
   onNavigate: (String) -> Unit,
   banners: @Composable () -> Unit = {},
+  /** The first sync is running: an empty list is not known to be empty yet (#297). */
+  isSyncing: Boolean = false,
+  /** Set when there are no conversations and reading them failed. */
+  maybeReadFailure: LoadFailure? = null,
+  onRetry: () -> Unit = {},
   /** Guests browse no channels (as on desktop); the Spaces tab lists only their own. */
   isGuest: Boolean = false,
   /** Admins' requests waiting for the user's decision: counted on Activity, shown on top of it. */
@@ -362,10 +376,14 @@ internal fun MainScaffold(
     Column(Modifier.fillMaxSize().padding(padding)) {
       banners()
       when {
+        maybeConversations == null && maybeReadFailure != null ->
+          ListFailed(ListPhase.Failed(maybeReadFailure), onRetry)
         maybeConversations == null -> LoadingScreen()
+        // Nothing yet while the first sync brings the conversations: not "no conversations".
+        maybeConversations.isEmpty() && isSyncing && shownTab != ChatTab.Activity -> ListSkeleton()
         isList && shownTab == ChatTab.Home -> ListTab(maybeConversations, list, homeList, onNavigate, canBrowse = !isGuest)
         shownTab == ChatTab.Home -> HomeTab(maybeConversations, list, homeList, onNavigate)
-        shownTab == ChatTab.Activity -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests, guestNoticeCount, guestNotices)
+        shownTab == ChatTab.Activity -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests, guestNoticeCount, guestNotices, isSyncing)
         else -> SpacesTab(maybeConversations, list, onNavigate, canBrowse = !isGuest)
       }
     }
@@ -487,6 +505,7 @@ private fun ActivityTab(
   joinRequests: @Composable () -> Unit,
   guestNoticeCount: Int,
   guestNotices: @Composable () -> Unit,
+  isSyncing: Boolean,
 ) {
   val waiting = activityConversations(conversations, list.lastActivity)
   Column(Modifier.fillMaxSize()) {
@@ -497,7 +516,9 @@ private fun ActivityTab(
     EntryRow(Icons.Filled.DateRange, stringResource(R.string.home_entry_scheduled)) { onNavigate("scheduled") }
     EntryRow(Icons.Filled.DateRange, stringResource(R.string.home_entry_meetings)) { onNavigate("meetings") }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-    if (waiting.isEmpty() && joinRequestCount == 0 && guestNoticeCount == 0) {
+    if (waiting.isEmpty() && joinRequestCount == 0 && guestNoticeCount == 0 && isSyncing) {
+      ListSkeleton()
+    } else if (waiting.isEmpty() && joinRequestCount == 0 && guestNoticeCount == 0) {
       RemainingEmptyState(
         icon = Icons.Filled.Done,
         title = stringResource(R.string.activity_empty_title),

@@ -217,4 +217,10 @@
   <string name="voice_seek">Move to</string>
   <string name="voice_speed">Playback speed %1$s</string>
   <string name="voice_unplayable">This voice message can\'t be played on this device.</string>
+  <string name="list_loading">Loading</string>
+  <string name="list_failed_network">Couldn\'t load this. Check your connection.</string>
+  <string name="list_failed_server">The server couldn\'t load this.</string>
+  <string name="list_failed_timeout">No answer came in time.</string>
+  <string name="list_failed_other">Couldn\'t load this.</string>
+  <string name="search_incomplete">History is still syncing, so results may be incomplete.</string>
 </resources>
