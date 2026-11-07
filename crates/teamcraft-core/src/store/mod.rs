@@ -335,6 +335,14 @@ pub enum MessageContent {
   Notetaker {
     request: teamcraft_proto::NotetakerRequest,
   },
+  /// A signed entry of the channel's role log, sent by its signer right after the append (e2ee.md
+  /// §4.6.3, part 1): it applies even if the log leaves it out, and a log that does is proof the
+  /// server holds it back. Checked like an entry of the log; the sender vouches for nothing.
+  ChannelRolesEntry {
+    version: u64,
+    payload: teamcraft_proto::Base64Bytes,
+    signature: teamcraft_proto::Base64Bytes,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -1402,6 +1410,7 @@ impl StoredMessage {
           | MessageContent::IndexSegment { .. }
           | MessageContent::IntegrationSource { .. }
           | MessageContent::Notetaker { .. }
+          | MessageContent::ChannelRolesEntry { .. }
       ),
     }
   }

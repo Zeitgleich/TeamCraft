@@ -46,7 +46,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       &workspace,
       is_roster_fresh,
       |conversation| channels.contains_key(&conversation),
-      |conversation| self.may_approve_as_owner(conversation, channels.get(&conversation)),
+      |conversation| self.approval_of(conversation, channels.get(&conversation)),
     )
   }
 
@@ -61,11 +61,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
-  /// Whether the channel's signed roles make this user an admin, the only case in which members take
-  /// in the admin they approve (e2ee.md §4.6.1); or nothing is signed here as far as this device knows
-  /// and the server lists them its admin: approving founds the log if it can, and every member may
-  /// add on such a channel.
-  fn may_approve_as_owner(&self, conversation: ConversationId, maybe_listed: Option<&ChannelRole>) -> bool {
+  /// Whether this user may approve as the channel's owner. Only if its signed roles make them an
+  /// admin, the only case in which members take in the admin they approve (e2ee.md §4.6.1); or
+  /// nothing is signed here as far as this device knows and the server lists them its admin:
+  /// approving founds the log if it can, and every member may add on such a channel. Never while
+  /// signed entries prove the server shows members different logs (e2ee.md §4.6.3, D3).
+  fn approval_of(&self, conversation: ConversationId, maybe_listed: Option<&ChannelRole>) -> Approval {
     let state: crate::channel_roles::ChannelRoleState = self.read(
       records::get_json(
         self.store_ref(),
@@ -74,8 +75,15 @@ impl<S: LocalStore> CoreChatBackend<S> {
       )
       .map(Option::unwrap_or_default),
     );
-    state.role_of(self.me_id()) == ChannelRole::Admin
+    if state.is_alarm_proven {
+      Approval::RolesDisputed
+    } else if state.role_of(self.me_id()) == ChannelRole::Admin
       || (state.may_act_as_unsigned() && maybe_listed == Some(&ChannelRole::Admin))
+    {
+      Approval::Allowed
+    } else {
+      Approval::OwnerRoleNotSigned
+    }
   }
 
   fn verified_workspace(&self) -> WorkspaceState {
@@ -86,9 +94,17 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 }
 
+/// Whether approving would work for this user in a channel, and if not, why.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Approval {
+  Allowed,
+  OwnerRoleNotSigned,
+  RolesDisputed,
+}
+
 /// The requests of others (the server lists the user's own too) for conversations
 /// `is_my_private_channel` accepts (private, unarchived channels the user is in), each with what
-/// the owner may do (`may_approve`: whether approving would work for this user in that channel).
+/// the owner may do (`approval`: whether approving would work for this user in that channel).
 /// None while the verified policy doesn't ask for an owner's approval: then they
 /// are moot, and the server closes them anyway.
 pub fn requests_to_decide(
@@ -97,7 +113,7 @@ pub fn requests_to_decide(
   workspace: &WorkspaceState,
   is_roster_fresh: bool,
   is_my_private_channel: impl Fn(ConversationId) -> bool,
-  may_approve: impl Fn(ConversationId) -> bool,
+  approval: impl Fn(ConversationId) -> Approval,
 ) -> Vec<JoinRequest> {
   if workspace.policy.admin_self_join != AdminSelfJoin::OwnerApproval {
     return Vec::new();
@@ -114,10 +130,12 @@ pub fn requests_to_decide(
       expires_at: request.expires_at.0,
       standing: if !is_roster_fresh || !workspace.is_admin(request.user.id) {
         JoinRequestStanding::NotAnAdmin
-      } else if may_approve(request.conversation_id) {
-        JoinRequestStanding::Approvable
       } else {
-        JoinRequestStanding::OwnerRoleNotSigned
+        match approval(request.conversation_id) {
+          Approval::Allowed => JoinRequestStanding::Approvable,
+          Approval::OwnerRoleNotSigned => JoinRequestStanding::OwnerRoleNotSigned,
+          Approval::RolesDisputed => JoinRequestStanding::RolesDisputed,
+        }
       },
     })
     .collect()
@@ -207,9 +225,24 @@ mod tests {
       &workspace(AdminSelfJoin::OwnerApproval),
       true,
       |id| id == conversation(CHANNEL),
-      |_| false,
+      |_| Approval::OwnerRoleNotSigned,
     );
     assert_eq!(shown[0].standing, JoinRequestStanding::OwnerRoleNotSigned);
+  }
+
+  /// Signed entries prove the server shows members different role logs: the owner may have been
+  /// demoted without being told (e2ee.md §4.6.3, D3).
+  #[test]
+  fn a_proven_alarm_only_allows_declining() {
+    let shown = requests_to_decide(
+      user(ME),
+      &[request(ADMIN, CHANNEL)],
+      &workspace(AdminSelfJoin::OwnerApproval),
+      true,
+      |id| id == conversation(CHANNEL),
+      |_| Approval::RolesDisputed,
+    );
+    assert_eq!(shown[0].standing, JoinRequestStanding::RolesDisputed);
   }
 
   /// [`requests_to_decide`] for `me`, where only [`CHANNEL`] is one of the user's private channels.
@@ -225,7 +258,7 @@ mod tests {
       &workspace(self_join),
       is_roster_fresh,
       |id| id == conversation(CHANNEL),
-      |_| true,
+      |_| Approval::Allowed,
     )
   }
 

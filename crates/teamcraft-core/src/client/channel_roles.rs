@@ -13,12 +13,13 @@ use teamcraft_proto::{
 use super::Client;
 use crate::api::ServerApi;
 use crate::channel_roles::{
-  ChannelRoleState, ChannelRolesHead, CheckedRoleKey, RoleKeyEvidence, RoleKeyStanding, RoleVerifier,
-  SignerAuthority,
+  ChannelRoleState, ChannelRolesHead, CheckedRoleKey, MessageEntry, RoleKeyEvidence, RoleKeyStanding,
+  RoleVerifier, SignerAuthority,
 };
 use crate::error::CoreError;
 use crate::records;
-use crate::store::{LocalStore, Table};
+use crate::store::{LocalStore, MessageContent, Table};
+use crate::trust::PinnedDirectory;
 
 /// Where a channel's verified roles are kept, in [`Table::Workspace`].
 const CHANNEL_ROLES_KEY_PREFIX: &str = "channel_roles/";
@@ -142,12 +143,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     state.prepare_read();
     // Before the read, so an entry that arrives while it runs isn't judged by a newer roster.
     let roster_at_read = self.workspace()?.roster.version;
-    let (entries, is_read_to_end) = match self.fetch_role_log(conversation, state.cursor).await {
+    let (entries, is_read_to_end) = match self.fetch_role_log(conversation, state.log_read_from()).await {
       Ok(read) => read,
       Err(CoreError::Api(error)) if error.is_not_found() || error.is_forbidden() => return Ok(()),
       Err(error) => return Err(error),
     };
-    if !entries.is_empty() {
+    // Entries members sent in the channel: the log must show the same (e2ee.md §4.6.3).
+    state.compare_log(&entries, is_read_to_end);
+    if entries.iter().any(|entry| entry.version > state.cursor) {
       // Entries are judged against the newest roster the server shows, with its history. A failed
       // read leaves them unread, to be judged next time: judged on an old roster they would be
       // refused for good, and could end up as a stretch only a workspace admin can end.
@@ -346,9 +349,32 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let Some(request) = maybe_request else {
         return Ok(RoleSigning::Unsigned);
       };
+      // A founding is no role change, and a server can get a second one signed by itself: it
+      // travels only in the log (e2ee.md §4.6.3, "Foundings stay out").
+      let is_founding = !self.channel_role_state(conversation)?.is_signed();
       match self.api.append_channel_role_log(conversation, &request).await {
-        Ok(_) => {
+        Ok(_) if is_founding => {
           self.sync_channel_roles(conversation).await?;
+          return Ok(RoleSigning::Signed);
+        },
+        // Taken here and queued for the members before the log is read again: what the log shows
+        // afterwards can neither stop the copy nor hide that it leaves the entry out (review of
+        // #1416). A failed read only means the next one compares.
+        Ok(response) => {
+          // What this device signed, not what the server says it stored; only its time is the
+          // server's, as in the log.
+          let appended = ChannelRoleLogEntryResponse {
+            version: request.expected_version + 1,
+            payload: request.payload.clone(),
+            signature: request.signature.clone(),
+            maybe_signer_device_id: Some(request.signer_device_id),
+            created_at: response.created_at,
+          };
+          self.take_channel_roles_entry(conversation, &appended)?;
+          self.send_channel_roles_entry(conversation, &appended).await?;
+          if let Err(error) = self.sync_channel_roles(conversation).await {
+            tracing::warn!(conversation_id = %conversation, %error, "could not read the channel roles after signing");
+          }
           return Ok(RoleSigning::Signed);
         },
         // What somebody reviewed isn't signed again on a log they didn't see: read it, they look.
@@ -492,6 +518,72 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// Sends the entry this device just appended to the channel's members as a hidden message, so it
+  /// reaches them even if the log leaves it out (e2ee.md §4.6.3, part 1). Through the outbox: it is
+  /// kept and goes once the device is online again. Only from inside the group; whatever the log
+  /// shows afterwards.
+  async fn send_channel_roles_entry(
+    &mut self,
+    conversation: ConversationId,
+    appended: &ChannelRoleLogEntryResponse,
+  ) -> Result<(), CoreError> {
+    if !self.has_group(conversation)? {
+      return Ok(());
+    }
+    let content = MessageContent::ChannelRolesEntry {
+      version: appended.version,
+      payload: appended.payload.clone(),
+      signature: appended.signature.clone(),
+    };
+    self.enqueue(conversation, None, content)?;
+    // Queued: a failure here only means it goes with the next flush.
+    if let Err(error) = self.flush_outbox().await {
+      tracing::debug!(conversation_id = %conversation, %error, "channel role entry queued for later");
+    }
+    Ok(())
+  }
+
+  /// Takes a role entry a member sent in the channel (e2ee.md §4.6.3, part 1), checked against the
+  /// stored roster and pins: receiving reads nothing from the server. An entry it can't verify
+  /// yet, or one it accepted, has the log read at the next upkeep, which compares the two.
+  pub(crate) fn take_channel_roles_entry(
+    &self,
+    conversation: ConversationId,
+    entry: &ChannelRoleLogEntryResponse,
+  ) -> Result<(), CoreError> {
+    let mut state = self.channel_role_state(conversation)?;
+    let workspace = self.workspace()?;
+    let pinned = PinnedDirectory::new(
+      &records::pinned_identities(&self.store)?,
+      &workspace.roster_identities(),
+    );
+    let verifier = RoleVerifier {
+      conversation,
+      workspace: &workspace,
+      roster_max_age_ms: self.roster_max_age_ms(),
+      now_ms: self.now_ms(),
+      tenure_clock_skew_ms: i64::try_from(self.settings.role_tenure_clock_skew.as_millis())
+        .unwrap_or(i64::MAX),
+      pinned: &pinned,
+    };
+    let outcome = state.take_message_entry(entry, &verifier);
+    match outcome {
+      MessageEntry::Known | MessageEntry::Ignored => return Ok(()),
+      MessageEntry::Fork => {
+        tracing::error!(conversation_id = %conversation, version = entry.version, "two valid channel role entries for one version")
+      },
+      MessageEntry::Accepted | MessageEntry::Ahead => {},
+    }
+    self.put_channel_role_state(conversation, &state)?;
+    if matches!(outcome, MessageEntry::Accepted | MessageEntry::Ahead) {
+      let mut ahead = self.channel_roles_ahead()?;
+      if ahead.insert(conversation) {
+        records::put_json(&self.store, Table::Workspace, CHANNEL_ROLES_AHEAD_KEY, &ahead)?;
+      }
+    }
+    Ok(())
+  }
+
   /// Syncs the role logs of channels where a member showed a newer head; afterwards their state
   /// says whether this device is shown less than its colleagues. One read when nothing is due.
   pub async fn check_channel_roles_heads(&mut self) -> Result<(), CoreError> {
@@ -499,14 +591,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if ahead.is_empty() {
       return Ok(());
     }
+    let mut still_open = BTreeSet::new();
     for conversation in &ahead {
       self.sync_channel_roles(*conversation).await?;
+      // A log too long for one read hasn't shown the entries members sent yet: read on next time.
+      if !self.channel_role_state(*conversation)?.unconfirmed.is_empty() {
+        still_open.insert(*conversation);
+      }
     }
     records::put_json(
       &self.store,
       Table::Workspace,
       CHANNEL_ROLES_AHEAD_KEY,
-      &BTreeSet::<ConversationId>::new(),
+      &still_open,
     )
   }
 

@@ -45,6 +45,9 @@ impl MessageContent {
       Self::Event { event } => event.heap_bytes(),
       Self::Reaction { emoji, .. } => emoji.len(),
       Self::IntegrationSource { .. } | Self::Notetaker { .. } => SMALL_PART_ALLOWANCE_BYTES,
+      Self::ChannelRolesEntry {
+        payload, signature, ..
+      } => payload.len() + signature.len(),
       Self::Delete { .. } | Self::Pin { .. } | Self::Deleted | Self::Unknown => 0,
     }
   }

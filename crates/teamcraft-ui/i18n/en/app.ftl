@@ -251,6 +251,7 @@ tab-close-hint = You can close this tab now.
 form-error-name = Enter a name.
 error-last-channel-admin = Make someone else channel admin in the channel's settings first, or delete the channel.
 error-role-change-not-confirmed = The role changed, but this device couldn't confirm it for the channel's members, so their apps don't count it yet. A workspace admin who is in this channel can.
+error-channel-roles-disputed = Not approved: members' apps show different roles for this channel, and signed entries prove it. A workspace admin can check the roles here; until then you can only decline.
 error-last-member = Nobody else is in this channel, so leaving deletes it. Choose Leave in its menu to confirm.
 error-import-in-progress = An import is running into this channel. Delete it once the import is done.
 error-space-has-hidden-channels = This space holds private channels you aren't in. Ask a workspace admin to delete it.

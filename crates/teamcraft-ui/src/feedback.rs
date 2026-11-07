@@ -119,6 +119,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
     FailureKind::UntrustedCertificate => "error-untrusted-certificate",
     FailureKind::Other => "error-generic",
     FailureKind::RoleChangeNotConfirmed => "error-role-change-not-confirmed",
+    FailureKind::ChannelRolesDisputed => "error-channel-roles-disputed",
     FailureKind::Link(failure) => match failure {
       LinkFailure::CodeInvalid => "error-link-code-invalid",
       LinkFailure::OtherVersion => "error-link-other-version",
