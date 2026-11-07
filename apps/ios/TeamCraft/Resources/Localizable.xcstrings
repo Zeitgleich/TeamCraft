@@ -1905,6 +1905,22 @@
         }
       }
     },
+    "badge_bot": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "BOT"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "BOT"
+          }
+        }
+      }
+    },
     "chat_preview_event": {
       "localizations": {
         "en": {

@@ -27,4 +27,5 @@
   <string name="no_conversations">Noch keine Unterhaltungen.</string>
   <string name="favorite_add">Zu Favoriten hinzufügen</string>
   <string name="favorite_remove">Aus Favoriten entfernen</string>
+  <string name="badge_bot">BOT</string>
 </resources>

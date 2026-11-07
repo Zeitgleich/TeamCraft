@@ -146,6 +146,8 @@ import de.zeitgleich.teamcraft.ui.toggled
 import de.zeitgleich.teamcraft.ui.selectionActions
 import de.zeitgleich.teamcraft.ui.UserAvatar
 import de.zeitgleich.teamcraft.ui.avatarColor
+import de.zeitgleich.teamcraft.ui.conversationAvatarColor
+import de.zeitgleich.teamcraft.ui.isWithBot
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import uniffi.teamcraft_ffi.FirstSyncItem
 import uniffi.teamcraft_ffi.ConversationItem
@@ -1046,6 +1048,21 @@ private fun RunningCallMark(count: Int) {
   }
 }
 
+/** The BOT marker after the name of a DM with a bot or integration account (as on web). */
+@Composable
+private fun BotBadge() {
+  Text(
+    stringResource(R.string.badge_bot),
+    modifier = Modifier
+      .padding(start = 6.dp)
+      .background(MaterialTheme.colorScheme.secondaryContainer, RoundedCornerShape(4.dp))
+      .padding(horizontal = 4.dp, vertical = 1.dp),
+    style = MaterialTheme.typography.labelSmall,
+    color = MaterialTheme.colorScheme.onSecondaryContainer,
+    maxLines = 1,
+  )
+}
+
 private val CALL_GREEN = Color(0xFF2E9E5B)
 
 @Composable
@@ -1064,6 +1081,7 @@ private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?
       fontWeight = if (isUnread) FontWeight.Bold else FontWeight.Normal,
       color = if (conversation.isMuted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
     )
+    if (conversation.isWithBot()) BotBadge()
     if (maybeSpaceName != null) {
       Text(
         maybeSpaceName,
@@ -1171,7 +1189,7 @@ internal fun ConversationAvatar(conversation: ConversationItem) {
         Modifier
           .size(AVATAR_SIZE)
           .background(
-            if (isPerson) avatarColor(conversation.maybePeerId, conversation.name) else MaterialTheme.colorScheme.surfaceVariant,
+            if (isPerson) conversationAvatarColor(conversation) else MaterialTheme.colorScheme.surfaceVariant,
             CircleShape,
           ),
         contentAlignment = Alignment.Center,

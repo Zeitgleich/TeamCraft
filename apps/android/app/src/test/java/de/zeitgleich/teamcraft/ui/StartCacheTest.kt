@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
+import uniffi.teamcraft_ffi.PeerInfo
 import uniffi.teamcraft_ffi.Presence
 
 class StartCacheTest {
@@ -76,6 +77,7 @@ class StartCacheTest {
       canPost = true,
       maybePeerPresence = Presence.AWAY,
       maybePeerId = "2",
+      maybePeer = PeerInfo(userId = "2", isBot = true, avatarHue = 2u),
       maybeDraftPreview = "draft",
     )
   }
