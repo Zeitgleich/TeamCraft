@@ -8,8 +8,8 @@ use teamcraft_proto::ClientMessageId;
 
 use crate::account_data::AccountData;
 use crate::client::draft_files::{
-  DraftFileSource, attach_draft_files, draft_file_retention_days, find_draft_file, own_draft_file,
-  remove_pending_draft_file,
+  DraftFileSource, attach_draft_files, draft_file_retention_days, find_draft_file, is_draft_file_expired,
+  own_draft_file, remove_pending_draft_file,
 };
 use crate::client::files::{PendingFile, PendingUpload, UploadPurpose, UploadRetry, UploadSource};
 use crate::client::stored_account_data;
@@ -60,7 +60,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
     maybe_thread: Option<ThreadId>,
   ) -> Vec<DraftFileItem> {
     let data = self.read(stored_account_data(self.store_ref()));
-    let can_travel = draft_file_retention_days(self.store_ref()).is_some();
+    let maybe_retention = draft_file_retention_days(self.store_ref());
+    let can_travel = maybe_retention.is_some();
+    let now = self.now_ms();
+    let is_expired = |added_at_ms: i64| is_draft_file_expired(added_at_ms, maybe_retention, now);
     let prefix = format!("{conversation}/");
     let pending = self.read(records::list_json_with_prefix::<PendingUpload>(
       self.store_ref(),
@@ -74,7 +77,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
           maybe_thread: thread,
           added_at_ms,
           ..
-        } if thread == maybe_thread => Some((added_at_ms, pending_item(upload, can_travel)?)),
+        } if thread == maybe_thread => {
+          let mut item = pending_item(upload, can_travel)?;
+          // Up and held, but kept on this device (the drafts were full): it expires the same way.
+          let is_held_up = upload
+            .files
+            .iter()
+            .any(|file| file.is_held && file.maybe_done.is_some());
+          if is_held_up && is_expired(added_at_ms) {
+            item.state = DraftFileState::Expired;
+          }
+          Some((added_at_ms, item))
+        },
         _ => None,
       })
       .collect();
@@ -85,10 +99,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
         .map(|(id, file)| {
           // The uploading device's own copy keeps a thumbnail too large to travel.
           let own = own_draft_file(self.store_ref(), id);
-          (
-            file.added_at_ms,
-            uploaded_item(id, own.as_ref().unwrap_or(&file.attachment)),
-          )
+          let mut item = uploaded_item(id, own.as_ref().unwrap_or(&file.attachment));
+          if is_expired(file.added_at_ms) {
+            item.state = DraftFileState::Expired;
+          }
+          (file.added_at_ms, item)
         }),
     );
     files.sort_by(|(a_time, a), (b_time, b)| (a_time, &a.id).cmp(&(b_time, &b.id)));
@@ -103,19 +118,22 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.command(CoreCommand::RemoveDraftFile { id: id.to_owned() });
   }
 
-  /// The pending file a message sends for a draft's file, and whether it came from the account data
-  /// (taken out of the draft on every device once the message is queued). A file still on this
-  /// device leaves the draft's uploads and continues as the message's.
+  /// Takes a file of the draft for its message. A file still on this device leaves the draft's
+  /// uploads and continues as the message's; an uploaded one comes from the account data (taken out
+  /// of the draft on every device once the message is queued), unless the server has likely
+  /// deleted it by now.
   pub(crate) fn take_draft_file(
     &self,
     data: &AccountData,
     conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
     id: &str,
-  ) -> Option<(PendingFile, bool)> {
-    let found = find_draft_file(self.store_ref(), data, conversation, id).unwrap_or_else(|error| {
-      tracing::error!(%error, "local store read failed");
-      None
-    });
+  ) -> Option<TakenDraftFile> {
+    let found =
+      find_draft_file(self.store_ref(), data, conversation, maybe_thread, id).unwrap_or_else(|error| {
+        tracing::error!(%error, "local store read failed");
+        None
+      });
     match found? {
       DraftFileSource::Pending(upload) => {
         let key = records::outbox_key(conversation, upload.client_message_id);
@@ -124,11 +142,31 @@ impl<S: LocalStore> CoreChatBackend<S> {
           return None;
         }
         // Held if it was announced as a draft's file; the message keeps it once it is up.
-        Some((upload.files.into_iter().next()?, false))
+        Some(TakenDraftFile::OnDevice(upload.files.into_iter().next()?))
       },
-      DraftFileSource::Uploaded(attachment) => Some((uploaded_file(attachment), true)),
+      DraftFileSource::Uploaded {
+        attachment,
+        added_at_ms,
+      } => {
+        let maybe_retention = draft_file_retention_days(self.store_ref());
+        if is_draft_file_expired(added_at_ms, maybe_retention, self.now_ms()) {
+          Some(TakenDraftFile::Expired)
+        } else {
+          Some(TakenDraftFile::Uploaded(uploaded_file(attachment)))
+        }
+      },
     }
   }
+}
+
+/// A draft's file as a message takes it.
+pub(crate) enum TakenDraftFile {
+  /// Still on this device: it goes up with the message.
+  OnDevice(PendingFile),
+  /// Up already, from the account data: kept as the message goes out.
+  Uploaded(PendingFile),
+  /// Up, but held so long the server has likely deleted it: not sent from the draft.
+  Expired,
 }
 
 /// An uploaded draft's file as a message's file: up already, held until the message keeps it.

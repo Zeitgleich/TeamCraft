@@ -603,6 +603,28 @@ mod drafts {
   }
 
   #[tokio::test]
+  async fn a_drafts_file_of_a_conversation_the_uploader_left_is_not_kept() {
+    let app = app!();
+    let (carol, dave) = (member("carol"), member("dave"));
+    let channel = channel_with(&app, &[&carol, &dave]).await;
+    let id = draft_file(&app, &carol, &channel).await;
+    let carol_id = user_id(&app, &carol).await;
+    let left = app
+      .delete(&carol, &format!("/conversations/{channel}/members/{carol_id}"))
+      .await;
+    assert!(left.status.is_success(), "{}", left.body);
+    assert_eq!(
+      app
+        .post(&carol, &format!("/attachments/{id}/keep"), json!({}))
+        .await
+        .error_code(),
+      "attachment_not_found",
+      "it stays held, and the sweeper removes it"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn a_file_removed_from_the_draft_is_gone_and_cant_be_kept() {
     let app = app!();
     let carol = member("carol");

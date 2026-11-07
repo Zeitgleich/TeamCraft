@@ -182,6 +182,124 @@ async fn a_send_that_overtakes_its_files_attachment_sends_the_file_once() {
   );
 }
 
+#[tokio::test]
+async fn a_file_the_server_wont_keep_yet_waits_without_holding_up_other_messages() {
+  let server = FakeServer::new();
+  server.set_draft_file_retention_days(30);
+  let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+  let mut alice = Peer::enroll_on_clock(
+    server.add_user("Alice"),
+    "Alice",
+    common::settings(),
+    Box::new(clock.clone()),
+  )
+  .await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "files")
+    .await
+    .unwrap();
+  alice
+    .client
+    .add_member(channel, bob.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  let alice_ui = backend_of(&alice);
+  alice_ui.attach_draft_files(channel, None, vec![file("held.txt", b"held")]);
+  run_commands(&mut alice, &alice_ui).await;
+  let attached = alice_ui.draft_files(channel, None);
+
+  server.fail_keeps(true);
+  alice_ui.send_message(message(channel, "with the draft's file", drafts_files(&attached)));
+  alice_ui.send_message(message(channel, "another one", vec![file("plain.txt", b"plain")]));
+  // The keep fails and backs off; the other message's file goes up and it is sent.
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let bob_ui = backend_of(&bob);
+  assert_eq!(last(&bob_ui, channel).body, "another one");
+
+  server.fail_keeps(false);
+  clock.advance(10 * 60 * 1000);
+  alice.client.upload_pending().await.unwrap();
+  alice.client.flush_outbox().await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  let received = last(&bob_ui, channel);
+  assert_eq!(received.body, "with the draft's file");
+  assert_eq!(
+    bob_ui.message_extras(channel, &[received.id])[0].files[0].file_name,
+    "held.txt"
+  );
+}
+
+#[tokio::test]
+async fn a_file_removed_while_it_goes_up_stays_removed() {
+  let (server, mut phone, _laptop, _bob, channel) = setup(Some(30)).await;
+  let phone_ui = backend_of(&phone);
+  phone_ui.attach_draft_files(channel, None, vec![file("second thoughts.txt", b"no")]);
+  let attached = phone_ui.draft_files(channel, None);
+  // The host drives the upload; the user removes the file while its blob is on the way.
+  let mut upload = phone
+    .client
+    .start_upload()
+    .await
+    .unwrap()
+    .expect("the file goes up");
+  let announced = server.attachment_ids();
+  assert_eq!(announced.len(), 1);
+  phone_ui.remove_draft_file(channel, None, &attached[0].id);
+  let sent = upload.sent().await;
+  phone.client.finish_upload(upload, sent).await.unwrap();
+  run_commands(&mut phone, &phone_ui).await;
+
+  assert!(phone_ui.draft_files(channel, None).is_empty());
+  assert!(phone.client.account_data().live_draft_files().next().is_none());
+  assert_eq!(
+    server.abandoned_attachments(),
+    announced,
+    "given up at the server"
+  );
+}
+
+#[tokio::test]
+async fn a_file_held_too_long_shows_expired_and_goes_up_again_from_where_it_was_picked() {
+  let (server, mut phone, _laptop, mut bob, channel) = setup(Some(30)).await;
+  let phone_ui = backend_of(&phone);
+  let mut picked = file("old.txt", b"from last month");
+  picked.maybe_draft_id = Some("00112233445566778899aabbccddeeff".into());
+  phone_ui.attach_draft_files(channel, None, vec![picked.clone()]);
+  run_commands(&mut phone, &phone_ui).await;
+  let first_upload = server.attachment_ids();
+
+  // A month later, by the device's clock.
+  let later = CoreChatBackend::new(
+    phone.store.clone(),
+    phone.client.user_id(),
+    Box::new(ManualClock::new(1_800_000_000_000 + 30 * 24 * 60 * 60 * 1000)),
+  );
+  assert_eq!(later.draft_files(channel, None)[0].state, DraftFileState::Expired);
+  // The composer still has the picked file: it goes up again instead of being lost.
+  later.send_message(message(channel, "still wanted", vec![picked]));
+  run_commands(&mut phone, &later).await;
+  settle(&mut [&mut phone, &mut bob]).await;
+  assert!(
+    server.kept_attachments().is_empty(),
+    "the expired one is not counted on"
+  );
+  let uploads = server.attachment_ids();
+  assert_eq!(uploads.len(), 2);
+  let resent = uploads.iter().find(|id| !first_upload.contains(id)).unwrap();
+  assert!(!server.is_held(*resent));
+  assert!(later.draft_files(channel, None).is_empty());
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  assert_eq!(
+    bob_ui.message_extras(channel, &[received.id])[0].files[0].file_name,
+    "old.txt"
+  );
+}
+
 /// Alice's phone and laptop and Bob in one channel; the server holds drafts' files for
 /// `maybe_retention_days` (`None`: an older server that holds none).
 async fn setup(maybe_retention_days: Option<u32>) -> (FakeServer, Peer, TestClient, Peer, ConversationId) {

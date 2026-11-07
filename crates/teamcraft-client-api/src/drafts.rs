@@ -54,6 +54,9 @@ pub enum DraftFileState {
   OnThisDevice,
   /// Can't go up (unreadable, too large) or gave up retrying: the user removes it.
   Failed,
+  /// Held by the server longer than it keeps drafts' files (`draft_file_retention_days`): it is
+  /// gone or about to be, and is not sent. The user attaches it again.
+  Expired,
   #[serde(other)]
   Unknown,
 }

@@ -26,6 +26,7 @@ use crate::store::{
 };
 use crate::transfers::Transfers;
 use crate::ui_backend::{CoreChatBackend, CoreCommand, RedactedText, imported_author_view, ui_message_id};
+use crate::ui_draft_files::TakenDraftFile;
 
 impl<S: LocalStore> CoreChatBackend<S> {
   /// Files attached to a message, with where their bytes are; `maybe_importer` is
@@ -185,34 +186,39 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let mut taken = Vec::new();
     let mut pending = Vec::with_capacity(files.len());
     for file in files {
-      match &file.source {
-        FileSource::Draft { id } => match self.take_draft_file(&data, conversation, id) {
-          Some((file, is_from_account)) => {
-            if is_from_account {
-              taken.push(id.clone());
-            }
-            pending.push(file);
-          },
-          // Removed on another device meanwhile: the message goes without it.
-          None => tracing::debug!(conversation_id = %conversation, "a draft's file to send is gone"),
+      let maybe_draft_id = match &file.source {
+        FileSource::Draft { id } => Some(id.clone()),
+        _ => file.maybe_draft_id.clone(),
+      };
+      let Some(id) = maybe_draft_id else {
+        pending.extend(pending_file(file));
+        continue;
+      };
+      let is_from_draft_only = matches!(file.source, FileSource::Draft { .. });
+      match self.take_draft_file(&data, conversation, maybe_thread, &id) {
+        Some(TakenDraftFile::OnDevice(taken_file)) => pending.push(taken_file),
+        Some(TakenDraftFile::Uploaded(taken_file)) => {
+          taken.push(id);
+          pending.push(taken_file);
         },
-        _ => match file.maybe_draft_id.clone() {
-          Some(id) => match self.take_draft_file(&data, conversation, &id) {
-            Some((taken_file, is_from_account)) => {
-              if is_from_account {
-                taken.push(id);
-              }
-              pending.push(taken_file);
-            },
-            // Its attachment hasn't reached the core yet: read it now, and don't attach it later.
-            None => {
-              if let Err(error) = note_sent_draft_file(self.store_ref(), &id) {
-                tracing::warn!(%error, "a sent draft's file was not noted");
-              }
-              pending.extend(pending_file(file));
-            },
-          },
-          None => pending.extend(pending_file(file)),
+        // The server's copy is gone or about to be: out of the draft, and sent from the file the
+        // app still has if it picked it here (the composer marks it otherwise, so it isn't sent).
+        Some(TakenDraftFile::Expired) => {
+          taken.push(id);
+          if !is_from_draft_only {
+            pending.extend(pending_file(file));
+          }
+        },
+        // Removed on another device meanwhile: the message goes without it.
+        None if is_from_draft_only => {
+          tracing::debug!(conversation_id = %conversation, "a draft's file to send is gone");
+        },
+        // Its attachment hasn't reached the core yet: read it now, and don't attach it later.
+        None => {
+          if let Err(error) = note_sent_draft_file(self.store_ref(), &id) {
+            tracing::warn!(%error, "a sent draft's file was not noted");
+          }
+          pending.extend(pending_file(file));
         },
       }
     }

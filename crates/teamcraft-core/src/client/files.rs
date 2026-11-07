@@ -477,7 +477,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.abandon_cancelled_uploads().await;
     let pending: Vec<PendingUpload> = records::list_json(&self.store, Table::PendingUploads)?;
     let can_hold_drafts = self.draft_file_retention_days().is_some();
-    for mut upload in pending {
+    'uploads: for mut upload in pending {
       match upload.purpose {
         // Goes up with its message, when it is sent.
         UploadPurpose::Draft { is_local: true, .. } => continue,
@@ -486,10 +486,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         UploadPurpose::Message => self.keep_held_files(&mut upload).await?,
       }
       while let Some(index) = next_due_file(&upload, self.now_ms()) {
-        match self
+        let started = self
           .start_file(upload.conversation_id, &mut upload.files[index])
-          .await
-        {
+          .await;
+        // A draft's file removed while it was being prepared stays removed (#1220).
+        if self.is_removed_draft_upload(&upload)? {
+          continue 'uploads;
+        }
+        match started {
           Ok((target, maybe_request, progress)) => {
             save_pending_upload(&self.store, &upload)?;
             return Ok(Some(BlobUpload {
@@ -563,6 +567,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         UploadStep::Failed
       },
     };
+    // A draft's file removed while its blob was confirmed stays removed (#1220).
+    if self.is_removed_draft_upload(&pending)? {
+      return Ok(UploadStep::Dropped);
+    }
     save_pending_upload(&self.store, &pending)?;
     self.complete_upload(&pending)?;
     self.remove_staged_copies(&pending);
@@ -842,7 +850,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Reads the server's attachment limit and whether it holds drafts' files again (a full sync does).
   pub(super) async fn refresh_attachment_limit(&self) -> Result<(), CoreError> {
     let me = self.api.me().await?;
-    self.store_draft_file_retention(me.maybe_draft_file_retention_days)?;
+    self.store_draft_limits(me.maybe_draft_file_retention_days, me.maybe_max_key_bag_bytes)?;
     self.store_attachment_limit(me.maybe_max_attachment_bytes)
   }
 
@@ -1030,26 +1038,65 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
+  /// Whether `upload` is a draft's file the user removed meanwhile (its record is gone). What the
+  /// server announced for it in the meantime is given up.
+  fn is_removed_draft_upload(&self, upload: &PendingUpload) -> Result<bool, CoreError> {
+    if upload.purpose.is_message()
+      || pending_upload(&self.store, upload.conversation_id, upload.client_message_id)?.is_some()
+    {
+      return Ok(false);
+    }
+    for attachment in upload
+      .files
+      .iter()
+      .filter_map(super::draft_files::file_attachment)
+    {
+      queue_abandon(&self.store, attachment)?;
+    }
+    Ok(true)
+  }
+
   /// Keeps the drafts' files of a message at the server before it goes out (#1220), so they aren't
   /// deleted with the draft later. A file the server no longer has (removed from the draft on
-  /// another device, or not sent in time) fails, and the message goes without it.
+  /// another device, or not sent in time) fails, and the message goes without it. Any other refusal
+  /// backs off on that file like a failed upload, so one message never holds up the others; only a
+  /// server out of reach (or a sign-in to renew) stops the round.
   async fn keep_held_files(&mut self, upload: &mut PendingUpload) -> Result<(), CoreError> {
+    let now = self.now_ms();
     let mut is_changed = false;
     let mut outcome = Ok(());
-    for file in upload.files.iter_mut().filter(|file| file.is_held) {
+    for file in upload
+      .files
+      .iter_mut()
+      .filter(|file| file.is_held && file.maybe_failure.is_none() && file.retry.is_due(now))
+    {
       let Some(attachment) = file.maybe_done.as_ref().map(|done| done.attachment_id) else {
         continue;
       };
       match self.api.keep_attachment(attachment).await {
-        Ok(()) => file.is_held = false,
+        Ok(()) => {
+          file.is_held = false;
+          file.retry = UploadRetry::default();
+        },
         Err(error) if is_status(&error, 404) => {
           file.is_held = false;
           file.maybe_done = None;
           file.maybe_failure = Some(TransferFailure::Missing);
         },
-        Err(error) => {
+        Err(error) if is_unreachable(&error) || error.is_sign_in_required() => {
           outcome = Err(CoreError::Api(error));
           break;
+        },
+        Err(error) => {
+          let error = CoreError::Api(error);
+          tracing::debug!(%error, "a draft's file was not kept; tried again later");
+          let maybe_server_wait = crate::retry::server_wait(&error);
+          file.retry.record_failure_after(
+            now,
+            &self.settings.upload_retry,
+            RetryCause::of(&error),
+            maybe_server_wait,
+          );
         },
       }
       is_changed = true;
@@ -1398,7 +1445,9 @@ pub fn retry_stalled_upload(
   };
   let mut has_waiting = false;
   for file in &mut upload.files {
-    if file.maybe_done.is_none() && file.maybe_failure.is_none() && file.retry.is_stalled() {
+    // A draft's file that is up but not kept stalls the same way (`keep_held_files`).
+    let is_waiting = file.maybe_done.is_none() || file.is_held;
+    if is_waiting && file.maybe_failure.is_none() && file.retry.is_stalled() {
       file.retry = UploadRetry::default();
       has_waiting = true;
     }

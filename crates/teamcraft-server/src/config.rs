@@ -1487,6 +1487,22 @@ impl Default for PolicyConfig {
   }
 }
 
+/// Longest `limits.draft_file_retention_days` taken: ten years, far beyond any useful draft.
+const MAX_DRAFT_FILE_RETENTION_DAYS: u32 = 3650;
+
+impl LimitsConfig {
+  /// Rejects limits that would delete drafts' files while they go up, or overflow a date.
+  pub fn validate(&self) -> Result<(), String> {
+    if !(1..=MAX_DRAFT_FILE_RETENTION_DAYS).contains(&self.draft_file_retention_days) {
+      return Err(format!(
+        "limits.draft_file_retention_days must be 1 to {MAX_DRAFT_FILE_RETENTION_DAYS}, is {}",
+        self.draft_file_retention_days
+      ));
+    }
+    Ok(())
+  }
+}
+
 impl Default for LimitsConfig {
   fn default() -> Self {
     Self {
@@ -1914,6 +1930,14 @@ mod tests {
       ..SecurityConfig::default()
     };
     assert!(SecurityConfig::default().validate().is_ok());
+    assert!(LimitsConfig::default().validate().is_ok());
+    for days in [0, MAX_DRAFT_FILE_RETENTION_DAYS + 1] {
+      let limits = LimitsConfig {
+        draft_file_retention_days: days,
+        ..LimitsConfig::default()
+      };
+      assert!(limits.validate().is_err(), "{days} days");
+    }
     assert!(with("https://chat.example.com:8443").validate().is_ok());
     assert!(with("chat.example.com").validate().is_err());
     assert!(with("https://chat.example.com/app").validate().is_err());

@@ -101,6 +101,14 @@ pub struct GetMeResponse {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_draft_file_retention_days: Option<u32>,
+  /// The largest key bag the server stores (`limits.max_key_bag_bytes`): clients keep what they put
+  /// into the account data (drafts' files, #1220) well below it. Absent from older servers.
+  #[serde(
+    rename = "max_key_bag_bytes",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_max_key_bag_bytes: Option<u64>,
 }
 
 #[cfg(test)]
@@ -162,6 +170,7 @@ mod tests {
       role: Role::Member,
       maybe_max_attachment_bytes: None,
       maybe_draft_file_retention_days: None,
+      maybe_max_key_bag_bytes: None,
     };
     assert_eq!(
       serde_json::to_string(&me).unwrap(),

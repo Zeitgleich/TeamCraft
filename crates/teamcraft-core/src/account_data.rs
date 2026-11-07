@@ -26,10 +26,14 @@ const DRAFT_PREVIEW_CHARS: usize = 80;
 /// Files of unsent drafts the account data carries (#1220). Each is a few hundred bytes and its
 /// thumbnail; more stay on the device they were picked on until they are sent.
 pub const MAX_DRAFT_FILES: usize = 30;
-/// Largest thumbnail of a draft's file in the account data: with [`MAX_DRAFT_FILES`] they fill at
-/// most about a quarter of the key bag (`limits.max_key_bag_bytes`, 1 MiB by default). A larger one
-/// stays on the device that made it; the others show the file without a picture.
+/// Largest thumbnail of a draft's file in the account data. A larger one stays on the device that
+/// made it; the others show the file without a picture.
 pub const MAX_DRAFT_THUMBNAIL_BYTES: usize = 6 * 1024;
+/// Share of the server's key bag limit (`limits.max_key_bag_bytes`) the drafts' files may take, so
+/// a key bag with them is never refused while keys, drafts' text and trust decisions fit.
+const DRAFT_FILES_SHARE_DIVISOR: u64 = 4;
+/// The key bag limit assumed of a server that publishes none (the server's default).
+const DEFAULT_KEY_BAG_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountData {
@@ -680,9 +684,10 @@ impl AccountData {
   }
 
   /// Adds an uploaded file to its draft; its thumbnail travels only when small enough. Returns
-  /// whether it was added: not when the drafts already carry [`MAX_DRAFT_FILES`] (the file then stays
-  /// on this device), nor when it was removed meanwhile (a tombstone that is newer).
-  pub fn add_draft_file(&mut self, id: &str, mut file: DraftFile, now_ms: i64) -> bool {
+  /// whether it was added: not when the drafts already carry [`MAX_DRAFT_FILES`] or fill their share
+  /// of the key bag ([`draft_files_budget`], the file then stays on this device), nor when it was
+  /// removed meanwhile (a tombstone that is newer).
+  pub fn add_draft_file(&mut self, id: &str, mut file: DraftFile, now_ms: i64, budget_bytes: u64) -> bool {
     if self.draft_files.get(id).is_some_and(|entry| entry.is_removed) {
       return false;
     }
@@ -697,15 +702,47 @@ impl AccountData {
     {
       file.attachment.maybe_thumbnail = None;
     }
-    self.draft_files.insert(
-      id.to_owned(),
-      Stamped {
-        value: file,
-        updated_at_ms: now_ms,
-        is_removed: false,
-      },
-    );
+    let entry = Stamped {
+      value: file,
+      updated_at_ms: now_ms,
+      is_removed: false,
+    };
+    let used = self.draft_files_bytes(Some(id));
+    if used.saturating_add(encoded_len(&entry)) > budget_bytes {
+      // Without its picture, then not at all.
+      let mut smaller = entry;
+      smaller.value.attachment.maybe_thumbnail = None;
+      if used.saturating_add(encoded_len(&smaller)) > budget_bytes {
+        return false;
+      }
+      self.draft_files.insert(id.to_owned(), smaller);
+      return true;
+    }
+    self.draft_files.insert(id.to_owned(), entry);
     true
+  }
+
+  /// Drops the thumbnails of the drafts' files, as the server refuses the key bag as too large (its
+  /// limit was lowered). Returns whether there were any.
+  pub fn shed_draft_thumbnails(&mut self, now_ms: i64) -> bool {
+    let mut is_changed = false;
+    for entry in self.draft_files.values_mut() {
+      if entry.value.attachment.maybe_thumbnail.take().is_some() {
+        entry.updated_at_ms = entry.updated_at_ms.max(now_ms);
+        is_changed = true;
+      }
+    }
+    is_changed
+  }
+
+  /// Bytes the drafts' files take in the encoded account data, tombstones included, without `except`.
+  fn draft_files_bytes(&self, maybe_except: Option<&str>) -> u64 {
+    self
+      .draft_files
+      .iter()
+      .filter(|(id, _)| maybe_except != Some(id.as_str()))
+      .map(|(id, entry)| encoded_len(entry).saturating_add(id.len() as u64))
+      .sum()
   }
 
   /// Takes a file out of its draft (removed, or sent): returns it if it was there. The tombstone
@@ -798,6 +835,16 @@ pub fn saved_key(conversation: ConversationId, message: ClientMessageId) -> Stri
     .map(|byte| format!("{byte:02x}"))
     .collect();
   format!("{conversation}/{hex}")
+}
+
+/// What the drafts' files may take of the key bag, from the limit the server published.
+pub fn draft_files_budget(maybe_key_bag_limit: Option<u64>) -> u64 {
+  maybe_key_bag_limit.unwrap_or(DEFAULT_KEY_BAG_BYTES) / DRAFT_FILES_SHARE_DIVISOR
+}
+
+/// The size of `value` as the account data encodes it.
+fn encoded_len<T: Serialize>(value: &T) -> u64 {
+  serde_json::to_vec(value).map_or(u64::MAX, |bytes| bytes.len() as u64)
 }
 
 pub fn draft_key(conversation: ConversationId, maybe_thread: Option<ThreadId>) -> String {
@@ -1201,12 +1248,43 @@ mod tests {
   mod draft_files {
     use super::*;
 
+    const BUDGET: u64 = 256 * 1024;
+
+    #[test]
+    fn the_drafts_files_stay_within_their_share_of_the_key_bag() {
+      assert_eq!(draft_files_budget(None), 256 * 1024);
+      assert_eq!(draft_files_budget(Some(64 * 1024)), 16 * 1024);
+      let mut data = AccountData::default();
+      let budget = draft_files_budget(Some(36 * 1024));
+      for (index, name) in ["first", "second"].into_iter().enumerate() {
+        let file = draft_file(id(1), index as i64, MAX_DRAFT_THUMBNAIL_BYTES);
+        assert!(data.add_draft_file(name, file, 10, budget));
+      }
+      let thumbnails = data
+        .live_draft_files()
+        .filter(|(_, file)| file.attachment.maybe_thumbnail.is_some())
+        .count();
+      assert_eq!(thumbnails, 1, "the second one travels without its picture");
+      assert!(data.draft_files_bytes(None) <= budget);
+      assert!(
+        !data.add_draft_file("none", draft_file(id(1), 3, 10), 10, 300),
+        "no room at all"
+      );
+      assert!(data.shed_draft_thumbnails(20));
+      assert!(
+        data
+          .live_draft_files()
+          .all(|(_, file)| file.attachment.maybe_thumbnail.is_none())
+      );
+      assert!(!data.shed_draft_thumbnails(30), "nothing left to drop");
+    }
+
     #[test]
     fn a_drafts_files_list_in_order_and_a_draft_of_files_only_is_a_draft() {
       let mut data = AccountData::default();
       let conversation = id(1);
-      assert!(data.add_draft_file("b", draft_file(conversation, 20, 10), 100));
-      assert!(data.add_draft_file("a", draft_file(conversation, 30, 10), 100));
+      assert!(data.add_draft_file("b", draft_file(conversation, 20, 10), 100, BUDGET));
+      assert!(data.add_draft_file("a", draft_file(conversation, 30, 10), 100, BUDGET));
       let order: Vec<&str> = data
         .draft_files(conversation, None)
         .into_iter()
@@ -1230,14 +1308,15 @@ mod tests {
     fn the_drafts_carry_a_bounded_number_of_files_and_only_small_thumbnails() {
       let mut data = AccountData::default();
       for index in 0..MAX_DRAFT_FILES {
-        assert!(data.add_draft_file(&index.to_string(), draft_file(id(1), 1, 10), 100));
+        assert!(data.add_draft_file(&index.to_string(), draft_file(id(1), 1, 10), 100, BUDGET));
       }
-      assert!(!data.add_draft_file("one more", draft_file(id(1), 1, 10), 100));
+      assert!(!data.add_draft_file("one more", draft_file(id(1), 1, 10), 100, BUDGET));
       data.take_draft_file("0", 200);
       assert!(data.add_draft_file(
         "one more",
         draft_file(id(1), 1, MAX_DRAFT_THUMBNAIL_BYTES + 1),
-        300
+        300,
+        BUDGET
       ));
       let (_, added) = data
         .draft_files(id(1), None)
@@ -1250,14 +1329,14 @@ mod tests {
     #[test]
     fn a_file_taken_out_on_one_device_stays_out_after_merging() {
       let mut phone = AccountData::default();
-      phone.add_draft_file("f", draft_file(id(1), 1, 10), 100);
+      phone.add_draft_file("f", draft_file(id(1), 1, 10), 100, BUDGET);
       let mut laptop = phone.clone();
       assert!(phone.take_draft_file("f", 200).is_some());
       assert!(phone.take_draft_file("f", 210).is_none(), "taken once");
       laptop.merge(&phone, 300);
       assert!(laptop.draft_files(id(1), None).is_empty());
       assert!(
-        !laptop.add_draft_file("f", draft_file(id(1), 1, 10), 400),
+        !laptop.add_draft_file("f", draft_file(id(1), 1, 10), 400, BUDGET),
         "a late upload doesn't bring it back"
       );
     }

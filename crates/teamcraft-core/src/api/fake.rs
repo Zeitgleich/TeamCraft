@@ -301,6 +301,8 @@ struct State {
   abandoned_attachments: Vec<AttachmentId>,
   /// Drafts' files the clients kept as they sent them, in order.
   kept_attachments: Vec<AttachmentId>,
+  /// While set, keeping a draft's file fails with a server error.
+  is_failing_keeps: bool,
   /// Uploads in parts keep only the parts' sizes, not their bytes (memory tests with large files).
   is_discarding_parts: bool,
   share_links: HashMap<String, AttachmentId>,
@@ -1804,6 +1806,11 @@ impl FakeServer {
     ids
   }
 
+  /// While set, keeping a draft's file fails with a server error (500).
+  pub fn fail_keeps(&self, is_failing: bool) {
+    self.lock().is_failing_keeps = is_failing;
+  }
+
   /// Whether the server holds the attachment as an unsent draft's file.
   pub fn is_held(&self, attachment: AttachmentId) -> bool {
     self
@@ -2170,6 +2177,7 @@ impl ServerApi for FakeServerApi {
         role: Role::Member,
         maybe_max_attachment_bytes: state.maybe_max_attachment_bytes,
         maybe_draft_file_retention_days: state.maybe_draft_file_retention_days,
+        maybe_max_key_bag_bytes: None,
       })
     })
   }
@@ -5567,6 +5575,9 @@ impl ServerApi for FakeServerApi {
 
   async fn keep_attachment(&self, attachment: AttachmentId) -> Result<(), ApiError> {
     self.with(|state, _| {
+      if state.is_failing_keeps {
+        return Err(ApiError::status(500, ErrorCode::Internal, "keeping failed"));
+      }
       let entry = state
         .attachments
         .get_mut(&attachment)

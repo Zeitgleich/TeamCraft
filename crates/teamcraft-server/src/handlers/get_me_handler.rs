@@ -27,5 +27,6 @@ pub async fn get_me_handler(
     role: caller.role,
     maybe_max_attachment_bytes: Some(state.settings.get().max_attachment_bytes),
     maybe_draft_file_retention_days: Some(state.settings.get().limits.draft_file_retention_days),
+    maybe_max_key_bag_bytes: u64::try_from(state.settings.get().limits.max_key_bag_bytes).ok(),
   }))
 }

@@ -410,10 +410,8 @@ pub fn Composer(
       .filter(|item| !gone_ids.with_value(|gone| gone.contains(&item.id)))
       .collect::<Vec<DraftFileItem>>()
   });
-  let has_files = move || {
-    !attachments.with(Vec::is_empty)
-      || other_files.with(|files| files.iter().any(|item| item.state != DraftFileState::Failed))
-  };
+  let has_files =
+    move || !attachments.with(Vec::is_empty) || other_files.with(|files| files.iter().any(is_sendable));
   let has_files_untracked = move || untrack(has_files);
 
   // Opening a conversation (or a thread) lets the user type at once, with mouse and keyboard only
@@ -537,6 +535,11 @@ pub fn Composer(
     if text.trim().is_empty() && !has_files_untracked() {
       return;
     }
+    // A file the server held too long is gone: the user decides, nothing goes out without it unsaid.
+    if other_files.with_untracked(|files| files.iter().any(|item| item.state == DraftFileState::Expired)) {
+      upload_error.set(Some(i18n.t("composer-draft-files-expired")));
+      return;
+    }
     // Slash commands run on the client; a command that sends something falls through to the send.
     if !has_files_untracked() {
       match slash::parse(&text) {
@@ -594,7 +597,7 @@ pub fn Composer(
     let others: Vec<DraftFileItem> = other_files
       .get_untracked()
       .into_iter()
-      .filter(|item| item.state != DraftFileState::Failed)
+      .filter(is_sendable)
       .collect();
     gone_ids.update_value(|gone| {
       gone.extend(local.iter().map(|file| file.draft_id.clone()));
@@ -1549,12 +1552,13 @@ pub fn Composer(
             </For>
             <For
               each=move || other_files.get()
-              key=|item| (item.id.clone(), item.state == DraftFileState::Failed, item.maybe_thumbnail.is_some())
+              key=|item| (item.id.clone(), status_key(&item.state), item.maybe_thumbnail.is_some())
               let:item
             >
               {
                 let id = item.id.clone();
-                let is_failed = item.state == DraftFileState::Failed;
+                let maybe_status = status_key(&item.state);
+                let is_failed = maybe_status.is_some();
                 let leading = match &item.maybe_thumbnail {
                   Some(bytes) => view! { <img class="chip-thumb" src=thumbnail_data_url(bytes) alt="" /> }.into_any(),
                   None => view! { <Icon name=IconName::File /> }.into_any(),
@@ -1563,7 +1567,7 @@ pub fn Composer(
                   <li class="chip" class:chip-failed=is_failed>
                     {leading}
                     <span class="chip-name">{item.file_name.clone()}</span>
-                    {is_failed.then(|| view! { <span class="chip-status">{move || i18n.t("composer-draft-file-failed")}</span> })}
+                    {maybe_status.map(|key| view! { <span class="chip-status">{move || i18n.t(key)}</span> })}
                     <button
                       class="icon-btn icon-btn-small"
                       aria-label=move || i18n.t("composer-remove-attachment")
@@ -2114,6 +2118,23 @@ fn pending_file_in_shell(file: ShellFile) -> PendingFile {
     maybe_duration_ms: None,
     draft_id: new_draft_id(),
     maybe_staged: None,
+  }
+}
+
+/// Whether a draft's file goes out with the message: not one that failed or expired.
+fn is_sendable(item: &DraftFileItem) -> bool {
+  matches!(
+    item.state,
+    DraftFileState::Ready | DraftFileState::Uploading | DraftFileState::OnThisDevice
+  )
+}
+
+/// What a draft's file's chip says about it, for one that won't go out.
+fn status_key(state: &DraftFileState) -> Option<&'static str> {
+  match state {
+    DraftFileState::Failed | DraftFileState::Unknown => Some("composer-draft-file-failed"),
+    DraftFileState::Expired => Some("composer-draft-file-expired"),
+    DraftFileState::Ready | DraftFileState::Uploading | DraftFileState::OnThisDevice => None,
   }
 }
 

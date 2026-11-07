@@ -238,12 +238,27 @@ pub async fn abandon_attachment(
 
 /// The uploader sends a file of their draft (#1220): it is no longer held for the draft and stays
 /// like any sent attachment. A file the sweeper or another device of the uploader removed meanwhile
-/// is not found; the client then sends without it and says so.
+/// is not found; the client then sends without it and says so. So is one of a conversation the
+/// uploader may no longer post in: it stays held, and the sweeper removes it with the draft.
 pub async fn keep_attachment(
   state: &AppState,
   caller: &AuthenticatedUser,
   id: AttachmentId,
 ) -> Result<(), ApiError> {
+  let maybe_conversation = state
+    .database
+    .get_attachment(id)
+    .await?
+    .filter(|attachment| attachment.maybe_uploader == Some(caller.user.id))
+    .and_then(|attachment| attachment.maybe_conversation);
+  let Some(conversation) = maybe_conversation else {
+    return Err(ApiError::attachment_not_found());
+  };
+  let access = load_conversation(state, caller, conversation)
+    .await
+    .map_err(|_| ApiError::attachment_not_found())?;
+  require(state, caller, Permission::CreatePost, &access.target())
+    .map_err(|_| ApiError::attachment_not_found())?;
   if state.database.keep_attachment(id, caller.user.id).await? {
     Ok(())
   } else {
@@ -389,9 +404,13 @@ async fn check_announcement(
 
 /// Until when a draft's file is held, for an announcement that says it is one.
 fn draft_until(state: &AppState, request: &CreateAttachmentRequest) -> Option<OffsetDateTime> {
+  // `limits.validate` keeps the days in range; a sum past the calendar holds as long as it can.
   request.is_draft.then(|| {
-    let days = state.settings.get().limits.draft_file_retention_days;
-    OffsetDateTime::now_utc() + time::Duration::days(i64::from(days))
+    let days = state.settings.get().limits.draft_file_retention_days.max(1);
+    let now = OffsetDateTime::now_utc();
+    now
+      .checked_add(time::Duration::days(i64::from(days)))
+      .unwrap_or(time::PrimitiveDateTime::MAX.assume_utc())
   })
 }
 
