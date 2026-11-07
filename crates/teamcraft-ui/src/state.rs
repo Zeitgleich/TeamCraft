@@ -276,6 +276,8 @@ pub enum Overlay {
   CallsUnavailable,
   /// The admin console's "Delete account" confirmation for this user; the console renders it.
   DeleteUser(UserId),
+  /// "Report a problem" (docs/bug-reports.md).
+  ReportProblem,
 }
 
 /// The sections of the settings dialog (PLAN.md §4 and §5, issue #327).

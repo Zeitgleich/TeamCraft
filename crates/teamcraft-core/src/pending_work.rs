@@ -1,7 +1,7 @@
-//! What still has to reach the server: messages in the outbox, files going up and queued actions
-//! (issue #158). A mobile shell asks before it lets the OS suspend the app: while anything is
-//! pending it keeps a background task (iOS) or schedules network-constrained work (Android) that
-//! runs the sync loop until the queue is empty or the OS's time is up.
+//! What still has to reach the server: messages in the outbox, files going up, queued actions
+//! (issue #158) and problem reports. A mobile shell asks before it lets the OS suspend the app:
+//! while anything is pending it keeps a background task (iOS) or schedules network-constrained
+//! work (Android) that runs the sync loop until the queue is empty or the OS's time is up.
 //!
 //! Everything counted here lives in the store, so it survives the process being killed; the next
 //! start (or the next background run) sends it, and the client message ID makes a send whose answer
@@ -23,6 +23,8 @@ pub struct PendingWork {
   pub uploads: usize,
   /// Read positions, acknowledgements, pins, presence and status changes in the queue.
   pub actions: usize,
+  /// Problem reports not yet in their conversation's outbox (docs/bug-reports.md).
+  pub reports: usize,
 }
 
 impl PendingWork {
@@ -47,6 +49,7 @@ impl PendingWork {
       sends,
       uploads,
       actions: pending_action_count(store)?,
+      reports: crate::client::bug_reports::queued_reports(store)?.len(),
     })
   }
 

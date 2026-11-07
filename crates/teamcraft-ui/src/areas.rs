@@ -57,6 +57,7 @@ use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
 use crate::components::profile_views::UserProfileDialog;
 use crate::components::quick_switcher::QuickSwitcher;
+use crate::components::report_problem::ReportProblemDialog;
 use crate::components::scheduled_view::ScheduledView;
 use crate::components::search_view::SearchView;
 use crate::components::security_ui::{
@@ -208,6 +209,8 @@ areas! {
   user_profile(user: UserId) => dialogs: view! { <UserProfileDialog user=user /> };
   new_message(_unit: ()) => dialogs: view! { <NewMessageDialog /> };
   link_device(_unit: ()) => dialogs: view! { <LinkDeviceDialog /> };
+  /// "Report a problem" (docs/bug-reports.md).
+  report_problem(_unit: ()) => dialogs: view! { <ReportProblemDialog /> };
   device_approval(_unit: ()) => dialogs: view! { <DeviceApprovalDialog /> };
   calls_unavailable(_unit: ()) => dialogs: view! { <CallsUnavailableDialog /> };
   /// Another device asking to be linked to this account, once one asks.

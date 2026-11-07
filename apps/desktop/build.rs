@@ -35,6 +35,7 @@ const COMMANDS: &[&str] = &[
   "core_retry_keychain",
   "core_status",
   "core_connection",
+  "core_recent_log",
   "core_network_changed",
   "core_enroll",
   "core_snapshot",

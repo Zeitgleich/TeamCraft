@@ -932,6 +932,19 @@ A recording stops at the maximum and waits for the user to send or discard it.
   file, so the server can't tell one apart and doesn't check. A policy signed before the setting
   reads as the defaults.
 
+### 3.10 Problem reports (issue #1362)
+
+Who receives "Report a problem" reports is part of the signed workspace policy (`bug_reports`,
+§2.3), so a hostile server can't redirect them: the owners and admins of the verified roster
+(default), or people an owner names. A report reaches them as an end-to-end encrypted group DM with
+the reporter; admins never get access to anything else through it. Details, the debug log and its
+redaction: [bug-reports.md](bug-reports.md).
+
+- **Admin UI:** Administration → Security policy → Problem reports; saving is a policy change, which
+  needs an owner (`sign_workspace`).
+- **Forwarding:** a recipient who wants the developers to look at a report writes the issue
+  themselves, leaving out what the reporter wouldn't want there. Nothing goes out automatically.
+
 ## 4. Audit log
 
 Every admin action, recovery, device change and role change is logged with actor, target and time.

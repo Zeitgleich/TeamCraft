@@ -129,6 +129,10 @@ pub enum CoreCommand {
   SendScheduledNow {
     id: ScheduledMessageId,
   },
+  /// "Report a problem" (docs/bug-reports.md): queued, then delivered to the recipients.
+  QueueBugReport {
+    report: teamcraft_client_api::bug_report::BugReport,
+  },
   SaveSearch {
     id: u64,
     name: String,
@@ -2153,6 +2157,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn send_scheduled_now(&self, id: ScheduledMessageId) {
     self.command(CoreCommand::SendScheduledNow { id });
+  }
+
+  fn send_bug_report(&self, report: teamcraft_client_api::bug_report::BugReport) {
+    self.command(CoreCommand::QueueBugReport { report });
+  }
+
+  fn bug_report_recipients(&self) -> Vec<UserId> {
+    self.read(crate::client::bug_reports::recipients(&self.store, self.me))
   }
 
   fn drafts(&self, maybe_space: Option<SpaceId>) -> Vec<teamcraft_client_api::drafts::DraftItem> {

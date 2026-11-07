@@ -7,6 +7,8 @@
 
 use teamcraft_proto::ErrorCode;
 
+use crate::bug_report::BugReportBlocker;
+
 /// Prefix of a failure that never reached the server.
 const NETWORK_PREFIX: &str = "network";
 /// Prefix of a call failure on this device ([`CallFailure`]): `call_<failure>`.
@@ -22,6 +24,8 @@ const CHANNEL_ROLES_DISPUTED_PREFIX: &str = "channel_roles_disputed";
 const NOTIFICATION_PREFIX: &str = "notification_";
 /// Prefix of a device link that failed ([`LinkFailure`]): `link_<failure>`.
 const LINK_PREFIX: &str = "link_";
+/// Prefix of a problem report that can't be queued ([`BugReportBlocker`]): `bug_report_<blocker>`.
+const BUG_REPORT_PREFIX: &str = "bug_report_";
 
 /// What went wrong and the technical detail behind it, for the "Details" of an error message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +59,8 @@ pub enum FailureKind {
   Notification(NotificationFailure),
   /// Linking a device failed ([`LinkFailure`], issue #645).
   Link(LinkFailure),
+  /// A problem report can't be queued (docs/bug-reports.md).
+  BugReport(BugReportBlocker),
   /// Anything else (local store, encryption, a stopped core).
   Other,
 }
@@ -372,6 +378,12 @@ impl ActionFailure {
     if let Some(failure) = prefix.strip_prefix(LINK_PREFIX).and_then(LinkFailure::from_wire) {
       return Self::new(FailureKind::Link(failure), detail);
     }
+    if let Some(blocker) = prefix
+      .strip_prefix(BUG_REPORT_PREFIX)
+      .and_then(BugReportBlocker::from_wire)
+    {
+      return Self::new(FailureKind::BugReport(blocker), detail);
+    }
     match ErrorCode::from(prefix.to_owned()) {
       ErrorCode::Unknown(_) => Self::other(text),
       code => Self::new(FailureKind::Server(code), detail),
@@ -388,6 +400,7 @@ impl ActionFailure {
         format!("{NOTIFICATION_PREFIX}{}: {}", failure.as_str(), self.detail)
       },
       FailureKind::Link(failure) => format!("{LINK_PREFIX}{}: {}", failure.as_str(), self.detail),
+      FailureKind::BugReport(blocker) => format!("{BUG_REPORT_PREFIX}{}: {}", blocker.as_str(), self.detail),
       FailureKind::CaptivePortal => format!("{CAPTIVE_PORTAL_PREFIX}: {}", self.detail),
       FailureKind::UntrustedCertificate => format!("{UNTRUSTED_CERTIFICATE_PREFIX}: {}", self.detail),
       FailureKind::RoleChangeNotConfirmed => format!("{ROLE_CHANGE_NOT_CONFIRMED_PREFIX}: {}", self.detail),
@@ -418,6 +431,18 @@ mod tests {
   fn link_failures_round_trip() {
     for failure in LinkFailure::ALL {
       let failure = ActionFailure::new(FailureKind::Link(failure), "device link: relay closed");
+      assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
+    }
+  }
+
+  #[test]
+  fn bug_report_failures_round_trip() {
+    for blocker in [
+      BugReportBlocker::NoRecipients,
+      BugReportBlocker::QueueFull,
+      BugReportBlocker::WrongConversation,
+    ] {
+      let failure = ActionFailure::new(FailureKind::BugReport(blocker), "problem report: nobody");
       assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
     }
   }

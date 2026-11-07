@@ -1,4 +1,5 @@
-//! Panics reach `tracing`, and so the system log (issue #1142). A file of its own: it needs the
+//! Panics reach `tracing`, and so the system log (issue #1142), with where they happened but not
+//! their message, which can carry data (docs/bug-reports.md). A file of its own: it needs the
 //! process's only subscriber and panic hook.
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
@@ -11,7 +12,7 @@ use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt as _};
 
 #[test]
-fn a_panic_on_any_thread_reaches_the_log_with_its_message_and_location() {
+fn a_panic_on_any_thread_reaches_the_log_with_its_location_but_not_its_message() {
   let lines = Lines::default();
   tracing::subscriber::set_global_default(tracing_subscriber::registry().with(lines.clone())).unwrap();
   let directory = std::env::temp_dir().join(format!("teamcraft-ffi-panic-{}", std::process::id()));
@@ -32,9 +33,11 @@ fn a_panic_on_any_thread_reaches_the_log_with_its_message_and_location() {
   let thread = std::thread::spawn(|| panic!("a bug in the sync loop"));
   assert!(thread.join().is_err());
 
-  let logged = lines.0.lock().unwrap();
-  assert!(logged.contains("a bug in the sync loop"), "{logged}");
+  // Cloned before asserting: a failed assertion panics, and the hook logs into the same lock.
+  let logged = lines.0.lock().unwrap().clone();
+  assert!(!logged.contains("a bug in the sync loop"), "{logged}");
   assert!(logged.contains("panic_log.rs"), "{logged}");
+  assert!(logged.contains("message_chars=22"), "{logged}");
   drop(teamcraft);
   std::fs::remove_dir_all(&directory).unwrap();
 }

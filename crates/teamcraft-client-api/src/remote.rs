@@ -301,6 +301,10 @@ pub struct SecuritySnapshot {
   /// verified (or from an older shell), which shows no notetaker controls.
   #[serde(rename = "notetaker", default, skip_serializing_if = "Option::is_none")]
   pub maybe_notetaker: Option<teamcraft_proto::NotetakerPolicy>,
+  /// Who this user's problem reports go to under the verified policy (docs/bug-reports.md), for
+  /// the report dialog; empty before a policy was verified, or from an older shell.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub bug_report_recipients: Vec<teamcraft_proto::UserId>,
   /// The key backup as this device knows it (issue #410); `None` from an older shell.
   #[serde(rename = "backup", default, skip_serializing_if = "Option::is_none")]
   pub maybe_backup: Option<crate::security::KeyBackupState>,
@@ -879,6 +883,10 @@ pub enum ChatAction {
   SendScheduledNow {
     id: ScheduledMessageId,
   },
+  /// "Report a problem" (docs/bug-reports.md).
+  SendBugReport {
+    report: crate::bug_report::BugReport,
+  },
   Acknowledge {
     conversation: ConversationId,
     message: MessageId,
@@ -1335,6 +1343,7 @@ impl ChatAction {
       Self::UpdateScheduled { id, body, due_at } => backend.update_scheduled(id, &body, due_at),
       Self::CancelScheduled { id } => backend.cancel_scheduled(id),
       Self::SendScheduledNow { id } => backend.send_scheduled_now(id),
+      Self::SendBugReport { report } => backend.send_bug_report(report),
       Self::Acknowledge {
         conversation,
         message,

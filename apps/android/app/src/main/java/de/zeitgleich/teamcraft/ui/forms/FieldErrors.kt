@@ -96,3 +96,35 @@ fun displayNameError(typed: String): Int? = when {
   typed.any(Char::isISOControl) -> R.string.profile_name_invalid
   else -> null
 }
+
+/** Longest description of a problem report, in characters (`MAX_DESCRIPTION_CHARS` of the core). */
+const val MAX_REPORT_DESCRIPTION = 4000
+
+/** Largest screenshot of a problem report, in bytes (`MAX_SCREENSHOT_BYTES` of the core). */
+const val MAX_REPORT_SCREENSHOT_BYTES = 10L * 1024 * 1024
+
+/** The picture types a problem report takes. */
+val REPORT_SCREENSHOT_TYPES = setOf("image/png", "image/jpeg", "image/webp")
+
+/** The fields of "Report a problem", top to bottom. */
+enum class ReportField { DESCRIPTION, SCREENSHOT }
+
+/** A screenshot as picked: its type and size, and whether its bytes could be read. */
+data class PickedScreenshotInfo(val mediaType: String, val sizeBytes: Long, val isRead: Boolean)
+
+/** The checks of the report form (docs/bug-reports.md), the same as the desktop and web dialog's. */
+fun reportErrors(description: String, maybeScreenshot: PickedScreenshotInfo?): FieldErrors<ReportField> = FieldErrors.of(
+  ReportField.DESCRIPTION to when {
+    description.isBlank() -> R.string.report_error_description
+    description.trim().length > MAX_REPORT_DESCRIPTION -> R.string.report_error_description_long
+    else -> null
+  },
+  ReportField.SCREENSHOT to maybeScreenshot?.let { picked ->
+    when {
+      picked.mediaType !in REPORT_SCREENSHOT_TYPES -> R.string.report_error_screenshot_type
+      picked.sizeBytes > MAX_REPORT_SCREENSHOT_BYTES -> R.string.report_error_screenshot_size
+      !picked.isRead -> R.string.report_error_screenshot_read
+      else -> null
+    }
+  },
+)

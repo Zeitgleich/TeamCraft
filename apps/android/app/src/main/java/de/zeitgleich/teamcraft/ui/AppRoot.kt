@@ -38,6 +38,7 @@ import de.zeitgleich.teamcraft.ui.screens.BrowseScreen
 import de.zeitgleich.teamcraft.ui.screens.ChatListScreen
 import de.zeitgleich.teamcraft.ui.screens.ConfirmServerScreen
 import de.zeitgleich.teamcraft.ui.screens.ServerEntryScreen
+import de.zeitgleich.teamcraft.ui.screens.ReportProblemScreen
 import de.zeitgleich.teamcraft.ui.screens.DraftsAndSentScreen
 import de.zeitgleich.teamcraft.ui.screens.FilesScreen
 import de.zeitgleich.teamcraft.ui.screens.OpenedDraft
@@ -456,7 +457,11 @@ private fun ReadyNavigation(
         onBack = { navigation.popBackStack() },
         onDnd = { navigation.navigate("dnd") },
         onDiagnostics = { navigation.navigate("notification_diagnostics") },
+        onReportProblem = { navigation.navigate("report_problem") },
       )
+    }
+    composable("report_problem") {
+      ReportProblemScreen(viewModel = viewModel, account = account, onBack = { navigation.popBackStack() })
     }
     composable("dnd") {
       DoNotDisturbScreen(viewModel = viewModel, account = account, onBack = { navigation.popBackStack() })

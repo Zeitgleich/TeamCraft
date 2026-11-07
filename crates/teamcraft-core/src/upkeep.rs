@@ -332,11 +332,11 @@ async fn check_workspace<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>)
   }
 }
 
-/// Sends what is waiting: file uploads, then link previews, then the outbox (a message with files
-/// goes out once they are uploaded), then queued read positions, acknowledgements, pins and
-/// presence. Returns whether the store changed.
+/// Sends what is waiting: problem reports into their outbox, file uploads, then link previews,
+/// then the outbox (a message with files goes out once they are uploaded), then queued read
+/// positions, acknowledgements, pins and presence. Returns whether the store changed.
 pub async fn flush<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>) -> bool {
-  let mut is_changed = false;
+  let mut is_changed = deliver_bug_reports(client).await;
   match client.upload_pending().await {
     Ok(uploaded) => is_changed |= uploaded > 0,
     Err(error) => tracing::debug!(%error, "uploads did not finish"),
@@ -347,7 +347,8 @@ pub async fn flush<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>) -> bo
 /// [`flush`] without the file uploads, for a host that runs them itself ([`UploadMode::Host`]).
 /// Link previews are made first, so a message goes out with its preview.
 pub async fn flush_sends<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>) -> bool {
-  let mut is_changed = false;
+  // Before the host's uploads see the outbox: a report's files are written with its message.
+  let mut is_changed = deliver_bug_reports(client).await;
   if let Err(error) = client.generate_pending_previews().await {
     tracing::debug!(%error, "link previews not made");
   }
@@ -370,6 +371,17 @@ pub async fn flush_sends<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>)
     Err(error) => tracing::debug!(%error, "queued actions not sent"),
   }
   is_changed
+}
+
+/// Puts queued problem reports into their group DMs (docs/bug-reports.md); whether any went.
+async fn deliver_bug_reports<A: ServerApi, S: LocalStore>(client: &mut Client<A, S>) -> bool {
+  match client.deliver_bug_reports().await {
+    Ok(delivered) => delivered > 0,
+    Err(error) => {
+      tracing::debug!(%error, "problem reports not delivered yet");
+      false
+    },
+  }
 }
 
 /// How long the next round waits after `failures` earlier failures in a row: the interval, doubling.

@@ -62,6 +62,9 @@ use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 use teamcraft_client_api::remote::CORE_FAILED_EVENT;
 use teamcraft_core::store::{OsKeystore, SecretVault};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 use crate::auth::servers::{ManagedServer, ServerDirectory, ServerState};
 use crate::auth::{AuthService, DesktopConfig, VaultStore};
@@ -79,8 +82,11 @@ fn main() -> anyhow::Result<()> {
   // renderer that flickers on some GPUs (startup_env.rs).
   #[cfg(target_os = "linux")]
   startup_env::ensure_startup_environment();
-  tracing_subscriber::fmt()
-    .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+  let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+  tracing_subscriber::registry()
+    .with(tracing_subscriber::fmt::layer().with_filter(env_filter))
+    // The recent log for "Report a problem" (docs/bug-reports.md), redacted, in memory only.
+    .with(teamcraft_client_api::debug_log::layer())
     .init();
 
   // No server yet: the account's server is set in `setup`, once the data directory is known.
@@ -288,6 +294,7 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_retry_keychain,
       core::commands::core_status,
       core::commands::core_connection,
+      core::commands::core_recent_log,
       core::commands::core_network_changed,
       core::commands::core_focus,
       core::commands::core_enroll,

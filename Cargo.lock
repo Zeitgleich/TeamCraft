@@ -10856,6 +10856,7 @@ version = "1.0.24"
 dependencies = [
  "base64 0.23.1",
  "emojis",
+ "js-sys",
  "oauth2",
  "psl",
  "semver",
@@ -10864,6 +10865,8 @@ dependencies = [
  "teamcraft-crypto",
  "teamcraft-proto",
  "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "yrs",
 ]

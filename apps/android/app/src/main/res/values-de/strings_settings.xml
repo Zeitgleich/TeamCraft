@@ -30,4 +30,25 @@
   <string name="export_diagnostics_summary">Teilt App- und Systemversion sowie die letzten Protokollzeilen mit dem Support. Es wird nichts gesendet, bis du eine App auswählst.</string>
   <string name="export_diagnostics_share_title">TeamCraft-Diagnose</string>
   <string name="export_diagnostics_failed">Die Diagnose konnte nicht exportiert werden.</string>
+  <!-- Problem melden (docs/bug-reports.md) -->
+  <string name="report_title">Problem melden</string>
+  <string name="report_summary">Beschreibe, was nicht funktioniert hat. Deine Meldung geht Ende-zu-Ende-verschlüsselt an die Personen, die TeamCraft in deiner Organisation betreuen.</string>
+  <string name="report_intro">Deine Meldung geht Ende-zu-Ende-verschlüsselt an die Personen, die TeamCraft in deiner Organisation betreuen. Von selbst verlässt sie deine Organisation nie.</string>
+  <string name="report_description">Was ist passiert?</string>
+  <string name="report_description_hint">Was du getan hast, was du erwartet hast und was stattdessen passiert ist.</string>
+  <string name="report_screenshot">Bildschirmfoto (optional)</string>
+  <string name="report_screenshot_add">Bildschirmfoto hinzufügen</string>
+  <string name="report_screenshot_remove">Entfernen</string>
+  <string name="report_screenshot_hint">Ein PNG-, JPEG- oder WebP-Bild bis 10 MB. Prüfe, dass es nichts zeigt, was du nicht teilen möchtest.</string>
+  <string name="report_preview">Was gesendet wird</string>
+  <string name="report_preview_hint">Neben deiner Beschreibung und dem Bildschirmfoto enthält die Meldung diesen Text: App- und Systemversion und das aktuelle Protokoll dieser App. Protokollzeilen enthalten nie Nachrichten, Dateinamen, Schlüssel oder Passwörter.</string>
+  <string name="report_send">Meldung senden</string>
+  <string name="report_queued">Meldung gespeichert. Sie wird jetzt gesendet oder sobald du online bist.</string>
+  <string name="report_error_description">Beschreibe, was passiert ist.</string>
+  <string name="report_error_description_long">Kürze die Beschreibung auf 4.000 Zeichen.</string>
+  <string name="report_error_screenshot_type">Wähle ein PNG-, JPEG- oder WebP-Bild.</string>
+  <string name="report_error_screenshot_size">Wähle ein Bild bis 10 MB.</string>
+  <string name="report_error_screenshot_read">Das Bild konnte nicht gelesen werden. Wähle es noch einmal oder entferne es.</string>
+  <string name="report_error_no_recipients">Niemand ist als Empfänger von Problemmeldungen eingerichtet. Bitte eine Eigentümerin oder einen Eigentümer, in der Administration am Computer Empfänger zu wählen.</string>
+  <string name="report_error_queue_full">Fünf Meldungen warten noch darauf, gesendet zu werden. Versuche es wieder, sobald du online bist.</string>
 </resources>
