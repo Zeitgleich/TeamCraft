@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.channelRoleAppointedByText
 import de.zeitgleich.teamcraft.ui.channelRoleLabel
 import de.zeitgleich.teamcraft.ui.droppedRoleNames
 import de.zeitgleich.teamcraft.ui.reviewedRolesMessage
@@ -98,15 +99,21 @@ fun ChannelMembersSheet(viewModel: MainViewModel, conversationId: String, onDism
 
 @Composable
 private fun MemberRow(member: ChannelMemberItem) {
-  Row(Modifier.fillMaxWidth().padding(vertical = Spacing.xs), verticalAlignment = Alignment.CenterVertically) {
-    Text(
-      member.name,
-      style = MaterialTheme.typography.bodyLarge,
-      maxLines = 1,
-      overflow = TextOverflow.Ellipsis,
-      modifier = Modifier.weight(1f),
-    )
-    channelRoleLabel(member.role)?.let { Badge(stringResource(it)) }
+  Column(Modifier.fillMaxWidth().padding(vertical = Spacing.xs)) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text(
+        member.name,
+        style = MaterialTheme.typography.bodyLarge,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.weight(1f),
+      )
+      channelRoleLabel(member.role)?.let { Badge(stringResource(it)) }
+    }
+    // Only where the verified role log says who appointed the role (issue #1246).
+    member.maybeAppointer?.let { appointer ->
+      Hint(stringResource(channelRoleAppointedByText(appointer), *listOfNotNull(appointer.maybeName).toTypedArray()))
+    }
   }
 }
 

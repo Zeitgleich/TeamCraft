@@ -4,6 +4,8 @@ import de.zeitgleich.teamcraft.R
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import uniffi.teamcraft_ffi.AppointerAuthorityItem
+import uniffi.teamcraft_ffi.ChannelMemberAppointer
 import uniffi.teamcraft_ffi.ChannelMemberRole
 import uniffi.teamcraft_ffi.ReviewedRolesOutcome
 import uniffi.teamcraft_ffi.RoleKeyMarkItem
@@ -17,6 +19,28 @@ class ChannelMembersTest {
     assertEquals(R.string.channel_role_moderator, channelRoleLabel(ChannelMemberRole.MODERATOR))
     assertNull(channelRoleLabel(ChannelMemberRole.MEMBER))
     assertNull("a role this version doesn't know isn't named", channelRoleLabel(ChannelMemberRole.OTHER))
+  }
+
+  @Test
+  fun theAppointerIsNamedOnlyWhereTheDirectoryHasThem() {
+    assertEquals(
+      R.string.channel_role_appointed_by_workspace_admin,
+      channelRoleAppointedByText(ChannelMemberAppointer("Alice", AppointerAuthorityItem.WORKSPACE_ADMIN)),
+    )
+    assertEquals(
+      R.string.channel_role_appointed_by_owner,
+      channelRoleAppointedByText(ChannelMemberAppointer("Alice", AppointerAuthorityItem.WORKSPACE_OWNER)),
+    )
+    assertEquals(
+      R.string.channel_role_appointed_by_channel_admin,
+      channelRoleAppointedByText(ChannelMemberAppointer("Alice", AppointerAuthorityItem.CHANNEL_ADMIN)),
+    )
+    assertEquals(
+      R.string.channel_role_appointed_by_channel_admin_unnamed,
+      channelRoleAppointedByText(ChannelMemberAppointer(null, AppointerAuthorityItem.CHANNEL_ADMIN)),
+    )
+    val unnamed = AppointerAuthorityItem.entries.map { channelRoleAppointedByText(ChannelMemberAppointer(null, it)) }
+    assertEquals(unnamed.size, unnamed.toSet().size)
   }
 
   @Test

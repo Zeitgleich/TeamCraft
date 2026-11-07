@@ -31,10 +31,17 @@ struct ChannelMembersView: View {
           }
           Section {
             ForEach(info.members, id: \.userId) { member in
-              HStack {
-                Text(verbatim: member.name).foregroundStyle(Theme.text).lineLimit(1)
-                Spacer()
-                if let key = ChannelMembers.roleKey(member.role) { badge(key) }
+              VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                  Text(verbatim: member.name).foregroundStyle(Theme.text).lineLimit(1)
+                  Spacer()
+                  if let key = ChannelMembers.roleKey(member.role) { badge(key) }
+                }
+                // Only where the verified role log says who appointed the role (issue #1246).
+                if let appointer = member.maybeAppointer {
+                  Text(verbatim: ChannelMembers.appointedByLine(appointer))
+                    .font(.footnote).foregroundStyle(Theme.textMuted)
+                }
               }
             }
           }

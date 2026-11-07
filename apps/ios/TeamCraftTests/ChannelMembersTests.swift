@@ -11,6 +11,22 @@ final class ChannelMembersTests: XCTestCase {
     XCTAssertNil(ChannelMembers.roleKey(.other), "a role this version doesn't know isn't named")
   }
 
+  func testTheAppointerIsNamedOnlyWhereTheDirectoryHasThem() {
+    let named = ChannelMemberAppointer(maybeName: "Alice", authority: .workspaceAdmin)
+    XCTAssertEqual(ChannelMembers.appointedByKey(named).key, "channel_role_appointed_by_workspace_admin")
+    XCTAssertTrue(ChannelMembers.appointedByKey(named).hasName)
+    let unnamed = ChannelMemberAppointer(maybeName: nil, authority: .channelAdmin)
+    XCTAssertEqual(ChannelMembers.appointedByKey(unnamed).key, "channel_role_appointed_by_channel_admin_unnamed")
+    XCTAssertFalse(ChannelMembers.appointedByKey(unnamed).hasName)
+    XCTAssertEqual(
+      ChannelMembers.appointedByKey(ChannelMemberAppointer(maybeName: "A", authority: .workspaceOwner)).key,
+      "channel_role_appointed_by_owner")
+    let keys = [AppointerAuthorityItem.workspaceOwner, .workspaceAdmin, .channelAdmin].map {
+      ChannelMembers.appointedByKey(ChannelMemberAppointer(maybeName: nil, authority: $0)).key
+    }
+    XCTAssertEqual(Set(keys).count, 3)
+  }
+
   func testACheckedKeyIsNotMarked() {
     XCTAssertNil(ChannelMembers.keyMarkKey(.checked))
     XCTAssertEqual(ChannelMembers.keyMarkKey(.changed), "channel_roles_review_key_changed")

@@ -12,6 +12,34 @@ enum ChannelMembers {
     }
   }
 
+  /// "Appointed by <name>, <authority>" (issue #1246), from the verified role log. The name is the
+  /// server directory's, so it only fills the placeholder of the returned format; where the signer
+  /// left the directory the line says only what they were (`hasName` is then false).
+  static func appointedByKey(_ appointer: ChannelMemberAppointer) -> (key: String, hasName: Bool) {
+    let hasName = appointer.maybeName != nil
+    switch appointer.authority {
+    case .workspaceOwner:
+      return (hasName ? "channel_role_appointed_by_owner" : "channel_role_appointed_by_owner_unnamed", hasName)
+    case .workspaceAdmin:
+      return (
+        hasName ? "channel_role_appointed_by_workspace_admin" : "channel_role_appointed_by_workspace_admin_unnamed",
+        hasName
+      )
+    case .channelAdmin:
+      return (
+        hasName ? "channel_role_appointed_by_channel_admin" : "channel_role_appointed_by_channel_admin_unnamed",
+        hasName
+      )
+    }
+  }
+
+  /// The line itself, in the user's language.
+  static func appointedByLine(_ appointer: ChannelMemberAppointer) -> String {
+    let (key, hasName) = appointedByKey(appointer)
+    let format = String(localized: String.LocalizationValue(key))
+    return hasName ? String(format: format, appointer.maybeName ?? "") : format
+  }
+
   /// The mark on a reviewed row's key; a checked key has none.
   static func keyMarkKey(_ mark: RoleKeyMarkItem) -> String? {
     switch mark {
