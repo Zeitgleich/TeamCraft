@@ -681,6 +681,11 @@ enum PersonColor {
   static func avatar(_ userId: String) -> Color {
     Color(hue: personHue(userId), saturation: 0.5, brightness: 0.6)
   }
+
+  /// The avatar colour of a hue (0..<360) the core named, as `avatar(_:)` makes it from an ID.
+  static func avatar(hue degrees: UInt16) -> Color {
+    Color(hue: Double(degrees % 360) / 360, saturation: 0.5, brightness: 0.6)
+  }
 }
 
 /// Marks a bubble child that takes the bubble's full width (a reply quote, a link preview) without

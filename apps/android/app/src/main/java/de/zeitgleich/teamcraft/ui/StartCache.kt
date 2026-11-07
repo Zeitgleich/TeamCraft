@@ -8,6 +8,7 @@ import de.zeitgleich.teamcraft.security.SealedCache
 import de.zeitgleich.teamcraft.security.SealedFile
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
+import uniffi.teamcraft_ffi.PeerInfo
 import uniffi.teamcraft_ffi.Presence
 
 /**
@@ -67,6 +68,8 @@ data class CachedConversation(
   val maybePeerPresence: String? = null,
   val isArchived: Boolean = false,
   val maybePeerId: String? = null,
+  val maybePeerIsBot: Boolean? = null,
+  val maybePeerHue: Int? = null,
   val isNotesToSelf: Boolean = false,
   val maybeDraftPreview: String? = null,
   val maybeSpaceImageVersion: String? = null,
@@ -89,6 +92,11 @@ data class CachedConversation(
       maybePeerPresence = Presence.entries.firstOrNull { it.name == maybePeerPresence },
       isArchived = isArchived,
       maybePeerId = maybePeerId,
+      maybePeer = if (maybePeerId != null && maybePeerIsBot != null && maybePeerHue != null) {
+        PeerInfo(userId = maybePeerId, isBot = maybePeerIsBot, avatarHue = maybePeerHue.toUShort())
+      } else {
+        null
+      },
       isNotesToSelf = isNotesToSelf,
       maybeDraftPreview = maybeDraftPreview,
       maybeSpaceImageVersion = maybeSpaceImageVersion,
@@ -111,6 +119,8 @@ data class CachedConversation(
       maybePeerPresence = item.maybePeerPresence?.name,
       isArchived = item.isArchived,
       maybePeerId = item.maybePeerId,
+      maybePeerIsBot = item.maybePeer?.isBot,
+      maybePeerHue = item.maybePeer?.avatarHue?.toInt(),
       isNotesToSelf = item.isNotesToSelf,
       maybeDraftPreview = item.maybeDraftPreview,
       maybeSpaceImageVersion = item.maybeSpaceImageVersion,

@@ -1974,9 +1974,11 @@ pub(crate) fn direct_peer(
     return None;
   }
   let other = *conversation.member_ids.iter().find(|member| **member != me)?;
+  let maybe_user = backend.user(other);
   Some(DirectPeer {
     id: other,
-    maybe_presence: backend.user(other).map(|user| Presence::from(user.presence)),
+    maybe_presence: maybe_user.as_ref().map(|user| Presence::from(user.presence)),
+    maybe_profile: maybe_user.map(|user| (user.is_bot, user.avatar_hue)),
   })
 }
 

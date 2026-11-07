@@ -12,6 +12,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import uniffi.teamcraft_ffi.ConversationItem
+import uniffi.teamcraft_ffi.ConversationKind
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -56,6 +58,17 @@ fun avatarColor(maybeUserId: String?, name: String): Color {
   val hue = maybeUserId?.toLongOrNull()?.mod(360L)?.toInt() ?: name.hashCode().mod(360)
   return avatarColorOfHue(hue)
 }
+
+/**
+ * The colour of a conversation's avatar: the hue the core gave the other person of a one-to-one DM
+ * (`maybePeer`, the desktop's colour), else [avatarColor].
+ */
+fun conversationAvatarColor(conversation: ConversationItem): Color =
+  conversation.maybePeer?.let { avatarColorOfHue(it.avatarHue.toInt()) }
+    ?: avatarColor(conversation.maybePeerId, conversation.name)
+
+/** The conversation is a one-to-one DM with a bot or integration account (the BOT marker). */
+fun ConversationItem.isWithBot(): Boolean = kind == ConversationKind.DIRECT && maybePeer?.isBot == true
 
 /** The same from a hue the core named ([avatarColor]). */
 fun avatarColorOfHue(hue: Int): Color = Color.hsl(hue.mod(360).toFloat(), AVATAR_SATURATION, AVATAR_LIGHTNESS)

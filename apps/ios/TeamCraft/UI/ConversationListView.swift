@@ -581,7 +581,7 @@ struct ConversationRow: View {
 
   var body: some View {
     HStack(spacing: 10) {
-      Image(systemName: icon).frame(width: 22).foregroundStyle(Theme.textMuted)
+      leading
         .overlay(alignment: .bottomTrailing) {
           if let presence = conversation.maybePeerPresence {
             Circle()
@@ -595,6 +595,7 @@ struct ConversationRow: View {
           Text(conversation.listName)
             .fontWeight(isUnread ? .semibold : .regular)
             .lineLimit(1)
+          if conversation.isWithBot { BotBadge() }
           if showsSpace, let space = conversation.maybeSpaceName {
             // After the name on the same line, so every row is as high as the others; it shortens
             // first (#1346).
@@ -678,6 +679,21 @@ struct ConversationRow: View {
     return date.formatted(date: .numeric, time: .omitted)
   }
 
+  /// A person's DM shows their colour and initials (the hue desktop shows); the rest a symbol.
+  @ViewBuilder
+  private var leading: some View {
+    if conversation.kind == .direct, !conversation.isNotesToSelf {
+      Text(AvatarView.initials(of: conversation.name))
+        .font(.system(size: 11, weight: .semibold))
+        .foregroundStyle(.white)
+        .frame(width: 26, height: 26)
+        .background(conversation.avatarColor, in: Circle())
+        .accessibilityHidden(true)
+    } else {
+      Image(systemName: icon).frame(width: 22).foregroundStyle(Theme.textMuted)
+    }
+  }
+
   private var icon: String {
     if conversation.isNotesToSelf { return "bookmark" }
     switch conversation.kind {
@@ -687,6 +703,31 @@ struct ConversationRow: View {
     case .private: return "lock"
     default: return "number"
     }
+  }
+}
+
+extension ConversationItem {
+  /// A one-to-one DM with a bot or integration account.
+  var isWithBot: Bool { kind == .direct && maybePeer?.isBot == true }
+
+  /// The avatar colour of the other person: the core's hue, else derived from the ID or the name.
+  var avatarColor: Color {
+    if let peer = maybePeer { return PersonColor.avatar(hue: peer.avatarHue) }
+    return PersonColor.avatar(maybePeerId ?? id)
+  }
+}
+
+/// The BOT marker after the name of a DM with a bot (as on web).
+struct BotBadge: View {
+  var body: some View {
+    Text("badge_bot")
+      .font(.caption2.weight(.semibold))
+      .foregroundStyle(Theme.textMuted)
+      .padding(.horizontal, 4)
+      .padding(.vertical, 1)
+      .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 4))
+      .lineLimit(1)
+      .fixedSize()
   }
 }
 

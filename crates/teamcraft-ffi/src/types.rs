@@ -187,6 +187,17 @@ pub struct SpaceMenuItem {
   pub channel_count: u32,
 }
 
+/// What the lists show of the other person in a one-to-one DM besides their presence (issue
+/// #132): the BOT marker and the avatar colour, the same hue as on desktop and web.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PeerInfo {
+  pub user_id: String,
+  /// A bot or integration account.
+  pub is_bot: bool,
+  /// Hue (0-359) of the generated avatar colour, derived from the user's ID.
+  pub avatar_hue: u16,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ConversationItem {
   pub id: String,
@@ -224,6 +235,9 @@ pub struct ConversationItem {
   /// The other person in a one-to-one DM, so the list can show their profile picture.
   #[uniffi(default = None)]
   pub maybe_peer_id: Option<String>,
+  /// The other person's bot flag and avatar hue in a one-to-one DM, once they are known (#132).
+  #[uniffi(default = None)]
+  pub maybe_peer: Option<PeerInfo>,
   /// The user's notes to themself ("Notes" in the lists, issue #829), decided by the core from
   /// the DM's participants; its `name` is empty, the apps name it in the user's language.
   #[uniffi(default = false)]
@@ -725,6 +739,13 @@ impl ConversationItem {
       can_post: conversation.can_post,
       is_archived: conversation.is_archived,
       maybe_peer_presence: maybe_peer.as_ref().and_then(|peer| peer.maybe_presence),
+      maybe_peer: maybe_peer.as_ref().and_then(|peer| {
+        peer.maybe_profile.map(|(is_bot, avatar_hue)| PeerInfo {
+          user_id: peer.id.to_string(),
+          is_bot,
+          avatar_hue,
+        })
+      }),
       maybe_peer_id: maybe_peer.map(|peer| peer.id.to_string()),
       is_notes_to_self: conversation.is_notes_to_self,
       maybe_draft_preview: conversation.maybe_draft_preview,
@@ -752,6 +773,8 @@ pub(crate) fn share_targets(items: Vec<ConversationItem>) -> Vec<ConversationIte
 pub(crate) struct DirectPeer {
   pub(crate) id: view::UserId,
   pub(crate) maybe_presence: Option<Presence>,
+  /// Bot flag and avatar hue, known together with the user.
+  pub(crate) maybe_profile: Option<(bool, u16)>,
 }
 
 impl ConversationKind {
@@ -1363,12 +1386,22 @@ mod tests {
     let peer = DirectPeer {
       id: view::id_from_raw(42),
       maybe_presence: Some(Presence::Away),
+      maybe_profile: Some((true, 42)),
     };
     let item = ConversationItem::from_view(conversation.clone(), None, Some(peer), false);
     assert_eq!(item.maybe_peer_id.as_deref(), Some("42"));
     assert_eq!(item.maybe_peer_presence, Some(Presence::Away));
+    assert_eq!(
+      item.maybe_peer,
+      Some(PeerInfo {
+        user_id: "42".into(),
+        is_bot: true,
+        avatar_hue: 42
+      })
+    );
     let unknown = ConversationItem::from_view(conversation, None, None, false);
     assert_eq!((unknown.maybe_peer_id, unknown.maybe_peer_presence), (None, None));
+    assert_eq!(unknown.maybe_peer, None);
   }
 
   #[test]

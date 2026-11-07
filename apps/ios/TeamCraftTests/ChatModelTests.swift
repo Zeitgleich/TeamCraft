@@ -24,6 +24,22 @@ final class ChatModelTests: XCTestCase {
     XCTAssertFalse(reader.canPost || reader.canReact || reader.canManageBookmarks || reader.canManageChannel)
   }
 
+  func testOnlyADirectMessageWithABotIsMarkedAndTakesTheCoreSHue() {
+    func direct(_ kind: ConversationKind, _ peer: PeerInfo?) -> ConversationItem {
+      ConversationItem(
+        id: "1", maybeSpaceId: nil, maybeSpaceName: nil, kind: kind, name: "Hook", topic: "",
+        unreadCount: 0, mentionCount: 0, isFavorite: false, isMuted: false, canPost: true,
+        maybePeerId: peer?.userId, maybePeer: peer)
+    }
+    let bot = PeerInfo(userId: "7", isBot: true, avatarHue: 200)
+    XCTAssertTrue(direct(.direct, bot).isWithBot)
+    XCTAssertFalse(direct(.direct, PeerInfo(userId: "7", isBot: false, avatarHue: 200)).isWithBot)
+    XCTAssertFalse(direct(.direct, nil).isWithBot)
+    XCTAssertFalse(direct(.group, bot).isWithBot)
+    XCTAssertEqual(direct(.direct, bot).avatarColor, PersonColor.avatar(hue: 200))
+    XCTAssertEqual(direct(.direct, nil).avatarColor, PersonColor.avatar("1"))
+  }
+
   func testChannelSectionsOrderFavoritesAndSpacesWithoutDirectMessages() {
     let sections = channelSections([
       item("1", "random", space: "Team B"),
