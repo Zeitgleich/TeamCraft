@@ -18,6 +18,7 @@ composer-archived = Dieser Kanal ist archiviert. Du kannst ihn lesen, aber niema
 composer-label = Nachricht
 composer-attachments = Anhänge
 composer-remove-attachment = Anhang entfernen
+composer-draft-file-failed = Nicht hochgeladen
 composer-attach = Dateien anhängen
 composer-emoji = Emoji hinzufügen
 composer-send = Nachricht senden

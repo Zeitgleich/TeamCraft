@@ -307,6 +307,7 @@ impl Setup {
         maybe_thumbnail: None,
         maybe_duration_ms: None,
         maybe_waveform: None,
+        maybe_draft_id: None,
       }],
     });
     run_commands(&mut alice, &alice_ui).await;

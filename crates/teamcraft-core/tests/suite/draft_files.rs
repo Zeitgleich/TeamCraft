@@ -158,6 +158,30 @@ async fn a_file_sent_while_still_going_up_continues_as_the_messages_and_is_kept(
   );
 }
 
+#[tokio::test]
+async fn a_send_that_overtakes_its_files_attachment_sends_the_file_once() {
+  let (server, mut phone, _laptop, mut bob, channel) = setup(Some(30)).await;
+  let phone_ui = backend_of(&phone);
+  let mut picked = file("raced.txt", b"overtaken");
+  picked.maybe_draft_id = Some("0123456789abcdef0123456789abcdef".into());
+  // The desktop app's actions may reach the core out of order: the send comes first.
+  phone_ui.send_message(message(channel, "", vec![picked.clone()]));
+  phone_ui.attach_draft_files(channel, None, vec![picked]);
+  run_commands(&mut phone, &phone_ui).await;
+  settle(&mut [&mut phone, &mut bob]).await;
+  assert!(
+    phone_ui.draft_files(channel, None).is_empty(),
+    "not back in the draft"
+  );
+  assert_eq!(server.attachment_ids().len(), 1);
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  assert_eq!(
+    bob_ui.message_extras(channel, &[received.id])[0].files[0].file_name,
+    "raced.txt"
+  );
+}
+
 /// Alice's phone and laptop and Bob in one channel; the server holds drafts' files for
 /// `maybe_retention_days` (`None`: an older server that holds none).
 async fn setup(maybe_retention_days: Option<u32>) -> (FakeServer, Peer, TestClient, Peer, ConversationId) {
@@ -214,6 +238,7 @@ fn drafts_files(items: &[teamcraft_client_api::drafts::DraftFileItem]) -> Vec<Ou
       maybe_thumbnail: None,
       maybe_duration_ms: None,
       maybe_waveform: None,
+      maybe_draft_id: None,
     })
     .collect()
 }
@@ -228,6 +253,7 @@ fn file(name: &str, bytes: &[u8]) -> OutgoingFile {
     maybe_thumbnail: None,
     maybe_duration_ms: None,
     maybe_waveform: None,
+    maybe_draft_id: None,
   }
 }
 

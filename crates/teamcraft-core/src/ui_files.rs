@@ -12,6 +12,7 @@ use teamcraft_proto::{AttachmentId, Base64Bytes, ClientMessageId};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::client::disk_downloads::{DownloadRecord, DownloadStatus, download_records};
+use crate::client::draft_files::note_sent_draft_file;
 use crate::client::files::{
   PendingFile, PendingUpload, RetryCause, TransferFailure, TransferState, UploadPurpose, UploadRetry,
   UploadSource, attachments_of, cancel_pending_file, failed_uploads, pending_upload, save_pending_upload,
@@ -195,7 +196,24 @@ impl<S: LocalStore> CoreChatBackend<S> {
           // Removed on another device meanwhile: the message goes without it.
           None => tracing::debug!(conversation_id = %conversation, "a draft's file to send is gone"),
         },
-        _ => pending.extend(pending_file(file)),
+        _ => match file.maybe_draft_id.clone() {
+          Some(id) => match self.take_draft_file(&data, conversation, &id) {
+            Some((taken_file, is_from_account)) => {
+              if is_from_account {
+                taken.push(id);
+              }
+              pending.push(taken_file);
+            },
+            // Its attachment hasn't reached the core yet: read it now, and don't attach it later.
+            None => {
+              if let Err(error) = note_sent_draft_file(self.store_ref(), &id) {
+                tracing::warn!(%error, "a sent draft's file was not noted");
+              }
+              pending.extend(pending_file(file));
+            },
+          },
+          None => pending.extend(pending_file(file)),
+        },
       }
     }
     let upload = PendingUpload {

@@ -123,6 +123,7 @@ fn DraftCard(draft: DraftItem) -> impl IntoView {
   let (conversation, maybe_thread) = (draft.conversation, draft.maybe_thread);
   // Deleting reaches all the user's devices and can't be taken back, so it asks first, in place.
   let is_confirming = RwSignal::new(false);
+  let file_count = draft.file_count as usize;
   let where_it_is = draft.maybe_thread.map(|_| match draft.maybe_thread_root.clone() {
     Some(root) => i18n.t_with("drafts-in-thread", &[("root", &root)]),
     None => i18n.t("drafts-in-thread-unknown"),
@@ -134,7 +135,17 @@ fn DraftCard(draft: DraftItem) -> impl IntoView {
         {where_it_is.map(|text| view! { <span class="saved-where" translate="no">{text}</span> })}
         <time class="saved-time">{format_date_time(draft.edited_at, locale)}</time>
       </div>
-      <div class="saved-body draft-body"><RichText body=draft.body.clone() me=state.me().username /></div>
+      {(!draft.body.trim().is_empty()).then(|| {
+        view! { <div class="saved-body draft-body"><RichText body=draft.body.clone() me=state.me().username /></div> }
+      })}
+      {(file_count > 0).then(|| {
+        view! {
+          <div class="sent-files">
+            <Icon name=IconName::Paperclip />
+            <span>{move || i18n.t_count("sent-files", file_count)}</span>
+          </div>
+        }
+      })}
       <div class="saved-actions">
         {move || {
           if is_confirming.get() {
@@ -142,7 +153,7 @@ fn DraftCard(draft: DraftItem) -> impl IntoView {
               <span class="draft-delete-question" role="status">{i18n.t("drafts-delete-question")}</span>
               <button
                 class="btn btn-small btn-danger"
-                on:click=move |_| state.write(|backend| backend.set_draft(conversation, maybe_thread, ""))
+                on:click=move |_| state.write(|backend| backend.discard_draft(conversation, maybe_thread))
               >
                 {i18n.t("drafts-delete")}
               </button>

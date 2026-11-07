@@ -813,6 +813,7 @@ fn file(name: &str, media_type: &str, bytes: Vec<u8>) -> OutgoingFile {
     maybe_thumbnail: None,
     maybe_duration_ms: None,
     maybe_waveform: None,
+    maybe_draft_id: None,
   }
 }
 

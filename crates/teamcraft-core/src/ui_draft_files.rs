@@ -4,6 +4,7 @@
 use teamcraft_client_api::actions::OutgoingFile;
 use teamcraft_client_api::drafts::{DraftFileItem, DraftFileState};
 use teamcraft_client_api::model::{ConversationId, ThreadId};
+use teamcraft_proto::ClientMessageId;
 
 use crate::account_data::AccountData;
 use crate::client::draft_files::{
@@ -24,7 +25,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
     maybe_thread: Option<ThreadId>,
     files: Vec<OutgoingFile>,
   ) {
-    let files: Vec<PendingFile> = files.into_iter().filter_map(pending_file).collect();
+    let files: Vec<(Option<ClientMessageId>, PendingFile)> = files
+      .into_iter()
+      .filter_map(|file| {
+        let maybe_id = file
+          .maybe_draft_id
+          .as_deref()
+          .and_then(|id| ClientMessageId::from_hex(id).ok());
+        Some((maybe_id, pending_file(file)?))
+      })
+      .collect();
     if files.is_empty() {
       return;
     }

@@ -23,6 +23,12 @@ use crate::store::{AttachmentRef, LocalStore, Table};
 /// Account record: how long the server holds drafts' files, in days, as it published it in
 /// `GET /me`; `None` for servers that hold none.
 pub const SERVER_DRAFT_RETENTION_KEY: &str = "server_draft_file_retention_days";
+/// File transfer record: IDs of drafts' files that messages took before their attachment reached
+/// the core (the app's actions may arrive out of order), so a late attachment doesn't bring them
+/// back into the draft.
+const SENT_DRAFT_FILES_KEY: &str = "sent_draft_files";
+/// How many such IDs are remembered: far more than files sent in the moment an action is in flight.
+const MAX_SENT_DRAFT_FILES: usize = 64;
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// How long the server holds drafts' files, if it holds them at all.
@@ -127,24 +133,30 @@ pub(crate) fn draft_file_retention_days(store: &impl LocalStore) -> Option<u32> 
     .flatten()
 }
 
-/// Attaches `files` to the draft, each as its own pending upload under a fresh ID. Files beyond what
-/// the drafts carry ([`MAX_DRAFT_FILES`], counting those still going up) stay on this device.
+/// Attaches `files` to the draft, each as its own pending upload under the ID the app chose (a
+/// fresh one without). Files beyond what the drafts carry ([`MAX_DRAFT_FILES`], counting those
+/// still going up) stay on this device. A file its message took already (the send reached the core
+/// first) is not attached again.
 pub fn attach_draft_files(
   store: &impl LocalStore,
   data: &AccountData,
   conversation: ConversationId,
   maybe_thread: Option<ThreadId>,
-  files: Vec<PendingFile>,
+  files: Vec<(Option<ClientMessageId>, PendingFile)>,
   now_ms: i64,
 ) -> Result<Vec<ClientMessageId>, CoreError> {
+  let sent = sent_draft_files(store)?;
   let mut traveling = data.live_draft_files().count()
     + draft_uploads(store)?
       .iter()
       .filter(|upload| upload.is_traveling())
       .count();
   let mut ids = Vec::with_capacity(files.len());
-  for (index, file) in files.into_iter().enumerate() {
-    let id = ClientMessageId::random();
+  for (index, (maybe_id, file)) in files.into_iter().enumerate() {
+    let id = maybe_id.unwrap_or_else(ClientMessageId::random);
+    if sent.contains(&id.to_hex()) || pending_upload(store, conversation, id)?.is_some() {
+      continue;
+    }
     let is_local = traveling >= MAX_DRAFT_FILES;
     traveling += usize::from(!is_local);
     let upload = PendingUpload {
@@ -162,6 +174,22 @@ pub fn attach_draft_files(
     ids.push(id);
   }
   Ok(ids)
+}
+
+/// Notes that a message took the draft's file `id` before its attachment reached the core.
+pub fn note_sent_draft_file(store: &impl LocalStore, id: &str) -> Result<(), CoreError> {
+  let mut sent = sent_draft_files(store)?;
+  if !sent.iter().any(|known| known == id) {
+    sent.push(id.to_owned());
+    let excess = sent.len().saturating_sub(MAX_SENT_DRAFT_FILES);
+    sent.drain(..excess);
+    records::put_json(store, Table::FileTransfers, SENT_DRAFT_FILES_KEY, &sent)?;
+  }
+  Ok(())
+}
+
+fn sent_draft_files(store: &impl LocalStore) -> Result<Vec<String>, CoreError> {
+  Ok(records::get_json(store, Table::FileTransfers, SENT_DRAFT_FILES_KEY)?.unwrap_or_default())
 }
 
 /// Where a draft's file is: still on this device (going up, failed or waiting for the send), or in

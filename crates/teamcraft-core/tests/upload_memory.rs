@@ -61,6 +61,7 @@ async fn a_large_file_goes_up_one_part_at_a_time() {
       maybe_thumbnail: None,
       maybe_duration_ms: None,
       maybe_waveform: None,
+      maybe_draft_id: None,
     }],
   });
   ui.drain_commands();

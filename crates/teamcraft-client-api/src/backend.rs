@@ -564,6 +564,13 @@ pub trait ChatBackend {
   }
   /// Takes a file out of the draft on every device of the user; the server deletes it.
   fn remove_draft_file(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>, _id: &str) {}
+  /// Deletes the draft with its files, on every device of the user.
+  fn discard_draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
+    self.set_draft(conversation, maybe_thread, "");
+    for file in self.draft_files(conversation, maybe_thread) {
+      self.remove_draft_file(conversation, maybe_thread, &file.id);
+    }
+  }
   /// The messages waiting for their time, and the rule that applies (docs/scheduled-messages.md).
   /// A backend that can't keep them answers with scheduling off, so nothing offers it.
   fn scheduled_overview(&self) -> ScheduledOverview {

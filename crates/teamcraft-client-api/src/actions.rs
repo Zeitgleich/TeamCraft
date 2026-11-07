@@ -76,6 +76,11 @@ pub struct OutgoingFile {
   /// ([`crate::voice::Waveform`]); it makes the audio file a voice message.
   #[serde(rename = "waveform", default, skip_serializing_if = "Option::is_none")]
   pub maybe_waveform: Option<Vec<u8>>,
+  /// The file's ID in the draft (#1220), chosen by the app as it attaches the file
+  /// ([`crate::backend::ChatBackend::attach_draft_files`]): sending it uses the draft's upload if
+  /// there is one, and reads `source` otherwise (the attachment hasn't reached the core yet).
+  #[serde(rename = "draft_id", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_draft_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

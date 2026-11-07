@@ -9,12 +9,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use teamcraft_proto::{BackgroundId, ErrorCode, HistoryPolicy};
 
 use teamcraft_client_api::actions::{
-  FileInfo, LinkedMessage, MessageExtras, PermalinkTarget, SavedItem, ShareLink, ShareLinkOptions,
-  WorkspaceEvent,
+  FileInfo, FileSource, LinkedMessage, MessageExtras, PermalinkTarget, SavedItem, ShareLink,
+  ShareLinkOptions, WorkspaceEvent,
 };
 use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
-use teamcraft_client_api::drafts::{DraftItem, SentItem};
+use teamcraft_client_api::drafts::{DraftFileItem, DraftFileState, DraftItem, SentItem};
 use teamcraft_client_api::privacy::{LastSeenVisibility, PrivacySettings};
 
 use crate::backend::ChatBackend;
@@ -207,6 +207,9 @@ struct State {
   saved: HashSet<MessageId>,
   /// The composers' unsent text with when it was last edited.
   drafts: BTreeMap<(ConversationId, Option<ThreadId>), (String, TimestampMs)>,
+  /// Files attached to drafts, ready at once (nothing goes up in the demo).
+  draft_files: BTreeMap<(ConversationId, Option<ThreadId>), Vec<DraftFileItem>>,
+  next_draft_file: u64,
   /// Share links the user created, by file.
   share_links: HashMap<String, ShareLink>,
   /// Open spaces the user isn't in yet.
@@ -279,6 +282,8 @@ impl MockBackend {
       next_background_id: 1,
       saved: HashSet::new(),
       drafts: BTreeMap::new(),
+      draft_files: BTreeMap::new(),
+      next_draft_file: 0,
       share_links: HashMap::new(),
       joinable: vec![JoinableSpace {
         id: id_from_raw(3),
@@ -1052,6 +1057,69 @@ impl ChatBackend for MockBackend {
     }
   }
 
+  fn send_message(&self, message: teamcraft_client_api::actions::OutgoingMessage) {
+    // Sending takes the draft's files out of it, as the core does.
+    if let Some(files) = self
+      .state
+      .borrow_mut()
+      .draft_files
+      .get_mut(&(message.conversation, message.maybe_thread))
+    {
+      files.retain(|file| {
+        !message
+          .files
+          .iter()
+          .any(|sent| matches!(&sent.source, FileSource::Draft { id } if *id == file.id))
+      });
+    }
+    self.post_message(message.conversation, message.maybe_thread, &message.body);
+  }
+
+  fn attach_draft_files(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+    files: Vec<teamcraft_client_api::actions::OutgoingFile>,
+  ) {
+    let mut state = self.state.borrow_mut();
+    for file in files {
+      state.next_draft_file += 1;
+      let item = DraftFileItem {
+        id: format!("demo-{}", state.next_draft_file),
+        size_bytes: match &file.source {
+          FileSource::Bytes { bytes } => bytes.len() as u64,
+          FileSource::Picked { size_bytes, .. } => *size_bytes,
+          FileSource::Path { .. } | FileSource::Draft { .. } => 0,
+        },
+        file_name: file.file_name,
+        media_type: file.media_type,
+        maybe_thumbnail: file.maybe_thumbnail,
+        state: DraftFileState::Ready,
+      };
+      state
+        .draft_files
+        .entry((conversation, maybe_thread))
+        .or_default()
+        .push(item);
+    }
+  }
+
+  fn draft_files(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Vec<DraftFileItem> {
+    let state = self.state.borrow();
+    state
+      .draft_files
+      .get(&(conversation, maybe_thread))
+      .cloned()
+      .unwrap_or_default()
+  }
+
+  fn remove_draft_file(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, id: &str) {
+    let mut state = self.state.borrow_mut();
+    if let Some(files) = state.draft_files.get_mut(&(conversation, maybe_thread)) {
+      files.retain(|file| file.id != id);
+    }
+  }
+
   fn drafts(&self, maybe_space: Option<SpaceId>) -> Vec<DraftItem> {
     let state = self.state.borrow();
     state
@@ -1066,6 +1134,10 @@ impl ChatBackend for MockBackend {
           maybe_thread_root: None,
           body: body.clone(),
           edited_at: *edited_at,
+          file_count: state
+            .draft_files
+            .get(&(*conversation, *maybe_thread))
+            .map_or(0, |files| u32::try_from(files.len()).unwrap_or(u32::MAX)),
         })
       })
       .collect()

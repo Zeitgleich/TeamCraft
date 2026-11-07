@@ -18,6 +18,7 @@ composer-archived = This channel is archived. You can read it, but nobody can po
 composer-label = Message
 composer-attachments = Attachments
 composer-remove-attachment = Remove attachment
+composer-draft-file-failed = Not uploaded
 composer-attach = Attach files
 composer-emoji = Add emoji
 composer-send = Send message

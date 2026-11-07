@@ -1520,6 +1520,48 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn draft_files(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+  ) -> Vec<teamcraft_client_api::drafts::DraftFileItem> {
+    match self.ask(ChatQuery::DraftFiles {
+      conversation,
+      maybe_thread,
+    }) {
+      Some(ChatAnswer::DraftFiles { files }) => files,
+      _ => Vec::new(),
+    }
+  }
+
+  fn attach_draft_files(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+    files: Vec<teamcraft_client_api::actions::OutgoingFile>,
+  ) {
+    self.act(ChatAction::AttachDraftFiles {
+      conversation,
+      maybe_thread,
+      files,
+    });
+  }
+
+  fn discard_draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
+    self.act(ChatAction::DiscardDraft {
+      conversation,
+      maybe_thread,
+    });
+  }
+
+  fn remove_draft_file(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, id: &str) {
+    self.act(ChatAction::RemoveDraftFile {
+      conversation,
+      maybe_thread,
+      id: id.to_owned(),
+    });
+  }
+
   fn drafts(&self, maybe_space: Option<SpaceId>) -> Vec<teamcraft_client_api::drafts::DraftItem> {
     match self.ask(ChatQuery::Drafts { maybe_space }) {
       Some(ChatAnswer::Drafts { drafts }) => drafts,
@@ -2948,6 +2990,7 @@ mod tests {
         maybe_thumbnail: None,
         maybe_duration_ms: None,
         maybe_waveform: None,
+        maybe_draft_id: None,
       });
       let blank = outgoing("   ", id);
 

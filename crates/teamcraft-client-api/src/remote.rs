@@ -854,6 +854,11 @@ pub enum ChatAction {
     maybe_thread: Option<ThreadId>,
     id: String,
   },
+  DiscardDraft {
+    conversation: ConversationId,
+    #[serde(default)]
+    maybe_thread: Option<ThreadId>,
+  },
   /// Keeps the message for `due_at` (server time, docs/scheduled-messages.md); it can't have files.
   ScheduleMessage {
     message: OutgoingMessage,
@@ -1318,6 +1323,10 @@ impl ChatAction {
         maybe_thread,
         id,
       } => backend.remove_draft_file(conversation, maybe_thread, &id),
+      Self::DiscardDraft {
+        conversation,
+        maybe_thread,
+      } => backend.discard_draft(conversation, maybe_thread),
       Self::ScheduleMessage { message, due_at } => backend.schedule_message(message, due_at),
       Self::UpdateScheduled { id, body, due_at } => backend.update_scheduled(id, &body, due_at),
       Self::CancelScheduled { id } => backend.cancel_scheduled(id),
