@@ -22,8 +22,8 @@ mod deep_links;
 mod desktop_entry;
 mod dropped_files;
 mod external_links;
-#[cfg(target_os = "linux")]
 mod file_manager_entries;
+#[cfg(target_os = "linux")]
 mod freedesktop;
 mod message_sound;
 mod mute_shortcut;
