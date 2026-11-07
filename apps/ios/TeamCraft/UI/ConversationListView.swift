@@ -229,7 +229,8 @@ struct ConversationListView: View {
                 conversation: conversation, maybePreview: previews[conversation.id],
                 // A space's section names it in its header, so its rows don't (#1345).
                 showsSpace: isHomeShown && !section.isSpace,
-                callCount: runningCalls[conversation.id] ?? 0)
+                callCount: runningCalls[conversation.id] ?? 0,
+                typingNames: typingNames(in: model.typingNow, conversation: conversation.id, thread: nil))
                 .tag(conversation.id)
                 .swipeActions(edge: .leading) { readButton(for: conversation) }
                 .swipeActions(edge: .trailing) { favoriteButton(for: conversation) }
@@ -580,6 +581,8 @@ struct ConversationRow: View {
   var showsSpace = false
   /// People in the call running here; 0 without one (issue #1352).
   var callCount = 0
+  /// Who types here right now (#882): the row says so instead of the preview.
+  var typingNames: [String] = []
 
   private var isUnread: Bool { conversation.unreadCount > 0 }
 
@@ -649,8 +652,15 @@ struct ConversationRow: View {
 
   @ViewBuilder
   private var previewText: some View {
-    // A draft stands in for the newest message: it's what the user owes this conversation (#1220).
-    if let draft = conversation.maybeDraftPreview {
+    if let line = typingRowText(typingNames, isDirect: conversation.kind == .direct) {
+      // Someone types: that stands in for the preview and the draft, until they stop (#882).
+      HStack(spacing: 6) {
+        TypingDots()
+        Text(line).italic()
+      }
+      .foregroundStyle(Theme.accent)
+    } else if let draft = conversation.maybeDraftPreview {
+      // A draft stands in for the newest message: it's what the user owes this conversation (#1220).
       Label {
         Text("draft_preview \(draft)")
       } icon: {

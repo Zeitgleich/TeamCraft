@@ -223,6 +223,14 @@ struct PermalinkTarget: Decodable, Equatable, Sendable {
   let maybeThread: String?
 }
 
+/// Others typing in one place right now (#882): a conversation itself, or with `maybeThread` a reply in
+/// one of its threads.
+struct TypingPlace: Decodable, Equatable, Sendable {
+  let conversation: String
+  let maybeThread: String?
+  let users: [String]
+}
+
 /// The tagged answer of a `ChatQuery`; read the field that belongs to its `answer`.
 struct ChatAnswer: Decodable, Sendable {
   let answer: String
@@ -231,6 +239,8 @@ struct ChatAnswer: Decodable, Sendable {
   let maybeBytes: Int64?
   let maybeTarget: PermalinkTarget?
   let users: [String]?
+  /// `ChatQuery.typingNow`: everyone typing anywhere.
+  let typing: [TypingPlace]?
   let maybeLink: String?
   let channels: [BrowsableChannel]?
   let guests: [ExpiringGuest]?

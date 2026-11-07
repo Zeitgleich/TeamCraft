@@ -12,6 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -37,6 +38,7 @@ import de.zeitgleich.teamcraft.core.Conversation
 import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.ui.avatarColorOfHue
 import de.zeitgleich.teamcraft.ui.avatarColor
+import de.zeitgleich.teamcraft.ui.TypingDots
 import de.zeitgleich.teamcraft.ui.UserAvatar
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
@@ -56,6 +58,8 @@ fun ConversationTopBar(
   /** The chat list's row: name and kind until the snapshot is read (issue #1425). */
   maybeListed: ConversationItem?,
   onBack: () -> Unit,
+  /** Who types in this conversation itself right now (#882); in a direct message the status gives way. */
+  typing: List<String> = emptyList(),
   actions: @Composable RowScope.() -> Unit,
 ) {
   val maybePeer = maybeConversation?.takeIf { it.kind == "Direct" }?.let { conversation ->
@@ -74,6 +78,7 @@ fun ConversationTopBar(
       pluralStringResource(R.plurals.conversation_members, maybeConversation.memberIds.size, maybeConversation.memberIds.size)
     else -> ""
   }
+  val isTypingInDirect = maybePeer != null && typing.isNotEmpty()
   TopAppBar(
     title = {
       Row(verticalAlignment = Alignment.CenterVertically) {
@@ -86,7 +91,20 @@ fun ConversationTopBar(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.semantics { heading() },
           )
-          if (subtitle.isNotBlank()) {
+          if (isTypingInDirect) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+              TypingDots()
+              Text(
+                stringResource(R.string.typing_direct),
+                modifier = Modifier.padding(start = 6.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodySmall,
+                fontStyle = FontStyle.Italic,
+                color = MaterialTheme.colorScheme.primary,
+              )
+            }
+          } else if (subtitle.isNotBlank()) {
             Text(
               subtitle,
               maxLines = 1,

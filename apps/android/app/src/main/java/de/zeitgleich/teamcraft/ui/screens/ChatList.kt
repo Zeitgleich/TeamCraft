@@ -78,6 +78,7 @@ import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -113,6 +114,9 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Dp
 import de.zeitgleich.teamcraft.ui.ListedSpace
+import de.zeitgleich.teamcraft.ui.TypingDots
+import de.zeitgleich.teamcraft.ui.typingLine
+import de.zeitgleich.teamcraft.ui.typingText
 import de.zeitgleich.teamcraft.ui.SpacePicture
 import de.zeitgleich.teamcraft.ui.Section
 import de.zeitgleich.teamcraft.ui.TabBadge
@@ -180,6 +184,7 @@ fun ChatListScreen(
   maybeSelectedId: String? = null,
 ) {
   val kept by viewModel.chatList.collectAsState()
+  val typing by viewModel.typingNames.collectAsState()
   val scope = rememberCoroutineScope()
   val conversations = kept.maybeConversations
   val previews = kept.previews
@@ -254,6 +259,7 @@ fun ChatListScreen(
     list = ListState(
       previews = previews,
       runningCalls = kept.runningCalls,
+      typing = typing,
       maybeSelectedId = maybeSelectedId,
       selection = selection,
       actionsFor = { conversation, maybeEntry -> rowActions(viewModel, conversation, maybeEntry) },
@@ -401,6 +407,8 @@ internal class ListState(
   val previews: Map<String, ChatListEntry>,
   /** Conversations with a call running and how many are in it: their rows say so (issue #1352). */
   val runningCalls: Map<String, Int> = emptyMap(),
+  /** Who types in each conversation right now (#882): its row says so instead of the preview. */
+  val typing: Map<String, List<String>> = emptyMap(),
   val maybeSelectedId: String?,
   val selection: List<String>,
   val actionsFor: (ConversationItem, ChatListEntry?) -> RowActions,
@@ -589,6 +597,7 @@ private fun LazyListScope.conversationRows(
         isSelecting = list.selection.isNotEmpty(),
         showsSpace = showsSpace && section.title !is SectionTitle.Space,
         callCount = list.runningCalls[conversation.id] ?: 0,
+        typing = list.typing[conversation.id].orEmpty(),
         onClick = { list.onOpen(conversation.id) },
         onLongPress = { list.onLongPress(conversation.id) },
         menu = { isOpen, onDismiss -> list.conversationMenu(conversation, isOpen, onDismiss) },
@@ -891,6 +900,7 @@ private fun SwipeableConversationRow(
   isSelecting: Boolean,
   showsSpace: Boolean,
   callCount: Int,
+  typing: List<String>,
   onClick: () -> Unit,
   onLongPress: () -> Unit,
   menu: @Composable (Boolean, () -> Unit) -> Unit,
@@ -925,6 +935,7 @@ private fun SwipeableConversationRow(
         isChecked,
         showsSpace,
         callCount,
+        typing,
         onClick,
         onLongPress = { if (isSelecting) onLongPress() else isMenuOpen = true },
       )
@@ -996,6 +1007,7 @@ private fun ConversationRow(
   isChecked: Boolean,
   showsSpace: Boolean,
   callCount: Int,
+  typing: List<String>,
   onClick: () -> Unit,
   onLongPress: () -> Unit,
 ) {
@@ -1034,7 +1046,7 @@ private fun ConversationRow(
       if (isChecked) CheckedAvatar() else ConversationAvatar(conversation)
       Column(Modifier.weight(1f).padding(start = 12.dp)) {
         TitleLine(conversation, maybeEntry, maybeSpaceName = conversation.maybeSpaceName.takeIf { showsSpace }, callCount = callCount)
-        PreviewLine(conversation, maybeEntry)
+        PreviewLine(conversation, maybeEntry, typing)
       }
     }
   }
@@ -1126,7 +1138,12 @@ private fun TitleLine(conversation: ConversationItem, maybeEntry: ChatListEntry?
 }
 
 @Composable
-private fun PreviewLine(conversation: ConversationItem, maybeEntry: ChatListEntry?) {
+private fun PreviewLine(conversation: ConversationItem, maybeEntry: ChatListEntry?, typing: List<String>) {
+  // Someone types: that stands in for the preview and the draft, until they stop (#882).
+  typingLine(typing)?.let { line ->
+    TypingPreview(typingText(line, isDirect = conversation.kind == ConversationKind.DIRECT))
+    return
+  }
   // A draft stands in for the newest message: it's what the user owes this conversation (#1220).
   conversation.maybeDraftPreview?.let { preview ->
     DraftLine(preview)
@@ -1141,6 +1158,23 @@ private fun PreviewLine(conversation: ConversationItem, maybeEntry: ChatListEntr
       overflow = TextOverflow.Ellipsis,
       style = MaterialTheme.typography.bodyMedium,
       color = if (isUnread) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
+}
+
+/** "typing…" or "Alice is typing…" in the preview's place, after three pulsing dots. */
+@Composable
+private fun TypingPreview(text: String) {
+  Row(verticalAlignment = Alignment.CenterVertically) {
+    TypingDots()
+    Text(
+      text,
+      modifier = Modifier.weight(1f).padding(start = 6.dp),
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+      style = MaterialTheme.typography.bodyMedium,
+      fontStyle = FontStyle.Italic,
+      color = MaterialTheme.colorScheme.primary,
     )
   }
 }

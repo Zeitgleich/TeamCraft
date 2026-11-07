@@ -129,6 +129,26 @@ func typingText(_ names: [String]) -> LocalizedStringKey? {
   }
 }
 
+/// Others typing in one place right now (#882): a conversation itself, or with `maybeThread` a reply
+/// in one of its threads.
+struct TypingNow: Equatable, Sendable {
+  let conversation: String
+  let maybeThread: String?
+  let names: [String]
+}
+
+/// Who types in this place: the conversation itself, or with `thread` a reply in that thread.
+func typingNames(in places: [TypingNow], conversation: String, thread: String?) -> [String] {
+  places.first { $0.conversation == conversation && $0.maybeThread == thread }?.names ?? []
+}
+
+/// What the chat list's row and the header say for these names: "typing…" in a direct message (the
+/// conversation is the person), else the same line as above the composer.
+func typingRowText(_ names: [String], isDirect: Bool) -> LocalizedStringKey? {
+  if isDirect && names.count == 1 { return "typing_direct" }
+  return typingText(names)
+}
+
 /// The `:name` being typed at the end of the composer text (two characters at least, so `:)` and
 /// `:D` stay emoticons), or nothing.
 func activeEmojiQuery(_ text: String) -> String? {
