@@ -108,6 +108,8 @@ const COMMANDS: &[&str] = &[
   "os_attention",
   "autostart_get",
   "autostart_set",
+  "file_manager_entries_get",
+  "file_manager_entries_set",
   "shell_prefs_get",
   "shell_prefs_set",
   "tray_update",

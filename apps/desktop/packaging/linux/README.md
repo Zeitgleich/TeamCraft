@@ -272,9 +272,39 @@ the session bus, so a panel that starts later is picked up.
 ## Sharing files from the file manager
 
 `teamcraft-desktop --share -- <paths>` hands files to the running app, which asks for a conversation.
+The app adds a **Send to TeamCraft** entry (**An TeamCraft senden**) to the file managers' context
+menus itself (`apps/desktop/src/file_manager_entries.rs`, #1393). It is a setting, on by default:
+Settings > Preferences > "Show "Send to TeamCraft" in the file manager". The files are per user, there
+are none system-wide; turning the setting off removes all of them, and the app writes them again at
+every start, so a moved AppImage or an updated install path is repaired.
 
-- **Thunar, Nautilus:** custom actions and scripts can run the command (`flatpak run
-  de.zeitgleich.teamcraft --share -- %F` for the Flatpak, the AppImage's path for the AppImage).
+| File manager    | Where                                                                  | In the menu                          |
+|-----------------|------------------------------------------------------------------------|--------------------------------------|
+| Dolphin (KDE)   | `~/.local/share/kio/servicemenus/…send-to.desktop`                     | right click, Actions                 |
+| Files (GNOME)   | `~/.local/share/nautilus/scripts/Send to TeamCraft`                    | right click, Scripts                 |
+| Nemo (Cinnamon) | `~/.local/share/nemo/actions/…send-to.nemo_action`                     | right click                          |
+| Caja (MATE)     | `~/.config/caja/scripts/Send to TeamCraft`                             | right click, Scripts                 |
+| Thunar (Xfce)   | action `de.zeitgleich.teamcraft.send-to` in `~/.config/Thunar/uca.xml` | right click (after a Thunar restart) |
+
+- Only a manager that is installed (its program on the `PATH`, or its folder exists) gets an entry.
+  The Flatpak cannot look, so it writes for all of them.
+- Every file carries `X-TeamCraft-Generated=true`; a file without it is never changed or removed, also
+  not when it has our name. Thunar's `uca.xml` is edited as text: the user's actions stay byte for
+  byte, ours is found by its `<unique-id>`; a file that isn't well-formed is left alone and the
+  setting reports the error.
+- The scripts' and menus' names follow the language of the session (`LC_ALL`, `LC_MESSAGES`,
+  `LANGUAGE`, `LANG`; English or German); Dolphin and Nemo carry both. A changed language renames the
+  script.
+- `Exec` per package: deb and rpm run `teamcraft-desktop`; the AppImage its own file (`$APPIMAGE`);
+  the Flatpak `flatpak run --file-forwarding de.zeitgleich.teamcraft --share -- @@ %F @@`, which
+  passes the files through the document portal. A binary that is not the installed one (a build from
+  source) is started by its path.
+- The Flatpak may write to exactly these folders (`finish-args` in `de.zeitgleich.teamcraft.yml`):
+  `xdg-data/kio/servicemenus`, `xdg-data/nautilus/scripts`, `xdg-data/nemo/actions`,
+  `xdg-config/caja/scripts`, `xdg-config/Thunar`.
+- Plasma 6 shows a user service menu only when its file is executable; the app sets that. A new
+  Nautilus script appears at once; Thunar reads `uca.xml` at start.
+- Nautilus passes only local files to scripts; for files on a remote share the entry does nothing.
 
 TeamCraft deliberately registers no `.desktop` entry with file MIME types: that put it under "Open
 with" for every file, which is opening, not sharing. KDE's "Share" menu (Purpose) only takes compiled
