@@ -50,17 +50,18 @@ futures-channel = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["async-await", "async-await-macro", "sink", "std"] }
 # REST client; uses fetch in the browser.
 reqwest.workspace = true
-# Thumbnails of image attachments, made by the sender's client (already in the tree via the
-# desktop stack; only the common decoders, no native code).
 # Link previews: the URL in a message and the page's image URL (already in the tree via reqwest).
 url = "2.5.8"
-image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 teamcraft-client-api = { path = "../teamcraft-client-api", optional = true }
 # The shared retry policy (src/retry.rs); natively also Happy Eyeballs for the WebSocket connects
 # (src/api/connect.rs).
 teamcraft-net.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Thumbnails of image attachments, made by the sender's client (already in the tree via the
+# desktop stack; only the common decoders, no native code). Not in the browser: there the browser's
+# own decoders make them (src/thumbnail/mod.rs, #135).
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 # Upload bodies streamed in chunks, so the bytes sent are counted for the progress (src/api/http.rs).
 reqwest = { workspace = true, features = ["stream"] }
 # SQLCipher: e2ee.md §9. Version matches the libsqlite3-sys already in the lock file (sqlx).
@@ -164,6 +165,11 @@ web-sys = { version = "0.3.83", features = [
   "XmlHttpRequestEventTarget",
   "XmlHttpRequestResponseType",
   "XmlHttpRequestUpload",
+  # Thumbnails and screenshots by the browser's decoders and a canvas: src/thumbnail/browser.rs.
+  "CanvasRenderingContext2d",
+  "HtmlCanvasElement",
+  "HtmlImageElement",
+  "ImageData",
 ] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]

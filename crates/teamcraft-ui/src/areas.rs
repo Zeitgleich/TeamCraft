@@ -256,15 +256,6 @@ areas! {
   integration_feed(conversation: ConversationId) => log: view! { <IntegrationFeed conversation=conversation /> };
 }
 
-/// Thumbnails of the pictures this page sends, by teamcraft-core's image codecs (its
-/// `make_thumbnail`, installed in `web_core.rs`): a large part of the app that a first visit doesn't
-/// need, so they load with the first picture.
-#[cfg(target_arch = "wasm32")]
-#[wasm_split(images, wasm_split_path = ::leptos::wasm_split, fallible)]
-pub fn thumbnail(bytes: &[u8], media_type: &str) -> Result<Option<Vec<u8>>, SplitLoaderError> {
-  Ok(teamcraft_core::thumbnail::thumbnail(bytes, media_type))
-}
-
 /// The app's own message sounds (#800), synthesized by teamcraft-media in the page: a first visit
 /// doesn't need them, so they load with the first sound (the page keeps each one once made).
 #[cfg(target_arch = "wasm32")]

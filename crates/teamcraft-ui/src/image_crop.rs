@@ -214,13 +214,13 @@ impl ImagePickError {
   }
 }
 
-/// The editor's copy of a picked file's bytes: upright, bounded in size, as PNG with its size
-/// (teamcraft-core, tested there). The UI only runs as wasm (browser and desktop webview); the
-/// native build of this crate is for tests and has no core.
-pub fn prepare_editor_image(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), ImagePickError> {
+/// The editor's copy of a picked file's bytes: upright, at most `EDITOR_IMAGE_MAX_SIDE` pixels per
+/// side, as PNG with its size. The browser decodes and scales it (teamcraft-core
+/// `thumbnail::browser`, #135); the UI only runs as wasm (browser and desktop webview), the native
+/// build of this crate is for tests.
+pub async fn prepare_editor_image(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), ImagePickError> {
   #[cfg(target_arch = "wasm32")]
-  let maybe_image =
-    teamcraft_core::thumbnail::editor_image(bytes).map(|image| (image.png, image.width, image.height));
+  let maybe_image = browser::editor_image(bytes).await;
   #[cfg(not(target_arch = "wasm32"))]
   let maybe_image: Option<(Vec<u8>, u32, u32)> = {
     let _ = bytes;
@@ -229,18 +229,11 @@ pub fn prepare_editor_image(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), ImagePi
   maybe_image.ok_or(ImagePickError::Unreadable)
 }
 
-/// Cuts `rect` out of the editor's PNG and scales it to at most `size_px`, as PNG.
-pub fn crop_png(editor_png: &[u8], rect: CropRect, size_px: u32) -> Result<Vec<u8>, ImagePickError> {
+/// Cuts `rect` out of the editor's PNG and scales it to at most `size_px`, as PNG; a smaller square
+/// is not scaled up, a rectangle outside the picture is clamped into it (see [`clamped_square`]).
+pub async fn crop_png(editor_png: &[u8], rect: CropRect, size_px: u32) -> Result<Vec<u8>, ImagePickError> {
   #[cfg(target_arch = "wasm32")]
-  let maybe_png = {
-    let square = teamcraft_core::thumbnail::SquareCrop {
-      quarter_turns: rect.quarter_turns,
-      x: rect.x,
-      y: rect.y,
-      side: rect.side,
-    };
-    teamcraft_core::thumbnail::cropped_square_png(editor_png, square, size_px)
-  };
+  let maybe_png = browser::cropped_square(editor_png, rect, size_px).await;
   #[cfg(not(target_arch = "wasm32"))]
   let maybe_png: Option<Vec<u8>> = {
     let _ = (editor_png, rect, size_px);
@@ -251,18 +244,91 @@ pub fn crop_png(editor_png: &[u8], rect: CropRect, size_px: u32) -> Result<Vec<u
 
 /// Scales a square PNG down until it fits a source picture (teamcraft-proto:
 /// `MAX_SOURCE_PICTURE_BYTES`), which travels inside messages. `None`: not even the smallest fits.
-pub fn fit_source_picture(square_png: &[u8], side_px: u32) -> Option<Vec<u8>> {
-  SOURCE_PICTURE_SIDES_PX.iter().find_map(|&size_px| {
+pub async fn fit_source_picture(square_png: &[u8], side_px: u32) -> Option<Vec<u8>> {
+  for size_px in SOURCE_PICTURE_SIDES_PX {
     let rect = CropRect {
       quarter_turns: 0,
       x: 0,
       y: 0,
       side: side_px,
     };
-    crop_png(square_png, rect, size_px)
+    let fits = crop_png(square_png, rect, size_px)
+      .await
       .ok()
-      .filter(|png| teamcraft_proto::check_source_picture(png).is_ok())
-  })
+      .filter(|png| teamcraft_proto::check_source_picture(png).is_ok());
+    if fits.is_some() {
+      return fits;
+    }
+  }
+  None
+}
+
+/// Width and height of a `width` × `height` picture turned clockwise by `quarter_turns`.
+pub fn turned_size(width: u32, height: u32, quarter_turns: u8) -> (u32, u32) {
+  match quarter_turns % 2 {
+    1 => (height, width),
+    _ => (width, height),
+  }
+}
+
+/// The square `rect` asks for in a turned picture of `width` × `height`, clamped into it: left,
+/// top and side (at least one pixel).
+pub fn clamped_square(width: u32, height: u32, rect: CropRect) -> (u32, u32, u32) {
+  let side = rect.side.min(width).min(height).max(1);
+  let x = rect.x.min(width.saturating_sub(side));
+  let y = rect.y.min(height.saturating_sub(side));
+  (x, y, side)
+}
+
+/// The crop's side in the result: `side`, scaled down to `size_px` when larger.
+pub fn output_side(side: u32, size_px: u32) -> u32 {
+  side.min(size_px).max(1)
+}
+
+#[cfg(target_arch = "wasm32")]
+mod browser {
+  use teamcraft_core::thumbnail::EDITOR_IMAGE_MAX_SIDE;
+  use teamcraft_core::thumbnail::browser::{Encoding, canvas, decoded, encode};
+
+  use super::{CropRect, clamped_square, output_side, turned_size};
+
+  /// See [`super::prepare_editor_image`].
+  pub async fn editor_image(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    let picture = decoded(bytes).await?;
+    let canvas = picture.fitted(EDITOR_IMAGE_MAX_SIDE)?;
+    let (width, height) = (canvas.width(), canvas.height());
+    let png = encode(&canvas, Encoding::Png, usize::MAX).await?;
+    Some((png, width, height))
+  }
+
+  /// See [`super::crop_png`]: the picture is turned and cut by the canvas' transform, so only the
+  /// square is drawn.
+  pub async fn cropped_square(editor_png: &[u8], rect: CropRect, size_px: u32) -> Option<Vec<u8>> {
+    let picture = decoded(editor_png).await?;
+    let turns = rect.quarter_turns % 4;
+    let (turned_width, turned_height) = turned_size(picture.width, picture.height, turns);
+    let (x, y, side) = clamped_square(turned_width, turned_height, rect);
+    let out = output_side(side, size_px);
+    let (canvas, context) = canvas(out, out)?;
+    let scale = f64::from(out) / f64::from(side);
+    let (width, height) = (f64::from(picture.width), f64::from(picture.height));
+    // Applied to the picture in reverse order: turned clockwise about the origin and moved back into
+    // view, the square moved to the origin, scaled to the result.
+    let (move_x, move_y, angle) = match turns {
+      1 => (height, 0.0, std::f64::consts::FRAC_PI_2),
+      2 => (width, height, std::f64::consts::PI),
+      3 => (0.0, width, -std::f64::consts::FRAC_PI_2),
+      _ => (0.0, 0.0, 0.0),
+    };
+    context.scale(scale, scale).ok()?;
+    context.translate(-f64::from(x), -f64::from(y)).ok()?;
+    context.translate(move_x, move_y).ok()?;
+    context.rotate(angle).ok()?;
+    context
+      .draw_image_with_html_image_element(picture.image(), 0.0, 0.0)
+      .ok()?;
+    encode(&canvas, Encoding::Png, usize::MAX).await
+  }
 }
 
 /// Rounds a non-negative pixel position; the picture is at most a few thousand pixels wide.
@@ -273,6 +339,8 @@ fn to_pixels(value: f64) -> u32 {
 
 #[cfg(test)]
 mod tests {
+  use futures_util::FutureExt;
+
   use super::*;
 
   const FRAME: f64 = 200.0;
@@ -443,8 +511,27 @@ mod tests {
       Err(ImagePickError::Size)
     );
     assert_eq!(
-      prepare_editor_image(b"not an image"),
-      Err(ImagePickError::Unreadable)
+      prepare_editor_image(b"not an image").now_or_never(),
+      Some(Err(ImagePickError::Unreadable))
     );
+  }
+
+  /// The browser crops with these (`browser::cropped_square`); they are the native crop's rules.
+  #[test]
+  fn the_crop_is_turned_clamped_and_never_enlarged() {
+    assert_eq!(turned_size(1000, 500, 0), (1000, 500));
+    assert_eq!(turned_size(1000, 500, 1), (500, 1000));
+    assert_eq!(turned_size(1000, 500, 3), (500, 1000));
+    let rect = |x, y, side| CropRect {
+      quarter_turns: 0,
+      x,
+      y,
+      side,
+    };
+    assert_eq!(clamped_square(500, 1000, rect(0, 500, 500)), (0, 500, 500));
+    assert_eq!(clamped_square(1000, 500, rect(9000, 9000, 9000)), (500, 0, 500));
+    assert_eq!(clamped_square(10, 10, rect(3, 3, 0)), (3, 3, 1));
+    assert_eq!(output_side(500, 256), 256);
+    assert_eq!(output_side(100, 256), 100, "a small square is not scaled up");
   }
 }

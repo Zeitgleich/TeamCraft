@@ -15,6 +15,7 @@ pub mod downloads;
 #[cfg(feature = "ui")]
 pub(crate) mod entry_tally;
 pub mod error;
+pub mod image_header;
 pub mod imported;
 pub mod integration_sources;
 pub mod link_preview;

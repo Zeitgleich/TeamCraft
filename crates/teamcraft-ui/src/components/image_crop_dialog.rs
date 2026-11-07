@@ -226,12 +226,13 @@ pub fn ImageCropDialog(
     spawn_local(async move {
       // Let the button show its spinner before the page's thread is busy cropping.
       next_frame().await;
-      let Some(result) = picture.try_with_value(|maybe| {
-        maybe.as_ref().map_or(Err(ImagePickError::Unreadable), |editor| {
-          crop_png(&editor.png, rect, target.output_px())
-        })
-      }) else {
+      let Some(maybe_png) = picture.try_with_value(|maybe| maybe.as_ref().map(|editor| editor.png.clone()))
+      else {
         return;
+      };
+      let result = match maybe_png {
+        Some(png) => crop_png(&png, rect, target.output_px()).await,
+        None => Err(ImagePickError::Unreadable),
       };
       match result {
         Ok(png) => {
@@ -624,15 +625,17 @@ fn load_picture(
     // The spinner paints before decoding takes the page's thread for a moment.
     next_frame().await;
     let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
-    let prepared = prepare_editor_image(&bytes).and_then(|(png, width, height)| {
-      let url = ObjectUrl::from_bytes(&png, "image/png").ok_or(ImagePickError::Unreadable)?;
-      Ok(EditorPicture {
-        png,
-        url,
-        width,
-        height,
-      })
-    });
+    let prepared = prepare_editor_image(&bytes)
+      .await
+      .and_then(|(png, width, height)| {
+        let url = ObjectUrl::from_bytes(&png, "image/png").ok_or(ImagePickError::Unreadable)?;
+        Ok(EditorPicture {
+          png,
+          url,
+          width,
+          height,
+        })
+      });
     match prepared {
       Ok(editor) => {
         let (width, height) = (editor.width, editor.height);
