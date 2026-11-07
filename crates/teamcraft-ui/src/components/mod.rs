@@ -116,6 +116,7 @@ pub mod rail;
 pub mod rail_menus;
 pub mod reaction_jump;
 pub mod recovery_kit_setup;
+pub mod report_problem;
 pub mod rich_text;
 pub mod roster_banner;
 pub mod scheduled_view;

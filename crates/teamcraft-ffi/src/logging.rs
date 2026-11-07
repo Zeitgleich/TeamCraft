@@ -3,18 +3,13 @@
 //! errors from everywhere, plus the lifecycle steps (open, enroll, recover, link, sync) at `info`.
 //! Never secrets (security.md): events carry IDs and error causes, no content.
 
-use std::collections::VecDeque;
-use std::fmt::{self, Write as _};
-use std::sync::{Arc, Mutex, Once, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Once;
+use std::time::Duration;
 
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 use tracing::Level;
-use tracing::field::{Field, Visit};
-use tracing::{Event, Subscriber};
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 use tracing_subscriber::filter::Targets;
-use tracing_subscriber::layer::{Context, Layer};
 
 use crate::TeamCraftError;
 
@@ -25,14 +20,8 @@ pub(crate) const LIFECYCLE: &str = "teamcraft_lifecycle";
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 const SYNC_TRACE: &str = "teamcraft_core::client::sync_trace";
 
-/// Lines the in-memory ring keeps for the diagnostics export (issue #1094); older ones drop out.
-pub(crate) const RING_CAPACITY: usize = 300;
-
 /// From here on an engine job is worth a line in the system log.
 const SLOW_JOB: Duration = Duration::from_millis(250);
-
-/// Longest line the ring keeps, in characters; the rest is cut so the ring's memory stays bounded.
-const MAX_LINE_CHARS: usize = 1024;
 
 /// The logcat tag; on iOS the os_log category (the subsystem is the app identifier).
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -118,11 +107,11 @@ pub(crate) fn outcome<T>(
   result
 }
 
-/// The recent system-log lines, oldest first, for the diagnostics export (issue #1094). The same
-/// events as logcat and os_log, so never secrets (security.md). Empty where no system log is
-/// installed (desktop builds of this crate).
+/// The recent log lines, oldest first, for the diagnostics export (issue #1094) and "Report a
+/// problem" (docs/bug-reports.md): the core's redacted ring (`teamcraft_client_api::debug_log`), which
+/// holds TeamCraft's own events from `info` and everything else from `warn`.
 pub(crate) fn recent_lines() -> Vec<String> {
-  global_ring().lines()
+  teamcraft_client_api::debug_log::recent_lines()
 }
 
 /// The text file the diagnostics export shares: a header with the app and OS version, then the
@@ -137,112 +126,6 @@ pub(crate) fn diagnostics_text(app_version: &str, os_version: &str, lines: &[Str
     text.push('\n');
   }
   text
-}
-
-fn global_ring() -> &'static LogRing {
-  static RING: OnceLock<LogRing> = OnceLock::new();
-  RING.get_or_init(|| LogRing::new(RING_CAPACITY))
-}
-
-/// A bounded in-memory copy of the system log. Events are formatted before the lock is taken, so
-/// the lock only covers a push, and logging stays cheap.
-#[derive(Clone, Debug)]
-pub(crate) struct LogRing {
-  capacity: usize,
-  lines: Arc<Mutex<VecDeque<String>>>,
-}
-
-impl LogRing {
-  pub(crate) fn new(capacity: usize) -> Self {
-    Self {
-      capacity,
-      lines: Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
-    }
-  }
-
-  /// The kept lines, oldest first.
-  pub(crate) fn lines(&self) -> Vec<String> {
-    self.lock().iter().cloned().collect()
-  }
-
-  fn push(&self, line: String) {
-    let mut lines = self.lock();
-    while lines.len() >= self.capacity {
-      lines.pop_front();
-    }
-    lines.push_back(line);
-  }
-
-  fn lock(&self) -> std::sync::MutexGuard<'_, VecDeque<String>> {
-    // A panic while pushing leaves a valid deque; the log must keep working after it.
-    self.lines.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-  }
-}
-
-impl<S: Subscriber> Layer<S> for LogRing {
-  fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-    if self.capacity == 0 {
-      return;
-    }
-    let metadata = event.metadata();
-    let mut line = format!(
-      "{} {:>5} {}:",
-      timestamp(SystemTime::now()),
-      metadata.level(),
-      metadata.target()
-    );
-    event.record(&mut LineVisitor(&mut line));
-    self.push(truncate(line));
-  }
-}
-
-/// Appends an event's message and `name=value` fields to a line.
-struct LineVisitor<'a>(&'a mut String);
-
-impl Visit for LineVisitor<'_> {
-  fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-    // Writing to a String can't fail.
-    if field.name() == "message" {
-      let _ = write!(self.0, " {value:?}");
-    } else {
-      let _ = write!(self.0, " {}={value:?}", field.name());
-    }
-  }
-}
-
-fn truncate(line: String) -> String {
-  match line.char_indices().nth(MAX_LINE_CHARS) {
-    Some((end, _)) => format!("{}...", &line[..end]),
-    None => line,
-  }
-}
-
-/// `2026-11-01T12:00:00Z` (UTC, whole seconds).
-fn timestamp(time: SystemTime) -> String {
-  let seconds = time
-    .duration_since(UNIX_EPOCH)
-    .map_or(0, |elapsed| elapsed.as_secs());
-  let (days, rest) = (seconds / 86_400, seconds % 86_400);
-  // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
-  let shifted = days as i64 + 719_468;
-  let era = shifted.div_euclid(146_097);
-  let day_of_era = shifted.rem_euclid(146_097);
-  let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-  let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-  let month_index = (5 * day_of_year + 2) / 153;
-  let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-  let month = if month_index < 10 {
-    month_index + 3
-  } else {
-    month_index - 9
-  };
-  let year = year_of_era + era * 400 + i64::from(month <= 2);
-  format!(
-    "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-    rest / 3_600,
-    rest % 3_600 / 60,
-    rest % 60
-  )
 }
 
 /// What reaches the system log: `warn` and above, lifecycle steps from `info`.
@@ -263,7 +146,7 @@ fn install_system_log() {
   let layer = paranoid_android::layer(TAG)
     .with_ansi(false)
     .with_filter(system_log_filter());
-  let ring = global_ring().clone().with_filter(system_log_filter());
+  let ring = teamcraft_client_api::debug_log::layer();
   // Ignored: another subscriber (a test harness) already owns the process.
   let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer).with(ring));
 }
@@ -274,7 +157,7 @@ fn install_system_log() {
   use tracing_subscriber::layer::{Layer as _, SubscriberExt as _};
 
   let layer = OsLogger::new(SUBSYSTEM, TAG).with_filter(system_log_filter());
-  let ring = global_ring().clone().with_filter(system_log_filter());
+  let ring = teamcraft_client_api::debug_log::layer();
   // Ignored: another subscriber (a test harness) already owns the process.
   let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer).with(ring));
 }
@@ -307,61 +190,19 @@ mod tests {
   mod ring {
     use super::*;
 
-    #[test]
-    fn keeps_only_the_newest_lines_in_order() {
-      let ring = LogRing::new(3);
-      record(&ring, || {
-        for number in 0..5 {
-          tracing::warn!(number, "event");
-        }
-      });
-      let lines = ring.lines();
-      assert_eq!(lines.len(), 3);
-      assert!(lines[0].ends_with("event number=2"), "{lines:?}");
-      assert!(lines[2].ends_with("event number=4"), "{lines:?}");
-    }
-
-    #[test]
-    fn applies_the_system_log_filter() {
-      let ring = LogRing::new(10);
-      record(&ring, || {
-        tracing::info!(target: "teamcraft_core::sync", "chatter");
-        tracing::debug!(target: LIFECYCLE, "detail");
-        tracing::info!(target: LIFECYCLE, "lifecycle");
-        tracing::error!("broken");
-      });
-      let lines = ring.lines();
-      assert_eq!(lines.len(), 2, "{lines:?}");
-      assert!(lines[0].contains("INFO teamcraft_lifecycle: lifecycle"));
-      assert!(lines[1].contains("ERROR"));
-    }
+    use teamcraft_client_api::debug_log::{DebugLog, DebugLogSettings};
 
     #[test]
     fn carries_the_failed_step_like_the_system_log() {
-      let ring = LogRing::new(10);
-      record(&ring, || {
+      let ring = DebugLog::new(DebugLogSettings::default());
+      let subscriber = tracing_subscriber::registry().with(ring.clone());
+      tracing::subscriber::with_default(subscriber, || {
         let result: Result<(), TeamCraftError> = Err(TeamCraftError::InvalidInput("bad".to_owned()));
         let _ = outcome(LifecycleStep::Open, result);
       });
       let lines = ring.lines();
       assert!(lines[0].contains("step=Open"), "{lines:?}");
       assert!(lines[0].contains("failed"), "{lines:?}");
-    }
-
-    #[test]
-    fn cuts_overlong_lines() {
-      let ring = LogRing::new(2);
-      record(&ring, || tracing::warn!("{}", "x".repeat(5_000)));
-      let line = &ring.lines()[0];
-      assert_eq!(line.chars().count(), MAX_LINE_CHARS + 3);
-      assert!(line.ends_with("..."));
-    }
-
-    #[test]
-    fn formats_the_timestamp_in_utc() {
-      let time = UNIX_EPOCH + std::time::Duration::from_secs(1_793_534_400);
-      assert_eq!(timestamp(time), "2026-11-01T12:00:00Z");
-      assert_eq!(timestamp(UNIX_EPOCH), "1970-01-01T00:00:00Z");
     }
 
     #[test]
@@ -372,11 +213,6 @@ mod tests {
         "TeamCraft diagnostics\nApp version: 1.2.3\nOS version: Android 15\nLog lines: 2\n\na\nb\n"
       );
       assert!(diagnostics_text("1", "2", &[]).ends_with("Log lines: 0\n\n"));
-    }
-
-    fn record(ring: &LogRing, events: impl FnOnce()) {
-      let subscriber = tracing_subscriber::registry().with(ring.clone().with_filter(system_log_filter()));
-      tracing::subscriber::with_default(subscriber, events);
     }
   }
 }

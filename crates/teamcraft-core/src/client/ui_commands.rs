@@ -137,6 +137,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       CoreCommand::CancelScheduled { id } => Box::pin(self.cancel_scheduled(id)).await,
       CoreCommand::SendScheduledNow { id } => Box::pin(self.send_scheduled_now(id)).await,
+      // On the heap like the scheduled sends: delivery opens a group DM, a big future.
+      CoreCommand::QueueBugReport { report } => Box::pin(self.queue_bug_report(report)).await,
       CoreCommand::SaveSearch { id, name, query } => self.update_account_data(|data, now| {
         data.save_search(id, &name, &query, now);
         true

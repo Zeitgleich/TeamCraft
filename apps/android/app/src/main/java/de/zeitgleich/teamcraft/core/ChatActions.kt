@@ -23,6 +23,9 @@ data class PickedFile(
   val maybeWaveform: List<Int>? = null,
 )
 
+/** A picture added to a problem report. */
+class ReportScreenshot(val fileName: String, val mediaType: String, val bytes: ByteArray)
+
 /** What the composer sends besides the text. */
 data class SendOptions(
   val maybeThread: String? = null,
@@ -63,6 +66,38 @@ object ChatActions {
   fun cancelScheduled(id: String) = action("cancel_scheduled") { put("id", id) }
 
   fun sendScheduledNow(id: String) = action("send_scheduled_now") { put("id", id) }
+
+  /**
+   * "Report a problem" (docs/bug-reports.md): [id] is the report's client message ID (32 hex
+   * digits), so a retried send is delivered once; [reportText] is exactly what the screen showed.
+   */
+  fun sendBugReport(
+    id: String,
+    description: String,
+    reportText: String,
+    fileName: String,
+    maybeScreenshot: ReportScreenshot?,
+  ) = action("send_bug_report") {
+    put(
+      "report",
+      buildJsonObject {
+        put("id", id)
+        put("description", description)
+        put("report_text", reportText)
+        put("file_name", fileName)
+        maybeScreenshot?.let { screenshot ->
+          put(
+            "screenshot",
+            buildJsonObject {
+              put("file_name", screenshot.fileName)
+              put("media_type", screenshot.mediaType)
+              put("bytes", java.util.Base64.getEncoder().encodeToString(screenshot.bytes))
+            },
+          )
+        }
+      },
+    )
+  }
 
   private fun outgoing(conversation: String, body: String, options: SendOptions) = buildJsonObject {
     put("conversation", conversation)

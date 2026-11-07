@@ -879,6 +879,10 @@ pub enum ChatAction {
   SendScheduledNow {
     id: ScheduledMessageId,
   },
+  /// "Report a problem" (docs/bug-reports.md).
+  SendBugReport {
+    report: crate::bug_report::BugReport,
+  },
   Acknowledge {
     conversation: ConversationId,
     message: MessageId,
@@ -1335,6 +1339,7 @@ impl ChatAction {
       Self::UpdateScheduled { id, body, due_at } => backend.update_scheduled(id, &body, due_at),
       Self::CancelScheduled { id } => backend.cancel_scheduled(id),
       Self::SendScheduledNow { id } => backend.send_scheduled_now(id),
+      Self::SendBugReport { report } => backend.send_bug_report(report),
       Self::Acknowledge {
         conversation,
         message,

@@ -21,6 +21,7 @@ Read before changing behaviour:
 | [docs/bridge.md](docs/bridge.md)                         | Integration bridge: webhooks and logs into encrypted channels |
 | [docs/meetings.md](docs/meetings.md)                     | Meetings, invitations, guests and lobby                       |
 | [docs/scheduled-messages.md](docs/scheduled-messages.md) | Send later: client-held, what the server learns               |
+| [docs/bug-reports.md](docs/bug-reports.md)               | Report a problem: encrypted delivery, redacted debug log      |
 | [docs/push-gateway.md](docs/push-gateway.md)             | Push gateway for store apps (own repo): server side, contract |
 | [docs/app-links.md](docs/app-links.md)                   | Links that open the installed app, per platform               |
 | [docs/operations.md](docs/operations.md)                 | Running an instance; deployment: Zeitgleich/teamcraft-deploy  |

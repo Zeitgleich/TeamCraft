@@ -109,4 +109,26 @@ class FieldErrorsTest {
       assertEquals(MAX_CONFIRM_OVER, confirmOverCount("99999"))
     }
   }
+
+  class Report {
+    @Test
+    fun aDescriptionIsRequiredAndBounded() {
+      assertEquals(R.string.report_error_description, reportErrors("  ", null)[ReportField.DESCRIPTION])
+      val long = "x".repeat(MAX_REPORT_DESCRIPTION + 1)
+      assertEquals(R.string.report_error_description_long, reportErrors(long, null)[ReportField.DESCRIPTION])
+      assertTrue(reportErrors("The call drops", null).isValid)
+    }
+
+    @Test
+    fun theScreenshotIsCheckedAtItsField() {
+      val pdf = PickedScreenshotInfo("application/pdf", 10, isRead = true)
+      val huge = PickedScreenshotInfo("image/png", MAX_REPORT_SCREENSHOT_BYTES + 1, isRead = false)
+      val unread = PickedScreenshotInfo("image/jpeg", 10, isRead = false)
+      assertEquals(R.string.report_error_screenshot_type, reportErrors("x", pdf)[ReportField.SCREENSHOT])
+      assertEquals(R.string.report_error_screenshot_size, reportErrors("x", huge)[ReportField.SCREENSHOT])
+      assertEquals(R.string.report_error_screenshot_read, reportErrors("x", unread)[ReportField.SCREENSHOT])
+      assertEquals(ReportField.DESCRIPTION, reportErrors("", pdf).maybeFirst)
+      assertTrue(reportErrors("x", PickedScreenshotInfo("image/webp", 10, isRead = true)).isValid)
+    }
+  }
 }

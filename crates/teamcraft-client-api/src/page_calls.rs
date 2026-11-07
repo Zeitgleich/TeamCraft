@@ -96,6 +96,10 @@ pub const EXPORT_VIDEO_STATS: &str = "video_stats";
 /// `network_changed()`: the page's core saw the network come back or change, or the page woke up
 /// (`online`, `visibilitychange`, `pageshow`, `resume`); a running call checks its session.
 pub const EXPORT_NETWORK_CHANGED: &str = "network_changed";
+/// `recent_log() -> string[]`: the module's recent log lines, oldest first and redacted
+/// ([`crate::debug_log`]), for "Report a problem" (docs/bug-reports.md). The module has a log of
+/// its own: it is a wasm instance of its own.
+pub const EXPORT_RECENT_LOG: &str = "recent_log";
 /// `stop() -> Promise`: leaves a running call; the page is signing out.
 pub const EXPORT_STOP: &str = "stop";
 /// `pick_screen(ScreenContentMode JSON, has_sound, ScreenShareResolution JSON) -> Promise<MediaStream>`:

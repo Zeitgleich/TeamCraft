@@ -11,6 +11,7 @@ mod admin_joins;
 mod attachments;
 mod attested;
 mod backgrounds;
+pub mod bug_reports;
 mod calls;
 mod catch_up;
 mod channel_roles;
@@ -74,6 +75,7 @@ use std::collections::{BTreeMap, HashMap};
 
 pub use abandoned::SIGN_OUT_REVOKE_PATIENCE;
 pub use account::stored_account_data;
+pub use bug_reports::BugReportError;
 pub use devices::OwnDeviceCheck;
 #[cfg(feature = "ui")]
 pub(crate) use enroll::{WRAPPED_KEYS_KEY, decode_wrapped_keys};

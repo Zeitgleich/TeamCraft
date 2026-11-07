@@ -33,6 +33,7 @@
     "allow-core-retry-keychain",
     "allow-core-status",
     "allow-core-connection",
+    "allow-core-recent-log",
     "allow-core-network-changed",
     "allow-core-enroll",
     "allow-core-snapshot",

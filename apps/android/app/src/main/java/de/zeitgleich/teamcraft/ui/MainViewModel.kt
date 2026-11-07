@@ -1561,6 +1561,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       is TeamCraftException.LinkCodeForNewDevice -> R.string.link_code_for_new_device
       is TeamCraftException.LinkCodeForSignedInDevice -> R.string.link_code_for_signed_in_device
       is TeamCraftException.LinkCodeExpired -> R.string.link_code_expired
+      is TeamCraftException.BugReportNoRecipients -> R.string.report_error_no_recipients
+      is TeamCraftException.BugReportQueueFull -> R.string.report_error_queue_full
       else -> R.string.error_generic
     }
   }

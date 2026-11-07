@@ -44,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
@@ -104,6 +105,7 @@ fun SettingsScreen(
   onBack: () -> Unit,
   onDnd: () -> Unit = {},
   onDiagnostics: () -> Unit = {},
+  onReportProblem: () -> Unit = {},
 ) {
   var maybePage by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
   BackHandler(enabled = maybePage != null) { maybePage = null }
@@ -122,7 +124,7 @@ fun SettingsScreen(
       verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
       when (page) {
-        null -> SettingsHub(viewModel, account, onOpen = { maybePage = it })
+        null -> SettingsHub(viewModel, account, onOpen = { maybePage = it }, onReportProblem = onReportProblem)
         SettingsPage.Notifications -> NotificationsPage(viewModel, onDnd, onDiagnostics)
         SettingsPage.Chats -> ChatsPage(viewModel)
         SettingsPage.Security -> SecurityPage(viewModel, account)
@@ -133,7 +135,12 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun SettingsHub(viewModel: MainViewModel, account: AppState.Ready, onOpen: (SettingsPage) -> Unit) {
+private fun SettingsHub(
+  viewModel: MainViewModel,
+  account: AppState.Ready,
+  onOpen: (SettingsPage) -> Unit,
+  onReportProblem: () -> Unit,
+) {
   val changes by viewModel.changeCount.collectAsState()
   // The user's own presence and custom status as the workspace shows them, not a guess.
   val maybeMe by produceState(viewModel.chat.maybeKeptSnapshot()?.me, changes) { value = viewModel.readChat { snapshot() }?.me ?: value }
@@ -187,6 +194,16 @@ private fun SettingsHub(viewModel: MainViewModel, account: AppState.Ready, onOpe
     leadingContent = { Icon(Icons.Filled.Share, contentDescription = null) },
     modifier = Modifier.clickable { exportDiagnostics(context) },
   )
+  // Every member can report; guests share no DM with the organization's admins.
+  if (maybeMe?.isGuest != true) {
+    ListItem(
+      headlineContent = { Text(stringResource(R.string.report_title)) },
+      supportingContent = { Text(stringResource(R.string.report_summary)) },
+      leadingContent = { Icon(painterResource(R.drawable.ic_help), contentDescription = null) },
+      trailingContent = { Chevron() },
+      modifier = Modifier.clickable(onClick = onReportProblem),
+    )
+  }
   HorizontalDivider()
   OutlinedButton(onClick = viewModel::signOut, modifier = Modifier.fillMaxWidth()) {
     Text(stringResource(R.string.sign_out))

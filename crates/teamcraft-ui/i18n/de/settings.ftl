@@ -660,3 +660,26 @@ settings-error-health-minutes = Gib 1 bis 1.440 Minuten ein.
 settings-error-health-backup-hours = Gib 1 bis 720 Stunden ein.
 settings-error-health-days = Gib 1 bis 365 Tage ein.
 settings-error-health-percent = Gib 50 bis 99 Prozent ein.
+
+## Problem melden (docs/bug-reports.md)
+report-menu = Problem melden…
+report-title = Problem melden
+report-intro = Deine Meldung geht Ende-zu-Ende-verschlüsselt an die Personen, die TeamCraft in deiner Organisation betreuen. Von selbst verlässt sie deine Organisation nie.
+report-description = Was ist passiert?
+report-description-hint = Was du getan hast, was du erwartet hast und was stattdessen passiert ist.
+report-screenshot = Bildschirmfoto (optional)
+report-screenshot-add = Bildschirmfoto hinzufügen…
+report-screenshot-remove = Entfernen
+report-screenshot-hint = Ein PNG-, JPEG- oder WebP-Bild bis 10 MB. Prüfe, dass es nichts zeigt, was du nicht teilen möchtest.
+report-preview = Was gesendet wird
+report-preview-hint = Neben deiner Beschreibung und dem Bildschirmfoto enthält die Meldung diesen Text: App- und Systemversion, den Zustand eines Anrufs, in dem du bist (mit Benutzer-IDs, ohne Namen), und das aktuelle Protokoll dieser App. Protokollzeilen enthalten nie Nachrichten, Dateinamen, Schlüssel oder Passwörter.
+report-gathering = Zustand der App wird gesammelt…
+report-send = Meldung senden
+report-queued = Meldung gespeichert. Sie wird jetzt gesendet oder sobald du online bist.
+report-error-description = Beschreibe, was passiert ist.
+report-error-description-long = Kürze die Beschreibung auf 4.000 Zeichen.
+report-error-screenshot-type = Wähle ein PNG-, JPEG- oder WebP-Bild.
+report-error-screenshot-size = Wähle ein Bild bis 10 MB.
+report-error-screenshot-read = Das Bild konnte nicht gelesen werden. Wähle es noch einmal oder entferne es.
+report-error-no-recipients = Niemand ist als Empfänger von Problemmeldungen eingerichtet. Bitte eine Eigentümerin oder einen Eigentümer, unter Administration → Sicherheitsrichtlinie Empfänger zu wählen.
+report-error-queue-full = Fünf Meldungen warten noch darauf, gesendet zu werden. Versuche es wieder, sobald du online bist.

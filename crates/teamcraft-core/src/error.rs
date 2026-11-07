@@ -55,6 +55,8 @@ pub enum CoreError {
   MeetingAdmitters(#[from] teamcraft_crypto::meeting_admitters::MeetingAdmittersError),
   #[error("channel roles: {0}")]
   ChannelRoles(#[from] crate::channel_roles::ChannelRoleError),
+  #[error("problem report: {0}")]
+  BugReport(#[from] crate::client::BugReportError),
   #[error("this device is not enrolled yet")]
   NotEnrolled,
   #[error("the account already has an identity key; recover it instead of enrolling anew")]
@@ -303,6 +305,14 @@ impl CoreError {
         FailureKind::Server(teamcraft_proto::ErrorCode::RecoveryPassphraseNotAllowed)
       },
       Self::RoleChangeNotConfirmed => FailureKind::RoleChangeNotConfirmed,
+      Self::BugReport(error) => FailureKind::BugReport(match error {
+        crate::client::BugReportError::NoRecipients => {
+          teamcraft_client_api::bug_report::BugReportBlocker::NoRecipients
+        },
+        crate::client::BugReportError::QueueFull => {
+          teamcraft_client_api::bug_report::BugReportBlocker::QueueFull
+        },
+      }),
       _ => FailureKind::Other,
     };
     ActionFailure::new(kind, self.to_string())
