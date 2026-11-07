@@ -4,6 +4,12 @@
   <string name="members_title">Mitglieder</string>
   <string name="channel_role_admin">Kanal-Admin</string>
   <string name="channel_role_moderator">Moderator</string>
+  <string name="channel_role_appointed_by_owner">Ernannt von %1$s (Workspace-Eigentümer)</string>
+  <string name="channel_role_appointed_by_workspace_admin">Ernannt von %1$s (Workspace-Admin)</string>
+  <string name="channel_role_appointed_by_channel_admin">Ernannt von %1$s (Kanal-Admin)</string>
+  <string name="channel_role_appointed_by_owner_unnamed">Ernannt von einem Workspace-Eigentümer</string>
+  <string name="channel_role_appointed_by_workspace_admin_unnamed">Ernannt von einem Workspace-Admin</string>
+  <string name="channel_role_appointed_by_channel_admin_unnamed">Ernannt von einem Kanal-Admin</string>
   <string name="channel_roles_alarm">Dieses Gerät und das eines anderen Mitglieds sehen unterschiedliche Rollen für diesen Kanal: Der Server zeigt den Leuten vielleicht verschiedene Listen. Der Chat ist davon nicht betroffen, und das Löschen dieses Kanals dauert auf diesem Gerät bis zum Ablauf der Aufbewahrungsfrist. Sag einem Workspace-Admin Bescheid, der die Rollen hier prüfen kann.</string>
   <string name="channel_roles_review_title">Rollen dieses Kanals prüfen</string>
   <string name="channel_roles_review_hint">Dieses Gerät kann nicht für jede Rolle hier einstehen, oder die Mitgliederliste zeigt eine, die niemand bestätigt hat. Du kannst sie prüfen, wenn du möchtest: Was du bestätigst, gilt auf den Geräten aller Mitglieder. Der Chat ist davon nicht betroffen.</string>

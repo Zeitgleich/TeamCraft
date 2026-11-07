@@ -2,6 +2,8 @@ package de.zeitgleich.teamcraft.ui
 
 import androidx.annotation.StringRes
 import de.zeitgleich.teamcraft.R
+import uniffi.teamcraft_ffi.AppointerAuthorityItem
+import uniffi.teamcraft_ffi.ChannelMemberAppointer
 import uniffi.teamcraft_ffi.ChannelMemberRole
 import uniffi.teamcraft_ffi.ReviewedRolesOutcome
 import uniffi.teamcraft_ffi.RoleKeyMarkItem
@@ -19,6 +21,25 @@ fun channelRoleLabel(role: ChannelMemberRole): Int? = when (role) {
   ChannelMemberRole.MODERATOR -> R.string.channel_role_moderator
   ChannelMemberRole.MEMBER, ChannelMemberRole.OTHER -> null
 }
+
+/**
+ * "Appointed by <name>, <authority>" (issue #1246), from the verified role log. The name is the
+ * server directory's, so it only ever fills the placeholder of [channelRoleAppointedByText]; where
+ * the signer left the directory the line says only what they were.
+ */
+@StringRes
+fun channelRoleAppointedByText(appointer: ChannelMemberAppointer): Int =
+  when (appointer.authority) {
+    AppointerAuthorityItem.WORKSPACE_OWNER ->
+      if (appointer.maybeName == null) R.string.channel_role_appointed_by_owner_unnamed
+      else R.string.channel_role_appointed_by_owner
+    AppointerAuthorityItem.WORKSPACE_ADMIN ->
+      if (appointer.maybeName == null) R.string.channel_role_appointed_by_workspace_admin_unnamed
+      else R.string.channel_role_appointed_by_workspace_admin
+    AppointerAuthorityItem.CHANNEL_ADMIN ->
+      if (appointer.maybeName == null) R.string.channel_role_appointed_by_channel_admin_unnamed
+      else R.string.channel_role_appointed_by_channel_admin
+  }
 
 /** The mark on a reviewed row's key; a checked key has none. */
 @StringRes

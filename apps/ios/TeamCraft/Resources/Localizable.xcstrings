@@ -13409,6 +13409,102 @@
         }
       }
     },
+    "channel_role_appointed_by_owner": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appointed by %@ (workspace owner)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ernannt von %@ (Workspace-Eigentümer)"
+          }
+        }
+      }
+    },
+    "channel_role_appointed_by_workspace_admin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appointed by %@ (workspace admin)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ernannt von %@ (Workspace-Admin)"
+          }
+        }
+      }
+    },
+    "channel_role_appointed_by_channel_admin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appointed by %@ (channel admin)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ernannt von %@ (Kanal-Admin)"
+          }
+        }
+      }
+    },
+    "channel_role_appointed_by_owner_unnamed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appointed by a workspace owner"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ernannt von einem Workspace-Eigentümer"
+          }
+        }
+      }
+    },
+    "channel_role_appointed_by_workspace_admin_unnamed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appointed by a workspace admin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ernannt von einem Workspace-Admin"
+          }
+        }
+      }
+    },
+    "channel_role_appointed_by_channel_admin_unnamed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Appointed by a channel admin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ernannt von einem Kanal-Admin"
+          }
+        }
+      }
+    },
     "channel_roles_alarm": {
       "localizations": {
         "en": {

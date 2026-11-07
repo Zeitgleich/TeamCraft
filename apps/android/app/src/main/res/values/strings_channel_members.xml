@@ -4,6 +4,12 @@
   <string name="members_title">Members</string>
   <string name="channel_role_admin">Channel admin</string>
   <string name="channel_role_moderator">Moderator</string>
+  <string name="channel_role_appointed_by_owner">Appointed by %1$s (workspace owner)</string>
+  <string name="channel_role_appointed_by_workspace_admin">Appointed by %1$s (workspace admin)</string>
+  <string name="channel_role_appointed_by_channel_admin">Appointed by %1$s (channel admin)</string>
+  <string name="channel_role_appointed_by_owner_unnamed">Appointed by a workspace owner</string>
+  <string name="channel_role_appointed_by_workspace_admin_unnamed">Appointed by a workspace admin</string>
+  <string name="channel_role_appointed_by_channel_admin_unnamed">Appointed by a channel admin</string>
   <string name="channel_roles_alarm">This device and another member\'s see different roles for this channel: the server may be showing people different lists. Chat isn\'t affected, and deleting this channel takes the retention on this device. Tell a workspace admin, who can check the roles here.</string>
   <string name="channel_roles_review_title">Check this channel\'s roles</string>
   <string name="channel_roles_review_hint">This device can\'t vouch for every role here, or the member list shows one nobody confirmed. You can check them if you want to: what you confirm counts on every member\'s device. Chat isn\'t affected.</string>

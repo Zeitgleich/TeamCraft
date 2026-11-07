@@ -11,7 +11,9 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use teamcraft_client_api::backend::ChatBackend as _;
-use teamcraft_client_api::model::{ChannelRole, ConversationId, RoleKeyMark, User, UserId};
+use teamcraft_client_api::model::{
+  AppointerAuthority, ChannelRole, ConversationId, RoleAppointer, RoleKeyMark, User, UserId,
+};
 use teamcraft_client_api::role_review::{
   RoleReviewRefusal, RoleReviewRow, dropped_role_holders, has_review_changed, role_review_refusal,
   role_review_rows,
@@ -63,6 +65,41 @@ pub struct ChannelMemberItem {
   pub user_id: String,
   pub name: String,
   pub role: ChannelMemberRole,
+  /// Who appointed the role, from the signed role log this device verified (issue #1246); `None`
+  /// says nothing (a member, or nothing verified).
+  #[uniffi(default = None)]
+  pub maybe_appointer: Option<ChannelMemberAppointer>,
+}
+
+/// On what authority a role's appointer signed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum AppointerAuthorityItem {
+  /// `channel-role-appointer-owner`
+  WorkspaceOwner,
+  /// `channel-role-appointer-workspace-admin`
+  WorkspaceAdmin,
+  /// `channel-role-appointer-channel-admin`
+  ChannelAdmin,
+}
+
+impl From<AppointerAuthority> for AppointerAuthorityItem {
+  fn from(authority: AppointerAuthority) -> Self {
+    match authority {
+      AppointerAuthority::WorkspaceOwner => Self::WorkspaceOwner,
+      AppointerAuthority::WorkspaceAdmin => Self::WorkspaceAdmin,
+      AppointerAuthority::ChannelAdmin => Self::ChannelAdmin,
+    }
+  }
+}
+
+/// The verified signer of a role, as the line "Appointed by <name>, <authority>" says it.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ChannelMemberAppointer {
+  /// The signer's name from the directory, which is the server's word and so only ever shown as a
+  /// name, never as part of the sentence; `None` where they left the directory
+  /// (`channel-role-appointed-by-*-unnamed`).
+  pub maybe_name: Option<String>,
+  pub authority: AppointerAuthorityItem,
 }
 
 /// The channel's members section.
@@ -328,13 +365,16 @@ impl Reads {
     let roles = backend.channel_roles(conversation);
     let members = users
       .iter()
-      .map(|user| ChannelMemberItem {
-        user_id: user.id.to_string(),
-        name: user.display_name.clone(),
-        role: roles
-          .iter()
-          .find(|member| member.user == user.id)
-          .map_or(ChannelMemberRole::Member, |member| (&member.role).into()),
+      .map(|user| {
+        let held = roles.iter().find(|member| member.user == user.id);
+        ChannelMemberItem {
+          user_id: user.id.to_string(),
+          name: user.display_name.clone(),
+          role: held.map_or(ChannelMemberRole::Member, |member| (&member.role).into()),
+          maybe_appointer: held.and_then(|member| member.maybe_appointer).map(|appointer| {
+            appointer_item(appointer, |id| backend.user(id).map(|found| found.display_name))
+          }),
+        }
       })
       .collect();
     let maybe_review = backend.channel_roles_review(conversation).map(|review| {
@@ -353,6 +393,17 @@ impl Reads {
       has_role_alarm: backend.channel_role_alarms().contains(&conversation),
       maybe_review,
     })
+  }
+}
+
+/// The appointer as the apps word it; the name only where the directory has the signer.
+fn appointer_item(
+  appointer: RoleAppointer,
+  name_of: impl FnOnce(UserId) -> Option<String>,
+) -> ChannelMemberAppointer {
+  ChannelMemberAppointer {
+    maybe_name: name_of(appointer.user),
+    authority: appointer.authority.into(),
   }
 }
 
@@ -448,6 +499,31 @@ mod tests {
       RoleReviewRefusalItem::from(RoleReviewRefusal::NoAdmin),
       RoleReviewRefusalItem::NoAdmin
     );
+  }
+
+  #[test]
+  fn the_appointer_is_named_from_the_directory_or_only_by_authority() {
+    let appointer = RoleAppointer {
+      user: parse_id::<UserId>("7").unwrap(),
+      authority: AppointerAuthority::WorkspaceAdmin,
+    };
+    let named = appointer_item(appointer, |_| Some("Alice".to_owned()));
+    assert_eq!(named.maybe_name.as_deref(), Some("Alice"));
+    assert_eq!(named.authority, AppointerAuthorityItem::WorkspaceAdmin);
+    let unnamed = appointer_item(appointer, |_| None);
+    assert_eq!(unnamed.maybe_name, None);
+    for (authority, expected) in [
+      (
+        AppointerAuthority::WorkspaceOwner,
+        AppointerAuthorityItem::WorkspaceOwner,
+      ),
+      (
+        AppointerAuthority::ChannelAdmin,
+        AppointerAuthorityItem::ChannelAdmin,
+      ),
+    ] {
+      assert_eq!(AppointerAuthorityItem::from(authority), expected);
+    }
   }
 
   #[test]
