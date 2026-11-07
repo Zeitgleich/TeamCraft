@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Service
+TryExec=teamcraft-desktop
+MimeType=all/allfiles;
+X-KDE-Protocols=file
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+Actions=sendToTeamCraft
+
+[Desktop Action sendToTeamCraft]
+Name=Send to TeamCraft
+Name[de]=An TeamCraft senden
+Icon=teamcraft-desktop
+Exec=teamcraft-desktop --share -- %F

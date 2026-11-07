@@ -106,7 +106,6 @@ modules:
       # Tauri's resource directory for an executable in /app/bin is /app/lib/<productName>.
       - install -Dm644 selfie_segmentation_landscape.onnx /app/lib/TeamCraft/models/selfie_segmentation_landscape.onnx
       - install -Dm644 apps/desktop/packaging/linux/de.zeitgleich.teamcraft.desktop /app/share/applications/de.zeitgleich.teamcraft.desktop
-      - install -Dm644 apps/desktop/packaging/linux/de.zeitgleich.teamcraft.share.desktop /app/share/applications/de.zeitgleich.teamcraft.share.desktop
       - install -Dm644 apps/desktop/packaging/linux/de.zeitgleich.teamcraft.metainfo.xml /app/share/metainfo/de.zeitgleich.teamcraft.metainfo.xml
       # Small sizes are the glyph (scripts/brand/icons.py); the scalable icon is the full mark.
       - install -Dm644 apps/desktop/icons/32x32.png /app/share/icons/hicolor/32x32/apps/de.zeitgleich.teamcraft.png

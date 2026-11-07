@@ -39,8 +39,9 @@ Needs a signed build: the extension and the app talk through the App Group.
 
 - [ ] Linux: drag a file over 1 GB from the file manager onto a conversation: it attaches at once,
       memory of the webview stays flat, and it sends.
-- [ ] Linux: "Open with" > TeamCraft in the file manager with several files selected and the app
-      running: the window comes forward with the picker. No file type's default app changed.
+- [ ] Linux (KDE, deb/rpm): Dolphin context menu > "Send to TeamCraft" with several files selected
+      and the app running: the window comes forward with the picker. TeamCraft is not listed under
+      "Open with", and the task bar shows its own icon.
 - [ ] `teamcraft-desktop --share -- a.pdf b.png` from a terminal, app closed: the app starts and offers
       the picker after the sign-in. With "start minimized" on, the window shows.
 - [ ] Windows (NSIS): Explorer > Send to > TeamCraft with several files. The entry goes with the
