@@ -57,6 +57,13 @@ enum ChatAction {
   /// The composer's unsent text, kept by the core (synced to the user's devices) so it survives the
   /// app being killed (issue #158). An empty body clears it.
   case setDraft(conversationId: String, maybeThreadId: String?, body: String)
+  /// Files go up with the draft as they are picked (#1220), each under its `maybeDraftId`, so the
+  /// draft keeps them after the app was killed and the user's other devices show and send them.
+  case attachDraftFiles(conversationId: String, maybeThreadId: String?, files: [PickedFile])
+  /// Takes a file out of the draft on every device of the user; the server deletes it.
+  case removeDraftFile(conversationId: String, maybeThreadId: String?, id: String)
+  /// Deletes the draft with its files, on every device of the user.
+  case discardDraft(conversationId: String, maybeThreadId: String?)
 
   /// The wire form.
   var json: String {
@@ -144,6 +151,21 @@ enum ChatAction {
         "action": "set_draft", "conversation": conversation,
         "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(), "body": body,
       ]
+    case .attachDraftFiles(let conversation, let maybeThread, let files):
+      object = [
+        "action": "attach_draft_files", "conversation": conversation,
+        "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(), "files": files.map(\.object),
+      ]
+    case .removeDraftFile(let conversation, let maybeThread, let id):
+      object = [
+        "action": "remove_draft_file", "conversation": conversation,
+        "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(), "id": id,
+      ]
+    case .discardDraft(let conversation, let maybeThread):
+      object = [
+        "action": "discard_draft", "conversation": conversation,
+        "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(),
+      ]
     }
     return jsonText(object)
   }
@@ -156,6 +178,8 @@ struct SendRequest: Equatable {
   var maybeThreadId: String?
   var body: String
   var files: [PickedFile] = []
+  /// Files of the draft attached on another device, or before the composer opened (#1220).
+  var draftFiles: [DraftFileItem] = []
   var maybeReplyToId: String?
   /// With `maybeReplyToId`: the one picture of an album the reply answers.
   var maybeReplyAttachmentId: String?
@@ -163,7 +187,10 @@ struct SendRequest: Equatable {
   var maybeClientMessageId: String?
 
   var object: [String: Any] {
-    [
+    let fromDraft: [[String: Any]] = draftFiles.map { item in
+      ["file_name": item.fileName, "media_type": item.mediaType, "source": ["kind": "draft", "id": item.id]]
+    }
+    return [
       "conversation": conversationId,
       "maybe_thread": maybeThreadId.map { $0 as Any } ?? NSNull(),
       "body": body,
@@ -174,16 +201,7 @@ struct SendRequest: Equatable {
       "wants_acknowledgement": false,
       "is_silent": false,
       "also_send_to_channel": false,
-      "files": files.map { file -> [String: Any] in
-        var object: [String: Any] = [
-          "file_name": file.fileName, "media_type": file.mediaType,
-          "source": ["kind": "path", "path": file.path],
-        ]
-        // A voice message (#204): its length and waveform travel inside the encrypted message.
-        if let duration = file.maybeDurationMs { object["duration_ms"] = duration }
-        if let waveform = file.maybeWaveform { object["waveform"] = waveform.map { Int($0) } }
-        return object
-      },
+      "files": files.map(\.object) + fromDraft,
     ]
   }
 }
@@ -197,8 +215,29 @@ struct PickedFile: Equatable, Identifiable {
   var maybeDurationMs: Int64?
   /// A recorded voice message's waveform, one byte per bar (#204).
   var maybeWaveform: [UInt8]?
+  /// Its ID in the composer's draft (#1220), chosen as it is attached: sending it takes the draft's
+  /// upload where there is one, and reads `path` otherwise.
+  var maybeDraftId: String?
 
   var id: String { path }
+
+  /// The core's `OutgoingFile`.
+  var object: [String: Any] {
+    var object: [String: Any] = [
+      "file_name": fileName, "media_type": mediaType,
+      "source": ["kind": "path", "path": path],
+    ]
+    // A voice message (#204): its length and waveform travel inside the encrypted message.
+    if let duration = maybeDurationMs { object["duration_ms"] = duration }
+    if let waveform = maybeWaveform { object["waveform"] = waveform.map { Int($0) } }
+    if let draftId = maybeDraftId { object["draft_id"] = draftId }
+    return object
+  }
+
+  /// A draft's file ID as the core reads it: 32 lowercase hex digits (`ClientMessageId`).
+  static func newDraftId() -> String {
+    UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+  }
 }
 
 /// The `ChatQuery` JSON messages (tagged by `kind`) that `TeamCraft.query(queryJson:)` answers.
@@ -225,6 +264,8 @@ enum ChatQuery {
   case scheduledMessages
   /// Every draft of the user (#1220).
   case drafts
+  /// The files of one draft (#1220), decoded as `DraftFilesAnswer`.
+  case draftFiles(conversationId: String, maybeThreadId: String?)
   /// The user's recent messages across the conversations (#1220).
   case sentMessages
 
@@ -266,6 +307,11 @@ enum ChatQuery {
       ])
     case .drafts:
       return jsonText(["kind": "drafts"])
+    case .draftFiles(let conversation, let maybeThread):
+      return jsonText([
+        "kind": "draft_files", "conversation": conversation,
+        "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(),
+      ])
     case .sentMessages:
       return jsonText(["kind": "sent_messages"])
     }

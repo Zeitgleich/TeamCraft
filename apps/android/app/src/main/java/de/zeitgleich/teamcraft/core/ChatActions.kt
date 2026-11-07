@@ -21,7 +21,21 @@ data class PickedFile(
   val maybeThumbnail: ByteArray? = null,
   val maybeDurationMs: Long? = null,
   val maybeWaveform: List<Int>? = null,
+  /** In the composer's draft (#1220): it went up with the draft, and its message takes it from there. */
+  val maybeDraft: DraftCopy? = null,
 )
+
+/**
+ * A picked file as the draft holds it (#1220): [id] is the app's choice ([DraftCopy.newId]), and
+ * [path] the core's own name of the staged copy, which the core deletes once the file is up. The
+ * composer keeps [PickedFile.path] for the preview and the picture editor.
+ */
+data class DraftCopy(val id: String, val path: String) {
+  companion object {
+    /** A draft's file ID as the core reads it: 32 lowercase hex digits (`ClientMessageId`). */
+    fun newId(): String = java.util.UUID.randomUUID().toString().replace("-", "")
+  }
+}
 
 /** What the composer sends besides the text. */
 data class SendOptions(
@@ -35,6 +49,8 @@ data class SendOptions(
   val isSilent: Boolean = false,
   val alsoSendToChannel: Boolean = false,
   val files: List<PickedFile> = emptyList(),
+  /** Files of the draft attached on another device, or before the composer opened (#1220). */
+  val draftFiles: List<DraftFileItem> = emptyList(),
   /** Chosen by the composer when a retry must be the same message (a scheduled one). */
   val maybeClientMessageId: String? = null,
 )
@@ -78,20 +94,32 @@ object ChatActions {
     put(
       "files",
       buildJsonArray {
-        options.files.forEach { file ->
+        options.files.forEach { add(outgoingFile(it)) }
+        options.draftFiles.forEach { item ->
           add(
             buildJsonObject {
-              put("file_name", file.fileName)
-              put("media_type", file.mediaType)
-              put("source", buildJsonObject { put("kind", "path"); put("path", file.path) })
-              file.maybeThumbnail?.let { bytes -> put("thumbnail", buildJsonArray { bytes.forEach { add(it.toInt() and 0xFF) } }) }
-              file.maybeDurationMs?.let { put("duration_ms", it) }
-              file.maybeWaveform?.let { waveform -> put("waveform", buildJsonArray { waveform.forEach { add(JsonPrimitive(it)) } }) }
+              put("file_name", item.fileName)
+              put("media_type", item.mediaType)
+              put("source", buildJsonObject { put("kind", "draft"); put("id", item.id) })
             },
           )
         }
       },
     )
+  }
+
+  /**
+   * A picked file: one of the draft is read from the core's copy, and goes with the draft's upload
+   * where there is one (the core reads the file only when the attachment hasn't reached it).
+   */
+  private fun outgoingFile(file: PickedFile) = buildJsonObject {
+    put("file_name", file.fileName)
+    put("media_type", file.mediaType)
+    put("source", buildJsonObject { put("kind", "path"); put("path", file.maybeDraft?.path ?: file.path) })
+    file.maybeThumbnail?.let { bytes -> put("thumbnail", buildJsonArray { bytes.forEach { add(it.toInt() and 0xFF) } }) }
+    file.maybeDurationMs?.let { put("duration_ms", it) }
+    file.maybeWaveform?.let { waveform -> put("waveform", buildJsonArray { waveform.forEach { add(JsonPrimitive(it)) } }) }
+    file.maybeDraft?.let { put("draft_id", it.id) }
   }
 
   fun react(conversation: String, message: String, emoji: String) = action("toggle_reaction") {
@@ -164,6 +192,26 @@ object ChatActions {
     put("conversation", conversation)
     put("maybe_thread", maybeThread.json())
     put("body", body)
+  }
+
+  /** Files go up with the draft as they are picked (#1220); each carries its [DraftCopy]. */
+  fun attachDraftFiles(conversation: String, maybeThread: String?, files: List<PickedFile>) = action("attach_draft_files") {
+    put("conversation", conversation)
+    put("maybe_thread", maybeThread.json())
+    put("files", buildJsonArray { files.forEach { add(outgoingFile(it)) } })
+  }
+
+  /** Takes a file out of the draft on every device of the user; the server deletes it. */
+  fun removeDraftFile(conversation: String, maybeThread: String?, id: String) = action("remove_draft_file") {
+    put("conversation", conversation)
+    put("maybe_thread", maybeThread.json())
+    put("id", id)
+  }
+
+  /** Deletes the draft with its files, on every device of the user. */
+  fun discardDraft(conversation: String, maybeThread: String?) = action("discard_draft") {
+    put("conversation", conversation)
+    put("maybe_thread", maybeThread.json())
   }
 
   fun typing(conversation: String) = action("typing") { put("conversation", conversation) }
@@ -346,6 +394,12 @@ object ChatQueries {
 
   fun drafts() = query("drafts") {}
 
+  /** The files of one draft ([decodeDraftFiles]). */
+  fun draftFiles(conversation: String, maybeThread: String?) = query("draft_files") {
+    put("conversation", conversation)
+    put("maybe_thread", maybeThread.json())
+  }
+
   fun sentMessages() = query("sent_messages") {}
 
   fun files(conversation: String) = query("conversation_files") { put("conversation", conversation) }
@@ -371,3 +425,6 @@ private fun String?.json() = this?.let(::JsonPrimitive) ?: JsonNull
 
 /** Decodes an answer of [ChatQueries]. */
 fun decodeAnswer(json: String): ChatAnswer = WireJson.decodeFromString(ChatAnswer.serializer(), json)
+
+/** Decodes the answer of [ChatQueries.draftFiles], whose `files` aren't a message's ([ChatAnswer.files]). */
+fun decodeDraftFiles(json: String): List<DraftFileItem> = WireJson.decodeFromString(DraftFilesAnswer.serializer(), json).files

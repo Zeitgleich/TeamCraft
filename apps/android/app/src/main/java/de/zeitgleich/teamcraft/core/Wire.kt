@@ -440,7 +440,49 @@ data class DraftItem(
   @SerialName("maybe_thread_root") val maybeThreadRoot: String? = null,
   val body: String,
   @SerialName("edited_at") val editedAt: Long,
+  /** Files attached to it; a draft may hold files and no text. */
+  @SerialName("file_count") val fileCount: Int = 0,
 )
+
+/** A file attached to a draft (#1220), as the composer shows it. */
+@Serializable
+data class DraftFileItem(
+  /** Names it for `FileSource::Draft` and for removing it. */
+  val id: String,
+  @SerialName("file_name") val fileName: String,
+  @SerialName("media_type") val mediaType: String,
+  @SerialName("size_bytes") val sizeBytes: Long = 0,
+  @SerialName("thumbnail") val maybeThumbnail: ImageBytes? = null,
+  @SerialName("state") val wireState: DraftFileStateWire = DraftFileStateWire(),
+) {
+  val state: DraftFileState get() = DraftFileState.of(wireState.state)
+
+  /** Goes out with the message: not one that failed or expired. */
+  val isSendable: Boolean get() = state == DraftFileState.UPLOADING || state == DraftFileState.READY || state == DraftFileState.ON_THIS_DEVICE
+}
+
+/** `DraftFileState`, tagged by `state` (`{"state":"ready"}`). */
+@Serializable
+data class DraftFileStateWire(val state: String = "unknown")
+
+/** Where a draft's file stands; one this app doesn't know counts as failed. */
+enum class DraftFileState(val wire: String) {
+  UPLOADING("uploading"),
+  READY("ready"),
+  ON_THIS_DEVICE("on_this_device"),
+  FAILED("failed"),
+  EXPIRED("expired"),
+  UNKNOWN("unknown"),
+  ;
+
+  companion object {
+    fun of(wire: String): DraftFileState = entries.firstOrNull { it.wire == wire } ?: UNKNOWN
+  }
+}
+
+/** The answer of the `draft_files` query. */
+@Serializable
+data class DraftFilesAnswer(val files: List<DraftFileItem> = emptyList())
 
 /** One message the user sent, as much of it as the list shows (#1220). */
 @Serializable
