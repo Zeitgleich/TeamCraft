@@ -220,6 +220,13 @@ pub fn core_connection(host: State<'_, CoreHost>) -> Result<CoreConnection, Comm
   Ok(host.current()?.connection_state().into())
 }
 
+/// The shell's recent log lines (core and calls), oldest first and redacted, for "Report a
+/// problem" (docs/bug-reports.md). Answered without the core: the log is the process's.
+#[tauri::command(rename_all = "snake_case")]
+pub fn core_recent_log() -> Vec<String> {
+  teamcraft_client_api::debug_log::recent_lines()
+}
+
 /// The webview saw the network come back or the window become visible again: the gateway checks
 /// its connection at once. A running call is left alone: it notices a new route to the SFU itself
 /// (and wake-up tells it in `main.rs`), while moving it to a new socket on every focus restarted

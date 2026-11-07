@@ -20,7 +20,7 @@ pub fn AuditSection() -> impl IntoView {
   let actor = RwSignal::new(None::<UserId>);
   let since = RwSignal::new(String::new());
   let until = RwSignal::new(String::new());
-  let users = Memo::new(move |_| state.read(|backend| backend.admin_users()));
+  let users = Memo::new(move |_| state.read(|backend| backend.admin_known_users()));
   // The server filters by actor and time, so a long log does not have to be loaded to be searched.
   let apply = move || {
     let filter = AuditFilter {

@@ -4,9 +4,12 @@ use teamcraft_proto::{AdminSelfJoin, GuestDmStart, HistoryPolicy, ScreenShareRes
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_owners::OwnersPanel;
 use crate::components::admin_policy::{
-  CheckRow, PolicyBlockerNote, PolicyFooter, SelectRow, use_policy_draft,
+  CheckRow, PolicyBlockerNote, PolicyDraft, PolicyFooter, SelectRow, use_policy_draft,
 };
+use crate::components::people_picker::PeoplePicker;
 use crate::i18n::use_i18n;
+use crate::model::{User, UserId};
+use crate::state::use_app_state;
 
 /// Session lengths offered, in hours; `0` stands for "no limit".
 const SESSION_HOURS: [u32; 5] = [24, 7 * 24, 30 * 24, 90 * 24, 0];
@@ -217,6 +220,8 @@ pub fn SecuritySection() -> impl IntoView {
         />
       </fieldset>
 
+      <BugReportRecipients policy=policy />
+
       <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
         <legend>{move || i18n.t("policy-voice-messages")}</legend>
         <CheckRow
@@ -416,6 +421,72 @@ pub fn SecuritySection() -> impl IntoView {
       <PolicyFooter policy=policy />
     </form>
   }
+}
+
+/// Who receives "Report a problem" reports (docs/bug-reports.md): the owners and admins, or the
+/// people picked here. Part of the signed policy, so the server can't redirect reports.
+#[component]
+fn BugReportRecipients(policy: PolicyDraft) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let draft = policy.draft;
+  let is_named = RwSignal::new(!draft.get_untracked().bug_reports.recipients.is_empty());
+  let chosen = RwSignal::new(Vec::<User>::new());
+  // The draft leads (it is reset after a save or a discard); the picker follows it.
+  Effect::new(move |_| {
+    let ids = draft.with(|p| p.bug_reports.recipients.clone());
+    if chosen.with_untracked(|users| user_ids(users)) != ids {
+      let users: Vec<User> = ids
+        .iter()
+        .filter_map(|id| state.read(|backend| backend.user(*id)))
+        .collect();
+      chosen.set(users);
+      is_named.set(!ids.is_empty() || is_named.get_untracked());
+    }
+  });
+  // Picks go into the draft; people the directory doesn't know here stay listed.
+  Effect::new(move |_| {
+    let picked = chosen.with(|users| user_ids(users));
+    let current = draft.with_untracked(|p| p.bug_reports.recipients.clone());
+    let unknown = current
+      .iter()
+      .filter(|id| state.read(|backend| backend.user(**id)).is_none());
+    let next: Vec<UserId> = picked.iter().chain(unknown).copied().collect();
+    if next != current {
+      policy.edit(|p| p.bug_reports.recipients = next);
+    }
+  });
+  let choose_admins = move |_| {
+    is_named.set(false);
+    chosen.set(Vec::new());
+  };
+  view! {
+    <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+      <legend>{move || i18n.t("policy-bug-reports")}</legend>
+      <p class="muted-text small">{move || i18n.t("policy-bug-reports-hint")}</p>
+      <label class="radio">
+        <input type="radio" name="bug_report_recipients" value="admins" prop:checked=move || !is_named.get() on:change=choose_admins />
+        <span>
+          <strong>{move || i18n.t("policy-bug-reports-admins")}</strong>
+          <span class="muted-text small">{move || i18n.t("policy-bug-reports-admins-hint")}</span>
+        </span>
+      </label>
+      <label class="radio">
+        <input type="radio" name="bug_report_recipients" value="named" prop:checked=move || is_named.get() on:change=move |_| is_named.set(true) />
+        <span>
+          <strong>{move || i18n.t("policy-bug-reports-named")}</strong>
+          <span class="muted-text small">{move || i18n.t("policy-bug-reports-named-hint")}</span>
+        </span>
+      </label>
+      <Show when=move || is_named.get() fallback=|| ()>
+        <PeoplePicker chosen=chosen chosen_label_key="policy-bug-reports-chosen" allows_guest_accounts=false />
+      </Show>
+    </fieldset>
+  }
+}
+
+fn user_ids(users: &[User]) -> Vec<UserId> {
+  users.iter().map(|user| user.id).collect()
 }
 
 /// "a.example, B.example ; c.example" becomes lower-case host names without `@`.

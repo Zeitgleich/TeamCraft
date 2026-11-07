@@ -235,7 +235,8 @@ reads "Request access again" and is gone once the admin is in. That is allowed, 
   under `owner_approval` doesn't hold against a modified client either; the design that closes these
   per channel is e2ee.md §4.6.2 (issue #878), not implemented. Nor against a former owner whose demotion
   the server withholds: unlike the roster, channel roles have no freshness window, for the reasons in
-  e2ee.md §4.6.3 (issue #876, design).
+  e2ee.md §4.6.3 (issue #876). The demotion reaches the members in the channel too, and once signed
+  entries prove the server leaves it out, their apps refuse approvals until a workspace admin looked.
 - **Members on older versions.** Clients before 1.0.9 still commit another admin's addition of an
   admin whatever the setting says. A member on 1.0.9 or later refuses that commit like any it
   can't verify, falls out of the group, asks to be added back and is added back into it, with the
@@ -497,7 +498,13 @@ independent of the size of the instance:
   console. The whole console loads once when it opens and after the admin's own changes.
 - The devices of a user load when their details open, not for every user on every refresh
   (`device_count` in the list is the count shown in the table).
-- Lists are read page by page (`after`) up to 1000 entries; a longer list says it is cut.
+- The Channels, Retention and Users pages load a page of 100 (`after`) when they open and the next
+  one when the admin asks ("Show more"). They search and filter through the server
+  (`GET /admin/conversations?query=&visibility=&has_guests=&inactive_days=&orphaned=`,
+  `GET /admin/users?query=`), asked 250 ms after the last key. `query` matches the channel's or its
+  space's name; `GET /admin/users?role=` lists the accounts of one role (the roster proposals read
+  the active owners and admins that way). The timer reads again the first pages of what is loaded
+  (3 at most), never the whole list.
 - A 429 is honoured: the console reads nothing until `Retry-After` has passed (`retry_after_secs`
   in the body, for browsers behind proxies that strip headers), then reads once more.
 
@@ -924,6 +931,19 @@ A recording stops at the maximum and waits for the user to send or discard it.
 - **Enforcement:** member clients apply it, like `screen_share`; a voice message is an encrypted audio
   file, so the server can't tell one apart and doesn't check. A policy signed before the setting
   reads as the defaults.
+
+### 3.10 Problem reports (issue #1362)
+
+Who receives "Report a problem" reports is part of the signed workspace policy (`bug_reports`,
+§2.3), so a hostile server can't redirect them: the owners and admins of the verified roster
+(default), or people an owner names. A report reaches them as an end-to-end encrypted group DM with
+the reporter; admins never get access to anything else through it. Details, the debug log and its
+redaction: [bug-reports.md](bug-reports.md).
+
+- **Admin UI:** Administration → Security policy → Problem reports; saving is a policy change, which
+  needs an owner (`sign_workspace`).
+- **Forwarding:** a recipient who wants the developers to look at a report writes the issue
+  themselves, leaving out what the reporter wouldn't want there. Nothing goes out automatically.
 
 ## 4. Audit log
 

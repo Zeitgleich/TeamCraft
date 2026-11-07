@@ -11,6 +11,7 @@
 mod app_link;
 mod bridge;
 mod calls;
+mod channel_roles;
 mod engine;
 mod error;
 mod http_fetch;
@@ -34,6 +35,11 @@ pub use calls::{
   CallEndReason, CallListener, CallMoveInfo, CallPhase, CallSession, CallStateInfo, EncodedVideoListener,
   IncomingCallInfo, NotetakerCallInfo, RemoteVideoFrame, RemoteVideoTrack, RunningCallItem, VideoListener,
   VideoTrackInfo,
+};
+pub use channel_roles::{
+  ChannelMemberItem, ChannelMemberRole, ChannelMembersInfo, ChannelRolesReviewItem, ReviewedRolesOutcome,
+  RoleKeyMarkItem, RoleReviewRefusalItem, RoleReviewRowItem, channel_roles_review_has_changed,
+  channel_roles_review_has_new,
 };
 pub use error::TeamCraftError;
 pub use http_fetch::{
@@ -1216,6 +1222,37 @@ impl TeamCraft {
 #[uniffi::export]
 pub fn diagnostics_text(app_version: String, os_version: String) -> String {
   logging::diagnostics_text(&app_version, &os_version, &logging::recent_lines())
+}
+
+/// The text of a "Report a problem" report (docs/bug-reports.md): versions, the connection in a
+/// word, and the core's recent log, redacted. The app shows it before sending and sends exactly it
+/// (the `send_bug_report` action). `platform` is `android` or `ios`; `user_id` may be empty.
+#[uniffi::export]
+pub fn bug_report_text(
+  platform: String,
+  app_version: String,
+  os_version: String,
+  user_id: String,
+  connection: String,
+  created_at_ms: i64,
+) -> String {
+  teamcraft_client_api::bug_report::ReportContext {
+    created_at_ms,
+    app_version,
+    platform,
+    system: os_version,
+    user: user_id.parse().ok(),
+    connection,
+    maybe_call: None,
+    log_lines: logging::recent_lines(),
+  }
+  .render()
+}
+
+/// The report file's name for a report made at `created_at_ms`.
+#[uniffi::export]
+pub fn bug_report_file_name(created_at_ms: i64) -> String {
+  teamcraft_client_api::bug_report::report_file_name(created_at_ms)
 }
 
 /// The recent system-log lines (logcat, os_log), oldest first, for the diagnostics export

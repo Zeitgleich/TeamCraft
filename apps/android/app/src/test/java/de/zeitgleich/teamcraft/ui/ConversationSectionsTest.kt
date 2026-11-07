@@ -173,6 +173,42 @@ class ConversationSectionsTest {
   }
 
   @Test
+  fun groupedBySpaceTheListHoldsFavoritesThenDmsThenEachSpaceByNameEachByRecency() {
+    val list = listOf(
+      item("1", "Amy", ConversationKind.DIRECT),
+      item("2", "general", ConversationKind.PUBLIC, space = "Project B"),
+      item("3", "random", ConversationKind.PUBLIC, space = "Project A"),
+      item("4", "release", ConversationKind.PUBLIC, space = "Project A", isFavorite = true),
+      item("5", "launch", ConversationKind.PUBLIC, space = "Project A"),
+      item("6", "only", ConversationKind.PUBLIC, space = "Project C", isFavorite = true),
+    )
+    val result = listSections(list, lastActivity = mapOf("3" to 10L, "5" to 30L), bySpace = true)
+    assertEquals(
+      listOf(
+        SectionTitle.Favorites,
+        SectionTitle.DirectMessages,
+        SectionTitle.Space("Project A"),
+        SectionTitle.Space("Project B"),
+      ),
+      result.map { it.title },
+    )
+    assertEquals(listOf("5", "3"), result[2].conversations.map { it.id })
+  }
+
+  @Test
+  fun groupedBySpaceTheChipsStillNarrowIt() {
+    val list = listOf(
+      item("1", "Amy", ConversationKind.DIRECT),
+      item("2", "general", ConversationKind.PUBLIC, space = "Project A"),
+    )
+    assertEquals(
+      listOf(SectionTitle.Space("Project A")),
+      listSections(list, chip = HomeFilter.Channels, bySpace = true).map { it.title },
+    )
+    assertEquals(listOf(SectionTitle.DirectMessages), listSections(list, chip = HomeFilter.People, bySpace = true).map { it.title })
+  }
+
+  @Test
   fun listedSpacesAreOneEachByName() {
     val spaces = listedSpaces(
       listOf(

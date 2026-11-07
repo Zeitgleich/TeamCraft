@@ -63,7 +63,7 @@ pub fn GuestsOverview() -> impl IntoView {
   let sponsors = Memo::new(move |_| {
     state.read(|backend| {
       backend
-        .admin_users()
+        .admin_known_users()
         .into_iter()
         .filter(|entry| entry.role != Role::Guest && entry.is_active)
         .map(|entry| (entry.user.id, entry.user.display_name))

@@ -147,6 +147,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       max_age_ms: i64::try_from(self.settings.signed_deletion_max_age.as_millis()).unwrap_or(i64::MAX),
       clock_skew_ms: i64::try_from(self.settings.signed_deletion_clock_skew.as_millis()).unwrap_or(i64::MAX),
       now_ms: self.now_ms(),
+      channel_roles_max_age_ms: i64::try_from(self.settings.channel_roles_max_age.as_millis())
+        .unwrap_or(i64::MAX),
+      newest_server_ms: self.newest_server_ms(),
     };
     let verified = match verify_signed_deletion(signed, &verifier) {
       Ok(verified) => verified,

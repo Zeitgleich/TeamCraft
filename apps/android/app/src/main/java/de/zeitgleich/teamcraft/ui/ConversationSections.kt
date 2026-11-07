@@ -144,12 +144,17 @@ fun directSections(
  * The list layout's one list (#1151): favorites, then every other DM and channel, each the most
  * recent first. Only conversations `chip` lets through whose names contain `filter` (any case) are
  * kept. Empty sections are left out.
+ *
+ * [bySpace] (#1345): after the favorites, the DMs, then the other channels of each space under its
+ * name (spaces by name, as in the Spaces tab), each still the most recent first. Favorites stay on
+ * top, across spaces; a space whose channels are all favorites has no section.
  */
 fun listSections(
   conversations: List<ConversationItem>,
   lastActivity: Map<String, Long> = emptyMap(),
   filter: String = "",
   chip: HomeFilter = HomeFilter.All,
+  bySpace: Boolean = false,
 ): List<Section> {
   val needle = filter.trim()
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
@@ -161,7 +166,17 @@ fun listSections(
     .partition { it.isFavorite }
   return buildList {
     if (favorites.isNotEmpty()) add(Section(SectionTitle.Favorites, favorites))
-    if (rest.isNotEmpty()) add(Section(SectionTitle.Everything, rest))
+    if (!bySpace) {
+      if (rest.isNotEmpty()) add(Section(SectionTitle.Everything, rest))
+      return@buildList
+    }
+    val (direct, channels) = rest.partition { it.isDirect }
+    if (direct.isNotEmpty()) add(Section(SectionTitle.DirectMessages, direct))
+    // groupBy keeps the recency order inside each space.
+    channels
+      .groupBy { it.maybeSpaceName }
+      .toSortedMap(nullsLast(String.CASE_INSENSITIVE_ORDER))
+      .forEach { (maybeSpace, items) -> add(Section(maybeSpace?.let { SectionTitle.Space(it) } ?: SectionTitle.Channels, items)) }
   }
 }
 

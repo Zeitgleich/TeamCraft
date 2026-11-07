@@ -583,6 +583,13 @@ pub trait ChatBackend {
   fn cancel_scheduled(&self, _id: ScheduledMessageId) {}
   /// Sends a waiting message now, whatever its time and status: the user decided.
   fn send_scheduled_now(&self, _id: ScheduledMessageId) {}
+  /// "Report a problem" (docs/bug-reports.md): queued on the device, then sent encrypted to the
+  /// recipients the verified policy names.
+  fn send_bug_report(&self, _report: crate::bug_report::BugReport) {}
+  /// Who this user's problem reports go to under the verified policy.
+  fn bug_report_recipients(&self) -> Vec<UserId> {
+    Vec::new()
+  }
   /// Every draft of the user, of one space or (`None`) of all conversations, last edited first.
   fn drafts(&self, _maybe_space: Option<SpaceId>) -> Vec<DraftItem> {
     Vec::new()
@@ -1138,14 +1145,38 @@ pub trait AdminBackend {
   /// Loads the devices of a user, once the console shows them; they arrive with the next change
   /// notification and stay current with the console's refreshes.
   fn admin_load_devices(&self, _user: UserId) {}
-  /// Whether the channel list ends before the instance's last channel (the console reads a bounded
-  /// number of pages).
-  fn admin_channels_truncated(&self) -> bool {
+  /// What the Channels and Retention pages list. The lists load page by page and the server
+  /// searches (issue #1241); a backend that has everything locally applies the query itself.
+  fn admin_channel_query(&self) -> crate::admin::AdminChannelQuery {
+    crate::admin::AdminChannelQuery::default()
+  }
+  /// Lists the channels that match `query` from the first page on. The same query is a no-op.
+  fn admin_set_channel_query(&self, _query: crate::admin::AdminChannelQuery) {}
+  /// Whether the instance has more channels than [`AdminBackend::admin_channels`] holds.
+  fn admin_channels_have_more(&self) -> bool {
     false
   }
-  /// Whether the user list ends before the instance's last account.
-  fn admin_users_truncated(&self) -> bool {
+  /// Reads the next page of channels; they arrive with the next change notification.
+  fn admin_load_more_channels(&self) {}
+  /// A next page of channels or users is being read.
+  fn admin_is_loading_more(&self) -> bool {
     false
+  }
+  /// What the Users page lists (see [`AdminBackend::admin_channel_query`]).
+  fn admin_user_query(&self) -> crate::admin::AdminUserQuery {
+    crate::admin::AdminUserQuery::default()
+  }
+  fn admin_set_user_query(&self, _query: crate::admin::AdminUserQuery) {}
+  /// Whether the instance has more accounts than [`AdminBackend::admin_users`] holds.
+  fn admin_users_have_more(&self) -> bool {
+    false
+  }
+  fn admin_load_more_users(&self) {}
+  /// Accounts the console knows by name and role, beyond the page of the Users list: the owners
+  /// and admins, and the first page. For names in the audit log and on the security pages, the
+  /// roster proposals and the import account's choices; never a list to page through.
+  fn admin_known_users(&self) -> Vec<AdminUser> {
+    self.admin_users()
   }
 
   /// Spaces by name, for the permission scheme scopes.

@@ -100,6 +100,24 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(listedSpaces(list).map(\.title), [.space("Project A"), .space("Project B")])
   }
 
+  /// #1345: grouped by space, the DMs come after the favorites, then each space by name.
+  func testTheListGroupedBySpaceKeepsFavoritesOnTopThenDmsThenEachSpace() {
+    let list = [
+      item("1", "Amy", kind: .direct),
+      item("2", "general", space: "Project B"),
+      item("3", "random", space: "Project A"),
+      item("4", "release", space: "Project A", favorite: true),
+      item("5", "launch", space: "Project A"),
+      item("6", "only", space: "Project C", favorite: true),
+    ]
+    let at = { (seconds: TimeInterval) in Date(timeIntervalSince1970: seconds) }
+    let sections = listSections(list, lastActivity: ["3": at(10), "5": at(30)], bySpace: true)
+    XCTAssertEqual(sections.map(\.title), [.favorites, .directMessages, .space("Project A"), .space("Project B")])
+    XCTAssertEqual(sections[2].conversations.map(\.id), ["5", "3"])
+    XCTAssertTrue(sections[2].isSpace)
+    XCTAssertEqual(listSections(list, chip: .people, bySpace: true).map(\.title), [.directMessages])
+  }
+
   func testHomeChipsPickUnreadPeopleOrGroups() {
     let list = [
       item("1", "Amy", kind: .direct, unread: 1),

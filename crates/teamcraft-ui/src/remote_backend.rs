@@ -1616,6 +1616,20 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::SendScheduledNow { id });
   }
 
+  fn send_bug_report(&self, report: teamcraft_client_api::bug_report::BugReport) {
+    self.act(ChatAction::SendBugReport { report });
+  }
+
+  fn bug_report_recipients(&self) -> Vec<UserId> {
+    self
+      .mirror
+      .borrow()
+      .snapshot
+      .security
+      .bug_report_recipients
+      .clone()
+  }
+
   fn acknowledge(&self, conversation: ConversationId, message: MessageId) {
     self.act(ChatAction::Acknowledge {
       conversation,

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.oidc_role, u.deactivated_at IS NOT NULL AS \"is_deactivated!\",\n                u.deleted_at IS NOT NULL AS \"is_deleted!\", u.deactivation_reason, u.created_at,\n                (SELECT count(*) FROM devices d WHERE d.user_id = u.id AND d.revoked_at IS NULL) AS \"device_count!\",\n                (SELECT count(*) FROM space_members m WHERE m.user_id = u.id) AS \"space_count!\",\n                (SELECT count(*) FROM memberships m WHERE m.user_id = u.id) AS \"conversation_count!\",\n                -- Only the day for users who hide their last seen or appear offline: admins still\n                -- spot unused devices, but not when someone was active.\n                (SELECT CASE WHEN u.last_seen_visibility = 'everyone' AND u.presence_pref <> 'invisible'\n                             THEN max(d.last_seen_at)\n                             ELSE date_trunc('day', max(d.last_seen_at), 'UTC') END\n                 FROM devices d WHERE d.user_id = u.id) AS last_seen\n         FROM users u\n         WHERE (u.display_name ILIKE $1 OR u.username ILIKE $1)\n           AND ($2 = 'all' OR ($2 = 'active') = (u.deactivated_at IS NULL))\n           AND ($3::bigint IS NULL OR u.id > $3)\n         ORDER BY u.id LIMIT $4",
+  "query": "SELECT u.id, u.username, u.display_name, u.kind, u.oidc_role, u.deactivated_at IS NOT NULL AS \"is_deactivated!\",\n                u.deleted_at IS NOT NULL AS \"is_deleted!\", u.deactivation_reason, u.created_at,\n                (SELECT count(*) FROM devices d WHERE d.user_id = u.id AND d.revoked_at IS NULL) AS \"device_count!\",\n                (SELECT count(*) FROM space_members m WHERE m.user_id = u.id) AS \"space_count!\",\n                (SELECT count(*) FROM memberships m WHERE m.user_id = u.id) AS \"conversation_count!\",\n                -- Only the day for users who hide their last seen or appear offline: admins still\n                -- spot unused devices, but not when someone was active.\n                (SELECT CASE WHEN u.last_seen_visibility = 'everyone' AND u.presence_pref <> 'invisible'\n                             THEN max(d.last_seen_at)\n                             ELSE date_trunc('day', max(d.last_seen_at), 'UTC') END\n                 FROM devices d WHERE d.user_id = u.id) AS last_seen\n         FROM users u\n         WHERE (u.display_name ILIKE $1 OR u.username ILIKE $1)\n           AND ($2 = 'all' OR ($2 = 'active') = (u.deactivated_at IS NULL))\n           AND ($3::bigint IS NULL OR u.id > $3)\n           AND ($5::text IS NULL OR u.oidc_role = $5)\n         ORDER BY u.id LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -122,7 +122,8 @@
         "Text",
         "Text",
         "Int8",
-        "Int8"
+        "Int8",
+        "Text"
       ]
     },
     "nullable": [
@@ -141,5 +142,5 @@
       null
     ]
   },
-  "hash": "a38cdf3d281184564421e206e91314fc75b69c34d0c236fe8bbe5ecaebf4696c"
+  "hash": "d59f4d25164d850389a736501201133be8c388c7862010d3e315e5eebf74b27d"
 }

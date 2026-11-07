@@ -85,6 +85,7 @@ pub async fn list_conversations(
       maybe_is_orphaned: query.maybe_is_orphaned,
       maybe_after: query.maybe_after,
       maybe_member: query.maybe_user_id,
+      maybe_query: query.maybe_query,
       limit: i64::from(limit),
     })
     .await?;
@@ -140,7 +141,17 @@ pub async fn list_users(
   };
   let mut rows = state
     .database
-    .admin_list_users(query.query.trim(), status, query.maybe_after, i64::from(limit))
+    .admin_list_users(
+      query.query.trim(),
+      status,
+      query
+        .maybe_role
+        .as_deref()
+        .map(str::trim)
+        .filter(|role| !role.is_empty()),
+      query.maybe_after,
+      i64::from(limit),
+    )
     .await?;
   let has_more = rows.len() > limit as usize;
   rows.truncate(limit as usize);

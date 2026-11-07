@@ -22,7 +22,7 @@ use crate::feedback::{ActionFailure, FailureKind, PendingAction, report_failure}
 use crate::i18n::{Locale, use_i18n};
 use crate::keys::t_with_shortcuts;
 use crate::prefs::{
-  AnimatedImages, CallPrefs, Density, ImageSize, SidebarLayout, SidebarSort, TextSize, Zoom,
+  AnimatedImages, CallPrefs, Density, ImageSize, ListGrouping, SidebarLayout, SidebarSort, TextSize, Zoom,
 };
 use crate::reactive::SetIfAlive;
 use crate::settings::{AudioLimit, MediaCacheLimit, MediaCacheMaxAge, PreviewLimit, SendMode, Theme};
@@ -59,6 +59,20 @@ pub fn AppearanceSection() -> impl IntoView {
           }
         })
       />
+      // Only the list has this order to choose (#1345).
+      <Show when=move || prefs.with(|all| all.sidebar.layout == SidebarLayout::List) fallback=|| ()>
+        <SegmentedRow
+          label="settings-list-grouping"
+          hint="settings-list-grouping-hint"
+          options=slug_options(&ListGrouping::ALL.map(ListGrouping::slug), "settings-list-grouping-")
+          value=Signal::derive(move || prefs.with(|all| all.sidebar.list_grouping.slug().to_owned()))
+          on_change=Callback::new(move |slug: String| {
+            if let Some(grouping) = ListGrouping::from_slug(&slug) {
+              prefs.update(|all| all.sidebar.list_grouping = grouping);
+            }
+          })
+        />
+      </Show>
     </SettingsCard>
     <SettingsCard heading="settings-messages-look" hint="settings-messages-look-hint">
       <MessagePreview />

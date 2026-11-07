@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- A channel's members section (issue #1262), worded as channels.ftl on desktop and web -->
+  <string name="members_title">Members</string>
+  <string name="channel_role_admin">Channel admin</string>
+  <string name="channel_role_moderator">Moderator</string>
+  <string name="channel_roles_alarm">This device and another member\'s see different roles for this channel: the server may be showing people different lists. Chat isn\'t affected, and deleting this channel takes the retention on this device. Tell a workspace admin, who can check the roles here.</string>
+  <string name="channel_roles_review_title">Check this channel\'s roles</string>
+  <string name="channel_roles_review_hint">This device can\'t vouch for every role here, or the member list shows one nobody confirmed. You can check them if you want to: what you confirm counts on every member\'s device. Chat isn\'t affected.</string>
+  <string name="channel_roles_review_hint_quiet">You can check this channel\'s roles if you want to: what you confirm counts on every member\'s device.</string>
+  <string name="channel_roles_review_action">Check roles</string>
+  <string name="channel_roles_review_confirm">Confirm exactly these roles</string>
+  <string name="channel_roles_review_new">New</string>
+  <string name="channel_roles_review_new_hint">New: only the server says this person has this role. Make sure it\'s right, and that the name is who you think it is.</string>
+  <string name="channel_roles_review_knows_none">This device knows no signed roles for this channel. Anybody who holds one elsewhere and isn\'t on this list would lose it, and can\'t be named here.</string>
+  <string name="channel_roles_review_key_changed">Key changed</string>
+  <string name="channel_roles_review_key_changed_hint">Key changed: this device saw another security key for this person than the signed roles name. That\'s normal after they set up their account again; if they didn\'t, ask them before you confirm.</string>
+  <string name="channel_roles_review_key_uncheckable">Can\'t check</string>
+  <string name="channel_roles_review_uncheckable_refused">This device can\'t check that the security key of somebody marked here is really theirs: only the server says so. A workspace admin who is in this channel can confirm these roles, once that person is in its encryption group.</string>
+  <string name="channel_roles_review_dropped">Confirming takes a role from or lowers the role of: %1$s. Only the server\'s list says so, so make sure that\'s right.</string>
+  <string name="channel_roles_review_unknown">Unknown person</string>
+  <string name="channel_roles_review_unknown_refused">The member list doesn\'t say who somebody here is, so these roles can\'t be confirmed. Try again once the list has loaded.</string>
+  <string name="channel_roles_review_changed">The channel\'s roles changed while you were looking, and nothing was confirmed. Check them again.</string>
+  <string name="channel_roles_review_no_admin">A channel needs an admin. Give somebody the admin role first.</string>
+</resources>

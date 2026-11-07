@@ -215,6 +215,29 @@
   font-size: var(--text-2xs);
 }
 
+/* The list grouped by space (#1345): a section heading with the space's tile in front, small enough
+   to stay a heading, not a row. A long name shortens. */
+.sb-list-space-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sb-list-space-title > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sb-list-space-title .space-tile {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  font-size: var(--text-2xs);
+}
+
 .sb-status {
   font-size: var(--text-sm);
 }

@@ -17,6 +17,10 @@
       window.__notifications.push({ title: args.title, body: args.body });
       return null;
     }
+    // No system to ask in a browser: no notifications banner, as in an unbundled macOS build.
+    if (cmd === 'notification_state' || cmd === 'notification_allow') {
+      return { permission: 'unavailable', platform: 'other', app_name: 'TeamCraft' };
+    }
     return post(cmd, args);
   };
   const callbacks = new Map();

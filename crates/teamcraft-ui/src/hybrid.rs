@@ -719,6 +719,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.send_scheduled_now(id);
   }
 
+  fn send_bug_report(&self, report: teamcraft_client_api::bug_report::BugReport) {
+    self.chat.send_bug_report(report);
+  }
+
+  fn bug_report_recipients(&self) -> Vec<UserId> {
+    self.chat.bug_report_recipients()
+  }
+
   fn drafts(&self, maybe_space: Option<SpaceId>) -> Vec<teamcraft_client_api::drafts::DraftItem> {
     self.chat.drafts(maybe_space)
   }
@@ -1743,18 +1751,66 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
-  fn admin_channels_truncated(&self) -> bool {
+  fn admin_channel_query(&self) -> teamcraft_client_api::admin::AdminChannelQuery {
     self
       .maybe_admin
       .as_ref()
-      .is_some_and(AdminLive::is_channel_list_truncated)
+      .map(AdminLive::channel_query)
+      .unwrap_or_default()
   }
 
-  fn admin_users_truncated(&self) -> bool {
+  fn admin_set_channel_query(&self, query: teamcraft_client_api::admin::AdminChannelQuery) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.set_channel_query(query);
+    }
+  }
+
+  fn admin_channels_have_more(&self) -> bool {
     self
       .maybe_admin
       .as_ref()
-      .is_some_and(AdminLive::is_user_list_truncated)
+      .is_some_and(AdminLive::channels_have_more)
+  }
+
+  fn admin_load_more_channels(&self) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.load_more_channels();
+    }
+  }
+
+  fn admin_is_loading_more(&self) -> bool {
+    self.maybe_admin.as_ref().is_some_and(AdminLive::is_loading_more)
+  }
+
+  fn admin_user_query(&self) -> teamcraft_client_api::admin::AdminUserQuery {
+    self
+      .maybe_admin
+      .as_ref()
+      .map(AdminLive::user_query)
+      .unwrap_or_default()
+  }
+
+  fn admin_set_user_query(&self, query: teamcraft_client_api::admin::AdminUserQuery) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.set_user_query(query);
+    }
+  }
+
+  fn admin_users_have_more(&self) -> bool {
+    self.maybe_admin.as_ref().is_some_and(AdminLive::users_have_more)
+  }
+
+  fn admin_load_more_users(&self) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.load_more_users();
+    }
+  }
+
+  fn admin_known_users(&self) -> Vec<AdminUser> {
+    match &self.maybe_admin {
+      Some(admin) => admin.known_users(),
+      None => Vec::new(),
+    }
   }
 
   fn policy_edit_blocker(&self) -> Option<PolicyBlocker> {

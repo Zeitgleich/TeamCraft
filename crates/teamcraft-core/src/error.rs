@@ -55,6 +55,8 @@ pub enum CoreError {
   MeetingAdmitters(#[from] teamcraft_crypto::meeting_admitters::MeetingAdmittersError),
   #[error("channel roles: {0}")]
   ChannelRoles(#[from] crate::channel_roles::ChannelRoleError),
+  #[error("problem report: {0}")]
+  BugReport(#[from] crate::client::BugReportError),
   #[error("this device is not enrolled yet")]
   NotEnrolled,
   #[error("the account already has an identity key; recover it instead of enrolling anew")]
@@ -166,6 +168,10 @@ pub enum CoreError {
   CallEncryptionPending(ConversationId),
   #[error("conversation {0} is not a meeting chat")]
   NotAMeetingChat(ConversationId),
+  /// Asked for a DM or group DM, the server answered with another kind of conversation (a
+  /// channel, a meeting chat): a hostile or broken server. Nothing is set up or sent there.
+  #[error("conversation {0} is no DM or group DM")]
+  NotADirectConversation(ConversationId),
   /// Letting a guest into a meeting chat's group failed a check of the guest link (e2ee.md §4.6,
   /// "Meeting guests"): nothing was added.
   #[error("the guest cannot be let in: {0}")]
@@ -233,6 +239,11 @@ pub enum JoinRequestRefusal {
   /// admin or a workspace admin signs the role first.
   #[error("this user's owner role in the channel isn't signed")]
   OwnerRoleNotSigned,
+  /// Signed entries prove the server shows members different role logs of the channel: the owner
+  /// may have been demoted without being told. Refused until a workspace admin's reviewed list
+  /// (e2ee.md §4.6.3, D3).
+  #[error("signed entries show the server gives members different role logs of this channel")]
+  RolesDisputed,
 }
 
 impl CoreError {
@@ -303,6 +314,11 @@ impl CoreError {
         FailureKind::Server(teamcraft_proto::ErrorCode::RecoveryPassphraseNotAllowed)
       },
       Self::RoleChangeNotConfirmed => FailureKind::RoleChangeNotConfirmed,
+      Self::BugReport(error) => match error.blocker() {
+        Some(blocker) => FailureKind::BugReport(blocker),
+        None => FailureKind::Other,
+      },
+      Self::JoinRequestNotApprovable(JoinRequestRefusal::RolesDisputed) => FailureKind::ChannelRolesDisputed,
       _ => FailureKind::Other,
     };
     ActionFailure::new(kind, self.to_string())

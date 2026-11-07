@@ -439,6 +439,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             meta,
           )?;
         }
+        if let MessageContent::ChannelRolesEntry {
+          version,
+          payload,
+          signature,
+        } = &content
+        {
+          // The message's server time stands in for the append's (e2ee.md §4.6.3, part 1).
+          let entry = teamcraft_proto::ChannelRoleLogEntryResponse {
+            version: *version,
+            payload: payload.clone(),
+            signature: signature.clone(),
+            maybe_signer_device_id: None,
+            created_at: teamcraft_proto::UnixMillis(message.id.snowflake().unix_millis()),
+          };
+          self.take_channel_roles_entry(conversation, &entry)?;
+        }
         let stored = StoredMessage {
           conversation_id: conversation,
           client_message_id: message.client_message_id,

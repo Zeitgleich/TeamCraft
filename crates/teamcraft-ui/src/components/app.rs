@@ -24,6 +24,7 @@ use crate::components::announcement_banner::AnnouncementBanner;
 use crate::components::bottom_nav::BottomNav;
 use crate::components::bundle_banner::{BundleBanner, ReleaseBanner};
 use crate::components::channel_view::ChannelView;
+use crate::components::desktop_notify::DesktopNotificationPrompt;
 use crate::components::edge_swipe::EdgeSwipeBack;
 use crate::components::file_drop;
 use crate::components::first_sync_bar::FirstSyncBar;
@@ -306,6 +307,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <StorageBanner />
         <RosterBanner />
         <NotificationPrompt />
+        <DesktopNotificationPrompt />
         <AnnouncementBanner />
         <GuestNotice />
         <UpdateNotice />
@@ -494,6 +496,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         Overlay::Bookmarks(conversation) => lazy_area(Place::Overlay, move || areas::bookmarks(conversation)),
         Overlay::UserProfile(user) => lazy_area(Place::Overlay, move || areas::user_profile(user)),
         Overlay::CallsUnavailable => lazy_area(Place::Overlay, || areas::calls_unavailable(())),
+        Overlay::ReportProblem => lazy_area(Place::Overlay, || areas::report_problem(())),
         // The admin console renders its own dialog, in its part of the app.
         // The downloads list hangs under its button in the top bar.
         Overlay::None | Overlay::StatusMenu | Overlay::Downloads | Overlay::DeleteUser(_) => ().into_any(),

@@ -187,6 +187,20 @@ mod overview {
       list("inactive_days=7".into()).await.is_empty(),
       "everything is fresh"
     );
+    // Search by the channel's or its space's name, any case; wildcards are plain characters.
+    assert_eq!(list("query=LEAD".into()).await, vec![private.clone()]);
+    assert_eq!(list("query=B".into()).await, vec![other.clone()], "space B");
+    assert_eq!(
+      list("query=e&visibility=public".into()).await,
+      vec![with_guest.clone(), other.clone()]
+    );
+    assert!(list("query=_".into()).await.is_empty());
+    assert!(list("query=%25".into()).await.is_empty());
+    assert_eq!(
+      list("query=".into()).await.len(),
+      3,
+      "empty text searches nothing"
+    );
     let paged = app.get(&bob, "/admin/conversations?limit=2").await;
     assert_eq!(paged.body["has_more"], true);
     let rest = list(format!(
@@ -229,6 +243,24 @@ mod overview {
         .unwrap()
         .len(),
       1
+    );
+
+    // By role (the roster proposals): the token's role, active accounts with status=active.
+    let owners = app.get(&bob, "/admin/users?role=owner").await;
+    assert_eq!(owners.body["users"].as_array().unwrap().len(), 1);
+    assert_eq!(owners.body["users"][0]["oidc_role"], "owner");
+    assert_eq!(
+      app.get(&bob, "/admin/users?role=admin&status=active").await.body["users"]
+        .as_array()
+        .unwrap()
+        .len(),
+      1
+    );
+    assert!(
+      app.get(&bob, "/admin/users?role=nobody").await.body["users"]
+        .as_array()
+        .unwrap()
+        .is_empty()
     );
 
     // Deactivation suspends: the device stays for a reactivation.

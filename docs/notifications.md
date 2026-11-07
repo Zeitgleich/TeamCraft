@@ -571,6 +571,19 @@ since the labels are translated) and a notification center delegate, an Objectiv
 delegate also lets banners show while the app is in front. An unbundled macOS build and a Linux session without a notification service fall back to the
 notification plugin (title and text only, no withdrawal).
 
+**Turning them on (#895).** The desktop app asks after sign-in as the web app does (#532): a banner
+"Turn on" / "Not now" (a week's snooze), and Settings > Notifications > "This device" with the
+system's real state (allowed, blocked in the system's settings with where to change them and the
+app's name there, off) and a test notification. The shell reads the state (`notification_state`:
+macOS notification settings, the Windows toast notifier's setting, whether a Linux notification
+service answers) and the UI reads it again whenever the window comes to the front. "Turn on" does
+the platform's step from the click: macOS asks for permission (`notification_allow`; no longer at
+start-up), Windows and Linux, which have no prompt, show a test notification so the user sees how
+and where they appear. The banner asks on macOS while the system has not asked, on Windows and
+Linux until the test went out here; never where notifications are blocked or missing (an unbundled
+macOS build, Linux without a notification service). Without notifications new messages show on the
+badge and in the tray only, which Settings says. Logic and tests: `components/desktop_notify.rs`.
+
 **Messages.** Mentions, DMs and followed thread replies by the rules above, the text only as far as
 "show message preview" and the workspace's lock-screen policy (`push_content_mode`) allow. Buttons:
 Mark as read; for top-level messages in conversations the user may post in also a reply field (a

@@ -10,6 +10,7 @@
 //! | [`watch_network_up`]: the network is back | Windows  | `network`                 |
 //! | [`install_notification_delegate`]         | macOS    | `notification_delegate`   |
 //! | `notification_attachment`: a picture      | macOS    | `notification_attachment` |
+//! | `notification_authorization`: allowed?    | macOS    | `notification_settings`   |
 //! | `webkit_version`: the library in use      | Linux    | `webkit_version`          |
 //! | `watch_process_failed`: page process died | Windows  | `webview2_process`        |
 //! | JNI: audio context for cpal (calls)       | Android  | `android_context`         |
@@ -22,6 +23,7 @@ mod android_context;
 mod network;
 mod notification_attachment;
 mod notification_delegate;
+mod notification_settings;
 mod resume;
 #[cfg(target_os = "linux")]
 mod webkit_version;
@@ -31,6 +33,9 @@ pub use notification_attachment::AttachmentError;
 #[cfg(target_os = "macos")]
 pub use notification_attachment::notification_attachment;
 pub use notification_delegate::{NotificationResponse, ResponseAction, install_notification_delegate};
+pub use notification_settings::NotificationAuthorization;
+#[cfg(target_os = "macos")]
+pub use notification_settings::notification_authorization;
 
 #[cfg(target_os = "android")]
 pub use android_context::Java_de_zeitgleich_teamcraft_calls_AudioContext_initialize;

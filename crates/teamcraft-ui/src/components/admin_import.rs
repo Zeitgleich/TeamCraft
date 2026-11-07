@@ -24,7 +24,7 @@ pub fn ImportSection() -> impl IntoView {
   // The import account is an admin of the identity provider (admin.md §3.8).
   let candidates = Memo::new(move |_| {
     let mut admins: Vec<(UserId, String)> = state
-      .read(|backend| backend.admin_users())
+      .read(|backend| backend.admin_known_users())
       .into_iter()
       .filter(|entry| entry.is_active && matches!(entry.role, Role::Admin | Role::Owner))
       .map(|entry| (entry.user.id, entry.user.display_name))

@@ -379,7 +379,8 @@ fn is_hidden_change(content: &MessageContent) -> bool {
     | MessageContent::Event { .. }
     | MessageContent::Reaction { .. }
     | MessageContent::IntegrationSource { .. }
-    | MessageContent::Notetaker { .. } => true,
+    | MessageContent::Notetaker { .. }
+    | MessageContent::ChannelRolesEntry { .. } => true,
     MessageContent::Text { .. } | MessageContent::File { .. } | MessageContent::Unknown => false,
   }
 }
@@ -705,6 +706,11 @@ mod tests {
       MessageContent::Canvas {
         update: teamcraft_proto::Base64Bytes::new(vec![1]),
         is_snapshot: false,
+      },
+      MessageContent::ChannelRolesEntry {
+        version: 2,
+        payload: teamcraft_proto::Base64Bytes::new(vec![1]),
+        signature: teamcraft_proto::Base64Bytes::new(vec![2]),
       },
     ];
     let store = crate::store::MemoryStore::new();

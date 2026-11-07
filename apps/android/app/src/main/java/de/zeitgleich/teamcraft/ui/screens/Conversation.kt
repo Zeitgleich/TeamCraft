@@ -516,6 +516,9 @@ private fun ConversationMenu(
   LaunchedEffect(conversationId, isOpen) { leave = viewModel.leaveChoice(conversationId) }
   var isNotifying by remember { mutableStateOf(false) }
   var isShowingBookmarks by remember { mutableStateOf(false) }
+  // A channel's members with their roles (#1262); DMs and group DMs have no roles.
+  val isChannel = maybeConversation?.kind == "Public" || maybeConversation?.kind == "Private"
+  var isShowingMembers by remember { mutableStateOf(false) }
   var maybeConfirming by remember { mutableStateOf<ChannelConfirmation?>(null) }
   var isPreparingCall by remember { mutableStateOf(false) }
   IconButton(onClick = { isPreparingCall = true }) {
@@ -558,6 +561,12 @@ private fun ConversationMenu(
       isOpen = false
       isShowingBookmarks = true
     })
+    if (isChannel) {
+      DropdownMenuItem(text = { Text(stringResource(R.string.members_title)) }, onClick = {
+        isOpen = false
+        isShowingMembers = true
+      })
+    }
     if (canArchive) {
       DropdownMenuItem(text = { Text(stringResource(R.string.channel_archive)) }, onClick = {
         isOpen = false
@@ -585,6 +594,9 @@ private fun ConversationMenu(
     }
   }
   if (isNotifying) ConversationNotificationsDialog(viewModel, conversationId) { isNotifying = false }
+  if (isShowingMembers) {
+    ChannelMembersSheet(viewModel, conversationId, onDismiss = { isShowingMembers = false })
+  }
   if (isShowingBookmarks) {
     BookmarksDialog(
       bookmarks = maybeConversation?.bookmarks.orEmpty(),

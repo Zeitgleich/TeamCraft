@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-core-recent-log"
+description = "Enables the core_recent_log command without any pre-configured scope."
+commands.allow = ["core_recent_log"]
+
+[[permission]]
+identifier = "deny-core-recent-log"
+description = "Denies the core_recent_log command without any pre-configured scope."
+commands.deny = ["core_recent_log"]

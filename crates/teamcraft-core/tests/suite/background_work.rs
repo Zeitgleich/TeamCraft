@@ -62,7 +62,8 @@ mod restart {
       PendingWork {
         sends: 1,
         uploads: 1,
-        actions: 0
+        actions: 0,
+        reports: 0,
       }
     );
 

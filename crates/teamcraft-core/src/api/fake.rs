@@ -162,6 +162,8 @@ struct State {
   failing_workspace_log: Option<WorkspaceLogFailure>,
   /// Reads of role logs of these channels answer 503.
   failing_role_logs: HashSet<ConversationId>,
+  /// Per reader and channel, the last role log version the server shows them: a withheld entry.
+  withheld_role_logs: HashMap<(UserId, ConversationId), u64>,
   role_log_reads: HashMap<ConversationId, usize>,
   /// The next append to a role log answers 409, as if another admin got there first.
   is_next_role_append_in_conflict: bool,
@@ -229,6 +231,8 @@ struct State {
   maybe_forced_device_id: Option<DeviceId>,
   /// A malicious server: the next message gets this ID instead of a fresh one.
   maybe_forced_message_id: Option<MessageId>,
+  /// A malicious server: every group DM asked for is answered with this conversation instead.
+  maybe_redirected_group_dm: Option<ConversationId>,
   /// A network cut armed per user: after the given number of calls, the next one fails.
   network_cuts: HashMap<UserId, (u32, NetworkCut)>,
   /// Users whose gateway connections stay open but carry nothing either way: no `hello`, no
@@ -723,6 +727,15 @@ impl FakeServer {
     }
   }
 
+  /// Shows `reader` the channel's role log only up to `last_shown`, as a server holding back a
+  /// demotion from them would (e2ee.md §4.6.3).
+  pub fn withhold_role_log(&self, reader: UserId, conversation: ConversationId, last_shown: u64) {
+    self
+      .lock()
+      .withheld_role_logs
+      .insert((reader, conversation), last_shown);
+  }
+
   /// The next append to a role log answers 409, as if another admin got there first.
   pub fn conflict_next_role_append(&self) {
     self.lock().is_next_role_append_in_conflict = true;
@@ -895,6 +908,11 @@ impl FakeServer {
   /// server might.
   pub fn force_next_message_id(&self, id: MessageId) {
     self.lock().maybe_forced_message_id = Some(id);
+  }
+
+  /// A malicious server: answers every request for a group DM with `conversation` instead.
+  pub fn redirect_group_dms_to(&self, conversation: ConversationId) {
+    self.lock().maybe_redirected_group_dm = Some(conversation);
   }
 
   /// The next `count` binary frames sent over any relay are lost.
@@ -2922,6 +2940,9 @@ impl ServerApi for FakeServerApi {
       participants.dedup();
       for user in &participants {
         state.user(*user)?;
+      }
+      if let Some(redirected) = state.maybe_redirected_group_dm {
+        return Ok(state.conversation(redirected)?.view(me));
       }
       let existing = state.conversations.values().find(|conversation| {
         conversation.response.kind == ConversationKind::Group
@@ -5276,15 +5297,20 @@ impl ServerApi for FakeServerApi {
           has_more: false,
         });
       }
-      let entry = state.actor_conversation_mut(conversation, me)?;
       let limit = query
         .maybe_limit
         .map_or(PAGE_SIZE, |limit| limit as usize)
         .clamp(1, PAGE_SIZE);
+      let last_shown = state
+        .withheld_role_logs
+        .get(&(me, conversation))
+        .copied()
+        .unwrap_or(u64::MAX);
+      let entry = state.actor_conversation_mut(conversation, me)?;
       let mut entries: Vec<_> = entry
         .role_log
         .iter()
-        .filter(|entry| entry.version > after)
+        .filter(|entry| entry.version > after && entry.version <= last_shown)
         .cloned()
         .collect();
       let has_more = entries.len() > limit;

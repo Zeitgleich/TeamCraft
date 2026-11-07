@@ -17,6 +17,7 @@ admin-metadata-detail = Admins manage rooms without being able to read them: no 
 admin-soon = Not available yet
 admin-search = Search
 admin-search-placeholder = Search by name…
+admin-show-more = Show more
 admin-filter = Filter
 admin-empty = Nothing matches.
 admin-detail-label = Details
@@ -975,3 +976,12 @@ admin-guests-skipped = { $count ->
     [one] One of them never expires and is left out when extending.
    *[other] { $count } of them never expire and are left out when extending.
 }
+
+## Problem reports (docs/bug-reports.md)
+policy-bug-reports = Problem reports
+policy-bug-reports-hint = "Report a problem" sends a person's description, an optional screenshot and the app's recent log, end-to-end encrypted, as a direct message. Choose who receives them.
+policy-bug-reports-admins = Owners and admins
+policy-bug-reports-admins-hint = Everyone with a role in the workspace's signed admin list. Nothing to set up.
+policy-bug-reports-named = These people
+policy-bug-reports-named-hint = For example the people who look after TeamCraft. Until you pick someone, reports go to the owners and admins.
+policy-bug-reports-chosen = Recipients of problem reports

@@ -1,15 +1,18 @@
 use leptos::prelude::*;
 
-use crate::admin::{AdminChannel, Retention};
-use crate::components::admin_console::{ListCutNotice, SectionHeader};
+use crate::admin::{AdminChannel, AdminChannelFilter, AdminChannelQuery, Retention};
+use crate::components::admin_console::{ListMore, SectionHeader};
 use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::use_i18n;
 use crate::model::ConversationKind;
+use crate::reactive::use_debounced;
 use crate::state::use_app_state;
 
 /// Instance maximum an owner may not exceed when the signed policy sets no limit of its own.
 const MAX_DAYS: u32 = 730;
 const MAX_MESSAGES: u32 = 1_000_000;
+/// The wait after the last key before the search asks the server.
+const SEARCH_DEBOUNCE_MS: u64 = 250;
 
 /// Retention per channel: keep the last N days and/or N messages, whichever is stricter.
 #[component]
@@ -23,6 +26,17 @@ pub fn RetentionSection() -> impl IntoView {
       .filter(|c| c.kind != ConversationKind::Direct)
       .collect::<Vec<_>>()
   });
+  // Channels page by page, searched by the server (issue #1241). The Channels page's quick filters
+  // don't apply here: this list is of every channel.
+  let query = RwSignal::new(state.read(|backend| backend.admin_channel_query()).text);
+  let debounced = use_debounced(query, SEARCH_DEBOUNCE_MS);
+  Effect::new(move |_| {
+    let asked = AdminChannelQuery {
+      text: debounced.get(),
+      filter: AdminChannelFilter::All,
+    };
+    state.write(|backend| backend.admin_set_channel_query(asked));
+  });
   let limits = Limits::of_policy(state.read(|backend| backend.workspace_policy()).1.retention.limit);
 
   view! {
@@ -30,6 +44,20 @@ pub fn RetentionSection() -> impl IntoView {
       title=Signal::derive(move || i18n.t("admin-retention-title"))
       subtitle=Signal::derive(move || i18n.t_with("admin-retention-subtitle", &[("days", &limits.max_days.to_string())]))
     />
+    <div class="admin-toolbar">
+      <label class="visually-hidden" for="admin-retention-search">{move || i18n.t("admin-search")}</label>
+      <input
+        id="admin-retention-search"
+        class="input"
+        type="search"
+        name="q"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder=move || i18n.t("admin-search-placeholder")
+        prop:value=move || query.get()
+        on:input=move |ev| query.set(event_target_value(&ev))
+      />
+    </div>
     <div class="table-wrap">
       <table class="data-table">
         <caption class="visually-hidden">{move || i18n.t("admin-retention-title")}</caption>
@@ -50,7 +78,13 @@ pub fn RetentionSection() -> impl IntoView {
         </tbody>
       </table>
     </div>
-    <ListCutNotice is_cut=Signal::derive(move || state.read(|backend| backend.admin_channels_truncated())) />
+    <Show when=move || channels.with(Vec::is_empty) fallback=|| ()>
+      <p class="empty-state">{move || i18n.t("admin-empty")}</p>
+    </Show>
+    <ListMore
+      has_more=Signal::derive(move || state.read(|backend| backend.admin_channels_have_more()))
+      on_more=Callback::new(move |()| state.write(|backend| backend.admin_load_more_channels()))
+    />
   }
 }
 

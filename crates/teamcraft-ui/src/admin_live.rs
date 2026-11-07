@@ -22,18 +22,19 @@ use teamcraft_proto::{
   ConversationVisibility, CreateBrandRequest, ErrorBody, ErrorCode, ExtendGuestRequest,
   GetAnnouncementResponse, HistoryPolicy, ListAdminConversationsResponse, ListAdminDevicesResponse,
   ListAdminGuestsQuery, ListAdminGuestsResponse, ListAdminSpacesResponse, ListAdminUsersResponse,
-  ListAuditResponse, ListConversationMembersResponse, ListSpaceMembersResponse, PermissionSchemeResponse,
-  RetentionSetting, RetentionStatusResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse,
-  RuntimeSettingsSection, SchemeChange, SendTestMailRequest, SetAnnouncementRequest,
-  SetChannelModerationRequest, SetRetentionRequest, SettingsTestResponse, SpaceId, UnixMillis,
-  UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateConversationRequest, UpdateMailSettingsRequest,
+  ListAuditResponse, ListConversationMembersResponse, PermissionSchemeResponse, RetentionSetting,
+  RetentionStatusResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection,
+  SchemeChange, SendTestMailRequest, SetAnnouncementRequest, SetChannelModerationRequest,
+  SetRetentionRequest, SettingsTestResponse, SpaceId, UnixMillis, UpdateBrandRequest,
+  UpdateCalendarSettingsRequest, UpdateConversationRequest, UpdateMailSettingsRequest,
   UpdatePermissionSchemeRequest, UpdateSpaceRequest, UserKind, WorkspacePolicy, WorkspacePolicyResponse,
 };
 
 use crate::admin::{
-  AdminChannel, AdminLoad, AdminSection, AdminSpace, AdminSpaceChanges, AdminUser, AuditAction, AuditEntry,
-  AuditFilter, DeviceInfo, DeviceVerification, RATE_LIMITED_CODE, READ_FAILED_CODE, Retention,
-  SettingsTestKind, UNREACHABLE_CODE,
+  AdminChannel, AdminChannelFilter, AdminChannelQuery, AdminLoad, AdminSection, AdminSpace,
+  AdminSpaceChanges, AdminUser, AdminUserQuery, AuditAction, AuditEntry, AuditFilter, DeviceInfo,
+  DeviceVerification, INACTIVE_AFTER_DAYS, RATE_LIMITED_CODE, READ_FAILED_CODE, Retention, SettingsTestKind,
+  UNREACHABLE_CODE,
 };
 use crate::auth::{ApiMethod, Authenticator, BinaryBody};
 use crate::clock::now_ms;
@@ -48,9 +49,20 @@ const LIST_LIMIT: u32 = 200;
 /// Guest memberships the overview shows at once; the filters narrow a longer list, and the console
 /// says that it is cut.
 const GUEST_LIST_LIMIT: u32 = 200;
-/// Pages of channels (and of users) one refresh reads: 1000 entries. Beyond that the console says
-/// the list is cut (issue #1217) instead of ending silently.
-const MAX_LIST_PAGES: usize = 5;
+/// Channels (and users) per page of the Channels, Retention and Users lists. The first page loads
+/// when the page opens, the next ones when the admin asks for more (issue #1241).
+const PAGE_SIZE: u32 = 100;
+/// Pages the timer and a refresh read again at most: the head of what the admin loaded. Pages
+/// loaded beyond stay as they were read, so the cost of a refresh depends on this and not on how
+/// far the admin scrolled, still less on the size of the workspace.
+const MAX_REFRESH_PAGES: usize = 3;
+/// Pages of owners (and of admins) read for the roster proposals: nobody is left out of them
+/// silently, and their number is far below this in practice.
+const MAX_ROLE_PAGES: usize = 5;
+/// The search box asks after its own debounce; the read follows at once.
+const QUERY_DELAY: Duration = Duration::ZERO;
+const MORE_CHANNELS_KEY: &str = "more:channels";
+const MORE_USERS_KEY: &str = "more:users";
 /// Servers from before the list carried owner and retention (`maybe_retention` absent): only this
 /// many channels get them, one request each, so an old server isn't flooded.
 const LEGACY_DETAIL_LIMIT: usize = 100;
@@ -98,11 +110,17 @@ pub struct AdminLive {
 #[derive(Default)]
 pub struct AdminData {
   load: AdminLoad,
+  /// The pages of channels loaded so far for [`AdminData::channel_query`].
   channels: Vec<AdminChannel>,
-  /// The lists end before the last entry (more pages than [`MAX_LIST_PAGES`]).
-  is_channel_list_truncated: bool,
+  channel_paging: Paging,
+  channel_query: AdminChannelQuery,
+  /// The pages of users loaded so far for [`AdminData::user_query`].
   users: Vec<AdminUser>,
-  is_user_list_truncated: bool,
+  user_paging: Paging,
+  user_query: AdminUserQuery,
+  /// Owners and admins, read by role: the roster proposals and the names of those who act in the
+  /// audit log, whatever page of the user list is open.
+  role_holders: Vec<AdminUser>,
   /// Devices of the users whose details were opened; refreshed with the console.
   devices: HashMap<UserId, Vec<AdminDeviceResponse>>,
   /// Owner and retention of channels, read one by one from a server that doesn't send them in the
@@ -178,12 +196,97 @@ impl AdminLive {
       .collect()
   }
 
-  pub fn is_channel_list_truncated(&self) -> bool {
-    self.data.borrow().is_channel_list_truncated
+  /// The accounts the console knows by name and role besides the Users list's pages: the page
+  /// loaded now and the owners and admins.
+  pub fn known_users(&self) -> Vec<AdminUser> {
+    let mut known = self.users();
+    let listed: HashSet<UserId> = known.iter().map(|user| user.user.id).collect();
+    known.extend(
+      self
+        .data
+        .borrow()
+        .role_holders
+        .iter()
+        .filter(|user| !listed.contains(&user.user.id))
+        .cloned(),
+    );
+    known
   }
 
-  pub fn is_user_list_truncated(&self) -> bool {
-    self.data.borrow().is_user_list_truncated
+  pub fn channel_query(&self) -> AdminChannelQuery {
+    self.data.borrow().channel_query.clone()
+  }
+
+  pub fn user_query(&self) -> AdminUserQuery {
+    self.data.borrow().user_query.clone()
+  }
+
+  pub fn channels_have_more(&self) -> bool {
+    self.data.borrow().channel_paging.has_more
+  }
+
+  pub fn users_have_more(&self) -> bool {
+    self.data.borrow().user_paging.has_more
+  }
+
+  /// Lists the channels of `query` from the first page on. What was loaded stays on screen until
+  /// the answer comes, and an answer to an earlier query is dropped.
+  pub fn set_channel_query(&self, query: AdminChannelQuery) {
+    if self.apply_channel_query(query) {
+      self.queue_reads(Reads::CONVERSATIONS, QUERY_DELAY);
+    }
+  }
+
+  /// Whether the query differs from the one the list holds; the list starts over if it does.
+  fn apply_channel_query(&self, query: AdminChannelQuery) -> bool {
+    let mut data = self.data.borrow_mut();
+    if data.channel_query == query {
+      return false;
+    }
+    data.channel_query = query;
+    data.channel_paging = data.channel_paging.restarted();
+    true
+  }
+
+  pub fn set_user_query(&self, query: AdminUserQuery) {
+    if self.apply_user_query(query) {
+      self.queue_reads(Reads::USERS, QUERY_DELAY);
+    }
+  }
+
+  fn apply_user_query(&self, query: AdminUserQuery) -> bool {
+    let mut data = self.data.borrow_mut();
+    if data.user_query == query {
+      return false;
+    }
+    data.user_query = query;
+    data.user_paging = data.user_paging.restarted();
+    true
+  }
+
+  /// A page after the last entry is being read.
+  pub fn is_loading_more(&self) -> bool {
+    let data = self.data.borrow();
+    data.loading.contains(MORE_CHANNELS_KEY) || data.loading.contains(MORE_USERS_KEY)
+  }
+
+  /// Reads the page after the last channel loaded; one at a time.
+  pub fn load_more_channels(&self) {
+    let mut data = self.data.borrow_mut();
+    if data.channel_paging.has_more && data.loading.insert(MORE_CHANNELS_KEY.into()) {
+      drop(data);
+      self.changed();
+      self.run(AdminTask::MoreChannels);
+    }
+  }
+
+  pub fn load_more_users(&self) {
+    let mut data = self.data.borrow_mut();
+    if data.user_paging.has_more && data.loading.insert(MORE_USERS_KEY.into()) {
+      drop(data);
+      self.changed();
+      self.run(AdminTask::MoreUsers);
+    }
   }
 
   /// Loads the devices of `user` once; they stay cached and current with the refreshes.
@@ -643,7 +746,7 @@ impl AdminLive {
   /// Owners and admins as the server lists them (active accounts only, each once): proposed for the
   /// first roster, and as additions to a signed one (issue #765).
   pub fn roster_candidates(&self) -> (Vec<UserId>, Vec<UserId>) {
-    teamcraft_client_api::admin::role_holders(&self.data.borrow().users)
+    teamcraft_client_api::admin::role_holders(&self.data.borrow().role_holders)
   }
 
   /// Fetches what was asked for now; a part that fails keeps its previous value and shows its error.
@@ -790,10 +893,13 @@ impl AdminLive {
             keeps_pinned,
           );
           data.channels = channels;
+          data.channel_paging.pages = list.pages;
+          data.channel_paging.has_more = list.has_more;
         }
         if let Some(spaces) = &spaces {
           data.spaces = spaces.spaces.iter().map(space_from_wire).collect();
         }
+        // Every first read asks for the channels (ALL), so a missing list is a failed one.
         data.load = match (&spaces, &conversations) {
           (Some(_), Some(_)) => AdminLoad::Loaded,
           _ => AdminLoad::Failed(errors.first().cloned().unwrap_or_default()),
@@ -814,11 +920,10 @@ impl AdminLive {
     {
       self.read_legacy_details(&list.items).await;
     }
-    let space_memberships = match &spaces {
-      Some(spaces) if reads.has(Reads::MEMBERSHIPS) && !self.is_quiet() => {
-        Some(self.space_memberships(&spaces.spaces).await)
-      },
-      _ => None,
+    let role_holders = if reads.has(Reads::ROLE_HOLDERS) && !self.is_quiet() {
+      settle(self.read_role_holders().await, &mut errors)
+    } else {
+      None
     };
     let guests = if reads.has(Reads::GUESTS) && !self.is_quiet() {
       let guests_path = guests_path(&self.data.borrow().guest_query);
@@ -839,44 +944,45 @@ impl AdminLive {
       None
     };
 
+    let has_conversations = conversations.is_some();
     {
       let mut data = self.data.borrow_mut();
       if let Some(list) = guests {
         data.guests = list;
       }
-      if let Some(list) = &conversations {
-        let channels = channels_of(
-          &list.items,
-          &space_names,
-          &data.legacy_details,
-          &policy_default_history,
-          keeps_pinned,
-        );
-        data.channels = channels;
-        data.is_channel_list_truncated = list.is_truncated;
-      }
-      if let Some(list) = &users {
-        let previous: HashMap<UserId, Vec<String>> = data
-          .users
-          .iter()
-          .map(|user| (user.user.id, user.space_names.clone()))
-          .collect();
-        data.users = list
-          .items
-          .iter()
-          .map(|summary| {
-            let names = match &space_memberships {
-              Some(memberships) => memberships.get(&summary.id).cloned().unwrap_or_default(),
-              None => previous.get(&summary.id).cloned().unwrap_or_default(),
-            };
-            user_from_wire(summary, names)
-          })
-          .collect();
-        data.is_user_list_truncated = list.is_truncated;
-      } else if let Some(memberships) = &space_memberships {
-        for user in &mut data.users {
-          user.space_names = memberships.get(&user.user.id).cloned().unwrap_or_default();
+      if let Some(list) = conversations {
+        let channels = list.map(|summaries| {
+          channels_of(
+            &summaries,
+            &space_names,
+            &data.legacy_details,
+            &policy_default_history,
+            keeps_pinned,
+          )
+        });
+        let (current, paging) = (std::mem::take(&mut data.channels), data.channel_paging);
+        match refreshed(&current, paging, channels, |channel| raw_id(channel.id)) {
+          Some((items, paging)) => {
+            data.channels = items;
+            data.channel_paging = paging;
+          },
+          // The admin searched for something else meanwhile; its answer follows.
+          None => data.channels = current,
         }
+      }
+      if let Some(list) = users {
+        let list = list.map(|summaries| summaries.iter().map(user_from_wire).collect());
+        let (current, paging) = (std::mem::take(&mut data.users), data.user_paging);
+        match refreshed(&current, paging, list, |user: &AdminUser| raw_id(user.user.id)) {
+          Some((items, paging)) => {
+            data.users = items;
+            data.user_paging = paging;
+          },
+          None => data.users = current,
+        }
+      }
+      if let Some(holders) = role_holders {
+        data.role_holders = holders.iter().map(user_from_wire).collect();
       }
       if let Some(policy) = policy {
         data.policy = policy.policy;
@@ -908,14 +1014,19 @@ impl AdminLive {
         data.runtime = runtime;
       }
       if let Some(audit) = audit {
-        let (channels, users) = (data.channels.clone(), data.users.clone());
+        let channels = data.channels.clone();
+        let users: Vec<AdminUser> = {
+          let mut known = data.users.clone();
+          known.extend(data.role_holders.iter().cloned());
+          known
+        };
         data.audit = audit
           .entries
           .iter()
           .map(|entry| audit_from_wire(entry, &space_names, &channels, &users))
           .collect();
       }
-      if data.load != AdminLoad::Loaded && spaces.is_some() && conversations.is_some() {
+      if data.load != AdminLoad::Loaded && spaces.is_some() && has_conversations {
         data.load = AdminLoad::Loaded;
       }
       // A refusal to wait for is what the admin should see first, not a failure it caused.
@@ -1156,26 +1267,6 @@ impl AdminLive {
     }
   }
 
-  async fn space_memberships(&self, spaces: &[AdminSpaceSummary]) -> HashMap<UserId, Vec<String>> {
-    let mut memberships: HashMap<UserId, Vec<String>> = HashMap::new();
-    let mut ignored = Vec::new();
-    for space in spaces {
-      if self.is_quiet() {
-        break;
-      }
-      let path = format!("/api/v1/admin/spaces/{}/members", space.id);
-      if let Some(list) = self.fetch::<ListSpaceMembersResponse>(&path, &mut ignored).await {
-        for member in list.members {
-          memberships
-            .entry(member.user.id)
-            .or_default()
-            .push(space.name.clone());
-        }
-      }
-    }
-    memberships
-  }
-
   /// Re-reads the on-demand data that is cached, so changes of other admins show up: only the kinds
   /// the open section shows (`reads`), and only what was looked at before.
   async fn reload_cached(&self, reads: Reads, errors: &mut Vec<String>) {
@@ -1295,7 +1386,8 @@ impl AdminLive {
     self.fetch_result(path.to_owned()).await.map(Some)
   }
 
-  /// The channel list, page after page up to [`MAX_LIST_PAGES`].
+  /// The head of the channel list: as many pages as are loaded, at most [`MAX_REFRESH_PAGES`], from
+  /// the first on. A page is [`PAGE_SIZE`] channels, whatever the number of channels.
   async fn read_conversations_if(
     &self,
     is_wanted: bool,
@@ -1303,55 +1395,153 @@ impl AdminLive {
     if !is_wanted {
       return Ok(None);
     }
-    let mut items = Vec::new();
+    let (query, paging) = {
+      let data = self.data.borrow();
+      (data.channel_query.clone(), data.channel_paging)
+    };
+    let mut list = Listed::empty(paging.generation);
     let mut maybe_after: Option<ConversationId> = None;
-    for _ in 0..MAX_LIST_PAGES {
-      let mut path = format!("/api/v1/admin/conversations?limit={LIST_LIMIT}");
-      if let Some(after) = maybe_after {
-        path.push_str(&format!("&after={after}"));
-      }
-      let page: ListAdminConversationsResponse = self.fetch_result(path).await?;
+    for _ in 0..paging.pages.clamp(1, MAX_REFRESH_PAGES) {
+      let page: ListAdminConversationsResponse =
+        self.fetch_result(conversations_path(&query, maybe_after)).await?;
       maybe_after = page.conversations.last().map(|summary| summary.id);
-      items.extend(page.conversations);
-      if !page.has_more || maybe_after.is_none() {
-        return Ok(Some(Listed {
-          items,
-          is_truncated: false,
-        }));
+      list.has_more = page.has_more && maybe_after.is_some();
+      list.pages += 1;
+      list.items.extend(page.conversations);
+      if !list.has_more {
+        break;
       }
     }
-    Ok(Some(Listed {
-      items,
-      is_truncated: true,
-    }))
+    Ok(Some(list))
   }
 
-  /// The user list, page after page up to [`MAX_LIST_PAGES`].
+  /// The head of the user list, like [`Self::read_conversations_if`].
   async fn read_users_if(&self, is_wanted: bool) -> Result<Option<Listed<AdminUserSummary>>, String> {
     if !is_wanted {
       return Ok(None);
     }
-    let mut items = Vec::new();
+    let (query, paging) = {
+      let data = self.data.borrow();
+      (data.user_query.clone(), data.user_paging)
+    };
+    let mut list = Listed::empty(paging.generation);
     let mut maybe_after: Option<UserId> = None;
-    for _ in 0..MAX_LIST_PAGES {
-      let mut path = format!("/api/v1/admin/users?status=all&limit={LIST_LIMIT}");
-      if let Some(after) = maybe_after {
-        path.push_str(&format!("&after={after}"));
-      }
-      let page: ListAdminUsersResponse = self.fetch_result(path).await?;
+    for _ in 0..paging.pages.clamp(1, MAX_REFRESH_PAGES) {
+      let page: ListAdminUsersResponse = self
+        .fetch_result(users_path(&query.text, None, maybe_after))
+        .await?;
       maybe_after = page.users.last().map(|summary| summary.id);
-      items.extend(page.users);
-      if !page.has_more || maybe_after.is_none() {
-        return Ok(Some(Listed {
-          items,
-          is_truncated: false,
-        }));
+      list.has_more = page.has_more && maybe_after.is_some();
+      list.pages += 1;
+      list.items.extend(page.users);
+      if !list.has_more {
+        break;
       }
     }
-    Ok(Some(Listed {
-      items,
-      is_truncated: true,
-    }))
+    Ok(Some(list))
+  }
+
+  /// The active owners and admins, each role on its own (the server filters by role). Few
+  /// accounts, but read to the end so the roster proposals leave nobody out.
+  async fn read_role_holders(&self) -> Result<Vec<AdminUserSummary>, String> {
+    let mut holders = Vec::new();
+    for role in ["owner", "admin"] {
+      let mut maybe_after: Option<UserId> = None;
+      for _ in 0..MAX_ROLE_PAGES {
+        let page: ListAdminUsersResponse = self.fetch_result(users_path("", Some(role), maybe_after)).await?;
+        maybe_after = page.users.last().map(|summary| summary.id);
+        holders.extend(page.users.into_iter().filter(|user| !user.is_deactivated));
+        if !page.has_more || maybe_after.is_none() {
+          break;
+        }
+      }
+    }
+    Ok(holders)
+  }
+
+  /// The page after the last channel loaded, appended once it arrives. An answer to a query that
+  /// changed meanwhile is dropped.
+  async fn more_channels_now(&self) {
+    let (query, paging, maybe_after) = {
+      let data = self.data.borrow();
+      (
+        data.channel_query.clone(),
+        data.channel_paging,
+        data.channels.last().map(|channel| channel.id),
+      )
+    };
+    let result = self
+      .fetch_result::<ListAdminConversationsResponse>(conversations_path(&query, maybe_after))
+      .await;
+    {
+      let mut data = self.data.borrow_mut();
+      data.loading.remove(MORE_CHANNELS_KEY);
+      match result {
+        Ok(page) if data.channel_paging.generation == paging.generation => {
+          let space_names: HashMap<SpaceId, String> = data
+            .spaces
+            .iter()
+            .map(|space| (space.id, space.name.clone()))
+            .collect();
+          let more = channels_of(
+            &page.conversations,
+            &space_names,
+            &data.legacy_details,
+            &data.policy.history_default,
+            data.policy.retention.keep_pinned,
+          );
+          let paging = data.channel_paging;
+          let (items, paging) = appended(
+            std::mem::take(&mut data.channels),
+            paging,
+            more,
+            page.has_more && !page.conversations.is_empty(),
+            |channel| raw_id(channel.id),
+          );
+          data.channels = items;
+          data.channel_paging = paging;
+        },
+        Ok(_) => {},
+        Err(error) => data.maybe_error = Some(error),
+      }
+    }
+    self.changed();
+  }
+
+  async fn more_users_now(&self) {
+    let (query, paging, maybe_after) = {
+      let data = self.data.borrow();
+      (
+        data.user_query.clone(),
+        data.user_paging,
+        data.users.last().map(|user| user.user.id),
+      )
+    };
+    let result = self
+      .fetch_result::<ListAdminUsersResponse>(users_path(&query.text, None, maybe_after))
+      .await;
+    {
+      let mut data = self.data.borrow_mut();
+      data.loading.remove(MORE_USERS_KEY);
+      match result {
+        Ok(page) if data.user_paging.generation == paging.generation => {
+          let more: Vec<AdminUser> = page.users.iter().map(user_from_wire).collect();
+          let paging = data.user_paging;
+          let (items, paging) = appended(
+            std::mem::take(&mut data.users),
+            paging,
+            more,
+            page.has_more && !page.users.is_empty(),
+            |user| raw_id(user.user.id),
+          );
+          data.users = items;
+          data.user_paging = paging;
+        },
+        Ok(_) => {},
+        Err(error) => data.maybe_error = Some(error),
+      }
+    }
+    self.changed();
   }
 
   /// A GET of the console. A failure is a short code the console words itself (never the path or
@@ -1528,6 +1718,8 @@ impl AdminLive {
         store,
       } => self.send_stored_now(method, path, maybe_body, store).await,
       AdminTask::Load { key, path, what } => self.load_now(key, path, what).await,
+      AdminTask::MoreChannels => self.more_channels_now().await,
+      AdminTask::MoreUsers => self.more_users_now().await,
       AdminTask::SettingsTest { kind, path, body } => self.run_settings_test_now(kind, path, body).await,
       AdminTask::BrandPreview { key, path } => self.brand_preview_now(key, path).await,
       AdminTask::UploadBrandAsset {
@@ -1579,6 +1771,10 @@ pub enum AdminTask {
   },
   /// Data the console shows on demand.
   Load { key: String, path: String, what: Loaded },
+  /// The next page of the channel list (issue #1241).
+  MoreChannels,
+  /// The next page of the user list.
+  MoreUsers,
   /// A connection test.
   SettingsTest {
     kind: SettingsTestKind,
@@ -1669,8 +1865,8 @@ impl Reads {
   const CALENDAR: Reads = Reads(1 << 8);
   const RUNTIME: Reads = Reads(1 << 9);
   const AUDIT: Reads = Reads(1 << 10);
-  /// One request per space: which spaces each user is in.
-  const MEMBERSHIPS: Reads = Reads(1 << 11);
+  /// The active owners and admins by role: a request or two, whatever the number of accounts.
+  const ROLE_HOLDERS: Reads = Reads(1 << 11);
   /// One request per channel, from servers that don't send owner and retention in the list.
   const LEGACY_DETAILS: Reads = Reads(1 << 12);
   const CACHED_SCHEMES: Reads = Reads(1 << 13);
@@ -1689,12 +1885,15 @@ impl Reads {
   fn of(section: AdminSection) -> Reads {
     match section {
       AdminSection::Channels => {
-        Self::SPACES | Self::CONVERSATIONS | Self::USERS | Self::LEGACY_DETAILS | Self::CACHED_MODERATION
+        Self::SPACES | Self::CONVERSATIONS | Self::LEGACY_DETAILS | Self::CACHED_MODERATION
       },
       AdminSection::Users => Self::USERS | Self::SPACES | Self::CACHED_DEVICES | Self::GUESTS,
       AdminSection::Permissions => Self::SPACES | Self::CACHED_SCHEMES,
       AdminSection::Retention => Self::SPACES | Self::CONVERSATIONS | Self::POLICY | Self::LEGACY_DETAILS,
-      AdminSection::Audit => Self::AUDIT | Self::SPACES | Self::CONVERSATIONS | Self::USERS,
+      // Names of what the entries are about: the head of the lists, and the admins who act.
+      AdminSection::Audit => {
+        Self::AUDIT | Self::SPACES | Self::CONVERSATIONS | Self::USERS | Self::ROLE_HOLDERS
+      },
       AdminSection::Announcement => Self::ANNOUNCEMENT,
       AdminSection::Brands => Self::BRANDS,
       AdminSection::Mail => Self::MAIL,
@@ -1702,13 +1901,14 @@ impl Reads {
       AdminSection::Settings => Self::RUNTIME,
       AdminSection::Instance => Self::INSTANCE,
       AdminSection::Health => Self::HEALTH,
-      // The owners and admins to propose for the roster come from the user list.
-      AdminSection::Security | AdminSection::People => Self::POLICY | Self::USERS,
+      // The owners and admins to propose for the roster are read by role, not out of the user list.
+      AdminSection::Security | AdminSection::People | AdminSection::Import => {
+        Self::POLICY | Self::ROLE_HOLDERS
+      },
       AdminSection::Backgrounds
       | AdminSection::Updates
       | AdminSection::Integrations
-      | AdminSection::Notetaker
-      | AdminSection::Import => Self::POLICY,
+      | AdminSection::Notetaker => Self::POLICY,
     }
   }
 }
@@ -1721,10 +1921,109 @@ impl std::ops::BitOr for Reads {
   }
 }
 
-/// A list read page by page; `is_truncated` when more pages were left than one refresh reads.
+/// The head of a list as one refresh read it.
 struct Listed<T> {
   items: Vec<T>,
-  is_truncated: bool,
+  /// Pages requested.
+  pages: usize,
+  /// The server has entries after the last one read.
+  has_more: bool,
+  /// The list's [`Paging::generation`] when the read started.
+  generation: u64,
+}
+
+impl<T> Listed<T> {
+  fn empty(generation: u64) -> Self {
+    Self {
+      items: Vec::new(),
+      pages: 0,
+      has_more: false,
+      generation,
+    }
+  }
+
+  fn map<U>(self, convert: impl FnOnce(Vec<T>) -> Vec<U>) -> Listed<U> {
+    Listed {
+      items: convert(self.items),
+      pages: self.pages,
+      has_more: self.has_more,
+      generation: self.generation,
+    }
+  }
+}
+
+/// How far a paged list is read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Paging {
+  /// Pages loaded so far (0: none yet).
+  pages: usize,
+  /// The server has entries after the last one loaded.
+  has_more: bool,
+  /// Counts the queries: an answer read for an earlier query is dropped.
+  generation: u64,
+}
+
+impl Paging {
+  /// The list starts over for a new query; what was read for the old one no longer counts.
+  fn restarted(self) -> Self {
+    Self {
+      pages: 0,
+      has_more: false,
+      generation: self.generation + 1,
+    }
+  }
+}
+
+/// Puts the head a refresh read in place of the pages loaded before. Pages the admin loaded beyond
+/// what a refresh reads again stay as they were, from the first entry after the new head on (IDs
+/// ascend), so a refresh costs at most [`MAX_REFRESH_PAGES`] requests however far the admin went.
+/// `None` when the head belongs to an earlier query.
+fn refreshed<T: Clone>(
+  current: &[T],
+  paging: Paging,
+  head: Listed<T>,
+  key: impl Fn(&T) -> u64,
+) -> Option<(Vec<T>, Paging)> {
+  if head.generation != paging.generation {
+    return None;
+  }
+  let is_tail_kept = head.has_more && paging.pages > head.pages;
+  let Some(last) = head.items.last().map(&key).filter(|_| is_tail_kept) else {
+    let paging = Paging {
+      pages: head.pages,
+      has_more: head.has_more,
+      ..paging
+    };
+    return Some((head.items, paging));
+  };
+  let mut items = head.items;
+  items.extend(current.iter().filter(|item| key(item) > last).cloned());
+  Some((items, paging))
+}
+
+/// Adds a page read after the last entry; an entry that is there already (it moved between pages
+/// while the admin read) is not shown twice.
+fn appended<T>(
+  mut current: Vec<T>,
+  paging: Paging,
+  page: Vec<T>,
+  has_more: bool,
+  key: impl Fn(&T) -> u64,
+) -> (Vec<T>, Paging) {
+  let last = current.last().map(&key);
+  current.extend(
+    page
+      .into_iter()
+      .filter(|item| last.is_none_or(|last| key(item) > last)),
+  );
+  (
+    current,
+    Paging {
+      pages: paging.pages + 1,
+      has_more,
+      ..paging
+    },
+  )
 }
 
 /// A channel's owner and effective retention: from the list, or read one by one from a server whose
@@ -1898,6 +2197,56 @@ fn channel_from_wire(
   }
 }
 
+/// `GET /admin/conversations` for one page of what the query lists.
+fn conversations_path(query: &AdminChannelQuery, maybe_after: Option<ConversationId>) -> String {
+  let mut path = format!("/api/v1/admin/conversations?limit={PAGE_SIZE}");
+  match query.filter {
+    AdminChannelFilter::All => {},
+    AdminChannelFilter::Private => path.push_str("&visibility=private"),
+    AdminChannelFilter::WithGuests => path.push_str("&has_guests=true"),
+    AdminChannelFilter::Inactive => path.push_str(&format!("&inactive_days={INACTIVE_AFTER_DAYS}")),
+    AdminChannelFilter::Orphaned => path.push_str("&orphaned=true"),
+  }
+  let text = query.text.trim();
+  if !text.is_empty() {
+    path.push_str(&format!("&query={}", encode_component(text)));
+  }
+  if let Some(after) = maybe_after {
+    path.push_str(&format!("&after={after}"));
+  }
+  path
+}
+
+/// `GET /admin/users` for one page: every account (or the active ones of `maybe_role`) whose name
+/// contains `text`.
+fn users_path(text: &str, maybe_role: Option<&str>, maybe_after: Option<UserId>) -> String {
+  let status = if maybe_role.is_some() { "active" } else { "all" };
+  let mut path = format!("/api/v1/admin/users?status={status}&limit={PAGE_SIZE}");
+  let text = text.trim();
+  if !text.is_empty() {
+    path.push_str(&format!("&query={}", encode_component(text)));
+  }
+  if let Some(role) = maybe_role {
+    path.push_str(&format!("&role={role}"));
+  }
+  if let Some(after) = maybe_after {
+    path.push_str(&format!("&after={after}"));
+  }
+  path
+}
+
+/// `text` as a URL query value: everything but unreserved characters as `%XX` of its UTF-8 bytes.
+fn encode_component(text: &str) -> String {
+  let mut encoded = String::with_capacity(text.len());
+  for byte in text.bytes() {
+    match byte {
+      b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => encoded.push(char::from(byte)),
+      _ => encoded.push_str(&format!("%{byte:02X}")),
+    }
+  }
+  encoded
+}
+
 /// `GET /admin/guests` with what the console's filters ask for. IDs and filter names are plain.
 fn guests_path(query: &ListAdminGuestsQuery) -> String {
   let mut path = format!("/api/v1/admin/guests?limit={GUEST_LIST_LIMIT}");
@@ -1913,7 +2262,7 @@ fn guests_path(query: &ListAdminGuestsQuery) -> String {
   path
 }
 
-fn user_from_wire(summary: &AdminUserSummary, space_names: Vec<String>) -> AdminUser {
+fn user_from_wire(summary: &AdminUserSummary) -> AdminUser {
   let username = summary.maybe_username.clone().unwrap_or_default();
   let role = summary
     .maybe_oidc_role
@@ -1944,7 +2293,8 @@ fn user_from_wire(summary: &AdminUserSummary, space_names: Vec<String>) -> Admin
     // Loaded when the user's details open (`AdminLive::load_devices`).
     devices: Vec::new(),
     last_seen: summary.maybe_last_seen_at.unwrap_or(summary.created_at).0,
-    space_names,
+    space_names: Vec::new(),
+    space_count: summary.space_count,
     is_active: !summary.is_deactivated,
     is_in_chats: summary.conversation_count > 0 || summary.space_count > 0 || summary.device_count > 0,
     maybe_guest: None,
@@ -2157,7 +2507,7 @@ mod tests {
         created_at: UnixMillis(1000),
       },
     ];
-    let user = user_from_wire(&summary, vec!["Space A".into()]);
+    let user = user_from_wire(&summary);
     assert_eq!(user.role, Role::Admin);
     assert!(!user.is_active);
     assert!(user.is_in_chats);
@@ -2309,21 +2659,27 @@ mod tests {
       block_on(live.refresh_once());
 
       let paths = server.paths();
-      // Twelve lists, the further pages of channels (2) and users (1), the audit log, and one
-      // request per space: 28 requests in all, once, where the console used to make about 650.
+      // Eleven lists and settings, the audit log, the guests and the owners and admins by role:
+      // the same 16 requests however many channels, users and spaces there are (it used to be
+      // about 650, then 28, with a page of 200 repeated up to 5 times for each list).
       assert!(
-        paths.len() <= 11 + 3 + 1 + 1 + SPACES as usize,
+        paths.len() <= 11 + 1 + 1 + 2,
         "{} requests: {paths:?}",
         paths.len()
       );
       assert_no_detail_requests(&paths);
+      assert!(
+        !paths.iter().any(|path| path.ends_with("/members")),
+        "no request per space: {paths:?}"
+      );
       assert_eq!(
         live.channels().len(),
-        CHANNELS as usize,
-        "every page of channels is read"
+        PAGE_SIZE as usize,
+        "the first page of channels, not all of them"
       );
-      assert_eq!(live.users().len(), USERS as usize);
-      assert!(!live.is_channel_list_truncated());
+      assert!(live.channels_have_more());
+      assert_eq!(live.users().len(), PAGE_SIZE as usize);
+      assert!(live.users_have_more());
       assert_eq!(live.channels()[7].maybe_owner, Some(id_from_raw(8)));
       assert_eq!(live.channels()[7].retention.maybe_days, Some(30));
     }
@@ -2527,12 +2883,257 @@ mod tests {
     }
 
     #[test]
-    fn a_list_longer_than_the_pages_read_says_so() {
-      let server = FakeServer::with_channels(MAX_LIST_PAGES as u64 * u64::from(LIST_LIMIT) + 50);
+    fn a_long_list_loads_a_page_at_a_time_and_more_on_request() {
+      let server = FakeServer::with_channels(PAGE_SIZE as u64 * 4 + 50);
       let live = AdminLive::new(server.clone());
       block_on(live.refresh_once());
-      assert_eq!(live.channels().len(), MAX_LIST_PAGES * LIST_LIMIT as usize);
-      assert!(live.is_channel_list_truncated());
+      assert_eq!(live.channels().len(), PAGE_SIZE as usize);
+      assert!(live.channels_have_more());
+      for _ in 0..4 {
+        more_channels(&live);
+      }
+      let channels = live.channels();
+      assert_eq!(channels.len(), PAGE_SIZE as usize * 4 + 50);
+      assert!(!live.channels_have_more());
+      assert!(
+        channels.windows(2).all(|pair| pair[0].id < pair[1].id),
+        "in order, none twice"
+      );
+      let after: Vec<_> = server
+        .paths()
+        .into_iter()
+        .filter(|path| path.contains("after="))
+        .collect();
+      assert_eq!(after.len(), 4, "one request per page: {after:?}");
+    }
+
+    #[test]
+    fn the_timer_reads_the_head_of_what_was_loaded_and_keeps_the_rest() {
+      let server = FakeServer::with_channels(PAGE_SIZE as u64 * 6 + 20);
+      let live = AdminLive::new(server.clone());
+      block_on(live.refresh_once());
+      for _ in 0..5 {
+        more_channels(&live);
+      }
+      assert_eq!(live.channels().len(), PAGE_SIZE as usize * 6);
+      server.clear();
+
+      live.wanted.set(Reads::of(AdminSection::Channels));
+      block_on(live.refresh_once());
+      let pages = server
+        .paths()
+        .into_iter()
+        .filter(|path| path.starts_with("/api/v1/admin/conversations?"))
+        .count();
+      assert_eq!(
+        pages, MAX_REFRESH_PAGES,
+        "the head, not the six pages the admin went through"
+      );
+      let channels = live.channels();
+      assert_eq!(
+        channels.len(),
+        PAGE_SIZE as usize * 6,
+        "what was loaded beyond stays"
+      );
+      assert!(channels.windows(2).all(|pair| pair[0].id < pair[1].id));
+      assert!(live.channels_have_more());
+    }
+
+    #[test]
+    fn the_server_searches_and_the_list_starts_over() {
+      let server = FakeServer::new();
+      let live = AdminLive::new(server.clone());
+      block_on(live.refresh_once());
+      more_channels(&live);
+      server.clear();
+
+      let query = AdminChannelQuery {
+        text: " channel-12 ".into(),
+        filter: AdminChannelFilter::Orphaned,
+      };
+      assert!(live.apply_channel_query(query.clone()));
+      assert!(
+        !live.apply_channel_query(query),
+        "the same query is not asked again"
+      );
+      live.wanted.set(Reads::CONVERSATIONS);
+      block_on(live.refresh_once());
+
+      assert_eq!(
+        server.paths(),
+        ["/api/v1/admin/conversations?limit=100&orphaned=true&query=channel-12"],
+        "one request: the first page of the search"
+      );
+      let names: Vec<String> = live.channels().into_iter().map(|channel| channel.name).collect();
+      assert_eq!(
+        names.len(),
+        11,
+        "channel-12 and channel-120 to channel-129: {names:?}"
+      );
+      assert!(names.iter().all(|name| name.starts_with("channel-12")));
+      assert!(!live.channels_have_more());
+    }
+
+    #[test]
+    fn users_are_searched_by_the_server_too() {
+      let server = FakeServer::new();
+      let live = AdminLive::new(server.clone());
+      block_on(live.refresh_once());
+      server.clear();
+      assert!(live.apply_user_query(AdminUserQuery {
+        text: "Person 29".into(),
+      }));
+      live.wanted.set(Reads::USERS);
+      block_on(live.refresh_once());
+      assert_eq!(
+        server.paths(),
+        ["/api/v1/admin/users?status=all&limit=100&query=Person%2029"]
+      );
+      let names: Vec<String> = live
+        .users()
+        .into_iter()
+        .map(|user| user.user.display_name)
+        .collect();
+      assert_eq!(names.len(), 11, "Person 29 and Person 290 to 299: {names:?}");
+      assert!(names.iter().all(|name| name.starts_with("Person 29")));
+    }
+
+    #[test]
+    fn owners_and_admins_come_by_role_not_out_of_the_user_list() {
+      let server = FakeServer::new();
+      let live = AdminLive::new(server.clone());
+      block_on(live.refresh_once());
+      let paths = server.paths();
+      assert!(paths.iter().any(|path| path.contains("role=owner")), "{paths:?}");
+      assert!(paths.iter().any(|path| path.contains("role=admin")), "{paths:?}");
+      // Person 250 is an admin and on none of the first page of 100.
+      let (owners, admins) = live.roster_candidates();
+      assert_eq!(owners, [id_from_raw::<UserId>(1)]);
+      assert_eq!(admins, [id_from_raw::<UserId>(250)]);
+      assert!(
+        live
+          .known_users()
+          .iter()
+          .any(|user| user.user.id == id_from_raw::<UserId>(250)),
+        "known by name for the audit log and the security pages"
+      );
+      assert!(
+        live
+          .users()
+          .iter()
+          .all(|user| user.user.id != id_from_raw::<UserId>(250))
+      );
+    }
+
+    #[test]
+    fn a_failed_page_keeps_the_list_and_says_so() {
+      let server = FakeServer::new();
+      let live = AdminLive::new(server.clone());
+      block_on(live.refresh_once());
+      server.refuse_everything_with(502, "<html>");
+      more_channels(&live);
+      assert_eq!(live.channels().len(), PAGE_SIZE as usize);
+      assert!(live.channels_have_more(), "asking again is possible");
+      assert!(live.maybe_error().is_some());
+      assert!(!live.is_loading_more());
+    }
+
+    #[test]
+    fn the_head_of_a_list_replaces_the_pages_it_read_and_the_rest_stays() {
+      let key = |number: &u64| *number;
+      let paging = Paging {
+        pages: 4,
+        has_more: true,
+        generation: 2,
+      };
+      let head = |items: Vec<u64>, has_more: bool| Listed {
+        items,
+        pages: 3,
+        has_more,
+        generation: 2,
+      };
+      let current: Vec<u64> = (1..=400).collect();
+
+      // 3 and 4 are gone, 1000 is new; pages beyond the head are kept from its last entry on.
+      let mut read: Vec<u64> = (1..=300).filter(|number| *number != 3 && *number != 4).collect();
+      read.push(301);
+      let (items, kept) = refreshed(&current, paging, head(read, true), key).expect("same query");
+      assert_eq!(items.len(), 298 + 1 + 99);
+      assert_eq!(items.last(), Some(&400));
+      assert!(!items.contains(&3));
+      assert_eq!(kept, paging);
+
+      // The list ended inside the head (channels were deleted): the head is all there is.
+      let (items, kept) =
+        refreshed(&current, paging, head((1..=250).collect(), false), key).expect("same query");
+      assert_eq!(items.len(), 250);
+      assert_eq!(
+        kept,
+        Paging {
+          pages: 3,
+          has_more: false,
+          generation: 2
+        }
+      );
+
+      // The admin searched for something else meanwhile.
+      let stale = Listed {
+        generation: 1,
+        ..head(vec![1], true)
+      };
+      assert!(refreshed(&current, paging, stale, key).is_none());
+    }
+
+    #[test]
+    fn a_page_is_added_after_the_last_entry_and_never_twice() {
+      let paging = Paging {
+        pages: 1,
+        has_more: true,
+        generation: 0,
+      };
+      // 98 and 99 moved up while the admin read: the page starts before the end of the list.
+      let (items, next) = appended(
+        (1..=99).collect::<Vec<u64>>(),
+        paging,
+        (98..=200).collect(),
+        true,
+        |n| *n,
+      );
+      assert_eq!(items.len(), 200);
+      assert_eq!(next.pages, 2);
+      assert!(next.has_more);
+      let (_, next) = appended(vec![1_u64], next, Vec::new(), false, |n| *n);
+      assert!(!next.has_more);
+    }
+
+    #[test]
+    fn search_text_is_sent_as_a_url_value() {
+      assert_eq!(encode_component("a b&c=d#é"), "a%20b%26c%3Dd%23%C3%A9");
+      assert_eq!(encode_component("Ab-9_.~"), "Ab-9_.~");
+      let path = conversations_path(
+        &AdminChannelQuery {
+          text: "x&y".into(),
+          filter: AdminChannelFilter::Inactive,
+        },
+        Some(id_from_raw(7)),
+      );
+      assert_eq!(
+        path,
+        "/api/v1/admin/conversations?limit=100&inactive_days=30&query=x%26y&after=7"
+      );
+      assert_eq!(
+        conversations_path(&AdminChannelQuery::default(), None),
+        "/api/v1/admin/conversations?limit=100"
+      );
+      assert_eq!(
+        users_path("", Some("admin"), None),
+        "/api/v1/admin/users?status=active&limit=100&role=admin"
+      );
+    }
+
+    fn more_channels(live: &AdminLive) {
+      live.data.borrow_mut().loading.insert(MORE_CHANNELS_KEY.into());
+      block_on(live.more_channels_now());
     }
 
     fn assert_no_detail_requests(paths: &[String]) {
@@ -2604,16 +3205,36 @@ mod tests {
           });
         }
         if path.starts_with("/api/v1/admin/conversations?") {
-          let (items, has_more) = page(path, self.inner.channels, |n| {
-            conversation(n, self.inner.is_legacy)
-          });
+          let needle = text_param(path, "query");
+          let (items, has_more) = page(
+            path,
+            (1..=self.inner.channels).filter(|n| {
+              needle
+                .as_ref()
+                .is_none_or(|needle| format!("channel-{n}").contains(needle.as_str()))
+            }),
+            |n| conversation(n, self.inner.is_legacy),
+          );
           return json(&ListAdminConversationsResponse {
             conversations: items,
             has_more,
           });
         }
         if path.starts_with("/api/v1/admin/users?") {
-          let (items, has_more) = page(path, USERS, user);
+          let needle = text_param(path, "query");
+          let role = text_param(path, "role");
+          let (items, has_more) = page(
+            path,
+            (1..=USERS).filter(|n| {
+              needle
+                .as_ref()
+                .is_none_or(|needle| format!("Person {n}").contains(needle.as_str()))
+                && role
+                  .as_ref()
+                  .is_none_or(|role| role_of(*n) == Some(role.as_str()))
+            }),
+            user,
+          );
           return json(&ListAdminUsersResponse {
             users: items,
             has_more,
@@ -2638,9 +3259,6 @@ mod tests {
             entries: Vec::new(),
             has_more: false,
           });
-        }
-        if path.starts_with("/api/v1/admin/spaces/") && path.ends_with("/members") {
-          return json(&ListSpaceMembersResponse { members: Vec::new() });
         }
         if path.starts_with("/api/v1/admin/conversations/") && path.ends_with("/members") {
           let number = id_in(path);
@@ -2702,19 +3320,50 @@ mod tests {
     }
 
     /// The page of `total` numbered entries a list request asks for: `limit` entries after `after`.
-    fn page<T>(path: &str, total: u64, make: impl Fn(u64) -> T) -> (Vec<T>, bool) {
-      let query = |name: &str| {
-        path
-          .split(['?', '&'])
-          .find_map(|pair| pair.strip_prefix(&format!("{name}=")))
-          .and_then(|value| value.parse::<u64>().ok())
-      };
-      let limit = query("limit").unwrap_or(50);
+    /// One page of the numbers that match, after the number the request names.
+    fn page<T>(path: &str, matching: impl Iterator<Item = u64>, make: impl Fn(u64) -> T) -> (Vec<T>, bool) {
+      let limit = text_param(path, "limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(50);
       // IDs are the numbers 1.. in order, so "after" is the last number of the previous page.
-      let first = query("after").unwrap_or(0) + 1;
-      let last = (first + limit - 1).min(total);
-      let items = (first..=last).map(&make).collect();
-      (items, last < total)
+      let after = text_param(path, "after")
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+      let mut rest: Vec<u64> = matching
+        .filter(|number| *number > after)
+        .take(limit + 1)
+        .collect();
+      let has_more = rest.len() > limit;
+      rest.truncate(limit);
+      (rest.into_iter().map(make).collect(), has_more)
+    }
+
+    /// The value of a query parameter, decoded.
+    fn text_param(path: &str, name: &str) -> Option<String> {
+      let (_, query) = path.split_once('?')?;
+      let raw = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix(&format!("{name}=")))?;
+      let mut bytes = Vec::new();
+      let mut chars = raw.bytes();
+      while let Some(byte) = chars.next() {
+        if byte == b'%' {
+          let hex: String = chars.by_ref().take(2).map(char::from).collect();
+          bytes.push(u8::from_str_radix(&hex, 16).unwrap_or(b'?'));
+        } else {
+          bytes.push(byte);
+        }
+      }
+      String::from_utf8(bytes).ok()
+    }
+
+    /// Person 1 owns the workspace, Person 250 is its only admin.
+    fn role_of(number: u64) -> Option<&'static str> {
+      match number {
+        1 => Some("owner"),
+        250 => Some("admin"),
+        _ => None,
+      }
     }
 
     fn id_in(path: &str) -> u64 {
@@ -2764,7 +3413,7 @@ mod tests {
         maybe_username: Some(format!("person{number}")),
         display_name: format!("Person {number}"),
         kind: UserKind::Member,
-        maybe_oidc_role: None,
+        maybe_oidc_role: role_of(number).map(str::to_owned),
         is_deactivated: false,
         is_deleted: false,
         maybe_deactivation_reason: None,

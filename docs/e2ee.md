@@ -1442,6 +1442,10 @@ holds:
     `MAX_CHANGE_AGE_EPOCHS` (32) ahead. Otherwise it sends the deletion unsigned. An admin outside the group has
     nothing to compare with and takes what it is told, as in `post_admin_change`, so for them only the age
     limit bounds it.
+  - A channel admin's signature purges at once only if somebody else signed a role entry of the channel this
+    device accepted within `channel_roles_max_age` (client, 30 days), counted from that signer's own date and
+    never from the server's (§4.6.3, part 3). Otherwise it takes the retention. A workspace admin's doesn't
+    need this; the roster's window bounds them.
 - **Nothing looks wrong.** A channel's role state or the workspace state with an alarm or a member's unexplained
   head (a sign of being shown different logs) purges nothing.
 - **The server doesn't list it.** A claim about what the server still lists changes nothing, signed or not.
@@ -1479,7 +1483,8 @@ Residual risks:
 - A workspace admin whose demotion the server withholds still counts until the roster they know gets too old
   (`workspace_max_age`, 30 days), without being in the group, wherever the demotion is held back. Heads members
   exchange raise the alarm that refuses a purge, if somebody has seen it. A demoted channel admin needs the same
-  withholding and to be still in the group, and has no time limit at all (§4.6.3, design, D1).
+  withholding and to be still in the group, and purges at once only within `channel_roles_max_age` (30 days)
+  after somebody else last signed the channel's roles (§4.6.3, D1).
 - A workspace admin's routine role entry anchors the whole snapshot it re-signs, so a founder's forged admin it
   carries along counts from then on.
 - **The name an admin sees is the server's word.** The signature binds the channel's ID, the epoch and the time,
@@ -2274,8 +2279,9 @@ workspace roster (admin.md §2.3):
     (`sign_reviewed_channel_roles`), and only on the log they saw: if it moved since, or another admin gets there first,
     nothing is signed and the panel says the roles changed and shows them anew. It is a checkpoint on every device: the entry names no head, so the role rules that bind one role change don't bind it, as for any
     checkpoint today. A device nobody is looking at (an import) has nobody to ask: it signs nothing, its server changes
-    stand unsigned and it logs that. Phones can't review yet (#1262), so a workspace admin in this state signs from
-    desktop or web.
+    stand unsigned and it logs that. The Android and iOS apps have the same look in a channel's members (#1262):
+    the rows, marks, names and refusals come from the same rule (`teamcraft_client_api::role_review`) over FFI, and
+    confirming is the same `sign_reviewed_channel_roles` on the log they saw.
   - **What the server's date says first:** dated outside every tenure, or against a roster that ended the tenure without
     a signing time (which proves no tenure over), the entry is an ordinary junk entry, skipped with no other effect, on
     every device alike. A server that postdates a real entry gains what withholding it gives.
@@ -2290,10 +2296,10 @@ workspace roster (admin.md §2.3):
     that accepted nothing yet: **it does not drop to "unsigned", where every member may act**. Under `owner_approval` an
     admin's addition is then refused on this device whoever commits it (it falls out and is added back, §4.6), and nobody
     here approves or signs but a workspace admin who reviewed. A workspace admin's deletion still purges, and chat isn't
-    touched. Only a workspace admin's members section says so, as above; a refused action says why in words. A list a
-    workspace admin looked at, on a fresh roster, ends it and anchors the channel; an ordinary entry doesn't, as the
-    stretch took the anchor away. Mobile apps have the refusals through the core
-    but not the look at the roles yet (issue #1262).
+    touched. Only a workspace admin's members section says so, as above, on desktop, web and the phones alike; a
+    refused action says why in words. A list a workspace admin looked at, on a fresh roster, ends it and anchors the
+    channel; an ordinary entry doesn't, as the stretch took the anchor away. The phones' members section also shows
+    every member the line for a channel where this device and a member's see different roles (issue #1262).
   - **After a removal** each device reads every channel's log it knows, a few per upkeep pass, so an entry the server shows
     later can't pass for one from before: it closes the window below for devices online then. A failed read waits five
     minutes, doubling up to six hours, and holds up no other channel. A local read while nothing is due, which is nearly
@@ -2353,8 +2359,9 @@ Residual risks: the founding entry of a channel is trust on first use, so a host
 member of a channel from before signed roles or through an honest admin's app ("Founding at first
 sight", above), can make somebody in its group a signed admin before a real admin is one (a workspace
 admin's checkpoint fixes it). A demotion the server withholds is noticed only through the
-heads members exchange; channel roles have no freshness window like the roster's, and §4.6.3 (issue
-#876, not implemented) says why a window can't simply be added and what to do instead. What a demoted
+heads members exchange and the signed entry its signer sends in the channel; channel roles have no
+freshness window like the roster's, and §4.6.3 (issue #876) says why a window can't simply be added and
+what is done instead. What a demoted
 workspace admin can still do is listed under "Reading the log late", above. The stage 2 rule holds only
 against honest clients: a member who
 commits an admin's addition anyway is refused by every honest device, and then adds them all back into
@@ -2604,10 +2611,10 @@ can't be added (`InsufficientCapabilities`); an empty extension list turns it of
 the switch (`UnsupportedProposal`) and an empty commit (`MissingSignedChange`); a commit from a group
 founded alone fails on decryption.
 
-### 4.6.3 Noticing a withheld channel role change (issue #876, design for review)
+### 4.6.3 Noticing a withheld channel role change (issue #876)
 
-**Status: design, not implemented.** Nothing below is in the code. The owner decided D1 to D4 (end of this
-section) on 2026-11-05; it needs a crypto review before it is built. It answers whether channel roles need a
+**Status: implemented** as decided (D1 to D4, end of this section, decided by the owner on 2026-11-05); "How it
+is built" at the end says where, and what the design left to the code. It answers whether channel roles need a
 freshness window like the roster's (`workspace_max_age`, admin.md §2.3). The short answer: not as a window on the roles. One decision can use a
 time limit, the rest can't, and what helps most is that the entry reaches the members another way.
 
@@ -2743,6 +2750,8 @@ refusing costs only speed.
 | A signer signs two entries for one version | The same. The person who can do this holds a signing key, and it shows                                                |
 | A device offline for weeks comes back      | It reads the hidden messages, sees newer versions and reads the log. No alarm unless the log leaves them out          |
 | The server drops one message by accident   | The signer's next text message carries the head, as today, and the log has the entry                                  |
+| A demoted admin signs on their old head    | Valid against the state before the demotion, so a proven alarm, approvals refused until a workspace admin looks. Can't be told from a real fork; the alarm names both signers' user IDs, so the reviewer sees who caused it |
+| The server is restored from a backup       | Role entries after the backup are gone from the log, while devices took them: proven alarms in every channel with a role change since. A workspace admin reviews each (docs/operations.md, "Backup and restore") |
 
 **What stays undetectable.**
 
@@ -2754,8 +2763,11 @@ refusing costs only speed.
   a limit.
 - **Use inside the window.** A demoted admin with that server can purge for up to 30 days after the last signature
   by somebody else. The limit ends this; it doesn't prevent it.
-- **Other signers on the same old log.** A second admin's real role change, or a member the demoted admin promoted,
-  counts as "somebody else" (tried, below). It shows in the member list and leaves entries a later head exposes.
+- **Other signers on the same old log.** A second admin's real role change counts as "somebody else" (tried,
+  below). Somebody the demoted admin appointed, directly or through people they appointed, doesn't, as this device
+  recorded the appointments; but a colluding account another admin appointed, or one whose role somebody else set
+  again later, does, and keeps the limit open while it signs. It shows in the member list and leaves entries a
+  later head exposes.
 - **A demotion by a workspace admin who isn't in the group.** They can't send the message. The first member who
   accepts the entry doesn't send it on, so the gap of today stays for this case until a member writes.
 - **`owner_approval` outside strict channels:** merges stay as they are. Noticing is all there is.
@@ -2774,14 +2786,44 @@ Older signers' entries reach the others through the log and heads as before.
 | D3  | What a proven alarm does                | Today's line for everybody in the members section, and approvals refused until a workspace admin's list ends it                                                      | No refusal, only the line: a former owner who was deceived goes on approving. Admins only: a member's device has the same evidence, and they can ask. Or a notification: louder than a rare thing most people can't act on deserves |
 | D4  | Commits: a limit?                       | No limit, strict channels answer them. #876 closes once parts 1 to 3 are built                                                                                       | "Stale means nobody may" on the merge rule: it splits from older clients and is judged at a time the server chooses, for very little                                                                                                |
 
-**What implementing it takes** (moderate):
+**How it is built.**
 
-- `teamcraft-core`: the control message and its handling, without foundings (a log read still compares what the log
-  shows at a version accepted from a message), the local record of who signed recently and when (additive state: without one, a
-  device takes the retention), the limit in `verified_by_channel_admin`, proven alarms apart from claimed ones, the
-  refusal in `approve_admin_join`, `channel_roles_max_age`.
-- Clients: the refusal's wording at the button, through i18n. The line exists.
-- Tests, with an injected clock and no sleeping:
+- **The message.** `MessageContent::ChannelRolesEntry` carries the entry's version, payload and signature, hidden
+  like any control message. Right after a successful append, before reading the log again, the signer's app takes
+  the entry it signed as if from a message (so it waits in `unconfirmed` there too) and queues the message in the
+  outbox, only from inside the group. What the log shows afterwards, or a failed read, stops neither: a log that
+  leaves the entry out raises the proven alarm on the signer's own device as well. It sends none for a founding, meaning any
+  entry its device appended while it had accepted nothing signed: the creator's founding and a founding at first
+  sight alike, since both are what a server can get signed twice.
+- **Receiving** (`ChannelRoleState::take_message_entry`) needs no network: it checks against the stored roster
+  and pins, with the message's server time as the entry's. It works on a copy, so an entry that fails changes
+  nothing, not even the cursor, and the real entry of that version still applies from the log. A device that
+  accepted nothing yet ignores every entry for version 1 (a founding) and takes a later one as a newer head.
+  Versions below the cursor are ignored. An accepted entry, and a newer head, queue the channel for the log read
+  the upkeep already makes for heads (`check_channel_roles_heads`).
+- **Which second entry is valid.** The device keeps the state before its last accepted entry (`before_head`,
+  without anything nested), and checks the other entry against it exactly as from the log. Not for a founding:
+  a fork whose earlier state accepted nothing is ignored, as a fork of foundings stays the alarm from heads.
+- **The log comparison.** Entries taken from messages wait in `unconfirmed` (at most 64, the oldest dropped
+  unchecked). The next read starts before the oldest of them (`log_read_from`); the log showing another entry
+  at that version, or none in a read to its end, is the proven alarm (`is_alarm_proven` next to `maybe_alarm`).
+  A workspace admin's reviewed list clears both. A read that can't get the log (refused, not a member) changes
+  nothing.
+- **Who signed lately.** `recent_signers` keeps, per signer, the latest start of an accepted entry: its
+  `signed_at_ms`, capped at this device's clock when it accepted it (at most 16 signers, the most recent).
+  `verify_signed_deletion` refuses a channel admin's deletion with `NoRecentOtherSigner` unless somebody else,
+  whose role doesn't go back to the deleter through the recorded appointments, has a start at or after the end minus `channel_roles_max_age`; the end is the latest of the device's clock,
+  the deletion's `signed_at_ms` and the newest server time it saw (`Client::newest_server_ms`). A state from
+  before this has no record and takes the retention.
+- **The refusal.** `approve_admin_join` reads the log, then refuses with `JoinRequestRefusal::RolesDisputed`
+  while a proven alarm stands. The web and desktop app show such a request with a note and Decline only
+  (`join-request-roles-disputed`), and word a refusal at the button (`error-channel-roles-disputed`). The mobile
+  apps get the standing as "owner role not signed" and the refusal as "not approvable", which also means
+  Decline only, until they learn the case.
+
+Tests (`channel_roles.rs` `entries_in_messages`, `signed_deletion.rs` `time_limit`, the suite's
+`a_withheld_demotion_reaches_the_former_owner_and_refuses_approvals`) cover this table, with an injected clock
+and no sleeping:
 
 | Decision             | Stale snapshot                     | Withheld demotion                                              | Offline admin                        | Clock skew                                                              | Older client                            |
 |----------------------|------------------------------------|----------------------------------------------------------------|--------------------------------------|-------------------------------------------------------------------------|-----------------------------------------|
@@ -2795,8 +2837,7 @@ Older signers' entries reach the others through the log and heads as before.
 **Tried.** In a throwaway test against `ChannelRoleState`, not kept in the tree: with Bob's demotion of Alice shown
 only to Bob's device, Carol's device accepts Alice's own entry with the unchanged snapshot, and then a third admin's,
 with version up by one and assignments, appointments and anchor unchanged, and Alice still an admin there. It also
-accepts Alice promoting Dave, then Dave's entry. Bob's device, given Carol's older head, doesn't change. The hidden
-message, the limit and everything end to end were not tried.
+accepts Alice promoting Dave, then Dave's entry. Bob's device, given Carol's older head, doesn't change.
 
 ### 4.7 Converting a channel between private and public
 
@@ -3168,7 +3209,7 @@ probe doing only the `serde_json` part (2026-11-04):
 | `automerge` 0.6.1                              | +930,498 B   | +284,962 B    | merges per character                |
 | Own op log, last writer wins per block         | a few kB     | a few kB      | one side's typing in the block lost |
 
-Neither CRDT breaks the budget of a signed-in first visit (10 MB gzip for now, docs/performance.md,
+Neither CRDT breaks the budget of a signed-in first visit (6.2 MB gzip, docs/performance.md,
 "Web bundle size"), and the editor doesn't count towards it anyway (below). `yrs` costs less than a
 third of `automerge` and speaks the Yjs format, which has editors and tooling around it. The op
 log would cost nothing, but it loses typing exactly where a meeting's notes are written: several

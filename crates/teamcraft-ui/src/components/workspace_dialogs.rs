@@ -12,6 +12,10 @@ use teamcraft_client_api::actions::{
 use teamcraft_client_api::model::{
   AppointerAuthority, ChannelMember, ChannelRole, ChannelRolesReview, RoleKeyMark,
 };
+use teamcraft_client_api::role_review::{
+  RoleReviewRefusal, RoleReviewRow, dropped_role_names, has_review_changed, role_review_refusal,
+  role_review_rows,
+};
 use teamcraft_client_api::role_rules::{
   RoleTarget, SpaceStanding, assignable_roles, can_manage_channel_roles,
 };
@@ -630,6 +634,9 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     roles.track();
     state.read(|backend| backend.channel_roles_review(conversation))
   });
+  // Only whether there is a review decides the panel: one re-created whenever the review changes
+  // (members loaded, a key checked) would close the list the admin just opened.
+  let has_roles_review = Memo::new(move |_| roles_review.with(Option::is_some));
   let has_role_alarm = Memo::new(move |_| {
     state
       .read(|backend| backend.channel_role_alarms())
@@ -650,9 +657,9 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
     <Show when=move || has_role_alarm.get() fallback=|| ()>
       <p class="hint" role="status">{move || i18n.t("channel-roles-alarm")}</p>
     </Show>
-    {move || roles_review.get().is_some().then(|| view! {
+    <Show when=move || has_roles_review.get() fallback=|| ()>
       <ChannelRolesReviewPanel conversation=conversation roles=roles users=members review=roles_review />
-    })}
+    </Show>
     <ChannelJoinRequests conversation=conversation />
     <ul class="settings-member-list">
       <For each=move || members.get() key=|user| user.id let:user>
@@ -698,10 +705,13 @@ fn ChannelRolesReviewPanel(
     shown_cursor.set(live_cursor.get_untracked());
     is_reviewing.set(true);
   };
-  let refusal = Memo::new(move |_| shown_rows.with(|list| role_review_refusal(list)));
+  let refusal =
+    Memo::new(move |_| shown_rows.with(|list| role_review_refusal(list).map(RoleReviewRefusal::i18n_key)));
   let has_changed_since = Memo::new(move |_| {
     is_reviewing.get()
-      && (shown_cursor.get() != live_cursor.get() || shown_rows.with(|list| *list != live_rows.get()))
+      && shown_rows.with(|shown| {
+        live_rows.with(|live| has_review_changed(shown_cursor.get(), shown, live_cursor.get(), live))
+      })
   });
   let has_new = Memo::new(move |_| shown_rows.with(|list| list.iter().any(|row| row.is_new)));
   // A device that knows no roles can't say whom a confirmed list takes one from.
@@ -812,95 +822,6 @@ fn ChannelRolesReviewPanel(
       </Show>
     </section>
   }
-}
-
-/// One role in the list a workspace admin reviews.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct RoleReviewRow {
-  user: UserId,
-  role: ChannelRole,
-  /// `None`: the member list names nobody for this role, so nobody can look at who it is.
-  maybe_name: Option<String>,
-  /// This device's snapshot doesn't give this person this role: the server's word alone.
-  is_new: bool,
-  key_mark: RoleKeyMark,
-}
-
-/// The admins and moderators the member list shows, against this device's snapshot.
-fn role_review_rows(
-  roles: &[ChannelMember],
-  users: &[User],
-  snapshot: &[(UserId, ChannelRole)],
-  key_marks: &[(UserId, RoleKeyMark)],
-) -> Vec<RoleReviewRow> {
-  roles
-    .iter()
-    .filter(|member| member.role != ChannelRole::Member)
-    .map(|member| RoleReviewRow {
-      user: member.user,
-      role: member.role.clone(),
-      maybe_name: users
-        .iter()
-        .find(|user| user.id == member.user && !user.display_name.trim().is_empty())
-        .map(|user| user.display_name.clone()),
-      is_new: !snapshot
-        .iter()
-        .any(|(user, role)| *user == member.user && *role == member.role),
-      // Not looked at yet counts as what it is: not checked.
-      key_mark: key_marks
-        .iter()
-        .find(|(user, _)| *user == member.user)
-        .map_or(RoleKeyMark::Uncheckable, |(_, mark)| *mark),
-    })
-    .collect()
-}
-
-fn role_rank(role: &ChannelRole) -> u8 {
-  match role {
-    ChannelRole::Admin => 2,
-    ChannelRole::Moderator => 1,
-    ChannelRole::Member | ChannelRole::Unknown(_) => 0,
-  }
-}
-
-/// Who has a role on this device that the list takes away or lowers, as far as anybody knows who
-/// that is.
-fn dropped_role_names(
-  rows: &[RoleReviewRow],
-  users: &[User],
-  snapshot: &[(UserId, ChannelRole)],
-  unknown: &str,
-) -> Vec<String> {
-  snapshot
-    .iter()
-    .filter(|(user, role)| {
-      rows
-        .iter()
-        .find(|row| row.user == *user)
-        .is_none_or(|row| role_rank(&row.role) < role_rank(role))
-    })
-    .map(|(user, _)| {
-      users
-        .iter()
-        .find(|known| known.id == *user)
-        .map_or_else(|| unknown.to_owned(), |known| known.display_name.clone())
-    })
-    .collect()
-}
-
-/// Why this list can't be confirmed (an i18n key): nobody confirms a role for somebody they can't
-/// see, and a channel keeps an admin.
-fn role_review_refusal(rows: &[RoleReviewRow]) -> Option<&'static str> {
-  if rows.iter().any(|row| row.maybe_name.is_none()) {
-    return Some("channel-roles-review-unknown-refused");
-  }
-  if rows.iter().any(|row| row.key_mark == RoleKeyMark::Uncheckable) {
-    return Some("channel-roles-review-uncheckable-refused");
-  }
-  if !rows.iter().any(|row| row.role == ChannelRole::Admin) {
-    return Some("channel-roles-review-no-admin");
-  }
-  None
 }
 
 #[component]
@@ -2390,144 +2311,6 @@ mod tests {
   }
 
   mod role_review {
-    use teamcraft_proto::{Id, Snowflake};
-
-    use super::*;
-
-    fn id(raw: i64) -> UserId {
-      UserId::from_snowflake(Snowflake::new(raw).unwrap())
-    }
-
-    fn named(raw: i64, name: &str) -> User {
-      User {
-        id: id(raw),
-        username: name.to_lowercase(),
-        display_name: name.into(),
-        presence: crate::model::PresenceStatus::Online,
-        maybe_custom_status: None,
-        avatar_hue: 0,
-        is_guest: false,
-        is_bot: false,
-        maybe_organization: None,
-        is_deactivated: false,
-        is_deleted: false,
-        device_setup: crate::model::DeviceSetup::Unknown,
-        maybe_email: None,
-      }
-    }
-
-    fn member(raw: i64, role: ChannelRole) -> ChannelMember {
-      ChannelMember {
-        user: id(raw),
-        role,
-        maybe_appointer: None,
-      }
-    }
-
-    fn row(raw: i64, role: ChannelRole, name: Option<&str>) -> RoleReviewRow {
-      RoleReviewRow {
-        user: id(raw),
-        role,
-        maybe_name: name.map(str::to_owned),
-        is_new: false,
-        key_mark: RoleKeyMark::Checked,
-      }
-    }
-
-    #[test]
-    fn who_this_device_s_snapshot_does_not_have_in_that_role_is_marked_new() {
-      let roles = [
-        member(1, ChannelRole::Admin),
-        member(2, ChannelRole::Admin),
-        member(3, ChannelRole::Moderator),
-        member(4, ChannelRole::Member),
-      ];
-      let snapshot = [(id(1), ChannelRole::Admin), (id(3), ChannelRole::Admin)];
-      let rows = role_review_rows(&roles, &[], &snapshot, &[]);
-      let new: Vec<_> = rows.iter().map(|row| (row.user, row.is_new)).collect();
-      assert_eq!(
-        new,
-        vec![(id(1), false), (id(2), true), (id(3), true)],
-        "somebody it doesn't name, a role it doesn't give, and no members"
-      );
-    }
-
-    /// A key this device can't check can't be confirmed, and neither can one it hasn't looked at.
-    #[test]
-    fn a_key_this_device_can_t_check_can_not_be_confirmed() {
-      let roles = [member(1, ChannelRole::Admin), member(2, ChannelRole::Admin)];
-      let users = [named(1, "Alice"), named(2, "Bob")];
-      let marks = [(id(1), RoleKeyMark::Checked)];
-      let rows = role_review_rows(&roles, &users, &[], &marks);
-      assert_eq!(rows[1].key_mark, RoleKeyMark::Uncheckable);
-      assert_eq!(
-        role_review_refusal(&rows),
-        Some("channel-roles-review-uncheckable-refused")
-      );
-      let marks = [(id(1), RoleKeyMark::Checked), (id(2), RoleKeyMark::Changed)];
-      let rows = role_review_rows(&roles, &users, &[], &marks);
-      assert_eq!(
-        role_review_refusal(&rows),
-        None,
-        "a changed key is marked, not refused"
-      );
-    }
-
-    /// The server lowering somebody is as much for the reviewer to see as leaving them out.
-    #[test]
-    fn who_the_list_lowers_is_named() {
-      let rows = [
-        row(1, ChannelRole::Moderator, Some("Alice")),
-        row(2, ChannelRole::Admin, Some("Bob")),
-      ];
-      let snapshot = [(id(1), ChannelRole::Admin), (id(2), ChannelRole::Moderator)];
-      let users = [named(1, "Alice"), named(2, "Bob")];
-      assert_eq!(
-        dropped_role_names(&rows, &users, &snapshot, "Unknown person"),
-        vec!["Alice".to_owned()]
-      );
-    }
-
-    /// The server leaving somebody out is what a reviewer must see: it takes the role from them.
-    #[test]
-    fn who_the_list_leaves_out_is_named() {
-      let rows = [row(1, ChannelRole::Admin, Some("Alice"))];
-      let snapshot = [
-        (id(1), ChannelRole::Admin),
-        (id(2), ChannelRole::Admin),
-        (id(3), ChannelRole::Moderator),
-      ];
-      assert_eq!(
-        dropped_role_names(&rows, &[], &snapshot, "Unknown person"),
-        vec!["Unknown person".to_owned(), "Unknown person".to_owned()]
-      );
-      assert!(dropped_role_names(&rows, &[], &snapshot[..1], "Unknown person").is_empty());
-    }
-
-    #[test]
-    fn somebody_the_member_list_has_no_name_for_can_not_be_signed() {
-      let rows = [
-        row(1, ChannelRole::Admin, Some("Alice")),
-        row(2, ChannelRole::Moderator, None),
-      ];
-      assert_eq!(
-        role_review_refusal(&rows),
-        Some("channel-roles-review-unknown-refused")
-      );
-    }
-
-    #[test]
-    fn a_list_without_an_admin_can_not_be_signed_and_a_full_one_can() {
-      let moderators = [row(2, ChannelRole::Moderator, Some("Bob"))];
-      assert_eq!(
-        role_review_refusal(&moderators),
-        Some("channel-roles-review-no-admin")
-      );
-      assert_eq!(role_review_refusal(&[]), Some("channel-roles-review-no-admin"));
-      let full = [row(1, ChannelRole::Admin, Some("Alice"))];
-      assert_eq!(role_review_refusal(&full), None);
-    }
-
     #[test]
     fn every_review_text_is_there_in_every_language() {
       for lang in ["en", "de"] {

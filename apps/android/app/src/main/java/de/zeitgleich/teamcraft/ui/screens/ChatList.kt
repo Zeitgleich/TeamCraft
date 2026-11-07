@@ -138,6 +138,7 @@ import de.zeitgleich.teamcraft.ui.isDirect
 import de.zeitgleich.teamcraft.ui.listSections
 import de.zeitgleich.teamcraft.ui.listedSpaces
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
+import de.zeitgleich.teamcraft.ui.theme.ChatListGrouping
 import de.zeitgleich.teamcraft.ui.theme.ChatListLayout
 import de.zeitgleich.teamcraft.ui.isListedInHome
 import de.zeitgleich.teamcraft.ui.listName
@@ -196,6 +197,7 @@ fun ChatListScreen(
   // Takes effect at once: the flow follows the setting (#1151).
   val context = LocalContext.current
   val layout by remember { AppearancePrefs.prefs(context).chatListLayout }.collectAsState()
+  val grouping by remember { AppearancePrefs.prefs(context).chatListGrouping }.collectAsState()
   val isList = layout == ChatListLayout.List
   BackHandler(enabled = selection.isNotEmpty()) { selection = emptyList() }
   // Back on Activity or Spaces goes Home first, as in other apps with a bottom navigation.
@@ -239,6 +241,7 @@ fun ChatListScreen(
     accountUserId = accountUserId,
     accountName = accountName,
     layout = layout,
+    grouping = grouping,
     tab = tab,
     onTab = { tab = it },
     maybeConversations = loaded,
@@ -326,6 +329,7 @@ internal fun MainScaffold(
   accountUserId: String,
   accountName: String,
   layout: ChatListLayout = ChatListLayout.Spaces,
+  grouping: ChatListGrouping = ChatListGrouping.Mixed,
   tab: ChatTab,
   onTab: (ChatTab) -> Unit,
   maybeConversations: List<ConversationItem>?,
@@ -383,7 +387,7 @@ internal fun MainScaffold(
         maybeConversations == null -> LoadingScreen()
         // Nothing yet while the first sync brings the conversations: not "no conversations".
         maybeConversations.isEmpty() && isSyncing && shownTab != ChatTab.Activity -> ListSkeleton()
-        isList && shownTab == ChatTab.Home -> ListTab(maybeConversations, list, homeList, onNavigate, canBrowse = !isGuest)
+        isList && shownTab == ChatTab.Home -> ListTab(maybeConversations, list, homeList, onNavigate, canBrowse = !isGuest, bySpace = grouping == ChatListGrouping.BySpace)
         shownTab == ChatTab.Home -> HomeTab(maybeConversations, list, homeList, onNavigate)
         shownTab == ChatTab.Activity -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests, guestNoticeCount, guestNotices, isSyncing)
         else -> SpacesTab(maybeConversations, list, onNavigate, canBrowse = !isGuest)
@@ -455,10 +459,11 @@ private fun ListTab(
   listState: LazyListState,
   onNavigate: (String) -> Unit,
   canBrowse: Boolean,
+  bySpace: Boolean,
 ) {
   var filter by rememberSaveable { mutableStateOf("") }
   var chip by rememberSaveable { mutableStateOf(HomeFilter.All) }
-  val sections = listSections(conversations, list.lastActivity, filter, chip)
+  val sections = listSections(conversations, list.lastActivity, filter, chip, bySpace)
   val spaces = listedSpaces(conversations)
   val isFiltering = filter.isNotBlank() || chip != HomeFilter.All
   LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
@@ -562,7 +567,10 @@ private fun SpacesTab(conversations: List<ConversationItem>, list: ListState, on
   }
 }
 
-/** [showsSpace]: name the space after a channel's name, where the list is not that space's own (#1152). */
+/**
+ * [showsSpace]: name the space after a channel's name, where the list is not that space's own
+ * (#1152). A space's section names it in its header, so its rows don't (#1345).
+ */
 private fun LazyListScope.conversationRows(
   sections: List<Section>,
   list: ListState,
@@ -579,7 +587,7 @@ private fun LazyListScope.conversationRows(
         isSelected = conversation.id == list.maybeSelectedId,
         isChecked = conversation.id in list.selection,
         isSelecting = list.selection.isNotEmpty(),
-        showsSpace = showsSpace,
+        showsSpace = showsSpace && section.title !is SectionTitle.Space,
         callCount = list.runningCalls[conversation.id] ?: 0,
         onClick = { list.onOpen(conversation.id) },
         onLongPress = { list.onLongPress(conversation.id) },

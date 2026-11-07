@@ -3,6 +3,7 @@
 
 use teamcraft_core::CoreError;
 use teamcraft_core::api::ApiError;
+use teamcraft_core::client::BugReportError;
 use teamcraft_core::store::StoreError;
 use teamcraft_crypto::backup::BackupError;
 use teamcraft_crypto::key_bag::KeyBagError;
@@ -86,6 +87,13 @@ pub enum TeamCraftError {
   /// cap, say. The app says it is too long instead of a generic failure.
   #[error("too large: {0}")]
   TooLarge(String),
+  /// Nobody but the reporter would receive a problem report (docs/bug-reports.md): an owner has
+  /// to choose recipients.
+  #[error("nobody is set up to receive problem reports")]
+  BugReportNoRecipients,
+  /// As many problem reports as a device keeps wait to be sent already.
+  #[error("too many problem reports wait to be sent")]
+  BugReportQueueFull,
   /// Anything else the core reported.
   #[error("{0}")]
   Core(String),
@@ -114,6 +122,8 @@ impl From<CoreError> for TeamCraftError {
       CoreError::LinkCodeForNewDevice => Self::LinkCodeForNewDevice,
       CoreError::LinkCodeForSignedInDevice => Self::LinkCodeForSignedInDevice,
       CoreError::LinkCodeExpired | CoreError::LinkPeerGone => Self::LinkCodeExpired,
+      CoreError::BugReport(BugReportError::NoRecipients) => Self::BugReportNoRecipients,
+      CoreError::BugReport(BugReportError::QueueFull) => Self::BugReportQueueFull,
       other => Self::Core(other.to_string()),
     }
   }
