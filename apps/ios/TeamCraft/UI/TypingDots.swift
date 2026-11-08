@@ -22,7 +22,7 @@ struct TypingDots: View {
     .accessibilityHidden(true)
   }
 
-  private func dots(alpha: (Int) -> Double) -> some View {
+  private func dots(alpha: @escaping (Int) -> Double) -> some View {
     HStack(spacing: dotSize / 2) {
       ForEach(0..<TypingDots.count, id: \.self) { dot in
         Circle().fill(color.opacity(alpha(dot))).frame(width: dotSize, height: dotSize)
