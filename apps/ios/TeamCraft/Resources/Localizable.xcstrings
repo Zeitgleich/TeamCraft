@@ -14976,6 +14976,86 @@
           }
         }
       }
+    },
+    "message_layout": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Messages"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachrichten"
+          }
+        }
+      }
+    },
+    "message_layout_bubbles": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bubbles"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Blasen"
+          }
+        }
+      }
+    },
+    "message_layout_list": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "List"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Liste"
+          }
+        }
+      }
+    },
+    "message_layout_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bubbles put your messages on the right. List shows every message with the sender's picture, name and time, as on the desktop."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Blasen zeigen deine Nachrichten rechts. Die Liste zeigt jede Nachricht mit Bild, Name und Uhrzeit, wie am Desktop."
+          }
+        }
+      }
+    },
+    "react_add": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add a reaction"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reaktion hinzufügen"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

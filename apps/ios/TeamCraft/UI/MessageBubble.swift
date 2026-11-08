@@ -1,5 +1,16 @@
 import SwiftUI
 
+/// How a conversation shows its messages (#1488), the desktop's choice between bubbles and the
+/// list: a setting of this device, as on desktop, web and Android.
+enum MessageLayout: String, CaseIterable {
+  /// Chat-app style: own messages on the trailing side in accent bubbles, others leading.
+  case bubbles
+  /// Every message on the leading side with its sender's picture, name and time on one line.
+  case list
+
+  static let key = "message_layout"
+}
+
 /// What every bubble of a conversation shares: how wide a bubble may get, whether bubbles name
 /// their sender (not in a one-to-one chat) and who can be mentioned.
 struct BubbleLook: Equatable {
@@ -7,14 +18,23 @@ struct BubbleLook: Equatable {
   static let widthShare: CGFloat = 0.8
   static let maxBubbleWidth: CGFloat = 520
 
+  /// The list's messages may be wider than a bubble: they have no bubble around them.
+  static let maxListWidth: CGFloat = 640
+
   let bubbleWidth: CGFloat
   let showsSenders: Bool
   var names = MentionNames()
+  /// The desktop's list instead of bubbles (#1488).
+  var isList = false
 
-  init(listWidth: CGFloat, showsSenders: Bool, names: MentionNames) {
-    bubbleWidth = max(120, min(listWidth * Self.widthShare, Self.maxBubbleWidth))
+  init(listWidth: CGFloat, showsSenders: Bool, names: MentionNames, isList: Bool = false) {
+    bubbleWidth =
+      isList
+      ? max(120, min(listWidth - listAvatarSize - listAvatarGap, Self.maxListWidth))
+      : max(120, min(listWidth * Self.widthShare, Self.maxBubbleWidth))
     self.showsSenders = showsSenders
     self.names = names
+    self.isList = isList
   }
 
   /// The room beside a bubble that stays free, so a long message doesn't span the whole row.
@@ -29,6 +49,9 @@ private let senderAvatarGap: CGFloat = 6
 /// Media sit close to the bubble's edge, text has room.
 private let bubbleMediaInset: CGFloat = 3
 private let bubbleTextInset: CGFloat = 9
+/// The list layout (#1488): large avatars and room between senders, as on the desktop.
+private let listAvatarSize: CGFloat = 40
+private let listAvatarGap: CGFloat = 12
 
 /// One message as a chat bubble (#713, the same design as the Android app): own messages on the
 /// trailing side in the accent, others on the leading side in a neutral bubble with the sender's
@@ -48,6 +71,9 @@ struct MessageRow: View {
   var canReact = true
   /// Opens another conversation: the room a call moved into (issue #1290).
   var onOpenConversation: (String) -> Void = { _ in }
+  /// The reactions the add-reaction pill offers, and how to react; nil where the user can't.
+  var quickReactions: [String] = []
+  var maybeOnReact: ((String) -> Void)?
 
   var body: some View {
     if let line = SystemLine(message: message, maybeExtras: maybeExtras, names: displayNames) {
@@ -64,9 +90,52 @@ struct MessageRow: View {
       }
       .frame(maxWidth: .infinity)
       .padding(.vertical, 4)
+    } else if look.isList {
+      listRow
     } else {
       bubbleRow
     }
+  }
+
+  /// The list layout (#1488): avatar, then the name in bold and the time on one line at the start
+  /// of a group, the message below without a bubble, everything on the leading side.
+  private var listRow: some View {
+    HStack(alignment: .top, spacing: listAvatarGap) {
+      Group {
+        if entry.isContinuation {
+          Color.clear
+        } else {
+          SenderAvatar(
+            name: message.authorName, userId: message.authorId, conversationId: message.conversationId,
+            maybeSourcePictureSha256: message.maybeSourcePictureSha256, size: listAvatarSize)
+        }
+      }
+      .frame(width: listAvatarSize, height: entry.isContinuation ? 1 : listAvatarSize)
+      VStack(alignment: .leading, spacing: 2) {
+        if !entry.isContinuation {
+          HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // A source's name always says it's a bot.
+            Text(verbatim: message.shownAuthorName)
+              .font(.subheadline.weight(.bold))
+              .foregroundStyle(PersonColor.name(message.authorId))
+              .lineLimit(1)
+            Text(message.sentDate, style: .time)
+              .font(.caption)
+              .foregroundStyle(Theme.textMuted)
+          }
+          .accessibilityElement(children: .combine)
+        }
+        MessageBubble(
+          entry: entry, maybeExtras: maybeExtras, isMine: isMine, look: look, showsName: false,
+          displayNames: displayNames)
+        BelowBubble(
+          message: message, maybeExtras: maybeExtras, showsThreadLink: showsThreadLink, onOpenThread: onOpenThread,
+          canReact: canReact, quickReactions: quickReactions, maybeOnReact: maybeOnReact)
+      }
+      Spacer(minLength: 0)
+    }
+    .padding(.top, entry.isContinuation ? 0 : 6)
+    .frame(maxWidth: .infinity, alignment: .leading)
   }
 
   private var message: MessageItem { entry.message }
@@ -96,7 +165,7 @@ struct MessageRow: View {
       }
       BelowBubble(
         message: message, maybeExtras: maybeExtras, showsThreadLink: showsThreadLink, onOpenThread: onOpenThread,
-        canReact: canReact
+        canReact: canReact, quickReactions: quickReactions, maybeOnReact: maybeOnReact
       )
         .padding(.leading, showsSender ? senderAvatarSize + senderAvatarGap : 0)
     }
@@ -122,14 +191,14 @@ struct MessageBubble: View {
           .font(.subheadline.weight(.semibold))
           .foregroundStyle(PersonColor.name(message.authorId))
           .lineLimit(1)
-          .padding(.horizontal, bubbleTextInset)
+          .padding(.horizontal, textInset)
           .padding(.top, 4)
       }
       if let forwarded = maybeExtras?.maybeForwarded {
         Text("forwarded_from \(forwarded.authorName)")
           .font(.caption.italic())
           .foregroundStyle(.secondary)
-          .padding(.horizontal, bubbleTextInset)
+          .padding(.horizontal, textInset)
           .padding(.top, 4)
       }
       if let reply = maybeExtras?.maybeReply {
@@ -144,17 +213,17 @@ struct MessageBubble: View {
       }
       if let placeholder = message.maybePlaceholder {
         PlaceholderLine(placeholder: placeholder)
-          .padding(.horizontal, bubbleTextInset)
+          .padding(.horizontal, textInset)
           .padding(.top, 3)
       } else if isDeleted {
         Text("message_deleted")
           .font(.body.italic())
           .foregroundStyle(.secondary)
-          .padding(.horizontal, bubbleTextInset)
+          .padding(.horizontal, textInset)
           .padding(.top, 3)
       } else if hasText {
         MessageBodyView(text: message.body, colors: markupColors, names: look.names)
-          .padding(.horizontal, bubbleTextInset)
+          .padding(.horizontal, textInset)
           .padding(.top, 3)
       }
       if !isDeleted {
@@ -166,18 +235,26 @@ struct MessageBubble: View {
           LinkPreviewCard(preview: preview, isInBubble: true).padding(.top, 4).bubbleStretch()
         }
       }
-      BubbleFooter(message: message, maybeExtras: maybeExtras, isMine: isMine)
-        .padding(.horizontal, bubbleTextInset - 2)
-        .padding(.top, 2)
+      // The list has the time next to the name; only markers and the own message's state stay.
+      if !look.isList || BubbleFooter.hasMarks(message: message, maybeExtras: maybeExtras, isMine: isMine) {
+        BubbleFooter(message: message, maybeExtras: maybeExtras, isMine: isMine, showsTime: !look.isList)
+          .padding(.horizontal, textInset == 0 ? 0 : textInset - 2)
+          .padding(.top, 2)
+      }
     }
-    .padding(bubbleMediaInset)
+    .padding(mediaInset)
     // Pictures set the bubble's width and the caption wraps to it.
-    .frame(width: images.isEmpty || isDeleted ? nil : shownMediaWidth + bubbleMediaInset * 2)
-    .foregroundStyle(isMine ? Theme.onOwnBubble : Theme.text)
-    .tint(isMine ? Theme.onOwnBubble : Theme.accent)
-    .background(isMine ? Theme.ownBubble : Theme.otherBubble, in: shape)
+    .frame(width: images.isEmpty || isDeleted ? nil : shownMediaWidth + mediaInset * 2)
+    .foregroundStyle(isOwnStyle ? Theme.onOwnBubble : Theme.text)
+    .tint(isOwnStyle ? Theme.onOwnBubble : Theme.accent)
+    .background(look.isList ? Color.clear : (isMine ? Theme.ownBubble : Theme.otherBubble), in: shape)
     .contentShape(shape)
   }
+
+  /// The list has no bubble: the text sits on the feed in the others' colours, mine included.
+  private var isOwnStyle: Bool { isMine && !look.isList }
+  private var mediaInset: CGFloat { look.isList ? 0 : bubbleMediaInset }
+  private var textInset: CGFloat { look.isList ? 0 : bubbleTextInset }
 
   private var message: MessageItem { entry.message }
   private var files: [FileInfo] { maybeExtras?.files ?? [] }
@@ -192,8 +269,8 @@ struct MessageBubble: View {
 
   /// The pictures' width: the bubble's room inside its edge (and beside the avatar).
   private var mediaWidth: CGFloat {
-    let avatarRoom = look.showsSenders && !isMine ? senderAvatarSize + senderAvatarGap : 0
-    return look.bubbleWidth - avatarRoom - bubbleMediaInset * 2
+    let avatarRoom = look.showsSenders && !isMine && !look.isList ? senderAvatarSize + senderAvatarGap : 0
+    return look.bubbleWidth - avatarRoom - mediaInset * 2
   }
 
   /// How wide the pictures show: a grid takes the room, one picture its own shape's width.
@@ -220,12 +297,12 @@ struct MessageBubble: View {
       style: .continuous)
   }
 
-  private var quoteAccent: Color { isMine ? Theme.onOwnBubble : Theme.accent }
+  private var quoteAccent: Color { isOwnStyle ? Theme.onOwnBubble : Theme.accent }
 
   /// Inside an own (accent) bubble everything is in the bubble's text colour; in others' the
   /// accent and the mention colours of the app.
   private var markupColors: MarkupColors {
-    if isMine {
+    if isOwnStyle {
       let content = Theme.onOwnBubble
       return MarkupColors(
         link: content, mention: content, mentionMe: content, mentionMeBackground: content.opacity(0.22),
@@ -378,6 +455,14 @@ struct BubbleFooter: View {
   let message: MessageItem
   let maybeExtras: MessageExtras?
   let isMine: Bool
+  var showsTime = true
+
+  /// Whether the list's footer has anything to say: pinned, edited, or an own message that is
+  /// still sending, failed or was read. The plain "sent" tick alone isn't worth a line.
+  static func hasMarks(message: MessageItem, maybeExtras: MessageExtras?, isMine: Bool) -> Bool {
+    let ownState = isMine && (message.isPending || maybeExtras?.isSendFailed == true || maybeExtras?.isRead == true)
+    return ownState || message.isEdited || maybeExtras?.isPinned == true
+  }
 
   var body: some View {
     HStack(spacing: 3) {
@@ -385,7 +470,7 @@ struct BubbleFooter: View {
         Image(systemName: "pin.fill").accessibilityLabel(Text("pinned"))
       }
       if message.isEdited { Text("edited") }
-      Text(message.sentDate, style: .time)
+      if showsTime { Text(message.sentDate, style: .time) }
       if isMine { stateIcon }
     }
     .font(.caption2)
@@ -433,6 +518,9 @@ struct BelowBubble: View {
   let showsThreadLink: Bool
   let onOpenThread: () -> Void
   var canReact = true
+  /// The add-reaction pill's choices and action (#1488); nil where the user can't react.
+  var quickReactions: [String] = []
+  var maybeOnReact: ((String) -> Void)?
 
   var body: some View {
     if maybeExtras?.isSendFailed == true { notSentLine }
@@ -446,6 +534,21 @@ struct BelowBubble: View {
             }
           }
           .disabled(!canReact)
+        }
+        if let onReact = maybeOnReact, !quickReactions.isEmpty {
+          Menu {
+            ForEach(quickReactions, id: \.self) { emoji in
+              Button(emoji) { onReact(emoji) }
+            }
+          } label: {
+            Image(systemName: "face.smiling")
+              .font(.caption)
+              .foregroundStyle(Theme.textMuted)
+              .padding(.horizontal, 10).padding(.vertical, 4)
+              .background(Theme.surface, in: Capsule())
+              .overlay(Capsule().stroke(Theme.border))
+          }
+          .accessibilityLabel(Text("react_add"))
         }
       }
     }
@@ -636,6 +739,7 @@ struct SenderAvatar: View {
   var conversationId = ""
   /// An integration source's own picture (docs/bridge.md, "Source identity"), from this device's store.
   var maybeSourcePictureSha256: String?
+  var size: CGFloat = senderAvatarSize
 
   @Environment(AppModel.self) private var model
   @State private var maybePicture: UIImage?
@@ -644,13 +748,13 @@ struct SenderAvatar: View {
     Group {
       if let maybePicture {
         Image(uiImage: maybePicture).resizable().scaledToFill()
-          .frame(width: senderAvatarSize, height: senderAvatarSize)
+          .frame(width: size, height: size)
           .clipShape(Circle())
       } else {
         Text(AvatarView.initials(of: name))
-          .font(.system(size: senderAvatarSize * 0.4, weight: .semibold))
+          .font(.system(size: size * 0.4, weight: .semibold))
           .foregroundStyle(.white)
-          .frame(width: senderAvatarSize, height: senderAvatarSize)
+          .frame(width: size, height: size)
           .background(PersonColor.avatar(userId), in: Circle())
       }
     }

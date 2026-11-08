@@ -247,6 +247,8 @@ private fun ChatsPage(viewModel: MainViewModel) {
   ChatListLayoutSetting()
   ChatListGroupingSetting()
   HorizontalDivider()
+  MessageLayoutSetting()
+  HorizontalDivider()
   CallStatusSoundsSetting()
   HorizontalDivider()
   OriginalDownloadSetting()

@@ -85,6 +85,8 @@ struct ChatPane: View {
   /// Whether voice messages may be recorded here and how long (#204).
   @State private var voicePolicy = VoiceMessagePolicy.fallback
   @AppStorage("share_typing") private var isSharingTyping = true
+  /// Bubbles or the desktop's list (#1488), a setting of this device.
+  @AppStorage(MessageLayout.key) private var messageLayoutRaw = MessageLayout.bubbles.rawValue
   @FocusState private var isComposerFocused: Bool
 
   private static let quickReactions = ["👍", "❤️", "😂", "🎉", "😮", "🙏"]
@@ -311,7 +313,9 @@ struct ChatPane: View {
   private var messageList: some View {
     GeometryReader { geometry in
       let listWidth = max(geometry.size.width - Self.listPadding * 2, 0)
-      let look = BubbleLook(listWidth: listWidth, showsSenders: showsSenders(conversation.kind), names: names)
+      let look = BubbleLook(
+        listWidth: listWidth, showsSenders: showsSenders(conversation.kind), names: names,
+        isList: messageLayoutRaw == MessageLayout.list.rawValue)
       let placedGaps = PlacedGaps(threadId == nil ? gaps : [], among: messages)
       ScrollViewReader { proxy in
         ScrollView {
@@ -495,7 +499,9 @@ struct ChatPane: View {
       onOpenThread: { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) },
       displayNames: displayNames,
       canReact: conversation.canReact,
-      onOpenConversation: { model.openConversationId = $0 }
+      onOpenConversation: { model.openConversationId = $0 },
+      quickReactions: Self.quickReactions,
+      maybeOnReact: conversation.canReact && message.maybePlaceholder == nil ? { react(message, $0) } : nil
     )
     if message.maybePlaceholder != nil {
       row

@@ -222,4 +222,9 @@
   <string name="list_failed_timeout">Keine Antwort rechtzeitig erhalten.</string>
   <string name="list_failed_other">Das konnte nicht geladen werden.</string>
   <string name="search_incomplete">Der Verlauf wird noch synchronisiert, die Ergebnisse können unvollständig sein.</string>
+  <string name="message_layout">Nachrichten</string>
+  <string name="message_layout_bubbles">Blasen</string>
+  <string name="message_layout_list">Liste</string>
+  <string name="message_layout_hint">Blasen zeigen deine Nachrichten rechts. Die Liste zeigt jede Nachricht mit Bild, Name und Uhrzeit, wie am Desktop.</string>
+  <string name="react_add">Reaktion hinzufügen</string>
 </resources>

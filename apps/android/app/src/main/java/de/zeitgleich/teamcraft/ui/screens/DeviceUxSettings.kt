@@ -37,6 +37,8 @@ import de.zeitgleich.teamcraft.ui.media.MediaQuality
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 import de.zeitgleich.teamcraft.ui.theme.ChatListGrouping
 import de.zeitgleich.teamcraft.ui.theme.ChatListLayout
+import de.zeitgleich.teamcraft.ui.MessageLayout
+import de.zeitgleich.teamcraft.ui.MessageLayoutPrefs
 import uniffi.teamcraft_ffi.CallStatusSounds
 import uniffi.teamcraft_ffi.OriginalDownload
 
@@ -236,6 +238,32 @@ fun ChatListLayoutSetting() {
   }
 }
 
+/** Messages as bubbles or as the desktop's list (#1488). A setting of this device; takes effect at once. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun MessageLayoutSetting() {
+  val context = LocalContext.current
+  val prefs = remember { MessageLayoutPrefs.of(context) }
+  val layout by prefs.layout.collectAsState()
+  Column {
+    Text(stringResource(R.string.message_layout))
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      for ((choice, label) in MESSAGE_LAYOUT_CHOICES) {
+        FilterChip(
+          selected = layout == choice,
+          onClick = { prefs.setLayout(choice) },
+          label = { Text(stringResource(label)) },
+        )
+      }
+    }
+    Text(
+      stringResource(R.string.message_layout_hint),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
+}
+
 /** In the list layout: DMs and channels together, or the channels grouped by space (#1345). */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -290,6 +318,11 @@ fun SendWithEnterSetting() {
 private val CHAT_LIST_LAYOUT_CHOICES = listOf(
   ChatListLayout.Spaces to R.string.nav_spaces,
   ChatListLayout.List to R.string.chat_list_layout_list,
+)
+
+private val MESSAGE_LAYOUT_CHOICES = listOf(
+  MessageLayout.Bubbles to R.string.message_layout_bubbles,
+  MessageLayout.List to R.string.message_layout_list,
 )
 
 private val CHAT_LIST_GROUPING_CHOICES = listOf(
