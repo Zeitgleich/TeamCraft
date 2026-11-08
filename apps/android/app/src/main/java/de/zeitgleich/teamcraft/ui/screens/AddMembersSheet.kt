@@ -40,7 +40,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
-import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.theme.Spacing
@@ -56,8 +55,9 @@ private const val ADD_SHOWN = 100
 
 /**
  * "Add people" to a channel (#1534), where the server says the user may: the directory through the
- * core, without the members, several at once. Each one added leaves the picked list, so a failure
- * part way keeps only those still to add, and the sheet stays open with why.
+ * core, without the members, several at once. As on desktop, people join the channel's space first
+ * where the user may add them there. The sheet closes once everybody is in; on a failure it stays
+ * with the picks and says why (members added meanwhile drop out of the list).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -82,14 +82,7 @@ internal fun AddMembersSheet(viewModel: MainViewModel, conversationId: String, m
     isAdding = true
     maybeFailure = null
     scope.launch {
-      for (user in picked.toList()) {
-        val maybeError = viewModel.tryAct(ChatActions.addMember(conversationId, user))
-        if (maybeError != null) {
-          maybeFailure = maybeError
-          break
-        }
-        picked = picked - user
-      }
+      maybeFailure = viewModel.tryAddPeople(conversationId, picked)
       isAdding = false
       if (maybeFailure == null) onDismiss()
     }
@@ -135,7 +128,13 @@ internal fun AddMembersSheet(viewModel: MainViewModel, conversationId: String, m
         if (isAdding) {
           CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
         } else {
-          Text(pluralStringResource(R.plurals.members_add_count, picked.size.coerceAtLeast(1), picked.size))
+          Text(
+            if (picked.isEmpty()) {
+              stringResource(R.string.members_add_submit)
+            } else {
+              pluralStringResource(R.plurals.members_add_count, picked.size, picked.size)
+            },
+          )
         }
       }
     }

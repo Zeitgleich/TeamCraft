@@ -31,6 +31,20 @@ extension AppModel {
     await create { try await $0.createSpace(input: input) }
   }
 
+  /// Adds people to a channel, to its space first where the user may (#1534); nil once everybody
+  /// is in, else why not.
+  func addPeople(_ userIds: [String], to conversationId: String) async -> LocalizedStringKey? {
+    do {
+      switch try await core().addPeopleToChannel(conversationId: conversationId, userIds: userIds) {
+      case .added: return nil
+      case .notInSpace: return "members_add_not_in_space"
+      case .notAllowed: return "create_not_allowed"
+      }
+    } catch {
+      return AppFailure(CoreFailure(error)).message
+    }
+  }
+
   private func create(_ call: (TeamCraft) async throws -> CreateOutcome) async -> CreateResult {
     do {
       return CreateResult(try await call(core()))

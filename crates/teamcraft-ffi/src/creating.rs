@@ -5,6 +5,8 @@
 //! at its field (forms.md); a lost connection is an error, and a retry with the same `request_key`
 //! creates nothing twice.
 
+use std::collections::HashSet;
+
 use teamcraft_client_api::backend::ChatBackend as _;
 use teamcraft_client_api::model::{ConversationId, SpaceId, User, UserId};
 use teamcraft_client_api::remote::ChatAnswer;
@@ -15,7 +17,7 @@ use teamcraft_core::client::workspace_admin::ChannelOptions;
 use teamcraft_core::ui_backend::CoreCommand;
 use teamcraft_proto::role_rules::can_in_workspace;
 use teamcraft_proto::{
-  CreateSpaceRequest, ErrorCode, IdempotencyKey, JoinPolicy, Permission, PermissionScheme,
+  CreateSpaceRequest, ErrorCode, HistoryPolicy, IdempotencyKey, JoinPolicy, Permission, PermissionScheme,
 };
 
 use crate::TeamCraft;
@@ -39,6 +41,24 @@ pub enum CreateOutcome {
   NameRefused { detail: String },
   /// The user may not create this here (any more): the role changed since the menu was shown.
   NotAllowed,
+}
+
+/// How adding people to a channel ended when the server answered.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum AddPeopleOutcome {
+  /// Everybody is in the channel now.
+  Added,
+  /// Somebody isn't in the channel's space, and the user may not add them to it: a space admin
+  /// invites them first.
+  NotInSpace,
+  /// The user may not add people here (any more).
+  NotAllowed,
+}
+
+/// Whom "Add people" puts into a channel, as the core decides it.
+struct ChannelAddition {
+  people: Vec<(UserId, bool)>,
+  joins_space: bool,
 }
 
 /// What the "new channel" sheet asks for.
@@ -67,7 +87,8 @@ pub struct NewSpaceInput {
 #[uniffi::export]
 impl TeamCraft {
   /// People whose name or username matches `query`, as the `people` answer of the `search_people`
-  /// query (JSON), at most `limit` (capped at 100). The people the device knows answer at once; the
+  /// query (JSON), at most `limit` (capped at 100), without the user, bots and deactivated
+  /// accounts. The people the device knows answer at once; the
   /// server's directory is asked once per query and a while, and its answer arrives as a change,
   /// so read again then. Unlike `query`, this hands that directory request to the client.
   pub async fn search_people(&self, query: String, limit: u32) -> Result<String, TeamCraftError> {
@@ -121,6 +142,42 @@ impl TeamCraft {
       })
       .await;
     created(result, |id: ConversationId| id.to_string())
+  }
+
+  /// Adds people to a channel, as desktop does: first to the channel's space where the user may
+  /// add or invite people there (guest accounts as guests), then to the channel's encryption group
+  /// with the history from their join on. People already in it are left alone.
+  pub async fn add_people_to_channel(
+    &self,
+    conversation_id: String,
+    user_ids: Vec<String>,
+  ) -> Result<AddPeopleOutcome, TeamCraftError> {
+    let conversation: ConversationId = parse_id(&conversation_id)?;
+    let users: Vec<UserId> = parse_ids(&user_ids)?;
+    let addition = self
+      .read(move |reads| reads.channel_addition(conversation, &users))
+      .await?;
+    let result = self
+      .call(move |engine| {
+        Box::pin(engine.with_client(move |client| {
+          Box::pin(async move {
+            let added = client
+              .add_people_to_channel(
+                conversation,
+                &addition.people,
+                HistoryPolicy::FromJoin,
+                addition.joins_space,
+              )
+              .await;
+            match added {
+              Ok(()) => Ok(AddPeopleOutcome::Added),
+              Err(error) => addition_refusal(&error).ok_or(error),
+            }
+          })
+        }))
+      })
+      .await?;
+    Ok(result)
   }
 
   /// Creates a channel in a space, with its encryption group, and answers its ID.
@@ -181,11 +238,53 @@ impl Reads {
     let people: Vec<User> = backend
       .search_people(query)
       .into_iter()
-      .filter(|user| user.id != me && !user.is_bot)
+      // As on desktop: never the user, bots or deactivated accounts (issue #654).
+      .filter(|user| user.id != me && !user.is_bot && !user.is_deactivated && !user.is_deleted)
       .take(max)
       .collect();
     let commands = backend.drain_commands();
     Ok((to_json(&ChatAnswer::People { people })?, commands))
+  }
+
+  /// The people to add (who of them is a guest account) and whether they join the space first.
+  fn channel_addition(
+    &self,
+    conversation: ConversationId,
+    users: &[UserId],
+  ) -> Result<ChannelAddition, TeamCraftError> {
+    let backend = self.backend()?;
+    let maybe_conversation = backend.conversation(conversation);
+    let members: HashSet<UserId> = maybe_conversation
+      .as_ref()
+      .map(|found| found.member_ids.iter().copied().collect())
+      .unwrap_or_default();
+    let joins_space = maybe_conversation
+      .and_then(|found| found.maybe_space)
+      .and_then(|space| {
+        backend
+          .spaces()
+          .into_iter()
+          .find(|candidate| candidate.id == space)
+      })
+      .is_some_and(|space| space.can_add_members || space.can_invite_guests);
+    let people = users
+      .iter()
+      .filter(|user| !members.contains(user))
+      .map(|user| (*user, backend.user(*user).is_some_and(|found| found.is_guest)))
+      .collect();
+    Ok(ChannelAddition { people, joins_space })
+  }
+}
+
+/// A refusal of adding people the sheet explains, if it is one.
+fn addition_refusal(error: &CoreError) -> Option<AddPeopleOutcome> {
+  let CoreError::Api(api @ ApiError::Status { status, .. }) = error else {
+    return None;
+  };
+  match (api.error_code(), *status) {
+    (Some(ErrorCode::NotSpaceMember), _) => Some(AddPeopleOutcome::NotInSpace),
+    (Some(ErrorCode::Forbidden), _) | (_, 403) => Some(AddPeopleOutcome::NotAllowed),
+    _ => None,
   }
 }
 
@@ -270,6 +369,19 @@ mod tests {
     );
     let kept = refusing::<()>(Err(CoreError::Api(ApiError::Network("offline".into()))));
     assert!(matches!(kept, Err(CoreError::Api(ApiError::Network(_)))));
+  }
+
+  #[test]
+  fn adding_people_outside_the_space_is_said_so() {
+    assert_eq!(
+      addition_refusal(&refused(400, Some(ErrorCode::NotSpaceMember))),
+      Some(AddPeopleOutcome::NotInSpace)
+    );
+    assert_eq!(
+      addition_refusal(&refused(403, None)),
+      Some(AddPeopleOutcome::NotAllowed)
+    );
+    assert_eq!(addition_refusal(&refused(500, None)), None);
   }
 
   #[test]

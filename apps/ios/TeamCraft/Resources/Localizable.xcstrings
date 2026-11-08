@@ -16152,6 +16152,22 @@
           }
         }
       }
+    },
+    "members_add_not_in_space": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Somebody isn't in this channel's space yet. A space admin can invite them first."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jemand ist noch nicht im Space dieses Kanals. Ein Space-Admin kann die Person zuerst einladen."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

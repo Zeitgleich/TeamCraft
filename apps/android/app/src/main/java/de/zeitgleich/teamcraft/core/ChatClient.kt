@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import uniffi.teamcraft_ffi.AddPeopleOutcome
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CreateOutcome
@@ -115,6 +116,10 @@ class ChatClient(
   suspend fun createChannel(input: NewChannelInput): CreateOutcome = core().createChannel(input)
 
   suspend fun createSpace(input: NewSpaceInput): CreateOutcome = core().createSpace(input)
+
+  /** Adds people to a channel, to its space first where the user may (#1534). */
+  suspend fun addPeopleToChannel(conversation: String, users: List<String>): AddPeopleOutcome =
+    core().addPeopleToChannel(conversation, users)
 
   /** The files of a draft (#1220), in the order they were attached. */
   suspend fun draftFiles(conversation: String, maybeThread: String?): List<DraftFileItem> =

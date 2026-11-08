@@ -81,6 +81,7 @@ import de.zeitgleich.teamcraft.server.isServerAllowed
 import de.zeitgleich.teamcraft.server.serverEntryErrorText
 import de.zeitgleich.teamcraft.server.transportErrorText
 import uniffi.teamcraft_ffi.AccountState
+import uniffi.teamcraft_ffi.AddPeopleOutcome
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CheckedServer
@@ -986,6 +987,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       CreateResult.Failed(errorText(failure))
     } catch (failure: IllegalStateException) {
       CreateResult.Failed(R.string.error_signed_out)
+    }
+
+  /** Adds people to a channel (#1534); answers why it failed, or null once everybody is in. */
+  @StringRes
+  suspend fun tryAddPeople(conversation: String, users: List<String>): Int? =
+    try {
+      when (withContext(Dispatchers.Default) { chat.addPeopleToChannel(conversation, users) }) {
+        AddPeopleOutcome.ADDED -> null
+        AddPeopleOutcome.NOT_IN_SPACE -> R.string.members_add_not_in_space
+        AddPeopleOutcome.NOT_ALLOWED -> R.string.create_not_allowed
+      }
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: TeamCraftException) {
+      errorText(failure)
+    } catch (failure: IllegalStateException) {
+      R.string.error_signed_out
     }
 
   /** Whether "New space" shows; false while the server can't tell (offline). */

@@ -202,8 +202,9 @@ private struct CreateForm<Access: View>: View {
 }
 
 /// "Add people" to a channel (#1534), where the server says the user may: the directory through
-/// the core, without the members, several at once. Each one added leaves the picked list, so a
-/// failure part way keeps only those still to add, and the sheet stays open with why.
+/// the core, without the members, several at once. As on desktop, people join the channel's space
+/// first where the user may add them there. The sheet closes once everybody is in; on a failure it
+/// stays with the picks and says why.
 struct AddChannelMembersView: View {
   @Environment(AppModel.self) private var model
   @Environment(\.dismiss) private var dismiss
@@ -215,14 +216,14 @@ struct AddChannelMembersView: View {
   @State private var picked: [String] = []
   @State private var pickedPeople: [String: BrowseSnapshot.Person] = [:]
   @State private var isAdding = false
-  @State private var maybeFailure: AppFailure?
+  @State private var maybeFailure: LocalizedStringKey?
 
   var body: some View {
     NavigationStack {
       List {
         if let failure = maybeFailure {
           Section {
-            Label(failure.message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.danger)
+            Label(failure, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.danger)
           }
         }
         if maybeFound != nil && shown.isEmpty {
@@ -275,13 +276,7 @@ struct AddChannelMembersView: View {
     guard !isAdding else { return }
     isAdding = true
     maybeFailure = nil
-    for user in picked {
-      if let failure = await model.performReporting(.addMember(conversationId: conversationId, userId: user)) {
-        maybeFailure = failure
-        break
-      }
-      picked.removeAll { $0 == user }
-    }
+    maybeFailure = await model.addPeople(picked, to: conversationId)
     isAdding = false
     if maybeFailure == nil { dismiss() }
   }
