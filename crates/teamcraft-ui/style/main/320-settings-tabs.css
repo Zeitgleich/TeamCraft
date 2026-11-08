@@ -31,7 +31,16 @@
   margin-top: 8px;
 }
 
-/* Quick do-not-disturb choices under the presence list. */
+/* "Pause notifications": a title row, then its choices indented under it. */
+.menu-group-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 4px 14px;
+  color: var(--text);
+}
+
 .menu-sub .menu-item {
   padding-left: 36px;
   min-height: 30px;

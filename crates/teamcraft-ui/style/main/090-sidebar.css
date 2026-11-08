@@ -265,3 +265,19 @@
   outline-color: var(--chrome-strong);
 }
 
+
+/* ---- Sidebar: Favorites' hint and drop target (issue #299) ---- */
+
+.sb-empty-hint {
+  margin: 2px 12px 4px 36px;
+  color: var(--sb-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  line-height: 1.4;
+}
+
+/* A channel dragged over Favorites: the section lights up where it will land. */
+.sb-section.is-drop-target {
+  border-radius: var(--radius);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
