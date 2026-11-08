@@ -1786,7 +1786,9 @@ impl Engine {
       creates_notes_to_self: true,
       history_backfill: HistoryBackfill::KEEP_RECENT,
       leaves_mls_upkeep_to_app: self.is_memory_constrained,
-      ..ClientSettings::default()
+      // The feeds show holes (issue #1438): a busy conversation's newest messages come ahead of
+      // the rest.
+      ..ClientSettings::default().with_capped_catch_up()
     }
   }
 

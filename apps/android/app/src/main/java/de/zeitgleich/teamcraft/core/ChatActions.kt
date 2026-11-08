@@ -215,6 +215,16 @@ object ChatActions {
   /** The reader came near the oldest row held: one more page from the server. */
   fun loadOlderHistory(conversation: String) = action("load_older_history") { put("conversation", conversation) }
 
+  /**
+   * The reader came near a hole in the history ([HistoryGap]): one page of it from the server,
+   * from [edge], the side the reader comes from (`older` or `newer`).
+   */
+  fun fillHistoryGap(conversation: String, after: String, edge: String) = action("fill_history_gap") {
+    put("conversation", conversation)
+    put("after", after)
+    put("edge", edge)
+  }
+
   /** Reads again how far the others read: receipts sent while the app was offline never arrive. */
   fun refreshReadReceipts(conversation: String) = action("refresh_read_receipts") { put("conversation", conversation) }
 

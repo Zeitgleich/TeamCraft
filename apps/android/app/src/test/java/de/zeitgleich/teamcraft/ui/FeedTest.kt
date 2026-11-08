@@ -6,6 +6,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import de.zeitgleich.teamcraft.core.HistoryGap
 import de.zeitgleich.teamcraft.core.Message
 
 class FeedTest {
@@ -104,6 +105,34 @@ class FeedTest {
     val eve = LocalDate.of(2026, 12, 31)
     assertEquals(false, dayShowsYear(eve, eve))
     assertEquals(true, dayShowsYear(eve, eve.plusDays(1)))
+  }
+
+  @Test
+  fun aHoleSitsAfterTheMessageBeforeItAndBreaksAGroup() {
+    val messages = listOf(message("1", "a", DAY_ONE), message("2", "a", DAY_ONE + MINUTE), message("3", "a", DAY_ONE + 2 * MINUTE))
+    val gap = HistoryGap(after = "1", index = 1, status = "available")
+    val items = feedItems(messages, maybeFirstUnread = null, zone = ZoneOffset.UTC, gaps = placeGaps(messages, listOf(gap)))
+    assertEquals(listOf("day-2026-10-21", "1", "gap-1", "2", "3"), items.map { it.key })
+    assertEquals(listOf(false, false, true), items.filterIsInstance<FeedItem.Entry>().map { it.isContinuation })
+    assertEquals(FeedContentType.Gap, items[2].contentType)
+  }
+
+  @Test
+  fun holesArePlacedByTheMessageBeforeThemSoAnAddedRowKeepsThemInPlace() {
+    val messages = listOf(message("1", "a", DAY_ONE), message("3", "a", DAY_ONE + 2 * MINUTE))
+    val placed = placeGaps(
+      messages,
+      listOf(
+        HistoryGap(after = "0", index = 0, status = "loading"),
+        HistoryGap(after = "1", index = 1, status = "available"),
+        HistoryGap(after = "9", index = 3, status = "available"),
+      ),
+    )
+    assertEquals(listOf(null, "1"), placed.map { it.maybeAfterMessage })
+    // A row of the app's own (the notified message) between them changes nothing.
+    val drawn = listOf(messages[0], message("2", "b", DAY_ONE + MINUTE), messages[1])
+    val items = feedItems(drawn, maybeFirstUnread = null, zone = ZoneOffset.UTC, gaps = placed)
+    assertEquals(listOf("gap-0", "day-2026-10-21", "1", "gap-1", "2", "3"), items.map { it.key })
   }
 
   private fun entries(vararg messages: Message): List<FeedItem.Entry> =

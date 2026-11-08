@@ -685,7 +685,8 @@ final class AppModel {
         conversationId: conversationId, maybeOldestId: maybeOldest?.id, oldestSentAtMs: maybeOldest?.sentAtMs ?? 0,
         older: older)
     else { return nil }
-    return MessagePage(messages: page.messages.map { $0.namingDeletedAuthor() }, hasOlder: page.hasOlder)
+    return MessagePage(
+      messages: page.messages.map { $0.namingDeletedAuthor() }, hasOlder: page.hasOlder, gaps: page.gaps)
   }
 
   func thread(conversationId: String, threadId: String) async -> [MessageItem] {

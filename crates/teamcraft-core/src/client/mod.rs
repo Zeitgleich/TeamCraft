@@ -368,8 +368,9 @@ impl ClientSettings {
     self
   }
 
-  /// The settings of a host whose feed shows holes in the history (the web and desktop apps): a
-  /// catch-up reads at most [`CATCH_UP_MESSAGE_PAGES`] pages of a conversation ahead of the rest.
+  /// The settings of a host whose feed shows holes in the history (web, desktop, and the mobile
+  /// apps through the FFI, issue #1438): a catch-up reads at most [`CATCH_UP_MESSAGE_PAGES`] pages
+  /// of a conversation ahead of the rest.
   pub fn with_capped_catch_up(mut self) -> Self {
     self.catch_up_message_pages = Some(CATCH_UP_MESSAGE_PAGES);
     self

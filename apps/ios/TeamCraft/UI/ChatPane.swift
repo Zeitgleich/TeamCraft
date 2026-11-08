@@ -61,6 +61,10 @@ struct ChatPane: View {
   @State private var maybeFeed: (conversationId: String, feed: PagedFeed)?
   @State private var hasOlder = false
   @State private var isLoadingOlder = false
+  /// Holes in the history among the messages (issue #1438): a catch-up read the newest ones first.
+  @State private var gaps: [HistoryGapItem] = []
+  /// A page of a hole was asked for; the next read says how it stands.
+  @State private var isFillingGap = false
   /// Older history the store doesn't hold: asked for when the feed reaches the store's end.
   @State private var serverHistory = OlderHistory.complete
   @State private var maybeKeyCatchUp: KeyCatchUpItem?
@@ -295,6 +299,7 @@ struct ChatPane: View {
     GeometryReader { geometry in
       let listWidth = max(geometry.size.width - Self.listPadding * 2, 0)
       let look = BubbleLook(listWidth: listWidth, showsSenders: showsSenders(conversation.kind), names: names)
+      let placedGaps = PlacedGaps(threadId == nil ? gaps : [], among: messages)
       ScrollViewReader { proxy in
         ScrollView {
           // One section per day: its date pill stays at the top while the day scrolls by.
@@ -317,16 +322,22 @@ struct ChatPane: View {
               .frame(maxWidth: .infinity)
               .padding(.vertical, 8)
             }
-            ForEach(feedSections(messages)) { section in
+            ForEach(placedGaps.above, id: \.after) { gap in gapRow(gap) }
+            ForEach(feedSections(messages, gaps: placedGaps)) { section in
               Section {
                 ForEach(section.entries) { entry in
-                  entryRow(entry, look: look, listWidth: listWidth)
-                    .onAppear {
-                      if entry.id == pageBackTriggerId { Task { await loadOlder() } }
-                      rowsOnScreen.insert(entry.id)
-                      reportSeenReactions()
-                    }
-                    .onDisappear { rowsOnScreen.remove(entry.id) }
+                  // One container whether or not a hole follows, so a row keeps its identity.
+                  VStack(alignment: .leading, spacing: 0) {
+                    entryRow(entry, look: look, listWidth: listWidth)
+                    ForEach(entry.gapsAfter, id: \.after) { gap in gapRow(gap) }
+                  }
+                  .onAppear {
+                    if entry.id == pageBackTriggerId { Task { await loadOlder() } }
+                    rowsOnScreen.insert(entry.id)
+                    reportSeenReactions()
+                    fillGapIfNear()
+                  }
+                  .onDisappear { rowsOnScreen.remove(entry.id) }
                 }
               } header: {
                 DayPill(date: section.day)
@@ -401,6 +412,56 @@ struct ChatPane: View {
     guard threadId == nil, canPageBack, !isLoadingOlder else { return }
     let isNear = messages.prefix(Self.olderAheadRows + 1).contains { rowsOnScreen.contains($0.id) }
     if isNear { Task { await loadOlder() } }
+  }
+
+  /// Asks for a page of a hole in the history once it comes within `olderAheadRows` of the rows on
+  /// screen (`gapToFill`, as web and desktop do). Not at the bottom of a list that scrolls, so
+  /// opening a conversation costs no extra request: the catch-up reads the hole by itself.
+  private func fillGapIfNear() {
+    guard threadId == nil, !isFillingGap, !gaps.isEmpty,
+      let firstVisible = messages.firstIndex(where: { rowsOnScreen.contains($0.id) }),
+      let lastVisible = messages.lastIndex(where: { rowsOnScreen.contains($0.id) }),
+      !isAtBottom || firstVisible == 0,
+      let request = gapToFill(gaps, firstVisible: firstVisible, lastVisible: lastVisible, ahead: Self.olderAheadRows)
+    else { return }
+    fillGap(request.gap, from: request.edge)
+  }
+
+  private func fillGap(_ gap: HistoryGapItem, from edge: GapEdge) {
+    isFillingGap = true
+    Task { await model.perform(.fillHistoryGap(conversationId: conversation.id, after: gap.after, edge: edge)) }
+  }
+
+  /// Where history this device hasn't read yet lies (issue #1438): a quiet loading line while the
+  /// catch-up or a request reads it, the failure with "Try again" when the last request failed.
+  @ViewBuilder
+  private func gapRow(_ gap: HistoryGapItem) -> some View {
+    if gap.status == .failed {
+      HStack {
+        Text("history_gap_failed")
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+        Button("older_history_retry") {
+          // From the side the reader is on now.
+          let firstVisible = messages.firstIndex(where: { rowsOnScreen.contains($0.id) }) ?? 0
+          fillGap(gap, from: gapEdge(gap, firstVisible: firstVisible))
+        }
+        .font(.footnote)
+      }
+      .frame(maxWidth: .infinity)
+      .padding(.vertical, 8)
+    } else {
+      HStack(spacing: 8) {
+        ProgressView()
+          .controlSize(.small)
+        Text("history_gap_loading")
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+      }
+      .accessibilityElement(children: .combine)
+      .frame(maxWidth: .infinity)
+      .padding(.vertical, 12)
+    }
   }
 
   private var names: MentionNames {
@@ -1202,8 +1263,11 @@ struct ChatPane: View {
       messages = page.messages
       extras = readExtras
       hasOlder = page.hasOlder
+      gaps = page.gaps
+      isFillingGap = false
       if let history = await model.olderHistory(conversationId: conversation.id) { serverHistory = history }
       pageBackIfNearOldest()
+      fillGapIfNear()
     }
     if conversation.unreadCount > 0 { await model.markRead(conversationId: conversation.id) }
     maybeKeyCatchUp = await model.keyCatchUp()
@@ -1229,6 +1293,7 @@ struct ChatPane: View {
     maybeFeed = (conversationId, feed)
     hasOlder = false
     serverHistory = .complete
+    gaps = []
     return feed
   }
 
@@ -1250,6 +1315,7 @@ struct ChatPane: View {
     messages = page.messages
     extras = readExtras
     hasOlder = page.hasOlder
+    gaps = page.gaps
   }
 
   private func reloadExtras() async {

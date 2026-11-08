@@ -372,6 +372,49 @@ pub struct MessagePage {
   pub messages: Vec<MessageItem>,
   /// Older messages exist: the list can page further back.
   pub has_older: bool,
+  /// History this device never read between these messages, oldest first: the list shows each
+  /// hole where it is and asks for it once the reader comes near (`fill_history_gap`).
+  #[uniffi(default = [])]
+  pub gaps: Vec<HistoryGapItem>,
+}
+
+/// A hole in the history among the messages of a [`MessagePage`] (#1156): a catch-up after a long
+/// absence read a busy conversation's newest page ahead of the rest (#1423) and reads the rest by
+/// itself; until then, and when the reader comes near, a page of it comes on request.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct HistoryGapItem {
+  /// The newest message before it: what a request (`fill_history_gap`) names it by.
+  pub after: String,
+  /// How many of the page's messages come before it (0: above the first).
+  pub index: u32,
+  /// How the conversation's last request for a hole stands.
+  pub status: HistoryGapStatus,
+}
+
+/// [`HistoryGapItem::status`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum HistoryGapStatus {
+  /// Nothing asked yet, or the last request was answered: a reader near it asks.
+  Available,
+  /// A page is on its way.
+  Loading,
+  /// The last request failed: the user can ask again, and the next connection does.
+  Failed,
+}
+
+impl From<teamcraft_client_api::model::HistoryGap> for HistoryGapItem {
+  fn from(gap: teamcraft_client_api::model::HistoryGap) -> Self {
+    use teamcraft_client_api::model::OlderHistory;
+    Self {
+      after: gap.after.to_string(),
+      index: u32::try_from(gap.index).unwrap_or(u32::MAX),
+      status: match gap.status {
+        OlderHistory::Loading => HistoryGapStatus::Loading,
+        OlderHistory::Failed => HistoryGapStatus::Failed,
+        OlderHistory::Available | OlderHistory::Complete => HistoryGapStatus::Available,
+      },
+    }
+  }
 }
 
 /// The line under a conversation in the chat lists ([`crate::TeamCraft::chat_previews`]).
