@@ -244,6 +244,8 @@ private fun ChatsPage(viewModel: MainViewModel) {
   ShareTypingSetting()
   DynamicColorSetting()
   HorizontalDivider()
+  ColorThemeSetting()
+  HorizontalDivider()
   ChatListLayoutSetting()
   ChatListGroupingSetting()
   HorizontalDivider()

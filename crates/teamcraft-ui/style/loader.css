@@ -12,7 +12,7 @@
   justify-content: center;
   gap: 28px;
   padding: 24px;
-  color: var(--text, #1b2230);
+  color: var(--text, #1d1d1d);
   font: var(--text-base, 14px) / 1.45 var(--font-ui, system-ui, sans-serif);
   transition: opacity 180ms ease-out;
 }
@@ -33,7 +33,7 @@
   }
 
   .tc-loader::before {
-    background: var(--bg, #0f141d);
+    background: var(--bg, #161616);
   }
 }
 
@@ -302,7 +302,7 @@
   height: 40px;
   border-radius: 50%;
   background: var(--surface-2, rgba(127, 127, 127, 0.15));
-  color: var(--text, #1b2230);
+  color: var(--text, #1d1d1d);
   opacity: 0;
   visibility: hidden;
   animation: tc-loader-reveal 240ms ease-out 30s forwards;

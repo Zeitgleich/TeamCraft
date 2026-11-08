@@ -25,6 +25,8 @@ pub struct SyncedAppSettings {
   /// Ask before `@channel` in conversations with more members than this; 0 never asks.
   pub confirm_channel_over: u32,
   pub call_status_sounds: CallStatusSounds,
+  /// The colour theme (#202), as stored: `color_theme_tokens` turns it into colours.
+  pub color_theme: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -136,6 +138,9 @@ impl From<SyncedAppSettings> for MobileSettings {
         CallStatusSounds::OwnOnly => CallStatusSoundsApi::OwnOnly,
         CallStatusSounds::Off => CallStatusSoundsApi::Off,
       },
+      color_theme: match app.color_theme.parse() {
+        Ok(theme) => theme,
+      },
     }
   }
 }
@@ -166,6 +171,7 @@ impl From<MobileSettings> for SyncedAppSettings {
         // `adopt` never takes the catch-all, so it can only be the default here.
         CallStatusSoundsApi::All | CallStatusSoundsApi::Unknown => CallStatusSounds::All,
       },
+      color_theme: settings.color_theme.to_string(),
     }
   }
 }

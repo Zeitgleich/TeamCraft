@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -182,14 +183,14 @@ private fun HeaderAvatar(name: String, maybeKind: String?, maybePeer: User?) {
           .size(12.dp)
           .background(scheme.surface, CircleShape)
           .padding(2.dp)
-          .background(presenceDotColor(peer.presence), CircleShape),
+          .background(presenceDotColor(peer.presence, LocalTeamCraftColors.current.presence), CircleShape),
       )
     }
   }
 }
 
-private fun presenceDotColor(presence: String): Color = when (presence) {
-  "Online" -> Color(0xFF2E9E5B)
+private fun presenceDotColor(presence: String, online: Color): Color = when (presence) {
+  "Online" -> online
   "Away" -> Color(0xFFE0A030)
   "DoNotDisturb" -> Color(0xFFD0453A)
   else -> Color(0xFF8A8F98)

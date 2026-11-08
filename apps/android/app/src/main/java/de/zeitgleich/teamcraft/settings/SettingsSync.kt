@@ -26,7 +26,7 @@ import uniffi.teamcraft_ffi.SyncedAppSettings
 
 /**
  * Keeps the settings that follow the account in step with it (#945, e2ee.md §6.4): the chat list's
- * layout, animated images, typing, mention rules and call sounds. The rules and the
+ * layout, animated images, typing, mention rules, call sounds and the colour theme. The rules and the
  * mapping live in the core (`teamcraft_client_api::mobile_settings`); this hands over the values of
  * the app's stores and writes back what changed.
  *
@@ -103,6 +103,7 @@ class SettingsSync(
       keywords = mention.keywords,
       confirmChannelOver = mentions.confirmChannelOver.coerceAtLeast(0).toUInt(),
       callStatusSounds = CallSoundPrefs.prefs(appContext).statusSounds,
+      colorTheme = appearance.colorThemeValue.value,
     )
   }
 
@@ -144,6 +145,7 @@ class SettingsSync(
       mentions.setConfirmChannelOver(settings.confirmChannelOver.coerceAtMost(Int.MAX_VALUE.toUInt()).toInt())
     }
     if (settings.callStatusSounds != before.callStatusSounds) CallSoundPrefs.prefs(appContext).setStatusSounds(settings.callStatusSounds)
+    if (settings.colorTheme != before.colorTheme) appearance.setColorTheme(settings.colorTheme)
   }
 
   private companion object {
