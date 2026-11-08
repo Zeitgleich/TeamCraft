@@ -12,7 +12,7 @@ image="teamcraft-e2e-web:local"
 out="${E2E_WEB_DIR:-$root/target/e2e-web}"
 checkout_id="$(printf '%s' "$root" | sha256sum | cut -c1-12)"
 
-"$engine" build -q -t "$image" -f "$root/tests/e2e/web/Containerfile" "$root/tests/e2e/web"
+"$engine" build -t "$image" -f "$root/tests/e2e/web/Containerfile" "$root/tests/e2e/web"
 mkdir -p "$out"
 # Trunk's pre_build hook writes the joined stylesheet to crates/teamcraft-ui/gen (#614); the
 # checkout is mounted read-only, so gen/ gets a tmpfs. Its mount point has to exist in the checkout.
