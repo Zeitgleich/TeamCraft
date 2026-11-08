@@ -40,6 +40,8 @@ enum ChatAction {
   case deleteChannel(conversationId: String)
   /// Deletes a space with its channels for everybody, after the user confirmed it.
   case deleteSpace(spaceId: String)
+  /// Joins an open space (#1526); its default channels follow.
+  case joinSpace(spaceId: String)
   case createChannel(spaceId: String, name: String)
   /// The direct conversation with a person; created when there is none yet.
   case openDm(userId: String)
@@ -138,6 +140,8 @@ enum ChatAction {
       object = ["action": "delete_channel", "conversation": conversation]
     case .deleteSpace(let space):
       object = ["action": "delete_space", "space": space]
+    case .joinSpace(let space):
+      object = ["action": "join_space", "space": space]
     case .extendGuest(let space, let user, let expiresAtMs):
       object = ["action": "extend_guest", "space": space, "user": user, "expires_at_ms": expiresAtMs]
     case .markReactionsSeen(let conversation, let messages):
@@ -273,6 +277,8 @@ enum ChatQuery {
   /// The channels of a space the user is in or can join.
   case browseChannels(spaceId: String)
   case expiringGuests
+  /// Open spaces the user isn't in, from the stored space list (#1526).
+  case joinableSpaces
   /// Others' reactions to the user's messages here that the user hasn't seen.
   case unseenReactions(conversationId: String)
   case olderHistory(conversationId: String)
@@ -315,6 +321,8 @@ enum ChatQuery {
       return jsonText(["kind": "browse_channels", "space": space])
     case .expiringGuests:
       return jsonText(["kind": "expiring_guests"])
+    case .joinableSpaces:
+      return jsonText(["kind": "joinable_spaces"])
     case .unseenReactions(let conversation):
       return jsonText(["kind": "unseen_reactions", "conversation": conversation])
     case .olderHistory(let conversation):

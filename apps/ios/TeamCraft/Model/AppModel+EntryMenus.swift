@@ -35,7 +35,12 @@ extension AppModel {
     await performReporting(.deleteSpace(spaceId: spaceId))
   }
 
-  func markSpaceRead(_ spaceId: String) async -> AppFailure? {
+  /// Joins an open space (#1526); `nil` when the core took it.
+  func joinSpace(_ spaceId: String) async -> AppFailure? {
+    await performReporting(.joinSpace(spaceId: spaceId))
+  }
+
+    func markSpaceRead(_ spaceId: String) async -> AppFailure? {
     await reporting { try await core().markSpaceRead(spaceId: spaceId) }
   }
 

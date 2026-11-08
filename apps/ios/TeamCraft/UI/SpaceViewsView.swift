@@ -15,11 +15,15 @@ struct SpaceViewsView: View {
   @State private var spaceId: String
   @State private var tab = SpaceViewTab.people
 
-  init(account: Account, spaces: [SpaceChoice], initialSpaceId: String, onOpen: @escaping (String) -> Void) {
+  init(
+    account: Account, spaces: [SpaceChoice], initialSpaceId: String, initialTab: SpaceViewTab = .people,
+    onOpen: @escaping (String) -> Void
+  ) {
     self.account = account
     self.spaces = spaces
     self.onOpen = onOpen
     _spaceId = State(initialValue: initialSpaceId)
+    _tab = State(initialValue: initialTab)
   }
 
   var body: some View {

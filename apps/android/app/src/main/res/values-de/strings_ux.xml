@@ -150,7 +150,7 @@
   <string name="settings_devices_summary">Neues Gerät verknüpfen</string>
   <string name="chat_list_layout">Chats und Kanäle</string>
   <string name="chat_list_layout_list">Liste</string>
-  <string name="chat_list_layout_hint">Spaces zeigt Direktnachrichten und die Kanäle jedes Space getrennt. Liste zeigt alles in einer Liste.</string>
+  <string name="chat_list_layout_hint">Spaces zeigt deine Direktnachrichten und jeweils einen Space; gewechselt wird oben in der Kopfzeile. Liste zeigt alles in einer Liste.</string>
   <string name="chat_list_grouping">Kanäle</string>
   <string name="chat_list_grouping_mixed">Mit den Chats gemischt</string>
   <string name="chat_list_grouping_by_space">Nach Spaces gruppiert</string>

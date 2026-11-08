@@ -358,6 +358,9 @@ object ChatActions {
 
   fun deleteSpace(space: String) = action("delete_space") { put("space", space) }
 
+  /** Joins an open space (#1526); its default channels follow. */
+  fun joinSpace(space: String) = action("join_space") { put("space", space) }
+
   /** `update_channel` with only `maybe_is_archived` set; the other changes stay absent. */
   fun archiveChannel(conversation: String, isArchived: Boolean = true) = action("update_channel") {
     put("conversation", conversation)
@@ -476,6 +479,9 @@ object ChatQueries {
   fun browseChannels(space: String) = query("browse_channels") { put("space", space) }
 
   fun expiringGuests() = query("expiring_guests") {}
+
+  /** Open spaces the user isn't in, from the stored space list (#1526). */
+  fun joinableSpaces() = query("joinable_spaces") {}
 
   fun search(text: String) = query("search") { put("query", text) }
 

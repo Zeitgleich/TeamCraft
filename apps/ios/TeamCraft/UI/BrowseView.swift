@@ -13,6 +13,8 @@ struct BrowseView: View {
   @Environment(AppModel.self) private var model
   @Environment(\.dismiss) private var dismiss
   @State var tab: Tab
+  /// The space whose channels show first: Home's selected space (#1526).
+  var maybeInitialSpaceId: String? = nil
   let onOpen: (String) -> Void
 
   @State private var snapshot: BrowseSnapshot?
@@ -192,7 +194,10 @@ struct BrowseView: View {
   private func reload() async {
     let loaded = await model.browseSnapshot()
     snapshot = loaded
-    if spaceId == nil { spaceId = loaded?.spaces?.first?.id }
+    if spaceId == nil {
+      let spaces = loaded?.spaces ?? []
+      spaceId = spaces.first { $0.id == maybeInitialSpaceId }?.id ?? spaces.first?.id
+    }
     await loadChannels()
     // A new direct conversation opens as soon as the core created it, as on desktop.
     if let users = maybePendingDm, let created = loaded?.directConversation(with: users) {

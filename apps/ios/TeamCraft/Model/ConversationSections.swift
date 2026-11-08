@@ -12,6 +12,8 @@ enum SectionTitle: Hashable {
   case archived
   /// Home's DMs with something new, on top of its list (#1488).
   case unreadDirect
+  /// The selected space's channels on Home of the spaces layout (#1526); the header names the space.
+  case spaceChannels(spaceId: String)
   /// The Activity tab's one list (shown without a header).
   case activity
 }
@@ -19,6 +21,10 @@ enum SectionTitle: Hashable {
 struct ConversationSection: Identifiable {
   let title: SectionTitle
   let conversations: [ConversationItem]
+  /// Set where a space's section comes from the space list rather than its channels: a space
+  /// without joined channels (#1526).
+  var maybeSpaceId: String? = nil
+  var maybeImageVersion: String? = nil
 
   var id: SectionTitle { title }
 
@@ -38,11 +44,24 @@ struct ConversationSection: Identifiable {
     case .archived: return "archived"
     case .directMessages: return "direct"
     case .space(let name):
-      if let spaceId = conversations.compactMap(\.maybeSpaceId).first { return "space:\(spaceId)" }
+      if let spaceId { return "space:\(spaceId)" }
       return "space-name:\(name)"
+    case .spaceChannels(let spaceId): return "space:\(spaceId)"
     case .everything, .activity: return nil
     }
   }
+
+  /// The space the section is of, from the space list or its channels; `nil` for other sections.
+  var spaceId: String? {
+    switch title {
+    case .space: return maybeSpaceId ?? conversations.compactMap(\.maybeSpaceId).first
+    case .spaceChannels(let spaceId): return spaceId
+    default: return nil
+    }
+  }
+
+  /// The space's picture version, from the space list or its channels.
+  var spaceImageVersion: String? { maybeImageVersion ?? conversations.compactMap(\.maybeSpaceImageVersion).first }
 
   /// The rows the section shows: all while open; while collapsed only those with something new and
   /// the open conversation, as the desktop sidebar does, so nothing new hides.
@@ -268,13 +287,87 @@ func listSections(
   return sections
 }
 
-/// One section per space the conversations are in, by name: what the list layout names under its
-/// list, each with its menu (#1151).
-func listedSpaces(_ conversations: [ConversationItem]) -> [ConversationSection] {
-  let bySpace = Dictionary(grouping: conversations.filter { !$0.isDirect && $0.maybeSpaceName != nil }, by: \.maybeSpaceName)
-  return bySpace.keys.compactMap { $0 }
-    .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-    .map { ConversationSection(title: .space($0), conversations: bySpace[$0] ?? []) }
+/// A space the user belongs to, as the space switcher and the lists name it (#1526).
+struct HomeSpace: Equatable, Identifiable, Sendable {
+  let id: String
+  var name: String
+  var maybeImageVersion: String?
+  /// Mentions in its channels.
+  var mentionCount = 0
+  /// Something new in a channel that isn't muted.
+  var hasUnread = false
+}
+
+/// Every space of the snapshot by name, with what is new in its channels counted from the live
+/// `conversations`, so the badges follow each change without a new snapshot read (#1466); so are its
+/// name and picture, where it has a channel. Spaces without joined channels are listed too. Same as
+/// Android.
+func homeSpaces(_ spaces: [HomeSpace], conversations: [ConversationItem]) -> [HomeSpace] {
+  var seenChannels = Set<String>()
+  let channels = conversations.filter { !$0.isDirect && !$0.isArchived && seenChannels.insert($0.id).inserted }
+  let bySpace = Dictionary(grouping: channels.filter { $0.maybeSpaceId != nil }, by: { $0.maybeSpaceId ?? "" })
+  var seen = Set<String>()
+  return spaces
+    .filter { seen.insert($0.id).inserted }
+    .map { space in
+      let own = bySpace[space.id] ?? []
+      var result = space
+      // A rename or a new picture reaches the channels before the next snapshot read.
+      if let live = own.first {
+        result.name = live.maybeSpaceName ?? space.name
+        result.maybeImageVersion = live.maybeSpaceImageVersion ?? space.maybeImageVersion
+      }
+      result.mentionCount = own.reduce(0) { $0 + Int($1.mentionCount) }
+      result.hasUnread = own.contains { $0.unreadCount > 0 && !$0.isMuted }
+      return result
+    }
+    .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+}
+
+/// The space Home of the spaces layout shows: the remembered one while the user still belongs to
+/// it, otherwise the first by name; `nil` without spaces.
+func selectedSpace(_ spaces: [HomeSpace], remembered: String?) -> HomeSpace? {
+  spaces.first { $0.id == remembered } ?? spaces.first
+}
+
+/// Whether a space other than `selectedId` has something new: the switcher shows a dot then.
+func hasNewElsewhere(_ spaces: [HomeSpace], selectedId: String?) -> Bool {
+  spaces.contains { $0.id != selectedId && ($0.mentionCount > 0 || $0.hasUnread) }
+}
+
+/// Home of the spaces layout with a space selected (#1526), as desktop's sidebar shows one space at
+/// a time: the DMs with something new, the favorites (of every space, as on desktop), then the
+/// selected space's channels under `.spaceChannels`, also when it has none yet. Channels outside any
+/// space stay listed. Same as Android.
+func spaceHomeSections(
+  _ conversations: [ConversationItem], spaceId: String, lastActivity: [String: Date] = [:], listsArchived: Bool = false
+) -> [ConversationSection] {
+  let shown = conversations.filter {
+    $0.isDirect || $0.isFavorite || $0.maybeSpaceId == nil || $0.maybeSpaceId == spaceId
+  }
+  let sections = homeSections(shown, lastActivity: lastActivity, listsArchived: listsArchived)
+  let channels = sections.filter(\.isSpace).flatMap(\.conversations)
+  let head = sections.filter { $0.title == .unreadDirect || $0.title == .favorites }
+  let tail = sections.filter { $0.title == .channels || $0.title == .archived }
+  return head + [ConversationSection(title: .spaceChannels(spaceId: spaceId), conversations: channels)] + tail
+}
+
+/// The list layout grouped by space (#1526): `sections` as `listSections` made them, plus a section
+/// for each space that has none (no joined channels, or all of them favorites), so every space can
+/// be found, its menu opened and its channels browsed. Spaces stay ordered by name. Same as Android.
+func withEmptySpaces(_ sections: [ConversationSection], spaces: [HomeSpace]) -> [ConversationSection] {
+  let listed = Set(sections.filter(\.isSpace).compactMap(\.spaceId))
+  let missing = spaces.filter { !listed.contains($0.id) }.map {
+    ConversationSection(title: .space($0.name), conversations: [], maybeSpaceId: $0.id, maybeImageVersion: $0.maybeImageVersion)
+  }
+  guard !missing.isEmpty else { return sections }
+  let head = sections.filter { !$0.isSpace && $0.title != .channels }
+  let tail = sections.filter { $0.title == .channels }
+  let merged = (sections.filter(\.isSpace) + missing).sorted { lhs, rhs in
+    guard case .space(let left) = lhs.title, case .space(let right) = rhs.title else { return false }
+    return left.localizedCaseInsensitiveCompare(right) == .orderedAscending
+  }
+  return head + merged + tail
 }
 
 /// What a tab shows next to its name: mentions everywhere; unread messages count in DMs (they are

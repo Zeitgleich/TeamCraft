@@ -49,6 +49,8 @@ import uniffi.teamcraft_ffi.OpenedAppLinkStep
 import uniffi.teamcraft_ffi.openAppLink
 import de.zeitgleich.teamcraft.ui.screens.SavedScreen
 import de.zeitgleich.teamcraft.ui.screens.ScheduledScreen
+import de.zeitgleich.teamcraft.ui.screens.BrowseSpacesScreen
+import de.zeitgleich.teamcraft.ui.screens.SpaceViewTab
 import de.zeitgleich.teamcraft.ui.screens.SpaceViewsScreen
 import de.zeitgleich.teamcraft.ui.screens.ThreadsScreen
 import de.zeitgleich.teamcraft.ui.screens.ConversationScreen
@@ -405,27 +407,41 @@ private fun ReadyNavigation(
         onBack = { navigation.popBackStack() },
       )
     }
+    composable("spaces/browse") {
+      BrowseSpacesScreen(viewModel = viewModel, onBack = { navigation.popBackStack() })
+    }
     composable("saved") {
       SavedScreen(viewModel = viewModel, onOpen = { navigation.navigate("conversation/$it") }, onBack = { navigation.popBackStack() })
     }
     composable(
-      "browse?people={people}",
-      arguments = listOf(navArgument("people") { type = NavType.BoolType; defaultValue = false }),
+      "browse?people={people}&space={space}",
+      arguments = listOf(
+        navArgument("people") { type = NavType.BoolType; defaultValue = false },
+        navArgument("space") { type = NavType.StringType; nullable = true; defaultValue = null },
+      ),
     ) { entry ->
       BrowseScreen(
         viewModel = viewModel,
         onOpen = { navigation.navigate("conversation/$it") },
         onBack = { navigation.popBackStack() },
         isPeopleFirst = entry.arguments?.getBoolean("people") == true,
+        maybeInitialSpaceId = entry.arguments?.getString("space"),
       )
     }
     composable("meetings") {
       MeetingsScreen(viewModel = viewModel, onBack = { navigation.popBackStack() })
     }
-    composable("space/{id}", arguments = listOf(navArgument("id") { type = NavType.StringType })) { entry ->
+    composable(
+      "space/{id}?tab={tab}",
+      arguments = listOf(
+        navArgument("id") { type = NavType.StringType },
+        navArgument("tab") { type = NavType.StringType; nullable = true; defaultValue = null },
+      ),
+    ) { entry ->
       SpaceViewsScreen(
         viewModel = viewModel,
         initialSpaceId = entry.arguments?.getString("id").orEmpty(),
+        initialTab = SpaceViewTab.entries.firstOrNull { it.name == entry.arguments?.getString("tab") } ?: SpaceViewTab.People,
         onOpen = { navigation.navigate("conversation/$it") },
         onBack = { navigation.popBackStack() },
       )

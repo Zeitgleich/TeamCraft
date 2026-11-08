@@ -1375,6 +1375,11 @@ final class AppModel {
     }
   }
 
+  /// Open spaces the user isn't in (#1526); `nil` when the core couldn't answer.
+  func joinableSpaces() async -> [JoinableSpace]? {
+    await answer(.joinableSpaces)?.spaces
+  }
+
   func browseChannels(spaceId: String) async -> [BrowsableChannel] {
     await answer(.browseChannels(spaceId: spaceId))?.channels ?? []
   }

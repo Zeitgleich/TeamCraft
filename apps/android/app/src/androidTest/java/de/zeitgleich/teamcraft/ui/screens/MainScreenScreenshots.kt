@@ -15,7 +15,11 @@ import org.junit.runner.RunWith
 import de.zeitgleich.teamcraft.ui.ChatListEntry
 import de.zeitgleich.teamcraft.ui.ChatPreview
 import de.zeitgleich.teamcraft.ui.ChatTab
+import de.zeitgleich.teamcraft.ui.HomeSpace
 import de.zeitgleich.teamcraft.ui.MainActivity
+import de.zeitgleich.teamcraft.ui.homeSpaces
+import de.zeitgleich.teamcraft.ui.theme.ChatListGrouping
+import de.zeitgleich.teamcraft.ui.theme.ChatListLayout
 import de.zeitgleich.teamcraft.ui.PreviewContent
 import de.zeitgleich.teamcraft.ui.PreviewSender
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
@@ -41,6 +45,19 @@ class MainScreenScreenshots {
       shoot("home-filled-$theme", isDark, CONVERSATIONS, previews(), ChatTab.Home)
       shoot("activity-$theme", isDark, CONVERSATIONS, previews(), ChatTab.Activity)
       shoot("direct-$theme", isDark, CONVERSATIONS, previews(), ChatTab.Direct)
+      // #1526: one space at a time, a space without channels, its switcher, and the list by space.
+      shoot("space-home-$theme", isDark, CONVERSATIONS, previews(), ChatTab.Home, maybeSpace = "s-Project B")
+      shoot("space-empty-$theme", isDark, CONVERSATIONS, previews(), ChatTab.Home, maybeSpace = "s-Project C")
+      shoot("space-switcher-$theme", isDark, CONVERSATIONS, previews(), ChatTab.Home, maybeSpace = "s-Project B", isSwitching = true)
+      shoot(
+        "list-by-space-$theme",
+        isDark,
+        CONVERSATIONS,
+        previews(),
+        ChatTab.Home,
+        layout = ChatListLayout.List,
+        grouping = ChatListGrouping.BySpace,
+      )
     }
   }
 
@@ -50,6 +67,10 @@ class MainScreenScreenshots {
     conversations: List<ConversationItem>,
     previews: Map<String, ChatListEntry>,
     tab: ChatTab,
+    layout: ChatListLayout = ChatListLayout.Spaces,
+    grouping: ChatListGrouping = ChatListGrouping.Mixed,
+    maybeSpace: String? = null,
+    isSwitching: Boolean = false,
   ) {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     ActivityScenario.launch(MainActivity::class.java).use { scenario ->
@@ -65,6 +86,10 @@ class MainScreenScreenshots {
                 brand = MainBrand("Brand A", maybeLogo = null),
                 accountUserId = "",
                 accountName = "Alex Example",
+                layout = layout,
+                grouping = grouping,
+                spaces = homeSpaces(SPACES, conversations),
+                maybeRememberedSpaceId = maybeSpace,
                 tab = tab,
                 onTab = {},
                 maybeConversations = conversations,
@@ -82,6 +107,10 @@ class MainScreenScreenshots {
                 onAccount = {},
                 onNavigate = {},
               )
+              if (isSwitching) {
+                val spaces = homeSpaces(SPACES, conversations)
+                SpaceSwitcherSheet(spaces, maybeSpace, canBrowse = true, onSelect = {}, onBrowse = {}, onDismiss = {})
+              }
             }
           }
         }
@@ -110,6 +139,8 @@ class MainScreenScreenshots {
   }
 
   private companion object {
+    val SPACES = listOf(HomeSpace("s-Project A", "Project A"), HomeSpace("s-Project B", "Project B"), HomeSpace("s-Project C", "Project C"))
+
     val CONVERSATIONS = listOf(
       item("1", "Sam Doe", ConversationKind.DIRECT, unread = 2u, presence = Presence.ONLINE),
       item("2", "Kim Lee", ConversationKind.DIRECT, presence = Presence.AWAY),

@@ -15,6 +15,8 @@ struct BrowseSnapshot: Decodable, Sendable {
     let name: String
     /// Whether the user may create channels here, as the core decided it (issue #758).
     let canCreateChannels: Bool?
+    /// Version of the space's picture; without one the space shows its letter (#1526).
+    let maybeImageVersion: String?
 
     /// "Create channel" is offered: the core's word, or offered when an older core didn't say.
     var offersChannelCreation: Bool { canCreateChannels ?? true }

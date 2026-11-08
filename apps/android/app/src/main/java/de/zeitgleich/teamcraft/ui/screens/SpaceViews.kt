@@ -13,6 +13,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -36,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -73,6 +78,19 @@ enum class SpaceViewTab(@StringRes val label: Int) {
   Files(R.string.space_tab_files),
 }
 
+/** A view's icon, as the space menu and Home's header show it (#1526). */
+@Composable
+fun SpaceViewIcon(tab: SpaceViewTab) {
+  when (tab) {
+    SpaceViewTab.People -> Icon(Icons.Filled.Person, contentDescription = null)
+    SpaceViewTab.DirectMessages -> Icon(Icons.Filled.Email, contentDescription = null)
+    SpaceViewTab.Calls -> Icon(Icons.Filled.Call, contentDescription = null)
+    SpaceViewTab.Meetings -> Icon(Icons.Filled.DateRange, contentDescription = null)
+    SpaceViewTab.Saved -> Icon(painterResource(R.drawable.ic_bookmark), contentDescription = null)
+    SpaceViewTab.Files -> Icon(painterResource(R.drawable.ic_description), contentDescription = null)
+  }
+}
+
 /** The upcoming meetings of a space, soonest first; a meeting belongs to the space it was scheduled in. */
 fun meetingsOfSpace(meetings: List<Meeting>, spaceId: String): List<Meeting> =
   upcomingMeetings(meetings).filter { it.maybeSpaceId == spaceId }
@@ -86,10 +104,16 @@ fun peopleOfRoster(roster: SpaceRoster) = roster.members.filterNot { it.isBot }.
  * list and none is selected. Everything content is filtered by the core on this device.
  */
 @Composable
-fun SpaceViewsScreen(viewModel: MainViewModel, initialSpaceId: String, onOpen: (String) -> Unit, onBack: () -> Unit) {
+fun SpaceViewsScreen(
+  viewModel: MainViewModel,
+  initialSpaceId: String,
+  onOpen: (String) -> Unit,
+  onBack: () -> Unit,
+  initialTab: SpaceViewTab = SpaceViewTab.People,
+) {
   val changes by viewModel.changeCount.collectAsState()
   var spaceId by rememberSaveable { mutableStateOf(initialSpaceId) }
-  var tab by rememberSaveable { mutableStateOf(SpaceViewTab.People) }
+  var tab by rememberSaveable { mutableStateOf(initialTab) }
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
   LaunchedEffect(changes) { snapshot = viewModel.readChat { snapshot() } }
   val spaces = snapshot?.spaces.orEmpty()

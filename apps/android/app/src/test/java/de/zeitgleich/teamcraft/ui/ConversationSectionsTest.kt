@@ -227,31 +227,6 @@ class ConversationSectionsTest {
   }
 
   @Test
-  fun listedSpacesAreOneEachByName() {
-    val spaces = listedSpaces(
-      listOf(
-        item("1", "a", ConversationKind.PUBLIC, space = "Project B"),
-        item("2", "b", ConversationKind.PUBLIC, space = "Project A"),
-        item("3", "c", ConversationKind.PUBLIC, space = "Project B"),
-        item("4", "Amy", ConversationKind.DIRECT),
-      ),
-    )
-    assertEquals(listOf("Project A", "Project B"), spaces.map { it.name })
-  }
-
-  @Test
-  fun listedSpacesCarryThePictureVersion() {
-    val spaces = listedSpaces(
-      listOf(
-        item("1", "a", ConversationKind.PUBLIC, space = "Project A", imageVersion = "v2"),
-        item("2", "b", ConversationKind.PUBLIC, space = "Project B"),
-      ),
-    )
-    assertEquals(listOf("v2", null), spaces.map { it.maybeImageVersion })
-  }
-
-  /** #701: a space shows the DMs the core named for it, newest first, and nothing else. */
-  @Test
   fun aSpaceShowsItsDirectMessagesNewestFirst() {
     val conversations = listOf(
       item("1", "general", ConversationKind.PUBLIC, space = "Project A"),
@@ -264,6 +239,76 @@ class ConversationSectionsTest {
     // The channel is no DM; Carl is not with the space's people.
     assertEquals(listOf("Amy, Bob", "Bob", "Amy"), result.map { it.name })
     assertEquals(emptyList<ConversationItem>(), spaceDirectMessages(conversations, ids = emptyList()))
+  }
+
+  @Test
+  fun spaceHomeShowsOnlyTheSelectedSpacesChannels() {
+    val conversations = listOf(
+      item("1", "general", ConversationKind.PUBLIC, space = "Project A"),
+      item("2", "random", ConversationKind.PUBLIC, space = "Project B"),
+      item("3", "release", ConversationKind.PUBLIC, space = "Project B", isFavorite = true),
+      item("4", "Amy", ConversationKind.DIRECT, unread = 1u),
+      item("5", "Bob", ConversationKind.DIRECT),
+    )
+    val result = spaceHomeSections(conversations, spaceId = "s-Project A")
+    assertEquals(
+      listOf(SectionTitle.UnreadDirect, SectionTitle.Favorites, SectionTitle.SpaceChannels("s-Project A")),
+      result.map { it.title },
+    )
+    assertEquals(listOf("general"), result.last().conversations.map { it.name })
+    assertEquals("space:s-Project A", result.last().collapseKey())
+  }
+
+  @Test
+  fun aSpaceWithoutChannelsStillHasItsSection() {
+    val result = spaceHomeSections(listOf(item("1", "general", ConversationKind.PUBLIC, space = "Project A")), spaceId = "s-empty")
+    assertEquals(listOf(SectionTitle.SpaceChannels("s-empty")), result.map { it.title })
+    assertEquals(emptyList<ConversationItem>(), result.single().conversations)
+  }
+
+  @Test
+  fun spacesCountWhatIsNewInTheirChannelsAndListEmptySpaces() {
+    val spaces = listOf(HomeSpace("s-b", "beta"), HomeSpace("s-Project A", "Old name"), HomeSpace("s-empty", "Empty"))
+    val conversations = listOf(
+      item("1", "general", ConversationKind.PUBLIC, space = "Project A", unread = 2u, mentions = 1u),
+      item("2", "quiet", ConversationKind.PUBLIC, space = "Project A", unread = 4u, mentions = 2u, isMuted = true),
+      item("3", "Amy", ConversationKind.DIRECT, unread = 1u),
+    )
+    val result = homeSpaces(spaces, conversations)
+    // The name follows the channels (a rename before the next snapshot read).
+    assertEquals(listOf("beta", "Empty", "Project A"), result.map { it.name })
+    assertEquals(HomeSpace("s-Project A", "Project A", mentionCount = 3, hasUnread = true), result[2])
+    assertEquals(HomeSpace("s-empty", "Empty"), result[1])
+    assertEquals(true, hasNewElsewhere(result, "s-b"))
+    assertEquals(false, hasNewElsewhere(result, "s-Project A"))
+  }
+
+  @Test
+  fun theRememberedSpaceIsKeptWhileTheUserIsInIt() {
+    val spaces = listOf(HomeSpace("a", "Alpha"), HomeSpace("b", "Beta"))
+    assertEquals("b", selectedSpace(spaces, "b")?.id)
+    assertEquals("a", selectedSpace(spaces, "gone")?.id)
+    assertEquals("a", selectedSpace(spaces, null)?.id)
+    assertEquals(null, selectedSpace(emptyList(), "b"))
+  }
+
+  @Test
+  fun theListBySpaceListsSpacesWithoutChannelsInNameOrder() {
+    val sections = listSections(
+      listOf(
+        item("1", "general", ConversationKind.PUBLIC, space = "Project B"),
+        item("2", "Amy", ConversationKind.DIRECT),
+      ),
+      bySpace = true,
+    )
+    val spaces = listOf(HomeSpace("s-Project B", "Project B"), HomeSpace("s-a", "Project A", maybeImageVersion = "v1"))
+    val result = withEmptySpaces(sections, spaces)
+    assertEquals(
+      listOf(SectionTitle.DirectMessages, SectionTitle.Space("Project A", "s-a", "v1"), SectionTitle.Space("Project B")),
+      result.map { it.title },
+    )
+    assertEquals("space:s-a", result[1].collapseKey())
+    assertEquals(sections, withEmptySpaces(sections, spaces.take(1)))
   }
 
   private fun item(
