@@ -33,6 +33,8 @@ pub struct NewMessageEvent {
   /// The thread the message replies in.
   pub maybe_thread: Option<ThreadId>,
   pub is_urgent: bool,
+  /// The message addresses the whole conversation (`@channel`) and the sender may do that.
+  pub is_channel_mention: bool,
   /// The conversation is an integration channel (logs, monitoring).
   pub is_integration: bool,
 }
@@ -41,6 +43,8 @@ pub struct NewMessageEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
   Muted,
+  /// The recipient's quiet hours for this conversation are on.
+  QuietHours,
   DoNotDisturb,
   /// A device of the user is in use: they see the message there.
   Active,
@@ -83,6 +87,9 @@ pub struct Decision {
 pub struct RecipientState {
   pub level_is_all: bool,
   pub level_is_none: bool,
+  /// The conversation's quiet hours are on: it acts muted.
+  pub is_quiet: bool,
+  /// Named in the message, or addressed by an `@channel` the recipient lets count here.
   pub is_mentioned: bool,
   /// DMs and group DMs notify like a mention.
   pub is_direct: bool,
@@ -101,7 +108,8 @@ pub struct RecipientState {
 
 /// The routing rules (notifications.md, "Push routing"):
 ///
-/// 1. Muted (level `none`, or muted until a later time) never notifies.
+/// 1. Muted (level `none`, muted until a later time, or the conversation's quiet hours) never
+///    notifies.
 /// 2. Do-not-disturb suppresses the push unless an override applies (decided by the caller).
 /// 3. Mentions, direct messages and replies in followed threads push; otherwise only `all` channels
 ///    do, and integration channels only for mentions.
@@ -111,6 +119,9 @@ pub struct RecipientState {
 pub fn decide(state: RecipientState) -> Result<Decision, Skip> {
   if state.level_is_none {
     return Err(Skip::Muted);
+  }
+  if state.is_quiet {
+    return Err(Skip::QuietHours);
   }
   if state.is_dnd {
     return Err(Skip::DoNotDisturb);
@@ -190,6 +201,7 @@ pub async fn notify_reminder(
     mentioned: vec![reminder.user],
     maybe_thread: message.maybe_thread_id,
     is_urgent: true,
+    is_channel_mention: false,
     is_integration: false,
   };
   let recipients = state
@@ -218,7 +230,8 @@ async fn push_to_recipient(
   let verdict = decide(RecipientState {
     level_is_all: level(state, &recipient) == NotificationLevel::All,
     level_is_none: is_muted(state, &recipient, now),
-    is_mentioned: event.mentioned.contains(&recipient.user),
+    is_quiet: notifications::is_quiet(recipient.maybe_quiet_hours.as_deref(), now),
+    is_mentioned: is_mentioned(event, &recipient),
     is_direct: matches!(event.kind, ConversationKind::Dm | ConversationKind::Group),
     is_integration: event.is_integration,
     is_dnd: is_dnd(
@@ -307,7 +320,8 @@ pub async fn notify_ring(
   });
   for recipient in recipients {
     let verdict = decide_ring(
-      is_muted(&state, &recipient, now),
+      is_muted(&state, &recipient, now)
+        || notifications::is_quiet(recipient.maybe_quiet_hours.as_deref(), now),
       is_dnd(
         &recipient,
         now,
@@ -763,6 +777,14 @@ fn is_mobile(provider: &PushProvider) -> bool {
   !matches!(provider, PushProvider::WebPush | PushProvider::Unknown(_))
 }
 
+/// Named in the message, or an `@channel` in a conversation where the recipient lets them count.
+/// The routing can't see the device setting "@channel notifies me", so the default doesn't count
+/// (notifications.md, "Per-conversation filters").
+fn is_mentioned(event: &NewMessageEvent, recipient: &PushRecipientRow) -> bool {
+  event.mentioned.contains(&recipient.user)
+    || (event.is_channel_mention && recipient.channel_mentions.counts(false))
+}
+
 fn always_pushes(recipient: &PushRecipientRow) -> bool {
   PushMode::from(recipient.push_mode.clone()) == PushMode::Always
 }
@@ -828,6 +850,7 @@ mod tests {
     RecipientState {
       level_is_all: false,
       level_is_none: false,
+      is_quiet: false,
       is_mentioned: false,
       is_direct: false,
       is_integration: false,
@@ -1018,6 +1041,143 @@ mod tests {
     }
   }
 
+  mod conversation_filters {
+    use teamcraft_proto::{ChannelMentions, DndWindow, QuietHours, Weekday};
+
+    use super::*;
+
+    // 2026-01-05 (Monday) 00:00 UTC.
+    const MONDAY: i64 = 1_767_571_200;
+    // 2026-03-29 (Sunday) 00:00 UTC: Europe/Berlin moves to summer time at 01:00 UTC.
+    const DST_SUNDAY: i64 = 1_774_742_400;
+
+    #[test]
+    fn quiet_hours_silence_even_mentions_and_direct_messages() {
+      let quiet = RecipientState {
+        is_quiet: true,
+        is_mentioned: true,
+        is_direct: true,
+        ..base()
+      };
+      assert_eq!(decide(quiet), Err(Skip::QuietHours));
+    }
+
+    #[test]
+    fn channel_mentions_push_where_the_member_lets_them_count() {
+      let at_level = |policy: ChannelMentions, mentioned: &[UserId], is_channel_mention: bool| {
+        let recipient = PushRecipientRow {
+          channel_mentions: policy,
+          ..row(None)
+        };
+        let event = NewMessageEvent {
+          mentioned: mentioned.to_vec(),
+          is_channel_mention,
+          ..event()
+        };
+        is_mentioned(&event, &recipient)
+      };
+      let me = user(1);
+      // The device setting is invisible here: the default doesn't count `@channel`.
+      assert!(!at_level(ChannelMentions::Default, &[], true));
+      assert!(at_level(ChannelMentions::Notify, &[], true));
+      assert!(!at_level(ChannelMentions::Ignore, &[], true));
+      assert!(!at_level(ChannelMentions::Notify, &[], false));
+      // A message from a future version follows the default.
+      assert!(!at_level(ChannelMentions::Unknown("x".into()), &[], true));
+      // Ignoring `@channel` never hides a direct mention.
+      assert!(at_level(ChannelMentions::Ignore, &[me], true));
+    }
+
+    #[test]
+    fn quiet_hours_cross_midnight_in_the_members_zone() {
+      let quiet = night(None, 60);
+      let at =
+        |unix: i64| notifications::is_quiet(Some(&quiet), OffsetDateTime::from_unix_timestamp(unix).unwrap());
+      // 22:00–07:00 Berlin winter time on Mondays is 21:00–06:00 UTC.
+      assert!(!at(MONDAY + 20 * 3600 + 59 * 60));
+      assert!(at(MONDAY + 21 * 3600));
+      assert!(at(MONDAY + 24 * 3600 + 5 * 3600 + 59 * 60));
+      assert!(!at(MONDAY + 24 * 3600 + 6 * 3600));
+    }
+
+    #[test]
+    fn quiet_hours_follow_daylight_saving_time_by_their_zone() {
+      // 00:00–06:00 local on Sundays. On the day of the change the window ends at 04:00 UTC
+      // (06:00 summer time), not at 05:00 as the stored winter offset would say.
+      let quiet = serde_json::to_string(&QuietHours {
+        utc_offset_minutes: 60,
+        maybe_time_zone: Some("Europe/Berlin".into()),
+        windows: vec![DndWindow {
+          weekdays: vec![Weekday::Sunday],
+          start_minute: 0,
+          end_minute: 6 * 60,
+        }],
+      })
+      .unwrap();
+      let at =
+        |unix: i64| notifications::is_quiet(Some(&quiet), OffsetDateTime::from_unix_timestamp(unix).unwrap());
+      assert!(at(DST_SUNDAY + 3 * 3600 + 59 * 60));
+      assert!(!at(DST_SUNDAY + 4 * 3600));
+      // Saturday 23:30 UTC is already Sunday 00:30 local.
+      assert!(at(DST_SUNDAY - 30 * 60));
+    }
+
+    #[test]
+    fn unreadable_quiet_hours_do_not_silence() {
+      let now = OffsetDateTime::from_unix_timestamp(MONDAY).unwrap();
+      assert!(!notifications::is_quiet(Some("{\"windows\":17}"), now));
+      assert!(!notifications::is_quiet(None, now));
+    }
+
+    fn night(maybe_time_zone: Option<&str>, utc_offset_minutes: i16) -> String {
+      serde_json::to_string(&QuietHours {
+        utc_offset_minutes,
+        maybe_time_zone: maybe_time_zone.map(Into::into),
+        windows: vec![DndWindow {
+          weekdays: vec![Weekday::Monday],
+          start_minute: 22 * 60,
+          end_minute: 7 * 60,
+        }],
+      })
+      .unwrap()
+    }
+
+    fn event() -> NewMessageEvent {
+      NewMessageEvent {
+        conversation: ConversationId::from_snowflake(Snowflake::new(5).unwrap()),
+        kind: ConversationKind::Channel,
+        message: MessageId::from_snowflake(Snowflake::new(6).unwrap()),
+        sender: user(2),
+        mentioned: Vec::new(),
+        maybe_thread: None,
+        is_urgent: false,
+        is_channel_mention: false,
+        is_integration: false,
+      }
+    }
+
+    fn row(maybe_quiet_hours: Option<String>) -> PushRecipientRow {
+      PushRecipientRow {
+        user: user(1),
+        maybe_notification_level: Some(NotificationLevel::Mentions),
+        presence_pref: "auto".into(),
+        maybe_dnd_until: None,
+        maybe_muted_until: None,
+        push_mode: "away_only".into(),
+        maybe_dnd_schedule: None,
+        channel_mentions: ChannelMentions::Default,
+        maybe_quiet_hours,
+        is_following_thread: false,
+        maybe_uses_desktop_attention: None,
+        devices: Vec::new(),
+      }
+    }
+
+    fn user(raw: i64) -> UserId {
+      UserId::from_snowflake(Snowflake::new(raw).unwrap())
+    }
+  }
+
   mod do_not_disturb {
     use teamcraft_proto::{DndWindow, UrgentScope, Weekday};
 
@@ -1162,6 +1322,8 @@ mod tests {
         maybe_muted_until: None,
         push_mode: "away_only".into(),
         maybe_dnd_schedule,
+        channel_mentions: teamcraft_proto::ChannelMentions::Default,
+        maybe_quiet_hours: None,
         is_following_thread: false,
         maybe_uses_desktop_attention: None,
         devices: Vec::new(),

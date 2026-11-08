@@ -1,6 +1,6 @@
 //! Notification preferences: per user and per conversation (PLAN.md §5).
 
-use teamcraft_proto::{ConversationId, MessageId, NotificationLevel, SpaceId, UserId};
+use teamcraft_proto::{ChannelMentions, ConversationId, MessageId, NotificationLevel, SpaceId, UserId};
 use time::OffsetDateTime;
 
 use crate::database::Database;
@@ -126,6 +126,42 @@ impl Database {
       to_db(user),
       level.as_str(),
       maybe_muted_until,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// Sets whether `@channel` counts as a mention of the member in one conversation.
+  pub async fn set_conversation_channel_mentions(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    channel_mentions: &ChannelMentions,
+  ) -> Result<(), DbError> {
+    sqlx::query!(
+      "UPDATE memberships SET channel_mentions = $3 WHERE conversation_id = $1 AND user_id = $2",
+      to_db(conversation),
+      to_db(user),
+      channel_mentions.as_str(),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// Sets or (with `None`) removes the quiet hours of one membership (JSON text of `QuietHours`).
+  pub async fn set_conversation_quiet_hours(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    maybe_quiet_hours: Option<&str>,
+  ) -> Result<(), DbError> {
+    sqlx::query!(
+      "UPDATE memberships SET quiet_hours = $3 WHERE conversation_id = $1 AND user_id = $2",
+      to_db(conversation),
+      to_db(user),
+      maybe_quiet_hours,
     )
     .execute(self.pool())
     .await?;

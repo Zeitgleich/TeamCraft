@@ -242,6 +242,55 @@ mod routing {
   }
 
   #[tokio::test]
+  async fn channel_mentions_push_where_the_member_lets_them_and_quiet_hours_silence() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    set_level(&app, &s.carol, &s.channel, "mentions").await;
+    let path = format!("/conversations/{}/messages", s.channel);
+    let settings = format!("/conversations/{}/notification-settings", s.channel);
+    let everyone = |n: u8| {
+      let mut body = message_body(n, &s.alice_device);
+      body["is_channel_mention"] = json!(true);
+      body
+    };
+
+    app.post(&s.alice, &path, everyone(1)).await;
+    assert!(
+      recorder.wait_for(0).await.is_empty(),
+      "the default doesn't count @channel for pushes"
+    );
+
+    app
+      .put(
+        &s.carol,
+        &settings,
+        json!({"level": "mentions", "channel_mentions": "notify"}),
+      )
+      .await;
+    send(&app, &s.alice, &s.channel, &s.alice_device, 2).await;
+    app.post(&s.alice, &path, everyone(3)).await;
+    let pushes = recorder.wait_for(1).await;
+    assert_eq!(pushes.len(), 1, "only the @channel message");
+    assert_eq!(pushes[0].wake_up.kind, PushKind::Mention);
+
+    // Quiet all week, all day long but a minute: silent whatever the clock says.
+    let every_day = json!(["mon", "tue", "wed", "thu", "fri", "sat", "sun"]);
+    app
+      .put(
+        &s.carol,
+        &settings,
+        json!({"level": "mentions", "quiet_hours": {"utc_offset_minutes": 0,
+               "windows": [{"weekdays": every_day, "start_minute": 0, "end_minute": 1439},
+                           {"weekdays": every_day, "start_minute": 1439, "end_minute": 0}]}}),
+      )
+      .await;
+    app.post(&s.alice, &path, everyone(4)).await;
+    assert_eq!(recorder.wait_for(1).await.len(), 1, "quiet hours");
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn channel_messages_push_to_people_who_never_chose_a_level() {
     let recorder = Recorder::default();
     let Some(app) = start(&recorder).await else { return };

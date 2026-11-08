@@ -215,6 +215,77 @@ mod conversation_settings {
   }
 
   #[tokio::test]
+  async fn filters_round_trip_and_older_clients_keep_them() {
+    let app = app!();
+    let carol = member("carol");
+    let channel = channel_with(&app, &[&carol]).await;
+    let path = format!("/conversations/{channel}/notification-settings");
+    let quiet = json!({
+      "utc_offset_minutes": 60,
+      "time_zone": "Europe/Berlin",
+      "windows": [{"weekdays": ["mon", "tue"], "start_minute": 1080, "end_minute": 480}]
+    });
+
+    let put = app
+      .put(
+        &carol,
+        &path,
+        json!({"level": "mentions", "is_inherited": true, "channel_mentions": "notify", "quiet_hours": quiet}),
+      )
+      .await;
+    assert_eq!(put.status, StatusCode::OK, "{}", put.body);
+    let expected =
+      json!({"level": "mentions", "is_inherited": true, "channel_mentions": "notify", "quiet_hours": quiet});
+    assert_eq!(app.get(&carol, &path).await.body, expected);
+    let conversation = app.get(&carol, &format!("/conversations/{channel}")).await;
+    assert_eq!(conversation.body["my_membership"]["channel_mentions"], "notify");
+    assert_eq!(conversation.body["my_membership"]["quiet_hours"], quiet);
+
+    // A client from before the filters changes the level only.
+    app.put(&carol, &path, json!({"level": "all"})).await;
+    assert_eq!(
+      app.get(&carol, &path).await.body,
+      json!({"level": "all", "is_inherited": false, "channel_mentions": "notify", "quiet_hours": quiet})
+    );
+
+    // Quiet hours without windows remove them; `default` reads as absent.
+    app
+      .put(
+        &carol,
+        &path,
+        json!({"level": "all", "channel_mentions": "default", "quiet_hours": {"utc_offset_minutes": 0, "windows": []}}),
+      )
+      .await;
+    assert_eq!(
+      app.get(&carol, &path).await.body,
+      json!({"level": "all", "is_inherited": false})
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn invalid_filters_are_rejected() {
+    let app = app!();
+    let carol = member("carol");
+    let channel = channel_with(&app, &[&carol]).await;
+    let path = format!("/conversations/{channel}/notification-settings");
+    for body in [
+      json!({"level": "all", "channel_mentions": "sometimes"}),
+      json!({"level": "all", "quiet_hours": {"utc_offset_minutes": 0, "windows": [{"weekdays": [], "start_minute": 0, "end_minute": 60}]}}),
+      json!({"level": "all", "quiet_hours": {"utc_offset_minutes": 0, "windows": [{"weekdays": ["mon"], "start_minute": 60, "end_minute": 60}]}}),
+      json!({"level": "all", "quiet_hours": {"utc_offset_minutes": 0, "time_zone": "Mars/Olympus", "windows": [{"weekdays": ["mon"], "start_minute": 0, "end_minute": 60}]}}),
+    ] {
+      let put = app.put(&carol, &path, body.clone()).await;
+      assert_eq!(put.status, StatusCode::BAD_REQUEST, "{body}: {}", put.body);
+    }
+    assert_eq!(
+      app.get(&carol, &path).await.body,
+      json!({"level": "mentions", "is_inherited": true})
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn only_members_with_a_known_level_can_change_it() {
     let app = app!();
     let carol = member("carol");

@@ -7,7 +7,7 @@ use teamcraft_proto::{
 };
 use tracing::warn;
 
-use super::access::{load_conversation, require, sees_all_history};
+use super::access::{allows, load_conversation, require, sees_all_history};
 use super::convert::message_response;
 use super::{presence, threads, urgent};
 use crate::auth::AuthenticatedUser;
@@ -118,11 +118,16 @@ pub async fn send_message(
       )
       .await?;
     } else {
+      let audience = Audience {
+        members,
+        is_channel_mention: request.is_channel_mention
+          && allows(state, caller, &Permission::UseChannelMentions, &access.target()),
+      };
       deliver_stored(
         state,
         &access.view.conversation,
         &outcome.message,
-        members,
+        audience,
         maybe_thread_root.as_ref(),
         time::OffsetDateTime::now_utc(),
       )
@@ -159,13 +164,21 @@ pub(super) async fn thread_root(
     .ok_or_else(|| ApiError::InvalidRequest("thread root is not a message of this conversation".into()))
 }
 
+/// Who a stored message goes to besides those it names.
+pub(super) struct Audience {
+  pub members: HashSet<UserId>,
+  /// It addresses the whole conversation and the sender may do that
+  /// ([`SendMessageRequest::is_channel_mention`]); not stored with the message, only routed.
+  pub is_channel_mention: bool,
+}
+
 /// What follows a freshly stored message: thread records, urgent reminders, the gateway and the push.
 /// A scheduled message goes the same way at its release (docs/scheduled-messages.md).
 pub(super) async fn deliver_stored(
   state: &AppState,
   conversation: &Conversation,
   message: &StoredMessage,
-  members: HashSet<UserId>,
+  audience: Audience,
   maybe_thread_root: Option<&StoredMessage>,
   now: time::OffsetDateTime,
 ) -> Result<(), ApiError> {
@@ -173,7 +186,7 @@ pub(super) async fn deliver_stored(
     state,
     &conversation.kind,
     message,
-    members,
+    audience.members,
     maybe_thread_root,
     now,
   )
@@ -188,6 +201,7 @@ pub(super) async fn deliver_stored(
       mentioned: message.mentioned_user_ids.clone(),
       maybe_thread: message.maybe_thread_id,
       is_urgent: message.is_urgent,
+      is_channel_mention: audience.is_channel_mention,
       is_integration: conversation.is_integration,
     },
   ));

@@ -20,7 +20,7 @@ use teamcraft_proto::{
 use time::OffsetDateTime;
 use tracing::warn;
 
-use super::access::{ConversationAccess, load_conversation, require};
+use super::access::{ConversationAccess, allows, load_conversation, require};
 use super::convert::{message_response, unix_millis};
 use super::messages::{self, MAX_CONTENT_KEY_ID_BYTES};
 use crate::auth::AuthenticatedUser;
@@ -216,11 +216,16 @@ pub async fn send_scheduled_now(
   {
     ReleaseOutcome::Released(outcome) => {
       if outcome.is_new {
+        let audience = messages::Audience {
+          members,
+          is_channel_mention: entry.is_channel_mention
+            && allows(state, caller, &Permission::UseChannelMentions, &access.target()),
+        };
         messages::deliver_stored(
           state,
           &access.view.conversation,
           &outcome.message,
-          members,
+          audience,
           maybe_thread_root.as_ref(),
           OffsetDateTime::now_utc(),
         )
@@ -323,11 +328,15 @@ async fn release_at_time(
   {
     ReleaseOutcome::Released(outcome) => {
       if outcome.is_new {
+        let audience = messages::Audience {
+          members,
+          is_channel_mention: entry.is_channel_mention && check.may_mention_channel,
+        };
         messages::deliver_stored(
           state,
           &check.access.view.conversation,
           &outcome.message,
-          members,
+          audience,
           check.maybe_thread_root.as_ref(),
           now,
         )
@@ -346,6 +355,8 @@ async fn release_at_time(
 struct ReleaseCheck {
   access: ConversationAccess,
   maybe_thread_root: Option<teamcraft_db::StoredMessage>,
+  /// The sender may still address the whole conversation.
+  may_mention_channel: bool,
 }
 
 /// Everything a send would check, now that nobody is signed in: the sender's account as it is now,
@@ -409,9 +420,11 @@ async fn check_release(
   {
     return Ok(Err(ScheduledHoldReason::StaleEpoch));
   }
+  let may_mention_channel = allows(state, &sender, &Permission::UseChannelMentions, &access.target());
   Ok(Ok(ReleaseCheck {
     access,
     maybe_thread_root,
+    may_mention_channel,
   }))
 }
 
@@ -581,6 +594,7 @@ fn sealed_parts<'a>(sealed: &'a SealedScheduledMessage, mentions: &'a [UserId]) 
     sender_device_id: sealed.device_id,
     mentioned_user_ids: mentions,
     is_urgent: sealed.is_urgent,
+    is_channel_mention: sealed.is_channel_mention,
     content_key_id: sealed.content_key_id.as_slice(),
     ciphertext: sealed.ciphertext.as_slice(),
     mls_epoch: sealed.mls_epoch,
@@ -630,6 +644,7 @@ fn response(state: &AppState, stored: &StoredScheduledMessage) -> ScheduledMessa
     ciphertext: Base64Bytes::new(stored.ciphertext.clone()),
     mentioned_user_ids: stored.mentioned_user_ids.clone(),
     is_urgent: stored.is_urgent,
+    is_channel_mention: stored.is_channel_mention,
     mls_epoch: stored.mls_epoch,
     due_at: unix_millis(stored.due_at),
     version: stored.version,

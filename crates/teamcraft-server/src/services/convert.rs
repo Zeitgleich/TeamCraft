@@ -150,6 +150,8 @@ pub fn my_membership(membership: &Membership) -> MyMembership {
     maybe_last_read_message_id: membership.maybe_last_read_message_id,
     maybe_muted_until: membership.maybe_muted_until.map(unix_millis),
     is_notification_inherited: membership.is_notification_inherited,
+    channel_mentions: membership.channel_mentions.clone(),
+    maybe_quiet_hours: super::notifications::quiet_hours(membership.maybe_quiet_hours.as_deref()),
     reactions_seen: membership.reactions_seen.clone(),
   }
 }

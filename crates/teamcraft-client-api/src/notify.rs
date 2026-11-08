@@ -2,8 +2,7 @@
 //! explicit mentions only, while keywords and the first name need the decrypted text. Desktop
 //! (`teamcraft-ui`'s notifier) and the mobile apps (`teamcraft-ffi`) share these rules.
 
-/// Words that notify the whole conversation.
-pub const CHANNEL_MENTIONS: [&str; 3] = ["channel", "here", "all"];
+pub use teamcraft_proto::{CHANNEL_MENTIONS, addresses_everyone};
 
 /// The user's mention preferences, with who the user is.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -11,6 +10,8 @@ pub struct MentionRules<'a> {
   pub username: &'a str,
   pub display_name: &'a str,
   pub first_name_is_mention: bool,
+  /// Whether `@channel` mentions the user here: the general choice, or the conversation's own
+  /// (`ChannelMentions::counts`).
   pub channel_mentions_notify: bool,
   pub keywords: &'a [String],
 }
@@ -23,7 +24,7 @@ pub fn is_mentioned(body: &str, rules: &MentionRules) -> bool {
   if words.contains(&username.as_str()) {
     return true;
   }
-  if rules.channel_mentions_notify && has_channel_mention(&words) {
+  if rules.channel_mentions_notify && addresses_everyone(body) {
     return true;
   }
   let first_name = rules
@@ -49,19 +50,13 @@ pub fn needs_channel_confirmation(body: &str, member_count: usize, confirm_over:
   if confirm_over == 0 || member_count <= confirm_over as usize {
     return false;
   }
-  has_channel_mention(&words(&body.to_lowercase()))
+  addresses_everyone(body)
 }
 
 fn words(lower: &str) -> Vec<&str> {
   lower
     .split(|c: char| !c.is_alphanumeric() && c != '@' && c != '_' && c != '-')
     .collect()
-}
-
-fn has_channel_mention(words: &[&str]) -> bool {
-  CHANNEL_MENTIONS
-    .iter()
-    .any(|mention| words.contains(&format!("@{mention}").as_str()))
 }
 
 #[cfg(test)]
