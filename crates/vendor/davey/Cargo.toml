@@ -10,10 +10,10 @@ keywords = ["MLS", "Encryption", "E2EE", "Discord", "DAVE"]
 edition = "2024"
 
 [dependencies]
-openmls = { features = ["js"], version = "0.8.1" }
-openmls_basic_credential = "0.5.0"
-openmls_rust_crypto = "0.5.1"
-openmls_traits = "0.5.0"
+openmls = { features = ["js"], version = "0.9.1" }
+openmls_basic_credential = "0.6.0"
+openmls_rust_crypto = "0.6.0"
+openmls_traits = "0.6.0"
 tracing = "0.1.41"
 thiserror = "2.0.12"
 # Crypto utils
@@ -42,3 +42,17 @@ pyo3 = { version = "0.29.3", optional = true }
 default = []
 napi = ["dep:napi", "dep:napi-derive"]
 pyo3 = ["dep:pyo3"]
+
+# TeamCraft vendoring: own workspace root, so the copy can be built and tested on its own.
+[workspace]
+
+# From the upstream workspace root (not part of the crate): scrypt is very slow unoptimised, and
+# tls_codec's debug assertions panic on truncated input instead of returning an error.
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3
+
+[profile.dev.package.tls_codec]
+debug-assertions = false

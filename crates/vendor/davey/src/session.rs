@@ -734,28 +734,39 @@ impl DaveSession {
       return Err(ProcessCommitError::UnexpectedSenderType);
     };
 
+    // openmls 0.9 reports an own commit that matches the pending one (by confirmation tag) as
+    // `OwnPendingCommit`, rejects a mismatching own commit with an update path as
+    // `OwnCommitMismatch`, and stages a mismatching own commit without one like anybody else's.
+    // DAVE accepts an own commit only if it is byte for byte the pending commit.
+    let is_from_self = committer == group.own_leaf_index();
     match group.process_message(&self.provider, protocol_message) {
       Ok(message) => match message.into_content() {
+        ProcessedMessageContent::StagedCommitMessage(_) if is_from_self => {
+          return Err(ProcessCommitError::OwnCommitMismatch);
+        }
         ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
           validate_staged_commit(group, &staged_commit, committer)?;
           group.merge_staged_commit(&self.provider, *staged_commit)?;
         }
+        ProcessedMessageContent::OwnPendingCommit => {
+          // This is our own commit, so merge our pending commit instead.
+          match &self.pending_commit_bytes {
+            Some(expected) if expected.as_slice() == commit => {
+              debug!("Found own commit, merging pending commit instead.");
+              let Some(staged_commit) = group.pending_commit() else {
+                return Err(ProcessCommitError::NoPendingCommit);
+              };
+              validate_staged_commit(group, staged_commit, group.own_leaf_index())?;
+              group.merge_pending_commit(&self.provider)?;
+            }
+            Some(_) => return Err(ProcessCommitError::OwnCommitMismatch),
+            None => return Err(ProcessCommitError::NoPendingCommit),
+          }
+        }
         _ => return Err(ProcessCommitError::ProcessedMessageNotStagedCommit),
       },
-      Err(ProcessMessageError::InvalidCommit(StageCommitError::OwnCommit)) => {
-        // This is our own commit, so merge our pending commit instead.
-        match &self.pending_commit_bytes {
-          Some(expected) if expected.as_slice() == commit => {
-            debug!("Found own commit, merging pending commit instead.");
-            let Some(staged_commit) = group.pending_commit() else {
-              return Err(ProcessCommitError::NoPendingCommit);
-            };
-            validate_staged_commit(group, staged_commit, group.own_leaf_index())?;
-            group.merge_pending_commit(&self.provider)?;
-          }
-          Some(_) => return Err(ProcessCommitError::OwnCommitMismatch),
-          None => return Err(ProcessCommitError::NoPendingCommit),
-        }
+      Err(ProcessMessageError::InvalidCommit(StageCommitError::OwnCommitMismatch)) => {
+        return Err(ProcessCommitError::OwnCommitMismatch);
       }
       Err(error) => return Err(ProcessCommitError::ProcessingMessageFailed(error)),
     }
