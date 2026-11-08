@@ -236,6 +236,11 @@ pub struct Space {
   /// The user's role in the space; `None` where the user only belongs to channels moved into it.
   #[serde(default)]
   pub maybe_my_role: Option<SpaceRole>,
+  /// The user's DMs and group DMs whose other people all belong to the space (#701), as far as
+  /// the device knows the space's members. Each is still the one conversation Chats lists; the
+  /// space only shows it too.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub direct_conversations: Vec<ConversationId>,
 }
 
 impl Space {
@@ -425,6 +430,7 @@ impl JoinableSpace {
       deleted_channel_count: 0,
       can_create_channels: false,
       maybe_my_role: None,
+      direct_conversations: Vec::new(),
     }
   }
 }

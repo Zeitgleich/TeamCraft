@@ -20,6 +20,8 @@ thread_local! {
 pub fn install() {
   std::panic::set_hook(Box::new(|info| {
     console_error_panic_hook::hook(info);
+    #[cfg(target_arch = "wasm32")]
+    crate::crash_reports::capture_panic(info);
     show(info);
   }));
 }

@@ -5,11 +5,11 @@
 use serde_json::json;
 use teamcraft_db::StoredSetting;
 use teamcraft_proto::{
-  AppLinkSettings, DpopPolicy, EmailDigestSettings, GatewayEvent, HealthAlertSettings, HolidaySettings,
-  IntegrationSettings, LimitSettings, LocalAccountSettings, MailTextSettings, MeetingMailSettings,
-  NotificationLevel, NotificationRuntimeSettings, Permission, RuntimeSettingsKey, RuntimeSettingsResponse,
-  RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource, ShareSettings,
-  SignInMethod, SignInPageSettings, Target,
+  AppLinkSettings, CrashReportSettings, DpopPolicy, EmailDigestSettings, GatewayEvent, HealthAlertSettings,
+  HolidaySettings, IntegrationSettings, LimitSettings, LocalAccountSettings, MailTextSettings,
+  MeetingMailSettings, NotificationLevel, NotificationRuntimeSettings, Permission, RuntimeSettingsKey,
+  RuntimeSettingsResponse, RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource,
+  ShareSettings, SignInMethod, SignInPageSettings, Target,
 };
 use tracing::{error, warn};
 
@@ -25,7 +25,7 @@ use crate::state::{AppState, Settings};
 
 /// Prefix of the rows in `server_settings`.
 const NAME_PREFIX: &str = "settings.";
-const ALL_KEYS: [RuntimeSettingsKey; 14] = [
+const ALL_KEYS: [RuntimeSettingsKey; 15] = [
   RuntimeSettingsKey::ServerRules,
   RuntimeSettingsKey::Notifications,
   RuntimeSettingsKey::EmailDigest,
@@ -40,6 +40,7 @@ const ALL_KEYS: [RuntimeSettingsKey; 14] = [
   RuntimeSettingsKey::AppLinks,
   RuntimeSettingsKey::HealthAlerts,
   RuntimeSettingsKey::Holidays,
+  RuntimeSettingsKey::CrashReports,
 ];
 const MAX_TEXT_CHARS: usize = 5000;
 /// Longest help text of the sign-in page, per language.
@@ -207,6 +208,8 @@ async fn response(state: &AppState) -> Result<RuntimeSettingsResponse, ApiError>
     .maybe_feed_url
     .as_deref()
     .map(|url| state.holiday_feed.status(url));
+  response.maybe_publisher_crash_reports_host =
+    state.crash_relay.publisher().map(|dsn| dsn.host().to_owned());
   Ok(response)
 }
 
@@ -248,6 +251,7 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
     RuntimeSettingsSection::AppLinks(values) => settings.app_links = values.clone(),
     RuntimeSettingsSection::HealthAlerts(values) => settings.health_alerts = values.clone(),
     RuntimeSettingsSection::Holidays(values) => settings.holidays = values.clone(),
+    RuntimeSettingsSection::CrashReports(values) => settings.crash_reports = values.clone(),
     RuntimeSettingsSection::ServerRules(rules) => {
       settings.policy.invites_require_verified_email = rules.invites_require_verified_email;
       settings.policy.default_spaces.clone_from(&rules.default_spaces);
@@ -360,6 +364,8 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
     app_links: settings.app_links.clone(),
     health_alerts: settings.health_alerts.clone(),
     holidays: settings.holidays.clone(),
+    crash_reports: settings.crash_reports.clone(),
+    maybe_publisher_crash_reports_host: None,
     maybe_holiday_feed: None,
     server_rules: ServerRulesSettings {
       invites_require_verified_email: settings.policy.invites_require_verified_email,
@@ -474,6 +480,7 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
     RuntimeSettingsSection::AppLinks(values) => check_app_links(values),
     RuntimeSettingsSection::HealthAlerts(values) => check_health_alerts(values),
     RuntimeSettingsSection::Holidays(values) => check_holidays(values),
+    RuntimeSettingsSection::CrashReports(values) => check_crash_reports(values),
     RuntimeSettingsSection::TokenBinding(values) => {
       if matches!(values.dpop_policy, DpopPolicy::Unknown(_)) {
         return Err(ApiError::InvalidRequest(
@@ -743,6 +750,13 @@ fn check_health_alerts(values: &HealthAlertSettings) -> Result<(), ApiError> {
 }
 
 /// At least one known method, each once; short help texts; an https help link.
+/// docs/crash-reports.md: a DSN the apps can use, a percentage, a plain environment name.
+fn check_crash_reports(values: &CrashReportSettings) -> Result<(), ApiError> {
+  values
+    .check()
+    .map_err(|error| ApiError::InvalidRequest(error.to_string()))
+}
+
 /// What goes into a file another company's servers read: nothing but well-formed identifiers.
 fn check_app_links(values: &AppLinkSettings) -> Result<(), ApiError> {
   check_count("android_package_names", values.android_package_names.len())?;
@@ -910,6 +924,7 @@ mod tests {
       RuntimeSettingsSection::AppLinks(original.app_links.clone()),
       RuntimeSettingsSection::HealthAlerts(original.health_alerts.clone()),
       RuntimeSettingsSection::Holidays(original.holidays.clone()),
+      RuntimeSettingsSection::CrashReports(original.crash_reports.clone()),
     ];
     assert_eq!(sections.len(), ALL_KEYS.len());
     let mut applied = Settings::default();
@@ -1006,6 +1021,7 @@ mod tests {
       RuntimeSettingsSection::AppLinks(defaults.app_links),
       RuntimeSettingsSection::HealthAlerts(defaults.health_alerts),
       RuntimeSettingsSection::Holidays(defaults.holidays),
+      RuntimeSettingsSection::CrashReports(defaults.crash_reports),
     ] {
       assert!(validate(&section).is_ok(), "{}", section.key());
     }

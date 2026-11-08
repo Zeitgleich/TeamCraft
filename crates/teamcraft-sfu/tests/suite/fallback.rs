@@ -781,9 +781,17 @@ mod session_end {
 mod slow_reader {
   use super::*;
 
+  /// Upper bound for the whole test. Only a hang guard: the test ends when the SFU drops the client.
+  const HANG_GUARD: Duration = Duration::from_secs(120);
+
   /// A participant that sends pings and never reads the answers: once its socket's buffers are full
   /// the writer stalls, and the write timeout drops the session. That the media queue's bound holds
-  /// meanwhile is tested with paused time in `teamcraft-media`'s `fallback_socket`.
+  /// meanwhile is tested with paused time in `teamcraft-media`'s `fallback_socket`, and the timeout
+  /// itself with a stalled sink in the same file.
+  ///
+  /// Both ends' buffers are pinned small, so the pipe holds a few KiB whatever the kernel would
+  /// autotune: the stall is reached after a bounded number of pings, not after a wall-clock
+  /// deadline that a loaded runner can miss. The test waits for the drop itself.
   #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
   async fn a_client_that_stops_reading_is_dropped() {
     let mut config = SfuConfig::default();
@@ -791,23 +799,23 @@ mod slow_reader {
     config.fallback.socket_send_buffer_bytes = 4096;
     config.reconnect_grace = Duration::ZERO;
     let sfu = start_sfu(config).await;
-    let mut sluggard = sfu.connect_socket().await;
+    let mut sluggard = sfu.connect_socket_with_receive_buffer(4096).await;
     send_join(&mut sluggard, &token(BOB)).await;
     wait_for_joined(&mut sluggard).await;
     let ping = serde_json::to_vec(&CallClientMessage::Ping { id: 1 }).unwrap();
     let frame = Bytes::from(FallbackFrame::Signal(&ping).encode());
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while sfu.control.room_stats().participants == 1 && Instant::now() < deadline {
-      for _ in 0..256 {
-        let _ = sluggard.feed(Message::Binary(frame.clone())).await;
+    let dropped = tokio::time::timeout(HANG_GUARD, async {
+      while sfu.control.room_stats().participants == 1 {
+        for _ in 0..256 {
+          // A refused write means the SFU already closed the connection.
+          let _ = sluggard.feed(Message::Binary(frame.clone())).await;
+        }
+        let _ = sluggard.flush().await;
+        tokio::task::yield_now().await;
       }
-      let _ = sluggard.flush().await;
-      tokio::task::yield_now().await;
-    }
-    assert!(
-      Instant::now() < deadline,
-      "the SFU kept the client that doesn't read"
-    );
+    })
+    .await;
+    assert!(dropped.is_ok(), "the SFU kept the client that doesn't read");
   }
 }
 
@@ -1422,6 +1430,27 @@ impl RunningSfu {
 
   async fn connect_socket(&self) -> Socket {
     self.try_connect_socket(None).await.unwrap()
+  }
+
+  /// Like [`Self::connect_socket`], with the client's receive buffer pinned to `bytes` before it
+  /// connects, so the kernel can't autotune it up to megabytes.
+  async fn connect_socket_with_receive_buffer(&self, bytes: usize) -> Socket {
+    let socket = socket2::Socket::new(
+      socket2::Domain::for_address(self.fallback_addr),
+      socket2::Type::STREAM,
+      None,
+    )
+    .unwrap();
+    socket.set_recv_buffer_size(bytes).unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let stream = tokio::net::TcpSocket::from_std_stream(socket.into())
+      .connect(self.fallback_addr)
+      .await
+      .unwrap();
+    let url = format!("ws://{}{CALL_FALLBACK_PATH}", self.fallback_addr);
+    let request = url.into_client_request().unwrap();
+    let stream = tokio_tungstenite::MaybeTlsStream::Plain(stream);
+    tokio_tungstenite::client_async(request, stream).await.unwrap().0
   }
 
   async fn try_connect_socket(

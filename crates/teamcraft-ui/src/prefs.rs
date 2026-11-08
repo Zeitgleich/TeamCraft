@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_client_api::color_theme::ColorTheme;
+use teamcraft_client_api::files_query::{FileSort, StarredFile};
 use teamcraft_client_api::message_sound::{MessageSound, OwnSoundLimits};
 use teamcraft_proto::{ChannelMentions, DndWindow, Weekday};
 
@@ -413,6 +414,9 @@ pub struct PrivacyPrefs {
   pub share_typing: bool,
   /// Minutes of inactivity before status turns to away; `None` never.
   pub away_after_minutes: Option<u32>,
+  /// Send crash reports when the instance has them on (docs/crash-reports.md); counts only while
+  /// the instance allows opting out.
+  pub send_crash_reports: bool,
 }
 
 impl Default for PrivacyPrefs {
@@ -421,6 +425,7 @@ impl Default for PrivacyPrefs {
       share_read_receipts: true,
       share_typing: true,
       away_after_minutes: Some(DEFAULT_AWAY_AFTER_MINUTES),
+      send_crash_reports: true,
     }
   }
 }
@@ -830,6 +835,9 @@ pub struct SidebarPrefs {
   /// in their normal place and only the bold name and the count mark them, so the list doesn't
   /// move under the pointer while the user works through them (#890).
   pub shows_unreads_section: bool,
+  /// A space lists the DMs and group DMs with its people too, in a section of its own (#701). They
+  /// stay in Chats; the space's rail entry counts their unread messages.
+  pub shows_space_dms: bool,
 }
 
 impl Default for SidebarPrefs {
@@ -843,6 +851,7 @@ impl Default for SidebarPrefs {
       is_grouped_by_space: false,
       reopen_last_conversation: true,
       shows_unreads_section: false,
+      shows_space_dms: true,
     }
   }
 }
@@ -887,6 +896,15 @@ pub struct OnboardingPrefs {
   pub is_dismissed: bool,
 }
 
+/// The Files view (issue #301): its order and the starred files, both following the account.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FilesPrefs {
+  pub sort: FileSort,
+  /// At most `files_query::MAX_STARRED_FILES`, oldest star first.
+  pub starred: Vec<StarredFile>,
+}
+
 /// Everything in one place, stored as a single JSON document.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -898,6 +916,7 @@ pub struct Preferences {
   pub sidebar: SidebarPrefs,
   pub composer: ComposerPrefs,
   pub onboarding: OnboardingPrefs,
+  pub files: FilesPrefs,
 }
 
 impl Preferences {

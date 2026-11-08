@@ -58,6 +58,8 @@ settings-send-ctrl-enter = { $send } (Enter für eine neue Zeile)
 settings-join-leave = Beitritts- und Austrittsmeldungen anzeigen
 settings-unreads-group = Ungelesene Unterhaltungen in einem eigenen Bereich oben anzeigen
 settings-unreads-group-hint = Aus: Jede Unterhaltung bleibt an ihrem Platz, Ungelesenes erkennst du am fetten Namen und an der Zahl. An: Die Unterhaltung, die du öffnest, bleibt im Bereich, bis du eine andere öffnest.
+settings-space-dms = Direktnachrichten mit Mitgliedern eines Space auch im Space anzeigen
+settings-space-dms-hint = Sie bleiben auch in den Chats. Die Ungelesen-Zahl des Space zählt sie mit.
 shortcut-switcher = Alles durchsuchen
 shortcut-settings = Einstellungen öffnen
 shortcut-shortcuts = Tastenkürzel anzeigen
@@ -722,6 +724,22 @@ settings-error-health-backup-hours = Gib 1 bis 720 Stunden ein.
 settings-error-health-days = Gib 1 bis 365 Tage ein.
 settings-error-health-percent = Gib 50 bis 99 Prozent ein.
 
+settings-group-crash_reports = Absturzberichte
+settings-group-crash_reports-hint = Wohin die Apps Absturz- und Fehlerberichte senden: standardmäßig an den Dienst des Herausgebers (wer die Apps und diesen Server gebaut hat) oder an ein eigenes Backend mit Sentry-Protokoll, etwa GlitchTip. Berichte enthalten Stacktraces, Versionen und eine zufällige Installations-ID, niemals Nachrichten, Namen, Dateinamen oder Schlüssel. Jede Person kann sie in ihren Datenschutzeinstellungen abschalten.
+settings-f-mode = Absturzberichte gehen an
+settings-crash-mode-publisher = Den Dienst des Herausgebers ({ $host })
+settings-crash-mode-publisher-none = Den Dienst des Herausgebers (in diesem Build keiner: es wird nichts gesendet)
+settings-crash-mode-own = Ein eigenes Backend (die DSN unten)
+settings-crash-mode-off = Nirgendwohin: Absturzberichte sind aus
+settings-f-dsn = DSN des Backend-Projekts
+settings-f-sample_percent = Anteil gesendeter behandelter Fehler (Abstürze werden immer gesendet)
+settings-f-environment = Name der Umgebung
+settings-f-allows_opt_out = Personen dürfen Absturzberichte in ihren Datenschutzeinstellungen abschalten
+settings-f-shows_notice = Beim ersten Start darauf hinweisen, dass die App Absturzberichte sendet
+settings-error-dsn = Gib die DSN des Projekts ein, etwa https://key@errors.example.com/1.
+settings-error-crash-percent = Gib 0 bis 100 Prozent ein.
+settings-error-crash-environment = Verwende 1 bis 64 Kleinbuchstaben, Ziffern, „-“, „_“ oder „.“.
+
 ## Problem melden (docs/bug-reports.md)
 report-menu = Problem melden…
 report-title = Problem melden
@@ -813,3 +831,11 @@ settings-holiday-feed-error-not_a_calendar = Er ist kein Kalender (vielleicht ei
 settings-holiday-feed-error-malformed = Der Kalender ist kaputt oder abgeschnitten.
 settings-holiday-feed-error-empty = Der Kalender hat keine ganztägigen Termine.
 settings-holiday-feed-error-too_many = Der Kalender hat mehr als 5000 Feiertage.
+
+## Absturzberichte (docs/crash-reports.md)
+crash-reports-heading = Absturzberichte
+crash-reports-send = Absturzberichte senden
+crash-reports-send-hint = Wenn die App abstürzt oder auf einen Fehler stößt, sendet sie einen Bericht an den Absturzbericht-Dienst deiner Organisation: wo in der App es passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.
+crash-reports-required-hint = Deine Organisation schreibt Absturzberichte vor. Sie enthalten, wo in der App ein Absturz passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.
+crash-reports-notice = Diese App sendet Absturzberichte an deine Organisation: wo ein Absturz passiert ist und die App-Version, niemals Nachrichten, Namen oder Dateien.
+crash-reports-notice-settings = Einstellungen

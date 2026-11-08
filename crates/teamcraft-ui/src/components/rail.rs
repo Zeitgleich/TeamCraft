@@ -6,7 +6,7 @@ use crate::channel_access::is_guest;
 use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::entry_menu::EntryMenuTrigger;
 use crate::components::icons::{Icon, IconName};
-use crate::components::rail_menus::{RailCreateMenu, RailFocusMenu};
+use crate::components::rail_menus::RailCreateMenu;
 use crate::components::space_tile::SpaceTileContent;
 use crate::entry_actions::MenuEntry;
 use crate::i18n::use_i18n;
@@ -22,8 +22,8 @@ const RAIL_BADGE_CAP: u32 = 99;
 /// the sidebar's place like a space's (#752; followed threads are one of its filters). In the
 /// grouped sidebar one entry stands for all spaces.
 ///
-/// Only the spaces (with "add space" at their end) scroll; the destinations above and Focus below
-/// stay in place (#652). Where spaces are scrolled out of sight, the scroller's edge fades.
+/// Only the spaces (with "add space" at their end) scroll; the destinations above stay in place
+/// (#652). Focus mode sits beside the account menu in the top bar (#299). Where spaces are scrolled out of sight, the scroller's edge fades.
 #[component]
 pub fn SpaceRail() -> impl IntoView {
   let state = use_app_state();
@@ -95,9 +95,6 @@ pub fn SpaceRail() -> impl IntoView {
         </Show>
       </div>
       </Show>
-      <div class="rail-bottom">
-        <RailFocusMenu />
-      </div>
     </nav>
   }
 }
@@ -278,10 +275,11 @@ fn RailBadgeView(badge: Memo<RailBadge>) -> impl IntoView {
   }
 }
 
-/// What the rail entry of `space` counts: only the space's own channels, DMs have their own entry.
-/// It reads through `state`, so a memo of it follows every new or read message.
+/// What the rail entry of `space` counts: what its sidebar lists, its channels and the DMs with its
+/// people (#701). Chats counts those DMs too; the app's badge counts each conversation once. It
+/// reads through `state`, so a memo of it follows every new or read message.
 fn space_badge(state: AppState, space: SpaceId) -> RailBadge {
-  RailBadge::of(&state.with_mutes(state.read(|backend| backend.space_conversations(space))))
+  RailBadge::of(&state.with_mutes(state.space_list(space)))
 }
 
 #[component]
@@ -424,10 +422,39 @@ mod tests {
     );
   }
 
+  /// #701: with the setting on, the space's badge counts the DMs it lists too (the demo's people
+  /// are in every space).
+  #[test]
+  fn a_space_counts_the_dms_it_lists() {
+    let (_, state) = demo_state();
+    let (_, other) = spaces(state);
+    let channels = space_badge(state, other);
+    state
+      .settings
+      .prefs
+      .update(|prefs| prefs.sidebar.shows_space_dms = true);
+    let dms =
+      RailBadge::of(&state.with_mutes(state.read(|backend| backend.space_direct_conversations(other))));
+    assert!(dms.count > 0);
+    assert_eq!(
+      space_badge(state, other),
+      RailBadge {
+        count: channels.count + dms.count,
+        mention_count: channels.mention_count + dms.mention_count
+      }
+    );
+  }
+
+  /// The demo, its spaces without the DMs they list (#701), so the badges count channels only.
   fn demo_state() -> (Rc<MockBackend>, AppState) {
     let mock = Rc::new(MockBackend::new(NOW));
     let backend: Rc<dyn Backend> = mock.clone();
-    (mock, AppState::new(backend, Settings::for_tests(), None))
+    let state = AppState::new(backend, Settings::for_tests(), None);
+    state
+      .settings
+      .prefs
+      .update(|prefs| prefs.sidebar.shows_space_dms = false);
+    (mock, state)
   }
 
   /// The demo's two spaces: Project A, then Project B.

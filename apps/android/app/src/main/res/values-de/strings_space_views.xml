@@ -3,6 +3,8 @@
   <string name="space_views_open">Personen, Anrufe, Meetings, gespeicherte Nachrichten und Dateien anzeigen</string>
   <string name="space_views_switch">Space wechseln</string>
   <string name="space_tab_people">Personen</string>
+  <string name="space_tab_direct_messages">Direktnachrichten</string>
+  <string name="space_direct_messages_empty">Direktnachrichten mit Personen aus diesem Space erscheinen hier. Sie bleiben auch in deinen Chats.</string>
   <string name="space_tab_calls">Anrufe</string>
   <string name="space_tab_meetings">Meetings</string>
   <string name="space_tab_saved">Gespeichert</string>

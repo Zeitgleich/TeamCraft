@@ -44,6 +44,8 @@ web-sys = { version = "0.3", features = [
   "AudioNode", "AudioScheduledSourceNode", "BaseAudioContext",
   # Decoding the user's own message sound without opening the audio device (message_sounds/page.rs).
   "OfflineAudioContext",
+  # Crash reports of the page (crash_reports.rs, docs/crash-reports.md): uncaught script errors.
+  "ErrorEvent", "PromiseRejectionEvent",
   # Recording voice messages in the browser (voice_recorder.rs, #204).
   "MediaRecorder", "MediaRecorderOptions", "BlobEvent", "MediaDevices", "MediaStreamConstraints",
   "MediaTrackConstraints", "MediaStreamTrack", "MediaStreamTrackState", "RecordingState", "AnalyserNode", "MediaStreamAudioSourceNode",

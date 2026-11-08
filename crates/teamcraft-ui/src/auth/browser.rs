@@ -1542,6 +1542,7 @@ mod tests {
         maybe_dpop_nonce: None,
         maybe_date: Some("Sun, 06 Nov 1994 08:49:37 GMT".to_owned()),
         maybe_age: maybe_age.map(str::to_owned),
+        maybe_retry_after: None,
         body: Vec::new(),
       };
       assert!(fresh_clock_offset(&answer(None)).is_some());

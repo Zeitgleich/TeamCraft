@@ -128,10 +128,12 @@ synced_prefs! {
   "sidebar.is_grouped_by_space" => sidebar.is_grouped_by_space,
   "sidebar.reopen_last_conversation" => sidebar.reopen_last_conversation,
   "sidebar.shows_unreads_section" => sidebar.shows_unreads_section,
+  "sidebar.shows_space_dms" => sidebar.shows_space_dms,
   "composer.convert_emoticons" => composer.convert_emoticons,
   "composer.show_formatting" => composer.show_formatting,
   "privacy.share_typing" => privacy.share_typing,
   "privacy.away_after_minutes" => privacy.away_after_minutes,
+  "privacy.send_crash_reports" => privacy.send_crash_reports,
   "notifications.desktop" => notifications.desktop,
   "notifications.push_delay_minutes" => notifications.push_delay_minutes,
   "notifications.first_name_is_mention" => notifications.first_name_is_mention,
@@ -151,6 +153,8 @@ synced_prefs! {
   "calls.status_sounds" => calls.status_sounds,
   "onboarding.done" => onboarding.done,
   "onboarding.is_dismissed" => onboarding.is_dismissed,
+  "files.sort" => files.sort,
+  "files.starred" => files.starred,
 }
 
 /// Preferences the server keeps, because it enforces them (`notify_sync`). They already follow the

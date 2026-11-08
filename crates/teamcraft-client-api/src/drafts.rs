@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use teamcraft_proto::AttachmentId;
+
 use crate::model::{ConversationId, MessageId, ThreadId, TimestampMs};
 
 /// One unsent text, in a conversation or in one of its threads.
@@ -27,6 +29,16 @@ pub struct DraftItem {
   /// Files attached to it (#1220); a draft may hold files and no text.
   #[serde(default, skip_serializing_if = "is_zero")]
   pub file_count: u32,
+}
+
+/// What a composer's message replies to, kept with the draft on this device (#1115). IDs only: the
+/// quote is read from the local store when the composer comes back.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DraftReply {
+  pub message: MessageId,
+  /// The one picture of an album the reply answers.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_attachment: Option<AttachmentId>,
 }
 
 /// A file attached to a draft (#1220), as the composer shows it. Files that went up travel with

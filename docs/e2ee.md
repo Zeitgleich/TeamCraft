@@ -3691,6 +3691,11 @@ restored together with them on a new device.
   thumbnails are dropped first, so keys, drafts' text and trust decisions sync again. An older app drops the
   field on upload, and the next newer device puts it back (its tombstones too, unless they were dropped
   meanwhile: a file removed then may come back to that device's draft and fail when sent).
+- **What a composer replies to** (#1115) stays out of the key bag: a local record of the device
+  (`draft_reply/{conversation}`), sealed like every other record (§9), holding the message's ID and,
+  for one picture of an album, the attachment's. The quote is read from the local store when the
+  composer comes back, so a target this device no longer has simply isn't restored. It goes when the
+  message is sent or the reply is cancelled, with the conversation, and at sign-out with the store.
 - The server sees that the key bag changed and its size, not what changed. Drafts make the key bag
   change while typing; clients upload at most once per sync round.
 - **Trust decisions travel too.** The identity keys the user's devices pinned and the workspace root
@@ -4986,7 +4991,7 @@ So exactly one core owns a device's store at a time:
   open then, shows a generic notification, and leaves the move to the app. Until 1.0.9 its core did
   catch a conversation up when the app wasn't syncing, writing MLS state next to the app's copy
   (issue #424 review). Should another process save MLS state anyway, the app's next MLS save sees it
-  and writes the whole state (§9.5).
+  and writes the whole state (§9.5). The app follows the extension's commits without a restart: the store's caches and the message cache above it drop what they hold when `PRAGMA data_version` says another connection committed, the check taken inside the snapshot of the read or once a group of writes holds the write lock, and nothing in a group is ever dropped. The screens' snapshot, built from this process's own write notes, reads everything again once per such commit (§9.5, `TrackedStore::take_changes`).
 
 **Writes that fail (web).** IndexedDB refuses writes when the origin's quota is exhausted. A failed
 write is kept and issued again on every flush, until it went through; the flush reports the reason

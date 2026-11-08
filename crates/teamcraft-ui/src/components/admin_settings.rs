@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use leptos::prelude::*;
 use serde_json::{Map, Value, json};
 use teamcraft_proto::{
-  HOLIDAY_REGIONS, HolidayFeedError, HolidayFeedStatus, RuntimeSettingsKey, RuntimeSettingsResponse,
-  RuntimeSettingsSection, SettingSource, Snowflake,
+  Dsn, HOLIDAY_REGIONS, HolidayFeedError, HolidayFeedStatus, RuntimeSettingsKey, RuntimeSettingsResponse,
+  RuntimeSettingsSection, SettingSource, Snowflake, is_crash_environment,
 };
 
 use crate::clock::{format_relative, now_ms};
@@ -24,7 +24,7 @@ const MINUTE: u64 = 60;
 type Values = BTreeMap<&'static str, String>;
 
 /// Groups in the order of the page.
-const GROUPS: [&str; 14] = [
+const GROUPS: [&str; 15] = [
   "server_rules",
   "notifications",
   "email_digest",
@@ -39,6 +39,7 @@ const GROUPS: [&str; 14] = [
   "app_links",
   "health_alerts",
   "holidays",
+  "crash_reports",
 ];
 /// The sign-in methods an admin can choose, as the form's values: comma-separated, in order.
 const METHOD_CHOICES: [&str; 4] = ["sso,local", "local,sso", "sso", "local"];
@@ -46,6 +47,8 @@ const METHOD_CHOICES: [&str; 4] = ["sso,local", "local,sso", "sso", "local"];
 const LEVEL_CHOICES: [&str; 2] = ["all", "mentions"];
 /// The policies for binding tokens to devices.
 const DPOP_POLICY_CHOICES: [&str; 3] = ["optional", "required", "off"];
+/// Where crash reports go (docs/crash-reports.md).
+const CRASH_MODE_CHOICES: [&str; 3] = ["publisher", "own", "off"];
 
 /// How a field is edited and checked.
 #[derive(Clone, Copy)]
@@ -81,6 +84,12 @@ enum Kind {
   MapText,
   /// An https link that may be empty (none).
   Link,
+  /// Where crash reports go, one of [`CRASH_MODE_CHOICES`].
+  CrashMode,
+  /// A crash reports DSN (docs/crash-reports.md); empty unless reports go to an own backend.
+  Dsn,
+  /// A crash reports environment name: lowercase letters, digits, `-`, `_`, `.`.
+  Environment,
 }
 
 #[derive(Clone, Copy)]
@@ -219,6 +228,29 @@ const APP_LINKS: &[FieldDef] = &[
   },
   text("apple_team_id"),
   text("apple_bundle_id"),
+];
+const CRASH_REPORTS: &[FieldDef] = &[
+  FieldDef {
+    id: "mode",
+    kind: Kind::CrashMode,
+  },
+  FieldDef {
+    id: "dsn",
+    kind: Kind::Dsn,
+  },
+  ranged(
+    "sample_percent",
+    1,
+    (0, 100),
+    PERCENT,
+    "settings-error-crash-percent",
+  ),
+  FieldDef {
+    id: "environment",
+    kind: Kind::Environment,
+  },
+  flag("allows_opt_out"),
+  flag("shows_notice"),
 ];
 const HEALTH_ALERTS: &[FieldDef] = &[
   flag("is_enabled"),
@@ -519,8 +551,12 @@ fn FieldRow(
       <TextField id=leak_key(dom_id) label=label input_type="number" unit=unit.unwrap_or_default() value=value on_input=on_input error=error />
     }
     .into_any(),
-    Kind::Text => view! {
+    Kind::Text | Kind::Environment => view! {
       <TextField id=leak_key(dom_id) label=label value=value on_input=on_input error=error />
+    }
+    .into_any(),
+    Kind::Dsn => view! {
+      <TextField id=leak_key(dom_id) label=label input_type="url" placeholder="https://key@errors.example.com/1" value=value on_input=on_input error=error />
     }
     .into_any(),
     Kind::Area | Kind::MapText => view! {
@@ -603,6 +639,42 @@ fn FieldRow(
               .map(|choice| {
                 let key = dpop_policy_choice_key(choice);
                 view! { <option value=choice selected=move || value.get() == choice>{move || i18n.t(key)}</option> }
+              })
+              .collect_view()}
+          </select>
+        </div>
+      }
+      .into_any()
+    },
+    Kind::CrashMode => {
+      let i18n = use_i18n();
+      let state = use_app_state();
+      let dom_id = leak_key(dom_id);
+      // Where the publisher's service is, so the admin sees where reports go by default.
+      let publisher_host = Memo::new(move |_| {
+        state
+          .read(|backend| backend.runtime_settings())
+          .and_then(|response| response.maybe_publisher_crash_reports_host)
+      });
+      let choice_text = move |choice: &'static str| match (choice, publisher_host.get()) {
+        ("publisher", Some(host)) => i18n.t_with("settings-crash-mode-publisher", &[("host", host.as_str())]),
+        ("publisher", None) => i18n.t("settings-crash-mode-publisher-none"),
+        ("own", _) => i18n.t("settings-crash-mode-own"),
+        _ => i18n.t("settings-crash-mode-off"),
+      };
+      view! {
+        <div class="field">
+          <label for=dom_id>{move || i18n.t(label)}</label>
+          <select
+            id=dom_id
+            class="input"
+            prop:value=move || value.get()
+            on:change=move |ev| on_input.run(event_target_value(&ev))
+          >
+            {CRASH_MODE_CHOICES
+              .into_iter()
+              .map(|choice| {
+                view! { <option value=choice selected=move || value.get() == choice>{move || choice_text(choice)}</option> }
               })
               .collect_view()}
           </select>
@@ -773,6 +845,7 @@ fn fields_of(slug: &str) -> &'static [FieldDef] {
     "app_links" => APP_LINKS,
     "health_alerts" => HEALTH_ALERTS,
     "holidays" => HOLIDAYS,
+    "crash_reports" => CRASH_REPORTS,
     _ => &[],
   }
 }
@@ -794,6 +867,7 @@ fn group_json(key: &RuntimeSettingsKey, response: &RuntimeSettingsResponse) -> O
     RuntimeSettingsKey::AppLinks => serde_json::to_value(&response.app_links),
     RuntimeSettingsKey::HealthAlerts => serde_json::to_value(&response.health_alerts),
     RuntimeSettingsKey::Holidays => serde_json::to_value(&response.holidays),
+    RuntimeSettingsKey::CrashReports => serde_json::to_value(&response.crash_reports),
     _ => return None,
   };
   value.ok()
@@ -827,11 +901,14 @@ fn value_text(kind: Kind, maybe_value: Option<&Value>) -> String {
       .map(|raw| format_scaled(raw, scale))
       .unwrap_or_default(),
     Kind::Text
+    | Kind::Dsn
+    | Kind::Environment
     | Kind::Area
     | Kind::MapText
     | Kind::Link
     | Kind::Level
     | Kind::DpopPolicy
+    | Kind::CrashMode
     | Kind::HolidayRegion => value.as_str().unwrap_or_default().to_owned(),
     Kind::Methods => value
       .as_array()
@@ -885,6 +962,14 @@ fn check(key: &RuntimeSettingsKey, values: &Values) -> Result<RuntimeSettingsSec
       Err(message) => errors.push((field.id, message)),
     }
   }
+  // An own backend needs its DSN.
+  if *key == RuntimeSettingsKey::CrashReports
+    && object.get("mode").and_then(Value::as_str) == Some("own")
+    && object.get("dsn").and_then(Value::as_str) == Some("")
+  {
+    // The DSN field comes right after the switch, before any other field that can be wrong.
+    errors.insert(0, ("dsn", "settings-error-dsn"));
+  }
   if !errors.is_empty() {
     return Err(errors);
   }
@@ -909,6 +994,15 @@ fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
       _ => Err(maybe_range_error.unwrap_or("admin-error-number")),
     },
     Kind::Text | Kind::Area => Ok(Value::String(typed.trim_end().to_owned())),
+    Kind::Dsn => match typed.trim() {
+      "" => Ok(json!("")),
+      dsn if dsn.parse::<Dsn>().is_ok() => Ok(json!(dsn)),
+      _ => Err("settings-error-dsn"),
+    },
+    Kind::Environment => match typed.trim() {
+      name if is_crash_environment(name) => Ok(json!(name)),
+      _ => Err("settings-error-crash-environment"),
+    },
     Kind::MapText => Ok(match typed.trim() {
       "" => Value::Null,
       text => Value::String(text.to_owned()),
@@ -932,6 +1026,12 @@ fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
         .unwrap_or(LEVEL_CHOICES[0]);
       Ok(json!(choice))
     },
+    Kind::CrashMode => Ok(json!(
+      CRASH_MODE_CHOICES
+        .into_iter()
+        .find(|choice| *choice == typed)
+        .unwrap_or(CRASH_MODE_CHOICES[0])
+    )),
     Kind::DpopPolicy => {
       let choice = DPOP_POLICY_CHOICES
         .into_iter()
@@ -1144,6 +1244,45 @@ mod tests {
   }
 
   #[test]
+  fn crash_reports_need_a_valid_dsn_while_on() {
+    let mut values: Values = [
+      ("mode", "own"),
+      ("dsn", ""),
+      ("sample_percent", "150"),
+      ("environment", "Prod"),
+    ]
+    .into_iter()
+    .map(|(id, value)| (id, value.to_owned()))
+    .collect();
+    assert_eq!(
+      check(&kind("crash_reports"), &values).err(),
+      Some(vec![
+        ("dsn", "settings-error-dsn"),
+        ("sample_percent", "settings-error-crash-percent"),
+        ("environment", "settings-error-crash-environment"),
+      ])
+    );
+    values.insert("dsn", "not a dsn".to_owned());
+    values.insert("sample_percent", "10".to_owned());
+    values.insert("environment", "staging".to_owned());
+    assert_eq!(
+      check(&kind("crash_reports"), &values).err(),
+      Some(vec![("dsn", "settings-error-dsn")])
+    );
+    values.insert("dsn", "https://key@errors.example.com/4".to_owned());
+    assert!(check(&kind("crash_reports"), &values).is_ok());
+    values.insert("allows_opt_out", "false".to_owned());
+    values.insert("shows_notice", "false".to_owned());
+    let Ok(RuntimeSettingsSection::CrashReports(mandatory)) = check(&kind("crash_reports"), &values) else {
+      panic!("a valid section");
+    };
+    assert!(!mandatory.allows_opt_out && !mandatory.shows_notice);
+    values.insert("mode", "publisher".to_owned());
+    values.insert("dsn", String::new());
+    assert!(check(&kind("crash_reports"), &values).is_ok());
+  }
+
+  #[test]
   fn every_label_is_translated() {
     use crate::i18n::{Locale, translate};
 
@@ -1166,6 +1305,12 @@ mod tests {
       "settings-error-health-backup-hours",
       "settings-error-health-days",
       "settings-error-health-percent",
+      "settings-error-crash-percent",
+      "settings-error-dsn",
+      "settings-error-crash-environment",
+      "settings-crash-mode-publisher-none",
+      "settings-crash-mode-own",
+      "settings-crash-mode-off",
       "settings-error-holiday-refresh-hours",
       "settings-error-holiday-max-age-days",
       "settings-holiday-feed-copy",

@@ -5622,6 +5622,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "url",
  "utoipa",
  "zeroize",
 ]
@@ -5649,6 +5650,7 @@ dependencies = [
  "serde",
  "serde_json",
  "subtle",
+ "teamcraft-client-api",
  "teamcraft-crypto",
  "teamcraft-db",
  "teamcraft-net",

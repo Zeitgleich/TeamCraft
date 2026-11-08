@@ -237,6 +237,37 @@ mod tests {
     assert_eq!(notified_conversation(&store, conversation()).unwrap(), None);
   }
 
+  /// Issue #1115: the app stays alive while the extension shows a push; opening the conversation
+  /// shows what the extension stored, without a relaunch.
+  #[cfg(feature = "sealed-sqlite")]
+  #[test]
+  fn what_the_extension_remembers_reaches_a_running_app() {
+    use teamcraft_crypto::secret::SymmetricKey;
+
+    use crate::store::{SealedSqliteStore, StaticKeySource, TrackedStore};
+
+    let directory = std::env::temp_dir().join(format!(
+      "teamcraft-notified-{}",
+      rand_core::RngCore::next_u64(&mut rand_core::OsRng)
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("store.db");
+    let key = SymmetricKey::generate(&mut rand_core::OsRng);
+    let app = TrackedStore::with_message_cache(
+      SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap(),
+      1 << 20,
+    );
+    let extension = SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    assert_eq!(notified_conversation(&app, conversation()).unwrap(), None);
+
+    remember(&extension, &preview(5, "lunch?")).unwrap();
+
+    let notified = notified_conversation(&app, conversation()).unwrap().unwrap();
+    assert_eq!(notified.maybe_message.unwrap().message_id, message_id(5));
+    drop((app, extension));
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
   fn preview(message: i64, text: &str) -> PushPreview {
     PushPreview {
       wake_up: PushWakeUp {

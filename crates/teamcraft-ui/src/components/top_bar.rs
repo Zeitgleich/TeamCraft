@@ -7,6 +7,7 @@ use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::brand_logo::BrandLogo;
 use crate::components::channel_glyph::{ChannelGlyph, channel_fallback_icon};
 use crate::components::icons::{Icon, IconName};
+use crate::components::rail_menus::FocusMenu;
 use crate::components::window_controls::{ClickOrDrag, window_drag_handler};
 use crate::history::{Travel, travel};
 use crate::i18n::use_i18n;
@@ -70,6 +71,8 @@ pub fn TopBar() -> impl IntoView {
         >
           <Icon name=IconName::Keyboard />
         </button>
+        // Focus mode next to the account menu (#299).
+        <FocusMenu />
         <div class="account">
           <button
             class="avatar-btn"

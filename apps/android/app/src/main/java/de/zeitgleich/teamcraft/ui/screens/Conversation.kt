@@ -131,6 +131,7 @@ import de.zeitgleich.teamcraft.core.Bookmark
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ChatSnapshot
+import de.zeitgleich.teamcraft.core.ReplyPreview
 import de.zeitgleich.teamcraft.core.Conversation
 import de.zeitgleich.teamcraft.core.HistoryGap
 import de.zeitgleich.teamcraft.core.Message
@@ -1115,14 +1116,23 @@ internal fun ForwardDialog(snapshot: ChatSnapshot, onPick: (String) -> Unit, onD
 
 /** The message the composer of a conversation replies to (set from the action sheet). */
 object ReplyTarget {
-  /** [maybeImage]: the one picture of an album the reply answers (#241). */
+  /**
+   * [maybeImage]: the one picture of an album the reply answers (#241). A target read back after
+   * the app was killed (#1115) names its author by [maybeAuthorId] and the picture by
+   * [maybeAttachmentId]: the core keeps only the IDs, on this device.
+   */
   data class Target(
     val conversation: String,
     val messageId: String,
     val excerpt: String,
     val authorName: String,
     val maybeImage: FileInfo? = null,
-  )
+    val maybeAttachmentId: String? = null,
+    val maybeAuthorId: String? = null,
+  ) {
+    /** The one picture the reply answers, however the target came. */
+    val attachmentId: String? get() = maybeImage?.fileId ?: maybeAttachmentId
+  }
 
   val current = kotlinx.coroutines.flow.MutableStateFlow<Target?>(null)
 
@@ -1132,6 +1142,19 @@ object ReplyTarget {
 
   fun setImage(file: FileInfo, authorName: String) {
     current.value = Target(file.conversation, file.message, file.fileName, authorName, file)
+  }
+
+  /** The target read back from the core (#1115); null when the quote names no message. */
+  fun restored(conversation: String, stored: ReplyPreview): Target? {
+    val messageId = stored.maybeMessage ?: return null
+    return Target(
+      conversation = conversation,
+      messageId = messageId,
+      excerpt = stored.maybeAttachment?.fileName ?: stored.excerpt,
+      authorName = "",
+      maybeAttachmentId = stored.maybeAttachment?.fileId,
+      maybeAuthorId = stored.author,
+    )
   }
 }
 
@@ -1187,11 +1210,26 @@ internal fun Composer(
     val stored = viewModel.readChat { query(ChatQueries.draft(conversationId, maybeThread)).maybeBody }.orEmpty()
     if (text.isEmpty()) text = stored
     draftSave.stored(stored)
+    // What the user was answering when the app was killed comes back with the text (#1115); a target
+    // chosen here since then stays.
+    if (maybeThread == null && ReplyTarget.current.value?.conversation != conversationId) {
+      val maybeKept = viewModel.readChat { query(ChatQueries.draftReply(conversationId)).maybeReply }
+      if (maybeKept != null && ReplyTarget.current.value?.conversation != conversationId) {
+        ReplyTarget.current.value = ReplyTarget.restored(conversationId, maybeKept)
+      }
+    }
     isDraftLoaded = true
     // Opened from "Drafts & sent" to go on writing (#1220).
     if (OpenedDraft.current.value == OpenedDraft.Target(conversationId, maybeThread)) {
       OpenedDraft.current.value = null
       focus.requestFocus()
+    }
+  }
+  // The reply target is kept at once: nothing is typed for it, and the app may be killed any time
+  // (#1115). Only a conversation's own composer replies, after the stored target was read.
+  LaunchedEffect(isDraftLoaded, maybeReply?.messageId, maybeReply?.attachmentId) {
+    if (isDraftLoaded && maybeThread == null) {
+      viewModel.act(ChatActions.setDraftReply(conversationId, maybeReply?.messageId, maybeReply?.attachmentId))
     }
   }
   val maybePendingShare by PendingShare.current.collectAsState()
@@ -1240,7 +1278,7 @@ internal fun Composer(
   fun sendOptions(sending: List<PickedFile>, fromDraft: List<DraftFileItem> = emptyList()) = SendOptions(
     maybeThread = maybeThread,
     maybeReplyTo = maybeReply?.messageId,
-    maybeReplyAttachment = maybeReply?.maybeImage?.fileId,
+    maybeReplyAttachment = maybeReply?.attachmentId,
     priority = priority,
     wantsAcknowledgement = wantsAcknowledgement,
     isSilent = isSilent,
@@ -1295,7 +1333,7 @@ internal fun Composer(
     val options = SendOptions(
       maybeThread = maybeThread,
       maybeReplyTo = maybeReply?.messageId,
-      maybeReplyAttachment = maybeReply?.maybeImage?.fileId,
+      maybeReplyAttachment = maybeReply?.attachmentId,
       priority = priority,
       wantsAcknowledgement = wantsAcknowledgement,
       isSilent = isSilent,
@@ -1367,7 +1405,7 @@ internal fun Composer(
           }
         }
         Text(
-          stringResource(R.string.replying_to, reply.authorName) + ": " + reply.excerpt,
+          stringResource(R.string.replying_to, reply.authorName.ifEmpty { reply.maybeAuthorId?.let { snapshot?.name(it) }.orEmpty() }) + ": " + reply.excerpt,
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
           style = MaterialTheme.typography.bodySmall,

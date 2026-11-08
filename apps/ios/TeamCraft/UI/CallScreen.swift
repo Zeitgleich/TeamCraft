@@ -124,7 +124,7 @@ struct CallScreen: View {
         if filmstrip.count > 0 { filmstripView }
       }
     } else {
-      avatarStage
+      gridStage
     }
   }
 

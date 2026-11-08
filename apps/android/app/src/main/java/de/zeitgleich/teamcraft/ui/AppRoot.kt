@@ -63,6 +63,7 @@ import de.zeitgleich.teamcraft.ui.screens.MessageScreen
 import de.zeitgleich.teamcraft.ui.screens.OrgRecoveryScreen
 import de.zeitgleich.teamcraft.ui.screens.SearchScreen
 import de.zeitgleich.teamcraft.ui.screens.SettingsScreen
+import de.zeitgleich.teamcraft.ui.screens.CrashReportsNotice
 import de.zeitgleich.teamcraft.ui.screens.SharePickerScreen
 import de.zeitgleich.teamcraft.ui.screens.ShareWaitingNotice
 import de.zeitgleich.teamcraft.ui.screens.StoreRecoveryScreen
@@ -285,6 +286,7 @@ private fun ReadyNavigation(
   LaunchedEffect(maybeShare != null, maybeShareId) {
     if (maybeShare != null) navigation.navigate("share") { launchSingleTop = true }
   }
+  CrashReportsNotice(viewModel.crashReports, onSettings = { navigation.navigate("settings/security") })
   NavHost(navController = navigation, startDestination = "chats") {
     composable("chats") {
       // Wide windows (tablets, unfolded foldables, landscape) show the conversation next to the list.
@@ -463,6 +465,18 @@ private fun ReadyNavigation(
         onDnd = { navigation.navigate("dnd") },
         onDiagnostics = { navigation.navigate("notification_diagnostics") },
         onReportProblem = { navigation.navigate("report_problem") },
+      )
+    }
+    // The crash reports notice's way to the privacy switch.
+    composable("settings/security") {
+      SettingsScreen(
+        viewModel = viewModel,
+        account = account,
+        onBack = { navigation.popBackStack() },
+        onDnd = { navigation.navigate("dnd") },
+        onDiagnostics = { navigation.navigate("notification_diagnostics") },
+        onReportProblem = { navigation.navigate("report_problem") },
+        opensSecurity = true,
       )
     }
     composable("report_problem") {

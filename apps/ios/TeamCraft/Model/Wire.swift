@@ -246,6 +246,8 @@ struct ChatAnswer: Decodable, Sendable {
   let guests: [ExpiringGuest]?
   let unseen: UnseenReactions?
   let maybeBody: String?
+  /// `ChatQuery.draftReply`: what the composer replies to.
+  let maybeReply: ReplyPreview?
   let olderHistory: OlderHistory?
   var calls: [CallHistoryItem]?
   var roster: SpaceRoster?

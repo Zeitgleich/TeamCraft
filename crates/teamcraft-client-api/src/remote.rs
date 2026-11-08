@@ -25,7 +25,7 @@ use crate::calls::{
   OrgBackgroundRule, OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall,
   ScreenContentMode, ScreenShareResolution, VideoQuality,
 };
-use crate::drafts::{DraftFileItem, DraftItem, SentItem};
+use crate::drafts::{DraftFileItem, DraftItem, DraftReply, SentItem};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::live::LiveSnapshot;
 use crate::model::{
@@ -872,6 +872,12 @@ pub enum ChatAction {
     #[serde(default)]
     maybe_thread: Option<ThreadId>,
   },
+  /// What the conversation's composer replies to (#1115), kept on this device; `None` forgets it.
+  SetDraftReply {
+    conversation: ConversationId,
+    #[serde(default)]
+    maybe_reply: Option<DraftReply>,
+  },
   /// Keeps the message for `due_at` (server time, docs/scheduled-messages.md); it can't have files.
   ScheduleMessage {
     message: OutgoingMessage,
@@ -1346,6 +1352,10 @@ impl ChatAction {
         conversation,
         maybe_thread,
       } => backend.discard_draft(conversation, maybe_thread),
+      Self::SetDraftReply {
+        conversation,
+        maybe_reply,
+      } => backend.set_draft_reply(conversation, maybe_reply),
       Self::ScheduleMessage { message, due_at } => backend.schedule_message(message, due_at),
       Self::UpdateScheduled { id, body, due_at } => backend.update_scheduled(id, &body, due_at),
       Self::CancelScheduled { id } => backend.cancel_scheduled(id),
@@ -1645,6 +1655,10 @@ pub enum ChatQuery {
     #[serde(default)]
     maybe_thread: Option<ThreadId>,
   },
+  /// What the conversation's composer replies to, as a quote (#1115).
+  DraftReply {
+    conversation: ConversationId,
+  },
   /// Every draft of one space or (`None`) of all conversations.
   Drafts {
     #[serde(default)]
@@ -1820,6 +1834,9 @@ pub enum ChatAnswer {
   },
   DraftFiles {
     files: Vec<DraftFileItem>,
+  },
+  DraftReply {
+    maybe_reply: Option<crate::actions::ReplyPreview>,
   },
   Drafts {
     drafts: Vec<DraftItem>,
@@ -2049,6 +2066,9 @@ impl ChatQuery {
         maybe_thread,
       } => ChatAnswer::DraftFiles {
         files: backend.draft_files(conversation, maybe_thread),
+      },
+      Self::DraftReply { conversation } => ChatAnswer::DraftReply {
+        maybe_reply: backend.draft_reply(conversation),
       },
       Self::Drafts { maybe_space } => ChatAnswer::Drafts {
         drafts: backend.drafts(maybe_space),

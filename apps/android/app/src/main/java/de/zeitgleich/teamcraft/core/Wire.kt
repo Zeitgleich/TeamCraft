@@ -63,6 +63,11 @@ data class Space(
   @SerialName("can_create_channels") val canCreateChannels: Boolean = true,
   /** Version of the space's picture; without one the space shows no picture. */
   @SerialName("maybe_image_version") val maybeImageVersion: String? = null,
+  /**
+   * The DMs and group DMs whose other people all belong to the space (#701), as the core decided
+   * it from the member list this device holds. They stay on Home too.
+   */
+  @SerialName("direct_conversations") val directConversations: List<String> = emptyList(),
 )
 
 @Serializable
@@ -583,6 +588,8 @@ data class ChatAnswer(
   @SerialName("maybe_target") val maybeTarget: PermalinkTarget? = null,
   @SerialName("maybe_message") val maybeMessage: String? = null,
   @SerialName("maybe_body") val maybeBody: String? = null,
+  /** [ChatQueries.draftReply]: what the composer replies to. */
+  @SerialName("maybe_reply") val maybeReply: ReplyPreview? = null,
   val drafts: List<DraftItem> = emptyList(),
   val sent: List<SentItem> = emptyList(),
   val files: List<FileInfo> = emptyList(),
