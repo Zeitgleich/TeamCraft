@@ -31,6 +31,8 @@ on:
       - "crates/teamcraft-uniffi-bindgen/**"
       - "Cargo.lock"
       - ".github/workflows/ios.yml"
+  # By hand on main after auto-merges: their pushes come from GITHUB_TOKEN and start no workflow.
+  workflow_dispatch:
 
 permissions:
   contents: read
