@@ -110,6 +110,53 @@ final class FeedTests: XCTestCase {
     XCTAssertEqual(typing, ["action": "typing", "conversation": "1"])
   }
 
+  func testTypingInAThreadCarriesTheThread() {
+    let thread = try? JSONSerialization.jsonObject(
+      with: Data(ChatAction.typing(conversationId: "1", maybeThreadId: "9").json.utf8)) as? [String: String]
+    XCTAssertEqual(thread, ["action": "typing", "conversation": "1", "maybe_thread": "9"])
+    XCTAssertEqual(ChatQuery.typingNow.json, #"{"kind":"typing_now"}"#)
+  }
+
+  func testTypingNowAnswerParsesPlaces() {
+    let answer = Wire.decode(
+      ChatAnswer.self,
+      from: #"{"answer":"typing","typing":[{"conversation":"7","users":["1"]},{"conversation":"7","maybe_thread":"9","users":["2"]}]}"#)
+    XCTAssertEqual(
+      answer?.typing,
+      [
+        TypingPlace(conversation: "7", maybeThread: nil, users: ["1"]),
+        TypingPlace(conversation: "7", maybeThread: "9", users: ["2"]),
+      ])
+  }
+
+  func testTypingIsReadPerPlace() {
+    let places = [
+      TypingNow(conversation: "7", maybeThread: nil, names: ["Alex"]),
+      TypingNow(conversation: "7", maybeThread: "9", names: ["Bo", "Cy"]),
+    ]
+    XCTAssertEqual(typingNames(in: places, conversation: "7", thread: nil), ["Alex"])
+    XCTAssertEqual(typingNames(in: places, conversation: "7", thread: "9"), ["Bo", "Cy"])
+    XCTAssertEqual(typingNames(in: places, conversation: "7", thread: "10"), [])
+    XCTAssertEqual(typingNames(in: places, conversation: "8", thread: nil), [])
+    // A direct message says "typing…"; a group names who types.
+    XCTAssertNotNil(typingRowText(["Alex"], isDirect: true))
+    XCTAssertNil(typingRowText([], isDirect: true))
+  }
+
+  func testTypingDotsPulseOneAfterTheOtherAndRest() {
+    let rest = TypingDots.restAlpha / 2
+    // Resting at the start of a cycle, the first dot peaks before the second.
+    XCTAssertEqual(TypingDots.alpha(at: 1.2, dot: 0), rest, accuracy: 0.001)
+    XCTAssertGreaterThan(TypingDots.alpha(at: 1.2 + 0.15, dot: 0), TypingDots.alpha(at: 1.2 + 0.15, dot: 1))
+    for dot in 0..<TypingDots.count {
+      for step in 0..<100 {
+        let alpha = TypingDots.alpha(at: Double(step) * 0.037, dot: dot)
+        XCTAssertGreaterThanOrEqual(alpha, rest - 0.0001)
+        XCTAssertLessThanOrEqual(alpha, 1.0001)
+      }
+    }
+  }
+
   func testMessageActionsSerialize() throws {
     func object(_ action: ChatAction) throws -> [String: Any]? {
       try JSONSerialization.jsonObject(with: Data(action.json.utf8)) as? [String: Any]

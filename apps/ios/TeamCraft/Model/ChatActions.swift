@@ -25,8 +25,9 @@ enum ChatAction {
   case forwardAttachment(fromConversationId: String, messageId: String, fileId: String, toConversationId: String)
   case setPinned(conversationId: String, messageId: String, isPinned: Bool)
   case setSaved(conversationId: String, messageId: String, isSaved: Bool)
-  /// The user types (send while the text changes; the core throttles).
-  case typing(conversationId: String)
+  /// The user types (send while the text changes; the core throttles), in a conversation or with
+  /// `maybeThreadId` a reply in one of its threads (#882).
+  case typing(conversationId: String, maybeThreadId: String? = nil)
   /// An own message the server rejected: send it again, or drop it.
   case retrySend(conversationId: String, messageId: String)
   case discardUnsent(conversationId: String, messageId: String)
@@ -104,8 +105,9 @@ enum ChatAction {
       object = ["action": "set_pinned", "conversation": conversation, "message": message, "is_pinned": isPinned]
     case .setSaved(let conversation, let message, let isSaved):
       object = ["action": "set_saved", "conversation": conversation, "message": message, "is_saved": isSaved]
-    case .typing(let conversation):
+    case .typing(let conversation, let maybeThread):
       object = ["action": "typing", "conversation": conversation]
+      if let maybeThread { object["maybe_thread"] = maybeThread }
     case .retrySend(let conversation, let message):
       object = ["action": "retry_send", "conversation": conversation, "message": message]
     case .discardUnsent(let conversation, let message):
@@ -250,7 +252,8 @@ enum ChatQuery {
   case spaceMembers(spaceId: String)
   case maxUploadBytes
   case resolvePermalink(link: String)
-  case typingUsers(conversationId: String)
+  /// Everyone typing anywhere, thread replies apart: one answer for the list, the header and the lines (#882).
+  case typingNow
   case permalink(conversationId: String, messageId: String)
   /// The channels of a space the user is in or can join.
   case browseChannels(spaceId: String)
@@ -287,8 +290,8 @@ enum ChatQuery {
       return jsonText(["kind": "max_upload_bytes"])
     case .resolvePermalink(let link):
       return jsonText(["kind": "resolve_permalink", "link": link])
-    case .typingUsers(let conversation):
-      return jsonText(["kind": "typing_users", "conversation": conversation])
+    case .typingNow:
+      return jsonText(["kind": "typing_now"])
     case .permalink(let conversation, let message):
       return jsonText(["kind": "permalink", "conversation": conversation, "message": message])
     case .browseChannels(let space):

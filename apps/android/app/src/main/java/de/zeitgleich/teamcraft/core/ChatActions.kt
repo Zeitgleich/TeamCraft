@@ -249,7 +249,11 @@ object ChatActions {
     put("maybe_thread", maybeThread.json())
   }
 
-  fun typing(conversation: String) = action("typing") { put("conversation", conversation) }
+  /** The user types in a conversation, or with [maybeThread] a reply in one of its threads (#882). */
+  fun typing(conversation: String, maybeThread: String? = null) = action("typing") {
+    put("conversation", conversation)
+    put("maybe_thread", maybeThread.json())
+  }
 
   fun retrySend(conversation: String, message: String) = action("retry_send") {
     put("conversation", conversation)
@@ -414,7 +418,8 @@ object ChatQueries {
 
   fun resolvePermalink(link: String) = query("resolve_permalink") { put("link", link) }
 
-  fun typingUsers(conversation: String) = query("typing_users") { put("conversation", conversation) }
+  /** Everyone typing anywhere, thread replies apart: one answer for the list, the header and the lines (#882). */
+  fun typingNow() = query("typing_now") {}
 
   fun firstUnread(conversation: String) = query("first_unread") { put("conversation", conversation) }
 
