@@ -187,6 +187,7 @@ const MINUTES: &str = "settings-unit-minutes";
 const HOURS: &str = "settings-unit-hours";
 const DAYS: &str = "settings-unit-days";
 const PERCENT: &str = "settings-unit-percent";
+const MILLISECONDS: &str = "settings-unit-ms";
 const MEGABYTES: &str = "settings-unit-mib";
 const U32_MAX: u64 = u32::MAX as u64;
 const U64_MAX: u64 = 9_000_000_000_000_000;
@@ -251,6 +252,13 @@ const CRASH_REPORTS: &[FieldDef] = &[
     (0, 100),
     PERCENT,
     "settings-error-crash-percent",
+  ),
+  ranged(
+    "slow_job_ms",
+    1,
+    (0, 60_000),
+    MILLISECONDS,
+    "settings-error-slow-job",
   ),
   FieldDef {
     id: "environment",
@@ -1257,6 +1265,7 @@ mod tests {
       ("dsn", ""),
       ("sample_percent", "150"),
       ("trace_percent", "101"),
+      ("slow_job_ms", "1000"),
       ("environment", "Prod"),
     ]
     .into_iter()
@@ -1316,6 +1325,8 @@ mod tests {
       "settings-error-health-days",
       "settings-error-health-percent",
       "settings-error-crash-percent",
+      "settings-error-slow-job",
+      "settings-unit-ms",
       "settings-error-dsn",
       "settings-error-crash-environment",
       "settings-crash-mode-publisher-none",

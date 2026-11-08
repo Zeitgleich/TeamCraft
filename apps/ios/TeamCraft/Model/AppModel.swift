@@ -727,6 +727,9 @@ final class AppModel {
   func send(conversationId: String, threadId: String?, body: String) async -> Bool {
     do {
       try await core().sendMessage(conversationId: conversationId, maybeThreadId: threadId, body: body)
+      // Performance data: from the queued message until the server took it (ChatPane's feed has no
+      // pending message left).
+      if threadId == nil { Perf.begin(.messageSend, key: conversationId) }
       return true
     } catch {
       return false
@@ -1469,6 +1472,7 @@ final class AppModel {
   }
 
   private func setConnection(_ maybeConnection: ConnectionState?) {
+    if maybeConnection != connection { Perf.connectionChanged(from: connection, to: maybeConnection) }
     connection = maybeConnection
     observeConnection()
   }

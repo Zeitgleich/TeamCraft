@@ -1371,10 +1371,22 @@ fn RowSlot(
     if !is_complete {
       return previous.cloned().flatten();
     }
-    // A channel switch is done once its first row shows a message (perf.rs).
+    // A channel switch is done once its first row shows a message; a catch-up once the
+    // conversation no longer is behind the server (perf.rs).
     if crate::perf::is_pending(crate::perf::PerfOperation::ChannelSwitch) {
       crate::perf::end_pending(
         crate::perf::PerfOperation::ChannelSwitch,
+        &conversation.to_string(),
+        crate::perf::PerfStatus::Ok,
+      );
+    }
+    if crate::perf::is_pending(crate::perf::PerfOperation::CatchUp)
+      && !state
+        .read(|backend| backend.conversation(conversation))
+        .is_some_and(|conv| conv.is_catching_up)
+    {
+      crate::perf::end_pending(
+        crate::perf::PerfOperation::CatchUp,
         &conversation.to_string(),
         crate::perf::PerfStatus::Ok,
       );

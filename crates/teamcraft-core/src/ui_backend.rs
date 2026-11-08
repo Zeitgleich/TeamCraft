@@ -912,6 +912,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// store's order. For the mobile apps' lists: asking per space read and decrypted every
   /// conversation and user record once per space.
   pub fn listed_conversations(&self, spaces: &BTreeSet<SpaceId>) -> Vec<Conversation> {
+    let _step = crate::timing::step("chat_list_build");
     self.conversations_where(|conversation| {
       conversation
         .maybe_space_id
@@ -1033,6 +1034,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     users: &BTreeMap<UserId, UserSummary>,
     preferences: &MentionPreferences,
   ) -> Conversation {
+    let _step = crate::timing::step("to_conversation");
     let conversation = self.listed_conversation(response, users, preferences, &self.account_data());
     self.flush_entry_tallies();
     conversation
@@ -1078,6 +1080,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     preferences: &MentionPreferences,
     need: EntryNeed,
   ) -> EntryCounts {
+    let _step = crate::timing::step("entry_counts");
     let is_unread = self.unread_check(response, maybe_mark);
     let maybe_importer = self.importer();
     let rules = MentionRules {
@@ -1243,6 +1246,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// Keeps the tallies counted since the last call, in one group: a start counts many at once, and
   /// each on its own would wait for the disk. They are a cache: one not kept is counted again.
   pub(crate) fn flush_entry_tallies(&self) {
+    let _step = crate::timing::step("flush_entry_tallies");
     let tallies = std::mem::take(&mut *self.entry_tallies.borrow_mut());
     if tallies.is_empty() {
       return;
@@ -1267,6 +1271,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     users: &BTreeMap<UserId, UserSummary>,
     unread: UnreadCounts,
   ) -> Conversation {
+    let _step = crate::timing::step("conversation_view");
     let mut member_ids = self.members(response.id);
     let is_notes_to_self = response.is_notes_to_self(self.me);
     // The import account is no person of a DM or the notes: the banner tells about it instead
@@ -2198,6 +2203,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   /// The conversation is lent, not copied: the feed asks again on every change of the open
   /// conversation, and a log channel changes all the time (issue #1000).
   fn message_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {
+    let _step = crate::timing::step("message_page_read");
     if self.store.indexes_feed() {
       return self.indexed_page(conversation, start, len);
     }

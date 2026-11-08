@@ -106,6 +106,7 @@ impl SearchService {
 
   /// Searches the local store and every imported segment.
   pub fn search(&mut self, store: &impl LocalStore, query: &SearchQuery) -> Result<SearchResults, CoreError> {
+    let _step = crate::timing::step("search_query");
     let local_messages = searchable_messages(store, &query.conversations)?;
     let local_index = build_index(local_messages.iter())?;
     let mut matches: BTreeMap<[u8; 16], SearchMatch> = BTreeMap::new();

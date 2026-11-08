@@ -47,6 +47,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     request: u64,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("older_history_page");
     let key = record_key(conversation);
     let record = records::get_json::<OlderHistoryRecord>(&self.store, Table::SyncState, &key)?;
     let maybe_position = record.and_then(|record| record.maybe_position);

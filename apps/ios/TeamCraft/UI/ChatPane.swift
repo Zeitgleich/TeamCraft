@@ -1,5 +1,6 @@
 import PhotosUI
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 /// A conversation, or one thread of it (`threadId`): messages, reactions and the composer.
@@ -12,6 +13,8 @@ struct ChatPane: View {
   let account: Account
 
   @State private var messages: [MessageItem] = []
+  /// Whether this conversation caught up with the server once open (#1521).
+  @State private var maybeCatchUp: CatchUpMeasure?
   /// People in the call running here; 0 without one (issue #1352).
   @State private var runningCallCount = 0
   /// The picked picture being edited before it is sent (issue #1354).
@@ -100,6 +103,18 @@ struct ChatPane: View {
     screenWithDialogs
     .safeAreaInset(edge: .top, spacing: 0) {
       if runningCallCount > 0 && threadId == nil { runningCallBanner }
+    }
+    .onAppear {
+      guard threadId == nil else { return }
+      Perf.begin(.channelSwitch, key: conversation.id)
+      maybeCatchUp = CatchUpMeasure(conversationId: conversation.id)
+    }
+    .onDisappear {
+      Perf.cancel(.channelSwitch, key: conversation.id)
+      maybeCatchUp?.dispose()
+    }
+    .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+      maybeCatchUp?.resumed()
     }
     .task(id: model.changeCount) {
       await reload()
@@ -1249,6 +1264,22 @@ struct ChatPane: View {
     draft = ""
   }
 
+  /// Performance data (#1521): the switch ends with the first read, a send once the server took it,
+  /// the catch-up once the store has what the server has.
+  private func observePerf(_ read: [MessageItem], gaps: [HistoryGapItem]) {
+    Perf.end(.channelSwitch, key: conversation.id)
+    if Perf.isRunning(.messageSend, key: conversation.id) && !read.contains(where: \.isPending) {
+      Perf.end(.messageSend, key: conversation.id)
+    }
+    guard let catchUp = maybeCatchUp else { return }
+    let conversationId = conversation.id
+    let isCatchingUp = conversation.isCatchingUp
+    Task {
+      let maybeNotified = await model.notifiedConversation(conversationId)
+      catchUp.observe(isBehind: maybeNotified != nil || isCatchingUp, isFromPush: maybeNotified != nil, hasGaps: !gaps.isEmpty)
+    }
+  }
+
   private func reload() async {
     // The messages are shown together with their extras and the senders' names (issue #1425): one
     // of them alone draws bubbles that change height once the rest arrives, and the feed jumps.
@@ -1267,6 +1298,7 @@ struct ChatPane: View {
       extras = readExtras
       hasOlder = page.hasOlder
       gaps = page.gaps
+      observePerf(page.messages, gaps: page.gaps)
       isFillingGap = false
       if let history = await model.olderHistory(conversationId: conversation.id) { serverHistory = history }
       pageBackIfNearOldest()

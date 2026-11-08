@@ -120,6 +120,8 @@ struct ConversationListView: View {
     }
     .task(id: model.changeCount) {
       conversations = await model.conversations()
+      // The chat list shows the core's rows: a signed-in start is done (#1521).
+      Perf.chatListShown()
       runningCalls = await model.runningCalls()
       hasLoaded = true
       maybeFirstSync = await model.firstSync()

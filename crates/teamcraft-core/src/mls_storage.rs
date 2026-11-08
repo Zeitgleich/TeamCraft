@@ -162,6 +162,7 @@ impl SavedMlsStorage {
 /// Loads the provider storage, moving the record of a version before 1.0.9 to entries first.
 /// The returned [`SavedMlsStorage`] knows what the store holds.
 pub fn load_mls_storage(store: &impl LocalStore) -> Result<(OpenMlsRustCrypto, SavedMlsStorage), CoreError> {
+  let _step = crate::timing::step("mls_storage_load");
   // Before the listing: another process's commit after it counts.
   let maybe_tally = store.write_tally();
   let Listed {

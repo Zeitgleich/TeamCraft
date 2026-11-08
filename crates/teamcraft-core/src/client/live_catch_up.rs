@@ -119,6 +119,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// to the first that has to wait. Nothing outside a fresh session's catch-up. A failure fails the
   /// catch-up like one of its own steps (the connection is then replaced and the sync runs again).
   pub(super) async fn apply_live_during_catch_up(&mut self) -> Result<(), CoreError> {
+    let _step = crate::timing::step("apply_live_frames");
     let mut applied = 0;
     loop {
       let Some(live) = &self.maybe_live_catch_up else {

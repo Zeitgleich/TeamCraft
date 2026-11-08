@@ -1128,6 +1128,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     user: UserId,
     requested: HistoryShare,
   ) -> Result<HistoryShare, CoreError> {
+    let _step = crate::timing::step("commit_addition");
     let history = self.effective_history(user, requested).await?;
     self
       .commit_change(
@@ -1248,6 +1249,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     maybe_first: Option<Result<ListMlsMessagesResponse, ApiError>>,
     maybe_members: Option<Vec<UserId>>,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("mls_catch_up");
     if self.ignores_queue_while_founding(conversation)? {
       // Nobody else is in this group, so the queue can only hold another founding's group
       // (whose welcome replaces this one) or nothing: following it would only refuse its entries
@@ -1426,6 +1428,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Handles one MLS queue entry of a group (commit, proposal or application message; welcomes go
   /// through [`Self::join_from_welcome`]).
   pub(crate) async fn process_mls(&mut self, message: &MlsMessageResponse) -> Result<MlsProgress, CoreError> {
+    let _step = crate::timing::step("mls_process");
     let conversation = message.conversation_id;
     if message.kind == MlsMessageKind::Welcome {
       return Ok(MlsProgress::Done);
@@ -1702,6 +1705,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     source: ChangeSource,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("commit_change");
     let source = match source {
       // The history choice is settled before signing: every member rotates (or not) by it.
       ChangeSource::Own(MembershipAction::AddUser { user_id, history }) => {
@@ -1877,6 +1881,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     output: CommitOutput,
     recipients: &[DeviceId],
   ) -> Result<Option<OwnCommit>, CoreError> {
+    let _step = crate::timing::step("post_commit");
     let epoch = self.group_or_error(conversation)?.epoch();
     let welcomes = match &output.maybe_welcome {
       Some(welcome) => recipients
@@ -1934,6 +1939,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Settles a commit whose answer was lost before this device commits again: merged if the queue
   /// shows it, discarded if another commit won, sent again if the server never got it.
   async fn resolve_pending_commit(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    let _step = crate::timing::step("resolve_pending_commit");
     if !self.has_pending_commit(conversation)? {
       return Ok(());
     }
@@ -2139,6 +2145,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     share: SharedKeys,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("share_history");
     // The bundle names a current key the new member takes: never one only the key bag knows.
     let (bundle, handed) = match share {
       SharedKeys::HistoryFor { user_id, added_epoch } => {
@@ -2710,6 +2717,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   pub(crate) async fn join_from_welcome(&mut self, welcome: &MlsMessageResponse) -> Result<(), CoreError> {
+    let _step = crate::timing::step("mls_join_welcome");
     let conversation = welcome.conversation_id;
     if self.is_welcome_outdated(conversation, welcome)? {
       return self.welcome_handled(welcome);

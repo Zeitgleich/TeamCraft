@@ -59,7 +59,7 @@ class CrashReports(private val context: Context, private val sdk: CrashSdk) {
     val maybeConfig = withContext(Dispatchers.Default) { crashReportsConfig(answer.body.decodeToString()) }
     updateConfig(
       maybeConfig?.let {
-        CrashConfig(it.dsn, it.sampleRate, it.environment, it.allowsOptOut, it.showsNotice, it.traceRate)
+        CrashConfig(it.dsn, it.sampleRate, it.environment, it.allowsOptOut, it.showsNotice, it.traceRate, it.slowJobMs.toLong())
       },
     )
   }
@@ -144,6 +144,8 @@ data class CrashConfig(
   val showsNotice: Boolean,
   /** Share of app starts, screen loads and core measures traced, 0 to 1; absent when stored by an older version. */
   val traceRate: Double = 0.0,
+  /** A core job that waits or runs this long is reported as a sampled warning; 0: never. */
+  val slowJobMs: Long = 1_000,
 )
 
 /** What the privacy settings and the first-start notice need to know. */

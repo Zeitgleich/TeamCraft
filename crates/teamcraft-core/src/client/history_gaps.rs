@@ -308,6 +308,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     conversation: ConversationId,
   ) -> Result<BacklogStep, CoreError> {
+    let _step = crate::timing::step("backlog_read_page");
     let Some(mut record) = read_record(&self.store, conversation)? else {
       return Ok(BacklogStep::Done);
     };
@@ -500,6 +501,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     edge: GapEdge,
     request: u64,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("history_gap_fill");
     let mut record = read_record(&self.store, conversation)?.unwrap_or_default();
     let maybe_gap = record.gaps.iter().copied().find(|gap| gap.after == after);
     let outcome = match maybe_gap {

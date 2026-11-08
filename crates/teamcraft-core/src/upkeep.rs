@@ -111,6 +111,7 @@ impl Upkeep {
   /// Runs what is due. Returns whether the store may have changed (the UI re-reads it then).
   /// Failures are logged and retried on a later tick: offline, every step fails fast.
   pub async fn tick<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) -> bool {
+    let _step = crate::timing::step("upkeep_tick");
     let now = client.now_ms();
     let interval_ms = i64::try_from(self.interval.as_millis()).unwrap_or(i64::MAX);
     let mut is_changed = false;

@@ -302,6 +302,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     mut maybe_first: Option<Result<ListMessagesResponse, ApiError>>,
     maybe_pages: Option<u32>,
   ) -> Result<usize, CoreError> {
+    let _step = crate::timing::step("catch_up_messages");
     let mut total = 0;
     if !self.is_history_loaded(conversation)? {
       let query = self.first_messages_query(conversation)?;
@@ -515,6 +516,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     messages: Vec<MessageResponse>,
     finish: impl FnOnce(&mut Self) -> Result<(), CoreError>,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("mls_decrypt_batch");
     let mut messages = messages.into_iter().peekable();
     let mut maybe_finish = Some(finish);
     loop {
@@ -830,6 +832,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// `Ok(false)`: not sendable yet (no content key).
   async fn send_entry(&mut self, entry: &OutboxEntry) -> Result<bool, CoreError> {
+    let _step = crate::timing::step("send_entry");
     let key = records::outbox_key(entry.conversation_id, entry.client_message_id);
     let Some(mut stored) = self
       .store
@@ -918,6 +921,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     client_message_id: ClientMessageId,
     content: &MessageContent,
   ) -> Result<EncryptedMessage, CoreError> {
+    let _step = crate::timing::step("seal_message");
     let ring = self
       .account
       .key_bag

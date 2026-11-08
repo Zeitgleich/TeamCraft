@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui
 
+import de.zeitgleich.teamcraft.crash.Perf
 import android.util.Log
 import android.app.Application
 import android.content.Intent
@@ -695,11 +696,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   suspend fun refreshChatList(myId: String) = chatListLock.withLock {
     val conversations = runCatching { graph.core.conversations() }.getOrNull()
     if (conversations == null) {
+      // A start whose chat list can't be read failed (#1375): its measure says so.
+      Perf.chatListFailed()
       // Cached rows stay; with none, the list says it could not be read instead of loading for ever.
       chatListState.update { if (it.maybeConversations == null) it.copy(maybeReadFailure = LoadFailure.OTHER) else it }
       return@withLock
     }
     chatListState.update { it.copy(maybeConversations = conversations, maybeReadFailure = null, runningCalls = runningCalls()) }
+    // The chat list shows the core's rows: a signed-in start is done (#1521).
+    Perf.chatListShown()
     val previews = chatPreviews(conversations, myId)
     chatListState.update { it.copy(previews = previews) }
     isStartCacheStale = false

@@ -10,6 +10,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
   ) -> Bool {
     // First, so a crash during the rest of the launch is reported (the last known setting).
     CrashReports.shared.install()
+    // Performance data: the signed-in start until the chat list shows the core's rows (#1521).
+    let entry =
+      launchOptions?[.remoteNotification] != nil ? "notification" : launchOptions?[.url] != nil ? "link" : "launcher"
+    Perf.beginStart(entry: entry)
     UNUserNotificationCenter.current().delegate = self
     // DM titles, members and notifications name deleted accounts in the user's language (#1066).
     setDeletedUserName(name: String(localized: "user_deleted_name"))

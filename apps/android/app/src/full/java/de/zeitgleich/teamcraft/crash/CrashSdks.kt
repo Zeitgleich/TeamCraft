@@ -11,8 +11,20 @@ import io.sentry.TransactionOptions
 import io.sentry.android.core.SentryAndroid
 import io.sentry.android.core.SentryAndroidOptions
 import io.sentry.protocol.User
+import io.sentry.Instrumenter
+import io.sentry.SentryDate
+import io.sentry.SentryEvent
+import io.sentry.SentryLevel
+import io.sentry.SentryLongDate
+import io.sentry.protocol.Message
 import kotlin.random.Random
+import uniffi.teamcraft_ffi.PerfJobKind
+import uniffi.teamcraft_ffi.PerfJobSpan
+import uniffi.teamcraft_ffi.PerfListener
+import uniffi.teamcraft_ffi.perfJobSpans
 import uniffi.teamcraft_ffi.recentLogLines
+import uniffi.teamcraft_ffi.setPerfListener
+import uniffi.teamcraft_ffi.setSlowJobThresholdMs
 
 /** Google Play builds: sentry-android (JVM, NDK and ANR crashes). */
 object CrashSdks {
@@ -38,6 +50,9 @@ private object SentryCrashSdk : CrashSdk {
     if (maybeRunning != null) Sentry.close()
     try {
       SentryAndroid.init(context.applicationContext) { options -> configure(options, settings) }
+      // The core's slow jobs as sampled warnings (issue #1521), with the instance's threshold.
+      setSlowJobThresholdMs(settings.config.slowJobMs.toULong())
+      setPerfListener(SlowJobReports)
       // The scope's user too: NDK crashes are written by the native SDK from the synced scope.
       Sentry.setUser(User().apply { id = settings.installationId })
       maybeRunning = settings
@@ -51,13 +66,17 @@ private object SentryCrashSdk : CrashSdk {
   @Synchronized
   override fun stop() {
     if (maybeRunning == null) return
+    setSlowJobThresholdMs(0uL)
     Sentry.close()
     maybeRunning = null
   }
 
-  override fun startTransaction(name: String, op: String): PerfHandle? {
+  override fun startTransaction(name: String, op: String, startedAtMs: Long): PerfHandle? {
     if (maybeRunning == null) return null
-    val options = TransactionOptions().apply { isBindToScope = false }
+    val options = TransactionOptions().apply {
+      isBindToScope = false
+      startTimestamp = sentryDate(startedAtMs.toDouble())
+    }
     val transaction = runCatching { Sentry.startTransaction(name, op, options) }.getOrNull() ?: return null
     // Left out by the trace rate: nothing to finish or send.
     if (transaction.isSampled != true) return null
@@ -127,11 +146,23 @@ private object SentryCrashSdk : CrashSdk {
   }
 }
 
-/** A measure of [Perf] as a sentry transaction. */
+/** A measure of [Perf] as a sentry transaction, with the core's jobs as its steps. */
 private class SentryPerfHandle(private val transaction: ITransaction) : PerfHandle {
   override fun tag(name: String, value: String) = transaction.setTag(name, value)
 
-  override fun finish(isOk: Boolean) = transaction.finish(if (isOk) SpanStatus.OK else SpanStatus.UNAVAILABLE)
+  override fun measure(name: String, value: Double) = transaction.setMeasurement(name, value)
+
+  override fun step(op: String, description: String, startMs: Long, endMs: Long) {
+    val step = transaction.startChild(op, description, sentryDate(startMs.toDouble()), Instrumenter.SENTRY)
+    step.finish(SpanStatus.OK, sentryDate(endMs.toDouble()))
+  }
+
+  override fun finish(isOk: Boolean) {
+    val endMs = System.currentTimeMillis().toDouble()
+    val startMs = transaction.startDate.nanoTimestamp() / 1_000_000.0
+    runCatching { perfJobSpans(startMs, endMs) }.getOrDefault(emptyList()).forEach(::addJob)
+    transaction.finish(if (isOk) SpanStatus.OK else SpanStatus.UNAVAILABLE, sentryDate(endMs))
+  }
 
   override fun cancel() {
     // The SDK has no way to drop a started transaction: `beforeSendTransaction` drops it by this tag.
@@ -139,7 +170,62 @@ private class SentryPerfHandle(private val transaction: ITransaction) : PerfHand
     transaction.finish(SpanStatus.CANCELLED)
   }
 
+  /**
+   * A core job as two steps: its wait in the queue (`queue.wait`) and its run (`core.read`,
+   * `core.engine`, `store.lock_wait`, `store.write_group`, `core.step`), named by the job's
+   * function or the step's name in the code.
+   */
+  private fun addJob(job: PerfJobSpan) {
+    val op = jobOp(job.kind)
+    if (job.startedAtMs - job.enqueuedAtMs >= MIN_STEP_MS) {
+      val wait = transaction.startChild("queue.wait", job.name, sentryDate(job.enqueuedAtMs), Instrumenter.SENTRY)
+      wait.setData(QUEUE_DEPTH_DATA, job.queueDepth.toLong())
+      wait.setData(QUEUE_DATA, op)
+      wait.finish(SpanStatus.OK, sentryDate(job.startedAtMs))
+    }
+    val run = transaction.startChild(op, job.name, sentryDate(job.startedAtMs), Instrumenter.SENTRY)
+    run.setData(QUEUE_DEPTH_DATA, job.queueDepth.toLong())
+    run.finish(SpanStatus.OK, sentryDate(job.doneAtMs))
+  }
+
   companion object {
     const val DROPPED_TAG = "teamcraft.dropped"
+    const val QUEUE_DEPTH_DATA = "teamcraft.queue_depth"
+    const val QUEUE_DATA = "teamcraft.queue"
+    private const val MIN_STEP_MS = 1.0
   }
 }
+
+/**
+ * A core job that waited or ran longer than the instance's threshold, as a warning (sampled with
+ * the handled errors' rate in `beforeSend`), grouped per job: its name, queue, wait, run and the
+ * queue's depth as tags. Names are functions in the code, never data.
+ */
+private object SlowJobReports : PerfListener {
+  override fun onSlowJob(job: PerfJobSpan) {
+    val waitMs = (job.startedAtMs - job.enqueuedAtMs).toLong()
+    val runMs = (job.doneAtMs - job.startedAtMs).toLong()
+    val event = SentryEvent().apply {
+      level = SentryLevel.WARNING
+      message = Message().apply { formatted = "Slow core job: ${job.name}" }
+      fingerprints = listOf("slow-core-job", job.name)
+      setTag("job", job.name)
+      setTag("queue", jobOp(job.kind))
+      setTag("wait_ms", waitMs.toString())
+      setTag("run_ms", runMs.toString())
+      setTag("queue_depth", job.queueDepth.toString())
+    }
+    runCatching { Sentry.captureEvent(event) }
+  }
+}
+
+private fun jobOp(kind: PerfJobKind): String = when (kind) {
+  PerfJobKind.READ_QUEUE -> "core.read"
+  PerfJobKind.ENGINE_QUEUE -> "core.engine"
+  PerfJobKind.STORE_LOCK -> "store.lock_wait"
+  PerfJobKind.WRITE_GROUP -> "store.write_group"
+  PerfJobKind.CORE_STEP -> "core.step"
+}
+
+/** Unix milliseconds (with a fraction) as the SDK's date. */
+private fun sentryDate(unixMs: Double): SentryDate = SentryLongDate((unixMs * 1_000_000.0).toLong())

@@ -6,6 +6,7 @@
 //! is no field a caller could fill with a message, a name, a file name or an ID at run time; the
 //! only run-time values are times, numbers and the random installation ID.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
@@ -51,6 +52,9 @@ pub enum PerfOperation {
   CallSetup,
   /// An MLS commit (adding or removing members, key updates) until the server took it.
   MlsCommit,
+  /// A conversation opened (or the app back from a push) until its newest server message is in the
+  /// store and shown: catches "the push came, the chat lacks it" behind a fast switch.
+  CatchUp,
 }
 
 /// How an operation ended (the protocol's span status).
@@ -72,8 +76,9 @@ pub enum PerfStatus {
 pub struct PerfSpan {
   /// The protocol's operation (`http.client`, `db`, `crypto`, `ui.render`).
   pub op: &'static str,
-  /// What it did: a route template or a step's name, never a concrete path or ID.
-  pub description: &'static str,
+  /// What it did: a route template or a step's name, never a concrete path or ID. Text from
+  /// elsewhere (the desktop shell's step names) passes [`PerfSpan::code_name`].
+  pub description: Cow<'static, str>,
   pub start_ms: f64,
   pub end_ms: f64,
   pub status: PerfStatus,
@@ -85,6 +90,18 @@ pub enum PerfUnit {
   Byte,
   /// A count (messages, members).
   None,
+}
+
+/// A timed step of the core (`teamcraft_core::timing`) as the desktop shell hands it to the page
+/// (`perf_core_steps`): a code name, never data; the page turns it into a [`PerfSpan`].
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CoreStep {
+  /// `core.step`, `store.lock_wait` or `store.write_group`.
+  pub op: String,
+  /// The step's or the request's name in the code (`messages`, `catch_up_conversation`).
+  pub name: String,
+  pub started_at_ms: f64,
+  pub took_ms: f64,
 }
 
 /// A trace: 16 random bytes, 32 hex digits.
@@ -158,6 +175,11 @@ impl Transaction {
     self.operation
   }
 
+  /// When it started, Unix time in milliseconds.
+  pub fn start_ms(&self) -> f64 {
+    self.start_ms
+  }
+
   /// When it ended, Unix time in milliseconds.
   pub fn end_ms(&self) -> f64 {
     self.end_ms
@@ -198,7 +220,7 @@ impl Transaction {
           "span_id": self.span_id.child(index).to_string(),
           "parent_span_id": self.span_id.to_string(),
           "op": span.op,
-          "description": span.description,
+          "description": span.description.as_ref(),
           "start_timestamp": seconds_f64(span.start_ms.max(self.start_ms)),
           "timestamp": seconds_f64(span.end_ms.clamp(self.start_ms, self.end_ms)),
           "status": span.status.as_str(),
@@ -238,6 +260,23 @@ impl Transaction {
   }
 }
 
+impl PerfSpan {
+  /// A name that came over a boundary (the desktop shell): kept only while it looks like a name
+  /// in the code (lowercase letters, digits, `_`, 1 to 48 characters), otherwise `step`.
+  pub fn code_name(name: &str) -> Cow<'static, str> {
+    let is_code = !name.is_empty()
+      && name.len() <= 48
+      && name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if is_code {
+      Cow::Owned(name.to_owned())
+    } else {
+      Cow::Borrowed("step")
+    }
+  }
+}
+
 impl PerfOperation {
   /// The transaction's name in the backend.
   pub fn name(self) -> &'static str {
@@ -250,6 +289,7 @@ impl PerfOperation {
       Self::FileDownload => "file.download",
       Self::CallSetup => "call.setup",
       Self::MlsCommit => "mls.commit",
+      Self::CatchUp => "conversation.catch_up",
     }
   }
 
@@ -262,6 +302,7 @@ impl PerfOperation {
       Self::Resync => "sync",
       Self::FileUpload | Self::FileDownload => "file",
       Self::CallSetup => "call",
+      Self::CatchUp => "sync",
     }
   }
 }
@@ -366,7 +407,7 @@ mod tests {
     let mut transaction = Transaction::start(PerfOperation::MessageSend, 1_000.0, [0; 40]);
     transaction.add_span(PerfSpan {
       op: "ui",
-      description: "late",
+      description: "late".into(),
       start_ms: 500.0,
       end_ms: 9_000.0,
       status: PerfStatus::Ok,
@@ -391,7 +432,7 @@ mod tests {
     for _ in 0..MAX_SPANS + 10 {
       transaction.add_span(PerfSpan {
         op: "x",
-        description: "y",
+        description: "y".into(),
         start_ms: 0.0,
         end_ms: 1.0,
         status: PerfStatus::Ok,
@@ -426,6 +467,18 @@ mod tests {
   }
 
   #[test]
+  fn names_from_the_shell_must_look_like_code() {
+    assert_eq!(
+      PerfSpan::code_name("catch_up_conversation"),
+      "catch_up_conversation"
+    );
+    assert_eq!(PerfSpan::code_name("migrate_to_v5"), "migrate_to_v5");
+    for leaky in ["Alice Example", "a@example.com", "/home/x", "", &"x".repeat(49)] {
+      assert_eq!(PerfSpan::code_name(leaky), "step", "{leaky}");
+    }
+  }
+
+  #[test]
   fn every_operation_has_a_distinct_name() {
     let all = [
       PerfOperation::StartToChannelList,
@@ -436,6 +489,7 @@ mod tests {
       PerfOperation::FileDownload,
       PerfOperation::CallSetup,
       PerfOperation::MlsCommit,
+      PerfOperation::CatchUp,
     ];
     let names: HashSet<&str> = all.iter().map(|operation| operation.name()).collect();
     assert_eq!(names.len(), all.len());
@@ -448,7 +502,7 @@ mod tests {
     let mut transaction = Transaction::start(PerfOperation::ChannelSwitch, 1_700_000_000_000.0, random);
     transaction.add_span(PerfSpan {
       op: "http.client",
-      description: "GET /api/v1/channels/{id}/messages",
+      description: "GET /api/v1/channels/{id}/messages".into(),
       start_ms: 1_700_000_000_010.0,
       end_ms: 1_700_000_000_070.0,
       status: PerfStatus::Error,

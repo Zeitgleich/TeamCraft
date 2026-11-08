@@ -22,6 +22,7 @@ mod logging;
 mod markup;
 mod media_viewer;
 mod notetaker;
+mod perf_jobs;
 mod reads;
 mod row_badge;
 mod server_entry;
@@ -61,6 +62,9 @@ pub use media_viewer::{
   OriginalDownload, album_layout, fetches_original_automatically, media_viewer_limits,
 };
 pub use notetaker::{MovedCallHint, NotetakerAddition};
+pub use perf_jobs::{
+  PerfJobKind, PerfJobSpan, PerfListener, perf_job_spans, set_perf_listener, set_slow_job_threshold_ms,
+};
 pub use server_entry::{
   CheckedServer, ServerAddress, ServerEntryError, SignInOption, SignInPageInfo, StoredServer,
   check_server_info, normalize_server_address, sign_in_page, sso_only_sign_in_page, stored_server,
@@ -154,6 +158,7 @@ impl TeamCraft {
     listener: Arc<dyn EventListener>,
   ) -> Result<Arc<Self>, TeamCraftError> {
     logging::install();
+    perf_jobs::install();
     outcome(LifecycleStep::Open, Self::open(config, tokens, listener))
   }
 
@@ -1519,11 +1524,14 @@ impl TeamCraft {
   {
     let (reply, answer) = oneshot::channel();
     let queued = Instant::now();
+    let timing = perf_jobs::queued(PerfJobKind::EngineQueue, std::any::type_name::<F>());
     let boxed: Job = Box::new(move |engine| {
       Box::pin(async move {
+        let running = timing.start();
         let started = Instant::now();
         let result = job(engine).await;
         logging::slow_job(std::any::type_name::<F>(), started - queued, started.elapsed());
+        running.done();
         // The caller may have given up waiting (cancelled coroutine); nothing to tell it then.
         let _ = reply.send(result);
       })

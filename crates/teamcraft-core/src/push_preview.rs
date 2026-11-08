@@ -128,6 +128,7 @@ pub async fn push_preview<A: ServerApi>(
   maybe_api: Option<&A>,
   sealed: &[u8],
 ) -> Result<PushPreview, CoreError> {
+  let _step = crate::timing::step("push_preview");
   let wake_up = open_push_wakeup(store, sealed)?;
   let maybe_conversation: Option<ConversationResponse> =
     records::get_json(store, Table::Conversations, &wake_up.conversation_id.to_string())?;
@@ -453,6 +454,7 @@ async fn fetch_and_decrypt<A: ServerApi>(
   wake_up: &PushWakeUp,
   message_id: MessageId,
 ) -> Result<(UserId, ShownContent), CoreError> {
+  let _step = crate::timing::step("push_fetch_decrypt");
   // `before` is exclusive: start right after the message, newest first.
   let next = Snowflake::new(message_id.snowflake().get().saturating_add(1))
     .map_err(|_| CoreError::Corrupt("message ID out of range".into()))?;

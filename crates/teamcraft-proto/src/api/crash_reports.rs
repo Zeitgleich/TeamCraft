@@ -16,6 +16,8 @@ use crate::wire_enum::wire_enum;
 pub const CRASH_REPORTS_PATH: &str = "/api/v1/crash-reports";
 /// Largest envelope the relay takes, in bytes; the apps' reports are far smaller.
 pub const MAX_CRASH_ENVELOPE_BYTES: usize = 256 * 1024;
+/// What counts as a slow job of the apps' core by default, in milliseconds.
+pub const DEFAULT_SLOW_JOB_MS: u32 = 1_000;
 /// Longest environment name, in characters.
 pub const MAX_CRASH_ENVIRONMENT_CHARS: usize = 64;
 
@@ -35,6 +37,10 @@ pub struct CrashReportSettings {
   /// lowered as instances grow. Absent from older rows: 100.
   #[serde(default = "all_percent")]
   pub trace_percent: u8,
+  /// A job of the apps' core that waits or runs this long, in milliseconds, is reported as a
+  /// sampled warning naming the job, its wait and its queue (issue #1521). 0: never. Absent: 1000.
+  #[serde(default = "default_slow_job_ms")]
+  pub slow_job_ms: u32,
   /// The environment the backend groups reports by (`production`, `staging`).
   pub environment: String,
   /// People may turn reports off in their privacy settings. Off: reports are mandatory on this
@@ -68,6 +74,8 @@ pub struct CrashReportsInfo {
   /// Share of measured operations sent as performance data. Absent (an older server): none.
   #[serde(default)]
   pub trace_percent: u8,
+  #[serde(default = "default_slow_job_ms")]
+  pub slow_job_ms: u32,
   pub environment: String,
   #[serde(default = "is_on")]
   pub allows_opt_out: bool,
@@ -128,6 +136,7 @@ impl Default for CrashReportSettings {
       dsn: String::new(),
       sample_percent: 100,
       trace_percent: 100,
+      slow_job_ms: DEFAULT_SLOW_JOB_MS,
       environment: "production".to_owned(),
       allows_opt_out: true,
       shows_notice: true,
@@ -176,6 +185,7 @@ impl CrashReportSettings {
       dsn: dsn.to_string(),
       sample_percent: self.sample_percent,
       trace_percent: self.trace_percent,
+      slow_job_ms: self.slow_job_ms,
       environment: self.environment.clone(),
       allows_opt_out: self.allows_opt_out,
       shows_notice: self.shows_notice,
@@ -189,6 +199,10 @@ fn is_on() -> bool {
 
 fn all_percent() -> u8 {
   100
+}
+
+fn default_slow_job_ms() -> u32 {
+  DEFAULT_SLOW_JOB_MS
 }
 
 /// Lowercase ASCII letters, digits, `-`, `_` and `.`, 1 to [`MAX_CRASH_ENVIRONMENT_CHARS`].
@@ -315,6 +329,7 @@ mod tests {
         dsn: "https://pub@crashes.example.com/1".to_owned(),
         sample_percent: 100,
         trace_percent: 100,
+        slow_job_ms: 1_000,
         environment: "production".to_owned(),
         allows_opt_out: true,
         shows_notice: true,
@@ -370,6 +385,7 @@ mod tests {
         "dsn": "",
         "sample_percent": 100,
         "trace_percent": 100,
+        "slow_job_ms": 1000,
         "environment": "production",
         "allows_opt_out": true,
         "shows_notice": true,

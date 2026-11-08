@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.crash.CatchUpMeasure
 import de.zeitgleich.teamcraft.crash.Perf
 import uniffi.teamcraft_ffi.PerfMeasure
 import android.widget.Toast
@@ -232,6 +233,10 @@ fun ConversationScreen(
   var isAskingServer by remember(conversationId) { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   val rights = rememberRights(viewModel, conversationId, changes)
+  // Performance data: whether the conversation caught up with the server once open (#1521).
+  val catchUp = remember(conversationId) { CatchUpMeasure(conversationId, System.currentTimeMillis()) }
+  DisposableEffect(catchUp) { onDispose { catchUp.dispose() } }
+  LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { catchUp.resumed() }
   // Performance data: from opening the conversation until its messages are read (issue #1521).
   DisposableEffect(conversationId) {
     Perf.begin(PerfMeasure.CHANNEL_SWITCH, conversationId)
@@ -270,6 +275,11 @@ fun ConversationScreen(
       maybeKeyCatchUp = viewModel.keyCatchUp()
       // After the messages: once the store has the notified one, the core no longer names it.
       maybeNotified = viewModel.notifiedConversation(conversationId)
+      catchUp.observe(
+        isBehind = maybeNotified != null || snapshot?.conversation(conversationId)?.isCatchingUp == true,
+        isFromPush = maybeNotified != null,
+        hasGaps = gaps.isNotEmpty(),
+      )
       pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: pinned
       unseenReactions = viewModel.readChat { query(ChatQueries.unseenReactions(conversationId)).unseen } ?: unseenReactions
       joinRequests = requestsIn(conversationId, viewModel.joinRequests.list())

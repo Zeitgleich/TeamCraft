@@ -43,9 +43,12 @@ object SentryTransactionScrub {
       // A span's tags are the SDK's (an HTTP call's query among them): none are needed.
       emptyMap(),
       span.measurements,
-      // Span data holds the full URL, query and body sizes of HTTP calls, file paths of file I/O.
-      null,
+      // Span data holds the full URL, query and body sizes of HTTP calls, file paths of file I/O:
+      // only the core jobs' queue facts (a number and a static name) stay.
+      span.data?.filterKeys { it in KEPT_DATA }?.filterValues { it is Number || (it is String && it in KEPT_QUEUES) },
     )
 
   private const val MAX_DESCRIPTION_CHARS = 256
+  private val KEPT_DATA = setOf("teamcraft.queue_depth", "teamcraft.queue")
+  private val KEPT_QUEUES = setOf("core.read", "core.engine", "store.lock_wait", "store.write_group", "core.step")
 }

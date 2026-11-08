@@ -8,8 +8,9 @@ use std::backtrace::Backtrace;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use teamcraft_client_api::crash_reporting::{MAX_PENDING_PANICS, PanicParts, PendingPanic};
+use teamcraft_client_api::crash_reporting::{CoreStep, MAX_PENDING_PANICS, PanicParts, PendingPanic};
 use teamcraft_client_api::debug_log;
+use teamcraft_core::timing::{self, TimedKind};
 
 const PENDING_FILE: &str = "crash-reports-pending.json";
 
@@ -38,6 +39,26 @@ pub fn set_data_dir(dir: &Path) {
 }
 
 /// The page takes the shell's pending panics to report them; the file is gone afterwards.
+/// The core's timed steps between two Unix milliseconds (#1521): the page attaches them to the
+/// measure it finishes, so a slow switch on desktop shows what the shell's core did meanwhile.
+#[tauri::command(rename_all = "snake_case")]
+pub fn perf_core_steps(start_ms: f64, end_ms: f64) -> Vec<CoreStep> {
+  timing::recent(start_ms, end_ms)
+    .into_iter()
+    .map(|timed| CoreStep {
+      op: match timed.kind {
+        TimedKind::Step => "core.step",
+        TimedKind::GroupLock => "store.lock_wait",
+        TimedKind::WriteGroup => "store.write_group",
+      }
+      .to_owned(),
+      name: timed.name.to_owned(),
+      started_at_ms: timed.started_at_ms,
+      took_ms: timed.took.as_secs_f64() * 1_000.0,
+    })
+    .collect()
+}
+
 #[tauri::command(rename_all = "snake_case")]
 pub fn crash_reports_take_native() -> Vec<PendingPanic> {
   let Some(path) = PENDING_PATH.get() else {

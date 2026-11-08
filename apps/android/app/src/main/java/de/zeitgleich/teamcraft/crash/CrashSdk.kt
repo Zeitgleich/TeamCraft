@@ -20,7 +20,7 @@ interface CrashSdk {
    * Starts a transaction ([Perf]); `null` while the SDK isn't running or the trace rate left this
    * one out. [name] and [op] come from the core's list of measures.
    */
-  fun startTransaction(name: String, op: String): PerfHandle? = null
+  fun startTransaction(name: String, op: String, startedAtMs: Long): PerfHandle? = null
 }
 
 /** What the SDK is started with: the instance's setting, this build's release and the installation. */

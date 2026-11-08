@@ -109,6 +109,10 @@ final class CrashReports {
     guard maybeRunning != settings else { return }
     if maybeRunning != nil { SentrySDK.close() }
     SentrySDK.start { options in Self.configure(options, settings: settings) }
+    // The core's slow jobs as sampled warnings, and the app's own measures (issue #1521).
+    setSlowJobThresholdMs(thresholdMs: settings.config.slowJobMs)
+    setPerfListener(listener: SlowJobReports())
+    Perf.setRunning(true)
     // The scope's user too, so every report path carries the installation ID and nothing else.
     SentrySDK.setUser(User(userId: settings.installationID))
     maybeRunning = settings
@@ -117,6 +121,8 @@ final class CrashReports {
 
   private func stop() {
     guard maybeRunning != nil else { return }
+    setSlowJobThresholdMs(thresholdMs: 0)
+    Perf.setRunning(false)
     SentrySDK.close()
     maybeRunning = nil
     Self.log.info("crash reports off")
@@ -180,10 +186,12 @@ struct CrashConfig: Codable, Equatable, Sendable {
   let showsNotice: Bool
   /// Share of app starts and screen loads traced, 0 to 1; 0 when stored by an older version.
   let traceRate: Double
+  /// A core job that waits or runs this long is reported as a sampled warning; 0: never.
+  let slowJobMs: UInt64
 
   init(
     dsn: String, sampleRate: Double, environment: String, allowsOptOut: Bool, showsNotice: Bool,
-    traceRate: Double = 0
+    traceRate: Double = 0, slowJobMs: UInt64 = 1_000
   ) {
     self.dsn = dsn
     self.sampleRate = sampleRate
@@ -191,12 +199,14 @@ struct CrashConfig: Codable, Equatable, Sendable {
     self.allowsOptOut = allowsOptOut
     self.showsNotice = showsNotice
     self.traceRate = traceRate
+    self.slowJobMs = slowJobMs
   }
 
   init(_ config: CrashReportsConfig) {
     self.init(
       dsn: config.dsn, sampleRate: config.sampleRate, environment: config.environment,
-      allowsOptOut: config.allowsOptOut, showsNotice: config.showsNotice, traceRate: config.traceRate)
+      allowsOptOut: config.allowsOptOut, showsNotice: config.showsNotice, traceRate: config.traceRate,
+      slowJobMs: config.slowJobMs)
   }
 
   init(from decoder: Decoder) throws {
@@ -207,6 +217,7 @@ struct CrashConfig: Codable, Equatable, Sendable {
     allowsOptOut = try container.decode(Bool.self, forKey: .allowsOptOut)
     showsNotice = try container.decode(Bool.self, forKey: .showsNotice)
     traceRate = try container.decodeIfPresent(Double.self, forKey: .traceRate) ?? 0
+    slowJobMs = try container.decodeIfPresent(UInt64.self, forKey: .slowJobMs) ?? 1_000
   }
 }
 
@@ -241,7 +252,11 @@ enum CrashEventScrub {
   ) -> Event? {
     // sentry-cocoa hands transactions (performance data, sampled by the SDK's trace rate) to
     // `beforeSend` too: they keep their spans, lose what a report never carries.
-    if event.type == "transaction" { return prepareTransaction(event, installationID: installationID) }
+    if event.type == "transaction" {
+      // A measure the user moved on from (`Perf.cancel`) is dropped here.
+      if event.tags?[Perf.droppedTag] != nil { return nil }
+      return prepareTransaction(event, installationID: installationID)
+    }
     guard isCrash(event) || roll < sampleRate else { return nil }
     event.request = nil
     event.serverName = nil

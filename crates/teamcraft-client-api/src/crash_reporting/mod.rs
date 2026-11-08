@@ -20,7 +20,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{CrashReportsInfo, is_crash_environment};
+use teamcraft_proto::{CrashReportsInfo, DEFAULT_SLOW_JOB_MS, is_crash_environment};
 pub use teamcraft_proto::{Dsn, DsnError};
 use thiserror::Error;
 
@@ -35,8 +35,8 @@ pub use reporter::{
 };
 pub use scrub::scrub;
 pub use transaction::{
-  MAX_MEASUREMENTS, MAX_SPANS, MAX_TAGS, PerfOperation, PerfSpan, PerfStatus, PerfUnit, SpanId, TraceId,
-  Transaction,
+  CoreStep, MAX_MEASUREMENTS, MAX_SPANS, MAX_TAGS, PerfOperation, PerfSpan, PerfStatus, PerfUnit, SpanId,
+  TraceId, Transaction,
 };
 
 /// How long one send may take, connect to answer. A dead backend must never hold the app up;
@@ -56,6 +56,10 @@ pub struct CrashReportingConfig {
   /// config of an older version: none, until the server's setting comes in.
   #[serde(default = "SampleRate::none")]
   pub trace_rate: SampleRate,
+  /// A job of the core that waits or runs this long, in milliseconds, is reported (mobile apps);
+  /// 0: never.
+  #[serde(default = "default_slow_job_ms")]
+  pub slow_job_ms: u32,
   pub environment: Environment,
   /// The user's opt-out counts; off: the instance requires reports.
   #[serde(default = "is_on")]
@@ -131,6 +135,7 @@ impl CrashReportingConfig {
       dsn: dsn.parse()?,
       sample_rate: SampleRate::new(sample_rate)?,
       trace_rate: SampleRate::NONE,
+      slow_job_ms: DEFAULT_SLOW_JOB_MS,
       environment: Environment::new(environment)?,
       allows_opt_out: true,
       shows_notice: true,
@@ -144,6 +149,7 @@ impl CrashReportingConfig {
       allows_opt_out: info.allows_opt_out,
       shows_notice: info.shows_notice,
       trace_rate: SampleRate::new(f64::from(info.trace_percent) / 100.0)?,
+      slow_job_ms: info.slow_job_ms,
       ..Self::new(
         &info.dsn,
         f64::from(info.sample_percent) / 100.0,
@@ -155,6 +161,10 @@ impl CrashReportingConfig {
 
 fn is_on() -> bool {
   true
+}
+
+fn default_slow_job_ms() -> u32 {
+  DEFAULT_SLOW_JOB_MS
 }
 
 impl SampleRate {
@@ -290,6 +300,7 @@ mod tests {
       dsn: "https://abc123@errors.example.com/7".to_owned(),
       sample_percent: 20,
       trace_percent: 5,
+      slow_job_ms: 1_000,
       environment: "production".to_owned(),
       allows_opt_out: false,
       shows_notice: true,
@@ -327,6 +338,7 @@ mod tests {
         "dsn": "https://abc123@errors.example.com/7",
         "sample_rate": 0.5,
         "trace_rate": 0.0,
+        "slow_job_ms": 1000,
         "environment": "production",
         "allows_opt_out": true,
         "shows_notice": true,

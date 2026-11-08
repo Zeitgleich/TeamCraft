@@ -15,6 +15,8 @@ pub struct CrashReportsConfig {
   /// Share of app starts, screen loads and HTTP calls traced as performance data, 0 to 1
   /// (issue #1521); 0 from an older server.
   pub trace_rate: f64,
+  /// A core job that waits or runs this long is reported as a sampled warning; 0: never.
+  pub slow_job_ms: u64,
   /// The environment the backend groups reports by (`production`).
   pub environment: String,
   /// The user's switch counts; off: the instance requires reports.
@@ -34,6 +36,7 @@ pub fn crash_reports_config(response_json: String) -> Option<CrashReportsConfig>
     dsn: config.dsn.to_string(),
     sample_rate: config.sample_rate.get(),
     trace_rate: config.trace_rate.get(),
+    slow_job_ms: u64::from(config.slow_job_ms),
     environment: config.environment.as_str().to_owned(),
     allows_opt_out: config.allows_opt_out,
     shows_notice: config.shows_notice,
@@ -51,6 +54,7 @@ pub enum PerfMeasure {
   FileUpload,
   FileDownload,
   CallSetup,
+  CatchUp,
 }
 
 /// The transaction name and operation of a measure (`channel.switch`, `navigation`).
@@ -70,6 +74,7 @@ pub fn perf_measure_name(measure: PerfMeasure) -> PerfMeasureName {
     PerfMeasure::FileUpload => PerfOperation::FileUpload,
     PerfMeasure::FileDownload => PerfOperation::FileDownload,
     PerfMeasure::CallSetup => PerfOperation::CallSetup,
+    PerfMeasure::CatchUp => PerfOperation::CatchUp,
   };
   PerfMeasureName {
     name: operation.name().to_owned(),

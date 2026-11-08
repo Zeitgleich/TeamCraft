@@ -118,6 +118,38 @@ pub fn cancel_pending(operation: PerfOperation) {
   });
 }
 
+/// A conversation opens: its switch runs until its first row shows (rows in memory unless a read
+/// from the core's store says otherwise), and, while it is behind the server, its catch-up until it
+/// no longer is (`conversation.catch_up`).
+pub fn begin_switch(key: &str, is_catching_up: bool) {
+  keep_only_pending(PerfOperation::ChannelSwitch, key);
+  begin_pending(PerfOperation::ChannelSwitch, key);
+  with_pending(PerfOperation::ChannelSwitch, key, |measure| {
+    measure.tag("source", "memory")
+  });
+  keep_only_pending(PerfOperation::CatchUp, key);
+  if is_catching_up && !is_pending_for(PerfOperation::CatchUp, key) {
+    begin_pending(PerfOperation::CatchUp, key);
+    let is_resyncing = is_pending(PerfOperation::Resync);
+    with_pending(PerfOperation::CatchUp, key, |measure| {
+      measure.tag("source", "open");
+      if is_resyncing {
+        measure.tag("resync", "yes");
+      }
+    });
+  }
+}
+
+/// Whether a measure of `operation` runs for `key`.
+pub fn is_pending_for(operation: PerfOperation, key: &str) -> bool {
+  PENDING.with(|pending| {
+    pending
+      .borrow()
+      .iter()
+      .any(|(running, running_key, _)| *running == operation && running_key == key)
+  })
+}
+
 /// The signed-in start is done (the channel list is on screen): measures it from the page's
 /// navigation, with the start's parts (`crate::start_timing`) as its steps. Once per page.
 pub fn finish_start() {
@@ -185,7 +217,7 @@ impl Measure {
     if let Some(transaction) = &mut self.maybe_transaction {
       transaction.add_span(PerfSpan {
         op,
-        description,
+        description: description.into(),
         start_ms,
         end_ms: now_ms(),
         status,
@@ -198,7 +230,7 @@ impl Measure {
     if let Some(transaction) = &mut self.maybe_transaction {
       transaction.add_span(PerfSpan {
         op,
-        description,
+        description: description.into(),
         start_ms,
         end_ms,
         status: PerfStatus::Ok,
@@ -228,14 +260,70 @@ impl Measure {
 
 #[cfg(target_arch = "wasm32")]
 mod platform {
-  use teamcraft_client_api::crash_reporting::Transaction;
+  use teamcraft_client_api::crash_reporting::{CoreStep, PerfSpan, PerfStatus, Transaction};
+  use teamcraft_core::timing::{self, TimedKind};
+
+  use crate::auth::tauri;
 
   pub fn should_trace() -> bool {
-    crate::crash_reports::should_trace()
+    let is_traced = crate::crash_reports::should_trace();
+    if is_traced {
+      // The page's own core (web) keeps its steps from now on; on desktop the shell does.
+      timing::enable_ring();
+    }
+    is_traced
   }
 
-  pub fn capture(transaction: Transaction) {
-    crate::crash_reports::capture_transaction(&transaction);
+  /// Queues the measure with the core's steps that overlapped it: on the web from the page's own
+  /// core, on desktop from the shell's (`perf_core_steps`).
+  pub fn capture(mut transaction: Transaction) {
+    let (start_ms, end_ms) = (transaction.start_ms(), transaction.end_ms());
+    if !tauri::is_available() {
+      for timed in timing::recent(start_ms, end_ms) {
+        transaction.add_span(PerfSpan {
+          op: kind_op(timed.kind),
+          description: timed.name.into(),
+          start_ms: timed.started_at_ms,
+          end_ms: timed.started_at_ms + timed.took.as_secs_f64() * 1_000.0,
+          status: PerfStatus::Ok,
+        });
+      }
+      crate::crash_reports::capture_transaction(&transaction);
+      return;
+    }
+    wasm_bindgen_futures::spawn_local(async move {
+      let args = serde_json::json!({ "start_ms": start_ms, "end_ms": end_ms });
+      // A shell without the command (older) only means no steps.
+      if let Ok(steps) = tauri::call::<Vec<CoreStep>>("perf_core_steps", &args).await {
+        for step in steps {
+          transaction.add_span(PerfSpan {
+            op: op_of(&step.op),
+            description: PerfSpan::code_name(&step.name),
+            start_ms: step.started_at_ms,
+            end_ms: step.started_at_ms + step.took_ms,
+            status: PerfStatus::Ok,
+          });
+        }
+      }
+      crate::crash_reports::capture_transaction(&transaction);
+    });
+  }
+
+  fn kind_op(kind: TimedKind) -> &'static str {
+    match kind {
+      TimedKind::Step => "core.step",
+      TimedKind::GroupLock => "store.lock_wait",
+      TimedKind::WriteGroup => "store.write_group",
+    }
+  }
+
+  /// The shell's operation, as one of the page's own names.
+  fn op_of(op: &str) -> &'static str {
+    match op {
+      "store.lock_wait" => "store.lock_wait",
+      "store.write_group" => "store.write_group",
+      _ => "core.step",
+    }
   }
 
   pub fn random40() -> [u8; 40] {

@@ -114,6 +114,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// of conversations with a placeholder due, once. Ends the catch-up when nothing waits any more.
   /// Returns whether a placeholder changed.
   pub fn settle_missing_keys(&mut self) -> Result<bool, CoreError> {
+    let _step = crate::timing::step("key_catch_up_settle");
     let now = self.now_ms();
     let mut is_changed = false;
     for conversation in waiting_conversations(&self.store)? {

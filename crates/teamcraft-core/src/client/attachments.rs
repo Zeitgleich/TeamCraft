@@ -108,6 +108,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     file: OutgoingFile,
   ) -> Result<AttachmentRef, CoreError> {
+    let _step = crate::timing::step("file_upload");
     let encrypted = encrypt_attachment(&file.content, DEFAULT_CHUNK_SIZE, &mut OsRng)?;
     let created = self
       .api
@@ -140,6 +141,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &self,
     attachment: &AttachmentRef,
   ) -> Result<SecretBytes, CoreError> {
+    let _step = crate::timing::step("file_download_decrypt");
     self.download_decrypted_capped(attachment, None).await
   }
 
