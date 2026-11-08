@@ -3704,12 +3704,13 @@ restored together with them on a new device.
   desktop) and `teamcraft-client-api/src/mobile_settings.rs` (Android and iOS, the same keys and
   values); settings the server enforces (push, do not disturb, conversation and space mutes, read
   receipts) stay with the server and aren't copied here. Light, dark or as the system stays on
-  each device, since it follows the room and the screen; colour themes (#202) are meant to sync.
+  each device, since it follows the room and the screen; the colour theme (#202,
+  `display.color_theme`: `brand`, `preset:<id>` or `custom:<four hex colours>`) syncs.
   An entry an older client wrote for a key no client reads any more (`theme`) stays as an unknown
   key.
   - *Mobile:* the apps sync the list layout and grouping, animated images, sharing typing, the
-    mention rules (first name, `@channel`, keywords, the `@channel` confirmation) and call status
-    sounds. The send key, language, wallpaper colours, notification content, media downloads and
+    mention rules (first name, `@channel`, keywords, the `@channel` confirmation), call status
+    sounds and the colour theme. The send key, language, wallpaper colours, notification content, media downloads and
     devices stay on the phone. The app hands its values to the core (`sync_settings`) at start,
     when `settings_mark` moved after a store change, and 1.5 s after the user changed one, and
     stores an opaque state (owner and per-setting bases) next to its settings. A phone holds one

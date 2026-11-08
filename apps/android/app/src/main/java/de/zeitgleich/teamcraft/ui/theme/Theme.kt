@@ -17,7 +17,9 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.material3.ColorScheme
 import androidx.compose.ui.graphics.Color
+import uniffi.teamcraft_ffi.AppThemeTokens
 import uniffi.teamcraft_ffi.BrandAccent
+import uniffi.teamcraft_ffi.colorThemeTokens
 import uniffi.teamcraft_ffi.LoginBrand
 
 /** The desktop UI's tokens (crates/teamcraft-ui/style/main/000-tokens.css), so both apps look alike. */
@@ -77,6 +79,8 @@ data class TeamCraftColors(
   val chromeText: Color,
   val chromeMuted: Color,
   val badge: Color,
+  /** The "online" dot. */
+  val presence: Color,
   val mentionBackground: Color,
   val mentionText: Color,
 )
@@ -87,6 +91,7 @@ private val LightExtra = TeamCraftColors(
   chromeMuted = Color(0xFF8793A8),
   // White badge numbers need 4.5:1.
   badge = Color(0xFFC8441F),
+  presence = Color(0xFF2E9E5B),
   mentionBackground = Color(0xFFFFF2CC),
   mentionText = Color(0xFF6A4B00),
 )
@@ -95,6 +100,7 @@ private val DarkExtra = LightExtra.copy(
   chrome = Color(0xFF141414),
   mentionBackground = Color(0xFF4A3B10),
   mentionText = Color(0xFFFFD978),
+  presence = Color(0xFF34C759),
 )
 
 val LocalTeamCraftColors = staticCompositionLocalOf { LightExtra }
@@ -107,23 +113,51 @@ val LocalTeamCraftColors = staticCompositionLocalOf { LightExtra }
 fun TeamCraftTheme(maybeBrand: LoginBrand? = null, content: @Composable () -> Unit) {
   val isDark = isSystemInDarkTheme()
   val context = LocalContext.current
-  val isDynamic by remember { AppearancePrefs.prefs(context).isDynamicColor }.collectAsState()
+  val prefs = remember { AppearancePrefs.prefs(context) }
+  val isDynamic by prefs.isDynamicColor.collectAsState()
+  val colorTheme by prefs.colorThemeValue.collectAsState()
+  // A chosen colour theme (#202): the accent, selection, badge and presence; surfaces stay neutral.
+  val maybeTheme = remember(colorTheme, isDark) { colorThemeTokens(colorTheme, isDark) }
   val scheme = when {
+    maybeTheme != null -> (if (isDark) Dark else Light).withTheme(maybeTheme)
     // The wallpaper's colors (Material You); the dark chrome and badges stay TeamCraft's.
     isDynamic && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
       if (isDark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
     isDark -> Dark.withAccent(maybeBrand?.dark)
     else -> Light.withAccent(maybeBrand?.light)
   }
+  val extra = (if (isDark) DarkExtra else LightExtra).let { base ->
+    maybeTheme?.let { base.withTheme(it) } ?: base
+  }
   val backdrop = remember { StatusBarBackdrop() }
   StatusBarIcons(isDarkTheme = isDark, backdrop = backdrop)
   CompositionLocalProvider(
-    LocalTeamCraftColors provides if (isDark) DarkExtra else LightExtra,
+    LocalTeamCraftColors provides extra,
     LocalStatusBarBackdrop provides backdrop,
   ) {
     MaterialTheme(colorScheme = scheme, typography = TeamCraftTypography, shapes = TeamCraftShapes, content = content)
   }
 }
+
+/** A colour theme's accent tokens over the scheme (the core checked their contrast). */
+private fun ColorScheme.withTheme(theme: AppThemeTokens): ColorScheme = copy(
+  primary = rgb(theme.accent),
+  onPrimary = rgb(theme.onAccent),
+  primaryContainer = rgb(theme.accentSoft),
+  onPrimaryContainer = rgb(theme.accentStrong),
+  secondaryContainer = rgb(theme.accentSoft),
+  onSecondaryContainer = rgb(theme.accentStrong),
+)
+
+private fun TeamCraftColors.withTheme(theme: AppThemeTokens) = copy(
+  chrome = rgb(theme.chrome),
+  chromeText = rgb(theme.onChrome),
+  badge = rgb(theme.badge),
+  presence = rgb(theme.presence),
+)
+
+/** An opaque color from the core's `0xRRGGBB`. */
+fun rgb(value: UInt): Color = Color(0xFF000000L or value.toLong())
 
 /** The brand's accent tokens over the scheme; each one only where the brand sets it. */
 private fun ColorScheme.withAccent(maybeAccent: BrandAccent?): ColorScheme {
