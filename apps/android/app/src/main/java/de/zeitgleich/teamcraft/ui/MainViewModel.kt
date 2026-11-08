@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.ui
 
+import de.zeitgleich.teamcraft.crash.Perf
+import uniffi.teamcraft_ffi.PerfMeasure
 import android.util.Log
 import android.app.Application
 import android.content.Intent
@@ -862,6 +864,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun send(conversationId: String, maybeThreadId: String?, body: String) = viewModelScope.launch {
     runCatching { graph.core.core().sendMessage(conversationId, maybeThreadId, body) }
+      // Performance data: from the queued message until the server took it (the conversation's
+      // feed has no pending message left, Conversation.kt).
+      .onSuccess { if (maybeThreadId == null) Perf.begin(PerfMeasure.MESSAGE_SEND, conversationId) }
   }
 
   fun markRead(conversationId: String) = viewModelScope.launch {

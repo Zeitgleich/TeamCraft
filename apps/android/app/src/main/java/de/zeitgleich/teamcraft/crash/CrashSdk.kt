@@ -15,6 +15,12 @@ interface CrashSdk {
 
   /** Stops capturing and sending; reports not sent yet stay on the device until the next start. */
   fun stop()
+
+  /**
+   * Starts a transaction ([Perf]); `null` while the SDK isn't running or the trace rate left this
+   * one out. [name] and [op] come from the core's list of measures.
+   */
+  fun startTransaction(name: String, op: String): PerfHandle? = null
 }
 
 /** What the SDK is started with: the instance's setting, this build's release and the installation. */

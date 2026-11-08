@@ -4,7 +4,10 @@ import android.content.Context
 import android.util.Log
 import io.sentry.KeyValueCollectionBehavior
 import io.sentry.Sentry
+import io.sentry.ITransaction
 import io.sentry.SentryOptions
+import io.sentry.SpanStatus
+import io.sentry.TransactionOptions
 import io.sentry.android.core.SentryAndroid
 import io.sentry.android.core.SentryAndroidOptions
 import io.sentry.protocol.User
@@ -18,8 +21,10 @@ object CrashSdks {
 
 /**
  * sentry-android, started by hand (auto-init is off in the manifest) and set up so it collects only
- * what docs/crash-reports.md allows: no PII, screenshots, view hierarchy, replay, tracing or
- * automatic breadcrumbs; every event passes [SentryEventScrub] before it is sent.
+ * what docs/crash-reports.md allows: no PII, screenshots, view hierarchy, replay or automatic
+ * breadcrumbs; every event passes [SentryEventScrub] before it is sent. Performance data (app start,
+ * screen loads, slow and frozen frames, the core's measures from [Perf]) is traced at the
+ * instance's trace rate and passes [SentryTransactionScrub].
  */
 private object SentryCrashSdk : CrashSdk {
   private const val TAG = "CrashReports"
@@ -50,6 +55,15 @@ private object SentryCrashSdk : CrashSdk {
     maybeRunning = null
   }
 
+  override fun startTransaction(name: String, op: String): PerfHandle? {
+    if (maybeRunning == null) return null
+    val options = TransactionOptions().apply { isBindToScope = false }
+    val transaction = runCatching { Sentry.startTransaction(name, op, options) }.getOrNull() ?: return null
+    // Left out by the trace rate: nothing to finish or send.
+    if (transaction.isSampled != true) return null
+    return SentryPerfHandle(transaction)
+  }
+
   private fun configure(options: SentryAndroidOptions, settings: CrashSdkSettings) {
     options.dsn = settings.config.dsn
     options.release = settings.release
@@ -70,7 +84,8 @@ private object SentryCrashSdk : CrashSdk {
     options.isAttachScreenshot = false
     options.isAttachViewHierarchy = false
     options.isAttachThreads = false
-    options.tracesSampleRate = null
+    // Performance data (issue #1521): off at a rate of 0, as from an older server.
+    options.tracesSampleRate = settings.config.traceRate.takeIf { it > 0.0 }
     options.profilesSampleRate = null
     options.sessionReplay.sessionSampleRate = null
     options.sessionReplay.onErrorSampleRate = null
@@ -85,9 +100,21 @@ private object SentryCrashSdk : CrashSdk {
     options.isEnableAppComponentBreadcrumbs = false
     options.isEnableNetworkEventBreadcrumbs = false
     options.isEnableUserInteractionTracing = false
-    options.isEnableAutoActivityLifecycleTracing = false
+    // Screen loads (`ui.load`, time to initial display) and the app start; frames are on by default.
+    options.isEnableAutoActivityLifecycleTracing = true
+    options.isEnableTimeToFullDisplayTracing = false
+    options.isEnableFramesTracking = true
+    // App start from the process start, with its phases.
+    options.isEnablePerformanceV2 = true
     // Breadcrumbs come from the core's redacted log only, set in beforeSend.
     options.beforeBreadcrumb = SentryOptions.BeforeBreadcrumbCallback { _, _ -> null }
+    options.beforeSendTransaction = SentryOptions.BeforeSendTransactionCallback { transaction, _ ->
+      if (transaction.getTag(SentryPerfHandle.DROPPED_TAG) != null) {
+        null
+      } else {
+        SentryTransactionScrub.prepare(transaction, installationId = settings.installationId)
+      }
+    }
     options.beforeSend = SentryOptions.BeforeSendCallback { event, _ ->
       SentryEventScrub.prepare(
         event,
@@ -97,5 +124,22 @@ private object SentryCrashSdk : CrashSdk {
         logLines = { runCatching { recentLogLines() }.getOrDefault(emptyList()) },
       )
     }
+  }
+}
+
+/** A measure of [Perf] as a sentry transaction. */
+private class SentryPerfHandle(private val transaction: ITransaction) : PerfHandle {
+  override fun tag(name: String, value: String) = transaction.setTag(name, value)
+
+  override fun finish(isOk: Boolean) = transaction.finish(if (isOk) SpanStatus.OK else SpanStatus.UNAVAILABLE)
+
+  override fun cancel() {
+    // The SDK has no way to drop a started transaction: `beforeSendTransaction` drops it by this tag.
+    transaction.setTag(DROPPED_TAG, "1")
+    transaction.finish(SpanStatus.CANCELLED)
+  }
+
+  companion object {
+    const val DROPPED_TAG = "teamcraft.dropped"
   }
 }

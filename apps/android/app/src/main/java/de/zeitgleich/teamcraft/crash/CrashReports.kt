@@ -59,7 +59,7 @@ class CrashReports(private val context: Context, private val sdk: CrashSdk) {
     val maybeConfig = withContext(Dispatchers.Default) { crashReportsConfig(answer.body.decodeToString()) }
     updateConfig(
       maybeConfig?.let {
-        CrashConfig(it.dsn, it.sampleRate, it.environment, it.allowsOptOut, it.showsNotice)
+        CrashConfig(it.dsn, it.sampleRate, it.environment, it.allowsOptOut, it.showsNotice, it.traceRate)
       },
     )
   }
@@ -142,6 +142,8 @@ data class CrashConfig(
   val environment: String,
   val allowsOptOut: Boolean,
   val showsNotice: Boolean,
+  /** Share of app starts, screen loads and core measures traced, 0 to 1; absent when stored by an older version. */
+  val traceRate: Double = 0.0,
 )
 
 /** What the privacy settings and the first-start notice need to know. */

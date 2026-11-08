@@ -122,8 +122,10 @@ final class CrashReports {
     Self.log.info("crash reports off")
   }
 
-  /// Only what docs/crash-reports.md allows: no PII, screenshots, view hierarchy, replay, tracing,
-  /// sessions or automatic breadcrumbs; every event passes `CrashEventScrub` before it is sent.
+  /// Only what docs/crash-reports.md allows: no PII, screenshots, view hierarchy, replay, sessions
+  /// or automatic breadcrumbs; every event passes `CrashEventScrub` before it is sent. Performance
+  /// data (app start, screen loads, slow and frozen frames) is traced at the instance's trace rate
+  /// (issue #1521), without network, file or Core Data spans, which would name URLs and files.
   private nonisolated static func configure(_ options: Options, settings: CrashSDKSettings) {
     options.dsn = settings.config.dsn
     options.releaseName = settings.release
@@ -134,7 +136,14 @@ final class CrashReports {
     options.enableAutoBreadcrumbTracking = false
     options.enableNetworkBreadcrumbs = false
     options.enableCaptureFailedRequests = false
-    options.enableAutoPerformanceTracing = false
+    // Performance data: off at a rate of 0, as from an older server.
+    options.tracesSampleRate = settings.config.traceRate > 0 ? NSNumber(value: settings.config.traceRate) : nil
+    options.enableAutoPerformanceTracing = settings.config.traceRate > 0
+    options.enableUIViewControllerTracing = true
+    options.enableUserInteractionTracing = false
+    options.enableNetworkTracking = false
+    options.enableFileIOTracing = false
+    options.enableCoreDataTracing = false
     // No sessions: release health isn't used, and an app that doesn't crash sends nothing.
     options.enableAutoSessionTracking = false
     options.enableAppHangTracking = true
@@ -169,19 +178,35 @@ struct CrashConfig: Codable, Equatable, Sendable {
   let environment: String
   let allowsOptOut: Bool
   let showsNotice: Bool
+  /// Share of app starts and screen loads traced, 0 to 1; 0 when stored by an older version.
+  let traceRate: Double
 
-  init(dsn: String, sampleRate: Double, environment: String, allowsOptOut: Bool, showsNotice: Bool) {
+  init(
+    dsn: String, sampleRate: Double, environment: String, allowsOptOut: Bool, showsNotice: Bool,
+    traceRate: Double = 0
+  ) {
     self.dsn = dsn
     self.sampleRate = sampleRate
     self.environment = environment
     self.allowsOptOut = allowsOptOut
     self.showsNotice = showsNotice
+    self.traceRate = traceRate
   }
 
   init(_ config: CrashReportsConfig) {
     self.init(
       dsn: config.dsn, sampleRate: config.sampleRate, environment: config.environment,
-      allowsOptOut: config.allowsOptOut, showsNotice: config.showsNotice)
+      allowsOptOut: config.allowsOptOut, showsNotice: config.showsNotice, traceRate: config.traceRate)
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    dsn = try container.decode(String.self, forKey: .dsn)
+    sampleRate = try container.decode(Double.self, forKey: .sampleRate)
+    environment = try container.decode(String.self, forKey: .environment)
+    allowsOptOut = try container.decode(Bool.self, forKey: .allowsOptOut)
+    showsNotice = try container.decode(Bool.self, forKey: .showsNotice)
+    traceRate = try container.decodeIfPresent(Double.self, forKey: .traceRate) ?? 0
   }
 }
 
@@ -214,6 +239,9 @@ enum CrashEventScrub {
   static func prepare(
     _ event: Event, installationID: String, sampleRate: Double, roll: Double, logLines: () -> [String]
   ) -> Event? {
+    // sentry-cocoa hands transactions (performance data, sampled by the SDK's trace rate) to
+    // `beforeSend` too: they keep their spans, lose what a report never carries.
+    if event.type == "transaction" { return prepareTransaction(event, installationID: installationID) }
     guard isCrash(event) || roll < sampleRate else { return nil }
     event.request = nil
     event.serverName = nil
@@ -230,6 +258,19 @@ enum CrashEventScrub {
       breadcrumb.message = CrashScrubber.scrub(line, maxChars: CrashScrubber.maxBreadcrumbChars)
       return breadcrumb
     }
+    return event
+  }
+
+  /// A transaction: no request, server name, extras or breadcrumbs, the installation ID as the only
+  /// user field, tag values scrubbed. Its spans come only from app start, screen loads and frames
+  /// (network, file and Core Data tracing are off), so they name no URL or file.
+  static func prepareTransaction(_ event: Event, installationID: String) -> Event {
+    event.request = nil
+    event.serverName = nil
+    event.extra = nil
+    event.breadcrumbs = nil
+    event.user = User(userId: installationID)
+    event.tags = event.tags?.mapValues { CrashScrubber.redact($0) }
     return event
   }
 

@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.crash.Perf
+import uniffi.teamcraft_ffi.PerfMeasure
 import android.widget.Toast
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Box
@@ -230,6 +232,12 @@ fun ConversationScreen(
   var isAskingServer by remember(conversationId) { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   val rights = rememberRights(viewModel, conversationId, changes)
+  // Performance data: from opening the conversation until its messages are read (issue #1521).
+  DisposableEffect(conversationId) {
+    Perf.begin(PerfMeasure.CHANNEL_SWITCH, conversationId)
+    Perf.tag(PerfMeasure.CHANNEL_SWITCH, conversationId, "source", if (maybeSeed != null) "seed" else "store")
+    onDispose { Perf.cancel(PerfMeasure.CHANNEL_SWITCH, conversationId) }
+  }
   LaunchedEffect(conversationId) {
     // Where the user stopped reading, before marking the conversation read.
     val maybeMessage = viewModel.readChat { query(ChatQueries.firstUnread(conversationId)).maybeMessage }
@@ -247,6 +255,10 @@ fun ConversationScreen(
       val maybeExtras = viewModel.readChat { extras(conversationId, tail.map { it.id }) }
       val maybeSnapshot = viewModel.readChat { snapshot() }
       messages = tail
+      Perf.end(PerfMeasure.CHANNEL_SWITCH, conversationId)
+      if (Perf.isRunning(PerfMeasure.MESSAGE_SEND, conversationId) && tail.none { it.isPending }) {
+        Perf.end(PerfMeasure.MESSAGE_SEND, conversationId)
+      }
       hasOlder = maybeTail?.hasOlder ?: false
       gaps = maybeTail?.gaps.orEmpty()
       extras = maybeExtras ?: extras
