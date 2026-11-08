@@ -9,7 +9,9 @@
 //!
 //! `TEAMCRAFT_STORM_READERS` list reads per change (default 3: the chat list, the open
 //! conversation's rights, the read watcher), `TEAMCRAFT_STORM_TICK_MS` time between changes
-//! (default 300), `TEAMCRAFT_STORM_SECS` how long (default 20). The sync loop finds no server.
+//! (default 300), `TEAMCRAFT_STORM_SECS` how long (default 20), `TEAMCRAFT_STORM_MESSAGES`
+//! messages per conversation (default 400), `TEAMCRAFT_STORM_BIG_CHATS` channels (default 3) with
+//! `TEAMCRAFT_STORM_BIG_MESSAGES` (default 90,000) instead, like an imported history. The sync loop finds no server.
 
 #![allow(clippy::print_stderr, reason = "the numbers are what this test is for")]
 #![allow(clippy::unwrap_used)]
@@ -41,7 +43,13 @@ const DMS: i64 = 20;
 const CONVERSATIONS: i64 = SPACES * CHANNELS_PER_SPACE + DMS;
 const PEOPLE: i64 = 120;
 const MEMBERS_PER_CHANNEL: i64 = 25;
-const MESSAGES_PER_CONVERSATION: i64 = 400;
+const DEFAULT_MESSAGES_PER_CONVERSATION: i64 = 400;
+/// A few channels with an imported history of this length, as on a real instance.
+const DEFAULT_BIG_CHATS: i64 = 3;
+const DEFAULT_BIG_MESSAGES: i64 = 90_000;
+/// The sync's messages are numbered from here, after any seeded history.
+const SYNCED_FROM: i64 = 1_000_000;
+const SEED_BATCH: usize = 2_000;
 /// Every other conversation has this many unread at its end, some of them mentioning the user.
 const UNREAD: i64 = 30;
 const PAGE: u32 = 50;
@@ -126,7 +134,8 @@ impl Sync {
     std::thread::spawn(move || {
       let store =
         SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::from_bytes(KEY))).unwrap();
-      let mut next = MESSAGES_PER_CONVERSATION;
+      // After every seeded history, the longest included.
+      let mut next = SYNCED_FROM;
       let mut written = 0;
       while !is_over.load(Ordering::SeqCst) {
         write_group(&store, || {
@@ -289,7 +298,7 @@ async fn seed(directory: &std::path::Path) {
     let conversation = conversation_id(index);
     let peer = people[usize::try_from(index % PEOPLE).unwrap()].id;
     let unread = if index % 2 == 0 { 0 } else { UNREAD };
-    let maybe_last_read = Some(message_id(index, MESSAGES_PER_CONVERSATION - unread - 1));
+    let maybe_last_read = Some(message_id(index, history_of(index) - unread - 1));
     let record = if index < SPACES * CHANNELS_PER_SPACE {
       channel_record(
         conversation,
@@ -300,6 +309,17 @@ async fn seed(directory: &std::path::Path) {
     } else {
       dm_record(conversation, me, peer, maybe_last_read)
     };
+    let history = history_of(index);
+    for start in (0..history).step_by(SEED_BATCH) {
+      write_group(store.as_ref(), || {
+        for n in start..(start + SEED_BATCH as i64).min(history) {
+          let sender = people[usize::try_from((index + n) % PEOPLE).unwrap()].id;
+          store.upsert_message(&message(conversation, sender, index, n))?;
+        }
+        Ok::<_, teamcraft_core::store::StoreError>(())
+      })
+      .unwrap();
+    }
     write_group(store.as_ref(), || {
       records::put_json(store.as_ref(), Table::Conversations, &conversation.to_string(), &record)?;
       let members: Vec<_> = (0..MEMBERS_PER_CHANNEL)
@@ -311,10 +331,6 @@ async fn seed(directory: &std::path::Path) {
         &conversation.to_string(),
         &serde_json::json!({ "members": members }),
       )?;
-      for n in 0..MESSAGES_PER_CONVERSATION {
-        let sender = people[usize::try_from((index + n) % PEOPLE).unwrap()].id;
-        store.upsert_message(&message(conversation, sender, index, n))?;
-      }
       Ok::<_, teamcraft_core::CoreError>(())
     })
     .unwrap();
@@ -445,6 +461,17 @@ fn conversation_id(index: i64) -> ConversationId {
 
 fn id<T: Id>(raw: i64) -> T {
   T::from_snowflake(Snowflake::new(raw).unwrap())
+}
+
+/// How many messages conversation `index` holds: the first `TEAMCRAFT_STORM_BIG_CHATS` channels
+/// have a long imported history (`TEAMCRAFT_STORM_BIG_MESSAGES`), the others
+/// `TEAMCRAFT_STORM_MESSAGES`.
+fn history_of(index: i64) -> i64 {
+  if index < env_number("TEAMCRAFT_STORM_BIG_CHATS", DEFAULT_BIG_CHATS) {
+    env_number("TEAMCRAFT_STORM_BIG_MESSAGES", DEFAULT_BIG_MESSAGES).min(SYNCED_FROM)
+  } else {
+    env_number("TEAMCRAFT_STORM_MESSAGES", DEFAULT_MESSAGES_PER_CONVERSATION).min(SYNCED_FROM)
+  }
 }
 
 fn env_number<T: std::str::FromStr>(name: &str, default: T) -> T {
