@@ -8,6 +8,7 @@ use time::{Duration, OffsetDateTime};
 
 use super::heartbeat::{Heartbeats, Reading};
 use super::tracker::{Observation, Verdict};
+use crate::holidays::feed::FeedHealth;
 
 /// A job is late once it missed this many of its runs.
 const JOB_MISSED_RUNS: i32 = 3;
@@ -16,7 +17,7 @@ const SFU_SILENT_AFTER: Duration = Duration::seconds(120);
 const SECONDS_PER_DAY: i64 = 86_400;
 
 /// Every check, in the order the console shows them.
-pub const ALL_CHECKS: [HealthCheckId; 12] = [
+pub const ALL_CHECKS: [HealthCheckId; 13] = [
   HealthCheckId::Database,
   HealthCheckId::ObjectStorage,
   HealthCheckId::IdentityProvider,
@@ -29,6 +30,7 @@ pub const ALL_CHECKS: [HealthCheckId; 12] = [
   HealthCheckId::Backup,
   HealthCheckId::Certificate,
   HealthCheckId::DiskSpace,
+  HealthCheckId::HolidayFeed,
 ];
 
 /// When a background job is expected to run.
@@ -80,6 +82,7 @@ pub struct Facts {
   pub retention_last_success: Option<OffsetDateTime>,
   pub partition_last_success: Option<OffsetDateTime>,
   pub heartbeats: Heartbeats,
+  pub holiday_feed: FeedHealth,
 }
 
 /// The verdict of every check.
@@ -134,6 +137,7 @@ pub fn observe(facts: &Facts) -> Vec<(HealthCheckId, Observation)> {
     (HealthCheckId::Backup, backup(facts)),
     (HealthCheckId::Certificate, certificate(facts)),
     (HealthCheckId::DiskSpace, disk(facts)),
+    (HealthCheckId::HolidayFeed, holiday_feed(facts)),
   ]
 }
 
@@ -270,6 +274,28 @@ fn disk(facts: &Facts) -> Observation {
       percent,
     ),
   }
+}
+
+/// The holiday feed's copy is not older than the settings allow. Without any copy, a failed fetch
+/// counts once the grace time is over (until then the first fetch may still be under way).
+fn holiday_feed(facts: &Facts) -> Observation {
+  let FeedHealth::Configured {
+    maybe_fetched_at,
+    has_failed,
+    max_age,
+  } = facts.holiday_feed
+  else {
+    return Observation::new(Verdict::NotConfigured);
+  };
+  let Some(fetched_at) = maybe_fetched_at else {
+    return Observation::new(if has_failed && !is_in_grace(facts) {
+      Verdict::Unhealthy
+    } else {
+      Verdict::NoData
+    });
+  };
+  let age = (facts.now - fetched_at).max(Duration::ZERO);
+  Observation::with_value(verdict(age <= max_age), age.whole_seconds())
 }
 
 fn verdict(is_fine: bool) -> Verdict {
@@ -549,6 +575,35 @@ mod tests {
   }
 
   #[test]
+  fn the_holiday_feed_is_judged_by_the_age_of_its_copy() {
+    let mut facts = facts_with(&[]);
+    assert_eq!(
+      verdict_of(&facts, HealthCheckId::HolidayFeed),
+      Verdict::NotConfigured
+    );
+    let configured = |maybe_fetched_at, has_failed| FeedHealth::Configured {
+      maybe_fetched_at,
+      has_failed,
+      max_age: Duration::days(7),
+    };
+    facts.holiday_feed = configured(Some(facts.now - Duration::days(2)), true);
+    let fresh = observation_of(&facts, HealthCheckId::HolidayFeed);
+    assert_eq!(
+      fresh.verdict,
+      Verdict::Healthy,
+      "a failure with a fresh copy is fine"
+    );
+    facts.holiday_feed = configured(Some(facts.now - Duration::days(8)), true);
+    assert_eq!(verdict_of(&facts, HealthCheckId::HolidayFeed), Verdict::Unhealthy);
+    facts.holiday_feed = configured(None, false);
+    assert_eq!(verdict_of(&facts, HealthCheckId::HolidayFeed), Verdict::NoData);
+    facts.holiday_feed = configured(None, true);
+    assert_eq!(verdict_of(&facts, HealthCheckId::HolidayFeed), Verdict::Unhealthy);
+    facts.started_at = facts.now;
+    assert_eq!(verdict_of(&facts, HealthCheckId::HolidayFeed), Verdict::NoData);
+  }
+
+  #[test]
   fn every_check_has_a_verdict_in_the_order_of_the_list() {
     let facts = facts_with(&[]);
     let checks: Vec<HealthCheckId> = observe(&facts).into_iter().map(|(check, _)| check).collect();
@@ -573,6 +628,7 @@ mod tests {
       retention_last_success: None,
       partition_last_success: None,
       heartbeats: Heartbeats::default(),
+      holiday_feed: FeedHealth::NotConfigured,
     }
   }
 

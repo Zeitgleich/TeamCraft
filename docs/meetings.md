@@ -223,11 +223,34 @@ series.
 "Skip public holidays" in the repeat section (`recurrence.skips_holidays`, stored in
 `meetings.skips_holidays`) leaves out the meetings of a series that start on a public holiday, on
 the organizer's wall clock (#1053). The holidays come from a `HolidaySource`
-(`crates/teamcraft-server/src/holidays`): today the bundled table, picked by the region admins set
-in the console (`holidays.region`, admin.md §6.3): `DE` for Germany's nationwide holidays, `DE-BY`
-and the other federal states for theirs. Movable feasts are computed from Easter, so the table
-needs no network and no yearly update. Holidays only parts of a state keep are left out. Without a
-region nothing is skipped.
+(`crates/teamcraft-server/src/holidays`), set by admins in the console (admin.md §6.3):
+
+- **The bundled table**, picked by `holidays.region`: `DE` for Germany's nationwide holidays and
+  `DE-BY` and the other federal states for theirs; `AT` for Austria (its holidays are federal law;
+  the state patron days only schools and the public service keep are left out); `CH` for
+  Switzerland's federal holidays and `CH-ZH` and the other cantons for theirs (without the
+  cantons' optional and half days). Movable feasts are computed from Easter, so the table needs no
+  network and no yearly update. Holidays only parts of a region keep are left out.
+- **An iCalendar feed** (#1426), `holidays.feed_url` (https), instead of the region or on top of
+  it: its all-day `VEVENT`s are holidays (`DTSTART;VALUE=DATE`, several days with `DTEND` or
+  `DURATION` up to 31 days, a yearly `RRULE` with `COUNT`, `UNTIL`, `INTERVAL`, `BYMONTH`,
+  `BYMONTHDAY` or one ordinal `BYDAY`, without `EXDATE`s); timed and cancelled events are not.
+  Another `RRULE` keeps only the event's own date. A background task fetches it every
+  `holidays.feed_refresh_secs` (a day) and right after the settings change, and keeps the last
+  good copy in memory and in `server_settings` (`holidays.feed_copy`: five years back to ten
+  ahead, at most 5000 dates), which is what the source answers from: a feed that is down never
+  holds up listing or ringing. Fetching: https only, no proxy, the address checked for the URL,
+  every redirect (at most three) and every connection, so neither a URL nor a name pointing into
+  the server's network is reached (`crates/teamcraft-server/src/outbound.rs`, shared with Web
+  Push); 10 s to connect, 20 s for the answer and between two pieces of the body, 60 s in all,
+  2 MiB at most. An HTML page (a captive portal), a calendar that is cut off or broken, one
+  without all-day events and one with too many are refused, and the copy before stays. After a
+  failure it tries again after a minute, doubling up to the refresh interval (at most six hours),
+  a quarter more or less at random; the console shows the copy and the last error under the
+  setting, and the health check `holiday_feed` fails once the copy is older than
+  `holidays.feed_max_age_secs` (a week) or no fetch worked since the start.
+
+Without a region or a feed copy nothing is skipped.
 
 A skipped meeting is listed like a cancelled one (`is_occurrence_cancelled`), marked
 `is_occurrence_holiday` ("Holiday"); the calendar event and the invitations have it as `EXDATE`
@@ -239,7 +262,8 @@ towards `COUNT`.
 | Condition                              | What happens                                                                                       |
 |----------------------------------------|----------------------------------------------------------------------------------------------------|
 | No region set, or the region changes   | Lists and ringing follow at once; calendar events follow on the next change of each meeting        |
-| A source that fetches is down (later)  | The trait answers from what it holds, never waiting: listing and ringing don't stop                |
+| The feed is down, slow or not a calendar | The last good copy stays in use (also over a restart); the console and `holiday_feed` say so    |
+| The feed changes                       | Lists and ringing follow with the next fetch; calendar events on the next change of each meeting |
 | A holiday is also cancelled            | Listed as cancelled; restoring takes the cancellation back and keeps the meeting on the holiday    |
 | Old clients                            | They see a skipped meeting as cancelled and can restore it; changing the rule there turns skipping off |
 
@@ -388,7 +412,7 @@ fake calendar and mailer; one test sends through the real SMTP sender to Mailpit
 ## Not done yet
 
 - "In a meeting" presence from the calendar (PLAN.md §9), moving a single meeting of a series (only
-  cancelling one), holidays from an iCalendar feed and per organizer, host controls (mute all, remove, lock, end for everyone) and
+  cancelling one), holidays per organizer, host controls (mute all, remove, lock, end for everyone) and
   meetings created in other CalDAV clients.
 - Per-organizer calendars (see above).
 - Meeting links: member clients reacting to `lobby_decision` instead of asking; making the link

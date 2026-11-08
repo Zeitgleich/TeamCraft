@@ -869,6 +869,7 @@ health-status-not-configured = Nicht eingerichtet
 health-detail-backup = Letztes Backup { $when }.
 health-detail-report = Letzte Meldung { $when }.
 health-detail-job = Zuletzt gelaufen { $when }.
+health-detail-holiday-feed = Kopie abgerufen { $when }.
 health-detail-job-not-yet = Seit dem Start des Servers noch nicht gelaufen.
 health-detail-certificate = { $count ->
     [one] Noch ein Tag bis zum Ablauf.
@@ -900,6 +901,8 @@ health-check-certificate = Zertifikat
 health-check-certificate-hint = Wird vom Deployment gemeldet. Schlägt fehl, wenn das ausgelieferte Zertifikat innerhalb des Limits in den Einstellungen abläuft.
 health-check-disk_space = Speicherplatz
 health-check-disk_space-hint = Wird vom Deployment gemeldet. Schlägt fehl, wenn die Platte voller ist als das Limit in den Einstellungen.
+health-check-holiday_feed = Feiertags-Feed
+health-check-holiday_feed-hint = Der iCalendar-Feed mit Feiertagen aus den Einstellungen. Schlägt fehl, wenn seine Kopie älter ist als das Limit dort oder noch kein Abruf geklappt hat. Aus ohne Feed.
 policy-owners-hint = Eigentümer halten den Workspace in Ordnung, und ihre Apps signieren die Admin-Liste und diese Richtlinie von selbst. Behalte mindestens zwei: Verlässt der einzige Eigentümer die Organisation oder verliert alle Geräte und das Wiederherstellungs-Kit, kann niemand den Workspace mehr verwalten. Um einen Eigentümer zu ersetzen, füge zuerst den neuen hinzu.
 roster-standing-waiting = Deine Admin-Rolle gilt noch nicht. Sie gilt, sobald die App eines Eigentümers geöffnet war; du musst nichts tun.
 roster-by-hand = Admin-Liste von Hand ändern

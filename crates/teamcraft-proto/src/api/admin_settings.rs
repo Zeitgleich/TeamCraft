@@ -358,6 +358,9 @@ pub struct RuntimeSettingsResponse {
   /// Absent from older servers: no region, nothing is skipped.
   #[serde(default)]
   pub holidays: HolidaySettings,
+  /// How the holiday feed stands; absent without a feed (and from older servers).
+  #[serde(rename = "holiday_feed", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_holiday_feed: Option<HolidayFeedStatus>,
   /// One entry per group.
   pub sources: Vec<RuntimeSettingsState>,
 }
@@ -632,19 +635,99 @@ pub struct MailTextSettings {
 }
 
 /// The regions of the bundled holiday table (ISO 3166-2): Germany's nationwide holidays and those
-/// of each federal state.
-pub const HOLIDAY_REGIONS: [&str; 17] = [
+/// of each federal state, Austria's (all federal), Switzerland's federal ones and those of each
+/// canton.
+pub const HOLIDAY_REGIONS: [&str; 45] = [
   "DE", "DE-BW", "DE-BY", "DE-BE", "DE-BB", "DE-HB", "DE-HH", "DE-HE", "DE-MV", "DE-NI", "DE-NW", "DE-RP",
-  "DE-SL", "DE-SN", "DE-ST", "DE-SH", "DE-TH",
+  "DE-SL", "DE-SN", "DE-ST", "DE-SH", "DE-TH", "AT", "CH", "CH-AG", "CH-AI", "CH-AR", "CH-BE", "CH-BL",
+  "CH-BS", "CH-FR", "CH-GE", "CH-GL", "CH-GR", "CH-JU", "CH-LU", "CH-NE", "CH-NW", "CH-OW", "CH-SG", "CH-SH",
+  "CH-SO", "CH-SZ", "CH-TG", "CH-TI", "CH-UR", "CH-VD", "CH-VS", "CH-ZG", "CH-ZH",
 ];
 
+/// The default of [`HolidaySettings::feed_refresh_secs`]: once a day.
+pub const DEFAULT_HOLIDAY_FEED_REFRESH_SECS: u64 = 86_400;
+/// The default of [`HolidaySettings::feed_max_age_secs`]: a week.
+pub const DEFAULT_HOLIDAY_FEED_MAX_AGE_SECS: u64 = 7 * 86_400;
+
 /// The public holidays repeating meetings can skip (#1053): "Skip public holidays" in a series
-/// leaves out its occurrences on these days, on the organizer's wall clock.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+/// leaves out its occurrences on these days, on the organizer's wall clock. The region's and the
+/// feed's holidays count together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct HolidaySettings {
-  /// One of [`HOLIDAY_REGIONS`]; empty: no holidays, nothing is skipped.
+  /// One of [`HOLIDAY_REGIONS`]; empty: no table.
   #[serde(default)]
   pub region: String,
+  /// An iCalendar feed (https) whose all-day events are holidays, instead of the region or on top
+  /// of it (#1426). The server fetches it in the background and keeps the last good copy.
+  #[serde(rename = "feed_url", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_feed_url: Option<String>,
+  /// How often the feed is fetched again.
+  #[serde(default = "default_holiday_feed_refresh_secs")]
+  pub feed_refresh_secs: u64,
+  /// A copy older than this raises the health check `holiday_feed`.
+  #[serde(default = "default_holiday_feed_max_age_secs")]
+  pub feed_max_age_secs: u64,
+}
+
+impl Default for HolidaySettings {
+  fn default() -> Self {
+    Self {
+      region: String::new(),
+      maybe_feed_url: None,
+      feed_refresh_secs: DEFAULT_HOLIDAY_FEED_REFRESH_SECS,
+      feed_max_age_secs: DEFAULT_HOLIDAY_FEED_MAX_AGE_SECS,
+    }
+  }
+}
+
+fn default_holiday_feed_refresh_secs() -> u64 {
+  DEFAULT_HOLIDAY_FEED_REFRESH_SECS
+}
+
+fn default_holiday_feed_max_age_secs() -> u64 {
+  DEFAULT_HOLIDAY_FEED_MAX_AGE_SECS
+}
+
+wire_enum! {
+  /// Why the last fetch of the holiday feed failed. The server keeps answering from its last good
+  /// copy meanwhile.
+  pub enum HolidayFeedError {
+    /// No connection: name, address refused (private), TLS, or the connection broke.
+    Unreachable => "unreachable",
+    /// A phase took too long: connecting, the answer, or reading it.
+    Timeout => "timeout",
+    /// The server answered with an error status or a redirect it may not follow.
+    HttpStatus => "http_status",
+    /// Larger than the server reads.
+    TooLarge => "too_large",
+    /// Not a calendar: an HTML page (a captive portal, a login page) or something else.
+    NotACalendar => "not_a_calendar",
+    /// A calendar the server cannot read: cut off or broken.
+    Malformed => "malformed",
+    /// A calendar without any all-day event.
+    Empty => "empty",
+    /// More holidays than the server keeps.
+    TooMany => "too_many",
+  }
+}
+
+/// How the holiday feed stands, for the console; only while a feed is set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct HolidayFeedStatus {
+  /// When the copy in use was fetched; absent: none yet, nothing from the feed is skipped.
+  #[serde(rename = "fetched_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_fetched_at: Option<UnixMillis>,
+  /// Holidays in that copy.
+  pub holidays: u32,
+  /// The last attempt, successful or not.
+  #[serde(rename = "last_attempt_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_last_attempt_at: Option<UnixMillis>,
+  /// Why the last attempt failed; absent when it worked.
+  #[serde(rename = "error", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_error: Option<HolidayFeedError>,
+  /// The status code of an `http_status` error.
+  #[serde(rename = "http_status", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_http_status: Option<u16>,
 }
 
 /// Meeting invitations. Placeholders: `{title}` `{organizer}` `{start}` `{end}` `{description}`

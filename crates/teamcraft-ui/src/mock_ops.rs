@@ -597,6 +597,7 @@ impl AdminBackend for MockBackend {
         },
         check(HealthCheckId::Certificate, HealthCheckStatus::Ok, Some(52)),
         check(HealthCheckId::DiskSpace, HealthCheckStatus::Ok, Some(41)),
+        check(HealthCheckId::HolidayFeed, HealthCheckStatus::NotConfigured, None),
       ],
       alerts: vec![HealthAlertResponse {
         check: HealthCheckId::Backup,

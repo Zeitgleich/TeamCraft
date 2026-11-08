@@ -3,10 +3,11 @@ use std::collections::BTreeMap;
 use leptos::prelude::*;
 use serde_json::{Map, Value, json};
 use teamcraft_proto::{
-  HOLIDAY_REGIONS, RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SettingSource,
-  Snowflake,
+  HOLIDAY_REGIONS, HolidayFeedError, HolidayFeedStatus, RuntimeSettingsKey, RuntimeSettingsResponse,
+  RuntimeSettingsSection, SettingSource, Snowflake,
 };
 
+use crate::clock::{format_relative, now_ms};
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_fields::{
   CheckField, FieldErrors, SourceBadge, TextAreaField, TextField, format_scaled, is_web_url, list_text,
@@ -256,10 +257,30 @@ const HEALTH_ALERTS: &[FieldDef] = &[
     "settings-error-health-percent",
   ),
 ];
-const HOLIDAYS: &[FieldDef] = &[FieldDef {
-  id: "region",
-  kind: Kind::HolidayRegion,
-}];
+const HOLIDAYS: &[FieldDef] = &[
+  FieldDef {
+    id: "region",
+    kind: Kind::HolidayRegion,
+  },
+  FieldDef {
+    id: "feed_url",
+    kind: Kind::Link,
+  },
+  ranged(
+    "feed_refresh_secs",
+    3_600,
+    (3_600, 7 * 86_400),
+    HOURS,
+    "settings-error-holiday-refresh-hours",
+  ),
+  ranged(
+    "feed_max_age_secs",
+    86_400,
+    (86_400, 90 * 86_400),
+    DAYS,
+    "settings-error-holiday-max-age-days",
+  ),
+];
 const NOTIFICATIONS: &[FieldDef] = &[
   flag("read_receipts_default"),
   FieldDef {
@@ -433,6 +454,7 @@ fn GroupForm(slug: &'static str) -> impl IntoView {
           .iter()
           .map(|field| view! { <FieldRow slug=slug field=*field draft=draft show_errors=show_errors /> })
           .collect_view()}
+        {(slug == "holidays").then(|| view! { <HolidayFeedLine /> })}
         {move || group_error.get().map(|key| view! { <p class="field-error" role="alert">{i18n.t(key)}</p> })}
         <div class="policy-footer">
           <button type="submit" class="btn btn-primary">{move || i18n.t("admin-save")}</button>
@@ -504,10 +526,17 @@ fn FieldRow(
       <TextAreaField id=leak_key(dom_id) label=label rows=3 value=value on_input=on_input error=error />
     }
     .into_any(),
-    Kind::Link => view! {
-      <TextField id=leak_key(dom_id) label=label input_type="url" placeholder="https://help.example.com" value=value on_input=on_input error=error />
-    }
-    .into_any(),
+    Kind::Link => {
+      let placeholder = if id == "feed_url" {
+        "https://calendar.example.com/holidays.ics"
+      } else {
+        "https://help.example.com"
+      };
+      view! {
+        <TextField id=leak_key(dom_id) label=label input_type="url" placeholder=placeholder value=value on_input=on_input error=error />
+      }
+      .into_any()
+    },
     Kind::Methods => {
       let i18n = use_i18n();
       let dom_id = leak_key(dom_id);
@@ -648,6 +677,71 @@ fn dpop_policy_choice_key(choice: &str) -> &'static str {
     "required" => "settings-dpop-required",
     "off" => "settings-dpop-off",
     _ => "settings-dpop-optional",
+  }
+}
+
+/// How the holiday feed stands: its copy, or why the last fetch failed.
+#[component]
+fn HolidayFeedLine() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let maybe_status = Memo::new(move |_| {
+    state
+      .read(|backend| backend.runtime_settings())
+      .and_then(|response| response.maybe_holiday_feed)
+  });
+  move || {
+    maybe_status.get().map(|status| {
+      let text = holiday_feed_text(&status, |key, args| i18n.t_with(key, args), i18n.locale().tag());
+      let class = if status.maybe_error.is_some() {
+        "field-error small"
+      } else {
+        "muted-text small"
+      };
+      view! { <p class=class role="status">{text}</p> }
+    })
+  }
+}
+
+/// The sentence of [`HolidayFeedLine`]; `t` translates a key with arguments.
+fn holiday_feed_text(
+  status: &HolidayFeedStatus,
+  t: impl Fn(&str, &[(&str, &str)]) -> String,
+  locale: &str,
+) -> String {
+  let now = now_ms();
+  let maybe_copy = status.maybe_fetched_at.map(|at| {
+    t(
+      "settings-holiday-feed-copy",
+      &[
+        ("count", &status.holidays.to_string()),
+        ("when", &format_relative(at.0, now, locale)),
+      ],
+    )
+  });
+  match &status.maybe_error {
+    None => maybe_copy.unwrap_or_else(|| t("settings-holiday-feed-waiting", &[])),
+    Some(error) => {
+      let reason = match error {
+        HolidayFeedError::HttpStatus => t(
+          "settings-holiday-feed-error-http_status",
+          &[(
+            "status",
+            &status
+              .maybe_http_status
+              .map(|code| code.to_string())
+              .unwrap_or_default(),
+          )],
+        ),
+        HolidayFeedError::Unknown(_) => t("settings-holiday-feed-error-unreachable", &[]),
+        known => t(&format!("settings-holiday-feed-error-{}", known.as_str()), &[]),
+      };
+      let kept = maybe_copy.unwrap_or_else(|| t("settings-holiday-feed-no-copy", &[]));
+      t(
+        "settings-holiday-feed-failed",
+        &[("reason", &reason), ("kept", &kept)],
+      )
+    },
   }
 }
 
@@ -1079,8 +1173,25 @@ mod tests {
       "settings-error-health-backup-hours",
       "settings-error-health-days",
       "settings-error-health-percent",
+      "settings-error-holiday-refresh-hours",
+      "settings-error-holiday-max-age-days",
+      "settings-holiday-feed-copy",
+      "settings-holiday-feed-waiting",
+      "settings-holiday-feed-failed",
+      "settings-holiday-feed-no-copy",
+      "settings-holiday-feed-error-unreachable",
+      "settings-holiday-feed-error-timeout",
+      "settings-holiday-feed-error-http_status",
+      "settings-holiday-feed-error-too_large",
+      "settings-holiday-feed-error-not_a_calendar",
+      "settings-holiday-feed-error-malformed",
+      "settings-holiday-feed-error-empty",
+      "settings-holiday-feed-error-too_many",
     ] {
       keys.push(error.into());
+    }
+    for code in std::iter::once("").chain(HOLIDAY_REGIONS) {
+      keys.push(holiday_region_key(code));
     }
     for slug in GROUPS {
       keys.push(format!("settings-group-{slug}"));

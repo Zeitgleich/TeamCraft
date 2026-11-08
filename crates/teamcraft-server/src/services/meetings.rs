@@ -262,7 +262,7 @@ pub async fn list_meetings(
     .collect();
   let cancelled = state.database.cancelled_occurrences(&series).await?;
   let kept = state.database.kept_holidays(&series).await?;
-  let maybe_holidays = holidays::source_of(&state.settings.get().holidays);
+  let maybe_holidays = holidays::source_of(state);
   let (from_ms, horizon_ms) = (
     unix_millis(from).0,
     unix_millis(maybe_to.unwrap_or(from + SERIES_LIST_HORIZON)).0,
@@ -800,7 +800,7 @@ async fn series_holiday_skips(
   if !meeting.skips_holidays {
     return Ok(HashSet::new());
   }
-  let Some(source) = holidays::source_of(&state.settings.get().holidays) else {
+  let Some(source) = holidays::source_of(state) else {
     return Ok(HashSet::new());
   };
   let kept = state

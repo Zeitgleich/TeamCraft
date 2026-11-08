@@ -86,6 +86,8 @@ pub struct AppState {
   pub metrics: Arc<crate::metrics::ServerMetrics>,
   /// The health checks and the alerts raised from them (issue #213).
   pub health: Arc<crate::health::HealthMonitor>,
+  /// The holiday feed's last good copy and how fetching it goes (#1426).
+  pub holiday_feed: Arc<crate::holidays::HolidayFeed>,
 }
 
 /// Runtime settings handlers need, taken from the configuration.
@@ -123,8 +125,8 @@ pub struct Settings {
   pub app_links: AppLinkSettings,
   /// When health checks raise alerts; only ever changed in the admin console.
   pub health_alerts: HealthAlertSettings,
-  /// The region whose public holidays repeating meetings can skip; only ever changed in the admin
-  /// console.
+  /// The region and the feed whose public holidays repeating meetings can skip; only ever changed
+  /// in the admin console.
   pub holidays: HolidaySettings,
   /// Meeting invitations: most invitees and the mail texts.
   pub meeting_mail: MeetingMailConfig,

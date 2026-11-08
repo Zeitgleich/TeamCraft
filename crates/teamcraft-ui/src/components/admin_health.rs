@@ -269,6 +269,10 @@ fn measured(check: &HealthCheckId, value: i64) -> Option<Detail> {
     },
     HealthCheckId::Certificate => Some(Detail::Days(value)),
     HealthCheckId::DiskSpace => Some(Detail::Percent(value)),
+    HealthCheckId::HolidayFeed => Some(Detail::Age {
+      key: "health-detail-holiday-feed",
+      secs: value,
+    }),
     _ => None,
   }
 }
@@ -363,6 +367,7 @@ mod tests {
       HealthCheckId::Backup,
       HealthCheckId::Certificate,
       HealthCheckId::DiskSpace,
+      HealthCheckId::HolidayFeed,
     ] {
       assert!(!check_key(&id).is_empty());
     }
