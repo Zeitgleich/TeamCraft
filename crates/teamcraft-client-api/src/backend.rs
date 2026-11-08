@@ -747,9 +747,17 @@ pub trait ChatBackend {
   /// Sends an edit of the channel's page (a Yjs update; `is_snapshot`: the whole page) as an
   /// encrypted, hidden message and keeps it at once. Refused where the user may not post.
   fn edit_canvas(&self, _conversation: ConversationId, _update: Vec<u8>, _is_snapshot: bool) {}
-  /// Replaces the page's updates with `merged` (all of them as one), if the list is still the one
-  /// of `revision`: the editor compacts what the core can't read.
-  fn compact_canvas(&self, _conversation: ConversationId, _revision: u64, _merged: Vec<u8>) {}
+  /// Replaces the page's updates with `merged` (all of them as one) and its version history with
+  /// `history` (the old one with the merged updates' marks added, [`crate::canvas::compaction`]),
+  /// if the list is still the one of `revision`: the editor compacts what the core can't read.
+  fn compact_canvas(
+    &self,
+    _conversation: ConversationId,
+    _revision: u64,
+    _merged: Vec<u8>,
+    _history: Vec<crate::canvas::CanvasMark>,
+  ) {
+  }
   /// Removes a person from a conversation (and rotates its keys).
   fn remove_member(&self, _conversation: ConversationId, _user: UserId) {}
   /// Invites someone by email to a space, as member or guest.

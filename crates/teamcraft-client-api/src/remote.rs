@@ -1072,6 +1072,8 @@ pub enum ChatAction {
     conversation: ConversationId,
     revision: u64,
     merged: teamcraft_proto::Base64Bytes,
+    #[serde(default)]
+    history: Vec<crate::canvas::CanvasMark>,
   },
   AddIntegrationSource {
     conversation: ConversationId,
@@ -1478,7 +1480,8 @@ impl ChatAction {
         conversation,
         revision,
         merged,
-      } => backend.compact_canvas(conversation, revision, merged.into_vec()),
+        history,
+      } => backend.compact_canvas(conversation, revision, merged.into_vec(), history),
       Self::AddIntegrationSource { conversation, source } => {
         backend.add_integration_source(conversation, source)
       },

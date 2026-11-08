@@ -363,8 +363,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.edit_canvas(conversation, update, is_snapshot);
   }
 
-  fn compact_canvas(&self, conversation: ConversationId, revision: u64, merged: Vec<u8>) {
-    self.chat.compact_canvas(conversation, revision, merged);
+  fn compact_canvas(
+    &self,
+    conversation: ConversationId,
+    revision: u64,
+    merged: Vec<u8>,
+    history: Vec<teamcraft_client_api::canvas::CanvasMark>,
+  ) {
+    self.chat.compact_canvas(conversation, revision, merged, history);
   }
 
   fn remove_member(&self, conversation: ConversationId, user: UserId) {

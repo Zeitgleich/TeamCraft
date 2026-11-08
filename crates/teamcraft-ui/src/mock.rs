@@ -390,6 +390,13 @@ impl ChatBackend for MockBackend {
     }
     let canvas = state.canvases.entry(conversation).or_default();
     canvas.updates.push(update.into());
+    canvas
+      .origins
+      .push(Some(teamcraft_client_api::canvas::CanvasOrigin {
+        by: me(),
+        at_ms: crate::clock::now_ms(),
+        is_snapshot,
+      }));
     canvas.revision += 1;
     canvas.updates_since_snapshot = if is_snapshot {
       0
@@ -398,12 +405,21 @@ impl ChatBackend for MockBackend {
     };
   }
 
-  fn compact_canvas(&self, conversation: ConversationId, revision: u64, merged: Vec<u8>) {
+  fn compact_canvas(
+    &self,
+    conversation: ConversationId,
+    revision: u64,
+    merged: Vec<u8>,
+    history: Vec<teamcraft_client_api::canvas::CanvasMark>,
+  ) {
     let mut state = self.state.borrow_mut();
     if let Some(canvas) = state.canvases.get_mut(&conversation)
       && canvas.revision == revision
     {
       canvas.updates = vec![merged.into()];
+      canvas.origins = vec![None];
+      canvas.is_compacted = true;
+      canvas.history = history;
       canvas.revision += 1;
     }
   }
