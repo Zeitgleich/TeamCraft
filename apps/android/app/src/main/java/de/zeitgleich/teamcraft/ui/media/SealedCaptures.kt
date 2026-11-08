@@ -12,9 +12,12 @@ import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSourceException
 import androidx.media3.datasource.DataSpec
+import java.io.Closeable
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import de.zeitgleich.teamcraft.security.SealedMedia
 
 /**
@@ -25,8 +28,15 @@ import de.zeitgleich.teamcraft.security.SealedMedia
 object SealedCaptures {
   const val SUFFIX = ".sealed"
 
-  /** Plain copies made for a moment (Transformer and the upload need a plain file). */
+  /** Plain copies older versions made for Transformer; only the start sweep still looks for them. */
   const val OPENED_PREFIX = "open-"
+
+  /** Transformer's output in the app's cache while a video is sent or saved; sealed ([SUFFIX]). */
+  const val EXPORT_PREFIX = "export-"
+  const val SAVE_PREFIX = "save-"
+
+  /** Files [expose] made readable, by token; only for as long as an export runs. */
+  private val exposed = ConcurrentHashMap<String, File>()
 
   fun isSealed(uri: Uri): Boolean = uri.scheme == "file" && uri.path?.endsWith(SUFFIX) == true
 
@@ -58,15 +68,30 @@ object SealedCaptures {
   fun size(context: Context, uri: Uri): Long = SealedMedia.Reader.open(fileOf(uri), key(context)).use { it.size }
 
   /**
-   * A plain copy beside the sealed file, for what can only read files (Transformer, the upload).
-   * The caller deletes it; one left by a kill goes at the next start ([MediaDraftStore.sweep]).
+   * Makes a sealed file readable through a `content:` URI of this app ([SealedMediaProvider]) until
+   * [Exposure.close]. For readers that build their own data source from a URI and can't be given
+   * [Factory] (Transformer's trim optimization): the plaintext is only ever decrypted into what
+   * they read. The token is random and the provider isn't exported.
    */
-  fun openToFile(context: Context, uri: Uri): File {
-    val source = fileOf(uri)
-    val ending = plainName(source.name).substringAfterLast('.', "bin")
-    val target = File(source.parentFile, "$OPENED_PREFIX${System.nanoTime()}.$ending")
-    SealedMedia.openTo(source, key(context), target)
-    return target
+  fun expose(context: Context, uri: Uri): Exposure {
+    val file = fileOf(uri)
+    val token = UUID.randomUUID().toString()
+    exposed[token] = file
+    val exposedUri = Uri.Builder().scheme("content").authority(authority(context)).appendPath(token).appendPath(plainName(file.name)).build()
+    return Exposure(exposedUri) { exposed.remove(token) }
+  }
+
+  /** The file a URI of [expose] stands for; `null` for any other URI or once it was closed. */
+  internal fun exposedFile(context: Context, uri: Uri): File? {
+    if (uri.scheme != "content" || uri.authority != authority(context)) return null
+    return uri.pathSegments.firstOrNull()?.let { exposed[it] }
+  }
+
+  private fun authority(context: Context): String = "${context.packageName}.sealedmedia"
+
+  /** A sealed file readable as [uri] until closed. */
+  class Exposure internal constructor(val uri: Uri, private val onClose: () -> Unit) : Closeable {
+    override fun close() = onClose()
   }
 
   /** Points [retriever] at [uri], decrypting while it reads when the file is sealed. */
@@ -90,8 +115,8 @@ object SealedCaptures {
   }
 
   /**
-   * Media3's source for the camera's sealed videos (ExoPlayer in the review): seekable, it decrypts
-   * the segments it reads. Other URIs go to [fallback].
+   * Media3's source for the camera's sealed videos (ExoPlayer in the review, Transformer): seekable,
+   * it decrypts the segments it reads. Other URIs go to [fallback].
    */
   @OptIn(UnstableApi::class)
   class Factory(context: Context, private val fallback: DataSource.Factory) : DataSource.Factory {
@@ -109,13 +134,14 @@ object SealedCaptures {
     private var isFallback = false
 
     override fun open(dataSpec: DataSpec): Long {
-      if (!isSealed(dataSpec.uri)) {
+      val maybeFile = if (isSealed(dataSpec.uri)) fileOf(dataSpec.uri) else exposedFile(context, dataSpec.uri)
+      if (maybeFile == null) {
         isFallback = true
         return fallback.open(dataSpec)
       }
       transferInitializing(dataSpec)
       val reader = try {
-        SealedMedia.Reader.open(fileOf(dataSpec.uri), key(context))
+        SealedMedia.Reader.open(maybeFile, key(context))
       } catch (failure: IOException) {
         throw DataSourceException(failure, PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND)
       } catch (failure: IllegalArgumentException) {

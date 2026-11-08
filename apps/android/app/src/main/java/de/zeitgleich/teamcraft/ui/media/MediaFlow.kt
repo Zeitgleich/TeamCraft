@@ -309,33 +309,33 @@ private suspend fun prepareItem(context: Context, viewModel: MainViewModel, item
   }
   val facts = VideoEditing.facts(context, uri)
   val isEdited = VideoEditing.needsExport(facts, item.video, quality)
-  // Transformer and the upload read plain files: a sealed camera video is opened beside it for as
-  // long as this takes (the staged copy is plain like every file to send, e2ee.md §9.2).
-  val maybeOpened = if (SealedCaptures.isSealed(uri)) withContext(Dispatchers.IO) { SealedCaptures.openToFile(context, uri) } else null
-  try {
-    val source = maybeOpened?.let(Uri::fromFile) ?: uri
-    // A video from the gallery is packed again even unedited (no re-encoding): that drops where it
-    // was taken and the camera's details. The app's own camera records none.
-    if (isEdited || !item.isCaptured) {
-      val target = File(context.cacheDir, "export-${System.nanoTime()}.mp4")
-      if (VideoEditing.export(context, source, item.video, facts, quality, target)) {
-        return viewModel.stageMovedFile("${name.substringBeforeLast('.', name)}.mp4", "video/mp4", target)
+  // A video from the gallery is packed again even unedited (no re-encoding): that drops where it
+  // was taken and the camera's details. The app's own camera records none.
+  if (isEdited || !item.isCaptured) {
+    // Sealed like the camera's files until it is staged, the one plain copy (e2ee.md §9.2).
+    val target = sealedExportFile(context, SealedCaptures.EXPORT_PREFIX)
+    try {
+      if (VideoEditing.export(context, uri, item.video, facts, quality, target)) {
+        return viewModel.stageSealedFile("${name.substringBeforeLast('.', name)}.mp4", "video/mp4", Uri.fromFile(target))
       }
-      // An edit the device can't do fails the send; an unedited video it can't repack goes as it
-      // is, as before (docs/e2ee.md §9.2 says so).
-      if (isEdited) return null
+    } finally {
+      withContext(NonCancellable + Dispatchers.IO) { target.delete() }
     }
-    return if (item.isCaptured) {
-      // The sealed original stays until the flow ends: a send that fails can go again.
-      val file = maybeOpened ?: uri.path?.let(::File) ?: return null
-      viewModel.stageMovedFile(name, "video/mp4", file)
-    } else {
-      viewModel.importFile(uri)
-    }
-  } finally {
-    maybeOpened?.let { withContext(NonCancellable + Dispatchers.IO) { it.delete() } }
+    // An edit the device can't do fails the send; an unedited video it can't repack goes as it
+    // is, as before (docs/e2ee.md §9.2 says so).
+    if (isEdited) return null
+  }
+  return when {
+    // The sealed original stays until the flow ends: a send that fails can go again.
+    SealedCaptures.isSealed(uri) -> viewModel.stageSealedFile(name, "video/mp4", uri)
+    item.isCaptured -> uri.path?.let { viewModel.stageMovedFile(name, "video/mp4", File(it)) }
+    else -> viewModel.importFile(uri)
   }
 }
+
+/** Where Transformer's sealed output waits in the cache; a kill's leftovers go at the next start. */
+private fun sealedExportFile(context: Context, prefix: String): File =
+  File(context.cacheDir, "$prefix${System.nanoTime()}.mp4${SealedCaptures.SUFFIX}")
 
 private suspend fun displayName(context: Context, uri: Uri): String = withContext(Dispatchers.IO) {
   if (uri.scheme == "file") return@withContext uri.lastPathSegment?.let(SealedCaptures::plainName) ?: "media"
@@ -357,24 +357,23 @@ private suspend fun saveToDevice(context: Context, viewModel: MainViewModel, ite
     if (item.isVideo) {
       val facts = VideoEditing.facts(context, uri)
       val isSealed = SealedCaptures.isSealed(uri)
-      val source = if (VideoEditing.needsExport(facts, item.video, quality)) {
-        val maybeOpened = if (isSealed) withContext(Dispatchers.IO) { SealedCaptures.openToFile(context, uri) } else null
-        try {
-          File(context.cacheDir, "save-${System.nanoTime()}.mp4").takeIf { VideoEditing.export(context, maybeOpened?.let(Uri::fromFile) ?: uri, item.video, facts, quality, it) }
-        } finally {
-          maybeOpened?.let { withContext(NonCancellable + Dispatchers.IO) { it.delete() } }
-        }
+      val maybeExport = if (VideoEditing.needsExport(facts, item.video, quality)) {
+        sealedExportFile(context, SealedCaptures.SAVE_PREFIX).takeIf { VideoEditing.export(context, uri, item.video, facts, quality, it) }
       } else {
         null
       }
       withContext(Dispatchers.IO) {
         try {
           insert(context, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, Environment.DIRECTORY_MOVIES, "video-${System.currentTimeMillis()}.mp4", "video/mp4") { out ->
-            val maybeInput = source?.inputStream() ?: if (isSealed) SealedCaptures.inputStream(context, uri) else context.contentResolver.openInputStream(uri)
+            val maybeInput = when {
+              maybeExport != null -> SealedCaptures.inputStream(context, Uri.fromFile(maybeExport))
+              isSealed -> SealedCaptures.inputStream(context, uri)
+              else -> context.contentResolver.openInputStream(uri)
+            }
             maybeInput?.use { it.copyTo(out) } != null
           }
         } finally {
-          source?.delete()
+          maybeExport?.delete()
         }
       }
     } else {

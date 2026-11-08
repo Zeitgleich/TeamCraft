@@ -4690,12 +4690,23 @@ model or time). The recorder writes a seekable MP4 to a file, so a video is plai
 recorded and is sealed as soon as the recording ends, the plain file then deleted (a delete, not a
 wipe of the flash). The review, the editors and the thumbnails read the plaintext through the
 sealed file (photos decrypted in memory; videos through a decrypting Media3 `DataSource` for
-ExoPlayer and a `MediaDataSource` for the frame and length reads). Transformer and the upload read
-plain files only, so sending or saving a camera video opens it into a plain copy beside it for that
-long (`open-*`, the sent copy is plain like every file to send in `outgoing/<account>`); copies and
-unfinished seals a kill left go at the next start once they are an hour old. Opening a draft seals
-camera files of older versions (or of a recording a kill interrupted) and deletes what the draft
-doesn't name, such as a recording a kill cut off. Pictures are drawn again
+ExoPlayer and a `MediaDataSource` for the frame and length reads). Trimming, muting and scaling a
+camera video go through Transformer without a plain file (#1403): it reads the sealed file through
+that `DataSource`, and the one read Media3 does with a source of its own (the trim optimization's
+sample table) through a `content:` URI of a non-exported provider that decrypts as it is read, a
+descriptor from the platform's proxy file system (`StorageManager.openProxyFileDescriptor`) under a
+random token that exists for the length of the export; if that read fails, Transformer re-encodes
+the whole video instead. The output, for every video the flow edits or packs again, is sealed while
+it is muxed (`SealedMedia.SeekableWriter`, version 2 of the format: a muxer goes back to patch sizes,
+so a segment can be sealed more than once, and each carries a random nonce, its index and last flag
+in the associated data; only the segment being worked on is plaintext, in memory). What leaves that
+is what was always plain: the copy to send, decrypted straight into `outgoing/<account>` like every
+file to send, or the one the user saves to the gallery. An unedited camera video is decrypted
+straight into `outgoing/<account>` the same way. The decoders' and encoders' buffers hold frames in
+memory as they would for any video. Unfinished seals and exports a kill left (the exports sealed, in
+the cache) go at the next start once they are an hour old. Opening a draft seals camera files of
+older versions (or of a recording a kill interrupted) and deletes what the draft doesn't name, such
+as a recording a kill cut off. Pictures are drawn again
 before they are sent, without their metadata; videos are packed again (no re-encoding unless
 edited) with only their orientation, so no location or camera details go along. A video the device
 can't pack again, unedited, goes as it is, as a file sent from the file picker does.

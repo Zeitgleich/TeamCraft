@@ -95,7 +95,7 @@ class MediaDraftStore(context: Context, private val capturesRoot: suspend () -> 
     @Volatile
     private var maybeCachedNames: Pair<File, MediaDraftNames>? = null
 
-    /** Plain copies of camera files ([SealedCaptures.openToFile]) and unfinished seals left this long are a kill's. */
+    /** Plain copies of older versions, unfinished seals and exports left this long are a kill's. */
     private const val LEFTOVER_MILLIS = 60L * 60 * 1000
 
     /**
@@ -113,7 +113,10 @@ class MediaDraftStore(context: Context, private val capturesRoot: suspend () -> 
 
     /** Drafts left for a week (a flow the app never came back to), those of older versions, and
      * camera folders whose draft is gone. */
-    fun sweep(context: Context, nowMillis: Long) = sweep(context.filesDir, nowMillis, names(context.filesDir))
+    fun sweep(context: Context, nowMillis: Long) {
+      sweep(context.filesDir, nowMillis, names(context.filesDir))
+      dropLeftoverExports(context.cacheDir, nowMillis)
+    }
 
     /**
      * The drafts of [conversation], purged (e2ee.md §4.6) or no longer listed, with their camera
@@ -262,6 +265,14 @@ class MediaDraftStore(context: Context, private val capturesRoot: suspend () -> 
         .filter { it.name.startsWith(SealedCaptures.OPENED_PREFIX) || it.name.endsWith(".tmp") }
         .filter { nowMillis - it.lastModified() > LEFTOVER_MILLIS }
         .forEach { it.deleteRecursively() }
+    }
+
+    /** Transformer's output a kill left in the cache (older versions wrote it plain). */
+    internal fun dropLeftoverExports(cacheDir: File, nowMillis: Long) {
+      cacheDir.listFiles().orEmpty()
+        .filter { it.name.startsWith(SealedCaptures.EXPORT_PREFIX) || it.name.startsWith(SealedCaptures.SAVE_PREFIX) }
+        .filter { nowMillis - it.lastModified() > LEFTOVER_MILLIS }
+        .forEach { it.delete() }
     }
 
     /** The core's sweep of its staging folder skips folders, so these are this store's to remove. */
