@@ -65,22 +65,57 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(directSections(list, filter: " sAm").flatMap(\.conversations).map(\.id), ["2", "1"])
   }
 
-  /// #1152: a starred channel lists in Home next to the favorite DMs, once, and stays in its space.
-  func testStarredChannelsListInHomeOnceAndStayInTheirSpace() {
-    let starred = item("2", "release", space: "Team A", favorite: true, unread: 3)
+  /// #1488: Home has the DMs with something new, then the favorites, then each space; the DMs tab
+  /// lists no channels, starred or not.
+  func testHomeHasUnreadDirectMessagesThenFavoritesThenSpaces() {
+    let at = { (seconds: TimeInterval) in Date(timeIntervalSince1970: seconds) }
     let list = [
-      item("1", "Sam", kind: .direct, favorite: true), starred, starred,
-      item("3", "general", space: "Team A"),
+      item("1", "Amy", kind: .direct, unread: 2),
+      item("2", "Bob", kind: .direct),
+      item("3", "muted", kind: .group, unread: 4, muted: true),
+      item("4", "Cid", kind: .direct, unread: 1),
+      item("5", "release", space: "Project A", favorite: true),
+      item("6", "Dan", kind: .direct, favorite: true, unread: 1),
+      item("7", "general", space: "Project A"),
+      item("8", "design", space: "Project B"),
     ]
-    let home = directSections(list, lastActivity: ["1": Date(timeIntervalSince1970: 10)])
-    XCTAssertEqual(home.map(\.title), [.favorites])
-    XCTAssertEqual(home[0].conversations.map(\.id), ["1", "2"])
-    XCTAssertEqual(channelSections([starred, list[3]]).first?.conversations.map(\.id), ["2"])
-    // Removing the star takes it out of Home.
-    XCTAssertTrue(directSections([item("2", "release", space: "Team A")]).isEmpty)
-    // The Home tab counts DMs only, so the channel's unread is counted once, in its space.
-    XCTAssertEqual(TabBadge(list.filter { $0.isDirect }).unread, 0)
-    XCTAssertEqual(TabBadge([starred, list[3]]).unread, 3)
+    let home = homeSections(list + [list[0]], lastActivity: ["1": at(10), "4": at(20)])
+    XCTAssertEqual(home.map(\.title), [.unreadDirect, .favorites, .space("Project A"), .space("Project B")])
+    XCTAssertEqual(home[0].conversations.map(\.name), ["Cid", "Amy"])
+    XCTAssertEqual(home[1].conversations.map(\.name), ["Dan", "release"])
+    XCTAssertEqual(home[2].conversations.map(\.name), ["general"])
+    XCTAssertTrue(directSections([item("5", "release", space: "Project A", favorite: true)]).isEmpty)
+  }
+
+  /// #1488: a collapsed section still shows what is new and the open conversation.
+  func testACollapsedSectionKeepsWhatIsNewAndTheOpenConversation() {
+    let section = ConversationSection(
+      title: .space("Project A"),
+      conversations: [
+        item("1", "general", space: "Project A"),
+        item("2", "release", space: "Project A", unread: 1),
+        item("3", "muted", space: "Project A", unread: 3, muted: true),
+        item("4", "open", space: "Project A"),
+      ])
+    XCTAssertEqual(section.visibleRows(isCollapsed: false, selectedId: nil).count, 4)
+    XCTAssertEqual(section.visibleRows(isCollapsed: true, selectedId: "4").map(\.name), ["release", "open"])
+    XCTAssertEqual(section.collapseKey, "space:Project A")
+    XCTAssertEqual(ConversationSection(title: .unreadDirect, conversations: []).collapseKey, "unread-direct")
+  }
+
+  func testActivityHoldsMentionsFirstThenUnreadWithoutMutedOrRead() {
+    let at = { (seconds: TimeInterval) in Date(timeIntervalSince1970: seconds) }
+    let result = activityConversations(
+      [
+        item("1", "read", space: "Project A"),
+        item("2", "Amy", kind: .direct, unread: 2),
+        item("3", "muted", unread: 5, muted: true),
+        item("4", "release", unread: 1, mentions: 1),
+        item("5", "Bob", kind: .direct, unread: 1),
+        item("6", "quiet", kind: .private, unread: 3, mentions: 2, muted: true),
+      ],
+      lastActivity: ["2": at(10), "5": at(20)])
+    XCTAssertEqual(result.map(\.name), ["quiet", "release", "Bob", "Amy"])
   }
 
   /// #1151: the list layout holds the DMs and the channels of all spaces, favorites first.
