@@ -16089,22 +16089,6 @@
         }
       }
     },
-    "members_add_none": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Nobody else matches."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Niemand sonst passt."
-          }
-        }
-      }
-    },
     "members_add_submit": {
       "localizations": {
         "en": {

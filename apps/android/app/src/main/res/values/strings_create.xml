@@ -27,11 +27,9 @@
   <string name="space_access_invite">Invitation only</string>
   <string name="space_access_invite_hint">People join when they are invited.</string>
   <string name="create_space_submit">Create space</string>
-  <string name="dm_opening">Opening…</string>
   <string name="members_add">Add people</string>
   <string name="members_add_submit">Add</string>
   <string name="members_add_not_in_space">Somebody isn\'t in this channel\'s space yet. A space admin can invite them first.</string>
-  <string name="members_add_none">Nobody else matches.</string>
   <plurals name="members_add_count">
     <item quantity="one">Add %d person</item>
     <item quantity="other">Add %d people</item>
