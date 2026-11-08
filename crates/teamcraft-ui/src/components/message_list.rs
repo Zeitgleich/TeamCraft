@@ -889,6 +889,12 @@ pub fn MessageList(
             } else {
               (IconName::Smile, "channel-empty-title", "channel-empty")
             };
+            // An empty conversation is shown in full: its switch is done (perf.rs).
+            crate::perf::end_pending(
+              crate::perf::PerfOperation::ChannelSwitch,
+              &conversation.to_string(),
+              crate::perf::PerfStatus::Ok,
+            );
             view! { <EmptyState icon=icon title_key=title_key body_key=body_key maybe_action=maybe_action /> }
           }}
         </Show>

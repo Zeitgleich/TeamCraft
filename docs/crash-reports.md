@@ -228,7 +228,7 @@ and release. Where to read them: [performance.md](performance.md), "Numbers from
 | Transaction          | From → to                                                                  | Apps                  |
 |----------------------|----------------------------------------------------------------------------|-----------------------|
 | `start.channel_list` | The page's navigation → the signed-in shell with the channel list rendered | Web, desktop          |
-| `channel.switch`     | Opening a conversation → its first row shows a message                     | Web, desktop, Android |
+| `channel.switch`     | Opening a conversation → its first row (or its empty state) shows          | Web, desktop, Android |
 | `message.send`       | Sending a plain message → the server's message replaced the pending row    | Web, desktop, Android |
 | `sync.reconnect`     | The core connecting again → connected (resume or full resync)              | Web, desktop, Android |
 | `file.download`      | An attachment's download and decryption (previews and the viewer)          | Web, desktop          |

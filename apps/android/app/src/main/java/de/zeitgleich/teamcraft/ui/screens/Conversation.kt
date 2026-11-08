@@ -1320,7 +1320,11 @@ internal fun Composer(
       return
     }
     // `:)` and `:tada:` become emoji, as on desktop.
+    val isPlain = maybeThread == null && files.isEmpty() && sendableDraftFiles.isEmpty()
     viewModel.act(ChatActions.send(conversationId, emojiConvert(text.trim()), sendOptions(files, sendableDraftFiles)))
+      // Performance data: from the queued message until the server took it (the feed has no
+      // pending message left, read below). Plain messages in the conversation only.
+      .invokeOnCompletion { failure -> if (failure == null && isPlain) Perf.begin(PerfMeasure.MESSAGE_SEND, conversationId) }
     viewModel.pickedSent(files, sendableDraftFiles.map { it.id })
     viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
     draftSave.stored("")
