@@ -3202,7 +3202,8 @@ from the join on once they are a guest, and gets the import's keys if the import
 ### 4.11 A channel's shared notes (issue #1221)
 
 A channel of a space has one page of notes (the "Notes" tab of its header: headings, paragraphs,
-bulleted and numbered lists, checklists) that its members edit together. It is end-to-end
+quotes, code blocks, bulleted and numbered lists, checklists, with bold, italic, struck-through and
+inline code text and links) that its members edit together. It is end-to-end
 encrypted like the channel's messages, and the server learns nothing it doesn't learn from a
 message: every change of the page *is* a message.
 
@@ -3213,6 +3214,35 @@ on every device, in any order and any number of times: concurrent typing in one 
 character by character, concurrent changes of a block's kind or check mark end with the same one
 winning everywhere, a block deleted on one device while another typed into it stays deleted.
 Offline edits are updates like any other and merge when they arrive.
+
+**Schema (issue #1456).** The root is `blocks`, a Y.Array of Y.Map. Block keys: `id` (string),
+`kind` (string: `paragraph`, `heading`, `heading2`, `heading3`, `bullet`, `numbered`, `check`,
+`quote`, `code`), `checked` (bool), `text` (Y.Text). Inline formatting is the Y.Text's own
+formatting: `bold`, `italic`, `strike`, `code` (`true`) and `link` (the address as a string), the
+names Quill and y-prosemirror use. A link is shown only when its address is a web address
+(`http://` or `https://`); whatever another member's client stored, no other scheme becomes a link.
+Formatting is ordinary Yjs content: concurrent formatting and typing merge like any other edit, and
+everything in this section about encryption, snapshots and history holds for it unchanged; the
+server still sees only encrypted messages of the same kind.
+
+The schema grows without breaking clients that don't know the new parts:
+
+- A kind a client doesn't know reads as a paragraph and its text stays; a formatting attribute it
+  doesn't know is left where it is and the text reads as plain.
+- A client that predates inline formatting reads a block's text without it. Its edits are text
+  insertions and removals, which leave the formatting of the text around them in place, so it
+  can't damage what it doesn't show. It sees a quote or code block as a paragraph: typing into one
+  whose text starts with a list or heading prefix (`# `, `- `, …) turns it into that kind on such a
+  client, as for any paragraph there, and its Enter and Backspace move text without the formatting.
+  The text itself stays, and the version history has the block as it was.
+- A later version must keep every block's Y.Text a sequence of characters: no embeds. All clients
+  address a block's text by its characters, and an embed would shift those offsets on clients that
+  don't know it. An inline object (a mention, a file reference) is text carrying an attribute.
+
+**Undo and redo** are per editor: yrs's `UndoManager` over the blocks, tracking only this editor's own
+transactions (updates from others are applied under an origin it ignores). An undo is an ordinary
+update that goes out like any edit, so other members' typing meanwhile stays and the history lists it.
+The stack lives as long as the open page.
 
 Three approaches were weighed. Their cost on the web is the code the browser downloads: a release
 `wasm32-unknown-unknown` build of a probe that creates, edits, encodes and merges a document

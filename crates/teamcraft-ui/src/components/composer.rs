@@ -2102,7 +2102,7 @@ fn focus_first_item(menu: NodeRef<html::Div>) {
 }
 
 /// `example.com` means `https://example.com`.
-fn with_scheme(url: &str) -> String {
+pub fn with_scheme(url: &str) -> String {
   if url.contains("://") || url.starts_with(markdown::PERMALINK_PREFIX) {
     url.to_owned()
   } else {
