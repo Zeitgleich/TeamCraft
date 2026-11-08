@@ -35,6 +35,7 @@ struct SettingsView: View {
         if let profile = maybeProfileJSON, OwnProfileDocument.canOverrideDisplayName(in: profile) {
           displayNameSection(profile: profile)
         }
+        HolidayRegionSection()
         Section("presence_title") {
           Picker("presence_title", selection: $presenceRaw) {
             ForEach(PresenceChoice.allCases) { choice in Text(choice.title).tag(choice.rawValue) }

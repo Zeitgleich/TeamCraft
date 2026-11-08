@@ -13904,6 +13904,886 @@
           }
         }
       }
+    },
+    "holiday_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Public holidays"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Feiertage"
+          }
+        }
+      }
+    },
+    "holiday_region_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Holidays of"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Feiertage von"
+          }
+        }
+      }
+    },
+    "holiday_region_instance": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The workspace's region"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Region des Workspace"
+          }
+        }
+      }
+    },
+    "holiday_instance_hint %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your repeating meetings that skip public holidays leave out those of the workspace's region: %@."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Serien, die Feiertage überspringen, lassen die der Region des Workspace aus: %@."
+          }
+        }
+      }
+    },
+    "holiday_own_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your repeating meetings that skip public holidays leave out those of this region instead of the workspace's."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Serien, die Feiertage überspringen, lassen die dieser Region aus statt der des Workspace."
+          }
+        }
+      }
+    },
+    "holiday_feed_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The workspace's holiday calendar counts as well."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Feiertagskalender des Workspace gilt zusätzlich."
+          }
+        }
+      }
+    },
+    "holiday_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The setting couldn't be loaded. Try again later."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Einstellung konnte nicht geladen werden. Versuch es später noch einmal."
+          }
+        }
+      }
+    },
+    "holiday_offline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You're offline. Connect to change the public holidays."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du bist offline. Verbinde dich, um die Feiertage zu ändern."
+          }
+        }
+      }
+    },
+    "holiday_save_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The region could not be saved. Try again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Region konnte nicht gespeichert werden. Versuch es noch einmal."
+          }
+        }
+      }
+    },
+    "holiday_region_none": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "None"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keine"
+          }
+        }
+      }
+    },
+    "holiday_region_de": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Germany (nationwide holidays only)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deutschland (nur bundesweite Feiertage)"
+          }
+        }
+      }
+    },
+    "holiday_region_de_bw": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Baden-Württemberg"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Baden-Württemberg"
+          }
+        }
+      }
+    },
+    "holiday_region_de_by": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bavaria"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bayern"
+          }
+        }
+      }
+    },
+    "holiday_region_de_be": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Berlin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Berlin"
+          }
+        }
+      }
+    },
+    "holiday_region_de_bb": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Brandenburg"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Brandenburg"
+          }
+        }
+      }
+    },
+    "holiday_region_de_hb": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bremen"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bremen"
+          }
+        }
+      }
+    },
+    "holiday_region_de_hh": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hamburg"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hamburg"
+          }
+        }
+      }
+    },
+    "holiday_region_de_he": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hesse"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hessen"
+          }
+        }
+      }
+    },
+    "holiday_region_de_mv": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mecklenburg-Western Pomerania"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mecklenburg-Vorpommern"
+          }
+        }
+      }
+    },
+    "holiday_region_de_ni": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lower Saxony"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Niedersachsen"
+          }
+        }
+      }
+    },
+    "holiday_region_de_nw": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "North Rhine-Westphalia"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nordrhein-Westfalen"
+          }
+        }
+      }
+    },
+    "holiday_region_de_rp": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rhineland-Palatinate"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rheinland-Pfalz"
+          }
+        }
+      }
+    },
+    "holiday_region_de_sl": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saarland"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saarland"
+          }
+        }
+      }
+    },
+    "holiday_region_de_sn": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saxony"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sachsen"
+          }
+        }
+      }
+    },
+    "holiday_region_de_st": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saxony-Anhalt"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sachsen-Anhalt"
+          }
+        }
+      }
+    },
+    "holiday_region_de_sh": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schleswig-Holstein"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schleswig-Holstein"
+          }
+        }
+      }
+    },
+    "holiday_region_de_th": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Thuringia"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Thüringen"
+          }
+        }
+      }
+    },
+    "holiday_region_at": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Austria"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Österreich"
+          }
+        }
+      }
+    },
+    "holiday_region_ch": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland (federal holidays only)"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz (nur Bundesfeiertage)"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_ag": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Aargau"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Aargau"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_ai": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Appenzell Innerrhoden"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Appenzell Innerrhoden"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_ar": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Appenzell Ausserrhoden"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Appenzell Ausserrhoden"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_be": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Bern"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Bern"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_bl": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Basel-Landschaft"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Basel-Landschaft"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_bs": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Basel-Stadt"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Basel-Stadt"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_fr": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Fribourg"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Freiburg"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_ge": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Geneva"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Genf"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_gl": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Glarus"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Glarus"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_gr": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Graubünden"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Graubünden"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_ju": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Jura"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Jura"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_lu": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Lucerne"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Luzern"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_ne": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Neuchâtel"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Neuenburg"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_nw": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Nidwalden"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Nidwalden"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_ow": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Obwalden"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Obwalden"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_sg": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: St. Gallen"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: St. Gallen"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_sh": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Schaffhausen"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Schaffhausen"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_so": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Solothurn"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Solothurn"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_sz": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Schwyz"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Schwyz"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_tg": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Thurgau"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Thurgau"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_ti": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Ticino"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Tessin"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_ur": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Uri"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Uri"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_vd": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Vaud"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Waadt"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_vs": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Valais"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Wallis"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_zg": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Zug"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Zug"
+          }
+        }
+      }
+    },
+    "holiday_region_ch_zh": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switzerland: Zurich"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schweiz: Zürich"
+          }
+        }
+      }
     }
   },
   "version": "1.0"
