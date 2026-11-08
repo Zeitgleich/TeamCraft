@@ -1,0 +1,77 @@
+diff --git a/davey/Cargo.toml b/davey/Cargo.toml
+index 5874f20..976238e 100644
+--- a/davey/Cargo.toml
++++ b/davey/Cargo.toml
+@@ -10,10 +10,10 @@ keywords = ["MLS", "Encryption", "E2EE", "Discord", "DAVE"]
+ edition = "2024"
+ 
+ [dependencies]
+-openmls = { features = ["js"], version = "0.8.1" }
+-openmls_basic_credential = "0.5.0"
+-openmls_rust_crypto = "0.5.1"
+-openmls_traits = "0.5.0"
++openmls = { features = ["js"], version = "0.9.1" }
++openmls_basic_credential = "0.6.0"
++openmls_rust_crypto = "0.6.0"
++openmls_traits = "0.6.0"
+ tracing = "0.1.41"
+ thiserror = "2.0.12"
+ # Crypto utils
+diff --git a/davey/src/session.rs b/davey/src/session.rs
+index 99fafe3..9dad084 100644
+--- a/davey/src/session.rs
++++ b/davey/src/session.rs
+@@ -734,28 +734,39 @@ impl DaveSession {
+       return Err(ProcessCommitError::UnexpectedSenderType);
+     };
+ 
++    // openmls 0.9 reports an own commit that matches the pending one (by confirmation tag) as
++    // `OwnPendingCommit`, rejects a mismatching own commit with an update path as
++    // `OwnCommitMismatch`, and stages a mismatching own commit without one like anybody else's.
++    // DAVE accepts an own commit only if it is byte for byte the pending commit.
++    let is_from_self = committer == group.own_leaf_index();
+     match group.process_message(&self.provider, protocol_message) {
+       Ok(message) => match message.into_content() {
++        ProcessedMessageContent::StagedCommitMessage(_) if is_from_self => {
++          return Err(ProcessCommitError::OwnCommitMismatch);
++        }
+         ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
+           validate_staged_commit(group, &staged_commit, committer)?;
+           group.merge_staged_commit(&self.provider, *staged_commit)?;
+         }
+-        _ => return Err(ProcessCommitError::ProcessedMessageNotStagedCommit),
+-      },
+-      Err(ProcessMessageError::InvalidCommit(StageCommitError::OwnCommit)) => {
+-        // This is our own commit, so merge our pending commit instead.
+-        match &self.pending_commit_bytes {
+-          Some(expected) if expected.as_slice() == commit => {
+-            debug!("Found own commit, merging pending commit instead.");
+-            let Some(staged_commit) = group.pending_commit() else {
+-              return Err(ProcessCommitError::NoPendingCommit);
+-            };
+-            validate_staged_commit(group, staged_commit, group.own_leaf_index())?;
+-            group.merge_pending_commit(&self.provider)?;
++        ProcessedMessageContent::OwnPendingCommit => {
++          // This is our own commit, so merge our pending commit instead.
++          match &self.pending_commit_bytes {
++            Some(expected) if expected.as_slice() == commit => {
++              debug!("Found own commit, merging pending commit instead.");
++              let Some(staged_commit) = group.pending_commit() else {
++                return Err(ProcessCommitError::NoPendingCommit);
++              };
++              validate_staged_commit(group, staged_commit, group.own_leaf_index())?;
++              group.merge_pending_commit(&self.provider)?;
++            }
++            Some(_) => return Err(ProcessCommitError::OwnCommitMismatch),
++            None => return Err(ProcessCommitError::NoPendingCommit),
+           }
+-          Some(_) => return Err(ProcessCommitError::OwnCommitMismatch),
+-          None => return Err(ProcessCommitError::NoPendingCommit),
+         }
++        _ => return Err(ProcessCommitError::ProcessedMessageNotStagedCommit),
++      },
++      Err(ProcessMessageError::InvalidCommit(StageCommitError::OwnCommitMismatch)) => {
++        return Err(ProcessCommitError::OwnCommitMismatch);
+       }
+       Err(error) => return Err(ProcessCommitError::ProcessingMessageFailed(error)),
+     }

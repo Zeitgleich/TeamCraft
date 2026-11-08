@@ -1,0 +1,54 @@
+diff --git a/davey/Cargo.toml b/davey/Cargo.toml
+index 976238e..e3701ad 100644
+--- a/davey/Cargo.toml
++++ b/davey/Cargo.toml
+@@ -16,6 +16,8 @@ openmls_rust_crypto = "0.6.0"
+ openmls_traits = "0.6.0"
+ tracing = "0.1.41"
+ thiserror = "2.0.12"
++# Instant that works in browsers (wasm32-unknown-unknown); re-exports std elsewhere.
++web-time = "1.1.0"
+ # Crypto utils
+ p256 = { version = "0.13" }
+ rand = "0.8"
+diff --git a/davey/src/cryptor/clock.rs b/davey/src/cryptor/clock.rs
+index f18b2c8..15d67a9 100644
+--- a/davey/src/cryptor/clock.rs
++++ b/davey/src/cryptor/clock.rs
+@@ -1,6 +1,7 @@
+ use std::time::Duration;
++// std::time::Instant panics on wasm32-unknown-unknown; web_time is std on native targets.
+ #[cfg(not(test))]
+-use std::time::Instant;
++use web_time::Instant;
+ 
+ /// A monotonic clock shared between a decryptor and its cipher managers.
+ /// In tests, time is frozen and only moves when advanced manually.
+diff --git a/davey/src/cryptor/decryptor.rs b/davey/src/cryptor/decryptor.rs
+index b62516c..7b61f58 100644
+--- a/davey/src/cryptor/decryptor.rs
++++ b/davey/src/cryptor/decryptor.rs
+@@ -2,8 +2,10 @@ use std::{
+   cmp::min,
+   collections::{HashMap, VecDeque},
+   sync::Arc,
+-  time::{Duration, Instant},
++  time::Duration,
+ };
++// std::time::Instant panics on wasm32-unknown-unknown; web_time is std on native targets.
++use web_time::Instant;
+ 
+ use tracing::{debug, trace, warn};
+ 
+diff --git a/davey/src/cryptor/encryptor.rs b/davey/src/cryptor/encryptor.rs
+index d836343..0ad9431 100644
+--- a/davey/src/cryptor/encryptor.rs
++++ b/davey/src/cryptor/encryptor.rs
+@@ -1,4 +1,6 @@
+-use std::{collections::HashMap, time::Instant};
++use std::collections::HashMap;
++// std::time::Instant panics on wasm32-unknown-unknown; web_time is std on native targets.
++use web_time::Instant;
+ 
+ use tracing::{debug, warn};
+ 

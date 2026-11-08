@@ -12,3 +12,4 @@ mod displayable_code;
 mod fingerprint;
 mod hash_ratchet;
 mod session;
+mod teamcraft_kat;

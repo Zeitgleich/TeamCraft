@@ -8,7 +8,7 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 
 use crate::{
-  CommitWelcome, DaveSession, ProposalsOperationType,
+  CommitWelcome, DaveSession, MediaType, ProposalsOperationType,
   errors::{
     ProcessCommitError, ProcessProposalsError, ProcessWelcomeError, SetExternalSenderError,
   },
@@ -378,5 +378,118 @@ fn proposals_without_state_reports_error() {
   assert!(matches!(
     session.process_proposals(ProposalsOperationType::APPEND, &[], None),
     Err(ProcessProposalsError::NoGroup)
+  ));
+}
+
+// TeamCraft (VENDORED.md): session-level checks of the transition model and the fixes of 0.2.0
+// that TeamCraft's call engine relies on.
+
+const OPUS_FRAME: &[u8] = &[0x78, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09];
+
+fn truncated_nonce_of(encrypted_frame: &[u8]) -> u32 {
+  let mut frame_processor = crate::cryptor::frame_processors::InboundFrameProcessor::new();
+  frame_processor.parse_frame(encrypted_frame);
+  assert!(frame_processor.encrypted);
+  frame_processor.truncated_nonce
+}
+
+fn established_and_prepared(external_sender: &TestExternalSender) -> (DaveSession, DaveSession) {
+  let mut a = init_and_set_external_sender(USER_A, external_sender, TEST_GROUP_ID);
+  let mut b = init_and_set_external_sender(USER_B, external_sender, TEST_GROUP_ID);
+  establish_group(external_sender, &mut a, &mut b);
+  a.prepare_transition(0, 1).unwrap();
+  b.prepare_transition(0, 1).unwrap();
+  (a, b)
+}
+
+/// Re-installing the current epoch's key (a repeated prepare for the same epoch) continues the
+/// nonce sequence; restarting it reused AES-GCM nonces under the same key.
+#[test]
+fn teamcraft_reprepare_of_current_epoch_keeps_nonce_sequence() {
+  let external_sender = TestExternalSender::new(TEST_GROUP_ID);
+  let (mut a, mut b) = established_and_prepared(&external_sender);
+  let first = a.encrypt_opus(OPUS_FRAME).unwrap().into_owned();
+
+  a.prepare_transition(0, 1).unwrap();
+  let second = a.encrypt_opus(OPUS_FRAME).unwrap().into_owned();
+
+  assert_eq!(truncated_nonce_of(&second), truncated_nonce_of(&first) + 1);
+  assert_eq!(b.decrypt(USER_A, MediaType::AUDIO, &first).unwrap(), OPUS_FRAME);
+  assert_eq!(b.decrypt(USER_A, MediaType::AUDIO, &second).unwrap(), OPUS_FRAME);
+}
+
+/// A prepared transition installs the new decryption keys at once and switches the encryption
+/// key only when it is executed.
+#[test]
+fn teamcraft_prepared_transition_switches_encryption_on_execute() {
+  let external_sender = TestExternalSender::new(TEST_GROUP_ID);
+  let (mut a, mut b) = established_and_prepared(&external_sender);
+  let mut c = init_and_set_external_sender(USER_C, &external_sender, TEST_GROUP_ID);
+  let roster = [USER_A, USER_B, USER_C];
+  let proposals = external_sender.propose_add(1, &c.create_key_package().unwrap());
+  let commit_welcome = a
+    .process_proposals(ProposalsOperationType::APPEND, &proposals, Some(&roster))
+    .unwrap()
+    .unwrap();
+  b.process_proposals(ProposalsOperationType::APPEND, &proposals, Some(&roster))
+    .unwrap();
+  assert!(a.process_commit(&commit_welcome.commit).unwrap());
+  assert!(b.process_commit(&commit_welcome.commit).unwrap());
+  c.process_welcome(&commit_welcome.welcome.unwrap(), Some(&roster))
+    .unwrap();
+  for session in [&mut a, &mut b, &mut c] {
+    session.prepare_transition(3, 1).unwrap();
+  }
+
+  let before = a.encrypt_opus(OPUS_FRAME).unwrap().into_owned();
+  assert!(c.decrypt(USER_A, MediaType::AUDIO, &before).is_err());
+  assert_eq!(b.decrypt(USER_A, MediaType::AUDIO, &before).unwrap(), OPUS_FRAME);
+
+  assert!(a.execute_transition(3).unwrap());
+  assert!(!a.execute_transition(3).unwrap(), "a transition runs once");
+  let after = a.encrypt_opus(OPUS_FRAME).unwrap().into_owned();
+  assert_eq!(c.decrypt(USER_A, MediaType::AUDIO, &after).unwrap(), OPUS_FRAME);
+  assert_eq!(b.decrypt(USER_A, MediaType::AUDIO, &after).unwrap(), OPUS_FRAME);
+}
+
+/// A downgrade to protocol version 0 stops encryption once executed; frames encrypted before
+/// still decrypt while the old keys are kept (10 seconds).
+#[test]
+fn teamcraft_downgrade_to_protocol_zero() {
+  let external_sender = TestExternalSender::new(TEST_GROUP_ID);
+  let (mut a, mut b) = established_and_prepared(&external_sender);
+  let before = a.encrypt_opus(OPUS_FRAME).unwrap().into_owned();
+
+  a.prepare_transition(7, 0).unwrap();
+  b.prepare_transition(7, 0).unwrap();
+  assert!(a.can_encrypt(), "the downgrade waits for its execution");
+  assert!(a.execute_transition(7).unwrap());
+  assert!(b.execute_transition(7).unwrap());
+
+  assert!(!a.can_encrypt());
+  assert!(matches!(
+    a.encrypt_opus(OPUS_FRAME),
+    Err(crate::errors::EncryptError::NotReady)
+  ));
+  assert_eq!(b.decrypt(USER_A, MediaType::AUDIO, &before).unwrap(), OPUS_FRAME);
+}
+
+/// A proposal that adds a second leaf for a user who is already in the group is refused.
+#[test]
+fn teamcraft_duplicate_user_in_proposals_is_rejected() {
+  let external_sender = TestExternalSender::new(TEST_GROUP_ID);
+  let (mut a, _b) = established_and_prepared(&external_sender);
+  let mut second_b = init_and_set_external_sender(USER_B, &external_sender, TEST_GROUP_ID);
+  let proposals = external_sender.propose_add(1, &second_b.create_key_package().unwrap());
+
+  let result = a.process_proposals(
+    ProposalsOperationType::APPEND,
+    &proposals,
+    Some(&[USER_A, USER_B]),
+  );
+
+  assert!(matches!(
+    result,
+    Err(ProcessProposalsError::InvalidRoster(crate::errors::RosterError::DuplicateUser(USER_B)))
   ));
 }
