@@ -798,6 +798,7 @@ mod tests {
             "guest_expiry",
             "holiday_resync",
             "key_package_pruning",
+            "meeting_notices",
             "oidc_sync",
             "partition_maintenance",
             "retention",
