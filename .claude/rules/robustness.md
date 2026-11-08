@@ -101,13 +101,14 @@ in [docs/performance.md](../../docs/performance.md) ("Clients"). A change that t
 | Idle, connected, in the foreground: CPU                 | ≤ 0.5 %   | ≤ 1 %                       | ≤ 1 %                                        |
 | Network while idle besides the gateway heartbeat        | none      | none                        | none                                         |
 | In the background                                       | –         | –                           | no wakelocks, no polling; push wakes the app |
-| Download size, a guest in a meeting (compressed)        | –         | ≤ 6.35 MB wasm, gzip -9     | –                                            |
-| Download size, signed-in first visit (compressed)       | –         | ≤ 5.8 MB wasm, gzip -9      | –                                            |
+| Download size, a guest in a meeting (compressed)        | –         | ≤ 6.28 MB, gzip -9          | –                                            |
+| Download size, signed-in first visit (compressed)       | –         | ≤ 5.74 MB, gzip -9          | –                                            |
 
 - The strict download budget is a guest's: somebody from outside who opens a meeting link, often
-  once and in a browser that never saw the app, waits for the lobby (the app and the service
-  worker), then the meeting's chunks (`guest`, `calls`) and the call module. The signed-in first
-  visit (the app, the signed-in app's chunks and the service worker) has a looser ceiling against
+  once and in a browser that never saw the app, waits for the lobby (the app, the service worker
+  and the UI's texts in one language), then the meeting's chunks (`guest`, `calls`) and the call
+  module. The signed-in first visit (the app, the signed-in app's chunks, the service worker and the
+  texts) has a looser ceiling against
   big regressions: a member loads it once, then from the service worker's cache. Both are measured
   as gzip -9 (brotli, where the server offers it, is about 30 % smaller). CI checks them on every
   change to the web client (`.github/workflows/web-size.yml`); see docs/performance.md, "Web bundle

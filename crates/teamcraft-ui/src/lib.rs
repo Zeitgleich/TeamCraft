@@ -142,6 +142,17 @@ pub use components::app::App;
 /// Mounts the application into `<body>`. Called from the wasm entry point.
 pub fn mount() {
   panic_overlay::install();
+  // The UI's texts first (`init.js` fetched them next to the app, i18n.rs): no view ever shows a
+  // message's key. Without them nothing mounts, and `init.js` shows the loading screen's failure.
+  wasm_bindgen_futures::spawn_local(async {
+    match i18n::load_start_language().await {
+      Ok(()) => mount_with_texts(),
+      Err(error) => tracing::error!(%error, "the UI's texts did not load"),
+    }
+  });
+}
+
+fn mount_with_texts() {
   // The desktop shell's incoming-call window shows only the call's card (#650).
   if auth::tauri::window_label().as_deref() == Some(teamcraft_client_api::call_window::CALL_WINDOW_LABEL) {
     components::incoming_call::mount_call_window();

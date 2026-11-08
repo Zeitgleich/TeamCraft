@@ -1,6 +1,7 @@
 //! The split web bundle (#334): areas of the app load as wasm chunks of their own the first time they
 //! open. The settings are one; opening them fetches their chunk and shows them. In a signed release
 //! the service worker installs without the chunks and fetches and checks one when it is first used.
+//! The UI's texts are files of their own, one per language, of which a page fetches the one it shows.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -78,6 +79,93 @@ async fn a_signed_release_fetches_and_checks_a_chunk_when_it_is_used() {
     })
     .await;
   rig.finish().await;
+}
+
+/// The UI's texts are a file per language (#1437): a page fetches only the one it shows, before its
+/// first view; a switch in the settings fetches the other one and shows it, and the next load starts
+/// in it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_page_fetches_only_the_language_it_shows() {
+  let Some(rig) = Rig::start().await else {
+    return;
+  };
+  rig
+    .browser
+    .screenshot_on_failure("web-split-texts", |page| async move {
+      record_every_resource(&page).await;
+      // Pins English before the app loads.
+      sign_in_as_alice(&page).await;
+      wait_for_text(&page, "browser-channel").await;
+      let texts = loaded_texts(&page).await;
+      assert!(
+        texts.iter().any(|text| text.contains("/i18n/en-"))
+          && !texts.iter().any(|text| text.contains("/i18n/de-")),
+        "an English page fetched {texts:?}"
+      );
+      page
+        .goto(format!("{WEB_ORIGIN}/settings/preferences"))
+        .await
+        .unwrap();
+      wait_for_text(&page, "App language").await;
+      page
+        .evaluate(
+          "(() => { const select = document.getElementById('set-settings-app-language-input'); \
+           select.value = 'de'; select.dispatchEvent(new Event('change', { bubbles: true })); })()",
+        )
+        .await
+        .unwrap();
+      wait_for_text(&page, "Sprache der App").await;
+      assert!(
+        loaded_texts(&page)
+          .await
+          .iter()
+          .any(|text| text.contains("/i18n/de-")),
+        "the switch fetched no German texts"
+      );
+
+      page.reload().await.unwrap();
+      let language = first_view_language(&page).await;
+      assert_eq!(language, "de", "the first view after the switch");
+      wait_for_text(&page, "Sprache der App").await;
+      let texts = loaded_texts(&page).await;
+      assert!(
+        texts.iter().any(|text| text.contains("/i18n/de-"))
+          && !texts.iter().any(|text| text.contains("/i18n/en-")),
+        "a German page fetched {texts:?}"
+      );
+    })
+    .await;
+  rig.finish().await;
+}
+
+/// The page's language (`<html lang>`) once the app showed its first view (startup.rs).
+async fn first_view_language(page: &Page) -> String {
+  let script =
+    "document.documentElement.hasAttribute('data-first-view') ? document.documentElement.lang : ''";
+  let deadline = Instant::now() + Duration::from_secs(60);
+  loop {
+    let language: String = page
+      .evaluate(script)
+      .await
+      .ok()
+      .and_then(|result| result.into_value().ok())
+      .unwrap_or_default();
+    if !language.is_empty() {
+      return language;
+    }
+    assert!(Instant::now() < deadline, "the app showed no first view");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+  }
+}
+
+/// The UI's text files the page fetched.
+async fn loaded_texts(page: &Page) -> Vec<String> {
+  page
+    .evaluate("performance.getEntriesByType('resource').map(e => e.name).filter(n => n.endsWith('.ftl'))")
+    .await
+    .ok()
+    .and_then(|result| result.into_value::<Vec<String>>().ok())
+    .unwrap_or_default()
 }
 
 /// A copy of the web build signed with a fresh key, as the release does it.

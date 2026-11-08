@@ -3222,7 +3222,7 @@ probe doing only the `serde_json` part (2026-11-04):
 | `automerge` 0.6.1                              | +930,498 B   | +284,962 B    | merges per character                |
 | Own op log, last writer wins per block         | a few kB     | a few kB      | one side's typing in the block lost |
 
-Neither CRDT breaks the budget of a signed-in first visit (5.8 MB gzip, docs/performance.md,
+Neither CRDT breaks the budget of a signed-in first visit (5.74 MB gzip, docs/performance.md,
 "Web bundle size"), and the editor doesn't count towards it anyway (below). `yrs` costs less than a
 third of `automerge` and speaks the Yjs format, which has editors and tooling around it. The op
 log would cost nothing, but it loses typing exactly where a meeting's notes are written: several
@@ -4757,7 +4757,8 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   The app is served from that cache, never from the network.
 - **Parts loaded when first used.** The app is split into wasm chunks that load when their part of
   the app first opens (#334). `release.json` lists them in `lazy` (the wasm files `index.html` and
-  `sw.js` don't name, including the signed-in app's), outside the signature so that older workers
+  `sw.js` don't name, including the signed-in app's, and the UI's texts, one file per language of
+  which a page fetches the one it shows, #1437), outside the signature so that older workers
   still verify the manifest. The worker installs without them, and fetches a chunk the first time a
   page asks for it, or in the background about 15 s after a page other than a guest's meeting page
   loaded (so guests never download the signed-in app), checks it against the signed hash in the

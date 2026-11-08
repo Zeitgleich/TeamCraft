@@ -77,10 +77,14 @@ new file for a new area, without touching a shared list.
   usually takes the next free number at the end (as an addition at the end of the old file did); a
   file that must come before rules it overrides takes a number before them. Each file closes its own
   blocks (a test checks), and `scripts/check-css.py` reads them in the same order as one stylesheet.
-- **Strings:** `i18n/<language>/<area>.ftl`. build.rs embeds every file it finds, the bundle of a
-  language loads them all. Each message id lives in one file, the same file name in every language;
-  the tests in `src/i18n.rs` check that no id is defined twice and that every language has every
-  English message in the same file.
+- **Strings:** `i18n/<language>/<area>.ftl`; the bundle of a language loads every file it finds.
+  Native builds (the tests) embed them (build.rs). The web app embeds none (#1437):
+  `scripts/finish-loader.sh` joins each language's files into one file of the build
+  (`i18n/<language>-<hash>.ftl`), `init.js` fetches the language the app starts in next to the app,
+  and the app mounts once it is there; another language is fetched when the user switches to it, and
+  the UI stays in the old one until then. Each message id lives in one file, the same file name in
+  every language; the tests in `src/i18n.rs` check that no id is defined twice and that every
+  language has every English message in the same file.
 
 `scripts/split-hotspots.py` made the split from the old files; `scripts/split-hotspots.py --check`
 (CI) fails if one of them comes back, for instance from a merge that keeps a branch's `main.css`.
@@ -285,7 +289,7 @@ the app checks the session and opens the account's data, until the app's first v
 chat. A check that takes longer says so under the bar. A reload with single sign-on loads the page
 twice (to the identity provider and back); the second load shows the mark already assembled. Its texts
 are the `loader-*` messages of `i18n/<language>/loader.ftl`, which `scripts/finish-loader.sh` (a Trunk hook) copies into
-`init.js` together with the size of the built wasm. Release builds use the `web-release` Cargo profile
+`init.js` together with the size of the built wasm and the names of the UI's text files. Release builds use the `web-release` Cargo profile
 (size over speed) and `wasm-opt -Oz`; the release tarball adds `.br`/`.gz` variants
 (`scripts/compress-web.sh`), which the server serves by `Accept-Encoding`. Browser login needs the server's
 origin registered as a redirect URI of the identity provider's client.

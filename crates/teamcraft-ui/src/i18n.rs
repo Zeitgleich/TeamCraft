@@ -1,6 +1,15 @@
 //! Localisation with Fluent. English is the source language; every user-facing string goes through
 //! [`I18n::t`] and friends. Translations live in `i18n/<language>/<area>.ftl`, one Fluent resource
-//! per area of the app (#614); a language's bundle loads all of its files, which build.rs embeds.
+//! per area of the app (#614).
+//!
+//! Native builds (the tests, the checks) embed every language's files (build.rs). The web app
+//! carries none of them (#1437): `scripts/finish-loader.sh` joins each language's files into one of
+//! the build (`i18n/<language>-<hash>.ftl`), `init.js` fetches the one the app starts in next to the
+//! app, and [`load_start_language`] waits for it before anything mounts, so no view ever shows a
+//! message's key in place of its text. Another language is fetched when the user switches to it;
+//! until it is there, the UI stays in the one it shows ([`I18n::set_locale`]).
+
+use std::cell::RefCell;
 
 use fluent_bundle::FluentBundle as MessageBundle;
 use fluent_bundle::{FluentArgs, FluentResource};
@@ -9,7 +18,8 @@ use unic_langid::LanguageIdentifier;
 
 use crate::reactive::get_if_observed;
 
-// `fn sources(tag)`: the embedded files of one language.
+// `fn sources(tag)`: the embedded files of one language (natively, and in every build of the tests).
+#[cfg(any(not(target_arch = "wasm32"), test))]
 include!(concat!(env!("OUT_DIR"), "/i18n_sources.rs"));
 
 /// UI languages that ship with translations.
@@ -47,22 +57,68 @@ impl Locale {
 /// Reactive translator. Cheap to copy; reading it inside a closure re-renders when the language changes.
 #[derive(Clone, Copy)]
 pub struct I18n {
+  /// The language the UI shows: always one whose texts are there.
   locale: RwSignal<Locale>,
+  /// The language last asked for; it replaces `locale` once its texts are there (natively at once).
+  #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+  wanted: RwSignal<Locale>,
 }
 
 impl I18n {
   pub fn new(initial: Locale) -> Self {
-    Self {
-      locale: RwSignal::new(initial),
+    // The web app starts with its stored language's texts (`load_start_language`); should they
+    // be missing, a language that is there shows until they arrive.
+    let shown = if is_loaded(initial) {
+      initial
+    } else {
+      loaded_locale().unwrap_or(initial)
+    };
+    let i18n = Self {
+      locale: RwSignal::new(shown),
+      wanted: RwSignal::new(initial),
+    };
+    if shown != initial {
+      i18n.set_locale(initial);
     }
+    i18n
   }
 
   pub fn locale(&self) -> Locale {
     get_if_observed(self.locale)
   }
 
+  /// Switches to `locale` once its texts are there: at once if they are, else (web) after fetching
+  /// them. Until then the UI stays in the language it shows, never with keys in place of texts; a
+  /// fetch that fails leaves it there too.
   pub fn set_locale(&self, locale: Locale) {
-    self.locale.set(locale);
+    self.wanted.set(locale);
+    if is_loaded(locale) {
+      self.locale.set(locale);
+    } else {
+      self.fetch_then_show(locale);
+    }
+  }
+
+  #[cfg(target_arch = "wasm32")]
+  fn fetch_then_show(self, locale: Locale) {
+    wasm_bindgen_futures::spawn_local(async move {
+      match web::load(locale).await {
+        Ok(()) => self.arrived(locale),
+        Err(error) => tracing::warn!(locale = locale.tag(), %error, "the language's texts did not load"),
+      }
+    });
+  }
+
+  /// Natively every language is there.
+  #[cfg(not(target_arch = "wasm32"))]
+  fn fetch_then_show(self, _locale: Locale) {}
+
+  /// `locale`'s texts are there: the UI shows them if it is still the language asked for.
+  #[cfg(any(target_arch = "wasm32", test))]
+  fn arrived(self, locale: Locale) {
+    if self.wanted.try_get_untracked() == Some(locale) && is_loaded(locale) {
+      self.locale.try_set(locale);
+    }
   }
 
   /// Translates a message without arguments.
@@ -115,55 +171,125 @@ pub fn translate_current(key: &str) -> String {
 }
 
 pub(crate) fn translate(locale: Locale, key: &str, maybe_args: Option<&FluentArgs>) -> String {
-  BUNDLES.with(|bundles| {
-    // Fall back to English for messages a translation has not caught up with yet.
-    for candidate in [locale, Locale::En] {
-      let bundle = bundles.get(candidate);
-      if let Some(pattern) = bundle.get_message(key).and_then(|message| message.value()) {
-        let mut errors = Vec::new();
-        return bundle
-          .format_pattern(pattern, maybe_args, &mut errors)
-          .into_owned();
-      }
-    }
-    tracing::warn!(key, "missing translation key");
-    key.to_owned()
-  })
+  BUNDLES
+    .with_borrow(|bundles| bundles.translate(locale, key, maybe_args))
+    .unwrap_or_else(|| {
+      tracing::warn!(key, "missing translation key");
+      key.to_owned()
+    })
+}
+
+/// Whether the texts of `locale` are there (natively always).
+fn is_loaded(locale: Locale) -> bool {
+  BUNDLES.with_borrow(|bundles| bundles.get(locale).is_some())
+}
+
+/// A language whose texts are there, English first.
+fn loaded_locale() -> Option<Locale> {
+  Locale::ALL.into_iter().find(|locale| is_loaded(*locale))
+}
+
+/// Builds the bundle of `locale` from `source` (all of the language's files as one text, as
+/// `scripts/finish-loader.sh` joins them) and keeps it.
+#[cfg(target_arch = "wasm32")]
+fn install(locale: Locale, source: &str) {
+  let bundle = build_bundle(locale, [("all files", source)]);
+  BUNDLES.with_borrow_mut(|bundles| *bundles.slot(locale) = Some(bundle));
+}
+
+/// Before the app mounts (web): the texts of the language it starts in, which `init.js` fetched
+/// next to the app (`globalThis.teamcraftTranslations`). Should the app's stored choice be another
+/// language than `init.js` picked (they read the same setting), that one is fetched too. An error
+/// means no texts at all: `init.js` then shows the loading screen's failure with its retry.
+#[cfg(target_arch = "wasm32")]
+pub async fn load_start_language() -> Result<(), String> {
+  web::load_start().await?;
+  let wanted = crate::settings::stored_locale();
+  if !is_loaded(wanted)
+    && let Err(error) = web::load(wanted).await
+  {
+    tracing::warn!(locale = wanted.tag(), %error, "the language's texts did not load");
+  }
+  Ok(())
+}
+
+/// Natively every language is embedded.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn load_start_language() -> Result<(), String> {
+  Ok(())
 }
 
 thread_local! {
-  static BUNDLES: Bundles = Bundles::load();
+  static BUNDLES: RefCell<Bundles> = RefCell::new(Bundles::embedded());
 }
 
+/// The bundle of each language whose texts are there.
+#[derive(Default)]
 struct Bundles {
-  en: MessageBundle<FluentResource>,
-  de: MessageBundle<FluentResource>,
+  en: Option<MessageBundle<FluentResource>>,
+  de: Option<MessageBundle<FluentResource>>,
 }
 
 impl Bundles {
-  fn load() -> Self {
-    Self {
-      en: build_bundle(Locale::En),
-      de: build_bundle(Locale::De),
+  #[cfg(any(not(target_arch = "wasm32"), test))]
+  fn embedded() -> Self {
+    let mut bundles = Self::default();
+    for locale in Locale::ALL {
+      *bundles.slot(locale) = Some(build_bundle(locale, sources(locale.tag()).iter().copied()));
+    }
+    bundles
+  }
+
+  /// The web app embeds none: they are fetched ([`load_start_language`]).
+  #[cfg(all(target_arch = "wasm32", not(test)))]
+  fn embedded() -> Self {
+    Self::default()
+  }
+
+  fn get(&self, locale: Locale) -> Option<&MessageBundle<FluentResource>> {
+    match locale {
+      Locale::En => self.en.as_ref(),
+      Locale::De => self.de.as_ref(),
     }
   }
 
-  fn get(&self, locale: Locale) -> &MessageBundle<FluentResource> {
+  fn slot(&mut self, locale: Locale) -> &mut Option<MessageBundle<FluentResource>> {
     match locale {
-      Locale::En => &self.en,
-      Locale::De => &self.de,
+      Locale::En => &mut self.en,
+      Locale::De => &mut self.de,
     }
+  }
+
+  /// The message in `locale`, else in English (a translation that has not caught up yet), else in
+  /// any language that is there (`locale` not fetched yet); `None` when no language has it.
+  fn translate(&self, locale: Locale, key: &str, maybe_args: Option<&FluentArgs>) -> Option<String> {
+    let candidates = [locale].into_iter().chain(Locale::ALL);
+    for bundle in candidates.filter_map(|candidate| self.get(candidate)) {
+      if let Some(pattern) = bundle.get_message(key).and_then(|message| message.value()) {
+        let mut errors = Vec::new();
+        return Some(
+          bundle
+            .format_pattern(pattern, maybe_args, &mut errors)
+            .into_owned(),
+        );
+      }
+    }
+    None
   }
 }
 
-fn build_bundle(locale: Locale) -> MessageBundle<FluentResource> {
+/// The bundle of `locale` from its files (`(file name, source)`).
+fn build_bundle<'a>(
+  locale: Locale,
+  files: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> MessageBundle<FluentResource> {
   let langid: LanguageIdentifier = locale.tag().parse().unwrap_or_default();
   let mut bundle = MessageBundle::new(vec![langid]);
   // Isolation marks confuse text selection and tests; the UI sets `dir` itself.
   bundle.set_use_isolating(false);
-  for (file, source) in sources(locale.tag()) {
+  for (file, source) in files {
     // `FluentResource::try_new` returns the partial resource together with the errors; keep what parsed.
-    let resource = match FluentResource::try_new((*source).to_owned()) {
+    let resource = match FluentResource::try_new(source.to_owned()) {
       Ok(resource) => resource,
       Err((resource, errors)) => {
         tracing::error!(
@@ -185,6 +311,82 @@ fn build_bundle(locale: Locale) -> MessageBundle<FluentResource> {
     }
   }
   bundle
+}
+
+/// The web app's texts: the start language from `init.js`, others fetched when asked for.
+#[cfg(target_arch = "wasm32")]
+mod web {
+  use js_sys::{Promise, Reflect};
+  use wasm_bindgen::{JsCast, JsValue};
+  use wasm_bindgen_futures::JsFuture;
+
+  use super::{Locale, install};
+
+  /// `init.js`'s fetch of the start language: a promise of `{ tag, text }`.
+  const START: &str = "teamcraftTranslations";
+  /// Each language's file of this build (`{ tag: url }`, scripts/finish-loader.sh).
+  const FILES: &str = "teamcraftTranslationFiles";
+
+  pub(super) async fn load_start() -> Result<(), String> {
+    let promise = Reflect::get(&js_sys::global(), &JsValue::from_str(START))
+      .ok()
+      .and_then(|value| value.dyn_into::<Promise>().ok())
+      .ok_or("init.js fetched no texts")?;
+    let start = JsFuture::from(promise).await.map_err(describe)?;
+    let field = |name: &str| {
+      Reflect::get(&start, &JsValue::from_str(name))
+        .ok()
+        .and_then(|value| value.as_string())
+    };
+    let locale = field("tag")
+      .and_then(|tag| Locale::from_tag(&tag))
+      .ok_or("init.js fetched texts of no known language")?;
+    let text = field("text").ok_or("init.js fetched no text")?;
+    install(locale, &text);
+    Ok(())
+  }
+
+  pub(super) async fn load(locale: Locale) -> Result<(), String> {
+    let files = Reflect::get(&js_sys::global(), &JsValue::from_str(FILES)).map_err(describe)?;
+    let url = Reflect::get(&files, &JsValue::from_str(locale.tag()))
+      .ok()
+      .and_then(|value| value.as_string())
+      .ok_or("this build names no file for the language")?;
+    let window = web_sys::window().ok_or("no window")?;
+    let response: web_sys::Response = JsFuture::from(window.fetch_with_str(&url))
+      .await
+      .map_err(describe)?
+      .dyn_into()
+      .map_err(describe)?;
+    // A file the server no longer has comes back as the app's page (its fallback), with 200.
+    let is_page = response
+      .headers()
+      .get("content-type")
+      .ok()
+      .flatten()
+      .is_some_and(|kind| kind.starts_with("text/html"));
+    if !response.ok() || is_page {
+      return Err(format!("{url}: HTTP {}", response.status()));
+    }
+    let text = JsFuture::from(response.text().map_err(describe)?)
+      .await
+      .map_err(describe)?
+      .as_string()
+      .ok_or("the file is no text")?;
+    install(locale, &text);
+    Ok(())
+  }
+
+  fn describe(error: JsValue) -> String {
+    error
+      .as_string()
+      .or_else(|| {
+        error
+          .dyn_ref::<js_sys::Error>()
+          .map(|error| String::from(error.message()))
+      })
+      .unwrap_or_else(|| format!("{error:?}"))
+  }
 }
 
 /// All Fluent files of `locale` as one text, for tests that look for messages in the sources.
@@ -302,6 +504,53 @@ mod tests {
         );
       }
     }
+  }
+
+  /// The web app has only the language it shows (#1437), as one text of all its files: every
+  /// message of English resolves from it, whichever language a caller asks for, so nothing that
+  /// renders before another language arrives shows a key.
+  #[test]
+  fn one_language_alone_has_every_message() {
+    let english = message_ids(&joined_source(Locale::En));
+    for locale in Locale::ALL {
+      let mut bundles = Bundles::default();
+      *bundles.slot(locale) = Some(build_bundle(
+        locale,
+        [("all files", joined_source(locale).as_str())],
+      ));
+      for asked in Locale::ALL {
+        for id in &english {
+          // Messages with only attributes have no value; none of the UI's do.
+          assert!(
+            bundles.translate(asked, id, None).is_some(),
+            "{id} is missing when only {locale:?} is there ({asked:?} asked)"
+          );
+        }
+      }
+    }
+  }
+
+  /// A language switch shows the new language only once its texts are there, and a switch back
+  /// before they arrive wins: the UI never shows keys and never jumps to a language left behind.
+  #[test]
+  fn a_switch_waits_for_the_languages_texts() {
+    let german = BUNDLES.with_borrow_mut(|bundles| bundles.de.take());
+    let i18n = I18n::new(Locale::De);
+    assert_eq!(i18n.locale(), Locale::En, "starts in a language that is there");
+    assert_eq!(i18n.t("settings-language"), "Language");
+    BUNDLES.with_borrow_mut(|bundles| bundles.de = german);
+    i18n.arrived(Locale::De);
+    assert_eq!(i18n.locale(), Locale::De);
+    assert_eq!(i18n.t("settings-language"), "Sprache");
+
+    let german = BUNDLES.with_borrow_mut(|bundles| bundles.de.take());
+    i18n.set_locale(Locale::En);
+    i18n.set_locale(Locale::De);
+    assert_eq!(i18n.locale(), Locale::En, "stays until German is there");
+    i18n.set_locale(Locale::En);
+    BUNDLES.with_borrow_mut(|bundles| bundles.de = german);
+    i18n.arrived(Locale::De);
+    assert_eq!(i18n.locale(), Locale::En, "German arrived after the switch back");
   }
 
   #[test]

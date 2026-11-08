@@ -7,7 +7,9 @@
 # over the canonical JSON of {version, files}; and puts the matching public key into <dist-dir>/sw.js.
 # `lazy` lists the wasm files index.html and sw.js don't name (the chunks that load when first used
 # and the signed-in app's, #334): the worker fetches those when needed or after a member's page
-# loaded instead of on install, so a guest's meeting page doesn't download the signed-in app.
+# loaded instead of on install, so a guest's meeting page doesn't download the signed-in app. The
+# UI's texts (`i18n/*.ftl`, one file per language, #1437) are lazy too: a page asks for the language
+# it shows.
 # `on_demand` (also in `lazy`) lists the background effects' segmentation (#439: the worker's
 # script and module, the model) and the photo backgrounds' full pictures: fetched only when someone
 # turns an effect on or picks the photo, never in the background. Both are outside the signature (older workers verify {version, files} only, and
@@ -58,7 +60,9 @@ def is_photo(path):
     return path.startswith("backgrounds/") and path.count("/") == 1 and path.endswith(".jpg")
 on_demand = sorted(path for path in files
                    if path.endswith(".nnef") or path.startswith(on_demand_prefixes) or is_photo(path))
-lazy = sorted(set(on_demand) | {path for path in files if path.endswith(".wasm") and path not in entry_points})
+# The UI's texts: each page asks for the language it shows (init.js, src/i18n.rs).
+texts = {path for path in files if path.startswith("i18n/") and path.endswith(".ftl")}
+lazy = sorted(set(on_demand) | texts | {path for path in files if path.endswith(".wasm") and path not in entry_points})
 manifest = {
     "version": version,
     "files": files,

@@ -1,7 +1,8 @@
 //! Embeds the Fluent resources: every `i18n/<language>/*.ftl`, so a new area file needs no list
 //! (#614). Writes `$OUT_DIR/i18n_sources.rs` with `fn sources(tag)`, the files of one language by
 //! name, sorted (src/i18n.rs builds the bundles from them). Comments are for the people editing the
-//! files: the embedded copies leave them out, so they don't add to the download.
+//! files: the embedded copies leave them out. Only native builds (the tests) include them: the web
+//! app fetches its language as a file of the build instead (scripts/finish-loader.sh, #1437).
 
 use std::error::Error;
 use std::fmt::Write as _;
