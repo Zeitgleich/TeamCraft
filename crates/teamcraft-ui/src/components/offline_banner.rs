@@ -97,10 +97,12 @@ pub fn OfflineBanner() -> impl IntoView {
           unsettled.set_if_alive(observed);
         }
       }
-      if connection
-        .try_get_untracked()
-        .is_some_and(|shown| shown != Some(state))
+      if let Some(shown) = connection.try_get_untracked()
+        && shown != Some(state)
       {
+        if let Some(previous) = shown {
+          crate::perf::connection_changed(previous, state);
+        }
         connection.set_if_alive(Some(state));
         // The identity provider refused the sign-in for good: back to the sign-in screen, which
         // says why (issue #883). Nothing the user could do here would help.

@@ -1365,6 +1365,14 @@ fn RowSlot(
     if !is_complete {
       return previous.cloned().flatten();
     }
+    // A channel switch is done once its first row shows a message (perf.rs).
+    if crate::perf::is_pending(crate::perf::PerfOperation::ChannelSwitch) {
+      crate::perf::end_pending(
+        crate::perf::PerfOperation::ChannelSwitch,
+        &conversation.to_string(),
+        crate::perf::PerfStatus::Ok,
+      );
+    }
     if index == 0 {
       return messages.into_iter().next().map(|message| (message, None));
     }

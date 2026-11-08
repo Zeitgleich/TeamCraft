@@ -27,7 +27,7 @@ use teamcraft_client_api::calls::BackgroundImageInfo;
 use teamcraft_client_api::model::{
   Conversation, ConversationId, CustomStatus, GapEdge, HistoryGap, InviteId, JoinableSpace, Message,
   MessageId, MessageKind, OlderHistory, PendingInvite, PresenceStatus, Space, SpaceId, SpaceRole,
-  SpaceRoster, ThreadId, ThreadSummary, UnseenReactions, User, UserId, pending_message_id,
+  SpaceRoster, ThreadId, ThreadSummary, UnseenReactions, User, UserId, is_pending, pending_message_id,
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
@@ -507,6 +507,17 @@ impl Feed {
     for (offset, message) in window.messages.into_iter().enumerate() {
       let index = window.start + offset;
       if self.rows.get(&index) != Some(&message) {
+        if let Some(previous) = self.rows.get(&index)
+          && is_pending(previous.id)
+          && !is_pending(message.id)
+        {
+          // The server took a message sent from here (perf.rs).
+          crate::perf::end_pending(
+            crate::perf::PerfOperation::MessageSend,
+            &previous.id.to_string(),
+            crate::perf::PerfStatus::Ok,
+          );
+        }
         self.rows.insert(index, message);
         is_changed = true;
       }
@@ -974,7 +985,22 @@ impl RemoteChat {
     let mut is_changed = false;
     loop {
       let args = json!({ "conversation": conversation, "start": page * PAGE, "len": PAGE });
+      let started_ms = crate::perf::now_ms();
       let outcome = call::<MessageWindow>("core_messages", &args).await;
+      // A switch whose rows weren't in the mirror: the read from the core's store is a step of it.
+      crate::perf::with_pending(
+        crate::perf::PerfOperation::ChannelSwitch,
+        &conversation.to_string(),
+        |measure| {
+          let status = if outcome.is_ok() {
+            crate::perf::PerfStatus::Ok
+          } else {
+            crate::perf::PerfStatus::Error
+          };
+          measure.span("db.query", "core_messages", started_ms, status);
+          measure.tag("source", "store");
+        },
+      );
       let mut mirror = self.mirror.borrow_mut();
       match outcome {
         Ok(window) => is_changed |= mirror.feeds.entry(conversation).or_default().apply(window),
@@ -1128,6 +1154,11 @@ impl RemoteChat {
   }
 
   fn withdraw_pending(&self, pending: PendingRow) {
+    crate::perf::end_pending(
+      crate::perf::PerfOperation::MessageSend,
+      &pending.id.to_string(),
+      crate::perf::PerfStatus::Error,
+    );
     let mut mirror = self.mirror.borrow_mut();
     match pending.maybe_thread {
       Some(thread) => {
@@ -1183,6 +1214,13 @@ impl ChatBackend for RemoteChat {
       .maybe_client_message_id
       .get_or_insert_with(ClientMessageId::random);
     let maybe_pending = self.show_pending(&message, id);
+    // Performance data: until the server's answer replaces the pending row (`Feed::store`).
+    if let Some(pending) = maybe_pending
+      .as_ref()
+      .filter(|pending| pending.maybe_thread.is_none())
+    {
+      crate::perf::begin_pending(crate::perf::PerfOperation::MessageSend, &pending.id.to_string());
+    }
     self.act_showing(ChatAction::SendMessage { message }, maybe_pending);
   }
 

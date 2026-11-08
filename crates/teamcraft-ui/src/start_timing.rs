@@ -12,6 +12,10 @@
 //!   sends a report) and puts it on `globalThis.teamcraftStartTiming`: each part's duration and when
 //!   it ended, in milliseconds since the page's navigation started.
 //!
+//! The marks are set on every start, until the first view (a few dozen, cheap): the performance
+//! data of a signed-in start (`crate::perf`, issue #1521) sends them as its steps. Only the summary
+//! and the measures need the switch.
+//!
 //! The times are wall-clock, of the page's main thread: a part that waits (for IndexedDB, a fetch)
 //! counts its wait, and parts overlap where the start runs them side by side.
 
@@ -207,9 +211,9 @@ mod web {
     web_sys::window()?.performance()
   }
 
-  /// Until the summary: a long session doesn't fill the timeline with marks nobody reads.
+  /// Until the first view: a long session doesn't fill the timeline with marks nobody reads.
   pub fn mark(name: &str) {
-    if !is_on() || IS_REPORTED.with(Cell::get) {
+    if IS_REPORTED.with(Cell::get) {
       return;
     }
     if let Some(performance) = performance() {
@@ -226,9 +230,26 @@ mod web {
       .as_f64()
   }
 
-  /// The first view is on screen: the summary, once per page.
+  /// Each part of this start that has both marks: its start and end, in milliseconds since the
+  /// navigation started.
+  pub fn parts() -> Vec<(Part, f64, f64)> {
+    let Some(performance) = performance() else {
+      return Vec::new();
+    };
+    Part::ALL
+      .into_iter()
+      .filter_map(|part| {
+        let (start, end) = part.marks();
+        let start_ms = mark_at(&performance, &start)?;
+        let end_ms = mark_at(&performance, &end)?;
+        (end_ms >= start_ms).then_some((part, start_ms, end_ms))
+      })
+      .collect()
+  }
+
+  /// The first view is on screen: no more marks, and the summary, once per page.
   pub fn report() {
-    if !is_on() || IS_REPORTED.with(|is_reported| is_reported.replace(true)) {
+    if IS_REPORTED.with(|is_reported| is_reported.replace(true)) || !is_on() {
       return;
     }
     let Some(performance) = performance() else { return };
@@ -272,7 +293,7 @@ mod web {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub use web::{is_on, report};
+pub use web::{is_on, parts, report};
 
 #[cfg(target_arch = "wasm32")]
 fn mark(name: &str) {
@@ -290,6 +311,12 @@ pub fn is_on() -> bool {
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn report() {}
+
+/// Natively there are no parts.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn parts() -> Vec<(Part, f64, f64)> {
+  Vec::new()
+}
 
 #[cfg(test)]
 mod tests {

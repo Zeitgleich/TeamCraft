@@ -152,7 +152,13 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     inbox.connect_app(state);
   }
   crate::components::typing_indicator::provide_typing_now(state);
+  // Performance data of a signed-in start: only when nothing (a sign-in page) came first.
+  let is_signed_in_start = !crate::startup::is_first_view_shown();
   crate::startup::first_view();
+  if is_signed_in_start {
+    // After the first view's effect: the channel list is on screen.
+    Effect::new(|_| crate::perf::finish_start());
+  }
   crate::viewport::watch_layout(state.layout);
   crate::viewport::track_visual_viewport();
   Effect::new(move |previous: Option<()>| {

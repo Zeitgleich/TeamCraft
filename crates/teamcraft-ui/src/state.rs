@@ -1174,6 +1174,10 @@ impl AppState {
       self.panel.set(SidePanel::Closed);
     }
     if self.view.get_untracked() != MainView::Conversation(id) {
+      // Performance data: until the new conversation's rows show (message_list.rs).
+      let key = id.to_string();
+      crate::perf::keep_only_pending(crate::perf::PerfOperation::ChannelSwitch, &key);
+      crate::perf::begin_pending(crate::perf::PerfOperation::ChannelSwitch, &key);
       // Leaving a conversation removes its divider; the new one is placed from its read marker.
       if let MainView::Conversation(previous) = self.view.get_untracked() {
         self.divider_event(previous, DividerEvent::Left);
