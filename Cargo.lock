@@ -11070,6 +11070,8 @@ dependencies = [
 name = "teamcraft-ffi"
 version = "1.0.25"
 dependencies = [
+ "async-trait",
+ "base64 0.23.1",
  "futures-channel",
  "futures-util",
  "paranoid-android",

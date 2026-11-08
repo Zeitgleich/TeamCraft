@@ -23,6 +23,8 @@ integration = []
 [dependencies]
 # Records sealed on plain SQLite (e2ee.md §9.2): SQLCipher can't link on Android.
 teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui", "sealed-sqlite"] }
+# Foreign async traits in UniFFI (the app's token requests with a proof).
+async-trait = "0.1.92"
 # The core's network-change stream, polled on the call thread (already in the tree via the core).
 futures-channel = "0.3"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
@@ -57,6 +59,7 @@ teamcraft-desktop-native = { path = "../teamcraft-desktop-native" }
 tracing-oslog = "0.3.0"
 
 [dev-dependencies]
+base64 = "0.23.1"
 tokio = { workspace = true, features = ["rt", "macros", "time", "net", "io-util"] }
 # The Happy Eyeballs test kit (`api::black_hole`) for `http_fetch`'s tests.
 teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui", "sealed-sqlite", "test-support"] }

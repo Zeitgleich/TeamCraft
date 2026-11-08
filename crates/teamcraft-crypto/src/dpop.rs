@@ -299,6 +299,20 @@ impl DpopPublicKey {
     })
   }
 
+  /// From an uncompressed SEC1 point (`0x04`, x, y), what a platform's key store hands out for
+  /// a key whose private half never leaves it. A point that is not on the curve is refused here.
+  pub fn from_uncompressed_point(point: &[u8]) -> Result<Self, DpopError> {
+    if point.len() != 1 + 2 * COORDINATE_BYTES || point[0] != 0x04 {
+      return Err(DpopError::BadKey);
+    }
+    VerifyingKey::from_sec1_bytes(point).map_err(|_| DpopError::BadKey)?;
+    let (x, y) = point[1..].split_at(COORDINATE_BYTES);
+    Ok(Self {
+      x: URL_SAFE_NO_PAD.encode(x),
+      y: URL_SAFE_NO_PAD.encode(y),
+    })
+  }
+
   /// The thumbprint the identity provider binds tokens to.
   pub fn thumbprint(&self) -> JwkThumbprint {
     JwkThumbprint::of_coordinates(&self.x, &self.y)
@@ -747,6 +761,8 @@ mod tests {
         Err(DpopError::BadKey)
       );
       assert!(DpopPublicKey::from_coordinates("short", "short").is_err());
+      assert!(DpopPublicKey::from_uncompressed_point(&[0x04; 10]).is_err());
+      assert!(DpopPublicKey::from_uncompressed_point(&[0x02; 65]).is_err());
     }
 
     #[test]

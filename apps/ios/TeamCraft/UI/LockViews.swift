@@ -169,7 +169,7 @@ struct OfflineBanner: View {
       case nil: return Text("connection_unreachable \(seconds)")
       }
     case .signInRequired:
-      return Text("connection_sign_in")
+      return model.isDeviceKeyLost ? Text("connection_device_key_lost") : Text("connection_sign_in")
     case .noRoleLeft:
       return Text("connection_no_role_left")
     }

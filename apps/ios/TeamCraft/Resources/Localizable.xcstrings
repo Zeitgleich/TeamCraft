@@ -4217,6 +4217,22 @@
         }
       }
     },
+    "error_device_key_lost": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your sign-in was bound to a key on this device, and the key is gone, for example because the app's local data was cleared. Nothing else is wrong: sign in again and this device gets a new key."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Anmeldung war an einen Schlüssel auf diesem Gerät gebunden, und der Schlüssel ist nicht mehr da, zum Beispiel weil die lokalen Daten der App gelöscht wurden. Sonst ist nichts passiert: Melde dich erneut an, dann bekommt dieses Gerät einen neuen Schlüssel."
+          }
+        }
+      }
+    },
     "error_signed_out": {
       "localizations": {
         "en": {
@@ -6021,6 +6037,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Jetzt versuchen"
+          }
+        }
+      }
+    },
+    "connection_device_key_lost": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device lost the key your sign-in is bound to, for example when its local data was cleared. Sign in again to get going; messages wait."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät hat den Schlüssel verloren, an den deine Anmeldung gebunden ist, zum Beispiel weil seine lokalen Daten gelöscht wurden. Melde dich erneut an; Nachrichten warten."
           }
         }
       }

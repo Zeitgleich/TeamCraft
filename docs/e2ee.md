@@ -374,8 +374,8 @@ leaves upkeep to the app, so it neither gets an ID token nor asks for one, and f
 
 DPoP (RFC 9449) makes a stolen or relayed access token useless without a key that stays on the
 device. This protects API access (posting, metadata, admin actions); message content is protected
-by E2EE either way. The server and the desktop and web clients are implemented; mobile sends no
-proofs yet (see "Not done yet").
+by E2EE either way. The server and the desktop, web and iOS clients are implemented; Android sends
+no proofs yet (see "Not done yet").
 
 **How it works.** The device has an ES256 key pair. At the token endpoint it proves that it holds
 the key, and the identity provider puts the key's thumbprint into the access token (`cnf.jkt`). With
@@ -467,14 +467,16 @@ platforms use hardware-backed keys where they have them. Tokens the server issue
 bearer tokens.
 
 **Clients** (`teamcraft_core::api::dpop`; web: `store/browser/dpop_key.rs`, `auth/browser.rs`;
-desktop: `apps/desktop/src/auth`).
+desktop: `apps/desktop/src/auth`; iOS: `apps/ios/Shared/DeviceProofKey.swift`, `SessionProofs.swift`).
 
 - **Key.** Behind `DpopSigner`: a public key and "sign these bytes", so that a hardware-backed key
   fits. One per device and server. In the browser a non-extractable Web Crypto ES256 key pair in
   its own IndexedDB database (the origin is the server), also for the service worker. On the desktop
   in the sealed secrets file (`SecretVault`), read with it at the start: no keychain access of its own
   at the start or later (#1150), and it is only made when it is needed. It stays after a sign-out,
-  because other tabs may be signing with it and it says nothing without a token.
+  because other tabs may be signing with it and it says nothing without a token. On iOS the key is in
+  the Secure Enclave (see "iOS" below): one per device and server, gone with the sign-out, as nothing else
+  signs with it.
 - **When a token goes with a proof.** A token that names a key (`cnf.jkt`) goes with `Authorization:
   DPoP` and a proof, on every API request and in the first frames of gateway and relay. Any other token
   stays a `Bearer` token: local accounts, bots, guests and unbound sessions. A proof with an unbound
@@ -539,13 +541,35 @@ desktop: `apps/desktop/src/auth`).
   an old `server-info` from a cache on the way, or more than two rotations of idle time), per concurrent
   request. Numbers:
   performance.md, "DPoP".
+- **iOS.** The key is in the Secure Enclave, made with `.privateKeyUsage` and nothing else: it signs
+  without asking the user, also while the phone is locked after its first unlock. Where there is no
+  enclave (the Simulator) or it makes no key, a software key takes its place, as far as a token thief on
+  the device goes the same as a desktop's. Both are one keychain item (`dpop-key.<server>`, in the
+  shared group, `AfterFirstUnlockThisDeviceOnly`), so neither reaches a restored phone. The app signs
+  bytes and the core makes the proofs (`DeviceProofKey`, `ProviderProver`), so RFC 9449 is
+  implemented once: `iat`, `ath`, nonce per party, one retry, also for the app's own requests to the
+  provider. The rules are the desktop's: a sign-in is bound when the provider advertises ES256 and a
+  fresh `server-info` has `DPoP-Nonce`, a session that isn't bound stays usable, and its next refresh **in
+  the app** tries to bind it. A session's binding is stored with its tokens (`boundKey`), so the two
+  can't disagree.
+  The **notification extension** signs for sessions that are bound already, with the same key, and
+  refreshes them under the same lock; it never makes a key and never binds a session, which is left to
+  the app (no key creation in a process that is killed at 30 s). It remembers no nonce, so each run
+  meets the provider's challenge once: one more round trip and signature.
+  **A key that can't be used keeps the session.** A keychain that can't be read or an enclave that
+  doesn't answer: nothing goes to the provider, the session stays, the core holds the token back
+  and retries like a network problem; the token is never `nil`, which would read as signed out. **A key
+  that is gone** (read and absent, or another key than the session names): the extension shows the
+  plain notification and changes nothing; the app says so in its banner, and on the sign-in screen
+  if it's there, and the session stays until the next sign-in replaces it. Nothing retries, and nothing
+  goes to the provider: signing in again is the only way out, which gets a new key.
 
 **Not done yet** (the next steps of issue #120):
 
-- Android and iOS: hardware-backed keys (Android Keystore, Secure Enclave) behind `DpopSigner`. Until
-  then they send no proofs and get unbound tokens: they work as bearer clients under `optional`, and
-  `required` refuses them. A software key through the FFI would be little work (`SoftwareDpopSigner`,
-  `AccessTokenSource::dpop_prover`), plus the proof in their own token requests (AppAuth, iOS).
+- Android: hardware-backed keys (Android Keystore) behind `DpopSigner`. Until then it sends no proofs
+  and gets unbound tokens: it works as a bearer client under `optional`, and `required` refuses it. The
+  iOS path is the template (`DeviceProofKey`, `TeamCraft::with_device_key`, `ProviderProver`); what is
+  left is a Keystore-backed key and the proof in AppAuth's token requests.
 - Secure Enclave for the macOS desktop: the key is software in the sealed file for now.
 - The identity provider: documented vendor-neutrally with the reference setup as example, and refresh
   tokens bound for public clients.
