@@ -19,7 +19,8 @@ use crate::convert;
 use crate::error::CoreError;
 use crate::records::{self, OutboxEntry};
 use crate::store::{
-  EditRecord, LocalStore, MessageContent, MessageEdge, Priority, StoredMessage, Table, Unreadable,
+  EditRecord, LocalStore, MessageContent, MessageEdge, MessageFilter, Priority, StoredMessage, Table,
+  Unreadable,
 };
 
 /// Result of [`Client::flush_outbox`].
@@ -283,16 +284,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Fetches messages newer than the newest one this device has (after being offline), and the
   /// first time the newest page of history.
   pub async fn catch_up_messages(&mut self, conversation: ConversationId) -> Result<usize, CoreError> {
-    self.catch_up_messages_from(conversation, None).await
+    self.catch_up_messages_from(conversation, None, None).await
   }
 
   /// [`Self::catch_up_messages`] with its first request already answered (a catch-up reads
   /// several conversations' first pages at once, issue #247): `maybe_first` answers
-  /// [`Self::first_messages_query`].
+  /// [`Self::first_messages_query`]. After `maybe_pages` pages of new messages with more to come,
+  /// the newest page is read and the rest noted as the conversation's backlog, which the caller
+  /// reads ([`Self::read_backlog`], issue #1423).
   pub(crate) async fn catch_up_messages_from(
     &mut self,
     conversation: ConversationId,
     mut maybe_first: Option<Result<ListMessagesResponse, ApiError>>,
+    maybe_pages: Option<u32>,
   ) -> Result<usize, CoreError> {
     let mut total = 0;
     if !self.is_history_loaded(conversation)? {
@@ -312,6 +316,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Without a stored server message (an empty conversation, or only own messages not sent yet)
     // there is no cursor: the newest page is read, and what came since arrives as events.
     let mut maybe_cursor = self.store.edge_server_id(conversation, MessageEdge::Newest)?;
+    let mut pages = 0_u32;
     loop {
       let is_newest_page = maybe_cursor.is_none();
       let page = match maybe_first.take() {
@@ -332,7 +337,102 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       if is_newest_page || !page.has_more {
         return Ok(total + self.load_imported_history(conversation).await?);
       }
+      pages = pages.saturating_add(1);
+      if let Some(cursor) = maybe_cursor
+        && maybe_pages.is_some_and(|max| pages >= max)
+      {
+        // Boxed: rare, and it would otherwise sit in every conversation's catch-up.
+        total += Box::pin(self.read_newest_ahead(conversation, cursor)).await?;
+        return Ok(total + self.load_imported_history(conversation).await?);
+      }
     }
+  }
+
+  /// A catch-up's jump to the newest messages (issue #1423): the newest page, and what lies between
+  /// it and `cursor`, the newest message read in order, noted as the backlog. Returns how many
+  /// messages arrived.
+  async fn read_newest_ahead(
+    &mut self,
+    conversation: ConversationId,
+    cursor: MessageId,
+  ) -> Result<usize, CoreError> {
+    let query = ListMessagesQuery {
+      maybe_before: None,
+      maybe_after: None,
+      maybe_limit: Some(self.settings.history_page_size),
+    };
+    let page = self.api.list_messages(conversation, &query).await?;
+    // A page that reaches back to the cursor leaves no hole: it was the rest.
+    if let Some(oldest) = page.messages.iter().map(|message| message.id).min()
+      && oldest > cursor
+    {
+      self.note_backlog(conversation, cursor, oldest)?;
+    }
+    let count = page.messages.len();
+    self.receive_page(page.messages)?;
+    Ok(count)
+  }
+
+  /// Takes the controls of `conversation` from `from` on again, in their order, whose outcome
+  /// depends on it: pins, bookmarks and channel role entries (issue #1423). A backlog read after
+  /// the newest page applied its older ones after the newer ones; the rest goes by its own order
+  /// (an edit by its ID, a deletion stays, a source change or a notetaker request by its time,
+  /// canvas updates merge). A pin of a message not held stays waiting for it as before, where it
+  /// is applied in its order (`apply_early_controls`).
+  pub(super) fn replay_controls_from(
+    &self,
+    conversation: ConversationId,
+    from: MessageId,
+  ) -> Result<(), CoreError> {
+    let mut controls: Vec<(MessageId, UserId, MessageContent)> = Vec::new();
+    self
+      .store
+      .visit_messages(conversation, MessageFilter::All, &mut |message| {
+        let Some(id) = message.maybe_server_id.filter(|id| *id >= from) else {
+          return;
+        };
+        if message.maybe_unreadable.is_none()
+          && matches!(
+            message.content,
+            MessageContent::Pin { .. }
+              | MessageContent::Bookmarks { .. }
+              | MessageContent::ChannelRolesEntry { .. }
+          )
+        {
+          controls.push((id, message.sender_user_id, message.content.clone()));
+        }
+      })?;
+    controls.sort_by_key(|(id, _, _)| *id);
+    for (id, sender, content) in controls {
+      let at_ms = id.snowflake().unix_millis();
+      match &content {
+        MessageContent::ChannelRolesEntry {
+          version,
+          payload,
+          signature,
+        } => {
+          let entry = teamcraft_proto::ChannelRoleLogEntryResponse {
+            version: *version,
+            payload: payload.clone(),
+            signature: signature.clone(),
+            maybe_signer_device_id: None,
+            created_at: teamcraft_proto::UnixMillis(at_ms),
+          };
+          self.take_channel_roles_entry(conversation, &entry)?;
+        },
+        MessageContent::Pin { target, .. } => {
+          let is_held = self
+            .store
+            .message(conversation, *target)?
+            .is_some_and(|stored| stored.maybe_unreadable.is_none());
+          if is_held {
+            apply_control_with(&self.store, conversation, sender, &content, at_ms, Some(id))?;
+          }
+        },
+        _ => apply_control_with(&self.store, conversation, sender, &content, at_ms, Some(id))?,
+      }
+    }
+    Ok(())
   }
 
   /// Loads the history of an import that just finished, which came without message events: the

@@ -1580,7 +1580,9 @@ impl Core {
       self.api(),
       store.clone(),
       Box::new(SystemClock),
-      ClientSettings::default().with_notes_to_self(),
+      ClientSettings::default()
+        .with_notes_to_self()
+        .with_capped_catch_up(),
     ) {
       Ok(maybe_client) => maybe_client,
       Err(error) => return unreadable_status(error),
@@ -1611,7 +1613,9 @@ impl Core {
       self.api(),
       store,
       Box::new(SystemClock),
-      ClientSettings::default().with_notes_to_self(),
+      ClientSettings::default()
+        .with_notes_to_self()
+        .with_capped_catch_up(),
       Argon2Settings::default(),
     )
     .await;
@@ -1999,7 +2003,7 @@ impl Core {
       self.api(),
       store,
       Box::new(SystemClock),
-      ClientSettings::default(),
+      ClientSettings::default().with_capped_catch_up(),
       device_name,
       // The key bag is wrapped with a random secret nobody keeps: the cheapest setting is plenty.
       Argon2Settings {
@@ -2045,7 +2049,9 @@ impl Core {
         self.api(),
         store,
         Box::new(SystemClock),
-        ClientSettings::default().with_notes_to_self(),
+        ClientSettings::default()
+          .with_notes_to_self()
+          .with_capped_catch_up(),
         options,
       )
       .await

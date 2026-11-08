@@ -7,13 +7,19 @@
 //! One record per conversation in [`Table::SyncState`] holds the holes and how the last request
 //! ended, like the reading above the oldest row (`older_history.rs`), whose failure rules it shares:
 //! a failure stands until the next connection.
+//!
+//! A catch-up leaves a hole too (issue #1423): in a conversation with more new messages than
+//! [`super::ClientSettings::catch_up_message_pages`] it reads the newest page ahead of the rest
+//! ([`Client::note_backlog`]). That hole, its *backlog*, isn't left to the reader: the same catch-up
+//! reads it full once every conversation shows its newest messages ([`Client::read_backlog`]), and
+//! one cut short does in the next. Messages carry state (pins, bookmarks, channel role entries,
+//! edits), so none may stay unread; those whose order matters are taken again in their order
+//! once the hole is read (`messaging.rs`, `replay_controls_from`).
 
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "ui")]
 use teamcraft_client_api::model::GapEdge;
-#[cfg(feature = "ui")]
-use teamcraft_proto::ListMessagesQuery;
-use teamcraft_proto::{ConversationId, MessageId, MessageResponse};
+use teamcraft_proto::{ConversationId, ListMessagesQuery, MessageId, MessageResponse};
 
 use super::Client;
 #[cfg(feature = "ui")]
@@ -44,6 +50,29 @@ pub(crate) struct GapsRecord {
   pub(crate) answered: u64,
   /// The connection during which that request failed; `None` when it didn't.
   pub(crate) maybe_failed_in: Option<u64>,
+  /// The hole a catch-up left and still has to read; absent from records of older versions.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub(crate) maybe_backlog: Option<Backlog>,
+}
+
+/// The new messages a catch-up left between those it read in order and the newest page, which it
+/// read ahead of them (issue #1423).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Backlog {
+  /// Where it starts: every hole after this message is part of it. The holes a jump to a date
+  /// leaves lie before what was held, so before this.
+  pub(crate) after: MessageId,
+  /// The oldest message of the newest page read ahead: what was taken before the hole, and whose
+  /// order-sensitive controls are taken again once the hole is read.
+  pub(crate) replay_from: MessageId,
+}
+
+impl GapsRecord {
+  /// The oldest hole of the backlog, if one is left.
+  fn backlog_gap(&self) -> Option<Gap> {
+    let backlog = self.maybe_backlog?;
+    self.gaps.iter().copied().find(|gap| gap.after >= backlog.after)
+  }
 }
 
 /// Where what a page read starts.
@@ -218,6 +247,82 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.store.delete(Table::SyncState, &record_key(conversation))?;
     Ok(())
   }
+
+  /// Notes the hole a catch-up leaves when it reads the newest page, whose oldest message is
+  /// `before`, ahead of the messages after `after`. Noted before the page is stored: a catch-up cut
+  /// short in between reads it again, and the hole too.
+  pub(super) fn note_backlog(
+    &self,
+    conversation: ConversationId,
+    after: MessageId,
+    before: MessageId,
+  ) -> Result<(), CoreError> {
+    let mut record = read_record(&self.store, conversation)?.unwrap_or_default();
+    record.gaps.push(Gap {
+      after,
+      maybe_before: Some(before),
+    });
+    record.gaps.sort_by_key(|gap| gap.after);
+    record.gaps.dedup();
+    record.maybe_backlog = Some(match record.maybe_backlog {
+      // One left by a catch-up cut short: both are read.
+      Some(earlier) => Backlog {
+        after: earlier.after.min(after),
+        replay_from: earlier.replay_from.min(before),
+      },
+      None => Backlog {
+        after,
+        replay_from: before,
+      },
+    });
+    tracing::info!(conversation_id = %conversation, "catch-up: the newest page ahead of the rest");
+    write_record(&self.store, conversation, &record)
+  }
+
+  /// Whether a catch-up left new messages of `conversation` to read.
+  pub(super) fn has_backlog(&self, conversation: ConversationId) -> Result<bool, CoreError> {
+    Ok(read_record(&self.store, conversation)?.is_some_and(|record| record.maybe_backlog.is_some()))
+  }
+
+  /// Reads the backlog of `conversation` full, oldest first, one page per request, and the live
+  /// events that may go ahead between two of them (`live_catch_up.rs`); then takes the controls
+  /// that came before it again, in their order. Each page is noted as it is stored, so a read cut
+  /// short goes on from there. Nothing to do without a backlog.
+  pub(super) async fn read_backlog(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    loop {
+      let Some(mut record) = read_record(&self.store, conversation)? else {
+        return Ok(());
+      };
+      let Some(backlog) = record.maybe_backlog else {
+        return Ok(());
+      };
+      let Some(gap) = record.backlog_gap() else {
+        // Read full (also from the reader's side, `fill_history_gap`).
+        self.replay_controls_from(conversation, backlog.replay_from)?;
+        record.maybe_backlog = None;
+        tracing::info!(conversation_id = %conversation, "catch-up: backlog read");
+        return write_record(&self.store, conversation, &record);
+      };
+      let query = ListMessagesQuery {
+        maybe_before: None,
+        maybe_after: Some(gap.after),
+        maybe_limit: Some(self.settings.history_page_size),
+      };
+      let page = self.api.list_messages(conversation, &query).await?;
+      let read = Read::after(gap.after, bounds(&page.messages), page.has_more);
+      self.receive_page(page.messages)?;
+      record.gaps = subtract(&record.gaps, read);
+      if record.backlog_gap() == Some(gap) {
+        // A page that doesn't get past the hole's start (only a server ignoring `after` sends one):
+        // the hole is left to the reader, rather than asked for again and again.
+        tracing::warn!(conversation_id = %conversation, "catch-up: a page of the backlog read nothing new");
+        record.maybe_backlog = None;
+      }
+      write_record(&self.store, conversation, &record)?;
+      self.note_sync_progress();
+      self.apply_live_during_catch_up().await?;
+    }
+  }
 }
 
 #[cfg(feature = "ui")]
@@ -330,7 +435,7 @@ fn write_record(
   record: &GapsRecord,
 ) -> Result<(), CoreError> {
   let key = record_key(conversation);
-  if record.gaps.is_empty() && record.answered == 0 {
+  if record.gaps.is_empty() && record.answered == 0 && record.maybe_backlog.is_none() {
     store.delete(Table::SyncState, &key)?;
     return Ok(());
   }

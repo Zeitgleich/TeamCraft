@@ -331,6 +331,13 @@ pub struct ClientSettings {
   /// How many conversations a catch-up reads from the server at once (issue #247): member lists
   /// and the first page of each queue and history. The MLS work itself stays one at a time.
   pub catch_up_concurrency: usize,
+  /// Pages of new messages a catch-up reads in a conversation before it takes the newest page and
+  /// leaves the rest until every other conversation is through (issue #1423): one busy channel
+  /// after a long absence holds up neither the others nor its own newest messages. The rest is
+  /// read in the same catch-up, in order, so nothing a message carries is skipped; meanwhile the
+  /// feed shows a hole there (`history_gaps.rs`). The MLS queue is always read whole. `None`
+  /// (default): every page in order, at once, for hosts whose feed shows no holes.
+  pub catch_up_message_pages: Option<u32>,
   /// Make the user's notes to self (a DM with themself) once a sync finds there is none. Off by
   /// default; the apps turn it on with [`ClientSettings::with_notes_to_self`].
   pub creates_notes_to_self: bool,
@@ -360,7 +367,18 @@ impl ClientSettings {
     self.creates_notes_to_self = true;
     self
   }
+
+  /// The settings of a host whose feed shows holes in the history (the web and desktop apps): a
+  /// catch-up reads at most [`CATCH_UP_MESSAGE_PAGES`] pages of a conversation ahead of the rest.
+  pub fn with_capped_catch_up(mut self) -> Self {
+    self.catch_up_message_pages = Some(CATCH_UP_MESSAGE_PAGES);
+    self
+  }
 }
+
+/// [`ClientSettings::catch_up_message_pages`] of the apps that show holes: 200 messages at the
+/// default page size, which is more than most conversations get in a day, and four round trips.
+pub const CATCH_UP_MESSAGE_PAGES: u32 = 4;
 
 pub struct Client<A, S> {
   api: A,
@@ -531,6 +549,7 @@ impl Default for ClientSettings {
       pending_actions: PendingActionSettings::default(),
       upload_retry: files::UploadRetrySettings::default(),
       catch_up_concurrency: 6,
+      catch_up_message_pages: None,
       creates_notes_to_self: false,
       makes_thumbnails: true,
       // A day: a user who comes back to a failed setup soon picks up its registration.

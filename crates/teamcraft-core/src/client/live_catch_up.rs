@@ -16,12 +16,24 @@
 //!   this catch-up already finished: its group is at the epoch the queue reached, and the next
 //!   commit or message comes next, as on a live connection. One the catch-up already read is
 //!   skipped as a repeat, as it was when the held frames came after the catch-up;
+//! - the same of a conversation the catch-up doesn't visit because nothing moved in it since the
+//!   last sync (its heads, issue #714, and nothing local due): it counts as finished from the start
+//!   (issue #1423). A welcome for it would have moved its MLS head; one a lying server sends
+//!   anyway is joined from the queue first (`join_from_welcome`), so a commit applied early only
+//!   brings that read forward;
+//! - membership and conversation changes of a finished conversation (`MembershipAdd`,
+//!   `MembershipRemove`, `ConversationUpdate`, issue #1423). They read and store that
+//!   conversation's record and member list, its history after a finished import, or forget it;
+//!   the only commit among them, a meeting guest's signed leave, goes into that conversation's
+//!   group, which is caught up. Nothing the catch-up still does reads that conversation again,
+//!   other than welcomes, which follow the queue first;
 //! - typing and presence, which touch no conversation's state.
 //!
-//! Everything else (a welcome, a membership or conversation change, workspace and space events, a
-//! closed connection) waits for the end of the catch-up, as before, and so does everything after it.
-//! Waiting membership changes are not committed in between (`apply_pending_changes`): they may
-//! concern groups not yet caught up, and the sync commits them at its end.
+//! Everything else (a welcome, a channel's role log, a deleted conversation, workspace and space
+//! events, an event of a conversation still being caught up, a closed connection) waits for the end
+//! of the catch-up, as before, and so does everything after it. Waiting membership changes are not
+//! committed in between (`apply_pending_changes`): they may concern groups not yet caught up, and
+//! the sync commits them at its end.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
@@ -70,9 +82,11 @@ pub(super) fn is_live_now(
     GatewayEvent::MlsMessage { message } => {
       message.kind != MlsMessageKind::Welcome && caught_up.contains(&message.conversation_id)
     },
-    GatewayEvent::ReadReceipt { conversation_id, .. } | GatewayEvent::MessageAck { conversation_id, .. } => {
-      caught_up.contains(conversation_id)
-    },
+    GatewayEvent::ReadReceipt { conversation_id, .. }
+    | GatewayEvent::MessageAck { conversation_id, .. }
+    | GatewayEvent::MembershipAdd { conversation_id, .. }
+    | GatewayEvent::MembershipRemove { conversation_id, .. }
+    | GatewayEvent::ConversationUpdate { conversation_id } => caught_up.contains(conversation_id),
     GatewayEvent::TypingStart { .. } | GatewayEvent::PresenceUpdate { .. } => true,
     _ => false,
   }
@@ -83,6 +97,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub(super) fn note_live_caught_up(&mut self, conversation: ConversationId) {
     if let Some(live) = &mut self.maybe_live_catch_up {
       live.caught_up.insert(conversation);
+    }
+  }
+
+  /// Conversations this catch-up doesn't visit, nothing having moved in them since the last sync:
+  /// current from the start, so what arrives for them is applied between the catch-up's steps.
+  pub(super) fn note_live_current(&mut self, conversations: impl IntoIterator<Item = ConversationId>) {
+    if let Some(live) = &mut self.maybe_live_catch_up {
+      live.caught_up.extend(conversations);
     }
   }
 
@@ -128,7 +150,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 mod tests {
   use teamcraft_proto::{
     Base64Bytes, ClientMessageId, DeviceId, Id, MessageId, MessageResponse, MlsMessageId, MlsMessageResponse,
-    PresenceState, Snowflake, UserId,
+    PresenceState, Snowflake, UserId, UserKind, UserSummary,
   };
 
   use super::*;
@@ -194,16 +216,54 @@ mod tests {
     };
     assert!(is_live_now(&event(presence), &caught_up));
     assert!(!is_live_now(
-      &event(GatewayEvent::ConversationUpdate {
-        conversation_id: done
-      }),
-      &caught_up
-    ));
-    assert!(!is_live_now(
       &Some(Ok(GatewayServerMessage::SessionInvalid)),
       &caught_up
     ));
     assert!(!is_live_now(&None, &caught_up));
+  }
+
+  #[test]
+  fn membership_and_conversation_changes_go_ahead_only_for_finished_conversations() {
+    let done = id::<ConversationId>(7);
+    let waiting = id::<ConversationId>(8);
+    let caught_up = BTreeSet::from([done]);
+    let changes = |conversation_id: ConversationId| {
+      [
+        GatewayEvent::ConversationUpdate { conversation_id },
+        GatewayEvent::MembershipRemove {
+          conversation_id,
+          user_id: id::<UserId>(2),
+        },
+        GatewayEvent::MembershipAdd {
+          conversation_id,
+          user: UserSummary {
+            id: id::<UserId>(2),
+            maybe_username: None,
+            display_name: "Ann".into(),
+            kind: UserKind::Member,
+            maybe_email: None,
+            maybe_organization: None,
+            maybe_has_devices: None,
+            is_deactivated: false,
+            is_deleted: false,
+          },
+        },
+      ]
+    };
+    for change in changes(done) {
+      assert!(is_live_now(&event(change.clone()), &caught_up), "{change:?}");
+    }
+    for change in changes(waiting) {
+      assert!(!is_live_now(&event(change.clone()), &caught_up), "{change:?}");
+    }
+    // A channel's role log and a deletion wait, also for a finished conversation.
+    assert!(!is_live_now(
+      &event(GatewayEvent::ConversationDelete {
+        conversation_id: done,
+        maybe_signed_deletion: None,
+      }),
+      &caught_up
+    ));
   }
 
   #[test]
