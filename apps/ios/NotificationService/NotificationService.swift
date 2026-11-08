@@ -1,20 +1,28 @@
 import CallKit
 import Foundation
 import UserNotifications
+import os
 
 /// Rewrites the generic APNs alert into what the push means (docs/e2ee.md §7, notifications.md
 /// "Mobile push delivery"): opens the sealed wake-up with the device's push key, fetches and
 /// decrypts the message from the shared store through the Rust core, and shows it with sender,
 /// preview, badge and the right interruption level. Calls go to CallKit (with the filtering
 /// entitlement) or show as an incoming-call alert; muted, DND and already shown messages stay quiet.
-/// The extension never touches MLS state; it takes the cross-process lock so the app and the
-/// extension don't sync at the same time.
+/// The extension never saves MLS state; it takes the cross-process lock so the app and the
+/// extension don't sync at the same time. A push it can't read from the store and the one fetched
+/// message (a new conversation, keys that changed, a sender's new device) is caught up on a probe
+/// that is thrown away: in memory only, and nothing sent to the server (issue #839, e2ee.md §7.2).
 ///
 /// Memory: extensions have a small limit (about 24 MB). The core opens the store with small caches
 /// and reads only the records of the notified message (issue #155; measured in docs/performance.md).
+/// The probe needs a few MB more, so it runs only with that much to spare; otherwise the push shows
+/// what the store and the fetched message give.
 final class NotificationService: UNNotificationServiceExtension {
   /// How long to wait for the app, which holds the lock while it is in the foreground.
   private static let lockTimeout: TimeInterval = 8
+  /// What must be free for the probe: its writes (at most 4 MB in the core) and a second look at
+  /// the MLS state while the first one is freed.
+  private static let probeMemoryBytes = 12 * 1024 * 1024
   /// Info.plist key (from `NSE_NOTIFICATION_FILTERING`): the extension is signed with
   /// `com.apple.developer.usernotifications.filtering`, so an empty content shows nothing.
   private static let filteringKey = "TCNotificationFiltering"
@@ -108,16 +116,28 @@ final class NotificationService: UNNotificationServiceExtension {
     do {
       let core = try CoreFactory().open(
         account: account, createKey: false, isMemoryConstrained: true, listener: ClosureEventListener {})
-      // Never catches the conversation up: the app alone advances the account's state (MLS,
-      // cursors), or the two processes would fork it (docs/e2ee.md §7.2).
-      let notification = try await core.notificationPreviewForPush(
-        payload: sealed, utcOffsetMinutes: PushClock.utcOffsetMinutes())
+      // Never advances the account's state: the app alone does (MLS, cursors), or the two
+      // processes would fork it. The probe catches up on a copy in memory and sends nothing
+      // (docs/e2ee.md §7.2).
+      let offset = PushClock.utcOffsetMinutes()
+      let notification: PushNotification
+      if hasMemoryForProbe {
+        notification = try await core.notificationProbeForPush(payload: sealed, utcOffsetMinutes: offset)
+      } else {
+        notification = try await core.notificationPreviewForPush(payload: sealed, utcOffsetMinutes: offset)
+      }
       // The app reloads what the extension stored.
       StoreChangeNotifier().post()
       return notification
     } catch {
       return nil
     }
+  }
+
+  /// Whether the extension has the memory the probe takes to spare (`os_proc_available_memory`,
+  /// what is left before the system ends it).
+  private static var hasMemoryForProbe: Bool {
+    os_proc_available_memory() >= probeMemoryBytes
   }
 
   /// Wakes the app into CallKit (`reportNewIncomingVoIPPushPayload`, iOS 14.5+, needs the filtering
