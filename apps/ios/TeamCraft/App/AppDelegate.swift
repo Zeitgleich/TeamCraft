@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
+    // First, so a crash during the rest of the launch is reported (the last known setting).
+    CrashReports.shared.install()
     UNUserNotificationCenter.current().delegate = self
     // DM titles, members and notifications name deleted accounts in the user's language (#1066).
     setDeletedUserName(name: String(localized: "user_deleted_name"))

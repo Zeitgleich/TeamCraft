@@ -325,6 +325,8 @@ final class AppModel {
     if case .signedOut = phase {
       servers.forgetActive()
     }
+    // The next server's crash reports setting comes after its sign-in.
+    CrashReports.shared.forgetServer()
     maybeServer = nil
     maybeSignInPage = nil
     brand.select(nil)
@@ -985,6 +987,7 @@ final class AppModel {
     storeDidChange()
     // The time in the background doesn't count: the reconnect gets the whole grace period.
     connectionGrace.appReturned(now: .now)
+    refreshCrashReports()
     await startSyncing()
     await reconcileNotifications()
     // APNs hands out the token once per launch, but the app may stay suspended for days: retry a
@@ -1498,6 +1501,7 @@ final class AppModel {
       await endSession()
       servers.forgetActive()
       maybeServer = nil
+      CrashReports.shared.forgetServer()
       await checkServer(address)
     case .check(let address):
       await checkServer(address)
@@ -1603,12 +1607,19 @@ final class AppModel {
     container.displayName = displayName
     try? NotificationAuthenticator().ensureKey()
     phase = .ready(Account(userId: userId, displayName: displayName, identityFingerprint: fingerprint))
+    refreshCrashReports()
     if let core = try? core() {
       await calls.attach(core: core)
     }
     await startSyncing()
     await refreshLinkRequests()
     await resumePush()
+  }
+
+  /// The signed-in server's crash reports setting (docs/crash-reports.md), in the background.
+  private func refreshCrashReports() {
+    guard let server = maybeServer else { return }
+    Task { await CrashReports.shared.refresh(server: server) }
   }
 
   private func startSyncing() async {

@@ -9,7 +9,6 @@
 //! [`scrub`] before it is queued, breadcrumbs come only from the redacted debug log ring, and the
 //! only identifier is a random [`InstallationId`], never a user ID.
 
-mod dsn;
 mod event;
 mod panic;
 mod queue;
@@ -20,13 +19,14 @@ use std::future::Future;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use teamcraft_proto::{CrashReportsInfo, is_crash_environment};
+pub use teamcraft_proto::{Dsn, DsnError};
 use thiserror::Error;
 
-pub use dsn::{Dsn, DsnError};
 pub use event::{
   AppInfo, AppPlatform, CrashEvent, CrashLevel, ErrorSource, EventId, InstallationId, StackFrame,
 };
-pub use panic::{PanicParts, frames_from_backtrace};
+pub use panic::{MAX_PENDING_PANICS, PanicParts, PendingPanic, frames_from_backtrace};
 pub use queue::{CrashQueue, CrashQueueLimits, QueuedCrashReport};
 pub use reporter::{CaptureOutcome, CrashReporter, FlushSummary, PendingSend};
 pub use scrub::scrub;
@@ -45,10 +45,16 @@ pub struct CrashReportingConfig {
   /// Share of non-fatal errors that are sent; crashes are always sent.
   pub sample_rate: SampleRate,
   pub environment: Environment,
+  /// The user's opt-out counts; off: the instance requires reports.
+  #[serde(default = "is_on")]
+  pub allows_opt_out: bool,
+  /// The apps say once, on the first start with reports on, that they send them.
+  #[serde(default = "is_on")]
+  pub shows_notice: bool,
 }
 
 /// The user's own choice in the privacy settings. Reports are on when the admin enabled them,
-/// with a notice on first start.
+/// with a notice on first start; it counts only while the instance allows opting out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CrashReportingConsent {
@@ -63,7 +69,7 @@ pub enum CrashReportingConsent {
 pub struct SampleRate(f64);
 
 /// The environment name the backend groups reports by (`production`, `staging`): lowercase ASCII
-/// letters, digits, `-`, `_` and `.`, 1 to [`Environment::MAX_CHARS`] characters.
+/// letters, digits, `-`, `_` and `.`, 1 to 64 characters.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Environment(String);
@@ -113,8 +119,28 @@ impl CrashReportingConfig {
       dsn: dsn.parse()?,
       sample_rate: SampleRate::new(sample_rate)?,
       environment: Environment::new(environment)?,
+      allows_opt_out: true,
+      shows_notice: true,
     })
   }
+
+  /// From what `GET /api/v1/server-info` said; a server's value that doesn't check is ignored
+  /// (reports stay off) rather than trusted.
+  pub fn from_info(info: &CrashReportsInfo) -> Result<Self, CrashReportingError> {
+    Ok(Self {
+      allows_opt_out: info.allows_opt_out,
+      shows_notice: info.shows_notice,
+      ..Self::new(
+        &info.dsn,
+        f64::from(info.sample_percent) / 100.0,
+        &info.environment,
+      )?
+    })
+  }
+}
+
+fn is_on() -> bool {
+  true
 }
 
 impl SampleRate {
@@ -159,15 +185,8 @@ impl From<SampleRate> for f64 {
 }
 
 impl Environment {
-  pub const MAX_CHARS: usize = 64;
-
   pub fn new(name: &str) -> Result<Self, CrashReportingError> {
-    let is_valid = !name.is_empty()
-      && name.len() <= Self::MAX_CHARS
-      && name
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'));
-    if is_valid {
+    if is_crash_environment(name) {
       Ok(Self(name.to_owned()))
     } else {
       Err(CrashReportingError::Environment)
@@ -247,6 +266,28 @@ mod tests {
   }
 
   #[test]
+  fn config_from_the_server_info() {
+    let info = CrashReportsInfo {
+      dsn: "https://abc123@errors.example.com/7".to_owned(),
+      sample_percent: 20,
+      environment: "production".to_owned(),
+      allows_opt_out: false,
+      shows_notice: true,
+    };
+    let config = CrashReportingConfig::from_info(&info).unwrap();
+    assert_eq!(config.sample_rate.get(), 0.2);
+    assert!(!config.allows_opt_out);
+    let hostile = CrashReportsInfo {
+      sample_percent: 200,
+      ..info
+    };
+    assert_eq!(
+      CrashReportingConfig::from_info(&hostile),
+      Err(CrashReportingError::SampleRate)
+    );
+  }
+
+  #[test]
   fn config_round_trips_through_json() {
     let config = CrashReportingConfig::new("https://abc123@errors.example.com/7", 0.5, "production").unwrap();
     let json = serde_json::to_value(&config).unwrap();
@@ -256,6 +297,8 @@ mod tests {
         "dsn": "https://abc123@errors.example.com/7",
         "sample_rate": 0.5,
         "environment": "production",
+        "allows_opt_out": true,
+        "shows_notice": true,
       })
     );
     assert_eq!(

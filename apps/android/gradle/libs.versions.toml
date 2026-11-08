@@ -11,6 +11,7 @@ composeBom = "2026.09.00"
 appauth = "0.11.1"
 browser = "1.10.0"
 firebaseMessaging = "26.0.1"
+sentry = "8.63.0"
 unifiedpush = "3.3.5"
 jna = "5.19.1"
 coreTelecom = "1.0.1"
@@ -42,6 +43,8 @@ kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutine
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
 appauth = { module = "net.openid:appauth", version.ref = "appauth" }
 firebase-messaging = { module = "com.google.firebase:firebase-messaging", version.ref = "firebaseMessaging" }
+sentry-android-core = { module = "io.sentry:sentry-android-core", version.ref = "sentry" }
+sentry-android-ndk = { module = "io.sentry:sentry-android-ndk", version.ref = "sentry" }
 unifiedpush-connector = { module = "org.unifiedpush.android:connector", version.ref = "unifiedpush" }
 jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
 androidx-core-telecom = { module = "androidx.core:core-telecom", version.ref = "coreTelecom" }

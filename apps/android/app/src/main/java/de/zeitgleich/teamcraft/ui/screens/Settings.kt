@@ -109,8 +109,9 @@ fun SettingsScreen(
   onDnd: () -> Unit = {},
   onDiagnostics: () -> Unit = {},
   onReportProblem: () -> Unit = {},
+  opensSecurity: Boolean = false,
 ) {
-  var maybePage by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
+  var maybePage by rememberSaveable { mutableStateOf(if (opensSecurity) SettingsPage.Security else null) }
   BackHandler(enabled = maybePage != null) { maybePage = null }
   val page = maybePage
   Scaffold(
@@ -272,6 +273,7 @@ private fun SecurityPage(viewModel: MainViewModel, account: AppState.Ready) {
   HorizontalDivider()
   SecureScreenSetting()
   AppLockSetting()
+  CrashReportsSetting(viewModel.crashReports)
   HorizontalDivider()
   KeyBackupStatus(viewModel)
   ChangePassphrase(viewModel)

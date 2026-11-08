@@ -68,6 +68,8 @@ pub use store::{TokenStore, VaultStore};
 
 /// The one request that goes out before the server confirmed a cached account, and the answer that
 /// confirms it.
+/// How long one crash report may take to reach the server (docs/crash-reports.md).
+const CRASH_REPORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const ME_PATH: &str = "/api/v1/me";
 /// How long the browser may take to come back.
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
@@ -232,6 +234,13 @@ impl AuthError {
 pub struct ApiResponse {
   pub status: u16,
   pub body: String,
+}
+
+/// The relay's answer to a crash report: status and `Retry-After` decide what the page's queue does.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CrashReportAnswer {
+  pub status: u16,
+  pub maybe_retry_after: Option<String>,
 }
 
 /// Response of an authenticated API call with a binary body; the bytes travel as base64.
@@ -960,6 +969,40 @@ impl<S: TokenStore> AuthService<S> {
       .await
       .map_err(|error| AuthError::Network(error.to_string()))?;
     Ok(ApiResponse { status, body })
+  }
+
+  /// One crash report envelope of the page to the active server's relay (docs/crash-reports.md),
+  /// without credentials: the page's content security policy only lets it talk to the shell.
+  /// A short timeout, so a dead relay never holds the page's queue for long.
+  pub async fn post_crash_report(&self, envelope: String) -> Result<CrashReportAnswer, AuthError> {
+    if envelope.len() > teamcraft_proto::MAX_CRASH_ENVELOPE_BYTES {
+      return Ok(CrashReportAnswer {
+        status: 413,
+        maybe_retry_after: None,
+      });
+    }
+    let url = format!(
+      "{}{}",
+      self.server()?.server_url.trim_end_matches('/'),
+      teamcraft_proto::CRASH_REPORTS_PATH
+    );
+    let response = self
+      .http()
+      .post(url)
+      .header(reqwest::header::CONTENT_TYPE, "application/x-sentry-envelope")
+      .timeout(CRASH_REPORT_TIMEOUT)
+      .body(envelope)
+      .send()
+      .await
+      .map_err(|error| AuthError::Network(error.to_string()))?;
+    Ok(CrashReportAnswer {
+      status: response.status().as_u16(),
+      maybe_retry_after: response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned),
+    })
   }
 
   /// A brand image of the active server (`/api/v1/brand/assets/{slot}`), without credentials:

@@ -133,6 +133,7 @@ synced_prefs! {
   "composer.show_formatting" => composer.show_formatting,
   "privacy.share_typing" => privacy.share_typing,
   "privacy.away_after_minutes" => privacy.away_after_minutes,
+  "privacy.send_crash_reports" => privacy.send_crash_reports,
   "notifications.desktop" => notifications.desktop,
   "notifications.push_delay_minutes" => notifications.push_delay_minutes,
   "notifications.first_name_is_mention" => notifications.first_name_is_mention,

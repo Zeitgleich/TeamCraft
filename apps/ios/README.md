@@ -247,6 +247,16 @@ The server's APNs sender is still a stub (`crates/teamcraft-server/src/push/send
 `call` wake-up kind is new (`PushKind::Call`): push and ring-in-the-background work only once the
 server sends them. The in-app paths (foreground, gateway) do not need it.
 
+### Crash reports
+
+sentry-cocoa (Swift Package Manager, `project.yml` → `packages`, pinned; the app target only)
+reports crashes, app hangs and MetricKit diagnostics, and only while the signed-in server's
+`server-info` has `crash_reports` and the user didn't turn them off (Settings → Privacy and
+security; docs/crash-reports.md, "iOS"). `Model/CrashReports.swift` starts and stops it,
+`Model/CrashScrubber.swift` and `CrashEventScrub` scrub every event. Readable stack traces need the
+archive's dSYMs: `<archive>.xcarchive/dSYMs/TeamCraft.app.dSYM` (Release builds use
+`dwarf-with-dsym`), uploaded to the crash reports backend (#1515).
+
 ## Signing and TestFlight
 
 CI builds unsigned (`CODE_SIGNING_ALLOWED=NO`). For a device or TestFlight you need an Apple

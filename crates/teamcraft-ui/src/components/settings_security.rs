@@ -485,6 +485,7 @@ pub fn SecuritySection() -> impl IntoView {
     </SettingsCard>
 
     <PrivacyCard />
+    <CrashReportsCard />
 
     <details class="set-details">
       <summary>{move || i18n.t("security-advanced")}</summary>
@@ -742,6 +743,47 @@ fn backup_detail(state: &KeyBackupState, i18n: I18n, now: TimestampMs) -> String
     parts.push(i18n.t("security-backup-pending"));
   }
   parts.join(" ")
+}
+
+/// Crash reports (docs/crash-reports.md): shown only while the instance has them on. A mandatory
+/// instance shows the switch on and disabled, saying that the organization requires them.
+#[component]
+fn CrashReportsCard() -> impl IntoView {
+  #[cfg(target_arch = "wasm32")]
+  {
+    let state = use_app_state();
+    let prefs = state.settings.prefs;
+    let status = Signal::derive(crate::crash_reports::status);
+    let is_mandatory = Signal::derive(move || status.get().is_some_and(|status| !status.allows_opt_out));
+    view! {
+      <Show when=move || status.get().is_some()>
+        <SettingsCard heading="crash-reports-heading">
+          <Show
+            when=move || is_mandatory.get()
+            fallback=move || view! {
+              <SwitchRow
+                label="crash-reports-send"
+                hint="crash-reports-send-hint"
+                value=Signal::derive(move || prefs.with(|all| all.privacy.send_crash_reports))
+                on_change=Callback::new(move |value: bool| prefs.update(|all| all.privacy.send_crash_reports = value))
+              />
+            }
+          >
+            <SwitchRow
+              label="crash-reports-send"
+              hint="crash-reports-required-hint"
+              value=Signal::derive(|| true)
+              on_change=Callback::new(|_: bool| {})
+              is_disabled=Signal::derive(|| true)
+            />
+          </Show>
+        </SettingsCard>
+      </Show>
+    }
+    .into_any()
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  ().into_any()
 }
 
 /// What others can see: read receipts, typing, last seen, and when the status turns to away.

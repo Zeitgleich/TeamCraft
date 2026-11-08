@@ -13,6 +13,7 @@ mod bridge;
 mod calls;
 mod channel_roles;
 mod color_theme;
+mod crash_reports;
 mod engine;
 mod error;
 mod http_fetch;
@@ -43,6 +44,7 @@ pub use channel_roles::{
   RoleKeyMarkItem, RoleReviewRefusalItem, RoleReviewRowItem, channel_roles_review_has_changed,
   channel_roles_review_has_new,
 };
+pub use crash_reports::{CrashReportsConfig, crash_reports_config};
 pub use error::TeamCraftError;
 pub use http_fetch::{
   HttpFetchError, HttpFetchHeader, HttpFetchMethod, HttpFetchRedirects, HttpFetchRequest, HttpFetchResponse,

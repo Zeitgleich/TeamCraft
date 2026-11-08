@@ -724,6 +724,22 @@ settings-error-health-backup-hours = Enter 1 to 720 hours.
 settings-error-health-days = Enter 1 to 365 days.
 settings-error-health-percent = Enter 50 to 99 percent.
 
+settings-group-crash_reports = Crash reports
+settings-group-crash_reports-hint = Where the apps send crash and error reports: by default to the publisher's service (whoever built the apps and this server), or to a backend of your own that speaks the Sentry protocol, such as GlitchTip. Reports carry stack traces, versions and a random installation ID, never messages, names, file names or keys. People can turn them off in their privacy settings.
+settings-f-mode = Crash reports go to
+settings-crash-mode-publisher = The publisher's service ({ $host })
+settings-crash-mode-publisher-none = The publisher's service (none in this build: nothing is sent)
+settings-crash-mode-own = An own backend (the DSN below)
+settings-crash-mode-off = Nowhere: crash reports are off
+settings-f-dsn = DSN of the backend project
+settings-f-sample_percent = Share of handled errors sent (crashes are always sent)
+settings-f-environment = Environment name
+settings-f-allows_opt_out = People may turn crash reports off in their privacy settings
+settings-f-shows_notice = Tell people on the first start that the app sends crash reports
+settings-error-dsn = Enter the project's DSN, like https://key@errors.example.com/1.
+settings-error-crash-percent = Enter 0 to 100 percent.
+settings-error-crash-environment = Use 1 to 64 lowercase letters, digits, "-", "_" or ".".
+
 ## Report a problem (docs/bug-reports.md)
 report-menu = Report a problem…
 report-title = Report a problem
@@ -815,3 +831,11 @@ settings-holiday-feed-error-not_a_calendar = it isn't a calendar (perhaps a sign
 settings-holiday-feed-error-malformed = the calendar is broken or cut off.
 settings-holiday-feed-error-empty = the calendar has no all-day events.
 settings-holiday-feed-error-too_many = the calendar has more than 5000 holidays.
+
+## Crash reports (docs/crash-reports.md)
+crash-reports-heading = Crash reports
+crash-reports-send = Send crash reports
+crash-reports-send-hint = When the app crashes or hits an error, it sends a report to your organization's crash reports service: where in the app it happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys.
+crash-reports-required-hint = Your organization requires crash reports. They say where in the app a crash happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys.
+crash-reports-notice = This app sends crash reports to your organization: where a crash happened and the app version, never messages, names or files.
+crash-reports-notice-settings = Settings

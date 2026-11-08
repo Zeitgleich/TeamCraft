@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Crash reports (docs/crash-reports.md); the same words as crates/teamcraft-ui/i18n/*/settings.ftl crash-reports-*. -->
+<resources>
+  <string name="crash_reports_title">Crash reports</string>
+  <string name="crash_reports_send">Send crash reports</string>
+  <string name="crash_reports_send_hint">When the app crashes or hits an error, it sends a report to your organization\'s crash reports service: where in the app it happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys.</string>
+  <string name="crash_reports_required_hint">Your organization requires crash reports. They say where in the app a crash happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys.</string>
+  <string name="crash_reports_notice">This app sends crash reports to your organization: where a crash happened and the app version, never messages, names or files.</string>
+  <string name="crash_reports_notice_settings">Settings</string>
+</resources>

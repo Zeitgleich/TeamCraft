@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-crash-reports-take-native"
+description = "Enables the crash_reports_take_native command without any pre-configured scope."
+commands.allow = ["crash_reports_take_native"]
+
+[[permission]]
+identifier = "deny-crash-reports-take-native"
+description = "Denies the crash_reports_take_native command without any pre-configured scope."
+commands.deny = ["crash_reports_take_native"]

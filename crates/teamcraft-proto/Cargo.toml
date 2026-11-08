@@ -21,5 +21,8 @@ utoipa.workspace = true
 rand_core.workspace = true
 # Write-only secrets in admin settings requests are cleared from memory when dropped.
 zeroize = { version = "1.9.1", features = ["derive"] }
+# The crash reports DSN (src/api/crash_reports.rs): server and apps parse it the same way. Already a
+# dependency of every client and the server.
+url.workspace = true
 
 [dev-dependencies]
