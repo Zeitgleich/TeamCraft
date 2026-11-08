@@ -67,6 +67,12 @@ typing-direct = schreibt …
 
 # ---- Meetings ----
 composer-confirm-channel = Diese Nachricht benachrichtigt alle in dieser Unterhaltung ({ $count } Personen). Trotzdem senden?
+composer-confirm-group = Diese Nachricht benachrichtigt { $count } Personen in den erwähnten Gruppen. Trotzdem senden?
+composer-confirm-group-capped = Diese Nachricht benachrichtigt nur die ersten { $cap } von { $count } Personen in den erwähnten Gruppen. Trotzdem senden?
+composer-group-outside = { $count ->
+    [one] 1 Mitglied der erwähnten Gruppen ist nicht in dieser Unterhaltung und wird nicht benachrichtigt.
+   *[other] { $count } Mitglieder der erwähnten Gruppen sind nicht in dieser Unterhaltung und werden nicht benachrichtigt.
+}
 composer-confirm-send = Trotzdem senden
 jump-to-date = Zu einem Datum springen
 

@@ -545,6 +545,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       _ => {},
     }
     self.refresh_stale_expiring_guests().await;
+    self.refresh_stale_user_groups().await;
     Ok(())
   }
 
@@ -792,9 +793,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.are_expiring_guests_stale = true;
         Ok(())
       },
+      // Read with the event's frame, or batched when a sync changes many groups at once.
+      GatewayEvent::UserGroupUpdate { .. } => {
+        self.are_user_groups_stale = true;
+        Ok(())
+      },
       GatewayEvent::OrgRecoveryUpdate { .. }
       | GatewayEvent::SystemEvent { .. }
-      | GatewayEvent::UserGroupUpdate { .. }
       | GatewayEvent::LobbyDecision { .. } => Ok(()),
       // A new name, username or avatar, or the account was deactivated: the cached summary goes.
       GatewayEvent::ProfileUpdate { user_id } => {

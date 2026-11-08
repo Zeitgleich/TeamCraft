@@ -242,6 +242,10 @@
   color: var(--accent-strong);
 }
 
+.mention-group {
+  font-weight: 600;
+}
+
 .mention-me {
   background: var(--mention-bg);
   color: var(--mention-text);

@@ -674,6 +674,22 @@ once per `limits.invite_resend_interval_secs` (the invitation's own mail counts)
 invitation in an unarchived space on a server that sends mail. It uses the current directory policy
 and guest domains, and the personal note of the first mail isn't repeated, as it was never stored. Revoking and resending are in the audit log.
 
+#### 3.2.4 Group mentions (issue #206)
+
+`@handle` of a user group notifies its members who are in the conversation, expanded on the sender's
+device (e2ee.md §4.4). Admins limit who may do that with `use_group_mentions` (a channel permission, in the
+scheme and channel moderation). The server can't read which handle a message mentions, so what it enforces
+differs from what devices do:
+
+| Who enforces it | What                                                                                                                          |
+|-----------------|-------------------------------------------------------------------------------------------------------------------------------|
+| The apps        | No suggestion and no expansion without the permission                                                                         |
+| The server      | At most `[limits] max_mentions_without_group_mentions` (default 10) mentioned people per message without the permission       |
+| The server      | At most `[limits] max_mentions_per_message` (default 200) for everybody; mentioned people must be members of the conversation |
+| Nobody          | Whether a list of people really came from a group, or was typed: a modified client can name up to the limit                   |
+
+Group membership stays visible only to whom it already was: members of the workspace, never guests.
+
 ### 3.3 Moderation
 
 Admins can't read reported content unless a member shows it to them:
@@ -1070,7 +1086,7 @@ Groups that are stored and reset as a whole:
 | `notifications`  | read receipt default, urgent repeat interval and count, phone push delay, desktop attention                                                   |
 | `email_digest`   | on/off, default and shortest interval, grace period, subjects and texts                                                                       |
 | `shares`         | on/off, default and longest expiry, download cap, links per user                                                                              |
-| `limits`         | attachment size and per-user total, avatar and background sizes, backgrounds per user, group DM size, user group size, meeting mails per hour |
+| `limits`         | mentioned people per message (`max_mentions_per_message`, `max_mentions_without_group_mentions`), attachment size and per-user total, avatar and background sizes, backgrounds per user, group DM size, user group size, meeting mails per hour |
 | `integration`    | default retention of integration channels                                                                                                     |
 | `local_accounts` | on/off (off: the form disappears, `/auth/local/*` answers 403 `local_accounts_disabled`, sessions end), second factor required, activation and session lifetime, failed attempts, lockout |
 | `sign_in_page`   | which methods the sign-in page offers (SSO, e-mail and password) and in which order; help text per language; help link; whether every sign-in shows the identity provider's login page |

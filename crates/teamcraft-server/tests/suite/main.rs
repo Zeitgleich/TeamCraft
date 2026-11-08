@@ -32,6 +32,7 @@ mod dpop;
 mod dpop_clients;
 mod first_sight;
 mod gateway;
+mod group_mentions;
 mod guests;
 mod hardening;
 mod health;

@@ -933,11 +933,39 @@ impl ChatBackend for MockBackend {
     summaries
   }
 
+  fn mentionable_groups(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::MentionableGroup> {
+    let members = self
+      .conversation(conversation)
+      .map(|conversation| conversation.member_ids)
+      .unwrap_or_default();
+    demo_groups()
+      .into_iter()
+      .map(|(handle, name, people)| {
+        let people: Vec<UserId> = people.iter().map(|id| id_from_raw::<UserId>(*id)).collect();
+        let outside = people.iter().filter(|user| !members.contains(user)).count();
+        teamcraft_client_api::model::MentionableGroup {
+          handle: handle.to_owned(),
+          name: name.to_owned(),
+          notified: people
+            .into_iter()
+            .filter(|user| *user != me() && members.contains(user))
+            .collect(),
+          outside_count: u32::try_from(outside).unwrap_or(u32::MAX),
+        }
+      })
+      .collect()
+  }
+
   fn post_message(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
     let body = body.trim();
     if body.is_empty() {
       return;
     }
+    let group_mentions =
+      teamcraft_client_api::notify::group_mention_reach(body, &self.mentionable_groups(conversation)).handles;
     let mut state = self.state.borrow_mut();
     let id = id_from_raw::<MessageId>(state.next_message_id);
     state.next_message_id += 1;
@@ -955,6 +983,8 @@ impl ChatBackend for MockBackend {
       maybe_imported: None,
       maybe_source: None,
       maybe_placeholder: None,
+      group_mentions,
+      mentions_me: false,
     };
     match maybe_thread {
       Some(thread) => {
@@ -1467,6 +1497,8 @@ impl State {
         maybe_imported: None,
         maybe_source: None,
         maybe_placeholder: None,
+        group_mentions: Vec::new(),
+        mentions_me: false,
       };
       if matches!(message.kind, MessageKind::User) {
         for _ in 0..rng.below(3) {
@@ -1512,6 +1544,8 @@ impl State {
               maybe_imported: None,
               maybe_source: None,
               maybe_placeholder: None,
+              group_mentions: Vec::new(),
+              mentions_me: false,
             });
           }
         }
@@ -1582,7 +1616,18 @@ fn log_line(conversation: ConversationId, index: usize, total: usize, now: Times
     maybe_imported: None,
     maybe_source: None,
     maybe_placeholder: None,
+    group_mentions: Vec::new(),
+    mentions_me: false,
   }
+}
+
+/// Handle, name and members of the demo workspace's user groups.
+fn demo_groups() -> [(&'static str, &'static str, &'static [u64]); 3] {
+  [
+    ("accounting", "Accounting", &[2, 3, 5]),
+    ("oncall", "On-call", &[1, 2, 6, 7]),
+    ("brand-b", "Brand B", &[5, 6, 7, 8]),
+  ]
 }
 
 fn demo_users() -> Vec<User> {

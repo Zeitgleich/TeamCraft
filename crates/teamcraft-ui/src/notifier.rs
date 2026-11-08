@@ -10,8 +10,10 @@ use std::collections::HashMap;
 
 use crate::clock::{local_utc_offset_minutes, now_ms};
 use teamcraft_client_api::actions::MessagePriority;
-pub use teamcraft_client_api::notify::needs_channel_confirmation;
 use teamcraft_client_api::notify::{self, MentionRules};
+pub use teamcraft_client_api::notify::{
+  GroupMentionReach, group_mention_reach, needs_channel_confirmation, needs_group_confirmation,
+};
 use teamcraft_proto::{ChannelMentions, DndCandidate, PushContentMode};
 
 use crate::model::{
@@ -40,6 +42,8 @@ pub struct PolicyInput<'a> {
   pub is_viewing: bool,
   /// The sender marked the message urgent.
   pub is_urgent: bool,
+  /// The sender named this user among the people to notify: `@username` or a group mention.
+  pub mentions_me: bool,
   /// The device's offset from UTC now; the schedule is checked in the device's own time.
   pub utc_offset_minutes: i16,
   /// When a quick do-not-disturb chosen on this device ends.
@@ -94,7 +98,9 @@ pub fn decide(input: &PolicyInput) -> Decision {
   if is_silenced_by_dnd(input) {
     return Decision::Skip(SkipReason::DoNotDisturb);
   }
-  let is_mentioned = is_mentioned(input.body, input.me, input.prefs, &filters.channel_mentions);
+  // A group mention is an ID in the message's list: who was in the group then, not who is now.
+  let is_mentioned =
+    input.mentions_me || is_mentioned(input.body, input.me, input.prefs, &filters.channel_mentions);
   if let CandidateKind::ThreadReply { is_thread_mine } = input.kind {
     let allowed = match input.prefs.thread_replies {
       ThreadReplies::Participating => true,
@@ -455,6 +461,7 @@ pub fn notifications_for(
         now,
         is_viewing: is_viewing(item.conversation.id),
         is_urgent: is_urgent(backend, &item.message),
+        mentions_me: item.message.mentions_me,
         utc_offset_minutes,
         maybe_dnd_until,
       };
@@ -667,6 +674,8 @@ mod tests {
         maybe_imported: None,
         maybe_source: None,
         maybe_placeholder: None,
+        group_mentions: Vec::new(),
+        mentions_me: false,
       }
     }
   }
@@ -796,6 +805,74 @@ mod tests {
       decide(&input(&prefs, ConversationKind::Public, "lunch?")),
       Decision::Notify
     );
+  }
+
+  mod group_mentions {
+    use super::*;
+
+    fn mentioned_through_a_group(prefs: &NotificationPrefs) -> PolicyInput<'_> {
+      PolicyInput {
+        mentions_me: true,
+        ..input(prefs, ConversationKind::Public, "@accounting please check")
+      }
+    }
+
+    #[test]
+    fn the_list_the_sender_attached_counts_as_a_mention() {
+      let prefs = mentions_only();
+      assert_eq!(decide(&mentioned_through_a_group(&prefs)), Decision::Notify);
+      assert_eq!(
+        decide(&input(
+          &prefs,
+          ConversationKind::Public,
+          "@accounting please check"
+        )),
+        Decision::Skip(SkipReason::NotMentioned),
+        "the same text without the user on the list doesn't"
+      );
+    }
+
+    #[test]
+    fn a_muted_conversation_stays_quiet() {
+      let mut prefs = mentions_only();
+      prefs.set_conversation(
+        &conversation(ConversationKind::Public).id.to_string(),
+        ConversationNotify {
+          maybe_level: None,
+          mute: MuteFor::Forever,
+        },
+      );
+      assert_eq!(
+        decide(&mentioned_through_a_group(&prefs)),
+        Decision::Skip(SkipReason::Muted)
+      );
+    }
+
+    #[test]
+    fn do_not_disturb_holds_it_back_like_any_other_mention() {
+      let mut prefs = mentions_only();
+      prefs.dnd.allows_urgent = true;
+      let in_dnd = User {
+        presence: PresenceStatus::DoNotDisturb,
+        ..me()
+      };
+      let mut candidate = mentioned_through_a_group(&prefs);
+      candidate.me = &in_dnd;
+      candidate.is_urgent = true;
+      assert_eq!(
+        decide(&candidate),
+        Decision::Skip(SkipReason::DoNotDisturb),
+        "urgent breaks through in direct conversations only, by default"
+      );
+      candidate.conversation = Box::leak(Box::new(conversation(ConversationKind::Group)));
+      assert_eq!(
+        decide(&candidate),
+        Decision::Notify,
+        "a group DM may break through"
+      );
+      candidate.is_urgent = false;
+      assert_eq!(decide(&candidate), Decision::Skip(SkipReason::DoNotDisturb));
+    }
   }
 
   #[test]
@@ -1247,6 +1324,7 @@ mod tests {
       now: NOW,
       is_viewing: false,
       is_urgent: false,
+      mentions_me: false,
       utc_offset_minutes: 0,
       maybe_dnd_until: None,
     }

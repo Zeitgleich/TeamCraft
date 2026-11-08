@@ -190,6 +190,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   async fn finish_full_sync(&mut self) -> Result<(), CoreError> {
     self.refresh_notification_settings().await?;
     self.trace_lap("notification settings");
+    Box::pin(self.refresh_user_groups()).await;
+    self.trace_lap("user groups");
     if let Err(error) = self.refresh_attachment_limit().await {
       if error.is_transient() {
         return Err(error);

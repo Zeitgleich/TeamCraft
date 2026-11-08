@@ -2,11 +2,14 @@
 //! the identity provider's groups. The server only keeps the sets; mentions are end-to-end
 //! encrypted and expanded by clients.
 
+use std::collections::HashMap;
+
 use serde_json::json;
 use teamcraft_db::{GroupCreateOutcome, NewUserGroup, UserGroup};
 use teamcraft_proto::{
-  CreateUserGroupRequest, GatewayEvent, ListUserGroupsResponse, Permission, Target, UpdateUserGroupRequest,
-  UserGroupDetailResponse, UserGroupId, UserGroupResponse, UserId, UserKind,
+  CreateUserGroupRequest, GatewayEvent, ListUserGroupRostersResponse, ListUserGroupsResponse, Permission,
+  Target, UpdateUserGroupRequest, UserGroupDetailResponse, UserGroupId, UserGroupResponse, UserGroupRoster,
+  UserId, UserKind,
 };
 
 use super::access::{is_guest, require};
@@ -29,6 +32,31 @@ pub async fn list_user_groups(
   let groups = state.database.list_user_groups().await?;
   Ok(ListUserGroupsResponse {
     groups: groups.iter().map(group_response).collect(),
+  })
+}
+
+/// Every group with its active members, for the sender's device to expand a group mention
+/// (docs/e2ee.md §4.4). No more than [`get_user_group`] shows per group, and for the same people.
+pub async fn list_user_group_rosters(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+) -> Result<ListUserGroupRostersResponse, ApiError> {
+  require_not_guest(caller)?;
+  let groups = state.database.list_user_groups().await?;
+  let mut members: HashMap<UserGroupId, Vec<UserId>> = HashMap::new();
+  for (group, user) in state.database.list_active_user_group_members().await? {
+    members.entry(group).or_default().push(user);
+  }
+  Ok(ListUserGroupRostersResponse {
+    groups: groups
+      .into_iter()
+      .map(|group| UserGroupRoster {
+        member_ids: members.remove(&group.id).unwrap_or_default(),
+        id: group.id,
+        handle: group.handle,
+        name: group.name,
+      })
+      .collect(),
   })
 }
 

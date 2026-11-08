@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.group_id, m.user_id\n         FROM user_group_members m\n         JOIN users u ON u.id = m.user_id\n         WHERE u.deactivated_at IS NULL\n         ORDER BY m.group_id, m.user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_group_members",
+            "name": "group_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "user_group_members",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "d7701fcdacf59ea011347253ed51b046f0b9c1c87755db1027e90142693668b3"
+}

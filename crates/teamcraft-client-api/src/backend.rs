@@ -39,8 +39,9 @@ use crate::calls::{
 use crate::drafts::{DraftFileItem, DraftItem, DraftReply, SentItem};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::model::{
-  Conversation, ConversationId, CustomStatus, DeviceId, FirstSync, KeyCatchUp, MembershipIssue, Message,
-  MessageId, PresenceStatus, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
+  Conversation, ConversationId, CustomStatus, DeviceId, FirstSync, KeyCatchUp, MembershipIssue,
+  MentionableGroup, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs,
+  User, UserId,
 };
 use crate::privacy::{LastSeenVisibility, PrivacySettings};
 use crate::scheduled::ScheduledOverview;
@@ -66,6 +67,11 @@ pub trait ChatBackend {
   /// The people to offer in lists, pickers and mentions: deactivated accounts are left out
   /// (issue #654).
   fn users(&self) -> Vec<User>;
+  /// The user groups this user may mention in the conversation, with who a mention would reach:
+  /// empty without `use_group_mentions` there (and in a backend without a copy of the groups).
+  fn mentionable_groups(&self, _conversation: ConversationId) -> Vec<MentionableGroup> {
+    Vec::new()
+  }
   /// People whose name or username contains `query` (any case): the people the backend knows and,
   /// for a backend that reads the server, the server's directory, so colleagues who share nothing
   /// with the user yet are found too. Such a backend asks the server at most once per query in a

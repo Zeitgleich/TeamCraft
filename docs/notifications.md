@@ -209,6 +209,23 @@ is only available while the signed push-content policy lets it show on the lock 
 and mark notifications (iOS: relevance score); they do not stop the server from pushing, and an extension
 without the filtering entitlement cannot suppress a notification.
 
+## Group mentions
+
+`@accounting` of a user group the sender may mention in a conversation (`use_group_mentions`, admin.md
+§3.2.4) notifies the group's members **who are in that conversation** (never anyone else; the sender's own
+device expands the handle, e2ee.md §4.4, and the handle itself travels in the ciphertext). For the people
+listed it counts as a mention everywhere a mention counts: push, badge, unread mention counts and the
+activity feed, and the same mute, do-not-disturb and urgent rules. A message's list is what the sender
+attached at sending: who is in the group later doesn't change who was mentioned.
+
+- **Composer:** groups are suggested after `@` next to people, only where the permission holds. A mention
+  of a group whose members aren't all in the conversation shows a hint that those members won't be notified.
+- **Large groups:** the `@channel` confirmation setting ("Ask before using @channel ... with more than",
+  `confirm_channel_over`) also asks before group mentions that notify more than that many people.
+- **Limit:** a message names at most `[limits] max_mentions_per_message` people (default 200). Beyond it a
+  device notifies the first ones and says so in the confirmation; the rest see the message without a
+  mention. Older clients and the phones render `@accounting` as text; the people listed are still mentioned.
+
 ## Push routing
 
 For each recipient without a live connection the server decides from metadata it has anyway

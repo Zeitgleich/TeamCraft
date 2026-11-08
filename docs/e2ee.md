@@ -805,6 +805,27 @@ flag, and whether the text addresses the whole conversation (`is_channel_mention
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts, a
 channel's shared notes (§4.11).
 
+**Group mentions (`@accounting`, issue #206).** The sender's device expands them: from its sealed copy of
+the user groups (`GET /user-groups/rosters`, refused to guests like the rest of the groups) it puts the
+IDs of the group's members who are in the conversation into `mentioned_user_ids`, and records the handle
+in `meta.group_mentions` inside the ciphertext so receivers show `@accounting`. No new plaintext field:
+the server sees a list of IDs like for any mention, and doesn't learn that (or which) group was
+mentioned. The IDs are the ones at sending: a later change of the group changes nothing about who was
+notified, and receivers never look up who is in a group to decide this. Older clients ignore the unknown
+field (`MessageMeta` isn't strict) and show `@accounting` as text, with the mention still counted for the
+people listed.
+
+What this means for `use_group_mentions`: because the list of IDs is all the server sees, it can't tell a
+group mention from people typed one by one, and it can't check that the IDs on the list really came from
+the group. Devices honour the permission (no suggestion, no expansion without it); the server enforces
+the part it can: a sender without the permission in the conversation may name at most
+`[limits] max_mentions_without_group_mentions` (default 10) people per message (`403` above that, also for
+scheduled messages at sealing), on top of the limit for everybody and of IDs having to be members. A
+modified client without the permission can still name up to that many people, or claim a handle in the
+ciphertext for the text it shows, which only changes how that word looks. Anybody a mention names is
+visible to the conversation as `mentioned_user_ids` always was, so a group mention shows other members
+who of them it named, as any mention does; no more of the group than that, and guests read no groups.
+
 Typing indicators are plaintext metadata too: a `typing` gateway frame tells the server that a user
 types in a conversation, and for a reply in which thread (thread IDs are visible metadata anyway), never
 what, and it forwards that to the other members (gateway.md). Clients

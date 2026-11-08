@@ -471,6 +471,11 @@ pub struct MessageMeta {
   /// identity"). Believed only from a bot account ([`crate::integration_sources::shown_source`]).
   #[serde(rename = "source", default, skip_serializing_if = "Option::is_none")]
   pub maybe_source: Option<Box<teamcraft_proto::SourceIdentity>>,
+  /// The user groups the sender's device expanded into `mentions`, by handle (`accounting`), so
+  /// receivers show `@accounting` as a group mention. Inside the ciphertext only: the server only
+  /// sees the expanded IDs (e2ee.md §4.4). An older client ignores it and shows the text.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub group_mentions: Vec<String>,
 }
 
 /// The quoted message: the reference, plus enough to show it where it isn't loaded.

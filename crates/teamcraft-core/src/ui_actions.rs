@@ -201,11 +201,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 
   fn text_content(&self, message: &OutgoingMessage, meta: MessageMeta) -> MessageContent {
-    MessageContent::Text {
-      body: message.body.clone(),
-      mentions: self.mentions_in(message.conversation, &message.body),
-      meta,
-    }
+    self.text_mentioning(message.conversation, &message.body, meta)
   }
 
   pub(crate) fn ui_send_message(&self, message: OutgoingMessage) {

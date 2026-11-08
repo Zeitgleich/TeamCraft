@@ -5,11 +5,32 @@ use crate::i18n::use_i18n;
 use crate::markdown::{self, Block, Inline, ListKind, PERMALINK_PREFIX};
 use crate::state::use_app_state;
 
+/// How to show the `@words` of a body.
+#[derive(Clone)]
+struct MentionMarks {
+  me: String,
+  groups: Vec<String>,
+  mentions_me: bool,
+}
+
 /// Renders a message body through the safe Markdown subset.
 #[component]
-pub fn RichText(#[prop(into)] body: String, #[prop(optional, into)] me: String) -> impl IntoView {
+pub fn RichText(
+  #[prop(into)] body: String,
+  #[prop(optional, into)] me: String,
+  /// Handles the sender expanded in this message: these `@words` show as group mentions.
+  #[prop(optional, into)]
+  group_mentions: Vec<String>,
+  /// The sender named this user among the people to notify (through a group or by name).
+  #[prop(optional)]
+  mentions_me: bool,
+) -> impl IntoView {
   let blocks = markdown::parse(&body);
-  let me = StoredValue::new(me);
+  let me = StoredValue::new(MentionMarks {
+    me,
+    groups: group_mentions,
+    mentions_me,
+  });
   blocks
     .into_iter()
     .map(|block| match block {
@@ -62,7 +83,7 @@ pub fn RichText(#[prop(into)] body: String, #[prop(optional, into)] me: String) 
 }
 
 /// Lines of a paragraph or quote, with a line break between them.
-fn render_lines(lines: Vec<Vec<Inline>>, me: String) -> Vec<AnyView> {
+fn render_lines(lines: Vec<Vec<Inline>>, me: MentionMarks) -> Vec<AnyView> {
   let last = lines.len().saturating_sub(1);
   lines
     .into_iter()
@@ -87,7 +108,7 @@ fn token_class(kind: TokenKind) -> &'static str {
   }
 }
 
-fn render_inlines(inlines: Vec<Inline>, me: String) -> Vec<AnyView> {
+fn render_inlines(inlines: Vec<Inline>, me: MentionMarks) -> Vec<AnyView> {
   inlines
     .into_iter()
     .map(|inline| match inline {
@@ -117,10 +138,12 @@ fn render_inlines(inlines: Vec<Inline>, me: String) -> Vec<AnyView> {
       }
       .into_any(),
       Inline::Mention(name) => {
-        let class = if name == me {
-          "mention mention-me"
-        } else {
-          "mention"
+        let is_group = me.groups.contains(&name.to_lowercase());
+        let class = match (is_group, name == me.me || (is_group && me.mentions_me)) {
+          (true, true) => "mention mention-group mention-me",
+          (true, false) => "mention mention-group",
+          (false, true) => "mention mention-me",
+          (false, false) => "mention",
         };
         view! { <span class=class translate="no">{format!("@{name}")}</span> }.into_any()
       },

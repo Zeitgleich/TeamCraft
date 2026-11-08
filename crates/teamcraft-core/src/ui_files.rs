@@ -22,7 +22,7 @@ use crate::error::CoreError;
 use crate::imported::Authorship;
 use crate::records;
 use crate::store::{
-  AttachmentRef, ImageDimensions, LocalStore, MediaRange, MessageContent, MessageMeta, StoredMessage, Table,
+  AttachmentRef, ImageDimensions, LocalStore, MediaRange, MessageMeta, StoredMessage, Table,
 };
 use crate::transfers::Transfers;
 use crate::ui_backend::{CoreChatBackend, CoreCommand, RedactedText, imported_author_view, ui_message_id};
@@ -172,12 +172,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     {
       return;
     }
-    let mentions = self.mentions_in(conversation, body);
-    let content = MessageContent::Text {
-      body: body.to_string(),
-      mentions,
-      meta,
-    };
+    let content = self.text_mentioning(conversation, body, meta);
     let Some(id) = self.enqueue_as(conversation, maybe_thread, content, maybe_id) else {
       return;
     };

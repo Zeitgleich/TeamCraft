@@ -20,10 +20,11 @@ use teamcraft_proto::{
   ListAdminConversationsResponse, ListConversationMembersResponse, ListConversationsResponse,
   ListDevicesResponse, ListInvitesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
   ListMlsMessagesResponse, ListScheduledMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse,
-  MessageResponse, MlsMessageResponse, MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse,
-  PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, ScheduleMessageRequest, ScheduledMessageId,
-  ScheduledMessageResponse, SearchUsersResponse, SendMessageRequest, SendScheduledMessageResponse, SpaceId,
-  SpaceMemberResponse, UpdateScheduledMessageRequest, UpdateSpaceMemberRequest, UploadIdentityKeyRequest,
+  ListUserGroupRostersResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest,
+  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
+  RegisterDeviceRequest, ScheduleMessageRequest, ScheduledMessageId, ScheduledMessageResponse,
+  SearchUsersResponse, SendMessageRequest, SendScheduledMessageResponse, SpaceId, SpaceMemberResponse,
+  UpdateScheduledMessageRequest, UpdateSpaceMemberRequest, UploadIdentityKeyRequest,
   UploadKeyPackagesRequest, UserId, UserSummary,
 };
 use teamcraft_proto::{AdminJoinRequestResponse, ListAdminJoinRequestsResponse};
@@ -608,6 +609,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn list_conversations(&self) -> Result<ListConversationsResponse, ApiError> {
     self.get("/conversations").await
+  }
+
+  async fn list_user_group_rosters(&self) -> Result<ListUserGroupRostersResponse, ApiError> {
+    self.get("/user-groups/rosters").await
   }
 
   async fn conversation(&self, conversation: ConversationId) -> Result<ConversationResponse, ApiError> {

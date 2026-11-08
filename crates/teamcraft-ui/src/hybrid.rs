@@ -223,6 +223,13 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.with_live_presences(self.chat.users())
   }
 
+  fn mentionable_groups(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::MentionableGroup> {
+    self.chat.mentionable_groups(conversation)
+  }
+
   fn search_people(&self, query: &str) -> Vec<User> {
     self.with_live_presences(self.chat.search_people(query))
   }
