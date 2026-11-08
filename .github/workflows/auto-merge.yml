@@ -7,6 +7,12 @@ name: Auto-merge
 # `pull_request_target` runs with this repository's token even for forks, so the job never checks
 # out or runs code of the pull request: it only calls the GitHub API, and the PR's data reaches the
 # shell through the environment, never through the script text.
+#
+# Whoever turns auto-merge on is the one who merges. With `GITHUB_TOKEN` that is github-actions,
+# and GitHub then neither closes the issues the pull request names ("Closes #…") nor runs the push
+# workflows on `main` (Android, iOS, CodeQL mobile). So the job uses a GitHub App's token when the
+# repository has one (variable AUTOMERGE_APP_ID, secret AUTOMERGE_APP_PRIVATE_KEY; the App needs
+# contents and pull requests: write). Without it, close-merged-issues.yml closes the issues.
 on:
   pull_request_target:
     types: [opened, reopened, ready_for_review]
@@ -24,8 +30,15 @@ jobs:
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)
     runs-on: ubuntu-latest
     steps:
+      - name: App token
+        id: app
+        if: ${{ vars.AUTOMERGE_APP_ID != '' }}
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.AUTOMERGE_APP_ID }}
+          private-key: ${{ secrets.AUTOMERGE_APP_PRIVATE_KEY }}
       - name: Enable auto-merge (squash)
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app.outputs.token || secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: gh pr merge --auto --squash "$PR_URL"
