@@ -70,6 +70,8 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.CustomStatus
+import de.zeitgleich.teamcraft.core.HOLIDAY_REGIONS
+import de.zeitgleich.teamcraft.core.HolidayRegion
 import de.zeitgleich.teamcraft.core.KeyBackup
 import de.zeitgleich.teamcraft.core.OwnProfile
 import de.zeitgleich.teamcraft.security.ScreenPrefs
@@ -82,6 +84,7 @@ import de.zeitgleich.teamcraft.ui.forms.fieldError
 import de.zeitgleich.teamcraft.ui.forms.passphraseError
 import de.zeitgleich.teamcraft.ui.forms.requiredTextError
 import de.zeitgleich.teamcraft.ui.forms.supportingText
+import de.zeitgleich.teamcraft.ui.rememberIsOnline
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushService
 import uniffi.teamcraft_ffi.TeamCraftException
@@ -161,6 +164,8 @@ private fun SettingsHub(
     }
   }
   DisplayNameSection(viewModel)
+  // Guests have no meetings of their own to skip holidays in; the server refuses them anyway.
+  if (maybeMe?.isGuest != true) HolidayRegionSection(viewModel)
   PresenceRow(presence) { choice ->
     presence = choice
     viewModel.setPresence(choice)
@@ -493,6 +498,95 @@ private fun DisplayNameSection(viewModel: MainViewModel) {
     }, enabled = !isSaving) { Text(stringResource(R.string.cancel)) }
     resetButton()
   }
+}
+
+/**
+ * Whose public holidays the user's repeating meetings skip (#1450): the workspace's region or one
+ * of their own. Saved as soon as it is picked, the row waits while it saves, and a refusal puts
+ * the old choice back and says so. Offline the row is off: it is a setting, not content. The
+ * meeting list reads afresh whenever it is opened, so it shows the skipped occurrences.
+ */
+@Composable
+private fun HolidayRegionSection(viewModel: MainViewModel) {
+  val scope = rememberCoroutineScope()
+  val isOnline = rememberIsOnline()
+  var maybeLoaded by remember { mutableStateOf<HolidayRegion?>(null) }
+  var hasFailedToLoad by remember { mutableStateOf(false) }
+  // The choice being saved, shown until the server answers; `""` is the workspace's region.
+  var maybePicked by remember { mutableStateOf<String?>(null) }
+  var maybeFailure by remember { mutableStateOf<Int?>(null) }
+  var isOpen by remember { mutableStateOf(false) }
+  LaunchedEffect(isOnline) {
+    if (isOnline && maybeLoaded == null) {
+      val read = viewModel.loadHolidayRegion()
+      maybeLoaded = read
+      hasFailedToLoad = read == null
+    }
+  }
+  val loaded = maybeLoaded
+  val isSaving = maybePicked != null
+  val current = maybePicked ?: loaded?.maybeRegion.orEmpty()
+  val isEnabled = isOnline && loaded != null && !isSaving
+  val hint = when {
+    !isOnline -> stringResource(R.string.holiday_offline)
+    hasFailedToLoad -> stringResource(R.string.holiday_unavailable)
+    loaded == null -> ""
+    else -> holidayHint(loaded)
+  }
+  Box {
+    ListItem(
+      headlineContent = { Text(stringResource(R.string.holiday_title)) },
+      supportingContent = {
+        Column {
+          Text(HOLIDAY_REGION_LABELS[current]?.let { stringResource(it) } ?: current)
+          if (hint.isNotEmpty()) Text(hint, style = MaterialTheme.typography.bodySmall)
+        }
+      },
+      trailingContent = { Chevron(isOpen = isOpen) },
+      modifier = Modifier.clickable(
+        enabled = isEnabled,
+        onClick = {
+          maybeFailure = null
+          isOpen = true
+        },
+      ),
+    )
+    DropdownMenu(expanded = isOpen, onDismissRequest = { isOpen = false }) {
+      for (code in listOf("") + HOLIDAY_REGIONS) {
+        DropdownMenuItem(
+          text = {
+            Text(
+              stringResource(if (code.isEmpty()) R.string.holiday_region_instance else HOLIDAY_REGION_LABELS.getValue(code)),
+              color = if (code == current) MaterialTheme.colorScheme.primary else Color.Unspecified,
+            )
+          },
+          onClick = {
+            isOpen = false
+            if (code == current) return@DropdownMenuItem
+            maybePicked = code
+            scope.launch {
+              val (saved, maybeError) = viewModel.trySetHolidayRegion(code.ifEmpty { null })
+              if (saved != null) maybeLoaded = saved else maybeFailure = maybeError
+              // On a refusal the old choice is back: it was only held while saving.
+              maybePicked = null
+            }
+          },
+        )
+      }
+    }
+  }
+  maybeFailure?.let { ErrorLine(it) }
+}
+
+@Composable
+private fun holidayHint(region: HolidayRegion): String {
+  val source = if (region.maybeRegion != null) {
+    stringResource(R.string.holiday_own_hint)
+  } else {
+    val name = HOLIDAY_REGION_LABELS[region.instanceRegion]?.let { stringResource(it) } ?: region.instanceRegion
+    stringResource(R.string.holiday_instance_hint, name)
+  }
+  return if (region.hasInstanceFeed) "$source ${stringResource(R.string.holiday_feed_hint)}" else source
 }
 
 /** The user's presence as one row; a tap opens the choices. */

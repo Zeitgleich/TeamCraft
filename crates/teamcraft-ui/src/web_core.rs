@@ -1456,7 +1456,10 @@ impl Core {
             notify_changed();
           }
         },
-        Wake::Tick => self.on_tick().await,
+        Wake::Tick => {
+          self.on_tick().await;
+          self.load_background_history(&mut requests).await;
+        },
       }
       self.report_progress();
       self.check_store();
@@ -1567,7 +1570,12 @@ impl Core {
       Some(typing_change) => deadline.min(typing_change),
       None => deadline,
     };
-    let until_tick_ms = deadline.saturating_sub(now_ms()).max(0);
+    // A catch-up's backlog: at once, but only after everything the select below looks at first.
+    let until_tick_ms = if self.is_background_history_due() {
+      0
+    } else {
+      deadline.saturating_sub(now_ms()).max(0)
+    };
     let is_reading = !self.is_sync_paused;
     let Self {
       connection,
@@ -1799,6 +1807,10 @@ impl Core {
     let mut client = client;
     // Calls ring and show their roster in the tab that runs the core.
     client.set_call_event_sink(Box::new(crate::web_calls::on_gateway_event));
+    // The loop reads what a catch-up leaves, a page per turn (issue #1448).
+    if let Err(error) = client.read_backlogs_in_background() {
+      tracing::warn!(%error, "backlogs left by an earlier run not found; the next catch-up reads them");
+    }
     self.client = Some(client);
     self.maybe_push_check_at_ms = Some(i64::MIN);
     store_string(&self.store_ready_key(), "1");
@@ -2783,6 +2795,32 @@ impl Core {
     if moved != self.maybe_reported_bytes {
       self.maybe_reported_bytes = moved;
       notify_local();
+    }
+  }
+
+  /// Whether a page of a catch-up's backlog is due (issue #1448): not while the sync is paused for
+  /// storage space, nor offline.
+  fn is_background_history_due(&self) -> bool {
+    !self.is_sync_paused
+      && self.connection.is_connected()
+      && self
+        .client
+        .as_ref()
+        .is_some_and(Client::is_background_history_due)
+  }
+
+  /// One page of a backlog; the UI's reads are answered meanwhile.
+  async fn load_background_history(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) {
+    if !self.is_background_history_due() {
+      return;
+    }
+    let read = self
+      .serve_during(requests, async |client: &mut Client<Api, Store>| {
+        client.load_background_history_page().await
+      })
+      .await;
+    if read == Some(true) {
+      notify_changed();
     }
   }
 

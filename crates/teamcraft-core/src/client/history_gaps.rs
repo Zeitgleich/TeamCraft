@@ -12,9 +12,15 @@
 //! [`super::ClientSettings::catch_up_message_pages`] it reads the newest page ahead of the rest
 //! ([`Client::note_backlog`]). That hole, its *backlog*, isn't left to the reader: the same catch-up
 //! reads it full once every conversation shows its newest messages ([`Client::read_backlog`]), and
-//! one cut short does in the next. Messages carry state (pins, bookmarks, channel role entries,
-//! edits), so none may stay unread; those whose order matters are taken again in their order
-//! once the hole is read (`messaging.rs`, `replay_controls_from`).
+//! one cut short does in the next. A host that reads backlogs itself
+//! ([`Client::read_backlogs_in_background`], issue #1448; every app's loop) does so after the sync
+//! instead, a page per turn between its other work, so the end of the sync doesn't wait for them;
+//! what an earlier run left is read on the next start, also on a resumed session. Messages carry
+//! state (pins, bookmarks, channel role entries, edits), so none may stay unread; those whose
+//! order matters are taken again in their order once the hole is read (`messaging.rs`,
+//! `replay_controls_from`).
+
+use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "ui")]
@@ -24,6 +30,7 @@ use teamcraft_proto::{ConversationId, ListMessagesQuery, MessageId, MessageRespo
 use super::Client;
 #[cfg(feature = "ui")]
 use super::older_history::read_connections;
+use super::sync::ResyncPart;
 #[cfg(feature = "ui")]
 use crate::api::ApiError;
 use crate::api::ServerApi;
@@ -289,40 +296,196 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// that came before it again, in their order. Each page is noted as it is stored, so a read cut
   /// short goes on from there. Nothing to do without a backlog.
   pub(super) async fn read_backlog(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    loop {
-      let Some(mut record) = read_record(&self.store, conversation)? else {
-        return Ok(());
-      };
-      let Some(backlog) = record.maybe_backlog else {
-        return Ok(());
-      };
-      let Some(gap) = record.backlog_gap() else {
-        // Read full (also from the reader's side, `fill_history_gap`).
-        self.replay_controls_from(conversation, backlog.replay_from)?;
-        record.maybe_backlog = None;
-        tracing::info!(conversation_id = %conversation, "catch-up: backlog read");
-        return write_record(&self.store, conversation, &record);
-      };
-      let query = ListMessagesQuery {
-        maybe_before: None,
-        maybe_after: Some(gap.after),
-        maybe_limit: Some(self.settings.history_page_size),
-      };
-      let page = self.api.list_messages(conversation, &query).await?;
-      let read = Read::after(gap.after, bounds(&page.messages), page.has_more);
-      self.receive_page(page.messages)?;
-      record.gaps = subtract(&record.gaps, read);
-      if record.backlog_gap() == Some(gap) {
-        // A page that doesn't get past the hole's start (only a server ignoring `after` sends one):
-        // the hole is left to the reader, rather than asked for again and again.
-        tracing::warn!(conversation_id = %conversation, "catch-up: a page of the backlog read nothing new");
-        record.maybe_backlog = None;
-      }
-      write_record(&self.store, conversation, &record)?;
-      self.note_sync_progress();
+    while self.read_backlog_page(conversation).await? == BacklogStep::More {
       self.apply_live_during_catch_up().await?;
     }
+    Ok(())
   }
+
+  /// One step of [`Self::read_backlog`]: the next page of the hole, or, once it is read full, the
+  /// controls that came before it taken again in their order (the end of the backlog).
+  pub(super) async fn read_backlog_page(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<BacklogStep, CoreError> {
+    let Some(mut record) = read_record(&self.store, conversation)? else {
+      return Ok(BacklogStep::Done);
+    };
+    let Some(backlog) = record.maybe_backlog else {
+      return Ok(BacklogStep::Done);
+    };
+    let Some(gap) = record.backlog_gap() else {
+      // Read full (also from the reader's side, `fill_history_gap`).
+      self.replay_controls_from(conversation, backlog.replay_from)?;
+      record.maybe_backlog = None;
+      tracing::info!(conversation_id = %conversation, "catch-up: backlog read");
+      write_record(&self.store, conversation, &record)?;
+      return Ok(BacklogStep::Done);
+    };
+    let query = ListMessagesQuery {
+      maybe_before: None,
+      maybe_after: Some(gap.after),
+      maybe_limit: Some(self.settings.history_page_size),
+    };
+    let page = self.api.list_messages(conversation, &query).await?;
+    let read = Read::after(gap.after, bounds(&page.messages), page.has_more);
+    self.receive_page(page.messages)?;
+    record.gaps = subtract(&record.gaps, read);
+    if record.backlog_gap() == Some(gap) {
+      // A page that doesn't get past the hole's start (only a server ignoring `after` sends one):
+      // the hole is left to the reader, rather than asked for again and again.
+      tracing::warn!(conversation_id = %conversation, "catch-up: a page of the backlog read nothing new");
+      record.maybe_backlog = None;
+    }
+    write_record(&self.store, conversation, &record)?;
+    self.note_sync_progress();
+    Ok(BacklogStep::More)
+  }
+
+  /// The host reads the backlogs a catch-up leaves itself, a page per turn of its loop
+  /// ([`Self::is_background_history_due`], [`Self::load_background_history_page`], issue #1448), so
+  /// the end of the full sync (the outbox, membership changes waiting, key packages, account data)
+  /// and the session it keeps no longer wait for them. Without this the catch-up reads them before
+  /// it ends, as before. Called by the host that polls, once per client; the backlogs an earlier
+  /// run left are read too, also on a resumed session, where no catch-up runs.
+  pub fn read_backlogs_in_background(&mut self) -> Result<(), CoreError> {
+    self.background_backlogs.is_on = true;
+    for (key, record) in
+      records::list_json_with_prefix::<GapsRecord>(&self.store, Table::SyncState, RECORD_PREFIX)?
+    {
+      if record.maybe_backlog.is_some()
+        && let Some(Ok(conversation)) = key.strip_prefix(RECORD_PREFIX).map(str::parse)
+      {
+        self.background_backlogs.due.insert(conversation);
+      }
+    }
+    Ok(())
+  }
+
+  /// Whether a host should ask for the next page read in the background now: a backlog a catch-up
+  /// left ([`Self::read_backlogs_in_background`]) or a first sync's older history.
+  pub fn is_background_history_due(&self) -> bool {
+    self.is_backlog_due() || self.is_older_history_due()
+  }
+
+  /// Reads one page in the background, for a host's loop while [`Self::is_background_history_due`]:
+  /// of a backlog first (new messages, the focused conversation's first), else of a first sync's
+  /// older history. A failure waits for its retry time. Returns whether the UI should read again.
+  pub async fn load_background_history_page(&mut self) -> bool {
+    if !self.is_backlog_due() {
+      return Box::pin(self.load_older_history_page()).await;
+    }
+    let before = self.sync_progress.count();
+    // Boxed: its future holds a page's requests and decryption, and sits in the host's loop.
+    match Box::pin(self.read_backlog_in_background()).await {
+      Ok(()) => self.background_backlogs.maybe_retry_at_ms = None,
+      Err(error) => {
+        tracing::debug!(%error, "backlog not read further yet");
+        self.background_backlogs.maybe_retry_at_ms = Some(self.now_ms().saturating_add(BACKLOG_RETRY_MS));
+      },
+    }
+    self.sync_progress.count() != before
+  }
+
+  /// A connection came up: a backlog page that failed is tried again at once.
+  pub(super) fn note_backlog_connection(&mut self) {
+    self.background_backlogs.maybe_retry_at_ms = None;
+  }
+
+  /// Whether a backlog waits for the host's loop and its retry time, if any, has come: a host that
+  /// waits for the catch-up waits for this too (the runner's `RunnerCommand::CatchUp`).
+  pub fn is_backlog_due(&self) -> bool {
+    let backlogs = &self.background_backlogs;
+    if backlogs.due.is_empty() {
+      return false;
+    }
+    let Some(retry_at_ms) = backlogs.maybe_retry_at_ms else {
+      return true;
+    };
+    let now = self.now_ms();
+    // Further ahead than a wait can be: the clock went back.
+    now >= retry_at_ms || retry_at_ms.saturating_sub(now) > BACKLOG_RETRY_MS
+  }
+
+  /// The end of a catch-up whose host reads the backlogs: notes those it leaves.
+  pub(super) fn leave_backlogs_to_host(&mut self, conversations: &[ConversationId]) -> Result<(), CoreError> {
+    for conversation in conversations {
+      if self.has_backlog(*conversation)? {
+        self.background_backlogs.due.insert(*conversation);
+      }
+    }
+    if !self.background_backlogs.due.is_empty() {
+      tracing::info!(
+        backlogs = self.background_backlogs.due.len(),
+        "catch-up: backlogs left to read in the background"
+      );
+    }
+    Ok(())
+  }
+
+  /// One page of the focused conversation's backlog, or else of the first due; at its end what its
+  /// messages need, as in the catch-up (`catch_up_backlogs`). A failure other than the network's
+  /// marks it for another try (`resync_marked_conversations`) and lets the others go on.
+  async fn read_backlog_in_background(&mut self) -> Result<(), CoreError> {
+    let backlogs = &self.background_backlogs.due;
+    let Some(conversation) = self
+      .catch_up_focus
+      .get()
+      .filter(|focus| backlogs.contains(focus))
+      .or_else(|| backlogs.first().copied())
+    else {
+      return Ok(());
+    };
+    // Read meanwhile from the reader's side, by a resync, or the conversation went.
+    let result = if self.has_backlog(conversation)? {
+      match self.read_backlog_page(conversation).await {
+        Ok(BacklogStep::More) => return Ok(()),
+        Ok(BacklogStep::Done) => self.finish_backlog(conversation).await,
+        Err(error) => Err(error),
+      }
+    } else {
+      Ok(())
+    };
+    // A network failure propagates: the backlog stays due and is tried again.
+    self.isolate(conversation, ResyncPart::Content, result)?;
+    self.background_backlogs.due.remove(&conversation);
+    self
+      .store
+      .delete(Table::SyncState, &super::catch_up::marker_key(conversation))?;
+    self.note_sync_progress();
+    Ok(())
+  }
+
+  /// What a backlog's messages need once it is read: those waiting for keys, and their senders'
+  /// keys.
+  pub(super) async fn finish_backlog(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    self.retry_undecrypted(conversation)?;
+    self.learn_sender_keys(conversation).await
+  }
+}
+
+/// How long a backlog page that failed waits for its next try in the background (offline, server
+/// trouble); a new connection tries again at once.
+const BACKLOG_RETRY_MS: i64 = 30_000;
+
+/// What [`Client::read_backlog_page`] left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BacklogStep {
+  /// More of the hole to read.
+  More,
+  /// Read full, or nothing was left.
+  Done,
+}
+
+/// The backlogs a catch-up leaves to the host's loop (issue #1448), beside their records.
+#[derive(Debug, Default)]
+pub(super) struct BackgroundBacklogs {
+  /// The host reads them ([`Client::read_backlogs_in_background`]); otherwise the catch-up does.
+  pub(super) is_on: bool,
+  /// Conversations with a backlog still to read.
+  due: BTreeSet<ConversationId>,
+  /// After a failure: not before this time.
+  maybe_retry_at_ms: Option<i64>,
 }
 
 #[cfg(feature = "ui")]
@@ -443,8 +606,11 @@ fn write_record(
 }
 
 fn record_key(conversation: ConversationId) -> String {
-  format!("history_gaps/{conversation}")
+  format!("{RECORD_PREFIX}{conversation}")
 }
+
+/// Key prefix of the records in [`Table::SyncState`], one per conversation with holes.
+const RECORD_PREFIX: &str = "history_gaps/";
 
 #[cfg(test)]
 mod tests {

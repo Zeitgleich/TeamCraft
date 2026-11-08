@@ -34,6 +34,13 @@
 //! of the catch-up, as before, and so does everything after it. Waiting membership changes are not
 //! committed in between (`apply_pending_changes`): they may concern groups not yet caught up, and
 //! the sync commits them at its end.
+//!
+//! A resumed session runs no catch-up, and nothing of this (looked at for issue #1448): what arrives
+//! while it reads the unread counts, presence and the running calls (`resync_live_state`) waits for
+//! those three reads only, and is applied right after them in its order; the counts are read once
+//! the replay drained, as `GET /unread` already counts the replayed messages. The backlogs a
+//! catch-up leaves are read after it where the host reads them (`history_gaps.rs`), with the
+//! connection live.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
