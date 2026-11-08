@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Material Symbols "workspaces" (Apache License 2.0): a space. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+  android:width="24dp"
+  android:height="24dp"
+  android:viewportWidth="960"
+  android:viewportHeight="960">
+  <group android:translateY="960">
+    <path
+      android:fillColor="#FF000000"
+      android:pathData="M240,-40q-66,0 -113,-47T80,-200q0,-66 47,-113t113,-47q66,0 113,47t47,113q0,66 -47,113T240,-40Zm480,0q-66,0 -113,-47t-47,-113q0,-66 47,-113t113,-47q66,0 113,47t47,113q0,66 -47,113T720,-40ZM240,-120q33,0 56.5,-23.5T320,-200q0,-33 -23.5,-56.5T240,-280q-33,0 -56.5,23.5T160,-200q0,33 23.5,56.5T240,-120Zm480,0q33,0 56.5,-23.5T800,-200q0,-33 -23.5,-56.5T720,-280q-33,0 -56.5,23.5T640,-200q0,33 23.5,56.5T720,-120ZM480,-520q-66,0 -113,-47t-47,-113q0,-66 47,-113t113,-47q66,0 113,47t47,113q0,66 -47,113t-113,47Zm0,-80q33,0 56.5,-23.5T560,-680q0,-33 -23.5,-56.5T480,-760q-33,0 -56.5,23.5T400,-680q0,33 23.5,56.5T480,-600Z" />
+  </group>
+</vector>

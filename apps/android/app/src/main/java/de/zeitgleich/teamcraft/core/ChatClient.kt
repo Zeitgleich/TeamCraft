@@ -9,7 +9,10 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
+import uniffi.teamcraft_ffi.CreateOutcome
 import uniffi.teamcraft_ffi.LeaveChoice
+import uniffi.teamcraft_ffi.NewChannelInput
+import uniffi.teamcraft_ffi.NewSpaceInput
 import uniffi.teamcraft_ffi.ReviewedRolesOutcome
 import uniffi.teamcraft_ffi.SpaceMenuItem
 import uniffi.teamcraft_ffi.TeamCraft
@@ -95,6 +98,23 @@ class ChatClient(
   suspend fun rawQuery(query: String): String = core().query(query)
 
   suspend fun act(action: String) = core().act(action)
+
+  /**
+   * People whose name or username matches [query], at most [limit], without the user and bots. The
+   * server's directory answers later as a change; read again then (#1534).
+   */
+  suspend fun searchPeople(query: String, limit: Int): List<User> =
+    decodeAnswer(core().searchPeople(query, limit.toUInt())).people
+
+  /** Whether "New space" shows: the workspace role allows creating spaces. */
+  suspend fun canCreateSpaces(): Boolean = core().canCreateSpaces()
+
+  /** Opens, or finds, the DM (one person) or group DM (several) with exactly these people. */
+  suspend fun openDirect(users: List<String>): CreateOutcome = core().openDirect(users)
+
+  suspend fun createChannel(input: NewChannelInput): CreateOutcome = core().createChannel(input)
+
+  suspend fun createSpace(input: NewSpaceInput): CreateOutcome = core().createSpace(input)
 
   /** The files of a draft (#1220), in the order they were attached. */
   suspend fun draftFiles(conversation: String, maybeThread: String?): List<DraftFileItem> =

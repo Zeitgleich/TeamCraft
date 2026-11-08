@@ -62,6 +62,8 @@ struct SpaceSwitcherView: View {
   let spaces: [HomeSpace]
   let selectedId: String?
   let canBrowse: Bool
+  /// "New space", where the workspace role allows it (#1534); the switcher closes first.
+  var onCreate: (() -> Void)?
   let onSelect: (String) -> Void
 
   var body: some View {
@@ -89,15 +91,25 @@ struct SpaceSwitcherView: View {
           .buttonStyle(.plain)
           .accessibilityAddTraits(space.id == selectedId ? .isSelected : [])
         }
-        if canBrowse {
+        if canBrowse || onCreate != nil {
           Section {
-            NavigationLink {
-              BrowseSpacesView { spaceId in
-                onSelect(spaceId)
+            if let onCreate {
+              Button {
                 dismiss()
+                onCreate()
+              } label: {
+                Label("create_space", systemImage: "plus")
               }
-            } label: {
-              Label("spaces_browse", systemImage: "magnifyingglass")
+            }
+            if canBrowse {
+              NavigationLink {
+                BrowseSpacesView { spaceId in
+                  onSelect(spaceId)
+                  dismiss()
+                }
+              } label: {
+                Label("spaces_browse", systemImage: "magnifyingglass")
+              }
             }
           }
         }

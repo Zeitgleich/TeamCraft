@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Starting things from the phone (#1534): the "New" menu, new channel, new space. -->
+<resources>
+  <string name="create_new">New</string>
+  <string name="create_message_hint">A direct message or a group</string>
+  <string name="create_channel_in">In %1$s</string>
+  <string name="create_browse_hint">Join channels of your spaces</string>
+  <string name="create_space">New space</string>
+  <string name="create_space_hint">For a team, a project or a topic</string>
+  <string name="create_description_label">Description (optional)</string>
+  <string name="create_name_too_long">Use at most 100 characters.</string>
+  <string name="create_name_invalid">Remove line breaks and other control characters.</string>
+  <string name="create_description_too_long">Use at most 1000 characters.</string>
+  <string name="create_name_refused">The server didn\'t accept this name. Try a shorter one without special characters.</string>
+  <string name="create_not_allowed">You can\'t create this here any more. Your role may have changed.</string>
+  <string name="create_channel_submit">Create channel</string>
+  <string name="create_channel_title">New channel in %1$s</string>
+  <string name="channel_access_label">Who can join</string>
+  <string name="channel_access_public">Public</string>
+  <string name="channel_access_public_hint">Everyone in the space can find and join it.</string>
+  <string name="channel_access_private">Private</string>
+  <string name="channel_access_private_hint">Only people who are added can see it.</string>
+  <string name="space_name_label">Space name</string>
+  <string name="space_name_missing">Enter a name for the space.</string>
+  <string name="space_access_open">Open</string>
+  <string name="space_access_open_hint">Everyone in the workspace can join.</string>
+  <string name="space_access_invite">Invitation only</string>
+  <string name="space_access_invite_hint">People join when they are invited.</string>
+  <string name="create_space_submit">Create space</string>
+  <string name="dm_opening">Opening…</string>
+</resources>

@@ -22,7 +22,13 @@ struct BrowseView: View {
   @State private var channels: [BrowsableChannel] = []
   /// People picked for a new DM (one) or group DM (several).
   @State private var picked: [String] = []
-  @State private var maybePendingDm: [String]?
+  /// The people the picker shows: the directory through the core, narrowed by `peopleQuery` (#1534).
+  @State private var maybePeople: [BrowseSnapshot.Person]?
+  /// Who was picked, kept so a pick stays named when the search no longer finds them.
+  @State private var pickedPeople: [String: BrowseSnapshot.Person] = [:]
+  @State private var peopleQuery = ""
+  @State private var isOpening = false
+  @State private var maybeDmFailure: AppFailure?
   @State private var isCreating = false
   @State private var showsArchived = false
 
@@ -49,7 +55,9 @@ struct BrowseView: View {
       }
       // A sheet, not an alert: an alert's text field can't show an error (forms.md).
       .sheet(isPresented: $isCreating) {
-        NewChannelSheet(onCreate: createChannel)
+        if let spaceId, let space = snapshot?.spaces?.first(where: { $0.id == spaceId }) {
+          NewChannelView(spaceId: spaceId, spaceName: space.name) { created in open(created) }
+        }
       }
       .joinNoteAlert(model)
     }
@@ -155,30 +163,59 @@ struct BrowseView: View {
     }
   }
 
-  @ViewBuilder
   private var peopleList: some View {
-    let people = snapshot?.people ?? []
-    if snapshot != nil && people.isEmpty {
-      hint("browse_no_people")
-    } else {
-      List {
-        Section {
-          ForEach(people) { person in
-            PersonPickRow(person: person, picked: $picked)
-              .disabled(maybePendingDm != nil)
-          }
-        } footer: {
-          Text("dm_pick_hint")
-        }
+    let found = maybePeople ?? []
+    // Picked people stay on top, also when the search would leave them out.
+    let people = picked.compactMap { id in found.first { $0.id == id } ?? pickedPeople[id] }
+      + found.filter { !picked.contains($0.id) }
+    return List {
+      if maybePeople != nil && people.isEmpty {
+        Text("browse_no_people").foregroundStyle(Theme.textMuted)
       }
-      .safeAreaInset(edge: .bottom) {
-        if !picked.isEmpty {
-          Button(LocalizedStringKey(picked.count == 1 ? "dm_start" : "dm_start_group")) { message(picked) }
-            .buttonStyle(.borderedProminent)
-            .frame(maxWidth: .infinity)
-            .padding()
-            .disabled(maybePendingDm != nil)
+      Section {
+        ForEach(people) { person in
+          PersonPickRow(person: person, picked: $picked)
+            .disabled(isOpening)
         }
+      } footer: {
+        Text("dm_pick_hint")
+      }
+    }
+    .onChange(of: picked) {
+      for id in picked where pickedPeople[id] == nil {
+        pickedPeople[id] = maybePeople?.first { $0.id == id }
+      }
+    }
+    .searchable(text: $peopleQuery, placement: .navigationBarDrawer(displayMode: .always), prompt: Text("browse_filter_people"))
+    .task(id: PeopleSearch(query: peopleQuery, changes: model.changeCount)) {
+      // A keystroke cancels this before the directory is asked; a change reads again at once.
+      if !peopleQuery.isEmpty { try? await Task.sleep(for: .milliseconds(250)) }
+      guard !Task.isCancelled else { return }
+      if let found = await model.searchPeople(peopleQuery.trimmingCharacters(in: .whitespacesAndNewlines)) {
+        maybePeople = found
+      }
+    }
+    .safeAreaInset(edge: .bottom) {
+      if !picked.isEmpty {
+        VStack(spacing: 8) {
+          if let maybeDmFailure {
+            Text(maybeDmFailure.message).font(.footnote).foregroundStyle(Theme.danger)
+          }
+          Button {
+            message(picked)
+          } label: {
+            if isOpening {
+              ProgressView().frame(maxWidth: .infinity)
+            } else {
+              Text(LocalizedStringKey(picked.count == 1 ? "dm_start" : "dm_start_group")).frame(maxWidth: .infinity)
+            }
+          }
+          .buttonStyle(.borderedProminent)
+          .controlSize(.large)
+          .disabled(isOpening)
+        }
+        .padding()
+        .background(.bar)
       }
     }
   }
@@ -199,11 +236,6 @@ struct BrowseView: View {
       spaceId = spaces.first { $0.id == maybeInitialSpaceId }?.id ?? spaces.first?.id
     }
     await loadChannels()
-    // A new direct conversation opens as soon as the core created it, as on desktop.
-    if let users = maybePendingDm, let created = loaded?.directConversation(with: users) {
-      maybePendingDm = nil
-      open(created)
-    }
   }
 
   private func loadChannels() async {
@@ -211,93 +243,28 @@ struct BrowseView: View {
     channels = await model.browseChannels(spaceId: spaceId)
   }
 
+  /// Opens the DM or group: one the device knows at once, a new one once the server made it.
   private func message(_ userIds: [String]) {
     if let existing = snapshot?.directConversation(with: userIds) {
       open(existing)
       return
     }
-    maybePendingDm = userIds
-    let action: ChatAction = userIds.count == 1 ? .openDm(userId: userIds[0]) : .openGroupDm(userIds: userIds)
-    Task { await model.perform(action) }
-  }
-
-  /// Creates the channel; nil when the core took it, else why not (shown at the name field).
-  private func createChannel(_ name: String) async -> AppFailure? {
-    guard let spaceId else { return .generic }
-    return await model.performReporting(.createChannel(spaceId: spaceId, name: name))
+    guard !isOpening else { return }
+    isOpening = true
+    maybeDmFailure = nil
+    Task {
+      switch await model.openDirect(userIds) {
+      case .created(let id): open(id)
+      case .nameRefused, .notAllowed: maybeDmFailure = .generic
+      case .failed(let failure): maybeDmFailure = failure
+      }
+      isOpening = false
+    }
   }
 
   private func open(_ conversationId: String) {
     onOpen(conversationId)
     dismiss()
-  }
-}
-
-/// The name of a new channel. An empty name and the server's refusal (a taken name) are said at
-/// the field; the sheet stays open with the input until the channel exists.
-private struct NewChannelSheet: View {
-  @Environment(\.dismiss) private var dismiss
-  let onCreate: (String) async -> AppFailure?
-
-  @State private var name = ""
-  @State private var maybeProblem: TextProblem?
-  @State private var isCreating = false
-  @State private var showsArchived = false
-  @FocusState private var isFocused: Bool
-  @AccessibilityFocusState private var isAccessibilityFocused: Bool
-
-  var body: some View {
-    NavigationStack {
-      Form {
-        Section {
-          TextField("channel_name_placeholder", text: $name)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .submitLabel(.done)
-            .focused($isFocused)
-            .accessibilityFocused($isAccessibilityFocused)
-            .accessibilityLabel(Text("channel_name"))
-            .fieldError(maybeProblem?.message)
-            .onSubmit { Task { await create() } }
-            .onChange(of: name) { maybeProblem = nil }
-          FieldMessage(maybeError: maybeProblem?.message)
-        } header: {
-          Text("channel_name")
-        }
-      }
-      .navigationTitle("channel_create")
-      .navigationBarTitleDisplayMode(.inline)
-      .toolbar {
-        ToolbarItem(placement: .cancellationAction) { Button("cancel") { dismiss() } }
-        ToolbarItem(placement: .confirmationAction) {
-          Button("channel_create_action") { Task { await create() } }
-            .disabled(isCreating)
-        }
-      }
-      .onAppear { isFocused = true }
-    }
-    .presentationDetents([.medium])
-  }
-
-  private func create() async {
-    guard !isCreating else { return }
-    if let problem = TextProblem.required(name, missing: "channel_name_missing") {
-      show(problem)
-      return
-    }
-    isCreating = true
-    if let failure = await onCreate(name.trimmingCharacters(in: .whitespacesAndNewlines)) {
-      show(.refused(failure))
-    } else {
-      dismiss()
-    }
-    isCreating = false
-  }
-
-  private func show(_ problem: TextProblem) {
-    maybeProblem = problem
-    isFocused = true
-    isAccessibilityFocused = true
   }
 }
 
@@ -322,4 +289,11 @@ struct PersonPickRow: View {
     }
     .accessibilityAddTraits(isPicked ? .isSelected : [])
   }
+}
+
+/// What the people search waits for: the typed text, and a change that may have brought the
+/// directory's answer.
+private struct PeopleSearch: Equatable {
+  let query: String
+  let changes: Int
 }

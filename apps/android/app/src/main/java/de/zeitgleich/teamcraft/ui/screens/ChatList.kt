@@ -70,6 +70,7 @@ import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -227,11 +228,24 @@ fun ChatListScreen(
   // snapshot read, again when the list's spaces change or the switcher opens, never per change.
   var snapshotSpaces by remember { mutableStateOf<List<HomeSpace>>(emptyList()) }
   var isSwitchingSpace by rememberSaveable { mutableStateOf(false) }
+  // The "New" menu and its forms (#1534); a space made here is read again at once (it has no channel).
+  var maybeCreating by rememberSaveable { mutableStateOf<CreateStep?>(null) }
+  var maybeNewChannelSpaceId by rememberSaveable { mutableStateOf<String?>(null) }
+  var createdSpaces by rememberSaveable { mutableIntStateOf(0) }
+  // Spaces where the user may create channels, and whether new spaces: asked when the menu or the
+  // switcher opens, so a role changed meanwhile counts.
+  var channelSpaceIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+  var canCreateSpaces by remember { mutableStateOf(false) }
+  val isChoosing = maybeCreating == CreateStep.Menu || isSwitchingSpace
   val listedSpaceIds = remember(conversations) { conversations?.mapNotNullTo(HashSet()) { it.maybeSpaceId } }
-  LaunchedEffect(conversations?.size, listedSpaceIds, isSwitchingSpace) {
+  LaunchedEffect(conversations?.size, listedSpaceIds, isSwitchingSpace, createdSpaces) {
     val maybeSnapshot = viewModel.readChat { snapshot() } ?: return@LaunchedEffect
     isGuest = maybeSnapshot.me.isGuest
     snapshotSpaces = maybeSnapshot.spaces.map { HomeSpace(it.id, it.name, it.maybeImageVersion) }
+    channelSpaceIds = maybeSnapshot.spaces.filter { it.canCreateChannels }.mapTo(HashSet()) { it.id }
+  }
+  LaunchedEffect(isChoosing, isGuest) {
+    if (isChoosing && !isGuest) canCreateSpaces = viewModel.canCreateSpaces()
   }
   val spaces = remember(snapshotSpaces, conversations) { homeSpaces(snapshotSpaces, conversations.orEmpty()) }
   // Takes effect at once: the flow follows the setting (#1151).
@@ -325,6 +339,14 @@ fun ChatListScreen(
           onDismiss,
           maybeOnOpenView = { view -> onNavigate("space/$spaceId?tab=${view.name}") },
           maybeOnBrowse = if (isGuest) null else ({ onNavigate("browse?space=$spaceId") }),
+          maybeOnNewChannel = if (spaceId in channelSpaceIds) {
+            {
+              maybeNewChannelSpaceId = spaceId
+              maybeCreating = CreateStep.Channel
+            }
+          } else {
+            null
+          },
         )
       },
       onBrowseSpace = { spaceId -> onNavigate("browse?space=$spaceId") },
@@ -345,6 +367,7 @@ fun ChatListScreen(
     onSearch = onSearch,
     onAccount = onSettings,
     onNavigate = onNavigate,
+    onCreate = { maybeCreating = CreateStep.Menu },
     banners = {
       OfflineBanner(onSignInAgain = { viewModel.signOut() })
       val firstSync = maybeFirstSync
@@ -376,6 +399,11 @@ fun ChatListScreen(
       spaces = spaces,
       maybeSelectedId = selectedSpace(spaces, maybeRememberedSpace)?.id,
       canBrowse = !isGuest,
+      canCreate = canCreateSpaces,
+      onCreate = {
+        isSwitchingSpace = false
+        maybeCreating = CreateStep.Space
+      },
       onSelect = { spaceId ->
         spaceChoice.select(spaceId)
         tab = ChatTab.Home
@@ -388,7 +416,62 @@ fun ChatListScreen(
       onDismiss = { isSwitchingSpace = false },
     )
   }
+  // A new channel goes into the space Home shows; in the list layout into the only space where the
+  // user may create one, else each space's menu has "New channel".
+  val maybeChannelSpace = (if (isList) null else selectedSpace(spaces, maybeRememberedSpace)?.takeIf { it.id in channelSpaceIds })
+    ?: spaces.singleOrNull { it.id in channelSpaceIds }.takeIf { isList }
+  when (maybeCreating) {
+    CreateStep.Menu -> CreateMenuSheet(
+      choices = CreateChoices(maybeChannelSpace?.name, canCreateSpace = canCreateSpaces, canBrowse = !isGuest),
+      onNewMessage = {
+        maybeCreating = null
+        onNavigate("browse?people=true")
+      },
+      onNewChannel = {
+        maybeNewChannelSpaceId = maybeChannelSpace?.id
+        maybeCreating = CreateStep.Channel
+      },
+      onNewSpace = { maybeCreating = CreateStep.Space },
+      onBrowse = {
+        maybeCreating = null
+        onNavigate(maybeChannelSpace?.let { "browse?space=${it.id}" } ?: "browse")
+      },
+      onDismiss = { maybeCreating = null },
+    )
+    CreateStep.Channel -> {
+      val maybeSpace = spaces.firstOrNull { it.id == maybeNewChannelSpaceId }
+      if (maybeSpace == null) {
+        // The space is gone (left, or the list changed): nothing to create a channel in.
+        LaunchedEffect(Unit) { maybeCreating = null }
+      } else {
+        NewChannelSheet(
+          viewModel = viewModel,
+          spaceId = maybeSpace.id,
+          spaceName = maybeSpace.name,
+          onCreated = { id ->
+            maybeCreating = null
+            onOpen(id)
+          },
+          onDismiss = { maybeCreating = null },
+        )
+      }
+    }
+    CreateStep.Space -> NewSpaceSheet(
+      viewModel = viewModel,
+      onCreated = { id ->
+        maybeCreating = null
+        createdSpaces++
+        spaceChoice.select(id)
+        tab = ChatTab.Home
+      },
+      onDismiss = { maybeCreating = null },
+    )
+    null -> Unit
+  }
 }
+
+/** Which part of "New" is open (#1534). */
+internal enum class CreateStep { Menu, Channel, Space }
 
 /** The server's brand as the top bar shows it: its name and, when it has one, its logo. */
 internal class MainBrand(val name: String, val maybeLogo: ImageBitmap?)
@@ -422,6 +505,8 @@ internal fun MainScaffold(
   onSearch: () -> Unit,
   onAccount: () -> Unit,
   onNavigate: (String) -> Unit,
+  /** Home's button: the "New" menu (#1534). */
+  onCreate: () -> Unit = {},
   banners: @Composable () -> Unit = {},
   /** The first sync is running: an empty list is not known to be empty yet (#297). */
   isSyncing: Boolean = false,
@@ -475,14 +560,16 @@ internal fun MainScaffold(
     snackbarHost = snackbarHost,
     floatingActionButton = {
       // Home and DMs, in the theme's color; not twice: empty DMs have the same action in the middle.
+      // On Home it opens the "New" menu (message, channel, space); on DMs it starts a message.
       if (maybeSelectionBar == null && (shownTab == ChatTab.Home || (shownTab == ChatTab.Direct && hasDirect))) {
+        val isHome = shownTab == ChatTab.Home
         ExtendedFloatingActionButton(
-          onClick = { onNavigate("browse?people=true") },
+          onClick = if (isHome) onCreate else ({ onNavigate("browse?people=true") }),
           expanded = isFabExpanded,
           containerColor = MaterialTheme.colorScheme.primary,
           contentColor = MaterialTheme.colorScheme.onPrimary,
-          icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
-          text = { Text(stringResource(R.string.dm_new)) },
+          icon = { Icon(if (isHome) Icons.Filled.Add else Icons.Filled.Edit, contentDescription = null) },
+          text = { Text(stringResource(if (isHome) R.string.create_new else R.string.dm_new)) },
         )
       }
     },

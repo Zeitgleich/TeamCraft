@@ -611,6 +611,8 @@ data class ChatAnswer(
   val load: ListLoadWire? = null,
   /** [ChatQueries.joinableSpaces]: open spaces the user isn't in (#1526). */
   val spaces: List<JoinableSpace> = emptyList(),
+  /** [ChatClient.searchPeople]: people by name, the server's directory included (#1534). */
+  val people: List<User> = emptyList(),
 )
 
 /** An open space the user may join, as "Browse spaces" lists it (#1526). */
