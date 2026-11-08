@@ -63,7 +63,7 @@ import java.time.ZoneOffset
 
 /** The overview, read again whenever the store changes. */
 @Composable
-private fun rememberScheduledOverview(viewModel: MainViewModel): ScheduledOverview? {
+internal fun rememberScheduledOverview(viewModel: MainViewModel): ScheduledOverview? {
   val changes by viewModel.changeCount.collectAsState()
   var overview by remember { mutableStateOf<ScheduledOverview?>(null) }
   LaunchedEffect(changes) {
@@ -438,8 +438,7 @@ fun SendLaterSheet(viewModel: MainViewModel, onPick: (Long) -> Unit, onDismiss: 
 
 /** On the main screen while a scheduled message waits for the user: nothing waits silently. */
 @Composable
-fun ScheduledAttentionCard(viewModel: MainViewModel, onOpen: () -> Unit) {
-  val maybeOverview = rememberScheduledOverview(viewModel)
+fun ScheduledAttentionCard(maybeOverview: ScheduledOverview?, onOpen: () -> Unit) {
   val count = maybeOverview?.messages?.count { it.needsAttention } ?: 0
   if (count == 0) return
   Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).clickable(onClick = onOpen)) {

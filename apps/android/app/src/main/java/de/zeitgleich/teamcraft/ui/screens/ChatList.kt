@@ -1,6 +1,16 @@
 package de.zeitgleich.teamcraft.ui.screens
 
 import androidx.compose.ui.semantics.heading
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.stateDescription
 import android.content.Context
 import android.text.format.DateUtils
 import androidx.activity.compose.BackHandler
@@ -103,6 +113,7 @@ import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Surface
@@ -136,7 +147,6 @@ import de.zeitgleich.teamcraft.ui.PreviewSender
 import de.zeitgleich.teamcraft.ui.SectionTitle
 import de.zeitgleich.teamcraft.ui.ChatTab
 import de.zeitgleich.teamcraft.ui.HomeFilter
-import de.zeitgleich.teamcraft.ui.channelSections
 import de.zeitgleich.teamcraft.ui.directSections
 import de.zeitgleich.teamcraft.ui.isDirect
 import de.zeitgleich.teamcraft.ui.listSections
@@ -144,7 +154,11 @@ import de.zeitgleich.teamcraft.ui.listedSpaces
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 import de.zeitgleich.teamcraft.ui.theme.ChatListGrouping
 import de.zeitgleich.teamcraft.ui.theme.ChatListLayout
-import de.zeitgleich.teamcraft.ui.isListedInHome
+import de.zeitgleich.teamcraft.ui.CollapsedSections
+import de.zeitgleich.teamcraft.ui.collapseKey
+import de.zeitgleich.teamcraft.ui.homeSections
+import de.zeitgleich.teamcraft.ui.visibleRows
+import de.zeitgleich.teamcraft.core.ScheduledOverview
 import de.zeitgleich.teamcraft.ui.listName
 import de.zeitgleich.teamcraft.ui.tabBadge
 import de.zeitgleich.teamcraft.ui.toggled
@@ -167,6 +181,7 @@ import uniffi.teamcraft_ffi.rowBadge
 private val FAB_CLEARANCE = 88.dp
 private val AVATAR_SIZE = 40.dp
 private val BRAND_LOGO_HEIGHT = 28.dp
+private val QUICK_CARD_WIDTH = 148.dp
 
 /**
  * The main screen, as the desktop's One Home (#237): the brand and the user's avatar on top, one
@@ -205,14 +220,13 @@ fun ChatListScreen(
   val grouping by remember { AppearancePrefs.prefs(context).chatListGrouping }.collectAsState()
   val isList = layout == ChatListLayout.List
   BackHandler(enabled = selection.isNotEmpty()) { selection = emptyList() }
-  // Back on Activity or Spaces goes Home first, as in other apps with a bottom navigation.
-  BackHandler(enabled = selection.isEmpty() && (tab == ChatTab.Activity || (tab == ChatTab.Spaces && !isList))) { tab = ChatTab.Home }
-  // A conversation opened from elsewhere (notification, link) shows in its own tab.
+  // Back on DMs or Activity goes Home first, as in other apps with a bottom navigation.
+  BackHandler(enabled = selection.isEmpty() && tab != ChatTab.Home) { tab = ChatTab.Home }
+  // A channel opened from elsewhere (notification, link) while the DMs show: Home has it. Home
+  // lists DMs with something new too, so a DM opened from there stays highlighted there.
   LaunchedEffect(maybeSelectedId, conversations, isList) {
     conversations?.firstOrNull { it.id == maybeSelectedId }?.let { selected ->
-      // A starred channel opened from Home stays there, highlighted under Favorites (#1346).
-      val staysHome = tab == ChatTab.Home && selected.isListedInHome
-      if (tab != ChatTab.Activity && !staysHome) tab = if (selected.isDirect || isList) ChatTab.Home else ChatTab.Spaces
+      if (tab == ChatTab.Direct && (isList || !selected.isDirect)) tab = ChatTab.Home
     }
   }
   var maybeFirstSync by remember { mutableStateOf<FirstSyncItem?>(null) }
@@ -227,6 +241,8 @@ fun ChatListScreen(
     }
   }
   val loaded = conversations
+  // The read the attention banner made already: its counts feed the Scheduled card too (#1466).
+  val maybeScheduled = rememberScheduledOverview(viewModel)
   // The list is usable once its rows and their last lines are there (start-up measurements, Play vitals).
   ReportDrawnWhen { conversations != null && (previews.isNotEmpty() || conversations.isEmpty()) }
   val maybeBrand by viewModel.loginBrand.collectAsState()
@@ -304,9 +320,10 @@ fun ChatListScreen(
         SyncingLine(isCatchingUp = conversations.orEmpty().any { it.isCatchingUp })
       }
       NotificationPermissionCard()
-      ScheduledAttentionCard(viewModel) { onNavigate("scheduled") }
+      ScheduledAttentionCard(maybeScheduled) { onNavigate("scheduled") }
     },
     isGuest = isGuest,
+    quickAccess = quickAccess(conversations.orEmpty(), maybeScheduled),
     joinRequestCount = joinRequests.size,
     joinRequests = { JoinRequestSection(joinRequests, viewModel.joinRequests) },
     guestNoticeCount = expiringGuests.size,
@@ -350,8 +367,10 @@ internal fun MainScaffold(
   /** Set when there are no conversations and reading them failed. */
   maybeReadFailure: LoadFailure? = null,
   onRetry: () -> Unit = {},
-  /** Guests browse no channels (as on desktop); the Spaces tab lists only their own. */
+  /** Guests browse no channels (as on desktop); Home lists only their own. */
   isGuest: Boolean = false,
+  /** What the quick-access cards on top of Home say (#1488). */
+  quickAccess: QuickAccess = QuickAccess(),
   /** Admins' requests waiting for the user's decision: counted on Activity, shown on top of it. */
   joinRequestCount: Int = 0,
   joinRequests: @Composable () -> Unit = {},
@@ -360,12 +379,15 @@ internal fun MainScaffold(
   snackbarHost: @Composable () -> Unit = {},
 ) {
   val isList = layout == ChatListLayout.List
-  // The tab the Spaces layout left: Home has its channels now.
-  val shownTab = if (isList && tab == ChatTab.Spaces) ChatTab.Home else tab
-  val hasDirect = isList || maybeConversations.orEmpty().any { it.isDirect }
-  // Home's list: the button shrinks to its icon once the list scrolls, so it never covers a row's text.
+  // The list layout has the DMs on Home and no tab of their own for them.
+  val shownTab = if (isList && tab == ChatTab.Direct) ChatTab.Home else tab
+  val hasDirect = maybeConversations.orEmpty().any { it.isDirect }
+  // The button shrinks to its icon once the list scrolls, so it never covers a row's text.
   val homeList = rememberLazyListState()
-  val isFabExpanded by remember { derivedStateOf { homeList.firstVisibleItemIndex == 0 } }
+  val directList = rememberLazyListState()
+  val isFabExpanded by remember(shownTab) {
+    derivedStateOf { (if (shownTab == ChatTab.Direct) directList else homeList).firstVisibleItemIndex == 0 }
+  }
   Scaffold(
     contentWindowInsets = ScreenInsets,
     topBar = { maybeSelectionBar?.invoke() ?: BrandTopBar(brand, accountUserId, accountName, onSearch = onSearch, onAccount = onAccount) },
@@ -374,11 +396,13 @@ internal fun MainScaffold(
     },
     snackbarHost = snackbarHost,
     floatingActionButton = {
-      // Only where it fits and not twice: an empty Home has the same action in its middle.
-      if (maybeSelectionBar == null && shownTab == ChatTab.Home && hasDirect) {
+      // Home and DMs, in the theme's color; not twice: empty DMs have the same action in the middle.
+      if (maybeSelectionBar == null && (shownTab == ChatTab.Home || (shownTab == ChatTab.Direct && hasDirect))) {
         ExtendedFloatingActionButton(
           onClick = { onNavigate("browse?people=true") },
           expanded = isFabExpanded,
+          containerColor = MaterialTheme.colorScheme.primary,
+          contentColor = MaterialTheme.colorScheme.onPrimary,
           icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
           text = { Text(stringResource(R.string.dm_new)) },
         )
@@ -393,10 +417,11 @@ internal fun MainScaffold(
         maybeConversations == null -> LoadingScreen()
         // Nothing yet while the first sync brings the conversations: not "no conversations".
         maybeConversations.isEmpty() && isSyncing && shownTab != ChatTab.Activity -> ListSkeleton()
-        isList && shownTab == ChatTab.Home -> ListTab(maybeConversations, list, homeList, onNavigate, canBrowse = !isGuest, bySpace = grouping == ChatListGrouping.BySpace)
-        shownTab == ChatTab.Home -> HomeTab(maybeConversations, list, homeList, onNavigate)
-        shownTab == ChatTab.Activity -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests, guestNoticeCount, guestNotices, isSyncing)
-        else -> SpacesTab(maybeConversations, list, onNavigate, canBrowse = !isGuest)
+        isList && shownTab == ChatTab.Home ->
+          ListTab(maybeConversations, list, homeList, onNavigate, canBrowse = !isGuest, bySpace = grouping == ChatListGrouping.BySpace, quickAccess)
+        shownTab == ChatTab.Home -> HomeTab(maybeConversations, list, homeList, onNavigate, canBrowse = !isGuest, quickAccess)
+        shownTab == ChatTab.Direct -> DirectTab(maybeConversations, list, directList, onNavigate)
+        else -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests, guestNoticeCount, guestNotices, isSyncing)
       }
     }
   }
@@ -425,14 +450,46 @@ internal class ListState(
 }
 
 /**
- * Home: the DMs (outside spaces) with their filters. The conversations start right below the bar;
- * threads, saved items, drafts and meetings are on Activity, people behind the new-message button.
+ * Home of the spaces layout (#1488): the quick-access cards, the DMs with something new, the
+ * favorites and each space's channels in sections the user can collapse, and browsing for more at
+ * the end. One `LazyColumn`, so only what is on screen is built.
  */
 @Composable
-private fun HomeTab(conversations: List<ConversationItem>, list: ListState, listState: LazyListState, onNavigate: (String) -> Unit) {
+private fun HomeTab(
+  conversations: List<ConversationItem>,
+  list: ListState,
+  listState: LazyListState,
+  onNavigate: (String) -> Unit,
+  canBrowse: Boolean,
+  quickAccess: QuickAccess,
+) {
+  val sections = homeSections(conversations, list.lastActivity, listsArchived = !canBrowse)
+  val context = LocalContext.current
+  val collapsing = remember { CollapsedSections.of(context) }
+  val collapsed by collapsing.collapsed.collectAsState()
+  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
+    item(key = "quick-access") { QuickAccessRow(quickAccess, onNavigate) }
+    if (sections.isEmpty()) {
+      item(key = "empty") {
+        EmptyHint(stringResource(R.string.spaces_empty))
+      }
+    }
+    collapsibleRows(sections, list, collapsed, onToggle = collapsing::toggle)
+    if (canBrowse) {
+      item(key = "browse") { EntryRow(Icons.Filled.Add, stringResource(R.string.browse_channels)) { onNavigate("browse") } }
+    }
+  }
+}
+
+/**
+ * DMs: the DMs and group DMs (outside spaces) with their filters. The conversations start right
+ * below the bar; people are behind the new-message button.
+ */
+@Composable
+private fun DirectTab(conversations: List<ConversationItem>, list: ListState, listState: LazyListState, onNavigate: (String) -> Unit) {
   var dmFilter by rememberSaveable { mutableStateOf("") }
   var homeChip by rememberSaveable { mutableStateOf(HomeFilter.All) }
-  if (conversations.none { it.isListedInHome }) {
+  if (conversations.none { it.isDirect }) {
     Column(Modifier.fillMaxSize()) {
       RemainingEmptyState(
         icon = Icons.Filled.Email,
@@ -468,6 +525,7 @@ private fun ListTab(
   onNavigate: (String) -> Unit,
   canBrowse: Boolean,
   bySpace: Boolean,
+  quickAccess: QuickAccess,
 ) {
   var filter by rememberSaveable { mutableStateOf("") }
   var chip by rememberSaveable { mutableStateOf(HomeFilter.All) }
@@ -475,6 +533,7 @@ private fun ListTab(
   val spaces = listedSpaces(conversations)
   val isFiltering = filter.isNotBlank() || chip != HomeFilter.All
   LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
+    item(key = "quick-access") { QuickAccessRow(quickAccess, onNavigate) }
     item(key = "filter") {
       FilterBar(filter, onChange = { filter = it }) {
         HomeChips(chip, showsChannels = true, onSelect = { chip = if (chip == it) HomeFilter.All else it })
@@ -508,8 +567,9 @@ private fun ListedSpaceRow(space: ListedSpace, list: ListState) {
 }
 
 /**
- * Activity: threads and saved items, then the requests to join that wait for the user's decision,
- * then every conversation that waits for the user.
+ * Activity: threads and meetings, then the requests to join that wait for the user's decision,
+ * then every conversation that waits for the user. Saved items, drafts and scheduled messages are
+ * Home's quick-access cards.
  */
 @Composable
 private fun ActivityTab(
@@ -525,10 +585,6 @@ private fun ActivityTab(
   val waiting = activityConversations(conversations, list.lastActivity)
   Column(Modifier.fillMaxSize()) {
     EntryRow(Icons.AutoMirrored.Filled.List, stringResource(R.string.threads_title)) { onNavigate("threads") }
-    EntryRow(Icons.Filled.Star, stringResource(R.string.saved_title)) { onNavigate("saved") }
-    EntryRow(Icons.Filled.DateRange, stringResource(R.string.scheduled_title)) { onNavigate("scheduled") }
-    EntryRow(Icons.Filled.Edit, stringResource(R.string.drafts_title)) { onNavigate("drafts") }
-    EntryRow(Icons.Filled.DateRange, stringResource(R.string.home_entry_scheduled)) { onNavigate("scheduled") }
     EntryRow(Icons.Filled.DateRange, stringResource(R.string.home_entry_meetings)) { onNavigate("meetings") }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     if (waiting.isEmpty() && joinRequestCount == 0 && guestNoticeCount == 0 && isSyncing) {
@@ -546,31 +602,6 @@ private fun ActivityTab(
         if (joinRequestCount > 0) item(key = "join-requests") { joinRequests() }
         conversationRows(listOf(Section(SectionTitle.Activity, waiting)), list, hasHeader = false)
       }
-    }
-  }
-}
-
-/**
- * Spaces: the channels by space; browsing for more is the first row (or the empty state's action),
- * for those who may browse.
- */
-@Composable
-private fun SpacesTab(conversations: List<ConversationItem>, list: ListState, onNavigate: (String) -> Unit, canBrowse: Boolean) {
-  val sections = channelSections(conversations, listsArchived = !canBrowse)
-  if (sections.isEmpty()) {
-    EmptyState(
-      icon = Icons.Filled.Search,
-      title = stringResource(R.string.spaces_empty_title),
-      text = stringResource(R.string.spaces_empty),
-      maybeAction = if (canBrowse) stringResource(R.string.browse_channels) to { onNavigate("browse") } else null,
-    )
-    return
-  }
-  LazyColumn(Modifier.fillMaxSize()) {
-    conversationRows(sections, list)
-    // After the channels: the list starts with what the user is in, finding more comes last.
-    if (canBrowse) {
-      item(key = "browse") { EntryRow(Icons.Filled.Add, stringResource(R.string.browse_channels)) { onNavigate("browse") } }
     }
   }
 }
@@ -601,6 +632,218 @@ private fun LazyListScope.conversationRows(
         onClick = { list.onOpen(conversation.id) },
         onLongPress = { list.onLongPress(conversation.id) },
         menu = { isOpen, onDismiss -> list.conversationMenu(conversation, isOpen, onDismiss) },
+      )
+    }
+  }
+}
+
+/**
+ * Home's sections (#1488): each header collapses its section; a collapsed one keeps what is new
+ * and the open conversation ([visibleRows]), so nothing new hides behind a chevron.
+ */
+private fun LazyListScope.collapsibleRows(
+  sections: List<Section>,
+  list: ListState,
+  collapsed: Set<String>,
+  onToggle: (String) -> Unit,
+) {
+  for (section in sections) {
+    val maybeKey = section.collapseKey()
+    val isCollapsed = maybeKey != null && maybeKey in collapsed
+    item(key = "section-${section.title}", contentType = "header") {
+      CollapsibleHeader(section, list, isCollapsed, onToggle = { maybeKey?.let(onToggle) })
+    }
+    val rows = section.visibleRows(isCollapsed, list.maybeSelectedId)
+    items(rows, key = { "${section.title}-${it.id}" }, contentType = { "row" }) { conversation ->
+      SwipeableConversationRow(
+        actions = list.actionsFor(conversation, list.previews[conversation.id]),
+        conversation = conversation,
+        maybeEntry = list.previews[conversation.id],
+        isSelected = conversation.id == list.maybeSelectedId,
+        isChecked = conversation.id in list.selection,
+        isSelecting = list.selection.isNotEmpty(),
+        showsSpace = section.title is SectionTitle.Favorites,
+        callCount = list.runningCalls[conversation.id] ?: 0,
+        typing = list.typing[conversation.id].orEmpty(),
+        onClick = { list.onOpen(conversation.id) },
+        onLongPress = { list.onLongPress(conversation.id) },
+        menu = { isOpen, onDismiss -> list.conversationMenu(conversation, isOpen, onDismiss) },
+        modifier = Modifier.animateItem(),
+      )
+    }
+  }
+}
+
+/**
+ * A Home section's header: the chevron and the title; a tap collapses or opens the section. A
+ * space's header also has its picture, a button to its views and its menu on a long-press (#1105).
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun CollapsibleHeader(section: Section, list: ListState, isCollapsed: Boolean, onToggle: () -> Unit) {
+  val haptics = LocalHapticFeedback.current
+  val title = section.title
+  val maybeSpaceId = (title as? SectionTitle.Space)?.let { section.conversations.firstNotNullOfOrNull { it.maybeSpaceId } }
+  val name = sectionTitleText(title)
+  var isMenuOpen by remember { mutableStateOf(false) }
+  // A quarter turn, short and without overshoot: it follows the tap, it doesn't perform.
+  val rotation by animateFloatAsState(
+    targetValue = if (isCollapsed) -90f else 0f,
+    animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+    label = "chevron",
+  )
+  val toggleLabel = stringResource(if (isCollapsed) R.string.section_expand else R.string.section_collapse, name)
+  Box(Modifier.fillMaxWidth()) {
+    Row(
+      Modifier
+        .fillMaxWidth()
+        .combinedClickable(
+          onClickLabel = toggleLabel,
+          onClick = onToggle,
+          onLongClickLabel = maybeSpaceId?.let { stringResource(R.string.entry_space_menu) },
+          onLongClick = maybeSpaceId?.let {
+            {
+              haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+              isMenuOpen = true
+            }
+          },
+        )
+        .semantics {
+          heading()
+          contentDescription = name
+          stateDescription = toggleLabel
+        }
+        .padding(start = Spacing.m, end = if (maybeSpaceId != null) 56.dp else Spacing.m, top = Spacing.m, bottom = Spacing.xs)
+        .heightIn(min = 32.dp),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(Spacing.s),
+    ) {
+      Icon(
+        Icons.Filled.KeyboardArrowDown,
+        contentDescription = null,
+        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.size(20.dp).graphicsLayer { rotationZ = rotation },
+      )
+      val maybeVersion = section.conversations.firstNotNullOfOrNull { it.maybeSpaceImageVersion }
+      if (maybeSpaceId != null && maybeVersion != null) SpacePicture(maybeSpaceId, maybeVersion)
+      Text(
+        name,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
+    if (maybeSpaceId != null) {
+      IconButton(
+        onClick = { list.onOpenSpace(maybeSpaceId) },
+        modifier = Modifier.align(Alignment.CenterEnd).padding(end = Spacing.xs),
+      ) {
+        Icon(
+          Icons.AutoMirrored.Filled.KeyboardArrowRight,
+          contentDescription = stringResource(R.string.space_views_open),
+          tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+      }
+      list.spaceMenu(maybeSpaceId, name, isMenuOpen) { isMenuOpen = false }
+    }
+  }
+}
+
+/** What the quick-access cards on top of Home count, from state the list has anyway (#1466). */
+internal data class QuickAccess(
+  val draftCount: Int = 0,
+  /** `null` while scheduling is off for the instance: no card then. */
+  val maybeScheduledCount: Int? = null,
+  val needsAttention: Boolean = false,
+)
+
+/** Drafts from the conversations' draft previews, scheduled messages from the banner's read. */
+internal fun quickAccess(conversations: List<ConversationItem>, maybeScheduled: ScheduledOverview?): QuickAccess =
+  QuickAccess(
+    draftCount = conversations.count { it.maybeDraftPreview != null },
+    maybeScheduledCount = maybeScheduled?.takeIf { it.policy.isEnabled || it.messages.isNotEmpty() }?.messages?.size,
+    needsAttention = maybeScheduled?.messages?.any { it.needsAttention } == true,
+  )
+
+/**
+ * The quick-access cards (#1488): Threads, Saved, Drafts and Scheduled side by side, each with an
+ * icon, a title and a one-line status; a card with something waiting is tinted.
+ */
+@Composable
+private fun QuickAccessRow(quickAccess: QuickAccess, onNavigate: (String) -> Unit) {
+  Row(
+    Modifier
+      .fillMaxWidth()
+      .horizontalScroll(rememberScrollState())
+      .padding(horizontal = Spacing.l, vertical = Spacing.s),
+    horizontalArrangement = Arrangement.spacedBy(Spacing.s),
+  ) {
+    QuickAccessCard(
+      icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = null) },
+      title = stringResource(R.string.home_entry_threads),
+      status = stringResource(R.string.quick_threads_status),
+      isHighlighted = false,
+    ) { onNavigate("threads") }
+    QuickAccessCard(
+      icon = { Icon(painterResource(R.drawable.ic_bookmark), contentDescription = null) },
+      title = stringResource(R.string.home_entry_saved),
+      status = stringResource(R.string.quick_saved_status),
+      isHighlighted = false,
+    ) { onNavigate("saved") }
+    QuickAccessCard(
+      icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
+      title = stringResource(R.string.home_entry_drafts),
+      status = if (quickAccess.draftCount > 0) {
+        pluralStringResource(R.plurals.quick_drafts_count, quickAccess.draftCount, quickAccess.draftCount)
+      } else {
+        stringResource(R.string.quick_drafts_none)
+      },
+      isHighlighted = quickAccess.draftCount > 0,
+    ) { onNavigate("drafts") }
+    quickAccess.maybeScheduledCount?.let { count ->
+      QuickAccessCard(
+        icon = { Icon(painterResource(R.drawable.ic_schedule), contentDescription = null) },
+        title = stringResource(R.string.home_entry_scheduled),
+        status = when {
+          quickAccess.needsAttention -> stringResource(R.string.quick_scheduled_attention)
+          count > 0 -> pluralStringResource(R.plurals.quick_scheduled_count, count, count)
+          else -> stringResource(R.string.quick_scheduled_none)
+        },
+        isHighlighted = count > 0 || quickAccess.needsAttention,
+      ) { onNavigate("scheduled") }
+    }
+  }
+}
+
+@Composable
+private fun QuickAccessCard(
+  icon: @Composable () -> Unit,
+  title: String,
+  status: String,
+  isHighlighted: Boolean,
+  onClick: () -> Unit,
+) {
+  val colors = MaterialTheme.colorScheme
+  Card(
+    onClick = onClick,
+    shape = RoundedCornerShape(16.dp),
+    colors = CardDefaults.cardColors(
+      containerColor = if (isHighlighted) colors.primaryContainer else colors.surfaceContainerHigh,
+      contentColor = if (isHighlighted) colors.onPrimaryContainer else colors.onSurface,
+    ),
+    modifier = Modifier.width(QUICK_CARD_WIDTH).semantics(mergeDescendants = true) {},
+  ) {
+    Column(Modifier.padding(Spacing.m), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+      Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) { icon() }
+      Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+      Text(
+        status,
+        style = MaterialTheme.typography.bodySmall,
+        color = if (isHighlighted) colors.onPrimaryContainer else colors.onSurfaceVariant,
+        fontWeight = if (isHighlighted) FontWeight.SemiBold else FontWeight.Normal,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
       )
     }
   }
@@ -678,7 +921,7 @@ private fun BrandTopBar(brand: MainBrand, accountUserId: String, accountName: St
   )
 }
 
-/** Home, Activity and Spaces, each with what is new in it. */
+/** Home, DMs and Activity, each with what is new in it (#1488). */
 @Composable
 private fun MainNavigation(
   selected: ChatTab,
@@ -693,24 +936,25 @@ private fun MainNavigation(
     containerColor = MaterialTheme.colorScheme.surfaceContainer,
     windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
   ) {
-    // The list layout has the channels on Home and no tab of their own for them.
-    for (tab in ChatTab.entries.filterNot { isList && it == ChatTab.Spaces }) {
+    // The list layout has the DMs on Home and no tab of their own for them.
+    for (tab in ChatTab.entries.filterNot { isList && it == ChatTab.Direct }) {
       val label = stringResource(
         when (tab) {
           ChatTab.Home -> R.string.nav_home
+          ChatTab.Direct -> R.string.nav_direct
           ChatTab.Activity -> R.string.nav_activity
-          ChatTab.Spaces -> R.string.nav_spaces
         },
       )
       val badge = when (tab) {
         // Channels count as "something new" there too; a number is for what is addressed to the user.
-        ChatTab.Home -> if (isList) TabBadge(maxOf(tabBadge(conversations).mentions, tabBadge(direct).unread), tabBadge(channels).unread) else tabBadge(direct)
+        ChatTab.Home -> if (isList) TabBadge(maxOf(tabBadge(conversations).mentions, tabBadge(direct).unread), tabBadge(channels).unread) else tabBadge(channels)
+        ChatTab.Direct -> tabBadge(direct)
         // A request waits for a decision like a mention waits for an answer.
         ChatTab.Activity -> TabBadge(mentions = tabBadge(conversations).mentions + joinRequestCount, unread = 0)
-        ChatTab.Spaces -> tabBadge(channels)
       }
       // Channels and Activity count only mentions; DMs count every unread message.
-      val count = if (tab == ChatTab.Home) maxOf(badge.mentions, badge.unread) else badge.mentions
+      val countsUnread = tab == ChatTab.Direct || (isList && tab == ChatTab.Home)
+      val count = if (countsUnread) maxOf(badge.mentions, badge.unread) else badge.mentions
       val description = when {
         count > 0 -> pluralStringResource(R.plurals.chat_tab_unread, count, label, count)
         badge.unread > 0 -> stringResource(R.string.chat_tab_new, label)
@@ -743,12 +987,9 @@ private fun MainNavigation(
 private fun NavigationIcon(tab: ChatTab) {
   when (tab) {
     ChatTab.Home -> Icon(Icons.Filled.Home, contentDescription = null)
+    // The marker of DMs elsewhere in the app (their empty state).
+    ChatTab.Direct -> Icon(Icons.Filled.Email, contentDescription = null)
     ChatTab.Activity -> Icon(Icons.Filled.Notifications, contentDescription = null)
-    // The channel marker of the lists, so the tab reads as "channels".
-    // In an icon-sized box, so the label lines up with the other tabs at any font scale.
-    ChatTab.Spaces -> Box(Modifier.size(24.dp).clearAndSetSemantics {}, contentAlignment = Alignment.Center) {
-      Text("#", style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold), maxLines = 1)
-    }
   }
 }
 
@@ -758,6 +999,8 @@ private fun EntryRow(icon: ImageVector, label: String, onClick: () -> Unit) {
   ListItem(
     headlineContent = { Text(label, style = MaterialTheme.typography.titleSmall) },
     leadingContent = { Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+    // On the list's own background, as the conversation rows above it.
+    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
     modifier = Modifier.clickable(onClick = onClick),
   )
 }
@@ -860,18 +1103,7 @@ internal fun EmptyHint(text: String) {
 
 @Composable
 internal fun SectionHeader(title: SectionTitle) {
-  val text = when (title) {
-    SectionTitle.Favorites -> stringResource(R.string.favorites)
-    SectionTitle.Archived -> stringResource(R.string.section_archived)
-    SectionTitle.Channels -> stringResource(R.string.channels)
-    SectionTitle.DirectMessages -> stringResource(R.string.direct_messages)
-    SectionTitle.Everything -> stringResource(R.string.list_conversations)
-    SectionTitle.Spaces -> stringResource(R.string.nav_spaces)
-    SectionTitle.Activity -> stringResource(R.string.nav_activity)
-    SectionTitle.Notes -> stringResource(R.string.notes_title)
-    SectionTitle.Recent -> stringResource(R.string.share_recent)
-    is SectionTitle.Space -> title.name
-  }
+  val text = sectionTitleText(title)
   Text(
     text.uppercase(),
     style = MaterialTheme.typography.labelMedium,
@@ -885,6 +1117,22 @@ internal fun SectionHeader(title: SectionTitle) {
       },
   )
 }
+
+@Composable
+private fun sectionTitleText(title: SectionTitle): String =
+  when (title) {
+    SectionTitle.Favorites -> stringResource(R.string.favorites)
+    SectionTitle.Archived -> stringResource(R.string.section_archived)
+    SectionTitle.Channels -> stringResource(R.string.channels)
+    SectionTitle.DirectMessages -> stringResource(R.string.direct_messages)
+    SectionTitle.Everything -> stringResource(R.string.list_conversations)
+    SectionTitle.Spaces -> stringResource(R.string.nav_spaces)
+    SectionTitle.Activity -> stringResource(R.string.nav_activity)
+    SectionTitle.Notes -> stringResource(R.string.notes_title)
+    SectionTitle.Recent -> stringResource(R.string.share_recent)
+    SectionTitle.UnreadDirect -> stringResource(R.string.section_unread_direct)
+    is SectionTitle.Space -> title.name
+  }
 
 /**
  * Swipe right toggles read/unread, swipe left toggles the favorite; both snap back. The same
@@ -904,6 +1152,7 @@ private fun SwipeableConversationRow(
   onClick: () -> Unit,
   onLongPress: () -> Unit,
   menu: @Composable (Boolean, () -> Unit) -> Unit,
+  modifier: Modifier = Modifier,
 ) {
   val haptics = LocalHapticFeedback.current
   val scope = rememberCoroutineScope()
@@ -912,6 +1161,7 @@ private fun SwipeableConversationRow(
   val state = rememberSwipeToDismissBoxState()
   SwipeToDismissBox(
     state = state,
+    modifier = modifier,
     gesturesEnabled = !isSelecting,
     enableDismissFromStartToEnd = actions.toggleRead != null,
     backgroundContent = { SwipeBackground(state.dismissDirection, conversation, isUnread = actions.isUnread) },

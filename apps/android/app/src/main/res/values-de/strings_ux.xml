@@ -222,6 +222,25 @@
   <string name="list_failed_timeout">Keine Antwort rechtzeitig erhalten.</string>
   <string name="list_failed_other">Das konnte nicht geladen werden.</string>
   <string name="search_incomplete">Der Verlauf wird noch synchronisiert, die Ergebnisse können unvollständig sein.</string>
+  <!-- Home layout (#1488): bottom navigation, quick-access cards, sections. -->
+  <string name="nav_direct">DMs</string>
+  <string name="quick_threads_status">Antworten, denen du folgst</string>
+  <string name="quick_saved_status">Für später gemerkt</string>
+  <string name="quick_drafts_none">Keine Entwürfe</string>
+  <plurals name="quick_drafts_count">
+    <item quantity="one">%d Entwurf</item>
+    <item quantity="other">%d Entwürfe</item>
+  </plurals>
+  <string name="quick_scheduled_none">Nichts geplant</string>
+  <plurals name="quick_scheduled_count">
+    <item quantity="one">%d wartet auf Versand</item>
+    <item quantity="other">%d warten auf Versand</item>
+  </plurals>
+  <string name="quick_scheduled_attention">Braucht deine Aufmerksamkeit</string>
+  <string name="section_unread_direct">Neue Nachrichten</string>
+  <string name="section_collapse">%1$s einklappen</string>
+  <string name="section_expand">%1$s ausklappen</string>
+  <!-- Message density (#598, #1488). -->
   <string name="message_layout">Nachrichtendichte</string>
   <string name="message_layout_bubbles">Blasen</string>
   <string name="message_layout_comfortable">Komfortabel</string>
