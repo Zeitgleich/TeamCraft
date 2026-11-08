@@ -1,0 +1,90 @@
+use crate::internal::*;
+use tract_core::ops;
+
+mod broadcast;
+mod cast;
+mod clamped_swiglu;
+#[cfg(feature = "complex")]
+mod complex;
+mod cumsum;
+mod downsample;
+mod dyn_slice;
+mod einsum;
+mod fft;
+mod gather;
+mod gelu_approximate;
+mod grid_sample;
+mod gru_cell;
+mod gru_seq;
+mod is_inf;
+mod lstm_cell;
+mod matmul;
+mod one_hot;
+mod pow_const;
+mod qconv;
+mod qmatmul;
+mod range;
+mod reduce;
+mod resize;
+mod rms_norm;
+mod scan;
+mod scatter;
+mod shape_of;
+mod silu;
+mod softmax;
+mod source;
+mod submodel;
+mod topk;
+mod trilu;
+
+pub fn register(registry: &mut Registry) {
+    registry.register_unit_element_wise("tract_core_round_even", &ops::math::RoundHalfToEven {});
+    registry.register_unit_element_wise("tract_core_erf", &ops::math::Erf {});
+    registry.register_unit_element_wise("tract_core_hard_swish", &ops::nn::HardSwish {});
+
+    registry.register_binary("tract_core_xor", &ops::logic::Xor {});
+    registry.register_binary("tract_core_bitand", &ops::logic::BitAnd {});
+    registry.register_binary("tract_core_bitor", &ops::logic::BitOr {});
+    registry.register_binary("tract_core_bitxor", &ops::logic::BitXor {});
+    registry.register_unit_element_wise("tract_core_bitnot", &ops::logic::BitNot {});
+
+    registry.register_unit_element_wise("tract_core_is_nan", &ops::math::IsNan {});
+
+    registry.register_binary("tract_shl", &ops::math::ShiftLeft);
+    registry.register_binary("tract_shr", &ops::math::ShiftRight);
+    broadcast::register(registry);
+    cast::register(registry);
+    clamped_swiglu::register(registry);
+    #[cfg(feature = "complex")]
+    complex::register(registry);
+    cumsum::register(registry);
+    downsample::register(registry);
+    dyn_slice::register(registry);
+    einsum::register(registry);
+    fft::register(registry);
+    gather::register(registry);
+    gelu_approximate::register(registry);
+    pow_const::register(registry);
+    grid_sample::register(registry);
+    gru_cell::register(registry);
+    gru_seq::register(registry);
+    lstm_cell::register(registry);
+    matmul::register(registry);
+    one_hot::register(registry);
+    qconv::register(registry);
+    qmatmul::register(registry);
+    reduce::register(registry);
+    resize::register(registry);
+    rms_norm::register(registry);
+    scan::register(registry);
+    scatter::register(registry);
+    shape_of::register(registry);
+    silu::register(registry);
+    softmax::register(registry);
+    source::register(registry);
+    submodel::register(registry);
+    range::register(registry);
+    topk::register(registry);
+    trilu::register(registry);
+    is_inf::register(registry);
+}
