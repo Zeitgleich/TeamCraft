@@ -39,6 +39,8 @@ use wtransport::Identity;
 const CALL_ID: u64 = 11;
 const DEVICES: [u64; 3] = [1, 2, 3];
 const CALL_DURATION: Duration = Duration::from_secs(3);
+/// How long after `CALL_DURATION` the clients get to agree on one key epoch before the test fails.
+const CONVERGENCE_LIMIT: Duration = Duration::from_secs(30);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn headless_clients_hear_each_other_through_the_sfu() {
@@ -73,13 +75,23 @@ async fn headless_clients_hear_each_other_through_the_sfu() {
     calls.push(NativeCall::join(config).await.unwrap());
   }
 
-  let mut secured = vec![false; calls.len()];
-  let deadline = tokio::time::Instant::now() + CALL_DURATION;
-  while tokio::time::Instant::now() < deadline {
+  // Each client's latest privacy code, from its last `Secured` event. A rekey is still in flight on a
+  // slow runner when the call duration ends, so the codes are compared once they agree (or the
+  // generous limit passes), never at a fixed moment.
+  let mut latest_codes: Vec<Option<String>> = vec![None; calls.len()];
+  let call_end = tokio::time::Instant::now() + CALL_DURATION;
+  let limit = call_end + CONVERGENCE_LIMIT;
+  loop {
+    let now = tokio::time::Instant::now();
+    let have_agreed = latest_codes.iter().all(|code| code.is_some())
+      && latest_codes.windows(2).all(|pair| pair[0] == pair[1]);
+    if now >= limit || (now >= call_end && have_agreed) {
+      break;
+    }
     for (index, call) in calls.iter_mut().enumerate() {
       if let Ok(Some(event)) = tokio::time::timeout(Duration::from_millis(10), call.next_event()).await {
-        if matches!(event, CallEngineEvent::Secured { .. }) {
-          secured[index] = true;
+        if let CallEngineEvent::Secured { privacy_code, .. } = &event {
+          latest_codes[index] = Some(privacy_code.clone());
         }
         assert!(
           !matches!(
@@ -91,18 +103,22 @@ async fn headless_clients_hear_each_other_through_the_sfu() {
       }
     }
   }
+  let secured: Vec<bool> = latest_codes.iter().map(Option::is_some).collect();
 
-  let mut codes = Vec::new();
+  // The codes are the agreed ones from before anybody left: the leavers' own stats are read one after
+  // the other, and each departure rekeys the group for those still in it.
   for call in calls {
     let stats = call.leave().await.unwrap();
     // Two others for most of the call: well above one second of frames.
     assert!(stats.frames_received > 100, "{stats:?}");
     assert!(stats.audible_frames_played > 50, "{stats:?}");
     assert!(stats.frames_sent > 100, "{stats:?}");
-    codes.push(stats.maybe_privacy_code.unwrap());
   }
   assert!(secured.iter().all(|is_secured| *is_secured), "{secured:?}");
-  assert!(codes.windows(2).all(|pair| pair[0] == pair[1]), "{codes:?}");
+  assert!(
+    latest_codes.iter().all(|code| code.is_some()) && latest_codes.windows(2).all(|pair| pair[0] == pair[1]),
+    "{latest_codes:?}"
+  );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
