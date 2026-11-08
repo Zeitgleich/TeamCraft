@@ -1,8 +1,8 @@
 import AVKit
 import SwiftUI
 
-/// The in-call screen: an edge-to-edge dark stage with the others' video (one full-bleed, several
-/// as a spotlight with a filmstrip) or a large avatar, the name, time and encryption chip on top,
+/// The in-call screen: an edge-to-edge dark stage with everybody as a tile of a grid (camera or
+/// avatar; a shared screen as a spotlight with a filmstrip), the name, time and encryption chip on top,
 /// round controls at the bottom and the self-view as a corner picture that can be thrown to
 /// another corner. A tap on the stage hides or shows the chrome. The system's call UI (lock
 /// screen, CarPlay) drives the same CallKit actions. DM and group DM calls can add people, which
@@ -114,7 +114,10 @@ struct CallScreen: View {
 
   @ViewBuilder
   private var stage: some View {
-    if let spotlight {
+    // A shared screen gets the stage; otherwise everybody is a tile of the grid (#1488).
+    if !orderedStreams.contains(where: \.isScreen) {
+      gridStage
+    } else if let spotlight {
       ZStack(alignment: .bottom) {
         RemoteVideoView(renderer: spotlight.renderer)
           .overlay(alignment: .bottomLeading) { nameTag(for: spotlight) }
@@ -125,8 +128,42 @@ struct CallScreen: View {
     }
   }
 
-  /// Without video: the people in the call as avatars with their names; whoever speaks has a ring.
-  private var avatarStage: some View {
+  /// The call as a grid (#1488), as on Android: a tile with rounded corners per person, their camera
+  /// when it is on, their avatar otherwise, and the name on the tile; whoever speaks has a ring. Up
+  /// to six tiles share the screen; more scroll in two columns. The top bar and the controls keep
+  /// their room.
+  private var gridStage: some View {
+    let tiles = stageTiles
+    let columns = tiles.count <= 2 ? 1 : 2
+    let rows = (tiles.count + columns - 1) / columns
+    return GeometryReader { proxy in
+      let free = proxy.size.height - Self.gridTopRoom - Self.gridBottomRoom - CGFloat(rows - 1) * 8
+      let tileHeight =
+        tiles.count <= 6
+        ? max(free / CGFloat(rows), 120)
+        : (proxy.size.width - 24 - 8) / 2 / 0.8
+      ScrollView {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns), spacing: 8) {
+          ForEach(tiles) { tile in
+            tileView(tile).frame(height: tileHeight)
+          }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, Self.gridTopRoom)
+        .padding(.bottom, Self.gridBottomRoom)
+      }
+      .scrollBounceBehavior(.basedOnSize)
+    }
+  }
+
+  private static let gridTopRoom: CGFloat = 136
+  private static let gridBottomRoom: CGFloat = 112
+  private static let tileShape = RoundedRectangle(cornerRadius: 20, style: .continuous)
+
+  /// Each person once, with their camera when it is on, then cameras nobody could be matched to.
+  /// Alone or still connecting: the one being called.
+  private var stageTiles: [StageTile] {
+    let cameras = orderedStreams.filter { !$0.isScreen }
     let people = call.participantUserIds.map { id in
       StagePerson(
         id: id, name: model.calls.names[id] ?? "",
@@ -134,50 +171,63 @@ struct CallScreen: View {
         isRejoining: call.reconnectingUserIds.contains(id),
         isMuted: call.mutedUserIds.contains(id))
     }
-    // Alone in the call (or still connecting): the one being called.
-    let shown =
-      people.isEmpty
-      ? [StagePerson(id: "", name: call.displayName, isSpeaking: false, isRejoining: false, isMuted: false)]
-      : people
-    let size: CGFloat = shown.count <= 1 ? 128 : (shown.count <= 4 ? 96 : 72)
-    return ScrollView {
-      LazyVGrid(
-        columns: [GridItem(.adaptive(minimum: size + 24), spacing: 20)], spacing: 20
-      ) {
-        ForEach(shown) { person in
-          VStack(spacing: 8) {
-            AvatarView(name: person.name, size: size)
-              .padding(4)
-              .overlay(
-                Circle().stroke(Theme.accent, lineWidth: person.isSpeaking ? 3 : 0)
-              )
-              .overlay(alignment: .bottomTrailing) {
-                if person.isMuted { mutedBadge }
-              }
-              .animation(.easeOut(duration: 0.15), value: person.isSpeaking)
-            Text(person.name).font(.footnote.weight(.medium)).foregroundStyle(.white).lineLimit(1)
-          }
-          .opacity(person.isRejoining ? 0.5 : 1)
-          .accessibilityElement(children: .ignore)
-          .accessibilityLabel(
-            person.isMuted
-              ? Text("call_person_muted \(person.name)") : Text(verbatim: person.name))
-        }
+    var tiles = people.map { person -> StageTile in
+      if let stream = cameras.first(where: { call.userIdByDevice[$0.deviceId] == person.id }) {
+        return .camera(stream)
       }
-      .padding(32)
-      .frame(maxWidth: .infinity, minHeight: UIScreen.main.bounds.height * 0.6)
+      return .avatar(person)
     }
-    .scrollBounceBehavior(.basedOnSize)
+    tiles += cameras.filter { call.userIdByDevice[$0.deviceId] == nil }.map { StageTile.camera($0) }
+    if tiles.isEmpty {
+      tiles = [.avatar(StagePerson(id: "", name: call.displayName, isSpeaking: false, isRejoining: false, isMuted: false))]
+    }
+    return tiles
   }
 
-  /// A small crossed-out microphone on a muted person's avatar.
-  private var mutedBadge: some View {
-    Image(systemName: "mic.slash.fill")
-      .font(.caption.weight(.semibold))
+  @ViewBuilder
+  private func tileView(_ tile: StageTile) -> some View {
+    switch tile {
+    case .camera(let stream):
+      RemoteVideoView(renderer: stream.renderer)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.black)
+        .overlay(alignment: .bottomLeading) { nameTag(for: stream) }
+        .clipShape(Self.tileShape)
+        .overlay(Self.tileShape.stroke(isSpeaking(stream) ? Theme.accent : .white.opacity(0.12), lineWidth: isSpeaking(stream) ? 3 : 1))
+        .animation(.easeOut(duration: 0.15), value: isSpeaking(stream))
+    case .avatar(let person):
+      GeometryReader { proxy in
+        AvatarView(name: person.name, size: min(max(min(proxy.size.width, proxy.size.height) * 0.45, 48), 128))
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+      }
+      .background(Color(white: 0.14))
+      .overlay(alignment: .bottomLeading) { personTag(person) }
+      .clipShape(Self.tileShape)
+      .overlay(
+        Self.tileShape.stroke(person.isSpeaking ? Theme.accent : .white.opacity(0.08), lineWidth: person.isSpeaking ? 3 : 1)
+      )
+      .opacity(person.isRejoining ? 0.5 : 1)
+      .animation(.easeOut(duration: 0.15), value: person.isSpeaking)
+      .accessibilityElement(children: .ignore)
+      .accessibilityLabel(person.isMuted ? Text("call_person_muted \(person.name)") : Text(verbatim: person.name))
+    }
+  }
+
+  /// The name on an avatar tile, as `nameTag` has it on a camera.
+  @ViewBuilder
+  private func personTag(_ person: StagePerson) -> some View {
+    if !person.name.isEmpty {
+      HStack(spacing: 4) {
+        if person.isMuted { Image(systemName: "mic.slash.fill").font(.caption2) }
+        Text(person.name).lineLimit(1)
+      }
+      .font(.caption.weight(.medium))
       .foregroundStyle(.white)
-      .frame(width: 26, height: 26)
-      .background(Color(red: 0.106, green: 0.133, blue: 0.188), in: Circle())
-      .overlay(Circle().stroke(.white.opacity(0.25)))
+      .padding(.horizontal, 8)
+      .padding(.vertical, 2)
+      .background(.black.opacity(0.55), in: Capsule())
+      .padding(8)
+    }
   }
 
   private func isMuted(_ stream: RemoteVideoStream) -> Bool {
@@ -567,6 +617,19 @@ struct CallScreen: View {
     return hours > 0
       ? String(format: "%d:%02d:%02d", hours, minutes, rest)
       : String(format: "%d:%02d", minutes, rest)
+  }
+}
+
+/// What a tile of the call's grid shows (#1488).
+private enum StageTile: Identifiable {
+  case camera(RemoteVideoStream)
+  case avatar(StagePerson)
+
+  var id: String {
+    switch self {
+    case .camera(let stream): return "camera-\(stream.id)"
+    case .avatar(let person): return "person-\(person.id)"
+    }
   }
 }
 

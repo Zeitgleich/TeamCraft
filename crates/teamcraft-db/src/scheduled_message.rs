@@ -25,6 +25,8 @@ pub struct StoredScheduledMessage {
   pub maybe_thread_id: Option<ThreadId>,
   pub mentioned_user_ids: Vec<UserId>,
   pub is_urgent: bool,
+  /// The text addresses the whole conversation (`SendMessageRequest::is_channel_mention`).
+  pub is_channel_mention: bool,
   pub content_key_id: Vec<u8>,
   pub ciphertext: Vec<u8>,
   pub mls_epoch: u64,
@@ -57,6 +59,8 @@ pub struct SealedParts<'a> {
   pub sender_device_id: DeviceId,
   pub mentioned_user_ids: &'a [UserId],
   pub is_urgent: bool,
+  /// The text addresses the whole conversation (`SendMessageRequest::is_channel_mention`).
+  pub is_channel_mention: bool,
   pub content_key_id: &'a [u8],
   pub ciphertext: &'a [u8],
   pub mls_epoch: u64,
@@ -142,8 +146,8 @@ impl Database {
     sqlx::query!(
       r#"INSERT INTO scheduled_messages
            (id, user_id, conversation_id, client_message_id, sender_device_id, thread_id, mentioned_user_ids,
-            is_urgent, content_key_id, ciphertext, mls_epoch, due_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
+            is_urgent, content_key_id, ciphertext, mls_epoch, due_at, is_channel_mention)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
       to_db(new.id),
       to_db(new.user_id),
       to_db(new.conversation_id),
@@ -156,6 +160,7 @@ impl Database {
       new.sealed.ciphertext,
       epoch_to_db(new.sealed.mls_epoch)?,
       new.due_at,
+      new.sealed.is_channel_mention,
     )
     .execute(&mut *tx)
     .await?;
@@ -171,7 +176,7 @@ impl Database {
   pub async fn list_scheduled_messages(&self, user: UserId) -> Result<Vec<StoredScheduledMessage>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT s.id, s.user_id, s.conversation_id, s.client_message_id, s.sender_device_id, s.thread_id,
-                s.mentioned_user_ids, s.is_urgent, s.content_key_id, s.ciphertext, s.mls_epoch, s.due_at,
+                s.mentioned_user_ids, s.is_urgent, s.is_channel_mention, s.content_key_id, s.ciphertext, s.mls_epoch, s.due_at,
                 s.version, s.hold_reason, s.held_at, COALESCE(h.epoch, 0) = s.mls_epoch AS "is_epoch_current!"
          FROM scheduled_messages s
          LEFT JOIN mls_epoch_heads h ON h.conversation_id = s.conversation_id
@@ -193,6 +198,7 @@ impl Database {
           thread_id: row.thread_id,
           mentioned_user_ids: &row.mentioned_user_ids,
           is_urgent: row.is_urgent,
+          is_channel_mention: row.is_channel_mention,
           content_key_id: row.content_key_id,
           ciphertext: row.ciphertext,
           mls_epoch: row.mls_epoch,
@@ -214,7 +220,7 @@ impl Database {
   ) -> Result<Option<StoredScheduledMessage>, DbError> {
     let maybe_row = sqlx::query!(
       r#"SELECT s.id, s.user_id, s.conversation_id, s.client_message_id, s.sender_device_id, s.thread_id,
-                s.mentioned_user_ids, s.is_urgent, s.content_key_id, s.ciphertext, s.mls_epoch, s.due_at,
+                s.mentioned_user_ids, s.is_urgent, s.is_channel_mention, s.content_key_id, s.ciphertext, s.mls_epoch, s.due_at,
                 s.version, s.hold_reason, s.held_at, COALESCE(h.epoch, 0) = s.mls_epoch AS "is_epoch_current!"
          FROM scheduled_messages s
          LEFT JOIN mls_epoch_heads h ON h.conversation_id = s.conversation_id
@@ -235,6 +241,7 @@ impl Database {
           thread_id: row.thread_id,
           mentioned_user_ids: &row.mentioned_user_ids,
           is_urgent: row.is_urgent,
+          is_channel_mention: row.is_channel_mention,
           content_key_id: row.content_key_id,
           ciphertext: row.ciphertext,
           mls_epoch: row.mls_epoch,
@@ -264,7 +271,7 @@ impl Database {
         sqlx::query!(
           r#"UPDATE scheduled_messages
              SET due_at = $4, sender_device_id = $5, mentioned_user_ids = $6, is_urgent = $7, content_key_id = $8,
-                 ciphertext = $9, mls_epoch = $10, version = version + 1, hold_reason = NULL, held_at = NULL, claimed_until = NULL, last_wake_at = NULL
+                 ciphertext = $9, mls_epoch = $10, is_channel_mention = $11, version = version + 1, hold_reason = NULL, held_at = NULL, claimed_until = NULL, last_wake_at = NULL
              WHERE id = $1 AND user_id = $2 AND version = $3"#,
           to_db(id),
           to_db(user),
@@ -276,6 +283,7 @@ impl Database {
           sealed.content_key_id,
           sealed.ciphertext,
           epoch_to_db(sealed.mls_epoch)?,
+          sealed.is_channel_mention,
         )
         .execute(self.pool())
         .await?
@@ -345,7 +353,7 @@ impl Database {
              FOR UPDATE SKIP LOCKED)
            RETURNING s.*)
          SELECT c.id, c.user_id, c.conversation_id, c.client_message_id, c.sender_device_id, c.thread_id,
-                c.mentioned_user_ids, c.is_urgent, c.content_key_id, c.ciphertext, c.mls_epoch, c.due_at,
+                c.mentioned_user_ids, c.is_urgent, c.is_channel_mention, c.content_key_id, c.ciphertext, c.mls_epoch, c.due_at,
                 c.version, c.hold_reason, c.held_at, COALESCE(h.epoch, 0) = c.mls_epoch AS "is_epoch_current!"
          FROM claimed c
          LEFT JOIN mls_epoch_heads h ON h.conversation_id = c.conversation_id
@@ -368,6 +376,7 @@ impl Database {
           thread_id: row.thread_id,
           mentioned_user_ids: &row.mentioned_user_ids,
           is_urgent: row.is_urgent,
+          is_channel_mention: row.is_channel_mention,
           content_key_id: row.content_key_id,
           ciphertext: row.ciphertext,
           mls_epoch: row.mls_epoch,
@@ -579,6 +588,7 @@ struct Parts<'a> {
   thread_id: Option<i64>,
   mentioned_user_ids: &'a [i64],
   is_urgent: bool,
+  is_channel_mention: bool,
   content_key_id: Vec<u8>,
   ciphertext: Vec<u8>,
   mls_epoch: i64,
@@ -600,6 +610,7 @@ fn from_parts(parts: Parts<'_>) -> Result<StoredScheduledMessage, DbError> {
     maybe_thread_id: from_db_opt(parts.thread_id)?,
     mentioned_user_ids: from_db_all(parts.mentioned_user_ids)?,
     is_urgent: parts.is_urgent,
+    is_channel_mention: parts.is_channel_mention,
     content_key_id: parts.content_key_id,
     ciphertext: parts.ciphertext,
     mls_epoch: u64::try_from(parts.mls_epoch)

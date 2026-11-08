@@ -24,8 +24,10 @@ struct ConversationListView: View {
   @State private var maybeBrowseTab: BrowseView.Tab?
   /// The space whose people, calls, meetings, saved messages and files are open (#954).
   @State private var maybeSpaceViews: SpaceChoice?
-  /// DMs live outside spaces (as on desktop), so they have their own tab.
+  /// Home, DMs and Activity (#1488), as on Android.
   @State private var tab: ChatTab = .home
+  /// Home's sections the user collapsed, on this device (keys: `ConversationSection.collapseKey`).
+  @AppStorage("home_collapsed_sections") private var collapsedRaw = ""
   @State private var homeChip: HomeFilter = .all
   /// Takes effect at once: the view follows the stored value (#1151).
   @AppStorage(ChatListLayout.key) private var layoutRaw = ChatListLayout.spaces.rawValue
@@ -53,8 +55,14 @@ struct ConversationListView: View {
             SyncingLine(isCatchingUp: conversations.contains(where: \.isCatchingUp))
             if let progress = maybeFirstSync { FirstSyncBar(progress: progress) }
             NotificationPromptCard()
-            if !isSearching && !conversations.isEmpty && !isList { tabPicker }
           }
+        }
+        // The new-message button floats above the list, in the theme's color (#1488).
+        .overlay(alignment: .bottomTrailing) {
+          if !isSearching && tab != .activity { composeButton }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+          if !isSearching && !conversations.isEmpty { bottomNavigation }
         }
         .navigationTitle("chats_title")
         .alert("dnd_save_failed", isPresented: $isMuteFailed) {}
@@ -86,15 +94,9 @@ struct ConversationListView: View {
             }
             .accessibilityLabel(Text("search_filters_title"))
           }
-          ToolbarItem(placement: .topBarLeading) {
-            Button { isShowingDrafts = true } label: { Image(systemName: "pencil.line") }
-              .accessibilityLabel(Text("drafts_title"))
-          }
+          // Drafts, scheduled messages and meetings are Home's quick-access cards; a new message is
+          // the floating button (#1488).
           ToolbarItemGroup(placement: .topBarTrailing) {
-            Button { maybeBrowseTab = .people } label: { Image(systemName: "square.and.pencil") }
-              .accessibilityLabel(Text("new_chat"))
-            Button { isShowingMeetings = true } label: { Image(systemName: "calendar") }
-              .accessibilityLabel(Text("meetings_title"))
             Button { isShowingSettings = true } label: { Image(systemName: "gearshape") }
               .accessibilityLabel(Text("settings_title"))
           }
@@ -135,12 +137,11 @@ struct ConversationListView: View {
         model.openConversationId = nil
       }
     }
-    // A conversation opened from elsewhere (notification, link, new message) shows in its own tab.
+    // A channel opened from elsewhere (notification, link) while the DMs show: Home has it. Home
+    // lists DMs with something new too, so a DM opened from there stays highlighted there.
     .onChange(of: selection) { _, id in
-      if let selected = conversations.first(where: { $0.id == id }) {
-        // A starred channel opened from Home stays there, highlighted under Favorites (#1346).
-        if tab == .home && selected.isListedInHome { return }
-        tab = selected.isDirect ? .home : .spaces
+      if let selected = conversations.first(where: { $0.id == id }), tab == .direct, isList || !selected.isDirect {
+        tab = .home
       }
     }
     // Why an action on a request to join didn't go through, also for the open channel's banner;
@@ -178,8 +179,13 @@ struct ConversationListView: View {
 
   private var isList: Bool { layoutRaw == ChatListLayout.list.rawValue }
 
-  /// Where the chips and the filter belong: Home, and always in the list layout.
-  private var isHomeShown: Bool { isList || tab == .home }
+  /// The tab on screen: the list layout has the DMs on Home and no tab of their own for them.
+  private var shownTab: ChatTab { isList && tab == .direct ? .home : tab }
+
+  /// Where the chips and the filter belong: the DMs, and Home in the list layout.
+  private var isFilterShown: Bool { isList ? shownTab == .home : shownTab == .direct }
+
+  private var collapsed: Set<String> { Set(collapsedRaw.split(separator: "\n").map(String.init)) }
 
   @ViewBuilder
   private var sidebar: some View {
@@ -197,11 +203,22 @@ struct ConversationListView: View {
       }
     } else {
       List(selection: $selection) {
-        if isHomeShown {
-          // Decided where the channels are (#799): in the list layout, here too.
-          if isList { JoinRequestSection() }
+        if shownTab == .home {
+          quickAccessCards
           ScheduledAttentionSection()
           GuestNoticeSection()
+        }
+        if shownTab == .activity {
+          // Admins asking to join a channel the user owns: they wait for a decision (#799).
+          JoinRequestSection()
+          if shownSections.isEmpty && model.joinRequests.isEmpty {
+            ContentUnavailableView {
+              Label("activity_empty_title", systemImage: "checkmark")
+            } description: {
+              Text("activity_empty")
+            }
+          }
+        } else if isFilterShown {
           TextField("dm_filter", text: $dmFilter)
             .textFieldStyle(.roundedBorder)
             .autocorrectionDisabled()
@@ -213,24 +230,22 @@ struct ConversationListView: View {
               Button("dm_new", systemImage: "square.and.pencil") { maybeBrowseTab = .people }
             }
           }
-        } else {
-          // Admins asking to join a channel the user owns: decided where the channels are (#799).
-          JoinRequestSection()
-          if shownSections.isEmpty {
-            Text("chats_no_channels").foregroundStyle(Theme.textMuted)
-          }
+        } else if shownSections.isEmpty {
+          Text("spaces_empty").foregroundStyle(Theme.textMuted)
         }
         ForEach(shownSections) { section in
+          let isCollapsible = shownTab == .home && !isList && section.collapseKey != nil
+          let isCollapsed = isCollapsible && collapsed.contains(section.collapseKey ?? "")
           Section(
-            header: sectionHeader(section)
+            header: sectionHeader(section, isCollapsible: isCollapsible, isCollapsed: isCollapsed)
               .contextMenu { spaceMenu(for: section) }
               .task(id: section.id) { await loadSpaceMenu(for: section) }
           ) {
-            ForEach(section.conversations, id: \.id) { conversation in
+            ForEach(section.visibleRows(isCollapsed: isCollapsed, selectedId: selection), id: \.id) { conversation in
               ConversationRow(
                 conversation: conversation, maybePreview: previews[conversation.id],
                 // A space's section names it in its header, so its rows don't (#1345).
-                showsSpace: isHomeShown && !section.isSpace,
+                showsSpace: section.title == .favorites || (isList && !section.isSpace),
                 callCount: runningCalls[conversation.id] ?? 0,
                 typingNames: typingNames(in: model.typingNow, conversation: conversation.id, thread: nil))
                 .tag(conversation.id)
@@ -249,9 +264,13 @@ struct ConversationListView: View {
             }
           }
         }
-        if isList && dmFilter.isEmpty && homeChip == .all { listSpacesSection }
+        if isList && shownTab == .home && dmFilter.isEmpty && homeChip == .all { listSpacesSection }
+        if !isList && shownTab == .home && canBrowseChannels {
+          Button("browse_channels", systemImage: "plus") { maybeBrowseTab = .channels }
+        }
       }
       .listStyle(.sidebar)
+      .animation(.snappy(duration: 0.25), value: collapsedRaw)
     }
   }
 
@@ -283,11 +302,13 @@ struct ConversationListView: View {
         conversations, lastActivity: previews.mapValues(\.sentDate), filter: dmFilter, chip: homeChip,
         bySpace: groupingRaw == ChatListGrouping.bySpace.rawValue)
     }
-    switch tab {
-    case .spaces: return channelSections(conversations, listsArchived: !canBrowseChannels)
-    case .home:
-      return directSections(
-        conversations, lastActivity: previews.mapValues(\.sentDate), filter: dmFilter, chip: homeChip)
+    let lastActivity = previews.mapValues(\.sentDate)
+    switch shownTab {
+    case .home: return homeSections(conversations, lastActivity: lastActivity, listsArchived: !canBrowseChannels)
+    case .direct: return directSections(conversations, lastActivity: lastActivity, filter: dmFilter, chip: homeChip)
+    case .activity:
+      let waiting = activityConversations(conversations, lastActivity: lastActivity)
+      return waiting.isEmpty ? [] : [ConversationSection(title: .activity, conversations: waiting)]
     }
   }
 
@@ -313,27 +334,119 @@ struct ConversationListView: View {
     }
   }
 
-  /// Home and spaces, each with what is new in it.
-  private var tabPicker: some View {
-    Picker("chats_title", selection: $tab) {
-      ForEach(ChatTab.allCases, id: \.self) { tab in
-        Text(tabLabel(tab)).tag(tab)
+  /// Home, DMs and Activity at the bottom (#1488), each with what is new in it: a number for what
+  /// is addressed to the user (mentions, DMs, requests to join), a dot for new channel messages.
+  private var bottomNavigation: some View {
+    HStack(spacing: 0) {
+      ForEach(ChatTab.allCases.filter { !(isList && $0 == .direct) }, id: \.self) { item in
+        let badge = tabBadge(item)
+        Button {
+          tab = item
+        } label: {
+          VStack(spacing: 2) {
+            Image(systemName: tabSymbol(item))
+              .symbolVariant(shownTab == item ? .fill : .none)
+              .font(.system(size: 20))
+              .frame(height: 26)
+              .overlay(alignment: .topTrailing) { TabBadgeMark(count: badge.count, hasNew: badge.hasNew) }
+            Text(tabLabel(item)).font(.caption2)
+          }
+          .frame(maxWidth: .infinity, minHeight: 49)
+          .foregroundStyle(shownTab == item ? Theme.accent : Theme.textMuted)
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(tabLabel(item)))
+        .accessibilityValue(badge.count > 0 ? Text("chat_unread \(badge.count)") : Text(verbatim: ""))
+        .accessibilityAddTraits(shownTab == item ? .isSelected : [])
       }
     }
-    .pickerStyle(.segmented)
-    .padding(.horizontal)
-    .padding(.vertical, 6)
+    .background(.bar)
+    .overlay(alignment: .top) { Divider() }
+    .sensoryFeedback(.selection, trigger: tab)
   }
 
-  /// "Home (3)": channels count only mentions (and the requests to join waiting for a decision),
-  /// DMs every unread message.
-  private func tabLabel(_ tab: ChatTab) -> String {
-    let isDirect = tab == .home
-    let name = isDirect ? String(localized: "home_title") : String(localized: "chats_tab_spaces")
-    let badge = TabBadge(conversations.filter { $0.isDirect == isDirect })
-    let count = isDirect ? max(badge.mentions, badge.unread) : badge.mentions + model.joinRequests.count
-    if count > 0 { return "\(name) (\(count))" }
-    return badge.unread > 0 ? "\(name) •" : name
+  private func tabLabel(_ tab: ChatTab) -> LocalizedStringKey {
+    switch tab {
+    case .home: return "home_title"
+    case .direct: return "nav_direct"
+    case .activity: return "nav_activity"
+    }
+  }
+
+  private func tabSymbol(_ tab: ChatTab) -> String {
+    switch tab {
+    case .home: return "house"
+    case .direct: return "bubble.left.and.bubble.right"
+    case .activity: return "bell"
+    }
+  }
+
+  /// Channels and Activity count only mentions; DMs (and the list layout's Home) every unread message.
+  private func tabBadge(_ tab: ChatTab) -> (count: Int, hasNew: Bool) {
+    let direct = TabBadge(conversations.filter(\.isDirect))
+    let channels = TabBadge(conversations.filter { !$0.isDirect })
+    switch tab {
+    case .home where isList:
+      return (max(direct.mentions + channels.mentions, direct.unread), channels.unread > 0)
+    case .home: return (channels.mentions, channels.unread > 0)
+    case .direct: return (max(direct.mentions, direct.unread), false)
+    case .activity: return (direct.mentions + channels.mentions + model.joinRequests.count, false)
+    }
+  }
+
+  /// New message, bottom right in the theme's color (#1488).
+  private var composeButton: some View {
+    Button { maybeBrowseTab = .people } label: {
+      Image(systemName: "square.and.pencil")
+        .font(.title2.weight(.semibold))
+        .foregroundStyle(.white)
+        .frame(width: 56, height: 56)
+        .background(Theme.accent, in: .rect(cornerRadius: 16))
+        .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
+    }
+    .buttonStyle(.plain)
+    .padding(16)
+    .accessibilityLabel(Text("new_chat"))
+  }
+
+  /// The quick-access cards on top of Home (#1488): drafts, scheduled messages and meetings, each
+  /// with a one-line status from state the list has anyway (#1466); a card with something waiting
+  /// is tinted.
+  private var quickAccessCards: some View {
+    let draftCount = conversations.filter { $0.maybeDraftPreview != nil }.count
+    return ScrollView(.horizontal, showsIndicators: false) {
+      HStack(spacing: 8) {
+        QuickAccessCard(
+          symbol: "pencil.line", title: "home_entry_drafts",
+          status: draftCount > 0 ? "quick_drafts_count \(draftCount)" : "quick_drafts_none",
+          isHighlighted: draftCount > 0
+        ) { isShowingDrafts = true }
+        if let scheduled = model.maybeScheduledCount {
+          let needsAttention = model.scheduledAttentionCount > 0
+          NavigationLink { ScheduledMessagesView() } label: {
+            QuickAccessCardLabel(
+              symbol: "clock", title: "home_entry_scheduled",
+              status: needsAttention
+                ? "quick_scheduled_attention" : scheduled > 0 ? "quick_scheduled_count \(scheduled)" : "quick_scheduled_none",
+              isHighlighted: needsAttention || scheduled > 0)
+          }
+          .buttonStyle(.plain)
+        }
+        QuickAccessCard(
+          symbol: "calendar", title: "home_entry_meetings", status: "quick_meetings_status", isHighlighted: false
+        ) { isShowingMeetings = true }
+      }
+      .padding(.vertical, 4)
+    }
+    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+    .listRowBackground(Color.clear)
+  }
+
+  private func toggleCollapsed(_ key: String) {
+    var keys = collapsed
+    if keys.contains(key) { keys.remove(key) } else { keys.insert(key) }
+    collapsedRaw = keys.sorted().joined(separator: "\n")
   }
 
   /// Read when unread; otherwise unread again from the newest message.
@@ -436,10 +549,47 @@ struct ConversationListView: View {
     leaveChoices[conversation.id] = await model.conversationLeaveChoice(conversation.id)
   }
 
-  /// A section's title; a space's opens the views of that space.
+  /// A section's title; a space's opens the views of that space. On Home, a tap on the title
+  /// collapses the section (#1488); a collapsed one keeps what is new.
   @ViewBuilder
-  private func sectionHeader(_ section: ConversationSection) -> some View {
-    if case .space(let name) = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
+  private func sectionHeader(_ section: ConversationSection, isCollapsible: Bool, isCollapsed: Bool) -> some View {
+    if section.title == .activity {
+      // Activity's one list needs no title.
+      EmptyView()
+    } else if isCollapsible, let key = section.collapseKey {
+      HStack(spacing: 8) {
+        Button { toggleCollapsed(key) } label: {
+          HStack(spacing: 8) {
+            Image(systemName: "chevron.down")
+              .font(.footnote.weight(.semibold))
+              .rotationEffect(.degrees(isCollapsed ? -90 : 0))
+            if section.isSpace, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
+              SpacePictureView(
+                spaceId: spaceId, maybeVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
+            }
+            Text(title(of: section.title))
+            Spacer(minLength: 0)
+          }
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(title(of: section.title)))
+        .accessibilityHint(
+          isCollapsed
+            ? Text("section_expand \(name(of: section.title))") : Text("section_collapse \(name(of: section.title))"))
+        .accessibilityAddTraits(.isHeader)
+        if case .space(let name) = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
+          Button {
+            maybeSpaceViews = SpaceChoice(
+              id: spaceId, name: name, maybeImageVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
+          } label: {
+            Image(systemName: "chevron.right").frame(minWidth: 44, minHeight: 32)
+          }
+          .buttonStyle(.plain)
+          .accessibilityLabel(Text("space_views_open"))
+        }
+      }
+    } else if case .space(let name) = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
       Button {
         maybeSpaceViews = SpaceChoice(
           id: spaceId, name: name, maybeImageVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
@@ -564,6 +714,20 @@ struct ConversationListView: View {
     .tint(.orange)
   }
 
+  /// The section's title as plain text, for what VoiceOver says about it.
+  private func name(of title: SectionTitle) -> String {
+    switch title {
+    case .space(let name): return name
+    case .favorites: return String(localized: "favorites")
+    case .archived: return String(localized: "section_archived")
+    case .channels: return String(localized: "channels")
+    case .directMessages: return String(localized: "direct_messages")
+    case .everything: return String(localized: "list_conversations")
+    case .unreadDirect: return String(localized: "section_unread_direct")
+    case .activity: return String(localized: "nav_activity")
+    }
+  }
+
   private func title(of title: SectionTitle) -> LocalizedStringKey {
     switch title {
     case .favorites: return "favorites"
@@ -572,6 +736,8 @@ struct ConversationListView: View {
     case .channels: return "channels"
     case .directMessages: return "direct_messages"
     case .everything: return "list_conversations"
+    case .unreadDirect: return "section_unread_direct"
+    case .activity: return "nav_activity"
     }
   }
 }
@@ -835,6 +1001,69 @@ struct FirstSyncBar: View {
       .padding(.horizontal)
       .padding(.vertical, 6)
       .accessibilityElement(children: .combine)
+    }
+  }
+}
+
+/// A quick-access card on top of Home (#1488): icon, title and a one-line status.
+private struct QuickAccessCard: View {
+  let symbol: String
+  let title: LocalizedStringKey
+  let status: LocalizedStringKey
+  let isHighlighted: Bool
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      QuickAccessCardLabel(symbol: symbol, title: title, status: status, isHighlighted: isHighlighted)
+    }
+    .buttonStyle(.plain)
+  }
+}
+
+private struct QuickAccessCardLabel: View {
+  let symbol: String
+  let title: LocalizedStringKey
+  let status: LocalizedStringKey
+  let isHighlighted: Bool
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Image(systemName: symbol).font(.body.weight(.semibold))
+      Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
+      Text(status)
+        .font(.caption)
+        .fontWeight(isHighlighted ? .semibold : .regular)
+        .foregroundStyle(isHighlighted ? Theme.accent : Theme.textMuted)
+        .lineLimit(1)
+    }
+    .frame(width: 132, alignment: .leading)
+    .padding(12)
+    .background(
+      isHighlighted ? Theme.accentSoft : Color(.secondarySystemGroupedBackground),
+      in: .rect(cornerRadius: 16))
+    .contentShape(.rect(cornerRadius: 16))
+    .accessibilityElement(children: .combine)
+  }
+}
+
+/// A tab's mark: the number of what is addressed to the user, or a dot for something new.
+private struct TabBadgeMark: View {
+  let count: Int
+  let hasNew: Bool
+
+  var body: some View {
+    if count > 0 {
+      Text(count > 99 ? "99+" : "\(count)")
+        .font(.caption2.weight(.bold))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 5)
+        .frame(minWidth: 18, minHeight: 18)
+        .background(.red, in: .capsule)
+        .offset(x: 12, y: -6)
+        .accessibilityHidden(true)
+    } else if hasNew {
+      Circle().fill(Theme.textMuted).frame(width: 8, height: 8).offset(x: 6, y: -2).accessibilityHidden(true)
     }
   }
 }

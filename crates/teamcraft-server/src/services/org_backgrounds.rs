@@ -15,6 +15,7 @@ use tracing::warn;
 use super::access::require;
 use super::audit;
 use super::convert::unix_millis;
+use super::storage_cleanup;
 use super::workspace::MAX_ORG_BACKGROUNDS;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -65,6 +66,7 @@ pub async fn complete_upload(
 ) -> Result<(), ApiError> {
   require(state, caller, Permission::ManageWorkspace, &Target::Instance)?;
   let store = blob_store(state)?;
+  store.check_available()?;
   let background = state
     .database
     .get_org_background(id)
@@ -75,7 +77,7 @@ pub async fn complete_upload(
   }
   let stored = store.object_size(&background.s3_key).await.map_err(|error| {
     warn!(%error, "checking an uploaded organization background failed");
-    ApiError::storage_unavailable("background storage")
+    ApiError::storage_failed("background storage", error)
   })?;
   match stored {
     None => Err(ApiError::Conflict("the background has not been uploaded".into())),
@@ -142,10 +144,7 @@ pub async fn delete(
     .delete_org_background(id)
     .await?
     .ok_or_else(ApiError::background_not_found)?;
-  if let Err(error) = store.delete_object(&key).await {
-    // The row is gone, so nobody gets a URL for it any more; storage cleanup can retry.
-    warn!(%error, "deleting an organization background object failed");
-  }
+  storage_cleanup::delete_or_queue(state, store, &key).await;
   audit::record(
     state,
     Some(caller.user.id),

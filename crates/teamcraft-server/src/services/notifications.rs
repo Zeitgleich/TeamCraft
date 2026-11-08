@@ -3,11 +3,13 @@
 
 use teamcraft_db::{Conversation, StoredSpaceNotifications, StoredUserSettings};
 use teamcraft_proto::{
-  ConversationId, ConversationKind, ConversationNotificationSettings, DndSchedule, GatewayEvent,
-  MAX_MEETING_REMINDER_MINUTES, MINUTES_PER_DAY, MessageId, NotificationLevel, NotificationSettings,
-  PushMode, ReadReceipt, ReadReceiptsResponse, SpaceId, SpaceNotificationSettings, UserId,
+  ChannelMentions, ConversationId, ConversationKind, ConversationNotificationSettings, DndSchedule,
+  DndWindow, GatewayEvent, MAX_MEETING_REMINDER_MINUTES, MINUTES_PER_DAY, MessageId, NotificationLevel,
+  NotificationSettings, PushMode, QuietHours, ReadReceipt, ReadReceiptsResponse, SpaceId,
+  SpaceNotificationSettings, UserId,
 };
 use time::OffsetDateTime;
+use tracing::warn;
 
 use super::access::{load_conversation, load_space};
 use super::convert::{offset_date_time, space_notification_settings, unix_millis};
@@ -110,7 +112,15 @@ pub async fn get_conversation_settings(
     level: membership.notification_level,
     maybe_muted_until: membership.maybe_muted_until.map(unix_millis),
     is_inherited: membership.is_notification_inherited,
+    maybe_channel_mentions: Some(membership.channel_mentions).filter(|policy| !policy.is_default()),
+    maybe_quiet_hours: quiet_hours(membership.maybe_quiet_hours.as_deref()),
   })
+}
+
+/// Stored quiet hours for a response; a value this version can't read reads as none (it was
+/// validated on write, so it comes from an incompatible version).
+pub fn quiet_hours(maybe_raw: Option<&str>) -> Option<QuietHours> {
+  maybe_raw.and_then(|raw| serde_json::from_str(raw).ok())
 }
 
 /// Sets the caller's notification level and mute time for one conversation.
@@ -124,11 +134,16 @@ pub async fn put_conversation_settings(
   if !access.is_member() {
     return Err(ApiError::Forbidden("not a member of this conversation".into()));
   }
+  if matches!(request.maybe_channel_mentions, Some(ChannelMentions::Unknown(_))) {
+    return Err(ApiError::InvalidRequest("unknown channel_mentions".into()));
+  }
+  let quiet_hours_change = quiet_hours_change(request.maybe_quiet_hours.as_ref())?;
   if request.is_inherited {
     state
       .database
       .clear_conversation_notifications(conversation, caller.user.id)
       .await?;
+    set_filters(state, caller, conversation, &request, quiet_hours_change).await?;
     announce_conversation_settings(state, caller, conversation);
     return get_conversation_settings(state, caller, conversation).await;
   }
@@ -145,8 +160,59 @@ pub async fn put_conversation_settings(
     .database
     .set_conversation_notifications(conversation, caller.user.id, &request.level, maybe_muted_until)
     .await?;
+  set_filters(state, caller, conversation, &request, quiet_hours_change).await?;
   announce_conversation_settings(state, caller, conversation);
-  Ok(request)
+  get_conversation_settings(state, caller, conversation).await
+}
+
+/// What a request does to the stored quiet hours.
+enum QuietHoursChange {
+  /// The request leaves them out (a client from before the field).
+  Keep,
+  /// Hours without windows remove them.
+  Remove,
+  /// Validated, as stored (JSON text).
+  Set(String),
+}
+
+fn quiet_hours_change(maybe_quiet: Option<&QuietHours>) -> Result<QuietHoursChange, ApiError> {
+  let Some(quiet) = maybe_quiet else {
+    return Ok(QuietHoursChange::Keep);
+  };
+  if quiet.windows.is_empty() {
+    return Ok(QuietHoursChange::Remove);
+  }
+  validate_zone(quiet.utc_offset_minutes, quiet.maybe_time_zone.as_deref())?;
+  validate_windows(&quiet.windows)?;
+  serde_json::to_string(quiet)
+    .map(QuietHoursChange::Set)
+    .map_err(|error| ApiError::Internal(format!("serializing quiet hours failed: {error}")))
+}
+
+/// Stores the filters the request names; absent ones keep their stored value (older clients).
+async fn set_filters(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  conversation: ConversationId,
+  request: &ConversationNotificationSettings,
+  quiet_hours: QuietHoursChange,
+) -> Result<(), ApiError> {
+  if let Some(channel_mentions) = &request.maybe_channel_mentions {
+    state
+      .database
+      .set_conversation_channel_mentions(conversation, caller.user.id, channel_mentions)
+      .await?;
+  }
+  let maybe_stored = match &quiet_hours {
+    QuietHoursChange::Keep => return Ok(()),
+    QuietHoursChange::Remove => None,
+    QuietHoursChange::Set(stored) => Some(stored.as_str()),
+  };
+  state
+    .database
+    .set_conversation_quiet_hours(conversation, caller.user.id, maybe_stored)
+    .await?;
+  Ok(())
 }
 
 /// The caller's devices keep the conversation (with their membership's level and mute time) and
@@ -293,10 +359,45 @@ pub fn receipts_enabled(state: &AppState, stored: &StoredUserSettings) -> bool {
 /// The user's UTC offset at `unix_seconds` in minutes: from the schedule's time zone if it names
 /// one this server knows (so daylight saving time needs no client), else the stored offset.
 pub fn utc_offset_at(schedule: &DndSchedule, unix_seconds: i64) -> i16 {
+  zone_offset_at(
+    schedule.maybe_time_zone.as_deref(),
+    schedule.utc_offset_minutes,
+    unix_seconds,
+  )
+}
+
+/// Quiet hours are evaluated like the DND schedule: in their time zone at that moment, so they
+/// follow daylight saving time without a client.
+pub fn quiet_offset_at(quiet: &QuietHours, unix_seconds: i64) -> i16 {
+  zone_offset_at(
+    quiet.maybe_time_zone.as_deref(),
+    quiet.utc_offset_minutes,
+    unix_seconds,
+  )
+}
+
+/// Whether a conversation's quiet hours (as stored) are on at `now`. A stored value this version
+/// can't read doesn't silence anything.
+pub fn is_quiet(maybe_quiet_hours: Option<&str>, now: OffsetDateTime) -> bool {
+  let Some(raw) = maybe_quiet_hours else {
+    return false;
+  };
+  match serde_json::from_str::<QuietHours>(raw) {
+    Ok(quiet) => {
+      let unix_seconds = now.unix_timestamp();
+      quiet.is_active_at(unix_seconds, quiet_offset_at(&quiet, unix_seconds))
+    },
+    Err(error) => {
+      // Validated on write, so this is a value from an incompatible version: notify.
+      warn!(%error, "ignoring unreadable quiet hours");
+      false
+    },
+  }
+}
+
+fn zone_offset_at(maybe_time_zone: Option<&str>, fallback_minutes: i16, unix_seconds: i64) -> i16 {
   use chrono::{Offset, TimeZone};
-  let maybe_offset = schedule
-    .maybe_time_zone
-    .as_deref()
+  let maybe_offset = maybe_time_zone
     .and_then(|zone| zone.parse::<chrono_tz::Tz>().ok())
     .zip(chrono::DateTime::from_timestamp(unix_seconds, 0))
     .map(|(zone, at)| {
@@ -308,7 +409,7 @@ pub fn utc_offset_at(schedule: &DndSchedule, unix_seconds: i64) -> i16 {
     });
   maybe_offset
     .and_then(|minutes| i16::try_from(minutes).ok())
-    .unwrap_or(schedule.utc_offset_minutes)
+    .unwrap_or(fallback_minutes)
 }
 
 /// Whether desktop attention holds the user's phone pushes back: the instance allows it and the user
@@ -350,23 +451,32 @@ fn settings_response(
 }
 
 fn validate_schedule(schedule: &DndSchedule) -> Result<(), ApiError> {
-  if schedule.utc_offset_minutes.abs() > MAX_UTC_OFFSET_MINUTES {
+  if schedule.allow_user_ids.len() > MAX_DND_ALLOWED_USERS {
+    return Err(ApiError::InvalidRequest("too many allowed users".into()));
+  }
+  validate_zone(schedule.utc_offset_minutes, schedule.maybe_time_zone.as_deref())?;
+  validate_windows(&schedule.windows)
+}
+
+fn validate_zone(utc_offset_minutes: i16, maybe_time_zone: Option<&str>) -> Result<(), ApiError> {
+  if utc_offset_minutes.abs() > MAX_UTC_OFFSET_MINUTES {
     return Err(ApiError::InvalidRequest(
       "utc_offset_minutes is out of range".into(),
     ));
   }
-  if schedule.windows.len() > MAX_DND_WINDOWS {
-    return Err(ApiError::InvalidRequest("too many DND windows".into()));
-  }
-  if schedule.allow_user_ids.len() > MAX_DND_ALLOWED_USERS {
-    return Err(ApiError::InvalidRequest("too many allowed users".into()));
-  }
-  if let Some(zone) = &schedule.maybe_time_zone
+  if let Some(zone) = maybe_time_zone
     && (zone.len() > MAX_TIME_ZONE_CHARS || zone.parse::<chrono_tz::Tz>().is_err())
   {
     return Err(ApiError::InvalidRequest("unknown time_zone".into()));
   }
-  for window in &schedule.windows {
+  Ok(())
+}
+
+fn validate_windows(windows: &[DndWindow]) -> Result<(), ApiError> {
+  if windows.len() > MAX_DND_WINDOWS {
+    return Err(ApiError::InvalidRequest("too many DND windows".into()));
+  }
+  for window in windows {
     if window.weekdays.is_empty()
       || window
         .weekdays

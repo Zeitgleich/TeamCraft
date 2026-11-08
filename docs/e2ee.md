@@ -798,7 +798,9 @@ for months must keep fresh ones on the server:
 
 Plaintext metadata: conversation ID, sender user and device, timestamp, message ID (server Snowflake)
 and client message ID, thread ID, `content_key_id`, size, **list of mentioned user IDs** (needed for notifications, §7), the "urgent"
-flag. Reactions are encrypted messages, so not even reaction counts are visible.
+flag, and whether the text addresses the whole conversation (`is_channel_mention`: `@channel`,
+`@here` or `@all`, set by the sending device, for members who let those push them; notifications.md,
+"Per-conversation filters"). Reactions are encrypted messages, so not even reaction counts are visible.
 
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts, a
 channel's shared notes (§4.11).
@@ -3704,12 +3706,13 @@ restored together with them on a new device.
   desktop) and `teamcraft-client-api/src/mobile_settings.rs` (Android and iOS, the same keys and
   values); settings the server enforces (push, do not disturb, conversation and space mutes, read
   receipts) stay with the server and aren't copied here. Light, dark or as the system stays on
-  each device, since it follows the room and the screen; colour themes (#202) are meant to sync.
+  each device, since it follows the room and the screen; the colour theme (#202,
+  `display.color_theme`: `brand`, `preset:<id>` or `custom:<four hex colours>`) syncs.
   An entry an older client wrote for a key no client reads any more (`theme`) stays as an unknown
   key.
   - *Mobile:* the apps sync the list layout and grouping, animated images, sharing typing, the
-    mention rules (first name, `@channel`, keywords, the `@channel` confirmation) and call status
-    sounds. The send key, language, wallpaper colours, notification content, media downloads and
+    mention rules (first name, `@channel`, keywords, the `@channel` confirmation), call status
+    sounds and the colour theme. The send key, language, wallpaper colours, notification content, media downloads and
     devices stay on the phone. The app hands its values to the core (`sync_settings`) at start,
     when `settings_mark` moved after a store change, and 1.5 s after the user changed one, and
     stores an opaque state (owner and per-setting bases) next to its settings. A phone holds one
@@ -4056,6 +4059,11 @@ Details:
   - *DND:* the weekly schedule, the allow list of people who break through, whether urgent messages
     do, and the IANA time zone (sent only while the schedule has ranges) are stored on the server, so
     that routing works with every device offline. The time zone says roughly where the user is.
+  - *Per-conversation filters:* per membership, whether `@channel` notifies (`default`, `notify`,
+    `ignore`) and quiet hours (weekly ranges with offset and IANA time zone), so routing honours them
+    with every device offline. Together with the `is_channel_mention` bit of a message the server
+    learns which messages address everybody; it could tell that from the mention list of a message
+    naming everybody before, but now also for messages naming nobody.
   - *Urgent breaks DND* (opt-in): with the option on, an urgent message reaches the user during DND, by
     default only in DMs and group DMs (`urgent_scope: direct`), so not everybody in a big channel can
     wake them; `everywhere` widens it. People on the allow list break through anyway.

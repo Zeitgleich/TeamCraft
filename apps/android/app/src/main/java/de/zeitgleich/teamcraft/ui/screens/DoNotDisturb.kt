@@ -214,7 +214,7 @@ private fun ScheduleSection(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun RangeRow(range: DndRange, onChange: (DndRange) -> Unit, onRemove: () -> Unit) {
+internal fun RangeRow(range: DndRange, onChange: (DndRange) -> Unit, onRemove: () -> Unit) {
   val context = LocalContext.current
   val locale = Locale.getDefault()
   Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {

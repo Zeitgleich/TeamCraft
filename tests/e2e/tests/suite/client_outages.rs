@@ -48,6 +48,7 @@ mod storage_outage {
         retry_after: Duration::from_millis(100),
         retry_max: Duration::from_millis(500),
         max_attempts: ATTEMPTS,
+        stalled_retry_every: Duration::from_secs(300),
         jitter: JitterMode::Equal,
       },
       ..ClientSettings::default()

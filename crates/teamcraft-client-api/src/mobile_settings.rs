@@ -4,7 +4,7 @@
 //! merge is [`reconcile`]; this module is what a mobile device feeds it and keeps between runs.
 //!
 //! What a phone keeps for itself stays out of [`MobileSettings`]: light, dark or as the system
-//! (on every client; colour themes, #202, will sync), the send key (Enter makes a new
+//! (on every client; the colour theme, #202, does sync), the send key (Enter makes a new
 //! line on a touch keyboard), the language (the system's per-app language), the wallpaper colors,
 //! how much a notification shows (capped by the app lock), media downloads and send quality (the data
 //! plan), and audio and video devices. Notification levels, mutes and do not disturb live on the
@@ -16,6 +16,7 @@ use teamcraft_proto::UserId;
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 
 use crate::calls::CallStatusSounds;
+use crate::color_theme::ColorTheme;
 use crate::settings_sync::{SettingBases, SyncedValues, keep_on_device, reconcile};
 
 pub const KEY_LIST_LAYOUT: &str = "sidebar.layout";
@@ -27,9 +28,10 @@ pub const KEY_CHANNEL_MENTIONS_NOTIFY: &str = "notifications.channel_mentions_no
 pub const KEY_KEYWORDS: &str = "notifications.keywords";
 pub const KEY_CONFIRM_CHANNEL_OVER: &str = "notifications.confirm_channel_over";
 pub const KEY_CALL_STATUS_SOUNDS: &str = "calls.status_sounds";
+pub const KEY_COLOR_THEME: &str = "display.color_theme";
 
 /// Every account key the mobile apps read and write, in the order of [`MobileSettings`].
-pub const MOBILE_KEYS: [&str; 9] = [
+pub const MOBILE_KEYS: [&str; 10] = [
   KEY_LIST_LAYOUT,
   KEY_LIST_GROUPING,
   KEY_ANIMATED_IMAGES,
@@ -39,6 +41,7 @@ pub const MOBILE_KEYS: [&str; 9] = [
   KEY_KEYWORDS,
   KEY_CONFIRM_CHANNEL_OVER,
   KEY_CALL_STATUS_SOUNDS,
+  KEY_COLOR_THEME,
 ];
 
 /// Lists that say what a person watches for: an upload carries everything in them, so values of
@@ -58,6 +61,8 @@ pub struct MobileSettings {
   /// Ask before `@channel` in conversations with more members than this; 0 never asks.
   pub confirm_channel_over: u32,
   pub call_status_sounds: CallStatusSounds,
+  /// The colours of the chrome and accent (#202); light or dark stays the device's.
+  pub color_theme: ColorTheme,
 }
 
 /// How the conversations are listed. Wire values as `teamcraft-ui` `SidebarLayout`.
@@ -121,6 +126,7 @@ impl Default for MobileSettings {
       keywords: Vec::new(),
       confirm_channel_over: 10,
       call_status_sounds: CallStatusSounds::All,
+      color_theme: ColorTheme::Brand,
     }
   }
 }
@@ -192,6 +198,7 @@ impl SyncedValues for MobileSettings {
       KEY_KEYWORDS => json!(self.keywords),
       KEY_CONFIRM_CHANNEL_OVER => json!(self.confirm_channel_over),
       KEY_CALL_STATUS_SOUNDS => serde_json::to_value(self.call_status_sounds).ok()?,
+      KEY_COLOR_THEME => serde_json::to_value(&self.color_theme).ok()?,
       _ => return None,
     };
     Some(value)
@@ -213,6 +220,13 @@ impl SyncedValues for MobileSettings {
       KEY_CONFIRM_CHANNEL_OVER => assign(&mut self.confirm_channel_over, value),
       // "unknown" is the catch-all's own name, never a value a client writes.
       KEY_CALL_STATUS_SOUNDS => value != &json!("unknown") && assign(&mut self.call_status_sounds, value),
+      // A newer client's theme keeps the one this device shows.
+      KEY_COLOR_THEME => {
+        let is_known = value
+          .as_str()
+          .is_some_and(|text| !matches!(text.parse(), Ok(ColorTheme::Unknown(_))));
+        is_known && assign(&mut self.color_theme, value)
+      },
       _ => false,
     }
   }
@@ -258,6 +272,7 @@ mod tests {
         keywords: vec!["release".into()],
         confirm_channel_over: 25,
         call_status_sounds: CallStatusSounds::OwnOnly,
+        color_theme: "preset:pine".parse().unwrap(),
       };
       let read = |key| settings.read(key).unwrap();
       assert_eq!(read(KEY_LIST_LAYOUT), json!("list"));
@@ -267,6 +282,7 @@ mod tests {
       assert_eq!(read(KEY_KEYWORDS), json!(["release"]));
       assert_eq!(read(KEY_CONFIRM_CHANNEL_OVER), json!(25));
       assert_eq!(read(KEY_CALL_STATUS_SOUNDS), json!("own_only"));
+      assert_eq!(read(KEY_COLOR_THEME), json!("preset:pine"));
     }
 
     #[test]
@@ -275,6 +291,7 @@ mod tests {
         list_layout: ListLayout::List,
         keywords: vec!["a".into(), "b".into()],
         call_status_sounds: CallStatusSounds::Off,
+        color_theme: "custom:#1b2233,#2f66e0,#2eb67d,#d1453b".parse().unwrap(),
         ..MobileSettings::default()
       };
       let mut copy = MobileSettings::default();
@@ -294,6 +311,8 @@ mod tests {
       assert!(!local.adopt(KEY_LIST_LAYOUT, &json!(3)));
       assert!(!local.adopt(KEY_CONFIRM_CHANNEL_OVER, &json!(-1)));
       assert!(!local.adopt("display.density", &json!("compact")));
+      assert!(!local.adopt(KEY_COLOR_THEME, &json!("preset:from-the-future")));
+      assert!(!local.adopt(KEY_COLOR_THEME, &json!(1)));
       assert_eq!(local, MobileSettings::default());
     }
 

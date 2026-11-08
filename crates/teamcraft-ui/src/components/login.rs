@@ -1426,8 +1426,10 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
         provide_context(crate::integrations::BotsHub::new(crate::rest::RestClient::new(control.authenticator())));
         provide_context(crate::groups::GroupsHub::new(crate::rest::RestClient::new(control.authenticator())));
         provide_context(crate::channel_policy::ChannelPolicyHub::new(crate::rest::RestClient::new(control.authenticator())));
-        provide_context(crate::profiles::ProfileHub::new(crate::rest::RestClient::new(control.authenticator())));
-        provide_context(crate::space_images::SpaceImageHub::new(control.authenticator()));
+        let picture_retries = crate::picture_retries::PictureRetries::new();
+        provide_context(picture_retries);
+        provide_context(crate::profiles::ProfileHub::new(crate::rest::RestClient::new(control.authenticator()), picture_retries));
+        provide_context(crate::space_images::SpaceImageHub::new(control.authenticator(), picture_retries));
         view! { <Shell backend=loaded settings=settings /> }.into_any()
       },
       Some(Err(error)) => {

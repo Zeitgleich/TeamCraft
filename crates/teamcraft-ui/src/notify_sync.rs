@@ -1,8 +1,8 @@
 //! Keeps the notification preferences that the server enforces in step with the server.
 //!
 //! Push routing runs on the server, so push mode, the do-not-disturb schedule, read receipts,
-//! thread auto-follow, the phone push level and the per-conversation level and mute time are stored
-//! there. The rest of the
+//! thread auto-follow, the phone push level and the per-conversation level, mute time and filters
+//! (`@channel`, quiet hours) are stored there. The rest of the
 //! notification preferences (desktop level, keywords, highlights) follow the account in its encrypted
 //! data, where the server can't read them (`settings_sync`). On start the
 //! server's values are applied to the local preferences; afterwards every local change of a server
@@ -22,7 +22,7 @@ use leptos::task::spawn_local;
 use teamcraft_proto::{
   ConversationNotificationSettings, DndSchedule as DndWire, DndWindow, ErrorBody, ErrorCode,
   ListConversationsResponse, ListSpacesResponse, MINUTES_PER_DAY, NotificationLevel, NotificationSettings,
-  PushMode, SpaceNotificationSettings, UnixMillis,
+  PushMode, QuietHours, SpaceNotificationSettings, UnixMillis,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
@@ -32,8 +32,8 @@ use crate::clock::{end_of_local_day, local_time_zone, local_utc_offset_minutes, 
 use crate::feedback::{ActionFailure, FailureKind, report_failure};
 use crate::model::TimestampMs;
 use crate::prefs::{
-  ConversationNotify, DEFAULT_MEETING_REMINDER_MINUTES, DndSchedule, EVERY_DAY, MuteFor, NotifyLevel,
-  Preferences, PushWhen,
+  ConversationFilters, ConversationNotify, DEFAULT_MEETING_REMINDER_MINUTES, DndSchedule, EVERY_DAY, MuteFor,
+  NotifyLevel, Preferences, PushWhen,
 };
 use crate::reactive::UpdateIfAlive;
 use crate::settings::Settings;
@@ -65,7 +65,7 @@ enum SendOutcome {
 /// One setting on its way to the server, with what the server had before.
 enum Sent {
   Global(Option<NotificationSettings>),
-  Conversation(String, Option<ConversationNotify>),
+  Conversation(String, Option<ConversationNotify>, Option<ConversationFilters>),
   Space(String, Option<ConversationNotify>),
 }
 
@@ -85,6 +85,7 @@ struct Confirmed {
   is_loaded: bool,
   maybe_global: Option<NotificationSettings>,
   conversations: BTreeMap<String, ConversationNotify>,
+  filters: BTreeMap<String, ConversationFilters>,
   spaces: BTreeMap<String, ConversationNotify>,
 }
 
@@ -151,7 +152,13 @@ impl NotificationSync {
             );
             let id = conversation.id.to_string();
             prefs.notifications.set_conversation(&id, notify);
-            state.conversations.insert(id, notify);
+            state.conversations.insert(id.clone(), notify);
+            let filters = filters_from_server(
+              &membership.channel_mentions,
+              membership.maybe_quiet_hours.as_ref(),
+            );
+            prefs.notifications.set_filters(&id, filters.clone());
+            state.filters.insert(id, filters);
           }
         }
       }
@@ -178,13 +185,17 @@ impl NotificationSync {
         .conversations
         .keys()
         .chain(state.conversations.keys())
+        .chain(prefs.notifications.filters.keys())
+        .chain(state.filters.keys())
         .collect();
-      let changed: Vec<(String, ConversationNotify)> = ids
+      let changed: Vec<(String, ConversationNotify, ConversationFilters)> = ids
         .into_iter()
         .filter_map(|id| {
           let wanted = prefs.notifications.conversation(id);
           let known = state.conversations.get(id).copied().unwrap_or_default();
-          (wanted != known).then(|| (id.clone(), wanted))
+          let wanted_filters = prefs.notifications.filters(id);
+          let known_filters = state.filters.get(id).cloned().unwrap_or_default();
+          (wanted != known || wanted_filters != known_filters).then(|| (id.clone(), wanted, wanted_filters))
         })
         .collect();
       let space_ids: std::collections::BTreeSet<&String> = prefs
@@ -222,13 +233,29 @@ impl NotificationSync {
         context.clone(),
       );
     }
-    for (id, notify) in changed_conversations {
-      let previous = confirmed.borrow_mut().conversations.insert(id.clone(), notify);
-      let wire = notify_to_server(&notify, now_ms());
+    for (id, notify, filters) in changed_conversations {
+      let (previous, previous_filters) = {
+        let mut state = confirmed.borrow_mut();
+        (
+          state.conversations.insert(id.clone(), notify),
+          state.filters.insert(id.clone(), filters.clone()),
+        )
+      };
+      let now = now_ms();
+      let wire = ConversationNotificationSettings {
+        // A choice from a newer version stays as the server has it.
+        maybe_channel_mentions: Some(filters.channel_mentions.clone())
+          .filter(|choice| !matches!(choice, teamcraft_proto::ChannelMentions::Unknown(_))),
+        maybe_quiet_hours: Some(quiet_hours_to_server(
+          &filters.quiet_windows,
+          &LocalZone::current(now),
+        )),
+        ..notify_to_server(&notify, now)
+      };
       self.put(
         format!("/api/v1/conversations/{id}/notification-settings"),
         serde_json::to_string(&wire).ok(),
-        Sent::Conversation(id, previous),
+        Sent::Conversation(id, previous, previous_filters),
         context.clone(),
       );
     }
@@ -302,8 +329,16 @@ fn forget_sent(confirmed: &Rc<RefCell<Confirmed>>, sent: Sent) {
   let mut state = confirmed.borrow_mut();
   match sent {
     Sent::Global(previous) => state.maybe_global = previous,
-    Sent::Conversation(id, Some(previous)) => drop(state.conversations.insert(id, previous)),
-    Sent::Conversation(id, None) => drop(state.conversations.remove(&id)),
+    Sent::Conversation(id, maybe_previous, maybe_previous_filters) => {
+      match maybe_previous {
+        Some(previous) => drop(state.conversations.insert(id.clone(), previous)),
+        None => drop(state.conversations.remove(&id)),
+      }
+      match maybe_previous_filters {
+        Some(previous) => drop(state.filters.insert(id, previous)),
+        None => drop(state.filters.remove(&id)),
+      }
+    },
     Sent::Space(id, Some(previous)) => drop(state.spaces.insert(id, previous)),
     Sent::Space(id, None) => drop(state.spaces.remove(&id)),
   }
@@ -314,14 +349,21 @@ fn forget_sent(confirmed: &Rc<RefCell<Confirmed>>, sent: Sent) {
 fn undo(context: &SendContext, sent: Sent) {
   let restore = match &sent {
     Sent::Global(previous) => Restore::Global(previous.clone()),
-    Sent::Conversation(id, previous) => Restore::Conversation(id.clone(), previous.unwrap_or_default()),
+    Sent::Conversation(id, previous, previous_filters) => Restore::Conversation(
+      id.clone(),
+      previous.unwrap_or_default(),
+      previous_filters.clone().unwrap_or_default(),
+    ),
     Sent::Space(id, previous) => Restore::Space(id.clone(), previous.unwrap_or_default()),
   };
   forget_sent(&context.confirmed, sent);
   context.settings.prefs.update_if_alive(|prefs| match restore {
     Restore::Global(Some(previous)) => apply_global(prefs, &previous),
     Restore::Global(None) => {},
-    Restore::Conversation(id, previous) => prefs.notifications.set_conversation(&id, previous),
+    Restore::Conversation(id, previous, previous_filters) => {
+      prefs.notifications.set_conversation(&id, previous);
+      prefs.notifications.set_filters(&id, previous_filters);
+    },
     Restore::Space(id, previous) => prefs.notifications.set_space(&id, previous),
   });
 }
@@ -329,7 +371,7 @@ fn undo(context: &SendContext, sent: Sent) {
 /// What [`undo`] puts back.
 enum Restore {
   Global(Option<NotificationSettings>),
-  Conversation(String, ConversationNotify),
+  Conversation(String, ConversationNotify, ConversationFilters),
   Space(String, ConversationNotify),
 }
 
@@ -584,6 +626,8 @@ pub fn notify_to_server(notify: &ConversationNotify, now: TimestampMs) -> Conver
       level: NotificationLevel::Mentions,
       maybe_muted_until: None,
       is_inherited: true,
+      maybe_channel_mentions: None,
+      maybe_quiet_hours: None,
     };
   }
   let level = match notify.maybe_level {
@@ -596,6 +640,8 @@ pub fn notify_to_server(notify: &ConversationNotify, now: TimestampMs) -> Conver
     level,
     maybe_muted_until: mute_until(notify.mute, now).map(UnixMillis),
     is_inherited: false,
+    maybe_channel_mentions: None,
+    maybe_quiet_hours: None,
   }
 }
 
@@ -617,6 +663,41 @@ pub fn notify_from_server(
     NotificationLevel::Mentions | NotificationLevel::Unknown(_) => None,
   };
   ConversationNotify { maybe_level, mute }
+}
+
+/// Quiet hours for the server, in this device's zone. Ranges the server would refuse are left out;
+/// without ranges left they are no quiet hours, which removes them on the server.
+pub fn quiet_hours_to_server(windows: &[DndWindow], zone: &LocalZone) -> QuietHours {
+  QuietHours {
+    utc_offset_minutes: zone.utc_offset_minutes,
+    maybe_time_zone: zone.maybe_time_zone.clone(),
+    windows: windows
+      .iter()
+      .filter(|window| is_valid_window(window))
+      .take(MAX_DND_WINDOWS)
+      .map(|window| DndWindow {
+        weekdays: EVERY_DAY
+          .iter()
+          .filter(|day| window.weekdays.contains(day))
+          .cloned()
+          .collect(),
+        ..window.clone()
+      })
+      .collect(),
+  }
+}
+
+/// A conversation's filters from the server's membership.
+pub fn filters_from_server(
+  channel_mentions: &teamcraft_proto::ChannelMentions,
+  maybe_quiet_hours: Option<&QuietHours>,
+) -> ConversationFilters {
+  ConversationFilters {
+    channel_mentions: channel_mentions.clone(),
+    quiet_windows: maybe_quiet_hours
+      .map(|quiet| quiet.windows.clone())
+      .unwrap_or_default(),
+  }
 }
 
 /// A space's setting for the server: the level is optional, so "no choice" stays distinct from
@@ -682,8 +763,14 @@ mod tests {
       mute: MuteFor::Forever,
     };
     confirmed.borrow_mut().conversations.insert("7".into(), muted);
-    forget_sent(&confirmed, Sent::Conversation("7".into(), None));
+    let quiet = ConversationFilters {
+      channel_mentions: teamcraft_proto::ChannelMentions::Ignore,
+      ..ConversationFilters::default()
+    };
+    confirmed.borrow_mut().filters.insert("7".into(), quiet);
+    forget_sent(&confirmed, Sent::Conversation("7".into(), None, None));
     assert!(!confirmed.borrow().conversations.contains_key("7"));
+    assert!(!confirmed.borrow().filters.contains_key("7"));
     confirmed.borrow_mut().spaces.insert("3".into(), muted);
     forget_sent(
       &confirmed,
@@ -895,6 +982,36 @@ mod tests {
         start_minute: 12 * 60,
         end_minute: 18 * 60,
       }
+    }
+
+    #[test]
+    fn quiet_hours_go_to_the_server_in_this_zone_without_ranges_it_would_refuse() {
+      let no_days = DndWindow {
+        weekdays: Vec::new(),
+        ..night(WORKDAYS.to_vec())
+      };
+      let wire = quiet_hours_to_server(
+        &[night(vec![Weekday::Friday, Weekday::Monday]), no_days],
+        &berlin(),
+      );
+      assert_eq!(wire.utc_offset_minutes, 60);
+      assert_eq!(wire.maybe_time_zone.as_deref(), Some("Europe/Berlin"));
+      assert_eq!(wire.windows, vec![night(vec![Weekday::Monday, Weekday::Friday])]);
+      // No ranges left: no quiet hours, which removes them on the server.
+      assert!(quiet_hours_to_server(&[], &berlin()).windows.is_empty());
+    }
+
+    #[test]
+    fn filters_come_from_the_membership_and_unknown_choices_are_kept() {
+      let later = teamcraft_proto::ChannelMentions::Unknown("only_admins".into());
+      let quiet = quiet_hours_to_server(&[weekend_afternoon()], &berlin());
+      let filters = filters_from_server(&later, Some(&quiet));
+      assert_eq!(filters.channel_mentions, later);
+      assert_eq!(filters.quiet_windows, vec![weekend_afternoon()]);
+      assert_eq!(
+        filters_from_server(&teamcraft_proto::ChannelMentions::Default, None),
+        ConversationFilters::default()
+      );
     }
 
     pub(super) fn berlin() -> LocalZone {

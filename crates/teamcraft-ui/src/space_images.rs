@@ -24,6 +24,7 @@ use crate::components::file_views::blob_url;
 use crate::feedback::{ActionFailure, FailureKind};
 use crate::model::{ConversationId, SpaceId};
 use crate::persisted_media::{self, CachedPicture, Freshness, MediaKey};
+use crate::picture_retries::{PictureMiss, PictureRetries};
 use crate::reactive::UpdateIfAlive;
 
 /// What the client uploads after scaling.
@@ -34,6 +35,7 @@ pub struct SpaceImageHub {
   auth: StoredValue<Rc<dyn Authenticator>, LocalStorage>,
   cache: RwSignal<ImageCache>,
   asked: StoredValue<HashSet<(ImageOwner, String)>>,
+  retries: PictureRetries,
 }
 
 /// Whose picture it is.
@@ -65,11 +67,12 @@ pub enum SpaceImageFailure {
 }
 
 impl SpaceImageHub {
-  pub fn new(auth: Rc<dyn Authenticator>) -> Self {
+  pub fn new(auth: Rc<dyn Authenticator>, retries: PictureRetries) -> Self {
     Self {
       auth: StoredValue::new_local(auth),
       cache: RwSignal::new(ImageCache::default()),
       asked: StoredValue::new(HashSet::new()),
+      retries,
     }
   }
 
@@ -86,6 +89,8 @@ impl SpaceImageHub {
       }
       return None;
     };
+    // A picture that did not load is asked for again in the next round.
+    self.retries.round();
     let (maybe_url, is_current) = self.cache.with(|cache| {
       let maybe_url = cache.best_url(owner).map(str::to_owned);
       (maybe_url, cache.url(owner, version).is_some())
@@ -169,16 +174,25 @@ impl SpaceImageHub {
         return;
       };
       let result = auth.api_request_bytes(ApiMethod::Get, &owner.path(), None).await;
-      match result {
+      let miss = match result {
         Ok(image) if image.status == 200 => {
+          hub.retries.succeeded();
           if let Some(url) = blob_url(&image.body, UPLOAD_CONTENT_TYPE) {
             hub.remember(owner, version.clone(), url);
             persisted_media::put(owner.media_key(), picture(version, image.body));
           }
+          return;
         },
-        // What is shown stays (an older cached picture, or the letter tile); the next version (or
-        // session) asks again.
-        Ok(_) | Err(_) => tracing::debug!(?owner, "picture not downloaded"),
+        Ok(image) => PictureMiss::of_status(image.status, &image.body),
+        Err(_) => PictureMiss::Later(None),
+      };
+      // What is shown stays (an older cached picture, or the letter tile).
+      tracing::debug!(?owner, ?miss, "picture not downloaded");
+      if let PictureMiss::Later(maybe_wait) = miss {
+        hub
+          .asked
+          .try_update_value(|asked| asked.remove(&(owner, version.clone())));
+        hub.retries.failed(maybe_wait);
       }
     });
   }

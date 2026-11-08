@@ -78,7 +78,10 @@ pub fn App() -> impl IntoView {
   apply_text_size(settings);
   apply_language_attribute();
   apply_deleted_user_name(i18n);
-  crate::viewport::sync_theme_color(move || settings.theme.track());
+  crate::viewport::sync_theme_color(move || {
+    settings.theme.track();
+    settings.prefs.with(|prefs| prefs.display.color_theme.to_string());
+  });
   crate::brand::provide_brand(settings);
   provide_window_chrome();
   if tauri::is_available() {
@@ -497,6 +500,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
           lazy_area(Place::Overlay, move || areas::edit_history(conversation, message))
         },
         Overlay::Bookmarks(conversation) => lazy_area(Place::Overlay, move || areas::bookmarks(conversation)),
+        Overlay::QuietHours(conversation) => lazy_area(Place::Overlay, move || areas::quiet_hours(conversation)),
         Overlay::UserProfile(user) => lazy_area(Place::Overlay, move || areas::user_profile(user)),
         Overlay::CallsUnavailable => lazy_area(Place::Overlay, || areas::calls_unavailable(())),
         Overlay::ReportProblem => lazy_area(Place::Overlay, || areas::report_problem(())),

@@ -25,15 +25,19 @@ sealed interface SectionTitle {
 
   /** The Activity tab's one list (shown without a header). */
   data object Activity : SectionTitle
+
+  /** Home's DMs with something new, on top of its list (#1488). */
+  data object UnreadDirect : SectionTitle
 }
 
 data class Section(val title: SectionTitle, val conversations: List<ConversationItem>)
 
 /**
- * The bottom navigation of the main screen (the desktop's One Home, #237): Home (global entries
- * and the DMs, outside spaces), Activity (what waits for the user) and the channels by space.
+ * The bottom navigation of the main screen (the desktop's One Home, #237; the layout of #1488):
+ * Home (the quick-access cards, the DMs with something new and the channels by space), the DMs,
+ * and Activity (what waits for the user).
  */
-enum class ChatTab { Home, Activity, Spaces }
+enum class ChatTab { Home, Direct, Activity }
 
 /**
  * The Activity tab: every conversation with a mention, or unread and not muted (the Unread filter
@@ -86,13 +90,6 @@ fun hitLocation(maybeSpaceName: String?, name: String, isNotesToSelf: Boolean, n
 val ConversationItem.isDirect: Boolean
   get() = kind == ConversationKind.DIRECT || kind == ConversationKind.GROUP
 
-/**
- * Whether the Home tab lists the conversation: DMs and group DMs, and the channels of a space the
- * user starred (#1152). The channel stays under Favorites in its space too.
- */
-val ConversationItem.isListedInHome: Boolean
-  get() = isDirect || (isFavorite && maybeSpaceId != null && !isArchived)
-
 /** Channels of the spaces: favorite channels first, then each space (spaces and channels by name). */
 fun channelSections(conversations: List<ConversationItem>, listsArchived: Boolean = false): List<Section> {
   val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
@@ -116,7 +113,50 @@ fun channelSections(conversations: List<ConversationItem>, listsArchived: Boolea
 }
 
 /**
- * The Home tab: favorites (starred channels of spaces among them, #1152), then the rest, each the most recent first (`lastActivity`: newest
+ * Home of the spaces layout (#1488): the DMs with something new (not favorites, the most recent
+ * first), then the favorites (DMs and channels, by name), then each space with its channels, as
+ * [channelSections] has them. Read DMs are on the DMs tab. Empty sections are left out.
+ */
+fun homeSections(
+  conversations: List<ConversationItem>,
+  lastActivity: Map<String, Long> = emptyMap(),
+  listsArchived: Boolean = false,
+): List<Section> {
+  val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
+  val byRecency = compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName)
+  val unique = conversations.distinctBy { it.id }
+  val unreadDirect = unique.filter { it.isDirect && !it.isFavorite && HomeFilter.Unread.matches(it) }.sortedWith(byRecency)
+  val favorites = unique.filter { it.isFavorite && !it.isArchived }.sortedWith(byName)
+  return buildList {
+    if (unreadDirect.isNotEmpty()) add(Section(SectionTitle.UnreadDirect, unreadDirect))
+    if (favorites.isNotEmpty()) add(Section(SectionTitle.Favorites, favorites))
+    addAll(channelSections(unique, listsArchived).filterNot { it.title == SectionTitle.Favorites })
+  }
+}
+
+/**
+ * The key a section's collapsed state is remembered under (#1488): a space by its id, so renaming
+ * it keeps the choice; `null` for the sections that can't be collapsed.
+ */
+fun Section.collapseKey(): String? = when (val title = title) {
+  SectionTitle.Favorites -> "favorites"
+  SectionTitle.UnreadDirect -> "unread-direct"
+  SectionTitle.Channels -> "channels"
+  SectionTitle.Archived -> "archived"
+  SectionTitle.DirectMessages -> "direct"
+  is SectionTitle.Space -> conversations.firstNotNullOfOrNull { it.maybeSpaceId }?.let { "space:$it" } ?: "space-name:${title.name}"
+  else -> null
+}
+
+/**
+ * The rows a section shows: all of them while it is open; while collapsed, only those with
+ * something new and the open conversation, as the desktop sidebar does, so nothing new hides.
+ */
+fun Section.visibleRows(isCollapsed: Boolean, maybeSelectedId: String?): List<ConversationItem> =
+  if (!isCollapsed) conversations else conversations.filter { HomeFilter.Unread.matches(it) || it.id == maybeSelectedId }
+
+/**
+ * The DMs tab: favorites, then the rest, each the most recent first (`lastActivity`: newest
  * message per conversation; by name without one). Only conversations `chip` lets through whose
  * names contain `filter` (any case) are kept. Empty sections are left out.
  */
@@ -131,7 +171,7 @@ fun directSections(
   val byRecency = compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName)
   val direct = conversations
     .distinctBy { it.id }
-    .filter { it.isListedInHome && chip.matches(it) && (needle.isEmpty() || it.name.contains(needle, ignoreCase = true)) }
+    .filter { it.isDirect && chip.matches(it) && (needle.isEmpty() || it.name.contains(needle, ignoreCase = true)) }
     .sortedWith(byRecency)
   val (favorites, rest) = direct.partition { it.isFavorite }
   return buildList {

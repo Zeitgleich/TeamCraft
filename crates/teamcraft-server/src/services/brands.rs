@@ -19,12 +19,13 @@ use tracing::{error, warn};
 use super::access::require;
 use super::audit;
 use super::convert::unix_millis;
+use super::storage_cleanup;
 use crate::auth::AuthenticatedUser;
 use crate::brand::{Brand, BrandAsset, BrandError, DatabaseBrand, StoredAsset, normalize_host, sniff_image};
 use crate::config::{BrandColorsConfig, BrandConfig};
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::storage::BlobStore;
+use crate::storage::{BlobStore, StorageError};
 
 /// Puts the database brands in force on top of the configuration's; at startup. A stored brand that
 /// no longer fits (a host name the server stopped serving) loses that host name with a warning; if
@@ -214,7 +215,7 @@ pub async fn take_over_brand(
         store
           .put_object(&asset.object_key, asset.bytes.to_vec(), asset.content_type)
           .await
-          .map_err(|error| ApiError::Unavailable(format!("storing a brand image failed: {error}")))?;
+          .map_err(storing_failed)?;
       }
     }
     store_brand(state, caller, &config).await?;
@@ -293,7 +294,7 @@ pub async fn put_asset(
     store
       .put_object(&asset.object_key, asset.bytes.to_vec(), content_type)
       .await
-      .map_err(|error| ApiError::Unavailable(format!("storing the image failed: {error}")))?;
+      .map_err(storing_failed)?;
     let maybe_previous = state
       .database
       .put_brand_asset(&asset_row(id, slot.as_str(), &asset))
@@ -612,10 +613,13 @@ async fn delete_objects(state: &AppState, keys: &[String]) {
     return;
   };
   for key in keys {
-    if let Err(error) = store.delete_object(key).await {
-      warn!(%error, "deleting a replaced brand image failed");
-    }
+    storage_cleanup::delete_or_queue(state, store, key).await;
   }
+}
+
+fn storing_failed(error: StorageError) -> ApiError {
+  warn!(%error, "storing a brand image failed");
+  ApiError::storage_failed("brand image storage", error)
 }
 
 fn blob_store(state: &AppState) -> Result<&BlobStore, ApiError> {

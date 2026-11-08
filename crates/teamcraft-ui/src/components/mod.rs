@@ -126,6 +126,7 @@ pub mod search_view;
 pub mod section_tabs;
 pub mod security_ui;
 pub mod settings_account;
+pub mod settings_color_theme;
 pub mod settings_keyboard;
 pub mod settings_modal;
 pub mod settings_notifications;

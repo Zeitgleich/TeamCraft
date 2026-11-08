@@ -6,16 +6,16 @@ import UIKit
 enum Theme {
   static let accent = dynamic(light: 0x005DFC, dark: 0x5C9DFF)
   static let onAccent = dynamic(light: 0xFFFFFF, dark: 0x04122E)
-  static let accentSoft = dynamic(light: 0xE3EDFF, dark: 0x13284A)
+  static let accentSoft = dynamic(light: 0xE3EDFF, dark: 0x182A47)
   static let accentStrong = dynamic(light: 0x004BD3, dark: 0x8AB8FF)
-  static let background = dynamic(light: 0xF6F7F9, dark: 0x0F141D)
-  static let surface = dynamic(light: 0xFFFFFF, dark: 0x151B27)
-  static let text = dynamic(light: 0x1B2230, dark: 0xE4E9F2)
-  static let textMuted = dynamic(light: 0x566175, dark: 0x9AA6BA)
+  static let background = dynamic(light: 0xF5F5F5, dark: 0x161616)
+  static let surface = dynamic(light: 0xFFFFFF, dark: 0x1E1E1E)
+  static let text = dynamic(light: 0x1D1D1D, dark: 0xF5F5F5)
+  static let textMuted = dynamic(light: 0x545454, dark: 0xB0B0B0)
   /// Dividers and card edges.
-  static let border = dynamic(light: 0xDCE0E7, dark: 0x28324A)
+  static let border = dynamic(light: 0xDDDDDD, dark: 0x363636)
   /// Edges of fields and controls: 3:1 against the surface (WCAG 1.4.11).
-  static let controlBorder = dynamic(light: 0x848EA0, dark: 0x626D86)
+  static let controlBorder = dynamic(light: 0x858585, dark: 0x7A7A7A)
   static let danger = dynamic(light: 0xC0392B, dark: 0xFF7A6B)
   /// Unread and mention badges; white numbers on it need 4.5:1.
   static let badge = dynamic(light: 0xC8441F, dark: 0xC8441F)
@@ -26,7 +26,7 @@ enum Theme {
   static let ownBubble = dynamic(light: 0x005DFC, dark: 0x1F57C2)
   static let onOwnBubble = Color.white
   /// Other people's bubbles: a neutral tone that stands off the conversation's background.
-  static let otherBubble = dynamic(light: 0xE8EBF0, dark: 0x232B3B)
+  static let otherBubble = dynamic(light: 0xEBEBEB, dark: 0x2C2C2C)
 
   static let radius: CGFloat = 12
   static let spacing: CGFloat = 12

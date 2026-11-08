@@ -9,7 +9,7 @@ use teamcraft_crypto::message::{
 };
 use teamcraft_proto::{
   Base64Bytes, ClientMessageId, ConversationId, Id, ListMessagesQuery, ListMessagesResponse, MessageId,
-  MessageResponse, SendMessageRequest, Snowflake, ThreadId, UserId,
+  MessageResponse, SendMessageRequest, Snowflake, ThreadId, UserId, addresses_everyone,
 };
 use zeroize::Zeroizing;
 
@@ -859,6 +859,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       // The one piece of metadata the server sees: it routes urgent pushes past do-not-disturb.
       is_urgent: matches!(&stored.content, MessageContent::Text { meta, .. } if meta.priority == Priority::Urgent),
+      // Members who let `@channel` notify them in this conversation get a push (notifications.md,
+      // "Per-conversation filters").
+      is_channel_mention: matches!(&stored.content, MessageContent::Text { body, .. } if addresses_everyone(body)),
     };
     let response = self.api.send_message(entry.conversation_id, &request).await?;
     stored.maybe_server_id = Some(response.id);

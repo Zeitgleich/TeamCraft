@@ -371,8 +371,9 @@ pub enum FileTransfer {
   Failed {
     reason: FileFailure,
   },
-  /// An upload that stopped retrying by itself after repeated failures. The message waits for it;
-  /// [`crate::backend::ChatBackend::retry_send`] on the message tries again.
+  /// An upload that stopped retrying at the usual pace after repeated failures; it is still tried
+  /// every few minutes. The message waits for it; [`crate::backend::ChatBackend::retry_send`] on
+  /// the message tries again at once.
   UploadStalled {
     reason: FileFailure,
   },

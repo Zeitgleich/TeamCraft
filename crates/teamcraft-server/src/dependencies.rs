@@ -37,6 +37,9 @@ pub struct DependenciesConfig {
   pub retry_max_ms: u64,
   /// How long `/readyz` waits for the database to answer; longer counts as a failure.
   pub readiness_timeout_ms: u64,
+  /// How often the object storage is asked whether it answers, so its breaker follows an outage
+  /// that only clients meet: they move the bytes with presigned URLs (0: never).
+  pub storage_probe_secs: u64,
   /// How long an API request may make no progress (no answer, no new piece of its body) before it
   /// is answered with 503 and `Retry-After`; what ends a request hanging on a database connection
   /// that stopped answering (0: no deadline).
@@ -66,6 +69,7 @@ pub struct DependencyOptions {
   pub retries: u32,
   pub retry: RetryPolicy,
   pub readiness_timeout: Duration,
+  pub maybe_storage_probe: Option<Duration>,
   pub maybe_request_deadline: Option<Duration>,
 }
 
@@ -406,6 +410,7 @@ impl Default for DependenciesConfig {
       retry_initial_ms: 200,
       retry_max_ms: 2_000,
       readiness_timeout_ms: 2_000,
+      storage_probe_secs: 10,
       request_deadline_secs: 60,
     }
   }
@@ -422,6 +427,8 @@ impl From<&DependenciesConfig> for DependencyOptions {
         Duration::from_millis(config.retry_max_ms),
       ),
       readiness_timeout: Duration::from_millis(config.readiness_timeout_ms.max(1)),
+      maybe_storage_probe: (config.storage_probe_secs > 0)
+        .then(|| Duration::from_secs(config.storage_probe_secs)),
       maybe_request_deadline: (config.request_deadline_secs > 0)
         .then(|| Duration::from_secs(config.request_deadline_secs)),
     }

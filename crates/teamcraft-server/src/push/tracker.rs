@@ -606,6 +606,8 @@ mod tests {
           maybe_muted_until: None,
           push_mode: "away_only".into(),
           maybe_dnd_schedule: None,
+          channel_mentions: teamcraft_proto::ChannelMentions::Default,
+          maybe_quiet_hours: None,
           is_following_thread: false,
           maybe_uses_desktop_attention: None,
           devices: Vec::new(),

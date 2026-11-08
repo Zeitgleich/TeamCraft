@@ -247,6 +247,8 @@ pub enum Overlay {
   /// The public links of one file of a message: new ones with options, the live ones with Revoke.
   ShareFile(ConversationId, MessageId, teamcraft_proto::AttachmentId),
   NewSpace,
+  /// The quiet hours of one conversation (notifications.md, "Per-conversation filters").
+  QuietHours(ConversationId),
   /// Pick one or several people to write to (a DM or a group DM).
   NewMessage,
   /// Open spaces to join and the user's own spaces, and the way to create a new one; a shared

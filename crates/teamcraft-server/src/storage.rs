@@ -19,8 +19,9 @@ use crate::dependencies::{CircuitOpen, DependencyGuard, Fault, Retries};
 pub enum StorageError {
   #[error("invalid storage endpoint: {0}")]
   Endpoint(String),
+  /// Built by the `From` impl below, which takes the URL out: it is presigned.
   #[error("storage request failed: {0}")]
-  Request(#[from] reqwest::Error),
+  Request(reqwest::Error),
   #[error("storage answered with status {0}")]
   Status(StatusCode),
   #[error("the stored object is larger than expected")]
@@ -36,6 +37,9 @@ pub enum StorageError {
   #[error(transparent)]
   Unavailable(#[from] CircuitOpen),
 }
+
+/// The key [`BlobStore::probe`] asks about; nothing is ever stored there.
+const PROBE_KEY: &str = "health/probe";
 
 /// Signs requests against one bucket.
 pub struct BlobStore {
@@ -85,6 +89,18 @@ impl BlobStore {
   /// "later" from us (503 with `Retry-After`) instead of a raw error from the storage.
   pub fn check_available(&self) -> Result<(), CircuitOpen> {
     self.guard.check()
+  }
+
+  /// Asks the storage about an object that doesn't exist, through its breaker. Clients move the
+  /// bytes with presigned URLs, so an outage may never reach the server otherwise: the breaker would
+  /// stay closed, or stay open with nobody to close it again. "Not found" and refusals count as
+  /// answers. While the breaker is open and its next probe isn't due, nothing is sent.
+  pub async fn probe(&self) -> Result<(), StorageError> {
+    self
+      .guard
+      .call(Retries::Once, fault, || self.object_size_once(PROBE_KEY))
+      .await
+      .map(|_| ())
   }
 
   pub fn expiry(&self) -> Duration {
@@ -340,6 +356,13 @@ impl BlobStore {
       ),
       status => Err(StorageError::Status(status)),
     }
+  }
+}
+
+impl From<reqwest::Error> for StorageError {
+  /// The URL of a failed request carries its signature, and these errors end up in the logs.
+  fn from(error: reqwest::Error) -> Self {
+    Self::Request(error.without_url())
   }
 }
 

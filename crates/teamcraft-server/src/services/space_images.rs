@@ -20,6 +20,7 @@ use tracing::warn;
 use super::access::{load_space, require};
 use super::audit::{self, Target as AuditTarget};
 use super::spaces::{get_space, notify_space};
+use super::storage_cleanup::delete_or_queue;
 use crate::auth::AuthenticatedUser;
 use crate::brand::sniff_image;
 use crate::error::ApiError;
@@ -106,16 +107,19 @@ pub async fn put_space_image(
   store
     .put_object(&image.key, png, SPACE_IMAGE_CONTENT_TYPE)
     .await
-    .map_err(|error| ApiError::Unavailable(format!("storing the picture failed: {error}")))?;
+    .map_err(|error| {
+      warn!(%error, "storing a picture failed");
+      ApiError::storage_failed("picture storage", error)
+    })?;
   let replaced = match state.database.set_space_image(id, Some(&image)).await {
     Ok(replaced) => replaced,
     Err(error) => {
-      forget_object(store, &image.key).await;
+      delete_or_queue(state, store, &image.key).await;
       return Err(error.into());
     },
   };
   if let Some(previous) = replaced {
-    forget_object(store, &previous).await;
+    delete_or_queue(state, store, &previous).await;
   }
   announce(state, caller, id, "space_image_set").await?;
   get_space(state, caller, id).await
@@ -134,7 +138,7 @@ pub async fn delete_space_image(
   }
   let store = blob_store(state)?;
   if let Some(previous) = state.database.set_space_image(id, None).await? {
-    forget_object(store, &previous).await;
+    delete_or_queue(state, store, &previous).await;
   }
   announce(state, caller, id, "space_image_removed").await?;
   get_space(state, caller, id).await
@@ -158,7 +162,7 @@ pub async fn get_space_image(
     .await
     .map_err(|error| {
       warn!(%error, space_id = %id, "reading a space picture failed");
-      ApiError::storage_unavailable("picture storage")
+      ApiError::storage_failed("picture storage", error)
     })?
     .ok_or_else(ApiError::space_image_not_found)?;
   Ok(SpaceImageFile {
@@ -267,13 +271,6 @@ fn blob_store(state: &AppState) -> Result<&Arc<BlobStore>, ApiError> {
     .maybe_blob_store
     .as_ref()
     .ok_or_else(|| ApiError::Unavailable("storage is not configured".into()))
-}
-
-/// Deletes a picture nobody refers to any more; a failure only leaves an orphan behind.
-async fn forget_object(store: &BlobStore, key: &str) {
-  if let Err(error) = store.delete_object(key).await {
-    warn!(%error, "deleting an old space picture failed");
-  }
 }
 
 #[cfg(test)]

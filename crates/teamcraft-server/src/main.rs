@@ -50,7 +50,7 @@ use teamcraft_server::services::session::{self, PolicyHolder};
 use teamcraft_server::services::{
   admin, admin_join_requests, attachments, backgrounds, brands, calendar_settings, conversations,
   email_digest, guests, key_packages, mail_settings, meeting_guests, meeting_notices, oidc, retention,
-  runtime_settings, urgent,
+  runtime_settings, storage_cleanup, urgent,
 };
 use teamcraft_server::state::{
   AppState, MeetingMailConfig, OidcSyncSettings, PushSettings, PushTtls, RetryPolicy, Settings,
@@ -321,6 +321,7 @@ async fn run() -> anyhow::Result<()> {
   spawn_email_digests(state.clone());
   spawn_account_housekeeping(state.clone());
   spawn_background_sweeper(state.clone());
+  spawn_storage_probe(state.clone());
   spawn_partition_maintenance(state.clone(), config.server.partitions_ahead_months);
   spawn_derived_presence(state.clone());
   health::spawn(state.clone());
@@ -463,6 +464,27 @@ fn is_transient(error: &anyhow::Error) -> bool {
   })
 }
 
+/// Keeps the object storage's breaker current (`[dependencies] storage_probe_secs`): clients talk
+/// to the storage directly, so the server may not see an outage or its end otherwise.
+fn spawn_storage_probe(state: AppState) {
+  let (Some(store), Some(period)) = (
+    state.maybe_blob_store.clone(),
+    state.dependencies.options().maybe_storage_probe,
+  ) else {
+    return;
+  };
+  tokio::spawn(async move {
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+      interval.tick().await;
+      if let Err(error) = store.probe().await {
+        tracing::debug!(%error, "the storage probe failed");
+      }
+    }
+  });
+}
+
 /// Removes deleted and abandoned call backgrounds and unfinished attachments once their upload URLs
 /// have expired, and files of drafts that were not sent in time (#1220).
 fn spawn_background_sweeper(state: AppState) {
@@ -485,6 +507,9 @@ fn spawn_background_sweeper(state: AppState) {
         Ok(0) => {},
         Ok(swept) => info!(swept, "swept files of drafts that were not sent"),
         Err(error) => warn!(%error, "sweeping drafts' files failed"),
+      }
+      if let Err(error) = storage_cleanup::sweep(&state).await {
+        warn!(%error, "deleting queued objects failed");
       }
       match meeting_guests::sweep_expired_guests(&state).await {
         Ok(0) => {},

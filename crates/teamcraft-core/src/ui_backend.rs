@@ -1424,6 +1424,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       level: membership.notification_level.clone(),
       maybe_muted_until: membership.maybe_muted_until,
       is_inherited: membership.is_notification_inherited,
+      maybe_channel_mentions: None,
+      maybe_quiet_hours: None,
     };
     let maybe_space: Option<SpaceResponse> = response
       .maybe_space_id
@@ -5875,6 +5877,8 @@ mod tests {
         maybe_last_read_message_id: None,
         maybe_muted_until: None,
         is_notification_inherited: false,
+        channel_mentions: Default::default(),
+        maybe_quiet_hours: None,
         reactions_seen: Default::default(),
       }
     }

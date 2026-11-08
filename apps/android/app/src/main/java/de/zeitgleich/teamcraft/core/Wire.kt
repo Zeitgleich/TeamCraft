@@ -14,6 +14,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import de.zeitgleich.teamcraft.notifications.DndSchedule
+import de.zeitgleich.teamcraft.notifications.DndWindow
 
 /**
  * The core's view models as they arrive over the JSON bridge (teamcraft-client-api `model`,
@@ -640,13 +641,28 @@ data class NotificationSettings(
   @SerialName("notifies_meeting_start") val maybeNotifiesMeetingStart: Boolean? = null,
 )
 
-/** Per-conversation level (`all`, `mentions`, `none`) and mute time. */
+/**
+ * Per-conversation level (`all`, `mentions`, `none`), mute time and filters (notifications.md,
+ * "Per-conversation filters"). Filters left `null` keep what the server has.
+ */
 @Serializable
 data class ConversationNotificationSettings(
   val level: String = "all",
   @SerialName("muted_until") val mutedUntil: Long? = null,
   /** Follows the space's setting; saving a level or mute makes it the conversation's own. */
   @SerialName("is_inherited") val isInherited: Boolean = false,
+  /** `default`, `notify` or `ignore`: whether `@channel` and `@here` notify here; absent reads as `default`. */
+  @SerialName("channel_mentions") val channelMentions: String? = null,
+  /** Times the conversation stays silent as if muted; no windows removes them. */
+  @SerialName("quiet_hours") val quietHours: QuietHours? = null,
+)
+
+/** Quiet hours of one conversation, in the user's zone like the DND schedule. */
+@Serializable
+data class QuietHours(
+  @SerialName("utc_offset_minutes") val utcOffsetMinutes: Int = 0,
+  @SerialName("time_zone") val maybeTimeZone: String? = null,
+  val windows: List<DndWindow> = emptyList(),
 )
 
 /** `PUT /me/presence`: `dnd` (optionally until a time) or `auto`. */

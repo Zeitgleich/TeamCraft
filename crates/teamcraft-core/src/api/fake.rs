@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt;
 use teamcraft_proto::{
-  AddConversationMemberRequest, AddSpaceMemberRequest, Base64Bytes, ChannelModeration, ChannelRole,
-  ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationHead, ConversationId,
-  ConversationKind, ConversationMemberResponse, ConversationResponse, ConversationVisibility,
+  AddConversationMemberRequest, AddSpaceMemberRequest, Base64Bytes, ChannelMentions, ChannelModeration,
+  ChannelRole, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationHead,
+  ConversationId, ConversationKind, ConversationMemberResponse, ConversationResponse, ConversationVisibility,
   CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeviceActivity, DeviceId, DeviceResponse,
   ErrorCode, GatewayClientMessage, GatewayEvent, GatewayServerMessage, GetMeResponse, HistoryPolicy, Id,
   IdempotencyKey, IdentityKeyResponse, JoinPolicy, KeyBagResponse, KeyPackageStatusResponse,
@@ -208,6 +208,7 @@ struct State {
   offline_users: HashSet<UserId>,
   /// Users whose blob uploads the network refuses (a browser's CSP, a proxy) while REST works.
   blob_refused_users: HashSet<UserId>,
+  maybe_upload_urls_expire_at_ms: Option<i64>,
   /// Users whose REST calls fail while their gateway still connects.
   rest_failing_users: HashSet<UserId>,
   /// Users the server answers 503 with this `Retry-After` (seconds): a dependency outage or a
@@ -1813,6 +1814,11 @@ impl FakeServer {
     }
   }
 
+  /// The expiry named for upload URLs from now on (by default they never expire).
+  pub fn set_upload_urls_expire_at(&self, at_ms: i64) {
+    self.lock().maybe_upload_urls_expire_at_ms = Some(at_ms);
+  }
+
   /// Attachments announced so far, finished or not.
   pub fn attachment_count(&self) -> usize {
     self.lock().attachments.len()
@@ -2194,6 +2200,7 @@ fn sent_request(entry: &ScheduledMessageResponse) -> SendMessageRequest {
     maybe_thread_id: entry.maybe_thread_id,
     mentioned_user_ids: entry.mentioned_user_ids.clone(),
     is_urgent: entry.is_urgent,
+    is_channel_mention: entry.is_channel_mention,
   }
 }
 
@@ -4980,6 +4987,7 @@ impl ServerApi for FakeServerApi {
         ciphertext: request.sealed.ciphertext.clone(),
         mentioned_user_ids: request.sealed.mentioned_user_ids.clone(),
         is_urgent: request.sealed.is_urgent,
+        is_channel_mention: request.sealed.is_channel_mention,
         mls_epoch: request.sealed.mls_epoch,
         due_at: request.due_at,
         version: 1,
@@ -5448,7 +5456,7 @@ impl ServerApi for FakeServerApi {
       Ok(CreateAttachmentResponse {
         id,
         upload_url: format!("{BLOB_SCHEME}{id}"),
-        expires_at: UnixMillis(0),
+        expires_at: UnixMillis(state.maybe_upload_urls_expire_at_ms.unwrap_or(i64::MAX)),
       })
     })
   }
@@ -7101,6 +7109,8 @@ impl Conversation {
       maybe_last_read_message_id: self.read_positions.get(&me).copied(),
       maybe_muted_until: None,
       is_notification_inherited: false,
+      channel_mentions: ChannelMentions::Default,
+      maybe_quiet_hours: None,
       reactions_seen: self.reactions_seen.get(&me).cloned().unwrap_or_default(),
     });
     response
