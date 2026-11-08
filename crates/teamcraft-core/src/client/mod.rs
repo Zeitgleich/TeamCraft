@@ -123,7 +123,7 @@ pub use linking::{
 };
 pub use member_device::{GroupAccess, is_waiting_for_device};
 pub use messaging::FlushReport;
-pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_content};
+pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_plaintext};
 #[cfg(feature = "ui")]
 pub(crate) use messaging::{apply_control, bookmarks_key};
 pub use missing_keys::{KeyCatchUp, key_catch_up};

@@ -74,6 +74,8 @@ pub use tracked::{DEFAULT_MESSAGE_CACHE_BYTES, RemovedRendition, StoreChanges, T
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, MlsMessageId, ThreadId, UserId};
 
+use crate::push_preview::ShownMessage;
+
 /// Key-value tables of the store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Table {
@@ -778,6 +780,21 @@ pub trait LocalStore {
         .find(|message| message.maybe_server_id == Some(server_id)),
     )
   }
+  /// [`Self::message_by_server_id`] as far as a notification reads it ([`ShownMessage`]): a store
+  /// that keeps messages as records of JSON reads only that part of one, so the browser's service
+  /// worker carries no reader of every kind of message (#1452). The default reads the whole message.
+  fn shown_message_by_server_id(
+    &self,
+    conversation: ConversationId,
+    server_id: MessageId,
+  ) -> Result<Option<ShownMessage>, StoreError> {
+    Ok(
+      self
+        .message_by_server_id(conversation, server_id)?
+        .as_ref()
+        .map(ShownMessage::from),
+    )
+  }
   /// Hands each message of [`Self::messages`] to `visit` by reference, for a reader that sums them
   /// up (counts, the newest, the unread ones) and keeps few: a store that holds them in memory
   /// copies none. The default reads them as [`Self::messages`] does.
@@ -1109,6 +1126,14 @@ macro_rules! forward_local_store {
         server_id: MessageId,
       ) -> Result<Option<StoredMessage>, StoreError> {
         (**self).message_by_server_id(conversation, server_id)
+      }
+
+      fn shown_message_by_server_id(
+        &self,
+        conversation: ConversationId,
+        server_id: MessageId,
+      ) -> Result<Option<ShownMessage>, StoreError> {
+        (**self).shown_message_by_server_id(conversation, server_id)
       }
 
       fn message_revision(&self, conversation: ConversationId) -> Option<u64> {

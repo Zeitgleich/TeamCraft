@@ -48,9 +48,9 @@ except ImportError:  # Optional: gzip is the budget, brotli is informational.
     brotli = None
 
 # A guest's meeting visit (lobby with the texts of one language, the meeting's modules, call module),
-# gzip -9, decimal megabytes: 5.92 MB on the way to 1.0.25 (#1437), plus about 6 %, so it warns (from
+# gzip -9, decimal megabytes: 5.84 MB on the way to 1.0.25 (#1452), plus about 6 %, so it warns (from
 # 95 %) only after real growth.
-DEFAULT_GUEST_BUDGET_BYTES = 6_280_000
+DEFAULT_GUEST_BUDGET_BYTES = 6_190_000
 # The split modules a guest loads once let into a meeting (teamcraft-ui `areas.rs`).
 GUEST_MODULES = ("guest", "calls")
 SPLIT_LOADER = "teamcraft-ui-split-*.js"
@@ -60,9 +60,9 @@ SPLIT_MODULE = re.compile(
     r'export const __wasm_split_load_(\w+) = wrapAsyncCb\(makeLoad\(\(\) => \{\s*'
     r'const src = fetch\(new URL\("\./([^"]+)".*?\n, \[([^\]]*)\]', re.S)
 # A signed-in first visit (app, the signed-in app's chunks, service worker, the texts of one
-# language), gzip -9: 5.42 MB on the way to 1.0.25 (#1437), plus about 6 %. A ceiling against big regressions; growth here is a
+# language), gzip -9: 5.33 MB on the way to 1.0.25 (#1452), plus about 6 %. A ceiling against big regressions; growth here is a
 # member's, who loads it once and then from the service worker's cache.
-DEFAULT_BUDGET_BYTES = 5_740_000
+DEFAULT_BUDGET_BYTES = 5_650_000
 # The call module's gzip -9 size, decimal megabytes: 0.86 MB with the effects' compositors (#439),
 # plus about 15 %. The segmentation is a module of its own that only loads when an effect starts.
 DEFAULT_CALL_MODULE_BUDGET_BYTES = 1_000_000

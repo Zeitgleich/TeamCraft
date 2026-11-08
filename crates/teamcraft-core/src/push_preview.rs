@@ -15,11 +15,14 @@ use teamcraft_proto::{
 };
 
 use crate::api::ServerApi;
-use crate::client::decrypt_content;
+use crate::client::decrypt_plaintext;
 use crate::error::CoreError;
 use crate::people_names::shown_name;
 use crate::records;
-use crate::store::{AttachmentRef, ConversationEvent, LocalStore, MessageContent, MessageMeta, Table};
+use crate::store::{LocalStore, Table};
+
+mod shown;
+pub use shown::{ShownContent, ShownFile, ShownMessage};
 
 pub(crate) const PUSH_KEY_RECORD: &str = "push_key";
 const PUSH_SESSION_RECORD: &str = "push_session";
@@ -212,14 +215,35 @@ fn is_message(wake_up: &PushWakeUp) -> bool {
 /// workspace state on this device yet, or one that cannot be read, a notification shows nothing
 /// but "New message".
 pub fn push_content_mode(store: &impl LocalStore) -> PushContentMode {
-  match records::get_json::<crate::workspace::WorkspaceState>(
-    store,
-    Table::Workspace,
-    crate::client::WORKSPACE_KEY,
-  ) {
+  match records::get_json::<NotificationsOfState>(store, Table::Workspace, crate::client::WORKSPACE_KEY) {
     Ok(Some(state)) => state.policy.notifications.push_content,
     Ok(None) | Err(_) => PushContentMode::Generic,
   }
+}
+
+/// What [`push_content_mode`] reads of the stored [`crate::workspace::WorkspaceState`]: its policy's
+/// notification settings, without the readers of the rest of the state, which the service worker
+/// doesn't need (#1452).
+#[derive(Deserialize)]
+struct NotificationsOfState {
+  #[serde(default)]
+  policy: NotificationsOfPolicy,
+}
+
+/// [`teamcraft_proto::WorkspacePolicy`] as [`push_content_mode`] reads it. The fields the policy
+/// can't do without are still required, so a state whose policy lacks them reads as unreadable, as
+/// with the whole state (and shows nothing but "New message").
+#[derive(Default, Deserialize)]
+#[allow(dead_code, reason = "of the required fields only their presence is checked")]
+struct NotificationsOfPolicy {
+  admin_self_join: serde::de::IgnoredAny,
+  org_recovery: serde::de::IgnoredAny,
+  history_default: serde::de::IgnoredAny,
+  retention: serde::de::IgnoredAny,
+  link_previews: serde::de::IgnoredAny,
+  compliance_archive: serde::de::IgnoredAny,
+  #[serde(default)]
+  notifications: teamcraft_proto::NotificationDefaults,
 }
 
 impl PushPreview {
@@ -308,7 +332,7 @@ async fn preview_content<A: ServerApi>(
   let conversation = wake_up.conversation_id;
   // One indexed lookup: the notification extension has little memory (issue #155).
   let local = store
-    .message_by_server_id(conversation, message_id)
+    .shown_message_by_server_id(conversation, message_id)
     .ok()
     .flatten();
   if let Some(message) = local {
@@ -336,7 +360,7 @@ async fn preview_content<A: ServerApi>(
 fn readable_preview(
   store: &impl LocalStore,
   sender: UserId,
-  content: &MessageContent,
+  content: &ShownContent,
 ) -> (Result<PreviewContent, PreviewGap>, bool, bool, Option<String>) {
   if is_hidden_change(content) {
     let gap = if adds_this_user(store, content) {
@@ -355,43 +379,26 @@ fn readable_preview(
 }
 
 /// The integration source's name a message of a bot shows instead of the bot's.
-fn source_name(store: &impl LocalStore, sender: UserId, content: &MessageContent) -> Option<String> {
-  let MessageContent::Text { meta, .. } = content else {
-    return None;
-  };
-  let identity = meta.maybe_source.as_deref()?;
+fn source_name(store: &impl LocalStore, sender: UserId, content: &ShownContent) -> Option<String> {
+  let identity = content.source()?;
   let is_bot = crate::integration_sources::is_known_bot(store, sender).unwrap_or(false);
-  crate::integration_sources::shown_source(identity, is_bot).map(|shown| shown.name)
+  crate::integration_sources::shown_source(&identity, is_bot).map(|shown| shown.name)
 }
 
-/// Whether this is a change to the conversation rather than something somebody said. An unknown
-/// kind is not: it may be a message of a newer client, so it still shows that something came.
-fn is_hidden_change(content: &MessageContent) -> bool {
+/// Whether this is a change to the conversation rather than something somebody said (which
+/// [`ShownContent`] tells from the kind). An unknown kind is not: it may be a message of a newer
+/// client, so it still shows that something came.
+fn is_hidden_change(content: &ShownContent) -> bool {
   match content {
-    MessageContent::Edit { .. }
-    | MessageContent::Delete { .. }
-    | MessageContent::Deleted
-    | MessageContent::IndexSegment { .. }
-    | MessageContent::Pin { .. }
-    | MessageContent::Bookmarks { .. }
-    // A hidden message by design (e2ee.md, "Transport: a hidden message"): an edit of the notes page.
-    | MessageContent::Canvas { .. }
-    | MessageContent::Event { .. }
-    | MessageContent::Reaction { .. }
-    | MessageContent::IntegrationSource { .. }
-    | MessageContent::Notetaker { .. }
-    | MessageContent::ChannelRolesEntry { .. } => true,
-    MessageContent::Text { .. } | MessageContent::File { .. } | MessageContent::Unknown => false,
+    ShownContent::Change | ShownContent::MemberAdded(_) => true,
+    ShownContent::Text { .. } | ShownContent::File(_) | ShownContent::Unknown => false,
   }
 }
 
 /// Being added to a conversation is the one change the person it concerns should hear of: the apps
 /// say "added you" ([`PreviewGap::AddedYou`]; the text is in their own strings).
-fn adds_this_user(store: &impl LocalStore, content: &MessageContent) -> bool {
-  let MessageContent::Event {
-    event: ConversationEvent::MemberAdded { user, .. },
-  } = content
-  else {
+fn adds_this_user(store: &impl LocalStore, content: &ShownContent) -> bool {
+  let ShownContent::MemberAdded(user) = content else {
     return false;
   };
   records::load_account(store)
@@ -427,8 +434,8 @@ fn failure_class(error: &CoreError) -> &'static str {
   }
 }
 
-fn is_silent(content: &MessageContent) -> bool {
-  matches!(content, MessageContent::Text { meta, .. } if meta.is_silent)
+fn is_silent(content: &ShownContent) -> bool {
+  matches!(content, ShownContent::Text { is_silent: true, .. })
 }
 
 async fn fetch_and_decrypt<A: ServerApi>(
@@ -436,7 +443,7 @@ async fn fetch_and_decrypt<A: ServerApi>(
   api: &A,
   wake_up: &PushWakeUp,
   message_id: MessageId,
-) -> Result<(UserId, MessageContent), CoreError> {
+) -> Result<(UserId, ShownContent), CoreError> {
   // `before` is exclusive: start right after the message, newest first.
   let next = Snowflake::new(message_id.snowflake().get().saturating_add(1))
     .map_err(|_| CoreError::Corrupt("message ID out of range".into()))?;
@@ -477,33 +484,40 @@ async fn fetch_and_decrypt<A: ServerApi>(
   let account = records::load_account(store)?.ok_or(CoreError::NotEnrolled)?;
   let maybe_sender_key =
     records::device_signing_key(store, message.sender_user_id, message.sender_device_id)?;
-  // Previews never show unsigned messages.
-  let content = decrypt_content(&account.key_bag, &message, maybe_sender_key.as_ref(), false)?;
+  // Previews never show unsigned messages. The content is read as `Client` reads it,
+  // but only as far as the notification shows it (#1452).
+  let plaintext = decrypt_plaintext(&account.key_bag, &message, maybe_sender_key.as_ref(), false)?;
+  let content = serde_json::from_slice(plaintext.expose_secret()).unwrap_or(ShownContent::Unknown);
   Ok((message.sender_user_id, content))
 }
 
-fn content_preview(content: &MessageContent) -> PreviewContent {
+fn content_preview(content: &ShownContent) -> PreviewContent {
   match content {
-    MessageContent::Text { body, meta, .. } if body.trim().is_empty() => text_without_body(meta),
-    MessageContent::Text { body, .. } => PreviewContent::Text(truncate(body)),
-    MessageContent::File { attachment } => file_preview(attachment),
+    ShownContent::Text {
+      body,
+      maybe_file,
+      maybe_forwarded_body,
+      ..
+    } if body.trim().is_empty() => text_without_body(maybe_file.as_ref(), maybe_forwarded_body.as_deref()),
+    ShownContent::Text { body, .. } => PreviewContent::Text(truncate(body)),
+    ShownContent::File(attachment) => file_preview(attachment),
     _ => PreviewContent::Unavailable,
   }
 }
 
 /// Pictures and files sent without a caption, or a forward with nothing added, are a text message
 /// with an empty body: they show what they carry, not "New message".
-fn text_without_body(meta: &MessageMeta) -> PreviewContent {
-  if let Some(attachment) = meta.attachments.first() {
+fn text_without_body(maybe_file: Option<&ShownFile>, maybe_forwarded_body: Option<&str>) -> PreviewContent {
+  if let Some(attachment) = maybe_file {
     return file_preview(attachment);
   }
-  match &meta.maybe_forwarded {
-    Some(forwarded) if !forwarded.body.trim().is_empty() => PreviewContent::Text(truncate(&forwarded.body)),
+  match maybe_forwarded_body {
+    Some(body) if !body.trim().is_empty() => PreviewContent::Text(truncate(body)),
     _ => PreviewContent::Unavailable,
   }
 }
 
-fn file_preview(attachment: &AttachmentRef) -> PreviewContent {
+fn file_preview(attachment: &ShownFile) -> PreviewContent {
   PreviewContent::File {
     file_name: attachment.file_name.clone(),
     kind: AttachmentKind::of(&attachment.media_type),
@@ -560,7 +574,12 @@ fn truncate(text: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::store::{AttachmentRef, ConversationEvent, MessageContent, MessageMeta};
   use teamcraft_proto::ConversationId;
+
+  fn shown(content: &MessageContent) -> ShownContent {
+    ShownContent::from(content)
+  }
 
   fn attachment(name: &str, media_type: &str) -> AttachmentRef {
     AttachmentRef {
@@ -640,14 +659,14 @@ mod tests {
       ..MessageMeta::default()
     };
     assert_eq!(
-      content_preview(&text("  ", with_files.clone())),
+      content_preview(&shown(&text("  ", with_files.clone()))),
       PreviewContent::File {
         file_name: "a.png".into(),
         kind: AttachmentKind::Image
       }
     );
     assert_eq!(
-      content_preview(&text("look", with_files)),
+      content_preview(&shown(&text("look", with_files))),
       PreviewContent::Text("look".into())
     );
     let forwarded = MessageMeta {
@@ -660,11 +679,11 @@ mod tests {
       ..MessageMeta::default()
     };
     assert_eq!(
-      content_preview(&text("", forwarded)),
+      content_preview(&shown(&text("", forwarded))),
       PreviewContent::Text("lunch?".into())
     );
     assert_eq!(
-      content_preview(&text(" ", MessageMeta::default())),
+      content_preview(&shown(&text(" ", MessageMeta::default()))),
       PreviewContent::Unavailable
     );
   }
@@ -716,13 +735,13 @@ mod tests {
     let store = crate::store::MemoryStore::new();
     for content in &hidden {
       assert_eq!(
-        readable_preview(&store, crate::store::nobody(), content).0,
+        readable_preview(&store, crate::store::nobody(), &shown(content)).0,
         Err(PreviewGap::Hidden)
       );
     }
     // A kind from a newer client may be a message: it still shows that something came.
     assert_eq!(
-      readable_preview(&store, crate::store::nobody(), &MessageContent::Unknown).0,
+      readable_preview(&store, crate::store::nobody(), &ShownContent::Unknown).0,
       Ok(PreviewContent::Unavailable)
     );
   }
@@ -744,6 +763,35 @@ mod tests {
     state.policy.notifications.push_content = PushContentMode::Sender;
     records::put_json(&store, Table::Workspace, crate::client::WORKSPACE_KEY, &state).unwrap();
     assert_eq!(push_content_mode(&store), PushContentMode::Sender);
+
+    // Read as the whole state reads (#1452): a policy without what it can't do without doesn't
+    // read; without the notification settings, or without a policy, the defaults apply.
+    let whole_state =
+      |store: &crate::store::MemoryStore| match records::get_json::<crate::workspace::WorkspaceState>(
+        store,
+        Table::Workspace,
+        crate::client::WORKSPACE_KEY,
+      ) {
+        Ok(Some(state)) => state.policy.notifications.push_content,
+        Ok(None) | Err(_) => PushContentMode::Generic,
+      };
+    let without = |field: &str| {
+      let mut json = serde_json::to_value(&state).unwrap();
+      json["policy"].as_object_mut().unwrap().remove(field);
+      json
+    };
+    let cases = [
+      (without("retention"), PushContentMode::Generic),
+      (without("notifications"), PushContentMode::Full),
+      (serde_json::json!({}), PushContentMode::Full),
+      (serde_json::json!({"policy": null}), PushContentMode::Generic),
+      (serde_json::to_value(&state).unwrap(), PushContentMode::Sender),
+    ];
+    for (json, expected) in cases {
+      records::put_json(&store, Table::Workspace, crate::client::WORKSPACE_KEY, &json).unwrap();
+      assert_eq!(push_content_mode(&store), expected, "{json}");
+      assert_eq!(whole_state(&store), expected, "{json}");
+    }
   }
 
   #[test]

@@ -58,6 +58,7 @@ use super::{
   FeedChange, FeedVersion, LocalStore, MediaRange, MessageEdge, MessageFilter, MessageOrder, MessageSlot,
   StoreError, StoredMessage, Table, WriteTally,
 };
+use crate::push_preview::ShownMessage;
 
 const ENTRY_NAMESPACE: &str = "entry";
 const MESSAGE_NAMESPACE: &str = "message";
@@ -214,6 +215,28 @@ enum Record {
   Message {
     message: Box<StoredMessage>,
   },
+}
+
+/// [`Record`] as reading an entry takes it: the record of a message is refused without reading the
+/// message, so a reader of entries alone (the browser's service worker) carries no reader of every
+/// kind of message (#1452).
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum EntryRecord {
+  Entry {
+    table: String,
+    key: String,
+    value: Base64Bytes,
+  },
+  Message,
+}
+
+/// [`Record`] as a notification reads a message ([`ShownMessage`]).
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ShownRecord {
+  Entry,
+  Message { message: ShownMessage },
 }
 
 /// Where a step of the catalog build left off ([`SealedStore::build_catalog`]).
@@ -1068,29 +1091,56 @@ impl<B: RecordBackend> SealedStore<B> {
     let Some(sealed) = self.backend.get_record(&id)? else {
       return Ok(None);
     };
-    match self.open_record(&id, &sealed)? {
-      Record::Entry {
+    match self.open_as::<EntryRecord>(&id, &sealed)? {
+      EntryRecord::Entry {
         table: found_table,
         key: found_key,
         value,
       } if found_table == table && found_key == key => Ok(Some(Zeroizing::new(value.into_vec()))),
-      Record::Entry { value, .. } => {
+      EntryRecord::Entry { value, .. } => {
         zeroize::Zeroize::zeroize(&mut value.into_vec());
         Err(StoreError::Corrupt(
           "a record holds another entry than its name".into(),
         ))
       },
-      Record::Message { .. } => Err(StoreError::Corrupt("an entry's record holds a message".into())),
+      EntryRecord::Message => Err(StoreError::Corrupt("an entry's record holds a message".into())),
     }
   }
 
   fn open_record(&self, id: &LookupId, sealed: &[u8]) -> Result<Record, StoreError> {
+    self.open_as(id, sealed)
+  }
+
+  /// A record read as `T`: [`Record`], or one of the narrower readers of it.
+  fn open_as<T: serde::de::DeserializeOwned>(&self, id: &LookupId, sealed: &[u8]) -> Result<T, StoreError> {
     // The key opened the catalog, so a record that doesn't open is damaged (or swapped).
     let plaintext = self
       .keys
       .open(id, sealed)
       .map_err(|_| StoreError::Corrupt("a record of the local database doesn't open".into()))?;
     serde_json::from_slice(plaintext.expose_secret()).map_err(|error| StoreError::Corrupt(error.to_string()))
+  }
+
+  /// [`Self::cached_message`] as far as a notification reads it: from the cache when the message is
+  /// there, else only that part of its record, which isn't cached.
+  fn shown_message(
+    &self,
+    state: &mut State<B>,
+    conversation: ConversationId,
+    client_message_id: ClientMessageId,
+  ) -> Result<Option<ShownMessage>, StoreError> {
+    let key = (conversation, *client_message_id.as_bytes());
+    if let Some(message) = state.messages.get(&key) {
+      return Ok(Some(ShownMessage::from(message)));
+    }
+    let id = self.message_id(conversation, client_message_id);
+    let Some(sealed) = self.backend.get_record(&id)? else {
+      return Ok(None);
+    };
+    match self.open_as::<ShownRecord>(&id, &sealed)? {
+      ShownRecord::Message { message } => Ok(Some(message)),
+      ShownRecord::Entry => Err(StoreError::Corrupt("a message record holds an entry".into())),
+    }
   }
 
   /// Seals an entry when the backend writes it. Until then the seal holds the value; it is wiped
@@ -1405,6 +1455,36 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
           .into_iter()
           .find(|message| message.maybe_server_id == Some(server_id)),
       )
+    })
+  }
+
+  /// [`Self::message_by_server_id`] reading only what a notification shows of the message.
+  fn shown_message_by_server_id(
+    &self,
+    conversation: ConversationId,
+    server_id: MessageId,
+  ) -> Result<Option<ShownMessage>, StoreError> {
+    self.reading(|state| {
+      let keys = self.index_keys(
+        state,
+        conversation,
+        Bound::Included(&MessageKey::first_at(server_id)),
+        Direction::Forward,
+        &mut |key, entry| {
+          key
+            .is_at(server_id)
+            .then_some(entry.server_id() == Some(server_id))
+        },
+      )?;
+      for key in &keys {
+        if let Some(message) = self.shown_message(state, conversation, key.client_message_id())?
+          && message.conversation_id == conversation
+          && message.maybe_server_id == Some(server_id)
+        {
+          return Ok(Some(message));
+        }
+      }
+      Ok(None)
     })
   }
 
@@ -2372,6 +2452,33 @@ mod tests {
     const MESSAGES: i64 = 100;
 
     #[test]
+    fn a_notification_reads_what_the_whole_message_says() {
+      let (records, key) = filled();
+      for n in [0, 5, MESSAGES - 1] {
+        let server = id(server_id(CHANNEL, n));
+        // From the record alone, then from the cache the whole read filled.
+        let cold = open(&records, &key)
+          .shown_message_by_server_id(id(CHANNEL), server)
+          .unwrap();
+        let store = open(&records, &key);
+        let whole = store.message_by_server_id(id(CHANNEL), server).unwrap();
+        assert!(whole.is_some());
+        assert_eq!(cold, whole.as_ref().map(ShownMessage::from));
+        assert_eq!(
+          store.shown_message_by_server_id(id(CHANNEL), server).unwrap(),
+          cold
+        );
+      }
+      let missing = id(server_id(CHANNEL, MESSAGES + 1));
+      assert_eq!(
+        open(&records, &key)
+          .shown_message_by_server_id(id(CHANNEL), missing)
+          .unwrap(),
+        None
+      );
+    }
+
+    #[test]
     fn a_tampered_index_page_is_built_again() {
       let (records, key) = filled();
       let page = page_id(&records, &key);
@@ -2499,6 +2606,10 @@ mod tests {
       drop(store);
       records.map.lock().unwrap().insert(moved_id, sealed);
 
+      let shown = open(&records, &key)
+        .shown_message_by_server_id(id(CHANNEL), id(server_id(CHANNEL, 5)))
+        .unwrap();
+      assert!(shown.is_none());
       let store = open(&records, &key);
       let at_old_place = store
         .message_by_server_id(id(CHANNEL), id(server_id(CHANNEL, 5)))

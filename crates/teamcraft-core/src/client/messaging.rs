@@ -992,6 +992,18 @@ pub(crate) fn decrypt_content(
   maybe_sender_key: Option<&teamcraft_crypto::identity::DeviceSigningPublicKey>,
   accept_unsigned: bool,
 ) -> Result<MessageContent, CoreError> {
+  let plaintext = decrypt_plaintext(key_bag, message, maybe_sender_key, accept_unsigned)?;
+  Ok(serde_json::from_slice(plaintext.expose_secret()).unwrap_or(MessageContent::Unknown))
+}
+
+/// [`decrypt_content`] before the content is read: the plaintext, decrypted and its signature
+/// checked the same way, for a reader of only part of it (a notification, [`crate::push_preview`]).
+pub(crate) fn decrypt_plaintext(
+  key_bag: &KeyBag,
+  message: &MessageResponse,
+  maybe_sender_key: Option<&teamcraft_crypto::identity::DeviceSigningPublicKey>,
+  accept_unsigned: bool,
+) -> Result<teamcraft_crypto::secret::SecretBytes, CoreError> {
   let ring = key_bag
     .ring(convert::conversation(message.conversation_id))
     .ok_or(CoreError::NoContentKey(message.conversation_id))?;
@@ -1002,18 +1014,17 @@ pub(crate) fn decrypt_content(
     sender_device_id: convert::device(message.sender_device_id),
     client_message_id: convert::client_message(message.client_message_id),
   };
-  let plaintext = if encrypted.is_signed() {
+  if encrypted.is_signed() {
     let sender_key = maybe_sender_key.ok_or(CoreError::UnknownSender {
       user: message.sender_user_id,
       device: message.sender_device_id,
     })?;
-    decrypt_message(ring, &context, &encrypted, sender_key)?
+    Ok(decrypt_message(ring, &context, &encrypted, sender_key)?)
   } else if accept_unsigned {
-    decrypt_unsigned_message(ring, &context, &encrypted)?
+    Ok(decrypt_unsigned_message(ring, &context, &encrypted)?)
   } else {
-    return Err(CoreError::Message(MessageError::InvalidSignature));
-  };
-  Ok(serde_json::from_slice(plaintext.expose_secret()).unwrap_or(MessageContent::Unknown))
+    Err(CoreError::Message(MessageError::InvalidSignature))
+  }
 }
 
 /// Applies a message that acts on another one: an edit (keeping the earlier text as history), a
