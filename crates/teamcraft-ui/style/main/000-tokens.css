@@ -6,17 +6,17 @@
   --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
 
-  --bg: #f6f7f9;
+  --bg: #f5f5f5;
   --surface: #ffffff;
-  --surface-2: #eff1f5;
-  --surface-3: #e5e8ee;
-  --border: #dce0e7;
+  --surface-2: #f0f0f0;
+  --surface-3: #e6e6e6;
+  --border: #dddddd;
   /* Edges of controls (fields, switches, checkboxes): 3:1 against the surface (WCAG 1.4.11), as
      Android's outline. --border stays for dividers and cards, which need no contrast. */
-  --border-strong: #848ea0;
-  --text: #1b2230;
-  /* Secondary text (#725): 5.6:1 on --surface-3, the darkest surface it sits on. */
-  --text-muted: #4f5a6d;
+  --border-strong: #858585;
+  --text: #1d1d1d;
+  /* Secondary text (#725): 6.1:1 on --surface-3, the darkest surface it sits on. */
+  --text-muted: #545454;
   --accent: #005dfc;
   --accent-strong: #004bd3;
   --on-accent: #ffffff;
@@ -27,7 +27,7 @@
   --mention-bg: #fff2cc;
   --mention-text: #6a4b00;
   /* Code fills (#843): 1.2:1 against the surface so a code block reads as one; text on it 13:1. */
-  --code-bg: #e8ebf0;
+  --code-bg: #ebebeb;
   /* The emoji skin tones (the Fitzpatrick modifiers' usual colours, and the yellow default) for the
      picker's swatches: the same in light and dark, like the emoji they stand for. */
   --skin-tone-default: #ffcc4d;
@@ -69,7 +69,7 @@
   /* A "favourite" star that is on: 3:1 on the surface (--away is 2.2:1 on white). */
   --star: #b07a00;
   --dnd: #e0463a;
-  --offline: #8b95a5;
+  --offline: #8e8e8e;
 
   --rail-w: 72px;
   --sidebar-w: 264px;
@@ -197,18 +197,18 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #0f141d;
-    --surface: #151b27;
-    --surface-2: #1c2433;
-    --surface-3: #263044;
-    --border: #28324a;
-    --border-strong: #626d86;
-    --text: #e4e9f2;
-    --text-muted: #aab5c7;
+    --bg: #161616;
+    --surface: #1e1e1e;
+    --surface-2: #262626;
+    --surface-3: #303030;
+    --border: #363636;
+    --border-strong: #7a7a7a;
+    --text: #f5f5f5;
+    --text-muted: #b0b0b0;
     --accent: #5c9dff;
     --accent-strong: #8ab8ff;
     --on-accent: #04122e;
-    --accent-soft: #13284a;
+    --accent-soft: #182a47;
     --focus: #8ab8ff;
     --danger: #ff7a6b;
     --dock-red: #ff453a;
@@ -218,19 +218,19 @@
     --star: #e8a317;
     --mention-bg: #4a3b10;
     --mention-text: #ffd978;
-    --code-bg: #222b3d;
+    --code-bg: #2a2a2a;
     --shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
     --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.45);
     /* A raised surface is lighter in the dark, and its top edge catches the light. */
     --scrim: rgba(0, 0, 0, 0.56);
-    --dialog-surface: #1a2130;
+    --dialog-surface: #252525;
     --dialog-edge: rgba(255, 255, 255, 0.08);
     --dialog-highlight: rgba(255, 255, 255, 0.06);
     --dialog-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 24px -8px rgba(0, 0, 0, 0.5), 0 32px 72px -16px rgba(0, 0, 0, 0.7);
-    --field-bg: #232c3d;
-    --field-bg-hover: #2a3448;
-    --chrome: #0a0e15;
-    --sb-bg: #0f1520;
+    --field-bg: #2c2c2c;
+    --field-bg-hover: #343434;
+    --chrome: #101010;
+    --sb-bg: #141414;
     --sb-current: #0064fc;
     --lvl-debug: #8591a4;
     --lvl-info: #6db3f2;
@@ -241,18 +241,18 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0f141d;
-  --surface: #151b27;
-  --surface-2: #1c2433;
-  --surface-3: #263044;
-  --border: #28324a;
-  --border-strong: #626d86;
-  --text: #e4e9f2;
-  --text-muted: #aab5c7;
+  --bg: #161616;
+  --surface: #1e1e1e;
+  --surface-2: #262626;
+  --surface-3: #303030;
+  --border: #363636;
+  --border-strong: #7a7a7a;
+  --text: #f5f5f5;
+  --text-muted: #b0b0b0;
   --accent: #5c9dff;
   --accent-strong: #8ab8ff;
   --on-accent: #04122e;
-  --accent-soft: #13284a;
+  --accent-soft: #182a47;
   --focus: #8ab8ff;
   --danger: #ff7a6b;
   --dock-red: #ff453a;
@@ -262,19 +262,19 @@
   --star: #e8a317;
   --mention-bg: #4a3b10;
   --mention-text: #ffd978;
-  --code-bg: #222b3d;
+  --code-bg: #2a2a2a;
   --shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.45);
   /* A raised surface is lighter in the dark, and its top edge catches the light. */
   --scrim: rgba(0, 0, 0, 0.56);
-  --dialog-surface: #1a2130;
+  --dialog-surface: #252525;
   --dialog-edge: rgba(255, 255, 255, 0.08);
   --dialog-highlight: rgba(255, 255, 255, 0.06);
   --dialog-shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 24px -8px rgba(0, 0, 0, 0.5), 0 32px 72px -16px rgba(0, 0, 0, 0.7);
-  --field-bg: #232c3d;
-  --field-bg-hover: #2a3448;
-  --chrome: #0a0e15;
-  --sb-bg: #0f1520;
+  --field-bg: #2c2c2c;
+  --field-bg-hover: #343434;
+  --chrome: #101010;
+  --sb-bg: #141414;
   --sb-current: #0064fc;
   --lvl-debug: #8591a4;
   --lvl-info: #6db3f2;

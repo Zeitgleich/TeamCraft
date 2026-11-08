@@ -8,9 +8,9 @@
   /* How long a row found by the search stays highlighted; FOUND_HIGHLIGHT in settings_modal.rs. */
   --set-found-dur: 1600ms;
   /* The theme tiles draw each theme as it looks, whatever theme is active. */
-  --tile-light-bg: #f6f7f9;
-  --tile-dark-bg: #151b27;
-  --tile-mid: #9aa6ba;
+  --tile-light-bg: #f5f5f5;
+  --tile-dark-bg: #1e1e1e;
+  --tile-mid: #a0a0a0;
   --set-nav-w: 236px;
   --set-row-min-h: 52px;
   --set-switch-w: 40px;
@@ -1023,7 +1023,7 @@
 .set-theme-preview {
   --tile-bg: var(--tile-light-bg);
   --tile-rail: #1a2434;
-  --tile-line: #dce0e7;
+  --tile-line: #dddddd;
   --tile-strong: #566175;
   --tile-bubble: #dff3f1;
   display: flex;
@@ -1037,8 +1037,8 @@
 
 .set-theme-preview.is-dark {
   --tile-bg: var(--tile-dark-bg);
-  --tile-rail: #0a0e15;
-  --tile-line: #28324a;
+  --tile-rail: #101010;
+  --tile-line: #363636;
   --tile-strong: var(--tile-mid);
   --tile-bubble: #123a38;
 }
