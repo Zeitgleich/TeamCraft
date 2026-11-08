@@ -16,6 +16,7 @@
 #![allow(clippy::print_stderr, reason = "the numbers are what this test is for")]
 #![allow(clippy::unwrap_used)]
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -24,8 +25,10 @@ use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::clock::SystemClock;
 use teamcraft_core::records;
 use teamcraft_core::store::{
-  LocalStore, MessageContent, SealedSqliteStore, StaticKeySource, StoredMessage, Table, write_group,
+  LocalStore, MessageContent, SealedSqliteStore, StaticKeySource, StoredMessage, Table, TrackedStore,
+  write_group,
 };
+use teamcraft_core::ui_backend::CoreChatBackend;
 use teamcraft_core::{ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
@@ -109,6 +112,106 @@ async fn measure_opening_a_chat_during_a_change_storm() {
   drop(core);
   std::fs::remove_dir_all(&directory).unwrap();
 }
+
+/// What one chat list pass costs after the writes a sync makes, each kind on its own, through the
+/// core the read thread uses and the same store connection (a second connection's writes don't
+/// reach the feed versions the counts are kept under).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a measurement: run by hand with --release"]
+async fn measure_a_list_pass_after_each_kind_of_sync_write() {
+  let directory = std::env::temp_dir().join(format!("teamcraft-list-pass-{}", std::process::id()));
+  std::fs::create_dir_all(&directory).unwrap();
+  let seeded = Instant::now();
+  let me = seed(&directory).await;
+  eprintln!("seeded {CONVERSATIONS} conversations in {:?}", seeded.elapsed());
+  let sealed = Arc::new(
+    SealedSqliteStore::open(
+      &store_path(&directory),
+      &StaticKeySource::new(SymmetricKey::from_bytes(KEY)),
+    )
+    .unwrap(),
+  );
+  let store = TrackedStore::new(sealed);
+  let backend = CoreChatBackend::new(store.clone(), me, Box::new(SystemClock));
+  let spaces: BTreeSet<SpaceId> = (0..SPACES).map(|space| id(900 + space)).collect();
+  let pass = |label: &str| {
+    let started = Instant::now();
+    let listed = backend.listed_conversations(&spaces);
+    assert_eq!(listed.len(), CONVERSATIONS as usize);
+    eprintln!("{label:<58} {:>9.1} ms", ms(started.elapsed()));
+  };
+  pass("first pass (counts every conversation, keeps the tallies)");
+  pass("nothing changed");
+  let mut next = SYNCED_FROM;
+  for round in 0..2 {
+    eprintln!(
+      "-- big channels read {}",
+      if round == 0 {
+        "up to near the end"
+      } else {
+        "never (no read position)"
+      }
+    );
+    write(&store, |store| {
+      for index in (0..CONVERSATIONS).step_by(usize::try_from(SYNC_SPREAD).unwrap()) {
+        store.upsert_message(&message(conversation_id(index), id(500), index, next))?;
+      }
+      Ok(())
+    });
+    next += 1;
+    pass("new messages in 10 conversations");
+    write(&store, |store| {
+      for index in 0..big_chats() {
+        store.upsert_message(&message(
+          conversation_id(index),
+          id(500 + index),
+          index,
+          history_of(index) / 2,
+        ))?;
+      }
+      Ok(())
+    });
+    pass("an old message written again in each big channel (edit)");
+    pass("nothing changed");
+    write(&store, |store| {
+      for index in 0..big_chats() {
+        let mut older = message(conversation_id(index), id(500 + index), index, 0);
+        older.maybe_server_id = Some(id(1_000_000_000 + index * 10_000_000 - 1 - next));
+        older.client_message_id = ClientMessageId::from_bytes([u8::try_from(next % 200).unwrap(); 16]);
+        store.upsert_message(&older)?;
+      }
+      Ok(())
+    });
+    next += 1;
+    pass("an older message inserted in each big channel (history)");
+    pass("nothing changed");
+    if round == 0 {
+      write(&store, |store| {
+        for index in 0..big_chats() {
+          let record = channel_record(conversation_id(index), id(900), index, None);
+          records::put_json(
+            store,
+            Table::Conversations,
+            &conversation_id(index).to_string(),
+            &record,
+          )?;
+        }
+        Ok(())
+      });
+      pass("read positions of the big channels gone");
+    }
+  }
+  drop(backend);
+  drop(store);
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// Writes in one group, as the sync loop does.
+fn write(store: &Store, writes: impl FnOnce(&Store) -> Result<(), teamcraft_core::CoreError>) {
+  write_group(store, || writes(store)).unwrap();
+}
+
+type Store = TrackedStore<Arc<SealedSqliteStore>>;
 
 /// What a storm of changes did to opening a chat.
 struct Storm {
@@ -251,7 +354,8 @@ impl Storm {
   }
 }
 
-async fn seed(directory: &std::path::Path) {
+/// Seeds the store and answers the account's user.
+async fn seed(directory: &std::path::Path) -> UserId {
   let store = SealedSqliteStore::open(
     &store_path(directory),
     &StaticKeySource::new(SymmetricKey::from_bytes(KEY)),
@@ -335,6 +439,7 @@ async fn seed(directory: &std::path::Path) {
     })
     .unwrap();
   }
+  me
 }
 
 fn space_record(space: SpaceId) -> SpaceResponse {
@@ -467,11 +572,15 @@ fn id<T: Id>(raw: i64) -> T {
 /// have a long imported history (`TEAMCRAFT_STORM_BIG_MESSAGES`), the others
 /// `TEAMCRAFT_STORM_MESSAGES`.
 fn history_of(index: i64) -> i64 {
-  if index < env_number("TEAMCRAFT_STORM_BIG_CHATS", DEFAULT_BIG_CHATS) {
+  if index < big_chats() {
     env_number("TEAMCRAFT_STORM_BIG_MESSAGES", DEFAULT_BIG_MESSAGES).min(SYNCED_FROM)
   } else {
     env_number("TEAMCRAFT_STORM_MESSAGES", DEFAULT_MESSAGES_PER_CONVERSATION).min(SYNCED_FROM)
   }
+}
+
+fn big_chats() -> i64 {
+  env_number("TEAMCRAFT_STORM_BIG_CHATS", DEFAULT_BIG_CHATS)
 }
 
 fn env_number<T: std::str::FromStr>(name: &str, default: T) -> T {
