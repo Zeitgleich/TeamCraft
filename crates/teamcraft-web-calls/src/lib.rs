@@ -31,7 +31,7 @@ use teamcraft_client_api::calls::{
 };
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::page_calls::{
-  BrowserGraphics, EffectsCompositing, PreparedCall, browser_effects_compositing,
+  BrowserGraphics, EffectsCompositing, PreparedCall, effects_compositing_with_override,
 };
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_client_api::video_stats::VideoStatsReport;
@@ -1025,7 +1025,23 @@ impl Host {
       has_webgl2,
       has_wasm_simd,
     };
-    browser_effects_compositing(graphics, &window.navigator().user_agent().unwrap_or_default())
+    // A local choice to compare WebGPU and WebGL2 on a device (#1336; `call_web::COMPOSITING_KEY`).
+    let maybe_override = window
+      .local_storage()
+      .ok()
+      .flatten()
+      .and_then(|storage| {
+        storage
+          .get_item(teamcraft_media::call_web::COMPOSITING_KEY)
+          .ok()
+          .flatten()
+      })
+      .and_then(|name| EffectsCompositing::from_name(&name));
+    effects_compositing_with_override(
+      graphics,
+      &window.navigator().user_agent().unwrap_or_default(),
+      maybe_override,
+    )
   }
 
   /// The organization's background rule from the page's core. Without the callback (an older page)

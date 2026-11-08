@@ -145,9 +145,9 @@ pub struct PreparedCall {
 /// How the browser's call module composites the background effects (#439).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EffectsCompositing {
-  /// WebGPU, read back as I420 for the encoders: Chrome, Edge, Safari 26.
+  /// WebGPU, read back as I420 for the encoders: Safari 26.
   WebGpu,
-  /// WebGL2, whose canvas the encoders take: Firefox and browsers without WebGPU.
+  /// WebGL2, whose canvas the encoders take: Chrome, Edge, Firefox and browsers without WebGPU.
   WebGl2,
 }
 
@@ -161,10 +161,18 @@ pub struct BrowserGraphics {
 }
 
 /// How this browser composites the background effects (#439), or `None` where it can't run them.
-/// WebGPU where there is one, except in Firefox: it reads a frame back from the GPU only about
-/// every 80 ms (measured with the effects' compositor, 720p, Firefox 147), far too slow for video,
-/// so it composites with WebGL2 like browsers without WebGPU. The segmentation needs WebAssembly
-/// SIMD (every browser with WebTransport has it). `user_agent` is `navigator.userAgent`.
+/// WebGL2 where there is one, except in Safari (and the other WebKit browsers), which composite
+/// with WebGPU where they have it:
+/// - Chromium (Chrome, Edge, ...): WebGL2 costs the main thread 1.5 instead of 4.0 ms a 720p
+///   picture and the whole browser 13 instead of 16 ms of CPU (#1336, docs/performance.md
+///   "Background effects in the browser"): the picture stays on the GPU, where WebGPU reads it with
+///   getImageData and reads the result back.
+/// - Firefox reads a frame back from WebGPU only about every 80 ms (Firefox 147), far too slow.
+/// - Safari: WebGPU measured 6.2 ms against WebGL2's 4.2 ms before the GPU wrote the I420 itself
+///   (#1295); it stays until it is measured again.
+///
+/// The segmentation needs WebAssembly SIMD (every browser with WebTransport has it). `user_agent`
+/// is `navigator.userAgent`.
 pub fn browser_effects_compositing(
   graphics: BrowserGraphics,
   user_agent: &str,
@@ -172,13 +180,42 @@ pub fn browser_effects_compositing(
   if !graphics.has_wasm_simd {
     return None;
   }
+  // Chrome, Edge, Opera, Brave, Samsung Internet and Android's WebView all say "Chrome/"; Chrome
+  // on iOS (WebKit) says "CriOS/".
+  let is_chromium = user_agent.contains("Chrome/") || user_agent.contains("Chromium/");
   let is_firefox = user_agent.contains("Firefox/");
-  if graphics.has_webgpu && !is_firefox {
+  if graphics.has_webgpu && !is_firefox && !(is_chromium && graphics.has_webgl2) {
     Some(EffectsCompositing::WebGpu)
   } else if graphics.has_webgl2 {
     Some(EffectsCompositing::WebGl2)
   } else {
     None
+  }
+}
+
+impl EffectsCompositing {
+  /// The compositing a name picks, as a local override gives it (#1336: `"webgpu"`, `"webgl2"`).
+  pub fn from_name(name: &str) -> Option<Self> {
+    match name.trim() {
+      "webgpu" => Some(EffectsCompositing::WebGpu),
+      "webgl2" => Some(EffectsCompositing::WebGl2),
+      _ => None,
+    }
+  }
+}
+
+/// [`browser_effects_compositing`], unless `maybe_override` (set locally to compare the two on a
+/// device, #1336) picks one the browser has. Without WebAssembly SIMD nothing runs either way.
+pub fn effects_compositing_with_override(
+  graphics: BrowserGraphics,
+  user_agent: &str,
+  maybe_override: Option<EffectsCompositing>,
+) -> Option<EffectsCompositing> {
+  let default = browser_effects_compositing(graphics, user_agent)?;
+  match maybe_override {
+    Some(EffectsCompositing::WebGpu) if graphics.has_webgpu => Some(EffectsCompositing::WebGpu),
+    Some(EffectsCompositing::WebGl2) if graphics.has_webgl2 => Some(EffectsCompositing::WebGl2),
+    _ => Some(default),
   }
 }
 
@@ -198,9 +235,11 @@ mod tests {
   use crate::model::id_from_raw;
 
   #[test]
-  fn effects_composite_with_webgpu_where_it_reads_back_in_time_else_with_webgl2() {
+  fn effects_composite_with_webgl2_except_in_safari_with_webgpu() {
     let chrome = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36";
+    let edge = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36 Edg/156.0.0.0";
     let safari = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6.2 Safari/605.1.15";
+    let chrome_on_ios = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/156.0.0.0 Mobile/15E148 Safari/604.1";
     let firefox = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0";
     let all = BrowserGraphics {
       has_webgpu: true,
@@ -208,9 +247,24 @@ mod tests {
       has_wasm_simd: true,
     };
     let compositing = |graphics, user_agent| browser_effects_compositing(graphics, user_agent);
-    assert_eq!(compositing(all, chrome), Some(EffectsCompositing::WebGpu));
+    assert_eq!(compositing(all, chrome), Some(EffectsCompositing::WebGl2));
+    assert_eq!(compositing(all, edge), Some(EffectsCompositing::WebGl2));
     assert_eq!(compositing(all, safari), Some(EffectsCompositing::WebGpu));
+    assert_eq!(
+      compositing(all, chrome_on_ios),
+      Some(EffectsCompositing::WebGpu),
+      "WebKit"
+    );
     assert_eq!(compositing(all, firefox), Some(EffectsCompositing::WebGl2));
+    let only_webgpu = BrowserGraphics {
+      has_webgl2: false,
+      ..all
+    };
+    assert_eq!(
+      compositing(only_webgpu, chrome),
+      Some(EffectsCompositing::WebGpu),
+      "Chrome without WebGL2"
+    );
     let no_webgpu = BrowserGraphics {
       has_webgpu: false,
       ..all
@@ -240,6 +294,41 @@ mod tests {
       ..all
     };
     assert_eq!(compositing(no_simd, chrome), None, "the segmentation needs SIMD");
+  }
+
+  #[test]
+  fn a_local_override_picks_the_compositing_where_the_browser_has_it() {
+    let chrome = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36";
+    let firefox = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0";
+    let all = BrowserGraphics {
+      has_webgpu: true,
+      has_webgl2: true,
+      has_wasm_simd: true,
+    };
+    let webgpu = EffectsCompositing::from_name("webgpu");
+    let webgl2 = EffectsCompositing::from_name(" webgl2\n");
+    assert_eq!(webgpu, Some(EffectsCompositing::WebGpu));
+    assert_eq!(webgl2, Some(EffectsCompositing::WebGl2));
+    assert_eq!(EffectsCompositing::from_name("cpu"), None);
+    let with = effects_compositing_with_override;
+    assert_eq!(with(all, chrome, None), browser_effects_compositing(all, chrome));
+    assert_eq!(with(all, chrome, webgpu), Some(EffectsCompositing::WebGpu));
+    assert_eq!(with(all, chrome, webgl2), Some(EffectsCompositing::WebGl2));
+    assert_eq!(
+      with(all, firefox, webgpu),
+      Some(EffectsCompositing::WebGpu),
+      "to measure it"
+    );
+    let no_webgpu = BrowserGraphics {
+      has_webgpu: false,
+      ..all
+    };
+    assert_eq!(with(no_webgpu, chrome, webgpu), Some(EffectsCompositing::WebGl2));
+    let no_simd = BrowserGraphics {
+      has_wasm_simd: false,
+      ..all
+    };
+    assert_eq!(with(no_simd, chrome, webgl2), None, "the segmentation needs SIMD");
   }
 
   #[test]

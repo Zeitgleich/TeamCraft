@@ -12099,8 +12099,6 @@ dependencies = [
 [[package]]
 name = "tract-nnef"
 version = "0.23.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3bdfc2f17d10eaf04d27f7a2d7b45e3dc41ffd0bc6c1e48d87636d7e960d441d"
 dependencies = [
  "byteorder",
  "erased-serde",

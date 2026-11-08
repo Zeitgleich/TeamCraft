@@ -25,7 +25,7 @@ use crate::effects::worker_protocol::{
 };
 use crate::effects::{EffectsError, SegmentationMask};
 
-/// How long the worker may take to start and load the model: both are downloads (about 1.6 MB and
+/// How long the worker may take to start and load the model: both are downloads (about 1.2 MB and
 /// 0.3 MB compressed) on a first start. Beyond it the effects count as unavailable.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 

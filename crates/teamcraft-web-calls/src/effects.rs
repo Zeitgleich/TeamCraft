@@ -2,8 +2,8 @@
 //! come from the page's core (the `background_rule` and `background_picture` callbacks). The
 //! segmentation runs in a worker of its own (`teamcraft-web-segmentation`), started when the first
 //! effect starts and kept for the session: only then are its module and the model downloaded, and
-//! the model is checked and parsed once. The compositing is `teamcraft-media`'s: WebGPU, or WebGL2
-//! where WebGPU reads frames back too slowly (Firefox) or isn't there. A photo's picture is a file
+//! the model is checked and parsed once. The compositing is `teamcraft-media`'s: WebGL2, or WebGPU
+//! in Safari (`page_calls::browser_effects_compositing` says why). A photo's picture is a file
 //! of the web release, downloaded when the photo is picked and checked against its pinned SHA-256.
 
 use std::cell::RefCell;
