@@ -498,6 +498,131 @@ pub enum CoreCommand {
   },
 }
 
+/// The part of the web app that runs a [`CoreCommand`] (#1413). The app every page loads, a guest's
+/// meeting included, runs the shared commands. The others only come from places of a member's app
+/// that are split modules of their own (teamcraft-ui `areas.rs`), and they run in that module, so
+/// their engine code loads with it instead of with every page. Other targets are one program:
+/// [`Client::run_ui_command`] runs every part.
+///
+/// [`Client::run_ui_command`]: crate::Client::run_ui_command
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandPart {
+  /// What a guest's meeting or a member's first screen may ask for.
+  Shared,
+  /// Spaces and channels, their members, roles and invitations: the workspace dialogs, a channel's
+  /// settings and the administration console (`workspace`).
+  Workspace,
+  /// The organization's call backgrounds, which only the administration console changes (`admin`).
+  Admin,
+}
+
+impl CoreCommand {
+  /// Where this command runs in the web app.
+  pub fn part(&self) -> CommandPart {
+    match self {
+      Self::CreateSpace { .. }
+      | Self::UpdateSpace { .. }
+      | Self::CreateChannelWith { .. }
+      | Self::UpdateChannel { .. }
+      | Self::MoveChannel { .. }
+      | Self::RefreshChannelBrowser { .. }
+      | Self::JoinChannel { .. }
+      | Self::ExtendGuest { .. }
+      | Self::RequestAdminJoin { .. }
+      | Self::WithdrawAdminJoin { .. }
+      | Self::ApproveAdminJoin { .. }
+      | Self::DeclineAdminJoin { .. }
+      | Self::JoinSpace { .. }
+      | Self::LeaveChannel { .. }
+      | Self::DeleteChannel { .. }
+      | Self::DeleteSpace { .. }
+      | Self::RefreshCategories { .. }
+      | Self::CreateCategory { .. }
+      | Self::RenameCategory { .. }
+      | Self::DeleteCategory { .. }
+      | Self::AddMemberWithHistory { .. }
+      | Self::RemoveMember { .. }
+      | Self::RetryRemoval { .. }
+      | Self::DiscardRemoval { .. }
+      | Self::InviteToSpace { .. }
+      | Self::AddPeopleToChannel { .. }
+      | Self::RefreshSpaceRoster { .. }
+      | Self::SetSpaceRole { .. }
+      | Self::SetChannelRole { .. }
+      | Self::SignReviewedChannelRoles { .. }
+      | Self::RefreshChannelRoles { .. }
+      | Self::RemoveSpaceMember { .. }
+      | Self::RevokeSpaceInvite { .. }
+      | Self::AddSpaceMembers { .. } => CommandPart::Workspace,
+      Self::AddOrgBackground { .. }
+      | Self::DeleteOrgBackground { .. }
+      | Self::SetOrgBackgroundRule { .. } => CommandPart::Admin,
+      Self::FlushOutbox
+      | Self::Typing { .. }
+      | Self::MarkRead { .. }
+      | Self::SetFavorite { .. }
+      | Self::SetPresence { .. }
+      | Self::SetCustomStatus { .. }
+      | Self::SetSaved { .. }
+      | Self::SetDraft { .. }
+      | Self::TakeDraftFiles { .. }
+      | Self::RemoveDraftFile { .. }
+      | Self::ScheduleMessage { .. }
+      | Self::UpdateScheduled { .. }
+      | Self::CancelScheduled { .. }
+      | Self::SendScheduledNow { .. }
+      | Self::QueueBugReport { .. }
+      | Self::SaveSearch { .. }
+      | Self::DeleteSavedSearch { .. }
+      | Self::WriteSettings { .. }
+      | Self::AddBackground { .. }
+      | Self::DeleteBackground { .. }
+      | Self::SetServerPin { .. }
+      | Self::Acknowledge { .. }
+      | Self::MarkUnread { .. }
+      | Self::MarkReadThrough { .. }
+      | Self::MarkReactionsSeen { .. }
+      | Self::MarkThreadRead { .. }
+      | Self::RefreshPresence { .. }
+      | Self::RefreshReadReceipts { .. }
+      | Self::SearchDirectory { .. }
+      | Self::RefreshPrivacy
+      | Self::SetLastSeenVisibility { .. }
+      | Self::RefreshCallHistory
+      | Self::RefreshOwnDevices
+      | Self::RevokeOwnDevice { .. }
+      | Self::RenameOwnDevice { .. }
+      | Self::TestPushOwnDevice { .. }
+      | Self::UploadFiles
+      | Self::GeneratePreviews
+      | Self::DownloadFile { .. }
+      | Self::ControlDownload { .. }
+      | Self::CreateShareLink { .. }
+      | Self::RevokeShareLink { .. }
+      | Self::RefreshShareLinks { .. }
+      | Self::DismissSuspectDeletions
+      | Self::RetryDmSetup { .. }
+      | Self::SetUpMeetingChat { .. }
+      | Self::UpdateMeetingChatMembers { .. }
+      | Self::AddPeopleToCall { .. }
+      | Self::AcceptCallMove { .. }
+      | Self::LetIntoMeetingChat { .. }
+      | Self::PrepareGuestLink { .. }
+      | Self::LetGuestIntoMeetingChat { .. }
+      | Self::PrepareGuestKeyCode { .. }
+      | Self::NoteMeetingLobby { .. }
+      | Self::SyncMeetingAdmitters { .. }
+      | Self::CheckMeetingAdmission { .. }
+      | Self::RefreshMembers { .. }
+      | Self::LoadHistoryAt { .. }
+      | Self::LoadOlderHistory { .. }
+      | Self::FillHistoryGap { .. } => CommandPart::Shared,
+      #[cfg(not(target_arch = "wasm32"))]
+      Self::FetchSearchHits { .. } => CommandPart::Shared,
+    }
+  }
+}
+
 /// Where the engine notes (in the sync state) which "jump to date" request it answered last.
 pub(crate) fn history_jump_key(conversation: ConversationId) -> String {
   format!("history-jump/{conversation}")
@@ -4586,6 +4711,92 @@ mod tests {
     assert!(conversation.is_favorite);
     assert_eq!(conversation.category, SidebarCategory::Favorites);
     assert!(backend.messages(channel, 0, 1)[0].id.snowflake().get() & PENDING_ID_BIT == 0);
+  }
+
+  /// The web app runs a command in the split module of its part (#1413): a part's runner refuses
+  /// the other parts' commands before anything reaches the server, and `run_ui_command` runs all.
+  #[cfg(not(target_arch = "wasm32"))]
+  #[tokio::test]
+  async fn each_part_runs_only_its_own_commands() {
+    use crate::api::ServerApi;
+    use crate::api::fake::FakeServer;
+
+    let server = FakeServer::new();
+    let api = server.add_user("Alice");
+    let options = crate::EnrollmentOptions {
+      device_name: "test".into(),
+      secret: crate::EnrollmentSecret::Passphrase(teamcraft_crypto::secret::SecretBytes::new(
+        b"passphrase".to_vec(),
+      )),
+      argon2: teamcraft_crypto::backup::Argon2Settings {
+        memory_kib: 64,
+        iterations: 1,
+        parallelism: 1,
+      },
+      maybe_attestation: None,
+    };
+    let store = std::sync::Arc::new(MemoryStore::new());
+    let mut client = crate::PendingEnrollment::new()
+      .complete(
+        api.clone(),
+        store.clone(),
+        Box::new(ManualClock::new(0)),
+        Default::default(),
+        options,
+      )
+      .await
+      .unwrap();
+    let space = api.list_spaces().await.unwrap().spaces[0].id;
+    let channel = client.create_channel(space, "general").await.unwrap();
+    let categories = || async { api.list_categories(space).await.unwrap().categories };
+
+    let workspace = CoreCommand::CreateCategory {
+      space,
+      name: "Projects".into(),
+    };
+    assert_eq!(workspace.part(), CommandPart::Workspace);
+    for refused in [
+      client.run_shared_command(workspace.clone()).await,
+      client.run_admin_command(workspace.clone()).await,
+    ] {
+      assert!(
+        matches!(refused, Err(CoreError::InvalidRequest(_))),
+        "{refused:?}"
+      );
+    }
+    assert!(
+      categories().await.is_empty(),
+      "a refused command asks nothing of the server"
+    );
+    client.run_workspace_command(workspace).await.unwrap();
+    assert_eq!(categories().await.len(), 1);
+    client
+      .run_ui_command(CoreCommand::CreateCategory {
+        space,
+        name: "Later".into(),
+      })
+      .await
+      .unwrap();
+    assert_eq!(categories().await.len(), 2);
+
+    let shared = CoreCommand::SetFavorite {
+      conversation: channel,
+      is_favorite: true,
+    };
+    assert_eq!(shared.part(), CommandPart::Shared);
+    let refused = client.run_workspace_command(shared.clone()).await;
+    assert!(
+      matches!(refused, Err(CoreError::InvalidRequest(_))),
+      "{refused:?}"
+    );
+    client.run_shared_command(shared).await.unwrap();
+    assert_eq!(
+      CoreCommand::DeleteOrgBackground {
+        id: "7".parse().unwrap()
+      }
+      .part(),
+      CommandPart::Admin
+    );
   }
 
   #[test]

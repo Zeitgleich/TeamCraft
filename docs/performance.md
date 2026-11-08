@@ -2017,12 +2017,12 @@ the chunks that load later. The limit:
 
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
-| A guest in a meeting: gzip -9 total  | 6,800,000 B  | fails; warns from 95 % (6.46 MB) |
-| Signed-in first visit: gzip -9 total | 6,200,000 B  | fails; warns from 95 % (5.89 MB) |
+| A guest in a meeting: gzip -9 total  | 6,350,000 B  | fails; warns from 95 % (6.03 MB) |
+| Signed-in first visit: gzip -9 total | 5,800,000 B  | fails; warns from 95 % (5.51 MB) |
 | The call module: gzip -9             | 1,000,000 B  | fails                            |
 
-Both budgets are the sizes measured below (#1148) plus about 6 %, so they warn only after real
-growth. For a while they were 10 MB, because the guest's meeting had reached its budget of the time
+Both budgets are the sizes measured below (#1413) plus about 6 %, so they warn only after real
+growth; before that they were 6.8 and 6.2 MB, the sizes of #1148 plus about 6 %. For a while they were 10 MB, because the guest's meeting had reached its budget of the time
 (5.7 MB) and blocked unrelated pull requests; at 10 MB the check caught nothing. Before that the
 guest budget was the guest's meeting of 2026-10-31 plus about 4 %, the signed-in ceiling the
 signed-in first visit on `main` 8d653d3c plus about 10 %. The single budget before (4,700,000 B,
@@ -2033,6 +2033,53 @@ information. The uncompressed size is printed but not limited: what a user waits
 transfer. The earlier growth ratchet on it (11.85 MB) was dropped with the split (#334): main had
 outgrown it anyway, and the split moves code between files without changing what matters. Raising
 the budget is a decision, not a fix.
+
+#### The UI's JSON and the engine's member parts out of the app (#1413, 2026-11-08)
+
+By the split's list (as below), the largest single function of the app was the JSON reader of
+`ChatAction` (`Deserialize` from a `serde_json::Value`, 0.29 MB before wasm-opt), with the writer of
+`ChatAnswer` (69 kB) and the readers of their fields: 0.65 MB of the app's 8.2 MB of code. The
+page's UI handed every action and query to the core in the same page as JSON, as it does to the
+desktop shell. It hands them over typed now (`web_core::act`, `web_core::query`); in JSON they only
+travel between two tabs of an account (#744), and that code is in a module of its own (`tabs`,
+loaded when another tab of the account asks something of this one). The desktop shell's JSON is in
+one too (`shell`, which only the desktop app loads), and the UI's cache of answers keeps each query
+beside its key instead of reading the key back as JSON. Without these two, the JSON reader of
+`ChatAnswer`, the writer of `ChatAction`, the reader of `ChatQuery` and the readers of their fields
+(0.8 MB before wasm-opt, 0.18 MB gzip) had only moved from the app into the chunks the signed-in app
+and a guest's meeting import.
+
+The engine's commands only a member's places of the app send (`CommandPart` in teamcraft-core
+`ui_backend.rs`) run in those places' modules: spaces, channels, their categories, members, roles
+and invitations in `workspace`, the organization's call backgrounds in `admin`
+(`Client::run_workspace_command`, `run_admin_command`; `run_shared_command` in the app). The same
+for the engine operations of a few chat actions (`web_core::EnginePart`): a new channel or member
+(`workspace`), a new recovery passphrase or key (`settings`), the console's policy, roster and user
+operations (`admin`). Their code was inlined into the command dispatch (`Client::run_command`, one
+195 kB function). Natively nothing changed: `run_ui_command` runs every part. A chunk that can't
+load fails the request as a network failure.
+
+Also out of the app: the public download page of a share link (`share`, 37 kB before wasm-opt). And
+"add to call" moved from `calls`, which a guest's meeting loads, to `dialogs`.
+
+Release `trunk build` on macOS (trunk 0.22.0, wasm-opt 131, the CI job's commands), `main`
+f3c055f8, gzip -9:
+
+| Download                                      | Before      | After       | Delta      |
+|-----------------------------------------------|-------------|-------------|------------|
+| A guest in a meeting (lobby, meeting, calls)  | 6,396,260 B | 5,974,383 B | −421,877 B |
+| Signed-in first visit                         | 5,830,884 B | 5,466,226 B | −364,658 B |
+| The app (in both)                             | 2,986,600 B | 2,751,820 B | −234,780 B |
+| `tabs` (when a second tab asks)               | –           | 337,038 B   |            |
+| `shell` (the desktop app only)                | –           | 178,357 B   |            |
+
+`tabs` and `shell` are counted with every chunk they import; most of their JSON code is in a chunk the
+two share.
+
+What is left, with where it is, is #1437: the translations (left out here, as the console's
+strings changed at the same time in #1433), the member-only rounds of the engine's upkeep (role
+signing), device linking, the guest's join page and the desktop-only parts of every browser page,
+the snapshot reads that still go through JSON in the page, and the service worker's growth.
 
 #### Back down from 10 MB (#1148, 2026-11-07)
 
@@ -2109,8 +2156,11 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
   console, `admin`), a conversation's huddle bar (`calls`), and the formatting toolbar, the emoji
   picker, the date pills' menu, the prompt of a device asking to be linked, the desktop app's update
   banner and the "open in another tab" page (`dialogs`; below); since 1.0.25 the decision about a
-  link from outside the desktop app, with the Public Suffix List (`links`, #1148). `lazy_area` shows a spinner when a
-  chunk takes a moment and an error with a retry when it can't load.
+  link from outside the desktop app, with the Public Suffix List (`links`, #1148), and the JSON of
+  the UI's actions and queries between two tabs (`tabs`) and to the desktop shell (`shell`), the
+  engine's commands of the workspace dialogs and the console (with `workspace`, `admin`) and a share
+  link's download page (`share`, #1413; above). `lazy_area` shows a spinner when a chunk takes a
+  moment and an error with a retry when it can't load.
 - Code several modules share goes into shared chunks (one per combination of modules), so each file
   is downloaded once.
 - The call engine (`teamcraft-web-calls`, #330) stays a module of its own that loads in the

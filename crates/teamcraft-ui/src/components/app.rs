@@ -40,8 +40,6 @@ use crate::components::offline_banner::OfflineBanner;
 use crate::components::rail::SpaceRail;
 use crate::components::roster_banner::RosterBanner;
 use crate::components::settings_tabs::apply_call_prefs;
-#[cfg(target_arch = "wasm32")]
-use crate::components::share_download::ShareDownloadPage;
 use crate::components::sidebar::Sidebar;
 use crate::components::sidebar_resizer::SidebarResizer;
 use crate::components::storage_banner::StorageBanner;
@@ -110,10 +108,13 @@ fn screen(settings: Settings) -> AnyView {
     return view! { <GuestJoinPage link=link /> }.into_any();
   }
 
-  // A share link needs no sign-in either: the file's key is in the fragment.
+  // A share link needs no sign-in either: the file's key is in the fragment. Its page is a chunk of
+  // its own (#1413).
   #[cfg(target_arch = "wasm32")]
   if let Some((id, fragment)) = share_link_from_location() {
-    return view! { <ShareDownloadPage id=id fragment=fragment /> }.into_any();
+    return lazy_area(Place::Screen, move || {
+      areas::share_download(id.clone(), fragment.clone())
+    });
   }
 
   // What the service worker says about the code that is running (docs/e2ee.md §9.3).

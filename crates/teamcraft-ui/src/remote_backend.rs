@@ -144,22 +144,56 @@ pub async fn link_cancel() -> Result<(), String> {
   call("core_link_cancel", &json!({})).await
 }
 
+/// Hands a chat action to the core: typed to the core in this page (the browser), which never puts
+/// it into JSON (#1413), or as the desktop shell's `core_action` command. Their JSON is in a
+/// module of its own (`areas::shell_action`), which only the desktop app loads.
+async fn core_action(action: ChatAction) -> Result<(), String> {
+  #[cfg(target_arch = "wasm32")]
+  if !crate::auth::tauri::is_available() {
+    return crate::web_core::act(action).await;
+  }
+  crate::areas::shell_action(action)
+    .await
+    .map_err(|error| error.to_string())?
+    .await
+}
+
+/// Asks the core a chat query, like [`core_action`].
+async fn core_query(query: ChatQuery) -> Result<ChatAnswer, String> {
+  #[cfg(target_arch = "wasm32")]
+  if !crate::auth::tauri::is_available() {
+    return crate::web_core::query(query).await;
+  }
+  crate::areas::shell_query(query)
+    .await
+    .map_err(|error| error.to_string())?
+    .await
+}
+
+/// `core_action` for the desktop shell, in JSON (in the `shell` chunk).
+pub(crate) async fn shell_action(action: ChatAction) -> Result<(), String> {
+  call("core_action", &json!({ "action": action })).await
+}
+
+/// `core_query` for the desktop shell, in JSON (in the `shell` chunk).
+pub(crate) async fn shell_query(query: ChatQuery) -> Result<ChatAnswer, String> {
+  call("core_query", &json!({ "query": query })).await
+}
+
 /// Wraps the key backup with a new recovery passphrase.
 pub async fn change_passphrase(passphrase: &str) -> Result<(), String> {
-  call(
-    "core_action",
-    &json!({ "action": ChatAction::ChangePassphrase { passphrase: passphrase.to_owned() } }),
-  )
+  core_action(ChatAction::ChangePassphrase {
+    passphrase: passphrase.to_owned(),
+  })
   .await
 }
 
 /// Wraps the key backup with the recovery key of a new kit the user saved (e2ee.md §6.5.7); the old
 /// kit and a legacy passphrase stop working.
 pub async fn set_recovery_key(recovery_key: &str) -> Result<(), String> {
-  call(
-    "core_action",
-    &json!({ "action": ChatAction::SetRecoveryKey { recovery_key: recovery_key.to_owned() } }),
-  )
+  core_action(ChatAction::SetRecoveryKey {
+    recovery_key: recovery_key.to_owned(),
+  })
   .await
 }
 
@@ -183,7 +217,7 @@ pub async fn link_announce() -> Result<(), String> {
 /// The settings the account holds (e2ee.md §6.4), fresh from the core rather than from the cache of
 /// answers: the caller reads them once per change of `ChatBackend::settings_mark`.
 pub async fn account_settings() -> Result<teamcraft_proto::synced_settings::SyncedSettings, String> {
-  match call::<ChatAnswer>("core_query", &json!({ "query": ChatQuery::AccountSettings })).await? {
+  match core_query(ChatQuery::AccountSettings).await? {
     ChatAnswer::AccountSettings { settings } => Ok(settings),
     _ => Err("unexpected answer to the account settings query".to_owned()),
   }
@@ -339,6 +373,9 @@ type ChangeNotifier = Rc<dyn Fn()>;
 /// answers stale; they are shown as they are until the next read has fetched fresh ones.
 #[derive(Default)]
 struct Slot {
+  /// The query, to ask it again (its key is the query in JSON, which is never read back: the
+  /// JSON reader of `ChatQuery` is only in the module two tabs talk through, #1413).
+  maybe_query: Option<ChatQuery>,
   maybe_answer: Option<ChatAnswer>,
   is_loading: bool,
   is_stale: bool,
@@ -627,6 +664,7 @@ impl RemoteChat {
     let (existing, must_load) = {
       let mut answers = self.answers.borrow_mut();
       let slot = answers.entry(key.clone()).or_default();
+      slot.maybe_query.get_or_insert_with(|| query.clone());
       slot.is_used = true;
       let must_load = !slot.is_loading && (slot.maybe_answer.is_none() || slot.is_stale);
       if must_load {
@@ -659,9 +697,10 @@ impl RemoteChat {
   async fn fetch_answer(&self, key: String, query: ChatQuery) -> bool {
     let mut is_changed = false;
     loop {
-      let outcome = call::<ChatAnswer>("core_query", &json!({ "query": query })).await;
+      let outcome = core_query(query.clone()).await;
       let mut answers = self.answers.borrow_mut();
       let slot = answers.entry(key.clone()).or_default();
+      slot.maybe_query.get_or_insert_with(|| query.clone());
       match outcome {
         Ok(answer) => is_changed |= slot.settle(answer),
         Err(error) => {
@@ -829,10 +868,10 @@ impl RemoteChat {
       applied
     };
     for (key, slot) in self.answers.borrow_mut().iter_mut() {
-      let query = serde_json::from_str::<ChatQuery>(key);
+      let maybe_query = slot.maybe_query.clone();
       // A message link's preview only changes with its own conversation: other changes keep
       // the answer it has (#319, no rescans on every message elsewhere).
-      if let Ok(ChatQuery::LinkedMessage { link }) = &query
+      if let Some(ChatQuery::LinkedMessage { link }) = &maybe_query
         && slot.maybe_answer.is_some()
         && !slot.is_loading
         && Route::from_permalink(link)
@@ -845,8 +884,8 @@ impl RemoteChat {
         slot.is_outdated = true;
         continue;
       }
-      match (slot.is_used, query) {
-        (true, Ok(query)) => {
+      match (slot.is_used, maybe_query) {
+        (true, Some(query)) => {
           slot.is_loading = true;
           plan.queries.push((key.clone(), query));
         },
@@ -1008,7 +1047,7 @@ impl RemoteChat {
     let backend = self.clone();
     let maybe_ticket = ActionTicket::current();
     spawn_local(async move {
-      let outcome = call::<()>("core_action", &json!({ "action": action })).await;
+      let outcome = core_action(action).await;
       *backend.maybe_error.borrow_mut() = outcome.as_ref().err().cloned();
       if let Err(error) = outcome {
         if let Some(pending) = maybe_pending {
@@ -2088,7 +2127,7 @@ impl ChatBackend for RemoteChat {
         conversation,
         maybe_thread,
       };
-      if let Err(error) = call::<()>("core_action", &json!({ "action": action })).await {
+      if let Err(error) = core_action(action).await {
         tracing::debug!(%error, "typing not announced");
       }
     });
@@ -2468,7 +2507,7 @@ impl ChatBackend for RemoteChat {
     let backend = self.clone();
     spawn_local(async move {
       let action = ChatAction::LoadOlderHistory { conversation };
-      match call::<()>("core_action", &json!({ "action": action })).await {
+      match core_action(action).await {
         Ok(()) => {
           // Read after the core took the action, so it says how this request stands.
           let query = ChatQuery::OlderHistory { conversation };
@@ -2540,7 +2579,7 @@ impl ChatBackend for RemoteChat {
         after: gap.after,
         edge,
       };
-      match call::<()>("core_action", &json!({ "action": action })).await {
+      match core_action(action).await {
         Ok(()) => {
           // Read after the core took the action, so it says how this request stands.
           let query = ChatQuery::HistoryGaps { conversation };
