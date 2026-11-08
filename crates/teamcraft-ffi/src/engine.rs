@@ -72,6 +72,10 @@ use crate::{EventListener, TokenProvider};
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
 const DOWNLOADS_DIR: &str = "downloads";
+/// Stack of the engine and read threads. They run the deepest calls (creating keys, MLS commits,
+/// the sync loop); Rust's 2 MiB default overflowed on a phone in a debug build (#1504). Only
+/// address space is reserved; pages are used as the stack grows.
+pub(crate) const THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 /// The longest a wake-up is worked on before its notification is shown with what is known by then.
 /// FCM gives a high-priority message about 10 s; the app hands over to expedited work at 8 s.
 const PUSH_PREVIEW_BUDGET: Duration = Duration::from_secs(7);
@@ -429,6 +433,7 @@ pub(crate) fn spawn(start: &EngineStart, late_problem: LateProblem) -> Result<En
   let own_jobs = jobs.downgrade();
   std::thread::Builder::new()
     .name("teamcraft-engine".into())
+    .stack_size(THREAD_STACK_BYTES)
     .spawn(move || {
       let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
