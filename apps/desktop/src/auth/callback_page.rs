@@ -268,15 +268,15 @@ const ICON_ALERT: &str =
 
 /// The UI's sign-in card tokens (crates/teamcraft-ui/style/main/000-tokens.css), light and dark.
 const STYLE: &str = "\
-:root{color-scheme:light;--bg:#f6f7f9;--surface:#fff;--border:#dce0e7;--text:#1b2230;--muted:#566175;\
+:root{color-scheme:light;--bg:#f5f5f5;--surface:#fff;--border:#dddddd;--text:#1d1d1d;--muted:#545454;\
 --accent:#005dfc;--accent-soft:#e3edff;--danger:#c0392b;--danger-soft:#f9e3e0;\
 --shadow:0 1px 2px rgba(16,24,40,.06),0 12px 32px rgba(16,24,40,.12);\
 font:15px/1.5 system-ui,-apple-system,\"Segoe UI\",Roboto,\"Noto Sans\",\"Helvetica Neue\",sans-serif}\
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){color-scheme:dark;--bg:#0f141d;\
---surface:#151b27;--border:#28324a;--text:#e4e9f2;--muted:#9aa6ba;--accent:#5c9dff;--accent-soft:#13284a;\
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){color-scheme:dark;--bg:#161616;\
+--surface:#1e1e1e;--border:#363636;--text:#f5f5f5;--muted:#b0b0b0;--accent:#5c9dff;--accent-soft:#182a47;\
 --danger:#ff7a6b;--danger-soft:#3a1d1a;--shadow:0 1px 2px rgba(0,0,0,.3),0 12px 32px rgba(0,0,0,.45)}}\
-:root[data-theme=dark]{color-scheme:dark;--bg:#0f141d;--surface:#151b27;--border:#28324a;--text:#e4e9f2;\
---muted:#9aa6ba;--accent:#5c9dff;--accent-soft:#13284a;--danger:#ff7a6b;--danger-soft:#3a1d1a;\
+:root[data-theme=dark]{color-scheme:dark;--bg:#161616;--surface:#1e1e1e;--border:#363636;--text:#f5f5f5;\
+--muted:#b0b0b0;--accent:#5c9dff;--accent-soft:#182a47;--danger:#ff7a6b;--danger-soft:#3a1d1a;\
 --shadow:0 1px 2px rgba(0,0,0,.3),0 12px 32px rgba(0,0,0,.45)}\
 *{box-sizing:border-box}\
 body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px 16px;background:var(--bg);color:var(--text)}\

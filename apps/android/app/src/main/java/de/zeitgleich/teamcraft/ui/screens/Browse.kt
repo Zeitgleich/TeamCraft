@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import androidx.annotation.StringRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -350,7 +351,7 @@ fun directWith(snapshot: ChatSnapshot, users: List<String>): String? {
 @Composable
 fun PresenceDot(presence: String) {
   val color = when (presence) {
-    "Online" -> Color(0xFF34C759)
+    "Online" -> LocalTeamCraftColors.current.presence
     "Away" -> Color(0xFFFF9F0A)
     "DoNotDisturb" -> Color(0xFFFF3B30)
     else -> MaterialTheme.colorScheme.outline

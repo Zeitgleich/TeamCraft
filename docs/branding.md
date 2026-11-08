@@ -224,6 +224,37 @@ brand's host, so its links can open in an installed app ([app-links.md](app-link
   a red dot while something is unread, so the tab is recognisable. The effective
   theme (setting, else the system) picks the `*_dark` assets and the `dark` colors.
 
+### 5.1 User colour themes (#202)
+
+The brand's colours are the **default theme** of every client of that brand. Each user can replace
+them with a colour theme of their own (Settings > Appearance > Colours on web and desktop, Settings >
+Chats on Android):
+
+- **Server default:** the brand's colours (or the product's without a brand).
+- **Presets:** built-in themes in groups (calm, bright sidebars, vivid, accessibility: red–green and
+  blue–yellow friendly, high contrast). Names and colours are the product's own.
+- **Custom:** four colours (navigation, selected items, online, notifications), shareable as a
+  theme code `#rrggbb,#rrggbb,#rrggbb,#rrggbb`.
+
+Every theme, preset or custom, is these four colours. The other tokens (rail and top bar, sidebar
+text, accent, accent soft and strong, on-accent, badge, online dot) are derived for light and dark
+mode by `teamcraft-client-api::color_theme`, the same code on every client, and contrast is enforced:
+text 4.5:1 on its background, marks 3:1 (WCAG AA). A colour that fails is moved toward black or
+white until it passes, so no choice makes text unreadable. A light navigation colour is darkened in
+dark mode, so the chrome stays dark there.
+
+**Themes colour the chrome only.** Message list, composer, threads, panels and dialogs stay
+neutral: white in light mode, dark grey (no tint) with white text in dark mode. Neither brands nor
+themes change them.
+
+The choice follows the account (the encrypted settings, [e2ee.md](e2ee.md) §6.4, key
+`display.color_theme`); light or dark stays per device. Web and desktop set the theme's tokens
+through the CSSOM after the brand's, so they win; Android maps them onto its Material scheme.
+
+Why keep brand colours: a company that runs several brands on one instance wants each brand's people
+to see their own colours without doing anything, and the sign-in screen (before any user setting
+exists) shows them. A user theme is a personal override, so the two don't compete.
+
 ## 6. Things that use the brand of the recipient
 
 The recipient's brand is the home brand (e-mail domain match, else the default brand). Where a request
