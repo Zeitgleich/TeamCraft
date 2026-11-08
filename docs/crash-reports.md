@@ -168,13 +168,13 @@ account, the device or the instance, and it is rotated when the user turns repor
 
 ## Symbols: readable stack traces
 
-| Platform         | What the report carries                       | Symbol upload (release workflow)                       |
-|------------------|-----------------------------------------------|--------------------------------------------------------|
-| Desktop, server  | Function names, resolved on the device       | None needed for names; see below for lines              |
-| Web (wasm)       | Function index and offset (names are stripped) | The unstripped `.wasm` kept as a release artifact      |
-| Android (Kotlin) | Obfuscated names (R8)                         | R8 `mapping.txt` → GlitchTip (ProGuard)                |
-| Android (NDK)    | Addresses and debug IDs of `libteamcraft_ffi.so` | The unstripped `.so` (ELF debug files) → GlitchTip    |
-| iOS              | Addresses and debug IDs                       | dSYMs → GlitchTip (follow-up issue)                     |
+| Platform         | What the report carries                          | Symbol upload (release workflow)                 |
+|------------------|--------------------------------------------------|--------------------------------------------------|
+| Desktop, server  | Function names, resolved on the device           | None needed for names; see below for lines       |
+| Web (wasm)       | Function index and offset (names are stripped)   | None (gap, below)                                |
+| Android (Kotlin) | Obfuscated names (R8)                            | R8 `mapping.txt` under the build's ProGuard UUID |
+| Android (NDK)    | Addresses and debug IDs of `libteamcraft_ffi.so` | The unstripped `.so` (ELF debug files)           |
+| iOS              | Addresses and debug IDs                          | dSYMs from the Xcode archive (#1515)             |
 
 - **Rust on desktop and server** resolves frames in the process (`std::backtrace`): release builds
   keep their symbol table, so function names are there; file and line need debug info in the
@@ -182,17 +182,21 @@ account, the device or the instance, and it is rotated when the user turns repor
   addresses plus debug images for server-side symbolication would need the `sentry` crate's
   debug-image code; not worth it while function names suffice.
 - **wasm** (`profile.web-release` strips the name section to save download size): a browser frame
-  is `wasm-function[1234]:0x5678`. GlitchTip doesn't symbolicate wasm; the release workflow keeps
-  the unstripped module as an artifact and `wasm-tools addr2line` (or `llvm-symbolizer`) maps a
-  frame by hand. Keeping the name section in the shipped module would cost download size against
-  the budget.
-- **Android:** GlitchTip accepts R8/ProGuard mappings and ELF debug files through its debug file
-  API (`glitchtip-cli debug-files upload`, compatible with `sentry-cli`). Older GlitchTip versions
-  failed to apply mappings uploaded without a `kind` (GlitchTip backend issue 504); check the
-  deobfuscation on the first deployed instance.
-- **Upload is optional.** The release workflow uploads when the secrets `CRASH_REPORTS_URL`,
+  is `wasm-function[1234]:0x5678`, and GlitchTip doesn't symbolicate wasm. To read one, build the
+  release's commit with `strip = false` (the build is reproducible) and map the frame with
+  `wasm-tools addr2line` or `llvm-symbolizer`. Keeping the name section in the shipped module would
+  cost download size against the budget; panics carry their message and location either way.
+- **Android:** the release workflow (`release.yml`, job `android`) gives the full release a fresh
+  ProGuard UUID (`-Pteamcraft.proguardUuid`, written to the app's `sentry-debug-meta.properties`)
+  and uploads `mapping.txt` under it (`sentry-cli upload-proguard`) and the unstripped libraries
+  of `merged_native_libs/fullRelease` (`sentry-cli debug-files upload`). `sentry-cli` is pinned by
+  version and SHA-256. GlitchTip takes both through its Sentry-compatible debug file API; older
+  GlitchTip versions failed to apply mappings uploaded without a `kind` (GlitchTip backend issue
+  504), so check the first deobfuscated crash.
+- **Upload is optional.** The workflow uploads when the secrets `CRASH_REPORTS_URL`,
   `CRASH_REPORTS_ORG`, `CRASH_REPORTS_PROJECT` and `CRASH_REPORTS_AUTH_TOKEN` exist and skips the
-  step otherwise, so forks and other operators build without them.
+  steps otherwise, so forks and other publishers build without them. A failed upload warns; the
+  release goes on.
 
 ## Store declarations
 
