@@ -8,6 +8,7 @@
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use teamcraft_core::client::is_catching_up;
 use teamcraft_core::store::LocalStore;
 use teamcraft_e2e::app::{App, DiskDir, disk_store, mobile_store};
 use teamcraft_e2e::netem::{Condition, PortConditions};
@@ -24,6 +25,10 @@ const CONVERSATIONS: usize = 38;
 const CHANGED: usize = 12;
 /// Messages per changed conversation while the user was away.
 const MESSAGES: usize = 40;
+/// Messages written while away to one more conversation, more than a capped catch-up reads at once
+/// (`catch_up_message_pages`, 200 messages): its older part is left to the app's loop (#1448), and
+/// only this conversation may show "catching up" once the sync is over (#1457).
+const BUSY_MESSAGES: usize = 250;
 /// Times per changed conversation somebody was added and removed again: each is a commit, an epoch
 /// the returning device applies and stores.
 const MEMBER_CHANGES: usize = 3;
@@ -108,6 +113,14 @@ async fn come_back<S: LocalStore + Clone + 'static>(store_name: &str, open_store
   for (index, conversation) in changed.iter().enumerate() {
     expected.extend(write_while_away(&mut alice, &mut bob, &mut dave, *conversation, index).await);
   }
+  // One more conversation is busier than a capped catch-up reads at once.
+  let busy = conversations[CHANGED];
+  let busy_texts: Vec<String> = (0..BUSY_MESSAGES)
+    .map(|index| format!("busy while away #{index}"))
+    .collect();
+  for text in &busy_texts {
+    alice.client.send_text(busy, None, text).await.unwrap();
+  }
   // Bob was online all along: he reads everything, or the writing itself went wrong.
   for (channel, text) in expected.iter().rev().step_by(MESSAGES) {
     bob.wait_for_text(*channel, text).await;
@@ -159,16 +172,53 @@ async fn come_back<S: LocalStore + Clone + 'static>(store_name: &str, open_store
   for (channel, text) in &expected {
     app.wait_for(channel, text, ARRIVAL_TIMEOUT).await;
   }
+  // The newest page of the busy conversation comes with the sync, the older part after it.
+  app
+    .wait_for(&busy, busy_texts.last().unwrap(), ARRIVAL_TIMEOUT)
+    .await;
   let all_at = started.elapsed();
   app.wait_connected(ARRIVAL_TIMEOUT).await;
+  // The scoped status (#1457): once the sync is over only the conversation with a backlog is still
+  // marked as catching up (the others' marks went as each was caught up), and its mark clears once
+  // the loop read the rest.
   let mut all_conversations = conversations.clone();
   all_conversations.push(dm);
+  let marked = |app: &App<S>| -> Vec<ConversationId> {
+    all_conversations
+      .iter()
+      .copied()
+      .filter(|channel| is_catching_up(&app.store, *channel).unwrap())
+      .collect()
+  };
+  let narrowing = Instant::now();
+  while marked(&app).iter().any(|channel| *channel != busy) {
+    assert!(
+      narrowing.elapsed() < ARRIVAL_TIMEOUT,
+      "conversations without a backlog still catching up: {:?}",
+      marked(&app)
+    );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+  let scoped_at = started.elapsed();
+  app.wait_for(&busy, &busy_texts[0], ARRIVAL_TIMEOUT).await;
+  let backlog_at = started.elapsed();
+  let clearing = Instant::now();
+  while !marked(&app).is_empty() {
+    assert!(
+      clearing.elapsed() < ARRIVAL_TIMEOUT,
+      "the mark stayed after the backlog was read: {:?}",
+      marked(&app)
+    );
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+  expected.extend(busy_texts.iter().map(|text| (busy, text.clone())));
   app.assert_each_once(&all_conversations, &expected);
   let reads = reads.borrow().clone();
   eprintln!(
     "long_absence ({store_name}): after coming back: the live message showed after {} ms, \
      the whole backlog ({} messages) after {} ms; UI reads meanwhile: {}, waited up to {} ms, took up to {} ms, \
-     up to {} conversations and {} people without a name",
+     up to {} conversations and {} people without a name; only the busy conversation was still \
+     catching up after {} ms, its backlog was read after {} ms",
     live_at.as_millis(),
     expected.len(),
     all_at.as_millis(),
@@ -176,7 +226,9 @@ async fn come_back<S: LocalStore + Clone + 'static>(store_name: &str, open_store
     reads.max_wait.as_millis(),
     reads.max_read.as_millis(),
     reads.max_unnamed_conversations,
-    reads.max_unnamed_people
+    reads.max_unnamed_people,
+    scoped_at.as_millis(),
+    backlog_at.as_millis()
   );
   if let Ok(app) = Rc::try_unwrap(app) {
     app.stop().await;
