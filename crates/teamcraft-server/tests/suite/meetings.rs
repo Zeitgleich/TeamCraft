@@ -609,6 +609,43 @@ mod series {
   }
 
   #[tokio::test]
+  async fn a_holiday_feed_must_be_public_and_shows_how_it_stands() {
+    let (app, _calendar) = app!();
+    let bob = admin();
+    for refused in [
+      "https://127.0.0.1/holidays.ics",
+      "https://localhost/holidays.ics",
+      "http://holidays.example.com/holidays.ics",
+    ] {
+      let put = app
+        .put(
+          &bob,
+          "/admin/settings",
+          json!({"section": "holidays", "values": {"region": "CH-ZH", "feed_url": refused}}),
+        )
+        .await;
+      assert_eq!(put.status, StatusCode::BAD_REQUEST, "{refused}: {}", put.body);
+    }
+    let put = app
+      .put(
+        &bob,
+        "/admin/settings",
+        json!({"section": "holidays", "values": {
+          "region": "CH-ZH",
+          "feed_url": "https://holidays.example.com/holidays.ics",
+          "feed_refresh_secs": 3600,
+        }}),
+      )
+      .await;
+    assert_eq!(put.status, StatusCode::OK, "{}", put.body);
+    assert_eq!(put.body["holidays"]["feed_max_age_secs"], 7 * 86_400);
+    // Not fetched yet (no task in tests): no copy, no error.
+    assert_eq!(put.body["holiday_feed"]["holidays"], 0, "{}", put.body);
+    assert!(put.body["holiday_feed"].get("error").is_none());
+    app.stop().await;
+  }
+
+  #[tokio::test]
   async fn one_occurrence_is_cancelled_and_restored_without_the_series() {
     let Some((app, calendar, mailer)) = start_with_mail().await else {
       return;

@@ -332,6 +332,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
     app_links: teamcraft_proto::AppLinkSettings::default(),
     health_alerts: teamcraft_proto::HealthAlertSettings::default(),
     holidays: teamcraft_proto::HolidaySettings::default(),
+    maybe_holiday_feed: None,
     server_rules: ServerRulesSettings {
       invites_require_verified_email: true,
       default_spaces: Vec::new(),

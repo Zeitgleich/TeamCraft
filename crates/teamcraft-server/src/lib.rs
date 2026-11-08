@@ -19,6 +19,7 @@ pub mod meetings;
 pub mod metrics;
 pub mod openapi;
 pub mod outage_gate;
+pub mod outbound;
 pub mod push;
 pub mod rendezvous;
 pub mod router;

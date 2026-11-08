@@ -98,6 +98,22 @@ impl Database {
     Ok(())
   }
 
+  /// Creates or replaces a value the server keeps by itself (no admin changed it, no secret): the
+  /// last good copy of the holiday feed.
+  pub async fn put_system_server_setting(&self, name: &str, value: &str) -> Result<(), DbError> {
+    sqlx::query!(
+      r#"INSERT INTO server_settings (name, value, sealed_secret, updated_by, updated_at)
+         VALUES ($1, $2::text::jsonb, NULL, NULL, now())
+         ON CONFLICT (name) DO UPDATE
+         SET value = EXCLUDED.value, sealed_secret = NULL, updated_by = NULL, updated_at = now()"#,
+      name,
+      value,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
   /// Removes a setting, so the configuration file's value applies again. `false` if there was none.
   pub async fn delete_server_setting(&self, name: &str) -> Result<bool, DbError> {
     let result = sqlx::query!("DELETE FROM server_settings WHERE name = $1", name)

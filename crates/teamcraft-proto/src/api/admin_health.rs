@@ -35,6 +35,8 @@ wire_enum! {
     Certificate => "certificate",
     /// The disk is not nearly full. Reported by the deployment.
     DiskSpace => "disk_space",
+    /// The copy of the holiday feed is recent enough (`holidays.feed_max_age_secs`).
+    HolidayFeed => "holiday_feed",
   }
 }
 

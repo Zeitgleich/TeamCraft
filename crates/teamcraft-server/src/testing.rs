@@ -576,6 +576,7 @@ impl TestApp {
         crate::health::JobSchedules::default(),
         time::OffsetDateTime::now_utc(),
       )),
+      holiday_feed: Arc::default(),
       settings: Arc::new(SettingsCell::new(settings)),
     };
 

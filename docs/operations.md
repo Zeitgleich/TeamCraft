@@ -199,6 +199,7 @@ nothing from any conversation, no addresses, no error texts.
 | `backup`                | the last backup is older than the limit (36 hours)                              | the deployment's heartbeat, see below    |
 | `certificate`           | the served certificate expires within the limit (14 days)                       | the deployment's heartbeat, see below    |
 | `disk_space`            | the disk is fuller than the limit (85 %)                                        | the deployment's heartbeat, see below    |
+| `holiday_feed`          | the holiday feed's copy is older than `holidays.feed_max_age_secs` (7 days), or no fetch worked yet | with `holidays.feed_url` (console)       |
 
 **When a failure becomes an alert.** A background task evaluates the checks every
 `[health] check_interval_secs` (30). It reads what the server keeps anyway (breakers, push results,

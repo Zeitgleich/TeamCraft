@@ -287,6 +287,7 @@ async fn run() -> anyhow::Result<()> {
       job_schedules(&config),
       time::OffsetDateTime::now_utc(),
     )),
+    holiday_feed: Arc::default(),
   };
   with_startup_retries("loading the settings", startup_deadline, || {
     load_runtime_settings(&state)
@@ -319,6 +320,8 @@ async fn run() -> anyhow::Result<()> {
   spawn_partition_maintenance(state.clone(), config.server.partitions_ahead_months);
   spawn_derived_presence(state.clone());
   health::spawn(state.clone());
+  teamcraft_server::holidays::feed::load(&state).await;
+  teamcraft_server::holidays::feed::spawn(state.clone());
   spawn_call_roster_sweeper(state.clone());
   // Before anybody asks for a join token: calls that ran on through this restart are taken over,
   // not opened a second time next to themselves (at most the SFU control timeout).

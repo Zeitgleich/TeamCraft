@@ -184,6 +184,7 @@ impl HealthMonitor {
         .metrics
         .job_last_success(BackgroundJob::PartitionMaintenance),
       heartbeats,
+      holiday_feed: state.holiday_feed.health(&state.settings.get().holidays),
     }
   }
 

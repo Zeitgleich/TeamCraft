@@ -19,6 +19,8 @@ use super::convert::unix_millis;
 use crate::auth::{AuthenticatedUser, public_origins};
 use crate::error::ApiError;
 use crate::holidays::HolidayRegion;
+use crate::holidays::feed::MAX_FEED_URL_CHARS;
+use crate::outbound::check_public_url_text;
 use crate::state::{AppState, Settings};
 
 /// Prefix of the rows in `server_settings`.
@@ -60,6 +62,13 @@ const MAX_ADMIN_JOIN_REQUEST_DAYS: u64 = 90;
 const MIN_ALERT_HOLD_SECS: u64 = 60;
 /// Longest backup age an admin can allow: a month.
 const MAX_BACKUP_AGE_SECS: u64 = 30 * 86_400;
+
+/// Holiday feed: fetched at most hourly and at least weekly; a copy may be allowed to age between a
+/// day and a quarter.
+const MIN_FEED_REFRESH_SECS: u64 = 3_600;
+const MAX_FEED_REFRESH_SECS: u64 = 7 * 86_400;
+const MIN_FEED_MAX_AGE_SECS: u64 = 86_400;
+const MAX_FEED_MAX_AGE_SECS: u64 = 90 * 86_400;
 
 /// Fewest proofs remembered: fewer would turn normal use into 503s.
 const MIN_REPLAY_CACHE_ENTRIES: u64 = 1000;
@@ -114,6 +123,9 @@ pub async fn put_settings(
     load(state).await?;
     announce_attachment_limit(state, before);
   }
+  if key == RuntimeSettingsKey::Holidays {
+    state.holiday_feed.settings_changed();
+  }
   audit::record(
     state,
     Some(caller.user.id),
@@ -154,6 +166,9 @@ pub async fn reset_settings(
     announce_attachment_limit(state, before);
     is_deleted
   };
+  if key == RuntimeSettingsKey::Holidays {
+    state.holiday_feed.settings_changed();
+  }
   if is_deleted {
     audit::record(
       state,
@@ -185,7 +200,13 @@ async fn response(state: &AppState) -> Result<RuntimeSettingsResponse, ApiError>
       }
     })
     .collect();
-  Ok(view(&settings, sources))
+  let mut response = view(&settings, sources);
+  response.maybe_holiday_feed = settings
+    .holidays
+    .maybe_feed_url
+    .as_deref()
+    .map(|url| state.holiday_feed.status(url));
+  Ok(response)
 }
 
 /// The stored groups that still parse; a row this version cannot read is skipped with a warning.
@@ -338,6 +359,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
     app_links: settings.app_links.clone(),
     health_alerts: settings.health_alerts.clone(),
     holidays: settings.holidays.clone(),
+    maybe_holiday_feed: None,
     server_rules: ServerRulesSettings {
       invites_require_verified_email: settings.policy.invites_require_verified_email,
       default_spaces: settings.policy.default_spaces.clone(),
@@ -659,14 +681,36 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
 }
 
 /// A hold and a clear time long enough not to flap, thresholds that can be met.
-/// No region, or one of the bundled table.
+/// No region or one of the bundled table; no feed or a public https URL; a refresh between an
+/// hour and a week, and a copy allowed to be at least as old as one refresh.
 fn check_holidays(values: &HolidaySettings) -> Result<(), ApiError> {
-  if values.region.is_empty() || HolidayRegion::from_code(&values.region).is_some() {
-    return Ok(());
+  if !values.region.is_empty() && HolidayRegion::from_code(&values.region).is_none() {
+    return Err(ApiError::InvalidRequest(
+      "region must be empty or a region of the holiday table, like DE or DE-BY".into(),
+    ));
   }
-  Err(ApiError::InvalidRequest(
-    "region must be empty or a region of the holiday table, like DE or DE-BY".into(),
-  ))
+  if let Some(url) = &values.maybe_feed_url {
+    if url.chars().count() > MAX_FEED_URL_CHARS {
+      return Err(ApiError::InvalidRequest(format!(
+        "feed_url must have at most {MAX_FEED_URL_CHARS} characters"
+      )));
+    }
+    if let Err(refusal) = check_public_url_text(url) {
+      return Err(ApiError::InvalidRequest(format!("feed_url {refusal}")));
+    }
+  }
+  check_range(
+    "feed_refresh_secs",
+    values.feed_refresh_secs,
+    MIN_FEED_REFRESH_SECS,
+    MAX_FEED_REFRESH_SECS,
+  )?;
+  check_range(
+    "feed_max_age_secs",
+    values.feed_max_age_secs,
+    values.feed_refresh_secs.max(MIN_FEED_MAX_AGE_SECS),
+    MAX_FEED_MAX_AGE_SECS,
+  )
 }
 
 fn check_health_alerts(values: &HealthAlertSettings) -> Result<(), ApiError> {
@@ -892,13 +936,53 @@ mod tests {
 
   #[test]
   fn the_holiday_region_is_none_or_one_of_the_table() {
-    let region = |code: &str| HolidaySettings { region: code.into() };
-    for good in ["", "DE", "DE-BY", "DE-TH"] {
+    let region = |code: &str| HolidaySettings {
+      region: code.into(),
+      ..HolidaySettings::default()
+    };
+    for good in ["", "DE", "DE-BY", "DE-TH", "AT", "CH", "CH-ZH", "CH-VS"] {
       assert!(check_holidays(&region(good)).is_ok(), "{good}");
     }
     for bad in ["de-by", "DE-XX", "Bavaria", " DE"] {
       assert!(check_holidays(&region(bad)).is_err(), "{bad}");
     }
+  }
+
+  #[test]
+  fn the_holiday_feed_must_be_public_https_with_sane_intervals() {
+    let feed = |url: &str| HolidaySettings {
+      maybe_feed_url: Some(url.into()),
+      ..HolidaySettings::default()
+    };
+    assert!(check_holidays(&feed("https://www.example.com/holidays/de.ics?key=abc")).is_ok());
+    for bad in [
+      "http://www.example.com/de.ics",
+      "https://127.0.0.1/de.ics",
+      "https://localhost/de.ics",
+      "https://user:pw@www.example.com/de.ics",
+      "webcal://www.example.com/de.ics",
+      "",
+    ] {
+      assert!(check_holidays(&feed(bad)).is_err(), "{bad}");
+    }
+    let long = format!("https://www.example.com/{}", "a".repeat(MAX_FEED_URL_CHARS));
+    assert!(check_holidays(&feed(&long)).is_err());
+    let with = |refresh: u64, max_age: u64| HolidaySettings {
+      feed_refresh_secs: refresh,
+      feed_max_age_secs: max_age,
+      ..HolidaySettings::default()
+    };
+    assert!(check_holidays(&with(3_600, 86_400)).is_ok());
+    assert!(check_holidays(&with(60, 86_400)).is_err(), "too often");
+    assert!(
+      check_holidays(&with(30 * 86_400, 90 * 86_400)).is_err(),
+      "too rarely"
+    );
+    assert!(
+      check_holidays(&with(3 * 86_400, 2 * 86_400)).is_err(),
+      "older than a refresh"
+    );
+    assert!(check_holidays(&with(86_400, 100 * 86_400)).is_err());
   }
 
   #[test]

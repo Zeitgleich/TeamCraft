@@ -1,10 +1,12 @@
-//! The bundled holiday table: Germany's public holidays, nationwide and per federal state, computed
-//! for any year without the network. Movable feasts follow Easter (Gregorian computus); repentance
-//! day is the Wednesday before 23 November.
+//! The bundled holiday table, computed for any year without the network: Germany's public
+//! holidays, nationwide and per federal state; Austria's (all of them federal law); Switzerland's
+//! federal ones and those of each canton. Movable feasts follow Easter (Gregorian computus).
 //!
-//! Holidays that only parts of a state keep (Corpus Christi in parts of Saxony and Thuringia,
+//! Holidays that only parts of a region keep (Corpus Christi in parts of Saxony and Thuringia,
 //! Assumption in Bavaria's Catholic communities, Augsburg's peace festival) are left out: a series
-//! of the whole state would skip a day most of it works.
+//! of the whole region would skip a day most of it works. For the same reason Austria's state
+//! patron days (Saint Leopold in Vienna and so on), which only schools and the public service keep,
+//! are not in the table, and neither are the Swiss cantons' optional and half days.
 
 use std::collections::BTreeSet;
 
@@ -16,7 +18,8 @@ use super::HolidaySource;
 /// Years looked at per question at most: a range wider than this is cut at its end.
 const MAX_YEARS: i32 = 100;
 
-/// A region of the table, by its ISO 3166-2 code.
+/// A region of the table, by its ISO 3166-2 code. A country stands for the holidays all of it
+/// keeps; its states or cantons add their own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HolidayRegion {
   /// The holidays all of Germany keeps.
@@ -37,6 +40,36 @@ pub enum HolidayRegion {
   SaxonyAnhalt,
   SchleswigHolstein,
   Thuringia,
+  /// Austria: its public holidays are federal law, the same in every state.
+  Austria,
+  /// The holidays all of Switzerland keeps.
+  Switzerland,
+  Aargau,
+  AppenzellInnerrhoden,
+  AppenzellAusserrhoden,
+  Bern,
+  BaselLandschaft,
+  BaselStadt,
+  Fribourg,
+  Geneva,
+  Glarus,
+  Graubuenden,
+  Jura,
+  Lucerne,
+  Neuchatel,
+  Nidwalden,
+  Obwalden,
+  StGallen,
+  Schaffhausen,
+  Solothurn,
+  Schwyz,
+  Thurgau,
+  Ticino,
+  Uri,
+  Vaud,
+  Valais,
+  Zug,
+  Zurich,
 }
 
 /// The table's holidays of one region.
@@ -48,9 +81,10 @@ pub struct BundledHolidays {
 /// One holiday of the table: on which day, where, and in which years.
 struct Rule {
   day: Day,
-  /// The federal states that keep it; empty: all of Germany.
+  /// The regions that keep it; a country stands for all of it.
   regions: &'static [HolidayRegion],
   years: Years,
+  weekdays: Weekdays,
 }
 
 #[derive(Clone, Copy)]
@@ -63,6 +97,13 @@ enum Day {
   Easter(i64),
   /// The Wednesday before 23 November.
   Repentance,
+  /// Glarus' Näfelser Fahrt: the first Thursday of April, a week later when that is Maundy
+  /// Thursday.
+  NaefelserFahrt,
+  /// Geneva's fast: the Thursday after the first Sunday of September.
+  GenevaFast,
+  /// Vaud's fast Monday: the day after the third Sunday of September (the federal day of thanks).
+  FastMonday,
 }
 
 #[derive(Clone, Copy)]
@@ -71,18 +112,35 @@ enum Years {
   Only(i32),
 }
 
+/// On which weekdays a holiday counts: a few cantons keep 2 January or 26 December only when it
+/// makes a long weekend.
+#[derive(Clone, Copy)]
+enum Weekdays {
+  Any,
+  Only(Weekday),
+  Not(&'static [Weekday]),
+}
+
 use HolidayRegion::{
-  BadenWuerttemberg, Bavaria, Berlin, Brandenburg, Bremen, Hamburg, Hesse, LowerSaxony,
-  MecklenburgVorpommern, NorthRhineWestphalia, RhinelandPalatinate, Saarland, Saxony, SaxonyAnhalt,
-  SchleswigHolstein, Thuringia,
+  Aargau, AppenzellAusserrhoden, AppenzellInnerrhoden, Austria, BadenWuerttemberg, BaselLandschaft,
+  BaselStadt, Bavaria, Berlin, Bern, Brandenburg, Bremen, Fribourg, Geneva, Germany, Glarus, Graubuenden,
+  Hamburg, Hesse, Jura, LowerSaxony, Lucerne, MecklenburgVorpommern, Neuchatel, Nidwalden,
+  NorthRhineWestphalia, Obwalden, RhinelandPalatinate, Saarland, Saxony, SaxonyAnhalt, Schaffhausen,
+  SchleswigHolstein, Schwyz, Solothurn, StGallen, Switzerland, Thurgau, Thuringia, Ticino, Uri, Valais, Vaud,
+  Zug, Zurich,
 };
 
-const EVERYWHERE: &[HolidayRegion] = &[];
+const DE: &[HolidayRegion] = &[Germany];
 const SINCE_REUNIFICATION: Years = Years::Since(1990);
+/// Austria's holidays as they stand since the national day (1967).
+const SINCE_NATIONAL_DAY: Years = Years::Since(1967);
+/// Switzerland's holidays as the table has them; Jura, the youngest canton, since 1979.
+const SINCE_JURA: Years = Years::Since(1979);
 
 const RULES: &[Rule] = &[
+  // --- Germany ---
   // New Year's Day.
-  fixed(1, 1, EVERYWHERE, SINCE_REUNIFICATION),
+  fixed(1, 1, DE, SINCE_REUNIFICATION),
   // Epiphany.
   fixed(
     1,
@@ -94,18 +152,18 @@ const RULES: &[Rule] = &[
   fixed(3, 8, &[Berlin], Years::Since(2019)),
   fixed(3, 8, &[MecklenburgVorpommern], Years::Since(2023)),
   // Good Friday, Easter Sunday, Easter Monday.
-  easter(-2, EVERYWHERE),
-  easter(0, &[Brandenburg]),
-  easter(1, EVERYWHERE),
+  easter(-2, DE, SINCE_REUNIFICATION),
+  easter(0, &[Brandenburg], SINCE_REUNIFICATION),
+  easter(1, DE, SINCE_REUNIFICATION),
   // Labour Day.
-  fixed(5, 1, EVERYWHERE, SINCE_REUNIFICATION),
+  fixed(5, 1, DE, SINCE_REUNIFICATION),
   // The 75th and 80th anniversary of the end of the war, once each.
   fixed(5, 8, &[Berlin], Years::Only(2020)),
   fixed(5, 8, &[Berlin], Years::Only(2025)),
   // Ascension Day, Whit Sunday, Whit Monday, Corpus Christi.
-  easter(39, EVERYWHERE),
-  easter(49, &[Brandenburg]),
-  easter(50, EVERYWHERE),
+  easter(39, DE, SINCE_REUNIFICATION),
+  easter(49, &[Brandenburg], SINCE_REUNIFICATION),
+  easter(50, DE, SINCE_REUNIFICATION),
   easter(
     60,
     &[
@@ -116,13 +174,14 @@ const RULES: &[Rule] = &[
       RhinelandPalatinate,
       Saarland,
     ],
+    SINCE_REUNIFICATION,
   ),
   // Assumption Day.
   fixed(8, 15, &[Saarland], SINCE_REUNIFICATION),
   // World Children's Day.
   fixed(9, 20, &[Thuringia], Years::Since(2019)),
   // Day of German Unity.
-  fixed(10, 3, EVERYWHERE, SINCE_REUNIFICATION),
+  fixed(10, 3, DE, SINCE_REUNIFICATION),
   // Reformation Day: all of Germany for its 500th anniversary.
   fixed(
     10,
@@ -142,7 +201,7 @@ const RULES: &[Rule] = &[
     &[Bremen, Hamburg, LowerSaxony, SchleswigHolstein],
     Years::Since(2018),
   ),
-  fixed(10, 31, EVERYWHERE, Years::Only(2017)),
+  fixed(10, 31, DE, Years::Only(2017)),
   // All Saints' Day.
   fixed(
     11,
@@ -157,20 +216,208 @@ const RULES: &[Rule] = &[
     SINCE_REUNIFICATION,
   ),
   // Day of Repentance and Prayer.
-  Rule {
-    day: Day::Repentance,
-    regions: &[Saxony],
-    years: SINCE_REUNIFICATION,
-  },
+  special(Day::Repentance, &[Saxony]),
   // Christmas Day and Boxing Day.
-  fixed(12, 25, EVERYWHERE, SINCE_REUNIFICATION),
-  fixed(12, 26, EVERYWHERE, SINCE_REUNIFICATION),
+  fixed(12, 25, DE, SINCE_REUNIFICATION),
+  fixed(12, 26, DE, SINCE_REUNIFICATION),
+  // --- Austria (Feiertagsruhegesetz; Good Friday stopped being one in 2019) ---
+  fixed(1, 1, &[Austria], SINCE_NATIONAL_DAY),
+  fixed(1, 6, &[Austria], SINCE_NATIONAL_DAY),
+  easter(1, &[Austria], SINCE_NATIONAL_DAY),
+  fixed(5, 1, &[Austria], SINCE_NATIONAL_DAY),
+  easter(39, &[Austria], SINCE_NATIONAL_DAY),
+  easter(50, &[Austria], SINCE_NATIONAL_DAY),
+  easter(60, &[Austria], SINCE_NATIONAL_DAY),
+  fixed(8, 15, &[Austria], SINCE_NATIONAL_DAY),
+  // National Day.
+  fixed(10, 26, &[Austria], SINCE_NATIONAL_DAY),
+  fixed(11, 1, &[Austria], SINCE_NATIONAL_DAY),
+  fixed(12, 8, &[Austria], SINCE_NATIONAL_DAY),
+  fixed(12, 25, &[Austria], SINCE_NATIONAL_DAY),
+  fixed(12, 26, &[Austria], SINCE_NATIONAL_DAY),
+  // --- Switzerland: federal (New Year, Ascension, National Day, Christmas) and per canton ---
+  fixed(1, 1, &[Switzerland], SINCE_JURA),
+  // Berchtold's Day; Neuchâtel only when 1 January is a Sunday.
+  fixed(1, 2, &[Aargau, Bern, Jura, Lucerne, Thurgau, Vaud], SINCE_JURA),
+  on_weekday(
+    fixed(1, 2, &[Neuchatel], SINCE_JURA),
+    Weekdays::Only(Weekday::Mon),
+  ),
+  // Epiphany.
+  fixed(1, 6, &[Schwyz, Ticino, Uri], SINCE_JURA),
+  // Republic Day of Neuchâtel.
+  fixed(3, 1, &[Neuchatel], SINCE_JURA),
+  // Saint Joseph.
+  fixed(3, 19, &[Nidwalden, Schwyz, Ticino, Uri, Valais], SINCE_JURA),
+  special(Day::NaefelserFahrt, &[Glarus]),
+  // Good Friday: everywhere but Graubünden, Ticino and Valais.
+  easter(
+    -2,
+    &[
+      Aargau,
+      AppenzellInnerrhoden,
+      AppenzellAusserrhoden,
+      Bern,
+      BaselLandschaft,
+      BaselStadt,
+      Fribourg,
+      Geneva,
+      Glarus,
+      Jura,
+      Lucerne,
+      Neuchatel,
+      Nidwalden,
+      Obwalden,
+      StGallen,
+      Schaffhausen,
+      Solothurn,
+      Schwyz,
+      Thurgau,
+      Uri,
+      Vaud,
+      Zug,
+      Zurich,
+    ],
+    SINCE_JURA,
+  ),
+  // Easter Monday and Whit Monday.
+  easter(1, SWISS_EASTER_MONDAY, SINCE_JURA),
+  easter(50, SWISS_EASTER_MONDAY, SINCE_JURA),
+  // Labour Day.
+  fixed(
+    5,
+    1,
+    &[
+      Aargau,
+      BaselLandschaft,
+      BaselStadt,
+      Jura,
+      Neuchatel,
+      Schaffhausen,
+      Thurgau,
+      Ticino,
+      Zurich,
+    ],
+    SINCE_JURA,
+  ),
+  easter(39, &[Switzerland], SINCE_JURA),
+  // Corpus Christi.
+  easter(
+    60,
+    &[
+      Aargau,
+      AppenzellInnerrhoden,
+      Jura,
+      Lucerne,
+      Neuchatel,
+      Nidwalden,
+      Obwalden,
+      Schwyz,
+      Ticino,
+      Uri,
+      Valais,
+      Zug,
+    ],
+    SINCE_JURA,
+  ),
+  // Independence of Jura; Saints Peter and Paul in Ticino.
+  fixed(6, 23, &[Jura], SINCE_JURA),
+  fixed(6, 29, &[Ticino], SINCE_JURA),
+  // National Day.
+  fixed(8, 1, &[Switzerland], SINCE_JURA),
+  // Assumption Day.
+  fixed(8, 15, SWISS_CATHOLIC_FEASTS, SINCE_JURA),
+  fixed(8, 15, &[Jura], SINCE_JURA),
+  special(Day::GenevaFast, &[Geneva]),
+  special(Day::FastMonday, &[Vaud]),
+  // Brother Klaus.
+  fixed(9, 25, &[Obwalden], SINCE_JURA),
+  // All Saints' Day.
+  fixed(11, 1, SWISS_CATHOLIC_FEASTS, SINCE_JURA),
+  fixed(11, 1, &[Glarus, Jura, StGallen], SINCE_JURA),
+  // Immaculate Conception.
+  fixed(12, 8, SWISS_CATHOLIC_FEASTS, SINCE_JURA),
+  fixed(12, 25, &[Switzerland], SINCE_JURA),
+  // Saint Stephen's Day: in the Appenzells and Uri not on a Tuesday or Saturday (so never a lone
+  // bridge day), in Neuchâtel only when it is a Monday.
+  fixed(
+    12,
+    26,
+    &[
+      Aargau,
+      Bern,
+      BaselLandschaft,
+      BaselStadt,
+      Glarus,
+      Graubuenden,
+      Lucerne,
+      StGallen,
+      Schaffhausen,
+      Schwyz,
+      Thurgau,
+      Ticino,
+      Zurich,
+    ],
+    SINCE_JURA,
+  ),
+  on_weekday(
+    fixed(
+      12,
+      26,
+      &[AppenzellInnerrhoden, AppenzellAusserrhoden, Uri],
+      SINCE_JURA,
+    ),
+    Weekdays::Not(&[Weekday::Tue, Weekday::Sat]),
+  ),
+  on_weekday(
+    fixed(12, 26, &[Neuchatel], SINCE_JURA),
+    Weekdays::Only(Weekday::Mon),
+  ),
+  // Restoration of the Republic of Geneva.
+  fixed(12, 31, &[Geneva], SINCE_JURA),
+];
+
+/// The cantons with Easter Monday and Whit Monday as public holidays.
+const SWISS_EASTER_MONDAY: &[HolidayRegion] = &[
+  Aargau,
+  AppenzellInnerrhoden,
+  AppenzellAusserrhoden,
+  Bern,
+  BaselLandschaft,
+  BaselStadt,
+  Geneva,
+  Glarus,
+  Graubuenden,
+  Jura,
+  Lucerne,
+  StGallen,
+  Schaffhausen,
+  Schwyz,
+  Thurgau,
+  Ticino,
+  Uri,
+  Vaud,
+  Zurich,
+];
+
+/// The cantons that keep Assumption, All Saints and the Immaculate Conception.
+const SWISS_CATHOLIC_FEASTS: &[HolidayRegion] = &[
+  Aargau,
+  AppenzellInnerrhoden,
+  Lucerne,
+  Nidwalden,
+  Obwalden,
+  Schwyz,
+  Ticino,
+  Uri,
+  Valais,
+  Zug,
 ];
 
 impl HolidayRegion {
   /// Every region, in the order of [`HOLIDAY_REGIONS`].
-  pub const ALL: [Self; 17] = [
-    Self::Germany,
+  pub const ALL: [Self; 45] = [
+    Germany,
     BadenWuerttemberg,
     Bavaria,
     Berlin,
@@ -187,9 +434,37 @@ impl HolidayRegion {
     SaxonyAnhalt,
     SchleswigHolstein,
     Thuringia,
+    Austria,
+    Switzerland,
+    Aargau,
+    AppenzellInnerrhoden,
+    AppenzellAusserrhoden,
+    Bern,
+    BaselLandschaft,
+    BaselStadt,
+    Fribourg,
+    Geneva,
+    Glarus,
+    Graubuenden,
+    Jura,
+    Lucerne,
+    Neuchatel,
+    Nidwalden,
+    Obwalden,
+    StGallen,
+    Schaffhausen,
+    Solothurn,
+    Schwyz,
+    Thurgau,
+    Ticino,
+    Uri,
+    Vaud,
+    Valais,
+    Zug,
+    Zurich,
   ];
 
-  /// The region of an ISO 3166-2 code (`DE`, `DE-BY`), upper case as the wire has it.
+  /// The region of an ISO 3166-2 code (`DE`, `DE-BY`, `CH-ZH`), upper case as the wire has it.
   pub fn from_code(code: &str) -> Option<Self> {
     let index = HOLIDAY_REGIONS.iter().position(|known| *known == code)?;
     Self::ALL.get(index).copied()
@@ -203,6 +478,15 @@ impl HolidayRegion {
       .unwrap_or_default();
     HOLIDAY_REGIONS[index]
   }
+
+  /// The country the region is part of (a country is its own).
+  pub fn country(self) -> Self {
+    match self.code().get(..2) {
+      Some("AT") => Austria,
+      Some("CH") => Switzerland,
+      _ => Germany,
+    }
+  }
 }
 
 impl BundledHolidays {
@@ -213,17 +497,29 @@ impl BundledHolidays {
   /// The region's holidays of one year.
   fn holidays_of_year(self, year: i32) -> impl Iterator<Item = NaiveDate> {
     let maybe_easter = easter_sunday(year);
+    let country = self.region.country();
     RULES
       .iter()
-      .filter(move |rule| rule.regions.is_empty() || rule.regions.contains(&self.region))
+      .filter(move |rule| rule.regions.contains(&self.region) || rule.regions.contains(&country))
       .filter(move |rule| match rule.years {
         Years::Since(first) => year >= first,
         Years::Only(only) => year == only,
       })
-      .filter_map(move |rule| match rule.day {
-        Day::Fixed { month, day } => NaiveDate::from_ymd_opt(year, month, day),
-        Day::Easter(offset) => maybe_easter?.checked_add_signed(Duration::days(offset)),
-        Day::Repentance => repentance_day(year),
+      .filter_map(move |rule| {
+        let date = match rule.day {
+          Day::Fixed { month, day } => NaiveDate::from_ymd_opt(year, month, day),
+          Day::Easter(offset) => maybe_easter?.checked_add_signed(Duration::days(offset)),
+          Day::Repentance => repentance_day(year),
+          Day::NaefelserFahrt => naefelser_fahrt(year, maybe_easter?),
+          Day::GenevaFast => nth_weekday(year, 9, Weekday::Sun, 1)?.checked_add_signed(Duration::days(4)),
+          Day::FastMonday => nth_weekday(year, 9, Weekday::Sun, 3)?.checked_add_signed(Duration::days(1)),
+        }?;
+        let counts = match rule.weekdays {
+          Weekdays::Any => true,
+          Weekdays::Only(weekday) => date.weekday() == weekday,
+          Weekdays::Not(weekdays) => !weekdays.contains(&date.weekday()),
+        };
+        counts.then_some(date)
       })
   }
 }
@@ -243,15 +539,30 @@ const fn fixed(month: u32, day: u32, regions: &'static [HolidayRegion], years: Y
     day: Day::Fixed { month, day },
     regions,
     years,
+    weekdays: Weekdays::Any,
   }
 }
 
-const fn easter(offset: i64, regions: &'static [HolidayRegion]) -> Rule {
+const fn easter(offset: i64, regions: &'static [HolidayRegion], years: Years) -> Rule {
   Rule {
     day: Day::Easter(offset),
     regions,
-    years: SINCE_REUNIFICATION,
+    years,
+    weekdays: Weekdays::Any,
   }
+}
+
+const fn special(day: Day, regions: &'static [HolidayRegion]) -> Rule {
+  Rule {
+    day,
+    regions,
+    years: SINCE_REUNIFICATION,
+    weekdays: Weekdays::Any,
+  }
+}
+
+const fn on_weekday(rule: Rule, weekdays: Weekdays) -> Rule {
+  Rule { weekdays, ..rule }
 }
 
 /// Easter Sunday of the Gregorian calendar (the anonymous computus of Meeus, Jones and Butcher).
@@ -275,6 +586,21 @@ fn repentance_day(year: i32) -> Option<NaiveDate> {
   let before = NaiveDate::from_ymd_opt(year, 11, 22)?;
   let back = (7 + before.weekday().num_days_from_monday() - Weekday::Wed.num_days_from_monday()) % 7;
   before.checked_sub_signed(Duration::days(i64::from(back)))
+}
+
+/// The `n`th (from 1) `weekday` of a month.
+fn nth_weekday(year: i32, month: u32, weekday: Weekday, n: u8) -> Option<NaiveDate> {
+  NaiveDate::from_weekday_of_month_opt(year, month, weekday, n)
+}
+
+/// The first Thursday of April, moved a week on when it is Maundy Thursday.
+fn naefelser_fahrt(year: i32, easter: NaiveDate) -> Option<NaiveDate> {
+  let first = nth_weekday(year, 4, Weekday::Thu, 1)?;
+  if Some(first) == easter.checked_sub_signed(Duration::days(3)) {
+    first.checked_add_signed(Duration::days(7))
+  } else {
+    Some(first)
+  }
 }
 
 #[cfg(test)]
@@ -390,6 +716,96 @@ mod tests {
     }
     assert_eq!(HolidayRegion::from_code("de-by"), None);
     assert_eq!(HolidayRegion::from_code(""), None);
+  }
+
+  #[test]
+  fn austria_keeps_thirteen_holidays_everywhere() {
+    assert_eq!(
+      in_year(HolidayRegion::Austria, 2026),
+      vec![
+        (1, 1),
+        (1, 6),
+        (4, 6),
+        (5, 1),
+        (5, 14),
+        (5, 25),
+        (6, 4),
+        (8, 15),
+        (10, 26),
+        (11, 1),
+        (12, 8),
+        (12, 25),
+        (12, 26),
+      ]
+    );
+  }
+
+  #[test]
+  fn switzerland_keeps_four_federal_holidays_and_cantons_add_theirs() {
+    assert_eq!(
+      in_year(HolidayRegion::Switzerland, 2026),
+      vec![(1, 1), (5, 14), (8, 1), (12, 25)]
+    );
+    assert_eq!(
+      in_year(HolidayRegion::Zurich, 2026),
+      vec![
+        (1, 1),
+        (4, 3),
+        (4, 6),
+        (5, 1),
+        (5, 14),
+        (5, 25),
+        (8, 1),
+        (12, 25),
+        (12, 26),
+      ]
+    );
+    let ticino = in_year(HolidayRegion::Ticino, 2026);
+    assert!(ticino.contains(&(6, 29)) && !ticino.contains(&(4, 3)));
+    let jura = in_year(HolidayRegion::Jura, 2026);
+    assert!(jura.contains(&(6, 23)) && jura.contains(&(11, 1)) && !jura.contains(&(12, 8)));
+    for region in HolidayRegion::ALL
+      .into_iter()
+      .filter(|region| region.code().starts_with("CH-"))
+    {
+      let found = in_year(region, 2026);
+      for federal in [(1, 1), (5, 14), (8, 1), (12, 25)] {
+        assert!(found.contains(&federal), "{} {federal:?}", region.code());
+      }
+    }
+  }
+
+  #[test]
+  fn the_swiss_moving_days_fall_where_the_cantons_keep_them() {
+    // Geneva's fast: the Thursday after the first Sunday of September; Vaud's: the Monday after
+    // the third.
+    assert!(in_year(HolidayRegion::Geneva, 2026).contains(&(9, 10)));
+    assert!(in_year(HolidayRegion::Vaud, 2026).contains(&(9, 21)));
+    // Näfelser Fahrt moves off Maundy Thursday (2 April 2026), not otherwise.
+    assert!(in_year(HolidayRegion::Glarus, 2026).contains(&(4, 9)));
+    assert!(in_year(HolidayRegion::Glarus, 2027).contains(&(4, 1)));
+  }
+
+  #[test]
+  fn some_cantons_keep_a_day_only_on_some_weekdays() {
+    // Neuchâtel: 26 December and 2 January only on a Monday.
+    assert!(in_year(HolidayRegion::Neuchatel, 2022).contains(&(12, 26)));
+    assert!(!in_year(HolidayRegion::Neuchatel, 2026).contains(&(12, 26)));
+    assert!(in_year(HolidayRegion::Neuchatel, 2023).contains(&(1, 2)));
+    assert!(!in_year(HolidayRegion::Neuchatel, 2026).contains(&(1, 2)));
+    // Uri: not on a Saturday (2026) but on a Friday (2025).
+    assert!(!in_year(HolidayRegion::Uri, 2026).contains(&(12, 26)));
+    assert!(in_year(HolidayRegion::Uri, 2025).contains(&(12, 26)));
+  }
+
+  #[test]
+  fn every_region_belongs_to_its_country() {
+    assert_eq!(HolidayRegion::Zurich.country(), HolidayRegion::Switzerland);
+    assert_eq!(HolidayRegion::Austria.country(), HolidayRegion::Austria);
+    assert_eq!(HolidayRegion::Bavaria.country(), HolidayRegion::Germany);
+    // A country's own holidays are none of its neighbours'.
+    assert!(!in_year(HolidayRegion::Austria, 2026).contains(&(10, 3)));
+    assert!(!in_year(HolidayRegion::Germany, 2026).contains(&(8, 1)));
   }
 
   fn in_year(region: HolidayRegion, year: i32) -> Vec<(u32, u32)> {

@@ -869,6 +869,7 @@ health-status-not-configured = Not set up
 health-detail-backup = Last backup { $when }.
 health-detail-report = Last report { $when }.
 health-detail-job = Last ran { $when }.
+health-detail-holiday-feed = Copy fetched { $when }.
 health-detail-job-not-yet = Has not run since the server started.
 health-detail-certificate = { $count ->
     [one] One day until it expires.
@@ -900,6 +901,8 @@ health-check-certificate = Certificate
 health-check-certificate-hint = Reported by the deployment. Fails when the served certificate expires within the limit in Settings.
 health-check-disk_space = Disk space
 health-check-disk_space-hint = Reported by the deployment. Fails when the disk is fuller than the limit in Settings.
+health-check-holiday_feed = Holiday feed
+health-check-holiday_feed-hint = The iCalendar feed of public holidays set under Settings. Fails when its copy is older than the limit there, or when no fetch has worked yet. Off without a feed.
 policy-owners-hint = Owners keep the workspace in order, and their apps sign the admin roster and this policy by themselves. Keep at least two: if the only owner leaves or loses all devices and the recovery kit, nobody can manage the workspace again. To replace an owner, add the new one first.
 roster-standing-waiting = Your admin role isn't in force yet. It will be as soon as an owner's app has been open; there's nothing you need to do.
 roster-by-hand = Change the roster by hand
