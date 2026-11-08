@@ -3280,12 +3280,40 @@ them, and the core refuses to keep or send an edit for them. A malicious server 
 change edits (it holds no content key, and edits are signed); like any message it could withhold
 some, and the page then lacks them until they arrive.
 
-**Not in this step** (issue #1245): version history and restore, presence on the page, quotes,
-code, links, mentions, embedded files, more pages per channel and pages for DMs and meetings, the
-notetaker writing its summary onto the meeting's page, "Pin to page", search over pages, the
-mobile apps, a snapshot when a member joins, stopping the history read at the newest snapshot, and
-not waking phones for page edits: today a page edit is a message like a reaction, so a phone of a
-member whose level is "all" gets a push for it (docs/notifications.md, "Push routing").
+**Version history (issue #1245).** Each device builds the page's history from the updates it
+holds; nothing about it reaches the server, which sees the edits as the messages they always were.
+With every update the core keeps who sent it and when (`CanvasOrigin`: the sender the message was
+decrypted and verified for, the server's time of the message; an own edit has the device's time
+until it is sent, then the server's). What an update changed is a Yjs snapshot of its own: per
+client the clock it inserted up to, and the items it deleted (`teamcraft-client-api::canvas::history`,
+`CanvasMark`). The page as it was at a time is the union of the changes of all updates up to that
+time, rendered from a document that keeps deleted items (`skip_gc`) built from all updates. A union
+per time, not a snapshot taken when an update arrives, so an older edit the device reads later from
+the channel's history still lands in the versions it belongs to. Merging is lossless, so the updates
+keep deleted text; a snapshot message has none for what it deleted, so the history is built with the
+updates as they were sent first, compactions next and snapshots last (where two cover the same range
+the merge keeps the first). The editor shows the versions per author and stretch of editing (edits of
+one author at most 5 minutes apart, a version spanning at most 30 minutes), newest first, read-only.
+"Restore" makes the current page that version again as one ordinary edit on top: blocks keep their
+IDs and only their changed text is replaced, so typing elsewhere meanwhile survives and the restore
+is itself a version. When the editor compacts the core's list it hands over the marks of the merged
+updates with it (`compact_canvas(…, history)`), coalesced; the core keeps them with the page,
+encrypted in its store like the updates, and at most 300 versions (older ones fold into the next:
+their changes stay in every later version, only their entry goes). A device has the versions of the
+updates it holds: one that joined later or was added from the join on starts at the first update or
+snapshot it got; updates kept before this history existed are the base of every version.
+
+**Who is editing.** The line under the toolbar names the other members whose edits arrived in the
+last two minutes, from the same origins. It is no presence of its own (no "has the page open", no
+carets) and sends nothing: an encrypted, ephemeral awareness channel over the gateway is left for
+later.
+
+**Not in this step** (issue #1245 and its follow-up): presence beyond recent edits (who has the page
+open, carets), quotes, code, links, mentions, embedded files, more pages per channel and pages for
+DMs and meetings, the notetaker writing its summary onto the meeting's page, "Pin to page", search
+over pages, the mobile apps, a snapshot when a member joins, stopping the history read at the newest
+snapshot, and not waking phones for page edits: today a page edit is a message like a reaction, so
+a phone of a member whose level is "all" gets a push for it (docs/notifications.md, "Push routing").
 
 ## 5. Adding a device (Threema/WhatsApp style)
 

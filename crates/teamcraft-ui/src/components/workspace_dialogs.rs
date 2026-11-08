@@ -629,7 +629,8 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
   let can_manage_roles =
     Memo::new(move |_| scheme.with(|scheme| actor.with(|actor| can_manage_channel_roles(scheme, actor))));
   // The members and the signed roles are read afresh while the section is open (e2ee.md §4.6.1).
-  Effect::new(move |_| state.write(|backend| backend.refresh_channel_roles(conversation)));
+  let refreshing = PendingAction::new();
+  Effect::new(move |_| refreshing.run(|| state.write(|backend| backend.refresh_channel_roles(conversation))));
   let roles_review = Memo::new(move |_| {
     roles.track();
     state.read(|backend| backend.channel_roles_review(conversation))
@@ -658,7 +659,7 @@ fn ChannelMembers(conversation: ConversationId) -> impl IntoView {
       <p class="hint" role="status">{move || i18n.t("channel-roles-alarm")}</p>
     </Show>
     <Show when=move || has_roles_review.get() fallback=|| ()>
-      <ChannelRolesReviewPanel conversation=conversation roles=roles users=members review=roles_review />
+      <ChannelRolesReviewPanel conversation=conversation roles=roles users=members review=roles_review refreshing=refreshing />
     </Show>
     <ChannelJoinRequests conversation=conversation />
     <ul class="settings-member-list">
@@ -682,6 +683,7 @@ fn ChannelRolesReviewPanel(
   roles: Memo<Vec<ChannelMember>>,
   users: Memo<Vec<User>>,
   review: Memo<Option<ChannelRolesReview>>,
+  refreshing: PendingAction,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
@@ -751,11 +753,15 @@ fn ChannelRolesReviewPanel(
       <Show
         when=move || is_reviewing.get()
         fallback=move || view! {
-          <div class="role-review-actions">
-            <button type="button" class="btn btn-small" on:click=move |_| open_review()>
-              {move || i18n.t("channel-roles-review-action")}
-            </button>
-          </div>
+          // Only once this device has looked: a list opened before the members and the keys are in
+          // would say "can't check" for everybody, then that the roles changed, though nobody changed them.
+          <Show when=move || !refreshing.is_pending() fallback=|| ()>
+            <div class="role-review-actions">
+              <button type="button" class="btn btn-small" on:click=move |_| open_review()>
+                {move || i18n.t("channel-roles-review-action")}
+              </button>
+            </div>
+          </Show>
         }
       >
         <ul class="settings-member-list role-review-list" tabindex="-1" node_ref=list_ref>

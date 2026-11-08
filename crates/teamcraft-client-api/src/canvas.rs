@@ -10,6 +10,11 @@
 //! concurrent typing in one block merges character by character, concurrent changes of a block's
 //! kind or check mark end with the same one winning everywhere.
 
+mod history;
+
+pub use history::{
+  CanvasMark, CanvasOrigin, CanvasVersion, compaction, editors_since, marks, origin_of, page_at, versions,
+};
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::Base64Bytes;
 use yrs::updates::decoder::Decode;
@@ -36,6 +41,17 @@ pub struct CanvasState {
   pub updates: Vec<Base64Bytes>,
   /// Updates applied since the last snapshot arrived (or since the start): when to send one.
   pub updates_since_snapshot: u32,
+  /// Who sent each of `updates` and when, by position ([`origin_of`]); `None` for a compaction's
+  /// merge. Shorter for a page kept before it had a history: the first updates have none.
+  #[serde(default)]
+  pub origins: Vec<Option<CanvasOrigin>>,
+  /// Whether the first of `updates` is a compaction whose changes `history` holds.
+  #[serde(default)]
+  pub is_compacted: bool,
+  /// What the compacted updates changed, oldest first ([`marks`]): the page's version history
+  /// before the rest of `updates`.
+  #[serde(default)]
+  pub history: Vec<CanvasMark>,
 }
 
 /// What a block is shown as.
@@ -244,6 +260,64 @@ impl CanvasDoc {
     Some(txn.encode_update_v1())
   }
 
+  /// Makes the page `target` again (a version restored from its history) as one edit on top of
+  /// the current page: blocks that stay keep their identity and only their changed text is
+  /// replaced, so typing elsewhere meanwhile survives; blocks not in `target` go, the others come
+  /// back. `None` when the page already is `target`.
+  pub fn restore(&mut self, target: &[Block]) -> Option<Vec<u8>> {
+    if self.blocks() == target {
+      return None;
+    }
+    let wanted: std::collections::HashSet<&str> = target.iter().map(|block| block.id.as_str()).collect();
+    let mut txn = self.doc.transact_mut();
+    // Blocks the version doesn't have go first.
+    let mut index = 0;
+    while index < self.blocks.len(&txn) {
+      let maybe_id = match self.blocks.get(&txn, index) {
+        Some(Out::YMap(map)) => string(&txn, &map, ID),
+        _ => None,
+      };
+      if maybe_id.as_deref().is_some_and(|id| wanted.contains(id)) {
+        index += 1;
+      } else {
+        self.blocks.remove(&mut txn, index);
+      }
+    }
+    // Then the version's blocks in its order: one in place is changed where it differs; blocks
+    // before it that come later in the version go (and come back there afresh); one gone is
+    // inserted with its old ID.
+    for (position, block) in target.iter().enumerate() {
+      let position = byte_index(position);
+      let maybe_at = (position..self.blocks.len(&txn)).find(|&at| match self.blocks.get(&txn, at) {
+        Some(Out::YMap(map)) => string(&txn, &map, ID).as_deref() == Some(block.id.as_str()),
+        _ => false,
+      });
+      match maybe_at {
+        Some(at) => {
+          if at > position {
+            self.blocks.remove_range(&mut txn, position, at - position);
+          }
+          if let Some(Out::YMap(map)) = self.blocks.get(&txn, position) {
+            write_block(&mut txn, &map, block);
+          }
+        },
+        None => {
+          let map = self.blocks.insert(&mut txn, position, MapPrelim::default());
+          map.insert(&mut txn, ID, block.id.as_str());
+          map.insert(&mut txn, KIND, block.kind.tag());
+          map.insert(&mut txn, CHECKED, block.is_checked);
+          map.insert(&mut txn, TEXT, TextPrelim::new(block.text.as_str()));
+        },
+      }
+    }
+    let length = self.blocks.len(&txn);
+    let count = byte_index(target.len());
+    if length > count {
+      self.blocks.remove_range(&mut txn, count, length - count);
+    }
+    Some(txn.encode_update_v1())
+  }
+
   /// Whether the page has updates waiting for ones not here yet.
   pub fn has_missing(&self) -> bool {
     let txn = self.doc.transact();
@@ -329,13 +403,20 @@ impl TextEdit {
   }
 }
 
+/// Inserts before it removes: the new text then follows the text before it, not what is removed,
+/// so typing of another member right after the removed part stays after the new text.
 fn replace(txn: &mut TransactionMut, text: &TextRef, edit: &TextEdit, new: &str) {
   let start = byte_index(edit.start);
-  if edit.removed > 0 {
-    text.remove_range(txn, start, byte_index(edit.removed));
+  let inserted = &new[edit.start..edit.inserted_end];
+  if !inserted.is_empty() {
+    text.insert(txn, start, inserted);
   }
-  if edit.inserted_end > edit.start {
-    text.insert(txn, start, &new[edit.start..edit.inserted_end]);
+  if edit.removed > 0 {
+    text.remove_range(
+      txn,
+      byte_index(edit.start + inserted.len()),
+      byte_index(edit.removed),
+    );
   }
 }
 
@@ -350,6 +431,27 @@ fn find<T: ReadTxn>(txn: &T, blocks: &ArrayRef, id: &str) -> Option<(u32, MapRef
     Some(Out::YMap(map)) if string(txn, &map, ID).as_deref() == Some(id) => Some((index, map)),
     _ => None,
   })
+}
+
+/// Brings a block's kind, check mark and text to `block`, changing only what differs.
+fn write_block(txn: &mut TransactionMut, map: &MapRef, block: &Block) {
+  let current = read_block(txn, map);
+  if current.kind != block.kind {
+    map.insert(txn, KIND, block.kind.tag());
+  }
+  if current.is_checked != block.is_checked {
+    map.insert(txn, CHECKED, block.is_checked);
+  }
+  match map.get(txn, TEXT) {
+    Some(Out::YText(text)) => {
+      if let Some(edit) = TextEdit::between(&current.text, &block.text) {
+        replace(txn, &text, &edit, &block.text);
+      }
+    },
+    _ => {
+      map.insert(txn, TEXT, TextPrelim::new(block.text.as_str()));
+    },
+  }
 }
 
 fn read_block<T: ReadTxn>(txn: &T, map: &MapRef) -> Block {

@@ -2743,11 +2743,18 @@ impl ChatBackend for RemoteChat {
     });
   }
 
-  fn compact_canvas(&self, conversation: ConversationId, revision: u64, merged: Vec<u8>) {
+  fn compact_canvas(
+    &self,
+    conversation: ConversationId,
+    revision: u64,
+    merged: Vec<u8>,
+    history: Vec<teamcraft_client_api::canvas::CanvasMark>,
+  ) {
     self.act(ChatAction::CompactCanvas {
       conversation,
       revision,
       merged: merged.into(),
+      history,
     });
   }
 

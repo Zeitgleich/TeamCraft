@@ -84,7 +84,9 @@ impl<S: LocalStore + Clone + 'static> App<S> {
       api,
       store.clone(),
       Box::new(SystemClock),
-      ClientSettings::default(),
+      // As every app has it (issue #1457): a catch-up reads a capped number of pages of a busy
+      // conversation, the rest is left to the loop, so that path is the one measured.
+      ClientSettings::default().with_capped_catch_up(),
     )
     .unwrap()
     .expect("an enrolled store");

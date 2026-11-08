@@ -197,7 +197,7 @@ fn main() -> anyhow::Result<()> {
       if let Err(error) = tray::install(app) {
         tracing::warn!(%error, "no tray icon");
       }
-      create_main_window(app)?;
+      create_main_window(app.handle(), None)?;
       video_playback::clear_opened_videos(app.handle());
       voice::clear_voice_folders(app.handle());
       // Logs once whether GStreamer can play phone videos (#804), off the start-up path.
@@ -408,6 +408,10 @@ fn main() -> anyhow::Result<()> {
     .run(|app, event| match event {
       // A downloaded update is installed when the app quits (docs/updates.md §4.3).
       tauri::RunEvent::Exit => app.state::<Arc<UpdateHost>>().install_on_exit(app),
+      // The last window closing is not the end while the main window is made anew (#1401).
+      tauri::RunEvent::ExitRequested { api, code: None, .. } if webview_recovery::is_replacing_window(app) => {
+        api.prevent_exit();
+      },
       // macOS: clicking the dock icon brings back a window that was closed to the tray.
       #[cfg(target_os = "macos")]
       tauri::RunEvent::Reopen { .. } => tray::show_main_window(app),
@@ -429,15 +433,23 @@ fn window_state_flags() -> StateFlags {
 /// The window is created here, not in `tauri.conf.json`, so it can start hidden in the tray. Debug
 /// builds take `TEAMCRAFT_BACKEND=server|mock` to pick the data source of a UI built with the `demo`
 /// feature (the UI reads it from `localStorage`); release builds never offer demo data.
-fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
+///
+/// Also called again when the webview's browser process died and the window has to be made anew
+/// (`webview_recovery`), then with `maybe_was_visible` set to whether the old one was shown.
+fn create_main_window(app: &tauri::AppHandle, maybe_was_visible: Option<bool>) -> tauri::Result<()> {
   let prefs = app.state::<ShellPrefsState>().get();
+  // A window made anew keeps the title bar the first one started with: the chrome state says so.
+  let title_bar = app
+    .try_state::<WindowChromeState>()
+    .map_or(prefs.title_bar, |chrome| chrome.title_bar());
   // Without a tray icon a hidden window couldn't come back: start minimized to the taskbar instead.
   // Linux asks D-Bus for the icon's host in the background; a window hidden before the answer is
   // brought back by `tray::reveal_without_host` if there is none.
-  let has_tray = tray::may_have_tray(app.handle());
+  let has_tray = tray::may_have_tray(app);
   // Started at login (autostart.rs): in the tray, like "start minimized".
   let is_start_minimized = prefs.is_start_minimized || autostart::is_login_launch();
-  let is_hidden = is_start_minimized && has_tray;
+  // A window made anew comes back as it was, not as the start-up setting says.
+  let is_hidden = maybe_was_visible.map_or(is_start_minimized && has_tray, |was_visible| !was_visible);
   // The title stays set without a title bar: the taskbar, Alt+Tab and the dock show it.
   let window = WebviewWindowBuilder::new(app, tray::MAIN_WINDOW, WebviewUrl::default())
     .title("TeamCraft")
@@ -452,7 +464,7 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     // A download the page starts itself lands in the downloads folder and is reported (#719).
     .on_download(webview_downloads::on_download)
     .on_new_window({
-      let app = app.handle().clone();
+      let app = app.clone();
       move |url, _features| {
         if is_allowed_new_window(&url) {
           return NewWindowResponse::Allow;
@@ -468,7 +480,7 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
     // The app never leaves its own pages (#651): a file dropped beside the drop zones, or a link the
     // page did not route, would replace the whole app. Web links go to the browser instead.
     .on_navigation({
-      let app = app.handle().clone();
+      let app = app.clone();
       let maybe_dev_url = cfg!(debug_assertions)
         .then(|| app.config().build.dev_url.clone())
         .flatten();
@@ -486,8 +498,11 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
         false
       }
     });
-  let window = window_chrome::configure(window, prefs.title_bar);
-  app.manage(WindowChromeState::new(prefs.title_bar));
+  let window = window_chrome::configure(window, title_bar);
+  // Managed once: a second call (the window made anew) finds it there.
+  if app.try_state::<WindowChromeState>().is_none() {
+    app.manage(WindowChromeState::new(title_bar));
+  }
   #[cfg(debug_assertions)]
   let window = match std::env::var("TEAMCRAFT_BACKEND") {
     Ok(mode) if matches!(mode.as_str(), "server" | "mock") => window.initialization_script(format!(
@@ -504,7 +519,7 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
   #[cfg(target_os = "linux")]
   {
     let dropped = app.state::<Arc<DroppedFilesState>>().inner().clone();
-    let handle = app.handle().clone();
+    let handle = app.clone();
     let configured = window.with_webview(move |webview| {
       let webview = webview.inner();
       webview_memory::configure(&webview);
@@ -533,8 +548,9 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
       tracing::warn!(%error, "a dead page will not load again by itself");
     }
   }
-  tray::reveal_without_host(app.handle());
-  if is_start_minimized
+  tray::reveal_without_host(app);
+  if maybe_was_visible.is_none()
+    && is_start_minimized
     && !has_tray
     && let Err(error) = window.minimize()
   {

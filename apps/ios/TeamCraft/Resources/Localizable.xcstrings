@@ -6057,6 +6057,22 @@
         }
       }
     },
+    "syncing_updates": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading new messages"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neue Nachrichten werden geladen"
+          }
+        }
+      }
+    },
     "connection_slow": {
       "localizations": {
         "en": {

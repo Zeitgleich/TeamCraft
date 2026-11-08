@@ -5,7 +5,7 @@ use teamcraft_client_api::actions::{
   ForwardedFrom, LinkPreview, LinkedMessage, MessageEdit, MessageExtras, MessagePriority, OutgoingMessage,
   PermalinkTarget, ReplyAttachmentPreview, ReplyPreview, SavedItem, WorkspaceEvent,
 };
-use teamcraft_client_api::canvas::CanvasState;
+use teamcraft_client_api::canvas::{CanvasMark, CanvasOrigin, CanvasState};
 use teamcraft_client_api::model::{
   Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, PENDING_ID_BIT,
   ThreadId, UserId, is_pending,
@@ -392,6 +392,28 @@ impl<S: LocalStore> CoreChatBackend<S> {
       revision: record.revision,
       updates: record.updates,
       updates_since_snapshot: record.updates_since_snapshot,
+      origins: record
+        .origins
+        .into_iter()
+        .map(|maybe_origin| {
+          maybe_origin.map(|origin| CanvasOrigin {
+            by: origin.by,
+            at_ms: origin.at_ms,
+            is_snapshot: origin.is_snapshot,
+          })
+        })
+        .collect(),
+      is_compacted: record.is_compacted,
+      history: record
+        .history
+        .into_iter()
+        .map(|mark| CanvasMark {
+          maybe_by: mark.maybe_by,
+          from_ms: mark.from_ms,
+          until_ms: mark.until_ms,
+          changes: mark.changes,
+        })
+        .collect(),
     }
   }
 
@@ -415,9 +437,25 @@ impl<S: LocalStore> CoreChatBackend<S> {
     );
   }
 
-  /// Replaces the page's updates with the editor's merge of them, if none arrived meanwhile.
-  pub(crate) fn ui_compact_canvas(&self, conversation: ConversationId, revision: u64, merged: Vec<u8>) {
-    if let Err(error) = crate::canvas::compact(self.store_ref(), conversation, revision, merged) {
+  /// Replaces the page's updates with the editor's merge of them and its history with the one
+  /// the editor made of them, if none arrived meanwhile.
+  pub(crate) fn ui_compact_canvas(
+    &self,
+    conversation: ConversationId,
+    revision: u64,
+    merged: Vec<u8>,
+    history: Vec<CanvasMark>,
+  ) {
+    let history = history
+      .into_iter()
+      .map(|mark| crate::canvas::CanvasMark {
+        maybe_by: mark.maybe_by,
+        from_ms: mark.from_ms,
+        until_ms: mark.until_ms,
+        changes: mark.changes,
+      })
+      .collect();
+    if let Err(error) = crate::canvas::compact(self.store_ref(), conversation, revision, merged, history) {
       tracing::error!(%error, "could not compact the page");
     }
   }

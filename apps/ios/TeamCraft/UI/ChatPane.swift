@@ -19,6 +19,8 @@ struct ChatPane: View {
   @State private var draft = ""
   /// The stored draft was read; saving before that would overwrite it with the empty field.
   @State private var isDraftLoaded = false
+  /// Whether an edit still waits for the typing pause (#1391).
+  @State private var draftSave = DraftSave()
   @State private var maybeEditing: MessageItem?
   @State private var maybeThread: ThreadTarget?
   @State private var extras: [String: MessageExtras] = [:]
@@ -109,8 +111,11 @@ struct ChatPane: View {
     // The composer lives in the core's drafts, so text typed before the app was killed is back
     // (issue #158), also from the user's other devices.
     .task(id: draftKey) {
+      // Text typed in the place just left is stored there first, not lost with the pause (#1391).
+      await saveDraft()
       isDraftLoaded = false
       let stored = await model.draft(conversationId: conversation.id, threadId: threadId)
+      draftSave.loaded(stored)
       if draft.isEmpty { draft = stored }
       isDraftLoaded = true
       await reloadDraftFiles()
@@ -122,10 +127,14 @@ struct ChatPane: View {
       if !shared.text.isEmpty { draft = draft.isEmpty ? shared.text : draft + "\n" + shared.text }
       await attach(shared.files)
     }
+    .onChange(of: draft) { _, text in
+      if isDraftLoaded && maybeEditing == nil { draftSave.edit(text, conversationId: conversation.id, threadId: threadId) }
+    }
     .task(id: draft) {
       // Saved after a pause in typing; a new keystroke cancels the wait.
+      let typed = draft
       guard (try? await Task.sleep(for: Self.draftSaveDelay)) != nil else { return }
-      await saveDraft()
+      await saveDraft(ifStill: typed)
     }
     .onChange(of: scenePhase) { _, phase in
       // Leaving the app saves at once: it may be suspended and killed before the pause is over.
@@ -171,6 +180,8 @@ struct ChatPane: View {
       if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
       // A recording stops when the user leaves; the take waits here for their return (#204).
       VoiceRecorder.shared.interrupt(.left, owner: draftKey)
+      // Text typed less than the pause ago is stored now; the pause's task goes with the view.
+      Task { await saveDraft() }
     }
   }
 
@@ -178,6 +189,8 @@ struct ChatPane: View {
   private var screen: some View {
     VStack(spacing: 0) {
       OfflineBanner()
+      // Only this conversation's own mark (issue #1457); a thread's pane follows its channel's.
+      SyncingLine(isCatchingUp: conversation.isCatchingUp)
       // Admins asking to join this channel, when the user owns it (admin.md §2.4.1).
       if threadId == nil { JoinRequestBanner(conversationId: conversation.id) }
       // Messages here wait for their keys (a newly linked device, issue #888): they show as
@@ -1236,9 +1249,12 @@ struct ChatPane: View {
   }
 
   /// Keeps the composer text in the core; an edit of a sent message is no draft.
-  private func saveDraft() async {
-    guard isDraftLoaded, maybeEditing == nil else { return }
-    await model.perform(.setDraft(conversationId: conversation.id, maybeThreadId: threadId, body: draft))
+  /// With `typed`, only if that text still waits (the pause is over); else whatever waits.
+  private func saveDraft(ifStill typed: String? = nil) async {
+    guard maybeEditing == nil else { return }
+    let maybeDue = typed.map { draftSave.takeDue(for: $0) } ?? draftSave.takePending()
+    guard let due = maybeDue else { return }
+    await model.perform(.setDraft(conversationId: due.conversationId, maybeThreadId: due.maybeThreadId, body: due.text))
   }
 
   private func cancelEditing() {
