@@ -121,6 +121,8 @@ enum Phase {
 
 /// An area's view on its way: its chunk loading, then the view built.
 type AreaLoad = Pin<Box<dyn Future<Output = Result<AnyView, SplitLoaderError>>>>;
+/// What an area needs before its view is built, when that is more than its chunk.
+type AreaFirst = Rc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>>>>>;
 
 /// Declares split points: `name(args) => module: view` builds `view` in chunk `module`.
 macro_rules! areas {
@@ -428,11 +430,23 @@ where
 {
   // Only this boxing is per caller: the views below are built once for every area. Generic, they
   // were copied for each caller's closure types, a few kB of the first visit each.
-  area_view(place, Rc::new(move || Box::pin(load())))
+  area_view(place, None, Rc::new(move || Box::pin(load())))
+}
+
+/// The administration console. Its texts are a file of their own on the web, fetched here before
+/// its view is built (`I18n::load_admin_texts`, #1462): a text read before they arrive would show
+/// its key, and nothing would render it again when they came.
+pub fn admin_console_area(section: AdminSection) -> AnyView {
+  let i18n = use_i18n();
+  area_view(
+    Place::Pane,
+    Some(Rc::new(move || Box::pin(i18n.load_admin_texts()))),
+    Rc::new(move || Box::pin(admin_console(section))),
+  )
 }
 
 /// [`lazy_area`] for any loader.
-fn area_view(place: Place, load: Rc<dyn Fn() -> AreaLoad>) -> AnyView {
+fn area_view(place: Place, maybe_first: Option<AreaFirst>, load: Rc<dyn Fn() -> AreaLoad>) -> AnyView {
   let i18n = use_i18n();
   let phase = RwSignal::new(Phase::Loading);
   let ready: StoredValue<Option<AnyView>, LocalStorage> = StoredValue::new_local(None);
@@ -444,8 +458,16 @@ fn area_view(place: Place, load: Rc<dyn Fn() -> AreaLoad>) -> AnyView {
   let start: Rc<dyn Fn()> = Rc::new(move || {
     let run = || {
       phase.set(Phase::Loading);
+      let maybe_first = maybe_first.as_ref().map(|first| first());
       let loading = load();
       spawn_local_scoped_with_cancellation(async move {
+        if let Some(first) = maybe_first
+          && let Err(error) = first.await
+        {
+          tracing::warn!(%error, "what a part of the app needs did not load");
+          phase.set_if_alive(Phase::Failed);
+          return;
+        }
         match loading.await {
           Ok(view) => {
             // Fails only when the area is gone; the view then goes with this task.

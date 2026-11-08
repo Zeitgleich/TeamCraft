@@ -10,8 +10,9 @@ that. The signed-in budget (`--budget-bytes`) is a looser ceiling against big re
 counts the compressed wasm a signed-in user's first visit transfers: the app (`teamcraft-ui-*_bg.wasm`), the signed-in app's pack, the
 one file with its chunks that `init.js` fetches next to it (#334, #1465; a guest's meeting link skips it) and the service worker
 (`teamcraft-web-sw*_bg.wasm`, installed on the first visit too). Both count the UI's texts in one
-language (`i18n/<language>-*.ftl`, #1437): the app carries none and fetches the language it starts in
-next to it; the larger language counts. The server sends them compressed, the browser compiles while it
+language (`i18n/<language>-<hash>.ftl`, #1437): the app carries none and fetches the language it starts in
+next to it; the larger language counts. The administration console's texts
+(`i18n/<language>-admin-<hash>.ftl`, #1462) load with the console and count in neither. The server sends them compressed, the browser compiles while it
 streams, and the service worker caches them afterwards, so the transfer size is what a user waits
 for. It is measured as gzip -9, which every server and browser supports; brotli (smaller) is
 printed too when the `brotli` module is installed. CI runs this after the release `trunk build`
@@ -48,9 +49,9 @@ except ImportError:  # Optional: gzip is the budget, brotli is informational.
     brotli = None
 
 # A guest's meeting visit (lobby with the texts of one language, the meeting's modules, call module),
-# gzip -9, decimal megabytes: 5.84 MB on the way to 1.0.25 (#1452), plus about 6 %, so it warns (from
-# 95 %) only after real growth.
-DEFAULT_GUEST_BUDGET_BYTES = 6_190_000
+# gzip -9, decimal megabytes: 5.86 MB with the console's texts out of the language file (#1462), plus
+# about 5 %, so it warns (from 95 %) only after real growth.
+DEFAULT_GUEST_BUDGET_BYTES = 6_180_000
 # The split modules a guest loads once let into a meeting (teamcraft-ui `areas.rs`).
 GUEST_MODULES = ("guest", "calls")
 SPLIT_LOADER = "teamcraft-ui-split-*.js"
@@ -61,9 +62,9 @@ SPLIT_MODULE = re.compile(
     r'export const __wasm_split_load_(\w+) = wrapAsyncCb\(makeLoad\(\(\) => \{\s*'
     r'const src = fetch(?:Part)?\(new URL\("\./([^"]+)".*?\n, \[([^\]]*)\]', re.S)
 # A signed-in first visit (app, the signed-in app's pack, service worker, the texts of one
-# language), gzip -9: 5.09 MB with the pack (#1465; 5.33 MB before), plus about 6 %. A ceiling against big regressions; growth here is a
+# language), gzip -9: 5.07 MB without the console's texts (#1462; 5.09 MB before), plus about 6 %. A ceiling against big regressions; growth here is a
 # member's, who loads it once and then from the service worker's cache.
-DEFAULT_BUDGET_BYTES = 5_390_000
+DEFAULT_BUDGET_BYTES = 5_370_000
 # The call module's gzip -9 size, decimal megabytes: 0.86 MB with the effects' compositors (#439),
 # plus about 15 %. The segmentation is a module of its own that only loads when an effect starts.
 DEFAULT_CALL_MODULE_BUDGET_BYTES = 1_000_000
@@ -78,8 +79,9 @@ PARTS = {
     "service_worker": "teamcraft-web-sw*_bg.wasm",
 }
 # The UI's texts, one file per language (teamcraft-ui scripts/finish-loader.sh): a first visit
-# fetches one of them.
+# fetches one of them, and never the administration console's (`<language>-admin-<hash>.ftl`).
 TRANSLATIONS = "i18n/*.ftl"
+ADMIN_TRANSLATIONS = re.compile(r"-admin-[0-9a-f]+\.ftl$")
 # The signed-in app's chunks: the one file `init.js` fetches next to the app (teamcraft-web-bundle).
 SESSION_PACK = re.compile(r"const sessionPack = '/([^'/]+)'")
 SESSION_MODULE = "session"
@@ -154,7 +156,7 @@ def measure(dist):
 def start_language_file(dist):
     """The UI's texts a first visit fetches: the largest language's file, compressed (None for a
     build that embeds them)."""
-    files = sorted(dist.glob(TRANSLATIONS))
+    files = [path for path in sorted(dist.glob(TRANSLATIONS)) if not ADMIN_TRANSLATIONS.search(path.name)]
     if not files:
         return None
     return max(files, key=lambda path: len(gzip.compress(path.read_bytes(), compresslevel=9)))

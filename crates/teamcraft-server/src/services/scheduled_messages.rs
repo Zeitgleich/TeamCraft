@@ -55,9 +55,9 @@ pub async fn schedule_message(
   if !policy.is_enabled {
     return Err(ApiError::ScheduledMessagesDisabled);
   }
-  check_member_may_post(state, caller, conversation).await?;
+  let access = check_member_may_post(state, caller, conversation).await?;
   let due_at = check_due_at(state, request.due_at)?;
-  check_sealed(state, caller, conversation, &request.sealed).await?;
+  check_sealed(state, caller, conversation, &access, &request.sealed).await?;
   check_mentions_are_members(state, conversation, &request.sealed.mentioned_user_ids).await?;
   if let Some(thread) = request.maybe_thread_id {
     messages::thread_root(state, conversation, thread).await?;
@@ -122,7 +122,7 @@ pub async fn update_scheduled_message(
   if !policy.is_enabled && !is_same_time {
     return Err(ApiError::ScheduledMessagesDisabled);
   }
-  check_member_may_post(state, caller, current.conversation_id).await?;
+  let access = check_member_may_post(state, caller, current.conversation_id).await?;
   // Sealing again keeps a time that may have passed: that is what a stale message waits for.
   let due_at = if is_same_time {
     current.due_at
@@ -130,7 +130,7 @@ pub async fn update_scheduled_message(
     check_due_at(state, request.due_at)?
   };
   if let Some(sealed) = &request.maybe_sealed {
-    check_sealed(state, caller, current.conversation_id, sealed).await?;
+    check_sealed(state, caller, current.conversation_id, &access, sealed).await?;
   }
   // Somebody mentioned may have left since the first seal, and it is a member's device sealing the
   // same text again: they drop out, as at the release, rather than the message getting stuck.
@@ -505,6 +505,7 @@ async fn check_sealed(
   state: &AppState,
   caller: &AuthenticatedUser,
   conversation: ConversationId,
+  access: &ConversationAccess,
   sealed: &SealedScheduledMessage,
 ) -> Result<(), ApiError> {
   let limits = &state.settings.get().limits;
@@ -523,9 +524,7 @@ async fn check_sealed(
       "content_key_id has an invalid size".into(),
     ));
   }
-  if sealed.mentioned_user_ids.len() > limits.max_mentions_per_message {
-    return Err(ApiError::InvalidRequest("too many mentions".into()));
-  }
+  messages::check_mention_count(state, caller, &access.target(), sealed.mentioned_user_ids.len())?;
   ensure_own_device(state, caller, sealed.device_id).await?;
   let current_epoch = state.database.current_epoch(conversation).await?;
   if sealed.mls_epoch != current_epoch {

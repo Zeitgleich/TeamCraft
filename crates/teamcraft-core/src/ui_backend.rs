@@ -23,10 +23,10 @@ use teamcraft_client_api::calls::{
 use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup, GapEdge,
-  HistoryGap, ImportedAuthorView, ImportedFrom, ImportedMark, JoinableSpace, MembershipIssue, Message,
-  MessageKind, OlderHistory, PENDING_ID_BIT, PendingInvite, Placeholder, PresenceStatus, Reaction,
-  SidebarCategory, Space, SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary,
-  TimestampMs, TypingNow, UnseenReactions, User, UserId, hue_from_hex, pending_message_id,
+  HistoryGap, ImportedAuthorView, ImportedFrom, ImportedMark, JoinableSpace, MembershipIssue,
+  MentionableGroup, Message, MessageKind, OlderHistory, PENDING_ID_BIT, PendingInvite, Placeholder,
+  PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId,
+  ThreadSummary, TimestampMs, TypingNow, UnseenReactions, User, UserId, hue_from_hex, pending_message_id,
 };
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
@@ -40,7 +40,9 @@ use teamcraft_proto::{
   MoveChannelRequest, UpdateConversationRequest, UpdateSpaceRequest, effective_notifications,
 };
 
-use teamcraft_client_api::notify::{MentionRules, is_mentioned};
+use teamcraft_proto::{DEFAULT_MAX_MENTIONS_PER_MESSAGE, DEFAULT_MAX_MENTIONS_WITHOUT_GROUP_MENTIONS};
+
+use teamcraft_client_api::notify::{MentionRules, expanded_mentions, group_mention_reach, is_mentioned};
 use teamcraft_client_api::receipts::{ReadIndicator, seen_by};
 use teamcraft_client_api::scheduled::ScheduledOverview;
 
@@ -53,13 +55,15 @@ use crate::clock::Clock;
 pub use crate::entry_tally::EntryNeed;
 use crate::entry_tally::{self, Counted, EntryPass, EntryTally, TallyInputs, UnreadRows};
 use crate::error::CoreError;
+use crate::group_mentions::{may_mention_groups, mentionable_groups, stored_rosters};
 use crate::imported::{Authorship, ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
 use crate::people_names::shown_name;
 use crate::records::{self, Draft};
 use crate::store::{
   BookmarkItem, ConversationEvent, FeedVersion, LocalStore, MessageContent, MessageEdge, MessageFilter,
-  MessageOrder, MessageSlot, StoreError, StoredMessage, Table, Unreadable, read_together, write_group,
+  MessageMeta, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, Unreadable, read_together,
+  write_group,
 };
 
 /// Rows read at a time when a list's anchor is looked for by its time ([`FeedAnchor`]).
@@ -1645,6 +1649,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       maybe_imported,
       maybe_source,
       maybe_placeholder: stored.maybe_unreadable.map(placeholder_view),
+      group_mentions: crate::group_mentions::shown_group_mentions(&stored.content),
+      mentions_me: matches!(&stored.content, MessageContent::Text { mentions, .. } if mentions.contains(&self.me)),
     }
   }
 
@@ -1977,6 +1983,56 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 
   /// `@username` mentions of conversation members in a message body.
+  /// A text message as a send seals it: `@username` and the groups it may mention here expanded
+  /// to the people they notify, the group handles recorded inside the ciphertext for receivers.
+  pub(crate) fn text_mentioning(
+    &self,
+    conversation: ConversationId,
+    body: &str,
+    mut meta: MessageMeta,
+  ) -> MessageContent {
+    if !body.contains('@') {
+      meta.group_mentions = Vec::new();
+      return MessageContent::Text {
+        body: body.to_owned(),
+        mentions: Vec::new(),
+        meta,
+      };
+    }
+    let direct = self.mentions_in(conversation, body);
+    let may_mention = self.may_mention_groups_in(conversation);
+    let reach = group_mention_reach(body, &self.mentionable_groups_in(conversation, may_mention));
+    let cap = if may_mention {
+      DEFAULT_MAX_MENTIONS_PER_MESSAGE
+    } else {
+      DEFAULT_MAX_MENTIONS_WITHOUT_GROUP_MENTIONS
+    };
+    meta.group_mentions = reach.handles.clone();
+    MessageContent::Text {
+      body: body.to_owned(),
+      mentions: expanded_mentions(direct, &reach, cap),
+      meta,
+    }
+  }
+
+  fn may_mention_groups_in(&self, conversation: ConversationId) -> bool {
+    let maybe_response: Option<ConversationResponse> = self.read(records::get_json(
+      &self.store,
+      Table::Conversations,
+      &conversation.to_string(),
+    ));
+    maybe_response.as_ref().is_some_and(may_mention_groups)
+  }
+
+  fn mentionable_groups_in(&self, conversation: ConversationId, may_mention: bool) -> Vec<MentionableGroup> {
+    if !may_mention {
+      return Vec::new();
+    }
+    let rosters = self.read(stored_rosters(&self.store));
+    let members: BTreeSet<UserId> = self.members(conversation).into_iter().collect();
+    mentionable_groups(&rosters, &members, self.me, true)
+  }
+
   pub(crate) fn mentions_in(&self, conversation: ConversationId, body: &str) -> Vec<UserId> {
     // Most messages mention nobody: sending them reads neither the user directory nor the members.
     if !body.contains('@') {
@@ -2246,17 +2302,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     Vec::new()
   }
 
+  fn mentionable_groups(&self, conversation: ConversationId) -> Vec<MentionableGroup> {
+    let may_mention = self.may_mention_groups_in(conversation);
+    self.mentionable_groups_in(conversation, may_mention)
+  }
+
   fn post_message(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
-    let mentions = self.mentions_in(conversation, body);
-    self.enqueue(
-      conversation,
-      maybe_thread,
-      MessageContent::Text {
-        body: body.to_string(),
-        mentions,
-        meta: Default::default(),
-      },
-    );
+    let content = self.text_mentioning(conversation, body, MessageMeta::default());
+    self.enqueue(conversation, maybe_thread, content);
   }
 
   fn toggle_reaction(&self, conversation: ConversationId, message: MessageId, emoji: &str) {

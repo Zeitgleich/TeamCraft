@@ -3,6 +3,15 @@ use utoipa::ToSchema;
 
 use crate::{Base64Bytes, ClientMessageId, ConversationId, DeviceId, MessageId, ThreadId, UserId};
 
+/// Default of the server's `[limits] max_mentions_per_message`: IDs a message may name in
+/// `mentioned_user_ids`. A device caps a group mention at it instead of having the message refused.
+pub const DEFAULT_MAX_MENTIONS_PER_MESSAGE: usize = 200;
+
+/// Default of `[limits] max_mentions_without_group_mentions`: IDs a message may name without
+/// `use_group_mentions` in its conversation. All a server that can't read the message can do about
+/// that permission (docs/e2ee.md §4.4).
+pub const DEFAULT_MAX_MENTIONS_WITHOUT_GROUP_MENTIONS: usize = 10;
+
 /// `POST /api/v1/conversations/{id}/messages`. The server stores the ciphertext without reading
 /// it; only routing metadata is visible (ARCHITECTURE.md §4.4). Re-sending the same
 /// `client_message_id` returns the stored message instead of creating a second one.

@@ -67,6 +67,7 @@ mod sync_trace;
 #[cfg(feature = "ui")]
 mod ui_commands;
 pub mod upload_parts;
+mod user_groups;
 mod workspace;
 pub mod workspace_admin;
 pub(crate) use account::ACCOUNT_DATA_KEY;
@@ -457,6 +458,9 @@ pub struct Client<A, S> {
   /// Gateway events said the guest list changed, and it wasn't read since.
   are_expiring_guests_stale: bool,
   maybe_expiring_guests_read_ms: Option<i64>,
+  /// A gateway event said a user group changed, and the groups weren't read since.
+  are_user_groups_stale: bool,
+  maybe_user_groups_read_ms: Option<i64>,
   /// What the device last said about its activity; a new gateway session identifies with it.
   device_activity: DeviceActivity,
   /// The conversation the user looks at; a catch-up takes it first (issue #247).
@@ -634,6 +638,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_live_catch_up: None,
       are_expiring_guests_stale: false,
       maybe_expiring_guests_read_ms: None,
+      are_user_groups_stale: false,
+      maybe_user_groups_read_ms: None,
       device_activity: DeviceActivity::Active,
       member_join_attempts: HashMap::new(),
       device_add_requests_handled: HashMap::new(),

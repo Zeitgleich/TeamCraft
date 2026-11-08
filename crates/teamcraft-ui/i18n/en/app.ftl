@@ -282,3 +282,20 @@ guest-notice-extend = { $count ->
    *[other] { $count } more days
 }
 guest-notice-extend-until = Until { $date }
+
+# Words of the administration side that the rest of the app shows too (a banner, an error toast, a
+# disabled entry): not in admin.ftl, whose file only the console loads (#1462).
+admin-soon = Not available yet
+admin-error-cannot-delete-self = You can't delete your own account.
+admin-error-last-admin = The workspace needs another active admin before this account can be deleted.
+admin-error-last-owner = This change would leave the workspace without an owner, and nobody could manage it again. Add the new owner first, then remove the old one.
+admin-integrations-copy = Copy
+announcement-dismiss = Dismiss the announcement
+roster-signing-contradictory = What the identity provider or the server says about { $names } doesn't match the roster. Check their role at the provider and, if needed, change it by hand under Security.
+roster-signing-provider-changed = This app's sign-in comes from another identity provider than the workspace trusts, so roles aren't changed by themselves. Check it under Security.
+roster-standing-expired-ask = No owner signed the admin roster within 30 days, so admin rights are paused on every app. An owner ({ $owners }) only needs to open TeamCraft on a device with their keys.
+roster-standing-expired-ask-unnamed = No owner signed the admin roster within 30 days, so admin rights are paused on every app. An owner only needs to open TeamCraft on a device with their keys.
+roster-standing-open = Open owners
+roster-standing-waiting = Your admin role isn't in force yet. It will be as soon as an owner's app has been open; there's nothing you need to do.
+channel-roles-alarm-banner = This device and another member's see different roles in { $channel }: the server may be showing people different lists. Look at the channel's members.
+channel-roles-alarm-banner-unnamed = This device and another member's see different roles in a channel: the server may be showing people different lists.

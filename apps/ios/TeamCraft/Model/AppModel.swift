@@ -11,6 +11,8 @@ enum AppFailure: Equatable {
   case tooLarge
   case backupOutOfMemory, backupTooNew, backupDamaged
   case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
+  /// The session is bound to a device key that is gone (docs/e2ee.md §3.1.2).
+  case deviceKeyLost
   /// The identity provider refused the sign-in (issue #1063); `code` is its cleaned `error`.
   case providerDenied, providerAlreadySignedIn
   case providerMisconfigured(code: String), providerRefused(code: String)
@@ -41,6 +43,7 @@ enum AppFailure: Equatable {
     switch self {
     case .network: return "error_network"
     case .signedOut: return "error_signed_out"
+    case .deviceKeyLost: return "error_device_key_lost"
     case .wrongPassphrase: return "error_wrong_passphrase"
     case .backupOutOfMemory: return "error_backup_out_of_memory"
     case .backupTooNew: return "error_backup_too_new"
@@ -183,6 +186,8 @@ final class AppModel {
   private(set) var pushStatus: PushStatus = .unknown
   /// Where the core's gateway connection stands (`nil`: no core open); the banner follows it.
   private(set) var connection: ConnectionState?
+  /// The connection needs a sign-in because the session's device key is gone: the banner says so.
+  private(set) var isDeviceKeyLost = false
   /// Since when the connection (or the device's network) is down: the banner waits out its grace
   /// period, the screens show the local store meanwhile (#713).
   private(set) var connectionGrace = ConnectionGrace()
@@ -210,7 +215,7 @@ final class AppModel {
   private(set) var maybeSignInPage: SignInPageInfo?
 
   @ObservationIgnored private let servers = ServerStore()
-  @ObservationIgnored private lazy var vault = SessionVault(servers: servers)
+  @ObservationIgnored private lazy var vault = SessionVault(servers: servers, bindsSessions: true)
   @ObservationIgnored private let container = SharedContainer()
   @ObservationIgnored private lazy var factory = CoreFactory(container: container, vault: vault, servers: servers)
   @ObservationIgnored private let login = WebLogin()
@@ -357,7 +362,7 @@ final class AppModel {
       let session: OidcSession
       do {
         session = try await login.login(
-          server: server, maybeLoginPageAlwaysShown: maybeSignInPage?.maybeLoginPageAlwaysShown)
+          server: server, maybeLoginPageAlwaysShown: maybeSignInPage?.maybeLoginPageAlwaysShown, proofs: vault.proofs)
       } catch {
         let maybeFailure = AppFailure.signIn(error)
         if maybeFailure != nil {
@@ -1474,6 +1479,11 @@ final class AppModel {
   private func setConnection(_ maybeConnection: ConnectionState?) {
     if maybeConnection != connection { Perf.connectionChanged(from: connection, to: maybeConnection) }
     connection = maybeConnection
+    if case .signInRequired = maybeConnection {
+      isDeviceKeyLost = vault.isDeviceKeyLost
+    } else {
+      isDeviceKeyLost = false
+    }
     observeConnection()
   }
 
@@ -1585,7 +1595,11 @@ final class AppModel {
       }
     } catch {
       let failure = CoreFailure(error)
-      if failure == .signedOut {
+      if vault.isDeviceKeyLost {
+        // Nothing went out and nothing is lost but the key: the next sign-in replaces the session
+        // and makes a new one (docs/e2ee.md §3.1.2).
+        phase = .signedOut(.deviceKeyLost)
+      } else if failure == .signedOut {
         vault.clear()
         phase = .signedOut(.signedOut)
       } else {

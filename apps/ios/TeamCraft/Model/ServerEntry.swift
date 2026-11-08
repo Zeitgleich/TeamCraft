@@ -166,14 +166,3 @@ struct ServerInfoAnswer: Equatable {
   let contentType: String?
   let body: Data
 }
-
-/// Hands the redirect response itself back instead of following it (also used by the local
-/// sign-in, so a password is never re-sent to wherever a redirect points).
-final class RedirectRefuser: NSObject, URLSessionTaskDelegate {
-  func urlSession(
-    _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void
-  ) {
-    completionHandler(nil)
-  }
-}

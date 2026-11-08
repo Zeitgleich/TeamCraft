@@ -46,10 +46,10 @@ use teamcraft_proto::{
   KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse,
   ListDevicesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
   ListMlsMessagesResponse, ListScheduledMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse,
-  MessageResponse, MlsMessageResponse, MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse,
-  PostMlsMessageRequest, PutDeviceListRequest, PutKeyBagRequest, RegisterDeviceRequest,
-  ScheduleMessageRequest, ScheduledMessageId, ScheduledMessageResponse, SearchUsersResponse,
-  SendMessageRequest, SendScheduledMessageResponse, SpaceId, SpaceMemberResponse,
+  ListUserGroupRostersResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest,
+  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutDeviceListRequest, PutKeyBagRequest,
+  RegisterDeviceRequest, ScheduleMessageRequest, ScheduledMessageId, ScheduledMessageResponse,
+  SearchUsersResponse, SendMessageRequest, SendScheduledMessageResponse, SpaceId, SpaceMemberResponse,
   UpdateScheduledMessageRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
 use teamcraft_proto::{
@@ -246,6 +246,8 @@ pub trait ServerApi {
     space: SpaceId,
   ) -> impl Future<Output = Result<ListSpaceMembersResponse, ApiError>>;
   fn list_conversations(&self) -> impl Future<Output = Result<ListConversationsResponse, ApiError>>;
+  /// Every user group with its members (`GET /user-groups/rosters`); refused for guests.
+  fn list_user_group_rosters(&self) -> impl Future<Output = Result<ListUserGroupRostersResponse, ApiError>>;
   fn conversation(
     &self,
     conversation: ConversationId,

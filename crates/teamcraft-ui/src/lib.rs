@@ -45,7 +45,6 @@ pub mod gestures;
 // Shared with the mobile apps (through the FFI), so they live in the client API.
 pub use teamcraft_client_api::{emoji, emoji_catalog};
 pub mod external_links;
-pub mod groups;
 pub mod highlight;
 pub mod history;
 pub mod hybrid;

@@ -29,8 +29,8 @@ use crate::drafts::{DraftFileItem, DraftItem, DraftReply, SentItem};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::live::LiveSnapshot;
 use crate::model::{
-  Conversation, ConversationId, CustomStatus, DeviceId, MembershipIssue, Message, MessageId, PresenceStatus,
-  Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
+  Conversation, ConversationId, CustomStatus, DeviceId, MembershipIssue, MentionableGroup, Message,
+  MessageId, PresenceStatus, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
 };
 use crate::privacy::{LastSeenVisibility, PrivacySettings};
 use crate::scheduled::ScheduledOverview;
@@ -1641,6 +1641,9 @@ pub enum ChatQuery {
   MembershipIssues {
     conversation: ConversationId,
   },
+  MentionableGroups {
+    conversation: ConversationId,
+  },
   UnconfirmedRemovals,
   GroupLeftovers,
   SuspectDeletions,
@@ -1941,6 +1944,9 @@ pub enum ChatAnswer {
   Devices {
     devices: Vec<DeviceInfo>,
   },
+  MentionableGroups {
+    groups: Vec<MentionableGroup>,
+  },
   MembershipIssues {
     issues: Vec<MembershipIssue>,
   },
@@ -2030,6 +2036,9 @@ impl ChatQuery {
       },
       Self::FirstSync => ChatAnswer::FirstSync {
         maybe_progress: backend.first_sync(),
+      },
+      Self::MentionableGroups { conversation } => ChatAnswer::MentionableGroups {
+        groups: backend.mentionable_groups(conversation),
       },
       Self::MembershipIssues { conversation } => ChatAnswer::MembershipIssues {
         issues: backend.membership_issues(conversation),

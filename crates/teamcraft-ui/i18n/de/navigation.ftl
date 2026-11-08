@@ -261,3 +261,10 @@ sent-files = { $count ->
     [one] { $count } Datei
    *[other] { $count } Dateien
   }
+
+# Words of the administration side that the rest of the app shows too (a banner, an error toast, a
+# disabled entry): not in admin.ftl, whose file only the console loads (#1462).
+health-alerts-badge = { $count ->
+    [one] Eine Systemwarnung
+   *[other] { $count } Systemwarnungen
+}

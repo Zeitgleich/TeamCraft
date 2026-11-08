@@ -9,8 +9,8 @@
 # and the signed-in app's, #334) and the signed-in app's pack (#1465): the worker fetches those when
 # needed or after a member's page loaded instead of on install, so a guest's meeting page doesn't
 # download the signed-in app. The
-# UI's texts (`i18n/*.ftl`, one file per language, #1437) are lazy too: a page asks for the language
-# it shows.
+# UI's texts (`i18n/*.ftl`, one file per language, #1437, and the administration console's per
+# language, #1462) are lazy too: a page asks for the language it shows, the console for its own.
 # `on_demand` (also in `lazy`) lists the background effects' segmentation (#439: the worker's
 # script and module, the model) and the photo backgrounds' full pictures: fetched only when someone
 # turns an effect on or picks the photo, never in the background; and the files in the signed-in

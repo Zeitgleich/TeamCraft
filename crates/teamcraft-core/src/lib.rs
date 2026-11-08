@@ -23,6 +23,7 @@ pub mod signed_deletion;
 pub mod space_dms;
 // The keys come from the UI contract (client-api), which the hosts of a UI build in; the service
 // worker reads pictures for its notifications.
+pub mod group_mentions;
 #[cfg(any(feature = "ui", feature = "service-worker"))]
 pub mod media_cache;
 pub mod mls_storage;

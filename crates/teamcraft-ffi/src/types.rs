@@ -1355,6 +1355,8 @@ mod tests {
         maybe_imported: None,
         maybe_source: None,
         maybe_placeholder: None,
+        group_mentions: Vec::new(),
+        mentions_me: false,
       }
     }
   }
@@ -1576,6 +1578,8 @@ mod tests {
       maybe_imported: None,
       maybe_source: None,
       maybe_placeholder: None,
+      group_mentions: Vec::new(),
+      mentions_me: false,
     }
   }
 

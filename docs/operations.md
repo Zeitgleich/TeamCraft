@@ -740,11 +740,11 @@ carried over. Work through it in this order:
 DPoP (RFC 9449) ties access tokens to a key on the device, so a stolen token, or one relayed by a
 look-alike server, doesn't work without that key (e2ee.md §3.1.2). The setting is in the admin console:
 Instance settings, "Binding sign-ins to devices". The default `optional` changes nothing for clients
-that don't support it. **The desktop and web apps send proofs, the mobile apps don't yet**, so stay on
-`optional` for now if people use those.
+that don't support it. **The desktop, web and iOS apps send proofs, the Android app doesn't yet**, so stay
+on `optional` for now if people use it.
 
 An identity provider that advertises DPoP (`dpop_signing_alg_values_supported`, on by default with
-current Keycloak) gets proofs from the desktop and web apps as soon as this server knows its origin,
+current Keycloak) gets proofs from the desktop, web and iOS apps as soon as this server knows its origin,
 and binds their tokens without further setup. To hold that back, leave the origin out of
 `public_origins` and the other settings below: `server-info` then offers no nonce and the apps stay
 unbound.

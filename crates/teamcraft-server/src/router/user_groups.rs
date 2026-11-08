@@ -12,6 +12,7 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
       handlers::list_user_groups_handler,
       handlers::create_user_group_handler
     ))
+    .routes(routes!(handlers::list_user_group_rosters_handler))
     .routes(routes!(
       handlers::get_user_group_handler,
       handlers::update_user_group_handler,

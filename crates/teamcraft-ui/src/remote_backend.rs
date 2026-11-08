@@ -1132,6 +1132,8 @@ impl RemoteChat {
         maybe_imported: None,
         maybe_source: None,
         maybe_placeholder: None,
+        group_mentions: Vec::new(),
+        mentions_me: false,
       };
       match message.maybe_thread {
         Some(thread) => mirror
@@ -1389,6 +1391,16 @@ impl ChatBackend for RemoteChat {
     match self.ask(ChatQuery::KeyCatchUp) {
       Some(ChatAnswer::KeyCatchUp { maybe_progress }) => maybe_progress,
       _ => None,
+    }
+  }
+
+  fn mentionable_groups(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::MentionableGroup> {
+    match self.ask(ChatQuery::MentionableGroups { conversation }) {
+      Some(ChatAnswer::MentionableGroups { groups }) => groups,
+      _ => Vec::new(),
     }
   }
 
@@ -3661,6 +3673,8 @@ mod tests {
           maybe_imported: None,
           maybe_source: None,
           maybe_placeholder: None,
+          group_mentions: Vec::new(),
+          mentions_me: false,
         })
         .collect(),
     }

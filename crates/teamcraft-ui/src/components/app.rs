@@ -353,7 +353,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <main id="main-content" class="main" tabindex="-1">
           {move || match main_view.get() {
             MainView::Conversation(id) => view! { <ChannelView conversation=id /> }.into_any(),
-            MainView::Admin(section) => lazy_area(Place::Pane, move || areas::admin_console(section)),
+            MainView::Admin(section) => areas::admin_console_area(section),
             MainView::Search => lazy_area(Place::Pane, || areas::search(())),
             MainView::Meetings => lazy_area(Place::Pane, || areas::meetings(())),
             MainView::Saved => lazy_area(Place::Pane, || areas::saved(())),

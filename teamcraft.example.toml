@@ -168,6 +168,8 @@ deleted_conversations_kept_days = 180
 [limits]
 max_ciphertext_bytes = 1048576
 max_mentions_per_message = 200
+# Mentioned people per message for senders without `use_group_mentions` in the conversation.
+max_mentions_without_group_mentions = 10
 max_group_dm_participants = 8
 max_name_length = 100
 max_text_length = 1000

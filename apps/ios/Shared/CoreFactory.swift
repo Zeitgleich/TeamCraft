@@ -114,7 +114,8 @@ struct CoreFactory {
       pushGatewayUrl: environment.pushGatewayURL?.absoluteString,
       isMemoryConstrained: isMemoryConstrained)
     let tokens = VaultTokenProvider(vault: vault)
-    let core = try TeamCraft(config: config, tokens: tokens, listener: listener)
+    let core = try TeamCraft.withDeviceKey(
+      config: config, tokens: tokens, deviceKey: vault.deviceKey, listener: listener)
     if runsUpkeep { tokens.attach(core) }
     return core
   }

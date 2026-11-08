@@ -8,8 +8,9 @@ use teamcraft_crypto::message::{
   EncryptedMessage, MessageContext, MessageError, decrypt_message, decrypt_unsigned_message, encrypt_message,
 };
 use teamcraft_proto::{
-  Base64Bytes, ClientMessageId, ConversationId, Id, ListMessagesQuery, ListMessagesResponse, MessageId,
-  MessageResponse, SendMessageRequest, Snowflake, ThreadId, UserId, addresses_everyone,
+  Base64Bytes, ClientMessageId, ConversationId, Id, ListConversationMembersResponse, ListMessagesQuery,
+  ListMessagesResponse, MessageId, MessageResponse, SendMessageRequest, Snowflake, ThreadId, UserId,
+  addresses_everyone,
 };
 use zeroize::Zeroizing;
 
@@ -830,6 +831,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     records::enqueue_message(&self.store, self.account.user_id, self.now_ms(), draft)
   }
 
+  /// `mentions` without people who left since the message was written (a group mention names
+  /// many, and a queued message waits): the server refuses a message naming a non-member. Only the
+  /// list for the server changes, not what the message says. Unknown members leave it as it is.
+  fn mentions_still_here(&self, conversation: ConversationId, mentions: &[UserId]) -> Vec<UserId> {
+    let members: Option<ListConversationMembersResponse> =
+      records::get_json(&self.store, Table::Members, &conversation.to_string()).unwrap_or_default();
+    match members {
+      Some(list) => mentions
+        .iter()
+        .copied()
+        .filter(|user| list.members.iter().any(|member| member.user.id == *user))
+        .collect(),
+      None => mentions.to_vec(),
+    }
+  }
+
   /// `Ok(false)`: not sendable yet (no content key).
   async fn send_entry(&mut self, entry: &OutboxEntry) -> Result<bool, CoreError> {
     let _step = crate::timing::step("send_entry");
@@ -857,7 +874,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       ciphertext: Base64Bytes::new(encrypted.to_bytes()?),
       maybe_thread_id: entry.maybe_thread_id,
       mentioned_user_ids: match &stored.content {
-        MessageContent::Text { mentions, .. } => mentions.clone(),
+        MessageContent::Text { mentions, .. } => self.mentions_still_here(entry.conversation_id, mentions),
         _ => Vec::new(),
       },
       // The one piece of metadata the server sees: it routes urgent pushes past do-not-disturb.

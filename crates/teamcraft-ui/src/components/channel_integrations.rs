@@ -11,8 +11,8 @@ use teamcraft_proto::{
 use wasm_bindgen::JsCast;
 
 use crate::channel_access::ChannelAccess;
-use crate::components::admin_integrations::CopyButton;
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::copy_button::CopyButton;
 use crate::components::icons::{Icon, IconName};
 use crate::components::image_crop_dialog::{CropTarget, CropUpload, ImageCropDialog};
 use crate::components::pending_button::PendingButton;
