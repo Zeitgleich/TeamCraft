@@ -300,6 +300,22 @@ mod tests {
     );
   }
 
+  /// Why the members section offers the list only after its refresh: the roles are the same, but
+  /// the same list read before and after this device looked at the keys doesn't compare equal.
+  #[test]
+  fn a_list_opened_before_the_keys_were_looked_at_counts_as_changed_once_they_are() {
+    let roles = [member(1, ChannelRole::Admin)];
+    let users = [named(1, "Alice")];
+    let before = role_review_rows(&roles, &users, &[], &[]);
+    let after = role_review_rows(&roles, &users, &[], &[(id(1), RoleKeyMark::Checked)]);
+    assert_eq!(
+      role_review_refusal(&before),
+      Some(RoleReviewRefusal::UncheckableKey)
+    );
+    assert_eq!(role_review_refusal(&after), None);
+    assert!(has_review_changed(Some(0), &before, Some(0), &after));
+  }
+
   #[test]
   fn every_refusal_has_its_own_text() {
     let keys = [
