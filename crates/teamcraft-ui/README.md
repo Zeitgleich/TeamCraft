@@ -82,7 +82,10 @@ new file for a new area, without touching a shared list.
   `scripts/finish-loader.sh` joins each language's files into one file of the build
   (`i18n/<language>-<hash>.ftl`), `init.js` fetches the language the app starts in next to the app,
   and the app mounts once it is there; another language is fetched when the user switches to it, and
-  the UI stays in the old one until then. Each message id lives in one file, the same file name in
+  the UI stays in the old one until then. `admin.ftl` is a file of its own there
+  (`i18n/<language>-admin-<hash>.ftl`), which the console fetches when it opens (#1462): a message
+  that anything outside the console shows goes into another file (a test checks).
+  Each message id lives in one file, the same file name in
   every language; the tests in `src/i18n.rs` check that no id is defined twice and that every
   language has every English message in the same file.
 

@@ -2198,13 +2198,14 @@ the chunks that load later. The limit:
 
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
-| A guest in a meeting: gzip -9 total  | 6,190,000 B  | fails; warns from 95 % (5.88 MB) |
-| Signed-in first visit: gzip -9 total | 5,390,000 B  | fails; warns from 95 % (5.12 MB) |
+| A guest in a meeting: gzip -9 total  | 6,180,000 B  | fails; warns from 95 % (5.87 MB) |
+| Signed-in first visit: gzip -9 total | 5,370,000 B  | fails; warns from 95 % (5.10 MB) |
 | The call module: gzip -9             | 1,000,000 B  | fails                            |
 
-Both budgets are the sizes measured below plus about 6 % (a guest's of #1452, a signed-in first
-visit's of #1465 and its pack; 5.65 MB before), so they warn only after real
-growth; before that they were 6.28 and 5.74 MB (#1437), 6.35 and 5.8 MB (#1413), 6.8 and 6.2 MB, the sizes of #1148 plus about 6 %. For a while they were 10 MB, because the guest's meeting had reached its budget of the time
+Both budgets are the sizes of #1462 below plus about 6 % for a signed-in first visit and about 5 %
+for a guest (6 % would have raised it, as the guest's meeting had grown since #1452), so they warn
+only after real growth; before that they were 6.19 and 5.39 MB (#1452, #1465; 5.65 MB before the
+pack), 6.28 and 5.74 MB (#1437), 6.35 and 5.8 MB (#1413), 6.8 and 6.2 MB, the sizes of #1148 plus about 6 %. For a while they were 10 MB, because the guest's meeting had reached its budget of the time
 (5.7 MB) and blocked unrelated pull requests; at 10 MB the check caught nothing. Before that the
 guest budget was the guest's meeting of 2026-10-31 plus about 4 %, the signed-in ceiling the
 signed-in first visit on `main` 8d653d3c plus about 10 %. The single budget before (4,700,000 B,
@@ -2215,6 +2216,33 @@ information. The uncompressed size is printed but not limited: what a user waits
 transfer. The earlier growth ratchet on it (11.85 MB) was dropped with the split (#334): main had
 outgrown it anyway, and the split moves code between files without changing what matters. Raising
 the budget is a decision, not a fix.
+
+#### The console's texts load with the console (#1462, 2026-11-08)
+
+`admin.ftl` was about a quarter of the language file every page fetches, for the few people who
+open the console. It is now a file of its own per language (`i18n/<language>-admin-<hash>.ftl`,
+17 kB gzip in English, 19 kB in German). `scripts/finish-loader.sh` writes it, and the console's
+area fetches it before it builds its view (`I18n::load_admin_texts`, `areas::admin_console_area`).
+A failed fetch shows the area's retry. Once the console was opened, a switch of the language waits
+for that language's file too. A signed release lists the files as `lazy`, like the languages.
+
+Before and after on the same tree (`trunk build --release`, then `scripts/check-web-size.py`):
+
+| gzip -9                                      | Before      | After       | Change     |
+|----------------------------------------------|-------------|-------------|------------|
+| Texts of one language (German, the larger)   | 76,161 B    | 58,190 B    | −17,971 B  |
+| App                                          | 2,644,388 B | 2,645,153 B | +765 B     |
+| Signed-in app (pack)                         | 1,969,826 B | 1,969,721 B | −105 B     |
+| Service worker                               | 401,556 B   | 401,556 B   | 0          |
+| **A signed-in first visit**                  | 5,091,931 B | 5,074,620 B | −17,311 B  |
+| **A guest in a meeting**                     | 5,878,190 B | 5,860,861 B | −17,329 B  |
+
+An admin pays one more round trip the first time the console opens: the texts first, then its
+chunk, because a view built before its texts arrive would keep showing keys. Everything a place
+outside the console shows moved to the files of those places (the announcement's dismiss label,
+the roster banners, "not available yet", the alerts badge, the three delete and owner errors, the
+copy button). The test `only_the_console_names_the_keys_of_admin_ftl` keeps it so: no literal key
+or built key's start from `admin.ftl` in code outside `components/admin_*` and `admin_live.rs`.
 
 #### The service worker reads only what a notification shows (#1452, 2026-11-08)
 

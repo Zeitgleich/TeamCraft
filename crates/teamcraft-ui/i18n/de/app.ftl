@@ -282,3 +282,20 @@ guest-notice-extend = { $count ->
    *[other] { $count } Tage mehr
 }
 guest-notice-extend-until = Bis { $date }
+
+# Words of the administration side that the rest of the app shows too (a banner, an error toast, a
+# disabled entry): not in admin.ftl, whose file only the console loads (#1462).
+admin-soon = Noch nicht verfügbar
+admin-error-cannot-delete-self = Du kannst dein eigenes Konto nicht löschen.
+admin-error-last-admin = Der Workspace braucht erst einen weiteren aktiven Admin, bevor dieses Konto gelöscht werden kann.
+admin-error-last-owner = Diese Änderung ließe den Workspace ohne Eigentümer zurück, und niemand könnte ihn mehr verwalten. Füge zuerst den neuen Eigentümer hinzu und entferne dann den bisherigen.
+admin-integrations-copy = Kopieren
+announcement-dismiss = Ankündigung schließen
+roster-signing-contradictory = Was der Identity Provider oder der Server über { $names } sagt, passt nicht zur Admin-Liste. Prüfe die Rolle beim Provider und ändere sie bei Bedarf unter Sicherheit von Hand.
+roster-signing-provider-changed = Die Anmeldung dieser App kommt von einem anderen Identity Provider als dem, dem der Workspace vertraut, daher ändern sich Rollen nicht von selbst. Prüfe das unter Sicherheit.
+roster-standing-expired-ask = Seit 30 Tagen hat kein Eigentümer die Admin-Liste signiert, daher ruhen die Admin-Rechte in allen Apps. Ein Eigentümer ({ $owners }) muss nur TeamCraft auf einem Gerät mit seinen Schlüsseln öffnen.
+roster-standing-expired-ask-unnamed = Seit 30 Tagen hat kein Eigentümer die Admin-Liste signiert, daher ruhen die Admin-Rechte in allen Apps. Ein Eigentümer muss nur TeamCraft auf einem Gerät mit seinen Schlüsseln öffnen.
+roster-standing-open = Eigentümer öffnen
+roster-standing-waiting = Deine Admin-Rolle gilt noch nicht. Sie gilt, sobald die App eines Eigentümers geöffnet war; du musst nichts tun.
+channel-roles-alarm-banner = Dieses Gerät und das eines anderen Mitglieds sehen unterschiedliche Rollen in { $channel }: Der Server zeigt den Leuten vielleicht verschiedene Listen. Sieh dir die Mitglieder des Kanals an.
+channel-roles-alarm-banner-unnamed = Dieses Gerät und das eines anderen Mitglieds sehen in einem Kanal unterschiedliche Rollen: Der Server zeigt den Leuten vielleicht verschiedene Listen.

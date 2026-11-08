@@ -102,6 +102,10 @@ async fn a_page_fetches_only_the_language_it_shows() {
           && !texts.iter().any(|text| text.contains("/i18n/de-")),
         "an English page fetched {texts:?}"
       );
+      assert!(
+        !texts.iter().any(|text| text.contains("-admin-")),
+        "the console's texts loaded before the console opened: {texts:?}"
+      );
       page
         .goto(format!("{WEB_ORIGIN}/settings/preferences"))
         .await

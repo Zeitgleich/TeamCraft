@@ -57,6 +57,7 @@ pub mod composer_commands;
 pub mod composer_editor;
 pub mod composer_toolbar;
 pub mod conversation_notify;
+pub mod copy_button;
 pub mod count_badge;
 pub mod date_jump;
 pub mod desktop_notify;

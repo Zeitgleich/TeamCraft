@@ -8,6 +8,11 @@
 //! app, and [`load_start_language`] waits for it before anything mounts, so no view ever shows a
 //! message's key in place of its text. Another language is fetched when the user switches to it;
 //! until it is there, the UI stays in the one it shows ([`I18n::set_locale`]).
+//!
+//! The administration console's texts (`admin.ftl`) are a file of their own on the web, which the
+//! console fetches before it renders ([`I18n::load_admin_texts`], #1462): only admins need them.
+//! Once it has, a language counts as there only with them. What the rest of the app shows is not
+//! in that file (the test `only_the_console_names_the_keys_of_admin_ftl`).
 
 use std::cell::RefCell;
 
@@ -68,7 +73,7 @@ impl I18n {
   pub fn new(initial: Locale) -> Self {
     // The web app starts with its stored language's texts (`load_start_language`); should they
     // be missing, a language that is there shows until they arrive.
-    let shown = if is_loaded(initial) {
+    let shown = if is_ready(initial) {
       initial
     } else {
       loaded_locale().unwrap_or(initial)
@@ -92,7 +97,7 @@ impl I18n {
   /// fetch that fails leaves it there too.
   pub fn set_locale(&self, locale: Locale) {
     self.wanted.set(locale);
-    if is_loaded(locale) {
+    if is_ready(locale) {
       self.locale.set(locale);
     } else {
       self.fetch_then_show(locale);
@@ -102,7 +107,7 @@ impl I18n {
   #[cfg(target_arch = "wasm32")]
   fn fetch_then_show(self, locale: Locale) {
     wasm_bindgen_futures::spawn_local(async move {
-      match web::load(locale).await {
+      match load_missing(locale).await {
         Ok(()) => self.arrived(locale),
         Err(error) => tracing::warn!(locale = locale.tag(), %error, "the language's texts did not load"),
       }
@@ -116,9 +121,31 @@ impl I18n {
   /// `locale`'s texts are there: the UI shows them if it is still the language asked for.
   #[cfg(any(target_arch = "wasm32", test))]
   fn arrived(self, locale: Locale) {
-    if self.wanted.try_get_untracked() == Some(locale) && is_loaded(locale) {
+    if self.wanted.try_get_untracked() == Some(locale) && is_ready(locale) {
       self.locale.try_set(locale);
     }
+  }
+
+  /// Before the console renders (web): the console's texts in the language the UI shows. An error
+  /// means they aren't there, and the console's area offers to try again. From here on a switch
+  /// to another language waits for that language's file too, so the console never shows a key.
+  #[cfg(target_arch = "wasm32")]
+  pub async fn load_admin_texts(self) -> Result<(), String> {
+    BUNDLES.with_borrow_mut(|bundles| bundles.needs_admin = true);
+    // Looked at again after the wait: the language shown may have changed meanwhile.
+    while let Some(shown) = self.locale.try_get_untracked() {
+      if BUNDLES.with_borrow(|bundles| bundles.has_admin(shown)) {
+        break;
+      }
+      web::load_admin(shown).await?;
+    }
+    Ok(())
+  }
+
+  /// Natively every text is embedded.
+  #[cfg(not(target_arch = "wasm32"))]
+  pub async fn load_admin_texts(self) -> Result<(), String> {
+    Ok(())
   }
 
   /// Translates a message without arguments.
@@ -184,6 +211,11 @@ fn is_loaded(locale: Locale) -> bool {
   BUNDLES.with_borrow(|bundles| bundles.get(locale).is_some())
 }
 
+/// Whether the UI can show `locale`: its texts are there, with the console's once it needs them.
+fn is_ready(locale: Locale) -> bool {
+  BUNDLES.with_borrow(|bundles| bundles.is_ready(locale))
+}
+
 /// A language whose texts are there, English first.
 fn loaded_locale() -> Option<Locale> {
   Locale::ALL.into_iter().find(|locale| is_loaded(*locale))
@@ -193,8 +225,25 @@ fn loaded_locale() -> Option<Locale> {
 /// `scripts/finish-loader.sh` joins them) and keeps it.
 #[cfg(target_arch = "wasm32")]
 fn install(locale: Locale, source: &str) {
+  // Two fetches may have crossed; a second bundle would lose the console's texts in the first.
+  if is_loaded(locale) {
+    return;
+  }
   let bundle = build_bundle(locale, [("all files", source)]);
   BUNDLES.with_borrow_mut(|bundles| *bundles.slot(locale) = Some(bundle));
+}
+
+/// Fetches what `locale` still lacks for the UI to show it.
+#[cfg(target_arch = "wasm32")]
+async fn load_missing(locale: Locale) -> Result<(), String> {
+  if !is_loaded(locale) {
+    web::load(locale).await?;
+  }
+  // Asked after the wait: the console may have opened meanwhile.
+  if !is_ready(locale) {
+    web::load_admin(locale).await?;
+  }
+  Ok(())
 }
 
 /// Before the app mounts (web): the texts of the language it starts in, which `init.js` fetched
@@ -229,6 +278,10 @@ thread_local! {
 struct Bundles {
   en: Option<MessageBundle<FluentResource>>,
   de: Option<MessageBundle<FluentResource>>,
+  /// The console was opened (web): a language is ready only with the console's texts.
+  needs_admin: bool,
+  /// The languages whose bundle got the console's texts ([`Bundles::add_admin`]).
+  with_admin: Vec<Locale>,
 }
 
 impl Bundles {
@@ -245,6 +298,40 @@ impl Bundles {
   #[cfg(all(target_arch = "wasm32", not(test)))]
   fn embedded() -> Self {
     Self::default()
+  }
+
+  fn is_ready(&self, locale: Locale) -> bool {
+    self.get(locale).is_some() && (!self.needs_admin || self.has_admin(locale))
+  }
+
+  fn has_admin(&self, locale: Locale) -> bool {
+    self.with_admin.contains(&locale)
+  }
+
+  /// Adds the console's texts to the bundle of `locale`, once (two fetches may have crossed).
+  #[cfg(any(target_arch = "wasm32", test))]
+  fn add_admin(&mut self, locale: Locale, source: &str) {
+    if self.has_admin(locale) {
+      return;
+    }
+    let Some(bundle) = self.slot(locale).as_mut() else {
+      return;
+    };
+    let resource = FluentResource::try_new(source.to_owned()).unwrap_or_else(|(resource, errors)| {
+      tracing::error!(
+        locale = locale.tag(),
+        error_count = errors.len(),
+        "invalid Fluent resource of the console"
+      );
+      resource
+    });
+    if bundle.add_resource(resource).is_err() {
+      tracing::error!(
+        locale = locale.tag(),
+        "duplicate message ids in the console's Fluent resource"
+      );
+    }
+    self.with_admin.push(locale);
   }
 
   fn get(&self, locale: Locale) -> Option<&MessageBundle<FluentResource>> {
@@ -321,7 +408,7 @@ mod web {
   use wasm_bindgen::{JsCast, JsValue};
   use wasm_bindgen_futures::JsFuture;
 
-  use super::{Locale, install};
+  use super::{BUNDLES, Locale, install};
 
   /// `init.js`'s fetch of the start language: a promise of `{ tag, text }`.
   const START: &str = "teamcraftTranslations";
@@ -348,11 +435,25 @@ mod web {
   }
 
   pub(super) async fn load(locale: Locale) -> Result<(), String> {
+    let text = fetch(locale.tag()).await?;
+    install(locale, &text);
+    Ok(())
+  }
+
+  /// The console's texts in `locale`, whose own texts must be there.
+  pub(super) async fn load_admin(locale: Locale) -> Result<(), String> {
+    let text = fetch(&format!("{}-admin", locale.tag())).await?;
+    BUNDLES.with_borrow_mut(|bundles| bundles.add_admin(locale, &text));
+    Ok(())
+  }
+
+  /// The file `FILES` names under `name`.
+  async fn fetch(name: &str) -> Result<String, String> {
     let files = Reflect::get(&js_sys::global(), &JsValue::from_str(FILES)).map_err(describe)?;
-    let url = Reflect::get(&files, &JsValue::from_str(locale.tag()))
+    let url = Reflect::get(&files, &JsValue::from_str(name))
       .ok()
       .and_then(|value| value.as_string())
-      .ok_or("this build names no file for the language")?;
+      .ok_or("this build names no such file of texts")?;
     let window = web_sys::window().ok_or("no window")?;
     let response: web_sys::Response = JsFuture::from(window.fetch_with_str(&url))
       .await
@@ -369,13 +470,11 @@ mod web {
     if !response.ok() || is_page {
       return Err(format!("{url}: HTTP {}", response.status()));
     }
-    let text = JsFuture::from(response.text().map_err(describe)?)
+    JsFuture::from(response.text().map_err(describe)?)
       .await
       .map_err(describe)?
       .as_string()
-      .ok_or("the file is no text")?;
-    install(locale, &text);
-    Ok(())
+      .ok_or_else(|| "the file is no text".to_owned())
   }
 
   fn describe(error: JsValue) -> String {
@@ -399,6 +498,9 @@ pub(crate) fn joined_source(locale: Locale) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// The console's texts (`scripts/finish-loader.sh` makes them a file of their own on the web).
+  const ADMIN_FILE: &str = "admin.ftl";
 
   #[test]
   fn translations_parse_without_errors() {
@@ -529,6 +631,45 @@ mod tests {
         }
       }
     }
+  }
+
+  /// The web app gets `admin.ftl` as a file of its own (#1462): without it every other file's
+  /// messages are there, with it the console's join them, also when two fetches crossed.
+  #[test]
+  fn the_consoles_texts_join_a_language_already_there() {
+    for locale in Locale::ALL {
+      let rest: Vec<_> = sources(locale.tag())
+        .iter()
+        .filter(|(file, _)| *file != ADMIN_FILE)
+        .copied()
+        .collect();
+      let mut bundles = Bundles::default();
+      *bundles.slot(locale) = Some(build_bundle(locale, rest));
+      assert!(bundles.translate(locale, "admin-title", None).is_none());
+      assert!(bundles.translate(locale, "settings-language", None).is_some());
+      for _ in 0..2 {
+        bundles.add_admin(locale, admin_source(locale));
+      }
+      assert!(bundles.translate(locale, "admin-title", None).is_some());
+      assert!(bundles.has_admin(locale));
+    }
+  }
+
+  /// Once the console was opened, a switch waits for the new language's console texts too.
+  #[test]
+  fn with_the_console_open_a_switch_waits_for_its_texts() {
+    let i18n = I18n::new(Locale::En);
+    BUNDLES.with_borrow_mut(|bundles| {
+      bundles.needs_admin = true;
+      bundles.with_admin = vec![Locale::En];
+    });
+    i18n.set_locale(Locale::De);
+    assert_eq!(i18n.locale(), Locale::En, "German has no console texts yet");
+    i18n.arrived(Locale::De);
+    assert_eq!(i18n.locale(), Locale::En, "its other texts alone are not enough");
+    BUNDLES.with_borrow_mut(|bundles| bundles.with_admin.push(Locale::De));
+    i18n.arrived(Locale::De);
+    assert_eq!(i18n.locale(), Locale::De);
   }
 
   /// A language switch shows the new language only once its texts are there, and a switch back
@@ -755,6 +896,89 @@ mod tests {
       }
     }
     assert!(missing.is_empty(), "keys without a translation: {missing:#?}");
+  }
+
+  /// On the web `admin.ftl` loads with the console (#1462), so a place outside it that names one
+  /// of its keys, as a literal or as the start of a built key, would show the key instead of a
+  /// text. Such a message belongs into the file of that place.
+  #[test]
+  fn only_the_console_names_the_keys_of_admin_ftl() {
+    let admin = message_ids(admin_source(Locale::En));
+    assert!(admin.len() > 500, "the scan found the console's messages");
+    let mut sources = Vec::new();
+    collect_sources(
+      &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+      &mut sources,
+    );
+    let mut named = Vec::new();
+    for (path, source) in &sources {
+      if is_console_file(path) {
+        continue;
+      }
+      let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+      for id in &admin {
+        let literal = format!("\"{id}\"");
+        // A CSS class may share a message's name.
+        if code
+          .match_indices(&literal)
+          .any(|(at, _)| !code[..at].ends_with("class="))
+        {
+          named.push(format!("{} names {id}", path.display()));
+        }
+      }
+      for (at, _) in code.match_indices("-{") {
+        let start = code[..=at].rsplit('"').next().unwrap_or_default();
+        if is_key_like(start) && admin.iter().any(|id| id.starts_with(start)) {
+          named.push(format!("{} builds {start}…", path.display()));
+        }
+      }
+    }
+    assert!(
+      named.is_empty(),
+      "keys of admin.ftl outside the console: {named:#?}"
+    );
+  }
+
+  /// That scan counts the console's files as the console: their components stay inside it.
+  #[test]
+  fn only_the_console_uses_the_consoles_components() {
+    let mut sources = Vec::new();
+    collect_sources(
+      &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+      &mut sources,
+    );
+    let mut used = Vec::new();
+    for (path, source) in &sources {
+      let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+      for (at, _) in code.match_indices("components::admin_") {
+        let rest = &code[at + "components::".len()..];
+        let path_end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':'));
+        let item = &rest[..path_end.unwrap_or(rest.len())];
+        // How the app reaches the console (`areas.rs`), and how often it refreshes.
+        let is_entry = matches!(item, "admin_console::AdminConsole" | "admin_console::REFRESH_MS");
+        if !is_console_file(path) && !is_entry {
+          used.push(format!("{}: {item}", path.display()));
+        }
+      }
+    }
+    assert!(used.is_empty(), "the console's components outside it: {used:#?}");
+  }
+
+  fn is_console_file(path: &std::path::Path) -> bool {
+    let name = path
+      .file_name()
+      .and_then(|name| name.to_str())
+      .unwrap_or_default();
+    name == "admin_live.rs"
+      || (name.starts_with("admin_") && path.parent().is_some_and(|parent| parent.ends_with("components")))
+  }
+
+  fn admin_source(locale: Locale) -> &'static str {
+    sources(locale.tag())
+      .iter()
+      .find(|(file, _)| *file == ADMIN_FILE)
+      .map(|(_, source)| *source)
+      .unwrap_or_default()
   }
 
   #[test]
