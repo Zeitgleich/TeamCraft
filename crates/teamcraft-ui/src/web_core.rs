@@ -75,6 +75,7 @@ use wasm_bindgen::JsCast;
 
 use crate::auth::{AuthError, Authenticator};
 use crate::settings::{load_string, store_string};
+use crate::start_timing::{self, Part};
 use crate::sync_reads::{StoredWorkspace, SyncRead, SyncReadAnswer, answer_during_sync};
 use crate::tab_handover::{
   Blocker, OnTaken, PERSIST_DRAFTS_EVENT, TabEvent, TabState, TakeoverAnswer, answer_takeover, keeps_lock,
@@ -1643,11 +1644,12 @@ impl Core {
       // Opened before, when the token wasn't there yet.
       Some(store) => store.clone(),
       None => {
-        let key = browser_database_key(&name)
+        let key = start_timing::timed(Part::StoreUnlock, browser_database_key(&name))
           .await
           .map_err(|error| error.to_string())?;
         let user = self.user;
         let started_ms = now_ms();
+        start_timing::start(Part::StoreRead);
         let opened = IndexedDbStore::open_reporting(&name, &key, |percent| {
           // Handed over or signed out meanwhile: whoever opens the store next goes on from here, and the
           // lock this core holds is what that tab waits for.
@@ -1660,6 +1662,7 @@ impl Core {
           ControlFlow::Continue(())
         })
         .await;
+        start_timing::end(Part::StoreRead);
         set_store_build(None);
         let opened = match opened {
           Ok(opened) => opened,
@@ -1671,14 +1674,17 @@ impl Core {
         store
       },
     };
-    let maybe_client = match Client::open(
-      self.api(),
-      store.clone(),
-      Box::new(SystemClock),
-      ClientSettings::default()
-        .with_notes_to_self()
-        .with_capped_catch_up(),
-    ) {
+    let opened = start_timing::timed_now(Part::ClientOpen, || {
+      Client::open(
+        self.api(),
+        store.clone(),
+        Box::new(SystemClock),
+        ClientSettings::default()
+          .with_notes_to_self()
+          .with_capped_catch_up(),
+      )
+    });
+    let maybe_client = match opened {
       Ok(maybe_client) => maybe_client,
       Err(error) => return unreadable_status(error),
     };
@@ -1994,7 +2000,10 @@ impl Core {
       // async-ok: the core's catch-up focus (a shared cell), not a signal.
       Request::Focus(conversation) => self.catch_up_focus.set(conversation),
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
-      Request::SnapshotChanges(maybe_since, reply) => drop(reply.send(self.snapshot_changes(maybe_since))),
+      Request::SnapshotChanges(maybe_since, reply) => {
+        let changes = start_timing::timed_now(Part::SnapshotBuild, || self.snapshot_changes(maybe_since));
+        drop(reply.send(changes));
+      },
       Request::Messages {
         conversation,
         start,
@@ -3225,7 +3234,9 @@ impl SyncReads<'_> {
     match request {
       Request::Snapshot(reply) => drop(reply.send(Ok(snapshots.snapshot(self.backend, changes, security)))),
       Request::SnapshotChanges(maybe_since, reply) => {
-        let answer = snapshots.changes_since(self.backend, changes, security, maybe_since);
+        let answer = start_timing::timed_now(Part::SnapshotBuild, || {
+          snapshots.changes_since(self.backend, changes, security, maybe_since)
+        });
         drop(reply.send(Ok(answer)));
       },
       other => return Some(other),

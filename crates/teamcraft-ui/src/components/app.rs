@@ -132,6 +132,8 @@ fn screen(settings: Settings) -> AnyView {
     let backend: Rc<dyn Backend> = Rc::new(crate::mock::MockBackend::new(now_ms()));
     return view! { <Shell backend=backend settings=settings /> }.into_any();
   }
+  // Ends in `SessionGate`, the module's first view (#1465).
+  crate::start_timing::start(crate::start_timing::Part::SessionChunk);
   lazy_area(Place::Screen, move || areas::session(settings))
 }
 

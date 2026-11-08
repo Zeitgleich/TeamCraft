@@ -26,6 +26,8 @@ pub fn first_view_shown() {
   if IS_SHOWN.with(|shown| shown.replace(true)) {
     return;
   }
+  // What the start cost, when asked for (#1465).
+  crate::start_timing::report();
   let Some(window) = web_sys::window() else { return };
   if let Some(root) = window.document().and_then(|document| document.document_element()) {
     // Without the attribute the loader still gets the event, or goes by its own deadline.

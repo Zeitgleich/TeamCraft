@@ -7,8 +7,8 @@ the lobby (the app, `teamcraft-ui-*_bg.wasm`, and the service worker), then, onc
 split modules of the meeting (`guest`, `calls`) with the shared chunks they import, read from the
 split loader `teamcraft-ui-split-*.js`, and the call module (`teamcraft-web-calls-*_bg.wasm`). `--guest-budget-bytes` limits
 that. The signed-in budget (`--budget-bytes`) is a looser ceiling against big regressions and
-counts the compressed wasm a signed-in user's first visit transfers: the app (`teamcraft-ui-*_bg.wasm`), the signed-in app's chunks that
-`init.js` fetches next to it (#334; a guest's meeting link skips them) and the service worker
+counts the compressed wasm a signed-in user's first visit transfers: the app (`teamcraft-ui-*_bg.wasm`), the signed-in app's pack, the
+one file with its chunks that `init.js` fetches next to it (#334, #1465; a guest's meeting link skips it) and the service worker
 (`teamcraft-web-sw*_bg.wasm`, installed on the first visit too). Both count the UI's texts in one
 language (`i18n/<language>-*.ftl`, #1437): the app carries none and fetches the language it starts in
 next to it; the larger language counts. The server sends them compressed, the browser compiles while it
@@ -55,14 +55,15 @@ DEFAULT_GUEST_BUDGET_BYTES = 6_190_000
 GUEST_MODULES = ("guest", "calls")
 SPLIT_LOADER = "teamcraft-ui-split-*.js"
 # In the split loader: the shared chunks, and each module's own file with the chunks it imports.
-SPLIT_CHUNK = re.compile(r'const (__chunk_\d+) = makeLoad\(\(\) => \{\s*const src = fetch\(new URL\("\./([^"]+)"')
+# (`fetchPart` where the file is in the signed-in app's pack, `fetch` otherwise.)
+SPLIT_CHUNK = re.compile(r'const (__chunk_\d+) = makeLoad\(\(\) => \{\s*const src = fetch(?:Part)?\(new URL\("\./([^"]+)"')
 SPLIT_MODULE = re.compile(
     r'export const __wasm_split_load_(\w+) = wrapAsyncCb\(makeLoad\(\(\) => \{\s*'
-    r'const src = fetch\(new URL\("\./([^"]+)".*?\n, \[([^\]]*)\]', re.S)
-# A signed-in first visit (app, the signed-in app's chunks, service worker, the texts of one
-# language), gzip -9: 5.33 MB on the way to 1.0.25 (#1452), plus about 6 %. A ceiling against big regressions; growth here is a
+    r'const src = fetch(?:Part)?\(new URL\("\./([^"]+)".*?\n, \[([^\]]*)\]', re.S)
+# A signed-in first visit (app, the signed-in app's pack, service worker, the texts of one
+# language), gzip -9: 5.09 MB with the pack (#1465; 5.33 MB before), plus about 6 %. A ceiling against big regressions; growth here is a
 # member's, who loads it once and then from the service worker's cache.
-DEFAULT_BUDGET_BYTES = 5_650_000
+DEFAULT_BUDGET_BYTES = 5_390_000
 # The call module's gzip -9 size, decimal megabytes: 0.86 MB with the effects' compositors (#439),
 # plus about 15 %. The segmentation is a module of its own that only loads when an effect starts.
 DEFAULT_CALL_MODULE_BUDGET_BYTES = 1_000_000
@@ -79,8 +80,9 @@ PARTS = {
 # The UI's texts, one file per language (teamcraft-ui scripts/finish-loader.sh): a first visit
 # fetches one of them.
 TRANSLATIONS = "i18n/*.ftl"
-# The signed-in app's chunks: the list `init.js` fetches next to the app (teamcraft-web-bundle).
-SESSION_LIST = re.compile(r"for \(const href of \[([^\]]*)\]\)")
+# The signed-in app's chunks: the one file `init.js` fetches next to the app (teamcraft-web-bundle).
+SESSION_PACK = re.compile(r"const sessionPack = '/([^'/]+)'")
+SESSION_MODULE = "session"
 LABELS = {"app": "app", "session": "signed-in app", "service_worker": "service worker",
           "translations": "texts (1 lang)"}
 
@@ -105,7 +107,7 @@ def main(argv=None):
     if sizes is None:
         return 2
     maybe_baseline = load_baseline(args.baseline)
-    lazy = measure_lazy(args.dist, session_files(args.dist))
+    lazy = measure_lazy(args.dist, session_files(args.dist) + packed_files(args.dist))
     guest_bytes = guest_visit_bytes(args.dist)
     if guest_bytes is None:
         return 2
@@ -174,15 +176,24 @@ def sizes_of(paths):
 
 
 def session_files(dist):
-    """The files `init.js` fetches next to the app (empty for a build without the list)."""
+    """The signed-in app's pack, which `init.js` fetches next to the app (empty for a build without
+    an `init.js`)."""
     init = dist / "init.js"
     if not init.is_file():
         return []
-    match = SESSION_LIST.search(init.read_text(encoding="utf-8"))
+    match = SESSION_PACK.search(init.read_text(encoding="utf-8"))
     if not match:
         # Else the signed-in app would silently drop out of the budget.
-        raise SessionListMissing("init.js has no list of the signed-in app's files")
-    return [dist / name for name in re.findall(r"'/([^'/]+)'", match.group(1))]
+        raise SessionListMissing("init.js doesn't name the signed-in app's pack")
+    return [dist / match.group(1)]
+
+
+def packed_files(dist):
+    """The wasm files that are in the signed-in app's pack: they load with it, not later."""
+    loaders = sorted(dist.glob(SPLIT_LOADER))
+    if not loaders:
+        return []
+    return [dist / name for name in split_modules(loaders[0].read_text(encoding="utf-8")).get(SESSION_MODULE, [])]
 
 
 class SessionListMissing(Exception):

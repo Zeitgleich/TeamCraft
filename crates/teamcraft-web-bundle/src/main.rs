@@ -10,10 +10,13 @@
 //! 2. runs wasm-bindgen on the main part (`--target web --keep-lld-exports`),
 //! 3. optimizes every part with wasm-opt (release),
 //! 4. names every file after the build (`<name>-<id>…`, so the server caches them for good),
-//! 5. writes `init.js`, which loads the app with the loading screen's progress (`loader.js`) and,
-//!    unless the page is a guest's meeting link, fetches the signed-in app's chunks (`session`) at
-//!    the same time, as it does the UI's texts in the language the app starts in (#1437); and the
-//!    preload links with subresource integrity into `index.html`.
+//! 5. joins the signed-in app's chunks (`session`) into one file, its pack (#1465), which the chunk
+//!    loader takes them from: hundreds of files, most of them under 1 kB, were each their own request
+//!    (through the service worker) and streaming compile, most of a phone's start;
+//! 6. writes `init.js`, which loads the app with the loading screen's progress (`loader.js`) and,
+//!    unless the page is a guest's meeting link, fetches the pack at the same time, as it does the
+//!    UI's texts in the language the app starts in (#1437); and the preload links with subresource
+//!    integrity into `index.html`.
 //!
 //! ```text
 //! teamcraft-web-bundle --input <app.wasm> --staging <dir> --name teamcraft-ui --initializer <loader.js>
@@ -74,8 +77,14 @@ fn main() -> Result<()> {
   }
   std::fs::remove_dir_all(&work)?;
   let initializer = copy_hashed(&args.initializer, &args.staging)?;
+  // After wasm-opt: the pack holds the files as they are served.
   let session_files = module_files(&link_script, SESSION_MODULE)?;
-  write_init(&args.staging, &names, &initializer, &session_files)?;
+  let pack = write_session_pack(&args.staging, &names, &session_files)?;
+  std::fs::write(
+    args.staging.join(&names.link_js),
+    with_session_pack(&link_script, &pack)?,
+  )?;
+  write_init(&args.staging, &names, &initializer, &pack)?;
   report(&args.staging, &wasm_files)?;
   Ok(())
 }
@@ -95,9 +104,23 @@ struct Names {
   main_js: String,
   main_wasm: String,
   link_js: String,
+  session_pack: String,
   /// File names of chunks start with this.
   chunk_prefix: String,
   id: String,
+}
+
+/// The signed-in app's files as one (see [`write_session_pack`]).
+struct SessionPack {
+  file: String,
+  parts: Vec<PackedPart>,
+}
+
+/// A file in the pack and where its bytes are.
+struct PackedPart {
+  file: String,
+  offset: usize,
+  len: usize,
 }
 
 /// One split-off part: the name wasm-split gave it and the one it is served under.
@@ -140,6 +163,7 @@ impl Names {
       main_js: format!("{name}-{id}.js"),
       main_wasm: format!("{name}-{id}_bg.wasm"),
       link_js: format!("{name}-split-{id}.js"),
+      session_pack: format!("{name}-session-{id}.pack"),
       chunk_prefix: format!("{name}-"),
       id: id.to_owned(),
     }
@@ -306,6 +330,61 @@ fn loader_definitions(link_script: &str) -> Vec<&str> {
     .collect()
 }
 
+/// Joins the files of the signed-in app into one, which `init.js` fetches next to the app. The split
+/// leaves that module with hundreds of shared chunks (one per combination of modules that share
+/// code), most of them under 1 kB: as files, each is a request (through the service worker, in a
+/// signed release), a streaming compile and an instantiation of its own (#1465). The files stay as
+/// they are next to the pack: a guest's meeting loads its parts of them one by one, and a page
+/// whose pack didn't arrive falls back on them.
+fn write_session_pack(staging: &Path, names: &Names, session_files: &[String]) -> Result<SessionPack> {
+  let mut bytes = Vec::new();
+  let mut parts = Vec::with_capacity(session_files.len());
+  for file in session_files {
+    let part = std::fs::read(staging.join(file)).with_context(|| format!("reading {file}"))?;
+    parts.push(PackedPart {
+      file: file.clone(),
+      offset: bytes.len(),
+      len: part.len(),
+    });
+    bytes.extend_from_slice(&part);
+  }
+  std::fs::write(staging.join(&names.session_pack), bytes)?;
+  Ok(SessionPack {
+    file: names.session_pack.clone(),
+    parts,
+  })
+}
+
+/// The chunk loader with the pack's files taken from the pack: each of them says where it is, every
+/// other file is still fetched by itself (`fetchPart` in [`PACK_LOADER`]).
+fn with_session_pack(link_script: &str, pack: &SessionPack) -> Result<String> {
+  let mut script = link_script.to_owned();
+  for part in &pack.parts {
+    let from = format!("fetch(new URL(\"./{}\", import.meta.url))", part.file);
+    if !script.contains(&from) {
+      bail!("the chunk loader doesn't fetch {}", part.file);
+    }
+    script = script.replace(
+      &from,
+      &format!(
+        "fetchPart(new URL(\"./{}\", import.meta.url), {}, {})",
+        part.file, part.offset, part.len
+      ),
+    );
+  }
+  if !script.contains(INSTANTIATE_STREAMING) {
+    bail!("the chunk loader doesn't instantiate its parts the way this tool expects");
+  }
+  let script = script.replace(INSTANTIATE_STREAMING, "instantiatePart(src, imports)");
+  let (first_line, rest) = script
+    .split_once('\n')
+    .context("the chunk loader has no import line")?;
+  Ok(format!(
+    "{first_line}\n{}{rest}",
+    PACK_LOADER.replace("__PACK_PARTS__", &pack.parts.len().to_string())
+  ))
+}
+
 fn optimize(wasm_opt: &Path, args: &[String], file: &Path) -> Result<()> {
   let status = std::process::Command::new(wasm_opt)
     .args(args)
@@ -335,15 +414,10 @@ fn copy_hashed(source: &Path, staging: &Path) -> Result<String> {
 
 /// `init.js` (it starts the app; the server's Content-Security-Policy allows no inline scripts) and
 /// the preload links in `index.html`.
-fn write_init(staging: &Path, names: &Names, initializer: &str, session_files: &[String]) -> Result<()> {
+fn write_init(staging: &Path, names: &Names, initializer: &str, pack: &SessionPack) -> Result<()> {
   let wasm_size = std::fs::metadata(staging.join(&names.main_wasm))?.len();
-  let session_urls = session_files
-    .iter()
-    .map(|file| format!("'{PUBLIC_URL}{file}'"))
-    .collect::<Vec<_>>()
-    .join(", ");
   let init = INIT_TEMPLATE
-    .replace("__SESSION_FILES__", &session_urls)
+    .replace("__SESSION_PACK__", &format!("{PUBLIC_URL}{}", pack.file))
     .replace("__MAIN_JS__", &format!("{PUBLIC_URL}{}", names.main_js))
     .replace("__MAIN_WASM__", &format!("{PUBLIC_URL}{}", names.main_wasm))
     .replace("__WASM_SIZE__", &wasm_size.to_string())
@@ -403,26 +477,76 @@ fn hex(bytes: &[u8]) -> String {
   })
 }
 
+/// How wasm-split's loader instantiates a part (`wasm_split_cli_support`, `js.rs`).
+const INSTANTIATE_STREAMING: &str = "WebAssembly.instantiateStreaming(src, imports)";
+
+/// Goes into the chunk loader, after its import line: how it gets and instantiates its parts.
+const PACK_LOADER: &str = r#"
+// The signed-in app's parts come out of one file, the pack `init.js` fetches next to the app
+// (#1465): hundreds of tiny modules, each its own request and compile, were most of a phone's start.
+// A part that isn't in the pack, or a pack that didn't arrive, is fetched on its own as before.
+// Parts this small compile faster right here than they wait for a turn of the event loop.
+const MAX_COMPILED_AT_ONCE = 64 * 1024;
+let partsToTake = __PACK_PARTS__;
+function fetchPart(url, offset, length) {
+  const pack = globalThis.teamcraftSessionPack;
+  if (!pack) return fetch(url);
+  // The last part asked for lets the pack's bytes go once the modules are compiled.
+  partsToTake -= 1;
+  if (partsToTake === 0) globalThis.teamcraftSessionPack = undefined;
+  return pack.then((bytes) => new Uint8Array(bytes, offset, length), () => fetch(url));
+}
+async function instantiatePart(src, imports) {
+  const part = await src;
+  if (part instanceof Response) return WebAssembly.instantiateStreaming(part, imports);
+  if (part.byteLength <= MAX_COMPILED_AT_ONCE) {
+    try {
+      return new WebAssembly.Instance(new WebAssembly.Module(part), imports);
+    } catch (error) {
+      // A browser may refuse to compile on the main thread above its own limit.
+      if (!(error instanceof RangeError)) throw error;
+    }
+  }
+  return WebAssembly.instantiate(part, imports);
+}
+"#;
+
 /// Starts the app like Trunk's initializer does: the wasm is fetched with progress for the loading
 /// screen (`loader.js` default export: `onStart`, `onProgress`, `onComplete`, `onSuccess`,
 /// `onFailure`).
 const INIT_TEMPLATE: &str = r#"import init from '__MAIN_JS__';
 import initializer from '__INITIALIZER__';
 
-// The signed-in app is a chunk of its own (areas.rs): fetched at once, next to the app, unless this
-// is a guest's meeting link (`/meeting/<id>#invite=…`, meetings.rs `parse_guest_link`) or a share
-// link's download page (`/f/<id>#…`, share_link.rs), which never need it. The chunk loader's own requests then come from these.
+// Local timing of the start (#1465, teamcraft-ui start_timing.rs): marks only when asked for with
+// `localStorage` `teamcraft.startTiming`; the app reads them at its first view. Nothing is sent.
+let isTiming = false;
+try {
+  isTiming = localStorage.getItem('teamcraft.startTiming') === '1';
+} catch (error) {
+  // Storage blocked: no timing.
+}
+const mark = (name) => isTiming && performance.mark(`teamcraft:${name}`);
+
+// The signed-in app is a chunk of its own (areas.rs): its files, in one pack (#1465), are fetched at
+// once, next to the app, unless this is a guest's meeting link (`/meeting/<id>#invite=…`, meetings.rs
+// `parse_guest_link`) or a share link's download page (`/f/<id>#…`, share_link.rs), which never need
+// it. The chunk loader takes them from it; without it, it fetches them one by one.
+const sessionPack = '__SESSION_PACK__';
 const isGuestLink = (/^\/meeting\/[^/]+\/?$/.test(location.pathname) && /(^#|&)invite=[^&]/.test(location.hash))
   || (/^\/f\/[A-Za-z0-9_-]+\/?$/.test(location.pathname) && location.hash.length > 1);
 if (!isGuestLink) {
-  for (const href of [__SESSION_FILES__]) {
-    const link = document.createElement('link');
-    link.rel = 'preload';
-    link.as = 'fetch';
-    link.crossOrigin = 'anonymous';
-    link.href = href;
-    document.head.append(link);
-  }
+  mark('session-pack:start');
+  globalThis.teamcraftSessionPack = fetch(sessionPack).then(async (response) => {
+    // A file the server doesn't have comes back as the app's page (its fallback), with 200.
+    if (!response.ok || (response.headers.get('content-type') || '').startsWith('text/html')) {
+      throw new Error(`${sessionPack}: HTTP ${response.status}`);
+    }
+    const bytes = await response.arrayBuffer();
+    mark('session-pack:end');
+    return bytes;
+  });
+  // Nobody may be waiting yet; the chunk loader falls back on the files.
+  globalThis.teamcraftSessionPack.catch(() => {});
 }
 
 // The UI's texts (teamcraft-ui i18n.rs): the app carries none, so the language it starts in is
@@ -451,12 +575,15 @@ async function startTranslations() {
   const tag = startLanguage();
   const file = translationFiles[tag];
   if (!file) throw new Error(`this build has no texts for ${tag}`);
+  mark('texts-fetch:start');
   const response = await fetch(file);
   // A file the server doesn't have comes back as the app's page (its fallback), with 200.
   if (!response.ok || (response.headers.get('content-type') || '').startsWith('text/html')) {
     throw new Error(`${file}: HTTP ${response.status}`);
   }
-  return { tag, text: await response.text() };
+  const text = await response.text();
+  mark('texts-fetch:end');
+  return { tag, text };
 }
 
 const hooks = initializer();
@@ -465,6 +592,7 @@ const total = __WASM_SIZE__;
 // No integrity here: the browser would hold the body back until it is checked, which stops the
 // progress bar and streaming compilation. It protects nothing, the same server sends index.html;
 // the signed release check is the service worker's.
+mark('wasm-fetch:start');
 const response = fetch('__MAIN_WASM__').then((response) => {
   const reader = response.body.getReader();
   let current = 0;
@@ -472,6 +600,7 @@ const response = fetch('__MAIN_WASM__').then((response) => {
     async pull(controller) {
       const { done, value } = await reader.read();
       if (done) {
+        mark('wasm-fetch:end');
         hooks.onProgress?.({ current: total, total });
         controller.close();
         return;
@@ -484,7 +613,11 @@ const response = fetch('__MAIN_WASM__').then((response) => {
   return new Response(stream, { headers: response.headers, status: response.status, statusText: response.statusText });
 });
 // Without its texts the app doesn't mount: that is a failure to load too.
-Promise.all([init({ module_or_path: response }), globalThis.teamcraftTranslations]).then(
+const started = init({ module_or_path: response }).then((value) => {
+  mark('wasm:ready');
+  return value;
+});
+Promise.all([started, globalThis.teamcraftTranslations]).then(
   ([value]) => {
     hooks.onComplete?.();
     hooks.onSuccess?.(value);
@@ -543,6 +676,69 @@ export const __wasm_split_load_admin = wrapAsyncCb(makeLoad(() => {
     );
     assert_eq!(module_files(script, "admin").unwrap().len(), 3);
     assert!(module_files(script, "missing").is_err());
+  }
+
+  fn pack_of(parts: &[(&str, usize, usize)]) -> SessionPack {
+    SessionPack {
+      file: "app-session-id.pack".to_owned(),
+      parts: parts
+        .iter()
+        .map(|&(file, offset, len)| PackedPart {
+          file: file.to_owned(),
+          offset,
+          len,
+        })
+        .collect(),
+    }
+  }
+
+  const LINK_SCRIPT: &str = r#"import { initSync } from "./app-id.js";
+const __chunk_1 = makeLoad(() => {
+    const src = fetch(new URL("./app-chunk-1-id.wasm", import.meta.url));
+    src.catch(() => {});
+    return async (imports) => (WebAssembly.instantiateStreaming(src, imports));
+}
+, []);
+export const __wasm_split_load_admin = wrapAsyncCb(makeLoad(() => {
+    const src = fetch(new URL("./app-split-admin-id.wasm", import.meta.url));
+    src.catch(() => {});
+    return async (imports) => (WebAssembly.instantiateStreaming(src, imports));
+}
+, []));
+"#;
+
+  #[test]
+  fn the_pack_holds_each_file_after_the_other() {
+    let dir = std::env::temp_dir().join(format!("web-bundle-pack-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.wasm"), b"aaa").unwrap();
+    std::fs::write(dir.join("b.wasm"), b"bb").unwrap();
+    let names = Names::new("app", "0123456789abcdef");
+    let pack = write_session_pack(&dir, &names, &["a.wasm".to_owned(), "b.wasm".to_owned()]).unwrap();
+    assert_eq!(pack.file, "app-session-0123456789abcdef.pack");
+    assert_eq!(std::fs::read(dir.join(&pack.file)).unwrap(), b"aaabb");
+    assert_eq!((pack.parts[1].offset, pack.parts[1].len), (3, 2));
+    assert!(write_session_pack(&dir, &names, &["missing.wasm".to_owned()]).is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+  }
+
+  #[test]
+  fn the_loader_takes_the_packed_files_from_the_pack_and_fetches_the_others() {
+    let script = with_session_pack(LINK_SCRIPT, &pack_of(&[("app-chunk-1-id.wasm", 7, 412)])).unwrap();
+    assert!(script.contains(r#"fetchPart(new URL("./app-chunk-1-id.wasm", import.meta.url), 7, 412)"#));
+    assert!(script.contains(r#"const src = fetch(new URL("./app-split-admin-id.wasm", import.meta.url));"#));
+    assert!(!script.contains("(WebAssembly.instantiateStreaming(src, imports))"));
+    assert_eq!(script.matches("(instantiatePart(src, imports))").count(), 2);
+    // Right after the import, which must stay the module's first statement.
+    assert!(script.starts_with("import { initSync } from \"./app-id.js\";\n\n// The signed-in app's parts"));
+    assert!(script.contains("let partsToTake = 1;"));
+  }
+
+  #[test]
+  fn a_loader_that_does_not_look_as_expected_stops_the_build() {
+    assert!(with_session_pack(LINK_SCRIPT, &pack_of(&[("not-there.wasm", 0, 1)])).is_err());
+    let other_way = LINK_SCRIPT.replace(INSTANTIATE_STREAMING, "WebAssembly.instantiate(src, imports)");
+    assert!(with_session_pack(&other_way, &pack_of(&[("app-chunk-1-id.wasm", 0, 1)])).is_err());
   }
 
   #[test]

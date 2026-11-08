@@ -51,6 +51,9 @@ const STATE_CACHE = 'teamcraft-sw-state';
 // activation, so the running worker, restarted meanwhile, keeps serving its own release.
 const PENDING_STATE = '/pending';
 const PUSH_CONFIG_CACHE = 'teamcraft-push-config';
+// The brand's colors of the last start (`brandTheme`).
+const BRAND_THEME_CACHE = 'teamcraft-brand-theme';
+const BRAND_THEME_PATH = '/api/v1/brand/theme.css';
 const PUSH_WASM = '__PUSH_WASM__';
 
 // Sharing into the installed app (#208). The manifest declares this as a share target
@@ -144,6 +147,10 @@ self.addEventListener('fetch', (event) => {
   const request = event.request;
   const url = new URL(request.url);
   if (request.method !== 'GET' || url.origin !== self.location.origin) return;
+  if (url.pathname === BRAND_THEME_PATH) {
+    event.respondWith(brandTheme(event));
+    return;
+  }
   if (url.pathname.startsWith('/api/') || url.pathname === '/sw.js' || url.pathname === '/release.json') return;
   event.respondWith(
     restored.then(() => (status.state === 'verified' ? fromVerifiedCache(event, url) : fetch(request))),
@@ -277,6 +284,23 @@ async function adoptPendingStatus() {
   status = await pending.json();
   await saveState('/state', status);
   await state.delete(PENDING_STATE);
+}
+
+// The brand's colors, which `index.html` links before the first paint (docs/branding.md): nothing is
+// painted until they are there, and on a phone the first request after a while can take seconds
+// (#1465). The copy of the last start answers at once and this start's answer is kept for the next
+// one, so nothing on the network holds back the first paint. Only colors, of the same origin; not
+// part of the signed release, and the same with or without a verified release.
+async function brandTheme(event) {
+  const cache = await caches.open(BRAND_THEME_CACHE);
+  const kept = await cache.match(BRAND_THEME_PATH, { ignoreVary: true });
+  const fresh = fetch(event.request).then(async (response) => {
+    if (response.ok) await cache.put(BRAND_THEME_PATH, response.clone());
+    return response;
+  });
+  if (!kept) return fresh;
+  event.waitUntil(fresh.catch(() => {}));
+  return kept;
 }
 
 async function fromVerifiedCache(event, url) {

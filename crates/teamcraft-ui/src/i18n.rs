@@ -203,7 +203,8 @@ fn install(locale: Locale, source: &str) {
 /// means no texts at all: `init.js` then shows the loading screen's failure with its retry.
 #[cfg(target_arch = "wasm32")]
 pub async fn load_start_language() -> Result<(), String> {
-  web::load_start().await?;
+  use crate::start_timing::{Part, timed};
+  timed(Part::Texts, web::load_start()).await?;
   let wanted = crate::settings::stored_locale();
   if !is_loaded(wanted)
     && let Err(error) = web::load(wanted).await

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>start bench</title></head>
+<body>
+<p id="status">seeding…</p>
+<script type="module">
+// Seeds the store of a member (web_start_seed), hands the app the account as a cached sign-in of
+// this tab, and opens the app. ?channels=&messages= size the data; ?frame=N opens the app N times
+// in an iframe instead and posts each start's timing to /__timing (for Safari in the simulator).
+import init, { seed } from './web_start_seed.js';
+const params = new URLSearchParams(location.search);
+const status = document.getElementById('status');
+const say = (text) => { status.textContent = text; };
+try {
+  localStorage.setItem('teamcraft.startTiming', '1');
+  if (!sessionStorage.getItem('teamcraft.local_session') || params.has('reseed')) {
+    await init();
+    const started = performance.now();
+    const me = JSON.parse(await seed(Number(params.get('channels') || 40), Number(params.get('messages') || 25), Number(params.get('history') || 0)));
+    sessionStorage.setItem('teamcraft.local_session', JSON.stringify({ token: 'start-bench', expires_at_ms: Date.now() + 3600e3, account: me }));
+    say(`seeded ${me.id} in ${Math.round(performance.now() - started)} ms`);
+  }
+  const frames = Number(params.get('frame') || 0);
+  if (!frames) {
+    location.href = '/';
+  } else {
+    const label = params.get('label') || 'run';
+    for (let run = 0; run < frames; run += 1) {
+      const frame = document.createElement('iframe');
+      frame.style.cssText = 'width:390px;height:700px;border:1px solid #888';
+      frame.src = '/';
+      document.body.replaceChildren(status, frame);
+      const summary = await new Promise((resolve, reject) => {
+        const deadline = Date.now() + 120000;
+        const poll = () => {
+          const found = frame.contentWindow && frame.contentWindow.teamcraftStartTiming;
+          if (found) return resolve(JSON.parse(JSON.stringify(found)));
+          if (Date.now() > deadline) return reject(new Error('no timing'));
+          setTimeout(poll, 50);
+        };
+        poll();
+      });
+      summary.paint = Object.fromEntries(frame.contentWindow.performance.getEntriesByType('paint').map((entry) => [entry.name, Math.round(entry.startTime)]));
+      summary.run = run;
+      summary.label = label;
+      summary.ua = navigator.userAgent;
+      await fetch('/__timing', { method: 'POST', body: JSON.stringify(summary) });
+      say(`${label} run ${run}: first view at ${summary.firstViewMs} ms`);
+      // Gone before the next one starts: its Web Lock on the store goes with it.
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      frame.remove();
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+    say(`${label}: done`);
+  }
+} catch (error) {
+  say(`failed: ${error}`);
+  await fetch('/__timing', { method: 'POST', body: JSON.stringify({ error: String(error) }) });
+}
+</script>
+</body>
+</html>

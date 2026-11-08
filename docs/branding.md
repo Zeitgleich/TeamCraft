@@ -163,6 +163,8 @@ of the request host:
 - `GET /api/v1/brand/theme.css` returns the brand's colors as CSS custom properties (light, dark by
   `prefers-color-scheme` and `[data-theme]` like `main.css`). It exists because the CSP forbids inline
   styles: the web shell links it before the first paint, so there is no flash of the default colors.
+  In a signed release the service worker answers it from the copy of the last start and fetches
+  the fresh one for the next start, so a slow network doesn't hold back the first paint (#1465).
   Only hex colors that passed validation are written; the CSS contains no other configured text.
 - `GET /api/v1/brand/manifest.webmanifest` is the web app manifest, so the web client can be
   installed (add to home screen): the brand's display name, `display: standalone`, its `chrome` color
