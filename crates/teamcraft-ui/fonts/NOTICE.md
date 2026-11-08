@@ -2,7 +2,8 @@
 
 The fonts of the font setting (issue #1494). They load only when someone picks one (`src/fonts.rs`):
 the web client fetches the file from its own origin and the service worker keeps it; the desktop app
-embeds the web build; Android bundles the same set in `apps/android/app/src/main/res/font/`.
+embeds the web build; Android bundles the same set in `apps/android/app/src/main/res/font/`, and
+the iOS app bundles those files too (`apps/ios/project.yml`, `UIAppFonts`).
 
 Every font is under the SIL Open Font License 1.1; the licence texts are in `licenses/`, and each file
 keeps its name table with the copyright and licence. Fonts with a Reserved Font Name are shipped

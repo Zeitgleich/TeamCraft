@@ -26,7 +26,7 @@ struct ServerEntryView: View {
           .frame(width: 72, height: 72)
           .accessibilityHidden(true)
         Text("server_entry_title")
-          .font(.largeTitle.bold())
+          .font(.app(.largeTitle).bold())
           .multilineTextAlignment(.center)
           .accessibilityAddTraits(.isHeader)
         Text(model.isServerLocked ? LocalizedStringKey("server_managed_hint") : LocalizedStringKey("server_entry_hint"))
@@ -34,7 +34,7 @@ struct ServerEntryView: View {
           .foregroundStyle(Theme.textMuted)
         VStack(alignment: .leading, spacing: 6) {
           Text("server_entry_label")
-            .font(.subheadline.weight(.semibold))
+            .font(.app(.subheadline).weight(.semibold))
             .accessibilityHidden(true)
           TextField("server_entry_placeholder", text: $address)
             .keyboardType(.URL)
@@ -107,11 +107,11 @@ struct ServerConfirmView: View {
       VStack(spacing: 24) {
         BrandLogo(brand: brand)
         Text(verbatim: brand.brand?.displayName ?? checked.server.displayName)
-          .font(.largeTitle.bold())
+          .font(.app(.largeTitle).bold())
           .multilineTextAlignment(.center)
           .accessibilityAddTraits(.isHeader)
         Text(verbatim: checked.server.address.host)
-          .font(.headline)
+          .font(.app(.headline))
           .foregroundStyle(Theme.textMuted)
         Text("server_confirm_provider \(checked.identityProviderHost)")
           .multilineTextAlignment(.center)
@@ -179,7 +179,7 @@ struct BrandTiles: View {
       } else {
         tile(Theme.accent) {
           Text(verbatim: String((brand.brand?.displayName ?? "").prefix(1)).uppercased())
-            .font(.title.bold())
+            .font(.app(.title).bold())
             .foregroundStyle(Theme.onAccent)
         }
       }

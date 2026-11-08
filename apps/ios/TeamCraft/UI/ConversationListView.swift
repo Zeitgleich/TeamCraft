@@ -443,7 +443,7 @@ struct ConversationListView: View {
               .font(.system(size: 20))
               .frame(height: 26)
               .overlay(alignment: .topTrailing) { TabBadgeMark(count: badge.count, hasNew: badge.hasNew) }
-            Text(tabLabel(item)).font(.caption2)
+            Text(tabLabel(item)).font(.app(.caption2))
           }
           .frame(maxWidth: .infinity, minHeight: 49)
           .foregroundStyle(shownTab == item ? Theme.accent : Theme.textMuted)
@@ -493,7 +493,7 @@ struct ConversationListView: View {
   private var composeButton: some View {
     Button { maybeBrowseTab = .people } label: {
       Image(systemName: "square.and.pencil")
-        .font(.title2.weight(.semibold))
+        .font(.app(.title2).weight(.semibold))
         .foregroundStyle(.white)
         .frame(width: 56, height: 56)
         .background(Theme.accent, in: .rect(cornerRadius: 16))
@@ -655,7 +655,7 @@ struct ConversationListView: View {
         Button { toggleCollapsed(key) } label: {
           HStack(spacing: 8) {
             Image(systemName: "chevron.down")
-              .font(.footnote.weight(.semibold))
+              .font(.app(.footnote).weight(.semibold))
               .rotationEffect(.degrees(isCollapsed ? -90 : 0))
             if section.isSpace, let spaceId = section.spaceId {
               SpacePictureView(spaceId: spaceId, maybeVersion: section.spaceImageVersion)
@@ -891,20 +891,20 @@ struct ConversationRow: View {
             // After the name on the same line, so every row is as high as the others; it shortens
             // first (#1346).
             Text(verbatim: space)
-              .font(.caption)
+              .font(.app(.caption))
               .foregroundStyle(Theme.textMuted)
               .lineLimit(1)
               .truncationMode(.tail)
               .layoutPriority(-1)
           }
           if conversation.isMuted {
-            Image(systemName: "bell.slash").font(.caption).foregroundStyle(Theme.textMuted)
+            Image(systemName: "bell.slash").font(.app(.caption)).foregroundStyle(Theme.textMuted)
               .accessibilityLabel(Text("chat_muted"))
           }
           Spacer()
           if callCount > 0 {
             Label("\(callCount)", systemImage: "phone.fill")
-              .font(.caption2.weight(.semibold))
+              .font(.app(.caption2).weight(.semibold))
               .foregroundStyle(.white)
               .padding(.horizontal, 6)
               .padding(.vertical, 1)
@@ -918,13 +918,13 @@ struct ConversationRow: View {
           }
           if let preview = maybePreview {
             Text(listTime(preview.sentDate))
-              .font(.caption)
+              .font(.app(.caption))
               .foregroundStyle(isUnread ? Theme.accent : Theme.textMuted)
           }
         }
         HStack {
           previewText
-            .font(.subheadline)
+            .font(.app(.subheadline))
             .foregroundStyle(isUnread ? Theme.text : Theme.textMuted)
             .lineLimit(1)
           Spacer()
@@ -1019,7 +1019,7 @@ extension ConversationItem {
 struct BotBadge: View {
   var body: some View {
     Text("badge_bot")
-      .font(.caption2.weight(.semibold))
+      .font(.app(.caption2).weight(.semibold))
       .foregroundStyle(Theme.textMuted)
       .padding(.horizontal, 4)
       .padding(.vertical, 1)
@@ -1041,8 +1041,8 @@ struct SearchResultsView: View {
       List(hits, id: \.message.id) { hit in
         Button { onSelect(hit) } label: {
           VStack(alignment: .leading, spacing: 2) {
-            Text(hit.listName).font(.caption).foregroundStyle(Theme.textMuted)
-            Text(verbatim: hit.message.shownAuthorName).font(.subheadline.weight(.semibold))
+            Text(hit.listName).font(.app(.caption)).foregroundStyle(Theme.textMuted)
+            Text(verbatim: hit.message.shownAuthorName).font(.app(.subheadline).weight(.semibold))
             Text(hit.message.body).lineLimit(3)
           }
         }
@@ -1106,7 +1106,7 @@ struct FirstSyncBar: View {
             ProgressView().controlSize(.mini)
           }
         }
-        .font(.footnote)
+        .font(.app(.footnote))
         .foregroundStyle(.secondary)
         if let fraction = progress.maybeFraction {
           ProgressView(value: Double(fraction))
@@ -1145,10 +1145,10 @@ private struct QuickAccessCardLabel: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 4) {
-      Image(systemName: symbol).font(.body.weight(.semibold))
-      Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
+      Image(systemName: symbol).font(.app(.body).weight(.semibold))
+      Text(title).font(.app(.subheadline).weight(.semibold)).lineLimit(1)
       Text(status)
-        .font(.caption)
+        .font(.app(.caption))
         .fontWeight(isHighlighted ? .semibold : .regular)
         .foregroundStyle(isHighlighted ? Theme.accent : Theme.textMuted)
         .lineLimit(1)
@@ -1171,7 +1171,7 @@ private struct TabBadgeMark: View {
   var body: some View {
     if count > 0 {
       Text(count > 99 ? "99+" : "\(count)")
-        .font(.caption2.weight(.bold))
+        .font(.app(.caption2).weight(.bold))
         .foregroundStyle(.white)
         .padding(.horizontal, 5)
         .frame(minWidth: 18, minHeight: 18)

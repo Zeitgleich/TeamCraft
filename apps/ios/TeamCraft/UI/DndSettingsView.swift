@@ -180,7 +180,7 @@ struct DndWindowSummary: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
       Text(DndWindowText.times(window))
-      Text(DndWindowText.days(window)).font(.caption).foregroundStyle(Theme.textMuted)
+      Text(DndWindowText.days(window)).font(.app(.caption)).foregroundStyle(Theme.textMuted)
     }
   }
 }
@@ -256,7 +256,7 @@ struct PersonPickerView: View {
       } label: {
         VStack(alignment: .leading) {
           Text(person.displayName)
-          if let username = person.username { Text(verbatim: "@\(username)").font(.caption).foregroundStyle(Theme.textMuted) }
+          if let username = person.username { Text(verbatim: "@\(username)").font(.app(.caption)).foregroundStyle(Theme.textMuted) }
         }
       }
     }

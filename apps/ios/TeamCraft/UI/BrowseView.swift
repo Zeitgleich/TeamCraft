@@ -96,15 +96,15 @@ struct BrowseView: View {
       VStack(alignment: .leading) {
         HStack(spacing: 4) {
           if isPrivate {
-            Image(systemName: "lock.fill").font(.footnote).foregroundStyle(Theme.textMuted)
+            Image(systemName: "lock.fill").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
               .accessibilityLabel(Text("browse_private"))
           }
           Text(verbatim: (isPrivate ? "" : "# ") + channel.name)
         }
         if !channel.isMember && maybeJoin == .requested {
-          Text("browse_join_requested_hint").font(.footnote).foregroundStyle(Theme.textMuted)
+          Text("browse_join_requested_hint").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
         } else if let topic = channel.topic, !topic.isEmpty {
-          Text(verbatim: topic).font(.footnote).foregroundStyle(Theme.textMuted)
+          Text(verbatim: topic).font(.app(.footnote)).foregroundStyle(Theme.textMuted)
         }
       }
       Spacer()
@@ -137,16 +137,16 @@ struct BrowseView: View {
         .disabled(isPending)
     case .requested:
       VStack(alignment: .trailing, spacing: 2) {
-        Text("browse_join_requested").font(.caption).foregroundStyle(Theme.textMuted)
+        Text("browse_join_requested").font(.app(.caption)).foregroundStyle(Theme.textMuted)
         Button("browse_join_withdraw") {
           Task { await model.withdrawJoinRequest(conversationId: channel.conversation) }
         }
-        .font(.subheadline)
+        .font(.app(.subheadline))
         .disabled(isPending)
       }
     case .asAdmin:
       Text("browse_join_admin_elsewhere")
-        .font(.caption)
+        .font(.app(.caption))
         .foregroundStyle(Theme.textMuted)
         .multilineTextAlignment(.trailing)
         .frame(maxWidth: 140, alignment: .trailing)
@@ -316,7 +316,7 @@ struct PersonPickRow: View {
           .foregroundStyle(isPicked ? Theme.accent : Theme.textMuted)
         VStack(alignment: .leading) {
           Text(verbatim: person.displayName).foregroundStyle(Theme.text)
-          Text(verbatim: "@" + person.username).font(.footnote).foregroundStyle(Theme.textMuted)
+          Text(verbatim: "@" + person.username).font(.app(.footnote)).foregroundStyle(Theme.textMuted)
         }
       }
     }
