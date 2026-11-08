@@ -12,6 +12,7 @@ mod app_link;
 mod bridge;
 mod calls;
 mod channel_roles;
+mod color_theme;
 mod engine;
 mod error;
 mod http_fetch;
