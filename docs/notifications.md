@@ -93,6 +93,8 @@ same list as a "Chats" tab (still labelled "Home" in the mobile shells until the
 |-----------------------------------|-----------------------------------------------------------------|
 | Level (all / mentions / none)     | `GET`/`PUT /conversations/{id}/notification-settings`           |
 | Mute until a time                 | same; also shown as `muted_until` in `my_membership`            |
+| `@channel` notifies here          | same (`channel_mentions`); also in `my_membership`              |
+| Quiet hours of a conversation     | same (`quiet_hours`); also in `my_membership`                   |
 | Do-not-disturb schedule           | `GET`/`PUT /me/notification-settings` (`dnd_schedule`)          |
 | Push mode (`away_only`, `always`) | same                                                            |
 | Auto-follow mentioned threads     | same                                                            |
@@ -134,6 +136,46 @@ as fallback, an allow list of senders, whether urgent messages break through) an
 the database does not interpret. The server evaluates it in the push routing with its time zone
 database, so a daylight saving change needs no client.
 
+### Per-conversation filters
+
+Issue #599. Next to level and mute time a member sets two filters per conversation, in the
+conversation's bell menu (desktop and web) or its notification dialog (Android):
+
+- **`@channel` and `@here`** (`channel_mentions`): `default` follows the general setting
+  "@channel notifies me" (Settings → Notifications, synced in the account's encrypted data), `notify`
+  lets `@channel`, `@here` and `@all` count as a mention here, `ignore` never. At the level
+  "mentions" this is the "only announcements" filter: chatter stays quiet, `@channel` gets through
+  (`notify`), or a channel whose members overuse it stops interrupting (`ignore`). A direct
+  `@username` mention always counts.
+- **Quiet hours** (`quiet_hours`): weekly ranges like the DND schedule's (weekdays, start and end
+  minute, a range past midnight belongs to the day it starts on), in the member's IANA time zone with
+  the UTC offset as fallback. While one is on, the conversation acts muted: no notification and no
+  push, also not for mentions, urgent messages and calls (as a mute; DND overrides don't apply).
+  Unread and mention counts are not affected, like a mute's.
+
+Both are the conversation's own: they don't follow the space and `"is_inherited": true` (back to the
+space's level) leaves them. A `PUT` without the fields keeps them, so clients from before them
+change nothing; quiet hours without ranges remove them; a value from a newer version reads as
+`default` (`ChannelMentions::Unknown`), and clients leave it out when they write. The server
+validates ranges and zone like the DND schedule's (at most 14 ranges).
+
+**What the server learns.** The server can't read message text, so the sending device marks a
+message that addresses the whole conversation (`is_channel_mention`, from `addresses_everyone` in
+`teamcraft-proto`, shared by every client). It counts only when the sender may use channel mentions
+(`use_channel_mentions`); the server never stores it with the message, a held message keeps it until
+it is released. The routing then treats the message as a mention for members whose
+`channel_mentions` is `notify`. It can't see the general device setting, so `default` doesn't push
+for `@channel` (as before the filter); members who want such pushes choose `notify`. Clients from
+before the bit send none: their `@channel` notifies on the desktops of members who let it, not on
+phones.
+
+**Where it is decided.** The push routing (`push::routing`) checks quiet hours right after the mute
+and evaluates them with its time zone database, so daylight saving time needs no client. The desktop
+and web notifier (`notifier::decide`) checks them again with the device's current offset, like the
+DND schedule, and applies `channel_mentions` to its own mention rules. Android shows what the push
+routing let through. Changes reach the user's other devices like level and mute: the server holds
+them, desktop and web read them at start, Android with the dialog.
+
 ## E-mail digest of missed mentions
 
 The only e-mail notification, **content-free** like everything the server can do here: it knows who is
@@ -174,6 +216,7 @@ keeps its gateway connection until it stops syncing, about half a minute later, 
 notification for what arrives over it. In order:
 
 1. **Muted** (level `none`, or muted until a later time, own or inherited from the space): never pushes.
+   The conversation's quiet hours count as a mute while they are on ("Per-conversation filters").
 2. **Do not disturb** (manual, timed, or the weekly schedule): suppresses the push unless an override
    applies: the sender is on the user's allow list, or the message is urgent and the user lets urgent
    messages through. Overrides apply to manual and scheduled DND alike.
@@ -182,9 +225,10 @@ notification for what arrives over it. In order:
    phones wait for the grace delay and go out only if the message is still unread then. Push mode
    `always` skips both.
 4. **Level** (see "Default level"): mentions, DMs and replies in followed threads push; other
-   messages only in `all` conversations; integration channels only for mentions.
+   messages only in `all` conversations; integration channels only for mentions. An `@channel`
+   counts as a mention where the member set `channel_mentions` to `notify`.
 
-Calls ring every device of the callee (desktop, web and phones alike) unless the conversation is muted or
+Calls ring every device of the callee (desktop, web and phones alike) unless the conversation is muted (quiet hours included) or
 DND is on without an override.
 
 ## Mobile push delivery
