@@ -7,7 +7,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import de.zeitgleich.teamcraft.core.ConversationNotificationSettings
 import de.zeitgleich.teamcraft.core.NotificationSettings
+import de.zeitgleich.teamcraft.core.QuietHours
 import de.zeitgleich.teamcraft.core.WireJson
 
 class DoNotDisturbTest {
@@ -114,6 +116,37 @@ class DoNotDisturbTest {
     assertFalse(QuickDnd.isScheduledAt(schedule, Instant.parse("2026-01-17T07:00:00Z"), BERLIN))
     // Thursday 23:00: not a Friday window.
     assertFalse(QuickDnd.isScheduledAt(schedule, Instant.parse("2026-01-15T22:00:00Z"), BERLIN))
+  }
+
+  @Test
+  fun quietHoursSaveInTheDeviceZoneAndNoRangesRemoveThem() {
+    val editor = QuietHoursEditor(listOf(DndRange(setOf(Weekday.SATURDAY), 9 * 60, 17 * 60)))
+    // A summer instant: Berlin is UTC+2.
+    val quiet = editor.toQuietHours(BERLIN, Instant.parse("2026-07-15T12:00:00Z"))
+    assertEquals(
+      """{"utc_offset_minutes":120,"time_zone":"Europe/Berlin","windows":[{"weekdays":["sat"],"start_minute":540,"end_minute":1020}]}""",
+      WireJson.encodeToString(QuietHours.serializer(), quiet),
+    )
+    assertEquals(editor, QuietHoursEditor.from(quiet))
+    assertTrue(QuietHoursEditor().toQuietHours(BERLIN, Instant.now()).windows.isEmpty())
+    assertFalse(QuietHoursEditor(listOf(DndRange(emptySet(), 0, 60))).isValid)
+  }
+
+  @Test
+  fun channelMentionsKeepAValueFromANewerServer() {
+    assertEquals(ChannelMentions.DEFAULT, ChannelMentions.shown(null))
+    assertEquals(ChannelMentions.NOTIFY, ChannelMentions.toSend(ChannelMentions.NOTIFY))
+    assertEquals(null, ChannelMentions.toSend("only_admins"))
+    val read = WireJson.decodeFromString(
+      ConversationNotificationSettings.serializer(),
+      """{"level":"mentions","channel_mentions":"only_admins","is_inherited":false}""",
+    )
+    assertEquals("only_admins", read.channelMentions)
+    // Older settings without filters send none, so the server keeps them.
+    assertEquals(
+      """{"level":"all","is_inherited":false}""",
+      WireJson.encodeToString(ConversationNotificationSettings.serializer(), ConversationNotificationSettings()),
+    )
   }
 
   private companion object {
