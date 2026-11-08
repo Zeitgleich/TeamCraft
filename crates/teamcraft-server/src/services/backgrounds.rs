@@ -12,6 +12,7 @@ use time::OffsetDateTime;
 use tracing::warn;
 
 use super::convert::unix_millis;
+use super::storage_cleanup;
 
 /// Extra time after an upload URL's expiry before a deleted background's row goes.
 const SWEEP_MARGIN: time::Duration = time::Duration::minutes(5);
@@ -72,7 +73,7 @@ pub async fn complete_background_upload(
   }
   let stored = store.object_size(&background.s3_key).await.map_err(|error| {
     warn!(%error, "checking the uploaded background failed");
-    ApiError::storage_unavailable("background storage")
+    ApiError::storage_failed("background storage", error)
   })?;
   match stored {
     None => Err(ApiError::Conflict("the background has not been uploaded".into())),
@@ -91,6 +92,7 @@ pub async fn download_background(
   id: BackgroundId,
 ) -> Result<BackgroundDownloadResponse, ApiError> {
   let store = blob_store(state)?;
+  store.check_available()?;
   let background = own_background(state, caller, id).await?;
   if !background.is_complete {
     return Err(ApiError::Conflict("the upload has not been completed".into()));
@@ -118,9 +120,7 @@ pub async fn sweep(state: &AppState, before: OffsetDateTime) -> Result<usize, Ap
   let mut keys = state.database.sweep_user_backgrounds(before).await?;
   keys.extend(state.database.sweep_org_backgrounds(before).await?);
   for key in &keys {
-    if let Err(error) = store.delete_object(key).await {
-      warn!(%error, "deleting a swept background object failed");
-    }
+    storage_cleanup::delete_or_queue(state, store, key).await;
   }
   Ok(keys.len())
 }
@@ -141,11 +141,8 @@ pub async fn delete_background(
 ) -> Result<(), ApiError> {
   let store = blob_store(state)?;
   own_background(state, caller, id).await?;
-  if let Some(key) = state.database.delete_user_background(id).await?
-    && let Err(error) = store.delete_object(&key).await
-  {
-    // The row is gone, so nobody can fetch the object any more; storage cleanup can retry.
-    warn!(%error, "deleting a background object failed");
+  if let Some(key) = state.database.delete_user_background(id).await? {
+    storage_cleanup::delete_or_queue(state, store, &key).await;
   }
   Ok(())
 }

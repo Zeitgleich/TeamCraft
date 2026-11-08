@@ -15,6 +15,7 @@ use tracing::warn;
 
 use super::convert::unix_millis;
 use super::directory::visible_user;
+use super::storage_cleanup::delete_or_queue;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -117,7 +118,7 @@ pub async fn create_avatar_upload(
     )
     .await?;
   if let Some(previous) = previous {
-    forget_object(store, &previous).await;
+    delete_or_queue(state, store, &previous).await;
   }
   Ok(CreateAvatarUploadResponse {
     upload_url: store
@@ -141,12 +142,12 @@ pub async fn complete_avatar_upload(
     .ok_or_else(|| ApiError::Conflict("no avatar upload is waiting".into()))?;
   let stored = store.object_size(&pending.key).await.map_err(|error| {
     warn!(%error, "avatar storage check failed");
-    ApiError::storage_unavailable("avatar storage")
+    ApiError::storage_failed("avatar storage", error)
   })?;
   match stored {
     None => return Err(ApiError::Conflict("the avatar has not been uploaded".into())),
     Some(size) if size != pending.size_bytes => {
-      forget_object(store, &pending.key).await;
+      delete_or_queue(state, store, &pending.key).await;
       return Err(ApiError::Conflict(format!(
         "the stored avatar has {size} bytes, {} were announced",
         pending.size_bytes
@@ -155,7 +156,7 @@ pub async fn complete_avatar_upload(
     Some(_) => {},
   }
   if let Some(replaced) = state.database.promote_pending_avatar(caller.user.id).await? {
-    forget_object(store, &replaced).await;
+    delete_or_queue(state, store, &replaced).await;
   }
   publish_update(state, caller.user.id).await?;
   profile_of(state, caller.user.id).await
@@ -169,7 +170,7 @@ pub async fn delete_my_avatar(state: &AppState, caller: &AuthenticatedUser) -> R
 pub(super) async fn remove_avatar(state: &AppState, user: UserId) -> Result<(), ApiError> {
   let store = blob_store(state)?;
   if let Some(key) = state.database.clear_avatar(user).await? {
-    forget_object(store, &key).await;
+    delete_or_queue(state, store, &key).await;
     publish_update(state, user).await?;
   }
   Ok(())
@@ -187,12 +188,15 @@ pub(super) async fn store_avatar(state: &AppState, user: UserId, png: Vec<u8>) -
   store
     .put_object(&avatar.key, png, AvatarContentType::Png.as_str())
     .await
-    .map_err(|error| ApiError::Unavailable(format!("storing the picture failed: {error}")))?;
+    .map_err(|error| {
+      warn!(%error, "storing a picture failed");
+      ApiError::storage_failed("avatar storage", error)
+    })?;
   if let Some(previous) = state.database.set_pending_avatar(user, &avatar).await? {
-    forget_object(store, &previous).await;
+    delete_or_queue(state, store, &previous).await;
   }
   if let Some(replaced) = state.database.promote_pending_avatar(user).await? {
-    forget_object(store, &replaced).await;
+    delete_or_queue(state, store, &replaced).await;
   }
   publish_update(state, user).await
 }
@@ -204,6 +208,8 @@ pub async fn get_avatar(
   user: UserId,
 ) -> Result<AvatarResponse, ApiError> {
   let store = blob_store(state)?;
+  // While the storage is down, say "later" here instead of handing out a URL that fails.
+  store.check_available()?;
   let visible = visible_user(state, caller, user).await?;
   let avatar = state
     .database
@@ -258,13 +264,6 @@ fn blob_store(state: &AppState) -> Result<&std::sync::Arc<BlobStore>, ApiError> 
     .maybe_blob_store
     .as_ref()
     .ok_or_else(|| ApiError::Unavailable("storage is not configured".into()))
-}
-
-/// Deletes an object nobody refers to any more; a failure only leaves an orphan behind.
-async fn forget_object(store: &BlobStore, key: &str) {
-  if let Err(error) = store.delete_object(key).await {
-    warn!(%error, "deleting an old avatar failed");
-  }
 }
 
 /// Trims; empty means "not set"; control characters are refused.
