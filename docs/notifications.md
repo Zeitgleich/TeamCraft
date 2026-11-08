@@ -140,7 +140,8 @@ database, so a daylight saving change needs no client.
 ### Per-conversation filters
 
 Issue #599. Next to level and mute time a member sets two filters per conversation, in the
-conversation's bell menu (desktop and web) or its notification dialog (Android):
+conversation's bell menu (desktop and web), its notification dialog (Android) or its "Notification
+filters" sheet (iOS):
 
 - **`@channel` and `@here`** (`channel_mentions`): `default` follows the general setting
   "@channel notifies me" (Settings → Notifications, synced in the account's encrypted data), `notify`
@@ -173,9 +174,9 @@ phones.
 **Where it is decided.** The push routing (`push::routing`) checks quiet hours right after the mute
 and evaluates them with its time zone database, so daylight saving time needs no client. The desktop
 and web notifier (`notifier::decide`) checks them again with the device's current offset, like the
-DND schedule, and applies `channel_mentions` to its own mention rules. Android shows what the push
+DND schedule, and applies `channel_mentions` to its own mention rules. Android and iOS show what the push
 routing let through. Changes reach the user's other devices like level and mute: the server holds
-them, desktop and web read them at start, Android with the dialog.
+them, desktop and web read them at start, Android and iOS with the dialog or sheet.
 
 ## E-mail digest of missed mentions
 

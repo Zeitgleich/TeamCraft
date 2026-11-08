@@ -15689,6 +15689,182 @@
         }
       }
     },
+    "notify_filters_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notification filters"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Benachrichtigungsfilter"
+          }
+        }
+      }
+    },
+    "notify_channel_mentions": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "@channel and @here"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "@channel und @here"
+          }
+        }
+      }
+    },
+    "notify_channel_mentions_default": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Follow my general setting"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Meiner allgemeinen Einstellung folgen"
+          }
+        }
+      }
+    },
+    "notify_channel_mentions_notify": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notify me"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mich benachrichtigen"
+          }
+        }
+      }
+    },
+    "notify_channel_mentions_ignore": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Never notify me"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nie benachrichtigen"
+          }
+        }
+      }
+    },
+    "notify_channel_mentions_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Whether @channel, @here and @all count as a mention in this conversation. A direct @name always counts."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ob @channel, @here und @all in dieser Unterhaltung als Erwähnung zählen. Eine direkte Erwähnung mit @Name zählt immer."
+          }
+        }
+      }
+    },
+    "notify_channel_mentions_unknown_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This conversation has a choice from a newer version. It stays as it is until you pick one here."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Unterhaltung hat eine Auswahl aus einer neueren Version. Sie bleibt, wie sie ist, bis du hier eine wählst."
+          }
+        }
+      }
+    },
+    "notify_quiet_hours": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quiet hours"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ruhezeiten"
+          }
+        }
+      }
+    },
+    "notify_quiet_hours_hint %@ %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This conversation is silent as if muted at these times, also for mentions and calls. Times are in %1$@. Up to %2$lld ranges."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zu diesen Zeiten ist diese Unterhaltung still wie stummgeschaltet, auch bei Erwähnungen und Anrufen. Zeiten in %1$@. Bis zu %2$lld Zeiträume."
+          }
+        }
+      }
+    },
+    "notify_quiet_no_days": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pick at least one day."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wähle mindestens einen Tag."
+          }
+        }
+      }
+    },
+    "notify_quiet_same_time": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start and end must differ."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beginn und Ende müssen sich unterscheiden."
+          }
+        }
+      }
+    },
     "create_new": {
       "localizations": {
         "en": {

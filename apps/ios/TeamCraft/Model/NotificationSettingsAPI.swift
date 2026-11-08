@@ -73,6 +73,20 @@ extension AppModel {
     return await request("PUT", path, body: body) != nil
   }
 
+  /// The conversation's settings document (`GET`), or `nil` offline.
+  func conversationNotificationSettingsJSON(_ conversationId: String) async -> String? {
+    await request("GET", "/conversations/\(conversationId)/notification-settings", body: nil)
+  }
+
+  /// Saves the filters on top of what the server has now, so level and mute time stay as they are.
+  func saveConversationFilters(_ conversationId: String, filters: ConversationFilters) async -> Bool {
+    let path = "/conversations/\(conversationId)/notification-settings"
+    guard let current = await request("GET", path, body: nil),
+      let body = filters.body(applyingTo: current, timeZone: .current, at: Date())
+    else { return false }
+    return await request("PUT", path, body: body) != nil
+  }
+
   // MARK: Diagnostics
 
   func pushDiagnostics() async -> PushDiagnosticsInfo? {
