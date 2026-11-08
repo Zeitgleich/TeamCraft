@@ -37,6 +37,8 @@ wire_enum! {
     DiskSpace => "disk_space",
     /// The copy of the holiday feed is recent enough (`holidays.feed_max_age_secs`).
     HolidayFeed => "holiday_feed",
+    /// The job that writes calendar events again when the holidays change ran lately (#1441).
+    HolidayResync => "holiday_resync",
   }
 }
 

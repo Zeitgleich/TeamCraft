@@ -261,12 +261,13 @@ fn measured(check: &HealthCheckId, value: i64) -> Option<Detail> {
       key: "health-detail-report",
       secs: value,
     }),
-    HealthCheckId::OidcSync | HealthCheckId::Retention | HealthCheckId::PartitionMaintenance => {
-      Some(Detail::Age {
-        key: "health-detail-job",
-        secs: value,
-      })
-    },
+    HealthCheckId::OidcSync
+    | HealthCheckId::Retention
+    | HealthCheckId::PartitionMaintenance
+    | HealthCheckId::HolidayResync => Some(Detail::Age {
+      key: "health-detail-job",
+      secs: value,
+    }),
     HealthCheckId::Certificate => Some(Detail::Days(value)),
     HealthCheckId::DiskSpace => Some(Detail::Percent(value)),
     HealthCheckId::HolidayFeed => Some(Detail::Age {
@@ -368,6 +369,7 @@ mod tests {
       HealthCheckId::Certificate,
       HealthCheckId::DiskSpace,
       HealthCheckId::HolidayFeed,
+      HealthCheckId::HolidayResync,
     ] {
       assert!(!check_key(&id).is_empty());
     }

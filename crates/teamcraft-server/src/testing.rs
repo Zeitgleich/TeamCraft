@@ -577,6 +577,7 @@ impl TestApp {
         time::OffsetDateTime::now_utc(),
       )),
       holiday_feed: Arc::default(),
+      holiday_resync: Arc::default(),
       settings: Arc::new(SettingsCell::new(settings)),
     };
 

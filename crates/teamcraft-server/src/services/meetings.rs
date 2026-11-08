@@ -38,6 +38,7 @@ use crate::config::MailTexts;
 use crate::error::ApiError;
 use crate::holidays::{self, HolidaySource};
 use crate::meetings::MeetingService;
+use crate::meetings::caldav::CalendarStore;
 use crate::meetings::ical::{self, EventAttendee, EventData, EventPerson, EventStatus, Method};
 use crate::meetings::mailer::OutgoingMail;
 use crate::state::AppState;
@@ -56,7 +57,8 @@ const MAX_LIST_LIMIT: i64 = 500;
 /// How far ahead a list without an end shows the occurrences of repeating meetings.
 const SERIES_LIST_HORIZON: Duration = Duration::days(90);
 /// How far ahead the calendar event of a series that skips public holidays has them as `EXDATE`;
-/// every change of the meeting writes the event anew (docs/meetings.md, "Holidays").
+/// every change of the meeting writes the event anew, and so does the holiday job when the holidays
+/// change or the horizon moves on (docs/meetings.md, "Holidays").
 const CALENDAR_HOLIDAY_HORIZON: Duration = Duration::days(2 * 365);
 /// "Meet now" meetings stay open this long.
 const INSTANT_MEETING_DURATION: Duration = Duration::hours(8);
@@ -262,7 +264,16 @@ pub async fn list_meetings(
     .collect();
   let cancelled = state.database.cancelled_occurrences(&series).await?;
   let kept = state.database.kept_holidays(&series).await?;
-  let maybe_holidays = holidays::source_of(state);
+  // One query for the holiday regions of all organizers of listed series, one source each (#1441).
+  let organizers: Vec<UserId> = stored
+    .iter()
+    .filter(|meeting| meeting.maybe_recurrence_rule.is_some() && meeting.skips_holidays)
+    .map(|meeting| meeting.organizer)
+    .collect::<HashSet<_>>()
+    .into_iter()
+    .collect();
+  let regions = state.database.holiday_regions(&organizers).await?;
+  let mut sources: HashMap<UserId, Option<Box<dyn HolidaySource>>> = HashMap::new();
   let (from_ms, horizon_ms) = (
     unix_millis(from).0,
     unix_millis(maybe_to.unwrap_or(from + SERIES_LIST_HORIZON)).0,
@@ -321,6 +332,9 @@ pub async fn list_meetings(
       .map(|starts| starts.iter().map(|start| unix_millis(*start).0).collect())
       .unwrap_or_default();
     let occurrences = occurrences_in(first, last - first, &recurrence, zone, from_ms, horizon_ms);
+    let maybe_holidays = sources
+      .entry(meeting.organizer)
+      .or_insert_with(|| holidays::source_of(state, regions.get(&meeting.organizer).map(String::as_str)));
     let on_holidays = holiday_skips(
       meeting,
       &occurrences,
@@ -495,6 +509,7 @@ async fn cancel_series(
   }
   let cancelled = load_meeting(state, id).await?;
   if let Some(calendar) = service.calendar() {
+    let _write = service.lock_calendar_event(id).await;
     // A calendar that is down must not keep a meeting alive that the organizer cancelled.
     if let Err(error) = calendar.delete_event(&meeting.id.to_string()).await {
       warn!(%error, meeting_id = %id, "removing the calendar event failed");
@@ -772,7 +787,7 @@ async fn has_occurrence_around(
 }
 
 /// The starts among `occurrences` the series leaves out as public holidays: none unless it skips
-/// them and the instance has holidays; the ones the organizer kept stay.
+/// them and its organizer has holidays; the ones the organizer kept stay.
 fn holiday_skips(
   meeting: &StoredMeeting,
   occurrences: &[Occurrence],
@@ -790,7 +805,7 @@ fn holiday_skips(
   skipped
 }
 
-/// [`holiday_skips`] of one series, with the instance's holidays and the kept ones looked up.
+/// [`holiday_skips`] of one series, with the organizer's holidays and the kept ones looked up.
 async fn series_holiday_skips(
   state: &AppState,
   meeting: &StoredMeeting,
@@ -800,7 +815,7 @@ async fn series_holiday_skips(
   if !meeting.skips_holidays {
     return Ok(HashSet::new());
   }
-  let Some(source) = holidays::source_of(state) else {
+  let Some(source) = organizer_holidays(state, meeting.organizer).await? else {
     return Ok(HashSet::new());
   };
   let kept = state
@@ -980,6 +995,61 @@ async fn sync_calendar(
   if meeting.kind != MeetingKind::Scheduled.as_str() {
     return Ok(());
   }
+  let _write = service.lock_calendar_event(meeting.id).await;
+  write_event(state, service, calendar.as_ref(), meeting).await
+}
+
+/// What [`resync_holidays`] did with one series.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HolidayResync {
+  /// The event has the current holidays already, or there is nothing to write (no calendar, or
+  /// the meeting is no scheduled series that skips holidays any more).
+  Current,
+  /// The event was written again with the current holidays.
+  Rewritten,
+}
+
+/// Writes the calendar event of a series that skips public holidays again when the holidays it
+/// leaves out are no longer the ones it was last written with (#1441): a new copy of the feed,
+/// other settings, the organizer's own region, or time moving the horizon on. Nothing else of
+/// the meeting changes: no new sequence, no mail (the calendar's update is enough), and an event
+/// that is current isn't written. The meeting is read under the event's lock, so a change of it
+/// that commits meanwhile is written after this, never overwritten by it.
+pub async fn resync_holidays(state: &AppState, id: MeetingId) -> Result<HolidayResync, ApiError> {
+  let Some(service) = state.maybe_meetings.as_deref() else {
+    return Ok(HolidayResync::Current);
+  };
+  let Some(calendar) = service.calendar() else {
+    return Ok(HolidayResync::Current);
+  };
+  let _write = service.lock_calendar_event(id).await;
+  let Some(meeting) = state.database.get_meeting(id).await? else {
+    return Ok(HolidayResync::Current);
+  };
+  let is_skipping_series = meeting.kind == MeetingKind::Scheduled.as_str()
+    && meeting.status == MeetingStatus::Scheduled.as_str()
+    && meeting.skips_holidays
+    && series_rule(&meeting).is_some();
+  if !is_skipping_series {
+    return Ok(HolidayResync::Current);
+  }
+  let zone = organizer_zone(state, meeting.organizer).await?;
+  let current = calendar_holidays(state, &meeting, zone).await?;
+  let maybe_written = state.database.calendar_holidays(id).await?;
+  if maybe_written.as_deref() == Some(current.as_slice()) {
+    return Ok(HolidayResync::Current);
+  }
+  write_event(state, service, calendar.as_ref(), &meeting).await?;
+  Ok(HolidayResync::Rewritten)
+}
+
+/// Builds the meeting's event and puts it into `calendar`; the caller holds the event's lock.
+async fn write_event(
+  state: &AppState,
+  service: &MeetingService,
+  calendar: &dyn CalendarStore,
+  meeting: &StoredMeeting,
+) -> Result<(), ApiError> {
   let brand = organizer_brand(state, meeting).await?;
   let join_url = meeting_link(state, service, &brand, meeting).await?;
   let event = event_for(state, service, &brand, meeting, join_url).await?;
@@ -987,7 +1057,18 @@ async fn sync_calendar(
   calendar
     .put_event(&meeting.id.to_string(), &ics)
     .await
-    .map_err(|error| ApiError::Unavailable(format!("the calendar rejected the meeting: {error}")))
+    .map_err(|error| ApiError::Unavailable(format!("the calendar rejected the meeting: {error}")))?;
+  if meeting.skips_holidays && meeting.maybe_recurrence_rule.is_some() {
+    // What the holiday job compares with; failing to keep it costs one more write later.
+    if let Err(error) = state
+      .database
+      .set_calendar_holidays(meeting.id, &event.holidays)
+      .await
+    {
+      warn!(%error, meeting_id = %meeting.id, "recording the holidays of the calendar event failed");
+    }
+  }
+  Ok(())
 }
 
 /// Owned parts of an iCalendar event, so it can be built from database rows.
@@ -997,6 +1078,8 @@ struct OwnedEvent {
   /// The RRULE as calendars read it ([`calendar_rule`]).
   maybe_rule: Option<String>,
   excluded_starts: Vec<OffsetDateTime>,
+  /// The starts among `excluded_starts` left out as public holidays, sorted.
+  holidays: Vec<OffsetDateTime>,
   join_url: String,
   organizer: EventPerson,
   attendees: Vec<EventAttendee>,
@@ -1077,7 +1160,7 @@ async fn event_for(
       })
     })
     .collect();
-  let (maybe_rule, excluded_starts) = match &meeting.maybe_recurrence_rule {
+  let (maybe_rule, excluded_starts, holidays) = match &meeting.maybe_recurrence_rule {
     Some(rule) => {
       let zone = organizer_zone(state, meeting.organizer).await?;
       let mut excluded = state
@@ -1086,18 +1169,24 @@ async fn event_for(
         .await?
         .remove(&meeting.id)
         .unwrap_or_default();
-      excluded.extend(calendar_holidays(state, meeting, zone).await?);
+      let holidays = calendar_holidays(state, meeting, zone).await?;
+      excluded.extend(holidays.iter().copied());
       excluded.sort_unstable();
       excluded.dedup();
-      (Some(calendar_rule(rule, meeting.starts_at, zone)), excluded)
+      (
+        Some(calendar_rule(rule, meeting.starts_at, zone)),
+        excluded,
+        holidays,
+      )
     },
-    None => (None, Vec::new()),
+    None => (None, Vec::new(), Vec::new()),
   };
   Ok(OwnedEvent {
     uid: meeting.uid.clone(),
     meeting: meeting.clone(),
     maybe_rule,
     excluded_starts,
+    holidays,
     join_url,
     organizer,
     attendees,
@@ -1689,6 +1778,16 @@ fn validated_times(
 }
 
 /// The time zone a series repeats in: the organizer's profile zone, UTC without one.
+/// The holidays the organizer's series skip: their own region, else the instance's, and the
+/// instance's feed (#1441).
+async fn organizer_holidays(
+  state: &AppState,
+  organizer: UserId,
+) -> Result<Option<Box<dyn HolidaySource>>, ApiError> {
+  let maybe_region = state.database.holiday_region(organizer).await?;
+  Ok(holidays::source_of(state, maybe_region.as_deref()))
+}
+
 async fn organizer_zone(state: &AppState, organizer: UserId) -> Result<Tz, ApiError> {
   let profile = state.database.get_profile(organizer).await?;
   Ok(

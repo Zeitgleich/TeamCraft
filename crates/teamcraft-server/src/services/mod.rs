@@ -24,6 +24,7 @@ pub mod devices;
 pub mod directory;
 pub mod email_digest;
 pub mod guests;
+pub mod holiday_regions;
 pub mod identity;
 pub mod import;
 pub mod invites;

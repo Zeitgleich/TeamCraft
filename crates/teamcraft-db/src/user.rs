@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use teamcraft_proto::{ManualPresence, UserId, UserKind};
 use time::OffsetDateTime;
@@ -393,6 +393,43 @@ impl Database {
     .execute(self.pool())
     .await?;
     Ok(())
+  }
+
+  /// The holiday region the user picked for their own series (#1441); `None`: the instance's.
+  pub async fn holiday_region(&self, user: UserId) -> Result<Option<String>, DbError> {
+    let maybe_region = sqlx::query_scalar!("SELECT holiday_region FROM users WHERE id = $1", to_db(user))
+      .fetch_optional(self.pool())
+      .await?;
+    Ok(maybe_region.flatten())
+  }
+
+  /// The holiday regions of those among `users` that picked one.
+  pub async fn holiday_regions(&self, users: &[UserId]) -> Result<HashMap<UserId, String>, DbError> {
+    let raw = to_db_all(users);
+    let rows = sqlx::query!(
+      r#"SELECT id, holiday_region AS "region!" FROM users
+         WHERE id = ANY($1) AND holiday_region IS NOT NULL"#,
+      &raw,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| Ok((from_db(row.id)?, row.region)))
+      .collect()
+  }
+
+  /// Sets the user's holiday region (`None`: the instance's again). `true` if it changed.
+  pub async fn set_holiday_region(&self, user: UserId, maybe_region: Option<&str>) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      r#"UPDATE users SET holiday_region = $2
+         WHERE id = $1 AND holiday_region IS DISTINCT FROM $2"#,
+      to_db(user),
+      maybe_region,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
   }
 }
 

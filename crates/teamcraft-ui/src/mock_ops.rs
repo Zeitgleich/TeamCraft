@@ -598,6 +598,11 @@ impl AdminBackend for MockBackend {
         check(HealthCheckId::Certificate, HealthCheckStatus::Ok, Some(52)),
         check(HealthCheckId::DiskSpace, HealthCheckStatus::Ok, Some(41)),
         check(HealthCheckId::HolidayFeed, HealthCheckStatus::NotConfigured, None),
+        check(
+          HealthCheckId::HolidayResync,
+          HealthCheckStatus::Ok,
+          Some(3 * 24 * hours),
+        ),
       ],
       alerts: vec![HealthAlertResponse {
         check: HealthCheckId::Backup,

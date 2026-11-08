@@ -640,6 +640,58 @@ impl Database {
     Ok(found)
   }
 
+  /// Up to `limit` scheduled series that skip public holidays, by ID after `maybe_after`; with
+  /// `maybe_organizers` only theirs. The holiday job walks them in pages (#1441).
+  pub async fn series_skipping_holidays(
+    &self,
+    maybe_after: Option<MeetingId>,
+    maybe_organizers: Option<&[UserId]>,
+    limit: i64,
+  ) -> Result<Vec<MeetingId>, DbError> {
+    let maybe_raw = maybe_organizers.map(to_db_all);
+    let ids = sqlx::query_scalar!(
+      r#"SELECT id FROM meetings
+         WHERE skips_holidays AND recurrence_rule IS NOT NULL
+           AND status = 'scheduled' AND kind = 'scheduled'
+           AND id > $1 AND ($2::bigint[] IS NULL OR organizer_user_id = ANY($2))
+         ORDER BY id LIMIT $3"#,
+      maybe_after.map_or(0, to_db),
+      maybe_raw.as_deref(),
+      limit,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    ids.into_iter().map(from_db).collect()
+  }
+
+  /// The holiday starts the meeting's calendar event was last written with, sorted; `None` when
+  /// that isn't known.
+  pub async fn calendar_holidays(&self, meeting: MeetingId) -> Result<Option<Vec<OffsetDateTime>>, DbError> {
+    let maybe_row = sqlx::query_scalar!(
+      "SELECT calendar_holidays FROM meetings WHERE id = $1",
+      to_db(meeting)
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(maybe_row.flatten())
+  }
+
+  /// Records the holiday starts (sorted) the meeting's calendar event was just written with.
+  pub async fn set_calendar_holidays(
+    &self,
+    meeting: MeetingId,
+    starts: &[OffsetDateTime],
+  ) -> Result<(), DbError> {
+    sqlx::query!(
+      "UPDATE meetings SET calendar_holidays = $2 WHERE id = $1",
+      to_db(meeting),
+      starts,
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
   /// Records an invitee's answer; `false` if nobody matches.
   pub async fn set_rsvp(
     &self,

@@ -1077,7 +1077,7 @@ Groups that are stored and reset as a whole:
 | `mail_texts`     | invitation and activation mail                                                                                                                |
 | `meeting_mail`   | most invitees; invitation, update and cancellation mail                                                                                       |
 | `token_binding`  | DPoP: off, optional (default) or required; proof age, clock leeway, nonce rotation, replay cache size in all and per account (e2ee.md §3.1.2) |
-| `holidays`       | the region (DE, AT, CH and their states or cantons) and an iCalendar feed whose public holidays repeating meetings can skip, how often the feed is fetched and when its copy counts as stale (none by default; docs/meetings.md, "Holidays") |
+| `holidays`       | the region (DE, AT, CH and their states or cantons) and an iCalendar feed whose public holidays repeating meetings can skip, how often the feed is fetched and when its copy counts as stale (none by default; organizers can pick a region of their own; docs/meetings.md, "Holidays") |
 
 **Signed or not.** Settings that member clients must be able to verify against a compromised server
 are part of the owner-signed workspace policy (§2.3) and are edited there: `admin_self_join`, org

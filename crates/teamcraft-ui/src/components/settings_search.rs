@@ -17,6 +17,7 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::Account, "profile-phone"),
   (SettingsTab::Account, "profile-time-zone"),
   (SettingsTab::Account, "settings-profile-hours-show"),
+  (SettingsTab::Account, "settings-holiday-own-region"),
   (SettingsTab::Appearance, "settings-theme"),
   (SettingsTab::Appearance, "settings-density"),
   (SettingsTab::Appearance, "settings-image-size"),

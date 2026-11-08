@@ -330,7 +330,15 @@ async fn refresh_feed(state: &AppState, client: &reqwest::Client, url: &str, ref
       // The host only: the path of a private calendar's feed is its password.
       info!(%host, holidays = copy.dates.len(), "holiday feed fetched");
       store(state, &copy).await;
+      let is_new = state
+        .holiday_feed
+        .copy_for(url)
+        .is_none_or(|before| before.dates != copy.dates);
       state.holiday_feed.succeeded(copy, refresh);
+      if is_new {
+        // Other holidays than before: the calendar events of the series that skip them follow.
+        state.holiday_resync.holidays_changed();
+      }
     },
     Err(error) => {
       let failures = state.holiday_feed.failed(url, error, refresh, now);

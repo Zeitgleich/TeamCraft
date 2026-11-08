@@ -482,6 +482,7 @@ mod changes {
 }
 
 mod series {
+  use teamcraft_server::holidays::resync::{self, Scope};
   use teamcraft_server::meetings::ical::Method;
 
   use super::*;
@@ -642,6 +643,219 @@ mod series {
     // Not fetched yet (no task in tests): no copy, no error.
     assert_eq!(put.body["holiday_feed"]["holidays"], 0, "{}", put.body);
     assert!(put.body["holiday_feed"].get("error").is_none());
+    app.stop().await;
+  }
+
+  /// Sets the instance's holiday region.
+  async fn instance_region(app: &TestApp, region: &str) {
+    let put = app
+      .put(
+        &admin(),
+        "/admin/settings",
+        json!({"section": "holidays", "values": {"region": region}}),
+      )
+      .await;
+    assert_eq!(put.status, StatusCode::OK, "{}", put.body);
+  }
+
+  /// Sets the user's own holiday region (`None`: the instance's).
+  async fn own_region(app: &TestApp, user: &TestUser, maybe_region: Option<&str>) -> Value {
+    let put = app
+      .put(user, "/me/holiday-region", json!({"region": maybe_region}))
+      .await;
+    assert_eq!(put.status, StatusCode::OK, "{}", put.body);
+    put.body
+  }
+
+  /// The starts of the listed occurrences of `id` that are left out as holidays.
+  async fn holidays_of(app: &TestApp, user: &TestUser, id: &str, days: i64) -> Vec<i64> {
+    let path = format!("/meetings?from={}&to={}", STARTS_AT - 1, STARTS_AT + days * DAY);
+    app.get(user, &path).await.body["meetings"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .filter(|m| m["id"] == id && m["is_occurrence_holiday"] == true)
+      .map(|m| (m["starts_at"].as_i64().unwrap() - STARTS_AT) / DAY)
+      .collect()
+  }
+
+  #[tokio::test]
+  async fn each_organizer_skips_the_holidays_of_their_own_region() {
+    let (app, _calendar) = app!();
+    let (alice, bob, carol) = (owner(), admin(), member("carol"));
+    let carol_id = user_id(&app, &carol).await;
+    instance_region(&app, "DE").await;
+    // Alice works in Bavaria; Bob keeps the instance's region (nationwide holidays only).
+    own_region(&app, &alice, Some("DE-BY")).await;
+    let series = |organizer: &TestUser| {
+      let organizer = organizer.clone();
+      let app = &app;
+      let carol_id = carol_id.clone();
+      async move {
+        let reply = app
+          .post(
+            &organizer,
+            "/meetings",
+            json!({
+              "title": "Standup", "starts_at": STARTS_AT, "ends_at": ENDS_AT,
+              "invitees": [{"kind": "user", "user_id": carol_id}],
+              "recurrence": {"frequency": "daily", "interval": 1, "count": 7, "skips_holidays": true},
+            }),
+          )
+          .await;
+        assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+        reply.id()
+      }
+    };
+    let (bavarian, nationwide) = (series(&alice).await, series(&bob).await);
+
+    // Carol is invited to both: New Year's Day for both, Epiphany (6 January) only in Bavaria.
+    assert_eq!(holidays_of(&app, &carol, &bavarian, 8).await, vec![0, 5]);
+    assert_eq!(holidays_of(&app, &carol, &nationwide, 8).await, vec![0]);
+    // The single series answers the same; restoring the Bavarian holiday is possible.
+    let epiphany = STARTS_AT + 5 * DAY;
+    let cancel = app
+      .delete(
+        &alice,
+        &format!("/meetings/{bavarian}?scope=occurrence&occurrence={epiphany}"),
+      )
+      .await;
+    assert_eq!(cancel.status, StatusCode::CONFLICT, "{}", cancel.body);
+    let not_a_holiday = app
+      .post(
+        &bob,
+        &format!("/meetings/{nationwide}/restore"),
+        json!({"occurrence": epiphany}),
+      )
+      .await;
+    assert_eq!(
+      not_a_holiday.status,
+      StatusCode::CONFLICT,
+      "{}",
+      not_a_holiday.body
+    );
+    // Back to the instance's region: Alice's series follows at once.
+    own_region(&app, &alice, None).await;
+    assert_eq!(holidays_of(&app, &carol, &bavarian, 8).await, vec![0]);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn the_own_region_is_one_of_the_table_and_not_for_guests() {
+    let (app, _calendar) = app!();
+    let alice = owner();
+    instance_region(&app, "AT").await;
+    let shown = app.get(&alice, "/me/holiday-region").await;
+    assert_eq!(shown.status, StatusCode::OK, "{}", shown.body);
+    assert_eq!(
+      shown.body,
+      json!({"instance_region": "AT", "has_instance_feed": false})
+    );
+    for refused in ["XX", "de-by", "DE-XX"] {
+      let put = app
+        .put(&alice, "/me/holiday-region", json!({"region": refused}))
+        .await;
+      assert_eq!(put.status, StatusCode::BAD_REQUEST, "{refused}: {}", put.body);
+    }
+    assert_eq!(own_region(&app, &alice, Some("CH-GE")).await["region"], "CH-GE");
+    assert_eq!(
+      app.get(&alice, "/me/holiday-region").await.body["region"],
+      "CH-GE"
+    );
+    // Absent and empty both mean the instance's again.
+    assert!(own_region(&app, &alice, Some("")).await.get("region").is_none());
+    own_region(&app, &alice, Some("CH-GE")).await;
+    let back = app.put(&alice, "/me/holiday-region", json!({})).await;
+    assert!(back.body.get("region").is_none(), "{}", back.body);
+    // The profile's update, which old apps send, leaves the region alone.
+    own_region(&app, &alice, Some("DE-HH")).await;
+    let profile = app.put(&alice, "/me/profile", json!({"title": "Engineer"})).await;
+    assert_eq!(profile.status, StatusCode::OK, "{}", profile.body);
+    assert_eq!(
+      app.get(&alice, "/me/holiday-region").await.body["region"],
+      "DE-HH"
+    );
+    let gina = guest("gina");
+    assert_eq!(
+      app.get(&gina, "/me/holiday-region").await.status,
+      StatusCode::FORBIDDEN
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn calendar_events_follow_holidays_that_change_without_the_meeting() {
+    let Some((app, calendar, mailer)) = start_with_mail().await else {
+      return;
+    };
+    let alice = owner();
+    let run = |scope: Scope| {
+      let state = app.state.clone();
+      async move { resync::run(&state, &scope, Duration::ZERO).await }
+    };
+    // No holidays yet: the event leaves nothing out.
+    let id = daily(
+      &app,
+      &alice,
+      json!({"frequency": "daily", "interval": 1, "count": 7, "skips_holidays": true}),
+    )
+    .await;
+    // A series that doesn't skip holidays is not the job's.
+    daily(
+      &app,
+      &alice,
+      json!({"frequency": "daily", "interval": 1, "count": 7}),
+    )
+    .await;
+    assert!(!unfolded(&calendar.event(&id).unwrap()).contains("EXDATE"));
+    let current = run(Scope::Everything).await;
+    assert_eq!((current.checked, current.rewritten, current.failed), (1, 0, 0));
+    assert!(current.is_complete);
+    let mails = mailer.sent().len();
+
+    // The admin sets a region: the next run writes the event with the holidays, once.
+    instance_region(&app, "DE").await;
+    let changed = run(Scope::Everything).await;
+    assert_eq!((changed.rewritten, changed.failed), (1, 0));
+    let ics = unfolded(&calendar.event(&id).unwrap());
+    assert!(ics.contains("EXDATE:20300101T090000Z"), "{ics}");
+    assert!(!ics.contains("20300106T090000Z"), "{ics}");
+    assert_eq!(run(Scope::Everything).await.rewritten, 0);
+
+    // The organizer picks Bavaria: their series follow.
+    own_region(&app, &alice, Some("DE-BY")).await;
+    let alice_id: teamcraft_proto::UserId = user_id(&app, &alice).await.parse().unwrap();
+    let theirs = run(Scope::Organizers(vec![alice_id])).await;
+    assert_eq!((theirs.checked, theirs.rewritten), (1, 1));
+    let ics = unfolded(&calendar.event(&id).unwrap());
+    assert!(ics.contains("20300106T090000Z"), "{ics}");
+    // Somebody else's region change isn't Alice's series.
+    let bob_id: teamcraft_proto::UserId = user_id(&app, &admin()).await.parse().unwrap();
+    assert_eq!(run(Scope::Organizers(vec![bob_id])).await.checked, 0);
+
+    // A calendar that is down: the run fails for the series and keeps its record, so the next
+    // run writes it.
+    own_region(&app, &alice, None).await;
+    calendar.set_failing(true);
+    let failed = run(Scope::Everything).await;
+    assert_eq!((failed.rewritten, failed.failed), (0, 1));
+    calendar.set_failing(false);
+    assert!(unfolded(&calendar.event(&id).unwrap()).contains("20300106T090000Z"));
+    assert_eq!(run(Scope::Everything).await.rewritten, 1);
+    assert!(!unfolded(&calendar.event(&id).unwrap()).contains("20300106T090000Z"));
+    // A cancelled series is left alone: its event is gone and stays gone.
+    let cancel = app.delete(&alice, &format!("/meetings/{id}")).await;
+    assert_eq!(cancel.status, StatusCode::OK, "{}", cancel.body);
+    instance_region(&app, "AT").await;
+    assert_eq!(run(Scope::Everything).await.checked, 0);
+    assert!(calendar.event(&id).is_none());
+    // No mail for any of it besides the cancellation (the calendar's update is enough).
+    let sent = mailer.sent();
+    assert!(
+      sent[mails..].iter().all(|mail| mail.method == Method::Cancel),
+      "{:?}",
+      sent[mails..].iter().map(|mail| &mail.subject).collect::<Vec<_>>()
+    );
     app.stop().await;
   }
 

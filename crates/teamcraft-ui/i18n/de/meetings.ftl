@@ -95,7 +95,7 @@ schedule-unit-meetings = { $count ->
 }
 schedule-on-days = An
 schedule-skip-holidays = Feiertage überspringen
-schedule-skip-holidays-hint = Meetings an Feiertagen der Region, die deine Admins eingestellt haben, fallen aus. Einzelne kannst du trotzdem stattfinden lassen.
+schedule-skip-holidays-hint = Meetings an Feiertagen deiner Region (Einstellungen, Konto) oder sonst der, die deine Admins eingestellt haben, fallen aus. Einzelne kannst du trotzdem stattfinden lassen.
 schedule-ends = Endet
 schedule-ends-never = Nie
 schedule-ends-count = Nach

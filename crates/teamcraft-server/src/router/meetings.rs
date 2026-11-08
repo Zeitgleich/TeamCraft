@@ -18,6 +18,10 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     .routes(routes!(handlers::list_meetings_handler, handlers::create_meeting_handler))
     .routes(routes!(handlers::create_instant_meeting_handler))
     .routes(routes!(
+      handlers::get_holiday_region_handler,
+      handlers::put_holiday_region_handler
+    ))
+    .routes(routes!(
       handlers::get_meeting_handler,
       handlers::update_meeting_handler,
       handlers::cancel_meeting_handler
