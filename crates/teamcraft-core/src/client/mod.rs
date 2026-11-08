@@ -581,6 +581,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     clock: Box<dyn Clock>,
     settings: ClientSettings,
   ) -> Result<Option<Self>, CoreError> {
+    let _step = crate::timing::step("client_open");
     let Some(account) = records::load_account(&store)? else {
       return Ok(None);
     };
@@ -786,6 +787,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   fn group(&mut self, conversation: ConversationId) -> Result<Option<&mut ConversationGroup>, CoreError> {
+    let _step = crate::timing::step("mls_group_load");
     if !self.groups.contains_key(&conversation) {
       let applied: Vec<[u8; 16]> =
         records::get_json(&self.store, Table::AppliedChanges, &conversation.to_string())?.unwrap_or_default();
@@ -941,6 +943,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Writes what changed in the MLS state (the provider storage) since the last save, as one
   /// group of writes; inside a caller's group it reaches the disk with that group.
   pub(crate) fn save_mls_storage(&self) -> Result<(), CoreError> {
+    let _step = crate::timing::step("mls_storage_save");
     mls_storage::save_mls_storage(&self.store, &self.provider, &self.saved_mls)
   }
 

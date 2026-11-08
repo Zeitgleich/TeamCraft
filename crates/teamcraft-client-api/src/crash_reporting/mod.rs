@@ -14,12 +14,13 @@ mod panic;
 mod queue;
 mod reporter;
 mod scrub;
+mod transaction;
 
 use std::future::Future;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{CrashReportsInfo, is_crash_environment};
+use teamcraft_proto::{CrashReportsInfo, DEFAULT_SLOW_JOB_MS, is_crash_environment};
 pub use teamcraft_proto::{Dsn, DsnError};
 use thiserror::Error;
 
@@ -28,8 +29,15 @@ pub use event::{
 };
 pub use panic::{MAX_PENDING_PANICS, PanicParts, PendingPanic, frames_from_backtrace};
 pub use queue::{CrashQueue, CrashQueueLimits, QueuedCrashReport};
-pub use reporter::{CaptureOutcome, CrashReporter, FlushSummary, PendingSend};
+pub use reporter::{
+  CaptureOutcome, CrashReporter, FlushSummary, MAX_TRANSACTIONS_PER_FLUSH, PendingSend, SendKind,
+  TRANSACTION_BATCH,
+};
 pub use scrub::scrub;
+pub use transaction::{
+  CoreStep, MAX_MEASUREMENTS, MAX_SPANS, MAX_TAGS, PerfOperation, PerfSpan, PerfStatus, PerfUnit, SpanId,
+  TraceId, Transaction,
+};
 
 /// How long one send may take, connect to answer. A dead backend must never hold the app up;
 /// the report stays queued and goes with the next flush.
@@ -44,6 +52,14 @@ pub struct CrashReportingConfig {
   pub dsn: Dsn,
   /// Share of non-fatal errors that are sent; crashes are always sent.
   pub sample_rate: SampleRate,
+  /// Share of measured operations sent as performance data (issue #1521). Absent from a stored
+  /// config of an older version: none, until the server's setting comes in.
+  #[serde(default = "SampleRate::none")]
+  pub trace_rate: SampleRate,
+  /// A job of the core that waits or runs this long, in milliseconds, is reported (mobile apps);
+  /// 0: never.
+  #[serde(default = "default_slow_job_ms")]
+  pub slow_job_ms: u32,
   pub environment: Environment,
   /// The user's opt-out counts; off: the instance requires reports.
   #[serde(default = "is_on")]
@@ -118,6 +134,8 @@ impl CrashReportingConfig {
     Ok(Self {
       dsn: dsn.parse()?,
       sample_rate: SampleRate::new(sample_rate)?,
+      trace_rate: SampleRate::NONE,
+      slow_job_ms: DEFAULT_SLOW_JOB_MS,
       environment: Environment::new(environment)?,
       allows_opt_out: true,
       shows_notice: true,
@@ -130,6 +148,8 @@ impl CrashReportingConfig {
     Ok(Self {
       allows_opt_out: info.allows_opt_out,
       shows_notice: info.shows_notice,
+      trace_rate: SampleRate::new(f64::from(info.trace_percent) / 100.0)?,
+      slow_job_ms: info.slow_job_ms,
       ..Self::new(
         &info.dsn,
         f64::from(info.sample_percent) / 100.0,
@@ -143,8 +163,13 @@ fn is_on() -> bool {
   true
 }
 
+fn default_slow_job_ms() -> u32 {
+  DEFAULT_SLOW_JOB_MS
+}
+
 impl SampleRate {
   pub const ALL: Self = Self(1.0);
+  pub const NONE: Self = Self(0.0);
 
   pub fn new(rate: f64) -> Result<Self, CrashReportingError> {
     if (0.0..=1.0).contains(&rate) {
@@ -156,6 +181,10 @@ impl SampleRate {
 
   pub fn get(self) -> f64 {
     self.0
+  }
+
+  fn none() -> Self {
+    Self::NONE
   }
 
   /// Whether an event with a uniform random `roll` in `[0, 1)` is kept.
@@ -270,16 +299,28 @@ mod tests {
     let info = CrashReportsInfo {
       dsn: "https://abc123@errors.example.com/7".to_owned(),
       sample_percent: 20,
+      trace_percent: 5,
+      slow_job_ms: 1_000,
       environment: "production".to_owned(),
       allows_opt_out: false,
       shows_notice: true,
     };
     let config = CrashReportingConfig::from_info(&info).unwrap();
     assert_eq!(config.sample_rate.get(), 0.2);
+    assert_eq!(config.trace_rate.get(), 0.05);
     assert!(!config.allows_opt_out);
     let hostile = CrashReportsInfo {
       sample_percent: 200,
       ..info
+    };
+    assert_eq!(
+      CrashReportingConfig::from_info(&hostile),
+      Err(CrashReportingError::SampleRate)
+    );
+    let hostile = CrashReportsInfo {
+      sample_percent: 20,
+      trace_percent: 101,
+      ..hostile
     };
     assert_eq!(
       CrashReportingConfig::from_info(&hostile),
@@ -296,6 +337,8 @@ mod tests {
       serde_json::json!({
         "dsn": "https://abc123@errors.example.com/7",
         "sample_rate": 0.5,
+        "trace_rate": 0.0,
+        "slow_job_ms": 1000,
         "environment": "production",
         "allows_opt_out": true,
         "shows_notice": true,
@@ -305,6 +348,13 @@ mod tests {
       serde_json::from_value::<CrashReportingConfig>(json).unwrap(),
       config
     );
+    let older: CrashReportingConfig = serde_json::from_value(serde_json::json!({
+      "dsn": "https://abc123@errors.example.com/7",
+      "sample_rate": 0.5,
+      "environment": "production",
+    }))
+    .unwrap();
+    assert_eq!(older.trace_rate, SampleRate::NONE);
     assert!(
       serde_json::from_value::<CrashReportingConfig>(serde_json::json!({
         "dsn": "https://abc123@errors.example.com/7",

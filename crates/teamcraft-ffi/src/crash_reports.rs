@@ -2,7 +2,7 @@
 //! instance's setting from `GET /api/v1/server-info`, checked the way the web and desktop apps
 //! check it, for the platform SDKs. Scrubbing and sending stay in the SDKs' `beforeSend`.
 
-use teamcraft_client_api::crash_reporting::CrashReportingConfig;
+use teamcraft_client_api::crash_reporting::{CrashReportingConfig, PerfOperation};
 use teamcraft_proto::ServerInfoResponse;
 
 /// What the platform crash SDK is started with while the instance has crash reports on.
@@ -12,6 +12,11 @@ pub struct CrashReportsConfig {
   pub dsn: String,
   /// Share of handled errors that are sent, 0 to 1; crashes are always sent.
   pub sample_rate: f64,
+  /// Share of app starts, screen loads and HTTP calls traced as performance data, 0 to 1
+  /// (issue #1521); 0 from an older server.
+  pub trace_rate: f64,
+  /// A core job that waits or runs this long is reported as a sampled warning; 0: never.
+  pub slow_job_ms: u64,
   /// The environment the backend groups reports by (`production`).
   pub environment: String,
   /// The user's switch counts; off: the instance requires reports.
@@ -30,10 +35,51 @@ pub fn crash_reports_config(response_json: String) -> Option<CrashReportsConfig>
   Some(CrashReportsConfig {
     dsn: config.dsn.to_string(),
     sample_rate: config.sample_rate.get(),
+    trace_rate: config.trace_rate.get(),
+    slow_job_ms: u64::from(config.slow_job_ms),
     environment: config.environment.as_str().to_owned(),
     allows_opt_out: config.allows_opt_out,
     shows_notice: config.shows_notice,
   })
+}
+
+/// What the mobile apps measure besides the SDK's own app start and screen loads (issue #1521),
+/// named as every app names it, so the backend shows one transaction per operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PerfMeasure {
+  StartToChannelList,
+  ChannelSwitch,
+  MessageSend,
+  Resync,
+  FileUpload,
+  FileDownload,
+  CallSetup,
+  CatchUp,
+}
+
+/// The transaction name and operation of a measure (`channel.switch`, `navigation`).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct PerfMeasureName {
+  pub name: String,
+  pub op: String,
+}
+
+#[uniffi::export]
+pub fn perf_measure_name(measure: PerfMeasure) -> PerfMeasureName {
+  let operation = match measure {
+    PerfMeasure::StartToChannelList => PerfOperation::StartToChannelList,
+    PerfMeasure::ChannelSwitch => PerfOperation::ChannelSwitch,
+    PerfMeasure::MessageSend => PerfOperation::MessageSend,
+    PerfMeasure::Resync => PerfOperation::Resync,
+    PerfMeasure::FileUpload => PerfOperation::FileUpload,
+    PerfMeasure::FileDownload => PerfOperation::FileDownload,
+    PerfMeasure::CallSetup => PerfOperation::CallSetup,
+    PerfMeasure::CatchUp => PerfOperation::CatchUp,
+  };
+  PerfMeasureName {
+    name: operation.name().to_owned(),
+    op: operation.op().to_owned(),
+  }
 }
 
 #[cfg(test)]
@@ -45,14 +91,26 @@ mod tests {
   #[test]
   fn an_instance_with_reports_on_gives_the_checked_config() {
     let config = crash_reports_config(answer(&format!(
-      r#"{{"dsn":"{DSN}","sample_percent":25,"environment":"production","allows_opt_out":false,"shows_notice":true}}"#
+      r#"{{"dsn":"{DSN}","sample_percent":25,"trace_percent":40,"environment":"production","allows_opt_out":false,"shows_notice":true}}"#
     )))
     .expect("config");
     assert_eq!(config.dsn, DSN);
     assert!((config.sample_rate - 0.25).abs() < f64::EPSILON);
+    assert!((config.trace_rate - 0.4).abs() < f64::EPSILON);
     assert_eq!(config.environment, "production");
     assert!(!config.allows_opt_out);
     assert!(config.shows_notice);
+  }
+
+  #[test]
+  fn measures_are_named_as_on_the_web() {
+    assert_eq!(
+      perf_measure_name(PerfMeasure::ChannelSwitch),
+      PerfMeasureName {
+        name: "channel.switch".to_owned(),
+        op: "navigation".to_owned()
+      }
+    );
   }
 
   #[test]

@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use super::Environment;
 
 /// Product name in the release (`teamcraft@1.0.9`), so all apps of a version group together.
-const RELEASE_PREFIX: &str = "teamcraft@";
+pub(super) const RELEASE_PREFIX: &str = "teamcraft@";
 
 /// One report, before scrubbing. Only the fields listed here exist: there is no user, no device
 /// name, no host name, no request and no free-form context a caller could fill with content.
@@ -208,7 +208,7 @@ macro_rules! hex_id {
   ($name:ident) => {
     impl fmt::Display for $name {
       fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
+        f.write_str(&hex(&self.0))
       }
     }
 
@@ -231,6 +231,18 @@ macro_rules! hex_id {
 hex_id!(EventId);
 hex_id!(InstallationId);
 
+/// Lowercase hex digits of `bytes`.
+pub(super) fn hex(bytes: &[u8]) -> String {
+  use fmt::Write;
+  bytes
+    .iter()
+    .fold(String::with_capacity(bytes.len() * 2), |mut text, byte| {
+      // Writing to a String can't fail.
+      let _ = write!(text, "{byte:02x}");
+      text
+    })
+}
+
 fn parse_hex16(text: &str) -> Option<[u8; 16]> {
   if text.len() != 32 || !text.is_ascii() {
     return None;
@@ -245,7 +257,12 @@ fn parse_hex16(text: &str) -> Option<[u8; 16]> {
 /// Unix time in seconds with milliseconds, as the protocol takes it.
 fn seconds(timestamp_ms: i64) -> f64 {
   // Precision: an i64 of milliseconds fits an f64 exactly until the year 287396.
-  timestamp_ms as f64 / 1000.0
+  seconds_f64(timestamp_ms as f64)
+}
+
+/// Unix time in seconds from milliseconds with a fraction (performance data).
+pub(super) fn seconds_f64(timestamp_ms: f64) -> f64 {
+  timestamp_ms / 1000.0
 }
 
 #[cfg(test)]

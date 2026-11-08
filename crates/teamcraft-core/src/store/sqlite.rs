@@ -145,6 +145,7 @@ impl SqlCipherStore {
   }
 
   fn initialize(connection: Connection, key_source: &impl DatabaseKeySource) -> Result<Self, StoreError> {
+    let _step = crate::timing::step("sqlite_initialize");
     let key = key_source.database_key()?;
     let hex: Zeroizing<String> = Zeroizing::new(
       key
@@ -892,6 +893,7 @@ fn decode_message(record: &[u8]) -> Result<StoredMessage, StoreError> {
 }
 
 fn migrate_to_v5(connection: &Connection) -> Result<(), StoreError> {
+  let _step = crate::timing::step("sqlite_migrate");
   connection.execute_batch(FEED_VERSIONS_V5).map_err(database_error)
 }
 
@@ -948,6 +950,7 @@ fn bump_feed_version(
 /// Version 4: the feed's columns and indexes, filled from every record (issue #155). A record that
 /// doesn't decode keeps the defaults, as no row of the feed; reading it fails as before.
 fn migrate_to_v4(connection: &Connection) -> Result<(), StoreError> {
+  let _step = crate::timing::step("sqlite_migrate");
   connection
     .execute_batch(FEED_COLUMNS_V4)
     .map_err(database_error)?;
@@ -1011,6 +1014,7 @@ fn placeholders(count: usize) -> String {
 /// Version 1: the tables, and the `in_channel` column that early 1.0 previews lacked (thread
 /// replies also sent to the conversation, `MessageMeta::is_also_in_channel`).
 fn migrate_to_v1(connection: &Connection) -> Result<(), StoreError> {
+  let _step = crate::timing::step("sqlite_migrate");
   connection.execute_batch(SCHEMA_V1).map_err(database_error)?;
   let has_in_channel = connection
     .prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'in_channel'")

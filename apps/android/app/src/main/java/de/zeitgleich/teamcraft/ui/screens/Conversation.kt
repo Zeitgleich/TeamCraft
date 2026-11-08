@@ -1,5 +1,8 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.crash.CatchUpMeasure
+import de.zeitgleich.teamcraft.crash.Perf
+import uniffi.teamcraft_ffi.PerfMeasure
 import android.widget.Toast
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Box
@@ -230,6 +233,16 @@ fun ConversationScreen(
   var isAskingServer by remember(conversationId) { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   val rights = rememberRights(viewModel, conversationId, changes)
+  // Performance data: whether the conversation caught up with the server once open (#1521).
+  val catchUp = remember(conversationId) { CatchUpMeasure(conversationId, System.currentTimeMillis()) }
+  DisposableEffect(catchUp) { onDispose { catchUp.dispose() } }
+  LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { catchUp.resumed() }
+  // Performance data: from opening the conversation until its messages are read (issue #1521).
+  DisposableEffect(conversationId) {
+    Perf.begin(PerfMeasure.CHANNEL_SWITCH, conversationId)
+    Perf.tag(PerfMeasure.CHANNEL_SWITCH, conversationId, "source", if (maybeSeed != null) "seed" else "store")
+    onDispose { Perf.cancel(PerfMeasure.CHANNEL_SWITCH, conversationId) }
+  }
   LaunchedEffect(conversationId) {
     // Where the user stopped reading, before marking the conversation read.
     val maybeMessage = viewModel.readChat { query(ChatQueries.firstUnread(conversationId)).maybeMessage }
@@ -247,6 +260,10 @@ fun ConversationScreen(
       val maybeExtras = viewModel.readChat { extras(conversationId, tail.map { it.id }) }
       val maybeSnapshot = viewModel.readChat { snapshot() }
       messages = tail
+      Perf.end(PerfMeasure.CHANNEL_SWITCH, conversationId)
+      if (Perf.isRunning(PerfMeasure.MESSAGE_SEND, conversationId) && tail.none { it.isPending }) {
+        Perf.end(PerfMeasure.MESSAGE_SEND, conversationId)
+      }
       hasOlder = maybeTail?.hasOlder ?: false
       gaps = maybeTail?.gaps.orEmpty()
       extras = maybeExtras ?: extras
@@ -258,6 +275,11 @@ fun ConversationScreen(
       maybeKeyCatchUp = viewModel.keyCatchUp()
       // After the messages: once the store has the notified one, the core no longer names it.
       maybeNotified = viewModel.notifiedConversation(conversationId)
+      catchUp.observe(
+        isBehind = maybeNotified != null || snapshot?.conversation(conversationId)?.isCatchingUp == true,
+        isFromPush = maybeNotified != null,
+        hasGaps = gaps.isNotEmpty(),
+      )
       pinned = viewModel.readChat { query(ChatQueries.pinned(conversationId)).messages } ?: pinned
       unseenReactions = viewModel.readChat { query(ChatQueries.unseenReactions(conversationId)).unseen } ?: unseenReactions
       joinRequests = requestsIn(conversationId, viewModel.joinRequests.list())
@@ -1308,7 +1330,11 @@ internal fun Composer(
       return
     }
     // `:)` and `:tada:` become emoji, as on desktop.
+    val isPlain = maybeThread == null && files.isEmpty() && sendableDraftFiles.isEmpty()
     viewModel.act(ChatActions.send(conversationId, emojiConvert(text.trim()), sendOptions(files, sendableDraftFiles)))
+      // Performance data: from the queued message until the server took it (the feed has no
+      // pending message left, read below). Plain messages in the conversation only.
+      .invokeOnCompletion { failure -> if (failure == null && isPlain) Perf.begin(PerfMeasure.MESSAGE_SEND, conversationId) }
     viewModel.pickedSent(files, sendableDraftFiles.map { it.id })
     viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
     draftSave.stored("")

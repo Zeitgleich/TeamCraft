@@ -130,6 +130,16 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   let is_connecting = Memo::new(move |_| {
     is_real && !call.has_ended.get() && state.read(|backend| backend.active_call().is_none())
   });
+  // Performance data: a call's setup ends when its media is secured and flows (perf.rs).
+  Effect::new(move |_| {
+    if is_real && state.read(|backend| backend.active_call().is_some_and(|active| active.is_secured)) {
+      crate::perf::end_pending(
+        crate::perf::PerfOperation::CallSetup,
+        "",
+        crate::perf::PerfStatus::Ok,
+      );
+    }
+  });
   let is_reconnecting = Memo::new(move |_| {
     state.read(|backend| backend.active_call().is_some_and(|active| active.is_reconnecting))
   });

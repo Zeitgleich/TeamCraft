@@ -89,6 +89,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Brings the account data up to date with the user's other devices: merges a newer key bag
   /// from the server, and uploads local changes.
   pub async fn sync_account_data(&mut self) -> Result<(), CoreError> {
+    let _step = crate::timing::step("account_data_sync");
     let remote = match self.read_ahead.key_bag.take() {
       Some(remote) => remote?,
       None => self.api.key_bag().await?,
@@ -185,6 +186,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     wrapped_keys: &[u8],
     wraps: WrapsOnMerge,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("key_bag_merge");
     let encrypted = EncryptedKeyBag::from_bytes(encrypted)?;
     if encrypted.sequence() < self.sync.key_bag_sequence {
       return Err(CoreError::KeyBagRollback {
@@ -274,5 +276,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
 /// The account data as last stored by the engine (for readers without the key bag).
 pub fn stored_account_data(store: &impl LocalStore) -> Result<AccountData, CoreError> {
+  let _step = crate::timing::step("account_data_read");
   Ok(records::get_json(store, Table::Account, ACCOUNT_DATA_KEY)?.unwrap_or_default())
 }

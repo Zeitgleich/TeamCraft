@@ -149,13 +149,32 @@ pub async fn load(
     return Ok(None);
   }
   let url = shared(&LOADING_URLS, (key, rendition), || async move {
+    // Performance data: a download from the server and its decryption (perf.rs).
+    let mut measure = crate::perf::begin(crate::perf::PerfOperation::FileDownload);
+    measure.tag(
+      "rendition",
+      match rendition {
+        Rendition::Inline => "inline",
+        Rendition::Full => "full",
+      },
+    );
     // Per priority: the viewer doesn't wait for a preview's download of the same file (the core
     // downloads it once while both wait).
-    let bytes = shared(&LOADING_BYTES, (key, priority), || {
+    let fetched = shared(&LOADING_BYTES, (key, priority), || {
       fetch_decrypted(conversation, key.message, key.attachment.to_string(), priority)
     })
-    .await?;
+    .await;
+    let bytes = match fetched {
+      Ok(bytes) => bytes,
+      Err(error) => {
+        measure.finish(crate::perf::PerfStatus::Error);
+        return Err(error);
+      },
+    };
     let url = Rc::new(url_for(&bytes, media_type, maybe_max_side).await?);
+    // Precision: a file's size in bytes is far below 2^53.
+    measure.measure("bytes", url.byte_len() as f64, crate::perf::PerfUnit::Byte);
+    measure.finish(crate::perf::PerfStatus::Ok);
     CACHE.with_borrow_mut(|cache| cache.insert((key, rendition), url.clone(), url.byte_len()));
     if let Some(persisted_key) = maybe_persisted_key {
       persist(persisted_key, &url);

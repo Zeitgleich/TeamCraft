@@ -21,6 +21,11 @@ pub fn first_view() {
   Effect::new(|_| first_view_shown());
 }
 
+/// Whether a first view was on screen already (a sign-in page before the signed-in app).
+pub fn is_first_view_shown() -> bool {
+  IS_SHOWN.with(Cell::get)
+}
+
 /// The first view is on screen now.
 pub fn first_view_shown() {
   if IS_SHOWN.with(|shown| shown.replace(true)) {

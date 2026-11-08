@@ -59,6 +59,7 @@ use super::{
   StoreError, StoredMessage, Table, WriteTally,
 };
 use crate::push_preview::ShownMessage;
+use crate::timing::{Mark, TimedKind};
 
 const ENTRY_NAMESPACE: &str = "entry";
 const MESSAGE_NAMESPACE: &str = "message";
@@ -119,6 +120,8 @@ struct State<B> {
   read_depth: u32,
   /// The thread whose group of writes is open; every other thread waits in [`SealedStore::lock`].
   maybe_group_owner: Option<ThreadIdStd>,
+  /// When the open group of writes began, while the store is timed (`timing`).
+  maybe_group_started: Option<Mark>,
   /// The backend's tally when last looked at: a change means the disk moved under the caches.
   maybe_tally: Option<WriteTally>,
   /// The catalog's current generation and whether it is complete; `None`: never started.
@@ -331,6 +334,7 @@ impl<B: RecordBackend> SealedStore<B> {
     database_key: &SymmetricKey,
     limits: SealedStoreLimits,
   ) -> Result<Self, StoreError> {
+    let _step = crate::timing::step("store_open");
     let store = Self::open_backend_to_build(backend, database_key, limits)?;
     store.build_catalog(None)?;
     Ok(store)
@@ -384,6 +388,7 @@ impl<B: RecordBackend> SealedStore<B> {
         awaiting: 0,
         read_depth: 0,
         maybe_group_owner: None,
+        maybe_group_started: None,
         maybe_tally,
         maybe_catalog: None,
         is_catalog_damaged: false,
@@ -406,6 +411,7 @@ impl<B: RecordBackend> SealedStore<B> {
   /// unreadable. At most `maybe_batches` batches (tests).
   #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
   fn build_catalog(&self, maybe_batches: Option<usize>) -> Result<BuildProgress, StoreError> {
+    let _step = crate::timing::step("catalog_build");
     match self.start_catalog_build()? {
       Some(mut build) => self.run_build(&mut build, maybe_batches),
       None => Ok(BuildProgress::Complete),
@@ -459,6 +465,7 @@ impl<B: RecordBackend> SealedStore<B> {
 
   /// Builds the catalog again under a new generation: it was found damaged while the store is open.
   fn rebuild_catalog(&self) -> Result<(), StoreError> {
+    let _step = crate::timing::step("catalog_rebuild");
     tracing::warn!("the local store's catalog disagrees with its records; building it again");
     self.lock().forget_all();
     let mut build = self.begin_build(new_generation(), None, false);
@@ -510,6 +517,7 @@ impl<B: RecordBackend> SealedStore<B> {
 
   /// One batch of `build`, or its end when no record is left.
   fn build_batch(&self, build: &mut CatalogBuild) -> Result<BuildStep, StoreError> {
+    let _step = crate::timing::step("catalog_build_batch");
     let batch = self
       .backend
       .records_after(build.maybe_after.as_ref(), CATALOG_BATCH)?;
@@ -840,12 +848,16 @@ impl<B: RecordBackend> SealedStore<B> {
       return state;
     }
     state.awaiting += 1;
+    let maybe_waiting = Mark::now();
     let mut state = self
       .group_ended
       .wait_while(state, |state| {
         state.maybe_group_owner.is_some_and(|owner| owner != me)
       })
       .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(waiting) = maybe_waiting {
+      waiting.note(TimedKind::GroupLock);
+    }
     state.awaiting -= 1;
     // A group that waits for the awaiting to have their turn may begin.
     self.group_ended.notify_all();
@@ -1821,6 +1833,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       // counts, and nobody else commits from here on.
       self.follow_disk(&mut state);
       state.maybe_group_owner = Some(thread::current().id());
+      state.maybe_group_started = Mark::now();
     }
     state.depth += 1;
     drop(state);
@@ -1855,6 +1868,11 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       }
     }
     let ended = self.backend.end_writes();
+    if state.depth == 0
+      && let Some(started) = state.maybe_group_started.take()
+    {
+      started.note(TimedKind::WriteGroup);
+    }
     if state.depth == 0 {
       // What moved here is a rollback or another process: this one's commits don't count.
       let maybe_tally = self.backend.write_tally();

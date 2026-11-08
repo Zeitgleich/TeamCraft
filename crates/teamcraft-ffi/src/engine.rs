@@ -371,6 +371,7 @@ async fn catch_up_for_push(
   conversation: ConversationId,
   deadline: tokio::time::Instant,
 ) -> Result<(), TeamCraftError> {
+  let _step = teamcraft_core::timing::step("push_catch_up");
   let timed_out = || TeamCraftError::Core("push catch-up timed out".into());
   tokio::time::timeout_at(deadline, client.push_refresh_conversation(conversation))
     .await
@@ -612,6 +613,7 @@ impl Engine {
   /// Opens the store and the read thread on it. Records that don't decode, or a key bag its own key
   /// doesn't open, make the store unreadable here already.
   fn open(start: EngineStart, own_jobs: mpsc::WeakUnboundedSender<Job>) -> Result<Self, OpenError> {
+    let _step = teamcraft_core::timing::step("engine_open_store");
     std::fs::create_dir_all(&start.data_dir)
       .map_err(|error| OpenError::Failed(TeamCraftError::Storage(error.to_string())))?;
     let [download_dir, upload_staging_dir] = start.plaintext_dirs();
@@ -722,6 +724,7 @@ impl Engine {
   }
 
   fn open_client(&mut self) -> Result<(), OpenError> {
+    let _step = teamcraft_core::timing::step("open_client");
     remove_shared_downloads(&self.shared_downloads);
     // Plaintext copies of files that were never sent (taken out of the composer, app stopped).
     if let Err(error) = sweep_staged_copies(&self.store, &self.upload_staging_dir) {
@@ -1284,6 +1287,7 @@ impl Engine {
     opening: PushOpening,
     reader: PushReader,
   ) -> Result<PushNotification, TeamCraftError> {
+    let _step = teamcraft_core::timing::step("push_notification");
     let opened_at = std::time::Instant::now();
     let preview = if opening == PushOpening::StoreOnly {
       push_preview::<Api>(&self.store, None, &payload).await?
@@ -1453,6 +1457,7 @@ impl Engine {
     deadline: tokio::time::Instant,
     preview: PushPreview,
   ) -> PushPreview {
+    let _step = teamcraft_core::timing::step("push_probe");
     // One copy of the MLS state in memory at a time: the extension's own client goes before the
     // probe's opens (it has nothing to do in the extension; the next use opens it again).
     if matches!(self.client, ClientSlot::Idle(_)) {

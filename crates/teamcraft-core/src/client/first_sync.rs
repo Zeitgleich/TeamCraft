@@ -193,6 +193,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// failure waits for its retry time, whatever it was. Returns whether the progress the UI shows
   /// changed: a page alone doesn't, so a long read doesn't make the UI read everything again.
   pub async fn load_older_history_page(&mut self) -> bool {
+    let _step = crate::timing::step("first_sync_older_page");
     let before = self.sync_progress.count();
     match self.read_older_page().await {
       Ok(()) => self.first_sync.maybe_retry_at_ms = None,

@@ -931,6 +931,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     file: &mut PendingFile,
   ) -> Result<(AttachmentRef, BlobRequest, TransferGuard), UploadError> {
+    let _step = crate::timing::step("file_encrypt");
     let content = read_source(&file.source, file.size_bytes)
       .await
       .map_err(|()| UploadError::Failed(TransferFailure::LocalFile))?;

@@ -766,6 +766,44 @@ the next frame.
 How fast and how lean the apps are for the person using them; the budgets they must stay within are
 in [.claude/rules/robustness.md](../.claude/rules/robustness.md) ("Performance and resources").
 
+### Numbers from real use (issue #1521)
+
+The measurements below are taken on purpose, on test machines. What real users see comes from the
+apps' performance data, sent with the crash reports to the same backend
+([crash-reports.md](crash-reports.md), "Performance data"): **GlitchTip → Performance**, one row
+per transaction name, with its p50/p95, throughput and the slowest samples.
+
+| Transaction             | Budget it checks (robustness.md)                    | Apps                         |
+|-------------------------|-----------------------------------------------------|------------------------------|
+| `start.channel_list`    | Signed-in start until the channel list is usable    | All                          |
+| `channel.switch`        | Channel switch, p95                                 | All                          |
+| `conversation.catch_up` | (none yet) open or foreground until up to date      | All                          |
+| `message.send`          | (none yet) send until the server took the message   | All                          |
+| `sync.reconnect`        | (none yet) connecting again until connected         | All                          |
+| `file.download`         | (none yet) an attachment's download and decryption  | Web, desktop                 |
+| `call.setup`            | (none yet) joining until the media is secured       | Web, desktop                 |
+| App start, `ui.load`    | Signed-in start (mobile), slow and frozen frames    | Android, iOS (the SDKs' own) |
+
+How to find a cause, not only a number:
+
+- **Open the slowest samples** of a transaction: on mobile its steps are the core's jobs. A long
+  `queue.wait` with a high `teamcraft.queue_depth` means the operation waited behind other jobs
+  (the steps next to it name them); a long `core.read` or `core.engine` means the job itself was
+  slow; `store.lock_wait` means it waited for another thread's writes, `store.write_group` how long
+  those held the store.
+- **Issues → "Slow core job: …"** lists jobs over the threshold even when no measure was open,
+  with their wait, run and queue depth as tags.
+- **Compare tags**: `start` cold against warm, `entry` (a notification start slower than a launcher
+  start), `start_cache` miss (the first frame had nothing to show), `activities` above 1 (copies of
+  the activity), `catch_up` by `source` and `gap_fill`.
+- Filter by the tag `app.platform` (`web`, `desktop`, `android`, `ios`) and by release
+  (`teamcraft@<version>`): a regression shows as a step in p95 from one release to the next.
+- A transaction's steps (spans) say where the time went: the start's parts (the same names as
+  `start_timing`, "Web start on phones" below), a channel switch's read from the core's store
+  (`db.query core_messages`, tag `source` = `store`; without it the rows were in memory).
+- The share of operations measured is the instance's "trace rate" (Administration → Crash
+  reports), 100 % while the team gathers data; lower it as an instance grows. No rebuild needed.
+
 ### DPoP (issue #120)
 
 What proofs cost a client with a bound token (e2ee.md §3.1.2); a client with an unbound token pays

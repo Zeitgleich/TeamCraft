@@ -91,6 +91,8 @@ fn main() -> anyhow::Result<()> {
     .init();
   // Panics of the shell are kept for the page to report (docs/crash-reports.md).
   crash_reports::install_hook();
+  // The core's steps for the page's performance data (#1521); cheap: only steps over 5 ms are kept.
+  teamcraft_core::timing::enable_ring();
 
   // No server yet: the account's server is set in `setup`, once the data directory is known.
   // The one read of the OS keychain per start happens when something first asks it for a secret
@@ -287,6 +289,7 @@ fn main() -> anyhow::Result<()> {
       auth::commands::public_get,
       auth::commands::crash_report_post,
       crash_reports::crash_reports_take_native,
+      crash_reports::perf_core_steps,
       auth::commands::public_asset,
       auth::commands::avatar_download,
       auth::commands::avatar_upload,

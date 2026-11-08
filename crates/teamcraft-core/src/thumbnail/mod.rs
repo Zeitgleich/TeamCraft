@@ -74,6 +74,7 @@ pub trait PictureCodec {
 /// [`PictureCodec::thumbnail`] as the platform makes it: natively right here, in the browser by
 /// the browser.
 pub async fn make_thumbnail(bytes: &[u8], media_type: &str) -> Option<Vec<u8>> {
+  let _step = crate::timing::step("thumbnail_make");
   if !essence(media_type).starts_with("image/") {
     return None;
   }
