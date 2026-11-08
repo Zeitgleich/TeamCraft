@@ -22,8 +22,19 @@ struct ConversationListView: View {
   @State private var isShowingFilters = false
   @State private var filters = SearchFilters()
   @State private var maybeBrowseTab: BrowseView.Tab?
+  /// The space whose channels "Browse channels" shows first (#1526).
+  @State private var maybeBrowseSpaceId: String?
   /// The space whose people, calls, meetings, saved messages and files are open (#954).
   @State private var maybeSpaceViews: SpaceChoice?
+  /// The view the space's views open on: the space menu names each (#1526).
+  @State private var spaceViewTab = SpaceViewTab.people
+  /// The spaces the user belongs to (#1526), also those without a joined channel, from the same
+  /// snapshot read as `canBrowseChannels`: again when the list's spaces change or the switcher
+  /// opens, never per change (#1466).
+  @State private var snapshotSpaces: [HomeSpace] = []
+  @State private var isSwitchingSpace = false
+  /// The space Home of the spaces layout shows, remembered on this device as on Android.
+  @AppStorage("home_selected_space") private var rememberedSpaceId = ""
   /// Home, DMs and Activity (#1488), as on Android.
   @State private var tab: ChatTab = .home
   /// Home's sections the user collapsed, on this device (keys: `ConversationSection.collapseKey`).
@@ -64,7 +75,8 @@ struct ConversationListView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
           if !isSearching && !conversations.isEmpty { bottomNavigation }
         }
-        .navigationTitle("chats_title")
+        .navigationTitle(maybeHeaderSpace.map { Text($0.name) } ?? Text("chats_title"))
+        .navigationBarTitleDisplayMode(maybeHeaderSpace == nil ? .automatic : .inline)
         .alert("dnd_save_failed", isPresented: $isMuteFailed) {}
         .alert("deletions_suspect \(suspectDeletions)", isPresented: isSuspectDeletionsShown) {}
         .task(id: shownSections.count) {
@@ -97,8 +109,25 @@ struct ConversationListView: View {
           // Drafts, scheduled messages and meetings are Home's quick-access cards; a new message is
           // the floating button (#1488).
           ToolbarItemGroup(placement: .topBarTrailing) {
+            if let space = maybeHeaderSpace {
+              // The selected space's views, browsing and actions, next to its name (#1526).
+              Menu {
+                spaceActions(spaceId: space.id, name: space.name, hasUnread: space.mentionCount > 0 || space.hasUnread)
+              } label: {
+                Image(systemName: "ellipsis.circle")
+              }
+              .accessibilityLabel(Text("space_options \(space.name)"))
+              .task(id: space.id) { spaceMenus[space.id] = await model.spaceMenu(space.id) }
+            }
             Button { isShowingSettings = true } label: { Image(systemName: "gearshape") }
               .accessibilityLabel(Text("settings_title"))
+          }
+          if let space = maybeHeaderSpace {
+            ToolbarItem(placement: .principal) {
+              SpaceSwitcherTitle(
+                space: space, hasNewElsewhere: hasNewElsewhere(spaces, selectedId: space.id)
+              ) { isSwitchingSpace = true }
+            }
           }
         }
     } detail: {
@@ -114,9 +143,15 @@ struct ConversationListView: View {
       }
     }
     .searchable(text: $query, prompt: Text("search_hint"))
-    // Once per account: a snapshot is too much to decode on every change for this.
-    .task(id: account.userId) {
-      canBrowseChannels = await model.browseSnapshot()?.canBrowseChannels ?? true
+    // A snapshot is too much to decode on every change for this: once per account, and again when
+    // the list's spaces change or the switcher opens (#1526).
+    .task(
+      id: SpacesRead(
+        userId: account.userId, count: conversations.count, spaceIds: listedSpaceIds, isSwitching: isSwitchingSpace)
+    ) {
+      guard let snapshot = await model.browseSnapshot() else { return }
+      canBrowseChannels = snapshot.canBrowseChannels
+      snapshotSpaces = (snapshot.spaces ?? []).map { HomeSpace(id: $0.id, name: $0.name, maybeImageVersion: $0.maybeImageVersion) }
     }
     .task(id: model.changeCount) {
       conversations = await model.conversations()
@@ -165,11 +200,20 @@ struct ConversationListView: View {
     .sheet(isPresented: $isShowingFilters) { SearchFiltersView(filters: $filters) }
     .sheet(item: $maybeSpaceViews) { choice in
       SpaceViewsView(
-        account: account, spaces: spaceChoices(conversations), initialSpaceId: choice.id
+        account: account, spaces: spaces.map { SpaceChoice(id: $0.id, name: $0.name, maybeImageVersion: $0.maybeImageVersion) },
+        initialSpaceId: choice.id, initialTab: spaceViewTab
       ) { conversationId in selection = conversationId }
     }
-    .sheet(item: $maybeBrowseTab) { tab in
-      BrowseView(tab: tab) { conversationId in selection = conversationId }
+    .sheet(item: $maybeBrowseTab, onDismiss: { maybeBrowseSpaceId = nil }) { tab in
+      BrowseView(tab: tab, maybeInitialSpaceId: maybeBrowseSpaceId) { conversationId in selection = conversationId }
+    }
+    .sheet(isPresented: $isSwitchingSpace) {
+      SpaceSwitcherView(
+        spaces: spaces, selectedId: maybeSelectedSpace?.id, canBrowse: canBrowseChannels
+      ) { spaceId in
+        rememberedSpaceId = spaceId
+        tab = .home
+      }
     }
   }
 
@@ -179,6 +223,23 @@ struct ConversationListView: View {
   private var isSearching: Bool { !fullQuery.isEmpty }
 
   private var isList: Bool { layoutRaw == ChatListLayout.list.rawValue }
+
+  private var isBySpace: Bool { isList && groupingRaw == ChatListGrouping.bySpace.rawValue }
+
+  /// The spaces the user belongs to, by name, with what is new in each (#1526).
+  private var spaces: [HomeSpace] { homeSpaces(snapshotSpaces, conversations: conversations) }
+
+  private var listedSpaceIds: Set<String> { Set(conversations.compactMap(\.maybeSpaceId)) }
+
+  /// The space Home of the spaces layout shows; the list layout shows all of them.
+  private var maybeSelectedSpace: HomeSpace? {
+    isList ? nil : selectedSpace(spaces, remembered: rememberedSpaceId)
+  }
+
+  /// The space the header names: on Home of the spaces layout, not while searching.
+  private var maybeHeaderSpace: HomeSpace? {
+    shownTab == .home && !isSearching ? maybeSelectedSpace : nil
+  }
 
   /// The tab on screen: the list layout has the DMs on Home and no tab of their own for them.
   private var shownTab: ChatTab { isList && tab == .direct ? .home : tab }
@@ -235,13 +296,22 @@ struct ConversationListView: View {
           Text("spaces_empty").foregroundStyle(Theme.textMuted)
         }
         ForEach(shownSections) { section in
-          let isCollapsible = shownTab == .home && !isList && section.collapseKey != nil
+          let isFiltering = !dmFilter.isEmpty || homeChip != .all
+          let isCollapsible = shownTab == .home && (!isList || (isBySpace && !isFiltering)) && section.collapseKey != nil
           let isCollapsed = isCollapsible && collapsed.contains(section.collapseKey ?? "")
           Section(
             header: sectionHeader(section, isCollapsible: isCollapsible, isCollapsed: isCollapsed)
               .contextMenu { spaceMenu(for: section) }
               .task(id: section.id) { await loadSpaceMenu(for: section) }
           ) {
+            // A space without joined channels says so, and where to find some (#1526).
+            if let spaceId = section.spaceId, section.conversations.isEmpty, !isCollapsed {
+              Text("space_no_channels").foregroundStyle(Theme.textMuted)
+              // Home of the spaces layout has the same button right below.
+              if canBrowseChannels && section.isSpace {
+                Button("browse_channels", systemImage: "plus") { browseChannels(in: spaceId) }
+              }
+            }
             ForEach(section.visibleRows(isCollapsed: isCollapsed, selectedId: selection), id: \.id) { conversation in
               ConversationRow(
                 conversation: conversation, maybePreview: previews[conversation.id],
@@ -265,9 +335,9 @@ struct ConversationListView: View {
             }
           }
         }
-        if isList && shownTab == .home && dmFilter.isEmpty && homeChip == .all { listSpacesSection }
-        if !isList && shownTab == .home && canBrowseChannels {
-          Button("browse_channels", systemImage: "plus") { maybeBrowseTab = .channels }
+        if isList && !isBySpace && shownTab == .home && dmFilter.isEmpty && homeChip == .all { listSpacesSection }
+        if (!isList || isBySpace) && shownTab == .home && canBrowseChannels {
+          Button("browse_channels", systemImage: "plus") { browseChannels(in: maybeSelectedSpace?.id) }
         }
       }
       .listStyle(.sidebar)
@@ -275,37 +345,58 @@ struct ConversationListView: View {
     }
   }
 
-  /// The spaces under the list layout's list: a space's menu and browsing for more are here, since
-  /// no header of a space is left to hold them (#1151).
+  /// The spaces under the list layout's list, also those without joined channels: a tap opens a
+  /// space's views and menu (#1151, #1526).
   private var listSpacesSection: some View {
     Section("chats_tab_spaces") {
-      ForEach(listedSpaces(conversations)) { section in
+      ForEach(spaces) { space in
         Menu {
-          spaceMenu(for: section)
+          spaceActions(spaceId: space.id, name: space.name, hasUnread: space.mentionCount > 0 || space.hasUnread)
         } label: {
-          HStack {
-            if let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
-              SpacePictureView(
-                spaceId: spaceId, maybeVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
-            }
-            Text(title(of: section.title))
+          HStack(spacing: 12) {
+            SpaceMark(spaceId: space.id, name: space.name, maybeImageVersion: space.maybeImageVersion)
+            Text(space.name).lineLimit(1)
+            Spacer(minLength: 8)
+            SpaceBadgeMark(space: space)
+            Image(systemName: "ellipsis").foregroundStyle(.secondary)
           }
+          .contentShape(Rectangle())
         }
-        .task(id: section.id) { await loadSpaceMenu(for: section) }
+        .accessibilityHint(Text("space_options \(space.name)"))
+        .task(id: space.id) { spaceMenus[space.id] = await model.spaceMenu(space.id) }
       }
-      Button("browse_channels", systemImage: "plus") { maybeBrowseTab = .channels }
+      Button("browse_channels", systemImage: "plus") { browseChannels(in: nil) }
     }
+  }
+
+  private func browseChannels(in maybeSpaceId: String?) {
+    maybeBrowseSpaceId = maybeSpaceId
+    maybeBrowseTab = .channels
+  }
+
+  private func openSpaceView(_ spaceId: String, name: String, tab: SpaceViewTab) {
+    spaceViewTab = tab
+    maybeSpaceViews = SpaceChoice(
+      id: spaceId, name: name, maybeImageVersion: spaces.first { $0.id == spaceId }?.maybeImageVersion)
   }
 
   private var shownSections: [ConversationSection] {
     if isList {
-      return listSections(
-        conversations, lastActivity: previews.mapValues(\.sentDate), filter: dmFilter, chip: homeChip,
-        bySpace: groupingRaw == ChatListGrouping.bySpace.rawValue)
+      let sections = listSections(
+        conversations, lastActivity: previews.mapValues(\.sentDate), filter: dmFilter, chip: homeChip, bySpace: isBySpace)
+      // While filtering, only matches count: no empty spaces.
+      let isFiltering = !dmFilter.isEmpty || homeChip != .all
+      return isBySpace && !isFiltering ? withEmptySpaces(sections, spaces: spaces) : sections
     }
     let lastActivity = previews.mapValues(\.sentDate)
     switch shownTab {
-    case .home: return homeSections(conversations, lastActivity: lastActivity, listsArchived: !canBrowseChannels)
+    case .home:
+      // Without spaces (yet), Home lists what there is.
+      if let space = maybeSelectedSpace {
+        return spaceHomeSections(
+          conversations, spaceId: space.id, lastActivity: lastActivity, listsArchived: !canBrowseChannels)
+      }
+      return homeSections(conversations, lastActivity: lastActivity, listsArchived: !canBrowseChannels)
     case .direct: return directSections(conversations, lastActivity: lastActivity, filter: dmFilter, chip: homeChip)
     case .activity:
       let waiting = activityConversations(conversations, lastActivity: lastActivity)
@@ -564,9 +655,8 @@ struct ConversationListView: View {
             Image(systemName: "chevron.down")
               .font(.footnote.weight(.semibold))
               .rotationEffect(.degrees(isCollapsed ? -90 : 0))
-            if section.isSpace, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
-              SpacePictureView(
-                spaceId: spaceId, maybeVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
+            if section.isSpace, let spaceId = section.spaceId {
+              SpacePictureView(spaceId: spaceId, maybeVersion: section.spaceImageVersion)
             }
             Text(title(of: section.title))
             Spacer(minLength: 0)
@@ -579,78 +669,92 @@ struct ConversationListView: View {
           isCollapsed
             ? Text("section_expand \(name(of: section.title))") : Text("section_collapse \(name(of: section.title))"))
         .accessibilityAddTraits(.isHeader)
-        if case .space(let name) = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
-          Button {
-            maybeSpaceViews = SpaceChoice(
-              id: spaceId, name: name, maybeImageVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
-          } label: {
-            Image(systemName: "chevron.right").frame(minWidth: 44, minHeight: 32)
-          }
-          .buttonStyle(.plain)
-          .accessibilityLabel(Text("space_views_open"))
+        // The space's views and actions behind a visible button (#1526), not only a long-press.
+        if case .space(let name) = section.title, let spaceId = section.spaceId {
+          spaceOptionsButton(spaceId: spaceId, name: name, section: section)
         }
       }
-    } else if case .space(let name) = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
-      Button {
-        maybeSpaceViews = SpaceChoice(
-          id: spaceId, name: name, maybeImageVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
-      } label: {
-        HStack {
-          SpacePictureView(
-            spaceId: spaceId, maybeVersion: section.conversations.compactMap(\.maybeSpaceImageVersion).first)
-          Text(title(of: section.title))
-          Spacer()
-          Image(systemName: "chevron.right")
-        }
+    } else if case .space(let name) = section.title, let spaceId = section.spaceId {
+      HStack {
+        SpacePictureView(spaceId: spaceId, maybeVersion: section.spaceImageVersion)
+        Text(title(of: section.title))
+        Spacer()
+        spaceOptionsButton(spaceId: spaceId, name: name, section: section)
       }
-      .accessibilityHint(Text("space_views_open"))
     } else {
       Text(title(of: section.title))
     }
   }
 
-  /// Mute (its channels follow), mark all read and leave: the menu of a space's header.
+  private func spaceOptionsButton(spaceId: String, name: String, section: ConversationSection) -> some View {
+    Menu {
+      spaceMenu(for: section)
+    } label: {
+      Image(systemName: "ellipsis.circle").frame(minWidth: 44, minHeight: 32)
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(Text("space_options \(name)"))
+  }
+
+  /// The menu of a space's section header (and its long-press).
   @ViewBuilder
   private func spaceMenu(for section: ConversationSection) -> some View {
-    if case .space(let name) = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first {
-      let menu = spaceMenus[spaceId]
-      Menu {
-        Button("mute_end", systemImage: "bell") { setSpaceMuted(spaceId, until: nil) }
-        ForEach(MutePreset.allCases) { preset in
-          Button(preset.title) { setSpaceMuted(spaceId, until: preset.mutedUntil(now: Date(), calendar: .current)) }
+    if case .space(let name) = section.title, let spaceId = section.spaceId {
+      spaceActions(
+        spaceId: spaceId, name: name,
+        hasUnread: section.conversations.contains(where: { $0.unreadCount > 0 || $0.mentionCount > 0 }))
+    }
+  }
+
+  /// A space's views and browsing its channels (#1526), then mute (its channels follow), mark all
+  /// read and leave. `hasUnread` stands in until the core's menu is read.
+  @ViewBuilder
+  private func spaceActions(spaceId: String, name: String, hasUnread: Bool) -> some View {
+    let menu = spaceMenus[spaceId]
+    Section {
+      ForEach(SpaceViewTab.allCases) { view in
+        Button { openSpaceView(spaceId, name: name, tab: view) } label: {
+          Label(view.title, systemImage: view.symbol)
         }
-      } label: {
-        Label("entry_mute_space", systemImage: "bell.slash")
       }
-      if menu?.hasUnread ?? section.conversations.contains(where: { $0.unreadCount > 0 || $0.mentionCount > 0 }) {
-        Button("entry_mark_all_read", systemImage: "envelope.open") {
-          Task { maybeActionFailure = await model.markSpaceRead(spaceId) }
-        }
+      if canBrowseChannels {
+        Button("browse_channels", systemImage: "plus") { browseChannels(in: spaceId) }
       }
-      switch menu?.leave ?? .hidden {
-      case .hidden:
-        EmptyView()
-      // `space_leave` doesn't answer `.lastMember`; the confirmation covers it either way.
-      case .allowed, .lastMember:
-        Button("entry_leave_space", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
-          maybeLeaving = .space(id: spaceId, name: name)
-        }
-      case .lastAdmin:
-        Button("entry_leave_last_space_admin", systemImage: "rectangle.portrait.and.arrow.right") {}
-          .disabled(true)
+    }
+    Menu {
+      Button("mute_end", systemImage: "bell") { setSpaceMuted(spaceId, until: nil) }
+      ForEach(MutePreset.allCases) { preset in
+        Button(preset.title) { setSpaceMuted(spaceId, until: preset.mutedUntil(now: Date(), calendar: .current)) }
       }
-      if menu?.canDelete == true {
-        Button("entry_delete_space", systemImage: "trash", role: .destructive) {
-          maybeLeaving = .spaceDeletion(id: spaceId, name: name, channels: menu?.channelCount ?? 0)
-        }
+    } label: {
+      Label("entry_mute_space", systemImage: "bell.slash")
+    }
+    if menu?.hasUnread ?? hasUnread {
+      Button("entry_mark_all_read", systemImage: "envelope.open") {
+        Task { maybeActionFailure = await model.markSpaceRead(spaceId) }
+      }
+    }
+    switch menu?.leave ?? .hidden {
+    case .hidden:
+      EmptyView()
+    // `space_leave` doesn't answer `.lastMember`; the confirmation covers it either way.
+    case .allowed, .lastMember:
+      Button("entry_leave_space", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) {
+        maybeLeaving = .space(id: spaceId, name: name)
+      }
+    case .lastAdmin:
+      Button("entry_leave_last_space_admin", systemImage: "rectangle.portrait.and.arrow.right") {}
+        .disabled(true)
+    }
+    if menu?.canDelete == true {
+      Button("entry_delete_space", systemImage: "trash", role: .destructive) {
+        maybeLeaving = .spaceDeletion(id: spaceId, name: name, channels: menu?.channelCount ?? 0)
       }
     }
   }
 
   private func loadSpaceMenu(for section: ConversationSection) async {
-    guard case .space = section.title, let spaceId = section.conversations.compactMap(\.maybeSpaceId).first else {
-      return
-    }
+    guard case .space = section.title, let spaceId = section.spaceId else { return }
     spaceMenus[spaceId] = await model.spaceMenu(spaceId)
   }
 
@@ -721,7 +825,7 @@ struct ConversationListView: View {
     case .space(let name): return name
     case .favorites: return String(localized: "favorites")
     case .archived: return String(localized: "section_archived")
-    case .channels: return String(localized: "channels")
+    case .channels, .spaceChannels: return String(localized: "channels")
     case .directMessages: return String(localized: "direct_messages")
     case .everything: return String(localized: "list_conversations")
     case .unreadDirect: return String(localized: "section_unread_direct")
@@ -734,13 +838,22 @@ struct ConversationListView: View {
     case .favorites: return "favorites"
     case .archived: return "section_archived"
     case .space(let name): return LocalizedStringKey(name)
-    case .channels: return "channels"
+    case .channels, .spaceChannels: return "channels"
     case .directMessages: return "direct_messages"
     case .everything: return "list_conversations"
     case .unreadDirect: return "section_unread_direct"
     case .activity: return "nav_activity"
     }
   }
+}
+
+/// When the chat list reads the snapshot for its spaces (#1526): per account, and when the list's
+/// spaces or its size change or the switcher opens; never on every change (#1466).
+private struct SpacesRead: Hashable {
+  let userId: String
+  let count: Int
+  let spaceIds: Set<String>
+  let isSwitching: Bool
 }
 
 struct ConversationRow: View {

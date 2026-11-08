@@ -609,6 +609,18 @@ data class ChatAnswer(
   val roster: SpaceRoster? = null,
   val overview: ScheduledOverview? = null,
   val load: ListLoadWire? = null,
+  /** [ChatQueries.joinableSpaces]: open spaces the user isn't in (#1526). */
+  val spaces: List<JoinableSpace> = emptyList(),
+)
+
+/** An open space the user may join, as "Browse spaces" lists it (#1526). */
+@Serializable
+data class JoinableSpace(
+  val id: String,
+  val name: String,
+  @SerialName("maybe_description") val maybeDescription: String? = null,
+  @SerialName("maybe_image_version") val maybeImageVersion: String? = null,
+  @SerialName("member_count") val memberCount: Int = 0,
 )
 
 /** Others typing in one place right now (#882): a conversation itself, or with a thread a reply in it. */

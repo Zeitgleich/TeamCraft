@@ -96,6 +96,18 @@ enum SpaceViewTab: String, CaseIterable, Identifiable, Sendable {
     case .files: return "space_tab_files"
     }
   }
+
+  /// The SF Symbol the space menu shows the view with (#1526).
+  var symbol: String {
+    switch self {
+    case .people: return "person.2"
+    case .directMessages: return "bubble.left.and.bubble.right"
+    case .calls: return "phone"
+    case .meetings: return "calendar"
+    case .saved: return "bookmark"
+    case .files: return "doc"
+    }
+  }
 }
 
 /// One choice per space the conversations are in, by name.

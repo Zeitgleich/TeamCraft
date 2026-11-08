@@ -66,7 +66,14 @@ import de.zeitgleich.teamcraft.ui.toggled
  * a new channel, and people to message directly.
  */
 @Composable
-fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -> Unit, isPeopleFirst: Boolean = false) {
+fun BrowseScreen(
+  viewModel: MainViewModel,
+  onOpen: (String) -> Unit,
+  onBack: () -> Unit,
+  isPeopleFirst: Boolean = false,
+  /** The space whose channels show first: Home's selected space (#1526). */
+  maybeInitialSpaceId: String? = null,
+) {
   val changes by viewModel.changeCount.collectAsState()
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
   var spaceIndex by rememberSaveable { mutableIntStateOf(0) }
@@ -87,9 +94,19 @@ fun BrowseScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
   var picked by rememberSaveable { mutableStateOf(listOf<String>()) }
   // A new direct conversation opens as soon as the core created it, as on desktop.
   var maybePendingDm by rememberSaveable { mutableStateOf<List<String>?>(null) }
+  var hasShownInitialSpace by rememberSaveable { mutableStateOf(maybeInitialSpaceId == null) }
   LaunchedEffect(changes, maybeSpace?.id) {
     val loaded = viewModel.readChat { snapshot() }
     snapshot = loaded
+    if (!hasShownInitialSpace && loaded != null) {
+      hasShownInitialSpace = true
+      val index = loaded.spaces.indexOfFirst { it.id == maybeInitialSpaceId }
+      // The read for the space's channels follows with the new key.
+      if (index > 0) {
+        spaceIndex = index
+        return@LaunchedEffect
+      }
+    }
     channels = maybeSpace
       ?.takeIf { loaded?.me?.isGuest != true }
       ?.let { space -> viewModel.readChat { query(ChatQueries.browseChannels(space.id)).channels } }

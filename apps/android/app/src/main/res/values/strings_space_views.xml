@@ -21,4 +21,20 @@
   <string name="space_meetings_empty">Meetings scheduled in this space show up here.</string>
   <string name="space_saved_empty">Messages you save from this space\'s channels show up here.</string>
   <string name="space_files_empty">Files and images shared in this space\'s channels show up here.</string>
+  <!-- Home's header in the spaces layout (#1526): the selected space; a tap lists all spaces -->
+  <string name="space_switcher_open">%1$s, switch space</string>
+  <string name="space_switcher_new_elsewhere">New messages in other spaces</string>
+  <string name="space_switcher_selected">Selected</string>
+  <string name="space_options">Options for %1$s</string>
+  <string name="space_no_channels">You haven\'t joined a channel in this space yet.</string>
+  <string name="spaces_none">You aren\'t in a space yet.</string>
+  <string name="space_badge_new">New messages</string>
+  <string name="spaces_browse">Browse spaces</string>
+  <string name="spaces_browse_empty">There are no other open spaces to join.</string>
+  <string name="space_join">Join</string>
+  <string name="space_join_named">Join %1$s</string>
+  <plurals name="space_member_count">
+    <item quantity="one">%d member</item>
+    <item quantity="other">%d members</item>
+  </plurals>
 </resources>

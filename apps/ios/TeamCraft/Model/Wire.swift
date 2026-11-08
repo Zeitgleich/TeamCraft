@@ -255,6 +255,17 @@ struct ChatAnswer: Decodable, Sendable {
   var overview: ScheduledOverview?
   var drafts: [DraftItem]?
   var sent: [SentItem]?
+  /// `ChatQuery.joinableSpaces`: open spaces the user isn't in (#1526).
+  var spaces: [JoinableSpace]?
+}
+
+/// An open space the user may join, as "Browse spaces" lists it (#1526).
+struct JoinableSpace: Decodable, Identifiable, Equatable, Sendable {
+  let id: String
+  let name: String
+  var maybeDescription: String?
+  var maybeImageVersion: String?
+  var memberCount: Int?
 }
 
 /// How far a conversation's history reaches beyond what this device holds.

@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Share
@@ -13,6 +14,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -104,9 +106,21 @@ fun ConversationEntryMenu(
   }
 }
 
-/** The long-press menu of a space's header: mute (its channels follow), mark all read, leave. */
+/**
+ * The menu of a space: mute (its channels follow), mark all read, leave. Opened from Home's header
+ * or a space's section (#1526), it starts with the space's views ([onOpenView]) and browsing its
+ * channels ([maybeOnBrowse], not for guests), so they are a labelled tap away.
+ */
 @Composable
-fun SpaceEntryMenu(viewModel: MainViewModel, spaceId: String, name: String, isOpen: Boolean, onDismiss: () -> Unit) {
+fun SpaceEntryMenu(
+  viewModel: MainViewModel,
+  spaceId: String,
+  name: String,
+  isOpen: Boolean,
+  onDismiss: () -> Unit,
+  maybeOnOpenView: ((SpaceViewTab) -> Unit)? = null,
+  maybeOnBrowse: (() -> Unit)? = null,
+) {
   var maybeMenu by remember(spaceId) { mutableStateOf<uniffi.teamcraft_ffi.SpaceMenuItem?>(null) }
   var isMuting by remember(spaceId) { mutableStateOf(false) }
   var isConfirmingLeave by remember(spaceId) { mutableStateOf(false) }
@@ -115,7 +129,30 @@ fun SpaceEntryMenu(viewModel: MainViewModel, spaceId: String, name: String, isOp
     if (isOpen) maybeMenu = viewModel.spaceMenu(spaceId)
   }
   val menu = maybeMenu
-  DropdownMenu(expanded = isOpen && menu != null, onDismissRequest = onDismiss) {
+  DropdownMenu(expanded = isOpen && (menu != null || maybeOnOpenView != null), onDismissRequest = onDismiss) {
+    if (maybeOnOpenView != null) {
+      for (tab in SpaceViewTab.entries) {
+        DropdownMenuItem(
+          text = { Text(stringResource(tab.label)) },
+          leadingIcon = { SpaceViewIcon(tab) },
+          onClick = {
+            onDismiss()
+            maybeOnOpenView(tab)
+          },
+        )
+      }
+    }
+    maybeOnBrowse?.let { onBrowse ->
+      DropdownMenuItem(
+        text = { Text(stringResource(R.string.browse_channels)) },
+        leadingIcon = { Icon(Icons.Filled.Add, contentDescription = null) },
+        onClick = {
+          onDismiss()
+          onBrowse()
+        },
+      )
+    }
+    if (menu != null && (maybeOnOpenView != null || maybeOnBrowse != null)) HorizontalDivider()
     if (menu != null) {
       for (entry in spaceMenu(menu.hasUnread, menu.leave, menu.canDelete)) {
         EntryMenuItem(entry, lastAdminHint = R.string.entry_leave_last_space_admin) {

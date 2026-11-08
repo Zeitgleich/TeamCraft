@@ -156,7 +156,7 @@
   <string name="settings_devices_summary">Link a new device</string>
   <string name="chat_list_layout">Chats and channels</string>
   <string name="chat_list_layout_list">List</string>
-  <string name="chat_list_layout_hint">Spaces shows direct messages and the channels of each space apart. List shows them all in one list.</string>
+  <string name="chat_list_layout_hint">Spaces shows your direct messages and one space at a time; switch spaces from the header. List shows everything in one list.</string>
   <string name="chat_list_grouping">Channels</string>
   <string name="chat_list_grouping_mixed">Mixed with chats</string>
   <string name="chat_list_grouping_by_space">Grouped by space</string>
