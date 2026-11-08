@@ -92,6 +92,8 @@ pub struct AppState {
   pub holiday_feed: Arc<crate::holidays::HolidayFeed>,
   /// The runs asked for of the job that keeps calendar events current with the holidays (#1441).
   pub holiday_resync: Arc<crate::holidays::resync::HolidayResync>,
+  /// Forwards the apps' crash reports to the backend in the instance settings.
+  pub crash_relay: Arc<crate::services::crash_reports::CrashRelay>,
 }
 
 /// Runtime settings handlers need, taken from the configuration.

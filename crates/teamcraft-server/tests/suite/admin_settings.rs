@@ -832,7 +832,13 @@ mod instance_settings {
     );
     assert_eq!(
       server_info(&app).await["crash_reports"],
-      json!({"dsn": "https://key@errors.example.com/3", "sample_percent": 20, "environment": "production"})
+      json!({
+        "dsn": "https://key@errors.example.com/3",
+        "sample_percent": 20,
+        "environment": "production",
+        "allows_opt_out": true,
+        "shows_notice": true,
+      })
     );
     values["is_enabled"] = json!(false);
     assert_eq!(

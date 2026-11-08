@@ -242,6 +242,8 @@ const CRASH_REPORTS: &[FieldDef] = &[
     id: "environment",
     kind: Kind::Environment,
   },
+  flag("allows_opt_out"),
+  flag("shows_notice"),
 ];
 const HEALTH_ALERTS: &[FieldDef] = &[
   flag("is_enabled"),
@@ -1219,6 +1221,12 @@ mod tests {
     );
     values.insert("dsn", "https://key@errors.example.com/4".to_owned());
     assert!(check(&kind("crash_reports"), &values).is_ok());
+    values.insert("allows_opt_out", "false".to_owned());
+    values.insert("shows_notice", "false".to_owned());
+    let Ok(RuntimeSettingsSection::CrashReports(mandatory)) = check(&kind("crash_reports"), &values) else {
+      panic!("a valid section");
+    };
+    assert!(!mandatory.allows_opt_out && !mandatory.shows_notice);
     values.insert("is_enabled", "false".to_owned());
     values.insert("dsn", String::new());
     assert!(check(&kind("crash_reports"), &values).is_ok());

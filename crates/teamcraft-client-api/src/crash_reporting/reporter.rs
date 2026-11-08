@@ -78,8 +78,18 @@ impl CrashReporter {
     self.drop_queue_unless_active();
   }
 
+  /// On when the instance has reports on and the user didn't opt out, or the instance doesn't
+  /// allow opting out.
   pub fn is_active(&self) -> bool {
-    self.maybe_config.is_some() && self.consent == CrashReportingConsent::Allowed
+    self
+      .maybe_config
+      .as_ref()
+      .is_some_and(|config| self.consent == CrashReportingConsent::Allowed || !config.allows_opt_out)
+  }
+
+  /// The instance's setting in force, for the privacy switch and the first-start notice.
+  pub fn config(&self) -> Option<&CrashReportingConfig> {
+    self.maybe_config.as_ref()
   }
 
   /// The queue as it should be stored now.
@@ -198,6 +208,19 @@ mod tests {
         CaptureOutcome::Disabled
       );
       reporter.set_consent(CrashReportingConsent::Allowed);
+      assert_eq!(
+        reporter.capture(event(0, CrashLevel::Fatal), 0.0),
+        CaptureOutcome::Queued
+      );
+    }
+
+    #[test]
+    fn a_mandatory_instance_ignores_the_opt_out() {
+      let mut mandatory = config(1.0);
+      mandatory.allows_opt_out = false;
+      let mut reporter = reporter(Some(mandatory));
+      reporter.set_consent(CrashReportingConsent::OptedOut);
+      assert!(reporter.is_active());
       assert_eq!(
         reporter.capture(event(0, CrashLevel::Fatal), 0.0),
         CaptureOutcome::Queued

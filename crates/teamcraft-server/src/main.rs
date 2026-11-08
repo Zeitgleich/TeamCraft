@@ -292,6 +292,10 @@ async fn run() -> anyhow::Result<()> {
     )),
     holiday_feed: Arc::default(),
     holiday_resync: Arc::default(),
+    crash_relay: Arc::new(
+      teamcraft_server::services::crash_reports::CrashRelay::new(false)
+        .context("building the crash reports relay client")?,
+    ),
   };
   with_startup_retries("loading the settings", startup_deadline, || {
     load_runtime_settings(&state)

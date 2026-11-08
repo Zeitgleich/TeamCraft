@@ -15,6 +15,7 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
   OpenApiRouter::with_openapi(Schemas::openapi())
     .routes(routes!(handlers::get_client_compatibility_handler))
     .routes(routes!(handlers::get_server_info_handler))
+    .routes(routes!(handlers::post_crash_report_handler))
     // Not in the OpenAPI document: the probes are outside the API, the document doesn't list itself.
     .route("/healthz", get(handlers::healthz_handler))
     .route("/readyz", get(handlers::readyz_handler))

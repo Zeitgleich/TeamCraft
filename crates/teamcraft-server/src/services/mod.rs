@@ -18,6 +18,7 @@ pub mod channel_images;
 pub mod channel_roles;
 pub mod conversations;
 pub mod convert;
+pub mod crash_reports;
 pub mod device_links;
 pub mod device_lists;
 pub mod devices;

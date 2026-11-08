@@ -45,10 +45,16 @@ pub struct CrashReportingConfig {
   /// Share of non-fatal errors that are sent; crashes are always sent.
   pub sample_rate: SampleRate,
   pub environment: Environment,
+  /// The user's opt-out counts; off: the instance requires reports.
+  #[serde(default = "is_on")]
+  pub allows_opt_out: bool,
+  /// The apps say once, on the first start with reports on, that they send them.
+  #[serde(default = "is_on")]
+  pub shows_notice: bool,
 }
 
 /// The user's own choice in the privacy settings. Reports are on when the admin enabled them,
-/// with a notice on first start.
+/// with a notice on first start; it counts only while the instance allows opting out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CrashReportingConsent {
@@ -113,18 +119,28 @@ impl CrashReportingConfig {
       dsn: dsn.parse()?,
       sample_rate: SampleRate::new(sample_rate)?,
       environment: Environment::new(environment)?,
+      allows_opt_out: true,
+      shows_notice: true,
     })
   }
 
   /// From what `GET /api/v1/server-info` said; a server's value that doesn't check is ignored
   /// (reports stay off) rather than trusted.
   pub fn from_info(info: &CrashReportsInfo) -> Result<Self, CrashReportingError> {
-    Self::new(
-      &info.dsn,
-      f64::from(info.sample_percent) / 100.0,
-      &info.environment,
-    )
+    Ok(Self {
+      allows_opt_out: info.allows_opt_out,
+      shows_notice: info.shows_notice,
+      ..Self::new(
+        &info.dsn,
+        f64::from(info.sample_percent) / 100.0,
+        &info.environment,
+      )?
+    })
   }
+}
+
+fn is_on() -> bool {
+  true
 }
 
 impl SampleRate {
@@ -255,11 +271,12 @@ mod tests {
       dsn: "https://abc123@errors.example.com/7".to_owned(),
       sample_percent: 20,
       environment: "production".to_owned(),
+      allows_opt_out: false,
+      shows_notice: true,
     };
-    assert_eq!(
-      CrashReportingConfig::from_info(&info).unwrap().sample_rate.get(),
-      0.2
-    );
+    let config = CrashReportingConfig::from_info(&info).unwrap();
+    assert_eq!(config.sample_rate.get(), 0.2);
+    assert!(!config.allows_opt_out);
     let hostile = CrashReportsInfo {
       sample_percent: 200,
       ..info
@@ -280,6 +297,8 @@ mod tests {
         "dsn": "https://abc123@errors.example.com/7",
         "sample_rate": 0.5,
         "environment": "production",
+        "allows_opt_out": true,
+        "shows_notice": true,
       })
     );
     assert_eq!(

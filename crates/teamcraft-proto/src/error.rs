@@ -124,6 +124,8 @@ wire_enum! {
     /// The request arrived on a host name that is not configured (docs/branding.md §3).
     UnknownHost => "unknown_host",
     BrandAssetNotFound => "brand_asset_not_found",
+    /// The instance has crash reports off (docs/crash-reports.md): the app drops its queued reports.
+    CrashReportsOff => "crash_reports_off",
     BrandNotFound => "brand_not_found",
     /// The signed workspace policy doesn't name the caller as the import account, or its import
     /// period is over (admin.md §3.8).
@@ -342,6 +344,7 @@ mod tests {
       ErrorCode::NotetakerKeyNotFound,
       ErrorCode::UnknownHost,
       ErrorCode::BrandAssetNotFound,
+      ErrorCode::CrashReportsOff,
       ErrorCode::UserGroupNotFound,
       ErrorCode::ScheduledMessageNotFound,
       ErrorCode::ScheduledMessagesDisabled,
