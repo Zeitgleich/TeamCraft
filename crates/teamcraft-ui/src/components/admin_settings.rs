@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use leptos::prelude::*;
 use serde_json::{Map, Value, json};
 use teamcraft_proto::{
-  HOLIDAY_REGIONS, HolidayFeedError, HolidayFeedStatus, RuntimeSettingsKey, RuntimeSettingsResponse,
-  RuntimeSettingsSection, SettingSource, Snowflake,
+  Dsn, HOLIDAY_REGIONS, HolidayFeedError, HolidayFeedStatus, RuntimeSettingsKey, RuntimeSettingsResponse,
+  RuntimeSettingsSection, SettingSource, Snowflake, is_crash_environment,
 };
 
 use crate::clock::{format_relative, now_ms};
@@ -24,7 +24,7 @@ const MINUTE: u64 = 60;
 type Values = BTreeMap<&'static str, String>;
 
 /// Groups in the order of the page.
-const GROUPS: [&str; 14] = [
+const GROUPS: [&str; 15] = [
   "server_rules",
   "notifications",
   "email_digest",
@@ -39,6 +39,7 @@ const GROUPS: [&str; 14] = [
   "app_links",
   "health_alerts",
   "holidays",
+  "crash_reports",
 ];
 /// The sign-in methods an admin can choose, as the form's values: comma-separated, in order.
 const METHOD_CHOICES: [&str; 4] = ["sso,local", "local,sso", "sso", "local"];
@@ -81,6 +82,10 @@ enum Kind {
   MapText,
   /// An https link that may be empty (none).
   Link,
+  /// A crash reports DSN (docs/crash-reports.md); empty while reports are off.
+  Dsn,
+  /// A crash reports environment name: lowercase letters, digits, `-`, `_`, `.`.
+  Environment,
 }
 
 #[derive(Clone, Copy)]
@@ -219,6 +224,24 @@ const APP_LINKS: &[FieldDef] = &[
   },
   text("apple_team_id"),
   text("apple_bundle_id"),
+];
+const CRASH_REPORTS: &[FieldDef] = &[
+  flag("is_enabled"),
+  FieldDef {
+    id: "dsn",
+    kind: Kind::Dsn,
+  },
+  ranged(
+    "sample_percent",
+    1,
+    (0, 100),
+    PERCENT,
+    "settings-error-crash-percent",
+  ),
+  FieldDef {
+    id: "environment",
+    kind: Kind::Environment,
+  },
 ];
 const HEALTH_ALERTS: &[FieldDef] = &[
   flag("is_enabled"),
@@ -519,8 +542,12 @@ fn FieldRow(
       <TextField id=leak_key(dom_id) label=label input_type="number" unit=unit.unwrap_or_default() value=value on_input=on_input error=error />
     }
     .into_any(),
-    Kind::Text => view! {
+    Kind::Text | Kind::Environment => view! {
       <TextField id=leak_key(dom_id) label=label value=value on_input=on_input error=error />
+    }
+    .into_any(),
+    Kind::Dsn => view! {
+      <TextField id=leak_key(dom_id) label=label input_type="url" placeholder="https://key@errors.example.com/1" value=value on_input=on_input error=error />
     }
     .into_any(),
     Kind::Area | Kind::MapText => view! {
@@ -773,6 +800,7 @@ fn fields_of(slug: &str) -> &'static [FieldDef] {
     "app_links" => APP_LINKS,
     "health_alerts" => HEALTH_ALERTS,
     "holidays" => HOLIDAYS,
+    "crash_reports" => CRASH_REPORTS,
     _ => &[],
   }
 }
@@ -794,6 +822,7 @@ fn group_json(key: &RuntimeSettingsKey, response: &RuntimeSettingsResponse) -> O
     RuntimeSettingsKey::AppLinks => serde_json::to_value(&response.app_links),
     RuntimeSettingsKey::HealthAlerts => serde_json::to_value(&response.health_alerts),
     RuntimeSettingsKey::Holidays => serde_json::to_value(&response.holidays),
+    RuntimeSettingsKey::CrashReports => serde_json::to_value(&response.crash_reports),
     _ => return None,
   };
   value.ok()
@@ -827,6 +856,8 @@ fn value_text(kind: Kind, maybe_value: Option<&Value>) -> String {
       .map(|raw| format_scaled(raw, scale))
       .unwrap_or_default(),
     Kind::Text
+    | Kind::Dsn
+    | Kind::Environment
     | Kind::Area
     | Kind::MapText
     | Kind::Link
@@ -885,6 +916,14 @@ fn check(key: &RuntimeSettingsKey, values: &Values) -> Result<RuntimeSettingsSec
       Err(message) => errors.push((field.id, message)),
     }
   }
+  // Reports can't be on without somewhere to send them.
+  if *key == RuntimeSettingsKey::CrashReports
+    && object.get("is_enabled") == Some(&Value::Bool(true))
+    && object.get("dsn").and_then(Value::as_str) == Some("")
+  {
+    // The DSN field comes right after the switch, before any other field that can be wrong.
+    errors.insert(0, ("dsn", "settings-error-dsn"));
+  }
   if !errors.is_empty() {
     return Err(errors);
   }
@@ -909,6 +948,15 @@ fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
       _ => Err(maybe_range_error.unwrap_or("admin-error-number")),
     },
     Kind::Text | Kind::Area => Ok(Value::String(typed.trim_end().to_owned())),
+    Kind::Dsn => match typed.trim() {
+      "" => Ok(json!("")),
+      dsn if dsn.parse::<Dsn>().is_ok() => Ok(json!(dsn)),
+      _ => Err("settings-error-dsn"),
+    },
+    Kind::Environment => match typed.trim() {
+      name if is_crash_environment(name) => Ok(json!(name)),
+      _ => Err("settings-error-crash-environment"),
+    },
     Kind::MapText => Ok(match typed.trim() {
       "" => Value::Null,
       text => Value::String(text.to_owned()),
@@ -1144,6 +1192,39 @@ mod tests {
   }
 
   #[test]
+  fn crash_reports_need_a_valid_dsn_while_on() {
+    let mut values: Values = [
+      ("is_enabled", "true"),
+      ("dsn", ""),
+      ("sample_percent", "150"),
+      ("environment", "Prod"),
+    ]
+    .into_iter()
+    .map(|(id, value)| (id, value.to_owned()))
+    .collect();
+    assert_eq!(
+      check(&kind("crash_reports"), &values).err(),
+      Some(vec![
+        ("dsn", "settings-error-dsn"),
+        ("sample_percent", "settings-error-crash-percent"),
+        ("environment", "settings-error-crash-environment"),
+      ])
+    );
+    values.insert("dsn", "not a dsn".to_owned());
+    values.insert("sample_percent", "10".to_owned());
+    values.insert("environment", "staging".to_owned());
+    assert_eq!(
+      check(&kind("crash_reports"), &values).err(),
+      Some(vec![("dsn", "settings-error-dsn")])
+    );
+    values.insert("dsn", "https://key@errors.example.com/4".to_owned());
+    assert!(check(&kind("crash_reports"), &values).is_ok());
+    values.insert("is_enabled", "false".to_owned());
+    values.insert("dsn", String::new());
+    assert!(check(&kind("crash_reports"), &values).is_ok());
+  }
+
+  #[test]
   fn every_label_is_translated() {
     use crate::i18n::{Locale, translate};
 
@@ -1166,6 +1247,9 @@ mod tests {
       "settings-error-health-backup-hours",
       "settings-error-health-days",
       "settings-error-health-percent",
+      "settings-error-crash-percent",
+      "settings-error-dsn",
+      "settings-error-crash-environment",
       "settings-error-holiday-refresh-hours",
       "settings-error-holiday-max-age-days",
       "settings-holiday-feed-copy",

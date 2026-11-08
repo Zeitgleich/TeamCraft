@@ -253,6 +253,7 @@ async fn run() -> anyhow::Result<()> {
       app_links: teamcraft_proto::AppLinkSettings::default(),
       health_alerts: teamcraft_proto::HealthAlertSettings::default(),
       holidays: teamcraft_proto::HolidaySettings::default(),
+      crash_reports: teamcraft_proto::CrashReportSettings::default(),
       max_attachment_bytes: config
         .storage
         .as_ref()

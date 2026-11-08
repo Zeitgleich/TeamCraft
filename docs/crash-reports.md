@@ -110,7 +110,8 @@ account, the device or the instance, and it is rotated when the user turns repor
 
 - **Instance (admin):** Administration → Crash reports: on/off, DSN, sample rate for non-fatal
   errors (crashes are always sent), environment name. Stored as an instance setting in the
-  database (admin-gui-over-config) and served to the apps with the instance config, so store apps
+  database (`settings.crash_reports`, a runtime settings group) and served to the apps in
+  `GET /api/v1/server-info` (`crash_reports`, absent while off), so store apps
   work for every instance without a rebuild. Off, or no DSN: nothing is captured or sent, and
   queued reports are dropped.
 - **User:** Settings → Privacy → "Send crash reports" (on by default when the admin enabled them),
@@ -174,7 +175,8 @@ account, the device or the instance, and it is rotated when the user turns repor
 |--------------------------------------------------------------|----------------------------------|
 | This design, the core module (config, scrub, queue, panic)   | Done (first pull request)        |
 | Panic hooks (desktop, server, web, mobile core), JS errors   | Next                             |
-| Admin setting, instance config, user opt-out, first notice   | Next                             |
+| Admin setting, served in `GET /api/v1/server-info`           | Done (second pull request)       |
+| User opt-out, first notice                                   | Next                             |
 | Android SDK, symbol upload in the release workflow           | Next                             |
 | iOS (sentry-cocoa, dSYMs)                                    | Follow-up issue (needs a Mac)    |
 | GlitchTip in teamcraft-deploy                                | teamcraft-deploy                 |
