@@ -41,6 +41,8 @@
 mod cadence;
 #[cfg(feature = "effects")]
 mod effects_preview;
+#[cfg(feature = "effects")]
+mod effects_timing;
 mod fallback;
 #[cfg(feature = "effects")]
 mod gl_compositor;
@@ -55,7 +57,9 @@ mod switch_back;
 mod video;
 
 #[cfg(feature = "effects")]
-pub use effects_preview::EffectsPreview;
+pub use effects_preview::{EffectsPreview, TimedEffects};
+#[cfg(feature = "effects")]
+pub use effects_timing::{COMPOSITING_KEY, TIMING_KEY};
 #[cfg(feature = "effects")]
 pub use gl_compositor::GlCompositor;
 #[cfg(feature = "effects")]

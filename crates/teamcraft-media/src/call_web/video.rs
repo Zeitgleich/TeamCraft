@@ -124,6 +124,10 @@ pub(super) struct LayerEncoders<E> {
   layers: Vec<Layer<E>>,
   open: EncoderOpener<E>,
   next_generation: u64,
+  /// Frames given to a layer's encoder, and those skipped because its queue was full (the effects'
+  /// timing reports both, #1336).
+  given: u64,
+  skipped_queue_full: u64,
 }
 
 /// Opens an encoder for a layer; the number (generation) tells its failure reports from those of
@@ -445,6 +449,11 @@ impl TrackSender {
     };
     let result = self.encoders.encode(&frame, is_periodic_keyframe);
     frame.close();
+    #[cfg(feature = "effects")]
+    if let Some(effects) = &mut self.maybe_effects {
+      let (given, skipped) = self.encoders.frame_counts();
+      effects.observe_encoders(given, skipped);
+    }
     result
   }
 
@@ -530,6 +539,8 @@ impl<E: FrameEncoder> LayerEncoders<E> {
       next_generation: layers.len() as u64,
       layers,
       open: Box::new(open),
+      given: 0,
+      skipped_queue_full: 0,
     })
   }
 
@@ -598,8 +609,10 @@ impl<E: FrameEncoder> LayerEncoders<E> {
         continue;
       }
       if layer.encoder.queue_size() > MAX_ENCODE_QUEUE {
+        self.skipped_queue_full += 1;
         continue;
       }
+      self.given += 1;
       let is_keyframe = std::mem::take(&mut layer.wants_keyframe) || is_periodic_keyframe;
       if let Err(error) = layer.encoder.encode(frame, is_keyframe) {
         warn!(%error, layer = layer.info.layer, "encoding a video frame failed");
@@ -607,6 +620,11 @@ impl<E: FrameEncoder> LayerEncoders<E> {
       }
     }
     Ok(())
+  }
+
+  /// Frames given to the layers' encoders so far, and those skipped because a queue was full.
+  pub fn frame_counts(&self) -> (u64, u64) {
+    (self.given, self.skipped_queue_full)
   }
 
   /// Every layer gets a new encoder from `open` (another codec, #565), at its size, which starts
@@ -1394,8 +1412,8 @@ pub(super) async fn play_hidden(stream: &MediaStream) -> Result<HtmlVideoElement
   Ok(video)
 }
 
-/// The camera's background effects (#439): the segmentation worker, a compositor (WebGPU, or WebGL2
-/// where reading a frame back from WebGPU is too slow, as in Firefox), the effect, and optionally a
+/// The camera's background effects (#439): the segmentation worker, a compositor (WebGL2, or WebGPU
+/// in Safari; `page_calls::browser_effects_compositing`), the effect, and optionally a
 /// canvas that shows each picture as it is sent, for the self view (`captureStream()` of it plays
 /// in a `<video>`).
 #[cfg(feature = "effects")]
@@ -1409,7 +1427,7 @@ pub struct CameraEffects {
 
 #[cfg(feature = "effects")]
 impl CameraEffects {
-  /// Composites with WebGPU (Chrome, Edge, Safari): the picture is read from a canvas, composited
+  /// Composites with WebGPU (Safari): the picture is read from a canvas, composited
   /// and turned into I420 on the GPU, and read back for the encoders.
   pub async fn webgpu(
     worker: std::rc::Rc<super::SegmentationWorker>,
@@ -1423,8 +1441,8 @@ impl CameraEffects {
     ))
   }
 
-  /// Composites with WebGL2 (Firefox, browsers without WebGPU): the picture stays on the GPU and
-  /// the encoders take the canvas it is drawn into.
+  /// Composites with WebGL2 (Chrome, Edge, Firefox, browsers without WebGPU): the picture stays on
+  /// the GPU and the encoders take the canvas it is drawn into.
   pub fn webgl(
     worker: std::rc::Rc<super::SegmentationWorker>,
     effect: crate::effects::BackgroundEffect,
@@ -1481,6 +1499,9 @@ pub(super) mod effects {
   use wasm_bindgen::prelude::*;
   use web_sys::{HtmlCanvasElement, HtmlVideoElement};
 
+  use web_time::Instant;
+
+  use super::super::effects_timing::{EffectsTiming, Stage};
   use super::super::{GlCompositor, SegmentationWorker, WebCallError, browser, dictionary, window};
   use super::CameraEffects;
   use crate::capture_convert::rgbx_to_i420;
@@ -1500,6 +1521,16 @@ pub(super) mod effects {
     WebGl(Box<GlCompositor>),
   }
 
+  impl BrowserCompositor {
+    /// As the timing names it.
+    fn name(&self) -> &'static str {
+      match self {
+        BrowserCompositor::WebGpu(_) => "webgpu",
+        BrowserCompositor::WebGl(_) => "webgl2",
+      }
+    }
+  }
+
   pub(in super::super) struct WebEffects {
     compositor: BrowserCompositor,
     /// WebGPU: the canvas the camera's picture is read from.
@@ -1515,6 +1546,8 @@ pub(super) mod effects {
     is_required: bool,
     /// Pictures in a row the effects failed on (sent without the effect where that is allowed).
     failures_in_a_row: u32,
+    /// Local timing of the steps (#1336): off unless asked for.
+    maybe_timing: Option<EffectsTiming>,
   }
 
   impl WebEffects {
@@ -1540,6 +1573,7 @@ pub(super) mod effects {
         .map_err(effects_error)?;
       // A mask the worker made for an earlier camera would show where the person was then.
       effects.worker.forget_mask();
+      let maybe_timing = EffectsTiming::from_storage(effects.compositor.name());
       Ok(Self {
         compositor: effects.compositor,
         maybe_reader,
@@ -1551,7 +1585,31 @@ pub(super) mod effects {
         maybe_view,
         is_required: effects.is_required,
         failures_in_a_row: 0,
+        maybe_timing,
       })
+    }
+
+    /// Times every picture's steps from now on, for one summary ([`WebEffects::timing`]).
+    pub fn time_for_bench(&mut self) {
+      self.maybe_timing = Some(EffectsTiming::for_bench(self.compositor.name()));
+    }
+
+    /// The timing so far, where it is on.
+    pub fn timing(&self) -> Option<&EffectsTiming> {
+      self.maybe_timing.as_ref()
+    }
+
+    /// The encoders' totals of frames given and skipped for a full queue, for the timing.
+    pub fn observe_encoders(&mut self, encoded: u64, skipped: u64) {
+      if let Some(timing) = &mut self.maybe_timing {
+        timing.observe_encoders(encoded, skipped);
+      }
+    }
+
+    fn record(&mut self, stage: Stage, started: Option<Instant>) {
+      if let (Some(timing), Some(started)) = (&mut self.maybe_timing, started) {
+        timing.record(stage, started);
+      }
     }
 
     pub fn set_effect(&mut self, effect: BackgroundEffect) {
@@ -1573,9 +1631,14 @@ pub(super) mod effects {
       let frame = if self.effect == BackgroundEffect::None {
         plain_frame(video, timestamp_us)?
       } else {
+        let started = self.maybe_timing.as_ref().map(|_| Instant::now());
         match self.apply(video, timestamp_us).await {
           Ok(frame) => {
             self.failures_in_a_row = 0;
+            self.record(Stage::Total, started);
+            if let Some(timing) = &mut self.maybe_timing {
+              timing.picture_done();
+            }
             frame
           },
           // A required background: the room must not show (the caller skips the picture).
@@ -1618,6 +1681,9 @@ pub(super) mod effects {
     ) -> Result<WebVideoFrame, WebCallError> {
       if let Some(answer) = self.worker.take_mask() {
         self.cadence.observe(answer.cost);
+        if let Some(timing) = &mut self.maybe_timing {
+          timing.record_segmentation(answer.cost);
+        }
         self.maybe_mask = Some(answer.mask);
       }
       if let Some(failure) = self.worker.maybe_failure() {
@@ -1632,9 +1698,18 @@ pub(super) mod effects {
         effect,
         maybe_mask,
         nobody,
+        maybe_timing,
         ..
       } = self;
       let mask = maybe_mask.as_ref().unwrap_or(nobody);
+      // Each step's start, where the timing is on.
+      let is_timed = maybe_timing.is_some();
+      let start = || is_timed.then(Instant::now);
+      let mut record = |stage, started: Option<Instant>| {
+        if let (Some(timing), Some(started)) = (maybe_timing.as_mut(), started) {
+          timing.record(stage, started);
+        }
+      };
       match compositor {
         BrowserCompositor::WebGpu(compositor) => {
           let Some((canvas, context)) = maybe_reader else {
@@ -1648,6 +1723,7 @@ pub(super) mod effects {
             canvas.set_height(height);
           }
           let (w, h) = (f64::from(width), f64::from(height));
+          let started = start();
           context
             .draw_video(video, 0.0, 0.0, w, h)
             .map_err(browser("canvas"))?;
@@ -1655,13 +1731,17 @@ pub(super) mod effects {
             .get_image_data(0.0, 0.0, w, h)
             .map_err(browser("canvas"))?
             .data();
+          record(Stage::Picture, started);
           if wants_picture {
+            let started = start();
             let small = shrink(&pixels, width, height);
             worker
               .segment(MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, &small)
               .map_err(effects_error)?;
+            record(Stage::ModelInput, started);
           }
           let timestamp = timestamp_us as u64;
+          let started = start();
           // The GPU turns the RGBA picture into I420 as it composites (#1295); only a picture too
           // large for its buffers is converted on the CPU first.
           let frame = if compositor.takes_rgba(width, height) {
@@ -1677,6 +1757,8 @@ pub(super) mod effects {
             compositor.apply(&frame, mask, effect).await
           }
           .map_err(effects_error)?;
+          record(Stage::Composite, started);
+          let started = start();
           let init: Object = dictionary(&[
             ("format", JsValue::from_str("I420")),
             ("codedWidth", JsValue::from(width)),
@@ -1684,22 +1766,34 @@ pub(super) mod effects {
             ("timestamp", JsValue::from(timestamp_us)),
           ])
           .map_err(browser("VideoFrame"))?;
-          WebVideoFrame::new(&Uint8Array::from(frame.data()).into(), &init).map_err(browser("VideoFrame"))
+          let frame = WebVideoFrame::new(&Uint8Array::from(frame.data()).into(), &init)
+            .map_err(browser("VideoFrame"))?;
+          record(Stage::Frame, started);
+          Ok(frame)
         },
         BrowserCompositor::WebGl(compositor) => {
+          let started = start();
           let size = compositor.take_picture(video).map_err(effects_error)?;
+          record(Stage::Picture, started);
           if wants_picture {
+            let started = start();
             let small = compositor.model_input().map_err(effects_error)?;
             worker
               .segment(MODEL_INPUT_WIDTH, MODEL_INPUT_HEIGHT, &small)
               .map_err(effects_error)?;
+            record(Stage::ModelInput, started);
           }
+          let started = start();
           compositor.composite(size, mask, effect).map_err(effects_error)?;
-          WebVideoFrame::new(
+          record(Stage::Composite, started);
+          let started = start();
+          let frame = WebVideoFrame::new(
             compositor.canvas().as_ref(),
             &dictionary(&[("timestamp", JsValue::from(timestamp_us))]).map_err(browser("VideoFrame"))?,
           )
-          .map_err(browser("VideoFrame"))
+          .map_err(browser("VideoFrame"))?;
+          record(Stage::Frame, started);
+          Ok(frame)
         },
       }
     }

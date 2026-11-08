@@ -19,6 +19,45 @@ use super::video::play_hidden;
 use super::{CameraEffects, WebCallError, sleep};
 use crate::effects::BackgroundEffect;
 use crate::video::CAMERA_FRAMERATE;
+use crate::web_api::VideoFrame;
+
+/// The effects' pipeline on its own, picture by picture, timed (#1336): what a call sends, for the
+/// effects bench (`examples/effects_bench.rs`), which encodes the pictures itself.
+pub struct TimedEffects {
+  pipeline: WebEffects,
+}
+
+impl TimedEffects {
+  /// The pipeline of `effects`, timing every picture.
+  pub fn new(effects: CameraEffects) -> Result<Self, WebCallError> {
+    let mut pipeline = WebEffects::new(effects)?;
+    pipeline.time_for_bench();
+    Ok(Self { pipeline })
+  }
+
+  /// `video`'s current picture through the effects, as the encoders get it.
+  pub async fn frame(
+    &mut self,
+    video: &HtmlVideoElement,
+    timestamp_us: f64,
+  ) -> Result<VideoFrame, WebCallError> {
+    self.pipeline.frame(video, timestamp_us).await
+  }
+
+  /// The encoders' totals of frames given and skipped because their queue was full.
+  pub fn observe_encoders(&mut self, given: u64, skipped: u64) {
+    self.pipeline.observe_encoders(given, skipped);
+  }
+
+  /// The timing of the pictures so far, as JSON (see `effects_timing`).
+  pub fn summary(&self) -> String {
+    self
+      .pipeline
+      .timing()
+      .map(|timing| timing.summary())
+      .unwrap_or_default()
+  }
+}
 
 /// Runs the effects on a camera for the self view only, until dropped.
 pub struct EffectsPreview {

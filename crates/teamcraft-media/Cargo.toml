@@ -99,8 +99,10 @@ photo-backgrounds = ["effects"]
 # Person segmentation for the effects with tract (pure-Rust inference; native and wasm), the model
 # as NNEF (tract's own format: no ONNX parser), and the check of a downloaded model against its
 # pinned SHA-256. The browser's segmentation worker is built with it alone (#1295: tract's ONNX
-# parser was most of that module), so no other crypto comes along.
-segmentation-nnef = ["effects", "dep:tract-nnef", "dep:tract-onnx-opl", "dep:sha2", "dep:getrandom"]
+# parser was most of that module), so no other crypto comes along. tract's `tract_core` NNEF
+# registry only with what the model uses (element-wise operators and the cast; our vendored
+# tract-nnef's `minimal_core_registry`, #1336): its other operators were a quarter of the module.
+segmentation-nnef = ["effects", "dep:tract-nnef", "tract-nnef/minimal_core_registry", "dep:tract-onnx-opl", "dep:sha2", "dep:getrandom"]
 # ... and the ONNX model the apps bundle, with tract's ONNX parser: the native apps load it, and the
 # `segmentation_model_nnef` example converts it to NNEF for the browser.
 segmentation = ["segmentation-nnef", "dep:tract-onnx"]
@@ -186,7 +188,7 @@ web-sys = { version = "0.3.106", optional = true, features = [
   "MediaDeviceInfo", "MediaDeviceKind", "MediaDevices", "MediaStream", "MediaStreamAudioSourceNode",
   "MediaStreamConstraints", "MediaStreamTrack", "MediaTrackConstraints", "MessageEvent", "MessagePort",
   "BinaryType", "WebSocket",
-  "Navigator", "ReadableStream", "ReadableStreamDefaultReader", "Url", "Window", "Worklet",
+  "Navigator", "ReadableStream", "ReadableStreamDefaultReader", "Storage", "Url", "Window", "Worklet",
   "WritableStream", "WritableStreamDefaultWriter", "DisplayMediaStreamConstraints",
   "Document", "Element", "EventTarget", "HtmlCanvasElement", "HtmlElement", "HtmlMediaElement",
   "HtmlVideoElement", "MediaTrackSettings", "Node", "ImageData", "ResizeObserver",
@@ -273,6 +275,13 @@ required-features = ["native"]
 [[example]]
 name = "video_bench"
 required-features = ["openh264-source", "segmentation"]
+
+# The browser's effects timed, WebGPU against WebGL2 (#1336; dev/effects-bench builds and serves
+# it). A wasm module: empty elsewhere.
+[[example]]
+name = "effects_bench"
+crate-type = ["cdylib"]
+required-features = ["web", "effects"]
 
 # The segmentation model as NNEF for the browser (#1295; models/fetch-nnef.sh runs it).
 [[example]]
