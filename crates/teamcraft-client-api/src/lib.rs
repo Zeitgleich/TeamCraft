@@ -17,6 +17,7 @@ pub mod call_view;
 pub mod call_window;
 pub mod calls;
 pub mod canvas;
+pub mod color_theme;
 pub mod custom_status;
 pub mod debug_log;
 pub mod drafts;

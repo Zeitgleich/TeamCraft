@@ -26,8 +26,9 @@ enum class ChatListGrouping {
 
 /**
  * "Use the colors of the wallpaper" (Material You, Android 12+) instead of the TeamCraft colors.
- * A device setting, off by default so the app looks like desktop and web. The layout of the
- * conversations follows the account (#945).
+ * A device setting, off by default so the app looks like desktop and web; a colour theme other
+ * than the server's default takes precedence. The layout of the conversations and the colour theme
+ * follow the account (#945, #202).
  */
 class AppearancePrefs private constructor(context: Context) {
   private val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -40,6 +41,23 @@ class AppearancePrefs private constructor(context: Context) {
   private val grouping = sharedGrouping ?: MutableStateFlow(
     ChatListGrouping.entries.firstOrNull { it.name == prefs.getString(KEY_GROUPING, null) } ?: ChatListGrouping.Mixed,
   ).also { sharedGrouping = it }
+
+  private val colorTheme = sharedColorTheme ?: MutableStateFlow(
+    prefs.getString(KEY_COLOR_THEME, null) ?: DEFAULT_COLOR_THEME,
+  ).also { sharedColorTheme = it }
+
+  /**
+   * The colour theme (#202) as the core stores it (`brand`, `preset:…`, `custom:…`); the core turns
+   * it into colours (`colorThemeTokens`). Follows the account; light or dark stays the device's.
+   */
+  val colorThemeValue: StateFlow<String> = colorTheme
+
+  fun setColorTheme(value: String) {
+    if (value == colorTheme.value) return
+    prefs.edit().putString(KEY_COLOR_THEME, value).apply()
+    colorTheme.value = value
+    LocalSettingChanges.changed()
+  }
 
   /** Live, like [chatListLayout]. */
   val chatListGrouping: StateFlow<ChatListGrouping> = grouping
@@ -72,11 +90,16 @@ class AppearancePrefs private constructor(context: Context) {
     private const val KEY_DYNAMIC = "dynamic_color"
     private const val KEY_LAYOUT = "chat_list_layout"
     private const val KEY_GROUPING = "chat_list_grouping"
+    private const val KEY_COLOR_THEME = "color_theme"
+
+    /** The server's brand colours, or the app's own without a brand. */
+    const val DEFAULT_COLOR_THEME = "brand"
 
     /** One flow per process: every screen and the theme see the same value. */
     private var shared: MutableStateFlow<Boolean>? = null
     private var sharedLayout: MutableStateFlow<ChatListLayout>? = null
     private var sharedGrouping: MutableStateFlow<ChatListGrouping>? = null
+    private var sharedColorTheme: MutableStateFlow<String>? = null
 
     val isSupported: Boolean get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 

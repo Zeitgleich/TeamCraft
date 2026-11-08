@@ -149,13 +149,15 @@ pub fn provide_brand(settings: Settings) {
 
   let system_dark = RwSignal::new(system_prefers_dark());
   watch_system_scheme(system_dark);
+  let color_theme = Memo::new(move |_| settings.prefs.with(|prefs| prefs.display.color_theme.clone()));
   Effect::new(move |_| {
     let is_dark = match settings.theme.get() {
       Theme::Dark => true,
       Theme::Light => false,
       Theme::System => system_dark.get(),
     };
-    apply_to_document(&brand.0.get(), is_dark);
+    let theme = color_theme.get().css_properties(is_dark);
+    apply_to_document(&brand.0.get(), &theme, is_dark);
   });
 
   leptos::task::spawn_local(async move {
@@ -304,8 +306,9 @@ thread_local! {
   static APPLIED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Sets the brand's colors on `<html>`, the page title and the favicon.
-fn apply_to_document(view: &BrandView, is_dark: bool) {
+/// Sets the brand's colors on `<html>`, then the user's colour theme over them (#202: a theme
+/// replaces the brand's chrome colours, the brand stays the default), and the page title.
+fn apply_to_document(view: &BrandView, theme: &[(&'static str, String)], is_dark: bool) {
   let Some(document) = web_sys::window().and_then(|window| window.document()) else {
     return;
   };
@@ -318,9 +321,14 @@ fn apply_to_document(view: &BrandView, is_dark: bool) {
       for property in applied.borrow_mut().drain(..) {
         drop(style.remove_property(&property));
       }
-      for (property, value) in view.properties(is_dark) {
+      let brand = view
+        .properties(is_dark)
+        .iter()
+        .map(|(property, value)| (property.as_str(), value.as_str()));
+      let user = theme.iter().map(|(property, value)| (*property, value.as_str()));
+      for (property, value) in brand.chain(user) {
         if style.set_property(property, value).is_ok() {
-          applied.borrow_mut().push(property.clone());
+          applied.borrow_mut().push(property.to_owned());
         }
       }
     });
@@ -359,7 +367,7 @@ fn set_favicon(document: &web_sys::Document, href: &str) {
   }
 }
 
-fn system_prefers_dark() -> bool {
+pub(crate) fn system_prefers_dark() -> bool {
   web_sys::window()
     .and_then(|window| window.match_media("(prefers-color-scheme: dark)").ok().flatten())
     .is_some_and(|query| query.matches())
