@@ -12,7 +12,7 @@ use crate::clock::{local_utc_offset_minutes, now_ms};
 use teamcraft_client_api::actions::MessagePriority;
 pub use teamcraft_client_api::notify::needs_channel_confirmation;
 use teamcraft_client_api::notify::{self, MentionRules};
-use teamcraft_proto::{DndCandidate, PushContentMode};
+use teamcraft_proto::{ChannelMentions, DndCandidate, PushContentMode};
 
 use crate::model::{
   Conversation, ConversationId, ConversationKind, Message, MessageId, PresenceStatus, SpaceId, ThreadId,
@@ -66,6 +66,8 @@ pub enum SkipReason {
   OwnMessage,
   Viewing,
   Muted,
+  /// The conversation's quiet hours are on.
+  QuietHours,
   LevelNothing,
   NotMentioned,
   DoNotDisturb,
@@ -84,10 +86,15 @@ pub fn decide(input: &PolicyInput) -> Decision {
   if input.prefs.is_muted_in(&id, maybe_space.as_deref()) {
     return Decision::Skip(SkipReason::Muted);
   }
+  let filters = input.prefs.filters(&id);
+  // Checked in this device's time, like the DND schedule; the server checks the stored zone.
+  if filters.is_quiet_at(input.now.div_euclid(MS_PER_SECOND), input.utc_offset_minutes) {
+    return Decision::Skip(SkipReason::QuietHours);
+  }
   if is_silenced_by_dnd(input) {
     return Decision::Skip(SkipReason::DoNotDisturb);
   }
-  let is_mentioned = is_mentioned(input.body, input.me, input.prefs);
+  let is_mentioned = is_mentioned(input.body, input.me, input.prefs, &filters.channel_mentions);
   if let CandidateKind::ThreadReply { is_thread_mine } = input.kind {
     let allowed = match input.prefs.thread_replies {
       ThreadReplies::Participating => true,
@@ -156,16 +163,21 @@ fn is_silenced_by_dnd(input: &PolicyInput) -> bool {
     })
 }
 
-/// `@username`, `@channel`/`@here`/`@all` (when enabled), the first name (when enabled) or a keyword
-/// (the rules are shared with the mobile apps).
-pub fn is_mentioned(body: &str, me: &User, prefs: &NotificationPrefs) -> bool {
+/// `@username`, `@channel`/`@here`/`@all` (when enabled, generally or in this conversation), the
+/// first name (when enabled) or a keyword (the rules are shared with the mobile apps).
+pub fn is_mentioned(
+  body: &str,
+  me: &User,
+  prefs: &NotificationPrefs,
+  channel_mentions: &ChannelMentions,
+) -> bool {
   notify::is_mentioned(
     body,
     &MentionRules {
       username: &me.username,
       display_name: &me.display_name,
       first_name_is_mention: prefs.first_name_is_mention,
-      channel_mentions_notify: prefs.channel_mentions_notify,
+      channel_mentions_notify: channel_mentions.counts(prefs.channel_mentions_notify),
       keywords: &prefs.keywords,
     },
   )
@@ -977,6 +989,134 @@ mod tests {
     }
   }
 
+  mod conversation_filters {
+    use teamcraft_proto::{DndWindow, Weekday};
+
+    use super::*;
+    use crate::prefs::ConversationFilters;
+
+    /// What notifies in a mentions-only channel, by message and by the channel's `@channel` choice.
+    #[test]
+    fn channel_mentions_by_message_kind_and_choice() {
+      let cases: [(&str, bool, CandidateKind, bool); 6] = [
+        ("@channel standup", false, CandidateKind::Message, true),
+        ("@here anyone?", false, CandidateKind::Message, true),
+        ("@alice look @channel", false, CandidateKind::Message, false),
+        ("plain words", true, CandidateKind::Message, false),
+        (
+          "@channel in thread",
+          false,
+          CandidateKind::ThreadReply {
+            is_thread_mine: false,
+          },
+          true,
+        ),
+        (
+          "plain reply",
+          false,
+          CandidateKind::ThreadReply { is_thread_mine: true },
+          false,
+        ),
+      ];
+      // (choice, the general setting) -> whether a pure `@channel` notifies.
+      let choices = [
+        (ChannelMentions::Default, true, true),
+        (ChannelMentions::Default, false, false),
+        (ChannelMentions::Notify, false, true),
+        (ChannelMentions::Ignore, true, false),
+        (ChannelMentions::Unknown("later".into()), true, true),
+      ];
+      for (choice, general, channel_notifies) in choices {
+        let mut prefs = mentions_only();
+        prefs.channel_mentions_notify = general;
+        prefs.set_filters(
+          &channel_id(),
+          ConversationFilters {
+            channel_mentions: choice.clone(),
+            ..ConversationFilters::default()
+          },
+        );
+        for (body, is_urgent, kind, is_only_channel) in cases {
+          let mut candidate = input(&prefs, ConversationKind::Public, body);
+          candidate.is_urgent = is_urgent;
+          candidate.kind = kind;
+          let is_direct = body.contains("@alice");
+          let is_thread = matches!(kind, CandidateKind::ThreadReply { .. });
+          let expected = if is_direct || is_thread || (is_only_channel && channel_notifies) {
+            Decision::Notify
+          } else {
+            Decision::Skip(SkipReason::NotMentioned)
+          };
+          assert_eq!(
+            decide(&candidate),
+            expected,
+            "{choice:?}, general {general}: {body}"
+          );
+        }
+      }
+    }
+
+    #[test]
+    fn quiet_hours_silence_like_a_mute_even_urgent_direct_mentions() {
+      let mut prefs = NotificationPrefs::default();
+      prefs.dnd.allows_urgent = true;
+      prefs.set_filters(&channel_id(), quiet(vec![Weekday::Wednesday], 11 * 60, 13 * 60));
+      let mut candidate = input(&prefs, ConversationKind::Public, "@alice now");
+      candidate.is_urgent = true;
+      assert_eq!(decide(&candidate), Decision::Skip(SkipReason::QuietHours));
+      // Other conversations are not affected.
+      prefs.filters.clear();
+      let candidate = input(&prefs, ConversationKind::Public, "@alice now");
+      assert_eq!(decide(&candidate), Decision::Notify);
+    }
+
+    #[test]
+    fn quiet_hours_end_exclusive_and_follow_the_weekday() {
+      let mut prefs = NotificationPrefs::default();
+      prefs.set_filters(&channel_id(), quiet(vec![Weekday::Wednesday], 9 * 60, 12 * 60));
+      // NOW is Wednesday 12:00: the window just ended.
+      assert_eq!(
+        decide(&input(&prefs, ConversationKind::Public, "lunch?")),
+        Decision::Notify
+      );
+      let mut earlier = input(&prefs, ConversationKind::Public, "lunch?");
+      earlier.now = NOW - 60_000;
+      assert_eq!(decide(&earlier), Decision::Skip(SkipReason::QuietHours));
+      // The same time on Thursday.
+      let mut thursday = input(&prefs, ConversationKind::Public, "lunch?");
+      thursday.now = NOW + 24 * 3_600_000 - 60_000;
+      assert_eq!(decide(&thursday), Decision::Notify);
+    }
+
+    #[test]
+    fn quiet_hours_past_midnight_and_in_the_device_zone() {
+      let mut prefs = NotificationPrefs::default();
+      // Tuesday 22:00 to Wednesday 13:00 local.
+      prefs.set_filters(&channel_id(), quiet(vec![Weekday::Tuesday], 22 * 60, 13 * 60));
+      let candidate = input(&prefs, ConversationKind::Public, "lunch?");
+      assert_eq!(decide(&candidate), Decision::Skip(SkipReason::QuietHours));
+      // Two hours ahead of UTC it is 14:00 local: over.
+      let mut ahead = input(&prefs, ConversationKind::Public, "lunch?");
+      ahead.utc_offset_minutes = 120;
+      assert_eq!(decide(&ahead), Decision::Notify);
+    }
+
+    fn quiet(weekdays: Vec<Weekday>, start_minute: u16, end_minute: u16) -> ConversationFilters {
+      ConversationFilters {
+        quiet_windows: vec![DndWindow {
+          weekdays,
+          start_minute,
+          end_minute,
+        }],
+        ..ConversationFilters::default()
+      }
+    }
+
+    fn channel_id() -> String {
+      conversation(ConversationKind::Public).id.to_string()
+    }
+  }
+
   #[test]
   fn own_messages_never_notify() {
     let prefs = NotificationPrefs::default();
@@ -1016,12 +1156,42 @@ mod tests {
       keywords: vec!["launch".into()],
       ..NotificationPrefs::default()
     };
-    assert!(is_mentioned("hey @alice!", &me, &prefs));
-    assert!(!is_mentioned("hey @alicejones", &me, &prefs));
-    assert!(is_mentioned("@channel standup", &me, &prefs));
-    assert!(is_mentioned("Alice, can you look?", &me, &prefs));
-    assert!(is_mentioned("the Launch plan", &me, &prefs));
-    assert!(!is_mentioned("nothing here", &me, &prefs));
+    assert!(is_mentioned(
+      "hey @alice!",
+      &me,
+      &prefs,
+      &ChannelMentions::Default
+    ));
+    assert!(!is_mentioned(
+      "hey @alicejones",
+      &me,
+      &prefs,
+      &ChannelMentions::Default
+    ));
+    assert!(is_mentioned(
+      "@channel standup",
+      &me,
+      &prefs,
+      &ChannelMentions::Default
+    ));
+    assert!(is_mentioned(
+      "Alice, can you look?",
+      &me,
+      &prefs,
+      &ChannelMentions::Default
+    ));
+    assert!(is_mentioned(
+      "the Launch plan",
+      &me,
+      &prefs,
+      &ChannelMentions::Default
+    ));
+    assert!(!is_mentioned(
+      "nothing here",
+      &me,
+      &prefs,
+      &ChannelMentions::Default
+    ));
   }
 
   #[test]
@@ -1031,7 +1201,12 @@ mod tests {
       first_name_is_mention: false,
       ..NotificationPrefs::default()
     };
-    assert!(!is_mentioned("@here please", &me(), &prefs));
+    assert!(!is_mentioned(
+      "@here please",
+      &me(),
+      &prefs,
+      &ChannelMentions::Default
+    ));
   }
 
   #[test]
