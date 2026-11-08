@@ -1976,7 +1976,9 @@ does everything behind them. Messages are another matter: their content keys cam
 so a conversation with many new messages may get its newest page before the rest (the hole is read
 in the same catch-up, `history_gaps.rs`). Some controls in messages depend on their order (pins,
 bookmarks, channel role entries, §4.6.3): they are taken again in their order once the hole is read,
-so the outcome is the one reading in order gives.
+so the outcome is the one reading in order gives. The same holds for every page read out of order
+(older history, a jump to a date and its holes, the first sync's backfill): one with a pin or bookmarks
+message takes them again from there on (issue #1438).
 
 ### 4.6.1 Signed channel roles
 
