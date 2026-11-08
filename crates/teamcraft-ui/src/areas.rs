@@ -64,6 +64,8 @@ use crate::components::security_ui::{
   DeviceApprovalDialog, LinkDeviceDialog, VerifyContactDialog, VerifyKeyDialog,
 };
 use crate::components::settings_modal::{SettingsModal, ShortcutsModal};
+#[cfg(target_arch = "wasm32")]
+use crate::components::share_download::ShareDownloadPage;
 use crate::components::share_link_dialog::ShareLinkDialog;
 use crate::components::space_invites::{AddToChannelDialog, BrowseSpacesDialog, InvitePeopleDialog};
 use crate::components::status_menu::{CustomStatusDialog, StatusMenu};
@@ -177,7 +179,8 @@ areas! {
   /// The call screens (the incoming call card stays in the app, so a call rings at once).
   call_prejoin(request: CallRequest) => calls: view! { <PreJoinScreen request=request /> };
   call_screen(request: CallRequest) => calls: view! { <CallScreen request=request /> };
-  add_to_call(conversation: ConversationId) => calls: view! { <AddToCallDialog conversation=conversation /> };
+  /// "Add to call" is a member's: in `dialogs`, not in the call screens' module a guest loads (#1413).
+  add_to_call(conversation: ConversationId) => dialogs: view! { <AddToCallDialog conversation=conversation /> };
   /// The bar of a call going on in a conversation, once there is one: it leads to the call screens.
   huddle_bar(conversation: ConversationId) => calls: view! { <HuddleBarContent conversation=conversation /> };
   /// The bar of a minimized call above the app (#1141).
@@ -254,6 +257,10 @@ areas! {
   canvas(conversation: ConversationId) => canvas: view! { <CanvasView conversation=conversation /> };
   /// The log view of an integration channel: its toolbar and the filtered log.
   integration_feed(conversation: ConversationId) => log: view! { <IntegrationFeed conversation=conversation /> };
+  /// The public page of a share link (`/f/<id>`, e2ee.md §4.5.1), a page of its own: neither a
+  /// member nor a guest needs it (#1413).
+  #[cfg(target_arch = "wasm32")]
+  share_download(id: String, fragment: String) => share: view! { <ShareDownloadPage id=id fragment=fragment /> };
 }
 
 /// The app's own message sounds (#800), synthesized by teamcraft-media in the page: a first visit
@@ -295,6 +302,119 @@ pub fn admin_task(
   task: AdminTask,
 ) -> Result<Pin<Box<dyn Future<Output = ()>>>, SplitLoaderError> {
   Ok(Box::pin(async move { live.perform(task).await }))
+}
+
+/// An engine request a split module runs, on its way (#1413).
+#[cfg(target_arch = "wasm32")]
+pub(crate) type EngineRun<'a> = Pin<Box<dyn Future<Output = Result<(), teamcraft_core::CoreError>> + 'a>>;
+
+/// A chat request in JSON, between two tabs of an account (`tabs`) or to the desktop shell
+/// (`shell`), on its way.
+pub(crate) type ChatRun<T> = Pin<Box<dyn Future<Output = Result<T, String>>>>;
+
+/// The engine's side of the workspace dialogs, a channel's settings and members, and the console's
+/// changes to spaces and channels (`CommandPart::Workspace`, #1413): a guest's page and a member's
+/// first screen never run it, so it loads with the dialogs that ask for it.
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(workspace, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn workspace_command(
+  client: &mut crate::web_core::WebClient,
+  command: teamcraft_core::ui_backend::CoreCommand,
+) -> Result<EngineRun<'_>, SplitLoaderError> {
+  Ok(Box::pin(client.run_workspace_command(command)))
+}
+
+/// A new channel or member through the engine (`web_core::EnginePart::Workspace`), with the
+/// workspace dialogs.
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(workspace, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn workspace_action(
+  client: &mut crate::web_core::WebClient,
+  action: teamcraft_client_api::remote::ChatAction,
+) -> Result<EngineRun<'_>, SplitLoaderError> {
+  Ok(Box::pin(crate::web_core::workspace_action(client, action)))
+}
+
+/// A new recovery passphrase or key (`web_core::EnginePart::Settings`), with the security settings.
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(settings, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn settings_action(
+  client: &mut crate::web_core::WebClient,
+  action: teamcraft_client_api::remote::ChatAction,
+) -> Result<EngineRun<'_>, SplitLoaderError> {
+  Ok(Box::pin(crate::web_core::settings_action(client, action)))
+}
+
+/// The console's engine operations (`web_core::EnginePart::Admin`): the workspace's policy and
+/// roster, and its operations on users and their chats.
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(admin, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn admin_action(
+  client: &mut crate::web_core::WebClient,
+  action: teamcraft_client_api::remote::ChatAction,
+) -> Result<EngineRun<'_>, SplitLoaderError> {
+  Ok(Box::pin(crate::web_core::admin_action(client, action)))
+}
+
+/// The engine's side of the console's own changes (`CommandPart::Admin`), in the console's chunk.
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(admin, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn admin_command(
+  client: &mut crate::web_core::WebClient,
+  command: teamcraft_core::ui_backend::CoreCommand,
+) -> Result<EngineRun<'_>, SplitLoaderError> {
+  Ok(Box::pin(client.run_admin_command(command)))
+}
+
+/// The page's UI hands chat actions and queries to the core typed (`web_core::act`, `query`); in
+/// JSON they only travel between two tabs of an account (#744). The JSON code of `ChatAction`,
+/// `ChatQuery` and `ChatAnswer` (about 0.65 MB of the app before wasm-opt) is in this module of its
+/// own (#1413), which loads when another tab of the account asks something of this one.
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(tabs, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn chat_request_from_json(
+  command: String,
+  args: serde_json::Value,
+) -> Result<ChatRun<serde_json::Value>, SplitLoaderError> {
+  Ok(Box::pin(crate::web_core::serve_chat_json(command, args)))
+}
+
+/// A follower tab's chat action, as JSON for the tab that runs the core.
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(tabs, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn act_in_owner_tab(
+  follower: Rc<crate::web_tabs::Follower>,
+  action: teamcraft_client_api::remote::ChatAction,
+) -> Result<ChatRun<()>, SplitLoaderError> {
+  Ok(Box::pin(crate::web_core::act_in_owner_tab(follower, action)))
+}
+
+/// A follower tab's chat query, as JSON for the tab that runs the core.
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(tabs, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn query_owner_tab(
+  follower: Rc<crate::web_tabs::Follower>,
+  query: teamcraft_client_api::remote::ChatQuery,
+) -> Result<ChatRun<teamcraft_client_api::remote::ChatAnswer>, SplitLoaderError> {
+  Ok(Box::pin(crate::web_core::query_owner_tab(follower, query)))
+}
+
+/// The desktop shell takes chat actions and queries in JSON (`core_action`, `core_query`); a browser
+/// hands them to the page's core typed. So the JSON code of `ChatAction` and `ChatAnswer` (about
+/// 0.65 MB before wasm-opt, shared with `tabs`) is in a module only the desktop app loads (#1413).
+#[wasm_split(shell, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn shell_action(
+  action: teamcraft_client_api::remote::ChatAction,
+) -> Result<ChatRun<()>, SplitLoaderError> {
+  Ok(Box::pin(crate::remote_backend::shell_action(action)))
+}
+
+/// A chat query for the desktop shell, as JSON.
+#[wasm_split(shell, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn shell_query(
+  query: teamcraft_client_api::remote::ChatQuery,
+) -> Result<ChatRun<teamcraft_client_api::remote::ChatAnswer>, SplitLoaderError> {
+  Ok(Box::pin(crate::remote_backend::shell_query(query)))
 }
 
 /// Shows the view `load` builds once its chunk is there: a placeholder until then, and a message

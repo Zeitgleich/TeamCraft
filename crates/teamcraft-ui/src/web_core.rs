@@ -27,6 +27,7 @@ use fluent_bundle::FluentArgs;
 use futures_channel::{mpsc, oneshot};
 use futures_util::future::{Either, pending, poll_immediate, select};
 use futures_util::{FutureExt, StreamExt};
+use leptos::wasm_split::SplitLoaderError;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use teamcraft_client_api::backend::ChatBackend;
@@ -56,7 +57,7 @@ use teamcraft_core::store::{
 };
 use teamcraft_core::transfers::Transfers;
 use teamcraft_core::typing::TypingAnnouncer;
-use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
+use teamcraft_core::ui_backend::{CommandPart, CoreChatBackend, CoreCommand};
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep, UploadMode};
 use teamcraft_core::{
@@ -132,6 +133,8 @@ const HANDOVER_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 type Api = HttpServerApi<WebTokens>;
 /// Notes what each write changes, so the UI's snapshot is rebuilt per conversation (issue #246).
 type Store = TrackedStore<Rc<IndexedDbStore>>;
+/// The page's client, for the split modules that run parts of it (`areas.rs`, #1413).
+pub(crate) type WebClient = Client<Api, Store>;
 type Listener = Rc<RefCell<dyn FnMut()>>;
 /// A wait for IndexedDB to have written everything ([`IndexedDbStore::flush`]).
 type Flush = Pin<Box<dyn Future<Output = Result<(), StoreError>>>>;
@@ -187,7 +190,7 @@ impl Running {
 
 /// The access token the core reads synchronously; renewed by [`keep_token_fresh`].
 #[derive(Clone)]
-struct WebTokens {
+pub(crate) struct WebTokens {
   slot: Rc<RefCell<TokenSlot>>,
   /// Signs the proofs of a bound token; set before the token it goes with.
   maybe_prover: Rc<RefCell<Option<Arc<DpopProver>>>>,
@@ -572,14 +575,13 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
         .await??,
       )
     },
-    "core_action" => {
-      let action: ChatAction = field(&args, "action")?;
-      ask(|reply| Request::Action(Box::new(action), reply)).await??;
-      Ok(Value::Null)
-    },
-    "core_query" => {
-      let query: ChatQuery = field(&args, "query")?;
-      to_value(ask(|reply| Request::Query(query, reply)).await??)
+    // The page itself asks typed ([`act`], [`query`]); as JSON they only come from another tab of
+    // the account, and are read in the `tabs` chunk (#1413).
+    "core_action" | "core_query" => {
+      crate::areas::chat_request_from_json(command.to_owned(), args)
+        .await
+        .map_err(|error| error.to_string())?
+        .await
     },
     // Only a follower tab asks for a file by command; it gets the bytes as base64 over the tab channel.
     "core_attachment" => {
@@ -650,6 +652,67 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
   }
 }
 
+/// Hands a chat action to the core (`core_action`), typed: the page's own UI never puts it into JSON
+/// (#1413). The JSON reader of [`ChatAction`] was the largest single piece of the app every page
+/// loads (0.29 MB before wasm-opt); it is in the `tabs` chunk now, which only a second tab of the
+/// account loads ([`serve_chat_json`]).
+pub async fn act(action: ChatAction) -> Result<(), String> {
+  match current_follower() {
+    Some(follower) => {
+      crate::areas::act_in_owner_tab(follower, action)
+        .await
+        .map_err(|error| error.to_string())?
+        .await
+    },
+    None => ask(|reply| Request::Action(Box::new(action), reply)).await?,
+  }
+}
+
+/// Asks the core a chat query (`core_query`), typed like [`act`].
+pub async fn query(query: ChatQuery) -> Result<ChatAnswer, String> {
+  match current_follower() {
+    Some(follower) => {
+      crate::areas::query_owner_tab(follower, query)
+        .await
+        .map_err(|error| error.to_string())?
+        .await
+    },
+    None => ask(|reply| Request::Query(query, reply)).await?,
+  }
+}
+
+/// `core_action` and `core_query` as JSON, from another tab of the account (in the `tabs` chunk).
+pub(crate) async fn serve_chat_json(command: String, args: Value) -> Result<Value, String> {
+  match command.as_str() {
+    "core_action" => {
+      let action: ChatAction = field(&args, "action")?;
+      ask(|reply| Request::Action(Box::new(action), reply)).await??;
+      Ok(Value::Null)
+    },
+    "core_query" => {
+      let query: ChatQuery = field(&args, "query")?;
+      to_value(ask(|reply| Request::Query(query, reply)).await??)
+    },
+    other => Err(format!("{other} is not a chat request")),
+  }
+}
+
+/// A follower tab's chat action, for the tab that runs the core (in the `tabs` chunk).
+pub(crate) async fn act_in_owner_tab(follower: Rc<Follower>, action: ChatAction) -> Result<(), String> {
+  let answer = follower
+    .call("core_action", serde_json::json!({ "action": action }))
+    .await?;
+  serde_json::from_value(answer).map_err(|error| format!("unreadable answer of core_action: {error}"))
+}
+
+/// A follower tab's chat query, for the tab that runs the core (in the `tabs` chunk).
+pub(crate) async fn query_owner_tab(follower: Rc<Follower>, query: ChatQuery) -> Result<ChatAnswer, String> {
+  let answer = follower
+    .call("core_query", serde_json::json!({ "query": query }))
+    .await?;
+  serde_json::from_value(answer).map_err(|error| format!("unreadable answer of core_query: {error}"))
+}
+
 /// One file of a message, downloaded and decrypted in memory, for the image viewer. A follower tab
 /// gets it from the tab that runs the core.
 pub async fn attachment(
@@ -689,6 +752,30 @@ async fn ask_attachment(
     reply,
   })
   .await?
+}
+
+/// Runs a command the UI adapter queued: the shared ones here, the others in the split module of
+/// the place of the app they come from (`CommandPart`, `areas.rs`, #1413). Their engine code then
+/// loads with that place, not with every page; it is there already when the place asks.
+async fn run_command(client: &mut WebClient, command: CoreCommand) -> Result<(), CoreError> {
+  let running = match command.part() {
+    CommandPart::Shared => return client.run_shared_command(command).await,
+    CommandPart::Workspace => crate::areas::workspace_command(client, command).await,
+    CommandPart::Admin => crate::areas::admin_command(client, command).await,
+  };
+  match running {
+    Ok(running) => running.await,
+    Err(error) => Err(part_not_loaded(&error)),
+  }
+}
+
+/// The chunk with the code of a request did not load: offline before it was ever cached, or a
+/// deploy in between. Said as a network failure, which the request was: trying again later helps.
+fn part_not_loaded(error: &SplitLoaderError) -> CoreError {
+  tracing::warn!(%error, "the part of the app that runs a request did not load");
+  CoreError::Api(ApiError::Network(format!(
+    "a part of the app did not load: {error}"
+  )))
 }
 
 fn field<T: DeserializeOwned>(args: &Value, name: &str) -> Result<T, String> {
@@ -2390,15 +2477,21 @@ impl Core {
 
   async fn action(&mut self, action: ChatAction) -> Result<(), String> {
     let client = self.client.as_mut().ok_or_else(not_set_up)?;
+    // Engine operations of a member's places of the app run in those places' split modules (#1413).
+    if let Some(part) = EnginePart::of(&action) {
+      let running = match part {
+        EnginePart::Workspace => crate::areas::workspace_action(client, action).await,
+        EnginePart::Settings => crate::areas::settings_action(client, action).await,
+        EnginePart::Admin => crate::areas::admin_action(client, action).await,
+      };
+      return match running {
+        Ok(running) => running.await,
+        Err(error) => Err(part_not_loaded(&error)),
+      }
+      .map_err(describe_failure);
+    }
     // Structure changes are engine operations (they found or change encryption groups).
     match &action {
-      ChatAction::CreateChannel { space, name } => {
-        return client
-          .create_channel(*space, name)
-          .await
-          .map(|_| ())
-          .map_err(describe_failure);
-      },
       ChatAction::OpenDm { user } => {
         return client.open_dm(*user).await.map(|_| ()).map_err(describe_failure);
       },
@@ -2407,26 +2500,6 @@ impl Core {
           .open_group_dm(users)
           .await
           .map(|_| ())
-          .map_err(describe_failure);
-      },
-      ChatAction::AddMember { conversation, user } => {
-        return client
-          .add_member(*conversation, *user)
-          .await
-          .map_err(describe_failure);
-      },
-      ChatAction::ChangePassphrase { passphrase } => {
-        let passphrase = SecretBytes::new(passphrase.clone().into_bytes());
-        return client
-          .upload_key_bag_with(&passphrase, Argon2Settings::default())
-          .await
-          .map_err(describe_failure);
-      },
-      ChatAction::SetRecoveryKey { recovery_key } => {
-        let recovery_key = parse_recovery_key(recovery_key).map_err(describe_failure)?;
-        return client
-          .set_recovery_key(&recovery_key)
-          .await
           .map_err(describe_failure);
       },
       ChatAction::SetActivity { is_idle } => {
@@ -2450,49 +2523,6 @@ impl Core {
           records::pin_identity(client.store(), *user, entry).map_err(describe_failure)?;
         }
         return Ok(());
-      },
-      ChatAction::PublishPolicy {
-        base,
-        policy,
-        owners,
-        admins,
-      } => {
-        return client
-          .publish_policy_with_genesis(base, policy.clone(), owners, admins)
-          .await
-          .map_err(describe_failure);
-      },
-      ChatAction::PublishRoster {
-        base_version,
-        members,
-      } => {
-        let roles = teamcraft_core::workspace::roster_roles(members);
-        return client
-          .publish_roster_based_on(*base_version, &roles)
-          .await
-          .map_err(describe_failure);
-      },
-      ChatAction::AdminJoinChannel { conversation } => {
-        let me = client.user_id();
-        return client
-          .admin_add_member(*conversation, me)
-          .await
-          .map_err(describe_failure);
-      },
-      ChatAction::AdminRemoveFromAllChats { user } => {
-        return client
-          .admin_remove_from_all_chats(*user)
-          .await
-          .map_err(describe_failure);
-      },
-      ChatAction::AdminDeleteUser { user } => {
-        return client.admin_delete_user(*user).await.map_err(describe_failure);
-      },
-      ChatAction::AdminRemoveGroupLeftover { conversation, user } => {
-        return client
-          .admin_remove_group_leftover(*conversation, *user)
-          .await
-          .map_err(describe_failure);
       },
       _ => {},
     }
@@ -2561,7 +2591,7 @@ impl Core {
       // A command can take long (a big history page); heartbeats go on meanwhile.
       let result = self
         .connection
-        .keep_alive(now_ms(), client.run_ui_command(command))
+        .keep_alive(now_ms(), run_command(client, command))
         .await;
       if let Err(error) = result {
         tracing::warn!(%error, "UI command failed");
@@ -2624,7 +2654,7 @@ impl Core {
       .serve_during(requests, async |client: &mut Client<Api, Store>| {
         let mut maybe_failure = None;
         for command in commands {
-          if let Err(error) = client.run_ui_command(command).await {
+          if let Err(error) = run_command(client, command).await {
             maybe_failure.get_or_insert(error);
           }
         }
@@ -3224,6 +3254,98 @@ fn unreadable_status(error: CoreError) -> Result<CoreStatus, String> {
 }
 
 /// Error text for the UI: the cause, without internal type names.
+/// The split module an engine operation of a chat action runs in (#1413): the places of a member's
+/// app that ask for it. A guest's page never does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EnginePart {
+  /// A new channel (the workspace dialogs) and a member added to one.
+  Workspace,
+  /// The recovery passphrase and the recovery key (the security settings).
+  Settings,
+  /// The administration console: the workspace's policy and roster, its operations on users.
+  Admin,
+}
+
+impl EnginePart {
+  fn of(action: &ChatAction) -> Option<Self> {
+    match action {
+      ChatAction::CreateChannel { .. } | ChatAction::AddMember { .. } => Some(Self::Workspace),
+      ChatAction::ChangePassphrase { .. } | ChatAction::SetRecoveryKey { .. } => Some(Self::Settings),
+      ChatAction::PublishPolicy { .. }
+      | ChatAction::PublishRoster { .. }
+      | ChatAction::AdminJoinChannel { .. }
+      | ChatAction::AdminRemoveFromAllChats { .. }
+      | ChatAction::AdminDeleteUser { .. }
+      | ChatAction::AdminRemoveGroupLeftover { .. } => Some(Self::Admin),
+      _ => None,
+    }
+  }
+}
+
+/// The engine operations of [`EnginePart::Workspace`] (in the `workspace` chunk).
+pub(crate) async fn workspace_action(client: &mut WebClient, action: ChatAction) -> Result<(), CoreError> {
+  match action {
+    ChatAction::CreateChannel { space, name } => client.create_channel(space, &name).await.map(|_| ()),
+    ChatAction::AddMember { conversation, user } => client.add_member(conversation, user).await,
+    _ => Err(not_this_part()),
+  }
+}
+
+/// The engine operations of [`EnginePart::Settings`] (in the `settings` chunk).
+pub(crate) async fn settings_action(client: &mut WebClient, action: ChatAction) -> Result<(), CoreError> {
+  match action {
+    ChatAction::ChangePassphrase { passphrase } => {
+      let passphrase = SecretBytes::new(passphrase.into_bytes());
+      client
+        .upload_key_bag_with(&passphrase, Argon2Settings::default())
+        .await
+    },
+    ChatAction::SetRecoveryKey { recovery_key } => {
+      let recovery_key = parse_recovery_key(&recovery_key)?;
+      client.set_recovery_key(&recovery_key).await
+    },
+    _ => Err(not_this_part()),
+  }
+}
+
+/// The engine operations of [`EnginePart::Admin`] (in the console's chunk, `admin`).
+pub(crate) async fn admin_action(client: &mut WebClient, action: ChatAction) -> Result<(), CoreError> {
+  match action {
+    ChatAction::PublishPolicy {
+      base,
+      policy,
+      owners,
+      admins,
+    } => {
+      client
+        .publish_policy_with_genesis(&base, policy, &owners, &admins)
+        .await
+    },
+    ChatAction::PublishRoster {
+      base_version,
+      members,
+    } => {
+      let roles = teamcraft_core::workspace::roster_roles(&members);
+      client.publish_roster_based_on(base_version, &roles).await
+    },
+    ChatAction::AdminJoinChannel { conversation } => {
+      let me = client.user_id();
+      client.admin_add_member(conversation, me).await
+    },
+    ChatAction::AdminRemoveFromAllChats { user } => client.admin_remove_from_all_chats(user).await,
+    ChatAction::AdminDeleteUser { user } => client.admin_delete_user(user).await,
+    ChatAction::AdminRemoveGroupLeftover { conversation, user } => {
+      client.admin_remove_group_leftover(conversation, user).await
+    },
+    _ => Err(not_this_part()),
+  }
+}
+
+/// A chat action given to the engine part it isn't of: a mistake here, refused before anything ran.
+fn not_this_part() -> CoreError {
+  CoreError::InvalidRequest("a chat action given to the wrong part of the app".to_owned())
+}
+
 fn describe(error: CoreError) -> String {
   error.to_string()
 }

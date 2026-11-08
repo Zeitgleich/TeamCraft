@@ -9,14 +9,51 @@ use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, MessageFilter, Table};
-use crate::ui_backend::{CoreCommand, history_jump_key, newest_server_id, note_lines_read};
+use crate::ui_backend::{CommandPart, CoreCommand, history_jump_key, newest_server_id, note_lines_read};
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// Runs a command, whatever its part ([`CommandPart`]): the hosts that are one program (desktop,
+  /// mobile, the bridge, tests).
   pub async fn run_ui_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
-    let Some(list) = command.loading_list() else {
-      return self.run_command(command).await;
+    match command.part() {
+      CommandPart::Shared => self.run_shared_command(command).await,
+      CommandPart::Workspace => self.run_workspace_command(command).await,
+      CommandPart::Admin => self.run_admin_command(command).await,
+    }
+  }
+
+  /// Runs a command of [`CommandPart::Shared`]; refuses the others. The web app calls the runner of
+  /// each part from where that part's code is (teamcraft-ui `web_core.rs`, `areas.rs`).
+  pub async fn run_shared_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
+    let maybe_list = command.loading_list();
+    let result = self.run_shared(command).await;
+    self.note_list(maybe_list, result)
+  }
+
+  /// Runs a command of [`CommandPart::Workspace`]; refuses the others.
+  pub async fn run_workspace_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
+    let maybe_list = command.loading_list();
+    let result = self.run_workspace(command).await;
+    self.note_list(maybe_list, result)
+  }
+
+  /// Runs a command of [`CommandPart::Admin`]; refuses the others.
+  pub async fn run_admin_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
+    let maybe_list = command.loading_list();
+    let result = self.run_admin(command).await;
+    self.note_list(maybe_list, result)
+  }
+
+  /// How a command that answers a list ended goes to that list.
+  fn note_list(
+    &self,
+    maybe_list: Option<LoadingList>,
+    result: Result<(), CoreError>,
+  ) -> Result<(), CoreError> {
+    let Some(list) = maybe_list else {
+      return result;
     };
-    let load = match self.run_command(command).await {
+    let load = match result {
       Ok(()) => ListLoad::Ready,
       // The list says so itself with a retry (issue #297), or shows its cached rows: no toast too.
       Err(error) => {
@@ -27,7 +64,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     list_outcomes::note(&self.store, list, load)
   }
 
-  async fn run_command(&mut self, command: CoreCommand) -> Result<(), CoreError> {
+  async fn run_shared(&mut self, command: CoreCommand) -> Result<(), CoreError> {
     match command {
       CoreCommand::FlushOutbox => self.flush_outbox().await.map(|_| ()),
       // Only the sync loop has the gateway to announce it on; without one there is no one to tell.
@@ -150,15 +187,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       CoreCommand::WriteSettings { writes } => self.write_synced_settings(&writes),
       CoreCommand::AddBackground { name, picture } => self.add_background(name, picture).await.map(|_| ()),
       CoreCommand::DeleteBackground { id } => self.delete_background(id).await,
-      CoreCommand::AddOrgBackground { name, picture } => {
-        self.add_org_background(name, picture).await.map(|_| ())
-      },
-      CoreCommand::DeleteOrgBackground { id } => self.delete_org_background(id).await,
-      CoreCommand::SetOrgBackgroundRule { rule } => {
-        self
-          .set_org_background_rule(rule.mode, rule.maybe_default, rule.guests_exempt, rule.order)
-          .await
-      },
       CoreCommand::SetServerPin {
         conversation,
         target,
@@ -256,67 +284,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         attachment, share_id, ..
       } => self.revoke_share_link(attachment, &share_id).await,
       CoreCommand::RefreshShareLinks { attachment } => self.refresh_share_links(attachment).await,
-      CoreCommand::CreateSpace { request } => self.create_space(&request).await.map(|_| ()),
-      CoreCommand::UpdateSpace { space, request } => self.update_space(space, &request).await.map(|_| ()),
-      CoreCommand::CreateChannelWith { space, options } => {
-        self.create_channel_with(space, *options).await.map(|_| ())
-      },
-      CoreCommand::UpdateChannel {
-        conversation,
-        request,
-      } => self.update_channel(conversation, &request).await,
-      CoreCommand::MoveChannel {
-        conversation,
-        request,
-      } => self.move_channel(conversation, &request).await,
-      CoreCommand::RefreshChannelBrowser { space } => self.refresh_channel_browser(space).await.map(|_| ()),
-      CoreCommand::JoinChannel { conversation } => self.join_channel(conversation).await,
-      CoreCommand::ExtendGuest {
-        space,
-        user,
-        expires_at_ms,
-      } => {
-        self
-          .extend_guest(space, user, teamcraft_proto::UnixMillis(expires_at_ms))
-          .await
-      },
-      CoreCommand::RequestAdminJoin { conversation } => self.request_admin_join(conversation).await,
-      CoreCommand::WithdrawAdminJoin { conversation } => self.withdraw_admin_join(conversation).await,
-      CoreCommand::ApproveAdminJoin {
-        conversation,
-        user,
-        history,
-      } => self.approve_admin_join_sharing(conversation, user, history).await,
-      CoreCommand::DeclineAdminJoin { conversation, user } => {
-        self.decline_admin_join(conversation, user).await
-      },
-      CoreCommand::JoinSpace { space } => self.join_space(space).await,
-      CoreCommand::LeaveChannel {
-        conversation,
-        deletes_if_last,
-      } => self.leave_channel(conversation, deletes_if_last).await,
       CoreCommand::DismissSuspectDeletions => self.dismiss_suspect_deletions(),
-      CoreCommand::DeleteChannel { conversation } => self.delete_channel(conversation).await,
-      CoreCommand::DeleteSpace { space } => self.delete_space(space).await,
-      CoreCommand::RefreshCategories { space } => self.refresh_categories(space).await.map(|_| ()),
-      CoreCommand::CreateCategory { space, name } => self.create_category(space, &name).await,
-      CoreCommand::RenameCategory {
-        space,
-        category,
-        name,
-      } => self.rename_category(space, category, &name).await,
-      CoreCommand::DeleteCategory { space, category } => self.delete_category(space, category).await,
-      CoreCommand::AddMemberWithHistory {
-        conversation,
-        user,
-        history,
-      } => {
-        self
-          .add_member_with_history(conversation, user, Some(history))
-          .await
-      },
-      CoreCommand::RemoveMember { conversation, user } => self.remove_member(conversation, user).await,
-      CoreCommand::RetryRemoval { conversation, user } => self.retry_removal(conversation, user).await,
       CoreCommand::RetryDmSetup { conversation } => self.retry_dm_setup(conversation).await,
       CoreCommand::SetUpMeetingChat {
         conversation,
@@ -372,6 +340,79 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .await
         .map(drop),
       CoreCommand::CheckMeetingAdmission { conversation } => self.check_meeting_admission(conversation).await,
+      CoreCommand::RefreshMembers { conversation } => self.refresh_members(conversation).await,
+      CoreCommand::SetCustomStatus { maybe_status } => {
+        let now = self.now_ms();
+        self
+          .set_custom_status(maybe_status.and_then(|status| status.to_wire(now)))
+          .await
+      },
+      other => Err(runs_elsewhere(&other)),
+    }
+  }
+
+  async fn run_workspace(&mut self, command: CoreCommand) -> Result<(), CoreError> {
+    match command {
+      CoreCommand::CreateSpace { request } => self.create_space(&request).await.map(|_| ()),
+      CoreCommand::UpdateSpace { space, request } => self.update_space(space, &request).await.map(|_| ()),
+      CoreCommand::CreateChannelWith { space, options } => {
+        self.create_channel_with(space, *options).await.map(|_| ())
+      },
+      CoreCommand::UpdateChannel {
+        conversation,
+        request,
+      } => self.update_channel(conversation, &request).await,
+      CoreCommand::MoveChannel {
+        conversation,
+        request,
+      } => self.move_channel(conversation, &request).await,
+      CoreCommand::RefreshChannelBrowser { space } => self.refresh_channel_browser(space).await.map(|_| ()),
+      CoreCommand::JoinChannel { conversation } => self.join_channel(conversation).await,
+      CoreCommand::ExtendGuest {
+        space,
+        user,
+        expires_at_ms,
+      } => {
+        self
+          .extend_guest(space, user, teamcraft_proto::UnixMillis(expires_at_ms))
+          .await
+      },
+      CoreCommand::RequestAdminJoin { conversation } => self.request_admin_join(conversation).await,
+      CoreCommand::WithdrawAdminJoin { conversation } => self.withdraw_admin_join(conversation).await,
+      CoreCommand::ApproveAdminJoin {
+        conversation,
+        user,
+        history,
+      } => self.approve_admin_join_sharing(conversation, user, history).await,
+      CoreCommand::DeclineAdminJoin { conversation, user } => {
+        self.decline_admin_join(conversation, user).await
+      },
+      CoreCommand::JoinSpace { space } => self.join_space(space).await,
+      CoreCommand::LeaveChannel {
+        conversation,
+        deletes_if_last,
+      } => self.leave_channel(conversation, deletes_if_last).await,
+      CoreCommand::DeleteChannel { conversation } => self.delete_channel(conversation).await,
+      CoreCommand::DeleteSpace { space } => self.delete_space(space).await,
+      CoreCommand::RefreshCategories { space } => self.refresh_categories(space).await.map(|_| ()),
+      CoreCommand::CreateCategory { space, name } => self.create_category(space, &name).await,
+      CoreCommand::RenameCategory {
+        space,
+        category,
+        name,
+      } => self.rename_category(space, category, &name).await,
+      CoreCommand::DeleteCategory { space, category } => self.delete_category(space, category).await,
+      CoreCommand::AddMemberWithHistory {
+        conversation,
+        user,
+        history,
+      } => {
+        self
+          .add_member_with_history(conversation, user, Some(history))
+          .await
+      },
+      CoreCommand::RemoveMember { conversation, user } => self.remove_member(conversation, user).await,
+      CoreCommand::RetryRemoval { conversation, user } => self.retry_removal(conversation, user).await,
       CoreCommand::DiscardRemoval { conversation, user } => self.discard_removal(conversation, user).await,
       CoreCommand::InviteToSpace {
         space,
@@ -428,7 +469,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           "these roles can't be signed in a way the channel's members accept".into(),
         )),
       },
-      CoreCommand::RefreshMembers { conversation } => self.refresh_members(conversation).await,
       CoreCommand::RefreshChannelRoles { conversation } => {
         self.refresh_members(conversation).await?;
         self.sync_channel_roles(conversation).await?;
@@ -441,14 +481,32 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         users,
         is_guest,
       } => self.add_space_members(space, &users, is_guest).await,
-      CoreCommand::SetCustomStatus { maybe_status } => {
-        let now = self.now_ms();
-        self
-          .set_custom_status(maybe_status.and_then(|status| status.to_wire(now)))
-          .await
-      },
+      other => Err(runs_elsewhere(&other)),
     }
   }
+
+  async fn run_admin(&mut self, command: CoreCommand) -> Result<(), CoreError> {
+    match command {
+      CoreCommand::AddOrgBackground { name, picture } => {
+        self.add_org_background(name, picture).await.map(|_| ())
+      },
+      CoreCommand::DeleteOrgBackground { id } => self.delete_org_background(id).await,
+      CoreCommand::SetOrgBackgroundRule { rule } => {
+        self
+          .set_org_background_rule(rule.mode, rule.maybe_default, rule.guests_exempt, rule.order)
+          .await
+      },
+      other => Err(runs_elsewhere(&other)),
+    }
+  }
+}
+
+/// A command given to another part's runner: a mistake of the host, refused before anything runs.
+fn runs_elsewhere(command: &CoreCommand) -> CoreError {
+  CoreError::InvalidRequest(format!(
+    "a command of {:?} given to the wrong part",
+    command.part()
+  ))
 }
 
 impl CoreCommand {
