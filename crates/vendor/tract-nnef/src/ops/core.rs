@@ -1,40 +1,72 @@
 use crate::internal::*;
 use tract_core::ops;
 
+#[cfg(not(feature = "minimal_core_registry"))]
 mod broadcast;
 mod cast;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod clamped_swiglu;
 #[cfg(feature = "complex")]
 mod complex;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod cumsum;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod downsample;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod dyn_slice;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod einsum;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod fft;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod gather;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod gelu_approximate;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod grid_sample;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod gru_cell;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod gru_seq;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod is_inf;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod lstm_cell;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod matmul;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod one_hot;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod pow_const;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod qconv;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod qmatmul;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod range;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod reduce;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod resize;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod rms_norm;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod scan;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod scatter;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod shape_of;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod silu;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod softmax;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod source;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod submodel;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod topk;
+#[cfg(not(feature = "minimal_core_registry"))]
 mod trilu;
 
 pub fn register(registry: &mut Registry) {
@@ -52,8 +84,16 @@ pub fn register(registry: &mut Registry) {
 
     registry.register_binary("tract_shl", &ops::math::ShiftLeft);
     registry.register_binary("tract_shr", &ops::math::ShiftRight);
-    broadcast::register(registry);
     cast::register(registry);
+    #[cfg(not(feature = "minimal_core_registry"))]
+    register_operators(registry);
+}
+
+/// The core registry's operators beyond the element-wise ones and the cast (see the
+/// `minimal_core_registry` feature).
+#[cfg(not(feature = "minimal_core_registry"))]
+fn register_operators(registry: &mut Registry) {
+    broadcast::register(registry);
     clamped_swiglu::register(registry);
     #[cfg(feature = "complex")]
     complex::register(registry);

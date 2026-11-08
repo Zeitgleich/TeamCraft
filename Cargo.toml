@@ -116,10 +116,13 @@ figment = { version = "0.10", features = ["toml", "env"] }
 # §6.5). See crates/vendor/wtransport/VENDORED.md.
 # openmls_memory_storage 0.6.0 notes the keys it changes, so a save of the MLS state writes them without
 # comparing the whole state (#840). See crates/vendor/openmls_memory_storage/VENDORED.md.
+# tract-nnef 0.23.9 with a `minimal_core_registry` feature, so the browser's segmentation module
+# leaves tract's unused core operators out (#1336). See crates/vendor/tract-nnef/VENDORED.md.
 [patch.crates-io]
 davey = { path = "crates/vendor/davey" }
 openmls_memory_storage = { path = "crates/vendor/openmls_memory_storage" }
 wtransport = { path = "crates/vendor/wtransport" }
+tract-nnef = { path = "crates/vendor/tract-nnef" }
 
 # Keep target/ small: several worktrees build in parallel on one disk. Line tables are enough
 # for backtraces; dependencies carry no debug info.

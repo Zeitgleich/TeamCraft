@@ -41,6 +41,10 @@ default = ["flate2"]
 flate2 = ["dep:flate2"]
 unstable-jinja = ["dep:minijinja"]
 unstable-safetensors = ["dep:safetensors"]
+# TeamCraft (VENDORED.md): the `tract_core` registry with only its element-wise operators and the
+# cast. Its other operators' loaders and dumpers (FFT and STFT with rustfft, LSTM, GRU, scans,
+# quantized convolutions and matrix products, ...) and what only they use stay out of the binary.
+minimal_core_registry = []
 
 [lib]
 name = "tract_nnef"
@@ -110,3 +114,6 @@ version = "1.0"
 
 [dev-dependencies.temp-dir]
 version = "0.2.0"
+
+# Builds and tests on its own: our workspace excludes crates/vendor.
+[workspace]
