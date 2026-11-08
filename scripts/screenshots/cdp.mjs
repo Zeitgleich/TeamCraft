@@ -2,19 +2,20 @@
 // opens one page and drives it. Node 22+ (built-in WebSocket and fetch); no npm packages.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const CHROME = process.env.CHROME || "google-chrome";
-const DEBUG_PORT = 9333;
 
 /** Starts Chrome and returns a page session; await `close()` at the end. */
 export async function launch() {
   const profile = mkdtempSync(join(tmpdir(), "teamcraft-shots-"));
   const chrome = spawn(CHROME, [
     "--headless=new",
-    `--remote-debugging-port=${DEBUG_PORT}`,
+    // Chrome picks a free port and names it in DevToolsActivePort: parallel runs (other sessions,
+    // a leftover Chrome) never drive each other's page.
+    "--remote-debugging-port=0",
     `--user-data-dir=${profile}`,
     "--no-first-run",
     "--hide-scrollbars",
@@ -22,8 +23,13 @@ export async function launch() {
     "--lang=en-US",
     "--font-render-hinting=none",
     "about:blank",
-  ], { stdio: "ignore" });
-  const target = await pageTarget();
+    // On Linux Chrome takes its languages (navigator.languages, which picks the app's) from the
+    // environment, not from --lang: a German desktop got German screenshots.
+  ], { stdio: "ignore", env: { ...process.env, LANG: "en_US.UTF-8", LANGUAGE: "en_US" } });
+  // Don't leave a headless Chrome behind when the script ends without `close()` (an error).
+  const killChrome = () => chrome.kill();
+  process.once("exit", killChrome);
+  const target = await pageTarget(profile);
   const page = new Page(new WebSocket(target.webSocketDebuggerUrl));
   await page.opened;
   await page.send("Page.enable");
@@ -33,15 +39,17 @@ export async function launch() {
     page.socket.close();
     chrome.kill();
     await exited;
+    process.off("exit", killChrome);
     rmSync(profile, { recursive: true, force: true });
   };
   return page;
 }
 
-async function pageTarget() {
+async function pageTarget(profile) {
   for (let attempt = 0; attempt < 100; attempt++) {
     try {
-      const targets = await (await fetch(`http://127.0.0.1:${DEBUG_PORT}/json`)).json();
+      const port = readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0];
+      const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
       const page = targets.find((target) => target.type === "page");
       if (page) return page;
     } catch {
