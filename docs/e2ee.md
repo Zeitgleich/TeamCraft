@@ -239,7 +239,7 @@ a provider admin, on somebody with no account noted yet. It can put that admin's
 somebody this device never pinned, with a role the admin holds anyway. And it can list that admin's token, naming the
 victim's real user ID and key, under somebody on the roster with the same role, which notes the wrong account for them: their
 real tokens then read as contradictory, which the owners see, and that admin's later token without the role can remove
-them. The window closes for each person only with their first token that counts, and iOS publishes no tokens yet (below), so somebody who only uses an iPhone stays exposed until they use desktop, web or Android. Somebody already on the roster when this arrived has
+them. The window closes for each person only with their first token that counts. Somebody already on the roster when this arrived has
 no noted account until then, and until then no token takes their role away.
 
 **Who sets what the tokens mean.** The signed policy has a `role_signing` group: the mode, the role names, and the
@@ -365,12 +365,10 @@ doesn't know. They don't understand the marks and can't act on them, and an olde
 which the clients keep through it. Nobody needs to update at the same moment and nothing splits. The new gateway event is unknown to
 older apps, which ignore it.
 
-**Mobile.** The logic is in the shared core and runs on the phones' upkeep too. The Android app hands over its ID token
-(`TeamCraft::note_id_token`, and `take_id_token_request` for a new one), so it publishes evidence and signs like desktop and web.
-The iOS app doesn't yet: without a token it publishes no evidence and signs no roster change automatically (`ProviderTokens` is `None`)
-and keeps re-signing for freshness as before, so an iOS-only admin is in force once their account has been open somewhere else. Channel
+**Mobile.** The logic is in the shared core and runs on the phones' upkeep too. The Android and iOS apps hand over their ID token
+(`TeamCraft::note_id_token`, and `take_id_token_request` for a new one), so they publish evidence and sign like desktop and web. Channel
 role logs need no token: its upkeep founds them like every other app's (§4.6.1, "Founding at first sight"). The notification extension
-leaves upkeep to the app, and founding only reads the MLS group, it doesn't change it.
+leaves upkeep to the app, so it neither gets an ID token nor asks for one, and founding only reads the MLS group, it doesn't change it.
 
 ### 3.1.2 Tokens bound to a device: DPoP (issue #120)
 

@@ -117,7 +117,8 @@ final class NotificationService: UNNotificationServiceExtension {
     defer { lock.release() }
     do {
       let core = try CoreFactory().open(
-        account: account, createKey: false, isMemoryConstrained: true, listener: ClosureEventListener {})
+        account: account, createKey: false, isMemoryConstrained: true, runsUpkeep: false,
+        listener: ClosureEventListener {})
       // Never advances the account's state: the app alone does (MLS, cursors), or the two
       // processes would fork it. The probe catches up on a copy in memory and sends nothing
       // (docs/e2ee.md §7.2).
