@@ -102,7 +102,9 @@ cargo deny check
   builds and passes `cargo fmt --check` and `clippy`.
 - Pull requests of people with write access get **auto-merge (squash)** on opening
   (`.github/workflows/auto-merge.yml`): they merge once `ci-gate` passes. Turn it off on a PR that must
-  wait: `gh pr merge --disable-auto <number>`.
+  wait: `gh pr merge --disable-auto <number>`. A merge by github-actions doesn't close the issues a
+  PR names: `close-merged-issues.yml` closes them every 30 minutes, unless auto-merge runs with the
+  App token (`AUTOMERGE_APP_ID`), which also starts the push workflows on `main`.
 - `main` only receives **squash merges** of reviewed branches; the squash commit message summarizes
   the feature (subject ≤ 72 chars, body explains what and why).
 - **Releases are nightly** (scheduled 22:00 Berlin, runs start hours late, `nightly-release.yml`, [docs/release.md](docs/release.md)):
