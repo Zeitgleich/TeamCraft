@@ -8,7 +8,7 @@ use teamcraft_client_api::color_theme::{ColorTheme, PRESETS, Rgb, ThemeColors};
 /// The colours a theme sets for light or dark mode, as `0xRRGGBB`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
 pub struct AppThemeTokens {
-  /// Bars that frame the content (the top bar).
+  /// The header above the content (the navigation colour, dark in dark mode).
   pub chrome: u32,
   /// Text and icons on [`Self::chrome`]: 4.5:1.
   pub on_chrome: u32,
@@ -60,7 +60,7 @@ pub fn color_theme_tokens(value: String, is_dark: bool) -> Option<AppThemeTokens
   let Ok(theme) = value.parse::<ColorTheme>();
   let tokens = theme.colors()?.tokens(is_dark);
   Some(AppThemeTokens {
-    chrome: rgb(tokens.chrome),
+    chrome: rgb(tokens.sidebar),
     on_chrome: rgb(tokens.sidebar_text),
     accent: rgb(tokens.accent),
     accent_strong: rgb(tokens.accent_strong),

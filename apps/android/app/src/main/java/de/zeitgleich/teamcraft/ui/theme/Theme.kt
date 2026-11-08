@@ -75,8 +75,12 @@ private val Dark = darkColorScheme(
 /** Colors outside Material's scheme: the dark sidebar chrome, badges, mentions. */
 @Immutable
 data class TeamCraftColors(
+  /** The main screen's header and the status bar behind it; a colour theme (#202) sets it. */
   val chrome: Color,
+  /** White text on strong fills (badges). */
   val chromeText: Color,
+  /** Text and icons on [chrome]: 4.5:1. */
+  val onChrome: Color,
   val chromeMuted: Color,
   val badge: Color,
   /** The "online" dot. */
@@ -88,6 +92,7 @@ data class TeamCraftColors(
 private val LightExtra = TeamCraftColors(
   chrome = Color(0xFF1A2434),
   chromeText = Color(0xFFFFFFFF),
+  onChrome = Color(0xFFFFFFFF),
   chromeMuted = Color(0xFF8793A8),
   // White badge numbers need 4.5:1.
   badge = Color(0xFFC8441F),
@@ -151,7 +156,7 @@ private fun ColorScheme.withTheme(theme: AppThemeTokens): ColorScheme = copy(
 
 private fun TeamCraftColors.withTheme(theme: AppThemeTokens) = copy(
   chrome = rgb(theme.chrome),
-  chromeText = rgb(theme.onChrome),
+  onChrome = rgb(theme.onChrome),
   badge = rgb(theme.badge),
   presence = rgb(theme.presence),
 )

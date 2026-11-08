@@ -122,6 +122,9 @@ import de.zeitgleich.teamcraft.ui.Section
 import de.zeitgleich.teamcraft.ui.TabBadge
 import de.zeitgleich.teamcraft.ui.activityConversations
 import de.zeitgleich.teamcraft.ui.theme.Spacing
+import de.zeitgleich.teamcraft.ui.theme.darkStatusBarBackdrop
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.luminance
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
@@ -366,8 +369,11 @@ internal fun MainScaffold(
   // Home's list: the button shrinks to its icon once the list scrolls, so it never covers a row's text.
   val homeList = rememberLazyListState()
   val isFabExpanded by remember { derivedStateOf { homeList.firstVisibleItemIndex == 0 } }
+  // The theme's colour (#202) fills the header and the status bar behind it; the lists sit on a
+  // neutral card with rounded top corners, so the theme never colours content.
   Scaffold(
     contentWindowInsets = ScreenInsets,
+    containerColor = LocalTeamCraftColors.current.chrome,
     topBar = { maybeSelectionBar?.invoke() ?: BrandTopBar(brand, accountUserId, accountName, onSearch = onSearch, onAccount = onAccount) },
     bottomBar = {
       if (maybeSelectionBar == null) MainNavigation(shownTab, isList, maybeConversations.orEmpty(), joinRequestCount, onSelect = onTab)
@@ -385,7 +391,13 @@ internal fun MainScaffold(
       }
     },
   ) { padding ->
-    Column(Modifier.fillMaxSize().padding(padding)) {
+    Column(
+      Modifier
+        .fillMaxSize()
+        .padding(padding)
+        .clip(RoundedCornerShape(topStart = CONTENT_CARD_RADIUS, topEnd = CONTENT_CARD_RADIUS))
+        .background(MaterialTheme.colorScheme.background),
+    ) {
       banners()
       when {
         maybeConversations == null && maybeReadFailure != null ->
@@ -644,11 +656,20 @@ private fun SectionHeaderWithMenu(section: Section, list: ListState) {
   }
 }
 
-/** The top app bar of the main screen: the server's brand (logo and name) and the user's avatar. */
+/** The rounded top corners of the neutral card the main screen's lists sit on. */
+private val CONTENT_CARD_RADIUS = 20.dp
+
+/**
+ * The top app bar of the main screen: the server's brand (logo and name) and the user's avatar, on
+ * the theme's header colour (#202), which also fills the status bar behind it.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun BrandTopBar(brand: MainBrand, accountUserId: String, accountName: String, onSearch: () -> Unit, onAccount: () -> Unit) {
+  val colors = LocalTeamCraftColors.current
+  val isDarkHeader = colors.chrome.luminance() < 0.5f
   TopAppBar(
+    modifier = if (isDarkHeader) Modifier.darkStatusBarBackdrop() else Modifier,
     title = {
       Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {
         brand.maybeLogo?.let { logo ->
@@ -674,7 +695,11 @@ private fun BrandTopBar(brand: MainBrand, accountUserId: String, accountName: St
       }
     },
     windowInsets = TopBarInsets,
-    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+    colors = TopAppBarDefaults.topAppBarColors(
+      containerColor = colors.chrome,
+      titleContentColor = colors.onChrome,
+      actionIconContentColor = colors.onChrome,
+    ),
   )
 }
 
