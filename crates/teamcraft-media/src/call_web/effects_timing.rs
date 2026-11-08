@@ -241,6 +241,6 @@ mod tests {
   /// Balanced braces and quotes: enough to catch a format slip without a JSON parser here.
   fn is_balanced(json: &str) -> bool {
     let opens = json.matches('{').count();
-    opens == json.matches('}').count() && json.matches('"').count() % 2 == 0
+    opens == json.matches('}').count() && json.matches('"').count().is_multiple_of(2)
   }
 }
