@@ -250,4 +250,33 @@ class WireTest {
     assertEquals("", answer.sent[0].excerpt)
     assertEquals(0, answer.sent[1].fileCount)
   }
+
+  @Test
+  fun theHolidayRegionIsAbsentWhileTheWorkspacesApplies() {
+    fun region(json: String) = WireJson.decodeFromString(HolidayRegion.serializer(), json)
+    val own = region("""{"region":"DE-BY","instance_region":"DE","has_instance_feed":true,"newer":1}""")
+    assertEquals("DE-BY", own.maybeRegion)
+    assertEquals("DE", own.instanceRegion)
+    assertTrue(own.hasInstanceFeed)
+    val instance = region("""{"instance_region":"CH-ZH"}""")
+    assertEquals(null, instance.maybeRegion)
+    assertEquals("CH-ZH", instance.instanceRegion)
+    assertFalse(instance.hasInstanceFeed)
+    assertEquals(HolidayRegion(), region("{}"))
+  }
+
+  @Test
+  fun theHolidayRegionRequestLeavesTheRegionOutToGoBack() {
+    fun body(maybeRegion: String?) =
+      WireJson.encodeToString(SetHolidayRegion.serializer(), SetHolidayRegion(maybeRegion))
+    assertEquals("""{"region":"CH-ZH"}""", body("CH-ZH"))
+    assertEquals("{}", body(null))
+  }
+
+  @Test
+  fun theHolidayRegionsAreTheServers() {
+    assertEquals(45, HOLIDAY_REGIONS.size)
+    assertEquals(HOLIDAY_REGIONS.size, HOLIDAY_REGIONS.toSet().size)
+    assertTrue(HOLIDAY_REGIONS.all { it.matches(Regex("[A-Z]{2}(-[A-Z]{2})?")) })
+  }
 }

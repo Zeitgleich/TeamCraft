@@ -1094,9 +1094,10 @@ impl Core {
           on_heap(|| self.open()).await;
           self.changed();
         },
-        // A first sync's older history: one page per turn, so what else is ready gets its turn.
-        () = std::future::ready(()), if self.is_older_history_due() => {
-          if on_heap(|| self.load_older_history(&mut requests)).await == Flow::Stop {
+        // A catch-up's backlogs and a first sync's older history: one page per turn, so what else is
+        // ready gets its turn.
+        () = std::future::ready(()), if self.is_background_history_due() => {
+          if on_heap(|| self.load_background_history(&mut requests)).await == Flow::Stop {
             break;
           }
         },
@@ -1330,6 +1331,10 @@ impl Core {
     let on_call_event = self.on_call_event.clone();
     client.set_call_event_sink(Box::new(move |event| on_call_event(event.clone())));
     client.share_catch_up_focus(self.catch_up_focus.clone());
+    // The loop reads what a catch-up leaves, a page per turn (issue #1448).
+    if let Err(error) = client.read_backlogs_in_background() {
+      tracing::warn!(%error, "backlogs left by an earlier run not found; the next catch-up reads them");
+    }
     let status = CoreStatus::Ready {
       identity_fingerprint: client.identity_fingerprint(),
     };
@@ -2269,12 +2274,17 @@ impl Core {
     self.changed();
   }
 
-  fn is_older_history_due(&self) -> bool {
-    self.connection.is_connected() && self.client.as_ref().is_some_and(Client::is_older_history_due)
+  fn is_background_history_due(&self) -> bool {
+    self.connection.is_connected()
+      && self
+        .client
+        .as_ref()
+        .is_some_and(Client::is_background_history_due)
   }
 
-  /// One page of a first sync's older history; the UI's reads are answered meanwhile.
-  async fn load_older_history(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) -> Flow {
+  /// One page of a backlog or of a first sync's older history; the UI's reads are answered
+  /// meanwhile.
+  async fn load_background_history(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) -> Flow {
     let Self {
       client: Some(client),
       connection,
@@ -2298,7 +2308,8 @@ impl Core {
       maybe_security: security_of(client).ok(),
       on_change: on_change.as_ref(),
     };
-    let reading = Box::pin(connection.keep_alive(SystemClock.now_ms(), client.load_older_history_page()));
+    let reading =
+      Box::pin(connection.keep_alive(SystemClock.now_ms(), client.load_background_history_page()));
     let served = serve_reads_during(reading, requests, &mut reads).await;
     self.has_queued_sends |= served.has_queued;
     if served.output {

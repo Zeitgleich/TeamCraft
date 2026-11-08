@@ -334,9 +334,10 @@ pub struct ClientSettings {
   /// Pages of new messages a catch-up reads in a conversation before it takes the newest page and
   /// leaves the rest until every other conversation is through (issue #1423): one busy channel
   /// after a long absence holds up neither the others nor its own newest messages. The rest is
-  /// read in the same catch-up, in order, so nothing a message carries is skipped; meanwhile the
-  /// feed shows a hole there (`history_gaps.rs`). The MLS queue is always read whole. `None`
-  /// (default): every page in order, at once, for hosts whose feed shows no holes.
+  /// read in order, so nothing a message carries is skipped: in the same catch-up, or after it from
+  /// the host's loop where the host reads backlogs (`Client::read_backlogs_in_background`, issue
+  /// #1448); meanwhile the feed shows a hole there (`history_gaps.rs`). The MLS queue is always read
+  /// whole. `None` (default): every page in order, at once, for hosts whose feed shows no holes.
   pub catch_up_message_pages: Option<u32>,
   /// Make the user's notes to self (a DM with themself) once a sync finds there is none. Off by
   /// default; the apps turn it on with [`ClientSettings::with_notes_to_self`].
@@ -460,6 +461,8 @@ pub struct Client<A, S> {
   catch_up_focus: CatchUpFocus,
   /// The first sync of a newly set up device, beside its record in the store.
   first_sync: first_sync::FirstSyncState,
+  /// The backlogs a catch-up left for the host's loop to read (issue #1448).
+  background_backlogs: history_gaps::BackgroundBacklogs,
   /// Wakes the host while a sync stores what the UI should show.
   sync_progress: SyncProgressSignal,
   /// Set while a catch-up joins the focused conversation's welcomes ahead of the others: the
@@ -633,6 +636,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),
       first_sync: Default::default(),
+      background_backlogs: Default::default(),
       sync_progress: Default::default(),
       is_welcome_cursor_held: false,
       sync_trace: Default::default(),

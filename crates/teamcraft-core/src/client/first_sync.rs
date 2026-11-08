@@ -8,9 +8,9 @@
 //! - **Newest:** the catch-up reads the newest page of every conversation (`catch_up.rs`).
 //! - **Older:** one page at a time, what the device keeps ([`HistoryBackfill`]): the last three
 //!   months of each conversation, the most recently active first, the one the user looks at ahead
-//!   of them. A host calls [`Client::load_older_history_page`] whenever nothing else is waiting, so
-//!   reads, sends and gateway events go first and nothing here runs while the app is in the
-//!   background or offline.
+//!   of them. A host calls [`Client::load_background_history_page`] whenever nothing else is
+//!   waiting (it reads the backlogs a catch-up left first, issue #1448), so reads, sends and gateway
+//!   events go first and nothing here runs while the app is in the background or offline.
 //!
 //! Everything lives in [`Table::SyncState`]: one small record, and per conversation in the older
 //! stage the cursor it stands at, written with its page. An app killed half way goes on where it

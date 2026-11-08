@@ -62,6 +62,9 @@ def main():
                 used.update(m.group(1) for m in KEY_LITERAL.finditer(text))
                 # A key returned from a helper (`return "favorites"`).
                 used.update(literal for literal in re.findall(r'"([a-z]+)"', text) if literal in keys)
+                # A key built from a prefix at run time (`"holiday_region_" + code`).
+                for prefix in re.findall(r'"([a-z][a-z0-9_]*_)"\s*\+', text):
+                    used.update(key for key in keys if key.startswith(prefix))
         # The app's catalog also serves keys the extension's Shared code looks up (notification actions).
         if catalog_path.startswith("TeamCraft"):
             for key in sorted(keys - used):
