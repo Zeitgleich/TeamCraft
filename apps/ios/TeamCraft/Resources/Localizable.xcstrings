@@ -1057,22 +1057,6 @@
         }
       }
     },
-    "call_add_people_none": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "There is nobody else you can add."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Es gibt niemanden, den du noch hinzufügen kannst."
-          }
-        }
-      }
-    },
     "call_camera_denied": {
       "localizations": {
         "en": {
@@ -3925,22 +3909,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "In diesen Zeiten bleiben Benachrichtigungen jede Woche still, in der Zeitzone dieses Geräts. Bis zu %lld Zeiträume."
-          }
-        }
-      }
-    },
-    "dnd_search_people": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Search people"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Personen suchen"
           }
         }
       }

@@ -42,13 +42,6 @@ enum ChatAction {
   case deleteSpace(spaceId: String)
   /// Joins an open space (#1526); its default channels follow.
   case joinSpace(spaceId: String)
-  case createChannel(spaceId: String, name: String)
-  /// The direct conversation with a person; created when there is none yet.
-  case openDm(userId: String)
-  /// The group DM with exactly these people (and the user); created when there is none yet.
-  case openGroupDm(userIds: [String])
-  /// Adds a person to a channel, with the history its policy allows (#1534).
-  case addMember(conversationId: String, userId: String)
   /// Reads again how far the others read: receipts sent while the app was offline never arrive.
   case refreshReadReceipts(conversationId: String)
   case refreshSpaceRoster(spaceId: String)
@@ -124,14 +117,6 @@ enum ChatAction {
       object = ["action": "cancel_upload", "conversation": conversation, "message": message, "file_id": file]
     case .joinChannel(let conversation):
       object = ["action": "join_channel", "conversation": conversation]
-    case .createChannel(let space, let name):
-      object = ["action": "create_channel", "space": space, "name": name]
-    case .openDm(let user):
-      object = ["action": "open_dm", "user": user]
-    case .openGroupDm(let users):
-      object = ["action": "open_group_dm", "users": users]
-    case .addMember(let conversation, let user):
-      object = ["action": "add_member", "conversation": conversation, "user": user]
     case .refreshSpaceRoster(let space):
       object = ["action": "refresh_space_roster", "space": space]
     case .refreshCallHistory:

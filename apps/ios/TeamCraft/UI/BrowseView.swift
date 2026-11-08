@@ -22,11 +22,6 @@ struct BrowseView: View {
   @State private var channels: [BrowsableChannel] = []
   /// People picked for a new DM (one) or group DM (several).
   @State private var picked: [String] = []
-  /// The people the picker shows: the directory through the core, narrowed by `peopleQuery` (#1534).
-  @State private var maybePeople: [BrowseSnapshot.Person]?
-  /// Who was picked, kept so a pick stays named when the search no longer finds them.
-  @State private var pickedPeople: [String: BrowseSnapshot.Person] = [:]
-  @State private var peopleQuery = ""
   @State private var isOpening = false
   @State private var maybeDmFailure: AppFailure?
   @State private var isCreating = false
@@ -164,56 +159,23 @@ struct BrowseView: View {
   }
 
   private var peopleList: some View {
-    let found = maybePeople ?? []
-    // Picked people stay on top, also when the search would leave them out.
-    let people = picked.compactMap { id in found.first { $0.id == id } ?? pickedPeople[id] }
-      + found.filter { !picked.contains($0.id) }
-    return List {
-      if maybePeople != nil && people.isEmpty {
-        Text("browse_no_people").foregroundStyle(Theme.textMuted)
-      }
-      Section {
-        ForEach(people) { person in
-          PersonPickRow(person: person, picked: $picked)
-            .disabled(isOpening)
-        }
-      } footer: {
-        Text("dm_pick_hint")
-      }
-    }
-    .onChange(of: picked) {
-      for id in picked where pickedPeople[id] == nil {
-        pickedPeople[id] = maybePeople?.first { $0.id == id }
-      }
-    }
-    .searchable(text: $peopleQuery, placement: .navigationBarDrawer(displayMode: .always), prompt: Text("browse_filter_people"))
-    .task(id: PeopleSearch(query: peopleQuery, changes: model.changeCount)) {
-      // A keystroke cancels this before the directory is asked; a change reads again at once.
-      if !peopleQuery.isEmpty { try? await Task.sleep(for: .milliseconds(250)) }
-      guard !Task.isCancelled else { return }
-      if let found = await model.findPeople(peopleQuery.trimmingCharacters(in: .whitespacesAndNewlines)) {
-        maybePeople = found
-      }
-    }
+    PeoplePicker(
+      picked: $picked, isEnabled: !isOpening, maybeFooter: "dm_pick_hint", maybeFailure: maybeDmFailure?.message
+    )
     .safeAreaInset(edge: .bottom) {
       if !picked.isEmpty {
-        VStack(spacing: 8) {
-          if let maybeDmFailure {
-            Text(maybeDmFailure.message).font(.footnote).foregroundStyle(Theme.danger)
+        Button {
+          message(picked)
+        } label: {
+          if isOpening {
+            ProgressView().frame(maxWidth: .infinity)
+          } else {
+            Text(LocalizedStringKey(picked.count == 1 ? "dm_start" : "dm_start_group")).frame(maxWidth: .infinity)
           }
-          Button {
-            message(picked)
-          } label: {
-            if isOpening {
-              ProgressView().frame(maxWidth: .infinity)
-            } else {
-              Text(LocalizedStringKey(picked.count == 1 ? "dm_start" : "dm_start_group")).frame(maxWidth: .infinity)
-            }
-          }
-          .buttonStyle(.borderedProminent)
-          .controlSize(.large)
-          .disabled(isOpening)
         }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .disabled(isOpening)
         .padding()
         .background(.bar)
       }
@@ -281,19 +243,9 @@ struct PersonPickRow: View {
       HStack {
         Image(systemName: isPicked ? "checkmark.circle.fill" : "circle")
           .foregroundStyle(isPicked ? Theme.accent : Theme.textMuted)
-        VStack(alignment: .leading) {
-          Text(verbatim: person.displayName).foregroundStyle(Theme.text)
-          Text(verbatim: "@" + person.username).font(.footnote).foregroundStyle(Theme.textMuted)
-        }
+        PersonLabel(person: person)
       }
     }
     .accessibilityAddTraits(isPicked ? .isSelected : [])
   }
-}
-
-/// What the people search waits for: the typed text, and a change that may have brought the
-/// directory's answer.
-private struct PeopleSearch: Equatable {
-  let query: String
-  let changes: Int
 }

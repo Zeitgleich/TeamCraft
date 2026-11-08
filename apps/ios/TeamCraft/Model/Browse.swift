@@ -37,18 +37,11 @@ struct BrowseSnapshot: Decodable, Sendable {
   }
 
   let me: Person
-  let users: [Person]?
   let spaces: [Space]?
   let conversations: [Conversation]?
 
   /// Guests browse no channels (the server refuses them, as on desktop): they only find people.
   var canBrowseChannels: Bool { me.isGuest != true }
-
-  /// Everyone the user can message, without the user and bots.
-  var people: [Person] {
-    (users ?? []).filter { $0.id != me.id && $0.isBot != true }
-      .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-  }
 
   /// The DM (one person) or group DM (several) with exactly these people and the user, if there is
   /// one.
@@ -60,16 +53,10 @@ struct BrowseSnapshot: Decodable, Sendable {
     }?.id
   }
 
-  /// The people "Add people" in a DM or group DM call offers: everyone the user can message who
-  /// isn't in that conversation, matching `query` (name or username) when one is typed.
-  func addablePeople(to conversationId: String, matching query: String) -> [Person] {
-    let members = Set(members(of: conversationId))
-    let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
-    return people.filter { person in
-      !members.contains(person.id)
-        && (needle.isEmpty || person.displayName.localizedCaseInsensitiveContains(needle)
-          || person.username.localizedCaseInsensitiveContains(needle))
-    }
+  /// Whom "Add people" in a DM or group DM call doesn't offer: the conversation's members and the
+  /// user (those not in the call join it from the DM).
+  func notAddableToCall(in conversationId: String) -> Set<String> {
+    Set(members(of: conversationId)).union([me.id])
   }
 
   /// Whom "Add people" in a DM or group DM call starts the meeting room with (docs/meetings.md,

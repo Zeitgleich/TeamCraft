@@ -67,12 +67,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.toggled
 
-/** How long the picker waits after a keystroke before it asks the directory. */
-private const val PEOPLE_SEARCH_PAUSE_MS = 250L
-
-/** The most people the picker lists; typing narrows it. */
-private const val PEOPLE_SHOWN = 100
-
 /**
  * Channels of each space to join (public ones, and private ones a workspace admin may ask to join),
  * a new channel, and people to message directly.
@@ -93,7 +87,7 @@ fun BrowseScreen(
   var channels by remember { mutableStateOf<List<BrowsableChannel>>(emptyList()) }
   var isCreating by remember { mutableStateOf(false) }
   var showsArchived by rememberSaveable { mutableStateOf(false) }
-  // Narrows people (name, username) and channels (name) as the user types: a directory can be long.
+  // Narrows the channels by name as the user types.
   var filter by rememberSaveable { mutableStateOf("") }
   val pendingJoins by viewModel.joinRequests.pending.collectAsState()
   val snackbars = rememberFailureSnackbars(viewModel)
@@ -104,10 +98,6 @@ fun BrowseScreen(
   val isShowingPeople = showPeople || isGuest
   // People picked for a new DM (one) or group DM (several).
   var picked by rememberSaveable { mutableStateOf(listOf<String>()) }
-  // The people the picker shows: the directory through the core, narrowed by the filter (#1534).
-  var people by remember { mutableStateOf<List<User>?>(null) }
-  // Who was picked, kept so a pick stays named when the filter no longer finds them.
-  var pickedPeople by remember { mutableStateOf(mapOf<String, User>()) }
   var isOpening by remember { mutableStateOf(false) }
   val scope = rememberCoroutineScope()
   var hasShownInitialSpace by rememberSaveable { mutableStateOf(maybeInitialSpaceId == null) }
@@ -127,12 +117,6 @@ fun BrowseScreen(
       ?.takeIf { loaded?.me?.isGuest != true }
       ?.let { space -> viewModel.readChat { query(ChatQueries.browseChannels(space.id)).channels } }
       ?: emptyList()
-  }
-  LaunchedEffect(changes, filter, isShowingPeople) {
-    if (!isShowingPeople) return@LaunchedEffect
-    // Typing restarts this: the directory is asked once the user pauses.
-    if (filter.isNotEmpty()) delay(PEOPLE_SEARCH_PAUSE_MS)
-    viewModel.readChat { searchPeople(filter.trim(), PEOPLE_SHOWN) }?.let { found -> people = found }
   }
   val startConversation: () -> Unit = start@{
     if (isOpening) return@start
@@ -179,78 +163,34 @@ fun BrowseScreen(
           Tab(selected = showPeople, onClick = { showPeople = true }, text = { Text(stringResource(R.string.people)) })
         }
       }
-      CompactSearchField(
-        value = filter,
-        onChange = { filter = it },
-        placeholder = stringResource(if (isShowingPeople) R.string.browse_filter_people else R.string.browse_filter_channels),
-        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
-      )
-      val needle = filter.trim()
-      // Picked people stay on top, also when the filter would leave them out.
-      val found = people.orEmpty()
-      val shownPeople = picked.mapNotNull { id -> found.firstOrNull { it.id == id } ?: pickedPeople[id] } +
-        found.filter { it.id !in picked }
-      // Archived channels are hidden from the lists, so this is the way back to the ones the user is
-      // in; nobody can join an archived channel.
-      val visibleChannels = channels
-        .filter { !it.isArchived || (showsArchived && it.isMember) }
-        .filter { needle.isEmpty() || it.name.contains(needle, ignoreCase = true) }
-      if (isShowingPeople && people != null && shownPeople.isEmpty()) {
-        EmptyHint(R.string.browse_no_people)
-      } else if (isShowingPeople) {
+      if (isShowingPeople) {
         Text(
           stringResource(R.string.dm_pick_hint),
           style = MaterialTheme.typography.bodySmall,
           color = MaterialTheme.colorScheme.onSurfaceVariant,
           modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
         )
-        LazyColumn(Modifier.fillMaxSize()) {
-          items(shownPeople, key = { it.id }) { user ->
-            val isPicked = user.id in picked
-            Row(
-              Modifier
-                .fillMaxWidth()
-                .toggleable(value = isPicked, role = Role.Checkbox, enabled = !isOpening) {
-                  picked = toggled(picked, user.id)
-                  pickedPeople = pickedPeople + (user.id to user)
-                }
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-              verticalAlignment = Alignment.CenterVertically,
-            ) {
-              Box {
-                UserAvatar(user.id, Modifier.size(40.dp)) {
-                  Box(Modifier.size(40.dp).background(avatarColorOfHue(user.avatarHue), CircleShape), contentAlignment = Alignment.Center) {
-                    Text(user.displayName.firstOrNull()?.uppercase().orEmpty(), color = Color.White, style = MaterialTheme.typography.titleMedium)
-                  }
-                }
-                Box(
-                  Modifier
-                    .align(Alignment.BottomEnd)
-                    .size(14.dp)
-                    .background(MaterialTheme.colorScheme.background, CircleShape),
-                  contentAlignment = Alignment.Center,
-                ) { PresenceDot(user.presence) }
-              }
-              Column(Modifier.weight(1f).padding(start = 12.dp)) {
-                Text(user.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(
-                  listOfNotNull("@" + user.username, user.maybeCustomStatus?.let { it.emoji + " " + it.text }).joinToString(" · "),
-                  style = MaterialTheme.typography.bodySmall,
-                  color = MaterialTheme.colorScheme.onSurfaceVariant,
-                  maxLines = 1,
-                  overflow = TextOverflow.Ellipsis,
-                )
-              }
-              // Picked people get a filled check; the others an empty ring, so it reads as a choice.
-              if (isPicked) {
-                Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-              } else {
-                Box(Modifier.padding(2.dp).size(20.dp).border(2.dp, MaterialTheme.colorScheme.outline, CircleShape))
-              }
-            }
-          }
-        }
+        PeoplePicker(
+          search = { query -> viewModel.readChat { searchPeople(query, PEOPLE_SHOWN) } },
+          changes = changes,
+          picked = picked,
+          onPick = { user -> picked = toggled(picked, user.id) },
+          isEnabled = !isOpening,
+          modifier = Modifier.weight(1f),
+        )
       } else {
+        CompactSearchField(
+          value = filter,
+          onChange = { filter = it },
+          placeholder = stringResource(R.string.browse_filter_channels),
+          modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
+        )
+        val needle = filter.trim()
+        // Archived channels are hidden from the lists, so this is the way back to the ones the user is
+        // in; nobody can join an archived channel.
+        val visibleChannels = channels
+          .filter { !it.isArchived || (showsArchived && it.isMember) }
+          .filter { needle.isEmpty() || it.name.contains(needle, ignoreCase = true) }
         if (spaces.size > 1) {
           PrimaryTabRow(selectedTabIndex = spaceIndex.coerceAtMost(spaces.lastIndex)) {
             spaces.forEachIndexed { index, space ->

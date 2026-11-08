@@ -19,11 +19,6 @@ final class BrowseTests: XCTestCase {
     }
     """
 
-  func testPeopleLeaveOutMeAndBotsSortedByName() throws {
-    let snapshot = try XCTUnwrap(Wire.decode(BrowseSnapshot.self, from: snapshotJSON))
-    XCTAssertEqual(snapshot.people.map(\.username), ["alice", "bob"])
-  }
-
   func testDirectConversationIsFoundButNotAGroup() throws {
     let snapshot = try XCTUnwrap(Wire.decode(BrowseSnapshot.self, from: snapshotJSON))
     XCTAssertEqual(snapshot.directConversation(with: ["2"]), "11")
@@ -36,12 +31,10 @@ final class BrowseTests: XCTestCase {
     XCTAssertNil(snapshot.directConversation(with: ["2", "3", "4"]))
   }
 
-  func testAddablePeopleLeaveOutTheConversationsMembers() throws {
+  func testACallDoesntOfferTheConversationsMembers() throws {
     let snapshot = try XCTUnwrap(Wire.decode(BrowseSnapshot.self, from: snapshotJSON))
-    XCTAssertEqual(snapshot.addablePeople(to: "11", matching: "").map(\.id), ["3"])
-    XCTAssertEqual(snapshot.addablePeople(to: "10", matching: "").map(\.id), [])
-    XCTAssertEqual(snapshot.addablePeople(to: "11", matching: "BO").map(\.id), ["3"])
-    XCTAssertEqual(snapshot.addablePeople(to: "11", matching: "alice").map(\.id), [])
+    XCTAssertEqual(snapshot.notAddableToCall(in: "11"), ["1", "2"])
+    XCTAssertTrue(snapshot.notAddableToCall(in: "10").isSuperset(of: ["1", "2", "3"]))
   }
 
   func testCallAdditionKeepsThePeopleInTheCallOutOfTheAdded() throws {
@@ -80,9 +73,6 @@ final class BrowseTests: XCTestCase {
   }
 
   func testBrowseActionsOnTheWire() {
-    XCTAssertEqual(ChatAction.openDm(userId: "2").json, #"{"action":"open_dm","user":"2"}"#)
-    XCTAssertEqual(
-      ChatAction.openGroupDm(userIds: ["2", "3"]).json, #"{"action":"open_group_dm","users":["2","3"]}"#)
     XCTAssertEqual(
       ChatAction.joinChannel(conversationId: "10").json, #"{"action":"join_channel","conversation":"10"}"#)
     XCTAssertEqual(ChatQuery.browseChannels(spaceId: "9").json, #"{"kind":"browse_channels","space":"9"}"#)

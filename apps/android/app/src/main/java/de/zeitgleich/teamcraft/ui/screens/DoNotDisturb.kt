@@ -1,5 +1,13 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.core.User
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.heading
+import androidx.compose.runtime.collectAsState
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.foundation.layout.navigationBarsPadding
 import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import android.content.Context
@@ -13,7 +21,6 @@ import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.time.format.TextStyle
 import java.util.Locale
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -23,17 +30,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -148,6 +151,8 @@ private fun ScheduleSection(
   val scope = rememberCoroutineScope()
   var maybeSaveResult by remember { mutableStateOf<Boolean?>(null) }
   var isPickingPerson by remember { mutableStateOf(false) }
+  // Names of people picked here: the directory may find people the snapshot doesn't know.
+  var pickedNames by remember { mutableStateOf(mapOf<String, String>()) }
   Text(stringResource(R.string.dnd_schedule_title), style = MaterialTheme.typography.titleMedium)
   Text(stringResource(R.string.dnd_schedule_hint, ZoneId.systemDefault().id), style = MaterialTheme.typography.bodySmall)
   editor.ranges.forEachIndexed { index, range ->
@@ -168,13 +173,13 @@ private fun ScheduleSection(
   Text(stringResource(R.string.dnd_allow_hint), style = MaterialTheme.typography.bodySmall)
   for (userId in editor.allowUserIds) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-      Text(maybeSnapshot?.name(userId) ?: userId, modifier = Modifier.weight(1f))
+      Text(pickedNames[userId] ?: maybeSnapshot?.name(userId) ?: userId, modifier = Modifier.weight(1f))
       TextButton(onClick = { onEdit(editor.copy(allowUserIds = editor.allowUserIds - userId)) }) {
         Text(stringResource(R.string.dnd_remove))
       }
     }
   }
-  OutlinedButton(onClick = { isPickingPerson = true }, enabled = maybeSnapshot != null) { Text(stringResource(R.string.dnd_add_person)) }
+  OutlinedButton(onClick = { isPickingPerson = true }) { Text(stringResource(R.string.dnd_add_person)) }
   Row(verticalAlignment = Alignment.CenterVertically) {
     Switch(checked = editor.allowsUrgent, onCheckedChange = { onEdit(editor.copy(allowsUrgent = it)) })
     Text(stringResource(R.string.dnd_allows_urgent), modifier = Modifier.padding(start = 8.dp))
@@ -198,14 +203,14 @@ private fun ScheduleSection(
     null -> Unit
   }
 
-  val snapshot = maybeSnapshot
-  if (isPickingPerson && snapshot != null) {
+  if (isPickingPerson) {
     PersonPicker(
-      snapshot = snapshot,
-      excluded = editor.allowUserIds.toSet() + snapshot.me.id,
-      onPick = { userId ->
+      viewModel = viewModel,
+      excluded = editor.allowUserIds.toSet(),
+      onPick = { user ->
         isPickingPerson = false
-        onEdit(editor.copy(allowUserIds = editor.allowUserIds + userId))
+        pickedNames = pickedNames + (user.id to user.displayName)
+        onEdit(editor.copy(allowUserIds = editor.allowUserIds + user.id))
       },
       onDismiss = { isPickingPerson = false },
     )
@@ -244,33 +249,27 @@ internal fun RangeRow(range: DndRange, onChange: (DndRange) -> Unit, onRemove: (
   }
 }
 
-/** People from the directory the core knows (members of the user's conversations). */
+/** A person to let through do not disturb: the app's people picker, one tap picks (#1534). */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PersonPicker(snapshot: ChatSnapshot, excluded: Set<String>, onPick: (String) -> Unit, onDismiss: () -> Unit) {
-  var filter by remember { mutableStateOf("") }
-  val people = snapshot.users
-    .filter { it.id !in excluded && !it.isBot }
-    .filter { filter.isBlank() || it.displayName.contains(filter, ignoreCase = true) || it.username.contains(filter, ignoreCase = true) }
-    .sortedBy { it.displayName.lowercase() }
-  AlertDialog(
-    onDismissRequest = onDismiss,
-    title = { Text(stringResource(R.string.dnd_add_person)) },
-    text = {
-      Column {
-        OutlinedTextField(value = filter, onValueChange = { filter = it }, singleLine = true, modifier = Modifier.fillMaxWidth())
-        LazyColumn(Modifier.heightIn(max = 320.dp)) {
-          items(people, key = { it.id }) { user ->
-            Text(
-              user.displayName,
-              modifier = Modifier.fillMaxWidth().clickable { onPick(user.id) }.padding(vertical = 12.dp),
-            )
-          }
-        }
-      }
-    },
-    confirmButton = {},
-    dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) } },
-  )
+private fun PersonPicker(viewModel: MainViewModel, excluded: Set<String>, onPick: (User) -> Unit, onDismiss: () -> Unit) {
+  val changes by viewModel.changeCount.collectAsState()
+  ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+    Text(
+      stringResource(R.string.dnd_add_person),
+      style = MaterialTheme.typography.titleLarge,
+      modifier = Modifier.padding(horizontal = 16.dp).semantics { heading() },
+    )
+    PeoplePicker(
+      search = { query -> viewModel.readChat { searchPeople(query, PEOPLE_SHOWN) } },
+      changes = changes,
+      picked = emptyList(),
+      onPick = onPick,
+      excluded = excluded,
+      mode = PickMode.One,
+      modifier = Modifier.heightIn(max = 520.dp).navigationBarsPadding(),
+    )
+  }
 }
 
 private fun pickTime(context: Context, minute: Int, onPicked: (Int) -> Unit) {

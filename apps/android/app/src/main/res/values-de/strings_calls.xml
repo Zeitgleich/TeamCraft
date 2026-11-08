@@ -25,7 +25,6 @@
   <string name="call_prejoin_moved">Der Anruf ist in „%1$s“ umgezogen, dort läuft er gerade.</string>
   <string name="call_add_people">Personen hinzufügen</string>
   <string name="call_add_hint">Der Anruf zieht mit allen Teilnehmenden in einen neuen Meetingraum um. Die Direktnachrichten bleiben, wie sie sind; die hinzugefügten Personen sehen sie nicht.</string>
-  <string name="call_add_nobody">Es gibt niemanden mehr zum Hinzufügen.</string>
   <string name="call_add">Zum Anruf hinzufügen</string>
   <string name="call_meeting_title">Anruf</string>
   <string name="call_move_offer">%1$s hat den Anruf in einen Meetingraum verschoben und %2$s hinzugefügt.</string>

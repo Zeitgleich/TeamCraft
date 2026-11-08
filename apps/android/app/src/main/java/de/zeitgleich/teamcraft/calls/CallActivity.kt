@@ -24,12 +24,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -51,7 +47,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -78,6 +73,8 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.security.ScreenPrefs.Companion.prefs
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
+import de.zeitgleich.teamcraft.ui.screens.PEOPLE_SHOWN
+import de.zeitgleich.teamcraft.ui.screens.PeoplePicker
 import de.zeitgleich.teamcraft.ui.toggled
 import kotlinx.coroutines.delay
 import uniffi.teamcraft_ffi.CallPhase
@@ -534,6 +531,7 @@ private fun AddPeopleDialog(moves: CallMoves, choice: AddPeopleChoice, onClose: 
   val requestKey = rememberSaveable { newRequestKey() }
   var picked by rememberSaveable { mutableStateOf(listOf<String>()) }
   val addState by moves.addState.collectAsStateWithLifecycle()
+  val changes by moves.changes.collectAsStateWithLifecycle()
   val isPending = addState == AddPeopleState.Pending
   val title = stringResource(R.string.call_meeting_title)
   val close = {
@@ -549,27 +547,15 @@ private fun AddPeopleDialog(moves: CallMoves, choice: AddPeopleChoice, onClose: 
     text = {
       Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(stringResource(R.string.call_add_hint), style = MaterialTheme.typography.bodySmall)
-        if (choice.candidates.isEmpty()) {
-          Text(stringResource(R.string.call_add_nobody))
-        }
-        LazyColumn(Modifier.heightIn(max = ADD_PEOPLE_LIST_HEIGHT)) {
-          items(choice.candidates, key = { it.id }) { user ->
-            val isPicked = user.id in picked
-            Row(
-              Modifier
-                .fillMaxWidth()
-                .toggleable(value = isPicked, enabled = !isPending, role = Role.Checkbox) { picked = toggled(picked, user.id) }
-                .padding(vertical = 8.dp),
-              verticalAlignment = Alignment.CenterVertically,
-            ) {
-              Checkbox(checked = isPicked, onCheckedChange = null, modifier = Modifier.padding(end = 12.dp))
-              Column(Modifier.weight(1f)) {
-                Text(user.displayName)
-                Text("@" + user.username, style = MaterialTheme.typography.bodySmall)
-              }
-            }
-          }
-        }
+        PeoplePicker(
+          search = { query -> moves.searchPeople(query, PEOPLE_SHOWN) },
+          changes = changes,
+          picked = picked,
+          onPick = { user -> picked = toggled(picked, user.id) },
+          excluded = choice.members,
+          isEnabled = !isPending,
+          modifier = Modifier.heightIn(max = ADD_PEOPLE_LIST_HEIGHT),
+        )
         (addState as? AddPeopleState.Failed)?.let { failed ->
           Text(stringResource(failed.text), color = MaterialTheme.colorScheme.error)
         }
@@ -577,7 +563,7 @@ private fun AddPeopleDialog(moves: CallMoves, choice: AddPeopleChoice, onClose: 
     },
     confirmButton = {
       Button(
-        onClick = { moves.add(choice, picked.filter { id -> choice.candidates.any { it.id == id } }, title, requestKey) },
+        onClick = { moves.add(choice, picked.filter { it !in choice.members }, title, requestKey) },
         enabled = picked.isNotEmpty() && !isPending,
       ) {
         if (isPending) {

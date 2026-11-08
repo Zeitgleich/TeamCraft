@@ -36,11 +36,6 @@ final class CreateTests: XCTestCase {
     XCTAssertEqual(CreateResult(.notAllowed), .notAllowed)
   }
 
-  func testAddMemberIsTheCoresAction() {
-    XCTAssertEqual(
-      ChatAction.addMember(conversationId: "10", userId: "2").json, #"{"action":"add_member","conversation":"10","user":"2"}"#)
-  }
-
   func testAddPeopleShowsOnlyWhereTheServerSaysSo() throws {
     let json = #"""
       {"me": {"id": "1", "username": "me", "display_name": "Me"},

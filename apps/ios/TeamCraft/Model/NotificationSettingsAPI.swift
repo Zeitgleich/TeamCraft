@@ -52,13 +52,6 @@ extension AppModel {
     return list.presences.first { $0.userId == userId }?.state
   }
 
-  /// People for the DND allow list (`GET /users?query=`).
-  func searchPeople(_ query: String) async -> [PersonSummary] {
-    let path = "/users?query=\(Self.queryEscaped(query))"
-    guard let json = await request("GET", path, body: nil) else { return [] }
-    return Wire.decode(PeopleList.self, from: json)?.users ?? []
-  }
-
   func person(_ userId: String) async -> PersonSummary? {
     guard let json = await request("GET", "/users/\(Self.queryEscaped(userId))", body: nil) else { return nil }
     return Wire.decode(PersonSummary.self, from: json)
@@ -147,6 +140,3 @@ struct PersonSummary: Decodable, Identifiable, Equatable {
   let username: String?
 }
 
-struct PeopleList: Decodable {
-  let users: [PersonSummary]
-}

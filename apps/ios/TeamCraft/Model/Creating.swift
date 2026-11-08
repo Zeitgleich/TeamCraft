@@ -7,7 +7,7 @@ extension AppModel {
   /// People whose name or username matches `query` (the server's directory included), without
   /// the user and bots, at most `limit`. `nil` when the core can't answer now; the directory's own
   /// answer arrives later as a change.
-  func findPeople(_ query: String, limit: UInt32 = 100) async -> [BrowseSnapshot.Person]? {
+  func searchPeople(_ query: String, limit: UInt32 = 100) async -> [BrowseSnapshot.Person]? {
     guard let json = try? await core().searchPeople(query: query, limit: limit) else { return nil }
     return Wire.decode(PeopleAnswer.self, from: json)?.people
   }
