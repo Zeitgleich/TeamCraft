@@ -240,4 +240,11 @@
   <string name="section_unread_direct">Neue Nachrichten</string>
   <string name="section_collapse">%1$s einklappen</string>
   <string name="section_expand">%1$s ausklappen</string>
+  <!-- Message density (#598, #1488). -->
+  <string name="message_layout">Nachrichtendichte</string>
+  <string name="message_layout_bubbles">Blasen</string>
+  <string name="message_layout_comfortable">Komfortabel</string>
+  <string name="message_layout_compact">Kompakt</string>
+  <string name="message_layout_hint">Blasen zeigen deine Nachrichten rechts. Komfortabel und Kompakt zeigen jede Nachricht mit Bild, Name und Uhrzeit, wie am Desktop.</string>
+  <string name="react_add">Reaktion hinzufügen</string>
 </resources>

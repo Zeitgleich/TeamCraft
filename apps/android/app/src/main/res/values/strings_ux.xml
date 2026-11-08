@@ -246,4 +246,11 @@
   <string name="section_unread_direct">New messages</string>
   <string name="section_collapse">Collapse %1$s</string>
   <string name="section_expand">Expand %1$s</string>
+  <!-- Message density (#598, #1488). -->
+  <string name="message_layout">Message density</string>
+  <string name="message_layout_bubbles">Bubbles</string>
+  <string name="message_layout_comfortable">Comfortable</string>
+  <string name="message_layout_compact">Compact</string>
+  <string name="message_layout_hint">Bubbles put your messages on the right. Comfortable and Compact show every message with the sender\'s picture, name and time, as on the desktop.</string>
+  <string name="react_add">Add a reaction</string>
 </resources>
