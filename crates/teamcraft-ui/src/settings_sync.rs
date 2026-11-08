@@ -151,6 +151,8 @@ synced_prefs! {
   "calls.status_sounds" => calls.status_sounds,
   "onboarding.done" => onboarding.done,
   "onboarding.is_dismissed" => onboarding.is_dismissed,
+  "files.sort" => files.sort,
+  "files.starred" => files.starred,
 }
 
 /// Preferences the server keeps, because it enforces them (`notify_sync`). They already follow the

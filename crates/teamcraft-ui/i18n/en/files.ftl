@@ -271,6 +271,17 @@ files-filter-media = Images and videos
 files-filter-documents = Documents
 files-all-empty = Files and images shared in any of your conversations show up here.
 files-space-empty = Files and images shared in this space's channels show up here.
+files-filter-starred = Starred
+files-sort = Sort
+files-sort-newest = Newest first
+files-sort-oldest = Oldest first
+files-sort-name = Name
+files-sort-largest = Largest first
+files-star = Star
+files-unstar = Remove star
+files-star-limit = You can star up to { $max } files. Remove a star to add another one.
+files-starred-empty-title = No starred files
+files-starred-empty = Star a file to find it here again quickly. Your stars follow you to your other devices.
 
 # Downloads list of the desktop app (top bar)
 downloads-title = Downloads

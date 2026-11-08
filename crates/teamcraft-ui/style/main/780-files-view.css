@@ -12,3 +12,38 @@
   padding: var(--space-2) max(var(--space-4), calc((100% - 760px) / 2)) var(--space-8);
 }
 
+
+/* Filters and the order share the header's row and wrap under the title where it is narrow. */
+.files-view-header {
+  flex-wrap: wrap;
+  row-gap: var(--space-2);
+  padding-block: var(--space-2);
+}
+
+.files-view-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.files-sort {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.files-sort .input {
+  width: auto;
+}
+
+/* The star of a file: outlined until starred, then filled in the star colour. */
+.file-star[aria-pressed="true"] {
+  color: var(--star);
+}
+
+.file-star[aria-pressed="true"] .icon {
+  fill: currentColor;
+}

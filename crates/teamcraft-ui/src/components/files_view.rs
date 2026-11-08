@@ -1,124 +1,245 @@
 //! The files the user can see: the "Files" entry of the sidebar (issue #301). Inside a space those of
-//! its conversations (#954), elsewhere those of all spaces, channels and direct messages. It gathers
-//! what each conversation already holds locally, newest first, with a filter by kind; nothing is
-//! fetched, so the server learns nothing about what is looked at.
+//! its conversations (#954), elsewhere those of all spaces, channels and direct messages. Filtered by
+//! kind, sorted, with starred files, a page at a time (`teamcraft_client_api::files_query`). It reads
+//! what the device already holds; nothing is fetched, so the server learns nothing about what is
+//! looked at.
 
 use leptos::prelude::*;
-use teamcraft_client_api::actions::FileInfo;
-use teamcraft_client_api::space_scope::{files_of_everything, files_of_space};
+use teamcraft_client_api::files_query::{
+  FILES_PAGE_SIZE, FileKind, FileScope, FileSort, FilesQuery, MAX_STARRED_FILES, StarredFile, files_page,
+  toggle_star,
+};
+use wasm_bindgen::JsCast;
 
 use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
-use crate::components::file_views::FileCard;
+use crate::components::file_views::{FileCard, FileStar};
 use crate::components::icons::IconName;
 use crate::components::page::ScopedSpaceName;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::use_i18n;
-use crate::lightbox::MediaKind;
 use crate::reactive::use_interval_while_visible;
 use crate::state::use_app_state;
 
-/// Files shown at once.
-const MAX_FILES: usize = 300;
 /// New files arrive without an event this view hears, so it looks again this often while it is
 /// open and visible.
 const REFRESH_MS: u64 = 15_000;
-
-/// What the list shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FileFilter {
-  All,
-  Media,
-  Documents,
-}
-
-impl FileFilter {
-  const ALL: [Self; 3] = [Self::All, Self::Media, Self::Documents];
-
-  fn label_key(self) -> &'static str {
-    match self {
-      Self::All => "files-filter-all",
-      Self::Media => "files-filter-media",
-      Self::Documents => "files-filter-documents",
-    }
-  }
-
-  fn matches(self, file: &FileInfo) -> bool {
-    let is_media = MediaKind::of(&file.media_type).is_some();
-    match self {
-      Self::All => true,
-      Self::Media => is_media,
-      Self::Documents => !is_media,
-    }
-  }
-}
+/// How far above the end of the list the next page comes in, in pixels.
+const PAGE_AHEAD_PX: i32 = 800;
 
 #[component]
 pub fn FilesView() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let filter = RwSignal::new(FileFilter::All);
+  let prefs = state.settings.prefs;
+  let kind = RwSignal::new(FileKind::All);
+  let pages = RwSignal::new(1_usize);
   let reload = RwSignal::new(0_u32);
   use_interval_while_visible(REFRESH_MS, move || reload.update(|count| *count += 1));
-  let scope = Memo::new(move |_| state.maybe_scoped_space());
-  let all_files = Memo::new(move |_| {
+  let scope = Memo::new(move |_| match state.maybe_scoped_space() {
+    Some(space) => FileScope::Space(space),
+    None => FileScope::Everything,
+  });
+  let sort = Memo::new(move |_| prefs.with(|all| all.files.sort));
+  let starred = Memo::new(move |_| prefs.with(|all| all.files.starred.clone()));
+  // Another filter, order or space starts at the first page again.
+  Effect::new(move |_| {
+    kind.track();
+    sort.track();
+    scope.track();
+    if pages.get_untracked() != 1 {
+      pages.set(1);
+    }
+  });
+  let page = Memo::new(move |_| {
     reload.track();
-    let maybe_space = scope.get();
-    // Looked at again on a timer, when the view opens and when the space changes, not on every
-    // change of the workspace.
+    let (scope, kind, sort, max_files) = (scope.get(), kind.get(), sort.get(), pages.get() * FILES_PAGE_SIZE);
+    // A star only reads again while the starred files are listed.
+    let starred_now = if kind == FileKind::Starred {
+      starred.get()
+    } else {
+      Vec::new()
+    };
+    // Read again on a timer, when the view opens and when the query changes, not on every change of
+    // the workspace.
     untrack(|| {
-      state.read(|backend| match maybe_space {
-        Some(space) => files_of_space(backend, space),
-        None => files_of_everything(backend),
+      state.read(|backend| {
+        files_page(
+          backend,
+          &FilesQuery {
+            scope,
+            kind,
+            sort,
+            starred: &starred_now,
+            max_files,
+          },
+        )
       })
     })
   });
-  let files = Memo::new(move |_| {
-    let wanted = filter.get();
-    all_files.with(|all| {
-      all
-        .iter()
-        .filter(|file| wanted.matches(file))
-        .take(MAX_FILES)
-        .cloned()
-        .collect::<Vec<_>>()
-    })
-  });
+  let on_scroll = move |ev: leptos::ev::Event| {
+    if page.with_untracked(|page| page.has_more) && is_near_end(&ev) {
+      pages.update(|pages| *pages += 1);
+    }
+  };
+  let is_full = Signal::derive(move || starred.with(|stars| stars.len() >= MAX_STARRED_FILES));
+  let star_of = move |file: &StarredFile| {
+    let file = file.clone();
+    let key = file.clone();
+    FileStar {
+      is_starred: Signal::derive(move || starred.with(|stars| stars.contains(&key))),
+      can_star: Signal::derive(move || !is_full.get()),
+      on_toggle: Callback::new(move |()| {
+        prefs.update(|all| {
+          let is_starred = all.files.starred.contains(&file);
+          if let Some(next) = toggle_star(&all.files.starred, &file, !is_starred) {
+            all.files.starred = next;
+          }
+        });
+      }),
+    }
+  };
+
   view! {
     <section class="files-view" aria-label=move || i18n.t("files-title")>
-      <header class="panel-header">
+      <header class="panel-header files-view-header">
         <CompactBack />
         <div class="panel-title">
           <h1>{move || i18n.t("files-title")}</h1>
           <ScopedSpaceName />
         </div>
-        <div class="segmented" role="group" aria-label=move || i18n.t("files-filter")>
-          <SlidingIndicator />
-          {FileFilter::ALL
-            .into_iter()
-            .map(|value| {
-              view! {
-                <button aria-pressed=move || (filter.get() == value).to_string() on:click=move |_| filter.set(value)>
-                  {move || i18n.t(value.label_key())}
-                </button>
+        <div class="files-view-controls">
+          <div class="segmented" role="group" aria-label=move || i18n.t("files-filter")>
+            <SlidingIndicator />
+            {FileKind::ALL
+              .into_iter()
+              .map(|value| {
+                view! {
+                  <button aria-pressed=move || (kind.get() == value).to_string() on:click=move |_| kind.set(value)>
+                    {move || i18n.t(kind_label_key(value))}
+                  </button>
+                }
+              })
+              .collect_view()}
+          </div>
+          <div class="files-sort">
+            <label for="files-sort">{move || i18n.t("files-sort")}</label>
+            <select
+              id="files-sort"
+              class="input"
+              on:change=move |ev| {
+                if let Some(value) = sort_from_slug(&event_target_value(&ev)) {
+                  prefs.update(|all| all.files.sort = value);
+                }
               }
-            })
-            .collect_view()}
+            >
+              {FileSort::ALL
+                .into_iter()
+                .map(|value| {
+                  view! {
+                    <option value=sort_slug(value) selected=move || sort.get() == value>
+                      {move || i18n.t(sort_label_key(value))}
+                    </option>
+                  }
+                })
+                .collect_view()}
+            </select>
+          </div>
         </div>
       </header>
-      <div class="files-view-body panel-scroll">
+      <div class="files-view-body panel-scroll" on:scroll=on_scroll>
         <div class="files-list">
-          <For each=move || files.get() key=|file| (file.message, file.file_id.clone()) let:file>
-            <FileCard file=file />
+          <For
+            each=move || page.with(|page| page.files.clone())
+            key=|file| (file.message, file.file_id.clone())
+            let:file
+          >
+            {
+              let star = star_of(&StarredFile::of(&file));
+              view! { <FileCard file=file maybe_star=star /> }
+            }
           </For>
         </div>
-        <Show when=move || files.with(Vec::is_empty) fallback=|| ()>
+        <Show when=move || page.with(|page| page.files.is_empty()) fallback=|| ()>
           {move || {
-            let body_key = if scope.get().is_some() { "files-space-empty" } else { "files-all-empty" };
-            view! { <EmptyState icon=IconName::Paperclip title_key="files-empty-title" body_key=body_key /> }
+            let (icon, title_key, body_key) = empty_keys(kind.get(), scope.get());
+            view! { <EmptyState icon=icon title_key=title_key body_key=body_key /> }
           }}
         </Show>
       </div>
     </section>
+  }
+}
+
+fn kind_label_key(kind: FileKind) -> &'static str {
+  match kind {
+    FileKind::All => "files-filter-all",
+    FileKind::Media => "files-filter-media",
+    FileKind::Documents => "files-filter-documents",
+    FileKind::Starred => "files-filter-starred",
+  }
+}
+
+fn sort_slug(sort: FileSort) -> &'static str {
+  match sort {
+    FileSort::Newest | FileSort::Unknown => "newest",
+    FileSort::Oldest => "oldest",
+    FileSort::Name => "name",
+    FileSort::Largest => "largest",
+  }
+}
+
+fn sort_from_slug(slug: &str) -> Option<FileSort> {
+  FileSort::ALL.into_iter().find(|sort| sort_slug(*sort) == slug)
+}
+
+fn sort_label_key(sort: FileSort) -> &'static str {
+  match sort {
+    FileSort::Newest | FileSort::Unknown => "files-sort-newest",
+    FileSort::Oldest => "files-sort-oldest",
+    FileSort::Name => "files-sort-name",
+    FileSort::Largest => "files-sort-largest",
+  }
+}
+
+/// What an empty list says: no starred files yet, or no files at all here.
+fn empty_keys(kind: FileKind, scope: FileScope) -> (IconName, &'static str, &'static str) {
+  match (kind, scope) {
+    (FileKind::Starred, _) => (IconName::Star, "files-starred-empty-title", "files-starred-empty"),
+    (_, FileScope::Space(_)) => (IconName::Paperclip, "files-empty-title", "files-space-empty"),
+    (_, FileScope::Everything) => (IconName::Paperclip, "files-empty-title", "files-all-empty"),
+  }
+}
+
+/// Whether the scrolled list is close enough to its end for the next page.
+fn is_near_end(ev: &leptos::ev::Event) -> bool {
+  ev.current_target()
+    .and_then(|target| target.dyn_into::<web_sys::Element>().ok())
+    .is_some_and(|element| {
+      element.scroll_top() + element.client_height() + PAGE_AHEAD_PX >= element.scroll_height()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn every_order_reads_back_from_its_slug() {
+    for sort in FileSort::ALL {
+      assert_eq!(sort_from_slug(sort_slug(sort)), Some(sort));
+    }
+  }
+
+  #[test]
+  fn keys_built_from_options_exist() {
+    let en = include_str!("../../i18n/en/files.ftl");
+    let mut keys: Vec<&str> = FileKind::ALL.into_iter().map(kind_label_key).collect();
+    keys.extend(FileSort::ALL.into_iter().map(sort_label_key));
+    keys.extend(["files-star", "files-unstar", "files-star-limit", "files-sort"]);
+    keys.extend(["files-starred-empty-title", "files-starred-empty"]);
+    for key in keys {
+      assert!(en.contains(&format!("\n{key} = ")), "{key}");
+    }
   }
 }

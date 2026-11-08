@@ -83,6 +83,7 @@ pub mod guest_notice;
 pub mod home;
 pub mod huddle_bar;
 pub mod icons;
+pub mod illustration;
 pub mod image_crop_dialog;
 pub mod incoming_call;
 pub mod join_requests;

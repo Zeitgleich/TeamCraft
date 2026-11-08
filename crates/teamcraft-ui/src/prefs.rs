@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_client_api::color_theme::ColorTheme;
+use teamcraft_client_api::files_query::{FileSort, StarredFile};
 use teamcraft_client_api::message_sound::{MessageSound, OwnSoundLimits};
 use teamcraft_proto::{ChannelMentions, DndWindow, Weekday};
 
@@ -887,6 +888,15 @@ pub struct OnboardingPrefs {
   pub is_dismissed: bool,
 }
 
+/// The Files view (issue #301): its order and the starred files, both following the account.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FilesPrefs {
+  pub sort: FileSort,
+  /// At most `files_query::MAX_STARRED_FILES`, oldest star first.
+  pub starred: Vec<StarredFile>,
+}
+
 /// Everything in one place, stored as a single JSON document.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -898,6 +908,7 @@ pub struct Preferences {
   pub sidebar: SidebarPrefs,
   pub composer: ComposerPrefs,
   pub onboarding: OnboardingPrefs,
+  pub files: FilesPrefs,
 }
 
 impl Preferences {
