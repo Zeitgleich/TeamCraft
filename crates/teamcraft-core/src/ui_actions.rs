@@ -28,7 +28,7 @@ use crate::read_state;
 use crate::records;
 use crate::store::{
   BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageMeta, MessageSlot, Priority,
-  ReplyAttachment, StoredMessage, Table,
+  ReplyAttachment, ReplyRef, StoredMessage, Table,
 };
 use crate::ui_backend::{CoreChatBackend, CoreCommand, ui_message_id};
 
@@ -882,19 +882,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           .message(conversation, reply.target)
           .map_err(CoreError::from),
       );
-      ReplyPreview {
-        maybe_message: maybe_target.as_ref().map(ui_message_id),
-        // The author the list shows, also for replies that named the import account as the
-        // author of an imported message before it was told apart.
-        author: maybe_target.as_ref().map_or(reply.author, |target| {
-          Authorship::of(target, maybe_importer).author
-        }),
-        excerpt: reply.excerpt.clone(),
-        maybe_attachment: reply
-          .maybe_attachment
-          .as_deref()
-          .map(|quoted| quoted_attachment(quoted, maybe_target.as_ref())),
-      }
+      reply_preview(reply, maybe_target.as_ref(), maybe_importer)
     });
     extras.maybe_forwarded = meta.maybe_forwarded.as_ref().map(|forwarded| ForwardedFrom {
       author_name: forwarded.author_name.clone(),
@@ -984,6 +972,27 @@ impl Ticks {
 /// What a reader sees of the picture a reply quotes. The quoted message's own thumbnail wins while
 /// it has the picture, so a sender can't show another picture under someone else's name; once the
 /// picture is deleted or expired, the copy in the reply is what's left.
+/// A quote as the apps show it: of `reply`, with what `maybe_target` says now where it is there.
+pub(crate) fn reply_preview(
+  reply: &ReplyRef,
+  maybe_target: Option<&StoredMessage>,
+  maybe_importer: Option<UserId>,
+) -> ReplyPreview {
+  ReplyPreview {
+    maybe_message: maybe_target.map(ui_message_id),
+    // The author the list shows, also for replies that named the import account as the
+    // author of an imported message before it was told apart.
+    author: maybe_target.map_or(reply.author, |target| {
+      Authorship::of(target, maybe_importer).author
+    }),
+    excerpt: reply.excerpt.clone(),
+    maybe_attachment: reply
+      .maybe_attachment
+      .as_deref()
+      .map(|quoted| quoted_attachment(quoted, maybe_target)),
+  }
+}
+
 fn quoted_attachment(
   quoted: &ReplyAttachment,
   maybe_target: Option<&StoredMessage>,

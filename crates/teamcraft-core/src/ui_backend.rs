@@ -2411,6 +2411,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     });
   }
 
+  fn draft_reply(&self, conversation: ConversationId) -> Option<teamcraft_client_api::actions::ReplyPreview> {
+    self.ui_draft_reply(conversation)
+  }
+
+  fn set_draft_reply(
+    &self,
+    conversation: ConversationId,
+    maybe_reply: Option<teamcraft_client_api::drafts::DraftReply>,
+  ) {
+    self.ui_set_draft_reply(conversation, maybe_reply);
+  }
+
   fn attach_draft_files(
     &self,
     conversation: ConversationId,

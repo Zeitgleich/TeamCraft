@@ -10,6 +10,18 @@ import org.junit.Test
 
 /** The actions and queries must have the exact shape the core's serde types expect. */
 class ChatActionsTest {
+  /** The reply target is kept with the draft on this device (#1115). */
+  @Test
+  fun aReplyTargetIsKeptAndForgotten() {
+    val kept = Json.parseToJsonElement(ChatActions.setDraftReply("7", "9", "4")).jsonObject
+    assertEquals("set_draft_reply", kept["action"]!!.jsonPrimitive.content)
+    assertEquals("9", kept["maybe_reply"]!!.jsonObject["message"]!!.jsonPrimitive.content)
+    assertEquals("4", kept["maybe_reply"]!!.jsonObject["maybe_attachment"]!!.jsonPrimitive.content)
+
+    val forgotten = Json.parseToJsonElement(ChatActions.setDraftReply("7", null, null)).jsonObject
+    assertEquals(JsonNull, forgotten["maybe_reply"])
+  }
+
   @Test
   fun sendCarriesReplyPriorityAndFiles() {
     val json = Json.parseToJsonElement(

@@ -18,8 +18,8 @@ use teamcraft_proto::{
 
 use crate::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, FileInfo, LinkedMessage, MediaAnchor, MediaPage,
-  MessageExtras, NewChannel, NewSpace, OutgoingFile, OutgoingMessage, PermalinkTarget, SavedItem, ShareLink,
-  ShareLinkOptions, SpaceChanges, SpaceInvite,
+  MessageExtras, NewChannel, NewSpace, OutgoingFile, OutgoingMessage, PermalinkTarget, ReplyPreview,
+  SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use crate::activity::ActivityFeed;
 use crate::admin::{
@@ -34,7 +34,7 @@ use crate::calls::{
 use crate::calls::{
   CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
 };
-use crate::drafts::{DraftFileItem, DraftItem, SentItem};
+use crate::drafts::{DraftFileItem, DraftItem, DraftReply, SentItem};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, FirstSync, KeyCatchUp, MembershipIssue, Message,
@@ -545,6 +545,14 @@ pub trait ChatBackend {
   }
   /// Stores the draft; an empty body removes it. Call debounced while typing.
   fn set_draft(&self, _conversation: ConversationId, _maybe_thread: Option<ThreadId>, _body: &str) {}
+  /// What the conversation's composer replies to, as a quote (#1115); `None` once the message is
+  /// gone. Kept on this device only.
+  fn draft_reply(&self, _conversation: ConversationId) -> Option<ReplyPreview> {
+    None
+  }
+  /// Keeps what the conversation's composer replies to, so it survives the app being killed
+  /// (#1115); `None` forgets it. Stays on this device, unlike the draft's text.
+  fn set_draft_reply(&self, _conversation: ConversationId, _maybe_reply: Option<DraftReply>) {}
   /// Attaches files to the draft (#1220): they go up at once, so they travel with the draft to the
   /// user's other devices. Sending them names them with [`crate::actions::FileSource::Draft`].
   fn attach_draft_files(

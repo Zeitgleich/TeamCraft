@@ -583,6 +583,8 @@ data class ChatAnswer(
   @SerialName("maybe_target") val maybeTarget: PermalinkTarget? = null,
   @SerialName("maybe_message") val maybeMessage: String? = null,
   @SerialName("maybe_body") val maybeBody: String? = null,
+  /** [ChatQueries.draftReply]: what the composer replies to. */
+  @SerialName("maybe_reply") val maybeReply: ReplyPreview? = null,
   val drafts: List<DraftItem> = emptyList(),
   val sent: List<SentItem> = emptyList(),
   val files: List<FileInfo> = emptyList(),
