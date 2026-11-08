@@ -100,10 +100,20 @@ links changes.
 
 ### Flavors
 
-| Flavor  | Push                | For                                        |
-|---------|---------------------|--------------------------------------------|
-| `full`  | FCM and UnifiedPush | Google Play                                |
-| `libre` | UnifiedPush only    | Devices and stores without Google services |
+| Flavor  | Push                | Crash reports                  | For                                        |
+|---------|---------------------|--------------------------------|--------------------------------------------|
+| `full`  | FCM and UnifiedPush | sentry-android (JVM, ANR, NDK) | Google Play                                |
+| `libre` | UnifiedPush only    | None (no SDK in the build)     | Devices and stores without Google services |
+
+Crash reports (`crash/`, docs/crash-reports.md "The Android SDK") run only while the signed-in
+server's `server-info` has `crash_reports` and the user didn't turn them off (Settings → Privacy
+and security). For readable stack traces the release workflow uploads, for `fullRelease`:
+
+| What                     | Path (from `apps/android`)                                                                        |
+|--------------------------|---------------------------------------------------------------------------------------------------|
+| R8 mapping               | `app/build/outputs/mapping/fullRelease/mapping.txt`                                               |
+| Unstripped native libs   | `app/build/intermediates/merged_native_libs/fullRelease/mergeFullReleaseNativeLibs/out/lib/<abi>/` |
+| ProGuard UUID in the APK | `assets/sentry-debug-meta.properties`, from `-Pteamcraft.proguardUuid=<uuid>`                     |
 
 ### Configuration
 
@@ -118,6 +128,7 @@ Gradle properties (`gradle.properties` has the defaults; override with `-P` or i
 | `teamcraft.oidcRedirectScheme` | Redirect URI is `<scheme>:/oauth/callback`; the server's client must allow it    |
 | `teamcraft.fcm*`               | Firebase project of the deployment (flavor `full`); empty: no FCM                |
 | `teamcraft.upload*`            | Upload signing key (see "Signing")                                               |
+| `teamcraft.proguardUuid`       | ProGuard UUID of a `fullRelease` build's R8 mapping (crash reports); empty: none |
 
 ### Server address
 

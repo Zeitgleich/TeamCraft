@@ -23,8 +23,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.calls.CallController
+import de.zeitgleich.teamcraft.crash.CrashReports
+import de.zeitgleich.teamcraft.crash.CrashSdks
 import de.zeitgleich.teamcraft.core.ActivityReports
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.core.NetworkTrust
@@ -54,6 +57,9 @@ import uniffi.teamcraft_ffi.setDeletedUserName
 /** Process-wide objects, shared by the activity, receivers and services. */
 class AppGraph(context: Context) {
   val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+  /** Crash reports to the instance's backend, when it has them on (docs/crash-reports.md). */
+  val crashReports = CrashReports(context, CrashSdks.platform())
 
   /** What other apps shared, until it has a conversation (issue #208). */
   val shares = ShareReceiver(File(context.noBackupFilesDir, "share-inbox"), MAX_IMPORT_BYTES, scope)
@@ -109,6 +115,12 @@ class TeamCraftApplication : Application(), Configuration.Provider {
   override fun onCreate() {
     super.onCreate()
     graph = AppGraph(this)
+    // First, so a crash during the rest of the start is reported (the last known setting).
+    graph.crashReports.install()
+    // The signed-in server's current setting, after every sign-in (and at start, signed in).
+    graph.scope.launch {
+      graph.auth.isSignedIn.collect { isSignedIn -> if (isSignedIn) refreshCrashReports(graph) }
+    }
     // DM titles, members and notifications name deleted accounts in the user's language (#1066).
     // Off the main thread: the first call loads the core's native library, which is not needed
     // for the first frame. The core sets it again before it opens (CoreRepository.core).
@@ -153,6 +165,7 @@ class TeamCraftApplication : Application(), Configuration.Provider {
       maybeStopping?.cancel()
       maybeStopping = null
       graph.connectionGrace.appReturned()
+      graph.scope.launch { refreshCrashReports(graph) }
       maybeStarting?.cancel()
       // An access token that ran out is renewed while the core opens, so the connection doesn't
       // start with waiting for it.
@@ -221,5 +234,12 @@ class TeamCraftApplication : Application(), Configuration.Provider {
     private const val STOP_DELAY_MS = 10_000L
 
     fun graph(context: Context): AppGraph = (context.applicationContext as TeamCraftApplication).graph
+
+    /** The signed-in server's crash reports setting; nothing while signed out. */
+    private suspend fun refreshCrashReports(graph: AppGraph) {
+      if (!graph.auth.isSignedIn.value) return
+      val server = withContext(Dispatchers.IO) { graph.servers.active() } ?: return
+      graph.crashReports.refresh(server)
+    }
   }
 }

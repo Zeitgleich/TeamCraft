@@ -1319,6 +1319,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   val segmentPrefetch get() = graph.segmentPrefetch
 
+  /** Crash reports: the privacy switch and the first-start notice. */
+  val crashReports get() = graph.crashReports
+
   fun pushService(): PushService? = graph.push.activeService()
 
   fun registerPush() = graph.push.register()
@@ -1635,6 +1638,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   private fun forgetActiveServer() {
     graph.auth.activate(null)
+    // The next server's crash reports setting comes after its sign-in.
+    graph.crashReports.forgetServer()
     activeServer.value = null
     maybeBrandStore = null
     brand.value = null
