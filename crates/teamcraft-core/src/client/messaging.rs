@@ -527,8 +527,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// After `received` (a page read out of order) was stored: when a pin or bookmarks message is
   /// among them, takes the controls from the oldest of those on again in their order
   /// ([`Self::replay_controls_from`]), so an older one doesn't overwrite a newer one that was read
-  /// first. `apply_control_with` writes both unconditionally; edits go by their ID already, and a
-  /// page without either costs no more than a lookup per message.
+  /// first. `apply_control_with` keeps the newest of each by its ID now (`NewestControl`, issue
+  /// #1448); this still puts right what was taken before that record existed. Edits go by their ID
+  /// already, and a page without either costs no more than a lookup per message.
   pub(super) fn settle_ordered_controls(
     &self,
     conversation: ConversationId,
@@ -848,6 +849,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           Some(response.id),
         )?;
       }
+      // Pins and bookmarks the same way, unless a later own one waits (issue #1448).
+      settle_sent_control(
+        &self.store,
+        entry.conversation_id,
+        entry.client_message_id,
+        self.account.user_id,
+        &stored.content,
+        response.id,
+      )?;
       if let MessageContent::IntegrationSource { change } = &stored.content {
         crate::integration_sources::settle_source_change(
           &self.store,
@@ -1032,7 +1042,9 @@ pub(crate) fn apply_control(
 
 /// [`apply_control`] for a control the server numbered (`maybe_server_id`). Edits converge on
 /// every device (issue #160): the one with the highest server ID wins, whatever order they arrive
-/// in; an own edit without an ID yet shows at once and is settled once it was sent.
+/// in; an own edit without an ID yet shows at once and is settled once it was sent. Pins and
+/// bookmarks the same way (issue #1448), by the newest one taken ([`NewestControl`]): one read out
+/// of order or decrypted late (parked for its key, #888) doesn't undo a newer one.
 fn apply_control_with(
   store: &impl LocalStore,
   conversation: ConversationId,
@@ -1042,7 +1054,12 @@ fn apply_control_with(
   maybe_server_id: Option<MessageId>,
 ) -> Result<(), CoreError> {
   if let MessageContent::Bookmarks { items } = content {
-    return records::put_json(store, Table::Account, &bookmarks_key(conversation), items);
+    let newest = NewestControl::Bookmarks;
+    if !newest.is_newer(store, conversation, maybe_server_id)? {
+      return Ok(());
+    }
+    records::put_json(store, Table::Account, &bookmarks_key(conversation), items)?;
+    return newest.note(store, conversation, maybe_server_id);
   }
   if let MessageContent::Canvas { update, is_snapshot } = content {
     // Decrypted in the conversation's group, so `sender` is a member of it; the server let it post.
@@ -1147,10 +1164,150 @@ fn apply_control_with(
       stored.content = MessageContent::Deleted;
       stored.edits.clear();
     },
-    MessageContent::Pin { is_pinned, .. } => stored.is_pinned = *is_pinned,
+    MessageContent::Pin { is_pinned, .. } => {
+      let newest = NewestControl::Pin(target);
+      if !newest.is_newer(store, conversation, maybe_server_id)? {
+        return Ok(());
+      }
+      stored.is_pinned = *is_pinned;
+      store.upsert_message(&stored)?;
+      return newest.note(store, conversation, maybe_server_id);
+    },
     _ => return Ok(()),
   }
   store.upsert_message(&stored)?;
+  Ok(())
+}
+
+/// What a pin or bookmarks control competes with: the newest control of the same kind this device
+/// took, by server ID, kept in [`Table::SyncState`] (issue #1448). An older one, read out of order
+/// or decrypted late, loses; the edits' rule (`maybe_edit_id`), without a field on the message.
+///
+/// One not numbered yet (an own change waiting to be sent) always shows and leaves the record as it
+/// is; once sent it counts like any other ([`settle_sent_control`]). Controls taken before this
+/// record existed left none: the first one taken after counts as the newest, as before, and pages
+/// read out of order still take their controls again in order (`replay_controls_from`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NewestControl {
+  /// The bookmarks bar of the conversation.
+  Bookmarks,
+  /// Whether this message is pinned.
+  Pin(ClientMessageId),
+}
+
+impl NewestControl {
+  /// The record this control competes with, if it is one.
+  fn of(content: &MessageContent) -> Option<Self> {
+    match content {
+      MessageContent::Bookmarks { .. } => Some(Self::Bookmarks),
+      MessageContent::Pin { target, .. } => Some(Self::Pin(*target)),
+      _ => None,
+    }
+  }
+
+  /// Whether a control numbered `maybe_server_id` comes after the newest one taken.
+  fn is_newer(
+    self,
+    store: &impl LocalStore,
+    conversation: ConversationId,
+    maybe_server_id: Option<MessageId>,
+  ) -> Result<bool, CoreError> {
+    let Some(id) = maybe_server_id else {
+      return Ok(true);
+    };
+    Ok(self.newest(store, conversation)?.is_none_or(|newest| newest < id))
+  }
+
+  /// Notes a control taken (after its effect is written: a crash in between leaves the record
+  /// behind, never ahead of what shows). Never moves back.
+  fn note(
+    self,
+    store: &impl LocalStore,
+    conversation: ConversationId,
+    maybe_server_id: Option<MessageId>,
+  ) -> Result<(), CoreError> {
+    let Some(id) = maybe_server_id else {
+      return Ok(());
+    };
+    if self
+      .newest(store, conversation)?
+      .is_some_and(|newest| newest >= id)
+    {
+      return Ok(());
+    }
+    records::put_json(store, Table::SyncState, &self.key(conversation), &id)
+  }
+
+  fn newest(
+    self,
+    store: &impl LocalStore,
+    conversation: ConversationId,
+  ) -> Result<Option<MessageId>, CoreError> {
+    records::get_json(store, Table::SyncState, &self.key(conversation))
+  }
+
+  fn key(self, conversation: ConversationId) -> String {
+    match self {
+      Self::Bookmarks => format!("{NEWEST_CONTROL_PREFIX}{conversation}/bookmarks"),
+      Self::Pin(target) => format!("{NEWEST_CONTROL_PREFIX}{conversation}/pin/{}", target.to_hex()),
+    }
+  }
+}
+
+/// Key prefix of the [`NewestControl`] records in [`Table::SyncState`].
+const NEWEST_CONTROL_PREFIX: &str = "newest-control/";
+
+/// An own pin or bookmarks message got its server ID `id` (issue #1448): from now on it counts like
+/// anybody's. It is taken again with it, so somebody else's control that was read before it went
+/// out (a catch-up reads before the outbox sends) and came first on the server no longer stands
+/// against it; after a lost answer the other one may have come after it, and stays. Unless a later
+/// own control of the same kind (the same message's pin, or the bookmarks) still waits to be sent:
+/// that one shows and is settled when it goes, this one only moves the record on.
+fn settle_sent_control(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  sent: ClientMessageId,
+  sender: UserId,
+  content: &MessageContent,
+  id: MessageId,
+) -> Result<(), CoreError> {
+  let Some(newest) = NewestControl::of(content) else {
+    return Ok(());
+  };
+  let waiting: Vec<(String, OutboxEntry)> =
+    records::list_json_with_prefix(store, Table::Outbox, &format!("{conversation}/"))?;
+  for (_, entry) in waiting {
+    if entry.client_message_id == sent || entry.maybe_last_error.is_some() {
+      continue;
+    }
+    let is_same = store
+      .message(conversation, entry.client_message_id)?
+      .is_some_and(|waiting| NewestControl::of(&waiting.content) == Some(newest));
+    if is_same {
+      return newest.note(store, conversation, Some(id));
+    }
+  }
+  apply_control_with(
+    store,
+    conversation,
+    sender,
+    content,
+    id.snowflake().unix_millis(),
+    Some(id),
+  )
+}
+
+/// A conversation whose history goes takes its records along.
+pub(super) fn forget_newest_controls(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<(), CoreError> {
+  for (key, _) in store.list_prefix(
+    Table::SyncState,
+    &format!("{NEWEST_CONTROL_PREFIX}{conversation}/"),
+  )? {
+    store.delete(Table::SyncState, &key)?;
+  }
   Ok(())
 }
 
@@ -1268,6 +1425,277 @@ mod tests {
         stored.content
       );
       assert_eq!(stored.maybe_edit_id, Some(id(300)));
+    }
+  }
+
+  /// Issue #1448: a pin or bookmarks message taken after a newer one (decrypted late, read out of
+  /// order) doesn't undo it; an own one shows at once and counts by its server ID once it went.
+  mod newest_pins_and_bookmarks {
+    use super::*;
+    use crate::store::BookmarkItem;
+
+    #[test]
+    fn an_older_pin_taken_later_loses_in_any_order() {
+      for order in [[(200, false), (150, true)], [(150, true), (200, false)]] {
+        let (store, conversation, target, author) = held_target();
+        for (server_id, is_pinned) in order {
+          apply_control_with(
+            &store,
+            conversation,
+            author,
+            &pin(target, is_pinned),
+            server_id,
+            Some(id(server_id)),
+          )
+          .unwrap();
+        }
+        assert!(!is_pinned(&store, conversation, target), "{order:?}");
+      }
+    }
+
+    #[test]
+    fn older_bookmarks_taken_later_lose_in_any_order() {
+      for order in [[(200, "newer"), (150, "older")], [(150, "older"), (200, "newer")]] {
+        let (store, conversation, _, author) = held_target();
+        for (server_id, title) in order {
+          apply_control_with(
+            &store,
+            conversation,
+            author,
+            &bookmarks(title),
+            server_id,
+            Some(id(server_id)),
+          )
+          .unwrap();
+        }
+        assert_eq!(bookmark_titles(&store, conversation), ["newer"], "{order:?}");
+      }
+    }
+
+    #[test]
+    fn a_control_of_another_message_or_kind_doesnt_compete() {
+      let (store, conversation, target, author) = held_target();
+      let other = ClientMessageId::from_bytes([2; 16]);
+      store
+        .upsert_message(&original(conversation, other, author))
+        .unwrap();
+      apply_control_with(
+        &store,
+        conversation,
+        author,
+        &pin(target, true),
+        200,
+        Some(id(200)),
+      )
+      .unwrap();
+      apply_control_with(
+        &store,
+        conversation,
+        author,
+        &pin(other, true),
+        150,
+        Some(id(150)),
+      )
+      .unwrap();
+      apply_control_with(
+        &store,
+        conversation,
+        author,
+        &bookmarks("bar"),
+        100,
+        Some(id(100)),
+      )
+      .unwrap();
+      assert!(is_pinned(&store, conversation, target));
+      assert!(is_pinned(&store, conversation, other));
+      assert_eq!(bookmark_titles(&store, conversation), ["bar"]);
+    }
+
+    /// The user pins while offline; the catch-up reads somebody's unpin from before, then the own
+    /// pin goes out and comes after it on the server, as on every other device.
+    #[test]
+    fn an_own_pin_sent_after_an_older_unpin_was_read_shows() {
+      let (store, conversation, target, author) = held_target();
+      let me: UserId = id(4);
+      let own = pin_here(&store, conversation, me, target, true);
+      apply_control_with(
+        &store,
+        conversation,
+        author,
+        &pin(target, false),
+        150,
+        Some(id(150)),
+      )
+      .unwrap();
+      assert!(
+        !is_pinned(&store, conversation, target),
+        "read before it went out"
+      );
+
+      sent(&store, conversation, own, me, 300);
+      assert!(is_pinned(&store, conversation, target));
+      apply_control_with(
+        &store,
+        conversation,
+        author,
+        &pin(target, false),
+        250,
+        Some(id(250)),
+      )
+      .unwrap();
+      assert!(
+        is_pinned(&store, conversation, target),
+        "an older one decrypted late"
+      );
+    }
+
+    #[test]
+    fn a_sent_pin_leaves_a_later_own_change_waiting_in_place() {
+      let (store, conversation, target, author) = held_target();
+      let me: UserId = id(4);
+      let pinned = pin_here(&store, conversation, me, target, true);
+      let unpinned = pin_here(&store, conversation, me, target, false);
+
+      sent(&store, conversation, pinned, me, 300);
+      assert!(!is_pinned(&store, conversation, target), "the unpin still waits");
+      apply_control_with(
+        &store,
+        conversation,
+        author,
+        &pin(target, true),
+        250,
+        Some(id(250)),
+      )
+      .unwrap();
+      assert!(
+        !is_pinned(&store, conversation, target),
+        "older than the pin sent"
+      );
+
+      sent(&store, conversation, unpinned, me, 301);
+      assert!(!is_pinned(&store, conversation, target));
+    }
+
+    /// After a lost answer the server numbers the own pin before a control that was read here
+    /// meanwhile: that one stays.
+    #[test]
+    fn an_own_pin_numbered_before_one_read_meanwhile_loses() {
+      let (store, conversation, target, author) = held_target();
+      let me: UserId = id(4);
+      let own = pin_here(&store, conversation, me, target, true);
+      apply_control_with(
+        &store,
+        conversation,
+        author,
+        &pin(target, false),
+        250,
+        Some(id(250)),
+      )
+      .unwrap();
+      sent(&store, conversation, own, me, 200);
+      assert!(!is_pinned(&store, conversation, target));
+    }
+
+    #[test]
+    fn a_purge_takes_the_records_along() {
+      let (store, conversation, target, author) = held_target();
+      apply_control_with(
+        &store,
+        conversation,
+        author,
+        &pin(target, true),
+        200,
+        Some(id(200)),
+      )
+      .unwrap();
+      apply_control_with(
+        &store,
+        conversation,
+        author,
+        &bookmarks("bar"),
+        100,
+        Some(id(100)),
+      )
+      .unwrap();
+      let other: ConversationId = id(11);
+      apply_control_with(&store, other, author, &bookmarks("bar"), 100, Some(id(100))).unwrap();
+      forget_newest_controls(&store, conversation).unwrap();
+      let left = store
+        .list_prefix(Table::SyncState, NEWEST_CONTROL_PREFIX)
+        .unwrap();
+      assert_eq!(left.len(), 1, "only the other conversation's");
+    }
+
+    fn held_target() -> (MemoryStore, ConversationId, ClientMessageId, UserId) {
+      let (conversation, target, author) = (id(10), ClientMessageId::from_bytes([1; 16]), id(3));
+      let store = MemoryStore::new();
+      store
+        .upsert_message(&original(conversation, target, author))
+        .unwrap();
+      (store, conversation, target, author)
+    }
+
+    fn pin(target: ClientMessageId, is_pinned: bool) -> MessageContent {
+      MessageContent::Pin { target, is_pinned }
+    }
+
+    fn bookmarks(title: &str) -> MessageContent {
+      MessageContent::Bookmarks {
+        items: vec![BookmarkItem {
+          emoji: String::new(),
+          title: title.into(),
+          url: "https://example.com".into(),
+          maybe_message: None,
+        }],
+      }
+    }
+
+    /// What `set_pinned` does before it sends: into the outbox, and shown at once.
+    fn pin_here(
+      store: &MemoryStore,
+      conversation: ConversationId,
+      me: UserId,
+      target: ClientMessageId,
+      is_pinned: bool,
+    ) -> ClientMessageId {
+      let draft = records::Draft {
+        conversation_id: conversation,
+        maybe_thread_id: None,
+        content: pin(target, is_pinned),
+      };
+      let own = records::enqueue_message(store, me, 50, draft).unwrap();
+      apply_control(store, conversation, me, &pin(target, is_pinned), 50).unwrap();
+      own
+    }
+
+    /// What `send_entry` does once the server numbered `own`.
+    fn sent(
+      store: &MemoryStore,
+      conversation: ConversationId,
+      own: ClientMessageId,
+      me: UserId,
+      server_id: i64,
+    ) {
+      let mut stored = store.message(conversation, own).unwrap().unwrap();
+      stored.maybe_server_id = Some(id(server_id));
+      store.upsert_message(&stored).unwrap();
+      store
+        .delete(Table::Outbox, &records::outbox_key(conversation, own))
+        .unwrap();
+      settle_sent_control(store, conversation, own, me, &stored.content, id(server_id)).unwrap();
+    }
+
+    fn is_pinned(store: &MemoryStore, conversation: ConversationId, target: ClientMessageId) -> bool {
+      store.message(conversation, target).unwrap().unwrap().is_pinned
+    }
+
+    fn bookmark_titles(store: &MemoryStore, conversation: ConversationId) -> Vec<String> {
+      records::get_json::<Vec<BookmarkItem>>(store, Table::Account, &bookmarks_key(conversation))
+        .unwrap()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| item.title)
+        .collect()
     }
   }
 

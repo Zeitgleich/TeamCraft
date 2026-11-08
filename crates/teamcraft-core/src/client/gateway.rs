@@ -159,6 +159,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if outcome.is_ok() {
       self.maybe_last_heard_ms = Some(self.now_ms());
       self.note_older_history_connection()?;
+      self.note_backlog_connection();
     }
     outcome
   }

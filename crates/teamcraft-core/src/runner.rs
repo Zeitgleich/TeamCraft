@@ -96,9 +96,10 @@ pub enum RunnerCommand {
   /// mobile app keeps its background time until then (issue #158). Whoever asks bounds the wait;
   /// a dropped receiver costs nothing.
   Drain(futures_channel::oneshot::Sender<()>),
-  /// Answers once a gateway connection is up and its catch-up done (at once while connected): a
-  /// mobile app woken in the background to fetch what came meanwhile keeps its time until then
-  /// (notifications.md, "Sync wake-ups"). Whoever asks bounds the wait.
+  /// Answers once a gateway connection is up and its catch-up done, the backlogs it left for this
+  /// loop included (issue #1448; at once while connected and none is due): a mobile app woken in
+  /// the background to fetch what came meanwhile keeps its time until then (notifications.md,
+  /// "Sync wake-ups"). Whoever asks bounds the wait.
   CatchUp(futures_channel::oneshot::Sender<()>),
   /// Ends [`SyncRunner::run`], which hands the client back.
   Stop,
@@ -128,10 +129,14 @@ impl Default for RunnerSettings {
 impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   /// `on_change` runs after anything that may have changed the store (the UI re-reads it).
   pub fn new(
-    client: Client<A, S>,
+    mut client: Client<A, S>,
     settings: RunnerSettings,
     on_change: Box<dyn Fn()>,
   ) -> (Self, RunnerHandle) {
+    // This loop reads what a catch-up leaves, between its other work (issue #1448).
+    if let Err(error) = client.read_backlogs_in_background() {
+      tracing::warn!(%error, "backlogs left by an earlier run not found; the next catch-up reads them");
+    }
     let (sender, commands) = mpsc::unbounded();
     let on_change: std::rc::Rc<dyn Fn()> = on_change.into();
     let mut connection = ConnectionSupervisor::new(settings.connection.clone(), ConnectionStatus::new());
@@ -220,11 +225,12 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         },
         Wake::Tick => {
           self.on_tick().await;
-          self.load_older_history().await;
+          self.load_background_history().await;
         },
       }
       self.report_progress();
       self.answer_drained();
+      self.answer_caught_up();
     }
   }
 
@@ -242,9 +248,13 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     // Never longer than a tick: after the wall clock went back, deadlines lie in the "future" by
     // the jump, and the tick notices the jump and moves them (robustness.md, "Time").
     let until_ms = deadline.saturating_sub(now).clamp(0, millis(self.settings.tick));
-    // Older history of a first sync: at once, but only after everything the select below looks at
-    // first (commands, frames, network changes, transfers).
-    let until_ms = if self.is_older_history_due() { 0 } else { until_ms };
+    // A catch-up's backlogs and a first sync's older history: at once, but only after everything
+    // the select below looks at first (commands, frames, network changes, transfers).
+    let until_ms = if self.is_background_history_due() {
+      0
+    } else {
+      until_ms
+    };
     let Self {
       commands,
       connection,
@@ -304,9 +314,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       RunnerCommand::CatchUp(caught_up) => {
         self.caught_up.push(caught_up);
         // Connected already: the connection's catch-up is done and its events arrive live.
-        if self.connection.is_connected() {
-          self.answer_caught_up();
-        }
+        self.answer_caught_up();
         return;
       },
       RunnerCommand::SetActivity(activity) => {
@@ -386,19 +394,20 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     }
   }
 
-  fn is_older_history_due(&self) -> bool {
-    self.connection.is_connected() && self.client.is_older_history_due()
+  fn is_background_history_due(&self) -> bool {
+    self.connection.is_connected() && self.client.is_background_history_due()
   }
 
-  /// One page of a first sync's older history, so whatever arrives next is answered after it.
-  async fn load_older_history(&mut self) {
-    if !self.is_older_history_due() {
+  /// One page of a backlog or of a first sync's older history, so whatever arrives next is answered
+  /// after it.
+  async fn load_background_history(&mut self) {
+    if !self.is_background_history_due() {
       return;
     }
     let now = self.client.now_ms();
     let is_changed = self
       .connection
-      .keep_alive(now, self.client.load_older_history_page())
+      .keep_alive(now, self.client.load_background_history_page())
       .await;
     if is_changed {
       self.changed();
@@ -531,8 +540,12 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     }
   }
 
-  /// Answers the [`RunnerCommand::CatchUp`] requests: a connection is up and caught up.
+  /// Answers the [`RunnerCommand::CatchUp`] requests once a connection is up and caught up, with no
+  /// backlog left to read now (one waiting for its retry doesn't hold the answer up).
   fn answer_caught_up(&mut self) {
+    if self.caught_up.is_empty() || !self.connection.is_connected() || self.client.is_backlog_due() {
+      return;
+    }
     for caught_up in self.caught_up.drain(..) {
       // The asker may have given up meanwhile; nothing to tell it then.
       let _ = caught_up.send(());
