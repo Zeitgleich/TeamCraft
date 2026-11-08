@@ -179,6 +179,7 @@ impl HealthMonitor {
       media,
       schedules: self.schedules,
       oidc_sync_last_success: state.metrics.job_last_success(BackgroundJob::OidcSync),
+      oidc_sync_held: state.oidc_sync.held(),
       retention_last_success: state.metrics.job_last_success(BackgroundJob::Retention),
       partition_last_success: state
         .metrics

@@ -104,6 +104,8 @@ pub struct StoredMeetingInvite {
   /// The shared link of the meeting: many guests, each gets an invite of their own.
   pub is_shared: bool,
   pub is_revoked: bool,
+  /// Who issued the link; `None` once that account no longer exists.
+  pub maybe_created_by: Option<UserId>,
 }
 
 /// Why a guest could not get an invite from a shared link.
@@ -781,7 +783,7 @@ impl Database {
   ) -> Result<Option<StoredMeetingInvite>, DbError> {
     let row = sqlx::query!(
       r#"SELECT id, meeting_id, email, label, redeemed_at IS NOT NULL AS "is_redeemed!", guest_user_id,
-                is_shared, revoked_at IS NOT NULL AS "is_revoked!"
+                is_shared, revoked_at IS NOT NULL AS "is_revoked!", created_by
          FROM meeting_invites WHERE id = $1"#,
       to_db(id),
     )
@@ -798,6 +800,7 @@ impl Database {
           maybe_guest_user: from_db_opt(row.guest_user_id)?,
           is_shared: row.is_shared,
           is_revoked: row.is_revoked,
+          maybe_created_by: from_db_opt(row.created_by)?,
         })
       })
       .transpose()

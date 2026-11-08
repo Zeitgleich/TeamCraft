@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM oidc_sync_held_deactivations WHERE NOT (user_id = ANY($1))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "437012d102724b2d51eac1ee80120b8f0bf1d27ec405e701ba8409ff9270685e"
+}

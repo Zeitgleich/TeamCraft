@@ -262,9 +262,15 @@ guest  = "external"
 - User profile attribute `tc_identity_key`: editable by the user (written by the client through the
   account API at enrollment), viewable by admins, not editable by the TeamCraft service account.
 - **Deprovisioning:** Keycloak calls `teamcraft-server` via OIDC back-channel logout when sessions end
-  (a logout token with `sid` ends that device's session only, so the user's other devices stay signed in);
-  the service account additionally polls for disabled users and role changes (every few minutes) and
-  triggers removal from all groups (docs/admin.md §3.2).
+  (a logout token with `sid` ends that device's session only, so the user's other devices stay signed in).
+  The service account additionally polls for disabled users and role changes (every 5 minutes by
+  default). The poll is on as soon as its secret is configured and is required for production
+  (docs/admin.md §3.2.3). It reads the whole realm before it changes anything, so a provider that
+  fails halfway changes nothing; a safety brake holds back a run that would deactivate too many users
+  at once (default: more than 10 % of the active users, at least 2, never everybody), until an admin
+  confirms or the provider is fixed. A deactivation suspends the account; it does **not** take the
+  user out of the MLS groups, which only an admin's device can sign (docs/admin.md §3.2.1, docs/e2ee.md
+  §4.6.4). The console shows how many such removals are pending.
 - **Roles and the admin roster:** Keycloak roles decide who is admin; the cryptographic admin roster
   (docs/admin.md §2.3) follows by itself – an owner's app verifies each person's ID token against Keycloak
   and signs (e2ee.md §3.1.3). A compromised VPS can't promote anyone without a matching Keycloak-signed

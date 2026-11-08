@@ -61,6 +61,7 @@ pub async fn join_meeting(
   if link.is_revoked && !link.is_shared {
     return Err(AuthError::InvalidToken("the join link was revoked".into()).into());
   }
+  ensure_link_creator_active(state, &link).await?;
   let meeting = state
     .database
     .get_meeting(meeting_id)
@@ -889,6 +890,24 @@ fn entry(
 }
 
 /// The personal (or old shared) link a one-time `#invite=` token names, if it is still good.
+/// A guest link of somebody deactivated answers like an unknown one (admin.md §3.2.1): paused like
+/// their share links, and it works again if they come back. Without this a leaver who kept a link
+/// could still make guest accounts with it.
+async fn ensure_link_creator_active(state: &AppState, link: &StoredMeetingInvite) -> Result<(), ApiError> {
+  let Some(creator) = link.maybe_created_by else {
+    return Ok(());
+  };
+  if state
+    .database
+    .get_user(creator)
+    .await?
+    .is_some_and(|user| !user.is_deactivated)
+  {
+    return Ok(());
+  }
+  Err(AuthError::InvalidToken("invalid join link".into()).into())
+}
+
 async fn invite_of(
   state: &AppState,
   service: &MeetingService,

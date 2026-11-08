@@ -177,6 +177,8 @@ async fn run() -> anyhow::Result<()> {
   );
   // Filled from the admin console's settings or the configuration once the database is read.
   let mailer: Arc<Slot<dyn Mailer>> = Arc::default();
+  let maybe_oidc_sync = build_oidc_sync(&config)?;
+  let has_oidc_sync = maybe_oidc_sync.is_some();
   let state = AppState {
     database,
     validator: Arc::new(build_validator(&config, &dependencies)?),
@@ -221,7 +223,9 @@ async fn run() -> anyhow::Result<()> {
     policy: Arc::new(PolicyHolder::default()),
     scheme: Arc::new(SchemeStore::default()),
     settings: Arc::new(SettingsCell::new(Settings {
-      maybe_oidc_sync: build_oidc_sync(&config)?,
+      maybe_oidc_sync,
+      is_oidc_sync_switched_off: config.oidc.sync.maybe_client_secret.is_some()
+        && !config.oidc.sync.is_requested(),
       policy: config.policy.clone(),
       limits: config.limits.clone(),
       gateway: config.gateway.clone(),
@@ -282,9 +286,10 @@ async fn run() -> anyhow::Result<()> {
       config.limits.max_concurrent_image_decodes.max(1),
     )),
     metrics: Arc::new(ServerMetrics::new().context("setting up the metrics")?),
+    oidc_sync: Arc::default(),
     health: Arc::new(HealthMonitor::new(
       config.health.clone(),
-      job_schedules(&config),
+      job_schedules(&config, has_oidc_sync),
       time::OffsetDateTime::now_utc(),
     )),
     holiday_feed: Arc::default(),
@@ -688,6 +693,11 @@ fn spawn_account_housekeeping(state: AppState) {
       if let Err(error) = session::forget_stale_sessions(&state, now).await {
         warn!(%error, "forgetting stale sessions failed");
       }
+      match admin::retry_deactivation_followups(&state).await {
+        Ok(0) => {},
+        Ok(finished) => info!(finished, "finished deactivations left unfinished"),
+        Err(error) => warn!(%error, "finishing deactivations failed"),
+      }
       match admin::sweep_deactivated_users(&state, now).await {
         Ok(0) => {},
         Ok(removed) => info!(removed, "removed long-deactivated users from all chats"),
@@ -800,14 +810,16 @@ fn spawn_email_digests(state: AppState) {
 }
 
 /// When the jobs the health checks watch are expected to run, from the configuration.
-fn job_schedules(config: &Config) -> JobSchedules {
+fn job_schedules(config: &Config, has_oidc_sync: bool) -> JobSchedules {
   let every = |interval_secs: u64, initial_delay_secs: u64| JobSchedule {
     interval: time::Duration::seconds(i64::try_from(interval_secs.max(1)).unwrap_or(i64::MAX)),
     initial_delay: time::Duration::seconds(i64::try_from(initial_delay_secs).unwrap_or(i64::MAX)),
+    missed_runs: JobSchedule::DEFAULT_MISSED_RUNS,
   };
   JobSchedules {
-    maybe_oidc_sync: config.oidc.sync.is_enabled.then(|| {
-      every(
+    maybe_oidc_sync: has_oidc_sync.then(|| JobSchedule {
+      missed_runs: i32::try_from(config.oidc.sync.stale_after_intervals.max(1)).unwrap_or(i32::MAX),
+      ..every(
         config.oidc.sync.interval_secs,
         config.oidc.sync.initial_delay_secs,
       )
@@ -828,21 +840,36 @@ fn job_schedules(config: &Config) -> JobSchedules {
   }
 }
 
-/// Settings of the OIDC sync, if enabled and complete.
+/// Settings of the OIDC sync, if it should run. On by default once the service account is
+/// configured; `is_enabled = true` without a complete configuration is an error, a default that
+/// can't work only a warning, so that an upgrade never stops a server from starting.
 fn build_oidc_sync(config: &Config) -> anyhow::Result<Option<OidcSyncSettings>> {
   let oidc = &config.oidc;
-  if !oidc.sync.is_enabled {
+  if !oidc.sync.is_requested() {
+    if oidc.sync.maybe_client_secret.is_some() {
+      warn!(
+        "the identity provider sync is switched off (oidc.sync.is_enabled = false): deactivated users keep access until their tokens end; required for production (admin.md 3.2.3)"
+      );
+    }
     return Ok(None);
   }
-  let secret = oidc
-    .sync
-    .maybe_client_secret
-    .clone()
-    .context("oidc.sync.client_secret is required")?;
-  let admin_url = match &oidc.sync.maybe_admin_url {
-    Some(url) => url.clone(),
-    None => teamcraft_server::services::oidc::admin_url_from_issuer(&oidc.issuer)
-      .context("oidc.sync.admin_url is required: the issuer is not <base>/realms/<realm>")?,
+  let is_explicit = oidc.sync.maybe_is_enabled == Some(true);
+  let Some(secret) = oidc.sync.maybe_client_secret.clone() else {
+    anyhow::bail!("oidc.sync.client_secret is required");
+  };
+  let derived_url = teamcraft_server::services::oidc::admin_url_from_issuer(&oidc.issuer);
+  let admin_url = match (&oidc.sync.maybe_admin_url, derived_url) {
+    (Some(url), _) => url.clone(),
+    (None, Some(url)) => url,
+    (None, None) if is_explicit => {
+      anyhow::bail!("oidc.sync.admin_url is required: the issuer is not <base>/realms/<realm>")
+    },
+    (None, None) => {
+      warn!(
+        "the identity provider sync is off: set oidc.sync.admin_url (the issuer is not <base>/realms/<realm>)"
+      );
+      return Ok(None);
+    },
   };
   Ok(Some(OidcSyncSettings {
     issuer: oidc.issuer.clone(),
@@ -857,17 +884,27 @@ fn build_oidc_sync(config: &Config) -> anyhow::Result<Option<OidcSyncSettings>> 
     roles: oidc.roles.clone(),
     page_size: oidc.sync.page_size,
     sync_groups: oidc.sync.sync_groups,
+    mode: oidc.sync.mode,
+    brake: teamcraft_server::services::oidc_brake::Brake::new(
+      oidc.sync.brake_max_percent,
+      oidc.sync.brake_min_allowed,
+    ),
+    interval: Duration::from_secs(oidc.sync.interval_secs.max(1)),
+    stale_after_intervals: oidc.sync.stale_after_intervals.max(1),
   }))
 }
 
 /// Compares users with the identity provider periodically.
 fn spawn_oidc_sync(state: AppState, initial_delay: Duration, interval: Duration) {
   tokio::spawn(async move {
+    oidc::load_brake_state(&state).await;
     tokio::time::sleep(initial_delay).await;
     let mut ticker = tokio::time::interval(interval.max(Duration::from_secs(1)));
     loop {
       ticker.tick().await;
       match oidc::sync_once(&state).await {
+        // Changes that failed count as a run that failed: repeated, it becomes an alert.
+        Ok(report) if report.failed > 0 => warn!(failed = report.failed, "oidc sync: some changes failed"),
         Ok(_) => state
           .metrics
           .job_succeeded(BackgroundJob::OidcSync, time::OffsetDateTime::now_utc()),

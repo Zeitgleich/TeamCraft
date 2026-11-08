@@ -1,13 +1,15 @@
 use std::collections::BTreeMap;
 
 use teamcraft_proto::{
-  ConversationId, ConversationVisibility, DeviceId, JoinPolicy, PushProvider, SpaceId, UserId, UserKind,
+  ConversationId, ConversationVisibility, DeviceId, JoinPolicy, PushProvider, Snowflake, SpaceId, UserId,
+  UserKind,
 };
 use time::OffsetDateTime;
 
 use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::{from_db, from_db_opt, to_db};
+use crate::snowflake::SnowflakeGenerator;
 
 #[derive(Debug, Clone)]
 pub struct AdminSpaceRow {
@@ -106,7 +108,21 @@ pub struct Deactivation {
   pub conversations: Vec<ConversationId>,
   /// Everyone who shares a conversation with the user.
   pub co_members: Vec<UserId>,
+  /// Bots paused with it because this user created them (a first deactivation only).
+  pub paused_bots: Vec<UserId>,
 }
+
+/// The audit entry a deactivation writes in its own transaction. `detail` is JSON text the
+/// database adds the number of conversations to.
+#[derive(Debug, Clone)]
+pub struct DeactivationAudit<'a> {
+  pub id: Snowflake,
+  pub maybe_actor: Option<UserId>,
+  pub detail: &'a str,
+}
+
+/// The deactivation reason of a bot its creator's deactivation paused.
+pub const CREATOR_DEACTIVATED_REASON: &str = "creator_deactivated";
 
 /// Outcome of removing a deactivated user from all chats.
 #[derive(Debug, Clone)]
@@ -362,8 +378,17 @@ impl Database {
 
   /// Deactivates (suspends) the account: the user can't sign in and gets no pushes (the push
   /// queries skip deactivated users), but memberships, space memberships, devices and their push
-  /// registrations stay, so reactivating restores everything. Returns who to tell. Idempotent.
-  pub async fn deactivate_user(&self, user: UserId, reason: &str) -> Result<Deactivation, DbError> {
+  /// registrations stay, so reactivating restores everything. Everything that decides access
+  /// happens in this transaction: the audit entry, the follow-up record and pausing the bots the
+  /// user created go with it or not at all. Returns who to tell. Idempotent: a repeat changes
+  /// nothing and reports what is there to tell.
+  pub async fn deactivate_user(
+    &self,
+    user: UserId,
+    reason: &str,
+    audit: &DeactivationAudit<'_>,
+    ids: &SnowflakeGenerator,
+  ) -> Result<Deactivation, DbError> {
     let mut tx = self.pool().begin().await?;
     let marked = sqlx::query!(
       "UPDATE users SET deactivated_at = now(), deactivation_reason = $2 WHERE id = $1 AND deactivated_at IS NULL",
@@ -374,25 +399,48 @@ impl Database {
     .await?;
     // Also when it already was: a caller that crashed after the commit repeats its steps.
     let was_already_deactivated = marked.rows_affected() == 0;
-    let conversations = sqlx::query_scalar!(
-      "SELECT conversation_id FROM memberships WHERE user_id = $1 ORDER BY conversation_id",
-      to_db(user),
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-    let co_members = sqlx::query_scalar!(
-      r#"SELECT DISTINCT o.user_id FROM memberships m
-         JOIN memberships o ON o.conversation_id = m.conversation_id AND o.user_id <> m.user_id
-         WHERE m.user_id = $1 ORDER BY o.user_id"#,
-      to_db(user),
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+    let (conversations, co_members) = deactivation_audience(&mut tx, user).await?;
+    let mut paused_bots = Vec::new();
+    if !was_already_deactivated {
+      insert_followup(&mut tx, user).await?;
+      insert_deactivation_audit(&mut tx, audit, user, conversations.len()).await?;
+      let bots = sqlx::query_scalar!(
+        r#"UPDATE users SET deactivated_at = now(), deactivation_reason = 'creator_deactivated'
+           WHERE deactivated_at IS NULL AND id IN (SELECT user_id FROM bots WHERE created_by = $1 AND revoked_at IS NULL)
+           RETURNING id"#,
+        to_db(user),
+      )
+      .fetch_all(&mut *tx)
+      .await?;
+      for bot in bots {
+        let bot: UserId = from_db(bot)?;
+        insert_followup(&mut tx, bot).await?;
+        let bot_conversations: i64 = sqlx::query_scalar!(
+          r#"SELECT count(*) AS "count!" FROM memberships WHERE user_id = $1"#,
+          to_db(bot),
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        insert_deactivation_audit(
+          &mut tx,
+          &DeactivationAudit {
+            id: ids.next_snowflake()?,
+            maybe_actor: None,
+            detail: r#"{"reason":"creator_deactivated","source":"system","note":"its creator was deactivated"}"#,
+          },
+          bot,
+          usize::try_from(bot_conversations).unwrap_or(usize::MAX),
+        )
+        .await?;
+        paused_bots.push(bot);
+      }
+    }
     tx.commit().await?;
     Ok(Deactivation {
       was_already_deactivated,
-      conversations: conversations.into_iter().map(from_db).collect::<Result<_, _>>()?,
-      co_members: co_members.into_iter().map(from_db).collect::<Result<_, _>>()?,
+      conversations,
+      co_members,
+      paused_bots,
     })
   }
 
@@ -508,16 +556,43 @@ impl Database {
   }
 
   /// Lifts the deactivation. Memberships and devices the user still has work again as before; after
-  /// a removal from all chats they stay removed. A deleted account stays deleted (`false`).
-  pub async fn reactivate_user(&self, user: UserId) -> Result<bool, DbError> {
+  /// a removal from all chats they stay removed. Bots paused because of it come back with it. A
+  /// deleted account stays deleted (`None`); otherwise the bots that came back.
+  pub async fn reactivate_user(&self, user: UserId) -> Result<Option<Vec<UserId>>, DbError> {
+    let mut tx = self.pool().begin().await?;
     let result = sqlx::query!(
       "UPDATE users SET deactivated_at = NULL, deactivation_reason = NULL
        WHERE id = $1 AND deactivated_at IS NOT NULL AND deleted_at IS NULL",
       to_db(user),
     )
-    .execute(self.pool())
+    .execute(&mut *tx)
     .await?;
-    Ok(result.rows_affected() > 0)
+    if result.rows_affected() == 0 {
+      return Ok(None);
+    }
+    sqlx::query!(
+      "DELETE FROM user_deactivation_followups WHERE user_id = $1",
+      to_db(user),
+    )
+    .execute(&mut *tx)
+    .await?;
+    let bots = sqlx::query_scalar!(
+      r#"UPDATE users SET deactivated_at = NULL, deactivation_reason = NULL
+         WHERE deactivation_reason = 'creator_deactivated' AND deleted_at IS NULL
+           AND id IN (SELECT user_id FROM bots WHERE created_by = $1 AND revoked_at IS NULL)
+         RETURNING id"#,
+      to_db(user),
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    sqlx::query!(
+      "DELETE FROM user_deactivation_followups WHERE user_id = ANY($1)",
+      &bots,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Some(bots.into_iter().map(from_db).collect::<Result<_, _>>()?))
   }
 }
 
@@ -581,6 +656,61 @@ pub(crate) fn like_pattern(text: &str) -> String {
     "%{}%",
     text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
   )
+}
+
+pub(crate) async fn deactivation_audience(
+  connection: &mut sqlx::PgConnection,
+  user: UserId,
+) -> Result<(Vec<ConversationId>, Vec<UserId>), DbError> {
+  let conversations = sqlx::query_scalar!(
+    "SELECT conversation_id FROM memberships WHERE user_id = $1 ORDER BY conversation_id",
+    to_db(user),
+  )
+  .fetch_all(&mut *connection)
+  .await?;
+  let co_members = sqlx::query_scalar!(
+    r#"SELECT DISTINCT o.user_id FROM memberships m
+       JOIN memberships o ON o.conversation_id = m.conversation_id AND o.user_id <> m.user_id
+       WHERE m.user_id = $1 ORDER BY o.user_id"#,
+    to_db(user),
+  )
+  .fetch_all(&mut *connection)
+  .await?;
+  Ok((
+    conversations.into_iter().map(from_db).collect::<Result<_, _>>()?,
+    co_members.into_iter().map(from_db).collect::<Result<_, _>>()?,
+  ))
+}
+
+async fn insert_followup(connection: &mut sqlx::PgConnection, user: UserId) -> Result<(), DbError> {
+  sqlx::query!(
+    "INSERT INTO user_deactivation_followups (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+    to_db(user),
+  )
+  .execute(connection)
+  .await?;
+  Ok(())
+}
+
+async fn insert_deactivation_audit(
+  connection: &mut sqlx::PgConnection,
+  audit: &DeactivationAudit<'_>,
+  user: UserId,
+  conversations: usize,
+) -> Result<(), DbError> {
+  sqlx::query!(
+    r#"INSERT INTO audit_log (id, actor_user_id, action, target_kind, target_id, detail)
+       VALUES ($1, $2, 'user_deactivated', 'user', $3,
+               ($4::text::jsonb || jsonb_build_object('conversations', $5::bigint)))"#,
+    audit.id.get(),
+    audit.maybe_actor.map(to_db),
+    to_db(user),
+    audit.detail,
+    i64::try_from(conversations).unwrap_or(i64::MAX),
+  )
+  .execute(connection)
+  .await?;
+  Ok(())
 }
 
 #[cfg(test)]

@@ -86,7 +86,11 @@ pub async fn rotate_token(
 ) -> Result<BotTokenResponse, ApiError> {
   require(state, caller, Permission::ManageUsers, &Target::Instance)?;
   let (token, hash) = new_token()?;
-  if !state.database.replace_bot_token(bot, &hash).await? {
+  if !state
+    .database
+    .replace_bot_token(bot, &hash, caller.user.id)
+    .await?
+  {
     return Err(ApiError::bot_not_found());
   }
   let stored = state
@@ -233,6 +237,7 @@ fn bot_response(bot: &StoredBot) -> BotResponse {
     maybe_description: bot.maybe_description.clone(),
     created_at: unix_millis(bot.created_at),
     is_revoked: bot.is_revoked,
+    is_paused: bot.is_paused && !bot.is_revoked,
   }
 }
 

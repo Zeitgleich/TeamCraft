@@ -25,6 +25,8 @@ wire_enum! {
     MediaServer => "media_server",
     /// The sync of users with the identity provider ran lately.
     OidcSync => "oidc_sync",
+    /// The sync's safety brake holds deactivations back: admins have to look at them.
+    OidcSyncBrake => "oidc_sync_brake",
     /// The retention job ran lately.
     Retention => "retention",
     /// The job that creates message partitions ahead ran lately.

@@ -14,6 +14,9 @@ pub struct BotResponse {
   pub created_at: UnixMillis,
   /// Revoked bots are deactivated and their token no longer works.
   pub is_revoked: bool,
+  /// Paused because the person who created it was deactivated: a new token brings it back.
+  #[serde(default)]
+  pub is_paused: bool,
 }
 
 /// `POST /api/v1/admin/bots`.

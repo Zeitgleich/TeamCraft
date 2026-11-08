@@ -193,7 +193,8 @@ nothing from any conversation, no addresses, no error texts.
 | `push_gateway`          | the push gateway's breaker is down                                              | with a push gateway                      |
 | `push_service`          | the last attempt of a direct push service (APNs, FCM, Web Push) was refused     | with one of them                         |
 | `media_server`          | the SFU has not reported for 2 minutes                                          | with `[calls]` and SFU reports           |
-| `oidc_sync`             | the sync missed three runs (`[oidc.sync] interval_secs`)                        | with `[oidc.sync]`                       |
+| `oidc_sync`             | the sync missed `[oidc.sync] stale_after_intervals` runs (default three)        | with the sync on                         |
+| `oidc_sync_brake`       | its safety brake holds deactivations back (admin.md §3.2.3)                     | with the sync on                         |
 | `retention`             | the job missed three runs (`[retention] interval_secs`)                         | with `[retention] enabled`               |
 | `partition_maintenance` | the job missed three runs (every 12 hours)                                      | always                                   |
 | `backup`                | the last backup is older than the limit (36 hours)                              | the deployment's heartbeat, see below    |

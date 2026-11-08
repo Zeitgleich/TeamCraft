@@ -18,10 +18,11 @@ use teamcraft_proto::OrgBackgroundId;
 
 use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse, AdminInstanceResponse,
-  AdminMailSettingsResponse, AnnouncementResponse, AttachmentId, BrandAssetSlot, ChannelModeration,
-  CreateBrandRequest, PermissionSchemeResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse,
-  RuntimeSettingsSection, SchemeChange, SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse,
-  UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
+  AdminMailSettingsResponse, AdminOidcSyncPreviewResponse, AdminOidcSyncResponse, AnnouncementResponse,
+  AttachmentId, BrandAssetSlot, ChannelModeration, CreateBrandRequest, PermissionSchemeResponse, Role,
+  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SendTestMailRequest,
+  SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest, UpdateCalendarSettingsRequest,
+  UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use teamcraft_client_api::actions::{
@@ -1607,6 +1608,26 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
 
   fn health_alert_count(&self) -> usize {
     self.maybe_admin.as_ref().map_or(0, AdminLive::open_alert_count)
+  }
+
+  fn oidc_sync_status(&self) -> Option<AdminOidcSyncResponse> {
+    self.maybe_admin.as_ref().and_then(AdminLive::oidc_sync)
+  }
+
+  fn oidc_sync_preview(&self) -> Option<AdminOidcSyncPreviewResponse> {
+    self.maybe_admin.as_ref().and_then(AdminLive::oidc_sync_preview)
+  }
+
+  fn run_oidc_sync_preview(&self) {
+    if let Some(admin) = self.maybe_admin.as_ref() {
+      admin.run_oidc_sync_preview();
+    }
+  }
+
+  fn confirm_oidc_sync_brake(&self, revision: i64) {
+    if let Some(admin) = self.maybe_admin.as_ref() {
+      admin.confirm_oidc_sync_brake(revision);
+    }
   }
 
   fn instance_status(&self) -> Option<AdminInstanceResponse> {

@@ -17,17 +17,18 @@ use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminConversationSummary, AdminDeviceResponse,
-  AdminHealthResponse, AdminInstanceResponse, AdminMailSettingsResponse, AdminSpaceSummary, AdminUserSummary,
-  AnnouncementResponse, AssignChannelOwnerRequest, AuditEntryResponse, BrandAssetSlot, ChannelModeration,
-  ConversationVisibility, CreateBrandRequest, ErrorBody, ErrorCode, ExtendGuestRequest,
-  GetAnnouncementResponse, HistoryPolicy, ListAdminConversationsResponse, ListAdminDevicesResponse,
-  ListAdminGuestsQuery, ListAdminGuestsResponse, ListAdminSpacesResponse, ListAdminUsersResponse,
-  ListAuditResponse, ListConversationMembersResponse, MAX_ADMIN_IDS, PermissionSchemeResponse,
-  RetentionSetting, RetentionStatusResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse,
-  RuntimeSettingsSection, SchemeChange, SendTestMailRequest, SetAnnouncementRequest,
-  SetChannelModerationRequest, SetRetentionRequest, SettingsTestResponse, SpaceId, UnixMillis,
-  UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateConversationRequest, UpdateMailSettingsRequest,
-  UpdatePermissionSchemeRequest, UpdateSpaceRequest, UserKind, WorkspacePolicy, WorkspacePolicyResponse,
+  AdminHealthResponse, AdminInstanceResponse, AdminMailSettingsResponse, AdminOidcSyncPreviewResponse,
+  AdminOidcSyncResponse, AdminSpaceSummary, AdminUserSummary, AnnouncementResponse,
+  AssignChannelOwnerRequest, AuditEntryResponse, BrandAssetSlot, ChannelModeration, ConversationVisibility,
+  CreateBrandRequest, ErrorBody, ErrorCode, ExtendGuestRequest, GetAnnouncementResponse, HistoryPolicy,
+  ListAdminConversationsResponse, ListAdminDevicesResponse, ListAdminGuestsQuery, ListAdminGuestsResponse,
+  ListAdminSpacesResponse, ListAdminUsersResponse, ListAuditResponse, ListConversationMembersResponse,
+  MAX_ADMIN_IDS, PermissionSchemeResponse, RetentionSetting, RetentionStatusResponse, Role,
+  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SendTestMailRequest,
+  SetAnnouncementRequest, SetChannelModerationRequest, SetRetentionRequest, SettingsTestResponse, SpaceId,
+  UnixMillis, UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateConversationRequest,
+  UpdateMailSettingsRequest, UpdatePermissionSchemeRequest, UpdateSpaceRequest, UserKind, WorkspacePolicy,
+  WorkspacePolicyResponse,
 };
 
 use crate::admin::{
@@ -45,6 +46,7 @@ use crate::server_backend::hue_from_seed;
 
 const REFRESH_DELAY: Duration = Duration::from_millis(500);
 const HEALTH_PATH: &str = "/api/v1/admin/health";
+const OIDC_SYNC_PATH: &str = "/api/v1/admin/oidc-sync";
 const LIST_LIMIT: u32 = 200;
 /// Guest memberships the overview shows at once; the filters narrow a longer list, and the console
 /// says that it is cut.
@@ -140,6 +142,8 @@ pub struct AdminData {
   announcement: Option<AnnouncementResponse>,
   instance: Option<AdminInstanceResponse>,
   health: Option<AdminHealthResponse>,
+  oidc_sync: Option<AdminOidcSyncResponse>,
+  oidc_sync_preview: Option<AdminOidcSyncPreviewResponse>,
   brands: Option<AdminBrandsResponse>,
   mail: Option<AdminMailSettingsResponse>,
   /// Loaded when the console shows the notetaker page.
@@ -409,6 +413,35 @@ impl AdminLive {
 
   pub fn health(&self) -> Option<AdminHealthResponse> {
     self.data.borrow().health.clone()
+  }
+
+  pub fn oidc_sync(&self) -> Option<AdminOidcSyncResponse> {
+    self.data.borrow().oidc_sync.clone()
+  }
+
+  pub fn oidc_sync_preview(&self) -> Option<AdminOidcSyncPreviewResponse> {
+    self.data.borrow().oidc_sync_preview.clone()
+  }
+
+  /// Asks what the sync would change now; the answer is kept for the console.
+  pub fn run_oidc_sync_preview(&self) {
+    self.send_stored(
+      ApiMethod::Post,
+      format!("{OIDC_SYNC_PATH}/preview"),
+      Some("{}".to_owned()),
+      Stored::OidcSyncPreview,
+    );
+  }
+
+  /// Confirms the deactivations the safety brake holds back.
+  pub fn confirm_oidc_sync_brake(&self, revision: i64) {
+    let body = serde_json::json!({ "revision": revision }).to_string();
+    self.send_stored(
+      ApiMethod::Post,
+      format!("{OIDC_SYNC_PATH}/brake/confirm"),
+      Some(body),
+      Stored::OidcSync,
+    );
   }
 
   /// How many health checks are alerting, as of the last read.
@@ -878,7 +911,7 @@ impl AdminLive {
     let mut errors: Vec<String> = Vec::new();
     let (
       ((spaces, conversations, users, policy, announcement), (instance, brands, mail, calendar, runtime)),
-      health,
+      (health, oidc_sync),
     ) = join(
       join(
         join5(
@@ -899,7 +932,10 @@ impl AdminLive {
           self.fetch_if::<RuntimeSettingsResponse>(reads.has(Reads::RUNTIME), "/api/v1/admin/settings"),
         ),
       ),
-      self.fetch_if::<AdminHealthResponse>(reads.has(Reads::HEALTH), HEALTH_PATH),
+      join(
+        self.fetch_if::<AdminHealthResponse>(reads.has(Reads::HEALTH), HEALTH_PATH),
+        self.fetch_if::<AdminOidcSyncResponse>(reads.has(Reads::HEALTH), OIDC_SYNC_PATH),
+      ),
     )
     .await;
     let spaces = settle(spaces, &mut errors).flatten();
@@ -909,6 +945,7 @@ impl AdminLive {
     let announcement = settle(announcement, &mut errors).flatten();
     let instance = settle(instance, &mut errors).flatten();
     let health = settle(health, &mut errors).flatten();
+    let oidc_sync = settle(oidc_sync, &mut errors).flatten();
     let brands = settle(brands, &mut errors).flatten();
     let mail = settle(mail, &mut errors).flatten();
     let calendar = settle(calendar, &mut errors).flatten();
@@ -1064,6 +1101,9 @@ impl AdminLive {
       if let Some(health) = health {
         self.open_alert_count.set(health.open_alert_count()); // async-ok: a Cell, not a signal.
         data.health = Some(health);
+      }
+      if oidc_sync.is_some() {
+        data.oidc_sync = oidc_sync;
       }
       if brands.is_some() {
         data.brands = brands;
@@ -1930,6 +1970,8 @@ pub enum Stored {
   Calendar,
   Runtime,
   Notetaker,
+  OidcSync,
+  OidcSyncPreview,
 }
 
 /// What on-demand data a load is for.
@@ -1958,6 +2000,8 @@ impl Stored {
       Self::Calendar => data.calendar = Some(serde_json::from_str(body)?),
       Self::Runtime => data.runtime = Some(serde_json::from_str(body)?),
       Self::Notetaker => data.notetaker = Some(serde_json::from_str(body)?),
+      Self::OidcSync => data.oidc_sync = Some(serde_json::from_str(body)?),
+      Self::OidcSyncPreview => data.oidc_sync_preview = Some(serde_json::from_str(body)?),
     }
     Ok(())
   }
@@ -2870,7 +2914,7 @@ mod tests {
           "{section:?}: {paths:?}"
         );
         if section == AdminSection::Health {
-          assert_eq!(paths, [HEALTH_PATH], "one small request");
+          assert_eq!(paths, [HEALTH_PATH, OIDC_SYNC_PATH], "two small requests");
         }
       }
     }
@@ -3481,6 +3525,13 @@ mod tests {
             policy: WorkspacePolicy::default(),
             maybe_entry: None,
           });
+        }
+        if path == OIDC_SYNC_PATH {
+          return (
+            200,
+            r#"{"state":"not_configured","mode":"apply","interval_secs":0,"stale_after_intervals":0,"brake":{"max_percent":10,"min_allowed":2},"is_stale":false,"held":[],"held_revision":0,"pending_removals":0,"unfinished_deactivations":0}"#
+              .to_owned(),
+          );
         }
         if path == HEALTH_PATH {
           return (

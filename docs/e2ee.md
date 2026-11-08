@@ -1140,7 +1140,7 @@ its own. See [admin.md](admin.md) §2.
   devices. It is not undone by a reactivation. The automatic removal after
   `remove_deactivated_after_days` is the server's alone and changes no group (A8); those users are
   listed for admins until one removes them. Admins should remove people who left the organization
-  rather than only suspend them.
+  rather than only suspend them. §4.6.4 says what a leaver can read at each stage.
 - **Exception: further devices of existing members.** A commit may add devices of users who already
   have a device in the group without a signed change, because each device is cross-signed by its
   user's identity key (§3). Removing anything always needs a signed change.
@@ -1980,6 +1980,27 @@ first sync's backfill): one with a pin or bookmarks message takes them again fro
 #1438). A pin or bookmarks message also loses against a newer one already taken, by the server's
 message IDs, like edits (issue #1448): one parked for its key and decrypted later can't undo a newer
 one either. An own one shows at once and, once sent, counts by the ID the server gave it.
+
+### 4.6.4 What a leaver can still read (issue #210)
+
+A removal from a group can only be made by a member's or admin's device; the server has nothing to commit
+with, and a removal only it asserts is no removal to the clients (security review A8). So deactivating an
+account, which the identity provider sync does on its own (admin.md §3.2.3), doesn't change any group.
+
+| When                                                         | The leaver's devices can read                                                                                                                                                                     |
+|--------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Anything already delivered to a device                       | Forever: it is on the device, decrypted or decryptable with keys the device holds. Nothing the server or anyone does takes it back; retention and message deletion only apply on devices that still sync |
+| After the deactivation, honest server                        | Nothing new: every request and the gateway are refused from the commit of the deactivation on, and a push is no longer sent                                                                       |
+| After the deactivation, server compromised, or keeping a copy of the ciphertext | New messages of groups the device is still in, as long as the devices stay in the group: ciphertext is still encrypted to them                                                                     |
+| After "Remove from all chats" is committed                   | Nothing sent from the new epoch on, also with a compromised server; only what was delivered before, as above                                                                                       |
+
+**How long.** Identity provider to deactivation: at most one sync interval plus the run itself (default 5
+minutes; immediately for sessions the provider ends by back-channel logout). A run the safety brake holds
+back extends that until an admin decides or the provider is fixed; a held user's provider tokens stop being
+renewed anyway. Deactivation to removal has no bound: it takes an admin's device to sign "Remove from all
+chats", and then the next member online to commit each channel (§4.6). Until the first it is listed for
+admins as pending (admin.md §3.2.3, `pending_removals`); the removal also waits while a channel has no member
+online. Admins should remove people who left the organization rather than only suspend them.
 
 ### 4.6.1 Signed channel roles
 

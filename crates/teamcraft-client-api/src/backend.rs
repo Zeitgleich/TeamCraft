@@ -9,11 +9,12 @@
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse, AdminInstanceResponse,
-  AdminMailSettingsResponse, AnnouncementResponse, AttachmentId, BackgroundId, BrandAssetSlot, CategoryId,
-  ChannelModeration, CreateBrandRequest, HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role,
-  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, ScheduledMessageId, SchemeChange,
-  SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest,
-  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
+  AdminMailSettingsResponse, AdminOidcSyncPreviewResponse, AdminOidcSyncResponse, AnnouncementResponse,
+  AttachmentId, BackgroundId, BrandAssetSlot, CategoryId, ChannelModeration, CreateBrandRequest,
+  HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role, RuntimeSettingsKey,
+  RuntimeSettingsResponse, RuntimeSettingsSection, ScheduledMessageId, SchemeChange, SendTestMailRequest,
+  SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest, UpdateCalendarSettingsRequest,
+  UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use crate::actions::{
@@ -1244,6 +1245,18 @@ pub trait AdminBackend {
   fn health_status(&self) -> Option<AdminHealthResponse> {
     None
   }
+  /// How the sync with the identity provider stands, as of the last read; `None` while unknown.
+  fn oidc_sync_status(&self) -> Option<AdminOidcSyncResponse> {
+    None
+  }
+  /// What the last preview of the sync found.
+  fn oidc_sync_preview(&self) -> Option<AdminOidcSyncPreviewResponse> {
+    None
+  }
+  /// Asks what the sync would change now, without changing anything.
+  fn run_oidc_sync_preview(&self) {}
+  /// Confirms the deactivations the safety brake holds back; `revision` names the list looked at.
+  fn confirm_oidc_sync_brake(&self, _revision: i64) {}
   /// How many health checks are alerting (the badges of the admin console); 0 for non-admins.
   fn health_alert_count(&self) -> usize {
     0

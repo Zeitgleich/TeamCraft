@@ -605,6 +605,18 @@ Deactivation and removal are two steps (issue #631); deletion is the final one (
   and its history stays readable (issue #698).
 - **Share links** of a deactivated user are paused (they answer like an unknown link) and work again
   after a reactivation if they haven't expired.
+- **Guest links and invitations.** A meeting guest link issued by a deactivated user is paused the same
+  way, and answers like an unknown one. A pending invitation of a guest whose sponsor is deactivated
+  waits: the invitee gets no access from it until the sponsor is back. Invitations of members are not
+  affected, since those people sign in through the organization's identity provider anyway.
+- **Bots** a deactivated user created are paused, reason `creator_deactivated`, because that person has
+  seen the token. They come back with the person. An admin can bring one back before that only by
+  issuing a new token, which also makes them its new creator (a plain "Reactivate" is refused).
+- **Channels they own** are not reassigned automatically: the server can't sign a channel role
+  (e2ee.md §4.6.1). The channel list's "No owner" filter finds them (a deactivated owner counts as
+  none), and an admin assigns a new owner (§2.5).
+- **Signed roster.** Roles in the roster are the owners' to sign; the server reports a deactivated admin
+  in `GET /role-evidence` and an owner's app takes them off (e2ee.md §3.1.3).
 - **Per reason** (`deactivation_reason`): `admin` and `oidc` only suspend; the OIDC sync reactivates a
   user it deactivated once the provider enables them again, with everything intact. Bots that are
   revoked and meeting guests (`left`, turned away, removed from the meeting, access ended) are
@@ -614,6 +626,74 @@ Deactivation and removal are two steps (issue #631); deletion is the final one (
   server could keep handing them that ciphertext. Removal is what takes them out
   cryptographically: the admin's signed change, committed by members, rotates the keys. The
   server's own removal is only a hint to the clients (security review A8).
+
+#### 3.2.3 The sync with the identity provider, its safety brake and the deactivation sequence (issue #210)
+
+The sync is on as soon as `[oidc.sync] client_secret` (the service account) is set, and **it is required
+for production**: without it someone disabled at the provider stays active here. `is_enabled = false`
+switches it off (console and log warn).
+
+**What an existing instance sees at the upgrade.** With a secret set and no `is_enabled`, the sync starts
+with the first start after the upgrade. Users disabled or deleted at the provider or without a role are
+deactivated `initial_delay_secs` later (a backlog over the brake's limit waits for an admin instead),
+role changes are picked up, and groups with `sync_groups`. `mode = "dry_run"` shows it first. With
+`is_enabled = false` set, nothing changes. Without a usable admin URL, the sync stays off with a warning;
+it never stops the server from starting.
+
+**System health** (console) shows the last run, its duration, the changes and a fixed error code (never
+the provider's answer, tokens or addresses), how many runs failed in a row, and warns when the sync has
+not run for `stale_after_intervals` intervals (default 3), raising the `oidc_sync` alert like other jobs.
+
+**One run.** It reads the whole provider first: all users, then the role of each. If any of that fails,
+or the provider lists nobody while the instance has users, nothing changes. Then it applies; one change
+that fails doesn't stop the others and is tried again by the next run.
+
+**The safety brake.** One run may deactivate at most `max(brake_min_allowed, brake_max_percent % of the
+active users)` (defaults 2 and 10 %, the share rounded up), and never everybody on an instance of two or
+more. Ten percent because deactivations by the sync are suspensions that the provider can undo, so a few
+false positives are cheap, while a mistake at the provider usually hits a group or all of the realm; the
+floor because a share of a handful of users means nothing. One leaver always goes through, whatever is
+configured. While it is engaged:
+
+- A run over the limit holds **all** of its deactivations back (no arbitrary subset goes through), changes
+  no roles or groups, is written to the audit log (`oidc_sync_brake_engaged`), and raises the
+  `oidc_sync_brake` alert after the hold time.
+- Users already held do not block later ones: the next run judges only those who newly appear, so a real
+  leaver is deactivated while the others wait. New ones that are themselves too many engage it again.
+- Fixing the provider ends it: whoever is no longer planned leaves the list; a list within the limit
+  goes through.
+- Confirming the list (`POST /admin/oidc-sync/brake/confirm` with the `held_revision` the admin saw, audit
+  `oidc_sync_brake_confirmed`) applies it. An owner has to confirm if an owner or admin is on the list. The
+  confirmation is stored first and stays on each entry until that deactivation has happened, so a provider
+  that is down or a failure doesn't need a second one. A list that changed since is refused (409).
+
+The brake limits what one run may do; several small runs in a row each pass it.
+
+**Dry run.** `[oidc.sync] mode = "dry_run"` runs the sync and reports what it would do; nothing changes, and
+groups are not looked at. `POST /admin/oidc-sync/preview` answers the same for one run, whatever the mode.
+
+**The deactivation sequence.** Every path (admin, sync, bots, meeting guests) goes through one function:
+
+| Step | What happens                                                                                                   | If it fails                                                                       |
+|------|----------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------|
+| 1    | One transaction: account marked deactivated, audit entry with `source` (`oidc_sync`, `manual`, later `scim`, `system`), the bots the user created paused and audited, a follow-up record | Nothing happened. The sync re-plans the user next run; the admin sees the error   |
+| 2    | Gateway connections close and can't resume                                                                     | Cannot fail; a crash ends the connections with the process                        |
+| 3    | Local sessions end, the user leaves running calls                                                              | Retried from the follow-up record                                                 |
+| 4    | Clients that share a conversation are told; the follow-up record goes                                         | Retried from the follow-up record                                                 |
+
+From step 1 on every REST request, gateway identify and sign-in is refused, whatever happens to steps 2 to
+4, so the user can't look deactivated and keep working, or the other way round. Follow-up records are
+retried by the account housekeeping and at the start of every sync; a reactivation removes them.
+
+**After the sequence.** Not part of it, by design:
+
+- *Tokens* of the identity provider: not revoked by the server (only the provider can), but refused on every
+  request; refresh tokens are the provider's.
+- *Push registrations and devices* are kept but unused (reactivation restores them); removal revokes them.
+- *MLS removal* needs an admin's device: see §3.2.1 and e2ee.md §4.6.4. Nothing queues it on the server, since
+  a server-made removal is no removal to the clients (A8). "Remove from all chats" posts the signed change into the
+  group, where the next online member commits it. The console shows how many deactivated
+  accounts still have devices or memberships (`pending_removals`), the list is the Users page.
 
 #### 3.2.2 Guest expiry (issue #212)
 

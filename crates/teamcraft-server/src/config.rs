@@ -184,7 +184,10 @@ pub struct OidcConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OidcSyncConfig {
-  pub is_enabled: bool,
+  /// Unset (the default): on once `client_secret` is set. `false` switches it off, which is not
+  /// meant for production (admin.md §3.2.3): leavers would only lose access when their tokens end.
+  #[serde(rename = "is_enabled")]
+  pub maybe_is_enabled: Option<bool>,
   pub interval_secs: u64,
   pub initial_delay_secs: u64,
   /// Secret of `server_client`.
@@ -199,6 +202,32 @@ pub struct OidcSyncConfig {
   /// Mirror the provider's top-level groups as user groups (`@handle`), members included. The
   /// handle is made from the group name; groups whose name cannot become a handle are skipped.
   pub sync_groups: bool,
+  /// `apply`, or `dry_run` to only report what it would change.
+  pub mode: OidcSyncRunMode,
+  /// The safety brake: a run may deactivate at most this share of the active users.
+  pub brake_max_percent: u32,
+  /// A run may always deactivate this many users, whatever the share (at least 1).
+  pub brake_min_allowed: u32,
+  /// Overdue (a warning in the console, then an alert) after this many intervals without a run.
+  pub stale_after_intervals: u32,
+}
+
+/// `[oidc.sync] mode`.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OidcSyncRunMode {
+  #[default]
+  Apply,
+  DryRun,
+}
+
+impl OidcSyncConfig {
+  /// Whether the sync should run: as `is_enabled` says, else once the service account is configured.
+  pub fn is_requested(&self) -> bool {
+    self
+      .maybe_is_enabled
+      .unwrap_or(self.maybe_client_secret.is_some())
+  }
 }
 
 /// Names of the identity provider's client roles per TeamCraft role (ARCHITECTURE.md §5.1.1).
@@ -1439,13 +1468,17 @@ impl Default for ServerConfig {
 impl Default for OidcSyncConfig {
   fn default() -> Self {
     Self {
-      is_enabled: false,
+      maybe_is_enabled: None,
       interval_secs: 300,
       initial_delay_secs: 30,
       maybe_client_secret: None,
       maybe_admin_url: None,
       page_size: 100,
       sync_groups: false,
+      mode: OidcSyncRunMode::Apply,
+      brake_max_percent: DEFAULT_BRAKE_MAX_PERCENT,
+      brake_min_allowed: DEFAULT_BRAKE_MIN_ALLOWED,
+      stale_after_intervals: DEFAULT_STALE_AFTER_INTERVALS,
     }
   }
 }
@@ -1489,6 +1522,9 @@ impl Default for PolicyConfig {
 
 /// Longest `limits.draft_file_retention_days` taken: ten years, far beyond any useful draft.
 const MAX_DRAFT_FILE_RETENTION_DAYS: u32 = 3650;
+const DEFAULT_BRAKE_MAX_PERCENT: u32 = 10;
+const DEFAULT_BRAKE_MIN_ALLOWED: u32 = 2;
+const DEFAULT_STALE_AFTER_INTERVALS: u32 = 3;
 
 impl LimitsConfig {
   /// Rejects limits that would delete drafts' files while they go up, or overflow a date.
