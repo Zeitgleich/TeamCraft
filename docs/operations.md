@@ -167,7 +167,8 @@ no error texts.**
 - `dependency`: `database`, `object_storage`, `identity_provider`, `push_gateway`, `sfu`, once in use.
   `state`: `ok`, `down`, `recovering`.
 - `job`: `database_check`, `email_digest`, `guest_expiry`, `holiday_resync`, `key_package_pruning`,
-  `oidc_sync`, `partition_maintenance`, `retention`, `scheduled_messages`, `urgent_scheduler`.
+  `meeting_notices`, `oidc_sync`, `partition_maintenance`, `retention`, `scheduled_messages`,
+  `urgent_scheduler`.
 
 **Cost.** With the listener off, requests pay nothing for it. With it on, one request costs a look at
 the path's first segments, two label lookups and two atomic updates, whatever the size of the

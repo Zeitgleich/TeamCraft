@@ -50,7 +50,7 @@ use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
 use teamcraft_core::downloads::{Downloads, Finished};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
-use teamcraft_core::push_text::{NAME_PLACEHOLDER, NotificationLabels};
+use teamcraft_core::push_text::{MINUTES_PLACEHOLDER, NAME_PLACEHOLDER, NotificationLabels};
 use teamcraft_core::records;
 use teamcraft_core::store::{
   DEFAULT_MESSAGE_CACHE_BYTES, IndexedDbStore, StoreError, TrackedStore, browser_database_key,
@@ -3523,6 +3523,9 @@ fn notification_labels(locale: crate::i18n::Locale) -> NotificationLabels {
   let mut name = FluentArgs::new();
   name.set("name", NAME_PLACEHOLDER);
   let with_name = |key: &str| Some(crate::i18n::translate(locale, key, Some(&name)));
+  let mut soon = FluentArgs::new();
+  soon.set("name", NAME_PLACEHOLDER);
+  soon.set("minutes", MINUTES_PLACEHOLDER);
   NotificationLabels {
     maybe_new_message: translate("notify-new-message"),
     maybe_new_message_from: with_name("notify-new-message-from"),
@@ -3535,6 +3538,19 @@ fn notification_labels(locale: crate::i18n::Locale) -> NotificationLabels {
     maybe_call_unknown: translate("notify-call-unknown"),
     maybe_test_body: translate("notify-test-body"),
     maybe_mark_read: translate("notify-action-mark-read"),
+    maybe_meeting_started: with_name("notify-meeting-started"),
+    maybe_meeting_started_unnamed: translate("notify-meeting-started-unnamed"),
+    maybe_meeting_soon: Some(crate::i18n::translate(
+      locale,
+      "notify-meeting-named-soon",
+      Some(&soon),
+    )),
+    maybe_meeting_soon_unnamed: Some(crate::i18n::translate(
+      locale,
+      "notify-meeting-named-soon-unnamed",
+      Some(&soon),
+    )),
+    maybe_join_meeting: translate("meetings-join"),
   }
 }
 

@@ -149,6 +149,28 @@ extension DndWindow: Codable {
 /// so the other fields (and ones this version doesn't know) are kept as they came.
 enum NotificationSettingsDocument {
   static let scheduleKey = "dnd_schedule"
+  static let reminderMinutesKey = "meeting_reminder_minutes"
+  static let notifiesStartKey = "notifies_meeting_start"
+  /// What somebody who never chose gets (the server's default too).
+  static let defaultReminderMinutes = 5
+
+  /// The meeting reminder settings in the document; defaults where the user never chose.
+  static func meetingReminder(in json: String) -> (minutes: Int, notifiesStart: Bool) {
+    let object = dictionary(json) ?? [:]
+    return (
+      minutes: object[reminderMinutesKey] as? Int ?? defaultReminderMinutes,
+      notifiesStart: object[notifiesStartKey] as? Bool ?? true
+    )
+  }
+
+  /// The document with the meeting reminder settings in place; `nil` if `json` isn't an object.
+  static func replacingMeetingReminder(in json: String, minutes: Int, notifiesStart: Bool) -> String? {
+    guard var object = dictionary(json) else { return nil }
+    object[reminderMinutesKey] = minutes
+    object[notifiesStartKey] = notifiesStart
+    guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return nil }
+    return String(decoding: data, as: UTF8.self)
+  }
 
   static func schedule(in json: String) -> DndSchedule? {
     guard let object = dictionary(json), let schedule = object[scheduleKey],

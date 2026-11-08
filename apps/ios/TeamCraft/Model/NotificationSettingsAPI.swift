@@ -18,6 +18,15 @@ extension AppModel {
     return await request("PUT", "/me/notification-settings", body: body) != nil
   }
 
+  /// Replaces the meeting reminder settings, keeping the others.
+  func saveMeetingReminder(minutes: Int, notifiesStart: Bool) async {
+    guard let current = await notificationSettingsJSON(),
+      let body = NotificationSettingsDocument.replacingMeetingReminder(
+        in: current, minutes: minutes, notifiesStart: notifiesStart)
+    else { return }
+    _ = await request("PUT", "/me/notification-settings", body: body)
+  }
+
   /// Quick DND until `date`; answers the end the server stored.
   func startDnd(until date: Date) async -> Date? {
     guard let answer = await request("PUT", "/me/presence", body: QuickDnd.requestBody(until: date)),

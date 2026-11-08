@@ -265,4 +265,22 @@
   <string name="color_theme_import">Theme code</string>
   <string name="color_theme_import_apply">Use</string>
   <string name="color_theme_import_invalid">A theme code is four hex colours separated by commas.</string>
+  <!-- Home layout (#1488): bottom navigation, quick-access cards, sections. -->
+  <string name="nav_direct">DMs</string>
+  <string name="quick_threads_status">Replies you follow</string>
+  <string name="quick_saved_status">Kept for later</string>
+  <string name="quick_drafts_none">No drafts</string>
+  <plurals name="quick_drafts_count">
+    <item quantity="one">%d draft</item>
+    <item quantity="other">%d drafts</item>
+  </plurals>
+  <string name="quick_scheduled_none">Nothing scheduled</string>
+  <plurals name="quick_scheduled_count">
+    <item quantity="one">%d waiting to send</item>
+    <item quantity="other">%d waiting to send</item>
+  </plurals>
+  <string name="quick_scheduled_attention">Needs your attention</string>
+  <string name="section_unread_direct">New messages</string>
+  <string name="section_collapse">Collapse %1$s</string>
+  <string name="section_expand">Expand %1$s</string>
 </resources>

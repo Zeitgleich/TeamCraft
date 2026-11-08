@@ -36,7 +36,6 @@ class ConversationSectionsTest {
   fun archivedChannelsLeaveTheLists() {
     val archived = item("1", "old", ConversationKind.PUBLIC, space = "Project A", isFavorite = true).copy(isArchived = true)
     assertEquals(emptyList<Section>(), channelSections(listOf(archived)))
-    assertEquals(false, archived.isListedInHome)
     assertEquals(listOf(SectionTitle.Archived), channelSections(listOf(archived), listsArchived = true).map { it.title })
     assertEquals(TabBadge(mentions = 0, unread = 0), tabBadge(listOf(archived.copy(mentionCount = 2u, unreadCount = 3u))))
   }
@@ -74,29 +73,48 @@ class ConversationSectionsTest {
   }
 
   @Test
-  fun aStarredChannelListsUnderHomeFavoritesAndStaysUnderFavoritesInItsSpace() {
+  fun homeHasUnreadDirectMessagesThenFavoritesThenSpaces() {
     val all = listOf(
-      item("1", "Amy", ConversationKind.DIRECT, isFavorite = true),
-      item("2", "release", ConversationKind.PUBLIC, space = "Project A", isFavorite = true, unread = 3u),
-      item("3", "general", ConversationKind.PUBLIC, space = "Project A"),
+      item("1", "Amy", ConversationKind.DIRECT, unread = 2u),
+      item("2", "Bob", ConversationKind.DIRECT),
+      item("3", "muted", ConversationKind.GROUP, unread = 4u, isMuted = true),
+      item("4", "Cid", ConversationKind.DIRECT, unread = 1u),
+      item("5", "release", ConversationKind.PUBLIC, space = "Project A", isFavorite = true),
+      item("6", "Dan", ConversationKind.DIRECT, unread = 1u, isFavorite = true),
+      item("7", "general", ConversationKind.PUBLIC, space = "Project A"),
+      item("8", "design", ConversationKind.PUBLIC, space = "Project B"),
     )
-    val home = directSections(all, lastActivity = mapOf("1" to 10L, "2" to 20L))
-    assertEquals(listOf(SectionTitle.Favorites), home.map { it.title })
-    assertEquals(listOf("release", "Amy"), home[0].conversations.map { it.name })
-    assertEquals(listOf("release"), channelSections(all).first { it.title == SectionTitle.Favorites }.conversations.map { it.name })
+    val home = homeSections(all + all.take(1), lastActivity = mapOf("1" to 10L, "4" to 20L))
+    assertEquals(
+      listOf(SectionTitle.UnreadDirect, SectionTitle.Favorites, SectionTitle.Space("Project A"), SectionTitle.Space("Project B")),
+      home.map { it.title },
+    )
+    assertEquals(listOf("Cid", "Amy"), home[0].conversations.map { it.name })
+    assertEquals(listOf("Dan", "release"), home[1].conversations.map { it.name })
+    assertEquals(listOf("general"), home[2].conversations.map { it.name })
   }
 
   @Test
-  fun aChannelHandedOverTwiceIsOneRowAndAnUnstarredOneIsNone() {
+  fun aCollapsedSectionStillShowsWhatIsNewAndTheOpenConversation() {
+    val section = Section(
+      SectionTitle.Space("Project A"),
+      listOf(
+        item("1", "general", ConversationKind.PUBLIC, space = "Project A"),
+        item("2", "release", ConversationKind.PUBLIC, space = "Project A", unread = 1u),
+        item("3", "muted", ConversationKind.PUBLIC, space = "Project A", unread = 3u, isMuted = true),
+        item("4", "open", ConversationKind.PUBLIC, space = "Project A"),
+      ),
+    )
+    assertEquals(4, section.visibleRows(isCollapsed = false, maybeSelectedId = null).size)
+    assertEquals(listOf("release", "open"), section.visibleRows(isCollapsed = true, maybeSelectedId = "4").map { it.name })
+    assertEquals("space:s-Project A", section.collapseKey())
+    assertEquals("unread-direct", Section(SectionTitle.UnreadDirect, emptyList()).collapseKey())
+  }
+
+  @Test
+  fun theDirectMessagesTabListsNoChannelsNotEvenStarredOnes() {
     val starred = item("2", "release", ConversationKind.PUBLIC, space = "Project A", isFavorite = true)
-    val home = directSections(listOf(starred, starred, item("3", "general", ConversationKind.PUBLIC, space = "Project A")))
-    assertEquals(listOf("release"), home.flatMap { it.conversations }.map { it.name })
-  }
-
-  @Test
-  fun removingTheStarTakesTheChannelOutOfHome() {
-    val channel = item("2", "release", ConversationKind.PUBLIC, space = "Project A", isFavorite = false)
-    assertEquals(emptyList<Section>(), directSections(listOf(channel)))
+    assertEquals(emptyList<Section>(), directSections(listOf(starred, item("3", "general", ConversationKind.PUBLIC, space = "Project A"))))
   }
 
   @Test

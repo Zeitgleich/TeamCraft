@@ -37,6 +37,14 @@ final class PushPresentationTests: XCTestCase {
     XCTAssertEqual(PushPresentation.of(PushFlags(kind: .call, maybeSuppression: .doNotDisturb), canFilter: true), .drop)
   }
 
+  func testAMeetingNoticeIsANormalNotificationNotARing() {
+    for kind in [PushNotificationKind.meetingReminder, .meetingStart] {
+      XCTAssertEqual(PushPresentation.of(PushFlags(kind: kind), canFilter: true), .meeting)
+      XCTAssertEqual(PushPresentation.of(PushFlags(kind: kind), canFilter: false), .meeting)
+      XCTAssertEqual(PushPresentation.of(PushFlags(kind: kind, maybeSuppression: .doNotDisturb), canFilter: true), .drop)
+    }
+  }
+
   func testDismissAndUnknownShowNothing() {
     for kind in [PushNotificationKind.dismiss, .unknown] {
       XCTAssertEqual(PushPresentation.of(PushFlags(kind: kind), canFilter: true), .drop)
@@ -110,7 +118,10 @@ final class NotificationStyleTests: XCTestCase {
       appName: "TeamCraft", newMessage: "New message", fileText: { "File \($0)" },
       attachmentText: { "\($0)" }, newMessageFrom: { "New message from \($0)" },
       sourceSender: { "Bot · \($0)" }, callTitle: "Incoming call",
-      callFrom: { "Call from \($0)" }, callUnknown: "Someone is calling", testBody: "Test", quietUpdate: "Updated")
+      callFrom: { "Call from \($0)" }, callUnknown: "Someone is calling",
+      meetingStarted: { "\($0) has started" }, meetingStartedUnnamed: "A meeting has started",
+      meetingSoon: { "\($0) starts in \($1) min" }, meetingSoonUnnamed: { "A meeting starts in \($0) min" },
+      testBody: "Test", quietUpdate: "Updated")
   }
 
   private func styled(_ presentation: PushPresentation, _ flags: PushFlags) -> UNMutableNotificationContent {

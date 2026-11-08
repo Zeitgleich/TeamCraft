@@ -317,6 +317,10 @@ notify-meeting-soon = { $minutes ->
    *[other] Meeting in { $minutes } minutes
 }
 notify-meeting-now = Meeting starting now
+notify-meeting-started = { $name } has started
+notify-meeting-started-unnamed = A meeting has started
+notify-meeting-named-soon = { $name } starts in { $minutes } min
+notify-meeting-named-soon-unnamed = A meeting starts in { $minutes } min
 
 # Workspace management
 settings-section-overview = Overview

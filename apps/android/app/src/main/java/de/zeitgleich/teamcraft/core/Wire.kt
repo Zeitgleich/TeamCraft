@@ -629,6 +629,10 @@ data class NotificationSettings(
   @SerialName("push_mode") val pushMode: String = "away_only",
   @SerialName("send_read_receipts") val sendReadReceipts: Boolean = true,
   @SerialName("dnd_schedule") val maybeDndSchedule: DndSchedule? = null,
+  /** Minutes before a meeting to remind (0: not at all); absent: never chose (5). */
+  @SerialName("meeting_reminder_minutes") val maybeMeetingReminderMinutes: Int? = null,
+  /** Whether a meeting's start notifies; absent: never chose (yes). */
+  @SerialName("notifies_meeting_start") val maybeNotifiesMeetingStart: Boolean? = null,
 )
 
 /** Per-conversation level (`all`, `mentions`, `none`) and mute time. */

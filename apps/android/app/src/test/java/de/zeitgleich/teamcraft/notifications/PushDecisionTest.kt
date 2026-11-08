@@ -147,6 +147,17 @@ class PushDecisionTest {
     assertEquals(PushDecision.Ignore(IgnoreReason.UNKNOWN_KIND), PushDecision.of(push(PushNotificationKind.UNKNOWN)))
   }
 
+  /** A planned meeting's reminder and start are normal notifications, not rings (#1421). */
+  @Test
+  fun aMeetingNoticeShowsAndNeverRings() {
+    for (kind in listOf(PushNotificationKind.MEETING_REMINDER, PushNotificationKind.MEETING_START)) {
+      val wakeUp = push(kind, maybeMessageId = null)
+      assertEquals(PushDecision.ShowMeeting(wakeUp), PushDecision.of(wakeUp))
+      val muted = wakeUp.copy(maybeSuppression = NotificationSuppression.MUTED)
+      assertEquals(PushDecision.Ignore(IgnoreReason.SUPPRESSED), PushDecision.of(muted))
+    }
+  }
+
   companion object {
     const val CONVERSATION = "100"
 

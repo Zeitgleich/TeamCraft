@@ -131,22 +131,12 @@ struct ActiveCall {
   has_had_both_sides: bool,
 }
 
-/// The people added to a call that moved into a meeting (`move_call`), or the invitees of a
-/// meeting whose call starts, rung on behalf of `by`.
+/// The people added to a call that moved into a meeting (`move_call`), rung on behalf of `by`
+/// until one of them answers or the timeout.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddedRing {
   pub by: UserId,
   pub users: HashSet<UserId>,
-  pub ends: RingEnd,
-}
-
-/// What ends the ringing of an [`AddedRing`] besides the timeout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RingEnd {
-  /// One of the rung people answering (a call moved into a meeting: the added people).
-  FirstAnswer,
-  /// Only the timeout: everybody invited to a meeting is told it started, whoever joins first.
-  Timeout,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -560,7 +550,7 @@ impl CallService {
       },
       Some(started) => {
         let is_answer = match &call.maybe_added_ring {
-          Some(ring) => ring.ends == RingEnd::FirstAnswer && ring.users.contains(&entry.user_id),
+          Some(ring) => ring.users.contains(&entry.user_id),
           None => entry.user_id != started.by,
         };
         if call.is_ringing && is_answer {
@@ -1248,7 +1238,6 @@ pub async fn report_joined(state: &AppState, report: SfuParticipantReport) -> Re
       .try_into()
       .unwrap_or(i64::MAX),
   );
-  let is_meeting = conversation.conversation.kind == ConversationKind::Meeting;
   calls.note_kind(conversation_id, report.call_id, conversation.conversation.kind);
   let change = calls.participant_joined(conversation_id, entry, rings, now);
   let members = state.database.conversation_member_ids(conversation_id).await?;
@@ -1270,8 +1259,6 @@ pub async fn report_joined(state: &AppState, report: SfuParticipantReport) -> Re
       );
       if snapshot.is_ringing {
         start_ringing(state, calls, &snapshot, &members);
-      } else if is_meeting {
-        ring_meeting_invitees(state, calls, conversation_id, snapshot.started_by, &members).await;
       }
     },
     JoinChange::Updated(snapshot) => {
@@ -1323,39 +1310,6 @@ fn start_ringing(state: &AppState, calls: &CallService, snapshot: &CallSnapshot,
     snapshot.call_id,
     calls.ring_timeout,
   );
-}
-
-/// A call that starts in a scheduled meeting's chat around one of its occurrences rings the invitees
-/// who haven't declined, also when the organizer starts it early (issue #1006). Their ringing ends
-/// with the timeout, not when the first of them joins. Failures only cost the ring.
-async fn ring_meeting_invitees(
-  state: &AppState,
-  calls: &CallService,
-  conversation_id: ConversationId,
-  starter: UserId,
-  members: &[UserId],
-) {
-  let users = match super::meetings::invitees_to_ring(state, conversation_id, starter).await {
-    Ok(users) if !users.is_empty() => users,
-    Ok(_) => return,
-    Err(error) => {
-      warn!(%error, conversation_id = %conversation_id, "finding the invitees to ring failed");
-      return;
-    },
-  };
-  let ring = AddedRing {
-    by: starter,
-    users,
-    ends: RingEnd::Timeout,
-  };
-  match calls.ring_added(conversation_id, ring, Instant::now(), || state.next_id()) {
-    Ok(Some(snapshot)) => {
-      publish_update(state, members.to_vec(), &snapshot);
-      start_ringing(state, calls, &snapshot, members);
-    },
-    Ok(None) => {},
-    Err(error) => warn!(%error, conversation_id = %conversation_id, "ringing the invitees failed"),
-  }
 }
 
 /// Somebody in a call added people: the call moves into the meeting chat the caller just started
@@ -1418,7 +1372,6 @@ pub async fn move_call(
       .copied()
       .filter(|user| *user != caller.user.id && target_members.contains(user))
       .collect(),
-    ends: RingEnd::FirstAnswer,
   };
   let maybe_ringing = calls.ring_added(request.to_conversation_id, ring, Instant::now(), || {
     state.next_id()
@@ -2044,7 +1997,6 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
       let ring = AddedRing {
         by: id(4),
         users: HashSet::from([id(6)]),
-        ends: RingEnd::FirstAnswer,
       };
       let ringing_now = service
         .ring_added(id(1), ring, Instant::now(), || Ok(id(100)))
@@ -2063,27 +2015,6 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
     }
 
     #[test]
-    fn invitees_of_a_starting_meeting_ring_until_the_timeout() {
-      let service = service();
-      service.call_for(id(1), Instant::now(), || Ok(id(100))).unwrap();
-      service.participant_joined(id(1), entry(4, 40), false, UnixMillis(0));
-      let ring = AddedRing {
-        by: id(4),
-        users: HashSet::from([id(6), id(7)]),
-        ends: RingEnd::Timeout,
-      };
-      service
-        .ring_added(id(1), ring, Instant::now(), || Ok(id(101)))
-        .unwrap();
-      service.participant_joined(id(1), entry(6, 60), false, UnixMillis(1));
-      assert!(
-        service.is_ringing(id(1), id(100)),
-        "the first invitee joining doesn't end the others' ringing"
-      );
-      assert!(service.stop_ringing(id(1), id(100)).is_some());
-    }
-
-    #[test]
     fn people_added_to_a_running_call_ring_at_once() {
       let service = service();
       service.call_for(id(1), Instant::now(), || Ok(id(100))).unwrap();
@@ -2091,7 +2022,6 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
       let ring = AddedRing {
         by: id(4),
         users: HashSet::from([id(6)]),
-        ends: RingEnd::FirstAnswer,
       };
 
       let ringing_now = service
@@ -2108,7 +2038,6 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
       let ring = AddedRing {
         by: id(4),
         users: HashSet::new(),
-        ends: RingEnd::FirstAnswer,
       };
       service
         .ring_added(id(1), ring, Instant::now(), || Ok(id(100)))

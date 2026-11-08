@@ -435,6 +435,8 @@ pub struct PushConfig {
   pub dismiss_ttl_secs: u64,
   /// How long a test push from the notification diagnostics may wait at the push service.
   pub test_ttl_secs: u64,
+  /// How long a meeting's reminder or start notice may wait at the push service.
+  pub meeting_ttl_secs: u64,
   /// How often a push that failed for a temporary reason (5xx, 429, timeout) is tried again, at most;
   /// the wake-up's TTL usually ends the retries first. `0`: never. Retries wait in the database, so
   /// they survive a restart.
@@ -1068,8 +1070,8 @@ pub struct MeetingsConfig {
   /// Most guests one shared guest link of a meeting lets into the lobby (docs/meetings.md).
   #[serde(default = "default_max_shared_link_guests")]
   pub max_shared_link_guests: u32,
-  /// A call started in a scheduled meeting's chat rings its invitees when it starts at most this
-  /// long before an occurrence (or during it); 0: never.
+  /// No longer used (#1421): a meeting's start is a notification at the scheduled time, see
+  /// docs/meetings.md "Starting". Accepted so existing configuration files still load.
   #[serde(default = "default_start_ring_lead_secs")]
   pub start_ring_lead_secs: u64,
   /// Shared secret of the inbox handler that forwards received RSVP e-mail (iMIP REPLY) to
@@ -1583,6 +1585,7 @@ impl Default for PushConfig {
       call_ttl_secs: 0,
       dismiss_ttl_secs: 86_400,
       test_ttl_secs: 300,
+      meeting_ttl_secs: 600,
       max_retries: 200,
       retry_initial_delay_ms: 2000,
       retry_max_delay_secs: 600,

@@ -245,7 +245,7 @@ pub struct NotificationPrefs {
 pub const LEVEL_DEFAULTS_REVISION: u32 = 1;
 
 /// Default of "remind before a meeting" (notifications.md, "Meeting reminders").
-pub const DEFAULT_MEETING_REMINDER_MINUTES: u16 = 5;
+pub const DEFAULT_MEETING_REMINDER_MINUTES: u16 = teamcraft_proto::DEFAULT_MEETING_REMINDER_MINUTES;
 
 impl Default for NotificationPrefs {
   fn default() -> Self {
