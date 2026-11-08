@@ -8,20 +8,28 @@
 //! which encrypts it as a hidden message of the channel. Updates of other members come back through
 //! the core and are merged in with the caret kept where it was. On the web this view is a wasm
 //! chunk of its own (`areas::canvas`), so the CRDT loads with the first page that opens.
+//!
+//! "Version history" (issue #1245) lists the page's versions as this device holds them, who made
+//! each and when ([`versions`]), shows one read-only and restores it as a new edit. The line under
+//! the toolbar names who else edited the page in the last minutes, from the same updates: no
+//! presence of its own goes to the server.
 
 use std::time::Duration;
 
 use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
 use leptos::prelude::*;
-use teamcraft_client_api::canvas::{Block, BlockKind, CanvasDoc, CanvasState, merge_updates, shift_caret};
+use teamcraft_client_api::canvas::{
+  Block, BlockKind, CanvasDoc, CanvasState, CanvasVersion, compaction, editors_since, merge_updates, page_at,
+  shift_caret, versions,
+};
 use teamcraft_client_api::model::OlderHistory;
 use wasm_bindgen::JsCast;
 
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::IconName;
 use crate::components::sliding_indicator::SlidingIndicator;
-use crate::i18n::use_i18n;
-use crate::model::ConversationId;
+use crate::i18n::{I18n, use_i18n};
+use crate::model::{ConversationId, UserId};
 use crate::state::{AppState, use_app_state};
 
 /// How long typing pauses before the edits go out.
@@ -36,6 +44,10 @@ const MAX_SNAPSHOT_BYTES: usize = 512 * 1024;
 const COMPACT_ABOVE: usize = 32;
 /// Pages of older history read per opening, so the page holds the edits from before this device.
 const MAX_HISTORY_PAGES: u32 = 20;
+/// Who edited the page this recently counts as editing it now.
+const EDITING_WINDOW_MS: i64 = 2 * 60 * 1000;
+/// How often that line is looked at again.
+const EDITING_CHECK_MS: u64 = 20_000;
 /// The element IDs of the blocks' text fields.
 const BLOCK_ID_PREFIX: &str = "canvas-block-";
 
@@ -145,12 +157,51 @@ pub fn CanvasView(conversation: ConversationId) -> impl IntoView {
   // Whatever waits goes out when the tab closes.
   on_cleanup(move || canvas.flush());
 
+  // Who else edited the page lately: "Anna is editing".
+  let now = RwSignal::new(crate::clock::now_ms());
+  crate::reactive::use_interval_while_visible(EDITING_CHECK_MS, move || {
+    let _ = now.try_set(crate::clock::now_ms());
+  });
+  let me = state.me().id;
+  let editors = Memo::new(move |_| {
+    let since = now.get() - EDITING_WINDOW_MS;
+    canvas.stored.with(|stored| editors_since(stored, since, me))
+  });
+  let editing = move || {
+    let names: Vec<String> = editors
+      .get()
+      .into_iter()
+      .map(|user| name_of(state, i18n, user))
+      .collect();
+    (!names.is_empty()).then(|| {
+      let joined = names.join(", ");
+      i18n.t_count_with("canvas-editing", names.len(), &[("names", joined.as_str())])
+    })
+  };
+
+  let show_history = RwSignal::new(false);
+  let toggle_history = move |_| {
+    // Own edits not handed over yet belong in the history.
+    canvas.flush();
+    show_history.update(|open| *open = !*open);
+  };
+
   let has_blocks = move || canvas.blocks.with(|blocks| !blocks.is_empty());
   view! {
     <div class="canvas-view">
-      <Show when=move || canvas.can_edit.get() fallback=|| ()>
-        <KindToolbar canvas=canvas />
-      </Show>
+      <div class="canvas-bar">
+        <Show when=move || canvas.can_edit.get() && !show_history.get() fallback=|| ()>
+          <KindToolbar canvas=canvas />
+        </Show>
+        <button
+          type="button"
+          class="btn canvas-history-button"
+          aria-pressed=move || show_history.get().to_string()
+          on:click=toggle_history
+        >
+          {move || i18n.t(if show_history.get() { "canvas-history-close" } else { "canvas-history" })}
+        </button>
+      </div>
       <p class="canvas-note">
         {move || {
           let mut parts = vec![i18n.t("canvas-encrypted")];
@@ -165,7 +216,16 @@ pub fn CanvasView(conversation: ConversationId) -> impl IntoView {
           parts.join(" ")
         }}
       </p>
-      <div class="canvas-page" role="group" aria-label=move || i18n.t("canvas-page-label")>
+      <p class="canvas-presence" aria-live="polite">{editing}</p>
+      <Show when=move || show_history.get() fallback=|| ()>
+        <CanvasHistory canvas=canvas open=show_history />
+      </Show>
+      <div
+        class="canvas-page"
+        role="group"
+        aria-label=move || i18n.t("canvas-page-label")
+        hidden=move || show_history.get()
+      >
         <For each=move || canvas.blocks.get() key=|block| block.id.clone() let:block>
           <BlockRow canvas=canvas id=block.id />
         </For>
@@ -188,6 +248,154 @@ pub fn CanvasView(conversation: ConversationId) -> impl IntoView {
       </div>
     </div>
   }
+}
+
+/// The page's versions, newest first, and the one picked shown read-only with a button that
+/// restores it.
+#[component]
+fn CanvasHistory(canvas: Canvas, open: RwSignal<bool>) -> impl IntoView {
+  let i18n = use_i18n();
+  let state = canvas.state;
+  let versions = Memo::new(move |_| {
+    canvas.stored.with(|stored| {
+      versions(stored).unwrap_or_else(|error| {
+        tracing::warn!(%error, "the page's history could not be read");
+        Vec::new()
+      })
+    })
+  });
+  // Picked by who and when, so a version arriving meanwhile doesn't move the pick; none: the
+  // newest.
+  let picked = RwSignal::new(None::<(UserId, i64)>);
+  let shown = Memo::new(move |_| {
+    let maybe_pick = picked.get();
+    versions.with(|versions| {
+      maybe_pick
+        .and_then(|pick| versions.iter().position(|version| version_key(version) == pick))
+        .or_else(|| (!versions.is_empty()).then_some(0))
+    })
+  });
+  let preview = Memo::new(move |_| {
+    let index = shown.get()?;
+    let version = versions.with(|versions| versions.get(index).cloned())?;
+    canvas.stored.with(|stored| match page_at(stored, &version) {
+      Ok(blocks) => Some(blocks),
+      Err(error) => {
+        tracing::warn!(%error, "a version of the page could not be read");
+        None
+      },
+    })
+  });
+  let restore = move |_| {
+    let Some(blocks) = preview.get_untracked() else {
+      return;
+    };
+    canvas.flush();
+    canvas.edit(|page| page.restore(&blocks).into_iter().collect());
+    canvas.flush();
+    open.set(false);
+  };
+  let can_restore = move || canvas.can_edit.get() && shown.get().is_some_and(|index| index > 0);
+  view! {
+    <section class="canvas-history" aria-label=move || i18n.t("canvas-history")>
+      <p class="canvas-note">{move || i18n.t("canvas-history-note")}</p>
+      <Show
+        when=move || versions.with(|versions| !versions.is_empty())
+        fallback=move || view! { <p class="canvas-history-empty">{move || i18n.t("canvas-history-empty")}</p> }
+      >
+        <div class="canvas-history-body">
+          <ul class="canvas-versions">
+            {move || {
+              versions
+                .get()
+                .into_iter()
+                .enumerate()
+                .map(|(index, version)| {
+                  let key = version_key(&version);
+                  let who = name_of(state, i18n, version.by);
+                  let when = crate::clock::format_date_time(version.until_ms, i18n.locale().tag());
+                  view! {
+                    <li>
+                      <button
+                        type="button"
+                        class="canvas-version"
+                        aria-pressed=move || (shown.get() == Some(index)).to_string()
+                        on:click=move |_| picked.set(Some(key))
+                      >
+                        <span class="canvas-version-when">{when}</span>
+                        <span class="canvas-version-who">{who}</span>
+                        {(index == 0)
+                          .then(|| view! { <span class="canvas-version-current">{move || i18n.t("canvas-history-current")}</span> })}
+                      </button>
+                    </li>
+                  }
+                })
+                .collect_view()
+            }}
+          </ul>
+          <div class="canvas-history-preview">
+            <div class="canvas-page canvas-preview" role="group" aria-label=move || i18n.t("canvas-history-preview")>
+              {move || preview.get().map(|blocks| preview_blocks(&blocks).collect_view())}
+            </div>
+            <Show when=can_restore fallback=|| ()>
+              <div class="canvas-history-actions">
+                <button type="button" class="btn btn-primary" on:click=restore>
+                  {move || i18n.t("canvas-history-restore")}
+                </button>
+              </div>
+            </Show>
+          </div>
+        </div>
+      </Show>
+    </section>
+  }
+}
+
+/// A version's blocks, read-only.
+fn preview_blocks(blocks: &[Block]) -> impl Iterator<Item = AnyView> + '_ {
+  blocks.iter().enumerate().map(move |(index, block)| {
+    let marker = match block.kind {
+      BlockKind::Bullet => view! { <span class="canvas-marker" aria-hidden="true">"•"</span> }.into_any(),
+      BlockKind::Numbered => {
+        let number = numbered_position(blocks, index);
+        view! { <span class="canvas-marker" aria-hidden="true">{format!("{number}.")}</span> }.into_any()
+      },
+      BlockKind::Check => {
+        view! { <input type="checkbox" class="canvas-check" disabled=true prop:checked=block.is_checked /> }
+          .into_any()
+      },
+      BlockKind::Paragraph | BlockKind::Heading => ().into_any(),
+    };
+    view! {
+      <div class=format!("canvas-block canvas-block-{}", block.kind.tag())>
+        {marker}
+        <div class="canvas-input canvas-preview-text">{block.text.clone()}</div>
+      </div>
+    }
+    .into_any()
+  })
+}
+
+/// The number of a numbered item: its place in the run of numbered items it ends.
+fn numbered_position(blocks: &[Block], index: usize) -> usize {
+  blocks[..index]
+    .iter()
+    .rev()
+    .take_while(|block| block.kind == BlockKind::Numbered)
+    .count()
+    + 1
+}
+
+fn version_key(version: &CanvasVersion) -> (UserId, i64) {
+  (version.by, version.from_ms)
+}
+
+/// A member's name as the app shows it; one the device doesn't know reads as such.
+fn name_of(state: AppState, i18n: I18n, user: UserId) -> String {
+  state
+    .read(|backend| backend.user(user))
+    .map(|person| person.display_name)
+    .unwrap_or_else(|| i18n.t("canvas-history-someone"))
 }
 
 /// The kinds the block with the caret can take.
@@ -233,13 +441,7 @@ fn BlockRow(canvas: Canvas, id: String) -> impl IntoView {
   let row = Memo::new(move |_| {
     canvas.blocks.with(|blocks| {
       let index = blocks.iter().position(|block| block.id == row_id)?;
-      let number = blocks[..index]
-        .iter()
-        .rev()
-        .take_while(|block| block.kind == BlockKind::Numbered)
-        .count()
-        + 1;
-      Some((blocks[index].clone(), number))
+      Some((blocks[index].clone(), numbered_position(blocks, index)))
     })
   });
   let kind = move || row.get().map_or(BlockKind::Paragraph, |(block, _)| block.kind);
@@ -552,13 +754,14 @@ impl Canvas {
     }
   }
 
-  /// Hands the core the merge of a long list, a frame later (not while the list is read).
+  /// Hands the core the merge of a long list with the history of what it merged, a frame later
+  /// (not while the list is read).
   fn compact_if_long(self, stored: &CanvasState) {
     if stored.updates.len() <= COMPACT_ABOVE {
       return;
     }
-    let merged = match merge_updates(&stored.updates) {
-      Ok(merged) => merged,
+    let (merged, history) = match compaction(stored) {
+      Ok(compacted) => compacted,
       Err(error) => {
         tracing::warn!(%error, "the page's updates could not be merged");
         return;
@@ -566,7 +769,7 @@ impl Canvas {
     };
     let (state, conversation, revision) = (self.state, self.conversation, stored.revision);
     request_animation_frame(move || {
-      let _ = state.try_write(|backend| backend.compact_canvas(conversation, revision, merged));
+      let _ = state.try_write(|backend| backend.compact_canvas(conversation, revision, merged, history));
     });
   }
 }
@@ -682,6 +885,7 @@ mod tests {
       revision: 1,
       updates: vec![merged.into()],
       updates_since_snapshot: SNAPSHOT_EVERY,
+      ..CanvasState::default()
     };
     let (whole, is_snapshot) = editor.outgoing(&due, true).unwrap();
     assert!(is_snapshot);

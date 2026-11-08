@@ -9,7 +9,7 @@ use crate::common;
 
 use common::{Peer, backend_of, run_commands, settings, settle};
 use teamcraft_client_api::backend::ChatBackend;
-use teamcraft_client_api::canvas::{Block, BlockKind, CanvasDoc};
+use teamcraft_client_api::canvas::{self, Block, BlockKind, CanvasDoc};
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::Client;
 use teamcraft_core::ui_backend::CoreChatBackend;
@@ -157,13 +157,21 @@ async fn a_compaction_keeps_the_page_and_waits_for_new_updates() {
   let state = bob_ui.canvas(channel);
   assert_eq!(state.updates.len(), 4);
   assert_eq!(state.updates_since_snapshot, 4);
-  let merged = teamcraft_client_api::canvas::merge_updates(&state.updates).unwrap();
+  let versions_before = canvas::versions(&state).unwrap();
+  let (merged, history) = canvas::compaction(&state).unwrap();
   // A stale revision changes nothing; the one read replaces the list.
-  bob_ui.compact_canvas(channel, state.revision - 1, merged.clone());
+  bob_ui.compact_canvas(channel, state.revision - 1, merged.clone(), history.clone());
   assert_eq!(bob_ui.canvas(channel).updates.len(), 4);
-  bob_ui.compact_canvas(channel, state.revision, merged);
-  assert_eq!(bob_ui.canvas(channel).updates.len(), 1);
+  bob_ui.compact_canvas(channel, state.revision, merged, history);
+  let compacted = bob_ui.canvas(channel);
+  assert_eq!(compacted.updates.len(), 1);
+  assert!(compacted.is_compacted);
   assert_eq!(page_of(&bob_ui, channel).blocks(), page.blocks());
+  assert_eq!(
+    canvas::versions(&compacted).unwrap(),
+    versions_before,
+    "the history stays"
+  );
 
   // A snapshot restarts the count.
   let whole = teamcraft_client_api::canvas::snapshot(&alice_ui.canvas(channel).updates)
@@ -173,6 +181,48 @@ async fn a_compaction_keeps_the_page_and_waits_for_new_updates() {
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
   assert_eq!(bob_ui.canvas(channel).updates_since_snapshot, 0);
+}
+
+#[tokio::test]
+async fn every_device_lists_the_versions_with_who_and_when_and_restores_one() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
+  let mut alice_page = CanvasDoc::new();
+  let (id, update) = alice_page.insert_block(None, BlockKind::Paragraph, "Budget: 10k");
+  alice_ui.edit_canvas(channel, update, false);
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  // Bob overwrites Alice's line well after: a version of his own.
+  server.advance_clock(std::time::Duration::from_secs(3600));
+  let mut bob_page = page_of(&bob_ui, channel);
+  bob_ui.edit_canvas(channel, bob_page.set_text(&id, "Budget: 50k").unwrap(), false);
+  run_commands(&mut bob, &bob_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+
+  for ui in [&alice_ui, &bob_ui] {
+    let state = ui.canvas(channel);
+    let versions = canvas::versions(&state).unwrap();
+    assert_eq!(
+      versions.iter().map(|version| version.by).collect::<Vec<_>>(),
+      [bob.client.user_id(), alice.client.user_id()],
+      "newest first, by who sent them"
+    );
+    assert!(versions[0].from_ms > versions[1].until_ms);
+    assert_eq!(
+      texts(&canvas::page_at(&state, &versions[1]).unwrap()),
+      ["Budget: 10k"]
+    );
+  }
+
+  // Alice restores her version: an edit like any other, which Bob's device takes.
+  let state = alice_ui.canvas(channel);
+  let old = canvas::page_at(&state, &canvas::versions(&state).unwrap()[1]).unwrap();
+  let mut page = page_of(&alice_ui, channel);
+  alice_ui.edit_canvas(channel, page.restore(&old).unwrap(), false);
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(texts(&page_of(&bob_ui, channel).blocks()), ["Budget: 10k"]);
+  assert_eq!(canvas::versions(&bob_ui.canvas(channel)).unwrap().len(), 3);
 }
 
 /// The page as `ui` holds it.

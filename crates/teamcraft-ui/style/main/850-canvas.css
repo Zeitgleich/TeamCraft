@@ -19,12 +19,22 @@
   gap: var(--space-3);
 }
 
-.canvas-toolbar {
+.canvas-bar {
   position: sticky;
   top: 0;
   z-index: 1;
-  align-self: flex-start;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.canvas-toolbar {
   flex-wrap: wrap;
+}
+
+.canvas-history-button {
+  margin-left: auto;
+  flex: none;
 }
 
 .canvas-toolbar button:disabled {
@@ -114,4 +124,131 @@
 .canvas-first {
   min-height: 6rem;
   border-color: var(--border);
+}
+
+/* Who else is editing, from the page's recent edits (#1245). */
+.canvas-presence {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--accent);
+}
+
+.canvas-presence:empty {
+  display: none;
+}
+
+/* ---- Version history of the notes (#1245) ---- */
+
+.canvas-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.canvas-history-empty {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.canvas-history-body {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.canvas-versions {
+  flex: none;
+  width: 14rem;
+  max-height: 60vh;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.canvas-version {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--space-2);
+  cursor: pointer;
+}
+
+.canvas-version:hover {
+  background: var(--surface-2);
+}
+
+.canvas-version:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.canvas-version[aria-pressed="true"] {
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+.canvas-version-when {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.canvas-version-who {
+  flex-basis: 100%;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.canvas-version-current {
+  font-size: var(--text-xs);
+  color: var(--accent);
+}
+
+.canvas-history-preview {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.canvas-preview {
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+}
+
+.canvas-preview-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-height: 1.5em;
+}
+
+.canvas-history-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+@media (max-width: 640px) {
+  .canvas-history-body {
+    flex-direction: column;
+  }
+
+  .canvas-versions {
+    width: 100%;
+    max-height: 30vh;
+  }
 }

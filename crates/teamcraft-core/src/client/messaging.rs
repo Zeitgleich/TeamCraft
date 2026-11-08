@@ -848,6 +848,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           Some(response.id),
         )?;
       }
+      // An own page edit counts from the server's time from now on, as on every other device.
+      if let MessageContent::Canvas { update, .. } = &stored.content {
+        crate::canvas::settle_time(&self.store, entry.conversation_id, update, stored.sent_at_ms)?;
+      }
       if let MessageContent::IntegrationSource { change } = &stored.content {
         crate::integration_sources::settle_source_change(
           &self.store,
@@ -1046,7 +1050,7 @@ fn apply_control_with(
   }
   if let MessageContent::Canvas { update, is_snapshot } = content {
     // Decrypted in the conversation's group, so `sender` is a member of it; the server let it post.
-    return crate::canvas::take_update(store, conversation, update, *is_snapshot);
+    return crate::canvas::take_update(store, conversation, update, *is_snapshot, sender, at_ms);
   }
   if let MessageContent::IntegrationSource { change } = content {
     // Decrypted in the conversation's group, so `sender` is a member of it; who may do what is

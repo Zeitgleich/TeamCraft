@@ -33,6 +33,18 @@ canvas-loading-history = Frühere Änderungen werden geladen …
 canvas-history-failed = Einige frühere Änderungen konnten noch nicht geladen werden.
 canvas-empty-title = Noch keine Notizen
 canvas-empty = Mitglieder, die hier schreiben dürfen, können Notizen für den ganzen Kanal anlegen.
+canvas-history = Versionsverlauf
+canvas-history-close = Zurück zu den Notizen
+canvas-history-note = Die Versionen, die dieses Gerät erhalten hat, und wer sie wann erstellt hat. Eine wiederhergestellte Version wird wieder zu den aktuellen Notizen, als neue Änderung für alle.
+canvas-history-empty = Dieses Gerät hat noch keine Versionen dieser Notizen.
+canvas-history-current = Aktuell
+canvas-history-preview = Die Notizen in dieser Version
+canvas-history-restore = Diese Version wiederherstellen
+canvas-history-someone = Jemand
+canvas-editing = { $count ->
+    [one] { $names } bearbeitet gerade
+   *[other] { $names } bearbeiten gerade
+  }
 members-button-label = { $count ->
     [one] Mitglieder anzeigen, { $count } Mitglied
    *[other] Mitglieder anzeigen, { $count } Mitglieder

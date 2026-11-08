@@ -33,6 +33,18 @@ canvas-loading-history = Loading earlier changes…
 canvas-history-failed = Some earlier changes could not be loaded yet.
 canvas-empty-title = No notes yet
 canvas-empty = Members who may post here can write notes for the whole channel.
+canvas-history = Version history
+canvas-history-close = Back to the notes
+canvas-history-note = The versions this device received, with who made them and when. Restoring one makes it the current notes again, as a new change everyone gets.
+canvas-history-empty = This device holds no versions of these notes yet.
+canvas-history-current = Current
+canvas-history-preview = The notes in this version
+canvas-history-restore = Restore this version
+canvas-history-someone = Someone
+canvas-editing = { $count ->
+    [one] { $names } is editing
+   *[other] { $names } are editing
+  }
 members-button-label = { $count ->
     [one] Show members, { $count } member
    *[other] Show members, { $count } members
