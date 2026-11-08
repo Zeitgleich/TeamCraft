@@ -12,7 +12,8 @@
 //! 4. names every file after the build (`<name>-<id>…`, so the server caches them for good),
 //! 5. writes `init.js`, which loads the app with the loading screen's progress (`loader.js`) and,
 //!    unless the page is a guest's meeting link, fetches the signed-in app's chunks (`session`) at
-//!    the same time; and the preload links with subresource integrity into `index.html`.
+//!    the same time, as it does the UI's texts in the language the app starts in (#1437); and the
+//!    preload links with subresource integrity into `index.html`.
 //!
 //! ```text
 //! teamcraft-web-bundle --input <app.wasm> --staging <dir> --name teamcraft-ui --initializer <loader.js>
@@ -424,6 +425,40 @@ if (!isGuestLink) {
   }
 }
 
+// The UI's texts (teamcraft-ui i18n.rs): the app carries none, so the language it starts in is
+// fetched next to it, and the app waits for them before anything mounts; it never shows a message's
+// key. `teamcraftTranslationFiles` names each language's file of this build (scripts/finish-loader.sh
+// puts it at the top of this file). The choice is the app's (settings.rs `stored_locale`): the saved
+// setting, else the browser's language, else English.
+const translationFiles = globalThis.teamcraftTranslationFiles || {};
+globalThis.teamcraftTranslations = startTranslations();
+
+function startLanguage() {
+  let saved = null;
+  try {
+    saved = localStorage.getItem('teamcraft.locale');
+  } catch (error) {
+    // Storage blocked: the browser's language.
+  }
+  for (const tag of [saved, navigator.language]) {
+    const primary = String(tag || '').split(/[-_]/)[0].toLowerCase();
+    if (translationFiles[primary]) return primary;
+  }
+  return 'en';
+}
+
+async function startTranslations() {
+  const tag = startLanguage();
+  const file = translationFiles[tag];
+  if (!file) throw new Error(`this build has no texts for ${tag}`);
+  const response = await fetch(file);
+  // A file the server doesn't have comes back as the app's page (its fallback), with 200.
+  if (!response.ok || (response.headers.get('content-type') || '').startsWith('text/html')) {
+    throw new Error(`${file}: HTTP ${response.status}`);
+  }
+  return { tag, text: await response.text() };
+}
+
 const hooks = initializer();
 hooks.onStart?.();
 const total = __WASM_SIZE__;
@@ -448,8 +483,9 @@ const response = fetch('__MAIN_WASM__').then((response) => {
   });
   return new Response(stream, { headers: response.headers, status: response.status, statusText: response.statusText });
 });
-init({ module_or_path: response }).then(
-  (value) => {
+// Without its texts the app doesn't mount: that is a failure to load too.
+Promise.all([init({ module_or_path: response }), globalThis.teamcraftTranslations]).then(
+  ([value]) => {
     hooks.onComplete?.();
     hooks.onSuccess?.(value);
   },

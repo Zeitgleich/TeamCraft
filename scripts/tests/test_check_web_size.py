@@ -92,6 +92,20 @@ class BudgetTest(unittest.TestCase):
         self.assertNotIn("split-session", lazy)
         self.assertIn("split-admin", lazy)
 
+    def test_both_visits_count_the_texts_of_the_larger_language(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
+            wasm_only = gzip_total_of(dist)
+            (dist / "i18n").mkdir()
+            (dist / "i18n" / "en-0123456789abcdef.ftl").write_bytes(os.urandom(200))
+            (dist / "i18n" / "de-0123456789abcdef.ftl").write_bytes(os.urandom(400))
+            german = len(gzip.compress((dist / "i18n" / "de-0123456789abcdef.ftl").read_bytes(), 9))
+            self.assertEqual(check.guest_visit_bytes(dist), wasm_only + german)
+            self.assertEqual(check.measure(dist)["translations"]["gzip_bytes"], german)
+            code, out, _ = run(str(dist), "--budget-bytes", str(wasm_only + german - 1))
+        self.assertEqual(code, 1)
+        self.assertIn("| texts (1 lang) ", out)
+
     def test_a_guest_visit_counts_the_call_module_but_not_the_signed_in_app(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)

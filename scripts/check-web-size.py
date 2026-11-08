@@ -9,7 +9,9 @@ split loader `teamcraft-ui-split-*.js`, and the call module (`teamcraft-web-call
 that. The signed-in budget (`--budget-bytes`) is a looser ceiling against big regressions and
 counts the compressed wasm a signed-in user's first visit transfers: the app (`teamcraft-ui-*_bg.wasm`), the signed-in app's chunks that
 `init.js` fetches next to it (#334; a guest's meeting link skips them) and the service worker
-(`teamcraft-web-sw*_bg.wasm`, installed on the first visit too). The server sends them compressed, the browser compiles while it
+(`teamcraft-web-sw*_bg.wasm`, installed on the first visit too). Both count the UI's texts in one
+language (`i18n/<language>-*.ftl`, #1437): the app carries none and fetches the language it starts in
+next to it; the larger language counts. The server sends them compressed, the browser compiles while it
 streams, and the service worker caches them afterwards, so the transfer size is what a user waits
 for. It is measured as gzip -9, which every server and browser supports; brotli (smaller) is
 printed too when the `brotli` module is installed. CI runs this after the release `trunk build`
@@ -45,10 +47,10 @@ try:
 except ImportError:  # Optional: gzip is the budget, brotli is informational.
     brotli = None
 
-# A guest's meeting visit (lobby, the meeting's modules, call module), gzip -9, decimal megabytes:
-# 5.97 MB on the way to 1.0.25 (#1413), plus about 6 %, so it warns (from 95 %) only after real
-# growth.
-DEFAULT_GUEST_BUDGET_BYTES = 6_350_000
+# A guest's meeting visit (lobby with the texts of one language, the meeting's modules, call module),
+# gzip -9, decimal megabytes: 5.92 MB on the way to 1.0.25 (#1437), plus about 6 %, so it warns (from
+# 95 %) only after real growth.
+DEFAULT_GUEST_BUDGET_BYTES = 6_280_000
 # The split modules a guest loads once let into a meeting (teamcraft-ui `areas.rs`).
 GUEST_MODULES = ("guest", "calls")
 SPLIT_LOADER = "teamcraft-ui-split-*.js"
@@ -57,10 +59,10 @@ SPLIT_CHUNK = re.compile(r'const (__chunk_\d+) = makeLoad\(\(\) => \{\s*const sr
 SPLIT_MODULE = re.compile(
     r'export const __wasm_split_load_(\w+) = wrapAsyncCb\(makeLoad\(\(\) => \{\s*'
     r'const src = fetch\(new URL\("\./([^"]+)".*?\n, \[([^\]]*)\]', re.S)
-# A signed-in first visit (app, the signed-in app's chunks, service worker), gzip -9: 5.47 MB on the
-# way to 1.0.25 (#1413), plus about 6 %. A ceiling against big regressions; growth here is a
+# A signed-in first visit (app, the signed-in app's chunks, service worker, the texts of one
+# language), gzip -9: 5.42 MB on the way to 1.0.25 (#1437), plus about 6 %. A ceiling against big regressions; growth here is a
 # member's, who loads it once and then from the service worker's cache.
-DEFAULT_BUDGET_BYTES = 5_800_000
+DEFAULT_BUDGET_BYTES = 5_740_000
 # The call module's gzip -9 size, decimal megabytes: 0.86 MB with the effects' compositors (#439),
 # plus about 15 %. The segmentation is a module of its own that only loads when an effect starts.
 DEFAULT_CALL_MODULE_BUDGET_BYTES = 1_000_000
@@ -74,9 +76,13 @@ PARTS = {
     "app": "teamcraft-ui-*_bg.wasm",
     "service_worker": "teamcraft-web-sw*_bg.wasm",
 }
+# The UI's texts, one file per language (teamcraft-ui scripts/finish-loader.sh): a first visit
+# fetches one of them.
+TRANSLATIONS = "i18n/*.ftl"
 # The signed-in app's chunks: the list `init.js` fetches next to the app (teamcraft-web-bundle).
 SESSION_LIST = re.compile(r"for \(const href of \[([^\]]*)\]\)")
-LABELS = {"app": "app", "session": "signed-in app", "service_worker": "service worker"}
+LABELS = {"app": "app", "session": "signed-in app", "service_worker": "service worker",
+          "translations": "texts (1 lang)"}
 
 
 def main(argv=None):
@@ -137,7 +143,19 @@ def measure(dist):
             print(f"error: init.js fetches files that aren't there: {', '.join(missing)}", file=sys.stderr)
             return None
         sizes["session"] = sizes_of(session)
+    maybe_texts = start_language_file(dist)
+    if maybe_texts is not None:
+        sizes["translations"] = sizes_of([maybe_texts])
     return sizes
+
+
+def start_language_file(dist):
+    """The UI's texts a first visit fetches: the largest language's file, compressed (None for a
+    build that embeds them)."""
+    files = sorted(dist.glob(TRANSLATIONS))
+    if not files:
+        return None
+    return max(files, key=lambda path: len(gzip.compress(path.read_bytes(), compresslevel=9)))
 
 
 def sizes_of(paths):
@@ -208,11 +226,14 @@ def check_call_module(lazy, budget_bytes):
 
 def guest_visit_bytes(dist):
     """gzip -9 of what a guest's meeting link loads, each file once: the lobby (app, service
-    worker), the meeting's split modules with their shared chunks, the call module. A build without
+    worker, the texts in one language), the meeting's split modules with their shared chunks, the call module. A build without
     a split loader or call module counts without them; None (with an error) when the loader names a
     file that isn't there or lacks a meeting module."""
     files = {matches[0] for pattern in PARTS.values() if (matches := sorted(dist.glob(pattern)))}
     files |= set(dist.glob(CALL_MODULE))
+    maybe_texts = start_language_file(dist)
+    if maybe_texts is not None:
+        files.add(maybe_texts)
     loaders = sorted(dist.glob(SPLIT_LOADER))
     if loaders:
         modules = split_modules(loaders[0].read_text(encoding="utf-8"))
@@ -274,7 +295,7 @@ def render(sizes, maybe_baseline, budget_bytes, guest_bytes, guest_budget_bytes)
     brotli_header = " brotli -11 |" if has_brotli else ""
     brotli_rule = "------------|" if has_brotli else ""
     lines = [
-        f"| Web wasm       | Uncompressed | gzip -9    |{brotli_header} gzip delta to main |",
+        f"| Web download   | Uncompressed | gzip -9    |{brotli_header} gzip delta to main |",
         f"|----------------|--------------|------------|{brotli_rule}--------------------|",
     ]
     for label, size, maybe_key in rows:

@@ -2026,11 +2026,11 @@ updated by hand and can't drift; one written before a crash means counting the d
 
 Two budgets, both on the **compressed** wasm (issue #910's follow-up, 2026-10-31). The strict one
 is a **guest's meeting**: somebody from outside who opens a meeting link, often once and in a
-browser that never saw the app, downloads the lobby (the app and the service worker), then, once
-let in, the meeting's split modules (`guest`, `calls`) with the shared chunks they import, and the
-call module. The looser one is a ceiling on a **signed-in first visit**: the app, the signed-in
-app's chunks that `init.js` fetches next to it, and the service worker, which is installed on the
-first visit too; a member loads it once, then from the service worker's cache. That is what a user waits for: the server sends the wasm
+browser that never saw the app, downloads the lobby (the app, the service worker and the UI's texts
+in one language), then, once let in, the meeting's split modules (`guest`, `calls`) with the shared
+chunks they import, and the call module. The looser one is a ceiling on a **signed-in first visit**:
+the app, the signed-in app's chunks that `init.js` fetches next to it, the texts, and the service
+worker, which is installed on the first visit too; a member loads it once, then from the service worker's cache. That is what a user waits for: the server sends the wasm
 with gzip or brotli, the browser compiles it while it streams (`instantiateStreaming`), and the
 service worker serves it from its cache on every later visit. The uncompressed size of a Leptos app
 of this scope is not a useful budget on its own; 10 MB uncompressed was reached with the features of
@@ -2043,12 +2043,12 @@ the chunks that load later. The limit:
 
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
-| A guest in a meeting: gzip -9 total  | 6,350,000 B  | fails; warns from 95 % (6.03 MB) |
-| Signed-in first visit: gzip -9 total | 5,800,000 B  | fails; warns from 95 % (5.51 MB) |
+| A guest in a meeting: gzip -9 total  | 6,280,000 B  | fails; warns from 95 % (5.97 MB) |
+| Signed-in first visit: gzip -9 total | 5,740,000 B  | fails; warns from 95 % (5.45 MB) |
 | The call module: gzip -9             | 1,000,000 B  | fails                            |
 
-Both budgets are the sizes measured below (#1413) plus about 6 %, so they warn only after real
-growth; before that they were 6.8 and 6.2 MB, the sizes of #1148 plus about 6 %. For a while they were 10 MB, because the guest's meeting had reached its budget of the time
+Both budgets are the sizes measured below (#1437) plus about 6 %, so they warn only after real
+growth; before that they were 6.35 and 5.8 MB (#1413), 6.8 and 6.2 MB, the sizes of #1148 plus about 6 %. For a while they were 10 MB, because the guest's meeting had reached its budget of the time
 (5.7 MB) and blocked unrelated pull requests; at 10 MB the check caught nothing. Before that the
 guest budget was the guest's meeting of 2026-10-31 plus about 4 %, the signed-in ceiling the
 signed-in first visit on `main` 8d653d3c plus about 10 %. The single budget before (4,700,000 B,
@@ -2059,6 +2059,36 @@ information. The uncompressed size is printed but not limited: what a user waits
 transfer. The earlier growth ratchet on it (11.85 MB) was dropped with the split (#334): main had
 outgrown it anyway, and the split moves code between files without changing what matters. Raising
 the budget is a decision, not a fix.
+
+#### The UI's texts as files of their own (#1437, 2026-11-08)
+
+Both languages' Fluent files were in the app's data (0.5 MB of text without comments, 0.14 MB gzip),
+which the split doesn't divide: every page carried both, and parsed both before the first view. The
+web app now embeds none. `scripts/finish-loader.sh` (the Trunk hook that already put the loading
+screen's texts into `init.js`) joins each language's files into one file of the build,
+`i18n/<language>-<hash>.ftl`, and names them in `init.js`. `init.js` fetches the language the app
+starts in (the saved setting, else the browser's language, as `settings.rs` decides) next to the
+app, and the app mounts only once it is there (`i18n::load_start_language`), so no view ever shows a
+message's key; without the file the loading screen shows its error with a retry. A switch to the
+other language fetches it, and the UI stays in the one it shows until it is there
+(`I18n::set_locale`). Native builds (the tests) still embed every file. The signed release lists the
+files as `lazy`: the service worker fetches the language a page asks for, a guest never downloads
+the other one, and a member's worker fetches it in the background with the other lazy files.
+`check-web-size.py` counts the larger language (German) in both budgets.
+
+Release `trunk build` on macOS (trunk 0.22.0, wasm-opt 131, the CI job's commands), `main`
+91c2166d, gzip -9:
+
+| Download                                      | Before      | After       | Delta      |
+|-----------------------------------------------|-------------|-------------|------------|
+| A guest in a meeting (lobby, meeting, calls)  | 5,984,442 B | 5,923,572 B | −60,870 B  |
+| Signed-in first visit                         | 5,476,064 B | 5,416,417 B | −59,647 B  |
+| The app (in both)                             | 2,760,505 B | 2,619,541 B | −140,964 B |
+| The texts, German (English: 66,911 B)         | in the app  | 75,689 B    |            |
+
+With English texts both visits are 8.8 kB smaller still. What is left is #1452: the service worker
+(0.49 MB gzip, in both budgets), the admin console's texts with the console (17 to 19 kB gzip of the
+language file), and the rest of #1437's list.
 
 #### The UI's JSON and the engine's member parts out of the app (#1413, 2026-11-08)
 
@@ -2102,8 +2132,8 @@ f3c055f8, gzip -9:
 `tabs` and `shell` are counted with every chunk they import; most of their JSON code is in a chunk the
 two share.
 
-What is left, with where it is, is #1437: the translations (left out here, as the console's
-strings changed at the same time in #1433), the member-only rounds of the engine's upkeep (role
+What was left, with where it is, was #1437: the translations (left out here, as the console's
+strings changed at the same time in #1433; done in #1437, above), the member-only rounds of the engine's upkeep (role
 signing), device linking, the guest's join page and the desktop-only parts of every browser page,
 the snapshot reads that still go through JSON in the page, and the service worker's growth.
 
