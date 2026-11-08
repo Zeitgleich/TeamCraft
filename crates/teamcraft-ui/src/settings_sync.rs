@@ -35,9 +35,7 @@ use crate::i18n::Locale;
 use crate::model::{ConversationId, UserId};
 use crate::prefs::Preferences;
 use crate::remote_backend;
-use crate::settings::{
-  SendMode, Settings, Theme, accounts_seen_on_device, browser_locale, load_json, store_json,
-};
+use crate::settings::{SendMode, Settings, accounts_seen_on_device, browser_locale, load_json, store_json};
 use crate::state::AppState;
 
 /// Where this device keeps what it last agreed on with the account. One account at a time, like the
@@ -51,7 +49,6 @@ const WRITE_DEBOUNCE: Duration = Duration::from_millis(1500);
 const FIRST_READ_RETRY: Duration = Duration::from_secs(5);
 const MAX_READ_RETRY: Duration = Duration::from_secs(300);
 
-const KEY_THEME: &str = "theme";
 const KEY_LOCALE: &str = "locale";
 const KEY_SEND_MODE: &str = "send_mode";
 const KEY_SHOW_JOIN_LEAVE: &str = "show_join_leave";
@@ -69,9 +66,9 @@ const PRIVATE_KEYS: [&str; 3] = [
 /// out of the preferences (`LocalValues::is_call_open`), so another device can't change the running
 /// call; a change in Settings here applies as usual.
 const CALL_KEY_PREFIX: &str = "calls.";
-/// Synced settings outside [`Preferences`], which have signals of their own.
-const SYNCED_TOP_LEVEL: [&str; 6] = [
-  KEY_THEME,
+/// Synced settings outside [`Preferences`], which have signals of their own. Light, dark or as the
+/// system stays on each device (it follows the room and the screen); colour themes (#202) will sync.
+const SYNCED_TOP_LEVEL: [&str; 5] = [
   KEY_LOCALE,
   KEY_SEND_MODE,
   KEY_SHOW_JOIN_LEAVE,
@@ -204,7 +201,6 @@ struct SyncState {
 /// The settings [`Settings`] holds for syncing, as plain values.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LocalValues {
-  theme: Theme,
   locale: Locale,
   default_locale: Locale,
   send_mode: SendMode,
@@ -262,7 +258,6 @@ pub fn start(state: AppState, settings: Settings) {
     phase
   });
   Effect::new(move |_| {
-    settings.theme.track();
     settings.locale.track();
     settings.send_mode.track();
     settings.show_join_leave.track();
@@ -448,7 +443,6 @@ impl LocalValues {
   /// The current values; `None` once the shell is gone.
   fn capture(settings: Settings) -> Option<Self> {
     Some(Self {
-      theme: settings.theme.try_get_untracked()?,
       locale: settings.locale.try_get_untracked()?,
       default_locale: browser_locale(),
       send_mode: settings.send_mode.try_get_untracked()?,
@@ -462,9 +456,6 @@ impl LocalValues {
 
   /// Sets the signals that changed, so each only tells its readers when it has news.
   fn apply(self, settings: Settings) {
-    if settings.theme.try_get_untracked() != Some(self.theme) {
-      settings.theme.try_set(self.theme);
-    }
     if settings.locale.try_get_untracked() != Some(self.locale) {
       settings.locale.try_set(self.locale);
     }
@@ -501,7 +492,6 @@ impl LocalValues {
 
   fn defaults(default_locale: Locale) -> Self {
     Self {
-      theme: Theme::System,
       locale: default_locale,
       default_locale,
       send_mode: SendMode::Enter,
@@ -526,7 +516,6 @@ impl SyncedValues for LocalValues {
 
   fn read(&self, key: &str) -> Option<Value> {
     match key {
-      KEY_THEME => Some(json!(self.theme.slug())),
       KEY_LOCALE => Some(json!(self.locale.tag())),
       KEY_SEND_MODE => Some(json!(self.send_mode.slug())),
       KEY_SHOW_JOIN_LEAVE => Some(json!(self.show_join_leave)),
@@ -542,7 +531,6 @@ impl SyncedValues for LocalValues {
 
   fn adopt(&mut self, key: &str, value: &Value) -> bool {
     match key {
-      KEY_THEME => assign(&mut self.theme, value.as_str().and_then(Theme::from_slug)),
       KEY_LOCALE => assign(&mut self.locale, value.as_str().and_then(Locale::from_tag)),
       KEY_SEND_MODE => assign(&mut self.send_mode, value.as_str().and_then(SendMode::from_slug)),
       KEY_SHOW_JOIN_LEAVE => assign(&mut self.show_join_leave, value.as_bool()),
@@ -570,12 +558,16 @@ fn assign<T>(place: &mut T, maybe_value: Option<T>) -> bool {
 mod tests {
   use std::collections::BTreeSet;
 
+  use teamcraft_client_api::calls::CallStatusSounds;
+  use teamcraft_client_api::mobile_settings::{MOBILE_KEYS, MobileSettings};
   use teamcraft_client_api::settings_sync::SettingBase;
   use teamcraft_proto::synced_settings::SettingEntry;
   use teamcraft_proto::{DeviceId, Id, Snowflake};
 
   use super::*;
-  use crate::prefs::{Density, NotifyLevel, Zoom};
+  use crate::prefs::{AnimatedImages, Density, ListGrouping, NotifyLevel, SidebarLayout, Zoom};
+
+  const KEY_DENSITY: &str = "display.density";
 
   mod lists {
     use super::*;
@@ -621,10 +613,61 @@ mod tests {
         assert!(!SYNCED_PREFS.contains(&key), "{key}");
       }
     }
+
+    /// The mobile apps write the same keys (`teamcraft_client_api::mobile_settings`); a key only
+    /// they knew would never reach web and desktop.
+    #[test]
+    fn every_mobile_key_is_synced_here() {
+      for key in MOBILE_KEYS {
+        assert!(
+          SYNCED_TOP_LEVEL.contains(&key) || SYNCED_PREFS.contains(&key),
+          "{key}"
+        );
+      }
+    }
   }
 
   mod values {
     use super::*;
+
+    /// Every value web and desktop write for a key the phones share reads the same there, except
+    /// values a phone has no counterpart for (hovering), which leave the phone's own in place.
+    #[test]
+    fn the_mobile_apps_read_what_this_client_writes() {
+      let mut desktop = values();
+      let mut phone = MobileSettings::default();
+      let without_phone_counterpart = [json!("on_hover")];
+      for (key, choices) in [
+        ("sidebar.layout", to_values(&SidebarLayout::ALL)),
+        ("sidebar.list_grouping", to_values(&ListGrouping::ALL)),
+        ("display.animated_images", to_values(&AnimatedImages::ALL)),
+        (
+          "calls.status_sounds",
+          to_values(&[
+            CallStatusSounds::All,
+            CallStatusSounds::OwnOnly,
+            CallStatusSounds::Off,
+          ]),
+        ),
+        ("privacy.share_typing", vec![json!(false), json!(true)]),
+        ("notifications.keywords", vec![json!(["a", "b"]), json!([])]),
+        ("notifications.confirm_channel_over", vec![json!(0), json!(25)]),
+      ] {
+        for value in choices {
+          assert!(desktop.adopt(key, &value), "{key} {value}");
+          let written = desktop.read(key).unwrap();
+          let is_taken = phone.adopt(key, &written);
+          assert_eq!(
+            is_taken,
+            !without_phone_counterpart.contains(&written),
+            "{key} {written}"
+          );
+          if is_taken {
+            assert_eq!(phone.read(key), Some(written), "{key}");
+          }
+        }
+      }
+    }
 
     #[test]
     fn every_key_reads_and_takes_its_own_value_back() {
@@ -640,13 +683,7 @@ mod tests {
     #[test]
     fn a_value_of_a_newer_client_is_refused_and_changes_nothing() {
       let mut local = values();
-      for key in [
-        "display.density",
-        KEY_THEME,
-        KEY_LOCALE,
-        KEY_SEND_MODE,
-        KEY_SKIN_TONE,
-      ] {
+      for key in ["display.density", KEY_LOCALE, KEY_SEND_MODE, KEY_SKIN_TONE] {
         assert!(!local.adopt(key, &json!("from-the-future")), "{key}");
       }
       assert_eq!(local, values());
@@ -680,12 +717,10 @@ mod tests {
     #[test]
     fn stored_names_stay_stable() {
       let mut local = values();
-      local.theme = Theme::Dark;
       local.prefs.display.density = Density::Compact;
       local.prefs.display.animated_images = crate::prefs::AnimatedImages::OnHover;
       local.prefs.notifications.desktop = NotifyLevel::Mentions;
       assert_eq!(local.read("display.animated_images"), Some(json!("on_hover")));
-      assert_eq!(local.read("theme"), Some(json!("dark")));
       assert_eq!(local.read("display.density"), Some(json!("compact")));
       assert_eq!(local.read("notifications.desktop"), Some(json!("mentions")));
     }
@@ -706,7 +741,6 @@ mod tests {
     #[test]
     fn a_new_install_gets_the_customized_settings_of_the_account() {
       let mut browser = values();
-      browser.theme = Theme::Dark;
       browser.prefs.display.density = Density::Compact;
       browser.prefs.notifications.keywords = vec!["release".to_owned()];
       browser.prefs.display.zoom = Zoom::from_percent(150);
@@ -714,7 +748,7 @@ mod tests {
       let writes = reconcile(&mut browser, &SyncedSettings::new(), &mut browser_bases);
       assert_eq!(
         writes.len(),
-        3,
+        2,
         "only what was customized, zoom stays: {writes:?}"
       );
 
@@ -724,7 +758,6 @@ mod tests {
       let mut desktop = values();
       let mut desktop_bases = SettingBases::new();
       assert!(reconcile(&mut desktop, &account, &mut desktop_bases).is_empty());
-      assert_eq!(desktop.theme, Theme::Dark);
       assert_eq!(desktop.prefs.display.density, Density::Compact);
       assert_eq!(desktop.prefs.notifications.keywords, ["release"]);
       assert_eq!(desktop.prefs.display.zoom, Zoom::DEFAULT, "zoom stays per device");
@@ -733,10 +766,10 @@ mod tests {
     #[test]
     fn a_setting_customized_on_this_device_is_kept() {
       let mut desktop = values();
-      desktop.theme = Theme::Light;
+      desktop.prefs.display.density = Density::Bubbles;
       let mut bases = SettingBases::new();
-      assert!(reconcile(&mut desktop, &entry(KEY_THEME, json!("dark")), &mut bases).is_empty());
-      assert_eq!(desktop.theme, Theme::Light);
+      assert!(reconcile(&mut desktop, &entry(KEY_DENSITY, json!("compact")), &mut bases).is_empty());
+      assert_eq!(desktop.prefs.display.density, Density::Bubbles);
     }
   }
 
@@ -770,8 +803,8 @@ mod tests {
       let mut local = values();
       local.is_call_open = true;
       let mut bases = SettingBases::new();
-      reconcile(&mut local, &entry(KEY_THEME, json!("dark")), &mut bases);
-      assert_eq!(local.theme, Theme::Dark);
+      reconcile(&mut local, &entry(KEY_DENSITY, json!("compact")), &mut bases);
+      assert_eq!(local.prefs.display.density, Density::Compact);
     }
   }
 
@@ -784,7 +817,7 @@ mod tests {
       local.prefs.display.zoom = Zoom::from_percent(150);
       let mut state = state_of(1);
       begin_account(&mut local, &mut state, user(2), &[]);
-      assert_eq!(local.theme, Theme::System);
+      assert_eq!(local.prefs.display.density, Density::Comfortable);
       assert!(local.prefs.notifications.keywords.is_empty());
       assert_eq!(local.prefs.display.zoom.percent(), 150, "the device's own stay");
       assert!(state.bases.is_empty());
@@ -809,7 +842,11 @@ mod tests {
         let mut local = customized();
         let mut state = SyncState::default();
         begin_account(&mut local, &mut state, user(2), &["1".to_owned()]);
-        assert_eq!(local.theme, Theme::Dark, "the look stays on the device");
+        assert_eq!(
+          local.prefs.display.density,
+          Density::Compact,
+          "the look stays on the device"
+        );
         assert!(local.prefs.notifications.keywords.is_empty());
         assert!(reconcile(&mut local, &SyncedSettings::new(), &mut state.bases).is_empty());
       }
@@ -845,7 +882,7 @@ mod tests {
         begin_account(&mut local, &mut state, user(2), &["2".to_owned()]);
         let writes = reconcile(&mut local, &SyncedSettings::new(), &mut state.bases);
         assert_eq!(writes.len(), 1, "{writes:?}");
-        assert_eq!(writes[0].key, KEY_THEME);
+        assert_eq!(writes[0].key, KEY_DENSITY);
         assert_eq!(
           local.prefs.notifications.keywords,
           ["private"],
@@ -865,16 +902,16 @@ mod tests {
         let mut local = customized();
         let mut state = SyncState::default();
         begin_account(&mut local, &mut state, user(2), &["1".to_owned()]);
-        local.theme = Theme::Light;
+        local.prefs.display.density = Density::Bubbles;
         let writes = reconcile(&mut local, &SyncedSettings::new(), &mut state.bases);
         assert_eq!(writes.len(), 1, "{writes:?}");
-        assert_eq!(writes[0].key, KEY_THEME);
+        assert_eq!(writes[0].key, KEY_DENSITY);
       }
     }
 
     fn customized() -> LocalValues {
       let mut local = values();
-      local.theme = Theme::Dark;
+      local.prefs.display.density = Density::Compact;
       local.prefs.notifications.keywords = vec!["private".to_owned()];
       local
     }
@@ -883,9 +920,9 @@ mod tests {
       SyncState {
         maybe_user: Some(user(raw)),
         bases: [(
-          KEY_THEME.to_owned(),
+          KEY_DENSITY.to_owned(),
           SettingBase {
-            value: json!("dark"),
+            value: json!("compact"),
             maybe_stamp: None,
             is_held: false,
             is_device_only: false,
@@ -924,5 +961,12 @@ mod tests {
 
   fn device(raw: i64) -> DeviceId {
     DeviceId::from_snowflake(Snowflake::new(raw).unwrap())
+  }
+
+  fn to_values<T: Serialize>(choices: &[T]) -> Vec<Value> {
+    choices
+      .iter()
+      .map(|choice| serde_json::to_value(choice).unwrap())
+      .collect()
   }
 }

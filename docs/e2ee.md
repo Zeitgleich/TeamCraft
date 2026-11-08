@@ -3697,12 +3697,24 @@ restored together with them on a new device.
   key bag is stored, uploads still pending, and which wraps exist (passphrase, passkey,
   organization). The server learns nothing new. When the recovery kit was last made is kept the
   same way (`recovery_key_set_at`, §6.5).
-- **User settings** (issue #945): theme, language, layout, notification words and the like, under
+- **User settings** (issue #945): language, layout, notification words and the like, under
   `settings`, one entry per setting: `{ value, version, writer }`, with the value opaque JSON to
   everything but the client that reads that key. The server sees neither names nor values. What is
-  synced and what stays on the device is listed in `teamcraft-ui/src/settings_sync.rs`; settings
-  the server enforces (push, do not disturb, mutes, read receipts) stay with the server and aren't
-  copied here.
+  synced and what stays on the device is listed in `teamcraft-ui/src/settings_sync.rs` (web and
+  desktop) and `teamcraft-client-api/src/mobile_settings.rs` (Android and iOS, the same keys and
+  values); settings the server enforces (push, do not disturb, conversation and space mutes, read
+  receipts) stay with the server and aren't copied here. Light, dark or as the system stays on
+  each device, since it follows the room and the screen; colour themes (#202) are meant to sync.
+  An entry an older client wrote for a key no client reads any more (`theme`) stays as an unknown
+  key.
+  - *Mobile:* the apps sync the list layout and grouping, animated images, sharing typing, the
+    mention rules (first name, `@channel`, keywords, the `@channel` confirmation) and call status
+    sounds. The send key, language, wallpaper colours, notification content, media downloads and
+    devices stay on the phone. The app hands its values to the core (`sync_settings`) at start,
+    when `settings_mark` moved after a store change, and 1.5 s after the user changed one, and
+    stores an opaque state (owner and per-setting bases) next to its settings. A phone holds one
+    account at a time, so with no owner on record its values count as this account's and are
+    offered, except keywords, which stay device-only as on web.
   - *Merge:* per setting the higher `version` wins, then the higher `writer` (the device ID). A
     change takes the version after the one its device holds. No clock is involved, unlike the rest
     of the account data, so a wrong device clock can't decide. The order is total, so every device
