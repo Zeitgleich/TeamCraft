@@ -14,6 +14,7 @@ use super::Client;
 use super::catch_up::FirstPages;
 use super::read_ahead::FirstListing;
 use super::server_changes::Observed;
+use super::workspace_admin::StoredRoster;
 use crate::api::{ApiError, ServerApi};
 use crate::clock::{Clock, SystemClock};
 use crate::error::CoreError;
@@ -535,7 +536,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       if space.maybe_my_role.is_none() || self.is_space_unlisted(space.id) {
         continue;
       }
-      match self.unchanged_space_members(space.id) {
+      // The space lists DMs with its members (#701), from the stored list: one this device never
+      // stored (an update from before it kept them) is read even when the head says unchanged.
+      let has_roster = self
+        .store
+        .get(Table::SpaceRosters, &space.id.to_string())?
+        .is_some();
+      match self.unchanged_space_members(space.id).filter(|_| has_roster) {
         Some(members) => listed.extend(members),
         None => due.push(space.id),
       }
@@ -555,6 +562,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         ids.push(member.user.id);
       }
       listed.extend(ids.iter().copied());
+      records::put_json(
+        &self.store,
+        Table::SpaceRosters,
+        &space.to_string(),
+        &StoredRoster::Visible(members),
+      )?;
       self.note_space_seen(space, ids);
     }
     Ok(listed)

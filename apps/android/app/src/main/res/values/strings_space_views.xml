@@ -3,6 +3,8 @@
   <string name="space_views_open">Show people, calls, meetings, saved messages and files</string>
   <string name="space_views_switch">Switch space</string>
   <string name="space_tab_people">People</string>
+  <string name="space_tab_direct_messages">Direct messages</string>
+  <string name="space_direct_messages_empty">Direct messages with people of this space show up here. They stay in your chats too.</string>
   <string name="space_tab_calls">Calls</string>
   <string name="space_tab_meetings">Meetings</string>
   <string name="space_tab_saved">Saved</string>

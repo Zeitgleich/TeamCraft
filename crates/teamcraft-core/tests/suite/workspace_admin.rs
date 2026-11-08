@@ -379,10 +379,10 @@ async fn space_settings_list_change_and_remove_members_and_withdraw_invitations(
   });
   run_commands(&mut alice, &alice_ui).await;
 
-  assert_eq!(
-    alice_ui.space_members(space),
-    SpaceRoster::Loading,
-    "nothing until the settings ask"
+  // The sync keeps the member list, for the DMs a space lists (#701); the settings read it afresh.
+  assert!(
+    matches!(alice_ui.space_members(space), SpaceRoster::Loaded(_)),
+    "the sync keeps the member list"
   );
   alice_ui.refresh_space_roster(space);
   run_commands(&mut alice, &alice_ui).await;

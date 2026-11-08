@@ -4505,6 +4505,22 @@
         }
       }
     },
+    "space_direct_messages_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Direct messages with people of this space show up here. They stay in your chats too."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Direktnachrichten mit Personen aus diesem Space erscheinen hier. Sie bleiben auch in deinen Chats."
+          }
+        }
+      }
+    },
     "space_files_empty": {
       "localizations": {
         "en": {
@@ -4629,6 +4645,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Anrufe"
+          }
+        }
+      }
+    },
+    "space_tab_direct_messages": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Direct messages"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Direktnachrichten"
           }
         }
       }

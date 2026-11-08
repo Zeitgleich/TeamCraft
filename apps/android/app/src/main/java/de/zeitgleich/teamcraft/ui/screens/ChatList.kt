@@ -1588,7 +1588,7 @@ private fun presenceLabel(presence: Presence): Int = when (presence) {
  * minimum width keeps the name from shifting while the count changes.
  */
 @Composable
-private fun RowCount(badge: RowBadge, isMuted: Boolean) {
+internal fun RowCount(badge: RowBadge, isMuted: Boolean) {
   val colors = LocalTeamCraftColors.current
   val description = pluralStringResource(
     // A red badge in a muted conversation counts only its mentions.

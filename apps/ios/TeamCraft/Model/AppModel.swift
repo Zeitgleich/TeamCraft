@@ -900,6 +900,14 @@ final class AppModel {
     await answer(.spaceCallHistory(spaceId: spaceId))?.calls ?? []
   }
 
+  /// The IDs of the DMs and group DMs the space shows (#701), as the core decided them.
+  func spaceDirectConversationIds(spaceId: String) async -> [String] {
+    guard let json = try? await core().snapshot(), let snapshot = Wire.decode(SpaceDirectSnapshot.self, from: json) else {
+      return []
+    }
+    return snapshot.spaces.first { $0.id == spaceId }?.directConversations ?? []
+  }
+
   func roster(spaceId: String) async -> SpaceRoster? {
     await answer(.spaceMembers(spaceId: spaceId))?.roster
   }

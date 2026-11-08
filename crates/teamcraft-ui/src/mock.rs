@@ -16,6 +16,7 @@ use teamcraft_client_api::activity::{ActivityFeed, ActivityItem, ActivityKind};
 use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
 use teamcraft_client_api::drafts::{DraftFileItem, DraftFileState, DraftItem, SentItem};
 use teamcraft_client_api::privacy::{LastSeenVisibility, PrivacySettings};
+use teamcraft_core::space_dms::is_with_members;
 
 use crate::backend::ChatBackend;
 use crate::calls::BackgroundImageInfo;
@@ -253,6 +254,7 @@ impl MockBackend {
           deleted_channel_count: 0,
           can_create_channels: true,
           maybe_my_role: Some(SpaceRole::SpaceAdmin),
+          direct_conversations: Vec::new(),
         },
         Space {
           id: space_b(),
@@ -272,6 +274,7 @@ impl MockBackend {
           deleted_channel_count: 0,
           can_create_channels: false,
           maybe_my_role: Some(SpaceRole::Member),
+          direct_conversations: Vec::new(),
         },
       ],
       conversations: demo_conversations(),
@@ -620,7 +623,24 @@ impl ChatBackend for MockBackend {
   }
 
   fn spaces(&self) -> Vec<Space> {
-    self.state.borrow().spaces.clone()
+    let mut spaces = self.state.borrow().spaces.clone();
+    let me = self.me().id;
+    for space in &mut spaces {
+      let SpaceRoster::Loaded(roster) = self.space_members(space.id) else {
+        continue;
+      };
+      let members: HashSet<UserId> = roster.into_iter().map(|member| member.user).collect();
+      space.direct_conversations = self
+        .state
+        .borrow()
+        .conversations
+        .iter()
+        .filter(|conversation| conversation.kind.is_direct_like())
+        .filter(|conversation| is_with_members(me, conversation.member_ids.iter().copied(), &members))
+        .map(|conversation| conversation.id)
+        .collect();
+    }
+    spaces
   }
 
   fn space_members(&self, space: SpaceId) -> SpaceRoster {

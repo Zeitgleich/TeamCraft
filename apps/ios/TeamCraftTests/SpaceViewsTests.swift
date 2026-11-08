@@ -10,6 +10,26 @@ final class SpaceViewsTests: XCTestCase {
       maybeSpaceImageVersion: imageVersion)
   }
 
+  /// #701: a space shows the DMs the core named for it, newest first, and nothing else.
+  func testASpaceShowsItsDirectMessagesNewestFirst() {
+    func direct(_ id: String, _ name: String, kind: ConversationKind = .direct) -> ConversationItem {
+      ConversationItem(
+        id: id, maybeSpaceId: nil, maybeSpaceName: nil, kind: kind, name: name, topic: "",
+        unreadCount: 0, mentionCount: 0, isFavorite: false, isMuted: false, canPost: true, isNotesToSelf: false,
+        maybeSpaceImageVersion: nil)
+    }
+    let conversations = [
+      item("1", space: ("1", "Project A")), direct("2", "Amy"), direct("3", "Bob"),
+      direct("4", "Amy, Bob", kind: .group), direct("5", "Carl"),
+    ]
+    let result = spaceDirectMessages(
+      conversations, ids: ["1", "2", "3", "4"],
+      lastActivity: ["3": Date(timeIntervalSince1970: 30), "4": Date(timeIntervalSince1970: 40)])
+    // The channel is no DM; Carl is not with the space's people.
+    XCTAssertEqual(result.map(\.name), ["Amy, Bob", "Bob", "Amy"])
+    XCTAssertEqual(spaceDirectMessages(conversations, ids: []), [])
+  }
+
   func testAChoiceCarriesThePictureVersion() {
     let choices = spaceChoices([item("1", space: ("1", "Project A"), imageVersion: "v2")])
     XCTAssertEqual(choices.map(\.maybeImageVersion), ["v2"])

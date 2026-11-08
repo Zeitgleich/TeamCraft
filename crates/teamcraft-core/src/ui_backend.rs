@@ -730,6 +730,8 @@ pub struct CoreChatBackend<S> {
   pub(crate) activity: RefCell<HashMap<ConversationId, crate::ui_activity::KeptActivity>>,
   /// The user's own messages per conversation, kept while it doesn't change (#1220).
   pub(crate) sent: RefCell<HashMap<ConversationId, crate::ui_drafts::KeptSent>>,
+  /// Each space's members as a set, kept while its stored member list doesn't change (#701).
+  pub(crate) space_members_kept: RefCell<HashMap<SpaceId, crate::space_dms::KeptMembers>>,
   /// Tallies counted and not kept yet ([`Self::flush_entry_tallies`]).
   entry_tallies: RefCell<BTreeMap<ConversationId, EntryTally>>,
   /// What the snapshot's entries count ([`Self::with_entry_need`]).
@@ -801,6 +803,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       mentions: RefCell::default(),
       activity: RefCell::default(),
       sent: RefCell::default(),
+      space_members_kept: RefCell::default(),
       entry_tallies: RefCell::default(),
       entry_need: EntryNeed::Everything,
       live_unread: RefCell::default(),
@@ -2087,9 +2090,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     let spaces: Vec<SpaceResponse> = self.read(records::list_json(&self.store, Table::Spaces));
     // A channel moved into a space keeps its members, who may not belong to the space itself.
     let conversations = self.conversations_raw();
-    spaces
+    let spaces: Vec<SpaceResponse> = spaces
       .into_iter()
       .filter(|space| space.maybe_my_role.is_some() || has_channel_in(&conversations, space.id))
+      .collect();
+    let ids: Vec<SpaceId> = spaces.iter().map(|space| space.id).collect();
+    let mut direct = self.space_direct_conversations_of(&ids, &conversations);
+    spaces
+      .into_iter()
       .map(|space| Space {
         id: space.id,
         name: space.name,
@@ -2113,6 +2121,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         // An older server leaves the hint out (taken as allowed); its guests still create nothing.
         can_create_channels: space.can_create_channels && space.maybe_my_role != Some(SpaceRole::Guest),
         maybe_my_role: space.maybe_my_role.clone(),
+        direct_conversations: direct.remove(&space.id).unwrap_or_default(),
       })
       .collect()
   }

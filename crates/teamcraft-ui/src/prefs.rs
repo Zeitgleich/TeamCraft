@@ -830,6 +830,9 @@ pub struct SidebarPrefs {
   /// in their normal place and only the bold name and the count mark them, so the list doesn't
   /// move under the pointer while the user works through them (#890).
   pub shows_unreads_section: bool,
+  /// A space lists the DMs and group DMs with its people too, in a section of its own (#701). They
+  /// stay in Chats; the space's rail entry counts their unread messages.
+  pub shows_space_dms: bool,
 }
 
 impl Default for SidebarPrefs {
@@ -843,6 +846,7 @@ impl Default for SidebarPrefs {
       is_grouped_by_space: false,
       reopen_last_conversation: true,
       shows_unreads_section: false,
+      shows_space_dms: true,
     }
   }
 }
