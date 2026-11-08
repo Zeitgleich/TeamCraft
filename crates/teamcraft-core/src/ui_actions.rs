@@ -776,6 +776,42 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
+  /// The newest `CallMoved` announced in `conversation` (issue #1321), named as
+  /// [`Self::with_room_name`] names it: the room's name is empty if the user isn't in the room.
+  pub(crate) fn ui_moved_call(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::notetaker::MovedCall> {
+    let mut newest: Option<(i64, UserId, ConversationId)> = None;
+    self.with_all_messages(conversation, &mut |all| {
+      for stored in all {
+        let MessageContent::Event {
+          event: ConversationEvent::CallMoved { meeting, .. },
+        } = &stored.content
+        else {
+          continue;
+        };
+        if newest.is_none_or(|(at, ..)| stored.sent_at_ms >= at) {
+          newest = Some((stored.sent_at_ms, stored.sender_user_id, *meeting));
+        }
+      }
+    });
+    let (moved_at, by, room) = newest?;
+    let WorkspaceEvent::CallMoved { room_name, .. } = self.with_room_name(WorkspaceEvent::CallMoved {
+      by,
+      room,
+      room_name: String::new(),
+    }) else {
+      return None;
+    };
+    Some(teamcraft_client_api::notetaker::MovedCall {
+      by,
+      room,
+      room_name,
+      moved_at,
+    })
+  }
+
   /// `event` with the name of the room a call moved into, as the sidebar shows it, if the user is
   /// in that room (issue #1290): the line links to it then. Other events as they are.
   fn with_room_name(&self, event: WorkspaceEvent) -> WorkspaceEvent {

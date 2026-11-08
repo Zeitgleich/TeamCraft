@@ -75,7 +75,7 @@ struct ChatPane: View {
   @State private var maybeReactionTarget: String?
   /// A call about to be joined whose running call has the notetaker in it: the user confirms
   /// after the notice (`true`: with video).
-  @State private var maybeNotetakerCall: Bool?
+  @State private var maybePreJoin: PreJoinNotice?
   /// Whether voice messages may be recorded here and how long (#204).
   @State private var voicePolicy = VoiceMessagePolicy.fallback
   @AppStorage("share_typing") private var isSharingTyping = true
@@ -254,11 +254,15 @@ struct ChatPane: View {
     .task(id: model.changeCount) {
       isSchedulingAllowed = await model.scheduledOverview()?.policy.isEnabled == true
     }
-    .alert("call_start", isPresented: notetakerCallBinding, presenting: maybeNotetakerCall) { withVideo in
-      Button("call_prejoin_join") { startCall(withVideo: withVideo) }
+    .alert("call_start", isPresented: preJoinBinding, presenting: maybePreJoin) { notice in
+      Button("call_prejoin_join") { startCall(withVideo: notice.withVideo) }
+      if let moved = notice.maybeMoved {
+        // The call moved into a room that runs now: latecomers go there (issue #1321).
+        Button("event_call_moved_open") { model.openConversationId = moved.roomId }
+      }
       Button("cancel", role: .cancel) {}
-    } message: { _ in
-      Text("call_prejoin_notetaker")
+    } message: { notice in
+      Text(verbatim: notice.message)
     }
     .alert("send_failed", isPresented: $isSendFailed) {
       Button("done", role: .cancel) {}
@@ -732,15 +736,18 @@ struct ChatPane: View {
       || (maybeEditing == nil && (!attachments.isEmpty || !sendableOtherFiles.isEmpty))
   }
 
-  private var notetakerCallBinding: Binding<Bool> {
-    Binding(get: { maybeNotetakerCall != nil }, set: { if !$0 { maybeNotetakerCall = nil } })
+  private var preJoinBinding: Binding<Bool> {
+    Binding(get: { maybePreJoin != nil }, set: { if !$0 { maybePreJoin = nil } })
   }
 
-  /// The call buttons: where the running call has the notetaker in it, the notice comes first, as on
-  /// the pre-join screens of desktop, web and Android (e2ee.md §8.2); otherwise the call starts.
+  /// The call buttons: where the running call has the notetaker in it, or the conversation's call
+  /// moved into a room that runs now, the notice comes first, as on the pre-join screens of
+  /// desktop, web and Android (e2ee.md §8.2, issue #1321); otherwise the call starts.
   private func prepareCall(withVideo: Bool) async {
-    if await model.isNotetakerInRunningCall(conversationId: conversation.id) {
-      maybeNotetakerCall = withVideo
+    let isNotetakerIn = await model.isNotetakerInRunningCall(conversationId: conversation.id)
+    let maybeMoved = await model.movedCallHint(conversationId: conversation.id)
+    if isNotetakerIn || maybeMoved != nil {
+      maybePreJoin = PreJoinNotice(withVideo: withVideo, isNotetakerIn: isNotetakerIn, maybeMoved: maybeMoved)
     } else {
       startCall(withVideo: withVideo)
     }
@@ -1454,5 +1461,25 @@ struct SwipeToReply<Content: View>: View {
         isPastThreshold = false
         withAnimation(.spring(duration: 0.25)) { offset = 0 }
       }
+  }
+}
+
+/// What the call buttons say before joining: the running call has the notetaker in it, and/or the
+/// conversation's call moved into a room that runs now (issue #1321).
+struct PreJoinNotice {
+  let withVideo: Bool
+  let isNotetakerIn: Bool
+  let maybeMoved: MovedCallHint?
+
+  /// The sentences that apply, one paragraph each.
+  var message: String {
+    var lines: [String] = []
+    if let moved = maybeMoved {
+      lines.append(String(localized: "call_prejoin_moved \(moved.roomName)"))
+    }
+    if isNotetakerIn {
+      lines.append(String(localized: "call_prejoin_notetaker"))
+    }
+    return lines.joined(separator: "\n\n")
   }
 }

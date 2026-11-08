@@ -9,7 +9,7 @@ use teamcraft_client_api::backend::ChatBackend as _;
 use teamcraft_client_api::meeting_invitees::{GUEST_ACCESS_GRACE_MS, adding_invitee, saved_change};
 use teamcraft_client_api::model::ConversationKind;
 use teamcraft_client_api::notetaker::{
-  AddRoute, ConversationRights, add_route, conversation_rights, may_ask_in,
+  AddRoute, ConversationRights, add_route, conversation_rights, may_ask_in, moved_call_hint,
 };
 use teamcraft_core::CoreError;
 use teamcraft_core::api::ServerApi as _;
@@ -40,7 +40,49 @@ pub enum NotetakerAddition {
   MoveToRoom,
 }
 
+/// Where the call of a conversation went, for somebody who comes to it late
+/// ([`crate::TeamCraft::moved_call_hint`]).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MovedCallHint {
+  /// The meeting room the call moved into, which the user is a member of.
+  pub room_id: String,
+  /// The room's name as the chat list shows it.
+  pub room_name: String,
+  /// Who moved the call.
+  pub by_user_id: String,
+}
+
 impl Engine {
+  /// The room the call of `conversation_id` moved into, if it did, the user is in the room and the
+  /// room's call runs with others in it now (issue #1321); `None` otherwise. Never starts a call.
+  pub(crate) async fn moved_call_hint(
+    &self,
+    conversation_id: &str,
+  ) -> Result<Option<MovedCallHint>, TeamCraftError> {
+    let conversation: ConversationId = parse_id(conversation_id)?;
+    let backend = self.backend()?;
+    let me = backend.me().id;
+    let Some(moved) = backend
+      .moved_call(conversation)
+      .filter(|moved| !moved.room_name.is_empty())
+    else {
+      return Ok(None);
+    };
+    let maybe_call = self
+      .api()
+      .running_call(moved.room)
+      .await
+      .map_err(CoreError::from)?;
+    let room_has_others = !others_in_call(maybe_call.as_ref(), me).is_empty();
+    Ok(
+      moved_call_hint(Some(moved), room_has_others, SystemClock.now_ms()).map(|moved| MovedCallHint {
+        room_id: moved.room.to_string(),
+        room_name: moved.room_name,
+        by_user_id: moved.by.to_string(),
+      }),
+    )
+  }
+
   /// The others in the call running in `conversation_id`, as the server's roster lists them; empty
   /// when none runs. Never starts a call.
   pub(crate) async fn call_participants(&self, conversation_id: &str) -> Result<Vec<String>, TeamCraftError> {

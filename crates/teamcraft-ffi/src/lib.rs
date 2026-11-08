@@ -56,7 +56,7 @@ pub use media_viewer::{
   AlbumLayout, MediaScope, MediaViewer, MediaViewerItem, MediaViewerLimits, MediaViewerState,
   OriginalDownload, album_layout, fetches_original_automatically, media_viewer_limits,
 };
-pub use notetaker::NotetakerAddition;
+pub use notetaker::{MovedCallHint, NotetakerAddition};
 pub use server_entry::{
   CheckedServer, ServerAddress, ServerEntryError, SignInOption, SignInPageInfo, StoredServer,
   check_server_info, normalize_server_address, sign_in_page, sso_only_sign_in_page, stored_server,
@@ -1098,6 +1098,20 @@ impl TeamCraft {
   pub async fn call_participants(&self, conversation_id: String) -> Result<Vec<String>, TeamCraftError> {
     self
       .call(move |engine| Box::pin(async move { engine.call_participants(&conversation_id).await }))
+      .await
+  }
+
+  /// Where the call of `conversation_id` went, for somebody who comes to it late (issue #1321): the
+  /// newest move announced in the conversation, if the user is a member of the room and the room's
+  /// call runs with others in it now, and the announcement is not hours old. The apps show "The
+  /// call moved into a room with the notetaker" with a way into the room before joining or starting
+  /// the conversation's call. `None` when there is nothing to point at. Never starts a call.
+  pub async fn moved_call_hint(
+    &self,
+    conversation_id: String,
+  ) -> Result<Option<MovedCallHint>, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.moved_call_hint(&conversation_id).await }))
       .await
   }
 

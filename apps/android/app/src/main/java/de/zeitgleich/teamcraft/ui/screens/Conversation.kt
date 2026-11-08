@@ -56,6 +56,7 @@ import de.zeitgleich.teamcraft.ui.PictureEdits
 import de.zeitgleich.teamcraft.ui.Pictures
 import androidx.compose.material3.Button
 import uniffi.teamcraft_ffi.CallPhase
+import uniffi.teamcraft_ffi.MovedCallHint
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -282,7 +283,7 @@ fun ConversationScreen(
     topBar = {
       val typingPlaces by viewModel.typingPlaces.collectAsState()
       ConversationTopBar(snapshot, conversation, maybeNotified, maybeListed, onBack, typing = typingIn(typingPlaces, conversationId)) {
-        ConversationMenu(viewModel, conversationId, conversation, rights, onOpenFiles)
+        ConversationMenu(viewModel, conversationId, conversation, rights, onOpenFiles, onOpenConversation)
       }
     },
   ) {
@@ -512,6 +513,7 @@ private fun ConversationMenu(
   maybeConversation: Conversation?,
   rights: ConversationRights,
   onOpenFiles: () -> Unit,
+  onOpenConversation: (String) -> Unit,
 ) {
   val isFavorite = maybeConversation?.isFavorite == true
   val name = maybeConversation?.name.orEmpty()
@@ -536,7 +538,21 @@ private fun ConversationMenu(
       value = viewModel.isNotetakerInRunningCall(conversationId)
     }
     val runningCount by produceState(0, conversationId) { value = viewModel.runningCalls()[conversationId] ?: 0 }
-    PreJoinDialog(name, isNotetakerInCall, runningCount, onDismiss = { isPreparingCall = false }) { options ->
+    // The call moved into a room the user is in, and that room's call runs now (issue #1321).
+    val maybeMoved by produceState<MovedCallHint?>(null, conversationId) {
+      value = viewModel.movedCallHint(conversationId)
+    }
+    PreJoinDialog(
+      name,
+      isNotetakerInCall,
+      runningCount,
+      onDismiss = { isPreparingCall = false },
+      maybeMovedRoom = maybeMoved,
+      onOpenRoom = { room ->
+        isPreparingCall = false
+        onOpenConversation(room)
+      },
+    ) { options ->
       isPreparingCall = false
       viewModel.startCall(conversationId, name, options)
     }
@@ -1795,6 +1811,8 @@ internal fun PreJoinDialog(
   runningCount: Int,
   onDismiss: () -> Unit,
   onJoin: (CallOptions) -> Unit,
+  maybeMovedRoom: MovedCallHint? = null,
+  onOpenRoom: (String) -> Unit = {},
 ) {
   var isCameraOn by rememberSaveable { mutableStateOf(false) }
   var isMuted by rememberSaveable { mutableStateOf(false) }
@@ -1810,6 +1828,16 @@ internal fun PreJoinDialog(
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.padding(bottom = 8.dp),
           )
+        }
+        maybeMovedRoom?.let { moved ->
+          // Latecomers: the call went into a room that is running now (issue #1321).
+          Text(
+            stringResource(R.string.call_prejoin_moved, moved.roomName),
+            style = MaterialTheme.typography.bodyMedium,
+          )
+          TextButton(onClick = { onOpenRoom(moved.roomId) }, modifier = Modifier.padding(bottom = 8.dp)) {
+            Text(stringResource(R.string.event_call_moved_open))
+          }
         }
         if (isNotetakerInCall) {
           Text(
