@@ -1,14 +1,16 @@
 import SwiftUI
 
-/// How a conversation shows its messages (#1488), the desktop's choice between bubbles and the
-/// list: a setting of this device, as on desktop, web and Android.
+/// How a conversation shows its messages: the desktop's message density (#576, #598) on mobile,
+/// stored under the same names, a setting of this device. Mobile starts with bubbles.
 enum MessageLayout: String, CaseIterable {
   /// Chat-app style: own messages on the trailing side in accent bubbles, others leading.
   case bubbles
-  /// Every message on the leading side with its sender's picture, name and time on one line.
-  case list
+  /// Every message on the leading side with its sender's picture, name and time on one line (#1488).
+  case comfortable
+  /// The same list, denser: smaller pictures, less room between senders.
+  case compact
 
-  static let key = "message_layout"
+  static let key = "message_density"
 }
 
 /// What every bubble of a conversation shares: how wide a bubble may get, whether bubbles name
@@ -24,17 +26,23 @@ struct BubbleLook: Equatable {
   let bubbleWidth: CGFloat
   let showsSenders: Bool
   var names = MentionNames()
-  /// The desktop's list instead of bubbles (#1488).
-  var isList = false
+  /// The desktop's comfortable or compact list instead of bubbles (#598, #1488).
+  var layout = MessageLayout.bubbles
 
-  init(listWidth: CGFloat, showsSenders: Bool, names: MentionNames, isList: Bool = false) {
-    bubbleWidth =
-      isList
-      ? max(120, min(listWidth - listAvatarSize - listAvatarGap, Self.maxListWidth))
-      : max(120, min(listWidth * Self.widthShare, Self.maxBubbleWidth))
+  var isList: Bool { layout != .bubbles }
+  var avatarSize: CGFloat { layout == .compact ? 28 : listAvatarSize }
+  var avatarGap: CGFloat { layout == .compact ? 8 : listAvatarGap }
+  var groupGap: CGFloat { layout == .compact ? 0 : 6 }
+
+  init(listWidth: CGFloat, showsSenders: Bool, names: MentionNames, layout: MessageLayout = .bubbles) {
+    self.layout = layout
     self.showsSenders = showsSenders
     self.names = names
-    self.isList = isList
+    let avatarRoom: CGFloat = layout == .compact ? 28 + 8 : listAvatarSize + listAvatarGap
+    bubbleWidth =
+      layout != .bubbles
+      ? max(120, min(listWidth - avatarRoom, Self.maxListWidth))
+      : max(120, min(listWidth * Self.widthShare, Self.maxBubbleWidth))
   }
 
   /// The room beside a bubble that stays free, so a long message doesn't span the whole row.
@@ -100,17 +108,17 @@ struct MessageRow: View {
   /// The list layout (#1488): avatar, then the name in bold and the time on one line at the start
   /// of a group, the message below without a bubble, everything on the leading side.
   private var listRow: some View {
-    HStack(alignment: .top, spacing: listAvatarGap) {
+    HStack(alignment: .top, spacing: look.avatarGap) {
       Group {
         if entry.isContinuation {
           Color.clear
         } else {
           SenderAvatar(
             name: message.authorName, userId: message.authorId, conversationId: message.conversationId,
-            maybeSourcePictureSha256: message.maybeSourcePictureSha256, size: listAvatarSize)
+            maybeSourcePictureSha256: message.maybeSourcePictureSha256, size: look.avatarSize)
         }
       }
-      .frame(width: listAvatarSize, height: entry.isContinuation ? 1 : listAvatarSize)
+      .frame(width: look.avatarSize, height: entry.isContinuation ? 1 : look.avatarSize)
       VStack(alignment: .leading, spacing: 2) {
         if !entry.isContinuation {
           HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -134,7 +142,7 @@ struct MessageRow: View {
       }
       Spacer(minLength: 0)
     }
-    .padding(.top, entry.isContinuation ? 0 : 6)
+    .padding(.top, entry.isContinuation ? 0 : look.groupGap)
     .frame(maxWidth: .infinity, alignment: .leading)
   }
 

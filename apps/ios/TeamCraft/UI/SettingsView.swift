@@ -290,7 +290,8 @@ private struct ChatsSettingsPage: View {
       Section {
         Picker("message_layout", selection: $messageLayout) {
           Text("message_layout_bubbles").tag(MessageLayout.bubbles.rawValue)
-          Text("message_layout_list").tag(MessageLayout.list.rawValue)
+          Text("message_layout_comfortable").tag(MessageLayout.comfortable.rawValue)
+          Text("message_layout_compact").tag(MessageLayout.compact.rawValue)
         }
       } footer: {
         Text("message_layout_hint")

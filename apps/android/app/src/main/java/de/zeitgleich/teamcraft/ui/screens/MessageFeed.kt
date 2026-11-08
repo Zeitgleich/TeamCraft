@@ -248,6 +248,12 @@ private val LIST_AVATAR_GAP = 12.dp
 private val LIST_PADDING_H = 16.dp
 private val LIST_GROUP_GAP = 12.dp
 private val LIST_MAX_WIDTH = 640.dp
+
+/** The compact list: the desktop's dense rows. */
+private val COMPACT_AVATAR_SIZE = 28.dp
+private val COMPACT_AVATAR_GAP = 8.dp
+private val COMPACT_PADDING_H = 12.dp
+private val COMPACT_GROUP_GAP = 6.dp
 private val MEDIA_CORNER = 14.dp
 
 /**
@@ -415,14 +421,20 @@ fun MessageFeed(
   }
   val showsSenders = showsSenders(messages.firstOrNull()?.let { snapshot?.conversation(it.conversation)?.kind })
   val messageLayout by remember { MessageLayoutPrefs.of(context) }.layout.collectAsState()
-  val isList = messageLayout == MessageLayout.List
+  val isList = messageLayout.isList
+  val isCompact = messageLayout == MessageLayout.Compact
   BoxWithConstraints(modifier.fillMaxSize()) {
     val bubbleMax = if (isList) {
-      minOf(maxWidth - LIST_AVATAR_SIZE - LIST_AVATAR_GAP - LIST_PADDING_H * 2, LIST_MAX_WIDTH)
+      val (avatar, gap, padding) = if (isCompact) {
+        Triple(COMPACT_AVATAR_SIZE, COMPACT_AVATAR_GAP, COMPACT_PADDING_H)
+      } else {
+        Triple(LIST_AVATAR_SIZE, LIST_AVATAR_GAP, LIST_PADDING_H)
+      }
+      minOf(maxWidth - avatar - gap - padding * 2, LIST_MAX_WIDTH)
     } else {
       minOf(maxWidth * BUBBLE_WIDTH_SHARE, BUBBLE_MAX_WIDTH)
     }
-    val look = FeedLook(bubbleMax = bubbleMax, showsSenders = showsSenders, names = names, isList = isList)
+    val look = FeedLook(bubbleMax = bubbleMax, showsSenders = showsSenders, names = names, isList = isList, isCompact = isCompact)
     CompositionLocalProvider(LocalFeedMotion provides feedMotion) {
       LazyColumn(Modifier.fillMaxSize(), state = listState, reverseLayout = true) {
         // Rows of one kind reuse each other's layout when they scroll in.
@@ -638,9 +650,16 @@ private class FeedLook(
   val bubbleMax: Dp,
   val showsSenders: Boolean,
   val names: MentionNames,
-  /** The desktop's list instead of bubbles (#1488): every message on the left, under its sender. */
+  /** The desktop's list instead of bubbles (#598, #1488): every message on the left, under its sender. */
   val isList: Boolean = false,
-)
+  /** The compact list: smaller pictures, less room between senders. */
+  val isCompact: Boolean = false,
+) {
+  val avatarSize: Dp get() = if (isCompact) COMPACT_AVATAR_SIZE else LIST_AVATAR_SIZE
+  val avatarGap: Dp get() = if (isCompact) COMPACT_AVATAR_GAP else LIST_AVATAR_GAP
+  val paddingH: Dp get() = if (isCompact) COMPACT_PADDING_H else LIST_PADDING_H
+  val groupGap: Dp get() = if (isCompact) COMPACT_GROUP_GAP else LIST_GROUP_GAP
+}
 
 /** The newest message the feed has handled; a plain holder, reading it never recomposes. */
 private class NewestSeen(var maybeMessage: Message? = null)
@@ -1107,16 +1126,16 @@ private fun ListMessageRow(
     ?: snapshot?.name(message.author).orEmpty()
   Row(
     modifier.padding(
-      start = LIST_PADDING_H,
-      end = LIST_PADDING_H,
-      top = if (entry.isContinuation) 2.dp else LIST_GROUP_GAP,
+      start = look.paddingH,
+      end = look.paddingH,
+      top = if (entry.isContinuation) if (look.isCompact) 0.dp else 2.dp else look.groupGap,
       bottom = 2.dp,
     ),
   ) {
-    Box(Modifier.width(LIST_AVATAR_SIZE)) {
-      if (!entry.isContinuation) SenderAvatar(maybeAuthor, snapshot?.name(message.author).orEmpty(), message, LIST_AVATAR_SIZE)
+    Box(Modifier.width(look.avatarSize)) {
+      if (!entry.isContinuation) SenderAvatar(maybeAuthor, snapshot?.name(message.author).orEmpty(), message, look.avatarSize)
     }
-    Spacer(Modifier.width(LIST_AVATAR_GAP))
+    Spacer(Modifier.width(look.avatarGap))
     Column(Modifier.weight(1f)) {
       if (!entry.isContinuation) SenderLine(name, message.sentAt, nameColor(maybeAuthor))
       Box(Modifier.widthIn(max = look.bubbleMax)) {

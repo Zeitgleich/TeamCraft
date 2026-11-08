@@ -315,7 +315,7 @@ struct ChatPane: View {
       let listWidth = max(geometry.size.width - Self.listPadding * 2, 0)
       let look = BubbleLook(
         listWidth: listWidth, showsSenders: showsSenders(conversation.kind), names: names,
-        isList: messageLayoutRaw == MessageLayout.list.rawValue)
+        layout: MessageLayout(rawValue: messageLayoutRaw) ?? .bubbles)
       let placedGaps = PlacedGaps(threadId == nil ? gaps : [], among: messages)
       ScrollViewReader { proxy in
         ScrollView {

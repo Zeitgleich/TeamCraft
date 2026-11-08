@@ -228,9 +228,10 @@
   <string name="list_failed_timeout">No answer came in time.</string>
   <string name="list_failed_other">Couldn\'t load this.</string>
   <string name="search_incomplete">History is still syncing, so results may be incomplete.</string>
-  <string name="message_layout">Messages</string>
+  <string name="message_layout">Message density</string>
   <string name="message_layout_bubbles">Bubbles</string>
-  <string name="message_layout_list">List</string>
-  <string name="message_layout_hint">Bubbles put your messages on the right. List shows every message with the sender\'s picture, name and time, as on the desktop.</string>
+  <string name="message_layout_comfortable">Comfortable</string>
+  <string name="message_layout_compact">Compact</string>
+  <string name="message_layout_hint">Bubbles put your messages on the right. Comfortable and Compact show every message with the sender\'s picture, name and time, as on the desktop.</string>
   <string name="react_add">Add a reaction</string>
 </resources>

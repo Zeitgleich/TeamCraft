@@ -238,7 +238,7 @@ fun ChatListLayoutSetting() {
   }
 }
 
-/** Messages as bubbles or as the desktop's list (#1488). A setting of this device; takes effect at once. */
+/** Messages as bubbles or as the desktop's comfortable or compact list (#598, #1488). A setting of this device; takes effect at once. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MessageLayoutSetting() {
@@ -322,7 +322,8 @@ private val CHAT_LIST_LAYOUT_CHOICES = listOf(
 
 private val MESSAGE_LAYOUT_CHOICES = listOf(
   MessageLayout.Bubbles to R.string.message_layout_bubbles,
-  MessageLayout.List to R.string.message_layout_list,
+  MessageLayout.Comfortable to R.string.message_layout_comfortable,
+  MessageLayout.Compact to R.string.message_layout_compact,
 )
 
 private val CHAT_LIST_GROUPING_CHOICES = listOf(

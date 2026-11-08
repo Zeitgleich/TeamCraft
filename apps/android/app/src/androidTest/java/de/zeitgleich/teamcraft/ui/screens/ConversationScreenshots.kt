@@ -61,12 +61,14 @@ class ConversationScreenshots {
       }
     }
     shoot("conversation-landscape-light", isDark = false, isLandscape = true) { viewModel -> ConversationSample(viewModel) }
-    // The desktop's list instead of bubbles (#1488).
+    // The desktop's comfortable and compact lists instead of bubbles (#598, #1488).
     val layout = MessageLayoutPrefs.of(InstrumentationRegistry.getInstrumentation().targetContext)
-    layout.setLayout(MessageLayout.List)
     try {
-      for (isDark in listOf(false, true)) {
-        shoot("conversation-list-${if (isDark) "dark" else "light"}", isDark) { viewModel -> ConversationSample(viewModel) }
+      for (choice in listOf(MessageLayout.Comfortable, MessageLayout.Compact)) {
+        layout.setLayout(choice)
+        for (isDark in listOf(false, true)) {
+          shoot("conversation-${choice.slug}-${if (isDark) "dark" else "light"}", isDark) { viewModel -> ConversationSample(viewModel) }
+        }
       }
     } finally {
       layout.setLayout(MessageLayout.Bubbles)

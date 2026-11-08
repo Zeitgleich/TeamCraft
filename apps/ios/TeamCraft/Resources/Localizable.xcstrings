@@ -14982,13 +14982,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Messages"
+            "value": "Message density"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Nachrichten"
+            "value": "Nachrichtendichte"
           }
         }
       }
@@ -15009,34 +15009,18 @@
         }
       }
     },
-    "message_layout_list": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "List"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Liste"
-          }
-        }
-      }
-    },
     "message_layout_hint": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bubbles put your messages on the right. List shows every message with the sender's picture, name and time, as on the desktop."
+            "value": "Bubbles put your messages on the right. Comfortable and Compact show every message with the sender's picture, name and time, as on the desktop."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Blasen zeigen deine Nachrichten rechts. Die Liste zeigt jede Nachricht mit Bild, Name und Uhrzeit, wie am Desktop."
+            "value": "Blasen zeigen deine Nachrichten rechts. Komfortabel und Kompakt zeigen jede Nachricht mit Bild, Name und Uhrzeit, wie am Desktop."
           }
         }
       }
@@ -15053,6 +15037,38 @@
           "stringUnit": {
             "state": "translated",
             "value": "Reaktion hinzufügen"
+          }
+        }
+      }
+    },
+    "message_layout_comfortable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Comfortable"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Komfortabel"
+          }
+        }
+      }
+    },
+    "message_layout_compact": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Compact"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kompakt"
           }
         }
       }
