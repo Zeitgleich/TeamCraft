@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s3_key, multipart_upload_id FROM storage_cleanup ORDER BY queued_at, s3_key LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "s3_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "storage_cleanup",
+            "name": "s3_key"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "multipart_upload_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "storage_cleanup",
+            "name": "multipart_upload_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "ed2441f181b57f8e196f6e9dd3b7af09eda1e6fa9bdd5581e05c892056933299"
+}

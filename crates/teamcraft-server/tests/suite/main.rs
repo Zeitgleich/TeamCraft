@@ -47,6 +47,7 @@ mod local_accounts;
 mod log_hygiene;
 mod meeting_guests;
 mod meeting_mail;
+mod meeting_notices;
 mod meetings;
 mod messages;
 mod metrics;

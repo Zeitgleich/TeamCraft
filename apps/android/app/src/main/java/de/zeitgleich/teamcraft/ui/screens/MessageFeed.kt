@@ -123,6 +123,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.ui.MessageLayout
+import de.zeitgleich.teamcraft.ui.MessageLayoutPrefs
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.FileInfo
@@ -239,6 +241,19 @@ private val SWIPE_REPLY_THRESHOLD = 72.dp
 
 private val AVATAR_SIZE = 32.dp
 private val AVATAR_GAP = 6.dp
+
+/** The list layout (#1488): large avatars, generous room between senders, as on the desktop. */
+private val LIST_AVATAR_SIZE = 40.dp
+private val LIST_AVATAR_GAP = 12.dp
+private val LIST_PADDING_H = 16.dp
+private val LIST_GROUP_GAP = 12.dp
+private val LIST_MAX_WIDTH = 640.dp
+
+/** The compact list: the desktop's dense rows. */
+private val COMPACT_AVATAR_SIZE = 28.dp
+private val COMPACT_AVATAR_GAP = 8.dp
+private val COMPACT_PADDING_H = 12.dp
+private val COMPACT_GROUP_GAP = 6.dp
 private val MEDIA_CORNER = 14.dp
 
 /**
@@ -405,9 +420,21 @@ fun MessageFeed(
     MentionNames(snapshot?.users.orEmpty().map { it.username.lowercase() }.toSet(), snapshot?.me?.username.orEmpty())
   }
   val showsSenders = showsSenders(messages.firstOrNull()?.let { snapshot?.conversation(it.conversation)?.kind })
+  val messageLayout by remember { MessageLayoutPrefs.of(context) }.layout.collectAsState()
+  val isList = messageLayout.isList
+  val isCompact = messageLayout == MessageLayout.Compact
   BoxWithConstraints(modifier.fillMaxSize()) {
-    val bubbleMax = minOf(maxWidth * BUBBLE_WIDTH_SHARE, BUBBLE_MAX_WIDTH)
-    val look = FeedLook(bubbleMax = bubbleMax, showsSenders = showsSenders, names = names)
+    val bubbleMax = if (isList) {
+      val (avatar, gap, padding) = if (isCompact) {
+        Triple(COMPACT_AVATAR_SIZE, COMPACT_AVATAR_GAP, COMPACT_PADDING_H)
+      } else {
+        Triple(LIST_AVATAR_SIZE, LIST_AVATAR_GAP, LIST_PADDING_H)
+      }
+      minOf(maxWidth - avatar - gap - padding * 2, LIST_MAX_WIDTH)
+    } else {
+      minOf(maxWidth * BUBBLE_WIDTH_SHARE, BUBBLE_MAX_WIDTH)
+    }
+    val look = FeedLook(bubbleMax = bubbleMax, showsSenders = showsSenders, names = names, isList = isList, isCompact = isCompact)
     CompositionLocalProvider(LocalFeedMotion provides feedMotion) {
       LazyColumn(Modifier.fillMaxSize(), state = listState, reverseLayout = true) {
         // Rows of one kind reuse each other's layout when they scroll in.
@@ -619,7 +646,20 @@ private fun OlderFailedRow(onRetry: () -> Unit) {
 }
 
 /** What every bubble of a feed shares. */
-private class FeedLook(val bubbleMax: Dp, val showsSenders: Boolean, val names: MentionNames)
+private class FeedLook(
+  val bubbleMax: Dp,
+  val showsSenders: Boolean,
+  val names: MentionNames,
+  /** The desktop's list instead of bubbles (#598, #1488): every message on the left, under its sender. */
+  val isList: Boolean = false,
+  /** The compact list: smaller pictures, less room between senders. */
+  val isCompact: Boolean = false,
+) {
+  val avatarSize: Dp get() = if (isCompact) COMPACT_AVATAR_SIZE else LIST_AVATAR_SIZE
+  val avatarGap: Dp get() = if (isCompact) COMPACT_AVATAR_GAP else LIST_AVATAR_GAP
+  val paddingH: Dp get() = if (isCompact) COMPACT_PADDING_H else LIST_PADDING_H
+  val groupGap: Dp get() = if (isCompact) COMPACT_GROUP_GAP else LIST_GROUP_GAP
+}
 
 /** The newest message the feed has handled; a plain holder, reading it never recomposes. */
 private class NewestSeen(var maybeMessage: Message? = null)
@@ -873,7 +913,9 @@ private fun SwipeToReply(message: Message, maybeOnReply: ((Message) -> Unit)?, c
 }
 
 /** The colours of one bubble and of the text and markup inside it. */
-private class BubbleColors(val container: Color, val content: Color, val muted: Color, val accent: Color, val markup: MarkupColors)
+private class BubbleColors(val container: Color, val content: Color, val muted: Color, val accent: Color, val markup: MarkupColors) {
+  fun withContainer(color: Color) = BubbleColors(color, content, muted, accent, markup)
+}
 
 /**
  * Own bubbles in the accent (a deeper shade of it in dark mode, so white text stays readable),
@@ -982,33 +1024,42 @@ private fun MessageRow(
   val reactQuickly: () -> Unit = { viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION)) }
   // Not readable yet (issue #888): no reactions, replies or actions until it is.
   val isPlaceholder = message.maybePlaceholder != null
+  val rowModifier = Modifier
+    .fillMaxWidth()
+    .background(
+      animateColorAsState(
+        if (isHighlighted) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+        label = "highlight",
+      ).value,
+    )
+    .combinedClickable(
+      onClick = {},
+      // Without the right to react, a tap doesn't wait to tell a double tap apart either.
+      onDoubleClick = reactQuickly.takeIf { canReact && !isPlaceholder },
+      onLongClick = {
+        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        onLongPress()
+      }.takeIf { !isPlaceholder },
+    )
+    .semantics {
+      if (isPlaceholder) return@semantics
+      customActions = listOfNotNull(
+        maybeOnReply?.let { reply -> CustomAccessibilityAction(replyLabel) { reply(message); true } },
+        CustomAccessibilityAction(reactLabel) { reactQuickly(); true }.takeIf { canReact },
+        CustomAccessibilityAction(moreLabel) { onLongPress(); true },
+      )
+    }
+  // The long-press menu has every reaction; the pill after the reactions opens it too.
+  val maybeOnAddReaction = onLongPress.takeIf { canReact && !isPlaceholder }
+  if (look.isList) {
+    ListMessageRow(
+      viewModel, entry, maybeExtras, extras, snapshot, look, isMine, onOpenThread, onOpenFile, onOpenPicture,
+      onLongPressImage, onOpenPermalink, canReact, maybeOnAddReaction, rowModifier,
+    )
+    return
+  }
   Column(
-    Modifier
-      .fillMaxWidth()
-      .background(
-        animateColorAsState(
-          if (isHighlighted) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
-          label = "highlight",
-        ).value,
-      )
-      .combinedClickable(
-        onClick = {},
-        // Without the right to react, a tap doesn't wait to tell a double tap apart either.
-        onDoubleClick = reactQuickly.takeIf { canReact && !isPlaceholder },
-        onLongClick = {
-          haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-          onLongPress()
-        }.takeIf { !isPlaceholder },
-      )
-      .semantics {
-        if (isPlaceholder) return@semantics
-        customActions = listOfNotNull(
-          maybeOnReply?.let { reply -> CustomAccessibilityAction(replyLabel) { reply(message); true } },
-          CustomAccessibilityAction(reactLabel) { reactQuickly(); true }.takeIf { canReact },
-          CustomAccessibilityAction(moreLabel) { onLongPress(); true },
-        )
-      }
-      .padding(start = 8.dp, end = 8.dp, top = if (entry.isContinuation) 2.dp else 8.dp, bottom = 2.dp),
+    rowModifier.padding(start = 8.dp, end = 8.dp, top = if (entry.isContinuation) 2.dp else 8.dp, bottom = 2.dp),
     horizontalAlignment = alignment,
   ) {
     Row(verticalAlignment = Alignment.Bottom) {
@@ -1041,8 +1092,93 @@ private fun MessageRow(
       }
     }
     Column(Modifier.padding(start = indent).widthIn(max = look.bubbleMax), horizontalAlignment = alignment) {
-      BelowBubble(viewModel, message, maybeExtras, onOpenThread, canReact)
+      BelowBubble(viewModel, message, maybeExtras, onOpenThread, canReact, maybeOnAddReaction)
     }
+  }
+}
+
+/**
+ * A message in the list layout (#1488): the sender's avatar, name and time on one line at the
+ * start of a group, the message below without a bubble, everything on the left.
+ */
+@Composable
+private fun ListMessageRow(
+  viewModel: MainViewModel,
+  entry: FeedItem.Entry,
+  maybeExtras: MessageExtras?,
+  extras: Map<String, MessageExtras>,
+  snapshot: ChatSnapshot?,
+  look: FeedLook,
+  isMine: Boolean,
+  onOpenThread: ((String) -> Unit)?,
+  onOpenFile: (FileInfo) -> Unit,
+  onOpenPicture: (PictureTarget) -> Unit,
+  onLongPressImage: (FileInfo) -> Unit,
+  onOpenPermalink: (String) -> Unit,
+  canReact: Boolean,
+  maybeOnAddReaction: (() -> Unit)?,
+  modifier: Modifier,
+) {
+  val message = entry.message
+  val maybeAuthor = snapshot?.user(message.author)
+  // A source's name always says it's a bot.
+  val name = message.maybeSource?.let { stringResource(R.string.source_sender, it.name) }
+    ?: snapshot?.name(message.author).orEmpty()
+  Row(
+    modifier.padding(
+      start = look.paddingH,
+      end = look.paddingH,
+      top = if (entry.isContinuation) if (look.isCompact) 0.dp else 2.dp else look.groupGap,
+      bottom = 2.dp,
+    ),
+  ) {
+    Box(Modifier.width(look.avatarSize)) {
+      if (!entry.isContinuation) SenderAvatar(maybeAuthor, snapshot?.name(message.author).orEmpty(), message, look.avatarSize)
+    }
+    Spacer(Modifier.width(look.avatarGap))
+    Column(Modifier.weight(1f)) {
+      if (!entry.isContinuation) SenderLine(name, message.sentAt, nameColor(maybeAuthor))
+      Box(Modifier.widthIn(max = look.bubbleMax)) {
+        Bubble(
+          viewModel = viewModel,
+          entry = entry,
+          maybeExtras = maybeExtras,
+          extras = extras,
+          snapshot = snapshot,
+          look = look,
+          isMine = isMine,
+          showsName = false,
+          onOpenFile = onOpenFile,
+          onOpenPicture = onOpenPicture,
+          onLongPressImage = onLongPressImage,
+          onOpenPermalink = onOpenPermalink,
+        )
+      }
+      BelowBubble(viewModel, message, maybeExtras, onOpenThread, canReact, maybeOnAddReaction)
+    }
+  }
+}
+
+/** The name in bold and the time after it, on one line. */
+@Composable
+private fun SenderLine(name: String, sentAt: Long, color: Color) {
+  val context = LocalContext.current
+  Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    Text(
+      name,
+      style = MaterialTheme.typography.titleSmall,
+      fontWeight = FontWeight.Bold,
+      color = color,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+      modifier = Modifier.weight(1f, fill = false),
+    )
+    Text(
+      DateUtils.formatDateTime(context, sentAt, DateUtils.FORMAT_SHOW_TIME),
+      style = MaterialTheme.typography.labelSmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      maxLines = 1,
+    )
   }
 }
 
@@ -1063,7 +1199,8 @@ private fun Bubble(
   onOpenPermalink: (String) -> Unit,
 ) {
   val message = entry.message
-  val colors = bubbleColors(isMine)
+  // The list has no bubble: the text sits on the feed in the others' colours, mine included.
+  val colors = if (look.isList) bubbleColors(isMine = false).withContainer(Color.Transparent) else bubbleColors(isMine)
   val corners = bubbleCorners(isMine, entry.isContinuation, entry.isGroupEnd)
   val shape = RoundedCornerShape(corners.topStart, corners.topEnd, corners.bottomEnd, corners.bottomStart)
   val files = maybeExtras?.files.orEmpty()
@@ -1081,11 +1218,13 @@ private fun Bubble(
     PicturesOnly(images, look, maybeExtras, message, isMine, onOpenFile, onLongPressImage)
     return
   }
-  // Short text: the time sits on the text's line instead of a line of its own.
-  val isTextOnly = hasText && others.isEmpty() && maybeExtras?.maybeLinkPreview == null && !hasTransfers && message.maybePlaceholder == null
+  // Short text: the time sits on the text's line instead of a line of its own (the list has it
+  // next to the name).
+  val isTextOnly = !look.isList && hasText && others.isEmpty() && maybeExtras?.maybeLinkPreview == null && !hasTransfers && message.maybePlaceholder == null
   Surface(color = colors.container, contentColor = colors.content, shape = shape) {
-    Column(Modifier.padding(BUBBLE_MEDIA_PADDING)) {
-      val textPadding = Modifier.padding(horizontal = BUBBLE_TEXT_PADDING_H - BUBBLE_MEDIA_PADDING)
+    val mediaPadding = if (look.isList) 0.dp else BUBBLE_MEDIA_PADDING
+    Column(Modifier.padding(mediaPadding)) {
+      val textPadding = Modifier.padding(horizontal = if (look.isList) 0.dp else BUBBLE_TEXT_PADDING_H - BUBBLE_MEDIA_PADDING)
       if (showsName) {
         Text(
           // A source's name always says it's a bot.
@@ -1120,7 +1259,7 @@ private fun Bubble(
           Box(Modifier.padding(top = 4.dp)) { VideoPreview(file, look.bubbleMax, onOpenFile) }
         }
       }
-      Column(textPadding.padding(top = BUBBLE_TEXT_PADDING_V - BUBBLE_MEDIA_PADDING)) {
+      Column(textPadding.padding(top = if (look.isList) 2.dp else BUBBLE_TEXT_PADDING_V - BUBBLE_MEDIA_PADDING)) {
         when {
           message.maybePlaceholder != null -> PlaceholderLine(message.maybePlaceholder, colors)
           isDeleted -> Text(
@@ -1144,7 +1283,11 @@ private fun Bubble(
         files.filter { it.transfer.isCancellable || it.transfer.state == "upload_failed" }.forEach { file ->
           UploadLine(viewModel, file, colors)
         }
-        if (!(isTextOnly && images.isEmpty() && videos.isEmpty())) Footer(message, maybeExtras, colors, isMine, Modifier.align(Alignment.End))
+        when {
+          // The time is next to the name; only markers and the own message's state are left.
+          look.isList -> if (hasFooterMarks(message, maybeExtras, isMine)) Footer(message, maybeExtras, colors, isMine, showsTime = false)
+          !(isTextOnly && images.isEmpty() && videos.isEmpty()) -> Footer(message, maybeExtras, colors, isMine, Modifier.align(Alignment.End))
+        }
       }
     }
   }
@@ -1250,6 +1393,7 @@ private fun BelowBubble(
   maybeExtras: MessageExtras?,
   onOpenThread: ((String) -> Unit)?,
   canReact: Boolean,
+  maybeOnAddReaction: (() -> Unit)? = null,
 ) {
   if (maybeExtras?.isSendFailed == true) NotSentLine(viewModel, message)
   if (message.reactions.isNotEmpty()) {
@@ -1263,6 +1407,7 @@ private fun BelowBubble(
           viewModel.act(ChatActions.react(message.conversation, message.id, reaction.emoji))
         }
       }
+      maybeOnAddReaction?.let { AddReactionPill(it) }
     }
   }
   if (maybeExtras?.wantsAcknowledgement == true) {
@@ -1283,6 +1428,25 @@ private fun BelowBubble(
         .clip(RoundedCornerShape(8.dp))
         .clickable { onOpenThread(message.id) }
         .padding(horizontal = 4.dp, vertical = 6.dp),
+    )
+  }
+}
+
+/** After the reactions: one more, from the message's menu with every reaction (#1488). */
+@Composable
+private fun AddReactionPill(onClick: () -> Unit) {
+  val scheme = MaterialTheme.colorScheme
+  Surface(
+    onClick = onClick,
+    shape = CircleShape,
+    color = scheme.surfaceContainerHigh,
+    border = BorderStroke(1.dp, scheme.outlineVariant),
+  ) {
+    Icon(
+      painterResource(R.drawable.ic_face),
+      contentDescription = stringResource(R.string.react_add),
+      tint = scheme.onSurfaceVariant,
+      modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp).size(16.dp),
     )
   }
 }
@@ -1309,7 +1473,14 @@ private fun ReactionPill(emoji: String, count: Int, isMine: Boolean, isEnabled: 
 
 /** Bottom-right inside the bubble: markers, "edited", the time and, for own messages, the state. */
 @Composable
-private fun Footer(message: Message, maybeExtras: MessageExtras?, colors: BubbleColors, isMine: Boolean, modifier: Modifier = Modifier) {
+private fun Footer(
+  message: Message,
+  maybeExtras: MessageExtras?,
+  colors: BubbleColors,
+  isMine: Boolean,
+  modifier: Modifier = Modifier,
+  showsTime: Boolean = true,
+) {
   val context = LocalContext.current
   // A rejected message says "not sent" below instead of "sending…" forever.
   val isSending = message.isPending && maybeExtras?.isSendFailed != true
@@ -1331,7 +1502,7 @@ private fun Footer(message: Message, maybeExtras: MessageExtras?, colors: Bubble
       "important" -> FooterLabel(stringResource(R.string.priority_important), if (isMine) colors.content else MaterialTheme.colorScheme.tertiary, isBold = true)
     }
     if (message.isEdited) FooterLabel(stringResource(R.string.edited), colors.muted)
-    FooterLabel(DateUtils.formatDateTime(context, message.sentAt, DateUtils.FORMAT_SHOW_TIME), colors.muted)
+    if (showsTime) FooterLabel(DateUtils.formatDateTime(context, message.sentAt, DateUtils.FORMAT_SHOW_TIME), colors.muted)
     when {
       !isMine -> {}
       isSending -> Icon(
@@ -1359,6 +1530,13 @@ private fun Footer(message: Message, maybeExtras: MessageExtras?, colors: Bubble
   }
 }
 
+/**
+ * Whether the list's footer has anything to say: pinned, priority, edited, or an own message that
+ * is still sending, failed or was read. The plain "sent" tick alone isn't worth a line.
+ */
+private fun hasFooterMarks(message: Message, maybeExtras: MessageExtras?, isMine: Boolean): Boolean =
+  (isMine && (message.isPending || maybeExtras?.isSendFailed == true || maybeExtras?.isRead == true)) || message.isEdited || maybeExtras?.isPinned == true || maybeExtras?.priority == "urgent" || maybeExtras?.priority == "important"
+
 @Composable
 private fun FooterLabel(text: String, color: Color, isBold: Boolean = false) {
   Text(
@@ -1379,11 +1557,11 @@ private fun nameColor(maybeUser: User?): Color {
 
 /** A round avatar: the sender's picture, or their initial on their hue. */
 @Composable
-private fun SenderAvatar(maybeUser: User?, name: String, message: Message) {
+private fun SenderAvatar(maybeUser: User?, name: String, message: Message, size: Dp = AVATAR_SIZE) {
   val account: @Composable () -> Unit = {
-    UserAvatar(maybeUser?.id, Modifier.size(AVATAR_SIZE)) {
+    UserAvatar(maybeUser?.id, Modifier.size(size)) {
       Box(
-        Modifier.size(AVATAR_SIZE).background(avatarColorOfHue(maybeUser?.avatarHue ?: 0), CircleShape),
+        Modifier.size(size).background(avatarColorOfHue(maybeUser?.avatarHue ?: 0), CircleShape),
         contentAlignment = Alignment.Center,
       ) {
         Text(
@@ -1397,7 +1575,7 @@ private fun SenderAvatar(maybeUser: User?, name: String, message: Message) {
   }
   val maybeSourcePicture = message.maybeSource?.maybePictureSha256
   if (maybeSourcePicture != null) {
-    SourceAvatar(message.conversation, maybeSourcePicture, Modifier.size(AVATAR_SIZE), account)
+    SourceAvatar(message.conversation, maybeSourcePicture, Modifier.size(size), account)
   } else {
     account()
   }

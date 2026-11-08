@@ -245,6 +245,8 @@ pub struct PushTtls {
   pub call: std::time::Duration,
   pub dismiss: std::time::Duration,
   pub test: std::time::Duration,
+  /// Reminders and start notices of meetings: no use once the meeting is well under way.
+  pub meeting: std::time::Duration,
 }
 
 /// Retries of pushes that failed for a temporary reason, through the durable queue
@@ -273,6 +275,7 @@ impl PushTtls {
       PushKind::Call => self.call,
       PushKind::Dismiss | PushKind::ScheduledSeal | PushKind::Sync => self.dismiss,
       PushKind::Test => self.test,
+      PushKind::MeetingReminder | PushKind::MeetingStart => self.meeting,
       PushKind::Message | PushKind::Mention | PushKind::Unknown(_) => self.message,
     }
   }
@@ -287,6 +290,7 @@ impl Default for PushSettings {
         call: Duration::from_secs(30),
         dismiss: Duration::from_secs(86_400),
         test: Duration::from_secs(300),
+        meeting: Duration::from_secs(600),
       },
       retry: RetryPolicy {
         max_retries: 200,

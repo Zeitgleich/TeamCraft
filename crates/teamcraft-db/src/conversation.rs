@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use teamcraft_proto::{
-  CategoryId, ChannelModeration, ChannelRole, ConversationId, ConversationKind, ConversationVisibility,
-  HistoryPolicy, IdempotencyKey, MessageId, NotificationLevel, Permission, ReactionsSeen, SpaceId, UserId,
+  CategoryId, ChannelMentions, ChannelModeration, ChannelRole, ConversationId, ConversationKind,
+  ConversationVisibility, HistoryPolicy, IdempotencyKey, MessageId, NotificationLevel, Permission,
+  ReactionsSeen, SpaceId, UserId,
 };
 
 use time::OffsetDateTime;
@@ -54,6 +55,10 @@ pub struct Membership {
   pub maybe_muted_until: Option<OffsetDateTime>,
   /// The member never chose level or mute time here, so the space's setting applies.
   pub is_notification_inherited: bool,
+  /// Whether `@channel` counts as a mention of the member here.
+  pub channel_mentions: ChannelMentions,
+  /// The member's quiet hours here as stored (JSON text of `QuietHours`, parsed by the server).
+  pub maybe_quiet_hours: Option<String>,
   /// Smallest message ID created after the member joined; history cut-off for `from_join`.
   pub joined_floor: MessageId,
   /// The import account added the member while it imported: they see the history from before
@@ -251,7 +256,8 @@ impl Database {
                 NOT m.notification_overridden AS "is_inherited?",
                 tc_snowflake_floor(m.joined_at) AS "joined_floor?",
                 m.sees_imported_history AS "sees_imported_history?",
-                m.reactions_seen_through_message_id, m.reactions_seen_message_ids AS "reactions_seen_message_ids?"
+                m.reactions_seen_through_message_id, m.reactions_seen_message_ids AS "reactions_seen_message_ids?",
+                m.channel_mentions AS "channel_mentions?", m.quiet_hours
          FROM conversations c
          LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1
          WHERE c.deleted_at IS NULL
@@ -282,6 +288,11 @@ impl Database {
         ) {
           (Some(role), Some(level), Some(is_favorite), Some(floor)) => Some(Membership {
             is_notification_inherited: row.is_inherited.unwrap_or(false),
+            channel_mentions: row
+              .channel_mentions
+              .map(ChannelMentions::from)
+              .unwrap_or_default(),
+            maybe_quiet_hours: row.quiet_hours,
             role: ChannelRole::from(role),
             notification_level: NotificationLevel::from(level),
             is_favorite,

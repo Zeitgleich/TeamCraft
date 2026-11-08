@@ -1,4 +1,6 @@
-use teamcraft_proto::{ConversationId, DeviceId, NotificationLevel, PushProvider, ThreadId, UserId};
+use teamcraft_proto::{
+  ChannelMentions, ConversationId, DeviceId, NotificationLevel, PushProvider, ThreadId, UserId,
+};
 use time::OffsetDateTime;
 
 use crate::database::Database;
@@ -28,6 +30,10 @@ pub struct PushRecipientRow {
   pub push_mode: String,
   /// The user's DND schedule as stored (JSON text, parsed by the server).
   pub maybe_dnd_schedule: Option<String>,
+  /// Whether `@channel` counts as a mention of the user in this conversation.
+  pub channel_mentions: ChannelMentions,
+  /// The user's quiet hours for this conversation as stored (JSON text, parsed by the server).
+  pub maybe_quiet_hours: Option<String>,
   /// The user follows the thread of the message being routed.
   pub is_following_thread: bool,
   /// The user lets desktop attention hold phone pushes back (`None`: never chose, so yes).
@@ -54,6 +60,7 @@ impl Database {
                      ELSE GREATEST(m.muted_until, sm.muted_until) END AS muted_until,
                 u.presence_pref, u.dnd_until,
                 COALESCE(s.push_mode, 'away_only') AS "push_mode!", s.dnd_schedule, s.uses_desktop_attention,
+                m.channel_mentions, m.quiet_hours,
                 tf.user_id IS NOT NULL AS "is_following_thread!",
                 d.id AS device_id, d.push_provider AS "push_provider!", d.push_token AS "push_token!",
                 d.push_key AS "push_key!"
@@ -93,6 +100,8 @@ impl Database {
           maybe_muted_until: row.muted_until,
           push_mode: row.push_mode,
           maybe_dnd_schedule: row.dnd_schedule,
+          channel_mentions: ChannelMentions::from(row.channel_mentions),
+          maybe_quiet_hours: row.quiet_hours,
           is_following_thread: row.is_following_thread,
           maybe_uses_desktop_attention: row.uses_desktop_attention,
           devices: vec![device],

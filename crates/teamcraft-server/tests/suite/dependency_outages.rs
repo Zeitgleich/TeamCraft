@@ -95,6 +95,57 @@ mod storage {
   }
 
   /// Starting an upload in parts creates something each time: never repeated.
+  /// Clients move the bytes themselves, so nothing else tells the server about an outage: the
+  /// probe opens the breaker, asks nothing while it is open, and closes it once the storage is back.
+  #[tokio::test]
+  async fn the_probe_follows_an_outage_nobody_else_sees() {
+    let (fake, store, guard, clock) = fake_store().await;
+    assert!(store.probe().await.is_ok(), "an unknown key is an answer");
+    assert_eq!(guard.state(), DependencyState::Ok);
+
+    fake.set_failing(true);
+    for _ in 0..3 {
+      assert!(store.probe().await.is_err());
+    }
+    assert_eq!(guard.state(), DependencyState::Down);
+    let asked = fake.requests();
+    assert!(store.probe().await.is_err());
+    assert_eq!(fake.requests(), asked, "an open breaker asks nothing");
+
+    clock.advance(OPEN_FOR);
+    assert!(store.probe().await.is_err(), "still down");
+    assert_eq!(guard.state(), DependencyState::Down);
+
+    fake.set_failing(false);
+    clock.advance(OPEN_FOR);
+    assert!(store.probe().await.is_ok());
+    assert_eq!(
+      guard.state(),
+      DependencyState::Ok,
+      "back without any client asking"
+    );
+  }
+
+  /// A storage that answers no one (bad endpoint, refused connection) counts like one answering
+  /// 503, and the error doesn't carry the signed URL into the logs.
+  #[tokio::test]
+  async fn an_unreachable_storage_opens_the_breaker_and_its_errors_hold_no_signature() {
+    let (guard, _clock) = guard(DependencyName::ObjectStorage);
+    let store = BlobStore::new(&storage_config("http://127.0.0.1:1"))
+      .unwrap()
+      .with_guard(guard.clone());
+    for _ in 0..3 {
+      let error = store.object_size("attachments/1").await.unwrap_err();
+      assert!(matches!(error, StorageError::Request(_)), "{error:?}");
+      let (shown, debug) = (error.to_string(), format!("{error:?}"));
+      assert!(
+        !shown.contains("X-Amz-Signature") && !debug.contains("X-Amz-Signature"),
+        "{shown} / {debug}"
+      );
+    }
+    assert_eq!(guard.state(), DependencyState::Down);
+  }
+
   #[tokio::test]
   async fn creating_an_upload_in_parts_is_not_repeated() {
     let (fake, store, _guard, _clock) = fake_store().await;
@@ -203,6 +254,101 @@ mod http {
     fake.set_failing(false);
     clock.advance(OPEN_FOR);
     assert_eq!(sweep().await.unwrap(), 1, "the next sweep after the outage");
+    app.stop().await;
+  }
+
+  /// A download URL is a promise the storage has to keep: none is handed out while it is down, for
+  /// any kind of object.
+  #[tokio::test]
+  async fn no_download_url_while_the_storage_is_down() {
+    let (_fake, endpoint) = FakeStorage::start().await;
+    let clock = ManualClock::new();
+    let dependencies = Arc::new(Dependencies::new(
+      DependencyOptions::default(),
+      Arc::new(clock.clone()),
+    ));
+    let guard = dependencies.guard(DependencyName::ObjectStorage);
+    let Some(app) =
+      TestApp::start_with_dependencies(Some(storage_config(&endpoint)), None, dependencies).await
+    else {
+      return;
+    };
+    let carol = member("carol");
+    let upload = start_avatar_upload(&app, &carol).await;
+    assert_eq!(upload.status, StatusCode::CREATED, "{}", upload.body);
+    let background = app
+      .post(&carol, "/me/backgrounds", json!({"size_bytes": 10}))
+      .await;
+    assert_eq!(background.status, StatusCode::CREATED, "{}", background.body);
+    let background_id = background.body["id"].as_str().unwrap().to_owned();
+
+    for _ in 0..3 {
+      guard.record_failure();
+    }
+    let carol_id = crate::common::user_id(&app, &carol).await;
+    let avatar = app.get(&carol, &format!("/users/{carol_id}/avatar")).await;
+    assert_unavailable(&avatar.status, &avatar.body);
+    let own = app
+      .get(&carol, &format!("/me/backgrounds/{background_id}/download"))
+      .await;
+    assert_unavailable(&own.status, &own.body);
+    // Before the link is even looked at, so a limited link isn't counted for a URL that would fail.
+    let share = app
+      .http
+      .post(format!("{}/api/v1/shares/no-such-link/download", app.base_url))
+      .json(&json!({}))
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(share.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // Its next probe is due: the URLs are handed out again.
+    clock.advance(OPEN_FOR);
+    let own = app
+      .get(&carol, &format!("/me/backgrounds/{background_id}/download"))
+      .await;
+    assert_ne!(own.status, StatusCode::SERVICE_UNAVAILABLE, "{}", own.body);
+    app.stop().await;
+  }
+
+  /// An object whose row is already gone can't be deleted later by anything else: a failed delete
+  /// waits in the database and the next sweep after the outage does it.
+  #[tokio::test]
+  async fn a_delete_that_fails_waits_for_the_next_sweep() {
+    let (fake, endpoint) = FakeStorage::start().await;
+    let Some(app) = TestApp::start_with_dependencies(
+      Some(storage_config(&endpoint)),
+      None,
+      Arc::new(Dependencies::default()),
+    )
+    .await
+    else {
+      return;
+    };
+    let carol = member("carol");
+    let first = start_avatar_upload(&app, &carol).await;
+    put(first.body["upload_url"].as_str().unwrap(), 4).await;
+    let completed = app.post(&carol, "/me/avatar/complete", json!({})).await;
+    assert_eq!(completed.status, StatusCode::OK, "{}", completed.body);
+    let old_key = fake.only_key();
+
+    // The new picture replaces the old one while the storage can't delete anything.
+    let second = start_avatar_upload(&app, &carol).await;
+    put(second.body["upload_url"].as_str().unwrap(), 4).await;
+    fake.set_refusing_deletes(true);
+    let replaced = app.post(&carol, "/me/avatar/complete", json!({})).await;
+    assert_eq!(replaced.status, StatusCode::OK, "{}", replaced.body);
+    let queued = app.state.database.storage_cleanups(10).await.unwrap();
+    assert_eq!(queued.len(), 1, "{queued:?}");
+
+    let sweep = || teamcraft_server::services::storage_cleanup::sweep(&app.state);
+    assert_eq!(sweep().await.unwrap(), 0, "still failing: nothing lost");
+    assert_eq!(app.state.database.storage_cleanups(10).await.unwrap().len(), 1);
+
+    fake.set_refusing_deletes(false);
+    assert_eq!(sweep().await.unwrap(), 1);
+    assert!(app.state.database.storage_cleanups(10).await.unwrap().is_empty());
+    assert_eq!(fake.stored(&old_key), None, "the object went too");
     app.stop().await;
   }
 
@@ -971,6 +1117,7 @@ struct FakeStorageInner {
   requests: AtomicUsize,
   is_failing: AtomicBool,
   is_refusing: AtomicBool,
+  is_refusing_deletes: AtomicBool,
   failures_left: AtomicUsize,
 }
 
@@ -988,6 +1135,26 @@ impl FakeStorage {
 
   fn set_refusing(&self, is_refusing: bool) {
     self.inner.is_refusing.store(is_refusing, Ordering::SeqCst);
+  }
+
+  /// Deletes fail with 503, everything else works.
+  fn set_refusing_deletes(&self, is_refusing: bool) {
+    self
+      .inner
+      .is_refusing_deletes
+      .store(is_refusing, Ordering::SeqCst);
+  }
+
+  /// The key of the only stored object.
+  fn only_key(&self) -> String {
+    let objects = self.inner.objects.lock().unwrap();
+    assert_eq!(objects.len(), 1, "{:?}", objects.keys());
+    objects
+      .keys()
+      .next()
+      .unwrap()
+      .trim_start_matches("/bucket/")
+      .to_owned()
   }
 
   fn fail_next(&self, count: usize) {
@@ -1030,6 +1197,13 @@ async fn answer_storage(
     return (
       StatusCode::SERVICE_UNAVAILABLE,
       "<Error><Code>ServiceUnavailable</Code></Error>",
+    )
+      .into_response();
+  }
+  if method == Method::DELETE && fake.inner.is_refusing_deletes.load(Ordering::SeqCst) {
+    return (
+      StatusCode::SERVICE_UNAVAILABLE,
+      "<Error><Code>SlowDown</Code></Error>",
     )
       .into_response();
   }

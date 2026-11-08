@@ -31,6 +31,7 @@ mod key_package;
 mod last_seen;
 mod local_account;
 mod meeting;
+mod meeting_notice;
 mod message;
 mod mls;
 mod notification;
@@ -49,6 +50,7 @@ mod share_link;
 mod snowflake;
 mod space;
 mod status;
+mod storage_cleanup;
 mod sync_heads;
 mod system_event;
 #[cfg(feature = "integration")]
@@ -106,6 +108,7 @@ pub use meeting::{
   AttendeeDiff, AttendeeKey, LobbyRow, MeetingChanges, NewAttendee, NewMeeting, SharedInviteClaim,
   StoredAttendee, StoredMeeting, StoredMeetingInvite,
 };
+pub use meeting_notice::{MeetingNoticeKind, MeetingNoticeRecipient};
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};
 pub use mls::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};
 pub use notification::{ReceiptRow, StoredSpaceNotifications, StoredUserSettings};
@@ -134,6 +137,7 @@ pub use space::{
   NewSpace, NewSpaceMember, Space, SpaceChanges, SpaceListing, SpaceMember, SpaceView, StoredSpaceImage,
 };
 pub use status::StoredStatus;
+pub use storage_cleanup::StorageCleanup;
 pub use sync_heads::ConversationHeadRow;
 pub use system_event::{NewSystemEvent, StoredSystemEvent};
 pub use thread::{ConversationUnreadRow, FollowedThread, ThreadActivity, ThreadQuery, ThreadUnreadTotals};

@@ -419,6 +419,7 @@ mod tests {
       maybe_call_id: None,
       maybe_badge: None,
       maybe_sent_at: None,
+      maybe_meeting: None,
     }
   }
 

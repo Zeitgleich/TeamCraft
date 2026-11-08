@@ -7,6 +7,7 @@ use tracing::error;
 
 use crate::auth::{AuthError, DpopRefusal};
 use crate::dependencies::CircuitOpen;
+use crate::storage::StorageError;
 
 /// `Retry-After` of a 503 for a backend that is not reachable (issue #743): long enough that
 /// clients don't add load while it recovers, short enough that they notice its return soon.
@@ -169,6 +170,15 @@ impl ApiError {
     Self::Busy {
       what,
       retry_after_secs: STORAGE_RETRY_AFTER_SECS,
+    }
+  }
+
+  /// What the client hears when a storage call failed: until the next probe when the breaker is
+  /// open, else [`Self::storage_unavailable`]. Never the storage's own answer.
+  pub fn storage_failed(what: &'static str, error: StorageError) -> Self {
+    match error {
+      StorageError::Unavailable(open) => open.into(),
+      _ => Self::storage_unavailable(what),
     }
   }
 
@@ -630,6 +640,21 @@ mod tests {
     .into_response();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(response.headers()[header::RETRY_AFTER], "2");
+  }
+
+  #[test]
+  fn a_storage_failure_names_the_breaker_s_time_when_it_is_open() {
+    let open = ApiError::storage_failed(
+      "picture storage",
+      StorageError::Unavailable(CircuitOpen {
+        dependency: DependencyName::ObjectStorage,
+        retry_after: std::time::Duration::from_secs(7),
+      }),
+    );
+    assert_eq!(open.retry_after_secs(), Some(7));
+    let failed = ApiError::storage_failed("picture storage", StorageError::TooLarge);
+    assert_eq!(failed.retry_after_secs(), Some(STORAGE_RETRY_AFTER_SECS));
+    assert_eq!(failed.status(), StatusCode::SERVICE_UNAVAILABLE);
   }
 
   #[test]

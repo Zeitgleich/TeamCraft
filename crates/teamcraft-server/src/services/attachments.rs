@@ -15,6 +15,7 @@ use tracing::warn;
 
 use super::access::{load_conversation, require, sees_all_history};
 use super::convert::unix_millis;
+use super::storage_cleanup;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -63,7 +64,7 @@ pub async fn sweep_unfinished_before(
     .sweep_unfinished_attachments(before, multipart_before)
     .await?;
   for attachment in &removed {
-    free_storage(store, attachment).await;
+    free_storage(state, store, attachment).await;
   }
   Ok(removed.len())
 }
@@ -224,7 +225,7 @@ pub async fn abandon_attachment(
     .await?
   {
     Some(removed) => {
-      free_storage(store, &removed).await;
+      free_storage(state, store, &removed).await;
       Ok(())
     },
     None => match state.database.get_attachment(id).await? {
@@ -283,7 +284,7 @@ pub async fn sweep_expired_drafts(state: &AppState, now: OffsetDateTime) -> Resu
   }
   let removed = state.database.sweep_expired_draft_attachments(now).await?;
   for attachment in &removed {
-    free_storage(store, attachment).await;
+    free_storage(state, store, attachment).await;
   }
   Ok(removed.len())
 }
@@ -465,6 +466,7 @@ async fn confirm_size(
           .await?
       {
         free_storage(
+          state,
           store,
           &RemovedAttachment {
             maybe_multipart_upload_id: None,
@@ -546,21 +548,17 @@ fn part_etags(request: &CompleteMultipartAttachmentRequest) -> Result<Vec<String
   Ok(parts.into_iter().map(|part| part.etag.clone()).collect())
 }
 
-/// Frees what an unfinished attachment left in the storage; failures are logged (a bucket
-/// lifecycle rule or the next sweep catches leftovers).
-async fn free_storage(store: &BlobStore, removed: &RemovedAttachment) {
-  let freed = match &removed.maybe_multipart_upload_id {
-    Some(upload_id) => store.abort_multipart(&removed.s3_key, upload_id).await,
-    None => store.delete_object(&removed.s3_key).await,
-  };
-  if let Err(error) = freed {
-    warn!(%error, "freeing an unfinished attachment's storage failed");
+/// Frees what an unfinished attachment left in the storage; a failure waits for the next sweep.
+async fn free_storage(state: &AppState, store: &BlobStore, removed: &RemovedAttachment) {
+  match &removed.maybe_multipart_upload_id {
+    Some(upload_id) => storage_cleanup::abort_or_queue(state, store, &removed.s3_key, upload_id).await,
+    None => storage_cleanup::delete_or_queue(state, store, &removed.s3_key).await,
   }
 }
 
 fn storage_unavailable(error: StorageError) -> ApiError {
   warn!(%error, "attachment storage request failed");
-  ApiError::storage_unavailable("attachment storage")
+  ApiError::storage_failed("attachment storage", error)
 }
 
 fn blob_store(state: &AppState) -> Result<&Arc<BlobStore>, ApiError> {

@@ -472,9 +472,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.sync_mls(conversation).await?;
     let mls_epoch = self.group_or_error(conversation)?.epoch();
     let encrypted: EncryptedMessage = self.seal_message(conversation, id, content)?;
-    let (mentioned_user_ids, is_urgent) = match content {
-      MessageContent::Text { mentions, meta, .. } => (mentions.clone(), meta.priority == Priority::Urgent),
-      _ => (Vec::new(), false),
+    let (mentioned_user_ids, is_urgent, is_channel_mention) = match content {
+      MessageContent::Text { body, mentions, meta } => (
+        mentions.clone(),
+        meta.priority == Priority::Urgent,
+        teamcraft_proto::addresses_everyone(body),
+      ),
+      _ => (Vec::new(), false, false),
     };
     Ok(SealedScheduledMessage {
       device_id: self.account.device_id,
@@ -482,6 +486,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       ciphertext: Base64Bytes::new(encrypted.to_bytes()?),
       mentioned_user_ids,
       is_urgent,
+      is_channel_mention,
       mls_epoch,
     })
   }

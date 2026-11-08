@@ -240,6 +240,7 @@ private struct NotificationsSettingsPage: View {
       Section {
         NavigationLink("notification_content_title") { NotificationContentView() }
         NavigationLink("dnd_title") { DndSettingsView() }
+        NavigationLink("meeting_reminder_title") { MeetingReminderSettingsView() }
         NavigationLink("rules_title") { NotificationRulesView() }
         NavigationLink("diagnostics_title") { NotificationDiagnosticsView(account: account) }
       }
@@ -255,6 +256,7 @@ private struct ChatsSettingsPage: View {
   @AppStorage("share_typing") private var isSharingTyping = true
   @AppStorage(ChatListLayout.key) private var chatListLayout = ChatListLayout.spaces.rawValue
   @AppStorage(ChatListGrouping.key) private var chatListGrouping = ChatListGrouping.mixed.rawValue
+  @AppStorage(MessageLayout.key) private var messageLayout = MessageLayout.bubbles.rawValue
   @AppStorage(CallStatusSoundsSetting.key) private var statusSounds = CallStatusSoundsSetting.all.rawValue
   @AppStorage(OriginalDownloadSetting.key) private var originalDownload = OriginalDownloadSetting.fallback.rawValue
   @AppStorage(AnimatedImagesSetting.key) private var animatedImages = AnimatedImagesSetting.fallback.rawValue
@@ -284,6 +286,15 @@ private struct ChatsSettingsPage: View {
         } footer: {
           Text("chat_list_grouping_hint")
         }
+      }
+      Section {
+        Picker("message_layout", selection: $messageLayout) {
+          Text("message_layout_bubbles").tag(MessageLayout.bubbles.rawValue)
+          Text("message_layout_comfortable").tag(MessageLayout.comfortable.rawValue)
+          Text("message_layout_compact").tag(MessageLayout.compact.rawValue)
+        }
+      } footer: {
+        Text("message_layout_hint")
       }
       Section {
         Picker("call_status_sounds", selection: $statusSounds) {

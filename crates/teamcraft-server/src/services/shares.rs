@@ -193,6 +193,8 @@ pub async fn download_share(
     .maybe_blob_store
     .as_ref()
     .ok_or_else(|| ApiError::Unavailable("storage is not configured".into()))?;
+  // Before a download is counted: a URL that fails at the storage would use up the link.
+  store.check_available()?;
   let now = OffsetDateTime::now_utc();
   let retry_window = Duration::minutes(i64::from(state.settings.get().shares.download_retry_minutes));
   if let Some(presented) = maybe_grant.filter(|_| !retry_window.is_zero())

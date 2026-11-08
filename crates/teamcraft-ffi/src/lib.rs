@@ -23,6 +23,7 @@ mod notetaker;
 mod reads;
 mod row_badge;
 mod server_entry;
+mod settings_sync;
 mod types;
 mod video;
 mod voice;
@@ -60,6 +61,9 @@ pub use notetaker::{MovedCallHint, NotetakerAddition};
 pub use server_entry::{
   CheckedServer, ServerAddress, ServerEntryError, SignInOption, SignInPageInfo, StoredServer,
   check_server_info, normalize_server_address, sign_in_page, sso_only_sign_in_page, stored_server,
+};
+pub use settings_sync::{
+  AppAnimatedImages, AppListGrouping, AppListLayout, SettingsSyncOutcome, SyncedAppSettings,
 };
 use teamcraft_client_api::remote::ChatAction;
 use teamcraft_core::api::proxy::SystemProxy;

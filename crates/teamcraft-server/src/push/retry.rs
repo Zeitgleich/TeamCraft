@@ -149,6 +149,11 @@ async fn attempt_next(state: &AppState, is_user_endpoint: bool) -> Result<bool, 
     claim.complete().await?;
     return Ok(true);
   }
+  if !is_meeting_notice_valid(state, &row.wake_up).await {
+    debug!(device_id = %row.device, "the meeting moved or was cancelled meanwhile; retry dropped");
+    claim.complete().await?;
+    return Ok(true);
+  }
   if is_read_meanwhile(state, row.user, &row.wake_up).await {
     debug!(device_id = %row.device, "the message was read meanwhile; retry dropped");
     claim.complete().await?;
@@ -220,6 +225,21 @@ fn is_still_ringing(state: &AppState, wake_up: &PushWakeUp) -> bool {
     .maybe_calls
     .as_ref()
     .is_some_and(|calls| calls.is_ringing(wake_up.conversation_id, call))
+}
+
+/// For a meeting's reminder or start notice: whether the occurrence it tells about still is on. A
+/// failed check lets it go (a notice too many beats none). Other kinds pass.
+async fn is_meeting_notice_valid(state: &AppState, wake_up: &PushWakeUp) -> bool {
+  let Some(meeting) = wake_up.maybe_meeting else {
+    return true;
+  };
+  match crate::services::meeting_notices::is_occurrence_on(state, meeting).await {
+    Ok(is_on) => is_on,
+    Err(error) => {
+      warn!(%error, "checking a meeting for its queued notice failed");
+      true
+    },
+  }
 }
 
 /// Whether the wake-up names a message the user has read since (on any device): showing it now

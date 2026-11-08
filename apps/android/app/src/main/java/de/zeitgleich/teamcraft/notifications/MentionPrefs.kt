@@ -1,12 +1,13 @@
 package de.zeitgleich.teamcraft.notifications
 
 import android.content.Context
+import de.zeitgleich.teamcraft.settings.LocalSettingChanges
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import uniffi.teamcraft_ffi.MentionSettings
 
 /**
- * Device-local notification preferences, as on desktop: keywords, the first name as a mention,
+ * Notification preferences applied on the device, as on desktop, that follow the account (#945): keywords, the first name as a mention,
  * `@channel` notifications and when to confirm a `@channel` before sending. The server only sees
  * explicit mentions; these are applied on the device by the core (teamcraft-client-api `notify`).
  */
@@ -21,6 +22,7 @@ class MentionPrefs(context: Context) {
 
   fun setConfirmChannelOver(count: Int) {
     prefs.edit().putInt(KEY_CONFIRM_OVER, count.coerceAtLeast(0)).apply()
+    LocalSettingChanges.changed()
   }
 
   fun update(settings: MentionSettings) {
@@ -30,6 +32,7 @@ class MentionPrefs(context: Context) {
       .putString(KEY_KEYWORDS, settings.keywords.joinToString(KEYWORD_SEPARATOR))
       .apply()
     state.value = settings
+    LocalSettingChanges.changed()
   }
 
   private fun read(): MentionSettings = MentionSettings(

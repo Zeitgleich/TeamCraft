@@ -2,6 +2,7 @@ package de.zeitgleich.teamcraft.ui
 
 import android.content.Context
 import android.net.ConnectivityManager
+import de.zeitgleich.teamcraft.settings.LocalSettingChanges
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import de.zeitgleich.teamcraft.ui.media.MediaQuality
@@ -19,12 +20,13 @@ class MediaPrefs private constructor(private val context: Context) {
     animatedImagesOf(prefs.getString(KEY_ANIMATED_IMAGES, null)),
   ).also { sharedAnimatedImages = it }
 
-  /** When animated images move. Kept on this device, like the mobile apps' other settings. */
+  /** When animated images move. Follows the account (#945). */
   val animatedImages: StateFlow<AnimatedImagesMode> get() = animatedImagesFlow
 
   fun setAnimatedImages(choice: AnimatedImagesMode) {
     prefs.edit().putString(KEY_ANIMATED_IMAGES, choice.name).apply()
     animatedImagesFlow.value = choice
+    LocalSettingChanges.changed()
   }
 
   val originalDownload: OriginalDownload get() = originalDownloadOf(prefs.getString(KEY_ORIGINAL_DOWNLOAD, null))

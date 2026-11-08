@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,\n                c.category_id, c.archived_at IS NOT NULL AS \"is_archived!\", c.is_integration, c.member_denied, c.guest_denied,\n                c.image_key, c.image_version, c.image_size_bytes, c.importer_user_id, c.imported_through_message_id,\n                m.role AS \"role?\", m.notification_level AS \"notification_level?\",\n                m.is_favorite AS \"is_favorite?\", m.last_read_message_id, m.muted_until,\n                NOT m.notification_overridden AS \"is_inherited?\",\n                tc_snowflake_floor(m.joined_at) AS \"joined_floor?\",\n                m.sees_imported_history AS \"sees_imported_history?\",\n                m.reactions_seen_through_message_id, m.reactions_seen_message_ids AS \"reactions_seen_message_ids?\"\n         FROM conversations c\n         LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1\n         WHERE c.deleted_at IS NULL\n           AND ($2::bigint IS NULL OR c.id = $2)\n           AND ($3::bigint IS NULL OR c.space_id = $3)\n           AND (NOT $4 OR m.user_id IS NOT NULL)\n           AND (NOT $5 OR (c.kind = 'channel' AND (c.visibility = 'public' OR $6)\n                           AND c.archived_at IS NULL AND m.user_id IS NULL))\n         ORDER BY c.id",
+  "query": "SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,\n                c.category_id, c.archived_at IS NOT NULL AS \"is_archived!\", c.is_integration, c.member_denied, c.guest_denied,\n                c.image_key, c.image_version, c.image_size_bytes, c.importer_user_id, c.imported_through_message_id,\n                m.role AS \"role?\", m.notification_level AS \"notification_level?\",\n                m.is_favorite AS \"is_favorite?\", m.last_read_message_id, m.muted_until,\n                NOT m.notification_overridden AS \"is_inherited?\",\n                tc_snowflake_floor(m.joined_at) AS \"joined_floor?\",\n                m.sees_imported_history AS \"sees_imported_history?\",\n                m.reactions_seen_through_message_id, m.reactions_seen_message_ids AS \"reactions_seen_message_ids?\",\n                m.channel_mentions AS \"channel_mentions?\", m.quiet_hours\n         FROM conversations c\n         LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1\n         WHERE c.deleted_at IS NULL\n           AND ($2::bigint IS NULL OR c.id = $2)\n           AND ($3::bigint IS NULL OR c.space_id = $3)\n           AND (NOT $4 OR m.user_id IS NOT NULL)\n           AND (NOT $5 OR (c.kind = 'channel' AND (c.visibility = 'public' OR $6)\n                           AND c.archived_at IS NULL AND m.user_id IS NULL))\n         ORDER BY c.id",
   "describe": {
     "columns": [
       {
@@ -295,6 +295,28 @@
             "name": "reactions_seen_message_ids"
           }
         }
+      },
+      {
+        "ordinal": 28,
+        "name": "channel_mentions?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "channel_mentions"
+          }
+        }
+      },
+      {
+        "ordinal": 29,
+        "name": "quiet_hours",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "quiet_hours"
+          }
+        }
       }
     ],
     "parameters": {
@@ -335,8 +357,10 @@
       null,
       false,
       true,
-      false
+      false,
+      false,
+      true
     ]
   },
-  "hash": "991d02dbeb4c06e9e8175a56a877216df369a15c16eb67997c96420639153ef2"
+  "hash": "18ebc61bfdd1e8632cecdf7b67a92a5925bd0064851848a3729566149e30b998"
 }

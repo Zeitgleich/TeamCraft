@@ -36,6 +36,7 @@ use crate::components::calls_unavailable::CallsUnavailableDialog;
 use crate::components::calls_view::CallsView;
 use crate::components::canvas_view::CanvasView;
 use crate::components::composer_toolbar::{ActiveFormats, FormatAction, FormatToolbarPanel};
+use crate::components::conversation_notify::QuietHoursDialog;
 use crate::components::date_jump::{DateJumpMenu, DateJumpPanel};
 use crate::components::directory_view::DirectoryView;
 use crate::components::downloads_menu::DownloadsButton;
@@ -204,6 +205,7 @@ areas! {
   forward(from: ConversationId, message: MessageId, maybe_attachment: Option<AttachmentId>) => dialogs: view! { <ForwardDialog from=from message=message maybe_attachment=maybe_attachment /> };
   edit_history(conversation: ConversationId, message: MessageId) => dialogs: view! { <EditHistoryDialog conversation=conversation message=message /> };
   bookmarks(conversation: ConversationId) => dialogs: view! { <BookmarksDialog conversation=conversation /> };
+  quiet_hours(conversation: ConversationId) => dialogs: view! { <QuietHoursDialog conversation=conversation /> };
   share_file(conversation: ConversationId, message: MessageId, file: AttachmentId) => dialogs: view! { <ShareLinkDialog conversation=conversation message=message file=file /> };
   verify_key(conversation: ConversationId) => dialogs: view! { <VerifyKeyDialog conversation=conversation /> };
   verify_contact(user: UserId) => dialogs: view! { <VerifyContactDialog user=user /> };

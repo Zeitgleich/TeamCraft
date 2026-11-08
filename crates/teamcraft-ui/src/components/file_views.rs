@@ -45,6 +45,7 @@ use crate::media_layout::{
 };
 use crate::model::{ConversationId, MessageId};
 use crate::object_url::{FetchError, ObjectUrl};
+use crate::picture_retries::{PictureRetries, use_picture_retries};
 use crate::prefs::ImageSize;
 use crate::preview::PreviewKind;
 use crate::state::{AppState, Overlay, use_app_state};
@@ -384,6 +385,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     is_loading: RwSignal::new(false),
     has_failed: RwSignal::new(false),
     has_thumbnail,
+    maybe_retries: use_picture_retries(),
   };
   let InlineLoad {
     full,
@@ -481,6 +483,20 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     });
   });
   let is_coming = move || plays() && is_loading.get();
+  // Not loaded (the storage is down, the network gone) and nothing else to show: asked for again
+  // with the app's other pictures, without waiting for a click. The button is a shortcut.
+  if let Some(retries) = inline.maybe_retries {
+    Effect::new(move |maybe_round: Option<u32>| {
+      let round = retries.round();
+      if maybe_round.is_some_and(|before| before != round)
+        && is_unavailable.get_untracked()
+        && !is_loading.get_untracked()
+      {
+        inline.start();
+      }
+      round
+    });
+  }
   // The file couldn't come down for an image the user asked to see move: say so and offer a retry.
   Effect::new(move |_| {
     if has_failed.get() && choice.get_untracked() == PlayChoice::Playing {
@@ -913,6 +929,8 @@ struct InlineLoad {
   /// The last load failed; an animation doesn't try again until the user asks.
   has_failed: RwSignal<bool>,
   has_thumbnail: bool,
+  /// When a picture that isn't there is asked for again; absent where no app runs it (tests).
+  maybe_retries: Option<PictureRetries>,
 }
 
 impl InlineLoad {
@@ -931,6 +949,7 @@ impl InlineLoad {
       is_loading,
       has_failed,
       has_thumbnail,
+      maybe_retries,
       ..
     } = self;
     let media_type = self.media_type.get_value();
@@ -950,7 +969,13 @@ impl InlineLoad {
       has_failed.try_set(loaded.is_err());
       match loaded {
         // The row may be gone by now: `try_set` drops the URL then.
-        Ok(Some(url)) => drop(full.try_set(Some(url))),
+        Ok(Some(url)) => {
+          is_unavailable.try_set(false);
+          if let Some(retries) = maybe_retries {
+            retries.succeeded();
+          }
+          drop(full.try_set(Some(url)));
+        },
         Ok(None) => {},
         // With a thumbnail it stays; the lightbox shows the error and a retry.
         Err(error) => {
@@ -962,6 +987,9 @@ impl InlineLoad {
             },
             FetchError::Unavailable(_) => {
               is_unavailable.try_set(true);
+              if let Some(retries) = maybe_retries {
+                retries.failed(None);
+              }
             },
           }
         },

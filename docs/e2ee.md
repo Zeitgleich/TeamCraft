@@ -798,7 +798,9 @@ for months must keep fresh ones on the server:
 
 Plaintext metadata: conversation ID, sender user and device, timestamp, message ID (server Snowflake)
 and client message ID, thread ID, `content_key_id`, size, **list of mentioned user IDs** (needed for notifications, §7), the "urgent"
-flag. Reactions are encrypted messages, so not even reaction counts are visible.
+flag, and whether the text addresses the whole conversation (`is_channel_mention`: `@channel`,
+`@here` or `@all`, set by the sending device, for members who let those push them; notifications.md,
+"Per-conversation filters"). Reactions are encrypted messages, so not even reaction counts are visible.
 
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts, a
 channel's shared notes (§4.11).
@@ -3718,12 +3720,24 @@ restored together with them on a new device.
   key bag is stored, uploads still pending, and which wraps exist (passphrase, passkey,
   organization). The server learns nothing new. When the recovery kit was last made is kept the
   same way (`recovery_key_set_at`, §6.5).
-- **User settings** (issue #945): theme, language, layout, notification words and the like, under
+- **User settings** (issue #945): language, layout, notification words and the like, under
   `settings`, one entry per setting: `{ value, version, writer }`, with the value opaque JSON to
   everything but the client that reads that key. The server sees neither names nor values. What is
-  synced and what stays on the device is listed in `teamcraft-ui/src/settings_sync.rs`; settings
-  the server enforces (push, do not disturb, mutes, read receipts) stay with the server and aren't
-  copied here.
+  synced and what stays on the device is listed in `teamcraft-ui/src/settings_sync.rs` (web and
+  desktop) and `teamcraft-client-api/src/mobile_settings.rs` (Android and iOS, the same keys and
+  values); settings the server enforces (push, do not disturb, conversation and space mutes, read
+  receipts) stay with the server and aren't copied here. Light, dark or as the system stays on
+  each device, since it follows the room and the screen; colour themes (#202) are meant to sync.
+  An entry an older client wrote for a key no client reads any more (`theme`) stays as an unknown
+  key.
+  - *Mobile:* the apps sync the list layout and grouping, animated images, sharing typing, the
+    mention rules (first name, `@channel`, keywords, the `@channel` confirmation) and call status
+    sounds. The send key, language, wallpaper colours, notification content, media downloads and
+    devices stay on the phone. The app hands its values to the core (`sync_settings`) at start,
+    when `settings_mark` moved after a store change, and 1.5 s after the user changed one, and
+    stores an opaque state (owner and per-setting bases) next to its settings. A phone holds one
+    account at a time, so with no owner on record its values count as this account's and are
+    offered, except keywords, which stay device-only as on web.
   - *Merge:* per setting the higher `version` wins, then the higher `writer` (the device ID). A
     change takes the version after the one its device holds. No clock is involved, unlike the rest
     of the account data, so a wrong device clock can't decide. The order is total, so every device
@@ -4065,6 +4079,11 @@ Details:
   - *DND:* the weekly schedule, the allow list of people who break through, whether urgent messages
     do, and the IANA time zone (sent only while the schedule has ranges) are stored on the server, so
     that routing works with every device offline. The time zone says roughly where the user is.
+  - *Per-conversation filters:* per membership, whether `@channel` notifies (`default`, `notify`,
+    `ignore`) and quiet hours (weekly ranges with offset and IANA time zone), so routing honours them
+    with every device offline. Together with the `is_channel_mention` bit of a message the server
+    learns which messages address everybody; it could tell that from the mention list of a message
+    naming everybody before, but now also for messages naming nobody.
   - *Urgent breaks DND* (opt-in): with the option on, an urgent message reaches the user during DND, by
     default only in DMs and group DMs (`urgent_scope: direct`), so not everybody in a big channel can
     wake them; `everywhere` widens it. People on the allow list break through anyway.
@@ -4080,8 +4099,10 @@ Details:
 - Wake-up kinds: `message`, `mention`, `call`, `dismiss` (a notification was read on another device, or
   a ring ended: remove it; silent, APNs background push / FCM normal priority, never to Web Push),
   `scheduled_seal` (above), `sync` (catch up in the background, silent, names nothing; above) and `test`
-  (diagnostics). Besides conversation, message, sender, thread and call IDs the sealed wake-up
-  carries the badge count and the send time; all of it is inside the ciphertext. What push services
+  (diagnostics), and `meeting_reminder` and `meeting_start` (a planned meeting's time, docs/meetings.md
+  "Starting"; alerts like a message, and a gateway is told `message`). Besides conversation, message,
+  sender, thread, call and meeting IDs the sealed wake-up carries the badge count, the send time and
+  a meeting's start; all of it is inside the ciphertext. What push services
   and a gateway additionally learn is the push type and priority: that a push was a silent withdrawal
   rather than an alert.
 - iOS calls go as mutable alerts on the app's topic, never as VoIP pushes: those need the separate

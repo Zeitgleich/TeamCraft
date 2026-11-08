@@ -126,6 +126,17 @@ notif-per-conversation-hint = Überschreibe die Stufe für einzelne Unterhaltung
 notif-level-col = Benachrichtigen
 notif-level-default = Standard
 notif-mute-col = Stumm
+notif-channel-mentions-col = @channel und @here
+notif-channel-mentions-default = Wie in den Einstellungen
+notif-channel-mentions-notify = Benachrichtigen
+notif-channel-mentions-ignore = Nicht benachrichtigen
+notif-quiet-col = Ruhezeiten
+notif-quiet-edit = Ruhezeiten…
+notif-quiet-on = An
+notif-quiet-off = Aus
+notif-quiet-title = Ruhezeiten
+notif-quiet-hint = In diesen Zeiten bleibt { $name } still, als wäre es stummgeschaltet: keine Benachrichtigungen, auch nicht bei Erwähnungen. Ungelesene Nachrichten werden weiter gezählt.
+notif-quiet-none = Noch keine Ruhezeiten.
 notif-mute-off = Aus
 notif-mute-hour = Für 1 Stunde
 notif-mute-tomorrow = Bis morgen
@@ -278,6 +289,10 @@ notify-meeting-soon = { $minutes ->
    *[other] Besprechung in { $minutes } Minuten
 }
 notify-meeting-now = Besprechung beginnt jetzt
+notify-meeting-started = { $name } hat begonnen
+notify-meeting-started-unnamed = Eine Besprechung hat begonnen
+notify-meeting-named-soon = { $name } beginnt in { $minutes } Min.
+notify-meeting-named-soon-unnamed = Eine Besprechung beginnt in { $minutes } Min.
 
 # Workspace management
 settings-section-overview = Übersicht

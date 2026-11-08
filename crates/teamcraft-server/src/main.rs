@@ -49,8 +49,8 @@ use teamcraft_server::services::scheduled_messages;
 use teamcraft_server::services::session::{self, PolicyHolder};
 use teamcraft_server::services::{
   admin, admin_join_requests, attachments, backgrounds, brands, calendar_settings, conversations,
-  email_digest, guests, key_packages, mail_settings, meeting_guests, oidc, retention, runtime_settings,
-  urgent,
+  email_digest, guests, key_packages, mail_settings, meeting_guests, meeting_notices, oidc, retention,
+  runtime_settings, storage_cleanup, urgent,
 };
 use teamcraft_server::state::{
   AppState, MeetingMailConfig, OidcSyncSettings, PushSettings, PushTtls, RetryPolicy, Settings,
@@ -60,6 +60,8 @@ use teamcraft_server::storage::BlobStore;
 use tracing::{info, warn};
 
 const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+/// How often the server looks for meeting reminders that are due.
+const MEETING_NOTICE_PERIOD: Duration = Duration::from_secs(20);
 const BACKGROUND_SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 /// `[storage].max_attachment_bytes` when there is no storage (attachments are off then anyway).
 const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
@@ -319,10 +321,12 @@ async fn run() -> anyhow::Result<()> {
   })
   .await?;
   spawn_urgent_scheduler(state.clone());
+  spawn_meeting_notices(state.clone());
   spawn_scheduled_messages(state.clone());
   spawn_email_digests(state.clone());
   spawn_account_housekeeping(state.clone());
   spawn_background_sweeper(state.clone());
+  spawn_storage_probe(state.clone());
   spawn_partition_maintenance(state.clone(), config.server.partitions_ahead_months);
   spawn_derived_presence(state.clone());
   health::spawn(state.clone());
@@ -465,6 +469,27 @@ fn is_transient(error: &anyhow::Error) -> bool {
   })
 }
 
+/// Keeps the object storage's breaker current (`[dependencies] storage_probe_secs`): clients talk
+/// to the storage directly, so the server may not see an outage or its end otherwise.
+fn spawn_storage_probe(state: AppState) {
+  let (Some(store), Some(period)) = (
+    state.maybe_blob_store.clone(),
+    state.dependencies.options().maybe_storage_probe,
+  ) else {
+    return;
+  };
+  tokio::spawn(async move {
+    let mut interval = tokio::time::interval(period);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+      interval.tick().await;
+      if let Err(error) = store.probe().await {
+        tracing::debug!(%error, "the storage probe failed");
+      }
+    }
+  });
+}
+
 /// Removes deleted and abandoned call backgrounds and unfinished attachments once their upload URLs
 /// have expired, and files of drafts that were not sent in time (#1220).
 fn spawn_background_sweeper(state: AppState) {
@@ -487,6 +512,9 @@ fn spawn_background_sweeper(state: AppState) {
         Ok(0) => {},
         Ok(swept) => info!(swept, "swept files of drafts that were not sent"),
         Err(error) => warn!(%error, "sweeping drafts' files failed"),
+      }
+      if let Err(error) = storage_cleanup::sweep(&state).await {
+        warn!(%error, "deleting queued objects failed");
       }
       match meeting_guests::sweep_expired_guests(&state).await {
         Ok(0) => {},
@@ -779,6 +807,22 @@ fn spawn_urgent_scheduler(state: AppState) {
       match urgent::run_due(&state, now).await {
         Ok(_) => state.metrics.job_succeeded(BackgroundJob::UrgentScheduler, now),
         Err(error) => warn!(%error, "urgent reminders failed"),
+      }
+    }
+  });
+}
+
+/// Reminders before a meeting and the notice at its start (docs/meetings.md, "Starting"), for every
+/// instance: they take each notice in the database, so only one of them sends it.
+fn spawn_meeting_notices(state: AppState) {
+  tokio::spawn(async move {
+    let mut interval = tokio::time::interval(MEETING_NOTICE_PERIOD);
+    loop {
+      interval.tick().await;
+      let now = time::OffsetDateTime::now_utc();
+      match meeting_notices::run_due(&state, now).await {
+        Ok(_) => state.metrics.job_succeeded(BackgroundJob::MeetingNotices, now),
+        Err(error) => warn!(%error, "meeting notices failed"),
       }
     }
   });
@@ -1173,6 +1217,7 @@ fn push_settings(config: &Config) -> PushSettings {
       call: Duration::from_secs(call_ttl_secs),
       dismiss: Duration::from_secs(push.dismiss_ttl_secs),
       test: Duration::from_secs(push.test_ttl_secs),
+      meeting: Duration::from_secs(push.meeting_ttl_secs),
     },
     retry: RetryPolicy {
       max_retries: push.max_retries,

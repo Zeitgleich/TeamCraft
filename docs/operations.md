@@ -94,8 +94,15 @@ exists; clients can still read what they have stored locally.
   Only the database makes `/readyz` answer 503, and only after the breaker opened (one slow ping,
   bounded by `readiness_timeout_ms`, doesn't take the instance out of the load balancer). Another
   dependency that is down makes it `degraded` with 200: every instance would meet the same outage,
-  and taking them out would turn a storage outage into a full one. Alert on `degraded` and on the
-  log lines `dependency is down` / `dependency is back`.
+  and taking them out would turn a storage outage into a full one: chat, calls and the gateway don't
+  need it. Alert on `degraded` and on the log lines `dependency is down` / `dependency is back`.
+- **Object storage outages.** Clients move the bytes with presigned URLs, so the server asks the
+  storage itself every `storage_probe_secs` (10 s, 0 turns it off, one `HEAD` of a key that doesn't
+  exist). Without traffic through the server an outage is seen within about three of those and the
+  end of one at the next probe. While the storage is down no upload or download URL is handed out.
+  Deletes that fail wait in the table `storage_cleanup` for the next background sweep (every
+  10 minutes); a growing table means the storage refuses them, the log line is `deleting a queued object
+  failed`.
 - **Database outages.** Handlers' errors feed the database's breaker, so it opens under traffic
   without anybody asking `/readyz`: requests that need the database then answer at once rather than
   after `acquire_timeout_secs`, and one request pings after `open_secs`. Server info, brand and client
@@ -167,7 +174,8 @@ no error texts.**
 - `dependency`: `database`, `object_storage`, `identity_provider`, `push_gateway`, `sfu`, once in use.
   `state`: `ok`, `down`, `recovering`.
 - `job`: `database_check`, `email_digest`, `guest_expiry`, `holiday_resync`, `key_package_pruning`,
-  `oidc_sync`, `partition_maintenance`, `retention`, `scheduled_messages`, `urgent_scheduler`.
+  `meeting_notices`, `oidc_sync`, `partition_maintenance`, `retention`, `scheduled_messages`,
+  `urgent_scheduler`.
 
 **Cost.** With the listener off, requests pay nothing for it. With it on, one request costs a look at
 the path's first segments, two label lookups and two atomic updates, whatever the size of the

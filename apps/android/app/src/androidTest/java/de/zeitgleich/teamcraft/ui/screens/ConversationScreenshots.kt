@@ -32,6 +32,8 @@ import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.MainActivity
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.MessageLayout
+import de.zeitgleich.teamcraft.ui.MessageLayoutPrefs
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 
 private const val MINUTE_MILLIS = 60_000L
@@ -55,10 +57,22 @@ class ConversationScreenshots {
       shoot("conversation-$theme", isDark) { viewModel -> ConversationSample(viewModel) }
       shoot("attach-$theme", isDark) { viewModel ->
         ConversationSample(viewModel)
-        AttachSheet(rememberAttachmentPickers(viewModel) {}, onDismiss = {})
+        AttachSheet(rememberAttachmentPickers(viewModel, onMediaFlow = {}) {}, onDismiss = {})
       }
     }
     shoot("conversation-landscape-light", isDark = false, isLandscape = true) { viewModel -> ConversationSample(viewModel) }
+    // The desktop's comfortable and compact lists instead of bubbles (#598, #1488).
+    val layout = MessageLayoutPrefs.of(InstrumentationRegistry.getInstrumentation().targetContext)
+    try {
+      for (choice in listOf(MessageLayout.Comfortable, MessageLayout.Compact)) {
+        layout.setLayout(choice)
+        for (isDark in listOf(false, true)) {
+          shoot("conversation-${choice.slug}-${if (isDark) "dark" else "light"}", isDark) { viewModel -> ConversationSample(viewModel) }
+        }
+      }
+    } finally {
+      layout.setLayout(MessageLayout.Bubbles)
+    }
   }
 
   private fun shoot(

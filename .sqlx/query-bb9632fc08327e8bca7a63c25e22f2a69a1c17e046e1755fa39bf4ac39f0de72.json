@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM meetings\n         WHERE kind = 'scheduled' AND status = 'scheduled' AND starts_at < $2\n           AND (starts_at >= $1 OR recurrence_rule IS NOT NULL)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "meetings",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bb9632fc08327e8bca7a63c25e22f2a69a1c17e046e1755fa39bf4ac39f0de72"
+}

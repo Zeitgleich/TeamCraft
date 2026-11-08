@@ -42,6 +42,9 @@ readiness_timeout_ms = 2000
 # An API request that makes no progress this long (no answer, no new piece of its body) gets 503 and
 # Retry-After instead of hanging on a database connection that stopped answering. 0: no deadline.
 request_deadline_secs = 60
+# How often the object storage is asked whether it answers, in seconds (0: never). Clients move the
+# bytes with presigned URLs, so without this the server may not notice an outage or its end.
+storage_probe_secs = 10
 
 [oidc]
 # Required. Issuer of the OIDC provider (reference setup: a Keycloak realm). Must equal the `iss`
@@ -521,9 +524,6 @@ served_hostnames = []
 # Most guests one shared guest link of a meeting lets into the lobby; every one of them still waits
 # for a host.
 # max_shared_link_guests = 50
-# A call started in a scheduled meeting's chat rings its invitees (who haven't declined) when it
-# starts at most this long before an occurrence, or during it; 0 turns this off.
-# start_ring_lead_secs = 3600
 # Shared secret of the inbox handler that forwards RSVP e-mail (iMIP REPLY) to
 # POST /api/internal/v1/meetings/replies with `Authorization: Bearer <token>`. The handler vouches for
 # the sender (DKIM/SPF). Without it that endpoint answers 503. Prefer TEAMCRAFT_MEETINGS__INBOX_TOKEN.
@@ -574,11 +574,13 @@ served_hostnames = []
 # vapid_private_key = "..."
 vapid_subject = "mailto:admin@example.com"
 # How long push services may hold a wake-up for an offline device: messages, rings (0: the ring
-# timeout of [calls]), withdrawals after reading elsewhere, test pushes.
+# timeout of [calls]), withdrawals after reading elsewhere, test pushes, a meeting's reminder and
+# start notice.
 ttl_secs = 86400
 call_ttl_secs = 0
 dismiss_ttl_secs = 86400
 test_ttl_secs = 300
+meeting_ttl_secs = 600
 # Temporary failures (5xx, 429, timeouts) are tried again until the wake-up's TTL ends, at most
 # max_retries times, waiting 2 s, then 4 s, ... (with jitter) up to retry_max_delay_secs, or longer
 # when the push service asks for it (Retry-After). Retries wait in the database and survive a

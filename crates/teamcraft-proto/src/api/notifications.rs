@@ -119,21 +119,78 @@ impl DndSchedule {
 
   /// Whether `unix_seconds` falls into one of the windows, given the user's UTC offset at that moment.
   pub fn is_active_at(&self, unix_seconds: i64, offset_minutes: i16) -> bool {
-    let local = unix_seconds + i64::from(offset_minutes) * 60;
-    let day = local.div_euclid(SECONDS_PER_DAY);
-    let minute = u16::try_from(local.rem_euclid(SECONDS_PER_DAY) / 60).unwrap_or(0);
-    // 1970-01-01 was a Thursday; Monday is index 0.
-    let today = Weekday::from_monday_based_index(day + 3);
-    let yesterday = Weekday::from_monday_based_index(day + 2);
-    self.windows.iter().any(|window| {
-      let (start, end) = (window.start_minute, window.end_minute);
-      if start < end {
-        window.weekdays.contains(&today) && (start..end).contains(&minute)
-      } else {
-        (window.weekdays.contains(&today) && minute >= start)
-          || (window.weekdays.contains(&yesterday) && minute < end)
-      }
-    })
+    windows_active_at(&self.windows, unix_seconds, offset_minutes)
+  }
+}
+
+/// Whether `unix_seconds` falls into one of `windows`, given the UTC offset at that moment. A window
+/// whose end is before its start runs past midnight and belongs to the day it starts on.
+pub fn windows_active_at(windows: &[DndWindow], unix_seconds: i64, offset_minutes: i16) -> bool {
+  let local = unix_seconds + i64::from(offset_minutes) * 60;
+  let day = local.div_euclid(SECONDS_PER_DAY);
+  let minute = u16::try_from(local.rem_euclid(SECONDS_PER_DAY) / 60).unwrap_or(0);
+  // 1970-01-01 was a Thursday; Monday is index 0.
+  let today = Weekday::from_monday_based_index(day + 3);
+  let yesterday = Weekday::from_monday_based_index(day + 2);
+  windows.iter().any(|window| {
+    let (start, end) = (window.start_minute, window.end_minute);
+    if start < end {
+      window.weekdays.contains(&today) && (start..end).contains(&minute)
+    } else {
+      (window.weekdays.contains(&today) && minute >= start)
+        || (window.weekdays.contains(&yesterday) && minute < end)
+    }
+  })
+}
+
+wire_enum! {
+  /// Whether `@channel`, `@here` and `@all` count as a mention of the member in one conversation
+  /// (notifications.md, "Per-conversation filters").
+  #[derive(Default)]
+  pub enum ChannelMentions {
+    /// The member's general choice: on the desktop the setting "@channel notifies me"; the push
+    /// routing, which can't see that device setting, doesn't count them.
+    #[default]
+    Default => "default",
+    /// They count as a mention here, also for phone pushes.
+    Notify => "notify",
+    /// They don't count as a mention here.
+    Ignore => "ignore",
+  }
+}
+
+impl ChannelMentions {
+  /// Whether a message to the whole conversation counts as a mention, given the member's general
+  /// choice. A value from a newer version follows the general choice.
+  pub fn counts(&self, general: bool) -> bool {
+    match self {
+      Self::Notify => true,
+      Self::Ignore => false,
+      Self::Default | Self::Unknown(_) => general,
+    }
+  }
+
+  pub fn is_default(&self) -> bool {
+    *self == Self::Default
+  }
+}
+
+/// Times at which one conversation stays quiet as if it were muted (notifications.md,
+/// "Per-conversation filters"), in the member's local time like [`DndSchedule`]: evaluators with a
+/// time zone database use `time_zone` at the moment in question, others `utc_offset_minutes`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct QuietHours {
+  pub utc_offset_minutes: i16,
+  /// IANA time zone name, for example `Europe/Berlin`.
+  #[serde(rename = "time_zone", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_time_zone: Option<String>,
+  pub windows: Vec<DndWindow>,
+}
+
+impl QuietHours {
+  /// Whether the conversation is quiet at `unix_seconds`, given the member's UTC offset then.
+  pub fn is_active_at(&self, unix_seconds: i64, offset_minutes: i16) -> bool {
+    windows_active_at(&self.windows, unix_seconds, offset_minutes)
   }
 }
 
@@ -168,9 +225,31 @@ pub struct NotificationSettings {
   /// default_level`). Servers from before the setting send nothing.
   #[serde(rename = "default_level", default, skip_serializing_if = "Option::is_none")]
   pub maybe_default_level: Option<NotificationLevel>,
+  /// How many minutes before a planned meeting the user is reminded, at most
+  /// [`MAX_MEETING_REMINDER_MINUTES`]; `0`: no reminder. Reads: the user's choice; absent: they never
+  /// chose ([`DEFAULT_MEETING_REMINDER_MINUTES`] applies). Writes: absent keeps the stored choice.
+  #[serde(
+    rename = "meeting_reminder_minutes",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_meeting_reminder_minutes: Option<u16>,
+  /// Whether a planned meeting's start notifies the user. Reads: the user's choice; absent: they
+  /// never chose (yes). Writes: absent keeps the stored choice.
+  #[serde(
+    rename = "notifies_meeting_start",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_notifies_meeting_start: Option<bool>,
 }
 
-/// `GET`/`PUT /api/v1/conversations/{id}/notification-settings`; `PUT` replaces both fields.
+/// The reminder before a meeting for somebody who never chose (minutes before the start).
+pub const DEFAULT_MEETING_REMINDER_MINUTES: u16 = 5;
+/// The longest lead time a reminder can have; the server looks this far ahead.
+pub const MAX_MEETING_REMINDER_MINUTES: u16 = 60;
+
+/// `GET`/`PUT /api/v1/conversations/{id}/notification-settings`; `PUT` replaces level and mute time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ConversationNotificationSettings {
   pub level: NotificationLevel,
@@ -178,9 +257,18 @@ pub struct ConversationNotificationSettings {
   #[serde(rename = "muted_until", default, skip_serializing_if = "Option::is_none")]
   pub maybe_muted_until: Option<UnixMillis>,
   /// Reads: the conversation follows its space's setting. Writes: `true` drops the conversation's
-  /// own setting (level and mute time are ignored) so it follows the space again.
+  /// own setting (level and mute time are ignored) so it follows the space again. The filters
+  /// below are the conversation's own either way.
   #[serde(default)]
   pub is_inherited: bool,
+  /// Reads: whether `@channel` counts as a mention here, absent for `default`. Writes: absent keeps
+  /// the stored choice (clients from before the field).
+  #[serde(rename = "channel_mentions", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_channel_mentions: Option<ChannelMentions>,
+  /// Reads: the quiet hours, if there are any. Writes: absent keeps them, quiet hours without
+  /// windows remove them.
+  #[serde(rename = "quiet_hours", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_quiet_hours: Option<QuietHours>,
 }
 
 /// `GET`/`PUT /api/v1/spaces/{id}/notification-settings`: the caller's setting for a whole space.
@@ -375,6 +463,76 @@ mod tests {
     );
   }
 
+  mod conversation_filters {
+    use super::*;
+
+    #[test]
+    fn channel_mentions_follow_the_general_choice_unless_set() {
+      assert!(ChannelMentions::Default.counts(true));
+      assert!(!ChannelMentions::Default.counts(false));
+      assert!(ChannelMentions::Notify.counts(false));
+      assert!(!ChannelMentions::Ignore.counts(true));
+      let future: ChannelMentions = serde_json::from_str("\"only_admins\"").unwrap();
+      assert_eq!(future, ChannelMentions::Unknown("only_admins".into()));
+      assert!(future.counts(true));
+      assert!(!future.counts(false));
+    }
+
+    #[test]
+    fn quiet_hours_cross_midnight_like_the_dnd_schedule() {
+      let quiet = QuietHours {
+        windows: night_shift(vec![Weekday::Friday]).windows,
+        ..QuietHours::default()
+      };
+      let friday = MONDAY_MIDNIGHT + 4 * 24 * HOUR;
+      assert!(quiet.is_active_at(friday + 23 * HOUR, 0));
+      assert!(quiet.is_active_at(friday + 24 * HOUR + 6 * HOUR, 0));
+      assert!(!quiet.is_active_at(friday + 24 * HOUR + 7 * HOUR, 0));
+      assert!(!quiet.is_active_at(friday + 21 * HOUR, 0));
+      // Sunday 22:00 is not in a Friday window.
+      assert!(!quiet.is_active_at(friday + 2 * 24 * HOUR + 22 * HOUR, 0));
+    }
+
+    #[test]
+    fn a_window_ending_at_midnight_ends_with_the_day() {
+      let quiet = QuietHours {
+        windows: vec![DndWindow {
+          weekdays: vec![Weekday::Monday],
+          start_minute: 18 * 60,
+          end_minute: 0,
+        }],
+        ..QuietHours::default()
+      };
+      assert!(quiet.is_active_at(MONDAY_MIDNIGHT + 23 * HOUR + 59 * 60, 0));
+      assert!(!quiet.is_active_at(MONDAY_MIDNIGHT + 24 * HOUR, 0));
+    }
+
+    #[test]
+    fn settings_from_older_clients_leave_the_filters_out() {
+      let old: ConversationNotificationSettings =
+        serde_json::from_str(r#"{"level":"mentions","is_inherited":false}"#).unwrap();
+      assert_eq!(old.maybe_channel_mentions, None);
+      assert_eq!(old.maybe_quiet_hours, None);
+      let new = ConversationNotificationSettings {
+        maybe_channel_mentions: Some(ChannelMentions::Notify),
+        maybe_quiet_hours: Some(QuietHours {
+          utc_offset_minutes: 60,
+          maybe_time_zone: Some("Europe/Berlin".into()),
+          windows: vec![DndWindow {
+            weekdays: vec![Weekday::Saturday, Weekday::Sunday],
+            start_minute: 600,
+            end_minute: 1200,
+          }],
+        }),
+        ..old
+      };
+      assert_eq!(
+        serde_json::to_string(&new).unwrap(),
+        r#"{"level":"mentions","is_inherited":false,"channel_mentions":"notify","quiet_hours":{"utc_offset_minutes":60,"time_zone":"Europe/Berlin","windows":[{"weekdays":["sat","sun"],"start_minute":600,"end_minute":1200}]}}"#
+      );
+    }
+  }
+
   #[test]
   fn settings_wire_format_is_stable() {
     let settings = NotificationSettings {
@@ -385,6 +543,8 @@ mod tests {
       maybe_uses_desktop_attention: None,
       maybe_level: None,
       maybe_default_level: None,
+      maybe_meeting_reminder_minutes: None,
+      maybe_notifies_meeting_start: None,
     };
     assert_eq!(
       serde_json::to_string(&settings).unwrap(),

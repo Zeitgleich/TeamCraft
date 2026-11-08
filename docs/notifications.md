@@ -93,9 +93,12 @@ same list as a "Chats" tab (still labelled "Home" in the mobile shells until the
 |-----------------------------------|-----------------------------------------------------------------|
 | Level (all / mentions / none)     | `GET`/`PUT /conversations/{id}/notification-settings`           |
 | Mute until a time                 | same; also shown as `muted_until` in `my_membership`            |
+| `@channel` notifies here          | same (`channel_mentions`); also in `my_membership`              |
+| Quiet hours of a conversation     | same (`quiet_hours`); also in `my_membership`                   |
 | Do-not-disturb schedule           | `GET`/`PUT /me/notification-settings` (`dnd_schedule`)          |
 | Push mode (`away_only`, `always`) | same                                                            |
 | Auto-follow mentioned threads     | same                                                            |
+| Meeting reminders                 | same (`meeting_reminder_minutes`, `notifies_meeting_start`)     |
 | Send read receipts                | same (default: `[notifications] read_receipts_default`)         |
 | Level of everything else          | same (`level`; default: `[notifications] default_level`, `all`) |
 
@@ -133,6 +136,46 @@ The DND schedule is typed (weekdays, start/end minute, the user's IANA time zone
 as fallback, an allow list of senders, whether urgent messages break through) and stored as JSON text
 the database does not interpret. The server evaluates it in the push routing with its time zone
 database, so a daylight saving change needs no client.
+
+### Per-conversation filters
+
+Issue #599. Next to level and mute time a member sets two filters per conversation, in the
+conversation's bell menu (desktop and web) or its notification dialog (Android):
+
+- **`@channel` and `@here`** (`channel_mentions`): `default` follows the general setting
+  "@channel notifies me" (Settings → Notifications, synced in the account's encrypted data), `notify`
+  lets `@channel`, `@here` and `@all` count as a mention here, `ignore` never. At the level
+  "mentions" this is the "only announcements" filter: chatter stays quiet, `@channel` gets through
+  (`notify`), or a channel whose members overuse it stops interrupting (`ignore`). A direct
+  `@username` mention always counts.
+- **Quiet hours** (`quiet_hours`): weekly ranges like the DND schedule's (weekdays, start and end
+  minute, a range past midnight belongs to the day it starts on), in the member's IANA time zone with
+  the UTC offset as fallback. While one is on, the conversation acts muted: no notification and no
+  push, also not for mentions, urgent messages and calls (as a mute; DND overrides don't apply).
+  Unread and mention counts are not affected, like a mute's.
+
+Both are the conversation's own: they don't follow the space and `"is_inherited": true` (back to the
+space's level) leaves them. A `PUT` without the fields keeps them, so clients from before them
+change nothing; quiet hours without ranges remove them; a value from a newer version reads as
+`default` (`ChannelMentions::Unknown`), and clients leave it out when they write. The server
+validates ranges and zone like the DND schedule's (at most 14 ranges).
+
+**What the server learns.** The server can't read message text, so the sending device marks a
+message that addresses the whole conversation (`is_channel_mention`, from `addresses_everyone` in
+`teamcraft-proto`, shared by every client). It counts only when the sender may use channel mentions
+(`use_channel_mentions`); the server never stores it with the message, a held message keeps it until
+it is released. The routing then treats the message as a mention for members whose
+`channel_mentions` is `notify`. It can't see the general device setting, so `default` doesn't push
+for `@channel` (as before the filter); members who want such pushes choose `notify`. Clients from
+before the bit send none: their `@channel` notifies on the desktops of members who let it, not on
+phones.
+
+**Where it is decided.** The push routing (`push::routing`) checks quiet hours right after the mute
+and evaluates them with its time zone database, so daylight saving time needs no client. The desktop
+and web notifier (`notifier::decide`) checks them again with the device's current offset, like the
+DND schedule, and applies `channel_mentions` to its own mention rules. Android shows what the push
+routing let through. Changes reach the user's other devices like level and mute: the server holds
+them, desktop and web read them at start, Android with the dialog.
 
 ## E-mail digest of missed mentions
 
@@ -174,6 +217,7 @@ keeps its gateway connection until it stops syncing, about half a minute later, 
 notification for what arrives over it. In order:
 
 1. **Muted** (level `none`, or muted until a later time, own or inherited from the space): never pushes.
+   The conversation's quiet hours count as a mute while they are on ("Per-conversation filters").
 2. **Do not disturb** (manual, timed, or the weekly schedule): suppresses the push unless an override
    applies: the sender is on the user's allow list, or the message is urgent and the user lets urgent
    messages through. Overrides apply to manual and scheduled DND alike.
@@ -182,9 +226,10 @@ notification for what arrives over it. In order:
    phones wait for the grace delay and go out only if the message is still unread then. Push mode
    `always` skips both.
 4. **Level** (see "Default level"): mentions, DMs and replies in followed threads push; other
-   messages only in `all` conversations; integration channels only for mentions.
+   messages only in `all` conversations; integration channels only for mentions. An `@channel`
+   counts as a mention where the member set `channel_mentions` to `notify`.
 
-Calls ring every device of the callee (desktop, web and phones alike) unless the conversation is muted or
+Calls ring every device of the callee (desktop, web and phones alike) unless the conversation is muted (quiet hours included) or
 DND is on without an override.
 
 ## Mobile push delivery
@@ -244,6 +289,7 @@ remembers per process which devices show what (for withdrawals and rings) and th
 | `push.ttl_secs`                                   | 86400       | TTL of message and mention wake-ups                                             |
 | `push.call_ttl_secs`                              | 0           | TTL of rings; `0` uses `[calls] ring_timeout_secs`                              |
 | `push.dismiss_ttl_secs` / `push.test_ttl_secs`    | 86400 / 300 | TTL of withdrawals and test pushes                                              |
+| `push.meeting_ttl_secs`                           | 600         | TTL of a meeting's reminder and start notice                                    |
 | `push.max_retries`, `push.retry_initial_delay_ms` | 200, 2000   | Retries after temporary failures, doubling the wait (jitter), within the TTL    |
 | `push.retry_max_delay_secs`                       | 600         | Longest wait between retries, unless the service asks for more (`Retry-After`)  |
 | `push.retry_workers`                              | 2           | Retry workers per pool (APNs/FCM; Web Push/UnifiedPush), one DB connection each |
@@ -598,7 +644,7 @@ conversation opens the conversation with the text as draft instead, for the usua
 In the browser, a push notification shown by the service worker (no tab open) has Mark as read for a
 top-level message: the worker sets the read position with the stored push session token, in the
 language the page last left next to the database name; with an expired session the click opens the
-conversation instead. Join on meeting reminders needs a server push for reminders and is not built.
+conversation instead. Join on a meeting's push joins through an open tab; with no tab open the click opens the meeting's chat.
 
 **Pictures (#543).** As in messaging apps, a notification shows who wrote or where: the sender's
 avatar for DMs and group DMs (thread replies included), the channel's picture (else its space's) for
@@ -686,9 +732,12 @@ here, answered by someone else (group calls), cancelled or timed out. A call nob
 user did not decline here leaves a "missed call" notification with Call back, under the direct-message
 rules again. Names appear only where the lock-screen policy allows sender names.
 
-**Meeting reminders.** For meetings the user is invited to or organizes, planned (not "meet now"),
-not cancelled and not declined: one notification `maybe_meeting_reminder_minutes` before (default 5,
-off possible) and one at the start (`notifies_meeting_start`, default on), each with Join. Times are
+**Meeting reminders.** Phones, and browsers without an open tab, get the server's push at the
+scheduled time (meetings.md, "Starting"), which also carries the settings below to every device.
+An open desktop or web app reminds by itself, as described here: for meetings the user is invited
+to or organizes, planned (not "meet now"), not cancelled and not declined, one notification
+`maybe_meeting_reminder_minutes` before (default 5, off possible) and one at the start
+(`notifies_meeting_start`, default on), each with Join. Times are
 the server's: `GET /meetings` carries `server_now`, and the client applies the measured offset, so a
 wrong device clock does not shift reminders. One timer sleeps until the next reminder, at most 15
 minutes (the list is refreshed then; a meeting created meanwhile is seen within that time); right

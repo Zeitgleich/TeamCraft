@@ -131,6 +131,11 @@ pub async fn push_preview<A: ServerApi>(
   let wake_up = open_push_wakeup(store, sealed)?;
   let maybe_conversation: Option<ConversationResponse> =
     records::get_json(store, Table::Conversations, &wake_up.conversation_id.to_string())?;
+  // A planned meeting's chat may be newer than this store: its notice is sent at the meeting's time.
+  let maybe_conversation = match (maybe_conversation, maybe_api) {
+    (None, Some(api)) if is_meeting_notice(&wake_up) => api.conversation(wake_up.conversation_id).await.ok(),
+    (known, _) => known,
+  };
   let is_direct = maybe_conversation.as_ref().is_some_and(|conversation| {
     matches!(conversation.kind, ConversationKind::Dm | ConversationKind::Group)
       || !conversation.participants.is_empty()
@@ -153,8 +158,8 @@ pub async fn push_preview<A: ServerApi>(
       },
       // A ring names no message; answering joins that conversation's call, which the server controls
       // anyway. It counts as verified when this device knows the conversation as one it is in, so the
-      // apps offer answer and decline.
-      (PushKind::Call, _) => (
+      // apps offer answer and decline (Join for a meeting's notice).
+      (PushKind::Call | PushKind::MeetingReminder | PushKind::MeetingStart, _) => (
         Ok(PreviewContent::Unavailable),
         false,
         maybe_conversation
@@ -205,6 +210,10 @@ pub fn device_push_content(store: &impl LocalStore) -> PushContentMode {
 /// Stores this device's own notification privacy setting (see [`device_push_content`]).
 pub fn save_device_push_content(store: &impl LocalStore, mode: &PushContentMode) -> Result<(), CoreError> {
   records::put_json(store, Table::Account, DEVICE_PUSH_CONTENT_RECORD, mode)
+}
+
+fn is_meeting_notice(wake_up: &PushWakeUp) -> bool {
+  matches!(wake_up.kind, PushKind::MeetingReminder | PushKind::MeetingStart)
 }
 
 fn is_message(wake_up: &PushWakeUp) -> bool {
@@ -618,6 +627,7 @@ mod tests {
         maybe_call_id: None,
         maybe_badge: None,
         maybe_sent_at: None,
+        maybe_meeting: None,
       },
       maybe_conversation_name: None,
       maybe_sender_name: None,
@@ -807,6 +817,7 @@ mod tests {
         maybe_call_id: None,
         maybe_badge: None,
         maybe_sent_at: None,
+        maybe_meeting: None,
       },
       maybe_conversation_name: Some("planning".into()),
       maybe_sender_name: Some("Alice".into()),
@@ -863,6 +874,7 @@ mod tests {
       maybe_call_id: None,
       maybe_badge: None,
       maybe_sent_at: None,
+      maybe_meeting: None,
     };
     let failed = PushPreview {
       wake_up: wake_up.clone(),

@@ -80,6 +80,7 @@
   <string name="push_kind_message">Nachricht</string>
   <string name="push_kind_call">Anruf</string>
   <string name="push_kind_dismiss">Anderswo gelesen</string>
+  <string name="push_kind_meeting">Besprechung</string>
   <string name="push_kind_test">Test</string>
   <string name="push_kind_sync">Hintergrund-Aktualisierung</string>
   <string name="catching_up_in_background">Neue Nachrichten werden abgerufen</string>
@@ -169,6 +170,10 @@
   <string name="notification_channel_direct_messages_description">Nachrichten von Personen, mit denen du einzeln oder in kleinen Gruppen schreibst.</string>
   <string name="notification_channel_meetings">Meeting-Erinnerungen</string>
   <string name="notification_channel_meetings_description">Erinnerungen kurz vor Beginn eines Meetings.</string>
+  <string name="meeting_notification_started">%1$s hat begonnen</string>
+  <string name="meeting_notification_started_unnamed">Eine Besprechung hat begonnen</string>
+  <string name="meeting_notification_soon">%1$s beginnt in %2$d Min.</string>
+  <string name="meeting_notification_soon_unnamed">Eine Besprechung beginnt in %1$d Min.</string>
   <string name="notification_mute">Für 8 Stunden stummschalten</string>
   <string name="notification_new_message">Neue Nachricht</string>
   <string name="notification_added_you">Hat dich zur Unterhaltung hinzugefügt</string>

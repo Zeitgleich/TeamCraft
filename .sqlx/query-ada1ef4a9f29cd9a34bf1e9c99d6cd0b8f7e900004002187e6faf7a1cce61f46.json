@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE memberships SET channel_mentions = $3 WHERE conversation_id = $1 AND user_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ada1ef4a9f29cd9a34bf1e9c99d6cd0b8f7e900004002187e6faf7a1cce61f46"
+}

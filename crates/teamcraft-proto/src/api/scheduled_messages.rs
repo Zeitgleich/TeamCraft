@@ -43,6 +43,9 @@ pub struct SealedScheduledMessage {
   pub mentioned_user_ids: Vec<UserId>,
   #[serde(default)]
   pub is_urgent: bool,
+  /// As in [`crate::SendMessageRequest::is_channel_mention`].
+  #[serde(default, skip_serializing_if = "crate::api::messages::is_false")]
+  pub is_channel_mention: bool,
   /// The MLS epoch it was sealed in, which must be the group's current one.
   pub mls_epoch: u64,
 }
@@ -84,6 +87,9 @@ pub struct ScheduledMessageResponse {
   pub mentioned_user_ids: Vec<UserId>,
   #[serde(default)]
   pub is_urgent: bool,
+  /// As in [`crate::SendMessageRequest::is_channel_mention`].
+  #[serde(default, skip_serializing_if = "crate::api::messages::is_false")]
+  pub is_channel_mention: bool,
   pub mls_epoch: u64,
   pub due_at: UnixMillis,
   pub version: u64,

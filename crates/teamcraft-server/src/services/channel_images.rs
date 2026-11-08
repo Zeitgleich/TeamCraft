@@ -19,6 +19,7 @@ use super::access::{load_conversation, require};
 use super::audit::{self, Target as AuditTarget};
 use super::conversations::{ensure_open_channel, get_conversation};
 use super::space_images::{SPACE_IMAGE_CONTENT_TYPE, SpaceImageFile, run_limited, sanitize};
+use super::storage_cleanup::delete_or_queue;
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -78,20 +79,23 @@ pub async fn put_channel_image(
   store
     .put_object(&image.key, png, SPACE_IMAGE_CONTENT_TYPE)
     .await
-    .map_err(|error| ApiError::Unavailable(format!("storing the picture failed: {error}")))?;
+    .map_err(|error| {
+      warn!(%error, "storing a picture failed");
+      ApiError::storage_failed("picture storage", error)
+    })?;
   match state.database.set_conversation_image(id, Some(&image)).await {
     Ok(ImageChange::Set { maybe_replaced_key }) => {
       if let Some(previous) = maybe_replaced_key {
-        forget_object(store, &previous).await;
+        delete_or_queue(state, store, &previous).await;
       }
     },
     // Deleted while the picture was uploading: the object is an orphan now.
     Ok(ImageChange::ChannelGone) => {
-      forget_object(store, &image.key).await;
+      delete_or_queue(state, store, &image.key).await;
       return Err(ApiError::conversation_not_found());
     },
     Err(error) => {
-      forget_object(store, &image.key).await;
+      delete_or_queue(state, store, &image.key).await;
       return Err(error.into());
     },
   }
@@ -121,7 +125,7 @@ pub async fn delete_channel_image(
   match state.database.set_conversation_image(id, None).await? {
     ImageChange::Set {
       maybe_replaced_key: Some(previous),
-    } => forget_object(store, &previous).await,
+    } => delete_or_queue(state, store, &previous).await,
     ImageChange::Set { .. } => {},
     ImageChange::ChannelGone => return Err(ApiError::conversation_not_found()),
   }
@@ -147,7 +151,7 @@ pub async fn get_channel_image(
     .await
     .map_err(|error| {
       warn!(%error, conversation_id = %id, "reading a channel picture failed");
-      ApiError::storage_unavailable("picture storage")
+      ApiError::storage_failed("picture storage", error)
     })?
     .ok_or_else(ApiError::channel_image_not_found)?;
   Ok(SpaceImageFile {
@@ -191,11 +195,4 @@ fn blob_store(state: &AppState) -> Result<&Arc<BlobStore>, ApiError> {
     .maybe_blob_store
     .as_ref()
     .ok_or_else(|| ApiError::Unavailable("storage is not configured".into()))
-}
-
-/// Deletes a picture nobody refers to any more; a failure only leaves an orphan behind.
-async fn forget_object(store: &BlobStore, key: &str) {
-  if let Err(error) = store.delete_object(key).await {
-    warn!(%error, "deleting an old channel picture failed");
-  }
 }

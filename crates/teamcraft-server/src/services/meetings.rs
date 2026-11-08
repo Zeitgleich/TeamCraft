@@ -17,11 +17,11 @@ use teamcraft_db::{
   StoredMeeting,
 };
 use teamcraft_proto::{
-  CancelMeetingQuery, CancelScope, ConversationId, ConversationKind, ConversationVisibility,
-  CreateInstantMeetingRequest, CreateMeetingRequest, GatewayEvent, HistoryPolicy, ListMeetingsQuery,
-  ListMeetingsResponse, MeetingAttendeeResponse, MeetingId, MeetingInvitee, MeetingKind, MeetingRecurrence,
-  MeetingReplyResponse, MeetingResponse, MeetingStatus, RecurrenceFrequency, RestoreMeetingRequest,
-  RsvpStatus, SetRsvpRequest, SpaceId, UnixMillis, UpdateMeetingRequest, UserId, Weekday,
+  CancelMeetingQuery, CancelScope, ConversationKind, ConversationVisibility, CreateInstantMeetingRequest,
+  CreateMeetingRequest, GatewayEvent, HistoryPolicy, ListMeetingsQuery, ListMeetingsResponse,
+  MeetingAttendeeResponse, MeetingId, MeetingInvitee, MeetingKind, MeetingRecurrence, MeetingReplyResponse,
+  MeetingResponse, MeetingStatus, RecurrenceFrequency, RestoreMeetingRequest, RsvpStatus, SetRsvpRequest,
+  SpaceId, UnixMillis, UpdateMeetingRequest, UserId, Weekday,
 };
 use time::{Duration, OffsetDateTime, PrimitiveDateTime};
 use tracing::warn;
@@ -713,54 +713,21 @@ pub async fn hide_meeting(
   announce(state, &meeting).await
 }
 
-/// Whom a call starting now in the meeting chat `conversation` rings (issue #1006): the invited
-/// users who haven't declined, but not `starter`, when the meeting is scheduled and an occurrence
-/// that isn't cancelled runs now or starts within the configured lead. Empty otherwise.
-pub async fn invitees_to_ring(
-  state: &AppState,
-  conversation: ConversationId,
-  starter: UserId,
-) -> Result<HashSet<UserId>, ApiError> {
-  let Some(lead) = state
-    .maybe_meetings
-    .as_deref()
-    .and_then(MeetingService::start_ring_lead)
-  else {
-    return Ok(HashSet::new());
-  };
-  let Some(meeting) = state.database.get_meeting_by_conversation(conversation).await? else {
-    return Ok(HashSet::new());
-  };
-  let is_on =
-    meeting.kind == MeetingKind::Scheduled.as_str() && meeting.status == MeetingStatus::Scheduled.as_str();
-  if !is_on || !has_occurrence_around(state, &meeting, OffsetDateTime::now_utc(), lead).await? {
-    return Ok(HashSet::new());
-  }
-  Ok(
-    state
-      .database
-      .list_attendees(meeting.id)
-      .await?
-      .into_iter()
-      .filter(|attendee| RsvpStatus::from(attendee.rsvp.clone()) != RsvpStatus::Declined)
-      .filter_map(|attendee| attendee.maybe_user)
-      .filter(|user| *user != starter)
-      .collect(),
-  )
-}
-
-/// Whether an occurrence of the meeting that isn't cancelled runs at `now` or starts within `lead`.
-async fn has_occurrence_around(
+/// The starts of the meeting's occurrences from `from_ms` up to `to_ms` that aren't cancelled or
+/// left out as public holidays, soonest first.
+pub(super) async fn occurrence_starts(
   state: &AppState,
   meeting: &StoredMeeting,
-  now: OffsetDateTime,
-  lead: std::time::Duration,
-) -> Result<bool, ApiError> {
-  let lead_ms = i64::try_from(lead.as_millis()).unwrap_or(i64::MAX);
-  let now_ms = unix_millis(now).0;
+  from_ms: i64,
+  to_ms: i64,
+) -> Result<Vec<i64>, ApiError> {
   let (first, last) = (unix_millis(meeting.starts_at).0, unix_millis(meeting.ends_at).0);
   let Some(recurrence) = series_rule(meeting) else {
-    return Ok(first.saturating_sub(lead_ms) <= now_ms && now_ms < last);
+    return Ok(if (from_ms..to_ms).contains(&first) {
+      vec![first]
+    } else {
+      Vec::new()
+    });
   };
   let zone = organizer_zone(state, meeting.organizer).await?;
   let cancelled: HashSet<i64> = state
@@ -772,18 +739,15 @@ async fn has_occurrence_around(
     .iter()
     .map(|start| unix_millis(*start).0)
     .collect();
-  let occurrences = occurrences_in(
-    first,
-    last - first,
-    &recurrence,
-    zone,
-    now_ms,
-    now_ms.saturating_add(lead_ms) + 1,
-  );
+  let occurrences = occurrences_in(first, last - first, &recurrence, zone, from_ms, to_ms);
   let on_holidays = series_holiday_skips(state, meeting, &occurrences, zone).await?;
-  Ok(occurrences.iter().any(|occurrence| {
-    !cancelled.contains(&occurrence.starts_at_ms) && !on_holidays.contains(&occurrence.starts_at_ms)
-  }))
+  Ok(
+    occurrences
+      .iter()
+      .map(|occurrence| occurrence.starts_at_ms)
+      .filter(|start| *start >= from_ms && !cancelled.contains(start) && !on_holidays.contains(start))
+      .collect(),
+  )
 }
 
 /// The starts among `occurrences` the series leaves out as public holidays: none unless it skips

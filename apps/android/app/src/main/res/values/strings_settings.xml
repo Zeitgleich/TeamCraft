@@ -10,6 +10,19 @@
   <string name="notify_mentions">Only mentions and direct messages</string>
   <string name="notify_none">Nothing</string>
   <string name="notify_mute">Mute</string>
+  <string name="notify_channel_mentions">\@channel and \@here</string>
+  <string name="notify_channel_mentions_default">As in settings</string>
+  <string name="notify_channel_mentions_notify">Notify me</string>
+  <string name="notify_channel_mentions_ignore">Don\'t notify me</string>
+  <string name="notify_quiet_hours">Quiet hours</string>
+  <string name="notify_quiet_hours_hint">Silent as if muted at these times, also for mentions. Times are in %1$s.</string>
+  <string name="meeting_reminder_title">Remind me before a meeting</string>
+  <string name="meeting_reminder_off">Off</string>
+  <plurals name="meeting_reminder_minutes">
+    <item quantity="one">%d minute before</item>
+    <item quantity="other">%d minutes before</item>
+  </plurals>
+  <string name="meeting_notify_start">Notify me when a meeting starts</string>
   <string name="read_receipts">Send read receipts</string>
   <string name="auto_follow_threads">Follow threads I\'m mentioned in</string>
   <string name="custom_status_title">Custom status</string>

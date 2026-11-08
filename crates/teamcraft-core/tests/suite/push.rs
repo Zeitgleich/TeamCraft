@@ -575,6 +575,7 @@ async fn a_message_past_the_read_position_counts_as_read() {
     maybe_call_id: None,
     maybe_badge: None,
     maybe_sent_at: None,
+    maybe_meeting: None,
   };
   assert!(!is_read(bob.store.as_ref(), &wake_up(first)));
 
@@ -674,6 +675,7 @@ fn wake_up_for(
     maybe_call_id: None,
     maybe_badge: None,
     maybe_sent_at: None,
+    maybe_meeting: None,
   };
   seal_wakeup(
     &key,

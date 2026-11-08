@@ -126,6 +126,17 @@ notif-per-conversation-hint = Override the level for single conversations or mut
 notif-level-col = Notify
 notif-level-default = Default
 notif-mute-col = Mute
+notif-channel-mentions-col = @channel and @here
+notif-channel-mentions-default = As in settings
+notif-channel-mentions-notify = Notify me
+notif-channel-mentions-ignore = Don't notify me
+notif-quiet-col = Quiet hours
+notif-quiet-edit = Quiet hours…
+notif-quiet-on = On
+notif-quiet-off = Off
+notif-quiet-title = Quiet hours
+notif-quiet-hint = During these times { $name } stays silent as if muted: no notifications, also not for mentions. Its unread messages still count.
+notif-quiet-none = No quiet hours yet.
 notif-mute-off = Off
 notif-mute-hour = For 1 hour
 notif-mute-tomorrow = Until tomorrow
@@ -278,6 +289,10 @@ notify-meeting-soon = { $minutes ->
    *[other] Meeting in { $minutes } minutes
 }
 notify-meeting-now = Meeting starting now
+notify-meeting-started = { $name } has started
+notify-meeting-started-unnamed = A meeting has started
+notify-meeting-named-soon = { $name } starts in { $minutes } min
+notify-meeting-named-soon-unnamed = A meeting starts in { $minutes } min
 
 # Workspace management
 settings-section-overview = Overview

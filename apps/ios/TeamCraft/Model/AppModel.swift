@@ -146,6 +146,9 @@ final class AppModel {
   private var typingTask: Task<Void, Never>?
   /// Scheduled messages that wait for the user (docs/scheduled-messages.md).
   private(set) var scheduledAttentionCount = 0
+  /// Scheduled messages waiting to be sent, from the same read (Home's Scheduled card, #1488);
+  /// `nil` while scheduling is off for the instance and nothing is scheduled.
+  private(set) var maybeScheduledCount: Int?
   /// The conversation a notification asked to open.
   var openConversationId: String?
   /// A message to show once its conversation is open (from a message link).
@@ -784,8 +787,13 @@ final class AppModel {
   /// How many scheduled messages wait for the user; called on every change the core reports.
   func refreshScheduledAttention() async {
     guard case .ready = phase else { return }
-    let count = await scheduledOverview()?.messages.filter(\.needsAttention).count ?? 0
+    let maybeOverview = await scheduledOverview()
+    let count = maybeOverview?.messages.filter(\.needsAttention).count ?? 0
     if count != scheduledAttentionCount { scheduledAttentionCount = count }
+    let maybeTotal = maybeOverview.flatMap { overview in
+      overview.policy.isEnabled || !overview.messages.isEmpty ? overview.messages.count : nil
+    }
+    if maybeTotal != maybeScheduledCount { maybeScheduledCount = maybeTotal }
   }
 
   /// A push or background task: seals again the scheduled messages whose group changed
@@ -1080,6 +1088,10 @@ final class AppModel {
       removeDelivered(notificationId)
       openConversationId = conversationId
       if isAuthentic { calls.startCall(conversationId: conversationId, displayName: conversation.name) }
+    case NotificationCategories.joinMeetingAction:
+      removeDelivered(notificationId)
+      openConversationId = conversationId
+      if isAuthentic { calls.startCall(conversationId: conversationId, displayName: conversation.name) }
     case NotificationCategories.declineCallAction:
       // There is no decline call in the core yet: the ring stops here, the caller rings on.
       removeDelivered(notificationId)
@@ -1119,7 +1131,7 @@ final class AppModel {
       // what that means.
       ScheduledSealTask.schedule()
       return .failed
-    case .message, .call, .test, .unknown:
+    case .message, .call, .meetingReminder, .meetingStart, .test, .unknown:
       // Not sent as background pushes; only the badge is taken.
       await DeliveredNotifications.setBadge(notification.maybeBadge)
       return .noData
@@ -1225,6 +1237,8 @@ final class AppModel {
       maybeContent = builder.message(for: notification, presentation: .message, base: base).content
     case .test:
       maybeContent = builder.test(for: notification, base: base)
+    case .meeting:
+      maybeContent = builder.meeting(for: notification, base: base)
     case .callKit, .callAlert:
       // The open app rings through the gateway (`onIncomingCall`); nothing to add.
       maybeContent = nil

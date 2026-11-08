@@ -1,12 +1,13 @@
 package de.zeitgleich.teamcraft.calls
 
 import android.content.Context
+import de.zeitgleich.teamcraft.settings.LocalSettingChanges
 import uniffi.teamcraft_ffi.CallStatusSounds
 
 /**
  * Which call status sounds play on this device: a soft repeating tone while the connection is
  * lost, short tones when it is back or the call ended, and a quieter one when someone else drops.
- * All of them by default.
+ * All of them by default. Follows the account (#945).
  */
 class CallSoundPrefs private constructor(context: Context) {
   private val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -25,6 +26,7 @@ class CallSoundPrefs private constructor(context: Context) {
       CallStatusSounds.OFF -> VALUE_OFF
     }
     prefs.edit().putString(KEY_STATUS_SOUNDS, value).apply()
+    LocalSettingChanges.changed()
   }
 
   companion object {

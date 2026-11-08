@@ -269,6 +269,7 @@ impl Setup {
         retry_max: Duration::from_secs(10),
         max_attempts: 3,
         jitter: JitterMode::None,
+        ..UploadRetrySettings::default()
       },
       maybe_upload_staging_dir: Some(staging),
       maybe_download_dir: Some(directory.clone()),
