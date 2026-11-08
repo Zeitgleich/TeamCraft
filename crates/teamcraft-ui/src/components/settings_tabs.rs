@@ -370,6 +370,12 @@ pub fn PreferencesSection() -> impl IntoView {
         on_change=Callback::new(move |on: bool| prefs.update(|all| all.sidebar.shows_unreads_section = on))
       />
       <SwitchRow
+        label="settings-space-dms"
+        hint="settings-space-dms-hint"
+        value=Signal::derive(move || prefs.get().sidebar.shows_space_dms)
+        on_change=Callback::new(move |on: bool| prefs.update(|all| all.sidebar.shows_space_dms = on))
+      />
+      <SwitchRow
         label="settings-sidebar-grouped"
         hint="settings-sidebar-grouped-hint"
         value=Signal::derive(move || prefs.get().sidebar.is_grouped_by_space)

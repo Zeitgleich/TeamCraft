@@ -6,6 +6,8 @@
 //! core. Network and decryption happen below it and arrive as store updates, which the UI picks up by
 //! re-reading after a revision bump (`AppState::revision` in `teamcraft-ui`).
 
+use std::collections::HashSet;
+
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse, AdminInstanceResponse,
@@ -78,6 +80,23 @@ pub trait ChatBackend {
   fn space_conversations(&self, space: SpaceId) -> Vec<Conversation>;
   /// DMs and group DMs; they live outside spaces.
   fn direct_conversations(&self) -> Vec<Conversation>;
+  /// The DMs and group DMs a space shows besides Chats (#701): those whose other people all
+  /// belong to it ([`Space::direct_conversations`]), in the order of [`Self::direct_conversations`].
+  fn space_direct_conversations(&self, space: SpaceId) -> Vec<Conversation> {
+    let Some(ids) = self
+      .spaces()
+      .into_iter()
+      .find(|candidate| candidate.id == space)
+      .map(|space| space.direct_conversations)
+      .filter(|ids| !ids.is_empty())
+    else {
+      return Vec::new();
+    };
+    let ids: HashSet<ConversationId> = ids.into_iter().collect();
+    let mut list = self.direct_conversations();
+    list.retain(|conversation| ids.contains(&conversation.id));
+    list
+  }
   /// The channels the user starred, from every space they are a member of: Chats lists them next
   /// to the favorite DMs (#1152). A left space or channel is not in it. The default asks each
   /// space; a backend that holds all conversations in one list should override it with one pass.

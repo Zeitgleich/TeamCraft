@@ -278,10 +278,11 @@ fn RailBadgeView(badge: Memo<RailBadge>) -> impl IntoView {
   }
 }
 
-/// What the rail entry of `space` counts: only the space's own channels, DMs have their own entry.
-/// It reads through `state`, so a memo of it follows every new or read message.
+/// What the rail entry of `space` counts: what its sidebar lists, its channels and the DMs with its
+/// people (#701). Chats counts those DMs too; the app's badge counts each conversation once. It
+/// reads through `state`, so a memo of it follows every new or read message.
 fn space_badge(state: AppState, space: SpaceId) -> RailBadge {
-  RailBadge::of(&state.with_mutes(state.read(|backend| backend.space_conversations(space))))
+  RailBadge::of(&state.with_mutes(state.space_list(space)))
 }
 
 #[component]

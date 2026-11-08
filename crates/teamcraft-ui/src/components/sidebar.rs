@@ -85,17 +85,17 @@ pub fn Sidebar() -> impl IntoView {
   let conversations = Memo::new(move |_| {
     let space = state.space.get();
     let is_grouped = is_grouped.get();
-    let list = state.read(|backend| {
-      if is_grouped {
+    let list = if is_grouped {
+      state.read(|backend| {
         backend
           .spaces()
           .into_iter()
           .flat_map(|space| backend.space_conversations(space.id))
           .collect()
-      } else {
-        backend.space_conversations(space)
-      }
-    });
+      })
+    } else {
+      state.space_list(space)
+    };
     state.sidebar_list(list)
   });
   let collapsed_spaces =

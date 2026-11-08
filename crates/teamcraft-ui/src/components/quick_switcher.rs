@@ -1067,6 +1067,7 @@ mod tests {
       deleted_channel_count: 0,
       can_create_channels: false,
       maybe_my_role: None,
+      direct_conversations: Vec::new(),
     }
   }
 

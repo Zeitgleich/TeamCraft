@@ -909,6 +909,39 @@ impl AppState {
     })
   }
 
+  /// What a space's sidebar lists: its channels, then, while the setting is on, the DMs and group
+  /// DMs with its people (#701), newest activity first. Those stay Chats' conversations: only a
+  /// space's own counts take them in, never a total that adds up Chats and the spaces.
+  pub fn space_list(&self, space: SpaceId) -> Vec<Conversation> {
+    let shows_dms = self.settings.prefs.with(|prefs| prefs.sidebar.shows_space_dms);
+    self.read(|backend| {
+      let mut list = backend.space_conversations(space);
+      if shows_dms {
+        list.extend(by_recent_activity(
+          backend,
+          backend.space_direct_conversations(space),
+        ));
+      }
+      list
+    })
+  }
+
+  /// Whether the sidebar of `space` lists the DM or group DM `conversation` (#701).
+  fn is_listed_in_space(&self, space: SpaceId, conversation: ConversationId) -> bool {
+    let has_no_dms = self
+      .settings
+      .prefs
+      .with_untracked(|prefs| !prefs.sidebar.shows_space_dms || prefs.sidebar.is_grouped_by_space);
+    !has_no_dms
+      && self.read(|backend| {
+        backend
+          .spaces()
+          .into_iter()
+          .find(|candidate| candidate.id == space)
+          .is_some_and(|space| space.direct_conversations.contains(&conversation))
+      })
+  }
+
   /// What Chats lists: [`Self::direct_entries`] and the channels the user starred in their spaces
   /// (#1152), each with the time of its newest message. Opening one of those switches to its
   /// space, as opening it from the space does ([`Self::open_conversation`]).
@@ -1116,7 +1149,11 @@ impl AppState {
     // scoped views (#954) and the selected space don't change (#1346). The same for every way in
     // (click, switcher, notification, link, keys): where Chats lists the conversation, it stays.
     let stays_in_chats = self.rail.get_untracked() == RailEntry::Chats && is_listed_in_chats(&conversation);
-    if !stays_in_chats {
+    // Likewise a DM the open space lists (#701) stays in the space.
+    let stays_in_space = self.rail.get_untracked() == RailEntry::Space
+      && conversation.kind.is_direct_like()
+      && self.is_listed_in_space(self.space.get_untracked(), id);
+    if !stays_in_chats && !stays_in_space {
       if let Some(space) = conversation.maybe_space {
         self.space.set(space);
         self.rail.set(RailEntry::Space);
@@ -1898,17 +1935,17 @@ impl AppState {
       .prefs
       .with(|prefs| prefs.sidebar.is_grouped_by_space);
     let options = self.settings.sidebar_options(self.held_unread.get_untracked());
-    let all = self.sidebar_list(self.read(|backend| {
-      if is_grouped {
+    let all = self.sidebar_list(if is_grouped {
+      self.read(|backend| {
         backend
           .spaces()
           .into_iter()
           .flat_map(|space| backend.space_conversations(space.id))
           .collect()
-      } else {
-        backend.space_conversations(space)
-      }
-    }));
+      })
+    } else {
+      self.space_list(space)
+    });
     build_sections(&all, &options)
       .into_iter()
       .flat_map(|section| section.conversations)
@@ -2276,6 +2313,16 @@ impl SettingsTab {
   }
 }
 
+/// `list` with the newest activity first; conversations without any keep their order after them.
+fn by_recent_activity(backend: &dyn Backend, list: Vec<Conversation>) -> Vec<Conversation> {
+  let mut timed: Vec<(Option<TimestampMs>, Conversation)> = list
+    .into_iter()
+    .map(|conversation| (backend.last_activity(conversation.id), conversation))
+    .collect();
+  timed.sort_by(|(a, _), (b, _)| b.cmp(a));
+  timed.into_iter().map(|(_, conversation)| conversation).collect()
+}
+
 /// Whether `members` are exactly `users` plus (optionally) `me`.
 fn has_exactly(members: &[UserId], users: &[UserId], me: UserId) -> bool {
   users.iter().all(|user| members.contains(user))
@@ -2353,6 +2400,80 @@ mod tests {
     );
     assert_eq!(remembered_conversation([kept], Some(gone)), None);
     assert_eq!(remembered_conversation([kept], None), None);
+  }
+
+  /// #701: a space lists the DMs with its people too, and no total counts them twice.
+  mod space_direct_messages {
+    use super::*;
+    use crate::sections::{RailBadge, badge_count};
+
+    #[test]
+    fn the_space_lists_its_channels_then_the_dms_with_its_people() {
+      let state = test_state();
+      let (space, _) = first_channel(&state);
+      let channels = state.read(|backend| backend.space_conversations(space));
+      let list = state.space_list(space);
+      assert_eq!(&list[..channels.len()], &channels[..]);
+      let dms = &list[channels.len()..];
+      assert!(!dms.is_empty());
+      assert!(dms.iter().all(|conversation| conversation.kind.is_direct_like()));
+      // The notes to self belong to no space.
+      assert!(dms.iter().all(|conversation| !conversation.is_notes_to_self));
+    }
+
+    #[test]
+    fn a_dm_opened_in_the_space_stays_there() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      let dm = state
+        .space_list(space)
+        .last()
+        .map(|conversation| conversation.id)
+        .unwrap();
+      state.open_conversation(dm);
+      assert_eq!(state.rail.get_untracked(), RailEntry::Space);
+      assert_eq!(state.space.get_untracked(), space);
+      assert_eq!(state.view.get_untracked(), MainView::Conversation(dm));
+    }
+
+    #[test]
+    fn the_setting_takes_them_out() {
+      let state = test_state();
+      let (space, _) = first_channel(&state);
+      state
+        .settings
+        .prefs
+        .update(|prefs| prefs.sidebar.shows_space_dms = false);
+      assert_eq!(
+        state.space_list(space),
+        state.read(|backend| backend.space_conversations(space))
+      );
+    }
+
+    #[test]
+    fn the_space_counts_its_dms_and_the_total_counts_them_once() {
+      let state = test_state();
+      let (space, _) = first_channel(&state);
+      let channels = RailBadge::of(&state.read(|backend| backend.space_conversations(space)));
+      let with_dms = RailBadge::of(&state.space_list(space));
+      assert!(with_dms.count > channels.count);
+      let (everything, direct) = state.read(|backend| {
+        let mut all: Vec<Conversation> = backend
+          .spaces()
+          .into_iter()
+          .flat_map(|space| backend.space_conversations(space.id))
+          .collect();
+        let direct = backend.direct_conversations();
+        all.extend(direct.clone());
+        (all, direct)
+      });
+      // Each DM once in the total, however many spaces show it.
+      let ids: std::collections::HashSet<ConversationId> =
+        everything.iter().map(|conversation| conversation.id).collect();
+      assert_eq!(ids.len(), everything.len());
+      assert!(badge_count(&everything) >= badge_count(&direct));
+    }
   }
 
   mod state_to_route {

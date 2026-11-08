@@ -18,16 +18,20 @@ pub enum SectionKind {
   Favorites,
   Channels,
   Integrations,
+  /// The DMs and group DMs with people of the space (#701), by recent activity. Each is still the
+  /// one conversation Chats lists.
+  DirectMessages,
   /// Only for guests, who have no channel browser to find them in.
   Archived,
 }
 
 impl SectionKind {
-  pub const ALL: [SectionKind; 5] = [
+  pub const ALL: [SectionKind; 6] = [
     Self::Unreads,
     Self::Favorites,
     Self::Channels,
     Self::Integrations,
+    Self::DirectMessages,
     Self::Archived,
   ];
 
@@ -41,6 +45,7 @@ impl SectionKind {
       Self::Favorites => "favorites",
       Self::Channels => "channels",
       Self::Integrations => "integrations",
+      Self::DirectMessages => "direct-messages",
       Self::Archived => "archived",
     }
   }
@@ -52,6 +57,7 @@ impl SectionKind {
       Self::Favorites => "sidebar-favorites",
       Self::Channels => "sidebar-channels",
       Self::Integrations => "sidebar-integrations",
+      Self::DirectMessages => "sidebar-direct-messages",
       Self::Archived => "sidebar-archived",
     }
   }
@@ -89,7 +95,9 @@ impl SidebarOptions {
 
 /// Groups the channels of a space: unread ones (optional), favorites, then the remaining by
 /// category. Every conversation appears exactly once; empty sections are omitted. Direct messages
-/// have their own page ([`build_direct`]); one passed in here goes into no section.
+/// passed in (those with people of the space, #701) go into their own section in the order given,
+/// whatever their unread count or star: they are Chats' conversations, shown here too, and a
+/// space's list shouldn't move them around.
 pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) -> Vec<Section> {
   let mut sections: Vec<Section> = SectionKind::ALL
     .into_iter()
@@ -101,7 +109,6 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
 
   for conversation in conversations
     .iter()
-    .filter(|conversation| !conversation.kind.is_direct_like())
     // Archived channels leave the list; Browse finds them, and the open one stays while it is open.
     .filter(|conversation| {
       !conversation.is_archived || options.lists_archived || options.maybe_held_open == Some(conversation.id)
@@ -109,7 +116,9 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
   {
     let is_unread = conversation.unread_count > 0 && !conversation.is_muted;
     let is_held_open = options.maybe_held_open == Some(conversation.id);
-    let kind = if conversation.is_archived && options.lists_archived {
+    let kind = if conversation.kind.is_direct_like() {
+      SectionKind::DirectMessages
+    } else if conversation.is_archived && options.lists_archived {
       SectionKind::Archived
     } else if options.show_unreads_group && (is_unread || is_held_open) {
       SectionKind::Unreads
@@ -127,7 +136,8 @@ pub fn build_sections(conversations: &[Conversation], options: &SidebarOptions) 
     }
   }
   for section in &mut sections {
-    if options.sort == SidebarSort::Alphabetical && section.kind != SectionKind::Unreads {
+    let keeps_order = matches!(section.kind, SectionKind::Unreads | SectionKind::DirectMessages);
+    if options.sort == SidebarSort::Alphabetical && !keeps_order {
       section
         .conversations
         .sort_by_key(|conversation| conversation.name.to_lowercase());
@@ -539,6 +549,8 @@ pub fn build_grouped(
   for section in build_sections(conversations, options) {
     match section.kind {
       SectionKind::Unreads | SectionKind::Favorites => top.push(section),
+      // The grouped sidebar holds the channels of every space; DMs are in Chats.
+      SectionKind::DirectMessages => {},
       SectionKind::Channels | SectionKind::Integrations | SectionKind::Archived => {
         channels.extend(section.conversations);
       },
@@ -736,7 +748,7 @@ mod tests {
   }
 
   #[test]
-  fn each_channel_appears_once_and_direct_messages_not_at_all() {
+  fn each_conversation_appears_once_and_direct_messages_in_their_own_section() {
     let list = vec![
       conversation(1, SidebarCategory::Channels, 3, false),
       conversation(2, SidebarCategory::Channels, 0, true),
@@ -750,7 +762,8 @@ mod tests {
       [
         SectionKind::Unreads,
         SectionKind::Favorites,
-        SectionKind::Integrations
+        SectionKind::Integrations,
+        SectionKind::DirectMessages
       ]
     );
     assert_eq!(
@@ -758,8 +771,27 @@ mod tests {
         .iter()
         .map(|section| section.conversations.len())
         .sum::<usize>(),
-      3
+      4
     );
+  }
+
+  /// #701: a space's DMs keep the order they come in (recent activity), unread, starred or sorted
+  /// by name.
+  #[test]
+  fn direct_messages_keep_their_order() {
+    let mut starred = direct(5, 0, None).0;
+    starred.is_favorite = true;
+    starred.name = "aaa".into();
+    let list = vec![direct(7, 4, None).0, starred, direct(6, 0, None).0];
+    let options = SidebarOptions {
+      sort: SidebarSort::Alphabetical,
+      ..SidebarOptions::plain(true)
+    };
+    let sections = build_sections(&list, &options);
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0].kind, SectionKind::DirectMessages);
+    let ids: Vec<ConversationId> = sections[0].conversations.iter().map(|c| c.id).collect();
+    assert_eq!(ids, [7, 5, 6].map(id_from_raw::<ConversationId>).to_vec());
   }
 
   #[test]
