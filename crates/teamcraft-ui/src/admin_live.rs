@@ -2858,11 +2858,11 @@ mod tests {
       block_on(live.refresh_once());
 
       let paths = server.paths();
-      // Eleven lists and settings, the audit log, the guests and the owners and admins by role:
-      // the same 16 requests however many channels, users and spaces there are (it used to be
+      // Twelve lists and settings, the audit log, the guests and the owners and admins by role:
+      // the same 17 requests however many channels, users and spaces there are (it used to be
       // about 650, then 28, with a page of 200 repeated up to 5 times for each list).
       assert!(
-        paths.len() <= 11 + 1 + 1 + 2,
+        paths.len() <= 12 + 1 + 1 + 2,
         "{} requests: {paths:?}",
         paths.len()
       );
@@ -3049,8 +3049,8 @@ mod tests {
       let live = AdminLive::new(server.clone());
       block_on(live.refresh_once());
 
-      // Only the first round of reads went out (the eleven lists); nothing followed once the server said to wait.
-      assert!(server.paths().len() <= 11, "{:?}", server.paths());
+      // Only the first round of reads went out (the twelve lists); nothing followed once the server said to wait.
+      assert!(server.paths().len() <= 12, "{:?}", server.paths());
       assert!(live.is_quiet());
       let detail = live.maybe_error().unwrap_or_default();
       assert_eq!(detail, "rate_limited:42");

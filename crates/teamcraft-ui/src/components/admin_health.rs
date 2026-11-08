@@ -175,7 +175,7 @@ fn OidcSyncContent(
             "oidc-sync-duration",
             &[
               ("when", &format_relative(finished, now, locale())),
-              ("seconds", &format!("{:.1}", run.duration_ms as f64 / 1000.0)),
+              ("seconds", &(run.duration_ms.max(0) + 999).div_euclid(1000).to_string()),
             ],
           );
           view! {
