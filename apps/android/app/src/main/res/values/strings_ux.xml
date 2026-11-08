@@ -228,4 +228,22 @@
   <string name="list_failed_timeout">No answer came in time.</string>
   <string name="list_failed_other">Couldn\'t load this.</string>
   <string name="search_incomplete">History is still syncing, so results may be incomplete.</string>
+  <!-- Home layout (#1488): bottom navigation, quick-access cards, sections. -->
+  <string name="nav_direct">DMs</string>
+  <string name="quick_threads_status">Replies you follow</string>
+  <string name="quick_saved_status">Kept for later</string>
+  <string name="quick_drafts_none">No drafts</string>
+  <plurals name="quick_drafts_count">
+    <item quantity="one">%d draft</item>
+    <item quantity="other">%d drafts</item>
+  </plurals>
+  <string name="quick_scheduled_none">Nothing scheduled</string>
+  <plurals name="quick_scheduled_count">
+    <item quantity="one">%d waiting to send</item>
+    <item quantity="other">%d waiting to send</item>
+  </plurals>
+  <string name="quick_scheduled_attention">Needs your attention</string>
+  <string name="section_unread_direct">New messages</string>
+  <string name="section_collapse">Collapse %1$s</string>
+  <string name="section_expand">Expand %1$s</string>
 </resources>

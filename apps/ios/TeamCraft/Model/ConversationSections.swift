@@ -10,6 +10,10 @@ enum SectionTitle: Hashable {
   case everything
   /// Archived channels, for guests, who have no channel browser to find them in.
   case archived
+  /// Home's DMs with something new, on top of its list (#1488).
+  case unreadDirect
+  /// The Activity tab's one list (shown without a header).
+  case activity
 }
 
 struct ConversationSection: Identifiable {
@@ -22,6 +26,29 @@ struct ConversationSection: Identifiable {
   var isSpace: Bool {
     if case .space = title { return true }
     return false
+  }
+
+  /// The key the section's collapsed state is remembered under (#1488): a space by its id, so
+  /// renaming it keeps the choice; `nil` for sections that can't be collapsed. Same as Android.
+  var collapseKey: String? {
+    switch title {
+    case .favorites: return "favorites"
+    case .unreadDirect: return "unread-direct"
+    case .channels: return "channels"
+    case .archived: return "archived"
+    case .directMessages: return "direct"
+    case .space(let name):
+      if let spaceId = conversations.compactMap(\.maybeSpaceId).first { return "space:\(spaceId)" }
+      return "space-name:\(name)"
+    case .everything, .activity: return nil
+    }
+  }
+
+  /// The rows the section shows: all while open; while collapsed only those with something new and
+  /// the open conversation, as the desktop sidebar does, so nothing new hides.
+  func visibleRows(isCollapsed: Bool, selectedId: String?) -> [ConversationItem] {
+    guard isCollapsed else { return conversations }
+    return conversations.filter { HomeFilter.unread.matches($0) || $0.id == selectedId }
   }
 }
 
@@ -45,9 +72,10 @@ enum ChatListGrouping: String, CaseIterable {
   static let key = "chat_list_grouping"
 }
 
-/// The two lists of the chats screen: Home (the DMs, outside spaces) and the channels by space.
+/// The bottom navigation of the chats screen (#1488, as on Android): Home (the DMs with something
+/// new and the channels by space), the DMs, and Activity (what waits for the user).
 enum ChatTab: Hashable, CaseIterable {
-  case home, spaces
+  case home, direct, activity
 }
 
 /// The filter chips of Home (as in Element): one at a time, `all` is none selected.
@@ -80,10 +108,6 @@ enum BadgeTone: Equatable {
 extension ConversationItem {
   /// DMs and group DMs live outside spaces and have their own tab.
   var isDirect: Bool { kind == .direct || kind == .group }
-
-  /// Whether the Home tab lists it: DMs and group DMs, and the channels of a space the user starred
-  /// (#1152). The channel stays under Favorites in its space too.
-  var isListedInHome: Bool { isDirect || (isFavorite && maybeSpaceId != nil && !isArchived) }
 
   /// The name lists and titles show: the notes to self have none of their own (they are named
   /// after the other people, and there are none), so they are called "Notes" in the user's
@@ -134,7 +158,43 @@ func channelSections(_ conversations: [ConversationItem], listsArchived: Bool = 
   return sections
 }
 
-/// The Home tab: favorites (starred channels of spaces among them, #1152), then the rest, each the most recent first (`lastActivity`: newest message
+/// Home of the spaces layout (#1488): the DMs with something new (not favorites, the most recent
+/// first), then the favorites (DMs and channels, by name), then each space with its channels, as
+/// `channelSections` has them. Read DMs are on the DMs tab. Empty sections are left out.
+func homeSections(
+  _ conversations: [ConversationItem], lastActivity: [String: Date] = [:], listsArchived: Bool = false
+) -> [ConversationSection] {
+  var seen = Set<String>()
+  let unique = conversations.filter { seen.insert($0.id).inserted }
+  let unreadDirect = unique
+    .filter { $0.isDirect && !$0.isFavorite && HomeFilter.unread.matches($0) }
+    .sorted { lhs, rhs in
+      let left = lastActivity[lhs.id] ?? .distantPast
+      let right = lastActivity[rhs.id] ?? .distantPast
+      return left == right ? byName(lhs, rhs) : left > right
+    }
+  let favorites = unique.filter { $0.isFavorite && !$0.isArchived }.sorted(by: byName)
+  var sections: [ConversationSection] = []
+  if !unreadDirect.isEmpty { sections.append(ConversationSection(title: .unreadDirect, conversations: unreadDirect)) }
+  if !favorites.isEmpty { sections.append(ConversationSection(title: .favorites, conversations: favorites)) }
+  sections += channelSections(unique, listsArchived: listsArchived).filter { $0.title != .favorites }
+  return sections
+}
+
+/// The Activity tab: every conversation with a mention, or unread and not muted, mentions first,
+/// then the most recent. Same as Android.
+func activityConversations(_ conversations: [ConversationItem], lastActivity: [String: Date] = [:]) -> [ConversationItem] {
+  conversations
+    .filter { HomeFilter.unread.matches($0) }
+    .sorted { lhs, rhs in
+      if lhs.mentionCount != rhs.mentionCount { return lhs.mentionCount > rhs.mentionCount }
+      let left = lastActivity[lhs.id] ?? .distantPast
+      let right = lastActivity[rhs.id] ?? .distantPast
+      return left == right ? byName(lhs, rhs) : left > right
+    }
+}
+
+/// The DMs tab: favorites, then the rest, each the most recent first (`lastActivity`: newest message
 /// per conversation; by name without one). Only conversations `chip` lets through whose names
 /// contain `filter` (any case) are kept. Empty sections are left out.
 func directSections(
@@ -152,7 +212,7 @@ func directSections(
     // Each conversation is one row, however often a caller hands it over.
     .filter { seen.insert($0.id).inserted }
     .filter {
-      $0.isListedInHome && chip.matches($0) && (needle.isEmpty || $0.listName.localizedCaseInsensitiveContains(needle))
+      $0.isDirect && chip.matches($0) && (needle.isEmpty || $0.listName.localizedCaseInsensitiveContains(needle))
     }
     .sorted(by: byRecency)
   let favorites = direct.filter(\.isFavorite)

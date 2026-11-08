@@ -40,7 +40,7 @@ class MainScreenScreenshots {
       shoot("home-empty-$theme", isDark, emptyList(), emptyMap(), ChatTab.Home)
       shoot("home-filled-$theme", isDark, CONVERSATIONS, previews(), ChatTab.Home)
       shoot("activity-$theme", isDark, CONVERSATIONS, previews(), ChatTab.Activity)
-      shoot("spaces-$theme", isDark, CONVERSATIONS, previews(), ChatTab.Spaces)
+      shoot("direct-$theme", isDark, CONVERSATIONS, previews(), ChatTab.Direct)
     }
   }
 
@@ -77,6 +77,7 @@ class MainScreenScreenshots {
                   onLongPress = {},
                 ),
                 maybeSelectionBar = null,
+                quickAccess = QuickAccess(draftCount = 1, maybeScheduledCount = 2),
                 onSearch = {},
                 onAccount = {},
                 onNavigate = {},
