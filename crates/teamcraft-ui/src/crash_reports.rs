@@ -126,6 +126,7 @@ pub fn flush() {
         break;
       }
     }
+    // async-ok: a thread-local Cell, not a signal.
     IS_FLUSHING.with(|flushing| flushing.set(false));
   });
 }

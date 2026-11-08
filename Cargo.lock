@@ -11276,6 +11276,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "subtle",
+ "teamcraft-client-api",
  "teamcraft-core",
  "teamcraft-crypto",
  "teamcraft-db",
