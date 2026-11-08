@@ -563,10 +563,11 @@ private fun ConversationMenu(
         isPreparingCall = false
         onOpenConversation(room)
       },
-    ) { options ->
-      isPreparingCall = false
-      viewModel.startCall(conversationId, name, options)
-    }
+      onJoin = { options ->
+        isPreparingCall = false
+        viewModel.startCall(conversationId, name, options)
+      },
+    )
   }
   IconButton(onClick = { isNotifying = true }) {
     if (maybeConversation?.isMuted == true) {
