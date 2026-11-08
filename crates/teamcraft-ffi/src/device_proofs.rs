@@ -49,8 +49,8 @@ pub enum DeviceProofError {
   #[error("the device's key can't be used right now")]
   KeyUnavailable,
   /// The token endpoint didn't answer.
-  #[error("no answer from the token endpoint: {message}")]
-  NoAnswer { message: String },
+  #[error("no answer from the token endpoint: {reason}")]
+  NoAnswer { reason: String },
 }
 
 /// An answer of a token endpoint, as far as proofs care. `body` is the answer's body, for the token
@@ -616,7 +616,7 @@ mod tests {
     async fn no_answer_comes_back_as_it_is() {
       let prover = ProviderProver::new(StandInKey::new()).unwrap();
       let script = Script::answering(vec![Err(DeviceProofError::NoAnswer {
-        message: "offline".into(),
+        reason: "offline".into(),
       })]);
       let error = prover
         .token_request(ENDPOINT.into(), TokenProofFallback::OnRefusal, script.clone())
@@ -626,7 +626,7 @@ mod tests {
       assert_eq!(
         error,
         DeviceProofError::NoAnswer {
-          message: "offline".into()
+          reason: "offline".into()
         }
       );
       assert_eq!(script.sent().len(), 1);
