@@ -14,6 +14,7 @@ mod calls;
 mod channel_roles;
 mod color_theme;
 mod crash_reports;
+mod device_proofs;
 mod engine;
 mod error;
 mod http_fetch;
@@ -45,6 +46,10 @@ pub use channel_roles::{
   channel_roles_review_has_new,
 };
 pub use crash_reports::{CrashReportsConfig, crash_reports_config};
+pub use device_proofs::{
+  DeviceProofError, DeviceProofKey, ProviderProver, TokenEndpointAnswer, TokenEndpointTransport,
+  TokenProofFallback, token_bound_key,
+};
 pub use error::TeamCraftError;
 pub use http_fetch::{
   HttpFetchError, HttpFetchHeader, HttpFetchMethod, HttpFetchRedirects, HttpFetchRequest, HttpFetchResponse,
@@ -154,7 +159,23 @@ impl TeamCraft {
     listener: Arc<dyn EventListener>,
   ) -> Result<Arc<Self>, TeamCraftError> {
     logging::install();
-    outcome(LifecycleStep::Open, Self::open(config, tokens, listener))
+    outcome(LifecycleStep::Open, Self::open(config, tokens, None, listener))
+  }
+
+  /// [`Self::new`] for an app with a device key for DPoP proofs (e2ee.md §3.1.2): a token bound to that
+  /// key goes with a proof, on every request and in the first frames.
+  #[uniffi::constructor]
+  pub fn with_device_key(
+    config: AppConfig,
+    tokens: Arc<dyn TokenProvider>,
+    device_key: Arc<dyn DeviceProofKey>,
+    listener: Arc<dyn EventListener>,
+  ) -> Result<Arc<Self>, TeamCraftError> {
+    logging::install();
+    outcome(
+      LifecycleStep::Open,
+      Self::open(config, tokens, Some(device_key), listener),
+    )
   }
 
   /// The session's newest ID token, for the role evidence of workspace owners and admins (e2ee.md
@@ -1465,6 +1486,7 @@ impl TeamCraft {
   fn open(
     config: AppConfig,
     tokens: Arc<dyn TokenProvider>,
+    maybe_device_key: Option<Arc<dyn DeviceProofKey>>,
     listener: Arc<dyn EventListener>,
   ) -> Result<Arc<Self>, TeamCraftError> {
     let network = NetworkChanges::new();
@@ -1478,7 +1500,7 @@ impl TeamCraft {
       id_tokens: id_tokens.clone(),
       running_calls: running_calls.clone(),
     };
-    let start = engine::EngineStart::new(config, tokens, listener, signals)?;
+    let start = engine::EngineStart::new(config, tokens, maybe_device_key, listener, signals)?;
     let recovery = Arc::new(Mutex::new(None));
     let threads = match engine::spawn(&start, late_problem(recovery.clone())) {
       Ok(threads) => Some(threads),
