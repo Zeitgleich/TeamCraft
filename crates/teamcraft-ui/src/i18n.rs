@@ -18,8 +18,8 @@ use unic_langid::LanguageIdentifier;
 
 use crate::reactive::get_if_observed;
 
-// `fn sources(tag)`: the embedded files of one language.
-#[cfg(not(target_arch = "wasm32"))]
+// `fn sources(tag)`: the embedded files of one language (natively, and in every build of the tests).
+#[cfg(any(not(target_arch = "wasm32"), test))]
 include!(concat!(env!("OUT_DIR"), "/i18n_sources.rs"));
 
 /// UI languages that ship with translations.
@@ -231,7 +231,7 @@ struct Bundles {
 }
 
 impl Bundles {
-  #[cfg(not(target_arch = "wasm32"))]
+  #[cfg(any(not(target_arch = "wasm32"), test))]
   fn embedded() -> Self {
     let mut bundles = Self::default();
     for locale in Locale::ALL {
@@ -241,7 +241,7 @@ impl Bundles {
   }
 
   /// The web app embeds none: they are fetched ([`load_start_language`]).
-  #[cfg(target_arch = "wasm32")]
+  #[cfg(all(target_arch = "wasm32", not(test)))]
   fn embedded() -> Self {
     Self::default()
   }
