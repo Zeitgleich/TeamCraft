@@ -34,6 +34,7 @@ pub mod media;
 pub mod media_viewer;
 pub mod meeting_invitees;
 pub mod message_sound;
+pub mod mobile_settings;
 pub mod model;
 pub mod notetaker;
 pub mod notify;

@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft
 
+import de.zeitgleich.teamcraft.settings.SettingsSync
 import de.zeitgleich.teamcraft.ui.ShareReceiver
 import de.zeitgleich.teamcraft.ui.StartCacheStore
 import de.zeitgleich.teamcraft.ui.media.MediaDraftStore
@@ -82,6 +83,8 @@ class AppGraph(context: Context) {
   val carProjection = CarProjection(context)
   val notifier = MessageNotifier(context, notificationContent, avatars, isInCar = carProjection::isActive)
   val mentionPrefs = MentionPrefs(context)
+  /** Settings that follow the account to the user's other devices (#945). */
+  val settingsSync = SettingsSync(context, core, mentionPrefs, scope)
   val calls = CallController(context, core, scope)
   val pushStats = PushStats(context)
   val pushHandler = PushHandler(context, notifier, calls, pushStats)
@@ -117,6 +120,7 @@ class TeamCraftApplication : Application(), Configuration.Provider {
     graph.scope.launch(Dispatchers.IO) { graph.segmentPrefetch.schedule() }
     graph.carProjection.start { graph.scope.launch { graph.push.endHolds(isForced = true) } }
     graph.readWatcher.start()
+    graph.settingsSync.start()
     graph.placeholderWatcher.start()
     graph.joinRequestWatcher.start()
     graph.network.start()
