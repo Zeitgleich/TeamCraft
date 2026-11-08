@@ -114,6 +114,9 @@ struct State<B> {
   /// thread ends its group early where it can ([`LocalStore::is_awaited`]), and the next group
   /// starts after them (issue #1466).
   awaiting: u32,
+  /// Depth of the read group of [`LocalStore::begin_reads`]: one snapshot of the disk for many
+  /// reads, held by [`Self::maybe_group_owner`] like a group of writes, without the write lock.
+  read_depth: u32,
   /// The thread whose group of writes is open; every other thread waits in [`SealedStore::lock`].
   maybe_group_owner: Option<ThreadIdStd>,
   /// The backend's tally when last looked at: a change means the disk moved under the caches.
@@ -379,6 +382,7 @@ impl<B: RecordBackend> SealedStore<B> {
         epoch: 0,
         depth: 0,
         awaiting: 0,
+        read_depth: 0,
         maybe_group_owner: None,
         maybe_tally,
         maybe_catalog: None,
@@ -779,7 +783,7 @@ impl<B: RecordBackend> SealedStore<B> {
     read: &mut impl FnMut(&mut State<B>) -> Result<T, StoreError>,
   ) -> Result<T, StoreError> {
     let mut state = self.lock();
-    let is_snapshot = state.depth == 0;
+    let is_snapshot = state.depth == 0 && state.read_depth == 0;
     if is_snapshot {
       self.backend.begin_read()?;
       self.follow_disk(&mut state);
@@ -1783,8 +1787,34 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     self.lock().awaiting > 0
   }
 
+  fn begin_reads(&self) -> Result<(), StoreError> {
+    let mut state = self.lock_to_begin();
+    if state.depth == 0 && state.read_depth == 0 {
+      self.backend.begin_read()?;
+      self.follow_disk(&mut state);
+      state.maybe_group_owner = Some(thread::current().id());
+    }
+    state.read_depth += 1;
+    Ok(())
+  }
+
+  fn end_reads(&self) {
+    let mut state = self.lock();
+    state.read_depth = state.read_depth.saturating_sub(1);
+    if state.read_depth == 0 && state.depth == 0 {
+      self.backend.end_read();
+      state.maybe_group_owner = None;
+      drop(state);
+      self.group_ended.notify_all();
+    }
+  }
+
   fn begin_writes(&self) -> Result<(), StoreError> {
     let mut state = self.lock_to_begin();
+    if state.depth == 0 && state.read_depth > 0 {
+      // A read group's snapshot ends for the writes, and begins again after them.
+      self.backend.end_read();
+    }
     self.backend.begin_writes()?;
     if state.depth == 0 {
       // Looked at once the group holds the write lock: a commit of another process it waited for
@@ -1848,8 +1878,16 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     }
     drop(log);
     if is_group_over {
-      self.lock().maybe_group_owner = None;
-      self.group_ended.notify_all();
+      let mut state = self.lock();
+      if state.read_depth > 0 {
+        // Within a read group, which goes on with a snapshot after these writes. Deliberately
+        // ignored: the next read takes one by itself if this fails.
+        let _ = self.backend.begin_read();
+      } else {
+        state.maybe_group_owner = None;
+        drop(state);
+        self.group_ended.notify_all();
+      }
     }
     if let Some(panic) = maybe_panic {
       std::panic::resume_unwind(panic);

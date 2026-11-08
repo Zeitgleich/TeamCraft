@@ -868,6 +868,14 @@ pub trait LocalStore {
   fn is_awaited(&self) -> bool {
     false
   }
+  /// Begins a read group ([`read_together`]): the reads up to [`Self::end_reads`] see one snapshot
+  /// of the disk, and other threads of this process wait for it like for a group of writes, while
+  /// other processes (the iOS notification extension) still write. Groups of writes may nest in it.
+  fn begin_reads(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
+  /// Ends the read group of [`Self::begin_reads`].
+  fn end_reads(&self) {}
   /// What of `conversation`'s messages was written or removed since `cursor`
   /// ([`Self::written_cursor`]), maybe more. `None` when the journal can't tell: it no longer holds
   /// what came after `cursor`, or another connection wrote meanwhile.
@@ -1078,16 +1086,22 @@ pub struct WriteTally {
   pub foreign: u64,
 }
 
-/// Runs `reads` as one look at the store: a group ([`LocalStore::begin_writes`]) that writes
-/// nothing, so many reads take the store's lock and check the disk once, and no other thread's
-/// group of writes slips in between them, each a wait of its own (a chat list pass, issue #1466).
-/// It holds the write lock while it runs: keep it short.
+/// Runs `reads` as one look at the store ([`LocalStore::begin_reads`]): many reads take the store's
+/// lock and check the disk once, and no other thread's group of writes slips in between them, each
+/// a wait of its own (a chat list pass, issue #1466). Other threads wait while it runs: keep it
+/// short. Groups of writes inside it are their own groups.
 pub fn read_together<S, T, E>(store: &S, reads: impl FnOnce() -> Result<T, E>) -> Result<T, E>
 where
   S: LocalStore + ?Sized,
   E: From<StoreError>,
 {
-  write_group(store, reads)
+  store.begin_reads()?;
+  let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(reads));
+  store.end_reads();
+  match result {
+    Ok(result) => result,
+    Err(panic) => std::panic::resume_unwind(panic),
+  }
 }
 
 /// Runs `writes` as one group of writes ([`LocalStore::begin_writes`]). An error of `writes` doesn't
@@ -1244,6 +1258,14 @@ macro_rules! forward_local_store {
 
       fn is_awaited(&self) -> bool {
         (**self).is_awaited()
+      }
+
+      fn begin_reads(&self) -> Result<(), StoreError> {
+        (**self).begin_reads()
+      }
+
+      fn end_reads(&self) {
+        (**self).end_reads()
       }
 
       fn written_since(&self, conversation: ConversationId, cursor: u64) -> Option<Vec<Written>> {

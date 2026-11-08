@@ -423,6 +423,38 @@ mod tests {
     assert!(!store.is_awaited());
   }
 
+  /// A read group holds no write lock: another connection (another process, the iOS notification
+  /// extension) writes meanwhile, and the group's own writes still land.
+  #[test]
+  fn a_read_group_lets_another_connection_write() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+    let app = SealedSqliteStore::open(&path, &key).unwrap();
+    let extension = SealedSqliteStore::open(&path, &key).unwrap();
+    app.put(Table::Users, "1", b"before").unwrap();
+    crate::store::read_together(&app, || {
+      assert_eq!(app.get(Table::Users, "1")?.as_deref(), Some(&b"before"[..]));
+      crate::store::write_group(&extension, || {
+        extension.put(Table::Users, "2", b"from the extension")
+      })?;
+      crate::store::write_group(&app, || app.put(Table::Users, "3", b"from the app"))?;
+      assert_eq!(app.get(Table::Users, "3")?.as_deref(), Some(&b"from the app"[..]));
+      Ok::<_, StoreError>(())
+    })
+    .unwrap();
+    assert_eq!(
+      app.get(Table::Users, "2").unwrap().as_deref(),
+      Some(&b"from the extension"[..])
+    );
+    assert_eq!(
+      extension.get(Table::Users, "3").unwrap().as_deref(),
+      Some(&b"from the app"[..])
+    );
+    drop((app, extension));
+    let _ = std::fs::remove_dir_all(directory);
+  }
+
   #[test]
   fn sealed_sqlite_behaves_like_a_store() {
     let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));

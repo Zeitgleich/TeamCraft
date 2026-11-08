@@ -649,6 +649,14 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     self.inner.is_awaited()
   }
 
+  fn begin_reads(&self) -> Result<(), StoreError> {
+    self.inner.begin_reads()
+  }
+
+  fn end_reads(&self) {
+    self.inner.end_reads();
+  }
+
   fn written_since(&self, conversation: ConversationId, cursor: u64) -> Option<Vec<Written>> {
     // Another connection's commit since the last write is found now.
     self.follow_disk();
