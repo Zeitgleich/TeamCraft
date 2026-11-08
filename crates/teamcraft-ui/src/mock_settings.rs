@@ -334,6 +334,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
     app_links: teamcraft_proto::AppLinkSettings::default(),
     health_alerts: teamcraft_proto::HealthAlertSettings::default(),
     crash_reports: teamcraft_proto::CrashReportSettings::default(),
+    maybe_publisher_crash_reports_host: Some("crashes.example.com".to_owned()),
     holidays: teamcraft_proto::HolidaySettings::default(),
     maybe_holiday_feed: None,
     server_rules: ServerRulesSettings {

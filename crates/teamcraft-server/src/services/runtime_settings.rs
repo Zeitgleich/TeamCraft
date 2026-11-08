@@ -208,6 +208,8 @@ async fn response(state: &AppState) -> Result<RuntimeSettingsResponse, ApiError>
     .maybe_feed_url
     .as_deref()
     .map(|url| state.holiday_feed.status(url));
+  response.maybe_publisher_crash_reports_host =
+    state.crash_relay.publisher().map(|dsn| dsn.host().to_owned());
   Ok(response)
 }
 
@@ -363,6 +365,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
     health_alerts: settings.health_alerts.clone(),
     holidays: settings.holidays.clone(),
     crash_reports: settings.crash_reports.clone(),
+    maybe_publisher_crash_reports_host: None,
     maybe_holiday_feed: None,
     server_rules: ServerRulesSettings {
       invites_require_verified_email: settings.policy.invites_require_verified_email,

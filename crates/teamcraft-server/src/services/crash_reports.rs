@@ -36,11 +36,15 @@ const MAX_RETRY_AFTER_SECS: u64 = 6 * 60 * 60;
 const ENVELOPE_CONTENT_TYPE: &str = "application/x-sentry-envelope";
 /// The server's own panics reported per process at most; one per place in the code.
 const MAX_SERVER_PANIC_REPORTS: u32 = 20;
+/// The publisher's crash reports service, built in by whoever builds the server and the apps
+/// (the release workflow sets it from a repository variable); empty or absent in other builds.
+const PUBLISHER_DSN: Option<&str> = option_env!("TEAMCRAFT_CRASH_REPORTS_DSN");
 
-/// The HTTP client that forwards reports.
+/// The HTTP client that forwards reports, and the publisher's service of this build.
 pub struct CrashRelay {
   http: reqwest::Client,
   allows_private: bool,
+  maybe_publisher: Option<Dsn>,
 }
 
 impl CrashRelay {
@@ -48,6 +52,11 @@ impl CrashRelay {
   /// public https address, resolved to public addresses only (an admin can't point the relay into
   /// the server's own network).
   pub fn new(allows_private: bool) -> Result<Self, reqwest::Error> {
+    Self::with_publisher(allows_private, publisher_dsn())
+  }
+
+  /// With another publisher service than the build's (tests).
+  pub fn with_publisher(allows_private: bool, maybe_publisher: Option<Dsn>) -> Result<Self, reqwest::Error> {
     let builder = reqwest::Client::builder()
       .timeout(FORWARD_TIMEOUT)
       .connect_timeout(CONNECT_TIMEOUT)
@@ -63,26 +72,43 @@ impl CrashRelay {
     } else {
       builder.dns_resolver(Arc::new(PublicOnlyResolver)).build()?
     };
-    Ok(Self { http, allows_private })
+    Ok(Self {
+      http,
+      allows_private,
+      maybe_publisher,
+    })
+  }
+
+  /// The publisher's service of this build, if it has one.
+  pub fn publisher(&self) -> Option<&Dsn> {
+    self.maybe_publisher.as_ref()
+  }
+}
+
+/// [`PUBLISHER_DSN`], parsed; a value that isn't a DSN is ignored with a warning.
+fn publisher_dsn() -> Option<Dsn> {
+  let text = PUBLISHER_DSN.map(str::trim).filter(|text| !text.is_empty())?;
+  match text.parse() {
+    Ok(dsn) => Some(dsn),
+    Err(error) => {
+      warn!(%error, "the built-in crash reports DSN is invalid; the publisher service is off");
+      None
+    },
   }
 }
 
 /// Forwards one envelope to the backend in the instance settings.
 pub async fn relay(state: &AppState, body: Bytes) -> Result<(), ApiError> {
-  let Some(info) = state.settings.get().crash_reports.info() else {
+  let relay = &state.crash_relay;
+  let Some(dsn) = state.settings.get().crash_reports.backend(relay.publisher()) else {
     return Err(ApiError::NotFound {
       code: ErrorCode::CrashReportsOff,
       what: "crash reports",
     });
   };
   check_envelope(&body)?;
-  let dsn: Dsn = info
-    .dsn
-    .parse()
-    .map_err(|_| ApiError::Unavailable("the crash reports DSN is invalid".into()))?;
   let url = Url::parse(&dsn.envelope_url(env!("CARGO_PKG_VERSION")))
     .map_err(|_| ApiError::Unavailable("the crash reports DSN is invalid".into()))?;
-  let relay = &state.crash_relay;
   if !relay.allows_private && check_public_url(&url).is_err() {
     warn!("the crash reports backend is not a public https address; reports are not forwarded");
     return Err(ApiError::Unavailable(
@@ -119,7 +145,7 @@ pub fn install_panic_hook(state: AppState) {
       .settings
       .get()
       .crash_reports
-      .info()
+      .info(state.crash_relay.publisher())
       .and_then(|info| CrashReportingConfig::from_info(&info).ok())
     else {
       return;

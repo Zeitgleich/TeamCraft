@@ -10,6 +10,8 @@ use thiserror::Error;
 use url::{Host, Url};
 use utoipa::ToSchema;
 
+use crate::wire_enum::wire_enum;
+
 /// `POST`: the server relays one envelope to the instance's backend (docs/crash-reports.md).
 pub const CRASH_REPORTS_PATH: &str = "/api/v1/crash-reports";
 /// Largest envelope the relay takes, in bytes; the apps' reports are far smaller.
@@ -17,13 +19,14 @@ pub const MAX_CRASH_ENVELOPE_BYTES: usize = 256 * 1024;
 /// Longest environment name, in characters.
 pub const MAX_CRASH_ENVIRONMENT_CHARS: usize = 64;
 
-/// Administration → Crash reports: where the apps send crash and error reports. Off by default;
-/// nothing is captured or sent until an admin sets a DSN and turns it on.
+/// Administration → Crash reports: where the apps send crash and error reports. By default to the
+/// publisher's service, the backend of whoever built the apps and the server (like the push
+/// gateway); an instance can send to a backend of its own instead, or turn reports off.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CrashReportSettings {
-  pub is_enabled: bool,
-  /// The backend project's DSN (`https://<public key>@errors.example.com/<project>`); may stay
-  /// empty while reports are off.
+  pub mode: CrashReportsMode,
+  /// The own backend's DSN (`https://<public key>@errors.example.com/<project>`); only used, and
+  /// only required, with [`CrashReportsMode::Own`].
   pub dsn: String,
   /// Percentage of handled errors that are sent; crashes are always sent.
   pub sample_percent: u8,
@@ -37,6 +40,18 @@ pub struct CrashReportSettings {
   /// operator who informs people another way (privacy policy, onboarding). Absent: on.
   #[serde(default = "is_on")]
   pub shows_notice: bool,
+}
+
+wire_enum! {
+  /// Where an instance's crash reports go.
+  pub enum CrashReportsMode {
+    /// The publisher's service, built into the server (`TEAMCRAFT_CRASH_REPORTS_DSN` at build
+    /// time); a build without one sends nothing. The default.
+    Publisher => "publisher",
+    /// The instance's own backend, [`CrashReportSettings::dsn`].
+    Own => "own",
+    Off => "off",
+  }
 }
 
 /// The part of [`CrashReportSettings`] the apps get in `GET /api/v1/server-info`, only while
@@ -60,6 +75,8 @@ pub enum CrashReportSettingsError {
   SamplePercent,
   #[error("environment must be 1 to 64 lowercase letters, digits, '-', '_' or '.'")]
   Environment,
+  #[error("mode must be publisher, own or off")]
+  Mode,
 }
 
 /// Envelope protocol version sent with every request.
@@ -97,7 +114,7 @@ pub enum DsnError {
 impl Default for CrashReportSettings {
   fn default() -> Self {
     Self {
-      is_enabled: false,
+      mode: CrashReportsMode::Publisher,
       dsn: String::new(),
       sample_percent: 100,
       environment: "production".to_owned(),
@@ -108,9 +125,12 @@ impl Default for CrashReportSettings {
 }
 
 impl CrashReportSettings {
-  /// Checks the values; a DSN is only required while reports are on.
+  /// Checks the values; a DSN is only required for an own backend.
   pub fn check(&self) -> Result<(), CrashReportSettingsError> {
-    if self.is_enabled || !self.dsn.trim().is_empty() {
+    if matches!(self.mode, CrashReportsMode::Unknown(_)) {
+      return Err(CrashReportSettingsError::Mode);
+    }
+    if self.mode == CrashReportsMode::Own || !self.dsn.trim().is_empty() {
       self.dsn.parse::<Dsn>()?;
     }
     if self.sample_percent > 100 {
@@ -122,10 +142,24 @@ impl CrashReportSettings {
     Ok(())
   }
 
-  /// What the apps get: `None` while reports are off or the values don't check.
-  pub fn info(&self) -> Option<CrashReportsInfo> {
-    (self.is_enabled && self.check().is_ok()).then(|| CrashReportsInfo {
-      dsn: self.dsn.trim().to_owned(),
+  /// The backend in force: the publisher's (`maybe_publisher`, built into the server) or the own
+  /// one; `None` while reports are off, the build has no publisher service, or the values don't
+  /// check.
+  pub fn backend(&self, maybe_publisher: Option<&Dsn>) -> Option<Dsn> {
+    if self.check().is_err() {
+      return None;
+    }
+    match self.mode {
+      CrashReportsMode::Publisher => maybe_publisher.cloned(),
+      CrashReportsMode::Own => self.dsn.parse().ok(),
+      CrashReportsMode::Off | CrashReportsMode::Unknown(_) => None,
+    }
+  }
+
+  /// What the apps get in `GET /api/v1/server-info`; `None` while no backend is in force.
+  pub fn info(&self, maybe_publisher: Option<&Dsn>) -> Option<CrashReportsInfo> {
+    self.backend(maybe_publisher).map(|dsn| CrashReportsInfo {
+      dsn: dsn.to_string(),
       sample_percent: self.sample_percent,
       environment: self.environment.clone(),
       allows_opt_out: self.allows_opt_out,
@@ -158,6 +192,15 @@ impl Dsn {
       self.public_key,
       url_safe(client_version)
     )
+  }
+
+  /// Host (and port) of the backend, for the console to say where reports go.
+  pub fn host(&self) -> &str {
+    let after_scheme = self
+      .base
+      .split_once("://")
+      .map_or(self.base.as_str(), |(_, rest)| rest);
+    after_scheme.split('/').next().unwrap_or(after_scheme)
   }
 
   pub fn project_id(&self) -> &str {
@@ -243,27 +286,53 @@ mod tests {
   use super::*;
 
   #[test]
-  fn settings_need_a_dsn_only_while_on() {
-    let mut settings = CrashReportSettings::default();
+  fn the_publisher_service_is_the_default() {
+    let publisher: Dsn = "https://pub@crashes.example.com/1".parse().unwrap();
+    let settings = CrashReportSettings::default();
     assert!(settings.check().is_ok());
-    assert_eq!(settings.info(), None);
-    settings.is_enabled = true;
-    assert!(matches!(settings.check(), Err(CrashReportSettingsError::Dsn(_))));
-    settings.dsn = " https://abc@errors.example.com/2 ".to_owned();
-    settings.sample_percent = 25;
     assert_eq!(
-      settings.info(),
+      settings.info(Some(&publisher)),
       Some(CrashReportsInfo {
-        dsn: "https://abc@errors.example.com/2".to_owned(),
-        sample_percent: 25,
+        dsn: "https://pub@crashes.example.com/1".to_owned(),
+        sample_percent: 100,
         environment: "production".to_owned(),
         allows_opt_out: true,
         shows_notice: true,
       })
     );
-    settings.sample_percent = 101;
+    // A build without a publisher service sends nothing by default.
+    assert_eq!(settings.info(None), None);
+  }
+
+  #[test]
+  fn an_own_backend_needs_its_dsn_and_off_is_off() {
+    let publisher: Dsn = "https://pub@crashes.example.com/1".parse().unwrap();
+    let mut settings = CrashReportSettings {
+      mode: CrashReportsMode::Own,
+      ..CrashReportSettings::default()
+    };
+    assert!(matches!(settings.check(), Err(CrashReportSettingsError::Dsn(_))));
+    assert_eq!(settings.info(Some(&publisher)), None);
+    settings.dsn = " https://abc@errors.example.com/2 ".to_owned();
+    settings.sample_percent = 25;
+    let info = settings.info(Some(&publisher)).unwrap();
+    assert_eq!(info.dsn, "https://abc@errors.example.com/2");
+    assert_eq!(info.sample_percent, 25);
+    settings.mode = CrashReportsMode::Off;
+    assert_eq!(settings.info(Some(&publisher)), None);
+    settings.mode = CrashReportsMode::Unknown("later".into());
+    assert_eq!(settings.check(), Err(CrashReportSettingsError::Mode));
+  }
+
+  #[test]
+  fn bad_values_send_nothing() {
+    let publisher: Dsn = "https://pub@crashes.example.com/1".parse().unwrap();
+    let mut settings = CrashReportSettings {
+      sample_percent: 101,
+      ..CrashReportSettings::default()
+    };
     assert_eq!(settings.check(), Err(CrashReportSettingsError::SamplePercent));
-    assert_eq!(settings.info(), None);
+    assert_eq!(settings.info(Some(&publisher)), None);
     settings.sample_percent = 0;
     settings.environment = "Prod".to_owned();
     assert_eq!(settings.check(), Err(CrashReportSettingsError::Environment));
@@ -274,7 +343,7 @@ mod tests {
     assert_eq!(
       serde_json::to_value(CrashReportSettings::default()).unwrap(),
       serde_json::json!({
-        "is_enabled": false,
+        "mode": "publisher",
         "dsn": "",
         "sample_percent": 100,
         "environment": "production",
@@ -282,18 +351,13 @@ mod tests {
         "shows_notice": true,
       })
     );
-    // A row stored before the two switches existed reads as both on.
-    let stored: CrashReportSettings = serde_json::from_value(serde_json::json!({
-      "is_enabled": true, "dsn": "https://k@errors.example.com/1", "sample_percent": 5, "environment": "prod",
-    }))
-    .unwrap();
-    assert!(stored.allows_opt_out && stored.shows_notice);
   }
 
   #[test]
   fn parses_a_dsn_and_builds_the_envelope_url() {
     let dsn: Dsn = "https://abc123@errors.example.com/42".parse().unwrap();
     assert_eq!(dsn.project_id(), "42");
+    assert_eq!(dsn.host(), "errors.example.com");
     assert_eq!(
       dsn.envelope_url("1.0.9"),
       "https://errors.example.com/api/42/envelope/?sentry_key=abc123&sentry_version=7&sentry_client=teamcraft%2F1.0.9"

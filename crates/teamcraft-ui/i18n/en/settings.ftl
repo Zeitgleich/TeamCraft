@@ -725,7 +725,12 @@ settings-error-health-days = Enter 1 to 365 days.
 settings-error-health-percent = Enter 50 to 99 percent.
 
 settings-group-crash_reports = Crash reports
-settings-group-crash_reports-hint = Where the apps send crash and error reports: a self-hosted backend that speaks the Sentry protocol, such as GlitchTip. Reports carry stack traces, versions and a random installation ID, never messages, names, file names or keys. People can turn them off in their privacy settings.
+settings-group-crash_reports-hint = Where the apps send crash and error reports: by default to the publisher's service (whoever built the apps and this server), or to a backend of your own that speaks the Sentry protocol, such as GlitchTip. Reports carry stack traces, versions and a random installation ID, never messages, names, file names or keys. People can turn them off in their privacy settings.
+settings-f-mode = Crash reports go to
+settings-crash-mode-publisher = The publisher's service ({ $host })
+settings-crash-mode-publisher-none = The publisher's service (none in this build: nothing is sent)
+settings-crash-mode-own = An own backend (the DSN below)
+settings-crash-mode-off = Nowhere: crash reports are off
 settings-f-dsn = DSN of the backend project
 settings-f-sample_percent = Share of handled errors sent (crashes are always sent)
 settings-f-environment = Environment name

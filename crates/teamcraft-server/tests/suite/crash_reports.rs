@@ -1,5 +1,5 @@
-//! The crash report relay (docs/crash-reports.md): off by default, forwards envelopes to the
-//! backend the admin set, and passes the backend's answer on in a form the apps act on.
+//! The crash report relay (docs/crash-reports.md): nothing without a backend (a test build has no
+//! publisher service), forwards envelopes to the one the admin set, and passes its answer on.
 #![cfg(feature = "integration")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -115,7 +115,7 @@ async fn enable(app: &TestApp, dsn: &str) {
       &admin(),
       "/admin/settings",
       json!({"section": "crash_reports", "values": {
-        "is_enabled": true, "dsn": dsn, "sample_percent": 100, "environment": "test",
+        "mode": "own", "dsn": dsn, "sample_percent": 100, "environment": "test",
       }}),
     )
     .await;

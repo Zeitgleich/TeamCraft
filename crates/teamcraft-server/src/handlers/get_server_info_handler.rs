@@ -60,7 +60,7 @@ pub async fn get_server_info_handler(
       maybe_help_link: settings.sign_in_page.maybe_help_link.clone(),
       is_login_page_always_shown: settings.sign_in_page.is_login_page_always_shown,
     },
-    maybe_crash_reports: settings.crash_reports.info(),
+    maybe_crash_reports: settings.crash_reports.info(state.crash_relay.publisher()),
   };
   let mut response = Json(body).into_response();
   set_public_cache(&mut response);

@@ -115,6 +115,9 @@ jobs:
           context: .
           file: containers/${{ matrix.image }}.Containerfile
           platforms: ${{ matrix.platform }}
+          # The publisher's crash reports service for the server (docs/crash-reports.md); the other
+          # images ignore it. A public value (a DSN only allows sending reports).
+          build-args: TEAMCRAFT_CRASH_REPORTS_DSN=${{ vars.TEAMCRAFT_CRASH_REPORTS_DSN }}
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.image }}-${{ matrix.arch }}

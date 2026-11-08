@@ -806,10 +806,10 @@ mod instance_settings {
     let bob = admin();
     assert!(
       server_info(&app).await.get("crash_reports").is_none(),
-      "off by default"
+      "nothing by default in a build without a publisher service"
     );
     let mut values = json!({
-      "is_enabled": true,
+      "mode": "own",
       "dsn": "",
       "sample_percent": 20,
       "environment": "production",
@@ -840,7 +840,7 @@ mod instance_settings {
         "shows_notice": true,
       })
     );
-    values["is_enabled"] = json!(false);
+    values["mode"] = json!("off");
     assert_eq!(
       app.put(&bob, "/admin/settings", section(&values)).await.status,
       StatusCode::OK

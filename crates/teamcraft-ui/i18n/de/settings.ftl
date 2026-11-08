@@ -725,7 +725,12 @@ settings-error-health-days = Gib 1 bis 365 Tage ein.
 settings-error-health-percent = Gib 50 bis 99 Prozent ein.
 
 settings-group-crash_reports = Absturzberichte
-settings-group-crash_reports-hint = Wohin die Apps Absturz- und Fehlerberichte senden: ein selbst betriebenes Backend mit Sentry-Protokoll, etwa GlitchTip. Berichte enthalten Stacktraces, Versionen und eine zufällige Installations-ID, niemals Nachrichten, Namen, Dateinamen oder Schlüssel. Jede Person kann sie in ihren Datenschutzeinstellungen abschalten.
+settings-group-crash_reports-hint = Wohin die Apps Absturz- und Fehlerberichte senden: standardmäßig an den Dienst des Herausgebers (wer die Apps und diesen Server gebaut hat) oder an ein eigenes Backend mit Sentry-Protokoll, etwa GlitchTip. Berichte enthalten Stacktraces, Versionen und eine zufällige Installations-ID, niemals Nachrichten, Namen, Dateinamen oder Schlüssel. Jede Person kann sie in ihren Datenschutzeinstellungen abschalten.
+settings-f-mode = Absturzberichte gehen an
+settings-crash-mode-publisher = Den Dienst des Herausgebers ({ $host })
+settings-crash-mode-publisher-none = Den Dienst des Herausgebers (in diesem Build keiner: es wird nichts gesendet)
+settings-crash-mode-own = Ein eigenes Backend (die DSN unten)
+settings-crash-mode-off = Nirgendwohin: Absturzberichte sind aus
 settings-f-dsn = DSN des Backend-Projekts
 settings-f-sample_percent = Anteil gesendeter behandelter Fehler (Abstürze werden immer gesendet)
 settings-f-environment = Name der Umgebung

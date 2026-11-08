@@ -362,6 +362,14 @@ pub struct RuntimeSettingsResponse {
   /// Absent from older servers: off.
   #[serde(default)]
   pub crash_reports: CrashReportSettings,
+  /// Host of the publisher's crash reports service built into this server; absent: the build has
+  /// none, and the mode `publisher` sends nothing.
+  #[serde(
+    rename = "publisher_crash_reports_host",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_publisher_crash_reports_host: Option<String>,
   /// How the holiday feed stands; absent without a feed (and from older servers).
   #[serde(rename = "holiday_feed", default, skip_serializing_if = "Option::is_none")]
   pub maybe_holiday_feed: Option<HolidayFeedStatus>,

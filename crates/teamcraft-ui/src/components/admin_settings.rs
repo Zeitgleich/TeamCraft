@@ -47,6 +47,8 @@ const METHOD_CHOICES: [&str; 4] = ["sso,local", "local,sso", "sso", "local"];
 const LEVEL_CHOICES: [&str; 2] = ["all", "mentions"];
 /// The policies for binding tokens to devices.
 const DPOP_POLICY_CHOICES: [&str; 3] = ["optional", "required", "off"];
+/// Where crash reports go (docs/crash-reports.md).
+const CRASH_MODE_CHOICES: [&str; 3] = ["publisher", "own", "off"];
 
 /// How a field is edited and checked.
 #[derive(Clone, Copy)]
@@ -82,7 +84,9 @@ enum Kind {
   MapText,
   /// An https link that may be empty (none).
   Link,
-  /// A crash reports DSN (docs/crash-reports.md); empty while reports are off.
+  /// Where crash reports go, one of [`CRASH_MODE_CHOICES`].
+  CrashMode,
+  /// A crash reports DSN (docs/crash-reports.md); empty unless reports go to an own backend.
   Dsn,
   /// A crash reports environment name: lowercase letters, digits, `-`, `_`, `.`.
   Environment,
@@ -226,7 +230,10 @@ const APP_LINKS: &[FieldDef] = &[
   text("apple_bundle_id"),
 ];
 const CRASH_REPORTS: &[FieldDef] = &[
-  flag("is_enabled"),
+  FieldDef {
+    id: "mode",
+    kind: Kind::CrashMode,
+  },
   FieldDef {
     id: "dsn",
     kind: Kind::Dsn,
@@ -639,6 +646,42 @@ fn FieldRow(
       }
       .into_any()
     },
+    Kind::CrashMode => {
+      let i18n = use_i18n();
+      let state = use_app_state();
+      let dom_id = leak_key(dom_id);
+      // Where the publisher's service is, so the admin sees where reports go by default.
+      let publisher_host = Memo::new(move |_| {
+        state
+          .read(|backend| backend.runtime_settings())
+          .and_then(|response| response.maybe_publisher_crash_reports_host)
+      });
+      let choice_text = move |choice: &'static str| match (choice, publisher_host.get()) {
+        ("publisher", Some(host)) => i18n.t_with("settings-crash-mode-publisher", &[("host", host.as_str())]),
+        ("publisher", None) => i18n.t("settings-crash-mode-publisher-none"),
+        ("own", _) => i18n.t("settings-crash-mode-own"),
+        _ => i18n.t("settings-crash-mode-off"),
+      };
+      view! {
+        <div class="field">
+          <label for=dom_id>{move || i18n.t(label)}</label>
+          <select
+            id=dom_id
+            class="input"
+            prop:value=move || value.get()
+            on:change=move |ev| on_input.run(event_target_value(&ev))
+          >
+            {CRASH_MODE_CHOICES
+              .into_iter()
+              .map(|choice| {
+                view! { <option value=choice selected=move || value.get() == choice>{move || choice_text(choice)}</option> }
+              })
+              .collect_view()}
+          </select>
+        </div>
+      }
+      .into_any()
+    },
     Kind::HolidayRegion => {
       let i18n = use_i18n();
       let dom_id = leak_key(dom_id);
@@ -865,6 +908,7 @@ fn value_text(kind: Kind, maybe_value: Option<&Value>) -> String {
     | Kind::Link
     | Kind::Level
     | Kind::DpopPolicy
+    | Kind::CrashMode
     | Kind::HolidayRegion => value.as_str().unwrap_or_default().to_owned(),
     Kind::Methods => value
       .as_array()
@@ -918,9 +962,9 @@ fn check(key: &RuntimeSettingsKey, values: &Values) -> Result<RuntimeSettingsSec
       Err(message) => errors.push((field.id, message)),
     }
   }
-  // Reports can't be on without somewhere to send them.
+  // An own backend needs its DSN.
   if *key == RuntimeSettingsKey::CrashReports
-    && object.get("is_enabled") == Some(&Value::Bool(true))
+    && object.get("mode").and_then(Value::as_str) == Some("own")
     && object.get("dsn").and_then(Value::as_str) == Some("")
   {
     // The DSN field comes right after the switch, before any other field that can be wrong.
@@ -982,6 +1026,12 @@ fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
         .unwrap_or(LEVEL_CHOICES[0]);
       Ok(json!(choice))
     },
+    Kind::CrashMode => Ok(json!(
+      CRASH_MODE_CHOICES
+        .into_iter()
+        .find(|choice| *choice == typed)
+        .unwrap_or(CRASH_MODE_CHOICES[0])
+    )),
     Kind::DpopPolicy => {
       let choice = DPOP_POLICY_CHOICES
         .into_iter()
@@ -1196,7 +1246,7 @@ mod tests {
   #[test]
   fn crash_reports_need_a_valid_dsn_while_on() {
     let mut values: Values = [
-      ("is_enabled", "true"),
+      ("mode", "own"),
       ("dsn", ""),
       ("sample_percent", "150"),
       ("environment", "Prod"),
@@ -1227,7 +1277,7 @@ mod tests {
       panic!("a valid section");
     };
     assert!(!mandatory.allows_opt_out && !mandatory.shows_notice);
-    values.insert("is_enabled", "false".to_owned());
+    values.insert("mode", "publisher".to_owned());
     values.insert("dsn", String::new());
     assert!(check(&kind("crash_reports"), &values).is_ok());
   }
@@ -1258,6 +1308,9 @@ mod tests {
       "settings-error-crash-percent",
       "settings-error-dsn",
       "settings-error-crash-environment",
+      "settings-crash-mode-publisher-none",
+      "settings-crash-mode-own",
+      "settings-crash-mode-off",
       "settings-error-holiday-refresh-hours",
       "settings-error-holiday-max-age-days",
       "settings-holiday-feed-copy",

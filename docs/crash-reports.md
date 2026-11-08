@@ -13,13 +13,17 @@ how sending stays out of the app's way, and how stack traces become readable (sy
 
 - **Wire format: the Sentry envelope protocol** (`POST /api/<project>/envelope/`). It is the
   de-facto open standard; several self-hosted backends accept it, so the backend is replaceable
-  (vendor-neutral rule). The app only knows a **DSN** (`https://<public key>@<host>/<project>`).
+  (vendor-neutral rule). The app only knows a **DSN** (`https://<public key>@<host>/<project>`), from its server.
 - **Default backend: GlitchTip** (decided 2026-11-08): Postgres + Valkey, errors plus uptime checks.
   It has a built-in MCP server and a Sentry-style API, so the developers' tools can read and triage
   issues directly. Bugsink (smaller, errors only) and Sentry self-hosted (heavy) take the same DSN.
+- **Who runs it:** by default the publisher of the apps (like Crashlytics for a store app): its DSN
+  is built into the server, and every instance's apps report there unless the instance's admin
+  sends them to an own backend or turns them off (Settings, below).
 - **Deployment:** an optional service of [teamcraft-deploy](https://github.com/Zeitgleich/teamcraft-deploy)
-  (`glitchtip_enabled`). The operator creates an organization and a project in GlitchTip and pastes
-  the project's DSN into Administration → Crash reports.
+  (`glitchtip_enabled`, also on a host of its own). Create an organization and a project in
+  GlitchTip; the project's DSN (Settings → Client Keys) goes into the build variable (publisher)
+  or into Administration → Crash reports (own backend).
 
 ### Who builds the reports
 
@@ -108,12 +112,19 @@ account, the device or the instance, and it is rotated when the user turns repor
 
 ## Settings
 
-- **Instance (admin):** Administration → Crash reports: on/off, DSN, sample rate for non-fatal
-  errors (crashes are always sent), environment name. Stored as an instance setting in the
-  database (`settings.crash_reports`, a runtime settings group) and served to the apps in
-  `GET /api/v1/server-info` (`crash_reports`, absent while off), so store apps
-  work for every instance without a rebuild. Off, or no DSN: nothing is captured or sent, and
-  queued reports are dropped.
+- **Where reports go (admin):** Administration → Crash reports → "Crash reports go to":
+  - **The publisher's service** (default): the backend of whoever built the apps and the server,
+    like the push gateway. The release workflow builds its DSN into the server image (repository
+    variable `TEAMCRAFT_CRASH_REPORTS_DSN`); the console names its host. A build without one (a
+    fork, a build from source) sends nothing in this mode.
+  - **An own backend:** the instance's own DSN (GlitchTip or any Sentry-protocol backend).
+  - **Nowhere:** crash reports are off.
+
+  Plus the sample rate for handled errors (crashes are always sent) and the environment name.
+  Stored as an instance setting in the database (`settings.crash_reports`) and served to the apps
+  in `GET /api/v1/server-info` (`crash_reports`, absent while nothing is sent), so store apps work
+  for every instance without a rebuild. Nothing to send: nothing is captured, and queued reports
+  are dropped.
 - **Mandatory or optional (admin):** "People may turn crash reports off" (on by default). Off:
   reports are mandatory on this instance; the privacy switch stays on, disabled, and says that the
   organization requires them. The operator then needs a legal basis of its own (for example
@@ -159,8 +170,8 @@ account, the device or the instance, and it is rotated when the user turns repor
   the app's data directory, at most five, synchronously (the process aborts right after). The page
   takes them on its next start (`crash_reports_take_native`) and reports them like its own, with the
   instance's setting and the user's choice, which the shell doesn't know.
-- **The server** reports its own panics straight to the DSN in its settings, when crash reports are
-  on: built and scrubbed in the hook, sent from a thread of its own (a panicking request never waits
+- **The server** reports its own panics straight to the backend in force (publisher's or own):
+  built and scrubbed in the hook, sent from a thread of its own (a panicking request never waits
   for the backend), at most 20 per process and one per place in the code. No breadcrumbs: the
   server keeps no debug log ring. Platform `server`, a random installation ID per start.
 - **Mobile core:** a Rust panic in the FFI reaches Kotlin or Swift as an exception, which the
