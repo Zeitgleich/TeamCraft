@@ -31,6 +31,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -57,6 +58,10 @@ private val CHANNEL_MENTION_CHOICES = listOf(
   ChannelMentions.NOTIFY to R.string.notify_channel_mentions_notify,
   ChannelMentions.IGNORE to R.string.notify_channel_mentions_ignore,
 )
+
+/** The lead times the settings offer, in minutes; `0` is no reminder (the desktop offers the same). */
+private val MEETING_REMINDER_CHOICES = listOf(0, 1, 5, 10, 15)
+private const val DEFAULT_MEETING_REMINDER_MINUTES = 5
 
 /**
  * A conversation's notification level, mute and filters (`@channel`, quiet hours), as the server
@@ -189,6 +194,30 @@ fun NotificationSettingsSection(viewModel: MainViewModel) {
         onCheckedChange = { save(current.copy(autoFollowMentionedThreads = it)) },
       )
       Text(stringResource(R.string.auto_follow_threads), style = MaterialTheme.typography.bodyMedium)
+    }
+    Text(stringResource(R.string.meeting_reminder_title), style = MaterialTheme.typography.bodyMedium)
+    val reminderMinutes = current.maybeMeetingReminderMinutes ?: DEFAULT_MEETING_REMINDER_MINUTES
+    for (minutes in MEETING_REMINDER_CHOICES) {
+      Row(verticalAlignment = Alignment.CenterVertically) {
+        RadioButton(
+          selected = reminderMinutes == minutes,
+          onClick = { save(current.copy(maybeMeetingReminderMinutes = minutes)) },
+        )
+        Text(
+          if (minutes == 0) {
+            stringResource(R.string.meeting_reminder_off)
+          } else {
+            pluralStringResource(R.plurals.meeting_reminder_minutes, minutes, minutes)
+          },
+        )
+      }
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Switch(
+        checked = current.maybeNotifiesMeetingStart ?: true,
+        onCheckedChange = { save(current.copy(maybeNotifiesMeetingStart = it)) },
+      )
+      Text(stringResource(R.string.meeting_notify_start), style = MaterialTheme.typography.bodyMedium)
     }
   }
 }

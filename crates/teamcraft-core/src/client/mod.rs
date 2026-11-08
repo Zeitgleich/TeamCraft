@@ -182,9 +182,11 @@ pub struct ClientSettings {
   /// bridge's operator config); it holds besides the server's limit. `None` (apps): the server's
   /// published limit decides, and servers that publish none get [`DEFAULT_MAX_UPLOAD_BYTES`].
   pub max_upload_bytes: Option<u64>,
-  /// This process is short of memory (the iOS notification extension): it doesn't move a version
-  /// before 1.0.9's MLS record (the client doesn't open, [`CoreError::MlsStateNotMoved`]) or tidy
-  /// the MLS records up; the app does when it opens.
+  /// This process is short of memory and runs next to the app (the iOS notification extension): it
+  /// doesn't move a version before 1.0.9's MLS record (the client doesn't open,
+  /// [`CoreError::MlsStateNotMoved`]) or tidy the MLS records up, and opening the client writes
+  /// nothing else either (the upload limit, catch-up marks the app may be setting right now, removal
+  /// records and account data); the app does all that when it opens.
   pub leaves_mls_upkeep_to_app: bool,
   /// How long an old MLS record set aside stays until it is wiped: never read, kept in case somebody
   /// has to look at a store that went wrong (e2ee.md §9.5).
@@ -591,10 +593,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     // The UI shows the upload limit before sending. Only when it changed: a commit here on every
     // open (the iOS notification extension's too) is a commit for nothing.
-    let maybe_recorded: Option<Option<u64>> =
-      records::get_json(&store, Table::Account, MAX_UPLOAD_KEY).unwrap_or(None);
-    if maybe_recorded != Some(settings.max_upload_bytes) {
-      records::put_json(&store, Table::Account, MAX_UPLOAD_KEY, &settings.max_upload_bytes)?;
+    if !settings.leaves_mls_upkeep_to_app {
+      let maybe_recorded: Option<Option<u64>> =
+        records::get_json(&store, Table::Account, MAX_UPLOAD_KEY).unwrap_or(None);
+      if maybe_recorded != Some(settings.max_upload_bytes) {
+        records::put_json(&store, Table::Account, MAX_UPLOAD_KEY, &settings.max_upload_bytes)?;
+      }
     }
     let sync = records::load_sync_state(&store)?;
     let maybe_preview_fetcher = previews::default_fetcher(&settings.link_previews);
@@ -648,13 +652,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       is_checking_as_before_v1_0_9: false,
       is_imported_history_paged: false,
     };
-    // A catch-up the app was closed during left its marks; the next one sets them again.
-    catch_up::clear_marks(&client.store)?;
     client.resume_first_sync()?;
-    // Startup: removal records of the user's devices count from the start, and this device's own
-    // (also from older versions) are shared.
-    client.apply_shared_removals()?;
-    client.share_removed_senders()?;
+    // The rest is the app's: it writes, and the app may be catching up next to this process (its
+    // marks would go and the indicator flicker). What the removal records add came from the app's
+    // own merge of the account data, which has put them in the store.
+    if !client.settings.leaves_mls_upkeep_to_app {
+      // A catch-up the app was closed during left its marks; the next one sets them again.
+      catch_up::clear_marks(&client.store)?;
+      // Startup: removal records of the user's devices count from the start, and this device's own
+      // (also from older versions) are shared.
+      client.apply_shared_removals()?;
+      client.share_removed_senders()?;
+    }
     Ok(Some(client))
   }
 

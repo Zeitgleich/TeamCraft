@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import de.zeitgleich.teamcraft.settings.LocalSettingChanges
 
 /** How the main screen lists conversations (#1151). */
 enum class ChatListLayout {
@@ -26,7 +27,7 @@ enum class ChatListGrouping {
 /**
  * "Use the colors of the wallpaper" (Material You, Android 12+) instead of the TeamCraft colors.
  * A device setting, off by default so the app looks like desktop and web. The layout of the
- * conversations is one too.
+ * conversations follows the account (#945).
  */
 class AppearancePrefs private constructor(context: Context) {
   private val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -46,6 +47,7 @@ class AppearancePrefs private constructor(context: Context) {
   fun setChatListGrouping(choice: ChatListGrouping) {
     prefs.edit().putString(KEY_GROUPING, choice.name).apply()
     grouping.value = choice
+    LocalSettingChanges.changed()
   }
 
   /** Live, so the main screen switches as soon as the setting changes. */
@@ -54,6 +56,7 @@ class AppearancePrefs private constructor(context: Context) {
   fun setChatListLayout(choice: ChatListLayout) {
     prefs.edit().putString(KEY_LAYOUT, choice.name).apply()
     layout.value = choice
+    LocalSettingChanges.changed()
   }
 
   /** Live, so the theme switches as soon as the setting changes. */

@@ -1080,6 +1080,10 @@ final class AppModel {
       removeDelivered(notificationId)
       openConversationId = conversationId
       if isAuthentic { calls.startCall(conversationId: conversationId, displayName: conversation.name) }
+    case NotificationCategories.joinMeetingAction:
+      removeDelivered(notificationId)
+      openConversationId = conversationId
+      if isAuthentic { calls.startCall(conversationId: conversationId, displayName: conversation.name) }
     case NotificationCategories.declineCallAction:
       // There is no decline call in the core yet: the ring stops here, the caller rings on.
       removeDelivered(notificationId)
@@ -1119,7 +1123,7 @@ final class AppModel {
       // what that means.
       ScheduledSealTask.schedule()
       return .failed
-    case .message, .call, .test, .unknown:
+    case .message, .call, .meetingReminder, .meetingStart, .test, .unknown:
       // Not sent as background pushes; only the badge is taken.
       await DeliveredNotifications.setBadge(notification.maybeBadge)
       return .noData
@@ -1225,6 +1229,8 @@ final class AppModel {
       maybeContent = builder.message(for: notification, presentation: .message, base: base).content
     case .test:
       maybeContent = builder.test(for: notification, base: base)
+    case .meeting:
+      maybeContent = builder.meeting(for: notification, base: base)
     case .callKit, .callAlert:
       // The open app rings through the gateway (`onIncomingCall`); nothing to add.
       maybeContent = nil
@@ -1413,7 +1419,7 @@ final class AppModel {
     if let maybeCore { return maybeCore }
     guard let account = container.activeAccount, vault.hasSession else { throw CoreFactoryError.noAccount }
     let opened = try factory.open(
-      account: account, createKey: createsKey,
+      account: account, createKey: createsKey, runsUpkeep: true,
       listener: ClosureEventListener { [weak self] in
         Task { @MainActor in self?.storeDidChange() }
       })

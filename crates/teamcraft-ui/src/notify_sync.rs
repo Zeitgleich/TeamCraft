@@ -32,8 +32,8 @@ use crate::clock::{end_of_local_day, local_time_zone, local_utc_offset_minutes, 
 use crate::feedback::{ActionFailure, FailureKind, report_failure};
 use crate::model::TimestampMs;
 use crate::prefs::{
-  ConversationFilters, ConversationNotify, DndSchedule, EVERY_DAY, MuteFor, NotifyLevel, Preferences,
-  PushWhen,
+  ConversationFilters, ConversationNotify, DEFAULT_MEETING_REMINDER_MINUTES, DndSchedule, EVERY_DAY, MuteFor,
+  NotifyLevel, Preferences, PushWhen,
 };
 use crate::reactive::UpdateIfAlive;
 use crate::settings::Settings;
@@ -410,6 +410,14 @@ fn retry_when_online(retry: RwSignal<u32>) {
 /// Server values into the local preferences (device-only fields stay).
 pub fn apply_global(prefs: &mut Preferences, server: &NotificationSettings) {
   let notes = &mut prefs.notifications;
+  // Absent: never chose here; the value on this device (the default, or what it already had) stays
+  // and goes to the server below once it differs.
+  if let Some(minutes) = server.maybe_meeting_reminder_minutes {
+    notes.maybe_meeting_reminder_minutes = (minutes > 0).then_some(minutes);
+  }
+  if let Some(notifies) = server.maybe_notifies_meeting_start {
+    notes.notifies_meeting_start = notifies;
+  }
   notes.push_when = match server.push_mode {
     PushMode::Always => PushWhen::Always,
     PushMode::AwayOnly | PushMode::Unknown(_) => PushWhen::AwayOrOffline,
@@ -456,7 +464,22 @@ pub fn global_from_prefs(
     maybe_uses_desktop_attention: Some(notes.uses_desktop_attention),
     maybe_level: push_level_to_server(notes.push, previous),
     maybe_default_level: previous.maybe_default_level.clone(),
+    maybe_meeting_reminder_minutes: meeting_reminder_to_server(
+      notes.maybe_meeting_reminder_minutes,
+      previous,
+    ),
+    maybe_notifies_meeting_start: (previous.maybe_notifies_meeting_start.is_some()
+      || !notes.notifies_meeting_start)
+      .then_some(notes.notifies_meeting_start),
   }
+}
+
+/// The reminder lead time as the user's own choice (`0`: off), unless they never chose and it still
+/// is the default, so the server has only what somebody really picked.
+fn meeting_reminder_to_server(maybe_minutes: Option<u16>, previous: &NotificationSettings) -> Option<u16> {
+  let wanted = maybe_minutes.unwrap_or(0);
+  (previous.maybe_meeting_reminder_minutes.is_some() || wanted != DEFAULT_MEETING_REMINDER_MINUTES)
+    .then_some(wanted)
 }
 
 /// The phone push level as the user's own choice, unless the user never chose and it still is the
@@ -791,6 +814,8 @@ mod tests {
         maybe_uses_desktop_attention: Some(true),
         maybe_level: Some(NotificationLevel::Mentions),
         maybe_default_level: Some(NotificationLevel::All),
+        maybe_meeting_reminder_minutes: None,
+        maybe_notifies_meeting_start: None,
       };
       apply_global(&mut prefs, &server);
       assert_eq!(prefs.notifications.push, NotifyLevel::Mentions);
@@ -925,6 +950,8 @@ mod tests {
         maybe_uses_desktop_attention: None,
         maybe_level: None,
         maybe_default_level: None,
+        maybe_meeting_reminder_minutes: None,
+        maybe_notifies_meeting_start: None,
       };
       apply_global(&mut prefs, &server);
       let dnd = &prefs.notifications.dnd;
@@ -987,7 +1014,7 @@ mod tests {
       );
     }
 
-    fn berlin() -> LocalZone {
+    pub(super) fn berlin() -> LocalZone {
       LocalZone {
         utc_offset_minutes: 60,
         maybe_time_zone: Some("Europe/Berlin".into()),
@@ -1130,6 +1157,55 @@ mod tests {
         maybe_uses_desktop_attention: Some(true),
         maybe_level,
         maybe_default_level,
+        maybe_meeting_reminder_minutes: None,
+        maybe_notifies_meeting_start: None,
+      }
+    }
+
+    mod meeting_reminders {
+      use super::super::dnd::berlin;
+      use super::*;
+
+      #[test]
+      fn the_server_keeps_only_what_somebody_really_picked() {
+        let server = server(None, None);
+        let mut prefs = Preferences::default();
+        apply_global(&mut prefs, &server);
+        assert_eq!(
+          prefs.notifications.maybe_meeting_reminder_minutes,
+          Some(5),
+          "the default stays"
+        );
+        let sent = global_from_prefs(&prefs, &server, &berlin());
+        assert_eq!(sent.maybe_meeting_reminder_minutes, None);
+        assert_eq!(sent.maybe_notifies_meeting_start, None);
+
+        prefs.notifications.maybe_meeting_reminder_minutes = None;
+        let off = global_from_prefs(&prefs, &server, &berlin());
+        assert_eq!(
+          off.maybe_meeting_reminder_minutes,
+          Some(0),
+          "turning it off is a choice"
+        );
+        prefs.notifications.notifies_meeting_start = false;
+        assert_eq!(
+          global_from_prefs(&prefs, &server, &berlin()).maybe_notifies_meeting_start,
+          Some(false)
+        );
+      }
+
+      #[test]
+      fn the_servers_choice_reaches_this_device() {
+        let mut server = server(None, None);
+        server.maybe_meeting_reminder_minutes = Some(0);
+        server.maybe_notifies_meeting_start = Some(false);
+        let mut prefs = Preferences::default();
+        apply_global(&mut prefs, &server);
+        assert_eq!(
+          prefs.notifications.maybe_meeting_reminder_minutes, None,
+          "0 is off"
+        );
+        assert!(!prefs.notifications.notifies_meeting_start);
       }
     }
   }

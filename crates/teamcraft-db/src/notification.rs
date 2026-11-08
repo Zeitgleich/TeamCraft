@@ -22,6 +22,10 @@ pub struct StoredUserSettings {
   pub maybe_uses_desktop_attention: Option<bool>,
   /// The level of conversations the user never configured; `None`: the instance default applies.
   pub maybe_level: Option<NotificationLevel>,
+  /// Minutes before a meeting to remind, `0`: not at all; `None`: never chose.
+  pub maybe_meeting_reminder_minutes: Option<i16>,
+  /// Whether a meeting's start notifies; `None`: never chose.
+  pub maybe_notifies_meeting_start: Option<bool>,
 }
 
 impl Default for StoredUserSettings {
@@ -33,6 +37,8 @@ impl Default for StoredUserSettings {
       maybe_dnd_schedule: None,
       maybe_uses_desktop_attention: None,
       maybe_level: None,
+      maybe_meeting_reminder_minutes: None,
+      maybe_notifies_meeting_start: None,
     }
   }
 }
@@ -57,7 +63,8 @@ impl Database {
     let row = sqlx::query!(
       r#"SELECT u.auto_follow_mentioned_threads,
                 COALESCE(s.push_mode, 'away_only') AS "push_mode!", s.send_read_receipts, s.dnd_schedule,
-                s.uses_desktop_attention, s.notification_level
+                s.uses_desktop_attention, s.notification_level, s.meeting_reminder_minutes,
+                s.notifies_meeting_start
          FROM users u LEFT JOIN user_notification_settings s ON s.user_id = u.id
          WHERE u.id = $1"#,
       to_db(user),
@@ -72,6 +79,8 @@ impl Database {
         maybe_dnd_schedule: row.dnd_schedule,
         maybe_uses_desktop_attention: row.uses_desktop_attention,
         maybe_level: row.notification_level.map(NotificationLevel::from),
+        maybe_meeting_reminder_minutes: row.meeting_reminder_minutes,
+        maybe_notifies_meeting_start: row.notifies_meeting_start,
       }),
     )
   }
@@ -92,18 +101,23 @@ impl Database {
     .await?;
     sqlx::query!(
       r#"INSERT INTO user_notification_settings
-           (user_id, push_mode, send_read_receipts, dnd_schedule, uses_desktop_attention, notification_level)
-         VALUES ($1, $2, $3, $4, $5, $6)
+           (user_id, push_mode, send_read_receipts, dnd_schedule, uses_desktop_attention, notification_level,
+            meeting_reminder_minutes, notifies_meeting_start)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (user_id) DO UPDATE SET push_mode = EXCLUDED.push_mode,
            send_read_receipts = EXCLUDED.send_read_receipts, dnd_schedule = EXCLUDED.dnd_schedule,
            uses_desktop_attention = EXCLUDED.uses_desktop_attention,
-           notification_level = EXCLUDED.notification_level, updated_at = now()"#,
+           notification_level = EXCLUDED.notification_level,
+           meeting_reminder_minutes = EXCLUDED.meeting_reminder_minutes,
+           notifies_meeting_start = EXCLUDED.notifies_meeting_start, updated_at = now()"#,
       to_db(user),
       settings.push_mode,
       settings.maybe_send_read_receipts,
       settings.maybe_dnd_schedule,
       settings.maybe_uses_desktop_attention,
       settings.maybe_level.as_ref().map(NotificationLevel::as_str),
+      settings.maybe_meeting_reminder_minutes,
+      settings.maybe_notifies_meeting_start,
     )
     .execute(&mut *tx)
     .await?;

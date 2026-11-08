@@ -12,6 +12,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::common::{self, PASSPHRASE, Peer, settle};
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
+use teamcraft_core::client::is_catching_up;
 use teamcraft_core::store::{
   LocalStore, MediaRange, MemoryStore, MessageFilter, StoreError, StoredMessage, Table,
 };
@@ -376,6 +377,51 @@ mod migration {
       .unwrap()
       .unwrap();
     assert_eq!(entry_records(&store), entries, "the app moved it");
+  }
+
+  /// Issue #1198: the app may be catching up next to the extension: opening writes nothing there,
+  /// and the marks of its catch-up stay. The app's own open still drops them.
+  #[tokio::test]
+  async fn a_process_short_of_memory_writes_nothing_when_the_client_opens() {
+    let server = FakeServer::new();
+    let bob = Peer::enroll(&server, "Bob").await;
+    let (store, api) = (bob.store.clone(), bob.api.clone());
+    drop(bob);
+    let conversation = ConversationId::from_snowflake(teamcraft_proto::Snowflake::new(7).unwrap());
+    store
+      .put(Table::SyncState, &format!("catching_up/{conversation}"), b"true")
+      .unwrap();
+    teamcraft_core::records::merge_removed_sender(
+      &store,
+      "sender-1",
+      &teamcraft_core::account_data::SenderAbsence {
+        left_at_ms: 1_000,
+        maybe_back_at_ms: None,
+      },
+    )
+    .unwrap();
+
+    let counted = CountingStore::on(Box::new(store.clone()));
+    let short_of_memory = teamcraft_core::ClientSettings {
+      leaves_mls_upkeep_to_app: true,
+      // A limit the store doesn't hold yet: the app notes it.
+      max_upload_bytes: Some(1),
+      ..common::settings()
+    };
+    let client = Client::open(api.clone(), &counted, common::clock(), short_of_memory)
+      .unwrap()
+      .unwrap();
+    drop(client);
+    assert_eq!(counted.written_tables(), Vec::<String>::new());
+    assert!(is_catching_up(&store, conversation).unwrap(), "the marks stay");
+
+    Client::open(api, store.clone(), common::clock(), common::settings())
+      .unwrap()
+      .unwrap();
+    assert!(
+      !is_catching_up(&store, conversation).unwrap(),
+      "the app drops them"
+    );
   }
 
   /// The entry records of the MLS table, without what a save writes besides them.

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, user_id, device_id, kind, conversation_id, message_id, sender_id, is_urgent,\n                thread_id, call_id, badge, sent_at_ms, attempts,\n                (EXTRACT(EPOCH FROM (expires_at - now())) * 1000)::bigint AS \"remaining_ms!\"\n         FROM push_retries\n         WHERE is_user_endpoint = $1 AND next_attempt_at <= now() AND expires_at > now()\n           AND NOT EXISTS (SELECT 1 FROM conversations c\n                           WHERE c.id = push_retries.conversation_id AND c.deleted_at IS NOT NULL)\n         ORDER BY next_attempt_at\n         LIMIT 1\n         FOR UPDATE SKIP LOCKED",
+  "query": "SELECT id, user_id, device_id, kind, conversation_id, message_id, sender_id, is_urgent,\n                thread_id, call_id, badge, sent_at_ms, attempts, meeting_id, meeting_starts_at_ms,\n                (EXTRACT(EPOCH FROM (expires_at - now())) * 1000)::bigint AS \"remaining_ms!\"\n         FROM push_retries\n         WHERE is_user_endpoint = $1 AND next_attempt_at <= now() AND expires_at > now()\n           AND NOT EXISTS (SELECT 1 FROM conversations c\n                           WHERE c.id = push_retries.conversation_id AND c.deleted_at IS NOT NULL)\n         ORDER BY next_attempt_at\n         LIMIT 1\n         FOR UPDATE SKIP LOCKED",
   "describe": {
     "columns": [
       {
@@ -148,6 +148,28 @@
       },
       {
         "ordinal": 13,
+        "name": "meeting_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "meeting_id"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "meeting_starts_at_ms",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "push_retries",
+            "name": "meeting_starts_at_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
         "name": "remaining_ms!",
         "type_info": "Int8",
         "origin": "Expression"
@@ -172,8 +194,10 @@
       true,
       true,
       false,
+      true,
+      true,
       null
     ]
   },
-  "hash": "f5eb4c9a8afbe46a09351a582ce075dbbc7c83f43694af4da133e0ce0d2082fa"
+  "hash": "1175904b6e65ef6a1de6e5a522d99b5ea905ebb6c86c92f9bf14de1e51675cb4"
 }

@@ -149,6 +149,10 @@ mod service_worker {
   const MARK_READ_ACTION: &str = "mark-read";
   /// Key of the newest message's ID in a notification's `data`, for the "mark as read" button.
   const MESSAGE_FIELD: &str = "message_id";
+  /// A meeting's notice replaces what the page showed for that meeting: the page's tag
+  /// (`NotificationTag::meeting` in `teamcraft-client-api`) and its Join button.
+  const MEETING_TAG_PREFIX: &str = "meeting:";
+  const JOIN_MEETING_ACTION: &str = "join-meeting";
 
   /// The service worker's `push` handler: decrypts the wake-up and shows the notification.
   /// Browsers require a notification for every push, so failures still show one that says a
@@ -462,6 +466,21 @@ mod service_worker {
       let actions = js_sys::Array::of1(&button);
       // `NotificationOptions.actions` is behind web-sys' unstable APIs; set the property directly.
       let _ = js_sys::Reflect::set(&options, &"actions".into(), &actions);
+    }
+    if let Some(meeting) = preview.wake_up.maybe_meeting {
+      // One notification per meeting, the start replacing the reminder; a click opens the chat.
+      let tag = format!("{MEETING_TAG_PREFIX}{}", meeting.meeting_id);
+      options.set_tag(&tag);
+      let _ = js_sys::Reflect::set(&data, &TAG_FIELD.into(), &tag.into());
+      if let (Some(label), true) = (
+        labels.maybe_join_meeting.as_deref(),
+        preview.is_conversation_verified,
+      ) {
+        let button = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&button, &"action".into(), &JOIN_MEETING_ACTION.into());
+        let _ = js_sys::Reflect::set(&button, &"title".into(), &label.into());
+        let _ = js_sys::Reflect::set(&options, &"actions".into(), &js_sys::Array::of1(&button));
+      }
     }
     options.set_data(&data);
     (text.title, options)

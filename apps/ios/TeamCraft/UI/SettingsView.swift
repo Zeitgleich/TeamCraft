@@ -240,6 +240,7 @@ private struct NotificationsSettingsPage: View {
       Section {
         NavigationLink("notification_content_title") { NotificationContentView() }
         NavigationLink("dnd_title") { DndSettingsView() }
+        NavigationLink("meeting_reminder_title") { MeetingReminderSettingsView() }
         NavigationLink("rules_title") { NotificationRulesView() }
         NavigationLink("diagnostics_title") { NotificationDiagnosticsView(account: account) }
       }

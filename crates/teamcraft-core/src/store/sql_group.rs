@@ -155,7 +155,9 @@ pub(crate) enum MigrationKind {
   /// Changes no table but what records hold, which the client moves when it opens the store (the
   /// MLS state per entry, `mls_storage`): versions before refuse the database instead of misreading
   /// it. It must not wait for upkeep: a failed upkeep step before it is noted as due
-  /// (`upkeep_due`) and run again on every open, and the marker is set anyway.
+  /// (`upkeep_due`) and run again on every open, and the marker is set anyway. A process that leaves
+  /// the layout to the app reads a store with only markers ahead (`check_layout_left_to_app`): a
+  /// marker whose records such a process can't read refuses them itself, as the MLS record does.
   Marker,
 }
 
@@ -269,6 +271,30 @@ fn run_due_upkeep(connection: &Connection, steps: &[Migration]) -> Result<(), St
         tracing::warn!(%error, version, "local database upkeep failed again; trying on the next start");
       },
     }
+  }
+  Ok(())
+}
+
+/// Whether a process that leaves the layout to the app may read this database without running a
+/// step: a newer layout is refused as always, and so is any step that changes tables or the file.
+/// Marker steps change neither, so a store with only those ahead reads as it is; they stay ahead,
+/// as does upkeep noted as due, for the app.
+#[cfg(feature = "sealed-sqlite")]
+pub(crate) fn check_layout_left_to_app(
+  connection: &Connection,
+  steps: &[Migration],
+) -> Result<(), StoreError> {
+  let supported = latest_version(steps);
+  let found = user_version(connection)?;
+  if found > supported {
+    return Err(StoreError::NewerSchema { found, supported });
+  }
+  let runs_steps = steps
+    .iter()
+    .filter(|step| step.version > found)
+    .any(|step| !matches!(step.kind, MigrationKind::Marker));
+  if runs_steps {
+    return Err(StoreError::LayoutBehind { found, supported });
   }
   Ok(())
 }

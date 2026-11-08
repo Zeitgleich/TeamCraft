@@ -7464,6 +7464,8 @@ fn default_notification_settings() -> NotificationSettings {
     maybe_uses_desktop_attention: None,
     maybe_level: None,
     maybe_default_level: None,
+    maybe_meeting_reminder_minutes: None,
+    maybe_notifies_meeting_start: None,
   }
 }
 

@@ -5,6 +5,9 @@ import Foundation
 struct OidcSession: Codable, Equatable {
   var accessToken: String
   var refreshToken: String?
+  /// The newest ID token of the session, for the core's role signing (docs/e2ee.md §3.1.3); `nil` for
+  /// a sign-in stored before the app kept it, until the first refresh that brings one.
+  var idToken: String?
   /// When the access token stops being valid.
   var expiresAt: Date
   /// The OIDC subject: the account key for local data.
@@ -21,6 +24,34 @@ struct OidcSession: Codable, Equatable {
   func isFresh(leeway: TimeInterval = 30, now: Date = Date()) -> Bool {
     expiresAt.timeIntervalSince(now) > leeway
   }
+
+  /// This session after a refresh answered with `response`. An answer without a usable ID token
+  /// leaves none: what the core signs with is the newest token or nothing, as on Android.
+  func renewed(by response: TokenResponse, now: Date = Date()) -> OidcSession {
+    var renewed = self
+    renewed.accessToken = response.accessToken
+    // The provider may rotate the refresh token; keep the old one if it doesn't.
+    renewed.refreshToken = response.refreshToken ?? refreshToken
+    renewed.expiresAt = now.addingTimeInterval(response.expiresIn ?? 300)
+    renewed.idToken = response.idToken.flatMap { isOwnIdToken($0) ? $0 : nil }
+    return renewed
+  }
+
+  /// Whether a refresh's ID token speaks for this session (OIDC Core §12.2): same subject, this
+  /// client, and the issuer of the token before it, if there is one to compare with.
+  private func isOwnIdToken(_ candidate: String) -> Bool {
+    guard let claims = IdTokenClaims(jwt: candidate), claims.subject == subject,
+      claims.audiences.contains(clientId)
+    else { return false }
+    guard let idToken, let previous = IdTokenClaims(jwt: idToken) else { return true }
+    return claims.issuer == previous.issuer
+  }
+}
+
+// security.md: never print the tokens, also not by accident through `String(describing:)`.
+extension OidcSession: CustomStringConvertible, CustomDebugStringConvertible {
+  var description: String { "OidcSession([redacted])" }
+  var debugDescription: String { description }
 }
 
 enum OidcError: Error, Equatable {
@@ -158,7 +189,7 @@ struct OidcClient {
       throw OidcError.invalidResponse
     }
     return OidcSession(
-      accessToken: response.accessToken, refreshToken: response.refreshToken,
+      accessToken: response.accessToken, refreshToken: response.refreshToken, idToken: idToken,
       expiresAt: Date().addingTimeInterval(response.expiresIn ?? 300), subject: claims.subject,
       displayName: claims.name, tokenEndpoint: endpoints.tokenEndpoint, clientId: clientId,
       loginHint: loginHintFromIdToken(idToken: idToken))
@@ -175,12 +206,7 @@ struct OidcClient {
         "client_id": session.clientId,
       ],
       urlSession: urlSession)
-    var renewed = session
-    renewed.accessToken = response.accessToken
-    // The provider may rotate the refresh token; keep the old one if it doesn't.
-    renewed.refreshToken = response.refreshToken ?? refreshToken
-    renewed.expiresAt = Date().addingTimeInterval(response.expiresIn ?? 300)
-    return renewed
+    return session.renewed(by: response)
   }
 
   private static func tokenRequest(
@@ -252,18 +278,24 @@ final class SessionVault {
   /// How long a process waits for the other one's refresh before it gives up for now.
   private static let refreshLockTimeout: TimeInterval = 20
 
-  private let keychain: KeychainStore
+  private let keychain: any SecretItems
   private let servers: ServerStore
   private let refreshLockURL: URL?
+  private let refreshTimeout: TimeInterval
+  private let refresh: @Sendable (OidcSession) async throws -> OidcSession
   private let queue = DispatchQueue(label: "de.zeitgleich.teamcraft.session")
 
   init(
-    keychain: KeychainStore = KeychainStore(), servers: ServerStore = ServerStore(),
-    refreshLockURL: URL? = SharedContainer().refreshLockFileURL
+    keychain: any SecretItems = KeychainStore(), servers: ServerStore = ServerStore(),
+    refreshLockURL: URL? = SharedContainer().refreshLockFileURL,
+    refreshTimeout: TimeInterval = 20,
+    refresh: @escaping @Sendable (OidcSession) async throws -> OidcSession = { try await OidcClient.refresh($0) }
   ) {
     self.keychain = keychain
     self.servers = servers
     self.refreshLockURL = refreshLockURL
+    self.refreshTimeout = refreshTimeout
+    self.refresh = refresh
   }
 
   func load() -> OidcSession? {
@@ -304,39 +336,57 @@ final class SessionVault {
 
   /// A valid access token, refreshed if it is about to expire; `nil` when signed out or the
   /// refresh failed. Blocks (up to the request timeout): the core asks on its engine thread.
-  func currentAccessToken() -> String? {
+  ///
+  /// `forceRefresh` renews a token that is still good, for a newer ID token. That is one attempt:
+  /// if it fails the token still is good and comes back, and the next regular refresh brings the
+  /// ID token instead.
+  func currentAccessToken(forceRefresh: Bool = false) -> String? {
     queue.sync {
       if let local = loadLocal() {
         // No refresh for local sessions: past its expiry the account is signed out.
         return local.isUsable() ? local.accessToken : nil
       }
       guard let stale = load() else { return nil }
-      if stale.isFresh() { return stale.accessToken }
+      if stale.isFresh(), !forceRefresh { return stale.accessToken }
       // One refresh across the app and the notification extension (issue #667): whoever waited
       // reads the keychain again and takes the token the other one got.
       let lock = refreshLockURL.map { ProcessLock(fileURL: $0) }
-      if let lock, !lock.acquire(timeout: Self.refreshLockTimeout) { return nil }
+      if let lock, !lock.acquire(timeout: Self.refreshLockTimeout) { return stale.accessTokenIfFresh }
       defer { lock?.release() }
       guard let session = load() else { return nil }
-      if session.isFresh() { return session.accessToken }
-      guard session.refreshToken != nil else { return nil }
+      // The other process's refresh brought a new ID token too: no second one for a forced refresh.
+      if session.isFresh(), !forceRefresh || session.accessToken != stale.accessToken {
+        return session.accessToken
+      }
+      guard session.refreshToken != nil else { return session.accessTokenIfFresh }
       let semaphore = DispatchSemaphore(value: 0)
       let box = ResultBox()
+      let refresh = self.refresh
       Task.detached {
-        do { box.outcome = .success(try await OidcClient.refresh(session)) } catch { box.outcome = .failure(error) }
+        do { box.outcome = .success(try await refresh(session)) } catch { box.outcome = .failure(error) }
         semaphore.signal()
       }
-      _ = semaphore.wait(timeout: .now() + 20)
+      _ = semaphore.wait(timeout: .now() + refreshTimeout)
       switch box.outcome {
       case .success(let renewed):
         try? save(renewed)
         return renewed.accessToken
       case .failure(let error):
-        // A rejected refresh token ends the session; a network error keeps it for the next try.
-        if case OidcError.sessionExpired = error { clear() }
-        return nil
+        // A rejected refresh token ends the session; anything else keeps it for the next try.
+        if case OidcError.sessionExpired = error {
+          clear()
+          return nil
+        }
+        return session.accessTokenIfFresh
       }
     }
+  }
+
+  /// The session's newest ID token; `nil` when signed out, for a local account, or while the
+  /// provider has sent none. Only reads the keychain and never waits for a refresh, so it is safe
+  /// on the main thread while the core's thread is in `currentAccessToken`.
+  func currentIdToken() -> String? {
+    load()?.idToken
   }
 
   private var activeItem: String? {
@@ -348,7 +398,13 @@ final class SessionVault {
   }
 }
 
-/// Carries the refresh result out of the `Task`; read only after the semaphore signalled.
+extension OidcSession {
+  fileprivate var accessTokenIfFresh: String? { isFresh() ? accessToken : nil }
+}
+
+/// Carries the refresh result out of the `Task`; read after the semaphore signalled or timed out.
+/// A refresh that didn't finish in time is no answer from the provider, so it must not read as a
+/// rejected refresh token, which ends the session.
 private final class ResultBox: @unchecked Sendable {
-  var outcome: Result<OidcSession, Error> = .failure(OidcError.sessionExpired)
+  var outcome: Result<OidcSession, Error> = .failure(OidcError.network("timed out"))
 }

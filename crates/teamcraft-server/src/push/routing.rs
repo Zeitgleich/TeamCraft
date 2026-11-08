@@ -8,7 +8,7 @@ use std::time::Duration;
 use teamcraft_db::{DueReminder, PushDeviceRow, PushRecipientRow};
 use teamcraft_proto::{
   CallId, ConversationId, ConversationKind, DeviceId, DndCandidate, DndSchedule, Id, MessageId,
-  NotificationLevel, PushKind, PushMode, PushProvider, PushWakeUp, Snowflake, TestPushOutcome,
+  NotificationLevel, PushKind, PushMeeting, PushMode, PushProvider, PushWakeUp, Snowflake, TestPushOutcome,
   TestPushResponse, ThreadId, UserId,
 };
 use time::OffsetDateTime;
@@ -264,6 +264,7 @@ async fn push_to_recipient(
     maybe_thread_id: event.maybe_thread,
     maybe_badge: badge(state, recipient.user, &recipient.devices).await,
     maybe_sent_at: Some(now_millis()),
+    maybe_meeting: None,
     ..PushWakeUp::for_message(
       decision.kind,
       event.conversation,
@@ -349,6 +350,7 @@ pub async fn notify_ring(
       maybe_call_id: Some(call),
       maybe_badge: None,
       maybe_sent_at: Some(now_millis()),
+      maybe_meeting: None,
     };
     for device in recipient.devices {
       if state.hub.is_device_connected(recipient.user, device.device) {
@@ -369,6 +371,86 @@ pub async fn notify_ring(
       },
     );
   }
+}
+
+/// A planned meeting's reminder or start notice (docs/meetings.md, "Starting"), already taken for
+/// these users.
+pub struct MeetingNotice {
+  pub conversation: ConversationId,
+  pub organizer: UserId,
+  pub kind: PushKind,
+  pub meeting: PushMeeting,
+  pub users: HashSet<UserId>,
+}
+
+/// Tells `notice.users` that a meeting starts soon or has started. Like a ring, only a mute or DND
+/// without an override stops it, and it is no ring: a normal notification. Phones get it even with
+/// the app open, as they keep no timers of their own; an open desktop or web app shows its own
+/// reminders ([`crate::services::meeting_notices`]), so those are only pushed while closed.
+pub async fn notify_meeting(
+  state: &AppState,
+  notice: &MeetingNotice,
+  now: OffsetDateTime,
+) -> Result<(), teamcraft_db::DbError> {
+  // Nobody is left out by the query (the organizer is told too).
+  let recipients = state
+    .database
+    .list_push_recipients(notice.conversation, no_user(), None)
+    .await?;
+  let wake_up = PushWakeUp {
+    kind: notice.kind.clone(),
+    conversation_id: notice.conversation,
+    maybe_message_id: None,
+    maybe_sender_id: Some(notice.organizer),
+    is_urgent: false,
+    maybe_thread_id: None,
+    maybe_call_id: None,
+    maybe_badge: None,
+    maybe_sent_at: Some(now_millis()),
+    maybe_meeting: Some(notice.meeting),
+  };
+  for recipient in recipients
+    .into_iter()
+    .filter(|recipient| notice.users.contains(&recipient.user))
+  {
+    if is_in_call(state, notice.conversation, recipient.user) {
+      continue;
+    }
+    let verdict = decide_ring(
+      is_muted(state, &recipient, now),
+      is_dnd(
+        &recipient,
+        now,
+        DndCandidate {
+          sender: notice.organizer,
+          is_urgent: false,
+          is_direct: false,
+        },
+      ),
+    );
+    if let Err(skip) = verdict {
+      debug!(user_id = %recipient.user, ?skip, "no meeting notice");
+      if skip == Skip::DoNotDisturb {
+        record_all(state, &recipient, DeliveryEvent::SuppressedDnd);
+      }
+      continue;
+    }
+    for device in recipient.devices {
+      if !is_mobile(&device.provider) && state.hub.is_device_connected(recipient.user, device.device) {
+        continue;
+      }
+      delivery::spawn(state.clone(), recipient.user, device, wake_up.clone());
+    }
+  }
+  Ok(())
+}
+
+/// Whether a device of the user is in the conversation's call already.
+fn is_in_call(state: &AppState, conversation: ConversationId, user: UserId) -> bool {
+  state
+    .maybe_calls
+    .as_ref()
+    .is_some_and(|calls| calls.is_user_in_call(conversation, user))
 }
 
 /// The ring ended (answered, timed out, cancelled): phones that rang stop.
@@ -402,6 +484,7 @@ pub async fn end_ring(state: AppState, call: CallId) {
       maybe_call_id: Some(call),
       maybe_badge: None,
       maybe_sent_at: Some(now_millis()),
+      maybe_meeting: None,
     };
     send_dismissal(&state, user, &devices, wake_up).await;
   }
@@ -454,6 +537,7 @@ pub async fn dismiss_read(
     maybe_call_id: None,
     maybe_badge,
     maybe_sent_at: Some(now_millis()),
+    maybe_meeting: None,
   };
   send_dismissal(&state, user, &devices, wake_up).await;
 }
@@ -497,6 +581,7 @@ pub fn wake_to_seal(state: AppState, user: UserId, conversation: ConversationId)
       maybe_call_id: None,
       maybe_badge: None,
       maybe_sent_at: Some(now_millis()),
+      maybe_meeting: None,
     };
     for row in rows {
       if can_dismiss(&row.provider) && !state.hub.is_device_connected(user, row.device) {
@@ -551,6 +636,7 @@ fn wake_to_sync(state: &AppState, recipient: &PushRecipientRow) {
       maybe_call_id: None,
       maybe_badge: None,
       maybe_sent_at: Some(now_millis()),
+      maybe_meeting: None,
     };
     for row in rows {
       if can_dismiss(&row.provider) && !state.hub.is_device_connected(user, row.device) {
@@ -585,6 +671,7 @@ pub async fn send_test(
     maybe_call_id: None,
     maybe_badge: None,
     maybe_sent_at: Some(sent_at),
+    maybe_meeting: None,
   };
   let outcome = match delivery::deliver_once(state, user, &row, &wake_up).await {
     Ok(()) => TestPushOutcome::Sent,
@@ -840,6 +927,10 @@ fn schedule(recipient: &PushRecipientRow) -> Option<DndSchedule> {
 /// worker 0, which no server hands out in practice.
 fn no_conversation() -> ConversationId {
   ConversationId::from_snowflake(Snowflake::ZERO)
+}
+
+fn no_user() -> UserId {
+  UserId::from_snowflake(Snowflake::ZERO)
 }
 
 #[cfg(test)]

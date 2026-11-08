@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.id AS \"user_id!\", s.meeting_reminder_minutes, s.notifies_meeting_start\n         FROM (SELECT organizer_user_id AS user_id FROM meetings WHERE id = $1\n               UNION\n               SELECT user_id FROM meeting_attendees\n               WHERE meeting_id = $1 AND user_id IS NOT NULL AND rsvp <> 'declined') invited\n         JOIN users u ON u.id = invited.user_id AND u.deactivated_at IS NULL\n         LEFT JOIN user_notification_settings s ON s.user_id = u.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "meeting_reminder_minutes",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "user_notification_settings",
+            "name": "meeting_reminder_minutes"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "notifies_meeting_start",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "user_notification_settings",
+            "name": "notifies_meeting_start"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "2246b4db8aa68d7489692935324aed1cb044a19ea0a4ff589c61ac545c4eccf1"
+}

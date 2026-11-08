@@ -225,7 +225,29 @@ pub struct NotificationSettings {
   /// default_level`). Servers from before the setting send nothing.
   #[serde(rename = "default_level", default, skip_serializing_if = "Option::is_none")]
   pub maybe_default_level: Option<NotificationLevel>,
+  /// How many minutes before a planned meeting the user is reminded, at most
+  /// [`MAX_MEETING_REMINDER_MINUTES`]; `0`: no reminder. Reads: the user's choice; absent: they never
+  /// chose ([`DEFAULT_MEETING_REMINDER_MINUTES`] applies). Writes: absent keeps the stored choice.
+  #[serde(
+    rename = "meeting_reminder_minutes",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_meeting_reminder_minutes: Option<u16>,
+  /// Whether a planned meeting's start notifies the user. Reads: the user's choice; absent: they
+  /// never chose (yes). Writes: absent keeps the stored choice.
+  #[serde(
+    rename = "notifies_meeting_start",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_notifies_meeting_start: Option<bool>,
 }
+
+/// The reminder before a meeting for somebody who never chose (minutes before the start).
+pub const DEFAULT_MEETING_REMINDER_MINUTES: u16 = 5;
+/// The longest lead time a reminder can have; the server looks this far ahead.
+pub const MAX_MEETING_REMINDER_MINUTES: u16 = 60;
 
 /// `GET`/`PUT /api/v1/conversations/{id}/notification-settings`; `PUT` replaces level and mute time.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -521,6 +543,8 @@ mod tests {
       maybe_uses_desktop_attention: None,
       maybe_level: None,
       maybe_default_level: None,
+      maybe_meeting_reminder_minutes: None,
+      maybe_notifies_meeting_start: None,
     };
     assert_eq!(
       serde_json::to_string(&settings).unwrap(),

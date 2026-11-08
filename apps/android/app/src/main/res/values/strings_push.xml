@@ -84,6 +84,7 @@
   <string name="push_kind_message">Message</string>
   <string name="push_kind_call">Call</string>
   <string name="push_kind_dismiss">Read elsewhere</string>
+  <string name="push_kind_meeting">Meeting</string>
   <string name="push_kind_test">Test</string>
   <string name="push_kind_sync">Background update</string>
   <string name="catching_up_in_background">Fetching new messages</string>
@@ -176,6 +177,10 @@
   <string name="notification_channel_direct_messages_description">Messages from people you chat with one to one or in small groups.</string>
   <string name="notification_channel_meetings">Meeting reminders</string>
   <string name="notification_channel_meetings_description">Reminders shortly before a meeting starts.</string>
+  <string name="meeting_notification_started">%1$s has started</string>
+  <string name="meeting_notification_started_unnamed">A meeting has started</string>
+  <string name="meeting_notification_soon">%1$s starts in %2$d min</string>
+  <string name="meeting_notification_soon_unnamed">A meeting starts in %1$d min</string>
   <string name="notification_mute">Mute for 8 hours</string>
   <string name="notification_new_message">New message</string>
   <string name="notification_added_you">Added you to the conversation</string>

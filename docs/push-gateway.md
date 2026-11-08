@@ -123,7 +123,9 @@ cost a server its devices.
 A server sends a kind newer than the gateway's first version (`scheduled_seal`, docs/scheduled-messages.md;
 `sync`, notifications.md "Sync wake-ups": silent, FCM normal priority and APNs background like `dismiss`)
 only if the gateway's `GET /v1/info` lists it, read at most hourly. A gateway without it means no such wake
-for store apps, not a refused request for each.
+for store apps, not a refused request for each. A planned meeting's reminder and start notice go to the
+gateway as `message`: the same visible alert at high priority, with the real kind in the sealed wake-up, so
+they need nothing new from a gateway.
 
 The contract is the versioned HTTP API `/v1` (api.md in the gateway repository). Both repositories carry
 the same JSON fixtures, one per request and response plus a known-answer signature; keep them
