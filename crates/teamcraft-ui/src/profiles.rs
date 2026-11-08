@@ -25,6 +25,7 @@ use crate::auth::fetch::fetch;
 use crate::auth::tauri;
 use crate::components::file_views::blob_url;
 use crate::persisted_media::{self, CachedPicture, Freshness, MediaKey};
+use crate::picture_retries::{PictureMiss, PictureRetries};
 use crate::reactive::UpdateIfAlive;
 use crate::rest::{RestClient, RestError, check};
 use crate::space_images::revoke;
@@ -43,6 +44,7 @@ pub struct ProfileHub {
   asked_cached: StoredValue<HashSet<UserId>>,
   /// Downloads started this session, per user and announced version.
   asked_avatars: StoredValue<HashSet<(UserId, Option<String>)>>,
+  retries: PictureRetries,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,7 +54,7 @@ struct ShownAvatar {
 }
 
 impl ProfileHub {
-  pub fn new(client: RestClient) -> Self {
+  pub fn new(client: RestClient, retries: PictureRetries) -> Self {
     Self {
       client: StoredValue::new_local(client),
       profiles: RwSignal::new(HashMap::new()),
@@ -60,6 +62,7 @@ impl ProfileHub {
       asked_profiles: StoredValue::new(HashSet::new()),
       asked_cached: StoredValue::new(HashSet::new()),
       asked_avatars: StoredValue::new(HashSet::new()),
+      retries,
     }
   }
 
@@ -75,6 +78,8 @@ impl ProfileHub {
   /// A `blob:` URL of the user's picture, if they have one and it has loaded (or is cached).
   /// Reactive.
   pub fn avatar_url(&self, user: UserId) -> Option<String> {
+    // An avatar that did not load is asked for again in the next round.
+    self.retries.round();
     let shown = self.avatars.with(|all| all.get(&user).cloned());
     if self.asked_cached.try_update_value(|asked| asked.insert(user)) == Some(true) {
       self.show_cached_avatar(user);
@@ -92,7 +97,8 @@ impl ProfileHub {
       }
       return None;
     }
-    // Only people known to have a picture are asked for it, once per version and session.
+    // Only people known to have a picture are asked for it, once per version and session unless
+    // the download failed for a reason that passes.
     let version = profile.maybe_avatar_version;
     let is_current = shown
       .as_ref()
@@ -220,7 +226,8 @@ impl ProfileHub {
 
   /// Downloads the picture of `user` in `maybe_version` (`None`: the server names none), unless the
   /// cache already has that version. A picture that doesn't load leaves what is shown: the cached
-  /// one, or the initials. Nothing for the user to act on.
+  /// one, or the initials, and is asked for again in the next round ([`PictureRetries`]). Nothing
+  /// for the user to act on.
   fn load_avatar(&self, user: UserId, maybe_version: Option<String>) {
     let hub = *self;
     let key = MediaKey::Avatar(user);
@@ -232,10 +239,20 @@ impl ProfileHub {
         hub.show_avatar(user, &cached, ShowIf::Always);
         return;
       }
-      let Some((bytes, content_type)) = hub.download_avatar(user).await else {
-        tracing::debug!("avatar not downloaded");
-        return;
+      let (bytes, content_type) = match hub.download_avatar(user).await {
+        Ok(downloaded) => downloaded,
+        Err(miss) => {
+          tracing::debug!(?miss, "avatar not downloaded");
+          if let PictureMiss::Later(maybe_wait) = miss {
+            hub
+              .asked_avatars
+              .try_update_value(|asked| asked.remove(&(user, maybe_version)));
+            hub.retries.failed(maybe_wait);
+          }
+          return;
+        },
       };
+      hub.retries.succeeded();
       let picture = CachedPicture {
         version: maybe_version.unwrap_or_default(),
         content_type,
@@ -272,20 +289,34 @@ impl ProfileHub {
   }
 
   /// The picture's bytes and type: through the desktop shell, or the page's own fetch.
-  async fn download_avatar(&self, user: UserId) -> Option<(Vec<u8>, String)> {
+  async fn download_avatar(&self, user: UserId) -> Result<(Vec<u8>, String), PictureMiss> {
+    let later = PictureMiss::Later(None);
     if tauri::is_available() {
-      let image = tauri::avatar_download(user).await.ok()?;
-      return (image.status < 300).then_some((image.body, image.maybe_content_type?));
+      let image = tauri::avatar_download(user).await.map_err(|_| later)?;
+      if image.status >= 300 {
+        return Err(PictureMiss::of_status(image.status, &image.body));
+      }
+      return image
+        .maybe_content_type
+        .map(|content_type| (image.body, content_type))
+        .ok_or(PictureMiss::Refused);
     }
     let path = format!("/api/v1/users/{user}/avatar");
-    let location = self
-      .client
-      .try_get_value()?
+    let client = self.client.try_get_value().ok_or(PictureMiss::Refused)?;
+    let location = client
       .get::<AvatarResponse>(&path)
       .await
-      .ok()?;
-    let image = fetch("GET", &location.download_url, &[], None).await.ok()?;
-    (image.status < 300).then(|| (image.body, location.content_type.as_str().to_owned()))
+      .map_err(|error| match error {
+        RestError::Refused { status, .. } => PictureMiss::of_status(status, &[]),
+        RestError::Auth(_) | RestError::Unreadable(_) => later,
+      })?;
+    let image = fetch("GET", &location.download_url, &[], None)
+      .await
+      .map_err(|_| later)?;
+    if image.status >= 300 {
+      return Err(PictureMiss::of_status(image.status, &[]));
+    }
+    Ok((image.body, location.content_type.as_str().to_owned()))
   }
 }
 

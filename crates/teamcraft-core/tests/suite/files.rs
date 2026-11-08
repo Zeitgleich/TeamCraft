@@ -506,7 +506,8 @@ async fn a_save_while_the_storage_is_down_says_so_and_a_retry_gets_the_file() {
 
 /// A refused blob upload (a browser's CSP, a proxy) goes into the same announced attachment on every
 /// retry, so unfinished uploads don't pile up into 409 Conflict. Retries back off, stop after the cap
-/// with a visible state, and the user's "Retry" sends the message once the network allows.
+/// with a visible state that stays while it is tried now and then, and the user's "Retry" sends the
+/// message once the network allows.
 #[tokio::test]
 async fn refused_uploads_reuse_their_slot_back_off_and_stall_until_retried() {
   let server = FakeServer::new();
@@ -515,6 +516,7 @@ async fn refused_uploads_reuse_their_slot_back_off_and_stall_until_retried() {
     retry_after: Duration::from_secs(2),
     retry_max: Duration::from_secs(10),
     max_attempts: 3,
+    stalled_retry_every: Duration::from_secs(300),
     jitter: JitterMode::None,
   };
   let client_settings = ClientSettings {
@@ -592,11 +594,25 @@ async fn refused_uploads_reuse_their_slot_back_off_and_stall_until_retried() {
     },
     "after the cap the file waits for the user"
   );
-  clock.advance(60 * 60 * 1000);
+  clock.advance(299_000);
   assert_eq!(
     alice.client.upload_pending().await.unwrap(),
     0,
-    "no retry on its own"
+    "nothing while its round is not due"
+  );
+  clock.advance(1_000);
+  assert!(alice.client.upload_pending().await.is_err(), "tried by itself");
+  assert_eq!(
+    server.attachment_count(),
+    1,
+    "the quiet retries reuse the slot too"
+  );
+  assert_eq!(
+    transfer(),
+    FileTransfer::UploadStalled {
+      reason: FileFailure::Network
+    },
+    "and it says the same until something changes"
   );
 
   server.refuse_blob_uploads(alice.client.user_id(), false);
@@ -608,6 +624,126 @@ async fn refused_uploads_reuse_their_slot_back_off_and_stall_until_retried() {
   let bob_ui = backend_of(&bob);
   let received = last(&bob_ui, channel);
   assert_eq!(bob_ui.message_extras(channel, &[received.id])[0].files.len(), 1);
+}
+
+/// A storage outage longer than the patience of the retries: the file is shown as stopped and why,
+/// the rest of the chat goes on, and once the storage is back the message goes out without anybody
+/// pressing "Retry", through a slot whose URL did not expire meanwhile.
+#[tokio::test]
+async fn a_storage_outage_stalls_the_file_and_its_end_sends_it_without_a_click() {
+  let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+  let (server, mut alice, mut bob, channel) = recovery_setup(&clock).await;
+  let alice_ui = backend_of(&alice);
+  let me = alice.client.user_id();
+
+  server.set_unavailable(me, Duration::from_secs(20));
+  alice_ui.send_message(with_files(
+    channel,
+    "after the outage",
+    vec![file("photo.jpg", "image/jpeg", jpeg())],
+  ));
+  for command in alice_ui.drain_commands() {
+    let _ = alice.client.run_ui_command(command).await;
+  }
+  let message = last(&alice_ui, channel);
+  let transfer = || {
+    alice_ui.message_extras(channel, &[message.id])[0].files[0]
+      .transfer
+      .clone()
+  };
+  clock.advance(30_000);
+  assert!(alice.client.upload_pending().await.is_err());
+  assert_eq!(
+    transfer(),
+    FileTransfer::UploadStalled {
+      reason: FileFailure::StorageUnavailable
+    }
+  );
+
+  clock.advance(300_000);
+  assert!(
+    alice.client.upload_pending().await.is_err(),
+    "still down: it stays as it is, and is tried again later"
+  );
+  server.clear_unavailable(me);
+  clock.advance(299_000);
+  assert_eq!(
+    alice.client.upload_pending().await.unwrap(),
+    0,
+    "the round isn't due yet"
+  );
+  clock.advance(1_000);
+  assert_eq!(alice.client.upload_pending().await.unwrap(), 1, "no click needed");
+  alice.client.flush_outbox().await.unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  assert_eq!(bob_ui.message_extras(channel, &[received.id])[0].files.len(), 1);
+}
+
+/// An upload URL that expired while a file waited isn't tried: the next attempt asks for a new one
+/// instead of losing one more round to a refusal.
+#[tokio::test]
+async fn a_slot_whose_url_expired_during_the_outage_is_announced_anew() {
+  let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+  let (server, mut alice, _bob, channel) = recovery_setup(&clock).await;
+  let alice_ui = backend_of(&alice);
+  let me = alice.client.user_id();
+
+  server.set_upload_urls_expire_at(1_800_000_600_000);
+  server.refuse_blob_uploads(me, true);
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![file("photo.jpg", "image/jpeg", jpeg())],
+  ));
+  for command in alice_ui.drain_commands() {
+    let _ = alice.client.run_ui_command(command).await;
+  }
+  assert_eq!(server.attachment_count(), 1);
+  server.refuse_blob_uploads(me, false);
+  server.set_upload_urls_expire_at(1_800_009_000_000);
+
+  clock.advance(600_000);
+  assert_eq!(
+    alice.client.upload_pending().await.unwrap(),
+    1,
+    "first try after the wait"
+  );
+  assert_eq!(server.attachment_count(), 2, "with a new slot");
+}
+
+/// A channel for the recovery tests: Alice on `clock`, stalling after two attempts, without jitter.
+async fn recovery_setup(clock: &Arc<ManualClock>) -> (FakeServer, Peer, Peer, ConversationId) {
+  let server = FakeServer::new();
+  let settings = ClientSettings {
+    upload_retry: UploadRetrySettings {
+      max_attempts: 2,
+      jitter: JitterMode::None,
+      ..UploadRetrySettings::default()
+    },
+    ..common::settings()
+  };
+  let mut alice = Peer::enroll_on_clock(
+    server.add_user("Alice"),
+    "Alice",
+    settings,
+    Box::new(clock.clone()),
+  )
+  .await;
+  let mut bob = Peer::enroll(&server, "Bob").await;
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "files")
+    .await
+    .unwrap();
+  alice
+    .client
+    .add_member(channel, bob.client.user_id())
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut bob]).await;
+  (server, alice, bob, channel)
 }
 
 #[tokio::test]

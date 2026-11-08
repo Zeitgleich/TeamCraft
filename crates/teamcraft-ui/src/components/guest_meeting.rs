@@ -121,10 +121,16 @@ fn GuestShell(
   provide_context(crate::channel_policy::ChannelPolicyHub::new(
     crate::rest::RestClient::new(auth.clone()),
   ));
-  provide_context(crate::profiles::ProfileHub::new(crate::rest::RestClient::new(
+  let picture_retries = crate::picture_retries::PictureRetries::new();
+  provide_context(picture_retries);
+  provide_context(crate::profiles::ProfileHub::new(
+    crate::rest::RestClient::new(auth.clone()),
+    picture_retries,
+  ));
+  provide_context(crate::space_images::SpaceImageHub::new(
     auth.clone(),
-  )));
-  provide_context(crate::space_images::SpaceImageHub::new(auth.clone()));
+    picture_retries,
+  ));
   crate::startup::first_view();
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
   crate::feedback::set_failure_sink(move |failure| state.show_failure(i18n, &failure));

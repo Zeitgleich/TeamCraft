@@ -208,6 +208,7 @@ struct State {
   offline_users: HashSet<UserId>,
   /// Users whose blob uploads the network refuses (a browser's CSP, a proxy) while REST works.
   blob_refused_users: HashSet<UserId>,
+  maybe_upload_urls_expire_at_ms: Option<i64>,
   /// Users whose REST calls fail while their gateway still connects.
   rest_failing_users: HashSet<UserId>,
   /// Users the server answers 503 with this `Retry-After` (seconds): a dependency outage or a
@@ -1811,6 +1812,11 @@ impl FakeServer {
     } else {
       state.blob_refused_users.remove(&user);
     }
+  }
+
+  /// The expiry named for upload URLs from now on (by default they never expire).
+  pub fn set_upload_urls_expire_at(&self, at_ms: i64) {
+    self.lock().maybe_upload_urls_expire_at_ms = Some(at_ms);
   }
 
   /// Attachments announced so far, finished or not.
@@ -5448,7 +5454,7 @@ impl ServerApi for FakeServerApi {
       Ok(CreateAttachmentResponse {
         id,
         upload_url: format!("{BLOB_SCHEME}{id}"),
-        expires_at: UnixMillis(0),
+        expires_at: UnixMillis(state.maybe_upload_urls_expire_at_ms.unwrap_or(i64::MAX)),
       })
     })
   }
