@@ -8433,22 +8433,6 @@
         }
       }
     },
-    "chats_no_channels": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No channels yet. Browse the channels of your spaces to join one."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Noch keine Kanäle. Durchsuche die Kanäle deiner Spaces, um einem beizutreten."
-          }
-        }
-      }
-    },
     "dm_new": {
       "localizations": {
         "en": {
