@@ -299,6 +299,10 @@ wire_enum! {
     /// Someone calls the user (a ring). On iOS a mutable alert on the app's topic, Android shows a
     /// full-screen incoming call (e2ee.md §7).
     Call => "call",
+    /// A planned meeting starts soon (docs/meetings.md, "Starting"): a normal notification with Join.
+    MeetingReminder => "meeting_reminder",
+    /// A planned meeting has started: a normal notification with Join, no ring.
+    MeetingStart => "meeting_start",
     /// The conversation was read on another device, or a ring ended: remove what was shown. Sent
     /// silently (APNs background push, FCM normal priority); never shows anything by itself.
     Dismiss => "dismiss",
@@ -354,6 +358,18 @@ pub struct PushWakeUp {
   /// When the server sent the wake-up; the diagnostics show the delay, the apps order by it.
   #[serde(rename = "sent_at", default, skip_serializing_if = "Option::is_none")]
   pub maybe_sent_at: Option<UnixMillis>,
+  /// The meeting and occurrence of a `meeting_reminder` or `meeting_start`.
+  #[serde(rename = "meeting", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_meeting: Option<PushMeeting>,
+}
+
+/// Which meeting a wake-up tells about. Its title stays out of the wake-up: the device names it from
+/// the meeting chat it has (or fetches), as for every other notification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PushMeeting {
+  pub meeting_id: crate::MeetingId,
+  /// The start of the occurrence: the apps say how many minutes are left.
+  pub starts_at: UnixMillis,
 }
 
 impl PushWakeUp {
@@ -375,6 +391,7 @@ impl PushWakeUp {
       maybe_call_id: None,
       maybe_badge: None,
       maybe_sent_at: None,
+      maybe_meeting: None,
     }
   }
 }

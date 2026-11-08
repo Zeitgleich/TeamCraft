@@ -158,6 +158,8 @@ async fn the_dnd_schedule_from_the_server_is_checked_again_with_its_overrides() 
       maybe_uses_desktop_attention: None,
       maybe_level: None,
       maybe_default_level: None,
+      maybe_meeting_reminder_minutes: None,
+      maybe_notifies_meeting_start: None,
     },
   );
   bob.client.refresh_notification_settings().await.unwrap();
@@ -209,6 +211,7 @@ async fn the_diagnostics_remember_the_last_push_and_its_delay() {
   assert_eq!(push_guard::push_diagnostics(store).unwrap().received_count, 0);
   let pushed = PushWakeUp {
     maybe_sent_at: Some(UnixMillis(MONDAY_NOON_MS - 1500)),
+    maybe_meeting: None,
     ..wake_up(&alice, channel, message)
   };
   push_guard::record_received(store, &pushed, MONDAY_NOON_MS);

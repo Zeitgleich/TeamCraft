@@ -66,6 +66,7 @@ pub enum BackgroundJob {
   Retention,
   ScheduledMessages,
   UrgentScheduler,
+  MeetingNotices,
 }
 
 /// What DPoP made of a request with an identity provider's token.
@@ -137,7 +138,7 @@ impl DpopOutcome {
 }
 
 impl BackgroundJob {
-  const ALL: [Self; 10] = [
+  const ALL: [Self; 11] = [
     Self::DatabaseCheck,
     Self::EmailDigest,
     Self::GuestExpiry,
@@ -148,6 +149,7 @@ impl BackgroundJob {
     Self::Retention,
     Self::ScheduledMessages,
     Self::UrgentScheduler,
+    Self::MeetingNotices,
   ];
 
   fn label(self) -> &'static str {
@@ -162,6 +164,7 @@ impl BackgroundJob {
       Self::Retention => "retention",
       Self::ScheduledMessages => "scheduled_messages",
       Self::UrgentScheduler => "urgent_scheduler",
+      Self::MeetingNotices => "meeting_notices",
     }
   }
 }

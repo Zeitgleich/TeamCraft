@@ -37,6 +37,14 @@ final class PushPresentationTests: XCTestCase {
     XCTAssertEqual(PushPresentation.of(PushFlags(kind: .call, maybeSuppression: .doNotDisturb), canFilter: true), .drop)
   }
 
+  func testAMeetingNoticeIsANormalNotificationNotARing() {
+    for kind in [PushNotificationKind.meetingReminder, .meetingStart] {
+      XCTAssertEqual(PushPresentation.of(PushFlags(kind: kind), canFilter: true), .meeting)
+      XCTAssertEqual(PushPresentation.of(PushFlags(kind: kind), canFilter: false), .meeting)
+      XCTAssertEqual(PushPresentation.of(PushFlags(kind: kind, maybeSuppression: .doNotDisturb), canFilter: true), .drop)
+    }
+  }
+
   func testDismissAndUnknownShowNothing() {
     for kind in [PushNotificationKind.dismiss, .unknown] {
       XCTAssertEqual(PushPresentation.of(PushFlags(kind: kind), canFilter: true), .drop)

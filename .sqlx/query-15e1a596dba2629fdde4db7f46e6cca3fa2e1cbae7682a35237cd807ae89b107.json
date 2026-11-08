@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO meeting_notices (meeting_id, starts_at, kind, user_id)\n         SELECT $1, $2, $3, user_id FROM UNNEST($4::bigint[]) AS user_id\n         ON CONFLICT DO NOTHING\n         RETURNING user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "meeting_notices",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Text",
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "15e1a596dba2629fdde4db7f46e6cca3fa2e1cbae7682a35237cd807ae89b107"
+}

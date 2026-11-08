@@ -31,6 +31,7 @@ mod key_package;
 mod last_seen;
 mod local_account;
 mod meeting;
+mod meeting_notice;
 mod message;
 mod mls;
 mod notification;
@@ -104,6 +105,7 @@ pub use meeting::{
   AttendeeDiff, AttendeeKey, LobbyRow, MeetingChanges, NewAttendee, NewMeeting, SharedInviteClaim,
   StoredAttendee, StoredMeeting, StoredMeetingInvite,
 };
+pub use meeting_notice::{MeetingNoticeKind, MeetingNoticeRecipient};
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};
 pub use mls::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};
 pub use notification::{ReceiptRow, StoredSpaceNotifications, StoredUserSettings};

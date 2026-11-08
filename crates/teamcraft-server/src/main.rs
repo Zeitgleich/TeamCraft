@@ -49,8 +49,8 @@ use teamcraft_server::services::scheduled_messages;
 use teamcraft_server::services::session::{self, PolicyHolder};
 use teamcraft_server::services::{
   admin, admin_join_requests, attachments, backgrounds, brands, calendar_settings, conversations,
-  email_digest, guests, key_packages, mail_settings, meeting_guests, oidc, retention, runtime_settings,
-  urgent,
+  email_digest, guests, key_packages, mail_settings, meeting_guests, meeting_notices, oidc, retention,
+  runtime_settings, urgent,
 };
 use teamcraft_server::state::{
   AppState, MeetingMailConfig, OidcSyncSettings, PushSettings, PushTtls, RetryPolicy, Settings,
@@ -60,6 +60,8 @@ use teamcraft_server::storage::BlobStore;
 use tracing::{info, warn};
 
 const SESSION_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+/// How often the server looks for meeting reminders that are due.
+const MEETING_NOTICE_PERIOD: Duration = Duration::from_secs(20);
 const BACKGROUND_SWEEP_INTERVAL: Duration = Duration::from_secs(600);
 /// `[storage].max_attachment_bytes` when there is no storage (attachments are off then anyway).
 const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
@@ -314,6 +316,7 @@ async fn run() -> anyhow::Result<()> {
   })
   .await?;
   spawn_urgent_scheduler(state.clone());
+  spawn_meeting_notices(state.clone());
   spawn_scheduled_messages(state.clone());
   spawn_email_digests(state.clone());
   spawn_account_housekeeping(state.clone());
@@ -774,6 +777,22 @@ fn spawn_urgent_scheduler(state: AppState) {
   });
 }
 
+/// Reminders before a meeting and the notice at its start (docs/meetings.md, "Starting"), for every
+/// instance: they take each notice in the database, so only one of them sends it.
+fn spawn_meeting_notices(state: AppState) {
+  tokio::spawn(async move {
+    let mut interval = tokio::time::interval(MEETING_NOTICE_PERIOD);
+    loop {
+      interval.tick().await;
+      let now = time::OffsetDateTime::now_utc();
+      match meeting_notices::run_due(&state, now).await {
+        Ok(_) => state.metrics.job_succeeded(BackgroundJob::MeetingNotices, now),
+        Err(error) => warn!(%error, "meeting notices failed"),
+      }
+    }
+  });
+}
+
 /// Mails the digests of missed mentions that are due (PLAN.md §5). Runs always: admins can switch
 /// the digest on and off in the console, and a pass with it off does nothing.
 fn spawn_email_digests(state: AppState) {
@@ -1136,6 +1155,7 @@ fn push_settings(config: &Config) -> PushSettings {
       call: Duration::from_secs(call_ttl_secs),
       dismiss: Duration::from_secs(push.dismiss_ttl_secs),
       test: Duration::from_secs(push.test_ttl_secs),
+      meeting: Duration::from_secs(push.meeting_ttl_secs),
     },
     retry: RetryPolicy {
       max_retries: push.max_retries,

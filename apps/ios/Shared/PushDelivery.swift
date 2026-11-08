@@ -15,6 +15,8 @@ enum PushPresentation: Equatable {
   /// An incoming call shown as a time-sensitive alert with answer and decline (no filtering
   /// entitlement, so CallKit can't be reached from the extension).
   case callAlert
+  /// A planned meeting's reminder or start notice: a normal notification with Join, no ring.
+  case meeting
   /// The diagnostics' test push: a short confirmation.
   case test
   /// Nothing; only possible with the filtering entitlement (an empty content is dropped).
@@ -31,6 +33,9 @@ enum PushPresentation: Equatable {
     case .call:
       if flags.isDuplicate || flags.maybeSuppression != nil { return canFilter ? .drop : .quietGeneric }
       return canFilter ? .callKit : .callAlert
+    case .meetingReminder, .meetingStart:
+      if flags.maybeSuppression != nil { return canFilter ? .drop : .quietGeneric }
+      return .meeting
     case .test:
       return .test
     case .dismiss, .scheduledSeal, .sync, .unknown:
@@ -78,6 +83,7 @@ enum NotificationKeys {
   static let messageKind = "message"
   static let callKind = "call"
   static let testKind = "test"
+  static let meetingKind = "meeting"
   /// An admin's request to join a channel the user owns, notified by the app itself (issue #799).
   static let joinRequestKind = "join_request"
   /// The admin of a join request's notification (with its conversation under `conversation`).

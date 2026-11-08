@@ -65,12 +65,40 @@ the change, and people taken off the list are removed from the group.
    day, and a wall-clock time the zone skips moves an hour on. The clients remind per occurrence.
    They read the list again when the gateway sends `meeting_update` (a meeting created, moved or
    cancelled elsewhere) and after each reconnect, not on a timer.
-   **Starting** a meeting is joining its chat's call. When that call starts at most
-   `start_ring_lead_secs` (default an hour) before an occurrence that isn't cancelled, or during
-   it, it rings the invited users who haven't declined (gateway `call_ring` and a ring push, as
-   for a call moved into a meeting), also when the organizer starts it early. Their ringing ends
-   with the ring timeout, not when the first of them joins. The organizer's app labels the button
-   of a planned meeting "Start"; "Meet now" is the separate meeting with nobody invited.
+   **Starting** a meeting is joining its chat's call. A planned meeting's start is a notification
+   at the scheduled time, not a ring (#1421): the server pushes "Meeting A starts in 5 min" (the
+   user's `meeting_reminder_minutes`, default 5, `0` off) and "Meeting A has started" (`notifies_meeting_start`,
+   default yes), each with Join, to every invited user who hasn't declined and to the organizer,
+   whether or not anybody has started the call. No ringtone, no call screen, and the call starting
+   rings nobody. A call starting early tells nobody by itself; the reminder and the start notice
+   come at their time. The organizer's app labels the button of a planned meeting "Start"; "Meet
+   now" is the separate meeting with nobody invited. Ringing stays for real calls and for people
+   added to a running call on purpose (step 7; an organizer's "ring everyone" for an urgent start
+   isn't built).
+
+   *How it is sent* (`services::meeting_notices`, every 20 s, on every instance): the server works
+   out what is due from the meetings as they are now, so a meeting that moved or was cancelled has
+   nothing planned that could fire; a series is expanded per occurrence, cancelled occurrences and
+   skipped holidays left out. Each notice is taken in the database first (table `meeting_notices`,
+   one row per occurrence, kind and user; `INSERT ... ON CONFLICT DO NOTHING`), so a restart or a
+   second instance sends none twice. The row is all that is new on the server: the title, time
+   and invitees are the ones it already holds, and nobody's device or time is added. A server down
+   at the time sends the start notice within 10 minutes after it, not later. A notice waiting
+   for a retry is dropped when the occurrence no longer stands (`push_retries.meeting_*`).
+
+   Pushes go to phones always (they keep no timers of their own; a phone in the background keeps
+   its connection for half a minute and gets nothing over it) and to browsers without a connection.
+   An open desktop or web app shows its own reminders (notifications.md, "Meeting reminders").
+   The wake-up names the chat, the meeting and the occurrence's start, and the device takes the
+   title from the chat it has, or fetches it, as for every notification: no meeting text is added
+   to a push (e2ee.md §7). Mutes and do-not-disturb apply as to a ring; a user already in the
+   meeting's call isn't told again. iOS and Android show it through the meetings channel with Join
+   (a tap opens the chat); the web service worker uses the same tag as the page's reminder, so
+   the start replaces the reminder. External invitees get the invitation mail only; they have no
+   account to notify. A desktop app that isn't running can't be told (it has no push), nor can a
+   phone without a push registration.
+
+   Dismissing a notice on one device doesn't clear it on the others yet.
 4. **Guests** open the meeting link `<base>/meeting/<token>#v=<fingerprint>` (see "Links"). The
    web client sends the token from the path to `POST /meetings/join` (no authentication) together
    with a display name and receives a guest session token valid until the meeting's end plus
