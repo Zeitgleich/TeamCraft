@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use sqlx::{Postgres, Transaction};
-use teamcraft_proto::{CallId, DeviceId, PushKind, PushRetryId, PushWakeUp, UnixMillis, UserId};
+use teamcraft_proto::{CallId, DeviceId, PushKind, PushMeeting, PushRetryId, PushWakeUp, UnixMillis, UserId};
 
 use crate::database::Database;
 use crate::error::DbError;
@@ -54,10 +54,11 @@ impl Database {
     let result = sqlx::query!(
       r#"INSERT INTO push_retries
            (id, user_id, device_id, is_user_endpoint, kind, conversation_id, message_id, sender_id,
-            is_urgent, thread_id, call_id, badge, sent_at_ms, attempts, next_attempt_at, expires_at)
+            is_urgent, thread_id, call_id, badge, sent_at_ms, attempts, next_attempt_at, expires_at,
+            meeting_id, meeting_starts_at_ms)
          SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
                 now() + $15::bigint * interval '1 millisecond',
-                now() + $16::bigint * interval '1 millisecond'
+                now() + $16::bigint * interval '1 millisecond', $18, $19
          WHERE (SELECT COUNT(*) FROM push_retries WHERE device_id = $3) < $17"#,
       to_db(retry.id),
       to_db(retry.user),
@@ -78,6 +79,8 @@ impl Database {
       millis(retry.delay),
       millis(retry.ttl),
       i64::from(max_per_device),
+      wake_up.maybe_meeting.map(|meeting| to_db(meeting.meeting_id)),
+      wake_up.maybe_meeting.map(|meeting| meeting.starts_at.0),
     )
     .execute(self.pool())
     .await?;
@@ -90,7 +93,7 @@ impl Database {
     let mut transaction = self.pool().begin().await?;
     let maybe_row = sqlx::query!(
       r#"SELECT id, user_id, device_id, kind, conversation_id, message_id, sender_id, is_urgent,
-                thread_id, call_id, badge, sent_at_ms, attempts,
+                thread_id, call_id, badge, sent_at_ms, attempts, meeting_id, meeting_starts_at_ms,
                 (EXTRACT(EPOCH FROM (expires_at - now())) * 1000)::bigint AS "remaining_ms!"
          FROM push_retries
          WHERE is_user_endpoint = $1 AND next_attempt_at <= now() AND expires_at > now()
@@ -107,6 +110,13 @@ impl Database {
       // Nothing claimed: the empty transaction ends with the drop.
       return Ok(None);
     };
+    let maybe_meeting = match (row.meeting_id, row.meeting_starts_at_ms) {
+      (Some(meeting_id), Some(starts_at)) => Some(PushMeeting {
+        meeting_id: from_db(meeting_id)?,
+        starts_at: UnixMillis(starts_at),
+      }),
+      _ => None,
+    };
     let wake_up = PushWakeUp {
       kind: PushKind::from(row.kind),
       conversation_id: from_db(row.conversation_id)?,
@@ -117,6 +127,7 @@ impl Database {
       maybe_call_id: from_db_opt(row.call_id)?,
       maybe_badge: row.badge.map(|badge| u32::try_from(badge).unwrap_or(0)),
       maybe_sent_at: row.sent_at_ms.map(UnixMillis),
+      maybe_meeting,
     };
     Ok(Some(PushRetryClaim {
       transaction,

@@ -179,7 +179,13 @@ impl ApnsSender {
           sealed: &sealed,
         }),
       ),
-      PushKind::Message | PushKind::Mention | PushKind::Call | PushKind::Test | PushKind::Unknown(_) => (
+      PushKind::Message
+      | PushKind::Mention
+      | PushKind::Call
+      | PushKind::MeetingReminder
+      | PushKind::MeetingStart
+      | PushKind::Test
+      | PushKind::Unknown(_) => (
         "alert",
         self.bundle_id.clone(),
         match message.urgency {

@@ -224,6 +224,86 @@
           }
         }
       }
+    },
+    "notification_meeting_started %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ has started"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat begonnen"
+          }
+        }
+      }
+    },
+    "notification_meeting_started_unnamed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A meeting has started"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eine Besprechung hat begonnen"
+          }
+        }
+      }
+    },
+    "notification_meeting_soon %@ %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ starts in %2$lld min"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ beginnt in %2$lld Min."
+          }
+        }
+      }
+    },
+    "notification_meeting_soon_unnamed %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A meeting starts in %lld min"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eine Besprechung beginnt in %lld Min."
+          }
+        }
+      }
+    },
+    "notification_join_meeting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitreten"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

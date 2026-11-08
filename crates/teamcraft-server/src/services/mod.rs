@@ -35,6 +35,7 @@ pub mod mail_settings;
 pub mod meeting_admitters;
 pub mod meeting_controls;
 pub mod meeting_guests;
+pub mod meeting_notices;
 pub mod meeting_occurrences;
 pub mod meetings;
 pub mod members;

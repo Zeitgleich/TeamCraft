@@ -4071,8 +4071,10 @@ Details:
 - Wake-up kinds: `message`, `mention`, `call`, `dismiss` (a notification was read on another device, or
   a ring ended: remove it; silent, APNs background push / FCM normal priority, never to Web Push),
   `scheduled_seal` (above), `sync` (catch up in the background, silent, names nothing; above) and `test`
-  (diagnostics). Besides conversation, message, sender, thread and call IDs the sealed wake-up
-  carries the badge count and the send time; all of it is inside the ciphertext. What push services
+  (diagnostics), and `meeting_reminder` and `meeting_start` (a planned meeting's time, docs/meetings.md
+  "Starting"; alerts like a message, and a gateway is told `message`). Besides conversation, message,
+  sender, thread, call and meeting IDs the sealed wake-up carries the badge count, the send time and
+  a meeting's start; all of it is inside the ciphertext. What push services
   and a gateway additionally learn is the push type and priority: that a push was a silent withdrawal
   rather than an alert.
 - iOS calls go as mutable alerts on the app's topic, never as VoIP pushes: those need the separate

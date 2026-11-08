@@ -71,6 +71,7 @@ class PushHandler(
         maybeBadge = decision.maybeBadge,
       )
       is PushDecision.ShowTest -> notifier.showTest(decision.maybeSentAtMs)
+      is PushDecision.ShowMeeting -> notifier.showMeeting(decision.notification)
     }
     handled.update { it + 1 }
   }

@@ -117,7 +117,11 @@ pub fn local_suppression(
 ) -> Result<Option<Suppression>, CoreError> {
   if !matches!(
     wake_up.kind,
-    PushKind::Message | PushKind::Mention | PushKind::Call
+    PushKind::Message
+      | PushKind::Mention
+      | PushKind::Call
+      | PushKind::MeetingReminder
+      | PushKind::MeetingStart
   ) {
     return Ok(None);
   }

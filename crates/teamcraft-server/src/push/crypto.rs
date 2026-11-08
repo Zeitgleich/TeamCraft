@@ -73,6 +73,7 @@ mod tests {
       maybe_call_id: None,
       maybe_badge: None,
       maybe_sent_at: None,
+      maybe_meeting: None,
     };
     let key = [7u8; PUSH_KEY_BYTES];
     assert_eq!(

@@ -10,7 +10,7 @@
 //! body ("Alex: text"). A notification never goes out empty.
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::PushKind;
+use teamcraft_proto::{PushKind, PushWakeUp};
 
 use crate::push_preview::{AttachmentKind, PreviewContent, PushPreview};
 
@@ -18,6 +18,8 @@ use crate::push_preview::{AttachmentKind, PreviewContent, PushPreview};
 pub const FALLBACK_TITLE: &str = "TeamCraft";
 /// Where a label with a name has the name (the page translates it with this as the argument).
 pub const NAME_PLACEHOLDER: &str = "{name}";
+/// Where a meeting reminder's label has the minutes left.
+pub const MINUTES_PLACEHOLDER: &str = "{minutes}";
 
 /// Translated notification texts, as the page leaves them for the service worker. Each may be
 /// missing (a page of an older version): English is used then.
@@ -54,6 +56,29 @@ pub struct NotificationLabels {
   /// "Mark as read", the notification's button; without it there is no button.
   #[serde(rename = "mark_read", default, skip_serializing_if = "Option::is_none")]
   pub maybe_mark_read: Option<String>,
+  /// "{name} has started", a planned meeting's start.
+  #[serde(rename = "meeting_started", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_meeting_started: Option<String>,
+  /// "A meeting has started", when its name may not show or isn't known.
+  #[serde(
+    rename = "meeting_started_unnamed",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_meeting_started_unnamed: Option<String>,
+  /// "{name} starts in {minutes} min", the reminder before a planned meeting.
+  #[serde(rename = "meeting_soon", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_meeting_soon: Option<String>,
+  /// "A meeting starts in {minutes} min".
+  #[serde(
+    rename = "meeting_soon_unnamed",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_meeting_soon_unnamed: Option<String>,
+  /// "Join", the notification's button on a meeting; without it there is no button.
+  #[serde(rename = "join_meeting", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_join_meeting: Option<String>,
 }
 
 /// Title and body of one notification.
@@ -95,6 +120,15 @@ impl NotificationLabels {
   }
 }
 
+/// How many whole minutes were left when the server sent a meeting's reminder (rounded up); the
+/// apps say it this way however late they show it. `None` without a meeting or send time.
+pub fn meeting_minutes_left(wake_up: &PushWakeUp) -> Option<u32> {
+  let meeting = wake_up.maybe_meeting?;
+  let sent = wake_up.maybe_sent_at?;
+  let left_ms = meeting.starts_at.0.saturating_sub(sent.0).max(0);
+  u32::try_from(left_ms.saturating_add(59_999) / 60_000).ok()
+}
+
 /// Title and body for a push preview, by the native apps' rules (see the module docs).
 pub fn notification_text(preview: &PushPreview, labels: &NotificationLabels) -> NotificationText {
   let maybe_marked = preview
@@ -114,6 +148,27 @@ pub fn notification_text(preview: &PushPreview, labels: &NotificationLabels) -> 
           None => label(&labels.maybe_call_unknown, "Someone is calling you"),
         },
       }
+    },
+    PushKind::MeetingReminder => NotificationText {
+      title: match maybe_conversation {
+        Some(name) => with_name(&labels.maybe_meeting_soon, "{name} starts in {minutes} min", name),
+        None => label(
+          &labels.maybe_meeting_soon_unnamed,
+          "A meeting starts in {minutes} min",
+        ),
+      }
+      .replace(
+        MINUTES_PLACEHOLDER,
+        &meeting_minutes_left(&preview.wake_up).unwrap_or(0).to_string(),
+      ),
+      body: String::new(),
+    },
+    PushKind::MeetingStart => NotificationText {
+      title: match maybe_conversation {
+        Some(name) => with_name(&labels.maybe_meeting_started, "{name} has started", name),
+        None => label(&labels.maybe_meeting_started_unnamed, "A meeting has started"),
+      },
+      body: String::new(),
     },
     PushKind::Test => NotificationText {
       title: FALLBACK_TITLE.to_owned(),
@@ -256,6 +311,49 @@ mod tests {
     }
   }
 
+  mod meetings {
+    use teamcraft_proto::{Id, PushMeeting, Snowflake, UnixMillis};
+
+    use super::*;
+
+    fn notice(kind: PushKind, minutes_left: i64) -> PushPreview {
+      let mut preview = preview(false, None, Some("Weekly"), PreviewContent::Unavailable);
+      preview.wake_up.kind = kind;
+      preview.wake_up.maybe_sent_at = Some(UnixMillis(1_000_000));
+      preview.wake_up.maybe_meeting = Some(PushMeeting {
+        meeting_id: teamcraft_proto::MeetingId::from_snowflake(Snowflake::ZERO),
+        starts_at: UnixMillis(1_000_000 + minutes_left * 60_000),
+      });
+      preview
+    }
+
+    #[test]
+    fn the_notice_names_the_meeting_and_rings_nobody() {
+      let german = german();
+      let start = notice(PushKind::MeetingStart, 0);
+      assert_eq!(notification_text(&start, &german).title, "Weekly has started");
+      let soon = notice(PushKind::MeetingReminder, 5);
+      assert_eq!(notification_text(&soon, &german).title, "Weekly starts in 5 min");
+    }
+
+    #[test]
+    fn without_a_name_it_says_a_meeting() {
+      let mut soon = notice(PushKind::MeetingReminder, 1);
+      soon.maybe_conversation_name = None;
+      assert_eq!(
+        notification_text(&soon, &german()).title,
+        "A meeting starts in 1 min"
+      );
+    }
+
+    #[test]
+    fn the_minutes_are_rounded_up_from_when_the_server_sent_it() {
+      let mut soon = notice(PushKind::MeetingReminder, 5);
+      soon.wake_up.maybe_sent_at = Some(UnixMillis(1_000_001));
+      assert_eq!(meeting_minutes_left(&soon.wake_up), Some(5));
+    }
+  }
+
   mod labels {
     use super::*;
 
@@ -308,6 +406,7 @@ mod tests {
       maybe_call_unknown: Some("Jemand ruft dich an".into()),
       maybe_test_body: Some("Testbenachrichtigung".into()),
       maybe_mark_read: Some("Als gelesen markieren".into()),
+      ..NotificationLabels::default()
     }
   }
 
@@ -346,6 +445,7 @@ mod tests {
         maybe_call_id: None,
         maybe_badge: None,
         maybe_sent_at: None,
+        maybe_meeting: None,
       },
       maybe_conversation_name: maybe_conversation.map(str::to_owned),
       maybe_sender_name: maybe_sender.map(str::to_owned),

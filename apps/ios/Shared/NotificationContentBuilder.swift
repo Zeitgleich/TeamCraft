@@ -82,6 +82,33 @@ struct NotificationContentBuilder {
     return content
   }
 
+  /// A planned meeting's reminder or start notice (docs/meetings.md, "Starting"): named from the
+  /// meeting chat, with Join when this device knows the chat as one the user is in.
+  func meeting(for notification: PushNotification, base: UNNotificationContent) -> UNMutableNotificationContent {
+    let name = Self.nonBlank(notification.maybeConversationName)
+    let isStart = notification.kind == .meetingStart
+    let minutes = Int(notification.maybeMeetingMinutes ?? 0)
+    let content = Self.mutable(base)
+    content.title =
+      switch (isStart, name) {
+      case (true, let name?): strings.meetingStarted(name)
+      case (true, nil): strings.meetingStartedUnnamed
+      case (false, let name?): strings.meetingSoon(name, minutes)
+      case (false, nil): strings.meetingSoonUnnamed(minutes)
+      }
+    content.subtitle = ""
+    content.body = ""
+    content.threadIdentifier = "meeting-\(notification.maybeMeetingId ?? notification.conversationId)"
+    content.targetContentIdentifier = notification.conversationId
+    let tag = NotificationAuthenticator().tag(for: notification.conversationId)
+    content.userInfo = NotificationKeys.userInfo(
+      kind: NotificationKeys.meetingKind, conversationId: notification.conversationId, maybeTag: tag)
+    content.categoryIdentifier =
+      tag != nil && notification.isConversationVerified ? NotificationCategories.meetingCategory : ""
+    Self.apply(.meeting, flags: PushFlags(notification), to: content)
+    return content
+  }
+
   /// The diagnostics' test push arrived and was opened end to end.
   func test(for notification: PushNotification, base: UNNotificationContent) -> UNMutableNotificationContent {
     let content = Self.mutable(base)
@@ -121,6 +148,11 @@ struct NotificationContentBuilder {
       content.sound = .defaultRingtone
       content.interruptionLevel = .timeSensitive
       content.relevanceScore = 1
+    case .meeting:
+      // A normal notification with the normal sound: no ringtone, no call screen.
+      content.sound = .default
+      content.interruptionLevel = .active
+      content.relevanceScore = 0.5
     case .test:
       content.sound = .default
       content.interruptionLevel = .active
@@ -203,6 +235,10 @@ struct NotificationStrings {
   let callTitle: String
   let callFrom: (String) -> String
   let callUnknown: String
+  let meetingStarted: (String) -> String
+  let meetingStartedUnnamed: String
+  let meetingSoon: (String, Int) -> String
+  let meetingSoonUnnamed: (Int) -> String
   let testBody: String
   let quietUpdate: String
 
@@ -224,6 +260,10 @@ struct NotificationStrings {
       callTitle: String(localized: "notification_call_title"),
       callFrom: { String(localized: "notification_call_from \($0)") },
       callUnknown: String(localized: "notification_call_unknown"),
+      meetingStarted: { String(localized: "notification_meeting_started \($0)") },
+      meetingStartedUnnamed: String(localized: "notification_meeting_started_unnamed"),
+      meetingSoon: { String(localized: "notification_meeting_soon \($0) \($1)") },
+      meetingSoonUnnamed: { String(localized: "notification_meeting_soon_unnamed \($0)") },
       testBody: String(localized: "notification_test_body"),
       quietUpdate: String(localized: "notification_quiet_update"))
   }
