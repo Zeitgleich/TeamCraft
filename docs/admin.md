@@ -504,7 +504,12 @@ independent of the size of the instance:
   `GET /admin/users?query=`), asked 250 ms after the last key. `query` matches the channel's or its
   space's name; `GET /admin/users?role=` lists the accounts of one role (the roster proposals read
   the active owners and admins that way). The timer reads again the first pages of what is loaded
-  (3 at most), never the whole list.
+  (3 at most), never the whole list. The next page also loads by itself when the foot of the list
+  scrolls into view; "Show more" stays for a failed read.
+- The notices on the Channels page (removals this device could not confirm, people left in an
+  encryption group) name channels and accounts that may sit on a page that isn't loaded. The
+  console reads them by ID, once each (`GET /admin/conversations?ids=` and
+  `GET /admin/users?ids=`, IDs separated by commas, at most 100 per request).
 - A 429 is honoured: the console reads nothing until `Retry-After` has passed (`retry_after_secs`
   in the body, for browsers behind proxies that strip headers), then reads once more.
 
@@ -642,7 +647,7 @@ set in the console's security section; the server enforces them.
   `demote_to_guest` or managing the space's members (`manage_space_members`, so space admins can). A
   guest made a member loses the expiry.
 - **Overview:** the guests tab of the console's users section lists every guest membership, soonest
-  expiry first (`GET /admin/guests`), filtered by space, sponsor, expiring soon, no sponsor (none, or
+  expiry first (`GET /admin/guests`), filtered by space, sponsor (a search by the sponsor's name or username, `sponsor_query`, asked 250 ms after the last key), expiring soon, no sponsor (none, or
   deactivated or deleted) and never signed in, with bulk extend and remove.
 - **At the expiry**, rechecked when the guest is removed, the guest leaves the space and its channels exactly as with a removal (§3.1.1,
   e2ee.md §4.6), audit `guest_expired`, and the guest, the sponsor if still in the space, and the space's admins are told. Their

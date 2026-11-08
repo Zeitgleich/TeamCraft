@@ -1813,6 +1813,19 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
+  fn admin_resolve_references(&self, channels: Vec<ConversationId>, users: Vec<UserId>) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.resolve_references(channels, users);
+    }
+  }
+
+  fn admin_referenced_channels(&self) -> Vec<AdminChannel> {
+    match &self.maybe_admin {
+      Some(admin) => admin.referenced_channels(),
+      None => Vec::new(),
+    }
+  }
+
   fn policy_edit_blocker(&self) -> Option<PolicyBlocker> {
     self.maybe_admin.as_ref()?;
     if self.role != Role::Owner {

@@ -337,6 +337,13 @@
 }
 
 /* The foot of a list that loads page by page. */
+/* Watched for the next page of a list: starts it a screen before the foot is reached. */
+.admin-more-sentinel {
+  height: 240px;
+  margin-top: -240px;
+  pointer-events: none;
+}
+
 .admin-more {
   display: flex;
   justify-content: center;

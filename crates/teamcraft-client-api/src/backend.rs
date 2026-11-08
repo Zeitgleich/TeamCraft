@@ -1179,6 +1179,17 @@ pub trait AdminBackend {
     self.admin_users()
   }
 
+  /// Reads the channels and accounts that notices refer to (unconfirmed removals, people left in
+  /// a group) by ID, those the loaded pages don't hold, so their names resolve whatever page
+  /// they are on (issue #1433). They arrive with the next change notification, through
+  /// [`AdminBackend::admin_referenced_channels`] and [`AdminBackend::admin_known_users`].
+  fn admin_resolve_references(&self, _channels: Vec<ConversationId>, _users: Vec<UserId>) {}
+  /// The channels read by [`AdminBackend::admin_resolve_references`] that
+  /// [`AdminBackend::admin_channels`] doesn't hold.
+  fn admin_referenced_channels(&self) -> Vec<AdminChannel> {
+    Vec::new()
+  }
+
   /// Spaces by name, for the permission scheme scopes.
   fn admin_spaces(&self) -> Vec<AdminSpace> {
     Vec::new()

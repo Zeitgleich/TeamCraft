@@ -59,6 +59,20 @@ impl ListTab {
   }
 }
 
+/// Has the console read the channels and accounts the `(channel, user)` pairs name, wherever they
+/// sit in the lists, so the notices show names and the deactivated marks (issue #1433).
+fn resolve_references(state: AppState, pairs: Memo<Vec<(ConversationId, UserId)>>) {
+  Effect::new(move |_| {
+    let pairs = pairs.get();
+    if pairs.is_empty() {
+      return;
+    }
+    let channels = pairs.iter().map(|(channel, _)| *channel).collect();
+    let users = pairs.iter().map(|(_, user)| *user).collect();
+    state.write(|backend| backend.admin_resolve_references(channels, users));
+  });
+}
+
 /// This admin's removals from channels it isn't in that can't be confirmed (e2ee.md §4.6): the
 /// admin removes again or keeps the person; the client never settles it on the server's word.
 #[component]
@@ -66,6 +80,7 @@ fn UnconfirmedRemovals(channels: Memo<Vec<AdminChannel>>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let removals = Memo::new(move |_| state.read(|backend| backend.unconfirmed_removals()));
+  resolve_references(state, removals);
   move || {
     removals
       .get()
@@ -106,6 +121,7 @@ fn GroupLeftovers(channels: Memo<Vec<AdminChannel>>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let leftovers = Memo::new(move |_| state.read(|backend| backend.group_leftovers()));
+  resolve_references(state, leftovers);
   // The removal is signed by this client; without its keys the list only informs.
   let can_remove = state.read(|backend| backend.can_remove_from_chats());
   let remove_all = PendingAction::new();
@@ -281,6 +297,13 @@ pub fn ChannelsSection() -> impl IntoView {
   let load = Memo::new(move |_| state.read(|backend| backend.admin_load()));
   let channels = Memo::new(move |_| state.read(|backend| backend.admin_channels()));
   let visible = channels;
+  // The notices name channels that may sit on a page that isn't loaded.
+  let referenced = Memo::new(move |_| state.read(|backend| backend.admin_referenced_channels()));
+  let named_channels = Memo::new(move |_| {
+    let mut named = channels.get();
+    named.extend(referenced.get());
+    named
+  });
   let selected_channel = Memo::new(move |_| {
     selected
       .get()
@@ -297,8 +320,8 @@ pub fn ChannelsSection() -> impl IntoView {
       title=Signal::derive(move || i18n.t("admin-channels-title"))
       subtitle=Signal::derive(move || i18n.t("admin-channels-subtitle"))
     />
-    <UnconfirmedRemovals channels=channels />
-    <GroupLeftovers channels=channels />
+    <UnconfirmedRemovals channels=named_channels />
+    <GroupLeftovers channels=named_channels />
     <div class="admin-toolbar">
       <label class="visually-hidden" for="admin-channel-search">{move || i18n.t("admin-search")}</label>
       <input

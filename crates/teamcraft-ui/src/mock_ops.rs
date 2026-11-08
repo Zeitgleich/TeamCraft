@@ -185,6 +185,10 @@ impl AdminBackend for MockBackend {
     self.ops.borrow().users.clone()
   }
 
+  fn admin_referenced_channels(&self) -> Vec<AdminChannel> {
+    self.ops.borrow().channels.clone()
+  }
+
   fn admin_channel_query(&self) -> teamcraft_client_api::admin::AdminChannelQuery {
     self.ops.borrow().channel_query.clone()
   }

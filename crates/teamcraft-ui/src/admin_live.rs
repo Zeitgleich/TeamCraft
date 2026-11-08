@@ -22,11 +22,11 @@ use teamcraft_proto::{
   ConversationVisibility, CreateBrandRequest, ErrorBody, ErrorCode, ExtendGuestRequest,
   GetAnnouncementResponse, HistoryPolicy, ListAdminConversationsResponse, ListAdminDevicesResponse,
   ListAdminGuestsQuery, ListAdminGuestsResponse, ListAdminSpacesResponse, ListAdminUsersResponse,
-  ListAuditResponse, ListConversationMembersResponse, PermissionSchemeResponse, RetentionSetting,
-  RetentionStatusResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection,
-  SchemeChange, SendTestMailRequest, SetAnnouncementRequest, SetChannelModerationRequest,
-  SetRetentionRequest, SettingsTestResponse, SpaceId, UnixMillis, UpdateBrandRequest,
-  UpdateCalendarSettingsRequest, UpdateConversationRequest, UpdateMailSettingsRequest,
+  ListAuditResponse, ListConversationMembersResponse, MAX_ADMIN_IDS, PermissionSchemeResponse,
+  RetentionSetting, RetentionStatusResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse,
+  RuntimeSettingsSection, SchemeChange, SendTestMailRequest, SetAnnouncementRequest,
+  SetChannelModerationRequest, SetRetentionRequest, SettingsTestResponse, SpaceId, UnixMillis,
+  UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateConversationRequest, UpdateMailSettingsRequest,
   UpdatePermissionSchemeRequest, UpdateSpaceRequest, UserKind, WorkspacePolicy, WorkspacePolicyResponse,
 };
 
@@ -121,6 +121,13 @@ pub struct AdminData {
   /// Owners and admins, read by role: the roster proposals and the names of those who act in the
   /// audit log, whatever page of the user list is open.
   role_holders: Vec<AdminUser>,
+  /// Channels and accounts that notices refer to (unconfirmed removals, people left in a group)
+  /// and that the loaded pages don't hold, read by ID (issue #1433).
+  referenced_channels: HashMap<ConversationId, AdminChannel>,
+  referenced_users: HashMap<UserId, AdminUser>,
+  /// What was asked by ID already, found or not: a notice about a deleted channel asks once.
+  asked_channels: HashSet<ConversationId>,
+  asked_users: HashSet<UserId>,
   /// Devices of the users whose details were opened; refreshed with the console.
   devices: HashMap<UserId, Vec<AdminDeviceResponse>>,
   /// Owner and retention of channels, read one by one from a server that doesn't send them in the
@@ -210,7 +217,64 @@ impl AdminLive {
         .filter(|user| !listed.contains(&user.user.id))
         .cloned(),
     );
+    let listed: HashSet<UserId> = known.iter().map(|user| user.user.id).collect();
+    let data = self.data.borrow();
+    known.extend(
+      data
+        .referenced_users
+        .values()
+        .filter(|user| !listed.contains(&user.user.id))
+        .cloned(),
+    );
     known
+  }
+
+  /// The channels notices refer to that the loaded pages don't hold, see
+  /// [`Self::resolve_references`].
+  pub fn referenced_channels(&self) -> Vec<AdminChannel> {
+    let data = self.data.borrow();
+    let listed: HashSet<ConversationId> = data.channels.iter().map(|channel| channel.id).collect();
+    data
+      .referenced_channels
+      .values()
+      .filter(|channel| !listed.contains(&channel.id))
+      .cloned()
+      .collect()
+  }
+
+  /// Reads the channels and accounts a notice refers to by ID, those the loaded pages and earlier
+  /// reads don't hold, so a name on a later page still resolves. They arrive with the next change
+  /// notification. Each ID is asked once.
+  pub fn resolve_references(&self, channels: Vec<ConversationId>, users: Vec<UserId>) {
+    let (channels, users) = self.unasked_references(channels, users);
+    if !channels.is_empty() || !users.is_empty() {
+      self.run(AdminTask::References { channels, users });
+    }
+  }
+
+  /// What of `channels` and `users` isn't loaded or asked for already; marks it as asked.
+  fn unasked_references(
+    &self,
+    channels: Vec<ConversationId>,
+    users: Vec<UserId>,
+  ) -> (Vec<ConversationId>, Vec<UserId>) {
+    let mut data = self.data.borrow_mut();
+    let known_users: HashSet<UserId> = data
+      .users
+      .iter()
+      .chain(data.role_holders.iter())
+      .map(|user| user.user.id)
+      .collect();
+    let known_channels: HashSet<ConversationId> = data.channels.iter().map(|channel| channel.id).collect();
+    let channels = channels
+      .into_iter()
+      .filter(|id| !known_channels.contains(id) && data.asked_channels.insert(*id))
+      .collect();
+    let users = users
+      .into_iter()
+      .filter(|id| !known_users.contains(id) && data.asked_users.insert(*id))
+      .collect();
+    (channels, users)
   }
 
   pub fn channel_query(&self) -> AdminChannelQuery {
@@ -1544,6 +1608,65 @@ impl AdminLive {
     self.changed();
   }
 
+  /// The channels and accounts `channels` and `users` name, [`MAX_ADMIN_IDS`] per request. An ID
+  /// that can't be read is asked again with the next look at the notice.
+  async fn references_now(&self, channels: Vec<ConversationId>, users: Vec<UserId>) {
+    let mut found_channels = Vec::new();
+    let mut found_users = Vec::new();
+    let mut errors = Vec::new();
+    for chunk in channels.chunks(MAX_ADMIN_IDS) {
+      let path = conversations_by_id_path(chunk);
+      match self.fetch_result::<ListAdminConversationsResponse>(path).await {
+        Ok(page) => found_channels.extend(page.conversations),
+        Err(error) => {
+          errors.push(error);
+          let mut data = self.data.borrow_mut();
+          for id in chunk {
+            data.asked_channels.remove(id);
+          }
+        },
+      }
+    }
+    for chunk in users.chunks(MAX_ADMIN_IDS) {
+      let path = users_by_id_path(chunk);
+      match self.fetch_result::<ListAdminUsersResponse>(path).await {
+        Ok(page) => found_users.extend(page.users),
+        Err(error) => {
+          errors.push(error);
+          let mut data = self.data.borrow_mut();
+          for id in chunk {
+            data.asked_users.remove(id);
+          }
+        },
+      }
+    }
+    {
+      let mut data = self.data.borrow_mut();
+      let space_names: HashMap<SpaceId, String> = data
+        .spaces
+        .iter()
+        .map(|space| (space.id, space.name.clone()))
+        .collect();
+      let channels = channels_of(
+        &found_channels,
+        &space_names,
+        &data.legacy_details,
+        &data.policy.history_default,
+        data.policy.retention.keep_pinned,
+      );
+      data
+        .referenced_channels
+        .extend(channels.into_iter().map(|channel| (channel.id, channel)));
+      data
+        .referenced_users
+        .extend(found_users.iter().map(|user| (user.id, user_from_wire(user))));
+      if let Some(error) = errors.into_iter().next() {
+        data.maybe_error = Some(error);
+      }
+    }
+    self.changed();
+  }
+
   /// A GET of the console. A failure is a short code the console words itself (never the path or
   /// the status); a 429 also makes the console wait for the server's `Retry-After`.
   async fn fetch_result<T: serde::de::DeserializeOwned>(&self, path: String) -> Result<T, String> {
@@ -1720,6 +1843,7 @@ impl AdminLive {
       AdminTask::Load { key, path, what } => self.load_now(key, path, what).await,
       AdminTask::MoreChannels => self.more_channels_now().await,
       AdminTask::MoreUsers => self.more_users_now().await,
+      AdminTask::References { channels, users } => self.references_now(channels, users).await,
       AdminTask::SettingsTest { kind, path, body } => self.run_settings_test_now(kind, path, body).await,
       AdminTask::BrandPreview { key, path } => self.brand_preview_now(key, path).await,
       AdminTask::UploadBrandAsset {
@@ -1775,6 +1899,11 @@ pub enum AdminTask {
   MoreChannels,
   /// The next page of the user list.
   MoreUsers,
+  /// Channels and accounts by ID, for the names in notices (issue #1433).
+  References {
+    channels: Vec<ConversationId>,
+    users: Vec<UserId>,
+  },
   /// A connection test.
   SettingsTest {
     kind: SettingsTestKind,
@@ -2235,6 +2364,27 @@ fn users_path(text: &str, maybe_role: Option<&str>, maybe_after: Option<UserId>)
   path
 }
 
+/// `GET /admin/conversations` for these channels only (at most [`MAX_ADMIN_IDS`]).
+fn conversations_by_id_path(ids: &[ConversationId]) -> String {
+  format!(
+    "/api/v1/admin/conversations?limit={MAX_ADMIN_IDS}&ids={}",
+    id_list(ids)
+  )
+}
+
+/// `GET /admin/users` for these accounts only, deactivated ones too.
+fn users_by_id_path(ids: &[UserId]) -> String {
+  format!(
+    "/api/v1/admin/users?status=all&limit={MAX_ADMIN_IDS}&ids={}",
+    id_list(ids)
+  )
+}
+
+/// IDs separated by commas, as the `ids` filters take them.
+fn id_list<T: std::fmt::Display>(ids: &[T]) -> String {
+  ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(",")
+}
+
 /// `text` as a URL query value: everything but unreserved characters as `%XX` of its UTF-8 bytes.
 fn encode_component(text: &str) -> String {
   let mut encoded = String::with_capacity(text.len());
@@ -2258,6 +2408,11 @@ fn guests_path(query: &ListAdminGuestsQuery) -> String {
   }
   if let Some(filter) = &query.maybe_filter {
     path.push_str(&format!("&filter={}", filter.as_str()));
+  }
+  if let Some(text) = query.maybe_sponsor_query.as_deref().map(str::trim)
+    && !text.is_empty()
+  {
+    path.push_str(&format!("&sponsor_query={}", encode_component(text)));
   }
   path
 }
@@ -3107,6 +3262,82 @@ mod tests {
     }
 
     #[test]
+    fn names_on_pages_that_are_not_loaded_are_read_by_id() {
+      let server = FakeServer::new();
+      let live = AdminLive::new(server.clone());
+      block_on(live.refresh_once());
+      let late_channel = id_from_raw::<ConversationId>(CHANNELS);
+      let late_user = id_from_raw::<UserId>(USERS - 1);
+      assert!(!live.channels().iter().any(|channel| channel.id == late_channel));
+      assert!(!live.known_users().iter().any(|user| user.user.id == late_user));
+      server.clear();
+
+      let (channels, users) = live.unasked_references(vec![late_channel, late_channel], vec![late_user]);
+      assert_eq!((channels.len(), users.len()), (1, 1), "each once");
+      block_on(live.references_now(channels, users));
+      assert_eq!(
+        server.paths(),
+        [
+          format!("/api/v1/admin/conversations?limit=100&ids={late_channel}"),
+          format!("/api/v1/admin/users?status=all&limit=100&ids={late_user}"),
+        ]
+      );
+      let named: Vec<String> = live
+        .referenced_channels()
+        .into_iter()
+        .map(|channel| channel.name)
+        .collect();
+      assert_eq!(named, [format!("channel-{CHANNELS}")]);
+      assert!(live.known_users().iter().any(|user| user.user.id == late_user));
+
+      // Asked and answered: nothing more is read, and what the pages hold isn't asked for.
+      let first_channel = live.channels()[0].id;
+      assert_eq!(
+        live.unasked_references(vec![late_channel, first_channel], vec![late_user]),
+        (Vec::new(), Vec::new())
+      );
+    }
+
+    #[test]
+    fn many_references_are_read_in_requests_of_at_most_the_server_limit() {
+      let server = FakeServer::new();
+      let live = AdminLive::new(server.clone());
+      block_on(live.refresh_once());
+      server.clear();
+      let users: Vec<UserId> = (1..=MAX_ADMIN_IDS as u64 + 1).map(id_from_raw).collect();
+      block_on(live.references_now(Vec::new(), users));
+      assert_eq!(server.paths().len(), 2);
+    }
+
+    #[test]
+    fn a_reference_that_could_not_be_read_is_asked_again_later() {
+      let server = FakeServer::new();
+      let live = AdminLive::new(server.clone());
+      let channel = id_from_raw::<ConversationId>(CHANNELS);
+      let (channels, _) = live.unasked_references(vec![channel], Vec::new());
+      server.refuse_everything_with(502, "bad gateway");
+      block_on(live.references_now(channels, Vec::new()));
+      assert!(live.maybe_error().is_some());
+      assert!(live.referenced_channels().is_empty());
+      let (again, _) = live.unasked_references(vec![channel], Vec::new());
+      assert_eq!(again, [channel]);
+    }
+
+    #[test]
+    fn the_guest_search_goes_to_the_server_as_a_url_value() {
+      let path = guests_path(&ListAdminGuestsQuery {
+        maybe_sponsor_query: Some(" Al&ice ".into()),
+        ..ListAdminGuestsQuery::default()
+      });
+      assert_eq!(path, "/api/v1/admin/guests?limit=200&sponsor_query=Al%26ice");
+      let blank = guests_path(&ListAdminGuestsQuery {
+        maybe_sponsor_query: Some("  ".into()),
+        ..ListAdminGuestsQuery::default()
+      });
+      assert_eq!(blank, "/api/v1/admin/guests?limit=200");
+    }
+
+    #[test]
     fn search_text_is_sent_as_a_url_value() {
       assert_eq!(encode_component("a b&c=d#é"), "a%20b%26c%3Dd%23%C3%A9");
       assert_eq!(encode_component("Ab-9_.~"), "Ab-9_.~");
@@ -3206,12 +3437,14 @@ mod tests {
         }
         if path.starts_with("/api/v1/admin/conversations?") {
           let needle = text_param(path, "query");
+          let ids = ids_param(path);
           let (items, has_more) = page(
             path,
             (1..=self.inner.channels).filter(|n| {
               needle
                 .as_ref()
                 .is_none_or(|needle| format!("channel-{n}").contains(needle.as_str()))
+                && ids.as_ref().is_none_or(|ids| ids.contains(n))
             }),
             |n| conversation(n, self.inner.is_legacy),
           );
@@ -3223,12 +3456,14 @@ mod tests {
         if path.starts_with("/api/v1/admin/users?") {
           let needle = text_param(path, "query");
           let role = text_param(path, "role");
+          let ids = ids_param(path);
           let (items, has_more) = page(
             path,
             (1..=USERS).filter(|n| {
-              needle
-                .as_ref()
-                .is_none_or(|needle| format!("Person {n}").contains(needle.as_str()))
+              ids.as_ref().is_none_or(|ids| ids.contains(n))
+                && needle
+                  .as_ref()
+                  .is_none_or(|needle| format!("Person {n}").contains(needle.as_str()))
                 && role
                   .as_ref()
                   .is_none_or(|role| role_of(*n) == Some(role.as_str()))
@@ -3355,6 +3590,11 @@ mod tests {
         }
       }
       String::from_utf8(bytes).ok()
+    }
+
+    /// The numbers of an `ids` parameter.
+    fn ids_param(path: &str) -> Option<Vec<u64>> {
+      text_param(path, "ids").map(|ids| ids.split(',').filter_map(|id| id.parse().ok()).collect())
     }
 
     /// Person 1 owns the workspace, Person 250 is its only admin.

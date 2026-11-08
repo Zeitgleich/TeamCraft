@@ -12,8 +12,9 @@ use teamcraft_proto::{
   ConversationKind, DeactivateUserRequest, DeactivationReason, DeviceId, GatewayEvent, Id,
   ListAdminConversationsQuery, ListAdminConversationsResponse, ListAdminDevicesResponse,
   ListAdminSpacesResponse, ListAdminUsersQuery, ListAdminUsersResponse, ListAuditQuery, ListAuditResponse,
-  ListConversationMembersResponse, ListSpaceMembersResponse, Permission, PushProvider, PushProviderState,
-  PushProviderStatus, RetentionPolicy, SfuStatus, SpaceId, StorageStatus, Target, UnixMillis, UserId,
+  ListConversationMembersResponse, ListSpaceMembersResponse, MAX_ADMIN_IDS, Permission, PushProvider,
+  PushProviderState, PushProviderStatus, RetentionPolicy, SfuStatus, SpaceId, StorageStatus, Target,
+  UnixMillis, UserId,
 };
 use time::OffsetDateTime;
 
@@ -73,6 +74,7 @@ pub async fn list_conversations(
 ) -> Result<ListAdminConversationsResponse, ApiError> {
   require(state, caller, Permission::ManageWorkspace, &Target::Instance)?;
   let limit = page_limit(state, query.maybe_limit);
+  let maybe_ids = parse_ids::<ConversationId>(query.maybe_ids.as_deref())?;
   let mut rows = state
     .database
     .admin_list_conversations(&AdminConversationFilter {
@@ -86,6 +88,7 @@ pub async fn list_conversations(
       maybe_after: query.maybe_after,
       maybe_member: query.maybe_user_id,
       maybe_query: query.maybe_query,
+      maybe_ids,
       limit: i64::from(limit),
     })
     .await?;
@@ -134,6 +137,7 @@ pub async fn list_users(
 ) -> Result<ListAdminUsersResponse, ApiError> {
   require(state, caller, Permission::ManageUsers, &Target::Instance)?;
   let limit = page_limit(state, query.maybe_limit);
+  let maybe_ids = parse_ids::<UserId>(query.maybe_ids.as_deref())?;
   let status = match query.maybe_status.unwrap_or(AdminUserStatus::All) {
     AdminUserStatus::Active => UserStatusFilter::Active,
     AdminUserStatus::Deactivated => UserStatusFilter::Deactivated,
@@ -149,6 +153,7 @@ pub async fn list_users(
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty()),
+      maybe_ids.as_deref(),
       query.maybe_after,
       i64::from(limit),
     )
@@ -629,6 +634,31 @@ async fn query_audit(state: &AppState, query: ListAuditQuery) -> Result<ListAudi
     entries: rows.iter().map(audit_response).collect(),
     has_more,
   })
+}
+
+/// The IDs of an `ids` filter: separated by commas, at most [`MAX_ADMIN_IDS`]. `None` without the
+/// filter; an empty filter lists nothing.
+fn parse_ids<T: std::str::FromStr>(maybe_text: Option<&str>) -> Result<Option<Vec<T>>, ApiError> {
+  let Some(text) = maybe_text else {
+    return Ok(None);
+  };
+  let parts: Vec<&str> = text
+    .split(',')
+    .map(str::trim)
+    .filter(|part| !part.is_empty())
+    .collect();
+  if parts.len() > MAX_ADMIN_IDS {
+    return Err(ApiError::InvalidRequest(format!("at most {MAX_ADMIN_IDS} ids")));
+  }
+  parts
+    .into_iter()
+    .map(|part| {
+      part
+        .parse()
+        .map_err(|_| ApiError::InvalidRequest("ids must be a comma separated list of IDs".into()))
+    })
+    .collect::<Result<Vec<T>, ApiError>>()
+    .map(Some)
 }
 
 fn page_limit(state: &AppState, maybe_limit: Option<u32>) -> u32 {

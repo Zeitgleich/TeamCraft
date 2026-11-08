@@ -164,13 +164,39 @@ pub fn SectionHeader(
 }
 
 /// The foot of a list that loads page by page (issue #1241): "Show more" while the instance has
-/// more entries than the list holds.
+/// more entries than the list holds. The next page also loads by itself when the foot scrolls into
+/// view (issue #1433); the button stays for a failed read, which the console banner reports and
+/// which isn't retried on its own, and for browsers without the observer.
 #[component]
 pub fn ListMore(#[prop(into)] has_more: Signal<bool>, #[prop(into)] on_more: Callback<()>) -> impl IntoView {
   let i18n = use_i18n();
   let state = use_app_state();
   let is_loading = Memo::new(move |_| state.read(|backend| backend.admin_is_loading_more()));
+  let has_error = Memo::new(move |_| state.read(|backend| backend.admin_error()).is_some());
+  let sentinel = NodeRef::<leptos::html::Div>::new();
+  let is_near_end = RwSignal::new(false);
+  let observer = StoredValue::new_local(None::<NearEndObserver>);
+  Effect::new(move |_| {
+    let Some(element) = sentinel.get() else {
+      return;
+    };
+    if observer.with_value(Option::is_none) {
+      observer.set_value(NearEndObserver::new(&element, is_near_end));
+    }
+  });
+  on_cleanup(move || {
+    if let Some(Some(observer)) = observer.try_update_value(Option::take) {
+      observer.disconnect();
+    }
+  });
+  // Runs again when a page arrived and the foot is still in view, so a short list fills the screen.
+  Effect::new(move |_| {
+    if is_near_end.get() && has_more.get() && !is_loading.get() && !has_error.get() {
+      on_more.run(());
+    }
+  });
   view! {
+    <div class="admin-more-sentinel" node_ref=sentinel aria-hidden="true"></div>
     <Show when=move || has_more.get() fallback=|| ()>
       <div class="admin-more">
         <button
@@ -185,6 +211,56 @@ pub fn ListMore(#[prop(into)] has_more: Signal<bool>, #[prop(into)] on_more: Cal
       </div>
     </Show>
   }
+}
+
+/// Follows whether the foot of a list is on screen.
+#[cfg(target_arch = "wasm32")]
+struct NearEndObserver {
+  observer: web_sys::IntersectionObserver,
+  _callback: wasm_bindgen::closure::Closure<dyn FnMut(js_sys::Array)>,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl NearEndObserver {
+  fn new(element: &web_sys::HtmlDivElement, is_near_end: RwSignal<bool>) -> Option<Self> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    use crate::reactive::SetIfAlive;
+
+    let callback = Closure::<dyn FnMut(js_sys::Array)>::new(move |entries: js_sys::Array| {
+      // The last entry is the newest state of the one observed element.
+      if let Some(entry) = entries
+        .iter()
+        .last()
+        .and_then(|entry| entry.dyn_into::<web_sys::IntersectionObserverEntry>().ok())
+      {
+        is_near_end.set_if_alive(entry.is_intersecting());
+      }
+    });
+    let observer = web_sys::IntersectionObserver::new(callback.as_ref().unchecked_ref()).ok()?;
+    observer.observe(element);
+    Some(Self {
+      observer,
+      _callback: callback,
+    })
+  }
+
+  fn disconnect(&self) {
+    self.observer.disconnect();
+  }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NearEndObserver;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NearEndObserver {
+  fn new(_element: &web_sys::HtmlDivElement, _is_near_end: RwSignal<bool>) -> Option<Self> {
+    None
+  }
+
+  fn disconnect(&self) {}
 }
 
 /// Says that a list ends before the instance's last entry: the console reads a bounded number of

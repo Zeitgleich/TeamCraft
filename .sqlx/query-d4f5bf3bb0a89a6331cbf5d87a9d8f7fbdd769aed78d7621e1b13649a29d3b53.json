@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT m.space_id, s.name AS space_name, m.user_id, m.expires_at, m.sponsor_user_id,\n                EXISTS (SELECT 1 FROM devices d WHERE d.user_id = m.user_id) AS \"has_signed_in!\"\n         FROM space_members m\n         JOIN spaces s ON s.id = m.space_id\n         JOIN users u ON u.id = m.user_id AND u.deleted_at IS NULL\n         LEFT JOIN users sponsor ON sponsor.id = m.sponsor_user_id\n         WHERE m.role = 'guest'\n           AND ($1::bigint IS NULL OR m.space_id = $1)\n           AND ($2::bigint IS NULL OR m.sponsor_user_id = $2)\n           AND ($3::timestamptz IS NULL OR m.expires_at <= $3)\n           AND (NOT $4 OR sponsor.id IS NULL OR sponsor.deactivated_at IS NOT NULL OR sponsor.deleted_at IS NOT NULL)\n           AND (NOT $5 OR NOT EXISTS (SELECT 1 FROM devices d WHERE d.user_id = m.user_id))\n         ORDER BY m.expires_at ASC NULLS LAST, m.space_id, m.user_id\n         LIMIT $6",
+  "query": "SELECT m.space_id, s.name AS space_name, m.user_id, m.expires_at, m.sponsor_user_id,\n                EXISTS (SELECT 1 FROM devices d WHERE d.user_id = m.user_id) AS \"has_signed_in!\"\n         FROM space_members m\n         JOIN spaces s ON s.id = m.space_id\n         JOIN users u ON u.id = m.user_id AND u.deleted_at IS NULL\n         LEFT JOIN users sponsor ON sponsor.id = m.sponsor_user_id\n         WHERE m.role = 'guest'\n           AND ($1::bigint IS NULL OR m.space_id = $1)\n           AND ($2::bigint IS NULL OR m.sponsor_user_id = $2)\n           AND ($3::timestamptz IS NULL OR m.expires_at <= $3)\n           AND (NOT $4 OR sponsor.id IS NULL OR sponsor.deactivated_at IS NOT NULL OR sponsor.deleted_at IS NOT NULL)\n           AND (NOT $5 OR NOT EXISTS (SELECT 1 FROM devices d WHERE d.user_id = m.user_id))\n           AND ($7::text IS NULL OR sponsor.display_name ILIKE $7 OR sponsor.username ILIKE $7)\n         ORDER BY m.expires_at ASC NULLS LAST, m.space_id, m.user_id\n         LIMIT $6",
   "describe": {
     "columns": [
       {
@@ -72,7 +72,8 @@
         "Timestamptz",
         "Bool",
         "Bool",
-        "Int8"
+        "Int8",
+        "Text"
       ]
     },
     "nullable": [
@@ -84,5 +85,5 @@
       null
     ]
   },
-  "hash": "d85ee1fb9f1faaf7717eb0d4a7453ca25cbe8bb4920326d20fb2b12c636a8ca4"
+  "hash": "d4f5bf3bb0a89a6331cbf5d87a9d8f7fbdd769aed78d7621e1b13649a29d3b53"
 }

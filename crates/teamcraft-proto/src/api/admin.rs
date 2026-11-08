@@ -27,6 +27,9 @@ pub struct ListAdminSpacesResponse {
   pub spaces: Vec<AdminSpaceSummary>,
 }
 
+/// How many IDs the `ids` filter of the admin lists takes at once.
+pub const MAX_ADMIN_IDS: usize = 100;
+
 /// Query of `GET /api/v1/admin/conversations`. Only channels are listed, public and private.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -55,6 +58,10 @@ pub struct ListAdminConversationsQuery {
   /// Only channels whose name or space name contains this text (case-insensitive).
   #[serde(rename = "query", default, skip_serializing_if = "Option::is_none")]
   pub maybe_query: Option<String>,
+  /// Only these channels: IDs separated by commas, at most [`MAX_ADMIN_IDS`]. The console names the
+  /// channels its notices refer to without reading every page.
+  #[serde(rename = "ids", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_ids: Option<String>,
   /// Continue after this channel (ascending IDs).
   #[serde(rename = "after", default, skip_serializing_if = "Option::is_none")]
   pub maybe_after: Option<ConversationId>,
@@ -134,6 +141,9 @@ pub struct ListAdminUsersQuery {
   /// every account.
   #[serde(rename = "role", default, skip_serializing_if = "Option::is_none")]
   pub maybe_role: Option<String>,
+  /// Only these accounts: IDs separated by commas, at most [`MAX_ADMIN_IDS`].
+  #[serde(rename = "ids", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_ids: Option<String>,
   #[serde(rename = "after", default, skip_serializing_if = "Option::is_none")]
   pub maybe_after: Option<UserId>,
   #[serde(rename = "limit", default, skip_serializing_if = "Option::is_none")]
