@@ -68,6 +68,7 @@ class ChatActionsTest {
   @Test
   fun groupDmListsThePeople() {
     assertEquals("""{"action":"open_group_dm","users":["2","3"]}""", ChatActions.openGroupDm(listOf("2", "3")))
+    assertEquals("""{"action":"add_member","conversation":"10","user":"2"}""", ChatActions.addMember("10", "2"))
   }
 
   @Test

@@ -381,6 +381,12 @@ object ChatActions {
 
   fun openDm(user: String) = action("open_dm") { put("user", user) }
 
+  /** Adds a person to a channel, with the history its policy allows (#1534). */
+  fun addMember(conversation: String, user: String) = action("add_member") {
+    put("conversation", conversation)
+    put("user", user)
+  }
+
   fun openGroupDm(users: List<String>) = action("open_group_dm") { put("users", buildJsonArray { users.forEach { add(JsonPrimitive(it)) } }) }
 
   fun changePassphrase(passphrase: String) = action("change_passphrase") { put("passphrase", passphrase) }

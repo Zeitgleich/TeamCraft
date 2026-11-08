@@ -35,4 +35,24 @@ final class CreateTests: XCTestCase {
     XCTAssertEqual(CreateResult(.nameRefused(detail: "too long")), .nameRefused)
     XCTAssertEqual(CreateResult(.notAllowed), .notAllowed)
   }
+
+  func testAddMemberIsTheCoresAction() {
+    XCTAssertEqual(
+      ChatAction.addMember(conversationId: "10", userId: "2").json, #"{"action":"add_member","conversation":"10","user":"2"}"#)
+  }
+
+  func testAddPeopleShowsOnlyWhereTheServerSaysSo() throws {
+    let json = #"""
+      {"me": {"id": "1", "username": "me", "display_name": "Me"},
+       "conversations": [
+         {"id": "10", "kind": "Public", "maybe_permissions": ["post", "manage_members"]},
+         {"id": "11", "kind": "Private", "maybe_permissions": ["post"]},
+         {"id": "12", "kind": "Private"},
+         {"id": "13", "kind": "Group", "maybe_permissions": ["manage_members"]}
+       ]}
+      """#
+    let snapshot = try XCTUnwrap(Wire.decode(BrowseSnapshot.self, from: json))
+    let canAdd = (snapshot.conversations ?? []).map(\.canAddMembers)
+    XCTAssertEqual(canAdd, [true, false, false, false])
+  }
 }

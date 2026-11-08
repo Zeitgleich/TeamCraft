@@ -27,6 +27,13 @@ struct BrowseSnapshot: Decodable, Sendable {
     /// `Public`, `Private`, `Direct`, `Group` or `Integration`.
     let kind: String
     let memberIds: [String]?
+    /// The channel permissions the server says the user holds here; nil when it didn't say.
+    let maybePermissions: [String]?
+
+    /// "Add people" shows: the server says the user may manage the channel's members (#1534).
+    var canAddMembers: Bool {
+      kind != "Direct" && kind != "Group" && (maybePermissions ?? []).contains("manage_members")
+    }
   }
 
   let me: Person

@@ -90,8 +90,13 @@ data class Conversation(
   @SerialName("is_notes_to_self") val isNotesToSelf: Boolean = false,
   /** Still being caught up after the device was away (issue #247): newer messages may come. */
   @SerialName("is_catching_up") val isCatchingUp: Boolean = false,
+  /** The channel permissions the server says the user holds here; `null` when it didn't say. */
+  @SerialName("maybe_permissions") val maybePermissions: List<String>? = null,
 ) {
   val isDirect: Boolean get() = kind == "Direct" || kind == "Group"
+
+  /** "Add people" shows: the server says the user may manage the channel's members (#1534). */
+  val canAddMembers: Boolean get() = !isDirect && maybePermissions.orEmpty().contains("manage_members")
 }
 
 /** A link or file pinned to a conversation's header. */

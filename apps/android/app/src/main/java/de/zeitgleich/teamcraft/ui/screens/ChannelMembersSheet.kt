@@ -69,6 +69,21 @@ fun ChannelMembersSheet(viewModel: MainViewModel, conversationId: String, onDism
   LaunchedEffect(conversationId, changes) { maybeInfo = viewModel.channelMembers(conversationId) }
   // Held here, not in the list's item: scrolling the review away doesn't close it.
   val shownReview = remember(conversationId) { mutableStateOf<ChannelRolesReviewItem?>(null) }
+  // "Add people", where the server says the user may (#1534).
+  var canAdd by remember(conversationId) { mutableStateOf(false) }
+  var isAdding by remember(conversationId) { mutableStateOf(false) }
+  LaunchedEffect(conversationId, changes) {
+    canAdd = viewModel.readChat { snapshot() }?.conversations?.firstOrNull { it.id == conversationId }?.canAddMembers == true
+  }
+  if (isAdding) {
+    AddMembersSheet(
+      viewModel = viewModel,
+      conversationId = conversationId,
+      memberIds = maybeInfo?.members?.map { it.userId }.orEmpty(),
+      onDismiss = { isAdding = false },
+    )
+    return
+  }
   ModalBottomSheet(onDismissRequest = onDismiss) {
     val info = maybeInfo
     LazyColumn(
@@ -81,6 +96,13 @@ fun ChannelMembersSheet(viewModel: MainViewModel, conversationId: String, onDism
           style = MaterialTheme.typography.titleMedium,
           modifier = Modifier.semantics { heading() },
         )
+      }
+      if (canAdd) {
+        item {
+          OutlinedButton(onClick = { isAdding = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(stringResource(R.string.members_add))
+          }
+        }
       }
       if (info == null) {
         item { CircularProgressIndicator(Modifier.padding(Spacing.l).size(24.dp)) }

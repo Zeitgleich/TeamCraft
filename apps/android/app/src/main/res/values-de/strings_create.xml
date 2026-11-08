@@ -27,4 +27,10 @@
   <string name="space_access_invite_hint">Personen treten bei, wenn sie eingeladen werden.</string>
   <string name="create_space_submit">Space erstellen</string>
   <string name="dm_opening">Wird geöffnet …</string>
+  <string name="members_add">Personen hinzufügen</string>
+  <string name="members_add_none">Niemand sonst passt.</string>
+  <plurals name="members_add_count">
+    <item quantity="one">%d Person hinzufügen</item>
+    <item quantity="other">%d Personen hinzufügen</item>
+  </plurals>
 </resources>

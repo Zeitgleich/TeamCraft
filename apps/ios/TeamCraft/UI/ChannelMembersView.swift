@@ -14,10 +14,18 @@ struct ChannelMembersView: View {
   @State private var maybeShown: ChannelRolesReviewItem?
   @State private var isSigning = false
   @State private var maybeMessageKey: String?
+  /// "Add people", where the server says the user may (#1534).
+  @State private var canAdd = false
+  @State private var isAdding = false
 
   var body: some View {
     NavigationStack {
       List {
+        if canAdd {
+          Section {
+            Button("members_add", systemImage: "person.badge.plus") { isAdding = true }
+          }
+        }
         if let info = maybeInfo {
           if info.hasRoleAlarm {
             Section { hint("channel_roles_alarm") }
@@ -55,7 +63,13 @@ struct ChannelMembersView: View {
     }
     // The members and the signed roles are read afresh while the section is open.
     .task(id: conversationId) { await model.refreshChannelMembers(conversationId) }
-    .task(id: model.changeCount) { maybeInfo = await model.channelMembers(conversationId) ?? maybeInfo }
+    .task(id: model.changeCount) {
+      maybeInfo = await model.channelMembers(conversationId) ?? maybeInfo
+      canAdd = await model.browseSnapshot()?.conversations?.first { $0.id == conversationId }?.canAddMembers ?? canAdd
+    }
+    .sheet(isPresented: $isAdding) {
+      AddChannelMembersView(conversationId: conversationId, memberIds: maybeInfo?.members.map(\.userId) ?? [])
+    }
   }
 
   @ViewBuilder

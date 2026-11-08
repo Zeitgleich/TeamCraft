@@ -200,3 +200,96 @@ private struct CreateForm<Access: View>: View {
     accessibilityFocused = field
   }
 }
+
+/// "Add people" to a channel (#1534), where the server says the user may: the directory through
+/// the core, without the members, several at once. Each one added leaves the picked list, so a
+/// failure part way keeps only those still to add, and the sheet stays open with why.
+struct AddChannelMembersView: View {
+  @Environment(AppModel.self) private var model
+  @Environment(\.dismiss) private var dismiss
+  let conversationId: String
+  let memberIds: [String]
+
+  @State private var query = ""
+  @State private var maybeFound: [BrowseSnapshot.Person]?
+  @State private var picked: [String] = []
+  @State private var pickedPeople: [String: BrowseSnapshot.Person] = [:]
+  @State private var isAdding = false
+  @State private var maybeFailure: AppFailure?
+
+  var body: some View {
+    NavigationStack {
+      List {
+        if let failure = maybeFailure {
+          Section {
+            Label(failure.message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.danger)
+          }
+        }
+        if maybeFound != nil && shown.isEmpty {
+          Text("members_add_none").foregroundStyle(Theme.textMuted)
+        }
+        ForEach(shown) { person in
+          PersonPickRow(person: person, picked: $picked).disabled(isAdding)
+        }
+      }
+      .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: Text("browse_filter_people"))
+      .navigationTitle("members_add")
+      .navigationBarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) { Button("cancel") { dismiss() }.disabled(isAdding) }
+        ToolbarItem(placement: .confirmationAction) {
+          if isAdding {
+            ProgressView()
+          } else {
+            Button("members_add_submit") { Task { await add() } }
+              .fontWeight(.semibold)
+              .disabled(picked.isEmpty)
+          }
+        }
+      }
+      .onChange(of: picked) {
+        for id in picked where pickedPeople[id] == nil {
+          pickedPeople[id] = maybeFound?.first { $0.id == id }
+        }
+      }
+      .task(id: AddSearch(query: query, changes: model.changeCount)) {
+        if !query.isEmpty { try? await Task.sleep(for: .milliseconds(250)) }
+        guard !Task.isCancelled else { return }
+        if let found = await model.searchPeople(query.trimmingCharacters(in: .whitespacesAndNewlines)) {
+          maybeFound = found
+        }
+      }
+    }
+    .interactiveDismissDisabled(isAdding)
+  }
+
+  /// The picked people first, then everybody found who isn't a member yet.
+  private var shown: [BrowseSnapshot.Person] {
+    let members = Set(memberIds)
+    let found = (maybeFound ?? []).filter { !members.contains($0.id) }
+    return picked.compactMap { id in found.first { $0.id == id } ?? pickedPeople[id] }
+      + found.filter { !picked.contains($0.id) }
+  }
+
+  private func add() async {
+    guard !isAdding else { return }
+    isAdding = true
+    maybeFailure = nil
+    for user in picked {
+      if let failure = await model.performReporting(.addMember(conversationId: conversationId, userId: user)) {
+        maybeFailure = failure
+        break
+      }
+      picked.removeAll { $0 == user }
+    }
+    isAdding = false
+    if maybeFailure == nil { dismiss() }
+  }
+}
+
+/// What the member search waits for: the typed text, and a change that may have brought the
+/// directory's answer.
+private struct AddSearch: Equatable {
+  let query: String
+  let changes: Int
+}

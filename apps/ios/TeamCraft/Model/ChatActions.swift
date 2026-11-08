@@ -47,6 +47,8 @@ enum ChatAction {
   case openDm(userId: String)
   /// The group DM with exactly these people (and the user); created when there is none yet.
   case openGroupDm(userIds: [String])
+  /// Adds a person to a channel, with the history its policy allows (#1534).
+  case addMember(conversationId: String, userId: String)
   /// Reads again how far the others read: receipts sent while the app was offline never arrive.
   case refreshReadReceipts(conversationId: String)
   case refreshSpaceRoster(spaceId: String)
@@ -128,6 +130,8 @@ enum ChatAction {
       object = ["action": "open_dm", "user": user]
     case .openGroupDm(let users):
       object = ["action": "open_group_dm", "users": users]
+    case .addMember(let conversation, let user):
+      object = ["action": "add_member", "conversation": conversation, "user": user]
     case .refreshSpaceRoster(let space):
       object = ["action": "refresh_space_roster", "space": space]
     case .refreshCallHistory:
