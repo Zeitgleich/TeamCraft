@@ -4281,6 +4281,38 @@
         }
       }
     },
+    "history_gap_loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading messages…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachrichten werden geladen …"
+          }
+        }
+      }
+    },
+    "history_gap_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Messages could not be loaded."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nachrichten konnten nicht geladen werden."
+          }
+        }
+      }
+    },
     "profile_name_change": {
       "localizations": {
         "en": {

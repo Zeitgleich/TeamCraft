@@ -120,11 +120,13 @@ import java.time.ZoneId
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.FileInfo
+import de.zeitgleich.teamcraft.core.HistoryGap
 import de.zeitgleich.teamcraft.core.LinkPreview
 import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
@@ -140,7 +142,12 @@ import de.zeitgleich.teamcraft.ui.FeedScrollAction
 import de.zeitgleich.teamcraft.ui.FeedScrollEvent
 import de.zeitgleich.teamcraft.ui.FeedScrollState
 import de.zeitgleich.teamcraft.ui.FirstUnread
+import de.zeitgleich.teamcraft.ui.GapRequest
 import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.PlacedGap
+import de.zeitgleich.teamcraft.ui.ServerHistory
+import de.zeitgleich.teamcraft.ui.gapEdge
+import de.zeitgleich.teamcraft.ui.gapToFill
 import de.zeitgleich.teamcraft.ui.MarkupColors
 import de.zeitgleich.teamcraft.ui.MentionNames
 import de.zeitgleich.teamcraft.ui.AUTO_FETCH_SETTLE_MS
@@ -278,10 +285,16 @@ fun MessageFeed(
   unseenReactions: UnseenReactions = UnseenReactions(),
   /** These messages' reactions were on screen, or the user jumped to them. */
   onReactionsSeen: (List<String>) -> Unit = {},
+  /** Holes in the history among [messages] (issue #1438), drawn where they are. */
+  gaps: List<PlacedGap> = emptyList(),
+  /** The reader came near a hole, or asked again after a failure: a page of it from that side. */
+  onFillGap: (GapRequest) -> Unit = {},
 ) {
   // Newest first in a reversed list: the bottom stays anchored when the keyboard opens or a picture
   // above grows, and the rows keep their place by key (the message ID) when new ones arrive.
-  val items = remember(messages, firstUnread) { feedItems(messages, firstUnread.maybeMessageId).asReversed() }
+  val items = remember(messages, firstUnread, gaps) {
+    feedItems(messages, firstUnread.maybeMessageId, gaps = gaps).asReversed()
+  }
   val listState = rememberLazyListState()
   val scope = rememberCoroutineScope()
   // Saveable: coming back from a thread or a rotation doesn't jump to the unread line again.
@@ -336,6 +349,7 @@ fun MessageFeed(
     }
   }
   PageBack(listState, items.size, older)
+  FillGaps(listState, items, onFillGap)
   val onSeen by rememberUpdatedState(onReactionsSeen)
   // Told once per message while it waits; a message whose reactions were seen and that gets a new
   // one later waits again.
@@ -401,6 +415,12 @@ fun MessageFeed(
           when (item) {
             is FeedItem.Day -> DayPill(item.date, Modifier.fillMaxWidth().padding(vertical = DAY_DIVIDER_PADDING))
             FeedItem.Unread -> UnreadDivider()
+            is FeedItem.Gap -> GapRow(item.gap) {
+              // From the side the reader is on now.
+              val row = items.indexOf(item)
+              val topVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: row
+              onFillGap(GapRequest(item.gap, gapEdge(row, topVisible)))
+            }
             // A placeholder (issue #888) has nothing to reply to or act on yet.
             is FeedItem.Entry -> SwipeToReply(item.message, maybeOnReply.takeIf { item.message.maybePlaceholder == null }) {
               MessageRow(
@@ -508,6 +528,67 @@ private fun PageBack(listState: LazyListState, rowCount: Int, older: OlderMessag
       topmost >= rowCount - 1 - OLDER_AHEAD_ROWS
     }.first { it }
     onNearOldest()
+  }
+}
+
+/**
+ * Asks for a page of a hole in the history once its row comes within [OLDER_AHEAD_ROWS] of the
+ * screen ([gapToFill]), like older history: not at the bottom of a list that scrolls, so opening a
+ * conversation costs no extra request (the catch-up reads the hole by itself), and again after every
+ * answer while the reader is still near.
+ */
+@Composable
+private fun FillGaps(listState: LazyListState, items: List<FeedItem>, onFillGap: (GapRequest) -> Unit) {
+  val fill by rememberUpdatedState(onFillGap)
+  val gapRows = remember(items) {
+    items.withIndex().mapNotNull { (index, item) -> (item as? FeedItem.Gap)?.let { index to it.gap } }
+  }
+  // Restarted when the rows change: a page arrived, or the answer changed the hole's status.
+  LaunchedEffect(listState, gapRows) {
+    if (gapRows.none { (_, gap) -> gap.status == ServerHistory.AVAILABLE }) return@LaunchedEffect
+    val request = snapshotFlow {
+      val visible = listState.layoutInfo.visibleItemsInfo
+      val isAtBottom = listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset <= AT_BOTTOM_SLOP_PX
+      val fits = !listState.canScrollForward && !listState.canScrollBackward
+      if (visible.isEmpty() || (isAtBottom && !fits)) {
+        null
+      } else {
+        // Reversed list: the bottommost visible row has the lowest index.
+        gapToFill(gapRows, visible.first().index, visible.last().index, OLDER_AHEAD_ROWS)
+      }
+    }.filterNotNull().first()
+    fill(request)
+  }
+}
+
+/**
+ * Where history this device hasn't read yet lies (issue #1438): a quiet loading line while the
+ * catch-up or a request reads it, the failure with "Try again" when the last request failed.
+ */
+@Composable
+private fun GapRow(gap: HistoryGap, onRetry: () -> Unit) {
+  Row(
+    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+    horizontalArrangement = Arrangement.Center,
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    if (gap.status == ServerHistory.FAILED) {
+      Text(
+        stringResource(R.string.history_gap_failed),
+        Modifier.weight(1f, fill = false),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+      TextButton(onClick = onRetry) { Text(stringResource(R.string.older_history_retry)) }
+    } else {
+      CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+      Text(
+        stringResource(R.string.history_gap_loading),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 8.dp),
+      )
+    }
   }
 }
 
@@ -694,8 +775,8 @@ private fun List<FeedItem>.dayAt(index: Int): LocalDate? =
   when (val item = getOrNull(index)) {
     is FeedItem.Day -> item.date
     is FeedItem.Entry -> Instant.ofEpochMilli(item.message.sentAt).atZone(ZoneId.systemDefault()).toLocalDate()
-    // The unread line sits right above a message, which is the next newer row.
-    FeedItem.Unread -> if (index > 0) dayAt(index - 1) else null
+    // The unread line sits right above a message, which is the next newer row; a hole is read with the rows below it.
+    FeedItem.Unread, is FeedItem.Gap -> if (index > 0) dayAt(index - 1) else null
     null -> null
   }
 

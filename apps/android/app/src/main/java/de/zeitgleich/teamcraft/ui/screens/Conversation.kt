@@ -132,6 +132,7 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.Conversation
+import de.zeitgleich.teamcraft.core.HistoryGap
 import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.DraftFileItem
@@ -157,7 +158,10 @@ import de.zeitgleich.teamcraft.ui.EmojiInput
 import de.zeitgleich.teamcraft.ui.FeedSeed
 import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.Mentions
+import de.zeitgleich.teamcraft.ui.GapRequest
 import de.zeitgleich.teamcraft.ui.PagedFeed
+import de.zeitgleich.teamcraft.ui.PlacedGap
+import de.zeitgleich.teamcraft.ui.placeGaps
 import de.zeitgleich.teamcraft.ui.PendingShare
 import de.zeitgleich.teamcraft.ui.TypingLine
 import de.zeitgleich.teamcraft.ui.shouldNotifyTyping
@@ -217,6 +221,8 @@ fun ConversationScreen(
     PagedFeed(PAGE, PAGE_BACK) { maybeOldest, older -> viewModel.readChat { tail(conversationId, maybeOldest, older) } }
   }
   var hasOlder by remember(conversationId) { mutableStateOf(maybeSeed?.hasOlder ?: false) }
+  // Holes in the history among the messages (issue #1438): a catch-up read the newest ones first.
+  var gaps by remember(conversationId) { mutableStateOf<List<HistoryGap>>(emptyList()) }
   var isLoadingOlder by remember(conversationId) { mutableStateOf(false) }
   // Older history the store doesn't hold: read when the feed reaches the store's end.
   var serverHistory by remember(conversationId) { mutableStateOf(ServerHistory.COMPLETE) }
@@ -241,6 +247,7 @@ fun ConversationScreen(
       val maybeSnapshot = viewModel.readChat { snapshot() }
       messages = tail
       hasOlder = maybeTail?.hasOlder ?: false
+      gaps = maybeTail?.gaps.orEmpty()
       extras = maybeExtras ?: extras
       snapshot = maybeSnapshot ?: snapshot
       // Read now: opened again, it starts at the end without an unread line.
@@ -325,6 +332,9 @@ fun ConversationScreen(
       onOpenConversation = onOpenConversation,
       unseenReactions = unseenReactions,
       onReactionsSeen = { seen -> viewModel.act(ChatActions.markReactionsSeen(conversationId, seen)) },
+      // Placed by the messages the core counted them among, before the notified one is added.
+      gaps = placeGaps(messages, gaps),
+      onFillGap = { request -> viewModel.act(ChatActions.fillHistoryGap(conversationId, request.gap.after, request.edge)) },
       older = OlderMessages(
         olderState(hasOlder, isLoadingOlder || isAskingServer, serverHistory),
         onRetry = { viewModel.act(ChatActions.loadOlderHistory(conversationId)) },
@@ -342,6 +352,7 @@ fun ConversationScreen(
           feed.older()?.let { tail ->
             messages = tail.messages
             hasOlder = tail.hasOlder
+            gaps = tail.gaps
           }
           isLoadingOlder = false
         }
@@ -763,6 +774,8 @@ private fun MessageList(
   older: OlderMessages = OlderMessages.None,
   unseenReactions: UnseenReactions = UnseenReactions(),
   onReactionsSeen: (List<String>) -> Unit = {},
+  gaps: List<PlacedGap> = emptyList(),
+  onFillGap: (GapRequest) -> Unit = {},
 ) {
   var maybeSelected by remember { mutableStateOf<Message?>(null) }
   var maybeSelectedImage by remember { mutableStateOf<FileInfo?>(null) }
@@ -803,6 +816,8 @@ private fun MessageList(
     older = older,
     unseenReactions = unseenReactions,
     onReactionsSeen = onReactionsSeen,
+    gaps = gaps,
+    onFillGap = onFillGap,
   )
   maybeSelected?.let { message ->
     MessageActions(

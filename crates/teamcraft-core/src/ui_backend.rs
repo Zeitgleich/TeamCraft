@@ -753,6 +753,26 @@ pub struct FeedTail {
   pub messages: Vec<Message>,
   /// Rows older than the first one exist: the list can page further back.
   pub has_older: bool,
+  /// Where the first row is in the whole feed: how many rows come before it.
+  pub start: usize,
+}
+
+impl FeedTail {
+  /// The holes among these rows, from those of the whole feed ([`ChatBackend::history_gaps`]),
+  /// each with its place counted from the first row (`index` 0: right above it). A paging list
+  /// shows them where they are (issues #1156, #1423); one above the first row is read again with
+  /// the page before it.
+  pub fn gaps_among(&self, gaps: Vec<HistoryGap>) -> Vec<HistoryGap> {
+    let end = self.start.saturating_add(self.messages.len());
+    gaps
+      .into_iter()
+      .filter(|gap| (self.start..=end).contains(&gap.index))
+      .map(|gap| HistoryGap {
+        index: gap.index - self.start,
+        ..gap
+      })
+      .collect()
+  }
 }
 
 impl<S: LocalStore> CoreChatBackend<S> {
@@ -1476,6 +1496,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           .map(|&at| self.to_message_among(&all[at], &relations))
           .collect(),
         has_older: start > 0,
+        start,
       };
     });
     tail
@@ -1498,6 +1519,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     FeedTail {
       messages: self.indexed_rows(conversation, &layout, start, len),
       has_older: start > 0,
+      start,
     }
   }
 
@@ -4119,6 +4141,25 @@ mod tests {
       let (backend, conversation) = feed_of(5);
       let tail = backend.feed_tail(conversation, Some(anchor(999, 2_500)), 0);
       assert_eq!(server_ids(&tail), [103, 104, 105]);
+    }
+
+    /// Issue #1438: the holes of the whole feed, placed among the rows a paging list holds.
+    #[test]
+    fn holes_are_placed_among_its_rows() {
+      let (backend, conversation) = feed_of(5);
+      let tail = backend.feed_tail(conversation, None, 3);
+      assert_eq!(tail.start, 2);
+      let gap = |index: usize| HistoryGap {
+        after: id(100),
+        index,
+        status: OlderHistory::Available,
+      };
+      let among: Vec<usize> = tail
+        .gaps_among(vec![gap(1), gap(2), gap(4), gap(5), gap(6)])
+        .into_iter()
+        .map(|gap| gap.index)
+        .collect();
+      assert_eq!(among, [0, 2, 3], "above its first row up to below its last");
     }
 
     #[test]
