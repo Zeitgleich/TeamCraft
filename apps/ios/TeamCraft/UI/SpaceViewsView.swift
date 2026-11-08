@@ -70,6 +70,11 @@ struct SpaceViewsView: View {
   private var content: some View {
     switch tab {
     case .people: SpacePeopleList(spaceId: spaceId, rosterDeadline: Self.rosterDeadline)
+    case .directMessages:
+      SpaceDirectMessagesList(account: account, spaceId: spaceId) { conversationId in
+        dismiss()
+        onOpen(conversationId)
+      }
     case .calls: SpaceCallsList(spaceId: spaceId) { dismiss() }
     case .meetings: SpaceMeetingsList(account: account, spaceId: spaceId) { dismiss() }
     case .saved:
@@ -260,6 +265,46 @@ private struct SpaceSavedList: View {
     }
     .task(id: SpaceLoadKey(changeCount: model.changeCount, spaceId: spaceId)) {
       maybeItems = await model.savedItems(spaceId: spaceId)
+    }
+  }
+}
+
+/// The DMs and group DMs with people of the space (#701), the most recent first. They are Home's
+/// conversations, shown here too; opening one opens it as from Home.
+private struct SpaceDirectMessagesList: View {
+  @Environment(AppModel.self) private var model
+  let account: Account
+  let spaceId: String
+  let onOpen: (String) -> Void
+
+  @State private var maybeConversations: [ConversationItem]?
+  @State private var previews: [String: ChatPreview] = [:]
+
+  var body: some View {
+    Group {
+      if let conversations = maybeConversations {
+        if conversations.isEmpty {
+          Text("space_direct_messages_empty").foregroundStyle(Theme.textMuted)
+        } else {
+          List(conversations, id: \.id) { conversation in
+            Button {
+              onOpen(conversation.id)
+            } label: {
+              ConversationRow(conversation: conversation, maybePreview: previews[conversation.id])
+            }
+            .buttonStyle(.plain)
+          }
+        }
+      } else {
+        ProgressView("loading")
+      }
+    }
+    .task(id: SpaceLoadKey(changeCount: model.changeCount, spaceId: spaceId)) {
+      let ids = await model.spaceDirectConversationIds(spaceId: spaceId)
+      let all = await model.conversations()
+      let listed = spaceDirectMessages(all, ids: ids)
+      previews = await model.chatPreviews(listed, myId: account.userId)
+      maybeConversations = spaceDirectMessages(listed, ids: ids, lastActivity: previews.mapValues(\.sentDate))
     }
   }
 }

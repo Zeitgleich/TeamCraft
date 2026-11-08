@@ -62,6 +62,11 @@ data class Space(
   @SerialName("can_create_channels") val canCreateChannels: Boolean = true,
   /** Version of the space's picture; without one the space shows no picture. */
   @SerialName("maybe_image_version") val maybeImageVersion: String? = null,
+  /**
+   * The DMs and group DMs whose other people all belong to the space (#701), as the core decided
+   * it from the member list this device holds. They stay on Home too.
+   */
+  @SerialName("direct_conversations") val directConversations: List<String> = emptyList(),
 )
 
 @Serializable

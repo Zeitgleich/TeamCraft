@@ -82,13 +82,14 @@ struct SpaceChoice: Equatable, Identifiable, Sendable {
 
 /// The views of one space, in the order of the sidebar on the desktop.
 enum SpaceViewTab: String, CaseIterable, Identifiable, Sendable {
-  case people, calls, meetings, saved, files
+  case people, directMessages, calls, meetings, saved, files
 
   var id: Self { self }
 
   var title: LocalizedStringKey {
     switch self {
     case .people: return "space_tab_people"
+    case .directMessages: return "space_tab_direct_messages"
     case .calls: return "space_tab_calls"
     case .meetings: return "space_tab_meetings"
     case .saved: return "space_tab_saved"
@@ -107,6 +108,33 @@ func spaceChoices(_ conversations: [ConversationItem]) -> [SpaceChoice] {
   }
   return choices.values
     .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+}
+
+/// The DMs and group DMs a space shows (#701): those of `conversations` named in `ids` (the space's
+/// `direct_conversations`, as the core decided them), the most recent first (`lastActivity`: newest
+/// message per conversation; by name without one). Each is still the one conversation Home lists.
+func spaceDirectMessages(
+  _ conversations: [ConversationItem], ids: [String], lastActivity: [String: Date] = [:]
+) -> [ConversationItem] {
+  let wanted = Set(ids)
+  var seen = Set<String>()
+  return conversations
+    .filter { $0.isDirect && wanted.contains($0.id) && seen.insert($0.id).inserted }
+    .sorted { lhs, rhs in
+      let left = lastActivity[lhs.id] ?? .distantPast
+      let right = lastActivity[rhs.id] ?? .distantPast
+      return left == right ? lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending : left > right
+    }
+}
+
+/// The spaces of the snapshot with the DMs each shows (#701).
+struct SpaceDirectSnapshot: Decodable, Sendable {
+  struct Space: Decodable, Sendable {
+    let id: String
+    var directConversations: [String]?
+  }
+
+  let spaces: [Space]
 }
 
 /// The meetings listed in a space: those scheduled in it.

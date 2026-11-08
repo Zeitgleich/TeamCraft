@@ -232,6 +232,22 @@ class ConversationSectionsTest {
     assertEquals(listOf("v2", null), spaces.map { it.maybeImageVersion })
   }
 
+  /** #701: a space shows the DMs the core named for it, newest first, and nothing else. */
+  @Test
+  fun aSpaceShowsItsDirectMessagesNewestFirst() {
+    val conversations = listOf(
+      item("1", "general", ConversationKind.PUBLIC, space = "Project A"),
+      item("2", "Amy", ConversationKind.DIRECT),
+      item("3", "Bob", ConversationKind.DIRECT, unread = 2u),
+      item("4", "Amy, Bob", ConversationKind.GROUP),
+      item("5", "Carl", ConversationKind.DIRECT),
+    )
+    val result = spaceDirectMessages(conversations, ids = listOf("1", "2", "3", "4"), lastActivity = mapOf("3" to 30L, "4" to 40L))
+    // The channel is no DM; Carl is not with the space's people.
+    assertEquals(listOf("Amy, Bob", "Bob", "Amy"), result.map { it.name })
+    assertEquals(emptyList<ConversationItem>(), spaceDirectMessages(conversations, ids = emptyList()))
+  }
+
   private fun item(
     id: String,
     name: String,

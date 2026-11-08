@@ -180,6 +180,25 @@ fun listSections(
   }
 }
 
+/**
+ * The DMs and group DMs a space shows (#701): those of `conversations` named in `ids` (the space's
+ * [de.zeitgleich.teamcraft.core.Space.directConversations]), the most recent first (`lastActivity`:
+ * newest message per conversation; by name without one). Each is still the one conversation Home
+ * lists, so no total adds it twice.
+ */
+fun spaceDirectMessages(
+  conversations: List<ConversationItem>,
+  ids: List<String>,
+  lastActivity: Map<String, Long> = emptyMap(),
+): List<ConversationItem> {
+  val wanted = ids.toSet()
+  val byName = compareBy<ConversationItem, String>(String.CASE_INSENSITIVE_ORDER) { it.name }
+  return conversations
+    .distinctBy { it.id }
+    .filter { it.isDirect && it.id in wanted }
+    .sortedWith(compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName))
+}
+
 /** A space the list layout names under its list, where its menu is. */
 data class ListedSpace(val id: String, val name: String, val maybeImageVersion: String? = null)
 
