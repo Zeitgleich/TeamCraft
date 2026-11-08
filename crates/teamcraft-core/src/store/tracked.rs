@@ -19,6 +19,7 @@
 //! purge interrupted by a crash is finished by the next start (#1161).
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
@@ -28,6 +29,7 @@ use super::{
   AttachmentRef, FeedVersion, LocalStore, MediaRange, MessageContent, MessageEdge, MessageFilter,
   MessageOrder, MessageSlot, StoreError, StoredMessage, Table, WriteTally, Written,
 };
+use crate::records::draft_reply_key;
 
 /// What the UI's message cache may hold by default (issue #1125): about 60,000 messages at the
 /// 1 KB a message of ordinary length takes decoded (docs/performance.md, "Local store"), but
@@ -68,6 +70,8 @@ pub struct TrackedStore<S> {
   media_purges: Arc<Mutex<MediaPurges>>,
   /// The messages written through this store, newest last ([`LocalStore::written_since`]).
   journal: Arc<Mutex<Journal>>,
+  /// [`WriteTally::foreign`] when the changes were last taken.
+  seen_foreign: Arc<AtomicU64>,
 }
 
 /// The newest writes of messages, by number: a reader that keeps its own number since asks what
@@ -128,6 +132,10 @@ pub struct StoreChanges {
   /// Something every entry may depend on: people's names, spaces, the conversation list,
   /// categories, the workspace, account data, mention rules.
   pub is_everything: bool,
+  /// Another process committed to the store (the iOS notification extension): it says nothing of
+  /// what it wrote, so every part of the snapshot and every feed is read again. Comes with the
+  /// three marks above.
+  pub is_foreign: bool,
 }
 
 /// What one write changed.
@@ -210,6 +218,7 @@ impl<S: LocalStore> TrackedStore<S> {
         backoff: HashMap::new(),
       })),
       journal: Arc::default(),
+      seen_foreign: Arc::default(),
     }
   }
 
@@ -318,9 +327,29 @@ impl<S: LocalStore> TrackedStore<S> {
     &self.inner
   }
 
-  /// Everything noted since the last call; starts noting afresh.
+  /// Everything noted since the last call; starts noting afresh. Writes of another process reach
+  /// no note, so a commit of one since the last call counts as a change of everything: the same
+  /// look the store's caches and the message cache take, once per snapshot, and nothing more when
+  /// no other process committed.
   pub fn take_changes(&self) -> StoreChanges {
-    std::mem::take(&mut *self.lock())
+    let is_foreign = self.take_foreign_commit();
+    let mut changes = std::mem::take(&mut *self.lock());
+    if is_foreign {
+      changes.is_foreign = true;
+      changes.is_everything = true;
+      changes.is_live = true;
+      changes.is_security = true;
+    }
+    changes
+  }
+
+  /// Whether another process committed since the last call. A count, not a flag: the store's
+  /// caches and the message cache look at it on their own.
+  fn take_foreign_commit(&self) -> bool {
+    self
+      .inner
+      .write_tally()
+      .is_some_and(|tally| self.seen_foreign.swap(tally.foreign, Ordering::Relaxed) != tally.foreign)
   }
 
   fn note(&self, change: Change) {
@@ -449,6 +478,11 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     }
     if table == Table::Conversations {
       self.inner.delete(Table::EntryTallies, key)?;
+      if let Ok(conversation) = key.parse::<ConversationId>() {
+        self
+          .inner
+          .delete(Table::Account, &draft_reply_key(conversation))?;
+      }
     }
     self.inner.delete(table, key)?;
     self.note(classify(table, key));
@@ -1199,6 +1233,31 @@ mod tests {
         assert_eq!(ours.message_revision(id(7)), revision);
         assert_eq!(clients(&ours, MessageFilter::All), [1]);
         assert_eq!(ours.message_revision(id(7)), revision);
+        drop((ours, theirs));
+        std::fs::remove_dir_all(&directory).unwrap();
+      }
+
+      /// Issue #1115: what another process wrote reaches no note, so its commit is read as a change
+      /// of everything, once.
+      #[test]
+      fn another_connections_commit_counts_as_a_change_of_everything_once() {
+        let (directory, ours, theirs) = two_connections();
+        ours.put(Table::Users, "9", b"mine").unwrap();
+        let own = ours.take_changes();
+        assert!(
+          own.is_everything && !own.is_foreign,
+          "our commits are noted as they are"
+        );
+
+        theirs.put(Table::Account, "bookkeeping", b"seen").unwrap();
+        let changed = ours.take_changes();
+        assert!(changed.is_foreign && changed.is_everything && changed.is_live && changed.is_security);
+
+        assert_eq!(
+          ours.take_changes(),
+          StoreChanges::default(),
+          "no other commit, no change"
+        );
         drop((ours, theirs));
         std::fs::remove_dir_all(&directory).unwrap();
       }

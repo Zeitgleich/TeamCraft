@@ -1321,6 +1321,41 @@ mod tests {
     std::fs::remove_dir_all(&directory).unwrap();
   }
 
+  /// Issue #1115: a commit of the iOS extension can't land inside a group of writes of the app:
+  /// SQLite's write lock holds it off, so the app's unfinished group is neither mixed with it nor
+  /// dropped from the caches, and both writes are there afterwards.
+  #[test]
+  fn an_open_group_of_writes_holds_another_connection_off_and_neither_is_lost() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let source = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+    let conversation = id(7);
+    let app = SealedSqliteStore::open(&path, &source).unwrap();
+    let extension = SealedSqliteStore::open(&path, &source).unwrap();
+
+    app.begin_writes().unwrap();
+    app
+      .upsert_message(&message(conversation, 0, Some(1), None, 0))
+      .unwrap();
+    assert!(
+      extension.put(Table::Users, "1", b"pushed").is_err(),
+      "the app holds the write lock"
+    );
+    assert_eq!(
+      listed(&app, conversation).len(),
+      1,
+      "its own write is still there"
+    );
+    app.end_writes().unwrap();
+
+    extension.put(Table::Users, "1", b"pushed").unwrap();
+
+    assert_eq!(app.get(Table::Users, "1").unwrap(), Some(b"pushed".to_vec()));
+    assert_eq!(listed(&app, conversation).len(), 1);
+    drop((app, extension));
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
   /// The extension opens with a store that was never migrated: no build, the messages stay as they
   /// are for the app's build, and its point reads work.
   #[test]

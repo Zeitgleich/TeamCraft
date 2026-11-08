@@ -41,9 +41,10 @@ struct ChatPane: View {
   @State private var isShowingFiles = false
   /// A channel's members with their roles (#1262); DMs and group DMs have no roles.
   @State private var isShowingMembers = false
-  @State private var maybeReplying: MessageItem?
-  /// The one picture of an album being answered, instead of a whole message (#241).
-  @State private var maybeReplyingImage: FileInfo?
+  /// What the next message replies to; kept in the core with the draft (#1115).
+  @State private var maybeReply: ComposerReply?
+  /// The stored reply target was read; saving before that would forget it.
+  @State private var isReplyLoaded = false
   @State private var maybeForwardingImage: FileInfo?
   @State private var isPictureGone = false
   @State private var maybeDeleting: MessageItem?
@@ -119,6 +120,11 @@ struct ChatPane: View {
       if draft.isEmpty { draft = stored }
       isDraftLoaded = true
       await reloadDraftFiles()
+      if threadId == nil {
+        // What the user was answering when the app was killed comes back with the text (#1115).
+        if maybeReply == nil { maybeReply = await model.draftReply(conversationId: conversation.id) }
+        isReplyLoaded = true
+      }
       takeOpenedPlace()
     }
     // What another app shared, once the stored draft is in the composer: the user sends it (#208).
@@ -129,6 +135,12 @@ struct ChatPane: View {
     }
     .onChange(of: draft) { _, text in
       if isDraftLoaded && maybeEditing == nil { draftSave.edit(text, conversationId: conversation.id, threadId: threadId) }
+    }
+    .onChange(of: maybeReply) { _, reply in
+      // At once: nothing is typed for it, and the app may be killed any time. Only a conversation's
+      // own composer replies; a thread's has nothing of this to store.
+      guard isReplyLoaded, threadId == nil else { return }
+      Task { await model.perform(.setDraftReply(conversationId: conversation.id, reply: reply)) }
     }
     .task(id: draft) {
       // Saved after a pause in typing; a new keystroke cancels the wait.
@@ -544,11 +556,7 @@ struct ChatPane: View {
   private var composer: some View {
     if conversation.canPost {
       VStack(alignment: .leading, spacing: 6) {
-        if let image = maybeReplyingImage {
-          imageReplyBar(image)
-        } else if let replying = maybeReplying {
-          replyBar(replying)
-        }
+        if let reply = maybeReply { replyBar(reply) }
         EmojiSuggestionBar(text: draft) { emoji in draft = completeEmoji(in: draft, with: emoji) }
         if !attachments.isEmpty || !otherFiles.isEmpty { attachmentChips }
         if VoiceRecorder.shared.showsBar(for: draftKey) {
@@ -661,14 +669,12 @@ struct ChatPane: View {
   private var canReply: Bool { threadId == nil && conversation.canPost }
 
   private func startReply(to message: MessageItem) {
-    maybeReplying = message
-    maybeReplyingImage = nil
+    maybeReply = ComposerReply(message: message)
     isComposerFocused = true
   }
 
   private func startImageReply(_ file: FileInfo) {
-    maybeReplying = nil
-    maybeReplyingImage = file
+    maybeReply = ComposerReply(image: file)
     isComposerFocused = true
   }
 
@@ -684,38 +690,22 @@ struct ChatPane: View {
     }
   }
 
-  /// The picture being answered, with a way out.
-  private func imageReplyBar(_ file: FileInfo) -> some View {
+  /// What's being answered, with a way out; a picture of an album shows beside the excerpt.
+  private func replyBar(_ reply: ComposerReply) -> some View {
     HStack {
       Rectangle().fill(Theme.accent).frame(width: 3)
-      if let thumbnail = ThumbnailCache.image(for: file) {
+      if let thumbnail = reply.maybeThumbnail {
         Image(uiImage: thumbnail).resizable().scaledToFill()
           .frame(width: 32, height: 32)
           .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
       }
       VStack(alignment: .leading, spacing: 2) {
-        Text("replying_to \(file.maybeSender.flatMap { displayNames[$0] } ?? "")")
+        Text("replying_to \(reply.authorName(from: displayNames))")
           .font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
-        Text(verbatim: file.fileName).font(.caption).foregroundStyle(Theme.textMuted).lineLimit(1)
+        Text(verbatim: reply.excerpt).font(.caption).foregroundStyle(Theme.textMuted).lineLimit(1)
       }
       Spacer()
-      Button { maybeReplyingImage = nil } label: { Image(systemName: "xmark.circle.fill") }
-        .foregroundStyle(Theme.textMuted)
-        .accessibilityLabel(Text("cancel"))
-    }
-    .frame(maxHeight: 40)
-  }
-
-  /// The message being answered, with a way out.
-  private func replyBar(_ message: MessageItem) -> some View {
-    HStack {
-      Rectangle().fill(Theme.accent).frame(width: 3)
-      VStack(alignment: .leading, spacing: 2) {
-        Text("replying_to \(message.shownAuthorName)").font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
-        Text(oneLine(message.body)).font(.caption).foregroundStyle(Theme.textMuted).lineLimit(1)
-      }
-      Spacer()
-      Button { maybeReplying = nil } label: { Image(systemName: "xmark.circle.fill") }
+      Button { maybeReply = nil } label: { Image(systemName: "xmark.circle.fill") }
         .foregroundStyle(Theme.textMuted)
         .accessibilityLabel(Text("cancel"))
     }
@@ -1063,22 +1053,19 @@ struct ChatPane: View {
   /// Hands the composer's text to the server to hold, to go out at `dueAtMs`.
   private func schedule(dueAtMs: Int64) async {
     let body = emojiConvert(text: draft.trimmingCharacters(in: .whitespacesAndNewlines))
-    let replying = maybeReplying
-    let replyingImage = maybeReplyingImage
+    let replying = maybeReply
     draft = ""
-    maybeReplying = nil
-    maybeReplyingImage = nil
+    maybeReply = nil
     let id = maybeScheduleAttempt.flatMap { $0.body == body ? $0.id : nil } ?? newClientMessageId()
     maybeScheduleAttempt = nil
     let request = SendRequest(
       conversationId: conversation.id, maybeThreadId: threadId, body: body,
-      maybeReplyToId: replyingImage?.message ?? replying?.id, maybeReplyAttachmentId: replyingImage?.fileId, maybeClientMessageId: id)
+      maybeReplyToId: replying?.messageId, maybeReplyAttachmentId: replying?.maybeAttachmentId, maybeClientMessageId: id)
     if let failure = await model.performReporting(.scheduleMessage(request, dueAtMs: dueAtMs)) {
       draft = body
       // After the text: its change would drop the attempt again.
       maybeScheduleAttempt = (body, id)
-      maybeReplying = replying
-      maybeReplyingImage = replyingImage
+      maybeReply = replying
       if failure == .tooLarge { isScheduleTooLarge = true } else { isSendFailed = true }
     }
   }
@@ -1095,7 +1082,7 @@ struct ChatPane: View {
       // A file the server held too long is gone: the user decides, nothing goes out without it unsaid.
       attachmentError = .draftFilesExpired
       return
-    } else if attachments.isEmpty && sendableOtherFiles.isEmpty && maybeReplying == nil && maybeReplyingImage == nil {
+    } else if attachments.isEmpty && sendableOtherFiles.isEmpty && maybeReply == nil {
       guard !body.isEmpty else { return }
       draft = ""
       if !(await model.send(conversationId: conversation.id, threadId: threadId, body: body)) {
@@ -1108,23 +1095,20 @@ struct ChatPane: View {
       let fromDraft = sendableOtherFiles
       // The draft's files go with the message; they don't show again while the core catches up.
       let sentIds = Set(files.compactMap(\.maybeDraftId) + fromDraft.map(\.id))
-      let replying = maybeReplying
-      let replyingImage = maybeReplyingImage
+      let replying = maybeReply
       draft = ""
       attachments = []
       goneDraftIds.formUnion(sentIds)
-      maybeReplying = nil
-      maybeReplyingImage = nil
+      maybeReply = nil
       let request = SendRequest(
         conversationId: conversation.id, maybeThreadId: threadId, body: body, files: files, draftFiles: fromDraft,
-        maybeReplyToId: replyingImage?.message ?? replying?.id, maybeReplyAttachmentId: replyingImage?.fileId)
+        maybeReplyToId: replying?.messageId, maybeReplyAttachmentId: replying?.maybeAttachmentId)
       if !(await model.performChecked(.sendMessage(request))) {
         // Nothing was sent: the text and the files stay for another try.
         draft = body
         attachments = files + attachments
         goneDraftIds.subtract(sentIds)
-        maybeReplying = replying
-        maybeReplyingImage = replyingImage
+        maybeReply = replying
         if files.isEmpty && fromDraft.isEmpty { isSendFailed = true } else { attachmentError = .sendFailed }
       }
     }
@@ -1145,16 +1129,13 @@ struct ChatPane: View {
       attachmentError = .unreadable
       return
     }
-    let replying = maybeReplying
-    let replyingImage = maybeReplyingImage
-    maybeReplying = nil
-    maybeReplyingImage = nil
+    let replying = maybeReply
+    maybeReply = nil
     let request = SendRequest(
       conversationId: conversation.id, maybeThreadId: threadId, body: "", files: [file],
-      maybeReplyToId: replyingImage?.message ?? replying?.id, maybeReplyAttachmentId: replyingImage?.fileId)
+      maybeReplyToId: replying?.messageId, maybeReplyAttachmentId: replying?.maybeAttachmentId)
     if !(await model.performChecked(.sendMessage(request))) {
-      maybeReplying = replying
-      maybeReplyingImage = replyingImage
+      maybeReply = replying
       attachmentError = .sendFailed
     }
     await reload()

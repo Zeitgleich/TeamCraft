@@ -510,6 +510,12 @@ pub fn save_sync_state(store: &impl LocalStore, state: &SyncState) -> Result<(),
   put_json(store, Table::SyncState, SYNC_KEY, state)
 }
 
+/// Account record: what the conversation's composer replies to (#1115). On this device only, and
+/// it goes with the conversation.
+pub fn draft_reply_key(conversation: ConversationId) -> String {
+  format!("draft_reply/{conversation}")
+}
+
 pub fn outbox_key(conversation: ConversationId, client_message_id: ClientMessageId) -> String {
   format!("{conversation}/{}", client_message_id.to_hex())
 }

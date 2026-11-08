@@ -239,6 +239,20 @@ object ChatActions {
     put("body", body)
   }
 
+  /** What the conversation's composer replies to (#1115), kept on this device; a null message forgets it. */
+  fun setDraftReply(conversation: String, maybeMessage: String?, maybeAttachment: String?) = action("set_draft_reply") {
+    put("conversation", conversation)
+    put(
+      "maybe_reply",
+      maybeMessage?.let { message ->
+        buildJsonObject {
+          put("message", message)
+          put("maybe_attachment", maybeAttachment.json())
+        }
+      } ?: JsonNull,
+    )
+  }
+
   /** Files go up with the draft as they are picked (#1220); each carries its [DraftCopy]. */
   fun attachDraftFiles(conversation: String, maybeThread: String?, files: List<PickedFile>) = action("attach_draft_files") {
     put("conversation", conversation)
@@ -441,6 +455,9 @@ object ChatQueries {
     put("conversation", conversation)
     put("maybe_thread", maybeThread.json())
   }
+
+  /** What the conversation's composer replies to, as a quote (#1115). */
+  fun draftReply(conversation: String) = query("draft_reply") { put("conversation", conversation) }
 
   fun drafts() = query("drafts") {}
 

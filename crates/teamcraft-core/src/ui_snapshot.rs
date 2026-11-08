@@ -151,6 +151,10 @@ impl SnapshotCache {
     security: impl FnOnce() -> Option<SecuritySnapshot>,
   ) {
     let next = self.revision + 1;
+    if changes.is_foreign {
+      // Who another process announced is not noted either: the next update reads the whole log.
+      self.presence = PresenceIndex::default();
+    }
     backend.read(
       self
         .presence
@@ -170,7 +174,11 @@ impl SnapshotCache {
       },
     };
     if let Some(parts) = &mut self.maybe_parts {
-      is_changed |= parts.note_feeds(&changes.conversations, next);
+      is_changed |= if changes.is_foreign {
+        parts.note_every_feed(next)
+      } else {
+        parts.note_feeds(&changes.conversations, next)
+      };
     }
     if let (Some(parts), Some(security)) = (&mut self.maybe_parts, maybe_security) {
       is_changed |= parts.security.set(security, next);
@@ -275,6 +283,13 @@ impl Parts {
       }
     }
     is_noted
+  }
+
+  /// [`Self::note_feeds`] for all conversations: another process committed, and which feeds it
+  /// wrote is unknown. A reader re-reads the window it shows, nothing more.
+  fn note_every_feed(&mut self, revision: u64) -> bool {
+    let conversations: BTreeSet<ConversationId> = self.conversations.keys().copied().collect();
+    self.note_feeds(&conversations, revision)
   }
 
   /// Re-reads only the conversations and people `changes` name.
@@ -567,4 +582,193 @@ pub fn key_backup_state(store: &impl LocalStore) -> Result<Option<KeyBackupState
     maybe_recovery_key_set_at,
     is_passphrase_allowed: crate::workspace::is_passphrase_allowed(store),
   }))
+}
+
+/// Issue #1115: the iOS notification extension writes the shared store while the app stays alive.
+#[cfg(test)]
+#[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+mod other_process {
+  use std::sync::Arc;
+
+  use teamcraft_client_api::snapshot_changes::SnapshotCursor;
+  use teamcraft_crypto::secret::SymmetricKey;
+  use teamcraft_proto::{
+    ClientMessageId, ConversationResponse, ConversationVisibility, HistoryPolicy, Id, Snowflake,
+  };
+
+  use super::*;
+  use crate::clock::ManualClock;
+  use crate::store::{MessageContent, SealedSqliteStore, StaticKeySource, StoredMessage, TrackedStore};
+
+  type Store = TrackedStore<Arc<SealedSqliteStore>>;
+
+  /// The app's store, backend and cache, and the extension's connection to the same file.
+  struct Fixture {
+    directory: std::path::PathBuf,
+    store: Store,
+    backend: CoreChatBackend<Store>,
+    cache: SnapshotCache,
+    extension: SealedSqliteStore,
+  }
+
+  #[test]
+  fn what_another_process_stored_shows_in_the_next_snapshot() {
+    let mut fixture = Fixture::open();
+    store_conversation(fixture.store.inner().as_ref(), "general");
+    fixture.store.upsert_message(&message(1)).unwrap();
+    let before = fixture.snapshot();
+    assert_eq!(before.conversations[0].name, "general");
+    assert_eq!(before.message_counts, [(conversation(), 1)]);
+
+    store_conversation(&fixture.extension, "planning");
+    fixture.extension.upsert_message(&message(2)).unwrap();
+
+    let after = fixture.snapshot();
+    assert_eq!(after.conversations[0].name, "planning");
+    assert_eq!(after.message_counts, [(conversation(), 2)]);
+  }
+
+  #[test]
+  fn a_reader_re_reads_the_feeds_after_another_process_committed() {
+    let mut fixture = Fixture::open();
+    store_conversation(fixture.store.inner().as_ref(), "general");
+    let cursor = fixture.cursor();
+
+    // The extension's push bookkeeping: nothing of the conversation's entry changes.
+    fixture.extension.put(Table::Account, "shown", b"[]").unwrap();
+
+    let answer = fixture.cache.changes_since(
+      &fixture.backend,
+      fixture.store.take_changes(),
+      || None,
+      Some(cursor),
+    );
+    assert!(answer.conversations.is_empty());
+    assert_eq!(answer.feeds, [conversation()]);
+    assert_ne!(answer.cursor.revision, cursor.revision);
+  }
+
+  #[test]
+  fn no_other_process_means_nothing_to_re_read() {
+    let mut fixture = Fixture::open();
+    store_conversation(fixture.store.inner().as_ref(), "general");
+    let cursor = fixture.cursor();
+
+    let answer = fixture.cache.changes_since(
+      &fixture.backend,
+      fixture.store.take_changes(),
+      || None,
+      Some(cursor),
+    );
+
+    assert_eq!(answer.cursor.revision, cursor.revision);
+    assert!(answer.feeds.is_empty());
+  }
+
+  impl Fixture {
+    fn open() -> Self {
+      let directory = std::env::temp_dir().join(format!(
+        "teamcraft-snapshot-{}",
+        rand_core::RngCore::next_u64(&mut rand_core::OsRng)
+      ));
+      std::fs::create_dir_all(&directory).unwrap();
+      let path = directory.join("store.db");
+      let key = SymmetricKey::generate(&mut rand_core::OsRng);
+      let app = SealedSqliteStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+      let extension = SealedSqliteStore::open(&path, &StaticKeySource::new(key)).unwrap();
+      let store = TrackedStore::with_message_cache(Arc::new(app), 1 << 20);
+      let backend = CoreChatBackend::new(store.clone(), id(1), Box::new(ManualClock::new(0)));
+      Self {
+        directory,
+        store,
+        backend,
+        cache: SnapshotCache::new(1),
+        extension,
+      }
+    }
+
+    fn snapshot(&mut self) -> ChatSnapshot {
+      self
+        .cache
+        .snapshot(&self.backend, self.store.take_changes(), || None)
+    }
+
+    /// Has the cache built its parts and answers where a reader stands.
+    fn cursor(&mut self) -> SnapshotCursor {
+      self
+        .cache
+        .changes_since(&self.backend, self.store.take_changes(), || None, None)
+        .cursor
+    }
+  }
+
+  impl Drop for Fixture {
+    fn drop(&mut self) {
+      // Left behind in the system's temporary folder at worst.
+      let _ = std::fs::remove_dir_all(&self.directory);
+    }
+  }
+
+  fn store_conversation(store: &impl LocalStore, name: &str) {
+    let response = ConversationResponse {
+      id: conversation(),
+      maybe_space_id: None,
+      kind: ConversationKindProto::Group,
+      maybe_name: Some(name.into()),
+      maybe_topic: None,
+      maybe_description: None,
+      visibility: ConversationVisibility::Public,
+      history_policy: HistoryPolicy::Full,
+      maybe_category_id: None,
+      is_archived: false,
+      moderation: Default::default(),
+      is_integration: false,
+      contains_guests: false,
+      maybe_organizer_user_id: None,
+      maybe_my_permissions: None,
+      maybe_importer_user_id: None,
+      maybe_imported_through: None,
+      maybe_my_membership: None,
+      participants: Vec::new(),
+      maybe_image: None,
+    };
+    records::put_json(
+      store,
+      Table::Conversations,
+      &conversation().to_string(),
+      &response,
+    )
+    .unwrap();
+  }
+
+  fn message(n: u8) -> StoredMessage {
+    StoredMessage {
+      conversation_id: conversation(),
+      client_message_id: ClientMessageId::from_bytes([n; 16]),
+      maybe_server_id: Some(id(i64::from(n))),
+      sender_user_id: id(2),
+      maybe_thread_id: None,
+      sent_at_ms: i64::from(n),
+      content: MessageContent::Text {
+        body: format!("message {n}"),
+        mentions: Vec::new(),
+        meta: Default::default(),
+      },
+      is_edited: false,
+      edits: Vec::new(),
+      maybe_edit_id: None,
+      is_pinned: false,
+      maybe_verified_commit: None,
+      maybe_server_change: None,
+      maybe_unreadable: None,
+    }
+  }
+
+  fn conversation() -> ConversationId {
+    id(7)
+  }
+
+  fn id<T: Id>(raw: i64) -> T {
+    T::from_snowflake(Snowflake::new(raw).unwrap())
+  }
 }
