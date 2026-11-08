@@ -52,6 +52,7 @@ const ENROLL_ERROR_ID: &str = "enroll-error";
 /// Shows the right screen for the sign-in state and the chat shell once the user is in.
 #[component]
 pub fn SessionGate(settings: Settings) -> impl IntoView {
+  crate::start_timing::end(crate::start_timing::Part::SessionChunk);
   let config = AppConfig::load();
   let control = SessionControl::new(auth::detect(config));
   provide_context(control);
@@ -1351,10 +1352,13 @@ pub(crate) async fn load_backend(
   me: &GetMeResponse,
 ) -> Result<Rc<dyn Backend>, LoadError> {
   if tauri::has_core() {
-    let chat = RemoteChat::connect().await.map_err(|reason| LoadError::Parse {
-      path: "core_snapshot".to_owned(),
-      reason,
-    })?;
+    let connecting = RemoteChat::connect();
+    let chat = crate::start_timing::timed(crate::start_timing::Part::Snapshot, connecting)
+      .await
+      .map_err(|reason| LoadError::Parse {
+        path: "core_snapshot".to_owned(),
+        reason,
+      })?;
     let hybrid = Hybrid::with_live(chat, me.role.clone(), auth);
     // Calls are optional: without them the app offers no calls.
     let hybrid = if tauri::is_available() {

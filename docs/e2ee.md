@@ -4826,7 +4826,11 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   changed; the hash check is the same for every source, and a mismatch is fetched once more from the
   network before the update is dropped. Precompressed responses (`.br`/`.gz` next to the files) arrive
   decoded, so the hashes are those of the files as built; the variants are not part of the manifest.
-  The app is served from that cache, never from the network.
+  The app is served from that cache, never from the network. `/api/` is left alone, with one
+  exception: the brand's colors (`/api/v1/brand/theme.css`, docs/branding.md), which the page waits
+  for before its first paint, answer from the copy of the last start while the fresh one is
+  fetched for the next (#1465). They are colors of the same origin, outside the signed release
+  as they always were.
 - **Parts loaded when first used.** The app is split into wasm chunks that load when their part of
   the app first opens (#334). `release.json` lists them in `lazy` (the wasm files `index.html` and
   `sw.js` don't name, including the signed-in app's, and the UI's texts, one file per language of
@@ -4836,10 +4840,16 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   loaded (so guests never download the signed-in app), checks it against the signed hash in the
   version's verified file list and only then stores and serves it. Files only some people use are
   also listed in `on_demand` (the background effects' segmentation worker and model and the photo
-  backgrounds' full pictures, #439): the
+  backgrounds' full pictures, #439; and the files in the signed-in app's pack, below): the
   worker skips them in the background fetch. A server that edits `lazy` or `on_demand` only
   changes when a file is downloaded, never what runs. A chunk that doesn't match its hash isn't
-  served, and the pages warn as for a release that doesn't verify. A page of a release whose chunks
+  served, and the pages warn as for a release that doesn't verify.
+- **The signed-in app's pack (#1465).** The chunks the signed-in app needs at once are also joined
+  into one file of the release (`teamcraft-ui-session-<id>.pack`, in `lazy`), so a start fetches one
+  file instead of 866. It is a file like the others: listed in the signed manifest with its SHA-256,
+  and checked by the worker before it is stored or served. The chunk loader only cuts the pack at
+  the offsets of the release's own loader script, which is signed too; a chunk taken from it is
+  the same bytes as the file of that name, and a page whose pack doesn't arrive fetches the files. A page of a release whose chunks
   the server no longer has (a deploy since it loaded, before the background fetch) gets an error
   for that part of the app with a retry and a reload, which brings the new release.
 - **Failed updates.** An update that does not verify is dropped: the previous verified version keeps

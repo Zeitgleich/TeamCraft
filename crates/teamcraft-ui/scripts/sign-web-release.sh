@@ -6,13 +6,16 @@
 # Writes <dist-dir>/release.json: every file of the bundle with its SHA-256, and an Ed25519 signature
 # over the canonical JSON of {version, files}; and puts the matching public key into <dist-dir>/sw.js.
 # `lazy` lists the wasm files index.html and sw.js don't name (the chunks that load when first used
-# and the signed-in app's, #334): the worker fetches those when needed or after a member's page
-# loaded instead of on install, so a guest's meeting page doesn't download the signed-in app. The
+# and the signed-in app's, #334) and the signed-in app's pack (#1465): the worker fetches those when
+# needed or after a member's page loaded instead of on install, so a guest's meeting page doesn't
+# download the signed-in app. The
 # UI's texts (`i18n/*.ftl`, one file per language, #1437) are lazy too: a page asks for the language
 # it shows.
 # `on_demand` (also in `lazy`) lists the background effects' segmentation (#439: the worker's
 # script and module, the model) and the photo backgrounds' full pictures: fetched only when someone
-# turns an effect on or picks the photo, never in the background. Both are outside the signature (older workers verify {version, files} only, and
+# turns an effect on or picks the photo, never in the background; and the files in the signed-in
+# app's pack (#1465), which a member loads with the pack and only a guest's meeting or a page whose
+# pack didn't arrive asks for one by one. Both are outside the signature (older workers verify {version, files} only, and
 # fetch `on_demand` files like lazy ones); every file is checked against its hash.
 # Run it on the machine that holds the release key, not on the server that serves the files.
 # Needs openssl 3, python3 and sha256sum (or shasum on macOS).
@@ -35,7 +38,7 @@ PY
 # sw.js (with its key) and release.json itself are not listed: the worker is fetched by the browser,
 # the manifest is what the worker verifies.
 python3 - "$dist" "$version" "$key" <<'PY'
-import base64, hashlib, json, os, subprocess, sys, tempfile
+import base64, hashlib, json, os, re, subprocess, sys, tempfile
 dist, version, key = sys.argv[1:4]
 files = {}
 for root, _, names in os.walk(dist):
@@ -58,11 +61,19 @@ entry_points = "".join(open(os.path.join(dist, name), encoding="utf-8").read() f
 on_demand_prefixes = ("teamcraft-segmentation-worker-", "teamcraft-web-segmentation-")
 def is_photo(path):
     return path.startswith("backgrounds/") and path.count("/") == 1 and path.endswith(".jpg")
-on_demand = sorted(path for path in files
-                   if path.endswith(".nnef") or path.startswith(on_demand_prefixes) or is_photo(path))
+# The split loader names a file that is in the signed-in app's pack with `fetchPart` (teamcraft-web-bundle).
+packed = set()
+for path in files:
+    if path.startswith("teamcraft-ui-split-") and path.endswith(".js"):
+        packed |= set(re.findall(r'fetchPart\(new URL\("\./([^"]+)"', open(os.path.join(dist, path), encoding="utf-8").read()))
+missing_packed = sorted(packed - set(files))
+if missing_packed:
+    raise SystemExit("the split loader names files that aren't there: " + ", ".join(missing_packed))
+on_demand = sorted(packed | {path for path in files
+                   if path.endswith(".nnef") or path.startswith(on_demand_prefixes) or is_photo(path)})
 # The UI's texts: each page asks for the language it shows (init.js, src/i18n.rs).
 texts = {path for path in files if path.startswith("i18n/") and path.endswith(".ftl")}
-lazy = sorted(set(on_demand) | texts | {path for path in files if path.endswith(".wasm") and path not in entry_points})
+lazy = sorted(set(on_demand) | texts | {path for path in files if path.endswith((".wasm", ".pack")) and path not in entry_points})
 manifest = {
     "version": version,
     "files": files,

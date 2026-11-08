@@ -5,8 +5,8 @@
 //! the app.
 //!
 //! The signed-in app itself is one (`session`): a guest who opens a meeting link loads only the
-//! guest pages, and `init.js` fetches the session's chunks next to the app for every other page, so
-//! signed-in users don't wait for them one after the other.
+//! guest pages, and `init.js` fetches the session's chunks (one file, their pack, #1465) next to
+//! the app for every other page, so signed-in users don't wait for them one after the other.
 //!
 //! Each split point is a `wasm_split` function that builds the area's view; [`lazy_area`] calls it,
 //! shows a placeholder while the chunk loads and, when it can't load (offline, a deploy in between),

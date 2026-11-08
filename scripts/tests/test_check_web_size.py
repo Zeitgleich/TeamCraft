@@ -18,6 +18,7 @@ SPEC.loader.exec_module(check)
 
 APP = "teamcraft-ui-0123abcd_bg.wasm"
 SERVICE_WORKER = "teamcraft-web-sw-4567ef_bg.wasm"
+SESSION_INIT = "const sessionPack = '/teamcraft-ui-session-0123abcd.pack';\n"
 
 
 class BudgetTest(unittest.TestCase):
@@ -79,10 +80,15 @@ class BudgetTest(unittest.TestCase):
     def test_the_signed_in_app_counts_and_a_guest_visit_is_printed(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
+            (dist / "teamcraft-ui-session-0123abcd.pack").write_bytes(os.urandom(700))
             (dist / "teamcraft-ui-split-session-0123abcd.wasm").write_bytes(os.urandom(700))
             (dist / "teamcraft-ui-split-admin-0123abcd.wasm").write_bytes(os.urandom(5000))
-            (dist / "init.js").write_text(
-                "for (const href of ['/teamcraft-ui-split-session-0123abcd.wasm']) {}\n")
+            (dist / "init.js").write_text(SESSION_INIT)
+            (dist / "teamcraft-ui-split-0123abcd.js").write_text(split_loader({
+                "guest": ["teamcraft-ui-split-admin-0123abcd.wasm"],
+                "calls": ["teamcraft-ui-split-admin-0123abcd.wasm"],
+                "session": ["teamcraft-ui-split-session-0123abcd.wasm"],
+            }, {}))
             code, out, err = run(str(dist), "--budget-bytes", "1500")
         self.assertEqual(code, 1)
         self.assertIn("| signed-in app ", out)
@@ -111,9 +117,8 @@ class BudgetTest(unittest.TestCase):
             dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
             first_visit = gzip_total_of(dist)
             (dist / "teamcraft-web-calls-0123abcd_bg.wasm").write_bytes(os.urandom(400))
-            (dist / "teamcraft-ui-split-session-0123abcd.wasm").write_bytes(os.urandom(5000))
-            (dist / "init.js").write_text(
-                "for (const href of ['/teamcraft-ui-split-session-0123abcd.wasm']) {}\n")
+            (dist / "teamcraft-ui-session-0123abcd.pack").write_bytes(os.urandom(5000))
+            (dist / "init.js").write_text(SESSION_INIT)
             guest = first_visit + len(gzip.compress((dist / "teamcraft-web-calls-0123abcd_bg.wasm").read_bytes(), 9))
             code, out, err = run(str(dist), "--guest-budget-bytes", str(guest), "--budget-bytes", "100000")
             self.assertEqual(code, 0, err)
@@ -157,22 +162,44 @@ class BudgetTest(unittest.TestCase):
     def test_a_signed_in_visit_over_its_ceiling_fails_while_the_guest_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
-            (dist / "teamcraft-ui-split-session-0123abcd.wasm").write_bytes(os.urandom(5000))
-            (dist / "init.js").write_text(
-                "for (const href of ['/teamcraft-ui-split-session-0123abcd.wasm']) {}\n")
+            (dist / "teamcraft-ui-session-0123abcd.pack").write_bytes(os.urandom(5000))
+            (dist / "init.js").write_text(SESSION_INIT)
             code, _, err = run(str(dist), "--guest-budget-bytes", "100000", "--budget-bytes", "3000")
         self.assertEqual(code, 1)
         self.assertIn("the signed-in web wasm is", err)
 
-    def test_a_listed_session_file_that_is_missing_is_an_error(self):
+    def test_a_named_pack_that_is_missing_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=10, service_worker_bytes=10)
-            (dist / "init.js").write_text("for (const href of ['/gone.wasm']) {}\n")
+            (dist / "init.js").write_text("const sessionPack = '/gone.pack';\n")
             code, _, err = run(str(dist))
         self.assertEqual(code, 2)
-        self.assertIn("gone.wasm", err)
+        self.assertIn("gone.pack", err)
 
-    def test_an_init_js_without_the_session_list_is_an_error(self):
+    def test_the_files_of_the_pack_are_not_listed_as_loading_later(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
+            (dist / "teamcraft-ui-session-0123abcd.pack").write_bytes(os.urandom(700))
+            (dist / "teamcraft-ui-chunk-1-0123abcd.wasm").write_bytes(os.urandom(700))
+            (dist / "teamcraft-ui-split-session-0123abcd.wasm").write_bytes(os.urandom(700))
+            (dist / "teamcraft-ui-split-guest-0123abcd.wasm").write_bytes(os.urandom(700))
+            (dist / "init.js").write_text(SESSION_INIT)
+            loader = split_loader({
+                "guest": ["teamcraft-ui-split-guest-0123abcd.wasm"],
+                "calls": ["teamcraft-ui-split-guest-0123abcd.wasm"],
+                "session": ["teamcraft-ui-split-session-0123abcd.wasm", "__chunk_1"],
+            }, {"__chunk_1": "teamcraft-ui-chunk-1-0123abcd.wasm"})
+            # The loader names a packed file with `fetchPart`.
+            loader = loader.replace('fetch(new URL("./teamcraft-ui-chunk-1', 'fetchPart(new URL("./teamcraft-ui-chunk-1')
+            (dist / "teamcraft-ui-split-0123abcd.js").write_text(loader)
+            code, out, err = run(str(dist), "--budget-bytes", "100000", "--guest-budget-bytes", "100000")
+        self.assertEqual(code, 0, err)
+        lazy = out.split("Loaded when first used")[1]
+        self.assertNotIn("chunk-1", lazy)
+        self.assertNotIn("split-session", lazy)
+        self.assertIn("split-guest", lazy)
+
+    def test_an_init_js_without_the_pack_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=10, service_worker_bytes=10)
             (dist / "init.js").write_text("import init from '/app.js';\n")

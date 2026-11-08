@@ -22,6 +22,7 @@ use crate::model::UserId;
 use crate::reactive::SetIfAlive;
 use crate::remote_backend;
 use crate::settings::{load_string, store_string};
+use crate::start_timing::{self, Part};
 
 const KEY_DEVICE_READY_PREFIX: &str = "teamcraft.device_ready.";
 /// How long the client core may wait for its access token before the user is told; it keeps
@@ -242,9 +243,10 @@ impl SessionControl {
       if tauri::is_available() && !control.has_server().await {
         return;
       }
-      match control.authenticator().cached_account().await {
+      let auth = control.authenticator();
+      match start_timing::timed(Part::CachedAccount, auth.cached_account()).await {
         Some(cached) if tauri::has_core() => control.start_from_cached_account(cached).await,
-        _ => control.restore_and_load().await,
+        _ => start_timing::timed(Part::Restore, control.restore_and_load()).await,
       }
     });
   }
@@ -292,7 +294,7 @@ impl SessionControl {
     let control = *self;
     let checked = cached.clone();
     spawn_local(async move { control.check_cached_account(checked, round).await });
-    let status = remote_backend::core_status(cached.id).await;
+    let status = start_timing::timed(Part::CoreStart, remote_backend::core_status(cached.id)).await;
     if self.core_round.try_get_untracked() != Some(round) {
       return;
     }
