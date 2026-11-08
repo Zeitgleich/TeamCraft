@@ -1754,16 +1754,25 @@ events held back everything behind them although nothing they touch is still bei
 
 A channel with hundreds of new messages was read page by page, in order, before the catch-up went on
 to the next conversation and before its own newest messages showed. With
-`catch_up_message_pages` (web and desktop: 4 pages, 200 messages) a catch-up reads that many, then
+`catch_up_message_pages` (every app: 4 pages, 200 messages) a catch-up reads that many, then
 the conversation's newest page, and moves on; the conversation counts as caught up for live events
 and the outbox, and the feed shows a hole between the two (#1156's gap row). The MLS queue is read
 whole as before. Once every conversation got that far, the same catch-up reads each hole full, in
 order, and takes pins, bookmarks and channel role entries from the newest page on again, so a pin in
 the hole doesn't undo a newer unpin; one cut short leaves the hole noted, and the next catch-up
 reads it (the conversation counts as due without a head that moved). Nothing a message carries is
-skipped, the store ends as before. The mobile apps leave it off until their feeds show holes.
-`catch_up.rs`: 30 new messages in pages of 5, two in order: cut short after one page of the hole,
-the newest five are there; the next catch-up reads the rest, every message once, in order.
+skipped, the store ends as before. `catch_up.rs`: 30 new messages in pages of 5, two in order: cut
+short after one page of the hole, the newest five are there; the next catch-up reads the rest, every
+message once, in order.
+
+The mobile apps turned it on once their feeds showed holes (issue #1438): the FFI's pages
+(`messages_from`, `message_tail`) carry the holes among their messages (`gaps`, each with its place
+in the page), iOS and Android draw a row there ("Loading messages…", or the failure with "Try
+again"), and a reader within 40 rows of it, not at the bottom of a list that scrolls, asks for a
+page of it from the side they come from, as web and desktop do. Paging back, a jump to a date and
+its holes, and the first sync's older history read pages out of order too: a pin or bookmarks
+message in such a page now takes the controls from it on again in their order (`replay_controls_from`),
+so an older one read later no longer undoes a newer one (`older_history.rs` tests).
 
 Not measured end to end yet: the e2e scenario (`long_absence.rs`) with a live message during the
 catch-up and the issue's 12 h gap with 40 conversations needs the Linux network namespace

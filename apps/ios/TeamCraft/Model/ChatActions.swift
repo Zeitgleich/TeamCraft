@@ -53,6 +53,8 @@ enum ChatAction {
   /// every device (issue #1009).
   case markReactionsSeen(conversationId: String, messageIds: [String])
   case loadOlderHistory(conversationId: String)
+  /// The reader came near a hole in the history (issue #1438): one page of it, from `edge`.
+  case fillHistoryGap(conversationId: String, after: String, edge: GapEdge)
   /// To an absolute time, so a retry doesn't extend twice; the server checks who may (issue #212).
   case extendGuest(spaceId: String, userId: String, expiresAtMs: Int64)
   /// The composer's unsent text, kept by the core (synced to the user's devices) so it survives the
@@ -140,6 +142,8 @@ enum ChatAction {
       object = ["action": "mark_reactions_seen", "conversation": conversation, "messages": messages]
     case .loadOlderHistory(let conversation):
       object = ["action": "load_older_history", "conversation": conversation]
+    case .fillHistoryGap(let conversation, let after, let edge):
+      object = ["action": "fill_history_gap", "conversation": conversation, "after": after, "edge": edge.rawValue]
     case .scheduleMessage(let request, let dueAtMs):
       object = ["action": "schedule_message", "message": request.object, "due_at": dueAtMs]
     case .updateScheduled(let id, let body, let dueAtMs):

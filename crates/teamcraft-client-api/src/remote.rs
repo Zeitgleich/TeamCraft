@@ -461,6 +461,11 @@ pub struct MessageTail {
   /// As [`MessageWindow::undecrypted`].
   #[serde(default)]
   pub undecrypted: usize,
+  /// History this device never read between these messages (#1156, #1423), oldest first: each
+  /// `index` counts the messages before it here (0: above the first). A list shows it there and,
+  /// once the reader comes near, asks for it ([`ChatAction::FillHistoryGap`]).
+  #[serde(default)]
+  pub gaps: Vec<crate::model::HistoryGap>,
 }
 
 /// Where the local client stands.

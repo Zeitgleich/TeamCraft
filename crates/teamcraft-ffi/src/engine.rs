@@ -34,11 +34,12 @@ use teamcraft_core::push_guard;
 use teamcraft_core::push_preview::{
   PreviewGap, PushPreview, is_read, push_preview, save_device_push_content,
 };
+use teamcraft_core::push_probe::{PROBE_OVERLAY_BYTES, probe_push};
 use teamcraft_core::records;
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{
-  DEFAULT_MESSAGE_CACHE_BYTES, LocalStore as _, SealedSqliteStore, SealedStoreLimits, StaticKeySource,
-  TrackedStore,
+  DEFAULT_MESSAGE_CACHE_BYTES, LocalStore as _, OverlayStore, SealedSqliteStore, SealedStoreLimits,
+  StaticKeySource, TrackedStore,
 };
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand, FeedAnchor};
 use teamcraft_core::{
@@ -78,6 +79,10 @@ const PUSH_FETCH_BUDGET: Duration = Duration::from_secs(4);
 /// What must be left of [`PUSH_PREVIEW_BUDGET`] to start following the groups, which can't be cut
 /// short once begun.
 const PUSH_FOLLOW_MIN_LEFT: Duration = Duration::from_secs(2);
+/// The longest the iOS notification extension works on a wake-up it probes (issue #839): the
+/// fetch, then the probe. The system gives it about 30 s, of which the wait for the app's lock may
+/// take 8; past that it shows the generic text itself.
+const PUSH_PROBE_BUDGET: Duration = Duration::from_secs(14);
 /// The decrypted downloads an account keeps: the disk cache the apps reopen pictures and files from
 /// without downloading them again. Above it the least recently used go at start and before every
 /// download, as apps fetch by themselves while they run (a deleted file is fetched again when opened:
@@ -289,6 +294,10 @@ impl PushOpening {
 pub(crate) enum PushReader {
   App,
   Extension,
+  /// A notification extension with memory to spare: when the preview couldn't read the message it
+  /// catches the conversation up on a throwaway copy of the store through a read-only API, which
+  /// advances nothing either (issue #839, [`teamcraft_core::push_probe`]).
+  ProbingExtension,
 }
 
 impl PushReader {
@@ -297,6 +306,11 @@ impl PushReader {
   /// syncing (the sync loop brings the message itself).
   fn catches_up(self, needs_catch_up: bool, is_client_idle: bool) -> bool {
     self == Self::App && needs_catch_up && is_client_idle
+  }
+
+  /// Whether the conversation is caught up on a probe instead (an extension that may).
+  fn probes(self, needs_catch_up: bool) -> bool {
+    self == Self::ProbingExtension && needs_catch_up
   }
 }
 
@@ -363,6 +377,24 @@ async fn catch_up_for_push(
     .await
     .map_err(|_| timed_out())??;
   Ok(())
+}
+
+/// `preview` with the names `later` learned where it had none.
+fn with_names_of(mut preview: PushPreview, later: PushPreview) -> PushPreview {
+  if preview.maybe_sender_name.is_none() {
+    preview.is_sender_source = later.is_sender_source;
+  }
+  preview.maybe_sender_name = preview.maybe_sender_name.or(later.maybe_sender_name);
+  preview.maybe_conversation_name = preview.maybe_conversation_name.or(later.maybe_conversation_name);
+  preview
+}
+
+/// Whether the preview read the message, or knows why it shows none (a setting, a reaction).
+fn is_readable(preview: &PushPreview) -> bool {
+  !matches!(
+    preview.maybe_gap,
+    Some(PreviewGap::NoSession | PreviewGap::NotDecrypted | PreviewGap::TimedOut)
+  )
 }
 
 /// What kind of error it was, for a log line that is exported: never its text.
@@ -1339,7 +1371,8 @@ impl Engine {
     payload: &[u8],
     reader: PushReader,
   ) -> Result<PushPreview, TeamCraftError> {
-    let deadline = tokio::time::Instant::now() + PUSH_PREVIEW_BUDGET;
+    let started = tokio::time::Instant::now();
+    let deadline = started + PUSH_PREVIEW_BUDGET;
     let api = self.api();
     // Without a token the preview still names conversation and sender, also when a refresh would
     // use up the time for the fetch.
@@ -1386,16 +1419,75 @@ impl Engine {
       if caught_up.maybe_gap != Some(PreviewGap::NoSession) {
         preview = caught_up;
       } else {
-        if preview.maybe_sender_name.is_none() {
-          preview.is_sender_source = caught_up.is_sender_source;
-        }
-        preview.maybe_sender_name = preview.maybe_sender_name.or(caught_up.maybe_sender_name);
-        preview.maybe_conversation_name = preview
-          .maybe_conversation_name
-          .or(caught_up.maybe_conversation_name);
+        preview = with_names_of(preview, caught_up);
       }
     }
+    if reader.probes(preview.needs_catch_up()) {
+      preview = self
+        .probe_for_push(payload, started + PUSH_PROBE_BUDGET, preview)
+        .await;
+    }
     Ok(preview)
+  }
+
+  /// The preview of a wake-up the extension couldn't read, after catching its conversation up on a
+  /// probe (issue #839): an overlay over the store that is dropped afterwards, and the server
+  /// through a read-only API. Nothing is saved and nothing is sent; the app processes the same
+  /// welcomes and commits later. Within `deadline`, cut short anywhere (all of it is thrown away),
+  /// after which the overlay still shows what was learned. `preview` stays, with any names learned,
+  /// when the probe didn't make the message readable.
+  async fn probe_for_push(
+    &mut self,
+    payload: &[u8],
+    deadline: tokio::time::Instant,
+    preview: PushPreview,
+  ) -> PushPreview {
+    // One copy of the MLS state in memory at a time: the extension's own client goes before the
+    // probe's opens (it has nothing to do in the extension; the next use opens it again).
+    if matches!(self.client, ClientSlot::Idle(_)) {
+      self.client = ClientSlot::Missing;
+    }
+    let started = tokio::time::Instant::now();
+    let overlay = OverlayStore::new(&self.store, PROBE_OVERLAY_BYTES);
+    let probe = probe_push(
+      self.api(),
+      &overlay,
+      Box::new(SystemClock),
+      self.client_settings(),
+      payload,
+    );
+    let probed = match tokio::time::timeout_at(deadline, probe).await {
+      Ok(Ok(Some((probed, report)))) => {
+        tracing::info!(
+          target: LIFECYCLE,
+          refused_calls = report.refused_calls,
+          overlay_kib = report.overlay_bytes / 1024,
+          read_messages = report.read_messages,
+          ran_ms = started.elapsed().as_millis(),
+          "push probed"
+        );
+        probed
+      },
+      Ok(Ok(None)) => return preview,
+      Ok(Err(error)) => {
+        // The class only: an error's text can carry what a server said.
+        let cause = error_class(&TeamCraftError::from(error));
+        tracing::info!(target: LIFECYCLE, cause, "push probe failed");
+        return preview;
+      },
+      Err(_elapsed) => {
+        tracing::info!(target: LIFECYCLE, overlay_kib = overlay.overlay_bytes() / 1024, "push probe timed out");
+        match push_preview::<Api>(&overlay, None, payload).await {
+          Ok(probed) => probed,
+          Err(_) => return preview,
+        }
+      },
+    };
+    if is_readable(&probed) {
+      probed
+    } else {
+      with_names_of(preview, probed)
+    }
   }
 
   pub(crate) async fn send_test_push(&self) -> Result<TestPushResult, TeamCraftError> {
@@ -1694,7 +1786,9 @@ impl Engine {
       creates_notes_to_self: true,
       history_backfill: HistoryBackfill::KEEP_RECENT,
       leaves_mls_upkeep_to_app: self.is_memory_constrained,
-      ..ClientSettings::default()
+      // The feeds show holes (issue #1438): a busy conversation's newest messages come ahead of
+      // the rest.
+      ..ClientSettings::default().with_capped_catch_up()
     }
   }
 
@@ -2040,6 +2134,15 @@ mod tests {
     );
     assert!(!PushReader::App.catches_up(false, true), "nothing missing");
     assert!(!PushReader::Extension.catches_up(true, true));
+    assert!(!PushReader::ProbingExtension.catches_up(true, true));
+  }
+
+  #[test]
+  fn only_an_extension_that_may_probes_and_only_for_what_it_could_not_read() {
+    assert!(PushReader::ProbingExtension.probes(true));
+    assert!(!PushReader::ProbingExtension.probes(false));
+    assert!(!PushReader::Extension.probes(true));
+    assert!(!PushReader::App.probes(true));
   }
 
   #[test]

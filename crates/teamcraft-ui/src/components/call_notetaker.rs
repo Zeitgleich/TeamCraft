@@ -24,7 +24,7 @@ use crate::meetings::MeetingsHub;
 use crate::model::UserId;
 use crate::notetaker::{
   AddRoute, ConversationRights, NotetakerInCall, NotetakerRefusal, add_route, conversation_rights,
-  notetaker_in_call,
+  moved_call_hint, notetaker_in_call,
 };
 use crate::state::{AppState, use_app_state};
 
@@ -344,6 +344,44 @@ pub fn NotetakerPreJoinNotice(conversation: ConversationId) -> impl IntoView {
         <span>{move || i18n.t("prejoin-notetaker")}</span>
       </p>
     </Show>
+  }
+}
+
+/// The pre-join screen's hint for somebody who comes late: the conversation's call moved into a
+/// room they are in, and that room's call runs now (issue #1321). It sends them there; it joins
+/// nothing. See [`moved_call_hint`] for when it shows.
+#[component]
+pub fn MovedCallNotice(conversation: ConversationId) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let hint = Memo::new(move |_| {
+    state.read(|backend| {
+      let moved = backend.moved_call(conversation)?;
+      let room_has_others = !backend.call_participants(moved.room).is_empty();
+      moved_call_hint(Some(moved), room_has_others, now_ms())
+    })
+  });
+  view! {
+    {move || {
+      hint.get().map(|moved| {
+        let room = moved.room;
+        view! {
+          <div class="call-notetaker-banner prejoin-notetaker" role="status">
+            <p>{i18n.t_with("prejoin-call-moved", &[("room", &moved.room_name)])}</p>
+            <button
+              type="button"
+              class="btn btn-small"
+              on:click=move |_| {
+                state.call.leave();
+                state.open_conversation(room);
+              }
+            >
+              {i18n.t("ws-call-moved-open")}
+            </button>
+          </div>
+        }
+      })
+    }}
   }
 }
 

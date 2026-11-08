@@ -14,17 +14,71 @@ struct FeedSection: Identifiable, Equatable {
 
 /// A message in the list. `isContinuation` when it follows the same author's previous one closely;
 /// `isGroupEnd` when the next one doesn't continue it (the group's last bubble carries the avatar).
+/// `gapsAfter` are the holes in the history right below it (issue #1438).
 struct FeedEntry: Identifiable, Equatable {
   let message: MessageItem
   let isContinuation: Bool
   var isGroupEnd = true
+  var gapsAfter: [HistoryGapItem] = []
 
   var id: String { message.id }
 }
 
+/// The holes in the history among a page's messages (issues #1156, #1438), placed by the message
+/// right before each, so that they stay where the core counted them; those before every message lie
+/// above the first.
+struct PlacedGaps: Equatable {
+  var above: [HistoryGapItem] = []
+  var after: [String: [HistoryGapItem]] = [:]
+
+  init() {}
+
+  init(_ gaps: [HistoryGapItem], among messages: [MessageItem]) {
+    for gap in gaps where Int(gap.index) <= messages.count {
+      if gap.index == 0 {
+        above.append(gap)
+      } else {
+        after[messages[Int(gap.index) - 1].id, default: []].append(gap)
+      }
+    }
+  }
+}
+
+/// Which side of a hole in the history a page is read from (`GapEdge` in Rust).
+enum GapEdge: String, Sendable {
+  /// Its oldest messages, after the row before it: the reader reads down towards it.
+  case older
+  /// Its newest messages, before the row after it: the reader reads up towards it.
+  case newer
+}
+
+/// The hole a feed asks a page of (issue #1438, as web and desktop do): the first, oldest first,
+/// within `ahead` rows of those on screen (`firstVisible...lastVisible`, positions among the page's
+/// messages); none while the conversation's last request is on its way or failed (that waits for
+/// "Try again" or the next connection). A hole below the first row on screen is read from its older
+/// side, the reader reading down towards it; one above it from its newer side, so what arrives
+/// continues what the reader looks at.
+func gapToFill(_ gaps: [HistoryGapItem], firstVisible: Int, lastVisible: Int, ahead: Int) -> (
+  gap: HistoryGapItem, edge: GapEdge
+)? {
+  guard
+    let gap = gaps.first(where: { Int($0.index) + ahead >= firstVisible && Int($0.index) <= lastVisible + ahead }),
+    gap.status == .available
+  else { return nil }
+  return (gap, gapEdge(gap, firstVisible: firstVisible))
+}
+
+/// The side of `gap` the reader comes from, with `firstVisible` the first row on screen.
+func gapEdge(_ gap: HistoryGapItem, firstVisible: Int) -> GapEdge {
+  Int(gap.index) > firstVisible ? .older : .newer
+}
+
 /// Lays out a conversation (oldest first): one section per day, and follow-up messages of the same
-/// author grouped into one block of bubbles. Messages without text (joins, renames) never group.
-func feedSections(_ messages: [MessageItem], calendar: Calendar = .current) -> [FeedSection] {
+/// author grouped into one block of bubbles. Messages without text (joins, renames) never group,
+/// nor do two with a hole in the history between them (`gaps`).
+func feedSections(_ messages: [MessageItem], gaps: PlacedGaps = PlacedGaps(), calendar: Calendar = .current)
+  -> [FeedSection]
+{
   var sections: [FeedSection] = []
   var maybePrevious: MessageItem?
   for message in messages {
@@ -39,8 +93,10 @@ func feedSections(_ messages: [MessageItem], calendar: Calendar = .current) -> [
     if isContinuation, !sections[last].entries.isEmpty {
       sections[last].entries[sections[last].entries.count - 1].isGroupEnd = false
     }
-    sections[last].entries.append(FeedEntry(message: message, isContinuation: isContinuation))
-    maybePrevious = message
+    let gapsAfter = gaps.after[message.id] ?? []
+    sections[last].entries.append(
+      FeedEntry(message: message, isContinuation: isContinuation, gapsAfter: gapsAfter))
+    maybePrevious = gapsAfter.isEmpty ? message : nil
   }
   return sections
 }

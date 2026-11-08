@@ -393,10 +393,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let maybe_next = maybe_oldest.filter(|oldest| {
       page.has_more && *oldest > window_starts && loaded < backfill.max_per_conversation && loaded < budget
     });
+    // Read newest first: an older pin or bookmarks message mustn't win (issue #1438).
+    let received = super::messaging::received_ids(conversation, &page.messages);
     self.atomically(|client| {
       for message in page.messages {
         client.receive_message(message)?;
       }
+      client.settle_ordered_controls(conversation, &received)?;
       if let Some(before) = maybe_next {
         records::put_json(
           &client.store,

@@ -20,6 +20,7 @@ mod lock;
 mod lru;
 mod memory;
 mod message_cache;
+mod overlay;
 pub mod sealed;
 mod sealed_catalog;
 mod sealed_index;
@@ -60,6 +61,7 @@ pub use key_source::{KeystoreThreadError, run_outside_runtime};
 #[cfg(not(target_arch = "wasm32"))]
 pub use lock::StoreLock;
 pub use memory::MemoryStore;
+pub use overlay::OverlayStore;
 pub use sealed::SealedStoreLimits;
 #[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
 pub use sealed_sqlite::{SealedSqliteStore, SqliteRecords};

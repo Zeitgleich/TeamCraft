@@ -515,8 +515,7 @@ high.
   history arriving, still reads the conversation whole once.
 - **Open:** the activity feed, threads and message
   actions still read a conversation whole, then cached. Paged member lists and "changes since" in the
-  full sync, a capped catch-up with a gap
-  marker, and the attachment lookup (`client/files.rs` `find_attachment`, next to #153's transfer
+  full sync, and the attachment lookup (`client/files.rs` `find_attachment`, next to #153's transfer
   code) are not part of this change. The 5,000-member workspace is not measured yet. The web store
   still reads all ciphertext at open, so it stays O(store) there; fetching per conversation is not
   sound with a synchronous `LocalStore` (docs/performance.md, #1127). Its first catalog build yields

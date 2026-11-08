@@ -101,11 +101,13 @@ impl Reads {
   ) -> Result<String, TeamCraftError> {
     let backend = self.backend()?;
     let tail = backend.feed_tail(conversation, maybe_anchor, older);
+    let gaps = tail.gaps_among(backend.history_gaps(conversation));
     to_json(&MessageTail {
       conversation,
       messages: tail.messages,
       has_older: tail.has_older,
       undecrypted: backend.undecrypted_count(conversation),
+      gaps,
     })
   }
 

@@ -95,7 +95,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // key isn't stored yet, and the same page would be read again.
     let maybe_page_oldest = page.messages.iter().map(|message| message.id).min();
     let position = next_position(maybe_page_oldest, page.has_more);
-    self.receive_page(page.messages)?;
+    self.receive_earlier_page(conversation, page.messages)?;
     Ok(position)
   }
 

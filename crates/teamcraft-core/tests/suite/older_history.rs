@@ -6,9 +6,10 @@
 
 use crate::common::{Peer, backend_of, run_commands, settings, settle};
 use teamcraft_client_api::backend::ChatBackend;
-use teamcraft_client_api::model::OlderHistory;
+use teamcraft_client_api::model::{Bookmark, BookmarkKind, OlderHistory};
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::ClientSettings;
+use teamcraft_core::store::LocalStore;
 use teamcraft_proto::{ConversationId, HistoryPolicy};
 
 #[tokio::test]
@@ -123,29 +124,113 @@ async fn a_restart_keeps_the_beginning_and_forgets_the_rest() {
   );
 }
 
+/// Alice pins a message and unpins it right away; Bob reads the history back in pages of two: the
+/// unpin first, kept until the message is there, then the message with its pin. The pin is older,
+/// so the message ends up unpinned, not pinned by the control applied last (issue #1438).
+#[tokio::test]
+async fn an_older_pin_read_later_doesnt_undo_a_newer_unpin() {
+  let (_server, mut alice, mut bob, channel) = bob_and_an_archive().await;
+  let target = alice.client.send_text(channel, None, "pin me").await.unwrap();
+  alice.client.set_pinned(channel, target, true).await.unwrap();
+  alice.client.set_pinned(channel, target, false).await.unwrap();
+  alice.client.send_text(channel, None, "after").await.unwrap();
+  add_bob(&mut alice, &mut bob, channel).await;
+  let ui = backend_of(&bob);
+
+  for _ in 0..2 {
+    ui.load_older_history(channel);
+    run_commands(&mut bob, &ui).await;
+  }
+
+  assert_eq!(bob.texts(channel), vec!["pin me", "after"]);
+  let stored = bob.store.message(channel, target).unwrap().unwrap();
+  assert!(!stored.is_pinned, "the older pin won");
+}
+
+/// Alice sets the bookmarks twice; Bob reads the newer list first and the older one a page later.
+/// The bar shows the newer list (issue #1438).
+#[tokio::test]
+async fn older_bookmarks_read_later_dont_replace_newer_ones() {
+  let (_server, mut alice, mut bob, channel) = bob_and_an_archive().await;
+  let alice_ui = backend_of(&alice);
+  for (title, text) in [("Old runbook", "one"), ("New runbook", "two")] {
+    alice_ui.set_bookmarks(channel, vec![link(title)]);
+    run_commands(&mut alice, &alice_ui).await;
+    alice.client.send_text(channel, None, text).await.unwrap();
+  }
+  add_bob(&mut alice, &mut bob, channel).await;
+  let ui = backend_of(&bob);
+
+  ui.load_older_history(channel);
+  run_commands(&mut bob, &ui).await;
+  assert_eq!(bookmark_titles(&ui, channel), ["New runbook"]);
+  ui.load_older_history(channel);
+  run_commands(&mut bob, &ui).await;
+
+  assert_eq!(bob.texts(channel), vec!["one", "two"]);
+  assert_eq!(
+    bookmark_titles(&ui, channel),
+    ["New runbook"],
+    "the older list won"
+  );
+}
+
 /// Alice wrote five messages; Bob, added with the full history, holds none of them. Pages are two
 /// messages long.
 async fn bob_after_five_messages() -> (FakeServer, Peer, Peer, ConversationId) {
+  let (server, mut alice, mut bob, channel) = bob_and_an_archive().await;
+  for text in ["one", "two", "three", "four", "five"] {
+    alice.client.send_text(channel, None, text).await.unwrap();
+  }
+  add_bob(&mut alice, &mut bob, channel).await;
+  (server, alice, bob, channel)
+}
+
+/// Alice's empty channel and Bob, not in it yet, who reads pages of two messages.
+async fn bob_and_an_archive() -> (FakeServer, Peer, Peer, ConversationId) {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
   let small_pages = ClientSettings {
     history_page_size: 2,
     ..settings()
   };
-  let mut bob = Peer::enroll_with_settings(&server, "Bob", small_pages).await;
+  let bob = Peer::enroll_with_settings(&server, "Bob", small_pages).await;
   let channel = alice
     .client
     .create_channel(alice.space().await, "archive")
     .await
     .unwrap();
-  for text in ["one", "two", "three", "four", "five"] {
-    alice.client.send_text(channel, None, text).await.unwrap();
-  }
+  (server, alice, bob, channel)
+}
+
+/// Adds Bob with the full history, which he holds none of yet.
+async fn add_bob(alice: &mut Peer, bob: &mut Peer, channel: ConversationId) {
   alice
     .client
     .add_member_with_history(channel, bob.client.user_id(), Some(HistoryPolicy::Full))
     .await
     .unwrap();
-  settle(&mut [&mut alice, &mut bob]).await;
-  (server, alice, bob, channel)
+  settle(&mut [alice, bob]).await;
+}
+
+fn link(title: &str) -> Bookmark {
+  Bookmark {
+    emoji: "📘".into(),
+    title: title.into(),
+    kind: BookmarkKind::Link,
+    url: "https://example.com/runbook".into(),
+    maybe_message: None,
+  }
+}
+
+fn bookmark_titles(
+  ui: &teamcraft_core::ui_backend::CoreChatBackend<std::sync::Arc<teamcraft_core::store::MemoryStore>>,
+  channel: ConversationId,
+) -> Vec<String> {
+  let conversation = ui.conversation(channel).unwrap();
+  conversation
+    .bookmarks
+    .into_iter()
+    .map(|bookmark| bookmark.title)
+    .collect()
 }

@@ -942,3 +942,286 @@ mod sealed_tokens {
     settle(&mut [&mut bob]).await;
   }
 }
+
+/// The iOS notification extension's probe (issue #839, e2ee.md §7.2): it catches the conversation
+/// up on a throwaway overlay through a read-only API, so the text shows again after key changes and
+/// in new conversations while nothing is saved and nothing is sent.
+mod probe {
+  use super::*;
+
+  use teamcraft_core::api::ReadOnlyApi;
+  use teamcraft_core::clock::SystemClock;
+  use teamcraft_core::push_probe::{PROBE_OVERLAY_BYTES, ProbeReport, probe_push};
+  use teamcraft_core::store::{MemoryStore, MessageContent, OverlayStore, StoreError, Table};
+  use teamcraft_proto::{ListMessagesQuery, ListMlsMessagesQuery};
+
+  /// Everything the store holds, written out: a probe leaves it exactly as it was.
+  fn everything(store: &MemoryStore, conversations: &[ConversationId]) -> String {
+    let tables: Vec<_> = Table::ALL
+      .iter()
+      .map(|table| store.list(*table).unwrap())
+      .collect();
+    let messages: Vec<_> = conversations
+      .iter()
+      .map(|conversation| store.messages(*conversation, MessageFilter::All).unwrap())
+      .collect();
+    format!("{tables:?}{messages:?}")
+  }
+
+  /// What the server holds that a catch-up could change: the conversation's MLS queue and messages,
+  /// the device's key packages and its read position.
+  async fn server_side(server: &FakeServer, bob: &Peer, conversation: ConversationId) -> String {
+    let queue = bob
+      .api
+      .list_mls_messages(conversation, &ListMlsMessagesQuery::default())
+      .await
+      .map(|page| page.messages.len());
+    let messages = bob
+      .api
+      .list_messages(conversation, &ListMessagesQuery::default())
+      .await
+      .map(|page| page.messages.len());
+    let key_packages = bob
+      .api
+      .key_package_status(bob.client.device_id())
+      .await
+      .map(|status| format!("{status:?}"));
+    let read = server.read_position(conversation, bob.client.user_id());
+    format!("{queue:?} {messages:?} {key_packages:?} {read:?}")
+  }
+
+  /// Bob's extension opens the push: the probe's preview, with the store and the server checked
+  /// before and after.
+  async fn probed(
+    server: &FakeServer,
+    bob: &Peer,
+    conversation: ConversationId,
+    sealed: &[u8],
+  ) -> (teamcraft_core::push_preview::PushPreview, ProbeReport) {
+    let conversations = [conversation];
+    let stored_before = everything(&bob.store, &conversations);
+    let server_before = server_side(server, bob, conversation).await;
+    let overlay = OverlayStore::new(bob.store.as_ref(), PROBE_OVERLAY_BYTES);
+    let (preview, report) = probe_push(
+      bob.api.clone(),
+      &overlay,
+      Box::new(SystemClock),
+      settings(),
+      sealed,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    drop(overlay);
+    assert_eq!(
+      everything(&bob.store, &conversations),
+      stored_before,
+      "the probe wrote to the store"
+    );
+    assert_eq!(
+      server_side(server, bob, conversation).await,
+      server_before,
+      "the probe changed something on the server"
+    );
+    (preview, report)
+  }
+
+  #[tokio::test]
+  async fn a_first_direct_message_shows_without_the_app() {
+    let (server, _alice, mut bob, _channel) = channel_with_two().await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let dm = carol.client.open_dm(bob.client.user_id()).await.unwrap();
+    let message = carol_says(&mut carol, dm, "are you around?").await;
+    let sealed = wake_up_for(&server, &bob, &carol, dm, message);
+    let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+      .await
+      .unwrap();
+    assert!(preview.needs_catch_up());
+
+    let (preview, _) = probed(&server, &bob, dm, &sealed).await;
+    assert_eq!(preview.content, PreviewContent::Text("are you around?".into()));
+    assert_eq!(preview.maybe_sender_name.as_deref(), Some("Carol"));
+    assert_eq!(preview.maybe_conversation_name.as_deref(), Some("Carol"));
+    assert_eq!(preview.maybe_gap, None);
+    assert!(preview.is_conversation_verified);
+
+    // The welcome is still there for the app: its key package wasn't spent.
+    bob.client.catch_up_for_push(dm).await.unwrap();
+    let preview = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+      .await
+      .unwrap();
+    assert_eq!(preview.content, PreviewContent::Text("are you around?".into()));
+    settle(&mut [&mut carol, &mut bob]).await;
+  }
+
+  /// A member added and removed again: two commits and a new content key the extension's fetch
+  /// alone can't read.
+  #[tokio::test]
+  async fn a_message_after_a_rotation_and_a_removal_shows_without_the_app() {
+    let (server, mut alice, mut bob, channel) = channel_with_two().await;
+    let carol = Peer::enroll(&server, "Carol").await;
+    alice
+      .client
+      .add_member(channel, carol.client.user_id())
+      .await
+      .unwrap();
+    alice
+      .client
+      .remove_member(channel, carol.client.user_id())
+      .await
+      .unwrap();
+    let message = alice_says(&mut alice, channel, "after the rotation").await;
+    let sealed = wake_up_for(&server, &bob, &alice, channel, message);
+    let before = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+      .await
+      .unwrap();
+    assert_eq!(before.maybe_gap, Some(PreviewGap::NotDecrypted));
+    let epoch = bob.client.mls_epoch(channel).unwrap();
+
+    let (preview, _) = probed(&server, &bob, channel, &sealed).await;
+    assert_eq!(preview.content, PreviewContent::Text("after the rotation".into()));
+    assert_eq!(preview.maybe_gap, None);
+    assert_eq!(
+      bob.client.mls_epoch(channel).unwrap(),
+      epoch,
+      "the app's group is where it was"
+    );
+
+    // The app follows the same commits afterwards.
+    bob.client.catch_up_for_push(channel).await.unwrap();
+    assert!(bob.client.mls_epoch(channel).unwrap() > epoch);
+    assert_eq!(
+      bob.texts(channel).last().map(String::as_str),
+      Some("after the rotation")
+    );
+    settle(&mut [&mut alice, &mut bob]).await;
+  }
+
+  /// A member added "from joining on": the commit that adds Carol comes with the message.
+  #[tokio::test]
+  async fn a_message_after_a_member_was_added_shows_without_the_app() {
+    let (server, mut alice, mut bob, channel) = channel_with_two().await;
+    let carol = Peer::enroll(&server, "Carol").await;
+    alice
+      .client
+      .add_member(channel, carol.client.user_id())
+      .await
+      .unwrap();
+    let message = alice_says(&mut alice, channel, "welcome carol").await;
+    let sealed = wake_up_for(&server, &bob, &alice, channel, message);
+
+    let (preview, _) = probed(&server, &bob, channel, &sealed).await;
+    assert_eq!(preview.content, PreviewContent::Text("welcome carol".into()));
+    assert_eq!(preview.maybe_gap, None);
+    settle(&mut [&mut alice, &mut bob]).await;
+  }
+
+  /// A message from a device of Alice's that Bob never saw.
+  #[tokio::test]
+  async fn a_message_from_a_senders_new_device_shows_without_the_app() {
+    let (server, mut alice, mut bob, channel) = channel_with_two().await;
+    let mut laptop = common::link_device(&mut alice).await;
+    // The laptop asks to be added, Alice's phone adds it (Bob's app doesn't run meanwhile).
+    let _gateway = laptop.connect_gateway().await.unwrap();
+    alice.client.full_sync().await.unwrap();
+    alice.client.apply_pending_changes().await.unwrap();
+    settle(&mut [&mut alice]).await;
+    laptop.full_sync().await.unwrap();
+    assert_eq!(
+      laptop.group_access(channel).unwrap(),
+      teamcraft_core::GroupAccess::Member
+    );
+    laptop.send_text(channel, None, "from my laptop").await.unwrap();
+    let message = laptop
+      .store()
+      .messages(channel, MessageFilter::TopLevel)
+      .unwrap()
+      .into_iter()
+      .find(
+        |message| matches!(&message.content, MessageContent::Text { body, .. } if body == "from my laptop"),
+      )
+      .and_then(|message| message.maybe_server_id)
+      .unwrap();
+    let sealed = wake_up_for(&server, &bob, &alice, channel, message);
+
+    let (preview, _) = probed(&server, &bob, channel, &sealed).await;
+    assert_eq!(preview.content, PreviewContent::Text("from my laptop".into()));
+    assert_eq!(preview.maybe_gap, None);
+    settle(&mut [&mut alice, &mut bob]).await;
+  }
+
+  /// Whatever a catch-up tries to change on the server is refused before it is sent: the inner API
+  /// never sees the call.
+  #[tokio::test]
+  async fn the_read_only_api_refuses_every_change_before_it_reaches_the_server() {
+    let (server, _alice, bob, channel) = channel_with_two().await;
+    let api = ReadOnlyApi::new(bob.api.clone());
+    let user = bob.client.user_id();
+    let calls_before = server.rest_call_count(user);
+    let position = SetReadPositionRequest {
+      message_id: MessageId::from_snowflake(channel.snowflake()),
+    };
+    assert!(api.set_read_position(channel, &position).await.is_err());
+    assert!(
+      api
+        .post_mls_message(
+          channel,
+          &teamcraft_proto::PostMlsMessageRequest {
+            device_id: bob.client.device_id(),
+            epoch: 0,
+            kind: teamcraft_proto::MlsMessageKind::Proposal,
+            payload: teamcraft_proto::Base64Bytes::new(vec![1]),
+          }
+        )
+        .await
+        .is_err()
+    );
+    assert!(api.revoke_device(bob.client.device_id()).await.is_err());
+    assert!(api.unregister_push(bob.client.device_id()).await.is_err());
+    assert!(api.join_conversation(channel).await.is_err());
+    assert!(api.connect_gateway().await.is_err());
+    assert!(api.get_blob("https://blobs.example.com/a").await.is_err());
+    assert!(api.provider_tokens().is_none());
+    assert_eq!(
+      server.rest_call_count(user),
+      calls_before,
+      "nothing reached the server"
+    );
+    assert_eq!(api.refusal_count(), 7);
+    assert_eq!(api.refused_calls()[0], "set_read_position");
+
+    // Reads go through.
+    assert!(api.list_members(channel).await.is_ok());
+    assert!(server.rest_call_count(user) > calls_before);
+  }
+
+  /// The probe's memory is bounded: past it a write fails like a full disk, and nothing is left
+  /// behind.
+  #[tokio::test]
+  async fn a_probe_past_its_memory_bound_fails_and_leaves_the_store_alone() {
+    let (server, _alice, bob, _channel) = channel_with_two().await;
+    let mut carol = Peer::enroll(&server, "Carol").await;
+    let dm = carol.client.open_dm(bob.client.user_id()).await.unwrap();
+    let message = carol_says(&mut carol, dm, "are you around?").await;
+    let sealed = wake_up_for(&server, &bob, &carol, dm, message);
+    let stored_before = everything(&bob.store, &[dm]);
+
+    // So little that not even the client's opening fits: the probe fails, and the extension shows
+    // the preview it had.
+    let overlay = OverlayStore::new(bob.store.as_ref(), 1);
+    let probed = probe_push(
+      bob.api.clone(),
+      &overlay,
+      Box::new(SystemClock),
+      settings(),
+      &sealed,
+    )
+    .await;
+    assert!(matches!(
+      probed,
+      Err(teamcraft_core::CoreError::Store(StoreError::QuotaExceeded))
+    ));
+    drop(overlay);
+    assert_eq!(everything(&bob.store, &[dm]), stored_before);
+  }
+}

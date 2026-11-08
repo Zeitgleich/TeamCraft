@@ -345,6 +345,7 @@ call-notetaker-banner = The notetaker is making a transcript of this call. For t
 call-notetaker-badge = Notetaker in the call – audio goes to OpenRouter
 call-notetaker-badge-detail = While the notetaker is in the call, everything said reaches it and is sent on to OpenRouter and the model's provider for the transcript. It doesn't use video or shared screens.
 prejoin-notetaker = The notetaker is in this call: what you say is sent to OpenRouter for a transcript.
+prejoin-call-moved = The call moved into “{ $room }”, which is running now.
 calls-mute-shortcut = Mute shortcut
 calls-mute-shortcut-hint = A key combination that mutes and unmutes your microphone during a call, in any app.
 calls-mute-shortcut-key = Shortcut

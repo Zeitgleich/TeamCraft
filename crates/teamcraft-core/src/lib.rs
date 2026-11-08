@@ -37,6 +37,7 @@ pub mod push_guard;
 #[cfg(any(feature = "ui", feature = "service-worker"))]
 pub mod push_picture;
 pub mod push_preview;
+pub mod push_probe;
 pub mod push_subscription;
 pub mod push_text;
 pub mod read_state;

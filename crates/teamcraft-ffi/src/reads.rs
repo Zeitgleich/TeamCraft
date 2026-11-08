@@ -386,9 +386,11 @@ impl Reads {
       feed_anchor(maybe_oldest_id, oldest_sent_at_ms)?,
       older_len(older),
     );
+    let gaps = tail.gaps_among(backend.history_gaps(conversation));
     Ok(MessagePage {
       messages: self.message_items(backend, &tail.messages),
       has_older: tail.has_older,
+      gaps: gaps.into_iter().map(Into::into).collect(),
     })
   }
 

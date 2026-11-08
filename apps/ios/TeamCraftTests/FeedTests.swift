@@ -46,6 +46,34 @@ final class FeedTests: XCTestCase {
     XCTAssertEqual(entries.map(\.isGroupEnd), [true, true])
   }
 
+  func testAHoleSitsAfterTheMessageBeforeItAndBreaksAGroup() {
+    let messages = [message("1", "a", dayOne), message("2", "a", dayOne + minute), message("3", "a", dayOne + 2 * minute)]
+    let gaps = [
+      HistoryGapItem(after: "0", index: 0, status: .loading), HistoryGapItem(after: "1", index: 1, status: .available),
+      HistoryGapItem(after: "9", index: 4, status: .available),
+    ]
+    let placed = PlacedGaps(gaps, among: messages)
+    XCTAssertEqual(placed.above.map(\.after), ["0"])
+    let entries = feedSections(messages, gaps: placed, calendar: utc).flatMap(\.entries)
+    XCTAssertEqual(entries.map { $0.gapsAfter.map(\.after) }, [["1"], [], []], "beyond the page is left out")
+    XCTAssertEqual(entries.map(\.isContinuation), [false, false, true])
+    XCTAssertEqual(entries.map(\.isGroupEnd), [true, false, true])
+  }
+
+  func testAHoleNearTheScreenIsReadFromTheReadersSide() {
+    // Rows 50 to 60 are on screen.
+    let below = HistoryGapItem(after: "1", index: 70, status: .available)
+    XCTAssertEqual(gapToFill([below], firstVisible: 50, lastVisible: 60, ahead: 40)?.edge, .older)
+    let above = HistoryGapItem(after: "2", index: 20, status: .available)
+    XCTAssertEqual(gapToFill([above], firstVisible: 50, lastVisible: 60, ahead: 40)?.edge, .newer)
+    XCTAssertEqual(gapToFill([above], firstVisible: 20, lastVisible: 30, ahead: 40)?.edge, .newer, "right above the screen")
+    XCTAssertNil(gapToFill([below], firstVisible: 0, lastVisible: 10, ahead: 40), "too far")
+    for status in [HistoryGapStatus.loading, .failed] {
+      let waiting = HistoryGapItem(after: "1", index: 55, status: status)
+      XCTAssertNil(gapToFill([waiting], firstVisible: 50, lastVisible: 60, ahead: 40))
+    }
+  }
+
   func testPreviewNamesSenderOnlyWhereNeeded() {
     XCTAssertEqual(chatPreview(message("1", "a", dayOne), myId: "me", isOneToOne: false).sender, .other("Name a"))
     XCTAssertEqual(chatPreview(message("1", "a", dayOne), myId: "me", isOneToOne: true).sender, .none)
