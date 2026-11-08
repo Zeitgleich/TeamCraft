@@ -271,6 +271,17 @@ files-filter-media = Bilder und Videos
 files-filter-documents = Dokumente
 files-all-empty = Dateien und Bilder aus allen deinen Unterhaltungen erscheinen hier.
 files-space-empty = Dateien und Bilder aus den Kanälen dieses Space erscheinen hier.
+files-filter-starred = Markiert
+files-sort = Sortieren
+files-sort-newest = Neueste zuerst
+files-sort-oldest = Älteste zuerst
+files-sort-name = Name
+files-sort-largest = Größte zuerst
+files-star = Markieren
+files-unstar = Markierung entfernen
+files-star-limit = Du kannst bis zu { $max } Dateien markieren. Entferne eine Markierung, um eine weitere hinzuzufügen.
+files-starred-empty-title = Keine markierten Dateien
+files-starred-empty = Markiere eine Datei, um sie hier schnell wiederzufinden. Deine Markierungen gelten auch auf deinen anderen Geräten.
 
 # Download-Liste der Desktop-App (obere Leiste)
 downloads-title = Downloads

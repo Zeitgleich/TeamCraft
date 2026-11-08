@@ -18,6 +18,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::actions::{FileFailure, FileInfo, FileTransfer, LinkPreview, PixelSize};
 use teamcraft_client_api::admin::format_bytes;
+use teamcraft_client_api::files_query::MAX_STARRED_FILES;
 use teamcraft_client_api::links::{LINKS_PER_PAGE, LinkInfo};
 use teamcraft_client_api::media_viewer::{AlbumGrid, MAX_ALBUM_TILES};
 use wasm_bindgen::JsCast;
@@ -1045,10 +1046,20 @@ fn ToolbarButton(label: &'static str, icon: IconName, on_click: impl Fn() + 'sta
   }
 }
 
+/// The star of a [`FileCard`] in the Files view (issue #301).
+#[derive(Clone, Copy)]
+pub struct FileStar {
+  pub is_starred: Signal<bool>,
+  /// False once the account starred as many files as it can; unstarring still works.
+  pub can_star: Signal<bool>,
+  pub on_toggle: Callback<()>,
+}
+
 /// One file as a compact card: icon (or a small preview), name, size, transfer state, a download
-/// button and "…". Pictures use it in the files panel; inline they are [`MediaTile`]s.
+/// button and "…". Pictures use it in the files panel; inline they are [`MediaTile`]s. The Files
+/// view adds a star (`maybe_star`).
 #[component]
-pub fn FileCard(file: FileInfo) -> impl IntoView {
+pub fn FileCard(file: FileInfo, #[prop(optional)] maybe_star: Option<FileStar>) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let conversation = file.conversation;
@@ -1108,6 +1119,7 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
         <span class="file-size">{format_bytes(file.size_bytes)}</span>
         {status}
       </div>
+      {maybe_star.map(|star| view! { <StarButton star=star /> })}
       {maybe_document_key.map(|key| view! {
         <button
           class="icon-btn file-action"
@@ -1130,6 +1142,33 @@ pub fn FileCard(file: FileInfo) -> impl IntoView {
       })}
       {is_on_server.then(|| view! { <FileMenu actions=actions /> })}
     </div>
+  }
+}
+
+/// Stars or unstars a file. At the limit an unstarred file's star is disabled and says why, rather
+/// than failing after the click.
+#[component]
+fn StarButton(star: FileStar) -> impl IntoView {
+  let i18n = use_i18n();
+  let label = move || {
+    let key = match (star.is_starred.get(), star.can_star.get()) {
+      (true, _) => "files-unstar",
+      (false, true) => "files-star",
+      (false, false) => "files-star-limit",
+    };
+    i18n.t_with(key, &[("max", &MAX_STARRED_FILES.to_string())])
+  };
+  view! {
+    <button
+      class="icon-btn file-action file-star"
+      aria-pressed=move || star.is_starred.get().to_string()
+      prop:disabled=move || !star.is_starred.get() && !star.can_star.get()
+      aria-label=label
+      data-tip=label
+      on:click=move |_| star.on_toggle.run(())
+    >
+      <Icon name=IconName::Star />
+    </button>
   }
 }
 

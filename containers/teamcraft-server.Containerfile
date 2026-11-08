@@ -10,9 +10,15 @@
 # (`docker buildx imagetools inspect <image>`, the top-level Digest), never a single-platform one.
 
 FROM docker.io/library/rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS build
+# The publisher's crash reports service (docs/crash-reports.md): built in when the release workflow
+# passes it (repository variable TEAMCRAFT_CRASH_REPORTS_DSN); empty builds send nothing by default.
+ARG TEAMCRAFT_CRASH_REPORTS_DSN=""
+# Only debug info is stripped: the symbol table stays, so the server's own panic reports name
+# their functions (a few MB).
 ENV SQLX_OFFLINE=true \
     CARGO_INCREMENTAL=0 \
-    CARGO_PROFILE_RELEASE_STRIP=symbols
+    CARGO_PROFILE_RELEASE_STRIP=debuginfo \
+    TEAMCRAFT_CRASH_REPORTS_DSN=${TEAMCRAFT_CRASH_REPORTS_DSN}
 WORKDIR /src
 COPY . .
 # rust-toolchain.toml would make rustup download a toolchain and the wasm target; the image's own

@@ -12,6 +12,7 @@ use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::channel_view::shown_name;
 use crate::components::entry_menu::EntryMenuTrigger;
 use crate::components::icons::{Icon, IconName};
+use crate::components::illustration::{Art, Illustration};
 use crate::components::modal::Modal;
 use crate::components::setup_checklist::SetupChecklist;
 use crate::components::sidebar::{DraftMark, draft_marker};
@@ -76,14 +77,16 @@ pub fn HomeSidebar(#[prop(optional)] is_list: bool) -> impl IntoView {
     let limit = if show_all.get() { 0 } else { limit };
     build_direct(state.chats_entries(), sort, limit, &query.get(), chip.get())
   });
-  let has_any = Memo::new(move |_| {
-    state.read(|backend| {
-      if is_list {
-        !backend.listed_conversations().is_empty()
-      } else {
-        !backend.direct_conversations().is_empty() || !backend.favorite_channels().is_empty()
-      }
-    })
+  // Notes to self are there from the start; they alone don't make the list less empty.
+  let has_others = Memo::new(move |_| {
+    is_list
+      || state.read(|backend| {
+        backend
+          .direct_conversations()
+          .iter()
+          .any(|conversation| !conversation.is_notes_to_self)
+          || !backend.favorite_channels().is_empty()
+      })
   });
   let is_filtered_out = Memo::new(move |_| list.with(|list| list.sections.is_empty()));
   let is_filtering = move || chip.get() != HomeFilter::All || !query.with(|query| query.trim().is_empty());
@@ -174,12 +177,22 @@ pub fn HomeSidebar(#[prop(optional)] is_list: bool) -> impl IntoView {
       >
         // Only a change between these three builds the list again; its rows follow `list` in place.
         {move || {
-          if !has_any.get() {
-            view! { <DirectEmpty /> }.into_any()
+          let is_unread_chip = chip.get() == HomeFilter::Unread && query.with(|query| query.trim().is_empty());
+          if is_filtered_out.get() && !is_filtering() {
+            view! { <DirectEmpty art=Art::Conversations /> }.into_any()
+          } else if is_filtered_out.get() && is_unread_chip {
+            view! { <DirectEmpty art=Art::AllRead /> }.into_any()
           } else if is_filtered_out.get() {
             view! { <p class="sb-empty">{move || i18n.t("dm-filter-empty")}</p> }.into_any()
           } else {
-            view! { <DirectSections list=list on_show_more=show_more /> }.into_any()
+            view! {
+              <DirectSections list=list on_show_more=show_more />
+              // Notes to self stay pinned on top; under them, where the direct messages will be.
+              <Show when=move || !has_others.get() && !is_filtering() fallback=|| ()>
+                <DirectEmpty art=Art::Conversations />
+              </Show>
+            }
+            .into_any()
           }
         }}
         {is_list.then(|| {
@@ -611,15 +624,22 @@ fn DirectItem(#[prop(into)] conversation: Signal<Conversation>) -> impl IntoView
   }
 }
 
-/// No DMs yet: say where they come from and offer to write one.
+/// No DMs yet (`Art::Conversations`): say where they come from and offer to write one. Or nothing
+/// unread under the Unread chip (`Art::AllRead`).
 #[component]
-fn DirectEmpty() -> impl IntoView {
+fn DirectEmpty(art: Art) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  let (title_key, body_key, offers_new) = match art {
+    Art::Conversations => ("dm-empty-title", "dm-empty", true),
+    Art::AllRead => ("dm-unread-empty-title", "dm-unread-empty", false),
+  };
   view! {
-    <div class="sb-empty">
-      <p>{move || i18n.t("dm-empty")}</p>
-      <Show when=move || can_start_any_direct(state) fallback=|| ()>
+    <div class="sb-empty dm-empty">
+      <Illustration art=art />
+      <p class="dm-empty-title">{move || i18n.t(title_key)}</p>
+      <p>{move || i18n.t(body_key)}</p>
+      <Show when=move || offers_new && can_start_any_direct(state) fallback=|| ()>
         <button class="btn btn-primary" on:click=move |_| state.overlay.set(Overlay::NewMessage)>
           {move || i18n.t("dm-new")}
         </button>

@@ -140,6 +140,17 @@ fn smtp_request(host: &str, port: u16, password: Value) -> Value {
   })
 }
 
+/// `GET /api/v1/server-info`, as an app asks before signing in.
+async fn server_info(app: &TestApp) -> Value {
+  let response = app
+    .http
+    .get(format!("{}/api/v1/server-info", app.base_url))
+    .send()
+    .await
+    .unwrap();
+  response.json().await.unwrap()
+}
+
 async fn is_reachable(address: &str) -> bool {
   tokio::time::timeout(
     std::time::Duration::from_secs(1),
@@ -788,6 +799,55 @@ mod calendar_settings {
 
 mod instance_settings {
   use super::*;
+
+  #[tokio::test]
+  async fn crash_reports_reach_the_apps_only_while_on() {
+    let app = app!(TestApp::start());
+    let bob = admin();
+    assert!(
+      server_info(&app).await.get("crash_reports").is_none(),
+      "nothing by default in a build without a publisher service"
+    );
+    let mut values = json!({
+      "mode": "own",
+      "dsn": "",
+      "sample_percent": 20,
+      "environment": "production",
+    });
+    let section = |values: &Value| json!({"section": "crash_reports", "values": values});
+    // On without a DSN, or with one the apps couldn't use, is refused.
+    assert_eq!(
+      app.put(&bob, "/admin/settings", section(&values)).await.status,
+      StatusCode::BAD_REQUEST
+    );
+    values["dsn"] = json!("http://key@errors.example.com/3");
+    assert_eq!(
+      app.put(&bob, "/admin/settings", section(&values)).await.status,
+      StatusCode::BAD_REQUEST
+    );
+    values["dsn"] = json!("https://key@errors.example.com/3");
+    assert_eq!(
+      app.put(&bob, "/admin/settings", section(&values)).await.status,
+      StatusCode::OK
+    );
+    assert_eq!(
+      server_info(&app).await["crash_reports"],
+      json!({
+        "dsn": "https://key@errors.example.com/3",
+        "sample_percent": 20,
+        "environment": "production",
+        "allows_opt_out": true,
+        "shows_notice": true,
+      })
+    );
+    values["mode"] = json!("off");
+    assert_eq!(
+      app.put(&bob, "/admin/settings", section(&values)).await.status,
+      StatusCode::OK
+    );
+    assert!(server_info(&app).await.get("crash_reports").is_none());
+    app.stop().await;
+  }
 
   #[tokio::test]
   async fn a_group_is_stored_in_force_and_reset_to_the_configuration() {

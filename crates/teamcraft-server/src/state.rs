@@ -6,7 +6,9 @@ use crate::auth::{DpopGuard, Revocations, TokenValidator};
 use secrecy::SecretString;
 
 use teamcraft_crypto::server_secret::SettingsSealingKey;
-use teamcraft_proto::{AppLinkSettings, HealthAlertSettings, HolidaySettings, TokenBindingSettings};
+use teamcraft_proto::{
+  AppLinkSettings, CrashReportSettings, HealthAlertSettings, HolidaySettings, TokenBindingSettings,
+};
 
 use crate::brand::BrandStore;
 use crate::config::{
@@ -90,6 +92,8 @@ pub struct AppState {
   pub holiday_feed: Arc<crate::holidays::HolidayFeed>,
   /// The runs asked for of the job that keeps calendar events current with the holidays (#1441).
   pub holiday_resync: Arc<crate::holidays::resync::HolidayResync>,
+  /// Forwards the apps' crash reports to the backend in the instance settings.
+  pub crash_relay: Arc<crate::services::crash_reports::CrashRelay>,
 }
 
 /// Runtime settings handlers need, taken from the configuration.
@@ -130,6 +134,9 @@ pub struct Settings {
   /// The region and the feed whose public holidays repeating meetings can skip; only ever changed
   /// in the admin console.
   pub holidays: HolidaySettings,
+  /// Where the apps send crash reports (docs/crash-reports.md); only ever changed in the admin
+  /// console, served in `GET /api/v1/server-info`.
+  pub crash_reports: CrashReportSettings,
   /// Meeting invitations: most invitees and the mail texts.
   pub meeting_mail: MeetingMailConfig,
   /// The mail server of the configuration file (`[mail.smtp]`, else `[meetings.smtp]`).

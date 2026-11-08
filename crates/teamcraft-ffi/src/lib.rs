@@ -13,6 +13,7 @@ mod bridge;
 mod calls;
 mod channel_roles;
 mod color_theme;
+mod crash_reports;
 mod device_proofs;
 mod engine;
 mod error;
@@ -44,6 +45,7 @@ pub use channel_roles::{
   RoleKeyMarkItem, RoleReviewRefusalItem, RoleReviewRowItem, channel_roles_review_has_changed,
   channel_roles_review_has_new,
 };
+pub use crash_reports::{CrashReportsConfig, crash_reports_config};
 pub use device_proofs::{
   DeviceProofError, DeviceProofKey, ProviderProver, TokenEndpointAnswer, TokenEndpointTransport,
   TokenProofFallback, token_bound_key,

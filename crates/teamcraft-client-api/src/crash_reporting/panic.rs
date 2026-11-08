@@ -2,6 +2,8 @@
 
 use std::panic::PanicHookInfo;
 
+use serde::{Deserialize, Serialize};
+
 use super::event::{CrashEvent, CrashLevel, ErrorSource, EventId, StackFrame};
 
 /// Prefix of TeamCraft's own crates in a function path: those frames are "in app".
@@ -17,8 +19,21 @@ const PANIC_MACHINERY: &[&str] = &[
   "<alloc::boxed::Box<F,A> as core::ops::function::Fn",
 ];
 
+/// Panics of another process of the app that its page reports (the desktop shell: its hook can't
+/// reach the network or the user's choice, the page has both). Bounded: [`MAX_PENDING_PANICS`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingPanic {
+  pub parts: PanicParts,
+  pub timestamp_ms: i64,
+  /// That process's recent redacted log lines (scrubbed again when reported).
+  pub breadcrumbs: Vec<String>,
+}
+
+/// Pending panics kept until the page takes them; older ones drop out.
+pub const MAX_PENDING_PANICS: usize = 5;
+
 /// What a panic hook knows, taken apart so it can be built in tests.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PanicParts {
   pub message: String,
   pub maybe_location: Option<(String, u32, u32)>,

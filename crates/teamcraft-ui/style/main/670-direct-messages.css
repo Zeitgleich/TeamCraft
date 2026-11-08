@@ -154,3 +154,44 @@
   box-shadow: none;
 }
 
+
+/* Chats without direct messages yet, or nothing unread (issue #301): a drawing, a headline, a
+   sentence and "New message", centred in the sidebar. */
+.dm-empty {
+  justify-items: center;
+  margin: var(--space-6) 16px;
+  text-align: center;
+  line-height: 1.5;
+}
+
+.dm-empty .dm-empty-title {
+  color: var(--chrome-strong);
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
+}
+
+.dm-empty .illustration {
+  margin-bottom: var(--space-1);
+}
+
+/* The drawings of components/illustration.rs, in the theme's colours. */
+.illustration-back {
+  /* Works on the dark sidebar and on light pages alike. */
+  fill: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+.illustration-front {
+  fill: var(--accent);
+}
+
+.illustration-mark {
+  fill: var(--on-accent);
+}
+
+.illustration-check {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}

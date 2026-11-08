@@ -27,6 +27,9 @@ const PUBLIC: &[(&str, &str)] = &[
   ("get", "/api/v1/client-compatibility"),
   // The apps learn how to sign in to a server from it, before anyone is signed in.
   ("get", "/api/v1/server-info"),
+  // Apps report crashes from before sign-in too; reports are scrubbed on the device, the relay only
+  // forwards them to the backend the admin set (docs/crash-reports.md). Public rate limit.
+  ("post", "/api/v1/crash-reports"),
   // Public presentation of the host (name, colors, logo): the login screen needs it before sign-in.
   ("get", "/api/v1/brand"),
   ("get", "/api/v1/brand/theme.css"),

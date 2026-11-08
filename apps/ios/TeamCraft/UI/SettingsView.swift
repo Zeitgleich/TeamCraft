@@ -367,6 +367,7 @@ private struct SecuritySettingsPage: View {
         Text("fingerprint_hint")
       }
       DeviceSecuritySection()
+      CrashReportsSection()
     }
     .navigationTitle("settings_security_title")
     .navigationBarTitleDisplayMode(.inline)

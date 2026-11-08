@@ -32,6 +32,13 @@ settings:
     OTHER_LDFLAGS: "$(inherited) -lresolv -lc++"
     ENABLE_BITCODE: "NO"
 
+packages:
+  # Crash reports (docs/crash-reports.md): crashes, app hangs and MetricKit diagnostics, sent to the
+  # instance's backend only while it has them on. The prebuilt static XCFramework product.
+  Sentry:
+    url: https://github.com/getsentry/sentry-cocoa
+    exactVersion: 9.33.0
+
 targets:
   TeamCraft:
     type: application
@@ -53,6 +60,9 @@ targets:
       - framework: Generated/TeamCraftFFI.xcframework
         embed: false
         link: true
+      # The app only; the extensions report nothing.
+      - package: Sentry
+        product: Sentry
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
       - sdk: CoreAudio.framework

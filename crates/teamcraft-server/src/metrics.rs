@@ -430,7 +430,7 @@ pub fn route_class(path: &str) -> &'static str {
     "org-recovery" | "role-evidence" => "e2ee",
     "gateway" | "rendezvous" => "gateway",
     "meetings" => "meetings",
-    "brand" | "client-compatibility" | "openapi.json" | "server-info" => "public",
+    "brand" | "client-compatibility" | "crash-reports" | "openapi.json" | "server-info" => "public",
     "guests" | "spaces" => "spaces",
     "sync" => "sync",
     "directory" | "me" | "presence" | "user-groups" | "users" => "users",

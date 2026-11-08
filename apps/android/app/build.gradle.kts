@@ -149,7 +149,32 @@ android {
   }
 }
 
+/**
+ * `sentry-debug-meta.properties` with the ProGuard UUID of `teamcraft.proguardUuid`: sentry-android
+ * sends it with every report, so the backend picks the R8 mapping the release workflow uploaded
+ * under that UUID (docs/crash-reports.md, "Symbols"). Without the property nothing is generated.
+ */
+abstract class ProguardUuidAssetTask : DefaultTask() {
+  @get:Input abstract val uuid: Property<String>
+
+  @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
+
+  @TaskAction
+  fun write() {
+    outputDirectory.get().file("sentry-debug-meta.properties").asFile
+      .writeText("io.sentry.ProguardUuids=${uuid.get()}\n")
+  }
+}
+
 androidComponents.onVariants { variant ->
+  val proguardUuid = setting("proguardUuid")
+  if (proguardUuid.isNotEmpty() && variant.name == "fullRelease") {
+    val uuidTask = tasks.register<ProguardUuidAssetTask>("generateFullReleaseProguardUuidAsset") {
+      uuid.set(proguardUuid)
+      outputDirectory.set(layout.buildDirectory.dir("generated/proguardUuid/${variant.name}"))
+    }
+    variant.sources.assets?.addGeneratedSourceDirectory(uuidTask, ProguardUuidAssetTask::outputDirectory)
+  }
   val task = tasks.register<AppLinksManifestTask>("generate${variant.name.replaceFirstChar(Char::uppercase)}AppLinksManifest") {
     hosts.set(setting("appLinkHosts").split(',').map(String::trim).filter(String::isNotEmpty))
     manifest.set(layout.buildDirectory.file("generated/appLinks/${variant.name}/AndroidManifest.xml"))
@@ -211,6 +236,10 @@ dependencies {
   // UniFFI's Kotlin bindings call the Rust library through JNA.
   implementation("${libs.jna.get()}@aar")
   "fullImplementation"(libs.firebase.messaging)
+  // Crash reports (docs/crash-reports.md): JVM, ANR and NDK crashes to the instance's backend.
+  // Core and NDK only, not the `sentry-android` bundle: it adds session replay, which is never used.
+  "fullImplementation"(libs.sentry.android.core)
+  "fullImplementation"(libs.sentry.android.ndk)
 
   testImplementation(libs.junit)
   androidTestImplementation(libs.androidx.test.runner)

@@ -253,6 +253,7 @@ async fn run() -> anyhow::Result<()> {
       app_links: teamcraft_proto::AppLinkSettings::default(),
       health_alerts: teamcraft_proto::HealthAlertSettings::default(),
       holidays: teamcraft_proto::HolidaySettings::default(),
+      crash_reports: teamcraft_proto::CrashReportSettings::default(),
       max_attachment_bytes: config
         .storage
         .as_ref()
@@ -291,11 +292,16 @@ async fn run() -> anyhow::Result<()> {
     )),
     holiday_feed: Arc::default(),
     holiday_resync: Arc::default(),
+    crash_relay: Arc::new(
+      teamcraft_server::services::crash_reports::CrashRelay::new(false)
+        .context("building the crash reports relay client")?,
+    ),
   };
   with_startup_retries("loading the settings", startup_deadline, || {
     load_runtime_settings(&state)
   })
   .await?;
+  teamcraft_server::services::crash_reports::install_panic_hook(state.clone());
   spawn_session_sweeper(state.clone());
   if state.settings.get().maybe_oidc_sync.is_some() {
     spawn_oidc_sync(

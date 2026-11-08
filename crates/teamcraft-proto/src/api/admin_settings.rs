@@ -12,8 +12,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::wire_enum::wire_enum;
 use crate::{
-  BrandAssetSlot, BrandColors, BrandLinks, ConversationId, HealthAlertSettings, NotificationLevel,
-  SignInMethod, SpaceId, UnixMillis,
+  BrandAssetSlot, BrandColors, BrandLinks, ConversationId, CrashReportSettings, HealthAlertSettings,
+  NotificationLevel, SignInMethod, SpaceId, UnixMillis,
 };
 
 /// The application and bundle ID of the official apps.
@@ -82,6 +82,7 @@ wire_enum! {
     AppLinks => "app_links",
     HealthAlerts => "health_alerts",
     Holidays => "holidays",
+    CrashReports => "crash_reports",
   }
 }
 
@@ -358,6 +359,17 @@ pub struct RuntimeSettingsResponse {
   /// Absent from older servers: no region, nothing is skipped.
   #[serde(default)]
   pub holidays: HolidaySettings,
+  /// Absent from older servers: off.
+  #[serde(default)]
+  pub crash_reports: CrashReportSettings,
+  /// Host of the publisher's crash reports service built into this server; absent: the build has
+  /// none, and the mode `publisher` sends nothing.
+  #[serde(
+    rename = "publisher_crash_reports_host",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_publisher_crash_reports_host: Option<String>,
   /// How the holiday feed stands; absent without a feed (and from older servers).
   #[serde(rename = "holiday_feed", default, skip_serializing_if = "Option::is_none")]
   pub maybe_holiday_feed: Option<HolidayFeedStatus>,
@@ -391,6 +403,7 @@ pub enum RuntimeSettingsSection {
   AppLinks(AppLinkSettings),
   HealthAlerts(HealthAlertSettings),
   Holidays(HolidaySettings),
+  CrashReports(CrashReportSettings),
 }
 
 /// Which installed apps may open this server's links (docs/app-links.md): what
@@ -778,6 +791,7 @@ impl RuntimeSettingsSection {
       Self::AppLinks(_) => RuntimeSettingsKey::AppLinks,
       Self::HealthAlerts(_) => RuntimeSettingsKey::HealthAlerts,
       Self::Holidays(_) => RuntimeSettingsKey::Holidays,
+      Self::CrashReports(_) => RuntimeSettingsKey::CrashReports,
     }
   }
 }
