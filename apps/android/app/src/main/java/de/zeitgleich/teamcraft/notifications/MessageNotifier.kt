@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
+import de.zeitgleich.teamcraft.calls.CallActivity
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -40,6 +41,7 @@ import kotlinx.coroutines.launch
 import uniffi.teamcraft_ffi.NotificationAttachmentKind
 import uniffi.teamcraft_ffi.NotificationGap
 import uniffi.teamcraft_ffi.PushNotification
+import uniffi.teamcraft_ffi.PushNotificationKind
 
 /**
  * Message notifications: one MessagingStyle notification per conversation (tag = conversation ID),
@@ -402,6 +404,46 @@ class MessageNotifier(
       .setContentIntent(launchIntent())
       .build()
     postSafely(QUIET_CALL_TAG, OTHER_ID, notification)
+  }
+
+  /**
+   * A planned meeting starts soon or has started (docs/meetings.md, "Starting"): the meetings
+   * channel, the start replaces the reminder, and no ringing. Join joins the meeting chat's call if
+   * this device knows it as one the user is in; otherwise a tap opens the app, as for a ring.
+   */
+  fun showMeeting(notification: PushNotification) {
+    if (!canPost()) return
+    val isStart = notification.kind == PushNotificationKind.MEETING_START
+    val name = notification.maybeConversationName?.takeIf { it.isNotBlank() }
+    val minutes = notification.maybeMeetingMinutes?.toInt() ?: 0
+    val title = when {
+      isStart && name != null -> context.getString(R.string.meeting_notification_started, name)
+      isStart -> context.getString(R.string.meeting_notification_started_unnamed)
+      name != null -> context.getString(R.string.meeting_notification_soon, name, minutes)
+      else -> context.getString(R.string.meeting_notification_soon_unnamed, minutes)
+    }
+    val conversationId = notification.conversationId
+    val builder = NotificationCompat.Builder(context, NotificationChannels.MEETINGS)
+      .setSmallIcon(R.drawable.ic_notification)
+      .setContentTitle(title)
+      .setCategory(NotificationCompat.CATEGORY_EVENT)
+      .setAutoCancel(true)
+      .setTimeoutAfter(if (isStart) MEETING_START_TIMEOUT_MS else minutes.coerceAtLeast(1) * 60_000L)
+      .setContentIntent(openIntent(conversationId))
+    notification.maybeMeetingStartsAtMs?.let { builder.setWhen(it).setShowWhen(true) }
+    if (notification.isConversationVerified) {
+      val join = PendingIntent.getActivity(
+        context,
+        conversationId.hashCode(),
+        Intent(context, CallActivity::class.java)
+          .setAction(CallActivity.ACTION_ANSWER)
+          .putExtra(CallActivity.EXTRA_CONVERSATION_ID, conversationId)
+          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+      )
+      builder.addAction(R.drawable.ic_notification, context.getString(R.string.meeting_join), join)
+    }
+    postSafely(MEETING_TAG_PREFIX + (notification.maybeMeetingId ?: conversationId), MEETING_ID, builder.build())
   }
 
   /** The diagnostics' test push arrived. */
@@ -845,6 +887,10 @@ class MessageNotifier(
     const val MESSAGE_ID = 1
     private const val SUMMARY_ID = 2
     private const val OTHER_ID = 3
+    private const val MEETING_ID = 5
+    private const val MEETING_TAG_PREFIX = "meeting:"
+    /** The notice of a started meeting goes away by itself if nobody reacted to it. */
+    private const val MEETING_START_TIMEOUT_MS = 60 * 60_000L
     private const val TEST_TAG = "test"
     private const val QUIET_CALL_TAG = "quiet_call"
     private const val UNREADABLE_TAG = "unreadable"

@@ -471,6 +471,25 @@ impl TestApp {
     .await
   }
 
+  /// Like [`Self::start_with_meetings`] with `dispatcher` as the push senders.
+  pub async fn start_with_meetings_and_push(
+    config: &MeetingsConfig,
+    calendar: Arc<dyn CalendarStore>,
+    mailer: Arc<dyn Mailer>,
+    dispatcher: PushDispatcher,
+  ) -> Option<Self> {
+    let meetings = MeetingService::new(config, MeetingBackends::fixed(Some(calendar), Some(mailer))).unwrap();
+    Self::start_full(
+      |settings: &mut Settings| settings.meeting_mail = meeting_mail_of(config),
+      Extras {
+        maybe_meetings: Some(meetings),
+        maybe_push: Some(dispatcher),
+        ..Extras::default()
+      },
+    )
+    .await
+  }
+
   async fn start_full(customize: impl FnOnce(&mut Settings), extras: Extras) -> Option<Self> {
     let Extras {
       maybe_storage,

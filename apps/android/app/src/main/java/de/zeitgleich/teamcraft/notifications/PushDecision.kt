@@ -69,6 +69,9 @@ sealed interface PushDecision {
   /** The diagnostics' test push arrived: a short confirmation. */
   data class ShowTest(val maybeSentAtMs: Long?) : PushDecision
 
+  /** A planned meeting starts soon or has started: a normal notification with Join, no ring. */
+  data class ShowMeeting(val notification: PushNotification) : PushDecision
+
   companion object {
     /**
      * `isRingOver`: this wake-up was opened so late that a ring in it has ended by now; it is told
@@ -78,6 +81,8 @@ sealed interface PushDecision {
     fun of(notification: PushNotification, isRingOver: Boolean = false): PushDecision = when (notification.kind) {
       PushNotificationKind.MESSAGE -> message(notification)
       PushNotificationKind.CALL -> call(notification, isRingOver)
+      PushNotificationKind.MEETING_REMINDER, PushNotificationKind.MEETING_START ->
+        if (notification.maybeSuppression != null) Ignore(IgnoreReason.SUPPRESSED) else ShowMeeting(notification)
       PushNotificationKind.DISMISS -> dismiss(notification)
       PushNotificationKind.SCHEDULED_SEAL -> SealScheduled
       PushNotificationKind.SYNC -> CatchUp

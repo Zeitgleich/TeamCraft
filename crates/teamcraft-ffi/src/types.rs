@@ -524,6 +524,10 @@ pub enum PushNotificationKind {
   Message,
   /// Report an incoming call (Android: full-screen notification, iOS: CallKit).
   Call,
+  /// A planned meeting starts soon: a normal notification with Join, on the meetings channel.
+  MeetingReminder,
+  /// A planned meeting has started: a normal notification with Join, on the meetings channel.
+  MeetingStart,
   /// Remove what was shown: the conversation (or thread) up to `maybe_message_id` was read on
   /// another device, or, with `maybe_call_id`, the ring ended. Never shows anything.
   Dismiss,
@@ -683,6 +687,16 @@ pub struct PushNotification {
   /// The app shows no missed call then. Defaulted, so items the apps build need no change.
   #[uniffi(default = false)]
   pub is_ring_answered: bool,
+  /// The meeting a reminder or start notice tells about (the notification's tag, so the start
+  /// replaces the reminder). Defaulted, so items the apps build need no change.
+  #[uniffi(default = None)]
+  pub maybe_meeting_id: Option<String>,
+  /// When the meeting starts (milliseconds since 1970). Defaulted, as above.
+  #[uniffi(default = None)]
+  pub maybe_meeting_starts_at_ms: Option<i64>,
+  /// Whole minutes left when the server sent the reminder. Defaulted, as above.
+  #[uniffi(default = None)]
+  pub maybe_meeting_minutes: Option<u32>,
 }
 
 /// What the newest notification showed of a conversation (issue #1065): opening it from the
@@ -924,6 +938,11 @@ impl From<PushPreview> for PushNotification {
       is_read: false,
       maybe_suppression: None,
       is_ring_answered: false,
+      maybe_meeting_id: wake_up
+        .maybe_meeting
+        .map(|meeting| meeting.meeting_id.to_string()),
+      maybe_meeting_starts_at_ms: wake_up.maybe_meeting.map(|meeting| meeting.starts_at.0),
+      maybe_meeting_minutes: teamcraft_core::push_text::meeting_minutes_left(wake_up),
       conversation_id: preview.wake_up.conversation_id.to_string(),
       maybe_message_id: preview.wake_up.maybe_message_id.map(|id| id.to_string()),
       maybe_conversation_name: preview.maybe_conversation_name,
@@ -1026,6 +1045,8 @@ pub(crate) fn notification_kind(kind: &PushKind) -> PushNotificationKind {
   match kind {
     PushKind::Message | PushKind::Mention => PushNotificationKind::Message,
     PushKind::Call => PushNotificationKind::Call,
+    PushKind::MeetingReminder => PushNotificationKind::MeetingReminder,
+    PushKind::MeetingStart => PushNotificationKind::MeetingStart,
     PushKind::Dismiss => PushNotificationKind::Dismiss,
     PushKind::ScheduledSeal => PushNotificationKind::ScheduledSeal,
     PushKind::Sync => PushNotificationKind::Sync,
