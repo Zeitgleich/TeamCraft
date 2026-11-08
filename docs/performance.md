@@ -766,6 +766,31 @@ the next frame.
 How fast and how lean the apps are for the person using them; the budgets they must stay within are
 in [.claude/rules/robustness.md](../.claude/rules/robustness.md) ("Performance and resources").
 
+### Numbers from real use (issue #1521)
+
+The measurements below are taken on purpose, on test machines. What real users see comes from the
+apps' performance data, sent with the crash reports to the same backend
+([crash-reports.md](crash-reports.md), "Performance data"): **GlitchTip → Performance**, one row
+per transaction name, with its p50/p95, throughput and the slowest samples.
+
+| Transaction          | Budget it checks (robustness.md)                    | Apps                               |
+|----------------------|-----------------------------------------------------|------------------------------------|
+| `start.channel_list` | Signed-in start until the channel list is usable    | Web, desktop                       |
+| `channel.switch`     | Channel switch, p95                                 | Web, desktop, Android              |
+| `message.send`       | (none yet) send until the server took the message   | Web, desktop, Android              |
+| `sync.reconnect`     | (none yet) connecting again until connected         | Web, desktop, Android              |
+| `file.download`      | (none yet) an attachment's download and decryption  | Web, desktop                       |
+| `call.setup`         | (none yet) joining until the media is secured       | Web, desktop                       |
+| App start, `ui.load` | Signed-in start (mobile), slow and frozen frames    | Android, iOS (the SDKs' own)       |
+
+- Filter by the tag `app.platform` (`web`, `desktop`, `android`, `ios`) and by release
+  (`teamcraft@<version>`): a regression shows as a step in p95 from one release to the next.
+- A transaction's steps (spans) say where the time went: the start's parts (the same names as
+  `start_timing`, "Web start on phones" below), a channel switch's read from the core's store
+  (`db.query core_messages`, tag `source` = `store`; without it the rows were in memory).
+- The share of operations measured is the instance's "trace rate" (Administration → Crash
+  reports), 100 % while the team gathers data; lower it as an instance grows. No rebuild needed.
+
 ### DPoP (issue #120)
 
 What proofs cost a client with a bound token (e2ee.md §3.1.2); a client with an unbound token pays

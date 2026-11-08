@@ -113,7 +113,8 @@ opt out (or the instance makes reports mandatory), and closes it when that ends.
   early in the next start is reported; changing the server forgets it.
 - **Options:** release `teamcraft@<version>`, the instance's environment, no personal data
   (`dataCollection`: no user info, cookies, headers, query parameters, bodies or file paths), no
-  screenshot, view hierarchy, threads, session replay, tracing, profiling or sessions, and no
+  screenshot, view hierarchy, threads, session replay, profiling or sessions, tracing only at the
+  trace rate ("Performance data"), and no
   automatic breadcrumbs (activity, app and system events, network, user interaction, app
   components); `beforeBreadcrumb` drops whatever else would add one. NDK and ANR capture are on.
 - **`beforeSend`** (`SentryEventScrub`): handled errors are sampled with the instance's rate
@@ -136,8 +137,9 @@ it with `SentrySDK.start` from the app delegate (the last known setting) and aft
 and return to the foreground (`server-info` through the same FFI check), and closes it when
 reports go off. Options: `sendDefaultPii`, `attachScreenshot`, `attachViewHierarchy`,
 `enableAutoBreadcrumbTracking`, `enableNetworkBreadcrumbs`, `enableCaptureFailedRequests`,
-`enableAutoPerformanceTracing` and `enableAutoSessionTracking` off; no tracing, profiling or
-replay (their defaults); `enableAppHangTracking` and `enableMetricKit` on. `beforeSend`
+and `enableAutoSessionTracking` off; tracing (app start, screen loads, frames) only at the trace
+rate, without network, file or Core Data spans ("Performance data"); no profiling or replay;
+`enableAppHangTracking` and `enableMetricKit` on. `beforeSend`
 (`CrashEventScrub`) and `CrashScrubber.swift` do what the Android side does, with the same test
 cases (`CrashScrubberTests`). The settings and the notice are the same as on Android.
 
@@ -214,6 +216,81 @@ account, the device or the instance, and it is rotated when the user turns repor
 - **Mobile core:** a Rust panic in the FFI reaches Kotlin or Swift as an exception, which the
   platform SDK reports (with its `beforeSend` scrubbing).
 
+## Performance data
+
+Issue #1521. How long the operations people wait for take on their devices, as Sentry
+`transaction` items to the same backend as crash reports (GlitchTip → Performance), so the
+budgets in robustness.md ("Performance and resources") are checked against real use, per platform
+and release. Where to read them: [performance.md](performance.md), "Numbers from real use".
+
+### What is measured
+
+| Transaction          | From → to                                                                  | Apps                  |
+|----------------------|----------------------------------------------------------------------------|-----------------------|
+| `start.channel_list` | The page's navigation → the signed-in shell with the channel list rendered | Web, desktop          |
+| `channel.switch`     | Opening a conversation → its first row shows a message                     | Web, desktop, Android |
+| `message.send`       | Sending a plain message → the server's message replaced the pending row    | Web, desktop, Android |
+| `sync.reconnect`     | The core connecting again → connected (resume or full resync)              | Web, desktop, Android |
+| `file.download`      | An attachment's download and decryption (previews and the viewer)          | Web, desktop          |
+| `call.setup`         | Joining a call → its media secured                                         | Web, desktop          |
+| SDK: app start       | Process start → first frame, with the SDK's phases                         | Android, iOS          |
+| SDK: `ui.load`       | A screen (activity, view controller) until displayed; slow/frozen frames   | Android, iOS          |
+
+Not yet measured: uploads (the draft's upload runs in the core, which reports no progress events
+the page could time cheaply), MLS commits (in the core; on desktop and mobile not in the page), and
+the core-side steps of a send or a resync. A start that showed a sign-in page first is not a
+signed-in start and is not measured. A measure the user moved on from (another conversation opened
+before the first one showed) is dropped, not sent as slow.
+
+### What a transaction contains
+
+- Its name (above), the protocol's `op`, start and end time, status (`ok`, `internal_error`,
+  `cancelled`, `deadline_exceeded`, `unavailable`).
+- Steps (spans, at most 32): an operation and a description from the code (`app.start` /
+  `store-read`, `db.query` / `core_messages`), their times and status.
+- Tags (at most 8) and measurements (at most 8) from the code: `source` = `store`, `account` =
+  `cached` or `restored`, `rendition` = `inline` or `full`, `link` = `slow`, `bytes`.
+- Release, environment, the platform tag, the OS name and the installation ID, as in a report.
+
+**Privacy by construction:** in `crash_reporting::Transaction`, the name is an enum, and span
+operations and descriptions, tag names and values and measurement names are `&'static str`: there
+is no field a caller could fill with text at run time, so a transaction can't carry a message, a
+name, a file name, an ID or a URL. The page keeps measures that start and end in different places
+by a local key (a conversation's or a pending message's ID), which never leaves the page. No
+breadcrumbs. The tests check the shape and the bounds (`transaction.rs`) and that the relay
+forwards transactions and nothing else besides events.
+
+On Android and iOS the SDKs build transactions; their `beforeSendTransaction` (Android:
+`SentryTransactionScrub`) or `beforeSend` (iOS: `CrashEventScrub.prepareTransaction`) drops the
+request, server name, extras and breadcrumbs, keeps only the installation ID as user, scrubs tag
+values, and on Android scrubs span descriptions ([CrashScrubber]: a URL keeps scheme, host and
+path) and drops span data and span tags (full URLs, queries, file paths). iOS turns network, file and Core Data tracing
+off, so no span names a URL or a file; Android has no HTTP integration (the app's HTTP runs in the
+core). The Android measures of its own (`Perf.kt`) take their names from the core
+(`perf_measure_name`), so every platform reports the same transaction names.
+
+### Sampling and sending
+
+- **Trace rate (admin):** Administration → Crash reports → "Share of measured operations sent as
+  performance data", `trace_percent` in the setting and in `server-info`. **100 % by default for
+  now**: the instance has a handful of users and the team needs the data; meant to be lowered as
+  instances grow, without a rebuild. An older server's `server-info` has no `trace_percent`: no
+  performance data. Only where crash reports are on and the user didn't opt out (or reports are
+  mandatory).
+- **Decided at the start** of an operation (`CrashReporter::should_trace`): an unmeasured
+  operation costs a random number.
+- **A buffer of its own:** at most 50 transactions and 256 KiB, 3 tries, 2 days; the oldest drop
+  out. Crash reports have their own queue, so performance data never pushes one out, and a flush
+  sends crash reports first.
+- **No timers, no idle traffic:** transactions go with the crash reports' flushes (start, after a
+  capture, back online) and when 5 are queued; at most 5 per flush, one request each (the protocol
+  takes one transaction per envelope), so the relay's per-address rate limit
+  (`public_requests_per_minute`, 30 by default) keeps room for crash reports. A `429` pauses both
+  queues. The page keeps the buffer in memory and stores it in `localStorage` when hidden or
+  closed.
+- **Relay:** `POST /api/v1/crash-reports` checks each item's type and forwards `event` and
+  `transaction` items only (attachments, sessions, replays: `400`), same size limit.
+
 ## Symbols: readable stack traces
 
 | Platform         | What the report carries                          | Symbol upload (release workflow)                 |
@@ -266,3 +343,5 @@ account, the device or the instance, and it is rotated when the user turns repor
 | iOS (sentry-cocoa), settings and notice                      | Written; Mac build: #1515        |
 | iOS dSYM upload, device test                                 | Next (#1515)                     |
 | GlitchTip in teamcraft-deploy                                | teamcraft-deploy                 |
+| Performance data: web, desktop, Android, iOS SDK (#1521)     | Done; iOS untested (#1515)       |
+| Performance data: uploads, MLS commits, iOS own measures     | Next                             |
