@@ -467,6 +467,12 @@ impl Settings {
   }
 }
 
+/// The stored preferences, read once without signals: for what runs before the app mounts (the
+/// crash reports' opt-out, which must hold for a crash during start).
+pub fn stored_prefs() -> Preferences {
+  load(KEY_PREFS, |text| Some(Preferences::from_json(text))).unwrap_or_default()
+}
+
 #[cfg(test)]
 impl Settings {
   /// Defaults without `localStorage`, for tests outside a browser.

@@ -413,6 +413,9 @@ pub struct PrivacyPrefs {
   pub share_typing: bool,
   /// Minutes of inactivity before status turns to away; `None` never.
   pub away_after_minutes: Option<u32>,
+  /// Send crash reports when the instance has them on (docs/crash-reports.md); counts only while
+  /// the instance allows opting out.
+  pub send_crash_reports: bool,
 }
 
 impl Default for PrivacyPrefs {
@@ -421,6 +424,7 @@ impl Default for PrivacyPrefs {
       share_read_receipts: true,
       share_typing: true,
       away_after_minutes: Some(DEFAULT_AWAY_AFTER_MINUTES),
+      send_crash_reports: true,
     }
   }
 }

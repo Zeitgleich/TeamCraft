@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-crash-report-post"
+description = "Enables the crash_report_post command without any pre-configured scope."
+commands.allow = ["crash_report_post"]
+
+[[permission]]
+identifier = "deny-crash-report-post"
+description = "Denies the crash_report_post command without any pre-configured scope."
+commands.deny = ["crash_report_post"]

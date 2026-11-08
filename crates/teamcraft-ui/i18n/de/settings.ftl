@@ -826,3 +826,11 @@ settings-holiday-feed-error-not_a_calendar = Er ist kein Kalender (vielleicht ei
 settings-holiday-feed-error-malformed = Der Kalender ist kaputt oder abgeschnitten.
 settings-holiday-feed-error-empty = Der Kalender hat keine ganztägigen Termine.
 settings-holiday-feed-error-too_many = Der Kalender hat mehr als 5000 Feiertage.
+
+## Absturzberichte (docs/crash-reports.md)
+crash-reports-heading = Absturzberichte
+crash-reports-send = Absturzberichte senden
+crash-reports-send-hint = Wenn die App abstürzt oder auf einen Fehler stößt, sendet sie einen Bericht an den Absturzbericht-Dienst deiner Organisation: wo in der App es passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.
+crash-reports-required-hint = Deine Organisation schreibt Absturzberichte vor. Sie enthalten, wo in der App ein Absturz passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.
+crash-reports-notice = Diese App sendet Absturzberichte an deine Organisation: wo ein Absturz passiert ist und die App-Version, niemals Nachrichten, Namen oder Dateien.
+crash-reports-notice-settings = Einstellungen

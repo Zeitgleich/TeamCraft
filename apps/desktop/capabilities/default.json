@@ -20,6 +20,7 @@
     "allow-api-request",
     "allow-api-request-bytes",
     "allow-public-get",
+    "allow-crash-report-post",
     "allow-public-asset",
     "allow-avatar-download",
     "allow-avatar-upload",

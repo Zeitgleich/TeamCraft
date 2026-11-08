@@ -17,7 +17,10 @@ use base64::Engine;
 
 use super::avatars::MAX_AVATAR_BYTES;
 use super::servers::ServerState;
-use super::{ApiBytesResponse, ApiResponse, AuthError, AuthService, DesktopConfig, HTTP_POLICY, VaultStore};
+use super::{
+  ApiBytesResponse, ApiResponse, AuthError, AuthService, CrashReportAnswer, DesktopConfig, HTTP_POLICY,
+  VaultStore,
+};
 use teamcraft_client_api::oidc_login::LoginRequest;
 
 pub type Service = AuthService<VaultStore>;
@@ -385,6 +388,15 @@ pub async fn api_get(path: String, service: State<'_, Arc<Service>>) -> Result<A
 #[tauri::command(rename_all = "snake_case")]
 pub async fn public_get(path: String, service: State<'_, Arc<Service>>) -> Result<ApiResponse, CommandError> {
   Ok(service.public_get(&path).await?)
+}
+
+/// A crash report of the page to the server's relay (docs/crash-reports.md).
+#[tauri::command(rename_all = "snake_case")]
+pub async fn crash_report_post(
+  envelope: String,
+  service: State<'_, Arc<Service>>,
+) -> Result<CrashReportAnswer, CommandError> {
+  Ok(service.post_crash_report(envelope).await?)
 }
 
 /// A brand image of the active server as bytes (the webview shows it as a `data:` URL).
