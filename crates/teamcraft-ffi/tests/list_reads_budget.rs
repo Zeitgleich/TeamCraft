@@ -59,6 +59,7 @@ const WAITING_ROWS: i64 = 2_000;
 const DEFAULT_BIG_NEVER_READ: i64 = 1;
 /// As the engine's `GROUP_TURN_MS`: a group runs this long before it ends early for a read.
 const GROUP_TURN: Duration = Duration::from_millis(16);
+const COLD_PASSES: usize = 20;
 const CATCH_UP_EVERY: Duration = Duration::from_millis(250);
 const DECRYPTED_PER_BATCH: usize = 25;
 const OLDER_PER_BATCH: i64 = 10;
@@ -314,6 +315,44 @@ async fn measure_a_start_during_a_catch_up() {
   );
   drop(backend);
   drop(store);
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// What a list pass costs when every pass follows another connection's commit (what a read
+/// connection of its own would see of the engine's commits): the store drops its caches each time.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a measurement: run by hand with --release"]
+async fn measure_a_list_pass_after_another_connections_commit() {
+  let directory = std::env::temp_dir().join(format!("teamcraft-cold-pass-{}", std::process::id()));
+  std::fs::create_dir_all(&directory).unwrap();
+  let me = seed(&directory).await;
+  let store = open_store(&directory);
+  let other = open_store(&directory);
+  let backend = CoreChatBackend::new(store.clone(), me, Box::new(SystemClock));
+  let spaces: BTreeSet<SpaceId> = (0..SPACES).map(|space| id(900 + space)).collect();
+  backend.listed_conversations(&spaces);
+  let mut warm = Vec::new();
+  let mut cold = Vec::new();
+  for n in 0..COLD_PASSES {
+    let pass = Instant::now();
+    backend.listed_conversations(&spaces);
+    warm.push(pass.elapsed());
+    other
+      .put(Table::SyncState, "cold-pass", &n.to_le_bytes())
+      .unwrap();
+    let pass = Instant::now();
+    backend.listed_conversations(&spaces);
+    cold.push(pass.elapsed());
+  }
+  warm.sort();
+  cold.sort();
+  eprintln!(
+    "list pass, caches warm: p50 {:.1} ms; after another connection's commit: p50 {:.1} ms, max {:.1} ms",
+    ms(warm[COLD_PASSES / 2]),
+    ms(cold[COLD_PASSES / 2]),
+    ms(cold[COLD_PASSES - 1])
+  );
+  drop((backend, store, other));
   std::fs::remove_dir_all(&directory).unwrap();
 }
 
