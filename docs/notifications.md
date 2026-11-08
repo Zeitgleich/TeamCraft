@@ -140,7 +140,8 @@ database, so a daylight saving change needs no client.
 ### Per-conversation filters
 
 Issue #599. Next to level and mute time a member sets two filters per conversation, in the
-conversation's bell menu (desktop and web) or its notification dialog (Android):
+conversation's bell menu (desktop and web), its notification dialog (Android) or its "Notification
+filters" sheet (iOS):
 
 - **`@channel` and `@here`** (`channel_mentions`): `default` follows the general setting
   "@channel notifies me" (Settings → Notifications, synced in the account's encrypted data), `notify`
