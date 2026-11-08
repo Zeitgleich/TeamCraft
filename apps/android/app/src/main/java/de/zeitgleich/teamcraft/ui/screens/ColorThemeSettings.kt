@@ -48,6 +48,7 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
@@ -173,7 +174,8 @@ private fun Swatch(name: String, colors: SwatchColors, isSelected: Boolean, onCl
     Text(
       name,
       style = if (isSelected) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelSmall,
-      maxLines = 1,
+      maxLines = 2,
+      textAlign = TextAlign.Center,
       overflow = TextOverflow.Ellipsis,
     )
   }
@@ -258,7 +260,7 @@ private fun ThemeCodeImport(onChoose: (String) -> Unit) {
   var code by remember { mutableStateOf("") }
   var isRefused by remember { mutableStateOf(false) }
   val focus = remember { FocusRequester() }
-  val submit = {
+  val submit: () -> Unit = {
     val maybeValue = colorThemeFromCode(code)
     if (maybeValue == null) {
       isRefused = true
