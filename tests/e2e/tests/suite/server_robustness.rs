@@ -678,6 +678,7 @@ fn message_request(device_id: DeviceId, bytes: usize) -> SendMessageRequest {
     maybe_thread_id: None,
     mentioned_user_ids: Vec::new(),
     is_urgent: false,
+    is_channel_mention: false,
   }
 }
 
