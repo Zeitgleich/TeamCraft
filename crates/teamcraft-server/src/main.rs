@@ -301,6 +301,7 @@ async fn run() -> anyhow::Result<()> {
     load_runtime_settings(&state)
   })
   .await?;
+  teamcraft_server::services::crash_reports::install_panic_hook(state.clone());
   spawn_session_sweeper(state.clone());
   if state.settings.get().maybe_oidc_sync.is_some() {
     spawn_oidc_sync(

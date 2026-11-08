@@ -23,6 +23,7 @@ const COMMANDS: &[&str] = &[
   "api_request_bytes",
   "public_get",
   "crash_report_post",
+  "crash_reports_take_native",
   "public_asset",
   "avatar_download",
   "avatar_upload",

@@ -17,6 +17,7 @@ mod calls;
 mod clipboard;
 mod clipboard_paste;
 mod core;
+mod crash_reports;
 mod deep_links;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
@@ -88,6 +89,8 @@ fn main() -> anyhow::Result<()> {
     // The recent log for "Report a problem" (docs/bug-reports.md), redacted, in memory only.
     .with(teamcraft_client_api::debug_log::layer())
     .init();
+  // Panics of the shell are kept for the page to report (docs/crash-reports.md).
+  crash_reports::install_hook();
 
   // No server yet: the account's server is set in `setup`, once the data directory is known.
   // The one read of the OS keychain per start happens when something first asks it for a secret
@@ -179,6 +182,7 @@ fn main() -> anyhow::Result<()> {
           tracing::debug!(%error, "could not notify the webview");
         }
       });
+      crash_reports::set_data_dir(&app.path().app_data_dir()?);
       let files = MediaFiles {
         codec_directory: app.path().app_data_dir()?.join("codecs"),
         maybe_segmentation_model: app.path().resolve(BUNDLED_MODEL, BaseDirectory::Resource).ok(),
@@ -282,6 +286,7 @@ fn main() -> anyhow::Result<()> {
       auth::commands::api_request_bytes,
       auth::commands::public_get,
       auth::commands::crash_report_post,
+      crash_reports::crash_reports_take_native,
       auth::commands::public_asset,
       auth::commands::avatar_download,
       auth::commands::avatar_upload,

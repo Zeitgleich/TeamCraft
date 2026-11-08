@@ -13,7 +13,7 @@ use leptos::prelude::*;
 use serde::Deserialize;
 use teamcraft_client_api::crash_reporting::{
   AppInfo, AppPlatform, CrashEvent, CrashLevel, CrashReporter, CrashReportingConfig, CrashReportingConsent,
-  CrashSendOutcome, ErrorSource, EventId, InstallationId, PanicParts, StackFrame,
+  CrashSendOutcome, ErrorSource, EventId, InstallationId, PanicParts, PendingPanic, StackFrame,
 };
 use teamcraft_client_api::debug_log;
 use teamcraft_client_api::server_entry::SERVER_INFO_PATH;
@@ -148,8 +148,28 @@ async fn refresh_config() {
     reporter.set_config(maybe_config);
     publish_status(reporter);
   });
+  take_shell_panics().await;
   store_queue();
   flush();
+}
+
+/// The desktop shell's panics since the last start (its hook keeps them for the page): reported
+/// like the page's own, with the instance's setting and the user's choice.
+async fn take_shell_panics() {
+  if !tauri::is_available() {
+    return;
+  }
+  let Ok(pending) =
+    tauri::call::<Vec<PendingPanic>>("crash_reports_take_native", &serde_json::json!({})).await
+  else {
+    return;
+  };
+  for panic in pending {
+    let event = panic
+      .parts
+      .into_event(event_id(), panic.timestamp_ms, panic.breadcrumbs);
+    with_reporter(|reporter| reporter.capture(event, random_roll()));
+  }
 }
 
 async fn server_info() -> Option<ServerInfoResponse> {
