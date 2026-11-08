@@ -285,8 +285,10 @@ async fn measure_a_start_during_a_catch_up() {
   passes.sort();
   opens.sort();
   eprintln!(
-    "list pass during the catch-up          p50 {:>8.1} ms, max {:>8.1} ms over {} passes",
+    "list pass during the catch-up          p50 {:>8.1} ms, p95 {:>8.1} ms, p99 {:>8.1} ms, max {:>8.1} ms over {} passes",
     ms(passes[passes.len() / 2]),
+    ms(passes[passes.len() * 95 / 100]),
+    ms(passes[passes.len() * 99 / 100]),
     ms(passes[passes.len() - 1]),
     passes.len()
   );

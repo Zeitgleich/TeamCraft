@@ -51,7 +51,7 @@ use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
 use crate::client::{ForwardScope, bookmarks_key};
 use crate::clock::Clock;
 pub use crate::entry_tally::EntryNeed;
-use crate::entry_tally::{self, Counted, EntryPass, EntryTally, TallyInputs};
+use crate::entry_tally::{self, Counted, EntryPass, EntryTally, TallyInputs, UnreadRows};
 use crate::error::CoreError;
 use crate::imported::{Authorship, ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
@@ -731,6 +731,9 @@ pub struct CoreChatBackend<S> {
   entry_tallies: RefCell<BTreeMap<ConversationId, EntryTally>>,
   /// What the snapshot's entries count ([`Self::with_entry_need`]).
   entry_need: EntryNeed,
+  /// The unread rows of conversations whose counts follow the store's journal of writes
+  /// ([`EntryNeed::Unread`]): a change costs a read of what it changed (issue #1466).
+  live_unread: RefCell<HashMap<ConversationId, LiveUnread>>,
   /// The feed rows of the conversations read last, kept while their messages don't change.
   feeds: RefCell<Vec<(ConversationId, FeedView)>>,
   /// What paging an indexed feed needs of the conversations read last, kept likewise.
@@ -795,6 +798,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       sent: RefCell::default(),
       entry_tallies: RefCell::default(),
       entry_need: EntryNeed::Everything,
+      live_unread: RefCell::default(),
       feeds: RefCell::default(),
       layouts: RefCell::default(),
       older_requests: RefCell::default(),
@@ -1067,7 +1071,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     };
     let mut memo = self.mentions.borrow_mut();
     memo.follow(&rules);
-    let pass = EntryPass::new(self.me, &rules, &mut memo, &is_unread, maybe_importer);
+    let mut pass = EntryPass::new(self.me, &rules, &mut memo, &is_unread, maybe_importer);
     let conversation = response.id;
     let result = match self.kept_feed_version(conversation) {
       Some(version) => {
@@ -1088,21 +1092,54 @@ impl<S: LocalStore> CoreChatBackend<S> {
           ),
           maybe_boundary: entry_tally::read_boundary(maybe_mark, maybe_last_read),
         };
+        if need == EntryNeed::Unread
+          && let Some(unread) = self.followed_unread(conversation, &inputs, &mut pass)
+        {
+          return EntryCounts {
+            unread,
+            ..EntryCounts::default()
+          };
+        }
+        // Taken before the scan: what is written meanwhile is decided again on the next read.
+        let maybe_cursor = self.store.written_cursor();
+        let mut rows = UnreadRows::new();
         let maybe_kept = entry_tally::kept_tally(&self.store, conversation);
-        entry_tally::counted(&self.store, conversation, &inputs, maybe_kept.clone(), need, pass).map(
-          |counted| match counted {
-            Counted::Kept(counts, tally) => {
-              if maybe_kept.as_ref() != Some(&tally) {
-                self.entry_tallies.borrow_mut().insert(conversation, tally);
-              }
-              counts
-            },
-            Counted::Unread(unread) => EntryCounts {
+        entry_tally::counted(
+          &self.store,
+          conversation,
+          &inputs,
+          maybe_kept.clone(),
+          need,
+          pass,
+          maybe_cursor.is_some().then_some(&mut rows),
+        )
+        .map(|counted| match counted {
+          Counted::Kept(counts, tally) => {
+            if maybe_kept.as_ref() != Some(&tally) {
+              self.entry_tallies.borrow_mut().insert(conversation, tally);
+            }
+            counts
+          },
+          Counted::Scanned(unread, maybe_tally) => {
+            if let Some(tally) = maybe_tally {
+              self.entry_tallies.borrow_mut().insert(conversation, tally);
+            }
+            if let Some(cursor) = maybe_cursor {
+              self.live_unread.borrow_mut().insert(
+                conversation,
+                LiveUnread {
+                  unread_key: inputs.unread_key,
+                  cursor,
+                  rows,
+                },
+              );
+            }
+            EntryCounts {
               unread,
               ..EntryCounts::default()
-            },
+            }
           },
-        )
+        })
       },
       None => entry_tally::counted_unkept(&self.store, conversation, pass),
     };
@@ -1110,6 +1147,47 @@ impl<S: LocalStore> CoreChatBackend<S> {
       tracing::error!(%error, "local store read failed");
       EntryCounts::default()
     })
+  }
+
+  /// The unread counts of a conversation a scan counted before, after what the store's journal says
+  /// was written to it since; a tally of them is kept when they changed. `None` when the journal
+  /// can't tell or what decides them changed (a read position, a mark, the rules): scan again.
+  fn followed_unread(
+    &self,
+    conversation: ConversationId,
+    inputs: &TallyInputs,
+    pass: &mut EntryPass<'_>,
+  ) -> Option<UnreadCounts> {
+    let mut lives = self.live_unread.borrow_mut();
+    let live = lives.get_mut(&conversation)?;
+    let maybe_followed = (live.unread_key == inputs.unread_key)
+      .then(|| self.store.written_cursor())
+      .flatten()
+      .and_then(|cursor| {
+        let written = self.store.written_since(conversation, live.cursor)?;
+        let result = entry_tally::followed_unread(&self.store, conversation, &mut live.rows, &written, pass);
+        let unread = result.unwrap_or_else(|error| {
+          tracing::debug!(%error, "local store read failed, counting again");
+          None
+        })?;
+        live.cursor = cursor;
+        Some((unread, !written.is_empty()))
+      });
+    let Some((unread, has_changed)) = maybe_followed else {
+      lives.remove(&conversation);
+      return None;
+    };
+    if has_changed {
+      match entry_tally::unread_kept_now(&self.store, conversation, inputs, unread) {
+        Ok(Some(tally)) => {
+          self.entry_tallies.borrow_mut().insert(conversation, tally);
+        },
+        Ok(None) => {},
+        // The tally is a cache: the next start counts again.
+        Err(error) => tracing::debug!(%error, "could not keep the unread counts"),
+      }
+    }
+    Some(unread)
   }
 
   /// The feed's version, where reads can use the store's feed index and a tally can be kept.
@@ -3407,6 +3485,16 @@ fn has_channel_in(conversations: &[ConversationResponse], space: SpaceId) -> boo
 
 pub(crate) fn is_deleted(message: &StoredMessage) -> bool {
   matches!(message.content, MessageContent::Deleted)
+}
+
+/// The unread rows of one conversation, counted by a scan and followed since through the store's
+/// journal of writes ([`CoreChatBackend::followed_unread`]).
+struct LiveUnread {
+  /// What decided them: another read position, mark or rule set scans again.
+  unread_key: u64,
+  /// Where the journal stood when they were last brought up to date.
+  cursor: u64,
+  rows: UnreadRows,
 }
 
 /// What a sidebar entry counts of a conversation ([`CoreChatBackend::entry_counts`]).

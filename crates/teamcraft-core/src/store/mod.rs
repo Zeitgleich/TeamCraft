@@ -618,6 +618,15 @@ pub struct MessageOrder {
   pub client_message_id: [u8; 16],
 }
 
+/// A write [`LocalStore::written_since`] tells of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Written {
+  /// This message was written or removed.
+  Message(ClientMessageId),
+  /// All of the conversation's messages went.
+  Conversation,
+}
+
 /// How far a conversation's feed was rewritten since the store began ([`LocalStore::feed_version`]).
 /// A new message changes neither count: a reader finds those by their position.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -846,6 +855,19 @@ pub trait LocalStore {
   fn feed_version(&self, conversation: ConversationId) -> Result<Option<FeedVersion>, StoreError> {
     let _ = conversation;
     Ok(None)
+  }
+  /// Where this store's journal of written messages stands now: a reader that keeps what it
+  /// derived per message (a chat list's unread counts, issue #1466) asks
+  /// [`Self::written_since`] from here later. `None`: the store keeps no journal.
+  fn written_cursor(&self) -> Option<u64> {
+    None
+  }
+  /// What of `conversation`'s messages was written or removed since `cursor`
+  /// ([`Self::written_cursor`]), maybe more. `None` when the journal can't tell: it no longer holds
+  /// what came after `cursor`, or another connection wrote meanwhile.
+  fn written_since(&self, conversation: ConversationId, cursor: u64) -> Option<Vec<Written>> {
+    let _ = (conversation, cursor);
+    None
   }
   /// The oldest or newest server message ID stored in `conversation`: the cursor of a catch-up, of
   /// older history and of the read position. Placeholders don't count (issue #888): their IDs are
@@ -1196,6 +1218,14 @@ macro_rules! forward_local_store {
 
       fn feed_version(&self, conversation: ConversationId) -> Result<Option<FeedVersion>, StoreError> {
         (**self).feed_version(conversation)
+      }
+
+      fn written_cursor(&self) -> Option<u64> {
+        (**self).written_cursor()
+      }
+
+      fn written_since(&self, conversation: ConversationId, cursor: u64) -> Option<Vec<Written>> {
+        (**self).written_since(conversation, cursor)
       }
 
       fn feed_len(&self, conversation: ConversationId) -> Result<usize, StoreError> {
