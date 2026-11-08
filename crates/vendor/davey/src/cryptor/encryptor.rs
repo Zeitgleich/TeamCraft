@@ -1,10 +1,8 @@
-#[cfg(feature = "napi")]
-use napi_derive::napi;
-use std::collections::HashMap;
-// std::time::Instant panics on wasm32-unknown-unknown; web_time is std on native targets.
-use web_time::Instant;
+use std::{collections::HashMap, time::Instant};
 
-use tracing::warn;
+use tracing::{debug, warn};
+
+use crate::errors::EncryptorEncryptError;
 
 use super::{
   aead_cipher::AeadCipher,
@@ -18,24 +16,26 @@ use super::{
   *,
 };
 
-#[cfg_attr(feature = "napi", napi(object))]
 #[cfg_attr(feature = "pyo3", pyclass(get_all, from_py_object))]
 #[derive(Clone)]
 pub struct EncryptionStats {
   /// Number of encryption successes
-  pub successes: u32,
+  pub successes: u64,
   /// Number of encryption failures
-  pub failures: u32,
+  pub failures: u64,
   /// Total encryption duration in microseconds
-  pub duration: u32,
+  pub duration: u64,
   /// Total amounts of encryption attempts
-  pub attempts: u32,
+  pub attempts: u64,
   /// Maximum attempts reached at encryption
-  pub max_attempts: u32,
+  pub max_attempts: u64,
+  /// Number of encryptions that failed due to a missing key
+  pub missing_keys: u64,
 }
 
 pub struct Encryptor {
   ratchet: Option<HashRatchet>,
+  key_domain_identity: Option<Vec<u8>>,
   cryptor: Option<AeadCipher>,
   current_key_generation: u32,
   truncated_nonce: u32,
@@ -54,6 +54,7 @@ impl Encryptor {
         duration: 0,
         attempts: 0,
         max_attempts: 0,
+        missing_keys: 0,
       },
     );
     stats.insert(
@@ -64,11 +65,13 @@ impl Encryptor {
         duration: 0,
         attempts: 0,
         max_attempts: 0,
+        missing_keys: 0,
       },
     );
 
     Self {
       ratchet: None,
+      key_domain_identity: None,
       cryptor: None,
       current_key_generation: 0,
       truncated_nonce: 0,
@@ -78,39 +81,75 @@ impl Encryptor {
   }
 
   pub fn set_key_ratchet(&mut self, ratchet: HashRatchet) {
+    // only a new key domain may restart the nonce sequence, a repeat would reuse nonces
+    if self.key_domain_identity.as_deref() != Some(ratchet.domain_identity()) {
+      self.key_domain_identity = Some(ratchet.domain_identity().to_vec());
+      self.current_key_generation = 0;
+      self.truncated_nonce = 0;
+    } else {
+      debug!("Key ratchet re-installed for current key domain, keeping nonce sequence");
+    }
+
     self.ratchet = Some(ratchet);
     self.cryptor = None;
-    self.current_key_generation = 0;
-    self.truncated_nonce = 0;
   }
 
-  // TODO use results to propogate errors up and return properly
+  /// Equivalent to `SetKeyRatchet(nullptr)`.
+  pub fn clear_key_ratchet(&mut self) {
+    self.ratchet = None;
+    self.cryptor = None;
+  }
+
+  pub fn has_key_ratchet(&self) -> bool {
+    self.ratchet.is_some()
+  }
+
   pub fn encrypt(
     &mut self,
     media_type: &MediaType,
     codec: Codec,
     frame: &[u8],
     encrypted_frame: &mut [u8],
-    bytes_written: &mut usize,
-  ) -> bool {
-    if *media_type != MediaType::AUDIO && *media_type != MediaType::VIDEO {
-      warn!("encryption failed, invalid media type {:?}", media_type);
-      return false;
-    }
-
-    let stats = self.stats.get_mut(media_type).unwrap();
-
+  ) -> Result<usize, EncryptorEncryptError> {
     if self.ratchet.is_none() {
       warn!("encryption failed, no ratchet");
+      let stats = self.stats.get_mut(media_type).unwrap();
       stats.failures += 1;
-      return false;
+      stats.missing_keys += 1;
+      return Err(EncryptorEncryptError::MissingKeyRatchet);
     }
 
     let start = Instant::now();
-    let mut success = true;
 
     let mut frame_processor = self.get_or_create_frame_processor();
+    let result = self.encrypt_with_processor(
+      media_type,
+      codec,
+      frame,
+      encrypted_frame,
+      &mut frame_processor,
+    );
+    self.return_frame_processor(frame_processor);
 
+    let stats = self.stats.get_mut(media_type).unwrap();
+    stats.duration += start.elapsed().as_micros() as u64;
+    if result.is_ok() {
+      stats.successes += 1;
+    } else {
+      stats.failures += 1;
+    }
+
+    result
+  }
+
+  fn encrypt_with_processor(
+    &mut self,
+    media_type: &MediaType,
+    codec: Codec,
+    frame: &[u8],
+    encrypted_frame: &mut [u8],
+    frame_processor: &mut OutboundFrameProcessor,
+  ) -> Result<usize, EncryptorEncryptError> {
     frame_processor.process_frame(frame, codec);
 
     let unencrypted_ranges = &frame_processor.unencrypted_ranges;
@@ -140,9 +179,8 @@ impl Encryptor {
       let (curr_cryptor, truncated_nonce) = self.get_next_cryptor_and_nonce();
 
       if curr_cryptor.is_none() {
-        warn!("encryption failed, no cryptor");
-        success = false;
-        break;
+        self.stats.get_mut(media_type).unwrap().missing_keys += 1;
+        return Err(EncryptorEncryptError::MissingCryptor);
       }
 
       let curr_cryptor = self.cryptor.as_mut().unwrap();
@@ -154,8 +192,7 @@ impl Encryptor {
       // ciphertext_bytes should be resized properly already
       if frame_processor.ciphertext_bytes.len() != plaintext_buffer.len() {
         warn!("encryption failed, plaintext mismatch (internal error!)");
-        success = false;
-        break;
+        return Err(EncryptorEncryptError::EncryptionFailure);
       }
       frame_processor
         .ciphertext_bytes
@@ -169,15 +206,14 @@ impl Encryptor {
 
       let stats = self.stats.get_mut(media_type).unwrap();
       stats.attempts += 1;
-      stats.max_attempts = stats.max_attempts.max(attempt as u32);
+      stats.max_attempts = stats.max_attempts.max(attempt as u64);
 
       let size = leb128_size(truncated_nonce as u64);
       let encrypted_frame_bytes =
         frame_size + AES_GCM_127_TRUNCATED_TAG_BYTES + size + ranges_size + 1 + MARKER_BYTES.len();
       if encrypted_frame_bytes > encrypted_frame.len() {
         warn!("encryption failed, encrypted frame buffer is too small");
-        success = false;
-        break;
+        return Err(EncryptorEncryptError::EncryptionFailure);
       }
 
       if let Ok(tag) = encrypt_result {
@@ -185,14 +221,12 @@ impl Encryptor {
           .copy_from_slice(&tag);
       } else {
         warn!("encryption failed, aead encryption failed");
-        success = false;
-        break;
+        return Err(EncryptorEncryptError::EncryptionFailure);
       }
 
       let Ok(reconstructed_frame_size) = frame_processor.reconstruct_frame(encrypted_frame) else {
         warn!("encryption failed, frame is too small to contain the encrypted frame");
-        success = false;
-        break;
+        return Err(EncryptorEncryptError::EncryptionFailure);
       };
 
       let (truncated_nonce_buffer, rest) =
@@ -203,22 +237,19 @@ impl Encryptor {
 
       if write_leb128(truncated_nonce as u64, truncated_nonce_buffer) != size {
         warn!("encryption failed, write_leb128 failed");
-        success = false;
-        break;
+        return Err(EncryptorEncryptError::EncryptionFailure);
       }
 
       if serialize_unencrypted_ranges(unencrypted_ranges, unencrypted_ranges_buffer) != ranges_size
       {
         warn!("encryption failed, serialize_unencrypted_ranges failed");
-        success = false;
-        break;
+        return Err(EncryptorEncryptError::EncryptionFailure);
       }
 
       let supplemental_bytes_large = SUPPLEMENTAL_BYTES + size + ranges_size;
       if supplemental_bytes_large > u8::MAX as usize {
         warn!("encryption failed, supplemental_bytes_large check failed");
-        success = false;
-        break;
+        return Err(EncryptorEncryptError::EncryptionFailure);
       }
 
       let supplemental_bytes = supplemental_bytes_large as u8;
@@ -234,48 +265,38 @@ impl Encryptor {
         + MARKER_BYTES.len();
       if encrypted_frame_bytes > encrypted_frame.len() {
         warn!("encryption failed, reconstructed encrypted frame exceeds buffer");
-        success = false;
-        break;
+        return Err(EncryptorEncryptError::EncryptionFailure);
       }
 
-      if validate_encrypted_frame(&frame_processor, &encrypted_frame[..encrypted_frame_bytes]) {
-        *bytes_written = encrypted_frame_bytes;
-        break;
-      } else if attempt >= MAX_CIPHERTEXT_VALIDATION_RETRIES {
-        warn!("encryption failed, reached max validation tries");
-        success = false;
-        break;
+      if validate_encrypted_frame(frame_processor, &encrypted_frame[..encrypted_frame_bytes]) {
+        return Ok(encrypted_frame_bytes);
       }
     }
 
-    let stats = self.stats.get_mut(media_type).unwrap();
-    stats.duration += start.elapsed().as_micros() as u32;
-    if success {
-      stats.successes += 1;
-    } else {
-      stats.failures += 1;
-    }
-
-    // FIXME this technically should return when frame_processor drops, but thats gonna be a bit annoying here
-    self.return_frame_processor(frame_processor);
-
-    success
+    warn!("encryption failed, reached max validation tries");
+    Err(EncryptorEncryptError::TooManyAttempts)
   }
 
-  pub fn get_max_ciphertext_byte_size(codec: Codec, frame: &[u8]) -> usize {
-    let mut frame_processor = OutboundFrameProcessor::new();
-    frame_processor.process_frame(frame, codec);
-    let frame_size =
-      frame_processor.encrypted_bytes.len() + frame_processor.unencrypted_bytes.len();
-    let ranges_size = unencrypted_ranges_size(&frame_processor.unencrypted_ranges);
+  /// Encrypts a frame into `encrypted_frame`, which is resized to fit the encrypted frame.
+  pub fn encrypt_to_vec(
+    &mut self,
+    media_type: &MediaType,
+    codec: Codec,
+    frame: &[u8],
+    encrypted_frame: &mut Vec<u8>,
+  ) -> Result<(), EncryptorEncryptError> {
+    encrypted_frame.resize(
+      Self::get_max_ciphertext_byte_size(*media_type, frame.len()),
+      0,
+    );
 
-    frame_size
-      + AES_GCM_127_TRUNCATED_TAG_BYTES
-      + leb128_size(u32::MAX as u64)
-      + ranges_size
-      + 1
-      + MARKER_BYTES.len()
-      + TRANSFORM_PADDING_BYTES
+    let result = self.encrypt(media_type, codec, frame, encrypted_frame);
+    encrypted_frame.truncate(*result.as_ref().unwrap_or(&0));
+    result.map(|_| ())
+  }
+
+  pub fn get_max_ciphertext_byte_size(_media_type: MediaType, frame_size: usize) -> usize {
+    frame_size + SUPPLEMENTAL_BYTES + TRANSFORM_PADDING_BYTES
   }
 
   fn get_next_cryptor_and_nonce(&mut self) -> (Option<&AeadCipher>, u32) {

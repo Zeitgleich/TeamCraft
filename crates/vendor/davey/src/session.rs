@@ -2,15 +2,21 @@
 use napi_derive::napi;
 use num_derive::FromPrimitive;
 use openmls::{
-  group::*,
+  group::{ProcessMessageError, *},
   prelude::{hash_ref::ProposalRef, tls_codec::Serialize, *},
   schedule::EpochAuthenticator,
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
+use openmls_traits::storage::StorageProvider;
 #[cfg(feature = "pyo3")]
 use pyo3::prelude::*;
-use std::{borrow::Cow, collections::HashMap, fmt::Debug, num::NonZeroU16};
+use std::{
+  borrow::Cow,
+  collections::{HashMap, HashSet},
+  fmt::Debug,
+  num::NonZeroU16,
+};
 use tracing::{debug, trace, warn};
 
 use crate::{
@@ -107,13 +113,18 @@ pub struct DaveSession {
   credential_with_key: CredentialWithKey,
 
   external_sender: Option<ExternalSender>,
+  join_key_package_ref: Option<KeyPackageRef>,
   group: Option<MlsGroup>,
+  pending_commit_bytes: Option<Vec<u8>>,
   status: SessionStatus,
   is_ready: bool,
 
   privacy_code: String,
   encryptor: Encryptor,
   decryptors: HashMap<u64, Decryptor>,
+  /// Pending transition IDs mapped to their protocol version
+  pending_transitions: HashMap<u16, u16>,
+  passthrough_mode: bool,
 }
 
 impl DaveSession {
@@ -135,16 +146,21 @@ impl DaveSession {
       signer,
       credential_with_key,
       external_sender: None,
+      join_key_package_ref: None,
       group: None,
+      pending_commit_bytes: None,
       status: SessionStatus::INACTIVE,
       is_ready: false,
       privacy_code: String::new(),
       encryptor: Encryptor::new(),
       decryptors: HashMap::new(),
+      pending_transitions: HashMap::new(),
+      passthrough_mode: false,
     })
   }
 
   /// Resets and re-initializes the session.
+  /// Encryption and decryption keys are kept until the next transition.
   pub fn reinit(
     &mut self,
     protocol_version: NonZeroU16,
@@ -152,6 +168,7 @@ impl DaveSession {
     channel_id: u64,
     key_pair: Option<&SigningKeyPair>,
   ) -> Result<(), ReinitError> {
+    let same_identity = user_id == self.user_id() && channel_id == self.channel_id();
     self.reset()?;
 
     let (ciphersuite, group_id, signer, credential_with_key) =
@@ -163,9 +180,12 @@ impl DaveSession {
     self.signer = signer;
     self.credential_with_key = credential_with_key;
     self.privacy_code.clear();
-    self.encryptor = Encryptor::new();
-    self.decryptors.clear();
-    self.is_ready = false;
+    if !same_identity {
+      self.encryptor = Encryptor::new();
+      self.decryptors.clear();
+      self.passthrough_mode = false;
+      self.is_ready = false;
+    }
 
     if self.external_sender.is_some() {
       self.create_pending_group()?;
@@ -201,6 +221,7 @@ impl DaveSession {
   }
 
   /// Resets the session by deleting the group and clearing the storage.
+  /// Encryption and decryption keys are kept.
   /// If you want to re-initialize the session, use [Self::reinit].
   pub fn reset(&mut self) -> Result<(), ResetError> {
     debug!("Resetting MLS session");
@@ -213,6 +234,9 @@ impl DaveSession {
     // Clear storage
     self.provider.storage().values.write().unwrap().clear();
 
+    self.join_key_package_ref = None;
+    self.pending_commit_bytes = None;
+    self.pending_transitions.clear();
     self.status = SessionStatus::INACTIVE;
 
     Ok(())
@@ -276,6 +300,11 @@ impl DaveSession {
     self.is_ready
   }
 
+  /// Whether this session has a key to encrypt frames with.
+  pub fn can_encrypt(&self) -> bool {
+    self.is_ready && self.encryptor.has_key_ratchet()
+  }
+
   /// Get the epoch authenticator of this session's group.
   pub fn get_epoch_authenticator(&self) -> Option<&EpochAuthenticator> {
     self.group.as_ref().map(|group| group.epoch_authenticator())
@@ -294,7 +323,7 @@ impl DaveSession {
     &mut self,
     external_sender_data: &[u8],
   ) -> Result<(), SetExternalSenderError> {
-    if self.status == SessionStatus::AWAITING_RESPONSE || self.status == SessionStatus::ACTIVE {
+    if self.has_established_group() {
       return Err(SetExternalSenderError::AlreadyInGroup);
     }
 
@@ -302,6 +331,7 @@ impl DaveSession {
     if let Some(mut group) = self.group.take() {
       group.delete(self.provider.storage())?;
     }
+    self.pending_commit_bytes = None;
 
     let external_sender = ExternalSender::tls_deserialize_exact_bytes(external_sender_data)?;
 
@@ -338,6 +368,21 @@ impl DaveSession {
         &self.signer,
         self.credential_with_key.clone(),
       )?;
+
+    // Only the latest key package can be used to join, so delete the previous one
+    if let Some(old_ref) = self.join_key_package_ref.take() {
+      self
+        .provider
+        .storage()
+        .delete_key_package(&old_ref)
+        .map_err(|_| KeyPackageNewError::StorageError)?;
+    }
+    self.join_key_package_ref = Some(
+      key_package
+        .key_package()
+        .hash_ref(self.provider.crypto())
+        .map_err(KeyPackageNewError::LibraryError)?,
+    );
 
     let buffer = key_package
       .key_package()
@@ -398,7 +443,6 @@ impl DaveSession {
     let proposals: Vec<u8> = VLBytes::tls_deserialize_exact_bytes(proposals)
       .map_err(ProcessProposalsError::DeserializeProposalFailed)?
       .into();
-    let mut commit_adds_members = false;
 
     if operation_type == ProposalsOperationType::APPEND {
       let mut remaining_bytes: &[u8] = &proposals;
@@ -411,10 +455,30 @@ impl DaveSession {
           .try_into_protocol_message()
           .map_err(ProcessProposalsError::MessageNotPrivateOrPublic)?;
 
+        let ProtocolMessage::PublicMessage(public_message) = &protocol_message else {
+          return Err(ProcessProposalsError::UnexpectedWireFormat);
+        };
+
+        if public_message.epoch() != group.epoch() {
+          return Err(ProcessProposalsError::EpochMismatch);
+        }
+
+        if public_message.content_type() != ContentType::Proposal {
+          return Err(ProcessProposalsError::UnexpectedContentType);
+        }
+
+        if !matches!(public_message.sender(), Sender::External(_)) {
+          return Err(ProcessProposalsError::UnexpectedSenderType);
+        }
+
         let processed_message = group.process_message(&self.provider, protocol_message)?;
 
         match processed_message.into_content() {
           ProcessedMessageContent::ProposalMessage(proposal) => {
+            if !matches!(proposal.proposal(), Proposal::Add(_) | Proposal::Remove(_)) {
+              return Err(ProcessProposalsError::UnexpectedProposalType);
+            }
+
             if let Proposal::Add(add_proposal) = proposal.proposal() {
               let incoming_user_id = u64::from_be_bytes(
                 add_proposal
@@ -433,8 +497,6 @@ impl DaveSession {
               {
                 return Err(ProcessProposalsError::UnexpectedUser(incoming_user_id));
               }
-
-              commit_adds_members = true;
             } else if let Proposal::Remove(remove_proposal) = proposal.proposal() {
               let leaf_index = remove_proposal.removed();
               let member = group.member(leaf_index);
@@ -452,12 +514,6 @@ impl DaveSession {
               };
               debug!(
                 "Storing remove proposal for user {outgoing_user_id} (leaf index: {leaf_index})",
-              );
-            }
-
-            if proposal.proposal_or_ref_type() == ProposalOrRefType::Proposal {
-              warn!(
-                "This next proposal isn't a reference, so our commit is probably going to be rejected",
               );
             }
 
@@ -487,9 +543,10 @@ impl DaveSession {
       group
         .clear_pending_commit(self.provider.storage())
         .map_err(ProcessProposalsError::RemovingPendingCommitFailed)?;
+      self.pending_commit_bytes = None;
       if self.status == SessionStatus::AWAITING_RESPONSE {
         self.status = {
-          if self.is_ready {
+          if group.epoch().as_u64() != 0 {
             SessionStatus::ACTIVE
           } else {
             SessionStatus::PENDING
@@ -499,12 +556,14 @@ impl DaveSession {
       return Ok(None);
     }
 
-    // libdave seems to overwrite pendingGroupCommit_ and then not use it anywhere else...
+    validate_projected_roster(group, group.pending_proposals(), None)?;
+
     if group.pending_commit().is_some() {
       warn!("A pending commit was already created! Removing...");
       group
         .clear_pending_commit(self.provider.storage())
         .map_err(ProcessProposalsError::RemovingPendingCommitFailed)?;
+      self.pending_commit_bytes = None;
     }
 
     let (commit, welcome, _group_info) = group
@@ -516,40 +575,40 @@ impl DaveSession {
     let commit = commit
       .tls_serialize_detached()
       .expect("failed to serialize commit");
+    self.pending_commit_bytes = Some(commit.clone());
 
-    let welcome = if commit_adds_members {
-      let Some(mls_message_out) = welcome else {
-        panic!("welcome was not returned when there are new members")
-      };
+    let welcome = welcome.map(|mls_message_out| {
       let MlsMessageBodyOut::Welcome(welcome) = mls_message_out.body() else {
-        panic!("message was not a welcome")
+        unreachable!("commit returned a non-welcome message as the welcome")
       };
 
-      Some(
-        welcome
-          .tls_serialize_detached()
-          .expect("failed to serialize welcome"),
-      )
-    } else {
-      None
-    };
+      welcome
+        .tls_serialize_detached()
+        .expect("failed to serialize welcome")
+    });
 
     Ok(Some(CommitWelcome { commit, welcome }))
   }
 
   /// Process a welcome message from [dave_mls_welcome (30)](https://daveprotocol.com/#dave_mls_welcome-30).
+  /// If the user wants to validate that all users in the welcomed group are expected to be in the group, pass them in `recognized_user_ids`.
+  /// Afterwards, prepare the transition with [Self::prepare_transition] to start using the new keys.
   /// Send a [dave_mls_invalid_commit_welcome (31)](https://daveprotocol.com/#dave_mls_invalid_commit_welcome-31) if the welcome couldn't be processed.
-  pub fn process_welcome(&mut self, welcome: &[u8]) -> Result<(), ProcessWelcomeError> {
-    if self.group.is_some() && self.status == SessionStatus::ACTIVE {
+  pub fn process_welcome(
+    &mut self,
+    welcome: &[u8],
+    recognized_user_ids: Option<&[u64]>,
+  ) -> Result<(), ProcessWelcomeError> {
+    // Our pending group is the only group at epoch 0, so any other group is already established
+    if let Some(group) = &self.group
+      && group.epoch().as_u64() != 0
+    {
       return Err(ProcessWelcomeError::AlreadyInGroup);
     }
 
     let Some(external_sender) = &self.external_sender else {
       return Err(ProcessWelcomeError::NoExternalSender);
     };
-
-    // TODO we are skipping using recognized user IDs in here for now
-    // See https://github.com/discord/libdave/blob/6e5ffbc1cb4eef6be96e8115c4626be598b7e501/cpp/src/dave/mls/session.cpp#L519
 
     debug!("Processing welcome");
 
@@ -565,6 +624,10 @@ impl DaveSession {
         .replace_old_group()
         .build()?;
 
+    if staged_join.group_context().group_id() != &self.group_id {
+      return Err(ProcessWelcomeError::UnexpectedGroupId);
+    }
+
     let external_senders = staged_join.group_context().extensions().external_senders();
     let Some(external_senders) = external_senders else {
       return Err(ProcessWelcomeError::ExpectedExternalSenderExtension);
@@ -576,6 +639,24 @@ impl DaveSession {
 
     if join_external_sender != external_sender {
       return Err(ProcessWelcomeError::UnexpectedExternalSender);
+    }
+
+    validate_roster(staged_join.members().map(|member| member.credential))?;
+
+    if let Some(ids) = recognized_user_ids {
+      for member in staged_join.members() {
+        let user_id = u64::from_be_bytes(
+          member
+            .credential
+            .serialized_content()
+            .try_into()
+            .map_err(ProcessWelcomeError::CredentialContentConvertFailed)?,
+        );
+
+        if !ids.contains(&user_id) {
+          return Err(ProcessWelcomeError::UnrecognizedUser(user_id));
+        }
+      }
     }
 
     let group = staged_join.into_group(&self.provider)?;
@@ -592,21 +673,31 @@ impl DaveSession {
       group.epoch().as_u64()
     );
     self.group = Some(group);
+    self.join_key_package_ref = None;
+    self.pending_commit_bytes = None;
     self.status = SessionStatus::ACTIVE;
-    self.update_ratchets()?;
 
     Ok(())
   }
 
   /// Process a commit from [dave_mls_announce_commit_transition (29)](https://daveprotocol.com/#dave_mls_announce_commit_transition-29).
-  /// Send a [dave_mls_invalid_commit_welcome (29)](https://daveprotocol.com/#dave_mls_announce_commit_transition-29) if the commit couldn't be processed.
-  pub fn process_commit(&mut self, commit: &[u8]) -> Result<(), ProcessCommitError> {
+  /// Afterwards, prepare the transition with [Self::prepare_transition] to start using the new keys.
+  /// Send a [dave_mls_invalid_commit_welcome (31)](https://daveprotocol.com/#dave_mls_invalid_commit_welcome-31) if the commit couldn't be processed.
+  ///
+  /// Returns `true` if the transition should be prepared, or `false` if the commit was ignored.
+  pub fn process_commit(&mut self, commit: &[u8]) -> Result<bool, ProcessCommitError> {
     let Some(group) = &mut self.group else {
-      return Err(ProcessCommitError::NoGroup);
+      warn!("Ignoring commit without a group");
+      return Ok(false);
     };
 
     if self.status == SessionStatus::PENDING {
-      return Err(ProcessCommitError::PendingGroup);
+      warn!("Ignoring commit for a pending group without queued proposals");
+      return Ok(false);
+    }
+
+    if group.pending_proposals().next().is_none() {
+      return Err(ProcessCommitError::NoQueuedProposals);
     }
 
     debug!("Processing commit");
@@ -618,24 +709,57 @@ impl DaveSession {
       .try_into_protocol_message()
       .map_err(ProcessCommitError::MessageNotPrivateOrPublic)?;
 
+    let is_own_commit = self.pending_commit_bytes.as_deref() == Some(commit);
+    if group.epoch().as_u64() == 0 && !is_own_commit {
+      return Err(ProcessCommitError::CommitBeforeWelcome);
+    }
+
     if protocol_message.group_id().as_slice() != self.group_id.as_slice() {
       return Err(ProcessCommitError::MessageForDifferentGroup);
     }
 
+    let ProtocolMessage::PublicMessage(public_message) = &protocol_message else {
+      return Err(ProcessCommitError::UnexpectedWireFormat);
+    };
+
+    if public_message.epoch() != group.epoch() {
+      return Err(ProcessCommitError::EpochMismatch);
+    }
+
+    if public_message.content_type() != ContentType::Commit {
+      return Err(ProcessCommitError::UnexpectedContentType);
+    }
+
+    let Sender::Member(committer) = *public_message.sender() else {
+      return Err(ProcessCommitError::UnexpectedSenderType);
+    };
+
     match group.process_message(&self.provider, protocol_message) {
       Ok(message) => match message.into_content() {
         ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
+          validate_staged_commit(group, &staged_commit, committer)?;
           group.merge_staged_commit(&self.provider, *staged_commit)?;
-        }
-        ProcessedMessageContent::OwnPendingCommit => {
-          // This is our own commit, lets merge pending instead
-          debug!("Found own commit, merging pending commit instead.");
-          group.merge_pending_commit(&self.provider)?;
         }
         _ => return Err(ProcessCommitError::ProcessedMessageNotStagedCommit),
       },
+      Err(ProcessMessageError::InvalidCommit(StageCommitError::OwnCommit)) => {
+        // This is our own commit, so merge our pending commit instead.
+        match &self.pending_commit_bytes {
+          Some(expected) if expected.as_slice() == commit => {
+            debug!("Found own commit, merging pending commit instead.");
+            let Some(staged_commit) = group.pending_commit() else {
+              return Err(ProcessCommitError::NoPendingCommit);
+            };
+            validate_staged_commit(group, staged_commit, group.own_leaf_index())?;
+            group.merge_pending_commit(&self.provider)?;
+          }
+          Some(_) => return Err(ProcessCommitError::OwnCommitMismatch),
+          None => return Err(ProcessCommitError::NoPendingCommit),
+        }
+      }
       Err(error) => return Err(ProcessCommitError::ProcessingMessageFailed(error)),
     }
+    self.pending_commit_bytes = None;
 
     debug!(
       "Commit processed successfully, our leaf index is {:?}, our epoch is {:?}",
@@ -643,9 +767,74 @@ impl DaveSession {
       group.epoch().as_u64()
     );
     self.status = SessionStatus::ACTIVE;
-    self.update_ratchets()?;
+
+    Ok(true)
+  }
+
+  /// Prepare for a transition from [dave_protocol_prepare_transition (21)](https://daveprotocol.com/#dave_protocol_prepare_transition-21).
+  /// This should be called after successfully processing a commit or welcome.
+  pub fn prepare_transition(
+    &mut self,
+    transition_id: u16,
+    protocol_version: u16,
+  ) -> Result<(), TransitionError> {
+    debug!("Preparing transition {transition_id} to protocol version {protocol_version}");
+
+    if protocol_version == 0 {
+      for decryptor in self.decryptors.values_mut() {
+        decryptor.expire_key_ratchets();
+      }
+    } else if self.has_established_group() {
+      self.update_ratchets()?;
+    }
+
+    if transition_id == 0 {
+      self.apply_transition(protocol_version)?;
+    } else {
+      self
+        .pending_transitions
+        .insert(transition_id, protocol_version);
+    }
 
     Ok(())
+  }
+
+  /// Execute a transition from [dave_protocol_execute_transition (22)](https://daveprotocol.com/#dave_protocol_execute_transition-22), switching the encryption key.
+  /// Returns whether a prepared transition was executed.
+  pub fn execute_transition(&mut self, transition_id: u16) -> Result<bool, TransitionError> {
+    let Some(protocol_version) = self.pending_transitions.remove(&transition_id) else {
+      debug!("No prepared transition to execute for {transition_id}");
+      return Ok(false);
+    };
+
+    debug!("Executing transition {transition_id} to protocol version {protocol_version}");
+    self.apply_transition(protocol_version)?;
+
+    Ok(true)
+  }
+
+  fn apply_transition(&mut self, protocol_version: u16) -> Result<(), TransitionError> {
+    if protocol_version == 0 {
+      self.reset()?;
+      self.encryptor.clear_key_ratchet();
+      self.privacy_code.clear();
+    } else if self.has_established_group() {
+      let ratchet = self.get_key_ratchet(self.user_id())?;
+      self.encryptor.set_key_ratchet(ratchet);
+    } else {
+      // Reinitialized with no group yet, so there is no key to encrypt with
+      self.encryptor.clear_key_ratchet();
+    }
+
+    Ok(())
+  }
+
+  /// Whether the session has a group past epoch 0, which is only for the pending group.
+  fn has_established_group(&self) -> bool {
+    self
+      .group
+      .as_ref()
+      .is_some_and(|group| group.epoch().as_u64() != 0)
   }
 
   /// Get the verification code of another member of the group.
@@ -735,9 +924,14 @@ impl DaveSession {
       }
 
       let ratchet = self.get_key_ratchet(uid)?;
+      let passthrough_mode = self.passthrough_mode;
       let decryptor = self.decryptors.entry(uid).or_insert_with(|| {
         debug!("Creating decryptor for user {uid:?}");
-        Decryptor::new()
+        let mut decryptor = Decryptor::new();
+        if passthrough_mode {
+          decryptor.transition_to_passthrough_mode(true, 0);
+        }
+        decryptor
       });
       decryptor.transition_to_key_ratchet(ratchet);
     }
@@ -758,12 +952,6 @@ impl DaveSession {
     self
       .decryptors
       .retain(|&uid, _| current_members.contains(&uid));
-
-    // Update encryptor
-    let user_id = self.user_id();
-    self
-      .encryptor
-      .set_key_ratchet(self.get_key_ratchet(user_id)?);
 
     // Update privacy code
     let old_code = self.privacy_code.clone();
@@ -811,28 +999,45 @@ impl DaveSession {
       return Err(EncryptError::NotReady);
     }
 
-    // Return the packet back to the client (passthrough) if the packet is a silence packet
+    // Return the packet back to the client (passthrough) if the packet is an opus silence packet
     // This may change in the future, see: https://daveprotocol.com/#silence-packets
-    if packet == OPUS_SILENCE_PACKET {
+    if codec == Codec::OPUS && packet == OPUS_SILENCE_PACKET {
       return Ok(Cow::Borrowed(packet));
     }
 
-    let mut out_size: usize = 0;
-    let mut encrypted_buffer = vec![0u8; Encryptor::get_max_ciphertext_byte_size(codec, packet)];
+    let mut encrypted_packet = Vec::new();
+    self.encrypt_into(media_type, codec, packet, &mut encrypted_packet)?;
 
-    let success = self.encryptor.encrypt(
-      &media_type,
-      codec,
-      packet,
-      &mut encrypted_buffer,
-      &mut out_size,
-    );
-    if !success {
-      return Err(EncryptError::EncryptionFailed);
+    Ok(Cow::Owned(encrypted_packet))
+  }
+
+  /// End-to-end encrypt a packet into a provided buffer, which is resized to fit the encrypted packet.
+  pub fn encrypt_into(
+    &mut self,
+    media_type: MediaType,
+    codec: Codec,
+    packet: &[u8],
+    encrypted_packet: &mut Vec<u8>,
+  ) -> Result<(), EncryptError> {
+    if !self.is_ready {
+      return Err(EncryptError::NotReady);
     }
-    encrypted_buffer.resize(out_size, 0);
 
-    Ok(Cow::Owned(encrypted_buffer))
+    // Return the packet back to the client (passthrough) if the packet is an opus silence packet
+    // This may change in the future, see: https://daveprotocol.com/#silence-packets
+    if codec == Codec::OPUS && packet == OPUS_SILENCE_PACKET {
+      encrypted_packet.clear();
+      encrypted_packet.extend_from_slice(packet);
+      return Ok(());
+    }
+
+    match self
+      .encryptor
+      .encrypt_to_vec(&media_type, codec, packet, encrypted_packet)
+    {
+      Err(EncryptorEncryptError::MissingKeyRatchet) => Err(EncryptError::NotReady),
+      result => Ok(result?),
+    }
   }
 
   /// End-to-end encrypt an opus packet.
@@ -856,15 +1061,28 @@ impl DaveSession {
     media_type: MediaType,
     packet: &[u8],
   ) -> Result<Vec<u8>, DecryptError> {
+    let mut frame = vec![0u8; Decryptor::get_max_plaintext_byte_size(media_type, packet.len())];
+    let frame_length = self.decrypt_into(user_id, media_type, packet, &mut frame)?;
+
+    frame.truncate(frame_length);
+    Ok(frame)
+  }
+
+  /// Decrypt an end-to-end encrypted packet into a provided buffer, returning the number of bytes written.
+  /// To keep parity with libdave, this writes as much as the buffer allows,
+  /// the provided buffer should at least be the length of the encrypted packet.
+  pub fn decrypt_into(
+    &mut self,
+    user_id: u64,
+    media_type: MediaType,
+    packet: &[u8],
+    frame: &mut [u8],
+  ) -> Result<usize, DecryptError> {
     let Some(decryptor) = self.decryptors.get_mut(&user_id) else {
       return Err(DecryptError::NoDecryptorForUser);
     };
 
-    let mut frame = vec![0u8; Decryptor::get_max_plaintext_byte_size(media_type, packet.len())];
-    let frame_length = decryptor.decrypt(media_type, packet, &mut frame)?;
-
-    frame.resize(frame_length, 0);
-    Ok(frame)
+    Ok(decryptor.decrypt(media_type, packet, frame)?)
   }
 
   /// Get decryption stats.
@@ -908,12 +1126,91 @@ impl DaveSession {
   }
 
   /// Set whether passthrough mode is enabled on all decryptors. The transition expiry (in seconds) when disabling passthrough mode defaults to 10 seconds
+  /// Enabling passthrough mode allows unencrypted frames until it is disabled, and also applies to decryptors created afterwards.
   pub fn set_passthrough_mode(&mut self, passthrough_mode: bool, transition_expiry: Option<u32>) {
+    self.passthrough_mode = passthrough_mode;
     for decryptor in self.decryptors.values_mut() {
       decryptor
         .transition_to_passthrough_mode(passthrough_mode, transition_expiry.unwrap_or(10) as usize);
     }
   }
+}
+
+/// Validates all credentials are basic and non-repeating
+/// See https://github.com/discord/libdave/blob/8de72b1f8a2ac3c5a5270755bb8091a62e3c6169/cpp/src/mls/session.cpp#L486-L499
+fn validate_roster(roster: impl IntoIterator<Item = Credential>) -> Result<(), RosterError> {
+  let mut user_ids = HashSet::new();
+  for credential in roster {
+    if credential.credential_type() != CredentialType::Basic {
+      return Err(RosterError::UnexpectedCredentialType);
+    }
+    let user_id = u64::from_be_bytes(
+      credential
+        .serialized_content()
+        .try_into()
+        .map_err(RosterError::CredentialContentConvertFailed)?,
+    );
+    if !user_ids.insert(user_id) {
+      return Err(RosterError::DuplicateUser(user_id));
+    }
+  }
+  Ok(())
+}
+
+/// Validates the roster that results from applying proposals
+fn validate_projected_roster<'a>(
+  group: &MlsGroup,
+  proposals: impl Iterator<Item = &'a QueuedProposal>,
+  update_path: Option<(LeafNodeIndex, &LeafNode)>,
+) -> Result<(), RosterError> {
+  let mut roster: HashMap<LeafNodeIndex, Credential> = group
+    .members()
+    .map(|member| (member.index, member.credential))
+    .collect();
+  let mut added = Vec::new();
+
+  for queued_proposal in proposals {
+    match queued_proposal.proposal() {
+      Proposal::Add(add_proposal) => {
+        added.push(add_proposal.key_package().leaf_node().credential().clone());
+      }
+      Proposal::Remove(remove_proposal) => {
+        roster.remove(&remove_proposal.removed());
+      }
+      Proposal::Update(update_proposal) => {
+        if let Sender::Member(index) = queued_proposal.sender() {
+          roster.insert(*index, update_proposal.leaf_node().credential().clone());
+        }
+      }
+      _ => {}
+    }
+  }
+
+  if let Some((committer, leaf_node)) = update_path {
+    roster.insert(committer, leaf_node.credential().clone());
+  }
+
+  validate_roster(roster.into_values().chain(added))
+}
+
+fn validate_staged_commit(
+  group: &MlsGroup,
+  staged_commit: &StagedCommit,
+  committer: LeafNodeIndex,
+) -> Result<(), ProcessCommitError> {
+  if staged_commit
+    .queued_proposals()
+    .any(|proposal| proposal.proposal_or_ref_type() != ProposalOrRefType::Reference)
+  {
+    return Err(ProcessCommitError::UnexpectedNonRefProposal);
+  }
+
+  let update_path = staged_commit
+    .update_path_leaf_node()
+    .map(|leaf_node| (committer, leaf_node));
+  validate_projected_roster(group, staged_commit.queued_proposals(), update_path)?;
+
+  Ok(())
 }
 
 impl Debug for DaveSession {
