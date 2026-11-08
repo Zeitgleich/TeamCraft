@@ -21,7 +21,7 @@ const KEY_SHA256: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c
 
 #[tokio::test]
 async fn a_members_request_reaches_the_notetaker_and_a_stop_ends_it() {
-  let (_server, mut alice, mut bob, mut notetaker, channel) = setup(NotetakerInviters::Members).await;
+  let (server, mut alice, mut bob, mut notetaker, channel) = setup(NotetakerInviters::Members).await;
   let bob_ui = backend_of(&bob);
   bob_ui.request_notetaker(channel, every_call());
   run_commands(&mut bob, &bob_ui).await;
@@ -36,6 +36,10 @@ async fn a_members_request_reaches_the_notetaker_and_a_stop_ends_it() {
   // The request is a hidden control message: nobody's timeline shows it.
   assert!(alice.texts(channel).is_empty());
 
+  // Requests are ordered by the server's millisecond clock, and a stop only ends a join sent
+  // strictly before it. The fake server's clock is the wall clock, so on a fast run the join and
+  // the stop landed in the same millisecond and the stop did not count: move the clock on.
+  server.advance_clock(std::time::Duration::from_millis(5));
   let alice_ui = backend_of(&alice);
   alice_ui.request_notetaker(channel, NotetakerRequest::Stop);
   run_commands(&mut alice, &alice_ui).await;
