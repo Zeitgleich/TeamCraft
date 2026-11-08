@@ -191,7 +191,7 @@ struct BrowseView: View {
       // A keystroke cancels this before the directory is asked; a change reads again at once.
       if !peopleQuery.isEmpty { try? await Task.sleep(for: .milliseconds(250)) }
       guard !Task.isCancelled else { return }
-      if let found = await model.searchPeople(peopleQuery.trimmingCharacters(in: .whitespacesAndNewlines)) {
+      if let found = await model.findPeople(peopleQuery.trimmingCharacters(in: .whitespacesAndNewlines)) {
         maybePeople = found
       }
     }

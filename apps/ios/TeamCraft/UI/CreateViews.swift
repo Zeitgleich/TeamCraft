@@ -256,7 +256,7 @@ struct AddChannelMembersView: View {
       .task(id: AddSearch(query: query, changes: model.changeCount)) {
         if !query.isEmpty { try? await Task.sleep(for: .milliseconds(250)) }
         guard !Task.isCancelled else { return }
-        if let found = await model.searchPeople(query.trimmingCharacters(in: .whitespacesAndNewlines)) {
+        if let found = await model.findPeople(query.trimmingCharacters(in: .whitespacesAndNewlines)) {
           maybeFound = found
         }
       }
