@@ -2097,12 +2097,12 @@ the chunks that load later. The limit:
 
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
-| A guest in a meeting: gzip -9 total  | 6,280,000 B  | fails; warns from 95 % (5.97 MB) |
-| Signed-in first visit: gzip -9 total | 5,740,000 B  | fails; warns from 95 % (5.45 MB) |
+| A guest in a meeting: gzip -9 total  | 6,190,000 B  | fails; warns from 95 % (5.88 MB) |
+| Signed-in first visit: gzip -9 total | 5,650,000 B  | fails; warns from 95 % (5.37 MB) |
 | The call module: gzip -9             | 1,000,000 B  | fails                            |
 
-Both budgets are the sizes measured below (#1437) plus about 6 %, so they warn only after real
-growth; before that they were 6.35 and 5.8 MB (#1413), 6.8 and 6.2 MB, the sizes of #1148 plus about 6 %. For a while they were 10 MB, because the guest's meeting had reached its budget of the time
+Both budgets are the sizes measured below (#1452) plus about 6 %, so they warn only after real
+growth; before that they were 6.28 and 5.74 MB (#1437), 6.35 and 5.8 MB (#1413), 6.8 and 6.2 MB, the sizes of #1148 plus about 6 %. For a while they were 10 MB, because the guest's meeting had reached its budget of the time
 (5.7 MB) and blocked unrelated pull requests; at 10 MB the check caught nothing. Before that the
 guest budget was the guest's meeting of 2026-10-31 plus about 4 %, the signed-in ceiling the
 signed-in first visit on `main` 8d653d3c plus about 10 %. The single budget before (4,700,000 B,
@@ -2113,6 +2113,50 @@ information. The uncompressed size is printed but not limited: what a user waits
 transfer. The earlier growth ratchet on it (11.85 MB) was dropped with the split (#334): main had
 outgrown it anyway, and the split moves code between files without changing what matters. Raising
 the budget is a decision, not a fix.
+
+#### The service worker reads only what a notification shows (#1452, 2026-11-08)
+
+The service worker's wasm (`teamcraft-web-sw`) had grown from 0.39 to 0.49 MB gzip since
+2026-10-31, in both budgets. By `twiggy` over a build with names (`cargo build -p teamcraft-web-sw
+--target wasm32-unknown-unknown --profile web-release` with `strip` off), more than a fifth of its
+1.57 MB of code before wasm-opt were JSON readers of things a notification never shows:
+
+- **Every kind of message.** A push reads one message, from the store or fetched and decrypted, to
+  show its text, its first file's name or that somebody was added. It read it as the whole
+  `MessageContent` (an AI notetaker's request, an integration source's change, a conversation
+  event of every kind, an imported message's origin, the workspace head in a message's metadata),
+  and the store read every record, an entry's too, as the `Record` enum that holds a whole
+  `StoredMessage`. Both are internally tagged, so serde buffers them first.
+  `push_preview::ShownContent` now reads only what a notification shows, from the same JSON (and
+  from a `MessageContent` the same way, which the tests check for every kind); the store reads a
+  message for a notification with `LocalStore::shown_message_by_server_id`, which the browser's
+  store (`SealedStore`) answers from that part of the record, and reads an entry without the reader
+  of a message's record. The plaintext is decrypted and its signature checked exactly as before
+  (`decrypt_plaintext`, split from `decrypt_content`); only the reading after it is narrower.
+- **The whole workspace state.** `push_content_mode` read the verified `WorkspaceState` (roster,
+  every policy with its defaults, the AI models' names) for one setting. It reads the policy's
+  notification settings now, with the fields the policy can't do without still required, so a state
+  that didn't read before still shows nothing but "New message".
+
+Together they take the worker's code before wasm-opt from 1.57 to 1.22 MB.
+
+What is left in the worker is mostly its job: the encrypted store, the key bag, the wake-up's
+crypto, Web Crypto, IndexedDB, and the REST client with DPoP for fetching the message, marking it
+read and a rotated subscription (`reqwest`, `http`'s header table, `url`, about 70 kB before
+wasm-opt; a fetch of its own would drop them, #1462). Release verification is in
+`sw.js` and unchanged.
+
+Release `trunk build` on macOS (trunk 0.22.0, wasm-opt 131, the CI job's commands), `main`
+90d31f25, gzip -9:
+
+| Download                                     | Before      | After       | Delta      |
+|----------------------------------------------|-------------|-------------|------------|
+| A guest in a meeting (lobby, meeting, calls) | 5,927,664 B | 5,840,596 B | −87,068 B  |
+| Signed-in first visit                        | 5,418,330 B | 5,331,316 B | −87,014 B  |
+| The service worker (in both)                 | 492,090 B   | 401,482 B   | −90,608 B  |
+| The app (in both)                            | 2,620,026 B | 2,623,579 B | +3,553 B   |
+
+The app is slightly larger: it carries the narrower readers next to the whole ones.
 
 #### The UI's texts as files of their own (#1437, 2026-11-08)
 
