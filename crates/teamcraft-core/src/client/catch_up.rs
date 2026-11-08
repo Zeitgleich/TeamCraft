@@ -11,6 +11,12 @@
 //! The MLS state is one per device, so the groups are still processed one after the other; what
 //! runs side by side is waiting for the server: member lists, and the first page of each
 //! conversation's MLS queue and messages.
+//!
+//! A conversation with more new messages than [`super::ClientSettings::catch_up_message_pages`]
+//! doesn't hold up the rest either (issue #1423): its MLS queue is read whole, its messages up to
+//! that many pages, then its newest page, and it counts as caught up for live events and the
+//! outbox. Its mark stays until the messages in between, its backlog, are read too: in order,
+//! after every conversation got that far, in this catch-up (`history_gaps.rs`).
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -208,6 +214,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.catch_up_each(waiting, &phases).await?;
     phases.lap("content", self.now_ms());
     self.trace_lap("catch-up: content");
+    // Boxed: only after a long absence, and it would otherwise sit in every catch-up's future.
+    Box::pin(self.catch_up_backlogs(conversations)).await?;
+    phases.lap("backlogs", self.now_ms());
+    self.trace_lap("catch-up: backlogs");
     tracing::info!(
       conversations = conversations.len(),
       total_ms = phases.total_ms(),
@@ -290,7 +300,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let mls_written_before = self.saved_mls.written_bytes();
     // One conversation's failure (a 403 right after a removal) marks it for another try and the
     // catch-up goes on with the others (issue #159).
-    let result = self.catch_up_content_from(conversation, first).await;
+    let result = self
+      .catch_up_content_from(conversation, first, self.settings.catch_up_message_pages)
+      .await;
     // One line each, so a slow conversation shows (issue #972).
     tracing::info!(
       conversation_id = %conversation,
@@ -302,7 +314,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if self.isolate(conversation, ResyncPart::Content, result)? {
       self.unmark_resync(conversation, ResyncPart::Content)?;
     }
-    self.store.delete(Table::SyncState, &marker_key(conversation))?;
+    self.unmark_unless_backlog(conversation)?;
     self.note_first_sync_caught_up(conversation)?;
     self.note_live_caught_up(conversation);
     // Its newest messages show in the list now, not once every conversation is through.
@@ -417,11 +429,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if !self.has_group(focus)? {
       return Ok(());
     }
-    let result = self.catch_up_content_from(focus, first).await;
+    let result = self
+      .catch_up_content_from(focus, first, self.settings.catch_up_message_pages)
+      .await;
     if self.isolate(focus, ResyncPart::Content, result)? {
       self.unmark_resync(focus, ResyncPart::Content)?;
     }
-    self.store.delete(Table::SyncState, &marker_key(focus))?;
+    self.unmark_unless_backlog(focus)?;
     self.note_first_sync_caught_up(focus)?;
     self.note_live_caught_up(focus);
     ahead.done.insert(focus);
@@ -499,12 +513,68 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
+  /// The conversation's mark goes, unless it still has a backlog to read
+  /// ([`Self::catch_up_backlogs`]).
+  fn unmark_unless_backlog(&self, conversation: ConversationId) -> Result<(), CoreError> {
+    if !self.has_backlog(conversation)? {
+      self.store.delete(Table::SyncState, &marker_key(conversation))?;
+    }
+    Ok(())
+  }
+
+  /// Reads the backlogs the catch-up of `conversations` left (and those a catch-up cut short left
+  /// before), the focused conversation's first, each like a conversation's own catch-up: a failure
+  /// marks it for another try and the rest goes on. Each loses its mark once read.
+  async fn catch_up_backlogs(&mut self, conversations: &[ConversationId]) -> Result<(), CoreError> {
+    let mut due = Vec::new();
+    for conversation in conversations {
+      if self.has_backlog(*conversation)? {
+        due.push(*conversation);
+      }
+    }
+    while !due.is_empty() {
+      let place = self
+        .catch_up_focus
+        .get()
+        .and_then(|focus| due.iter().position(|conversation| *conversation == focus))
+        .unwrap_or(0);
+      let conversation = due.remove(place);
+      let started_ms = self.now_ms();
+      let result = self.catch_up_backlog(conversation).await;
+      tracing::info!(
+        conversation_id = %conversation,
+        ms = self.now_ms().saturating_sub(started_ms),
+        is_ok = result.is_ok(),
+        "catch-up: backlog done"
+      );
+      // One that failed is read by the next try (`resync_marked_conversations`) or catch-up.
+      self.isolate(conversation, ResyncPart::Content, result)?;
+      self.store.delete(Table::SyncState, &marker_key(conversation))?;
+      self.note_sync_progress();
+      self.apply_live_during_catch_up().await?;
+    }
+    Ok(())
+  }
+
+  /// One conversation's backlog, if it has one, and what its messages need: those waiting for keys
+  /// and their senders' keys.
+  pub(super) async fn catch_up_backlog(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    if !self.has_backlog(conversation)? {
+      return Ok(());
+    }
+    self.read_backlog(conversation).await?;
+    self.retry_undecrypted(conversation)?;
+    self.learn_sender_keys(conversation).await
+  }
+
   /// One conversation's part of a catch-up, with its first pages possibly read ahead: its MLS
-  /// backlog, new messages, messages waiting for keys and the senders' keys.
+  /// backlog, new messages (after `maybe_pages` pages the newest, the rest left as its backlog),
+  /// messages waiting for keys and the senders' keys.
   pub(super) async fn catch_up_content_from(
     &mut self,
     conversation: ConversationId,
     first: FirstPages,
+    maybe_pages: Option<u32>,
   ) -> Result<(), CoreError> {
     if self.has_group(conversation)? {
       self
@@ -512,7 +582,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .await?;
     }
     self
-      .catch_up_messages_from(conversation, first.maybe_messages)
+      .catch_up_messages_from(conversation, first.maybe_messages, maybe_pages)
       .await?;
     self.retry_undecrypted(conversation)?;
     // Senders this device has no verified key for yet (it isn't in the group, or just joined).

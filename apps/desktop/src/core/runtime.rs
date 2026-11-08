@@ -1314,7 +1314,8 @@ impl Core {
       maybe_download_dir: self.config.maybe_download_dir.clone(),
       creates_notes_to_self: true,
       history_backfill: HistoryBackfill::KEEP_RECENT,
-      ..ClientSettings::default()
+      // The feed shows holes: a busy conversation's newest messages come ahead of the rest.
+      ..ClientSettings::default().with_capped_catch_up()
     }
   }
 

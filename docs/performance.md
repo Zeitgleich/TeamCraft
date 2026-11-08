@@ -1739,9 +1739,35 @@ first that has to wait (a welcome, a membership change, an event of a conversati
 holds back everything after it, so the order stays the server's. `coming_back.rs`, 24 channels with
 400 ms member lists: Ann's message to the open chat during the catch-up shows at the next step,
 within one batch of member lists, before the catch-up ends (before: at its end). An epoch change in
-a finished channel during the catch-up keeps its order, every message readable once. Not yet: a cap
-on the backlog after a long absence ("jump to latest" with the gap marker of #155), see the
-follow-up of #1021; the e2e measurement (`long_absence.rs`) wasn't rerun for this change.
+a finished channel during the catch-up keeps its order, every message readable once.
+
+**More ahead of the catch-up, and a busy channel's newest page first** (issue #1423). Two kinds of
+events held back everything behind them although nothing they touch is still being caught up:
+
+- Events of a conversation the catch-up doesn't visit, because nothing moved in it since the last
+  sync (heads, #714): it is current, and now counts as finished from the start. `coming_back.rs`:
+  Ann's message to such a channel during the catch-up shows at the next step (before: at the end).
+- Membership and conversation changes (`MembershipAdd`, `MembershipRemove`, `ConversationUpdate`)
+  of a finished conversation: they read that conversation's record and member list, and the only
+  commit among them goes into its own group, which is caught up. In the epoch-change test, Ann's
+  message after adding Bob now shows before the catch-up ends.
+
+A channel with hundreds of new messages was read page by page, in order, before the catch-up went on
+to the next conversation and before its own newest messages showed. With
+`catch_up_message_pages` (web and desktop: 4 pages, 200 messages) a catch-up reads that many, then
+the conversation's newest page, and moves on; the conversation counts as caught up for live events
+and the outbox, and the feed shows a hole between the two (#1156's gap row). The MLS queue is read
+whole as before. Once every conversation got that far, the same catch-up reads each hole full, in
+order, and takes pins, bookmarks and channel role entries from the newest page on again, so a pin in
+the hole doesn't undo a newer unpin; one cut short leaves the hole noted, and the next catch-up
+reads it (the conversation counts as due without a head that moved). Nothing a message carries is
+skipped, the store ends as before. The mobile apps leave it off until their feeds show holes.
+`catch_up.rs`: 30 new messages in pages of 5, two in order: cut short after one page of the hole,
+the newest five are there; the next catch-up reads the rest, every message once, in order.
+
+Not measured end to end yet: the e2e scenario (`long_absence.rs`) with a live message during the
+catch-up and the issue's 12 h gap with 40 conversations needs the Linux network namespace
+(`scripts/e2e-network.sh`) and was rerun neither for #1021 nor for #1423.
 
 ### Local store: opening and reading a large account (issue #155)
 

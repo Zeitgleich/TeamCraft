@@ -1967,6 +1967,17 @@ message times. A device's own decision to commit still uses its own clock.
 only after its MLS queue was caught up, so an offline message never goes out under a key that a member
 removed meanwhile still holds.
 
+**Events and history during the catch-up** (issues #1021, #1423). A group's MLS queue is always read
+whole and in order; nothing about a group is applied before it. What arrives live meanwhile is applied
+in the server's order, a strict prefix of it, and only while each event concerns a conversation whose
+group is caught up (or one nothing moved in since the last sync), or none (`live_catch_up.rs`); a
+welcome, a role log, a deletion and anything of a conversation still to come wait for the end, and so
+does everything behind them. Messages are another matter: their content keys came through the queue,
+so a conversation with many new messages may get its newest page before the rest (the hole is read
+in the same catch-up, `history_gaps.rs`). Some controls in messages depend on their order (pins,
+bookmarks, channel role entries, §4.6.3): they are taken again in their order once the hole is read,
+so the outcome is the one reading in order gives.
+
 ### 4.6.1 Signed channel roles
 
 A channel's roles (admin = channel owner, moderator, member; admin.md §1) are changed on the server

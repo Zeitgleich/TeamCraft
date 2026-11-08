@@ -170,6 +170,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       "full sync: reading what changed"
     );
     self.keep_listed_heads(conversations.iter().map(|conversation| conversation.id));
+    // What nothing moved in is current already: its live events don't wait for the others
+    // (issue #1423, `live_catch_up.rs`).
+    let due: BTreeSet<ConversationId> = content_due.iter().chain(&members_due).copied().collect();
+    self.note_live_current(
+      listed
+        .iter()
+        .copied()
+        .filter(|conversation| !due.contains(conversation)),
+    );
     self.trace_lap("what is due");
     self.catch_up_conversations(&content_due, &members_due).await?;
     self.finish_first_sync_newest(&listed)
@@ -296,8 +305,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// and the senders' keys.
   async fn sync_conversation_content(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     self
-      .catch_up_content_from(conversation, FirstPages::default())
-      .await
+      .catch_up_content_from(conversation, FirstPages::default(), None)
+      .await?;
+    // What a catch-up left to read (issue #1423).
+    Box::pin(self.catch_up_backlog(conversation)).await
   }
 
   /// Keeps one conversation's failure from failing the whole sync (issue #159): a 403 or 404 right

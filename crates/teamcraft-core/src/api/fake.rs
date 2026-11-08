@@ -185,6 +185,9 @@ struct State {
   /// REST calls per user, also those that failed (tests about idle traffic).
   rest_calls: HashMap<UserId, u64>,
   message_lists: HashMap<UserId, u64>,
+  /// Per user, the message list after which they fail as on a lost network
+  /// ([`FakeServer::cut_message_lists_after`]).
+  message_list_cuts: HashMap<UserId, u64>,
   users: BTreeMap<UserId, UserSummary>,
   devices: BTreeMap<DeviceId, Device>,
   identity_keys: HashMap<UserId, IdentityKeyResponse>,
@@ -690,6 +693,19 @@ impl FakeServer {
   /// How many pages of messages `user` asked for so far.
   pub fn message_list_count(&self, user: UserId) -> u64 {
     self.lock().message_lists.get(&user).copied().unwrap_or(0)
+  }
+
+  /// Answers `lists` more pages of messages of `user`, then fails the next ones as a lost network
+  /// would; `None`: answers them again.
+  pub fn cut_message_lists_after(&self, user: UserId, maybe_lists: Option<u64>) {
+    let mut state = self.lock();
+    let answered = state.message_lists.get(&user).copied().unwrap_or(0);
+    match maybe_lists {
+      Some(lists) => state
+        .message_list_cuts
+        .insert(user, answered.saturating_add(lists)),
+      None => state.message_list_cuts.remove(&user),
+    };
   }
 
   /// How many directory searches (`GET /users?query=`) arrived so far.
@@ -4016,7 +4032,12 @@ impl ServerApi for FakeServerApi {
     query: &ListMessagesQuery,
   ) -> Result<ListMessagesResponse, ApiError> {
     self.with(|state, me| {
-      *state.message_lists.entry(me).or_default() += 1;
+      let lists = state.message_lists.entry(me).or_default();
+      *lists += 1;
+      let lists = *lists;
+      if state.message_list_cuts.get(&me).is_some_and(|cut| lists > *cut) {
+        return Err(ApiError::Network("fake server: message lists cut".into()));
+      }
       let limit = query
         .maybe_limit
         .map_or(PAGE_SIZE, |limit| limit as usize)

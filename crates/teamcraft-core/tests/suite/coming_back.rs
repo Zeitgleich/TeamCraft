@@ -267,9 +267,9 @@ async fn a_message_to_the_open_chat_during_the_catch_up_shows_before_it_ends() {
 }
 
 /// A channel already caught up changes epoch while the rest is still caught up: Ann writes, adds
-/// Bob (a commit), and writes again in the new epoch. The first message may go ahead; the membership
-/// change waits for the end of the catch-up, and so does what comes after it, so the group follows
-/// the commits in their order and every message is readable, once.
+/// Bob (a commit), and writes again in the new epoch. All of it goes ahead in its order, the
+/// membership change too (issue #1423): the group follows the commits in their order and every
+/// message is readable, once, before the catch-up ends.
 #[tokio::test(start_paused = true)]
 async fn an_epoch_change_in_a_caught_up_channel_during_the_catch_up_keeps_its_order() {
   let mut day = Day::begin().await;
@@ -282,8 +282,10 @@ async fn an_epoch_change_in_a_caught_up_channel_during_the_catch_up_keeps_its_or
   let channel = day.channels[0];
   let store = day.phone.store.clone();
   day.phone.client().catch_up_focus().set(channel);
+  let shown = Arc::new(Mutex::new(None));
+  let shown_at = shown.clone();
   let Day { ann, phone, .. } = &mut day;
-  phone
+  let woke = phone
     .awake_while(
       async move {
         let woke_at = Instant::now();
@@ -297,10 +299,40 @@ async fn an_epoch_change_in_a_caught_up_channel_during_the_catch_up_keeps_its_or
         ann.client.send_text(channel, None, "before Bob").await.unwrap();
         ann.client.add_member(channel, bob_id).await.unwrap();
         ann.client.send_text(channel, None, "with Bob").await.unwrap();
+        let sent_at = woke_at.elapsed();
+        while !texts(store.as_ref(), channel)
+          .iter()
+          .any(|text| text == "with Bob")
+        {
+          tokio::time::sleep(Duration::from_millis(20)).await;
+          assert!(
+            woke_at.elapsed() < Duration::from_secs(60),
+            "\"with Bob\" never showed"
+          );
+        }
+        *shown_at.lock().unwrap() = Some((sent_at, woke_at.elapsed()));
       },
       Told::has_the_afternoon_and_bob,
     )
     .await;
+  let (sent_at, shown_at) = shown.lock().unwrap().expect("shown");
+  let caught_up = woke
+    .first(|told| {
+      told.channels_marked == 0
+        && told.channel_texts[1..]
+          .iter()
+          .all(|count| *count == NEWS_PER_CHANNEL + 1)
+    })
+    .expect("never caught up")
+    .at;
+  assert!(
+    sent_at < caught_up,
+    "sent at {sent_at:?}, after the catch-up ({caught_up:?}): the test proves nothing"
+  );
+  assert!(
+    shown_at < caught_up,
+    "sent at {sent_at:?}, shown at {shown_at:?}, the catch-up ended at {caught_up:?}"
+  );
   let channel_texts = texts(day.phone.store.as_ref(), channel);
   let mut expected = vec!["hello 0".to_owned()];
   expected.extend((0..NEWS_PER_CHANNEL).map(|news| format!("news {news} in 0")));
@@ -308,6 +340,79 @@ async fn an_epoch_change_in_a_caught_up_channel_during_the_catch_up_keeps_its_or
   expected.push("with Bob".into());
   assert_eq!(channel_texts, expected);
   assert!(!is_catching_up(day.phone.store.as_ref(), channel).unwrap());
+}
+
+/// A channel nothing happened in while the phone was away isn't read by its catch-up: it is current
+/// from the start, so Ann's message to it during the catch-up shows at the next step (issue #1423),
+/// not once every conversation that changed is through.
+#[tokio::test(start_paused = true)]
+async fn a_message_to_a_chat_that_didnt_change_shows_during_the_catch_up() {
+  let mut day = Day::begin().await;
+  let space = day.ann.space().await;
+  let quiet = day.ann.client.create_channel(space, "quiet").await.unwrap();
+  day.ann.client.add_member(quiet, day.me).await.unwrap();
+  day
+    .ann
+    .client
+    .send_text(quiet, None, "quiet morning")
+    .await
+    .unwrap();
+  day.phone.awake_until(None, Told::has_the_morning).await;
+  assert_eq!(texts(day.phone.store.as_ref(), quiet), vec!["quiet morning"]);
+
+  day.desktop_afternoon().await;
+  day.server.delay_member_lists(day.me, MEMBER_LIST_DELAY);
+  let (store, direct) = (day.phone.store.clone(), day.direct);
+  let shown = Arc::new(Mutex::new(None));
+  let shown_at = shown.clone();
+  day.phone.client().catch_up_focus().set(direct);
+  let Day { ann, phone, .. } = &mut day;
+  let woke = phone
+    .awake_while(
+      async move {
+        let woke_at = Instant::now();
+        // The catch-up runs: the open chat is through, the channels are still on their way.
+        while texts(store.as_ref(), direct).len() < DIRECT_COMPLETE {
+          tokio::time::sleep(Duration::from_millis(20)).await;
+          assert!(
+            woke_at.elapsed() < Duration::from_secs(60),
+            "the open chat never caught up"
+          );
+        }
+        ann.client.send_text(quiet, None, "live").await.unwrap();
+        let sent_at = woke_at.elapsed();
+        while texts(store.as_ref(), quiet).len() < 2 {
+          tokio::time::sleep(Duration::from_millis(20)).await;
+          assert!(
+            woke_at.elapsed() < Duration::from_secs(60),
+            "the live message never showed"
+          );
+        }
+        *shown_at.lock().unwrap() = Some((sent_at, woke_at.elapsed()));
+      },
+      Told::has_the_afternoon,
+    )
+    .await;
+
+  let (sent_at, shown_at) = shown.lock().unwrap().expect("shown");
+  let caught_up = woke.caught_up_at();
+  assert!(
+    sent_at < caught_up,
+    "sent at {sent_at:?}, after the catch-up ({caught_up:?}): the test proves nothing"
+  );
+  assert!(
+    shown_at < caught_up,
+    "sent at {sent_at:?}, shown at {shown_at:?}, the catch-up ended at {caught_up:?}"
+  );
+  assert!(
+    shown_at - sent_at <= MEMBER_LIST_DELAY * 2 + AT_ONCE,
+    "sent at {sent_at:?}, shown at {shown_at:?}"
+  );
+  assert_eq!(
+    texts(day.phone.store.as_ref(), quiet),
+    vec!["quiet morning", "live"]
+  );
+  day.phone.assert_everything_once(&day);
 }
 
 /// Away for less than the resume window (a look at another app): the server replays what was
