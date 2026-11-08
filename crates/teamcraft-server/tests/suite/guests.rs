@@ -712,6 +712,26 @@ mod notices_and_extending {
     assert_eq!(soon.body["guests"][0]["user"]["id"], ext_id);
     let unsponsored = app.get(&admin(), "/admin/guests?filter=no_sponsor").await;
     assert_eq!(unsponsored.body["guests"], json!([]), "alice sponsors");
+    // By the sponsor's name, any case; wildcards are plain characters.
+    let sponsored = app.get(&admin(), "/admin/guests?sponsor_query=ALIC").await;
+    assert_eq!(
+      sponsored.body["guests"][0]["user"]["id"], ext_id,
+      "{}",
+      sponsored.body
+    );
+    let nobody = app.get(&admin(), "/admin/guests?sponsor_query=zzz").await;
+    assert_eq!(nobody.body["guests"], json!([]));
+    for wildcard in ["_", "%25"] {
+      let reply = app
+        .get(&admin(), &format!("/admin/guests?sponsor_query={wildcard}"))
+        .await;
+      assert_eq!(reply.body["guests"], json!([]), "{wildcard} is literal");
+    }
+    let everyone = app.get(&admin(), "/admin/guests?sponsor_query=").await;
+    assert_eq!(
+      everyone.body["guests"][0]["user"]["id"], ext_id,
+      "empty text searches nothing"
+    );
     app.stop().await;
   }
 }

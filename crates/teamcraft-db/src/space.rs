@@ -130,6 +130,8 @@ pub struct ExpiringGuest {
 pub struct AdminGuestListFilter {
   pub maybe_space: Option<SpaceId>,
   pub maybe_sponsor: Option<UserId>,
+  /// Part of the sponsor's display name or username, any case; guests without a sponsor never match.
+  pub maybe_sponsor_query: Option<String>,
   pub maybe_expires_by: Option<OffsetDateTime>,
   pub has_no_sponsor: bool,
   pub has_never_signed_in: bool,
@@ -595,6 +597,12 @@ impl Database {
     &self,
     filter: &AdminGuestListFilter,
   ) -> Result<Vec<AdminGuestRow>, DbError> {
+    let maybe_pattern = filter
+      .maybe_sponsor_query
+      .as_deref()
+      .map(str::trim)
+      .filter(|query| !query.is_empty())
+      .map(crate::admin::like_pattern);
     let rows = sqlx::query!(
       r#"SELECT m.space_id, s.name AS space_name, m.user_id, m.expires_at, m.sponsor_user_id,
                 EXISTS (SELECT 1 FROM devices d WHERE d.user_id = m.user_id) AS "has_signed_in!"
@@ -608,6 +616,7 @@ impl Database {
            AND ($3::timestamptz IS NULL OR m.expires_at <= $3)
            AND (NOT $4 OR sponsor.id IS NULL OR sponsor.deactivated_at IS NOT NULL OR sponsor.deleted_at IS NOT NULL)
            AND (NOT $5 OR NOT EXISTS (SELECT 1 FROM devices d WHERE d.user_id = m.user_id))
+           AND ($7::text IS NULL OR sponsor.display_name ILIKE $7 OR sponsor.username ILIKE $7)
          ORDER BY m.expires_at ASC NULLS LAST, m.space_id, m.user_id
          LIMIT $6"#,
       filter.maybe_space.map(to_db),
@@ -616,6 +625,7 @@ impl Database {
       filter.has_no_sponsor,
       filter.has_never_signed_in,
       filter.limit,
+      maybe_pattern,
     )
     .fetch_all(self.pool())
     .await?;

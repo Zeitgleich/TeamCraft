@@ -4,12 +4,16 @@
 use std::collections::HashSet;
 
 use leptos::prelude::*;
-use teamcraft_proto::{AdminGuestFilter, AdminGuestResponse, ListAdminGuestsQuery, Role, SpaceId, UserId};
+use teamcraft_proto::{AdminGuestFilter, AdminGuestResponse, ListAdminGuestsQuery, SpaceId, UserId};
 
 use crate::clock::format_date;
 use crate::components::admin_console::ListCutNotice;
 use crate::i18n::use_i18n;
+use crate::reactive::use_debounced;
 use crate::state::use_app_state;
+
+/// The wait after the last key before the sponsor search asks the server.
+const SEARCH_DEBOUNCE_MS: u64 = 250;
 
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -23,8 +27,13 @@ pub fn GuestsOverview() -> impl IntoView {
   let query = RwSignal::new(ListAdminGuestsQuery::default());
   let selected = RwSignal::new(HashSet::<Key>::new());
   let is_confirming_removal = RwSignal::new(false);
+  let sponsor_text = RwSignal::new(String::new());
+  let debounced_sponsor = use_debounced(sponsor_text, SEARCH_DEBOUNCE_MS);
   Effect::new(move |_| {
-    let current = query.get();
+    let mut current = query.get();
+    let text = debounced_sponsor.get();
+    let text = text.trim();
+    current.maybe_sponsor_query = (!text.is_empty()).then(|| text.to_owned());
     state.write(|backend| backend.set_admin_guest_query(current));
   });
   let list = Memo::new(move |_| state.read(|backend| backend.admin_guests()));
@@ -60,16 +69,6 @@ pub fn GuestsOverview() -> impl IntoView {
     is_confirming_removal.set(false);
   };
   let spaces = Memo::new(move |_| state.read(|backend| backend.admin_spaces()));
-  let sponsors = Memo::new(move |_| {
-    state.read(|backend| {
-      backend
-        .admin_known_users()
-        .into_iter()
-        .filter(|entry| entry.role != Role::Guest && entry.is_active)
-        .map(|entry| (entry.user.id, entry.user.display_name))
-        .collect::<Vec<_>>()
-    })
-  });
   view! {
     <div class="admin-toolbar guest-filters">
       <label class="field-inline">
@@ -98,15 +97,16 @@ pub fn GuestsOverview() -> impl IntoView {
       </label>
       <label class="field-inline">
         <span>{move || i18n.t("admin-col-sponsor")}</span>
-        <select class="input" on:change=move |event| {
-          let value = event_target_value(&event);
-          query.update(|query| query.maybe_sponsor_id = value.parse().ok());
-        }>
-          <option value="">{move || i18n.t("admin-guests-any")}</option>
-          <For each=move || sponsors.get() key=|sponsor| sponsor.0 let:sponsor>
-            <option value=sponsor.0.to_string() translate="no">{sponsor.1.clone()}</option>
-          </For>
-        </select>
+        <input
+          class="input"
+          type="search"
+          name="sponsor"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder=move || i18n.t("admin-guests-sponsor-placeholder")
+          prop:value=move || sponsor_text.get()
+          on:input=move |event| sponsor_text.set(event_target_value(&event))
+        />
       </label>
     </div>
     <Show when=move || !chosen().is_empty() fallback=|| ()>

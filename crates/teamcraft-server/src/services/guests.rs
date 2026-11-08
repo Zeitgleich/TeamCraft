@@ -393,6 +393,7 @@ pub async fn admin_list(
     .admin_list_guests(&AdminGuestListFilter {
       maybe_space: query.maybe_space_id,
       maybe_sponsor: query.maybe_sponsor_id,
+      maybe_sponsor_query: query.maybe_sponsor_query,
       maybe_expires_by: (query.maybe_filter == Some(AdminGuestFilter::ExpiringSoon))
         .then(|| now + Duration::days(i64::from(longest))),
       has_no_sponsor: query.maybe_filter == Some(AdminGuestFilter::NoSponsor),

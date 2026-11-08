@@ -201,6 +201,23 @@ mod overview {
       3,
       "empty text searches nothing"
     );
+    // By ID, whatever page they would be on; none, or malformed or too many IDs.
+    assert_eq!(
+      list(format!("ids={other},{private}")).await,
+      vec![private.clone(), other.clone()]
+    );
+    assert_eq!(
+      list(format!("ids={with_guest}&visibility=private")).await,
+      Vec::<String>::new()
+    );
+    assert!(list("ids=".into()).await.is_empty());
+    assert!(list("ids=424242".into()).await.is_empty());
+    for bad in ["ids=abc".to_owned(), format!("ids={}", vec!["1"; 101].join(","))] {
+      assert_eq!(
+        app.get(&bob, &format!("/admin/conversations?{bad}")).await.status,
+        StatusCode::BAD_REQUEST
+      );
+    }
     let paged = app.get(&bob, "/admin/conversations?limit=2").await;
     assert_eq!(paged.body["has_more"], true);
     let rest = list(format!(
@@ -261,6 +278,24 @@ mod overview {
         .as_array()
         .unwrap()
         .is_empty()
+    );
+
+    // By ID: the accounts a notice refers to, on whatever page.
+    let by_id = app
+      .get(&bob, &format!("/admin/users?ids={carol_id}&status=all"))
+      .await;
+    assert_eq!(by_id.body["users"].as_array().unwrap().len(), 1);
+    assert_eq!(by_id.body["users"][0]["id"], json!(carol_id));
+    assert_eq!(by_id.body["users"][0]["is_deactivated"], true);
+    assert!(
+      app.get(&bob, "/admin/users?ids=").await.body["users"]
+        .as_array()
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(
+      app.get(&bob, "/admin/users?ids=abc").await.status,
+      StatusCode::BAD_REQUEST
     );
 
     // Deactivation suspends: the device stays for a reactivation.

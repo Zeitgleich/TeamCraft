@@ -942,6 +942,7 @@ admin-guests-filter-all = Alle Gäste
 admin-guests-filter-expiring = Laufen bald ab
 admin-guests-filter-no-sponsor = Ohne Betreuung
 admin-guests-filter-never = Nie angemeldet
+admin-guests-sponsor-placeholder = Nach Paten suchen …
 admin-guests-any = Alle
 admin-guests-bulk = Ausgewählte Gäste
 admin-guests-selected = { $count ->

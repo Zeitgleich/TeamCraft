@@ -66,6 +66,9 @@ pub struct ListAdminGuestsQuery {
   pub maybe_space_id: Option<SpaceId>,
   #[serde(rename = "sponsor_id", default, skip_serializing_if = "Option::is_none")]
   pub maybe_sponsor_id: Option<UserId>,
+  /// Only guests whose sponsor's name or username contains this text (case-insensitive).
+  #[serde(rename = "sponsor_query", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_sponsor_query: Option<String>,
   #[serde(rename = "filter", default, skip_serializing_if = "Option::is_none")]
   pub maybe_filter: Option<AdminGuestFilter>,
   #[serde(rename = "limit", default, skip_serializing_if = "Option::is_none")]
