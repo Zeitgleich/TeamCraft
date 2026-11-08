@@ -9,19 +9,42 @@
 //! its text. Any set of updates gives the same page in any order and any number of times:
 //! concurrent typing in one block merges character by character, concurrent changes of a block's
 //! kind or check mark end with the same one winning everywhere.
+//!
+//! The schema, and what it asks of later versions (issue #1456, e2ee.md §4.11):
+//!
+//! - Root: `blocks`, a Y.Array of Y.Map, one per block.
+//! - Block keys: `id` (string), `kind` (string, [`BlockKind::tag`]), `checked` (bool), `text`
+//!   (Y.Text). A key this version doesn't know is left alone.
+//! - Inline formatting is Y.Text formatting: `bold`, `italic`, `strike` and `code` (`true`), `link`
+//!   (the address, a string; only addresses [`is_page_link`] allows are shown as links). An attribute
+//!   this version doesn't know is left alone and shown as plain text.
+//! - A later version may add kinds and attributes: a kind unknown here reads as a paragraph and its
+//!   text stays. It must not put embeds into a block's text: every client counts a block's text
+//!   as its characters only, so an inline object has to be text with an attribute (a mention is
+//!   `@name` carrying a `mention` attribute).
+//!
+//! A client from before inline formatting reads the text without it, and its edits leave the
+//! formatting of the text around them in place.
 
 mod history;
 
 pub use history::{
   CanvasMark, CanvasOrigin, CanvasVersion, compaction, editors_since, marks, origin_of, page_at, versions,
 };
+use std::sync::{Arc, Mutex};
+
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::Base64Bytes;
+use yrs::types::Attrs;
+use yrs::types::text::YChange;
+use yrs::undo::{Options as UndoOptions, UndoManager};
 use yrs::updates::decoder::Decode;
 use yrs::{
   Any, Array, ArrayRef, Doc, GetString, Map, MapPrelim, MapRef, Out, ReadTxn, StateVector, Text, TextPrelim,
   TextRef, Transact, TransactionMut, Update,
 };
+
+use crate::markdown;
 
 /// The root array of blocks.
 const BLOCKS: &str = "blocks";
@@ -30,6 +53,14 @@ const ID: &str = "id";
 const KIND: &str = "kind";
 const CHECKED: &str = "checked";
 const TEXT: &str = "text";
+/// The inline formatting attribute of a link; the marks' are in [`InlineMark::attribute`].
+const LINK: &str = "link";
+/// The origin of updates applied from outside: what undo leaves alone.
+const REMOTE_ORIGIN: &str = "remote";
+/// The key the undo log's watch on the document is registered under.
+const UNDO_WATCH: &str = "undo";
+/// Edits this close together are undone together.
+const UNDO_GROUP_MS: u64 = 500;
 
 /// What the core keeps of a channel's page: the updates in the order they arrived, never read by
 /// the core itself.
@@ -59,18 +90,26 @@ pub struct CanvasState {
 pub enum BlockKind {
   Paragraph,
   Heading,
+  Heading2,
+  Heading3,
   Bullet,
   Numbered,
   Check,
+  Quote,
+  Code,
 }
 
 impl BlockKind {
-  pub const ALL: [Self; 5] = [
+  pub const ALL: [Self; 9] = [
     Self::Paragraph,
     Self::Heading,
+    Self::Heading2,
+    Self::Heading3,
     Self::Bullet,
     Self::Numbered,
     Self::Check,
+    Self::Quote,
+    Self::Code,
   ];
 
   /// The block's kind as the document stores it.
@@ -78,9 +117,13 @@ impl BlockKind {
     match self {
       Self::Paragraph => "paragraph",
       Self::Heading => "heading",
+      Self::Heading2 => "heading2",
+      Self::Heading3 => "heading3",
       Self::Bullet => "bullet",
       Self::Numbered => "numbered",
       Self::Check => "check",
+      Self::Quote => "quote",
+      Self::Code => "code",
     }
   }
 
@@ -92,16 +135,26 @@ impl BlockKind {
       .unwrap_or(Self::Paragraph)
   }
 
-  /// A list item: Enter makes another one of the same kind.
-  pub fn is_list(self) -> bool {
-    matches!(self, Self::Bullet | Self::Numbered | Self::Check)
+  /// Enter makes another block of the same kind (a list or a quote); in an empty one it ends it.
+  pub fn continues_on_enter(self) -> bool {
+    matches!(self, Self::Bullet | Self::Numbered | Self::Check | Self::Quote)
   }
 
-  /// The kind typed at the start of a paragraph turns it into ("# ", "- ", "1. ", "[] "), with
-  /// the length of that prefix in bytes.
+  /// Whether the block's text is shown as it is: code has no inline formatting, and Enter stays
+  /// in it.
+  pub fn is_code(self) -> bool {
+    self == Self::Code
+  }
+
+  /// The kind typed at the start of a paragraph turns it into ("# ", "- ", "1. ", "[] ", "> ",
+  /// three backticks), with the length of that prefix in bytes.
   pub fn from_prefix(text: &str) -> Option<(Self, usize)> {
-    const PREFIXES: [(&str, BlockKind); 7] = [
+    const PREFIXES: [(&str, BlockKind); 11] = [
       ("# ", BlockKind::Heading),
+      ("## ", BlockKind::Heading2),
+      ("### ", BlockKind::Heading3),
+      ("> ", BlockKind::Quote),
+      ("```", BlockKind::Code),
       ("- ", BlockKind::Bullet),
       ("* ", BlockKind::Bullet),
       ("1. ", BlockKind::Numbered),
@@ -124,6 +177,139 @@ pub struct Block {
   pub kind: BlockKind,
   pub text: String,
   pub is_checked: bool,
+  /// The formatted stretches of `text`, in order and not overlapping; the rest is plain.
+  pub spans: Vec<TextSpan>,
+}
+
+impl Block {
+  /// The text in stretches of one formatting each, plain ones (`None`) included.
+  pub fn runs(&self) -> Vec<(&str, Option<&TextStyle>)> {
+    let mut runs = Vec::with_capacity(self.spans.len() * 2 + 1);
+    let mut at = 0;
+    for span in &self.spans {
+      if span.start > at {
+        runs.push((&self.text[at..span.start], None));
+      }
+      runs.push((&self.text[span.start..span.end], Some(&span.style)));
+      at = span.end;
+    }
+    if at < self.text.len() || runs.is_empty() {
+      runs.push((&self.text[at..], None));
+    }
+    runs
+  }
+
+  /// Whether the text from `start` to `end` (UTF-16 units) has `mark` throughout. A caret asks what
+  /// typing there would get: the formatting of the character before it.
+  pub fn has_mark(&self, start: u32, end: u32, mark: InlineMark) -> bool {
+    let (from, to) = (byte_offset(&self.text, start), byte_offset(&self.text, end));
+    if from == to {
+      return self.style_before(from).is_some_and(|style| style.has(mark));
+    }
+    let mut covered = from;
+    for span in self.spans.iter().filter(|span| span.style.has(mark)) {
+      if span.start > covered {
+        break;
+      }
+      covered = covered.max(span.end);
+      if covered >= to {
+        return true;
+      }
+    }
+    false
+  }
+
+  /// The address of the link at the start of the range, or before a caret.
+  pub fn link_at(&self, start: u32) -> Option<&str> {
+    self
+      .style_before(byte_offset(&self.text, start))
+      .or_else(|| self.style_at(byte_offset(&self.text, start)))
+      .and_then(|style| style.maybe_link.as_deref())
+  }
+
+  fn style_at(&self, at: usize) -> Option<&TextStyle> {
+    style_at(&self.spans, at)
+  }
+
+  fn style_before(&self, at: usize) -> Option<&TextStyle> {
+    self.text[..at]
+      .chars()
+      .next_back()
+      .and_then(|last| self.style_at(at - last.len_utf8()))
+  }
+}
+
+/// A formatting a stretch of text has or hasn't.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum InlineMark {
+  Bold,
+  Italic,
+  Strike,
+  Code,
+}
+
+impl InlineMark {
+  pub const ALL: [Self; 4] = [Self::Bold, Self::Italic, Self::Strike, Self::Code];
+
+  /// The formatting attribute the document stores.
+  fn attribute(self) -> &'static str {
+    match self {
+      Self::Bold => "bold",
+      Self::Italic => "italic",
+      Self::Strike => "strike",
+      Self::Code => "code",
+    }
+  }
+}
+
+/// The formatting of a stretch of text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TextStyle {
+  pub is_bold: bool,
+  pub is_italic: bool,
+  pub is_strike: bool,
+  pub is_code: bool,
+  pub maybe_link: Option<String>,
+}
+
+impl TextStyle {
+  pub fn has(&self, mark: InlineMark) -> bool {
+    match mark {
+      InlineMark::Bold => self.is_bold,
+      InlineMark::Italic => self.is_italic,
+      InlineMark::Strike => self.is_strike,
+      InlineMark::Code => self.is_code,
+    }
+  }
+
+  fn is_plain(&self) -> bool {
+    *self == Self::default()
+  }
+
+  fn from_attributes(maybe_attributes: Option<&Attrs>) -> Self {
+    let Some(attributes) = maybe_attributes else {
+      return Self::default();
+    };
+    let is_on = |mark: InlineMark| matches!(attributes.get(mark.attribute()), Some(Any::Bool(true)));
+    Self {
+      is_bold: is_on(InlineMark::Bold),
+      is_italic: is_on(InlineMark::Italic),
+      is_strike: is_on(InlineMark::Strike),
+      is_code: is_on(InlineMark::Code),
+      maybe_link: match attributes.get(LINK) {
+        Some(Any::String(url)) if is_page_link(url) => Some(url.to_string()),
+        _ => None,
+      },
+    }
+  }
+}
+
+/// A formatted stretch of a block's text, in bytes of its text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextSpan {
+  pub start: usize,
+  pub end: usize,
+  pub style: TextStyle,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -141,6 +327,16 @@ pub struct CanvasDoc {
   blocks: ArrayRef,
   /// Block IDs this instance handed out: with the document's random client ID, unique.
   next_block: u64,
+  /// This editor's own edits, for undo and redo ([`CanvasDoc::enable_undo`]).
+  maybe_undo: Option<UndoLog>,
+}
+
+/// The undo and redo of one editor. Only what this editor did: updates from others are applied
+/// under [`REMOTE_ORIGIN`], which it doesn't track.
+struct UndoLog {
+  manager: UndoManager<()>,
+  /// The updates undo and redo made, which go to the other members like any edit.
+  made: Arc<Mutex<Vec<Vec<u8>>>>,
 }
 
 impl Default for CanvasDoc {
@@ -158,7 +354,57 @@ impl CanvasDoc {
       doc,
       blocks,
       next_block: 0,
+      maybe_undo: None,
     }
+  }
+
+  /// Keeps this editor's edits from now on, so they can be undone. `now_ms` is the time it groups
+  /// them by (a parameter: wasm has no system clock).
+  pub fn enable_undo(&mut self, now_ms: impl Fn() -> u64 + Send + Sync + 'static) {
+    let mut manager = UndoManager::with_options(UndoOptions {
+      capture_timeout_millis: UNDO_GROUP_MS,
+      tracked_origins: std::collections::HashSet::new(),
+      capture_transaction: None,
+      timestamp: Arc::new(now_ms),
+      init_undo_stack: Vec::new(),
+      init_redo_stack: Vec::new(),
+    });
+    manager.expand_scope(&self.doc, &self.blocks);
+    let made = Arc::new(Mutex::new(Vec::new()));
+    let origin = manager.as_origin();
+    let sink = Arc::clone(&made);
+    let watched = self.doc.observe_update_v1(UNDO_WATCH, move |txn, event| {
+      if txn.origin() == Some(&origin)
+        && let Ok(mut updates) = sink.lock()
+      {
+        updates.push(event.update.clone());
+      }
+    });
+    if watched.is_ok() {
+      self.maybe_undo = Some(UndoLog { manager, made });
+    }
+  }
+
+  /// Takes back this editor's last edit; the update to send when there was one.
+  pub fn undo(&mut self) -> Option<Vec<u8>> {
+    let log = self.maybe_undo.as_mut()?;
+    log.manager.undo_blocking();
+    log.take_update()
+  }
+
+  /// Does again what [`Self::undo`] took back.
+  pub fn redo(&mut self) -> Option<Vec<u8>> {
+    let log = self.maybe_undo.as_mut()?;
+    log.manager.redo_blocking();
+    log.take_update()
+  }
+
+  pub fn can_undo(&self) -> bool {
+    self.maybe_undo.as_ref().is_some_and(|log| log.manager.can_undo())
+  }
+
+  pub fn can_redo(&self) -> bool {
+    self.maybe_undo.as_ref().is_some_and(|log| log.manager.can_redo())
   }
 
   /// The page made of `updates`, in any order.
@@ -182,7 +428,7 @@ impl CanvasDoc {
     let update = Update::decode_v1(&merged).map_err(|_| CanvasError::Decode)?;
     self
       .doc
-      .transact_mut()
+      .transact_mut_with(REMOTE_ORIGIN)
       .apply_update(update)
       .map_err(|_| CanvasError::Apply)
   }
@@ -222,20 +468,110 @@ impl CanvasDoc {
     kind: BlockKind,
     text: &str,
   ) -> (String, Vec<u8>) {
-    let id = format!("{:x}-{:x}", self.doc.client_id().get(), self.next_block);
-    self.next_block += 1;
+    let id = self.next_block_id();
     let mut txn = self.doc.transact_mut();
     let index = match maybe_after {
       Some(after) => find(&txn, &self.blocks, after).map_or(self.blocks.len(&txn), |(index, _)| index + 1),
       None => 0,
     };
-    let map = self.blocks.insert(&mut txn, index, MapPrelim::default());
-    map.insert(&mut txn, ID, id.as_str());
-    map.insert(&mut txn, KIND, kind.tag());
-    map.insert(&mut txn, CHECKED, false);
-    map.insert(&mut txn, TEXT, TextPrelim::new(text));
+    let block = Block {
+      id: id.clone(),
+      kind,
+      text: text.to_owned(),
+      is_checked: false,
+      spans: Vec::new(),
+    };
+    insert_block_at(&mut txn, &self.blocks, index, &block);
     let update = txn.encode_update_v1();
     (id, update)
+  }
+
+  /// Enter: `start..end` (UTF-16 units) of the block goes, what follows becomes a new block of
+  /// `next_kind` right after it, its formatting kept. The new block's ID and the update.
+  pub fn split_block(
+    &mut self,
+    id: &str,
+    start: u32,
+    end: u32,
+    next_kind: BlockKind,
+  ) -> Option<(String, Vec<u8>)> {
+    let new_id = self.next_block_id();
+    let mut txn = self.doc.transact_mut();
+    let (index, map) = find(&txn, &self.blocks, id)?;
+    let block = read_block(&txn, &map);
+    let (from, to) = (byte_offset(&block.text, start), byte_offset(&block.text, end));
+    let tail = Block {
+      id: new_id.clone(),
+      kind: next_kind,
+      text: block.text[to..].to_owned(),
+      is_checked: false,
+      spans: spans_within(&block.spans, to, block.text.len()),
+    };
+    if let Some(Out::YText(text)) = map.get(&txn, TEXT)
+      && block.text.len() > from
+    {
+      text.remove_range(&mut txn, byte_index(from), byte_index(block.text.len() - from));
+    }
+    insert_block_at(&mut txn, &self.blocks, index + 1, &tail);
+    let update = txn.encode_update_v1();
+    Some((new_id, update))
+  }
+
+  /// Backspace at a block's start: its text moves to the end of `into`, formatting kept, and the
+  /// block goes.
+  pub fn join_blocks(&mut self, into: &str, id: &str) -> Option<Vec<u8>> {
+    let mut txn = self.doc.transact_mut();
+    let (_, target) = find(&txn, &self.blocks, into)?;
+    let (index, map) = find(&txn, &self.blocks, id)?;
+    let joined = read_block(&txn, &map);
+    let kept = read_block(&txn, &target);
+    if let Some(Out::YText(text)) = target.get(&txn, TEXT) {
+      text.insert(&mut txn, byte_index(kept.text.len()), &joined.text);
+      let mut spans = kept.spans;
+      let offset = kept.text.len();
+      spans.extend(joined.spans.into_iter().map(|span| TextSpan {
+        start: span.start + offset,
+        end: span.end + offset,
+        style: span.style,
+      }));
+      write_spans(&mut txn, &text, &spans);
+    }
+    self.blocks.remove(&mut txn, index);
+    Some(txn.encode_update_v1())
+  }
+
+  /// Turns `mark` on or off for `start..end` (UTF-16 units) of a block; `None` for an empty range.
+  pub fn set_mark(
+    &mut self,
+    id: &str,
+    start: u32,
+    end: u32,
+    mark: InlineMark,
+    is_on: bool,
+  ) -> Option<Vec<u8>> {
+    let value = if is_on { Any::Bool(true) } else { Any::Null };
+    self.format(id, start, end, mark.attribute(), value)
+  }
+
+  /// `mark` on `start..end` (UTF-16 units) of a block if part of it lacks it, otherwise off.
+  pub fn toggle_mark(&mut self, id: &str, start: u32, end: u32, mark: InlineMark) -> Option<Vec<u8>> {
+    let is_on = {
+      let txn = self.doc.transact();
+      let (_, map) = find(&txn, &self.blocks, id)?;
+      read_block(&txn, &map).has_mark(start, end, mark)
+    };
+    self.set_mark(id, start, end, mark, !is_on)
+  }
+
+  /// Links `start..end` (UTF-16 units) of a block to an address [`is_page_link`] allows, or takes
+  /// the link away.
+  pub fn set_link(&mut self, id: &str, start: u32, end: u32, maybe_url: Option<&str>) -> Option<Vec<u8>> {
+    let value = match maybe_url {
+      Some(url) if is_page_link(url) => Any::from(url),
+      Some(_) => return None,
+      None => Any::Null,
+    };
+    self.format(id, start, end, LINK, value)
   }
 
   /// Removes a block with its text.
@@ -301,13 +637,7 @@ impl CanvasDoc {
             write_block(&mut txn, &map, block);
           }
         },
-        None => {
-          let map = self.blocks.insert(&mut txn, position, MapPrelim::default());
-          map.insert(&mut txn, ID, block.id.as_str());
-          map.insert(&mut txn, KIND, block.kind.tag());
-          map.insert(&mut txn, CHECKED, block.is_checked);
-          map.insert(&mut txn, TEXT, TextPrelim::new(block.text.as_str()));
-        },
+        None => insert_block_at(&mut txn, &self.blocks, position, block),
       }
     }
     let length = self.blocks.len(&txn);
@@ -318,11 +648,45 @@ impl CanvasDoc {
     Some(txn.encode_update_v1())
   }
 
+  fn next_block_id(&mut self) -> String {
+    let id = format!("{:x}-{:x}", self.doc.client_id().get(), self.next_block);
+    self.next_block += 1;
+    id
+  }
+
+  fn format(&mut self, id: &str, start: u32, end: u32, attribute: &str, value: Any) -> Option<Vec<u8>> {
+    let mut txn = self.doc.transact_mut();
+    let (_, map) = find(&txn, &self.blocks, id)?;
+    let Some(Out::YText(text)) = map.get(&txn, TEXT) else {
+      return None;
+    };
+    let whole = text.get_string(&txn);
+    let (from, to) = (byte_offset(&whole, start), byte_offset(&whole, end));
+    if from >= to {
+      return None;
+    }
+    let attributes = Attrs::from([(Arc::from(attribute), value)]);
+    text.format(&mut txn, byte_index(from), byte_index(to - from), attributes);
+    Some(txn.encode_update_v1())
+  }
+
   /// Whether the page has updates waiting for ones not here yet.
   pub fn has_missing(&self) -> bool {
     let txn = self.doc.transact();
     let store = txn.store();
     store.pending_update().is_some() || store.pending_ds().is_some()
+  }
+}
+
+impl UndoLog {
+  /// What the last undo or redo made, as one update.
+  fn take_update(&mut self) -> Option<Vec<u8>> {
+    let made = std::mem::take(&mut *self.made.lock().ok()?);
+    match made.as_slice() {
+      [] => None,
+      [update] => Some(update.clone()),
+      updates => merge_updates(updates).ok(),
+    }
   }
 }
 
@@ -362,6 +726,49 @@ pub fn shift_caret(old: &str, new: &str, offset: u32) -> u32 {
     new_units.len() - suffix
   };
   u32::try_from(shifted).unwrap_or(u32::MAX)
+}
+
+/// The UTF-16 range the change from `old` to `new` wrote, in `new`; `None` when it only removed.
+pub fn typed_range(old: &str, new: &str) -> Option<(u32, u32)> {
+  let (prefix, end) = changed_end(old, new);
+  (end > prefix).then(|| (units(prefix), units(end)))
+}
+
+/// Where a caret stands after the change from `old` to `new`: at the end of what changed.
+pub fn caret_after_change(old: &str, new: &str) -> u32 {
+  units(changed_end(old, new).1)
+}
+
+/// The byte index of a caret given in UTF-16 units (as text fields count), on a character boundary
+/// and within `text`.
+pub fn byte_offset(text: &str, units: u32) -> usize {
+  let mut counted = 0_u32;
+  for (index, character) in text.char_indices() {
+    if counted >= units {
+      return index;
+    }
+    counted += u32::try_from(character.len_utf16()).unwrap_or(2);
+  }
+  text.len()
+}
+
+/// Whether a block's text may link to `url`: the web addresses messages may link to (no permalink
+/// into the app, no other scheme). What another member's client stored is held to it as well.
+pub fn is_page_link(url: &str) -> bool {
+  markdown::is_allowed_link(url) && !url.starts_with(markdown::PERMALINK_PREFIX)
+}
+
+/// The start of the change from `old` to `new` and its end in `new`, in UTF-16 units.
+fn changed_end(old: &str, new: &str) -> (usize, usize) {
+  let old_units: Vec<u16> = old.encode_utf16().collect();
+  let new_units: Vec<u16> = new.encode_utf16().collect();
+  let prefix = common_prefix(&old_units, &new_units);
+  let suffix = common_suffix(&old_units[prefix..], &new_units[prefix..]);
+  (prefix, new_units.len() - suffix)
+}
+
+fn units(count: usize) -> u32 {
+  u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 /// The smallest change from one text to another: `removed` bytes at `start`, then the new text's
@@ -409,7 +816,10 @@ fn replace(txn: &mut TransactionMut, text: &TextRef, edit: &TextEdit, new: &str)
   let start = byte_index(edit.start);
   let inserted = &new[edit.start..edit.inserted_end];
   if !inserted.is_empty() {
-    text.insert(txn, start, inserted);
+    match replaced_attributes(txn, text, edit) {
+      Some(attributes) => text.insert_with_attributes(txn, start, inserted, attributes),
+      None => text.insert(txn, start, inserted),
+    }
   }
   if edit.removed > 0 {
     text.remove_range(
@@ -418,6 +828,28 @@ fn replace(txn: &mut TransactionMut, text: &TextRef, edit: &TextEdit, new: &str)
       byte_index(edit.removed),
     );
   }
+}
+
+/// What new text replacing part of a formatted text gets: the formatting of what it replaces. `None`
+/// when nothing is replaced (typing takes the formatting around it) or the text has no formatting.
+fn replaced_attributes(txn: &TransactionMut, text: &TextRef, edit: &TextEdit) -> Option<Attrs> {
+  if edit.removed == 0 {
+    return None;
+  }
+  let mut offset = 0;
+  let mut maybe_found = None;
+  let mut has_formatting = false;
+  for chunk in text.diff(txn, YChange::identity) {
+    let Out::Any(Any::String(piece)) = chunk.insert else {
+      continue;
+    };
+    has_formatting |= chunk.attributes.is_some();
+    if maybe_found.is_none() && offset + piece.len() > edit.start {
+      maybe_found = Some(chunk.attributes.map(|boxed| *boxed).unwrap_or_default());
+    }
+    offset += piece.len();
+  }
+  maybe_found.filter(|_| has_formatting)
 }
 
 /// Offsets count bytes (the document's default offset kind). A block's text never reaches 4 GiB:
@@ -447,24 +879,129 @@ fn write_block(txn: &mut TransactionMut, map: &MapRef, block: &Block) {
       if let Some(edit) = TextEdit::between(&current.text, &block.text) {
         replace(txn, &text, &edit, &block.text);
       }
+      write_spans(txn, &text, &block.spans);
     },
     _ => {
-      map.insert(txn, TEXT, TextPrelim::new(block.text.as_str()));
+      let text = map.insert(txn, TEXT, TextPrelim::new(block.text.as_str()));
+      write_spans(txn, &text, &block.spans);
     },
   }
 }
 
+/// A new block at `index` of the array, with `block`'s ID, kind, check mark, text and formatting.
+fn insert_block_at(txn: &mut TransactionMut, blocks: &ArrayRef, index: u32, block: &Block) {
+  let map = blocks.insert(txn, index, MapPrelim::default());
+  map.insert(txn, ID, block.id.as_str());
+  map.insert(txn, KIND, block.kind.tag());
+  map.insert(txn, CHECKED, block.is_checked);
+  let text = map.insert(txn, TEXT, TextPrelim::new(block.text.as_str()));
+  write_spans(txn, &text, &block.spans);
+}
+
+/// Brings the formatting this version knows of `text` to `target`, stretch by stretch and only
+/// where it differs. Attributes it doesn't know stay as they are.
+fn write_spans(txn: &mut TransactionMut, text: &TextRef, target: &[TextSpan]) {
+  let (whole, current) = read_text(txn, text);
+  let mut cuts = vec![0, whole.len()];
+  for span in current.iter().chain(target) {
+    cuts.extend([span.start.min(whole.len()), span.end.min(whole.len())]);
+  }
+  cuts.sort_unstable();
+  cuts.dedup();
+  for stretch in cuts.windows(2) {
+    let plain = TextStyle::default();
+    let have = style_at(&current, stretch[0]).unwrap_or(&plain);
+    let want = style_at(target, stretch[0]).unwrap_or(&plain);
+    let attributes = attribute_changes(have, want);
+    if !attributes.is_empty() {
+      text.format(
+        txn,
+        byte_index(stretch[0]),
+        byte_index(stretch[1] - stretch[0]),
+        attributes,
+      );
+    }
+  }
+}
+
+/// The attributes that turn the formatting `have` into `want`.
+fn attribute_changes(have: &TextStyle, want: &TextStyle) -> Attrs {
+  let mut attributes = Attrs::new();
+  for mark in InlineMark::ALL {
+    if have.has(mark) != want.has(mark) {
+      let value = if want.has(mark) {
+        Any::Bool(true)
+      } else {
+        Any::Null
+      };
+      attributes.insert(Arc::from(mark.attribute()), value);
+    }
+  }
+  if have.maybe_link != want.maybe_link {
+    let value = want.maybe_link.as_deref().map_or(Any::Null, Any::from);
+    attributes.insert(Arc::from(LINK), value);
+  }
+  attributes
+}
+
+fn style_at(spans: &[TextSpan], at: usize) -> Option<&TextStyle> {
+  spans
+    .iter()
+    .find(|span| span.start <= at && at < span.end)
+    .map(|span| &span.style)
+}
+
+/// The formatting of `start..end` of a text, relative to `start`.
+fn spans_within(spans: &[TextSpan], start: usize, end: usize) -> Vec<TextSpan> {
+  spans
+    .iter()
+    .filter(|span| span.end > start && span.start < end)
+    .map(|span| TextSpan {
+      start: span.start.max(start) - start,
+      end: span.end.min(end) - start,
+      style: span.style.clone(),
+    })
+    .collect()
+}
+
 fn read_block<T: ReadTxn>(txn: &T, map: &MapRef) -> Block {
-  let text = match map.get(txn, TEXT) {
-    Some(Out::YText(text)) => text.get_string(txn),
-    _ => String::new(),
+  let (text, spans) = match map.get(txn, TEXT) {
+    Some(Out::YText(text)) => read_text(txn, &text),
+    _ => (String::new(), Vec::new()),
   };
   Block {
     id: string(txn, map, ID).unwrap_or_default(),
     kind: BlockKind::from_tag(&string(txn, map, KIND).unwrap_or_default()),
     text,
     is_checked: matches!(map.get(txn, CHECKED), Some(Out::Any(Any::Bool(true)))),
+    spans,
   }
+}
+
+/// A block's text and its formatted stretches. Only text counts: see the module's schema.
+fn read_text<T: ReadTxn>(txn: &T, text: &TextRef) -> (String, Vec<TextSpan>) {
+  let mut whole = String::new();
+  let mut spans: Vec<TextSpan> = Vec::new();
+  for chunk in text.diff(txn, YChange::identity) {
+    let Out::Any(Any::String(piece)) = chunk.insert else {
+      continue;
+    };
+    let style = TextStyle::from_attributes(chunk.attributes.as_deref());
+    let start = whole.len();
+    whole.push_str(&piece);
+    if style.is_plain() {
+      continue;
+    }
+    match spans.last_mut() {
+      Some(last) if last.end == start && last.style == style => last.end = whole.len(),
+      _ => spans.push(TextSpan {
+        start,
+        end: whole.len(),
+        style,
+      }),
+    }
+  }
+  (whole, spans)
 }
 
 fn string<T: ReadTxn>(txn: &T, map: &MapRef, key: &str) -> Option<String> {
@@ -688,10 +1225,27 @@ mod tests {
     let maybe_block = (!blocks.is_empty()).then(|| blocks[random.below(blocks.len())].clone());
     let words = ["alpha", "beta", "Grüße", "✓ done", ""];
     let word = words[random.below(words.len())];
-    match (random.below(5), maybe_block) {
+    match (random.below(8), maybe_block) {
       (0, _) | (_, None) => {
         let after = blocks.last().map(|block| block.id.clone());
         Some(page.insert_block(after.as_deref(), BlockKind::Paragraph, word).1)
+      },
+      (5, Some(block)) => {
+        let length = u32::try_from(block.text.encode_utf16().count()).unwrap();
+        let start = u32::try_from(random.below(length as usize + 1)).unwrap();
+        let mark = InlineMark::ALL[random.below(InlineMark::ALL.len())];
+        page.toggle_mark(&block.id, start, length, mark)
+      },
+      (6, Some(block)) => {
+        let length = u32::try_from(block.text.encode_utf16().count()).unwrap();
+        let start = u32::try_from(random.below(length as usize + 1)).unwrap();
+        page
+          .split_block(&block.id, start, start, BlockKind::Bullet)
+          .map(|(_, update)| update)
+      },
+      (7, Some(block)) => {
+        let length = u32::try_from(block.text.encode_utf16().count()).unwrap();
+        page.set_link(&block.id, 0, length, Some("https://example.com/a"))
       },
       (1, Some(block)) => {
         let cut = block.text.char_indices().map(|(at, _)| at).nth(random.below(3));
@@ -778,6 +1332,276 @@ mod tests {
     assert_eq!(BlockKind::from_prefix("# Title"), Some((BlockKind::Heading, 2)));
     assert_eq!(BlockKind::from_prefix("[ ] task"), Some((BlockKind::Check, 4)));
     assert_eq!(BlockKind::from_prefix("plain"), None);
+    assert_eq!(
+      BlockKind::from_prefix("### Title"),
+      Some((BlockKind::Heading3, 4))
+    );
+    assert_eq!(BlockKind::from_prefix("> said"), Some((BlockKind::Quote, 2)));
+    assert_eq!(BlockKind::from_prefix("```"), Some((BlockKind::Code, 3)));
     assert_eq!(BlockKind::from_tag("table"), BlockKind::Paragraph);
+    assert_eq!(BlockKind::from_tag("quote"), BlockKind::Quote);
+  }
+
+  const BOLD: TextStyle = TextStyle {
+    is_bold: true,
+    is_italic: false,
+    is_strike: false,
+    is_code: false,
+    maybe_link: None,
+  };
+
+  fn span(start: usize, end: usize, style: TextStyle) -> TextSpan {
+    TextSpan { start, end, style }
+  }
+
+  /// A page with one paragraph, its block's ID and the page, under a fake clock that never reaches
+  /// the grouping window, so each edit is its own undo step.
+  fn undoable(text: &str) -> (CanvasDoc, String) {
+    let mut page = CanvasDoc::new();
+    let (id, _) = page.insert_block(None, BlockKind::Paragraph, text);
+    let ticks = std::sync::atomic::AtomicU64::new(1);
+    page.enable_undo(move || ticks.fetch_add(10 * UNDO_GROUP_MS, std::sync::atomic::Ordering::Relaxed));
+    (page, id)
+  }
+
+  #[test]
+  fn formatting_converges_and_survives_older_clients_edits() {
+    let (mut alice, mut bob) = pair();
+    let id = alice.page.blocks()[0].id.clone();
+    let from_alice = alice
+      .edit(|page| page.set_mark(&id, 0, 3, InlineMark::Bold, true))
+      .unwrap();
+    // An editor without inline formatting replaces the text around the formatted part.
+    let from_bob = bob.edit(|page| page.set_text(&id, "Agenda!")).unwrap();
+    alice.receive([&from_bob]);
+    bob.receive([&from_alice]);
+    assert_eq!(alice.page.blocks(), bob.page.blocks());
+    let block = &alice.page.blocks()[0];
+    assert_eq!(block.text, "Agenda!");
+    assert_eq!(block.spans, [span(0, 3, BOLD)]);
+    assert_eq!(block.runs(), [("Age", Some(&BOLD)), ("nda!", None)]);
+  }
+
+  #[test]
+  fn typing_takes_the_formatting_before_it_and_replacing_what_it_replaces() {
+    let mut page = CanvasDoc::new();
+    let (id, _) = page.insert_block(None, BlockKind::Paragraph, "abcd");
+    page.set_mark(&id, 1, 3, InlineMark::Bold, true).unwrap();
+    assert_eq!(page.blocks()[0].spans, [span(1, 3, BOLD)]);
+    // Typing at the end of the bold part continues it.
+    page.set_text(&id, "abcXd").unwrap();
+    assert_eq!(page.blocks()[0].spans, [span(1, 4, BOLD)]);
+    // Before it, it does not.
+    page.set_text(&id, "YabcXd").unwrap();
+    assert_eq!(page.blocks()[0].spans, [span(2, 5, BOLD)]);
+    // Replacing the bold word keeps it bold; replacing the plain end stays plain.
+    page.set_text(&id, "YaNEWd").unwrap();
+    assert_eq!(page.blocks()[0].spans, [span(2, 5, BOLD)]);
+    page.set_text(&id, "YaNEWz").unwrap();
+    assert_eq!(page.blocks()[0].text, "YaNEWz");
+    assert_eq!(page.blocks()[0].spans, [span(2, 5, BOLD)]);
+  }
+
+  #[test]
+  fn toggling_a_mark_and_asking_about_it() {
+    let mut page = CanvasDoc::new();
+    let (id, _) = page.insert_block(None, BlockKind::Paragraph, "Grüße");
+    // In UTF-16 units: "Gr" then "üß".
+    page.toggle_mark(&id, 2, 4, InlineMark::Italic).unwrap();
+    let block = page.blocks().remove(0);
+    assert_eq!(block.spans[0].start, 2);
+    assert_eq!(&block.text[block.spans[0].start..block.spans[0].end], "üß");
+    assert!(block.has_mark(2, 4, InlineMark::Italic));
+    assert!(!block.has_mark(1, 4, InlineMark::Italic), "not throughout");
+    assert!(
+      block.has_mark(4, 4, InlineMark::Italic),
+      "typing after it continues it"
+    );
+    assert!(
+      !block.has_mark(2, 2, InlineMark::Italic),
+      "typing before it does not"
+    );
+    // Partly formatted: on for all first, then off.
+    page.toggle_mark(&id, 0, 4, InlineMark::Italic).unwrap();
+    assert!(page.blocks()[0].has_mark(0, 4, InlineMark::Italic));
+    page.toggle_mark(&id, 0, 4, InlineMark::Italic).unwrap();
+    assert!(page.blocks()[0].spans.is_empty());
+    assert_eq!(
+      page.toggle_mark(&id, 3, 3, InlineMark::Bold),
+      None,
+      "an empty range"
+    );
+  }
+
+  #[test]
+  fn only_web_links_are_stored_or_shown() {
+    let mut page = CanvasDoc::new();
+    let (id, _) = page.insert_block(None, BlockKind::Paragraph, "docs");
+    assert!(page.set_link(&id, 0, 4, Some("javascript:alert(1)")).is_none());
+    page.set_link(&id, 0, 4, Some("https://example.com/a")).unwrap();
+    let block = page.blocks().remove(0);
+    assert_eq!(block.link_at(2), Some("https://example.com/a"));
+    page.set_link(&id, 0, 4, None).unwrap();
+    assert!(page.blocks()[0].spans.is_empty());
+    // A hostile client writes the attribute directly: it is not read as a link.
+    {
+      let mut txn = page.doc.transact_mut();
+      let (_, map) = find(&txn, &page.blocks, &id).unwrap();
+      let Some(Out::YText(text)) = map.get(&txn, TEXT) else {
+        panic!("a text");
+      };
+      let attributes = Attrs::from([(Arc::from(LINK), Any::from("javascript:alert(1)"))]);
+      text.format(&mut txn, 0, 4, attributes);
+    }
+    assert!(page.blocks()[0].spans.is_empty());
+  }
+
+  #[test]
+  fn newer_attributes_and_kinds_stay_untouched() {
+    let mut page = CanvasDoc::new();
+    let (id, _) = page.insert_block(None, BlockKind::Paragraph, "hello");
+    let text = {
+      let mut txn = page.doc.transact_mut();
+      let (_, map) = find(&txn, &page.blocks, &id).unwrap();
+      map.insert(&mut txn, KIND, "table");
+      let Some(Out::YText(text)) = map.get(&txn, TEXT) else {
+        panic!("a text");
+      };
+      let attributes = Attrs::from([(Arc::from("mention"), Any::from("user-1"))]);
+      text.format(&mut txn, 0, 5, attributes);
+      text
+    };
+    let block = page.blocks().remove(0);
+    assert_eq!(block.kind, BlockKind::Paragraph);
+    assert!(block.spans.is_empty());
+    page.toggle_mark(&id, 0, 5, InlineMark::Bold).unwrap();
+    page.toggle_mark(&id, 0, 5, InlineMark::Bold).unwrap();
+    page.restore(std::slice::from_ref(&block));
+    let txn = page.doc.transact();
+    let chunks = text.diff(&txn, YChange::identity);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(
+      chunks[0]
+        .attributes
+        .as_ref()
+        .and_then(|attributes| attributes.get("mention")),
+      Some(&Any::from("user-1"))
+    );
+    let (_, map) = find(&txn, &page.blocks, &id).unwrap();
+    assert_eq!(
+      string(&txn, &map, KIND).as_deref(),
+      Some("table"),
+      "the kind stays"
+    );
+  }
+
+  #[test]
+  fn splitting_and_joining_keep_formatting() {
+    let mut page = CanvasDoc::new();
+    let (id, _) = page.insert_block(None, BlockKind::Bullet, "abcdef");
+    page.set_mark(&id, 1, 5, InlineMark::Bold, true).unwrap();
+    let (new_id, _) = page.split_block(&id, 2, 3, BlockKind::Bullet).unwrap();
+    let blocks = page.blocks();
+    assert_eq!(texts(&page), ["ab", "def"]);
+    assert_eq!(blocks[0].spans, [span(1, 2, BOLD)]);
+    assert_eq!(blocks[1].spans, [span(0, 2, BOLD)]);
+    assert_eq!(blocks[1].kind, BlockKind::Bullet);
+    page.join_blocks(&id, &new_id).unwrap();
+    let blocks = page.blocks();
+    assert_eq!(texts(&page), ["abdef"]);
+    assert_eq!(blocks[0].spans, [span(1, 4, BOLD)]);
+  }
+
+  #[test]
+  fn restoring_brings_formatting_back() {
+    let mut page = CanvasDoc::new();
+    let (id, _) = page.insert_block(None, BlockKind::Paragraph, "hello world");
+    page.set_mark(&id, 0, 5, InlineMark::Bold, true).unwrap();
+    let version = page.blocks();
+    page.set_mark(&id, 0, 5, InlineMark::Bold, false).unwrap();
+    page.set_mark(&id, 6, 11, InlineMark::Strike, true).unwrap();
+    page.set_text(&id, "hello there").unwrap();
+    page.restore(&version).unwrap();
+    assert_eq!(page.blocks(), version);
+    // A block that is gone comes back with its formatting.
+    page.remove_block(&id).unwrap();
+    page.restore(&version).unwrap();
+    assert_eq!(page.blocks(), version);
+  }
+
+  #[test]
+  fn undo_takes_back_own_edits_only_and_goes_to_the_others() {
+    let (mut page, id) = undoable("one");
+    let mut other = CanvasDoc::from_updates(&[page
+      .doc
+      .transact()
+      .encode_state_as_update_v1(&StateVector::default())])
+    .unwrap();
+    assert!(!page.can_undo());
+    assert_eq!(page.undo(), None, "nothing to take back");
+    let typed = page.set_text(&id, "one two").unwrap();
+    other.sync(&[&typed]).unwrap();
+    // Somebody else adds to the same block.
+    let theirs = other.set_text(&id, "one two three").unwrap();
+    page.sync(&[&theirs]).unwrap();
+    assert_eq!(texts(&page), ["one two three"]);
+
+    let undone = page.undo().unwrap();
+    assert_eq!(texts(&page), ["one three"], "only the own edit goes");
+    other.sync(&[&undone]).unwrap();
+    assert_eq!(other.blocks(), page.blocks());
+    assert!(page.can_redo());
+
+    let redone = page.redo().unwrap();
+    assert_eq!(texts(&page), ["one two three"]);
+    other.sync(&[&redone]).unwrap();
+    assert_eq!(other.blocks(), page.blocks());
+    assert!(!page.can_redo());
+  }
+
+  #[test]
+  fn undo_brings_back_formatting_and_removed_blocks() {
+    let (mut page, id) = undoable("one");
+    page.set_mark(&id, 0, 3, InlineMark::Bold, true).unwrap();
+    let (second, _) = page.insert_block(Some(&id), BlockKind::Check, "two");
+    page.set_checked(&second, true).unwrap();
+    let before = page.blocks();
+    page.remove_block(&second).unwrap();
+    assert_eq!(texts(&page), ["one"]);
+    page.undo().unwrap();
+    assert_eq!(
+      page.blocks(),
+      before,
+      "the block is back with its ID, kind and check mark"
+    );
+    page.undo().unwrap();
+    page.undo().unwrap();
+    assert_eq!(texts(&page), ["one"]);
+    assert!(page.blocks()[0].spans == [span(0, 3, BOLD)]);
+    page.undo().unwrap();
+    assert!(page.blocks()[0].spans.is_empty());
+  }
+
+  #[test]
+  fn edits_in_quick_succession_are_undone_together() {
+    let mut page = CanvasDoc::new();
+    let (id, _) = page.insert_block(None, BlockKind::Paragraph, "");
+    page.enable_undo(|| 1_000);
+    page.set_text(&id, "a").unwrap();
+    page.set_text(&id, "ab").unwrap();
+    page.set_text(&id, "abc").unwrap();
+    page.undo().unwrap();
+    assert_eq!(texts(&page), [""]);
+    assert!(!page.can_undo());
+  }
+
+  #[test]
+  fn changes_name_their_range_and_end() {
+    assert_eq!(typed_range("ab", "aXYb"), Some((1, 3)));
+    assert_eq!(typed_range("abc", "ac"), None);
+    assert_eq!(typed_range("", "😀"), Some((0, 2)));
+    assert_eq!(caret_after_change("one two", "one"), 3);
+    assert_eq!(caret_after_change("one", "one two"), 7);
+    assert_eq!(caret_after_change("one", "X one"), 2);
   }
 }

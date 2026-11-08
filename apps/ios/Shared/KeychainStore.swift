@@ -7,10 +7,17 @@ enum KeychainError: Error, Equatable {
   case randomFailed(OSStatus)
 }
 
+/// Where the session's tokens are kept: the keychain, or a stand-in in tests.
+protocol SecretItems {
+  func read(_ account: String) throws -> Data?
+  func write(_ data: Data, for account: String) throws
+  func delete(_ account: String) throws
+}
+
 /// Generic-password items in the keychain access group the app shares with its notification
 /// extension. Items are readable after the first unlock and never leave the device, so the
 /// extension can open the store while the phone is locked (docs/e2ee.md §7, §9.2).
-struct KeychainStore {
+struct KeychainStore: SecretItems {
   let service: String
   /// Empty: the process's default group (unsigned simulator builds have no shared one).
   let accessGroup: String

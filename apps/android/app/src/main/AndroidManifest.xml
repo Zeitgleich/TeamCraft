@@ -139,6 +139,11 @@
         android:value="androidx.startup"
         tools:node="remove" />
     </provider>
+    <!-- Sealed camera videos for the app's own video export; other apps can't reach it, no plain file. -->
+    <provider
+      android:name=".ui.media.SealedMediaProvider"
+      android:authorities="${applicationId}.sealedmedia"
+      android:exported="false" />
     <!-- Opens decrypted downloads in other apps without exposing the rest of the app's files. -->
     <provider
       android:name="androidx.core.content.FileProvider"

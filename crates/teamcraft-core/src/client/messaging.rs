@@ -44,6 +44,10 @@ enum OutboxScope {
 /// Messages a removed device sent shortly before its removal reached this device can carry a
 /// slightly later server time; they still count.
 pub(crate) const REMOVED_SENDER_GRACE_MS: i64 = 5 * 60 * 1000;
+/// How long a group of received messages runs at least before it ends early for a waiting read
+/// ([`Client::receive_in_groups`]): a read waits about this long at worst, and a catch-up the UI
+/// reads all the time still writes in groups, not message by message.
+const GROUP_TURN_MS: i64 = 16;
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Writes a text message to the store and the outbox, then tries to send it. Works offline: the
@@ -498,12 +502,41 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// them one commit at a time (issue #972). Receiving is idempotent, so a crash that drops the
   /// group only means the page is read again.
   pub(super) fn receive_page(&mut self, messages: Vec<MessageResponse>) -> Result<(), CoreError> {
-    self.atomically(|client| {
-      for message in messages {
-        client.receive_message(message)?;
+    self.receive_in_groups(messages, |_| Ok(()))
+  }
+
+  /// Receives `messages` in groups of writes, then runs `finish` in the last one. A group ends
+  /// early, after the message at hand, when another thread waits for the store (the UI's reads
+  /// while a catch-up decrypts a page, issue #1466); receiving is idempotent, so a crash between
+  /// two groups only means the page is read again, and `finish` (a cursor, the order of controls)
+  /// runs with the last of them.
+  pub(super) fn receive_in_groups(
+    &mut self,
+    messages: Vec<MessageResponse>,
+    finish: impl FnOnce(&mut Self) -> Result<(), CoreError>,
+  ) -> Result<(), CoreError> {
+    let mut messages = messages.into_iter().peekable();
+    let mut maybe_finish = Some(finish);
+    loop {
+      let is_done = self.atomically(|client| {
+        let began_ms = client.now_ms();
+        while let Some(message) = messages.next() {
+          client.receive_message(message)?;
+          // Long enough for the page to make progress, short enough for a read not to notice.
+          let has_had_its_turn = client.now_ms().saturating_sub(began_ms) >= GROUP_TURN_MS;
+          if messages.peek().is_some() && has_had_its_turn && client.store.is_awaited() {
+            return Ok(false);
+          }
+        }
+        if let Some(finish) = maybe_finish.take() {
+          finish(client)?;
+        }
+        Ok(true)
+      })?;
+      if is_done {
+        return Ok(());
       }
-      Ok(())
-    })
+    }
   }
 
   /// [`Self::receive_page`] for a page of `conversation` read out of order: before the messages
@@ -516,10 +549,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     messages: Vec<MessageResponse>,
   ) -> Result<(), CoreError> {
     let received = received_ids(conversation, &messages);
-    self.atomically(|client| {
-      for message in messages {
-        client.receive_message(message)?;
-      }
+    self.receive_in_groups(messages, |client| {
       client.settle_ordered_controls(conversation, &received)
     })
   }

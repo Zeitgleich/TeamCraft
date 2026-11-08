@@ -132,6 +132,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Takes the files a message sends out of their drafts on every device (#1220).
+  #[cfg(feature = "ui")]
   pub(crate) fn take_draft_files(&mut self, ids: &[String]) -> Result<(), CoreError> {
     self.update_account_data(|data, now| {
       let mut is_changed = false;
@@ -147,6 +148,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Removes an uploaded file from its draft on every device and gives it up at the server.
+  #[cfg(feature = "ui")]
   pub(crate) fn remove_draft_file(&mut self, id: &str) -> Result<(), CoreError> {
     let mut maybe_removed = None;
     self.update_account_data(|data, now| {

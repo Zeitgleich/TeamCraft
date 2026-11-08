@@ -555,6 +555,7 @@ mod tests {
       kind: BlockKind::Bullet,
       text: "d".into(),
       is_checked: false,
+      spans: Vec::new(),
     });
     page.restore(&target).unwrap();
     assert_eq!(page.blocks(), target);

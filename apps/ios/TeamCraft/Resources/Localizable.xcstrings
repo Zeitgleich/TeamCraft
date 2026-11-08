@@ -6057,6 +6057,22 @@
         }
       }
     },
+    "syncing_updates": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading new messages"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neue Nachrichten werden geladen"
+          }
+        }
+      }
+    },
     "connection_slow": {
       "localizations": {
         "en": {
@@ -14781,6 +14797,182 @@
           "stringUnit": {
             "state": "translated",
             "value": "Schweiz: Zürich"
+          }
+        }
+      }
+    },
+    "notification_meeting_started %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ has started"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat begonnen"
+          }
+        }
+      }
+    },
+    "notification_meeting_started_unnamed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A meeting has started"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eine Besprechung hat begonnen"
+          }
+        }
+      }
+    },
+    "notification_meeting_soon %@ %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ starts in %2$lld min"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ beginnt in %2$lld Min."
+          }
+        }
+      }
+    },
+    "notification_meeting_soon_unnamed %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A meeting starts in %lld min"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eine Besprechung beginnt in %lld Min."
+          }
+        }
+      }
+    },
+    "notification_join_meeting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitreten"
+          }
+        }
+      }
+    },
+    "diagnostics_kind_meeting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Meeting"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Besprechung"
+          }
+        }
+      }
+    },
+    "meeting_reminder_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remind me before a meeting"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vor einer Besprechung erinnern"
+          }
+        }
+      }
+    },
+    "meeting_reminder_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aus"
+          }
+        }
+      }
+    },
+    "meeting_reminder_minutes %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld min before"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld Min. vorher"
+          }
+        }
+      }
+    },
+    "meeting_notify_start": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notify me when a meeting starts"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Benachrichtigen, wenn eine Besprechung beginnt"
+          }
+        }
+      }
+    },
+    "meeting_reminder_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "For meetings you are invited to and have not declined. Also with the app closed."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Für Besprechungen, zu denen du eingeladen bist und die du nicht abgelehnt hast. Auch wenn die App geschlossen ist."
           }
         }
       }

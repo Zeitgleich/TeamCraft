@@ -225,8 +225,13 @@ jobs:
           GARAGE_SHA256_AARCH64: 69b6040cef428b993500c17dd0d0c1240acf2f3f667b9b05ceba4b9660db4e8c
           MAILPIT_SHA256_X86_64: 4b5993c978e8604c70d43927e2ad103b311bba3b1822fa0cf1d4ee4ec890a93c
           MAILPIT_SHA256_AARCH64: e1e45d1dc72bd497fb262a1e4100178eee057c42c5fc36d143eb8621769e1137
+          # Downloads from GitHub go authenticated: unauthenticated ones are what an outage throttles
+          # first. curl doesn't send the header on to the redirect's host.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          # One timeout of a host must not fail the job: retried with pauses, for up to five minutes.
+          fetch() { curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors --retry-max-time 300 "$@"; }
           if [ "${{ matrix.arch }}" = x86_64 ]; then
             garage_sha="$GARAGE_SHA256_X86_64"; mailpit_sha="$MAILPIT_SHA256_X86_64"; mailpit_arch=amd64
           else
@@ -234,8 +239,8 @@ jobs:
           fi
           dir="$RUNNER_TEMP/services"
           mkdir -p "$dir" /var/lib/garage/meta /var/lib/garage/data
-          curl -fsSL -o "$dir/garage" "https://garagehq.deuxfleurs.fr/_releases/v${GARAGE_VERSION}/${{ matrix.arch }}-unknown-linux-musl/garage"
-          curl -fsSL -o "$dir/mailpit.tar.gz" "https://github.com/axllent/mailpit/releases/download/v${MAILPIT_VERSION}/mailpit-linux-${mailpit_arch}.tar.gz"
+          fetch -o "$dir/garage" "https://garagehq.deuxfleurs.fr/_releases/v${GARAGE_VERSION}/${{ matrix.arch }}-unknown-linux-musl/garage"
+          fetch -H "Authorization: Bearer $GH_TOKEN" -o "$dir/mailpit.tar.gz" "https://github.com/axllent/mailpit/releases/download/v${MAILPIT_VERSION}/mailpit-linux-${mailpit_arch}.tar.gz"
           echo "$garage_sha  $dir/garage" | sha256sum -c -
           echo "$mailpit_sha  $dir/mailpit.tar.gz" | sha256sum -c -
           tar -xzf "$dir/mailpit.tar.gz" -C "$dir" mailpit
@@ -294,12 +299,16 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends chromium chromium-driver
       - name: Test runner (the wasm-bindgen release Cargo.lock pins; its checksum is checked)
+        env:
+          # Authenticated and retried, as the services' downloads of the test job.
+          GH_TOKEN: ${{ github.token }}
         run: |
+          fetch() { curl -fsSL --retry 6 --retry-delay 5 --retry-all-errors --retry-max-time 300 -H "Authorization: Bearer $GH_TOKEN" "$@"; }
           version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/[^0-9.]/, "", $0); print; exit }' Cargo.lock)"
           name="wasm-bindgen-${version}-x86_64-unknown-linux-musl"
           base="https://github.com/wasm-bindgen/wasm-bindgen/releases/download/${version}/${name}.tar.gz"
-          curl -fsSL -o "$RUNNER_TEMP/runner.tar.gz" "$base"
-          expected="$(curl -fsSL "${base}.sha256sum" | cut -d' ' -f1)"
+          fetch -o "$RUNNER_TEMP/runner.tar.gz" "$base"
+          expected="$(fetch "${base}.sha256sum" | cut -d' ' -f1)"
           echo "${expected}  $RUNNER_TEMP/runner.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/runner.tar.gz" -C "$RUNNER_TEMP"
           install "$RUNNER_TEMP/${name}/wasm-bindgen-test-runner" /usr/local/bin/

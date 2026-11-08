@@ -27,6 +27,13 @@ import javax.crypto.spec.SecretKeySpec
  * `i (8, big-endian) || 0 0 0 || last (1)`, and the header is the associated data of every segment.
  * Reordered, dropped, appended or cut segments and a changed header all fail to open (the STREAM
  * construction of Hoang, Reyhanitabar, Rogaway and Vizár).
+ *
+ * Version 2 is what [SeekableWriter] leaves: the same layout, for output that is written out of
+ * order (a muxer goes back to patch sizes), so a segment can be sealed more than once. A counter
+ * nonce would repeat there, so each segment is `random nonce (12) || ciphertext || tag`, and its
+ * index and whether it is the last one go into the associated data after the header instead.
+ * Segments that a writer replaced can't be told from the current one by the file alone; these files
+ * only exist for the length of an export.
  */
 object SealedMedia {
   const val SEGMENT_SIZE = 64 * 1024
@@ -35,6 +42,7 @@ object SealedMedia {
   internal const val TAG_LENGTH = 16
   private val MAGIC = byteArrayOf('T'.code.toByte(), 'C'.code.toByte(), 'S'.code.toByte(), 'M'.code.toByte())
   private const val VERSION: Byte = 1
+  private const val VERSION_SEEKABLE: Byte = 2
   private const val SALT_LENGTH = 16
   private const val NONCE_LENGTH = 12
   private const val TRANSFORMATION = "AES/GCM/NoPadding"
@@ -74,21 +82,13 @@ object SealedMedia {
     out
   }
 
-  /** Decrypts [source] into [target] (for tools that need a plain file, such as Transformer). */
-  fun openTo(source: File, key: ByteArray, target: File) {
-    try {
-      Reader.open(source, key).use { reader -> target.outputStream().use { reader.inputStream().copyTo(it, SEGMENT_SIZE) } }
-    } catch (failure: Throwable) {
-      target.delete()
-      throw failure
-    }
-  }
+  private fun isKnownVersion(version: Byte): Boolean = version == VERSION || version == VERSION_SEEKABLE
 
   /** Whether [file] starts like a sealed media file (it says nothing about whether it opens). */
   fun looksSealed(file: File): Boolean = runCatching {
     file.inputStream().use { input ->
       val start = ByteArray(MAGIC.size + 1)
-      input.read(start) == start.size && start.copyOf(MAGIC.size).contentEquals(MAGIC) && start[MAGIC.size] == VERSION
+      input.read(start) == start.size && start.copyOf(MAGIC.size).contentEquals(MAGIC) && isKnownVersion(start[MAGIC.size])
     }
   }.getOrDefault(false)
 
@@ -98,6 +98,8 @@ object SealedMedia {
    */
   class Reader private constructor(private val file: RandomAccessFile, key: ByteArray) : Closeable {
     private val header = ByteArray(HEADER_LENGTH)
+    private val isSeekable: Boolean
+    private val overhead: Int
     private val segmentSize: Int
     private val segmentCount: Long
     private val fileKey: SecretKeySpec
@@ -112,16 +114,18 @@ object SealedMedia {
       try {
         file.seek(0)
         file.readFully(header)
-        require(header.copyOf(MAGIC.size).contentEquals(MAGIC) && header[MAGIC.size] == VERSION) { "not sealed media" }
+        require(header.copyOf(MAGIC.size).contentEquals(MAGIC) && isKnownVersion(header[MAGIC.size])) { "not sealed media" }
+        isSeekable = header[MAGIC.size] == VERSION_SEEKABLE
+        overhead = if (isSeekable) NONCE_LENGTH + TAG_LENGTH else TAG_LENGTH
         segmentSize = ByteBuffer.wrap(header, MAGIC.size + 1, 4).int
         require(segmentSize in 1..(16 * 1024 * 1024)) { "bad segment size" }
         val body = file.length() - HEADER_LENGTH
-        val sealedSegment = segmentSize.toLong() + TAG_LENGTH
-        require(body >= TAG_LENGTH) { "no segments" }
+        val sealedSegment = segmentSize.toLong() + overhead
+        require(body >= overhead) { "no segments" }
         segmentCount = (body + sealedSegment - 1) / sealedSegment
         val last = body - (segmentCount - 1) * sealedSegment
-        require(last >= TAG_LENGTH) { "cut segment" }
-        size = (segmentCount - 1) * segmentSize + (last - TAG_LENGTH)
+        require(last >= overhead) { "cut segment" }
+        size = (segmentCount - 1) * segmentSize + (last - overhead)
         fileKey = fileKey(key, header.copyOfRange(HEADER_LENGTH - SALT_LENGTH, HEADER_LENGTH))
       } catch (failure: Throwable) {
         file.close()
@@ -166,14 +170,18 @@ object SealedMedia {
 
     private fun segment(index: Long): ByteArray {
       if (index == cachedIndex) return cached
-      val sealedSegment = segmentSize.toLong() + TAG_LENGTH
+      val sealedSegment = segmentSize.toLong() + overhead
       val isLast = index == segmentCount - 1
       val sealedLength = if (isLast) (file.length() - HEADER_LENGTH - index * sealedSegment).toInt() else sealedSegment.toInt()
       val sealed = ByteArray(sealedLength)
       file.seek(HEADER_LENGTH + index * sealedSegment)
       file.readFully(sealed)
       val plain = try {
-        cipher(Cipher.DECRYPT_MODE, fileKey, header, index, isLast).doFinal(sealed)
+        if (isSeekable) {
+          seekableCipher(Cipher.DECRYPT_MODE, fileKey, header, sealed.copyOf(NONCE_LENGTH), index, isLast).doFinal(sealed, NONCE_LENGTH, sealed.size - NONCE_LENGTH)
+        } else {
+          cipher(Cipher.DECRYPT_MODE, fileKey, header, index, isLast).doFinal(sealed)
+        }
       } catch (failure: GeneralSecurityException) {
         throw IOException("sealed media segment $index does not open", failure)
       }
@@ -243,6 +251,160 @@ object SealedMedia {
     }
   }
 
+  /**
+   * Seals what a muxer writes, which isn't in order: it goes back to patch sizes and rewrites its
+   * index, so this is a file with a position (`write` at [position], [seek], [truncate]). Only the
+   * segment being worked on is plaintext, in memory. Every segment on disk is the full segment
+   * size until [close] cuts the last one to length and marks it, so a file that was never closed
+   * does not open. One user at a time, like the output it stands for.
+   */
+  class SeekableWriter(file: File, key: ByteArray, private val segmentSize: Int = SEGMENT_SIZE, private val random: SecureRandom = SecureRandom()) : Closeable {
+    private val output = RandomAccessFile(file, "rw")
+    private val header: ByteArray
+    private val fileKey: SecretKeySpec
+    private val sealedSegment = segmentSize.toLong() + NONCE_LENGTH + TAG_LENGTH
+    private val buffer = ByteArray(segmentSize)
+    private var bufferIndex = -1L
+    private var isDirty = false
+
+    /** Segments that have a version on disk. */
+    private var sealedCount = 0L
+    private var isClosed = false
+
+    /** Where the next write goes. */
+    var position = 0L
+      private set
+
+    /** The length of the plaintext so far. */
+    var size = 0L
+      private set
+
+    init {
+      try {
+        require(segmentSize > 0)
+        val salt = ByteArray(SALT_LENGTH).also(random::nextBytes)
+        header = ByteBuffer.allocate(HEADER_LENGTH).put(MAGIC).put(VERSION_SEEKABLE).putInt(segmentSize).put(salt).array()
+        fileKey = fileKey(key, salt)
+        // Like a new FileOutputStream: Transformer starts over in the same file when an append fails.
+        output.setLength(0)
+        output.write(header)
+      } catch (failure: Throwable) {
+        output.close()
+        throw failure
+      }
+    }
+
+    /** Writes all of [source] at [position]; returns how much that was. */
+    fun write(source: ByteBuffer): Int {
+      check(!isClosed) { "closed" }
+      val total = source.remaining()
+      while (source.hasRemaining()) {
+        val index = position / segmentSize
+        select(index)
+        val within = (position - index * segmentSize).toInt()
+        val count = minOf(source.remaining(), segmentSize - within)
+        source.get(buffer, within, count)
+        isDirty = true
+        position += count
+        if (position > size) size = position
+      }
+      return total
+    }
+
+    fun seek(position: Long) {
+      check(!isClosed) { "closed" }
+      require(position >= 0)
+      this.position = position
+    }
+
+    /** Cuts the plaintext to [newSize] if it is longer; [position] moves back if it was past that. */
+    fun truncate(newSize: Long) {
+      check(!isClosed) { "closed" }
+      require(newSize >= 0)
+      if (newSize < size) {
+        val keptCount = (newSize + segmentSize - 1) / segmentSize
+        val within = (newSize % segmentSize).toInt()
+        if (within != 0) {
+          // What is cut must read as nothing if the file grows over it again.
+          select(newSize / segmentSize)
+          buffer.fill(0, within, segmentSize)
+          isDirty = true
+        }
+        if (bufferIndex >= keptCount) {
+          bufferIndex = -1
+          isDirty = false
+        }
+        sealedCount = minOf(sealedCount, keptCount)
+        output.setLength(HEADER_LENGTH + sealedCount * sealedSegment)
+        size = newSize
+      }
+      if (position > newSize) position = newSize
+    }
+
+    /** Seals the last segment for good. Without this the file doesn't open. */
+    override fun close() {
+      if (isClosed) return
+      isClosed = true
+      try {
+        val count = maxOf(1L, (size + segmentSize - 1) / segmentSize)
+        val lastIndex = count - 1
+        val lastLength = (size - lastIndex * segmentSize).toInt()
+        select(lastIndex)
+        sealGapsBefore(lastIndex)
+        seal(lastIndex, buffer, lastLength, isLast = true)
+        output.setLength(HEADER_LENGTH + lastIndex * sealedSegment + NONCE_LENGTH + lastLength + TAG_LENGTH)
+      } finally {
+        output.close()
+        buffer.fill(0)
+      }
+    }
+
+    private fun select(index: Long) {
+      if (index == bufferIndex) return
+      flush()
+      if (index < sealedCount) open(index) else buffer.fill(0)
+      bufferIndex = index
+    }
+
+    private fun flush() {
+      if (!isDirty) return
+      sealGapsBefore(bufferIndex)
+      seal(bufferIndex, buffer, segmentSize, isLast = false)
+      sealedCount = maxOf(sealedCount, bufferIndex + 1)
+      isDirty = false
+    }
+
+    /** A seek past the end leaves segments nobody wrote; they read as zeros. */
+    private fun sealGapsBefore(index: Long) {
+      if (sealedCount >= index) return
+      val zeros = ByteArray(segmentSize)
+      while (sealedCount < index) {
+        seal(sealedCount, zeros, segmentSize, isLast = false)
+        sealedCount += 1
+      }
+    }
+
+    private fun seal(index: Long, plain: ByteArray, length: Int, isLast: Boolean) {
+      val nonce = ByteArray(NONCE_LENGTH).also(random::nextBytes)
+      val sealed = seekableCipher(Cipher.ENCRYPT_MODE, fileKey, header, nonce, index, isLast).doFinal(plain, 0, length)
+      output.seek(HEADER_LENGTH + index * sealedSegment)
+      output.write(nonce)
+      output.write(sealed)
+    }
+
+    private fun open(index: Long) {
+      val sealed = ByteArray(sealedSegment.toInt())
+      output.seek(HEADER_LENGTH + index * sealedSegment)
+      output.readFully(sealed)
+      val plain = try {
+        seekableCipher(Cipher.DECRYPT_MODE, fileKey, header, sealed.copyOf(NONCE_LENGTH), index, isLast = false).doFinal(sealed, NONCE_LENGTH, sealed.size - NONCE_LENGTH)
+      } catch (failure: GeneralSecurityException) {
+        throw IOException("sealed media segment $index does not open", failure)
+      }
+      System.arraycopy(plain, 0, buffer, 0, plain.size)
+    }
+  }
+
   private fun fileKey(key: ByteArray, salt: ByteArray): SecretKeySpec {
     require(key.size == KEY_LENGTH) { "bad key" }
     val mac = Mac.getInstance("HmacSHA256")
@@ -259,4 +421,11 @@ object SealedMedia {
       updateAAD(header)
     }
   }
+
+  private fun seekableCipher(mode: Int, fileKey: SecretKeySpec, header: ByteArray, nonce: ByteArray, index: Long, isLast: Boolean): Cipher =
+    Cipher.getInstance(TRANSFORMATION).apply {
+      init(mode, fileKey, GCMParameterSpec(TAG_LENGTH * 8, nonce))
+      updateAAD(header)
+      updateAAD(ByteBuffer.allocate(9).putLong(index).put(if (isLast) 1 else 0).array())
+    }
 }

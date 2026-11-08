@@ -19,14 +19,16 @@ channel-tab-notes = Notes
 
 ## A channel's shared notes (Notes tab)
 canvas-page-label = Shared notes
-canvas-toolbar = Block style
+canvas-toolbar = Formatting
 canvas-kind-paragraph = Text
-canvas-kind-heading = Heading
 canvas-kind-bullet = Bulleted list
 canvas-kind-numbered = Numbered list
 canvas-kind-check = Checklist
+canvas-undo = Undo
+canvas-redo = Redo
+canvas-link-remove = Remove link
 canvas-check-label = Done
-canvas-placeholder = Write notes for this channel. Start a line with # for a heading, - for a list or [] for a checklist.
+canvas-placeholder = Write notes for this channel. Start a line with # for a heading, - for a list, [] for a checklist or > for a quote.
 canvas-encrypted = Everyone in the channel sees and edits these notes; they are end-to-end encrypted like its messages.
 canvas-read-only = You can read them; only members who may post here can change them.
 canvas-loading-history = Loading earlier changes…

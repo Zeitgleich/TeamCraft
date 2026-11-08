@@ -110,6 +110,10 @@ pub enum IconName {
   Folder,
   /// A pulse line: how a system is doing.
   Activity,
+  /// A curved arrow back: undo.
+  Undo,
+  /// A curved arrow onward: redo.
+  Redo,
 }
 
 impl IconName {
@@ -243,6 +247,8 @@ impl IconName {
       Self::Key => "M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-7.8 7.8 5.5 5.5 0 0 1 7.8-7.8z M15.5 7.5l3 3L22 7l-3-3",
       Self::Layers => "M12 2l10 5-10 5L2 7z M2 17l10 5 10-5 M2 12l10 5 10-5",
       Self::Activity => "M22 12h-4l-3 9L9 3l-3 9H2",
+      Self::Undo => "M9 14 4 9l5-5 M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
+      Self::Redo => "M15 14l5-5-5-5 M20 9H9.5a5.5 5.5 0 0 0 0 11H13",
       Self::Alert => {
         "M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z M12 9v4 M12 17h.01"
       },

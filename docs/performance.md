@@ -1337,6 +1337,107 @@ get worse either: before, the core also started only after `GET /me`.
   nothing about what came before it, so it needs proof that the connection had no gap). The rest is in
   the next section.
 
+#### Web start on phones (issue #1465)
+
+The start of the web app was measured part by part for the first time, because a phone showed the
+loading screen for a long time. What the start spends is on the page on demand, nothing is sent:
+`localStorage.setItem("teamcraft.startTiming", "1")`, then start the app again. `init.js` and the
+app put `performance.mark`s `teamcraft:<part>:start` and `:end`, a `performance.measure` per part,
+and at the first view a summary (`start timing: …`) into the console and on
+`globalThis.teamcraftStartTiming`: each part's `ms` and `endMs` (since the navigation started) and
+`firstViewMs` (`crates/teamcraft-ui/src/start_timing.rs`).
+
+Release `trunk build` (trunk 0.22.0, wasm-opt 131, macOS), `main` a31c48b2, medians of warm starts,
+milliseconds. The left pair is Safari in the iOS Simulator (iPhone 17 Pro, iOS 26.0, the Mac's CPU,
+not throttled) with a release signed by a test key, so the files come from the service worker, and
+a store of 30 channels and 3,150 messages. The right pair is WebKit on macOS (Playwright 1.56,
+WebKit 26.0), unsigned, no service worker, and 30 channels with 21,150 messages. Neither is a phone:
+the iPhone's numbers are in #1475. Both are the signed-in start from the local data, as after a
+reload or the next tap on the icon, with no server behind it (`dev/start-bench`, below).
+
+| Part (ms)                                         | Safari sim: before | after   | WebKit macOS: before | after   |
+|---------------------------------------------------|--------------------|---------|----------------------|---------|
+| The app's wasm: fetch (`wasm-fetch`)              | 452                | 68      | 234                  | 67      |
+| ... compile after the last byte (`wasm-compile`)  | 8                  | 7       | 12                   | 6       |
+| The UI's texts: fetch (`texts-fetch`)             | 389                | 6       | 199                  | 3       |
+| ... reading them (`texts`)                        | 4                  | 4       | 4                    | 4       |
+| The signed-in app's pack (`session-pack`)         | –                  | 6       | –                    | 11      |
+| Its chunks until its first view (`session-chunk`) | 519                | 77      | 325                  | 71      |
+| The cached account (`cached-account`)             | 0                  | 0       | 0                    | 0       |
+| Store key (`store-unlock`)                        | 3                  | 5       | 5                    | 4       |
+| Store records (`store-read`)                      | 34                 | 27      | 57                   | 59      |
+| Client on the store (`client-open`)               | 17                 | 14      | 14                   | 14      |
+| The core until its status (`core-start`)          | 66                 | 53      | 88                   | 85      |
+| First snapshot, built (`snapshot-build`)          | 17                 | 15      | 17                   | 17      |
+| ... until the UI has it (`snapshot`)              | 21                 | 18      | 20                   | 20      |
+| **First view (`firstViewMs`)**                    | **1160**           | **265** | **759**              | **302** |
+
+The parts overlap (the fetches run side by side), so they don't add up. The first view is the end of
+the start: the screen hands over to it. The rest of what the numbers say:
+
+- **The chunks were most of it.** The split leaves the signed-in app with 866 files, its own and
+  the shared chunks, 669 of them under 1 kB (one per combination of split modules, #334). Each was
+  a request of its own and a streaming compile, through the service worker in a signed release, and
+  they were queued before the app's own wasm and texts: the texts (75 kB) took as long as the
+  6.9 MB wasm, and took 3 to 6 ms with the queue gone (the wasm 67). `teamcraft-web-bundle` now
+  joins them into one file, `teamcraft-ui-session-<id>.pack`, in the signed release like any other
+  file and checked by the worker before it is served. The chunk loader cuts the files out of it, by
+  offsets in the (signed) loader script. Tiny parts compile right there, synchronously, in the same
+  turn; the few large ones go through `WebAssembly.instantiate` off the main thread. A part not in
+  the pack, or a page whose pack didn't arrive, fetches its file as before, so the guest's page and
+  the failure path stay the same. Compressed as one, the download shrinks too (below).
+- **The first paint waited for the network.** `index.html` links the brand's colors
+  (`/api/v1/brand/theme.css`), the page waits for them before it paints anything, and the service
+  worker didn't touch `/api/`. With every API request 2 s late the first paint came after 2,015 to
+  2,070 ms, before the loading screen showed, in WebKit on the sign-in path (it doesn't show in the
+  table: that server answers at once, and `first-view` is timed by script, which keeps running).
+  The worker now answers that one file from the copy of the last start and fetches the fresh one
+  for the next: first paint after 9 to 13 ms (signed-in: 15 to 26 ms), with the same 2 s delay, from
+  the start after the worker has its copy. A change of the brand's colors shows one start later.
+- **The rest of #778's list:** the start doesn't wait for the token or `GET /me`. Refused API
+  requests didn't change the first view, and with every API request 2 s late the signed-in first
+  view came at 198 to 249 ms (WebKit, signed, 10 channels). The web core doesn't decrypt the store
+  before the first read either, as #155 described: `store-read` is the ciphertext only, 57 ms for
+  21,150 messages' records on this machine. What is still O(store) is that read, and the sidebar's
+  counts for a store that has none kept: 21,150 messages counted once are 200 ms here, written then
+  (`entry_tally.rs`), and read back in 17 ms from the next start on. A start interrupted within the
+  first moments writes none, which is why a bench that reloads at once keeps paying it.
+- **Compile:** not where the time goes. In WebKit on this Mac `WebAssembly.compile` of the 6.9 MB
+  app takes 11 to 13 ms and `compileStreaming` 49 to 64 ms with its fetch, the same on every page
+  load: WebKit keeps nothing between loads that shows here, and there is nothing for a cache to
+  save. The app already compiles while it streams (`instantiateStreaming`). The pack leaves that as
+  it was and removes the cost that grew with the number of files, not their size.
+- **What the phone adds** isn't in these numbers: a phone's CPU and storage are slower by a factor
+  only the phone can say (#1475), and it may reach the server slowly, which no longer holds
+  anything back in a signed release.
+
+The download of a signed-in first visit shrinks too (gzip -9, all of it, same build):
+
+| Download                                   | Before      | After       | Delta      |
+|--------------------------------------------|-------------|-------------|------------|
+| Signed-in first visit                      | 5,432,009 B | 5,168,840 B | −263,169 B |
+| The signed-in app's files (866 / one pack) | 2,231,031 B | 1,967,862 B | −263,169 B |
+
+To measure the same: build the release as above, then the seed and the bench page, and serve them
+(`dev/start-bench`; Playwright with its WebKit, or Safari in the iOS Simulator with
+`xcrun simctl openurl booted "http://127.0.0.1:8091/__bench/index.html?frame=10"`, which reports the
+timing to the local server, the page's console being out of reach):
+
+```sh
+cargo build --example web_start_seed -p teamcraft-core --target wasm32-unknown-unknown --profile web-release
+wasm-bindgen --target web --out-dir /tmp/bench --out-name web_start_seed --no-typescript \
+  target/wasm32-unknown-unknown/web-release/examples/web_start_seed.wasm
+cp dev/start-bench/index.html /tmp/bench/
+python3 dev/start-bench/serve.py crates/teamcraft-ui/dist /tmp/bench 8091 /tmp/timing.jsonl
+node dev/start-bench/measure.js http://127.0.0.1:8091 cached 8 30 5 700   # needs playwright; channels, messages, history
+```
+
+`--api=delay:2000` on `serve.py` answers every API request 2 s late; sign a copy of the build
+(`crates/teamcraft-ui/scripts/sign-web-release.sh`, a key of your own) to run it through the service
+worker. The first start with empty caches is left out of the medians: it took 98.8 s in the
+simulator before and 0.68 s after. Before, 93 s of that were the texts waiting behind the 866 other
+requests of this local test server, so read it as the shape of the problem, not its size.
+
 #### Own changes show at once (issue #778)
 
 A sent message reached the UI's mirror only after the core had answered, and then after two more
@@ -2083,7 +2184,7 @@ is a **guest's meeting**: somebody from outside who opens a meeting link, often 
 browser that never saw the app, downloads the lobby (the app, the service worker and the UI's texts
 in one language), then, once let in, the meeting's split modules (`guest`, `calls`) with the shared
 chunks they import, and the call module. The looser one is a ceiling on a **signed-in first visit**:
-the app, the signed-in app's chunks that `init.js` fetches next to it, the texts, and the service
+the app, the signed-in app's pack (its chunks in one file, #1465) that `init.js` fetches next to it, the texts, and the service
 worker, which is installed on the first visit too; a member loads it once, then from the service worker's cache. That is what a user waits for: the server sends the wasm
 with gzip or brotli, the browser compiles it while it streams (`instantiateStreaming`), and the
 service worker serves it from its cache on every later visit. The uncompressed size of a Leptos app
@@ -2098,10 +2199,11 @@ the chunks that load later. The limit:
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
 | A guest in a meeting: gzip -9 total  | 6,190,000 B  | fails; warns from 95 % (5.88 MB) |
-| Signed-in first visit: gzip -9 total | 5,650,000 B  | fails; warns from 95 % (5.37 MB) |
+| Signed-in first visit: gzip -9 total | 5,390,000 B  | fails; warns from 95 % (5.12 MB) |
 | The call module: gzip -9             | 1,000,000 B  | fails                            |
 
-Both budgets are the sizes measured below (#1452) plus about 6 %, so they warn only after real
+Both budgets are the sizes measured below plus about 6 % (a guest's of #1452, a signed-in first
+visit's of #1465 and its pack; 5.65 MB before), so they warn only after real
 growth; before that they were 6.28 and 5.74 MB (#1437), 6.35 and 5.8 MB (#1413), 6.8 and 6.2 MB, the sizes of #1148 plus about 6 %. For a while they were 10 MB, because the guest's meeting had reached its budget of the time
 (5.7 MB) and blocked unrelated pull requests; at 10 MB the check caught nothing. Before that the
 guest budget was the guest's meeting of 2026-10-31 plus about 4 %, the signed-in ceiling the
@@ -2298,7 +2400,7 @@ The app is split into wasm chunks (`crates/teamcraft-ui/src/areas.rs`, built by
 `crates/teamcraft-web-bundle` from the Trunk hook `scripts/build-app.sh`; Trunk 0.22 can't split):
 
 - **The signed-in app** (`session`: sign-in, the shell, everything a member uses) is a chunk of its
-  own. `init.js` fetches its files next to the app's for every page except a guest's meeting link,
+  own. `init.js` fetches its files, as one pack since #1465, next to the app's for every page except a guest's meeting link,
   so signed-in users load both at once and a guest only loads the guest pages. As the app grows,
   what a guest downloads doesn't.
 - **Areas loaded when first used:** the administration console, settings, the lightbox, the

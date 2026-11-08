@@ -84,6 +84,15 @@ struct GatewayInfoKinds {
   kinds: Vec<PushKind>,
 }
 
+/// The kind a gateway is told. A meeting's notices go exactly like a message (a visible alert, high
+/// priority); the real kind is in the sealed wake-up, so a gateway from before them delivers them too.
+fn gateway_kind(kind: &PushKind) -> PushKind {
+  match kind {
+    PushKind::MeetingReminder | PushKind::MeetingStart => PushKind::Message,
+    other => other.clone(),
+  }
+}
+
 /// The sender of one provider (APNs or FCM) behind a [`GatewayClient`].
 pub struct GatewaySender {
   client: Arc<GatewayClient>,
@@ -339,7 +348,7 @@ impl PushSender for GatewaySender {
         .push(&GatewayPushRequest {
           request_id: Base64Bytes::new(request_id.to_vec()),
           provider: self.provider.clone(),
-          kind: message.kind.clone(),
+          kind: gateway_kind(&message.kind),
           urgency: match message.urgency {
             Urgency::Normal => GatewayUrgency::Normal,
             Urgency::High => GatewayUrgency::High,

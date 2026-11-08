@@ -618,6 +618,15 @@ pub struct MessageOrder {
   pub client_message_id: [u8; 16],
 }
 
+/// A write [`LocalStore::written_since`] tells of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Written {
+  /// This message was written or removed.
+  Message(ClientMessageId),
+  /// All of the conversation's messages went.
+  Conversation,
+}
+
 /// How far a conversation's feed was rewritten since the store began ([`LocalStore::feed_version`]).
 /// A new message changes neither count: a reader finds those by their position.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -724,6 +733,10 @@ pub enum StoreError {
     "the local database is from a newer version of the app (layout {found}, this version reads up to {supported})"
   )]
   NewerSchema { found: i64, supported: i64 },
+  /// A process that leaves the layout to the app (the iOS notification extension) found steps only
+  /// the app runs (issue #1198). Nothing was changed, and the app migrates the store when it opens.
+  #[error("the app hasn't brought the local database up to date yet (layout {found} of {supported})")]
+  LayoutBehind { found: i64, supported: i64 },
   /// A write of a group failed, so none of the group's writes was kept.
   #[error("the local database did not save a group of changes: {0}")]
   GroupFailed(String),
@@ -846,6 +859,33 @@ pub trait LocalStore {
   fn feed_version(&self, conversation: ConversationId) -> Result<Option<FeedVersion>, StoreError> {
     let _ = conversation;
     Ok(None)
+  }
+  /// Where this store's journal of written messages stands now: a reader that keeps what it
+  /// derived per message (a chat list's unread counts, issue #1466) asks
+  /// [`Self::written_since`] from here later. `None`: the store keeps no journal.
+  fn written_cursor(&self) -> Option<u64> {
+    None
+  }
+  /// Whether another thread waits for this thread's open group of writes to end (the UI's reads,
+  /// issue #1466): a long group of independent steps (a page of received messages) ends early
+  /// then, and begins again after them. `false` for stores where nobody waits.
+  fn is_awaited(&self) -> bool {
+    false
+  }
+  /// Begins a read group ([`read_together`]): the reads up to [`Self::end_reads`] see one snapshot
+  /// of the disk, and other threads of this process wait for it like for a group of writes, while
+  /// other processes (the iOS notification extension) still write. Groups of writes may nest in it.
+  fn begin_reads(&self) -> Result<(), StoreError> {
+    Ok(())
+  }
+  /// Ends the read group of [`Self::begin_reads`].
+  fn end_reads(&self) {}
+  /// What of `conversation`'s messages was written or removed since `cursor`
+  /// ([`Self::written_cursor`]), maybe more. `None` when the journal can't tell: it no longer holds
+  /// what came after `cursor`, or another connection wrote meanwhile.
+  fn written_since(&self, conversation: ConversationId, cursor: u64) -> Option<Vec<Written>> {
+    let _ = (conversation, cursor);
+    None
   }
   /// The oldest or newest server message ID stored in `conversation`: the cursor of a catch-up, of
   /// older history and of the read position. Placeholders don't count (issue #888): their IDs are
@@ -1050,6 +1090,24 @@ pub struct WriteTally {
   pub foreign: u64,
 }
 
+/// Runs `reads` as one look at the store ([`LocalStore::begin_reads`]): many reads take the store's
+/// lock and check the disk once, and no other thread's group of writes slips in between them, each
+/// a wait of its own (a chat list pass, issue #1466). Other threads wait while it runs: keep it
+/// short. Groups of writes inside it are their own groups.
+pub fn read_together<S, T, E>(store: &S, reads: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+where
+  S: LocalStore + ?Sized,
+  E: From<StoreError>,
+{
+  store.begin_reads()?;
+  let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(reads));
+  store.end_reads();
+  match result {
+    Ok(result) => result,
+    Err(panic) => std::panic::resume_unwind(panic),
+  }
+}
+
 /// Runs `writes` as one group of writes ([`LocalStore::begin_writes`]). An error of `writes` doesn't
 /// undo what it wrote before; only a crash, a failed write of the group or a panic does.
 pub fn write_group<S, T, E>(store: &S, writes: impl FnOnce() -> Result<T, E>) -> Result<T, E>
@@ -1196,6 +1254,26 @@ macro_rules! forward_local_store {
 
       fn feed_version(&self, conversation: ConversationId) -> Result<Option<FeedVersion>, StoreError> {
         (**self).feed_version(conversation)
+      }
+
+      fn written_cursor(&self) -> Option<u64> {
+        (**self).written_cursor()
+      }
+
+      fn is_awaited(&self) -> bool {
+        (**self).is_awaited()
+      }
+
+      fn begin_reads(&self) -> Result<(), StoreError> {
+        (**self).begin_reads()
+      }
+
+      fn end_reads(&self) {
+        (**self).end_reads()
+      }
+
+      fn written_since(&self, conversation: ConversationId, cursor: u64) -> Option<Vec<Written>> {
+        (**self).written_since(conversation, cursor)
       }
 
       fn feed_len(&self, conversation: ConversationId) -> Result<usize, StoreError> {

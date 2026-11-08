@@ -175,3 +175,61 @@ struct OfflineBanner: View {
     }
   }
 }
+
+/// A thin moving line under the banner while the app gets what happened while it was away: the
+/// connection is being set up, or `isCatchingUp` (this conversation, or one in the list, still has
+/// messages to come; issue #1457). Without it a chat looked complete for a moment and then
+/// changed. It shows only after `SyncingLine.delay`, so a quick catch-up doesn't flash, and keeps
+/// its height, so nothing below moves.
+struct SyncingLine: View {
+  static let delay: Duration = .milliseconds(300)
+  static let height: CGFloat = 2
+
+  let isCatchingUp: Bool
+  @Environment(AppModel.self) private var model
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @State private var isShown = false
+  @State private var isSliding = false
+  private let network = NetworkMonitor.shared
+
+  private var isSyncing: Bool {
+    ConnectionNotice.isSyncing(isOnline: network.isOnline, isCatchingUp: isCatchingUp, connection: model.connection)
+  }
+
+  var body: some View {
+    Rectangle()
+      .fill(Color.clear)
+      .frame(height: Self.height)
+      .overlay {
+        if isShown {
+          GeometryReader { proxy in
+            Capsule()
+              .fill(Color.accentColor)
+              .frame(width: proxy.size.width * 0.35)
+              // Reduce motion: a still bar instead of one sliding back and forth.
+              .offset(x: reduceMotion ? proxy.size.width * 0.325 : (isSliding ? proxy.size.width * 0.65 : 0))
+              .animation(
+                reduceMotion ? nil : .easeInOut(duration: 1.1).repeatForever(autoreverses: true), value: isSliding)
+          }
+          .transition(.opacity)
+        }
+      }
+      .clipped()
+      .animation(.easeOut(duration: 0.2), value: isShown)
+      .accessibilityElement()
+      .accessibilityLabel(Text("syncing_updates"))
+      .accessibilityHidden(!isShown)
+      .task(id: isSyncing) {
+        if isSyncing {
+          // Cancelled by the next change of `isSyncing`, so a short wait never shows the line.
+          try? await Task.sleep(for: Self.delay)
+          guard !Task.isCancelled else { return }
+          isShown = true
+          isSliding = true
+        } else {
+          isShown = false
+          isSliding = false
+        }
+      }
+  }
+}

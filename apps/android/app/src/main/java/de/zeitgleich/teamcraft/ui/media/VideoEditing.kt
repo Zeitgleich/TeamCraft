@@ -52,15 +52,19 @@ import androidx.compose.ui.unit.dp
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.container.Mp4OrientationData
+import androidx.media3.common.util.Clock
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.effect.Presentation
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.transformer.Composition
+import androidx.media3.transformer.DefaultDecoderFactory
 import androidx.media3.transformer.DefaultEncoderFactory
 import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
+import androidx.media3.transformer.ExoPlayerAssetLoader
 import androidx.media3.transformer.ExportResult
-import androidx.media3.transformer.InAppMp4Muxer
 import androidx.media3.transformer.Transformer
 import androidx.media3.transformer.VideoEncoderSettings
 import java.io.File
@@ -92,7 +96,7 @@ data class VideoFacts(val durationMs: Long, val shortSidePx: Int, val bitrate: I
  * Trims, mutes and scales videos on the device before sending (#1358), with Media3 Transformer.
  * Trim and mute alone keep the encoded video where the container allows it (only the start is
  * re-encoded); Standard quality re-encodes to 720p. The video is streamed from and to files; it is
- * never held in memory whole.
+ * never held in memory whole, and a sealed camera video stays sealed on the way (#1403).
  */
 object VideoEditing {
   suspend fun facts(context: Context, uri: Uri): VideoFacts? = withContext(Dispatchers.IO) {
@@ -134,54 +138,68 @@ object VideoEditing {
   }
 
   /**
-   * Exports the edited video into `target`; `false` when the device can't (the user is told).
-   * Transformer reads files only: a sealed camera video is passed as a plain copy
-   * ([SealedCaptures.openToFile]).
+   * Exports the edited video into `target`, sealed ([SealedMp4MuxerFactory]); open it with
+   * [SealedCaptures]. `false` when the device can't (the user is told). A sealed camera video is
+   * read through its key, not through a plain copy: the pipeline by [SealedCaptures.Factory], and
+   * the trim optimization, which reads the URI with a source of its own, by
+   * [SealedCaptures.expose]. If that one read fails, Transformer re-encodes all of it instead.
    */
-  @OptIn(UnstableApi::class)
-  suspend fun export(context: Context, uri: Uri, edit: VideoEdit, facts: VideoFacts?, quality: MediaQuality, target: File): Boolean =
-    withContext(Dispatchers.Main) {
-      val clipping = MediaItem.ClippingConfiguration.Builder()
-        .setStartPositionMs(edit.startMs)
-        .apply { edit.maybeEndMs?.let { setEndPositionMs(it) } }
-        .build()
-      val item = MediaItem.Builder().setUri(uri).setClippingConfiguration(clipping).build()
-      val isScaling = quality == MediaQuality.Standard && facts != null && isLargerThanStandard(facts)
-      val effects = if (isScaling) Effects(emptyList(), listOf(Presentation.createForShortSide(STANDARD_SHORT_SIDE_PX))) else Effects.EMPTY
-      val edited = EditedMediaItem.Builder(item).setRemoveAudio(edit.isMuted).setEffects(effects).build()
-      suspendCancellableCoroutine { continuation ->
-        val builder = Transformer.Builder(context)
-          // Only how to turn the video goes along: no place, no XMP, no camera details.
-          .setMuxerFactory(InAppMp4Muxer.Factory { entries -> entries.retainAll { it is Mp4OrientationData } })
-          .addListener(object : Transformer.Listener {
-            override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-              if (continuation.isActive) continuation.resume(true)
-            }
-
-            override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
-              target.delete()
-              if (continuation.isActive) continuation.resume(false)
-            }
-          })
-        if (isScaling) {
-          builder.setVideoMimeType(MimeTypes.VIDEO_H264)
-          builder.setEncoderFactory(
-            DefaultEncoderFactory.Builder(context)
-              .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(STANDARD_VIDEO_BITRATE).build())
-              .build(),
-          )
-        } else {
-          // Only the part before the first kept key frame is re-encoded; the rest is copied.
-          builder.experimentalSetTrimOptimizationEnabled(true)
-        }
-        val transformer = builder.build()
-        continuation.invokeOnCancellation {
-          transformer.cancel()
-          target.delete()
-        }
-        transformer.start(edited, target.absolutePath)
-      }
+  suspend fun export(context: Context, uri: Uri, edit: VideoEdit, facts: VideoFacts?, quality: MediaQuality, target: File): Boolean {
+    val key = withContext(Dispatchers.IO) { MediaDraftStore.captureKey(context) } ?: return false
+    val maybeExposure = if (SealedCaptures.isSealed(uri)) SealedCaptures.expose(context, uri) else null
+    try {
+      return withContext(Dispatchers.Main) { runTransformer(context, maybeExposure?.uri ?: uri, maybeExposure != null, edit, facts, quality, target, key) }
+    } finally {
+      maybeExposure?.close()
     }
+  }
+
+  @OptIn(UnstableApi::class)
+  private suspend fun runTransformer(context: Context, uri: Uri, isSealed: Boolean, edit: VideoEdit, facts: VideoFacts?, quality: MediaQuality, target: File, key: ByteArray): Boolean {
+    val clipping = MediaItem.ClippingConfiguration.Builder()
+      .setStartPositionMs(edit.startMs)
+      .apply { edit.maybeEndMs?.let { setEndPositionMs(it) } }
+      .build()
+    val item = MediaItem.Builder().setUri(uri).setClippingConfiguration(clipping).build()
+    val isScaling = quality == MediaQuality.Standard && facts != null && isLargerThanStandard(facts)
+    val effects = if (isScaling) Effects(emptyList(), listOf(Presentation.createForShortSide(STANDARD_SHORT_SIDE_PX))) else Effects.EMPTY
+    val edited = EditedMediaItem.Builder(item).setRemoveAudio(edit.isMuted).setEffects(effects).build()
+    return suspendCancellableCoroutine { continuation ->
+      val builder = Transformer.Builder(context)
+        .setMuxerFactory(SealedMp4MuxerFactory(key))
+        .addListener(object : Transformer.Listener {
+          override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+            if (continuation.isActive) continuation.resume(true)
+          }
+
+          override fun onError(composition: Composition, exportResult: ExportResult, exportException: ExportException) {
+            target.delete()
+            if (continuation.isActive) continuation.resume(false)
+          }
+        })
+      if (isSealed) {
+        val sources = DefaultMediaSourceFactory(SealedCaptures.Factory(context, DefaultDataSource.Factory(context)))
+        builder.setAssetLoaderFactory(ExoPlayerAssetLoader.Factory(context, DefaultDecoderFactory.Builder(context).build(), Clock.DEFAULT, sources))
+      }
+      if (isScaling) {
+        builder.setVideoMimeType(MimeTypes.VIDEO_H264)
+        builder.setEncoderFactory(
+          DefaultEncoderFactory.Builder(context)
+            .setRequestedVideoEncoderSettings(VideoEncoderSettings.Builder().setBitrate(STANDARD_VIDEO_BITRATE).build())
+            .build(),
+        )
+      } else {
+        // Only the part before the first kept key frame is re-encoded; the rest is copied.
+        builder.experimentalSetTrimOptimizationEnabled(true)
+      }
+      val transformer = builder.build()
+      continuation.invokeOnCancellation {
+        transformer.cancel()
+        target.delete()
+      }
+      transformer.start(edited, target.absolutePath)
+    }
+  }
 
   private fun isLargerThanStandard(facts: VideoFacts): Boolean =
     facts.shortSidePx > STANDARD_SHORT_SIDE_PX || facts.bitrate > STANDARD_MAX_SOURCE_BITRATE

@@ -93,6 +93,8 @@ final class NotificationService: UNNotificationServiceExtension {
       return UNNotificationContent()
     case .callAlert:
       return builder.callAlert(for: notification, base: original)
+    case .meeting:
+      return builder.meeting(for: notification, base: original)
     case .test:
       return builder.test(for: notification, base: original)
     case .drop:
@@ -106,6 +108,8 @@ final class NotificationService: UNNotificationServiceExtension {
   }
 
   /// Opens the core under the cross-process lock; `nil` if not signed in, locked out or failed.
+  /// A store that still needs a layout step fails here too: the extension doesn't migrate it (no
+  /// `VACUUM` under its limits, #1198) and the app does on its next start.
   private static func decrypt(_ sealed: Data) async -> PushNotification? {
     let container = SharedContainer()
     guard let account = container.activeAccount else { return nil }
@@ -115,7 +119,8 @@ final class NotificationService: UNNotificationServiceExtension {
     defer { lock.release() }
     do {
       let core = try CoreFactory().open(
-        account: account, createKey: false, isMemoryConstrained: true, listener: ClosureEventListener {})
+        account: account, createKey: false, isMemoryConstrained: true, runsUpkeep: false,
+        listener: ClosureEventListener {})
       // Never advances the account's state: the app alone does (MLS, cursors), or the two
       // processes would fork it. The probe catches up on a copy in memory and sends nothing
       // (docs/e2ee.md §7.2).

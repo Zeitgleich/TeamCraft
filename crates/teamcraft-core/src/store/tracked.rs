@@ -26,7 +26,7 @@ use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, 
 use super::message_cache::MessageCache;
 use super::{
   AttachmentRef, FeedVersion, LocalStore, MediaRange, MessageContent, MessageEdge, MessageFilter,
-  MessageOrder, MessageSlot, StoreError, StoredMessage, Table, WriteTally,
+  MessageOrder, MessageSlot, StoreError, StoredMessage, Table, WriteTally, Written,
 };
 
 /// What the UI's message cache may hold by default (issue #1125): about 60,000 messages at the
@@ -66,6 +66,21 @@ pub struct TrackedStore<S> {
   /// noted.
   notes_conversation_purges: bool,
   media_purges: Arc<Mutex<MediaPurges>>,
+  /// The messages written through this store, newest last ([`LocalStore::written_since`]).
+  journal: Arc<Mutex<Journal>>,
+}
+
+/// The newest writes of messages, by number: a reader that keeps its own number since asks what
+/// came after it. Bounded; what fell out, and whatever another connection wrote, it can't tell.
+#[derive(Debug, Default)]
+struct Journal {
+  entries: VecDeque<(u64, ConversationId, Written)>,
+  /// The number the next write gets.
+  next: u64,
+  /// It can tell of the writes from this number on.
+  complete_from: u64,
+  /// [`WriteTally::foreign`] when last looked at.
+  seen_foreign: u64,
 }
 
 /// The host's work on [`MEDIA_PURGE_PREFIX`] records.
@@ -130,6 +145,47 @@ enum Change {
   Nothing,
 }
 
+impl Journal {
+  /// Writes kept at most; older ones are no longer told apart.
+  const MAX_ENTRIES: usize = 8_192;
+
+  /// Noted before the write: a reader that asks meanwhile reads the message again, which costs a
+  /// read and is right either way.
+  fn note(&mut self, conversation: ConversationId, written: Written) {
+    self.entries.push_back((self.next, conversation, written));
+    self.next += 1;
+    if self.entries.len() > Self::MAX_ENTRIES
+      && let Some((dropped, _, _)) = self.entries.pop_front()
+    {
+      self.complete_from = dropped + 1;
+    }
+  }
+
+  fn follow_disk(&mut self, maybe_tally: Option<WriteTally>) {
+    if let Some(tally) = maybe_tally
+      && tally.foreign != self.seen_foreign
+    {
+      self.seen_foreign = tally.foreign;
+      // What the other connection wrote isn't here: nobody's number before now holds.
+      self.complete_from = self.next;
+    }
+  }
+
+  fn since(&self, conversation: ConversationId, cursor: u64) -> Option<Vec<Written>> {
+    if cursor < self.complete_from || cursor > self.next {
+      return None;
+    }
+    Some(
+      self
+        .entries
+        .iter()
+        .filter(|(number, held, _)| *number >= cursor && *held == conversation)
+        .map(|(_, _, written)| *written)
+        .collect(),
+    )
+  }
+}
+
 impl<S: LocalStore> TrackedStore<S> {
   pub fn new(inner: S) -> Self {
     Self::with_message_cache(inner, 0)
@@ -153,6 +209,7 @@ impl<S: LocalStore> TrackedStore<S> {
         in_flight: BTreeSet::new(),
         backoff: HashMap::new(),
       })),
+      journal: Arc::default(),
     }
   }
 
@@ -343,6 +400,12 @@ impl<S: LocalStore> TrackedStore<S> {
   fn follow_disk(&self) {
     let maybe_tally = self.inner.write_tally();
     self.cache().follow_disk(maybe_tally);
+    self.journal().follow_disk(maybe_tally);
+  }
+
+  fn journal(&self) -> std::sync::MutexGuard<'_, Journal> {
+    // Invariant-free data: at worst a reader reads again what it keeps.
+    self.journal.lock().unwrap_or_else(PoisonError::into_inner)
   }
 
   fn cache(&self) -> std::sync::MutexGuard<'_, MessageCache> {
@@ -409,6 +472,10 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     {
       self.note_removed([old]);
     }
+    self.journal().note(
+      message.conversation_id,
+      Written::Message(message.client_message_id),
+    );
     self.inner.upsert_message(message)?;
     // After the write: a commit of another process before it is counted by now.
     self.follow_disk();
@@ -574,9 +641,32 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     self.inner.feed_version(conversation)
   }
 
+  fn written_cursor(&self) -> Option<u64> {
+    Some(self.journal().next)
+  }
+
+  fn is_awaited(&self) -> bool {
+    self.inner.is_awaited()
+  }
+
+  fn begin_reads(&self) -> Result<(), StoreError> {
+    self.inner.begin_reads()
+  }
+
+  fn end_reads(&self) {
+    self.inner.end_reads();
+  }
+
+  fn written_since(&self, conversation: ConversationId, cursor: u64) -> Option<Vec<Written>> {
+    // Another connection's commit since the last write is found now.
+    self.follow_disk();
+    self.journal().since(conversation, cursor)
+  }
+
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
     // Not read message by message: a big channel would be held in memory whole.
     self.note_removed_conversation(conversation)?;
+    self.journal().note(conversation, Written::Conversation);
     self.inner.delete_messages(conversation)?;
     self
       .inner
@@ -596,6 +686,9 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     if let Some(old) = self.inner.message(conversation, client_message_id)? {
       self.note_removed([old]);
     }
+    self
+      .journal()
+      .note(conversation, Written::Message(client_message_id));
     self.inner.delete_message(conversation, client_message_id)?;
     // After the write: a commit of another process before it is counted by now.
     self.follow_disk();
@@ -1178,5 +1271,48 @@ mod tests {
 
   fn id<T: Id>(raw: i64) -> T {
     T::from_snowflake(Snowflake::new(raw).unwrap())
+  }
+}
+
+#[cfg(test)]
+mod journal_tests {
+  use super::*;
+
+  fn conversation(raw: i64) -> ConversationId {
+    <ConversationId as teamcraft_proto::Id>::from_snowflake(teamcraft_proto::Snowflake::new(raw).unwrap())
+  }
+
+  fn written(n: u8) -> Written {
+    Written::Message(ClientMessageId::from_bytes([n; 16]))
+  }
+
+  #[test]
+  fn tells_what_came_after_a_cursor_in_one_conversation() {
+    let mut journal = Journal::default();
+    journal.note(conversation(1), written(1));
+    let cursor = journal.next;
+    journal.note(conversation(1), written(2));
+    journal.note(conversation(2), written(3));
+    assert_eq!(journal.since(conversation(1), cursor), Some(vec![written(2)]));
+    assert_eq!(journal.since(conversation(2), journal.next), Some(Vec::new()));
+  }
+
+  #[test]
+  fn cannot_tell_past_what_it_dropped_or_another_connection_wrote() {
+    let mut journal = Journal::default();
+    let cursor = journal.next;
+    for n in 0..=Journal::MAX_ENTRIES {
+      journal.note(conversation(1), written((n % 200) as u8));
+    }
+    assert_eq!(journal.since(conversation(1), cursor), None);
+    let fresh = journal.next;
+    journal.follow_disk(Some(WriteTally { lost: 0, foreign: 1 }));
+    assert_eq!(journal.since(conversation(1), fresh - 1), None);
+    assert_eq!(journal.since(conversation(1), journal.next), Some(Vec::new()));
+    assert_eq!(
+      journal.since(conversation(1), journal.next + 1),
+      None,
+      "a cursor from the future"
+    );
   }
 }

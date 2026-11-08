@@ -9,12 +9,13 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use teamcraft_crypto::local_store::{LOOKUP_ID_LEN, LookupId};
 
 use super::sealed::{RecordBackend, SealedStore, SealedStoreLimits};
 use super::sql_group::{
-  Migration, MigrationKind, WriteGroup, run_migrations, sqlite_error as database_error,
+  Migration, MigrationKind, WriteGroup, check_layout_left_to_app, run_migrations,
+  sqlite_error as database_error,
 };
 use super::sqlite_log::{LOG_PRAGMAS, PurgeState};
 use super::sqlite_wipe::wipe_free_pages;
@@ -98,15 +99,37 @@ impl SealedStore<SqliteRecords> {
     )
   }
 
-  /// [`Self::open_with_limits`] for a process that must stay small (the iOS notification
-  /// extension): it never builds the catalog of a store that lacks one, however long the history.
+  /// [`Self::open_with_limits`] for a process that must stay small and runs next to the app (the
+  /// iOS notification extension): it never builds the catalog of a store that lacks one, however
+  /// long the history, runs no step of the layout and no upkeep (`VACUUM` takes memory and time it
+  /// doesn't have, and would keep the app out of the store), and creates no database.
+  ///
+  /// A store that needs such a step is [`StoreError::LayoutBehind`], found on a read-only connection
+  /// so that even its closing changes nothing; the app migrates it when it opens.
   pub fn open_without_building(
     path: &Path,
     key_source: &impl DatabaseKeySource,
     limits: SealedStoreLimits,
   ) -> Result<Self, StoreError> {
-    let backend = Self::backend_of(Connection::open(path).map_err(database_error)?)?;
+    Self::check_layout_is_left_to_app(path)?;
+    let connection = Connection::open_with_flags(
+      path,
+      OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(database_error)?;
+    Self::set_up_connection(&connection)?;
+    let backend = Self::records_on(connection)?;
     SealedStore::open_backend_without_building(backend, &key_source.database_key()?, limits)
+  }
+
+  fn check_layout_is_left_to_app(path: &Path) -> Result<(), StoreError> {
+    let connection = Connection::open_with_flags(
+      path,
+      OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(database_error)?;
+    connection.busy_timeout(BUSY_TIMEOUT).map_err(database_error)?;
+    check_layout_left_to_app(&connection, MIGRATIONS)
   }
 
   /// A database that lives only in memory, for tests.
@@ -128,6 +151,12 @@ impl SealedStore<SqliteRecords> {
   }
 
   fn backend_of(connection: Connection) -> Result<SqliteRecords, StoreError> {
+    Self::set_up_connection(&connection)?;
+    run_migrations(&connection, MIGRATIONS)?;
+    Self::records_on(connection)
+  }
+
+  fn set_up_connection(connection: &Connection) -> Result<(), StoreError> {
     // secure_delete: freed pages are zeroed, so a deleted record's ciphertext doesn't linger in
     // them (issue #391); the write-ahead log is cleared by `purge_freed`. Records are read one by
     // one under pseudorandom IDs (issue #155): mapped, a read is no system call, and the pages
@@ -137,8 +166,10 @@ impl SealedStore<SqliteRecords> {
         "{LOG_PRAGMAS} PRAGMA secure_delete = ON; PRAGMA mmap_size = {MMAP_BYTES};"
       ))
       .map_err(database_error)?;
-    connection.busy_timeout(BUSY_TIMEOUT).map_err(database_error)?;
-    run_migrations(&connection, MIGRATIONS)?;
+    connection.busy_timeout(BUSY_TIMEOUT).map_err(database_error)
+  }
+
+  fn records_on(connection: Connection) -> Result<SqliteRecords, StoreError> {
     // Before anything is read: a commit of another connection after it counts (the caches drop
     // what they hold).
     let mut group = WriteGroup::default();
@@ -357,6 +388,103 @@ mod tests {
   /// more than two batches.
   const ENTRIES: usize = 1100;
   const MESSAGES: u8 = 60;
+
+  /// Issue #1466: a reader waiting for a group of writes is seen by the group's thread, and has its
+  /// turn before the next group begins.
+  #[test]
+  fn a_waiting_reader_reads_between_two_groups() {
+    let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+    let store = std::sync::Arc::new(SealedSqliteStore::open_in_memory(&key).unwrap());
+    store.put(Table::Users, "1", b"before").unwrap();
+    store.begin_writes().unwrap();
+    assert!(!store.is_awaited(), "nobody waits yet");
+    store.put(Table::Users, "1", b"in the first group").unwrap();
+    let (answer, answered) = std::sync::mpsc::channel();
+    let reader = {
+      let store = store.clone();
+      std::thread::spawn(move || answer.send(store.get(Table::Users, "1").unwrap()).unwrap())
+    };
+    while !store.is_awaited() {
+      std::thread::yield_now();
+    }
+    store.end_writes().unwrap();
+    store.begin_writes().unwrap();
+    store.put(Table::Users, "1", b"in the second group").unwrap();
+    store.end_writes().unwrap();
+    // It had its turn between the two groups, not after both.
+    let read = answered.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    assert_eq!(read.as_deref(), Some(&b"in the first group"[..]));
+    reader.join().unwrap();
+    assert!(!store.is_awaited());
+  }
+
+  /// Threads that read and write at once, some in groups that end early for the readers: every
+  /// write lands, nobody waits for ever.
+  #[test]
+  fn readers_and_writers_in_groups_take_turns() {
+    let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+    let store = std::sync::Arc::new(SealedSqliteStore::open_in_memory(&key).unwrap());
+    let threads: Vec<_> = (0..4)
+      .map(|thread| {
+        let store = store.clone();
+        std::thread::spawn(move || {
+          for n in 0..200 {
+            let key = format!("{thread}/{n}");
+            if thread % 2 == 0 {
+              crate::store::write_group(store.as_ref(), || {
+                store.put(Table::Users, &key, b"written")?;
+                if store.is_awaited() {
+                  return Ok::<_, StoreError>(());
+                }
+                store.put(Table::Users, &format!("{key}/more"), b"written")
+              })
+              .unwrap();
+            } else {
+              crate::store::read_together(store.as_ref(), || store.get(Table::Users, "0/0").map(|_| ()))
+                .unwrap();
+            }
+          }
+        })
+      })
+      .collect();
+    for thread in threads {
+      thread.join().unwrap();
+    }
+    assert!(store.get(Table::Users, "2/199").unwrap().is_some());
+    assert!(!store.is_awaited());
+  }
+
+  /// A read group holds no write lock: another connection (another process, the iOS notification
+  /// extension) writes meanwhile, and the group's own writes still land.
+  #[test]
+  fn a_read_group_lets_another_connection_write() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+    let app = SealedSqliteStore::open(&path, &key).unwrap();
+    let extension = SealedSqliteStore::open(&path, &key).unwrap();
+    app.put(Table::Users, "1", b"before").unwrap();
+    crate::store::read_together(&app, || {
+      assert_eq!(app.get(Table::Users, "1")?.as_deref(), Some(&b"before"[..]));
+      crate::store::write_group(&extension, || {
+        extension.put(Table::Users, "2", b"from the extension")
+      })?;
+      crate::store::write_group(&app, || app.put(Table::Users, "3", b"from the app"))?;
+      assert_eq!(app.get(Table::Users, "3")?.as_deref(), Some(&b"from the app"[..]));
+      Ok::<_, StoreError>(())
+    })
+    .unwrap();
+    assert_eq!(
+      app.get(Table::Users, "2").unwrap().as_deref(),
+      Some(&b"from the extension"[..])
+    );
+    assert_eq!(
+      extension.get(Table::Users, "3").unwrap().as_deref(),
+      Some(&b"from the app"[..])
+    );
+    drop((app, extension));
+    let _ = std::fs::remove_dir_all(directory);
+  }
 
   #[test]
   fn sealed_sqlite_behaves_like_a_store() {
@@ -1232,6 +1360,167 @@ mod tests {
     std::fs::remove_dir_all(&directory).unwrap();
   }
 
+  /// The database file and what its log holds, to compare before and after.
+  fn files_of(path: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
+    let log = std::fs::read(path.with_extension("db-wal")).unwrap_or_default();
+    (std::fs::read(path).unwrap(), log)
+  }
+
+  fn user_version(path: &std::path::Path) -> i64 {
+    Connection::open(path)
+      .unwrap()
+      .query_row("PRAGMA user_version", [], |row| row.get(0))
+      .unwrap()
+  }
+
+  fn copy_of_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let directory = scratch_dir();
+    let copy = directory.join("store.db");
+    std::fs::copy(
+      std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/store")
+        .join(name),
+      &copy,
+    )
+    .unwrap();
+    (directory, copy)
+  }
+
+  fn fixture_key() -> StaticKeySource {
+    StaticKeySource::new(helper_key())
+  }
+
+  /// Issue #1198: a store of a release before the layout the extension can read is left exactly as
+  /// it was, the refusal is one the extension answers with the generic notification (not a damaged
+  /// store), and the app migrates it as ever on its next start.
+  #[test]
+  fn the_extension_leaves_an_old_store_as_it_is_for_the_app_to_migrate() {
+    let (directory, path) = copy_of_fixture("v1.0.2-sealed.db");
+    let before = files_of(&path);
+
+    let refused =
+      SealedSqliteStore::open_without_building(&path, &fixture_key(), SealedStoreLimits::minimal());
+    let Err(error) = refused else {
+      panic!("an old store must not open in the extension");
+    };
+    assert!(matches!(
+      error,
+      StoreError::LayoutBehind {
+        found: 0,
+        supported: 5
+      }
+    ));
+    assert!(!error.is_unreadable(), "not a store to offer resetting");
+    assert_eq!(files_of(&path), before, "nothing changed on disk");
+
+    let app = SealedSqliteStore::open(&path, &fixture_key()).unwrap();
+    assert!(crate::records::load_account(&app).unwrap().is_some());
+    assert!(app.message_by_server_id(id(70), id(900)).unwrap().is_some());
+    drop(app);
+    assert_eq!(user_version(&path), 5);
+    let reopened =
+      SealedSqliteStore::open_without_building(&path, &fixture_key(), SealedStoreLimits::minimal());
+    assert!(reopened.is_ok(), "the extension reads what the app migrated");
+    drop(reopened);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// A store of the layout before the free-page wipe (`VACUUM`), the heaviest step there is: the
+  /// extension doesn't run it, and the app does.
+  #[test]
+  fn the_extension_does_not_vacuum_a_store_that_is_due() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let free_pages = |path: &std::path::Path| -> i64 {
+      Connection::open(path)
+        .unwrap()
+        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+        .unwrap()
+    };
+    {
+      let connection = Connection::open(&path).unwrap();
+      run_migrations(&connection, &MIGRATIONS[..1]).unwrap();
+      connection
+        .execute(
+          "INSERT INTO sealed_records (id, value) VALUES (?1, ?2)",
+          params![[1u8; LOOKUP_ID_LEN].as_slice(), [7u8; 64 * 1024].as_slice()],
+        )
+        .unwrap();
+      connection.execute("DELETE FROM sealed_records", []).unwrap();
+    }
+    assert!(free_pages(&path) > 0);
+    let before = files_of(&path);
+
+    assert!(matches!(
+      SealedSqliteStore::open_without_building(&path, &fixture_key(), SealedStoreLimits::minimal()),
+      Err(StoreError::LayoutBehind { found: 1, .. })
+    ));
+    assert_eq!(files_of(&path), before);
+
+    drop(SealedSqliteStore::open(&path, &fixture_key()).unwrap());
+    assert_eq!(free_pages(&path), 0, "the app wiped them");
+    assert_eq!(user_version(&path), 5);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Markers change no table, so a store with only those ahead still shows notifications; the
+  /// extension leaves them, and the catalog's build, to the app.
+  #[test]
+  fn the_extension_reads_a_store_with_only_markers_ahead_and_moves_none() {
+    let (directory, path) = copy_of_fixture("v1.0.9-sealed.db");
+    assert_eq!(user_version(&path), 3);
+    let store =
+      SealedSqliteStore::open_without_building(&path, &fixture_key(), SealedStoreLimits::minimal()).unwrap();
+    assert!(crate::records::load_account(&store).unwrap().is_some());
+    drop(store);
+    assert_eq!(user_version(&path), 3, "the markers stay for the app");
+
+    drop(SealedSqliteStore::open(&path, &fixture_key()).unwrap());
+    assert_eq!(user_version(&path), 5);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Upkeep a failed `VACUUM` left due would run on every open: not in the extension.
+  #[test]
+  fn the_extension_leaves_upkeep_that_is_due_to_the_app() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    drop(SealedSqliteStore::open(&path, &fixture_key()).unwrap());
+    let due = |path: &std::path::Path| -> i64 {
+      Connection::open(path)
+        .unwrap()
+        .query_row("SELECT count(*) FROM upkeep_due", [], |row| row.get(0))
+        .unwrap()
+    };
+    Connection::open(&path)
+      .unwrap()
+      .execute_batch(
+        "CREATE TABLE upkeep_due (version INTEGER PRIMARY KEY); INSERT INTO upkeep_due VALUES (2);",
+      )
+      .unwrap();
+
+    drop(
+      SealedSqliteStore::open_without_building(&path, &fixture_key(), SealedStoreLimits::minimal()).unwrap(),
+    );
+    assert_eq!(due(&path), 1, "the extension leaves it");
+
+    drop(SealedSqliteStore::open(&path, &fixture_key()).unwrap());
+    assert_eq!(due(&path), 0, "the app runs it");
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  #[test]
+  fn the_extension_creates_no_store() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    assert!(matches!(
+      SealedSqliteStore::open_without_building(&path, &fixture_key(), SealedStoreLimits::minimal()),
+      Err(StoreError::Database(_))
+    ));
+    assert!(!path.exists());
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
   /// Issue #1128: a process killed while a catalog build batch is written but not yet committed
   /// (the helper process dies at that point), however far the build had got, loses no record: the
   /// batch is rolled back, the next open goes on after the last committed batch, and the catalog
@@ -1464,6 +1753,10 @@ mod tests {
   /// The records every killed build starts from: entries and messages, written the way a version
   /// before the catalog wrote them (no catalog yet), enough for three batches.
   fn write_store_without_catalog(path: &std::path::Path) {
+    let connection = Connection::open(path).unwrap();
+    connection.execute_batch(LOG_PRAGMAS).unwrap();
+    run_migrations(&connection, MIGRATIONS).unwrap();
+    drop(connection);
     let store = SealedSqliteStore::open_without_building(
       path,
       &StaticKeySource::new(helper_key()),

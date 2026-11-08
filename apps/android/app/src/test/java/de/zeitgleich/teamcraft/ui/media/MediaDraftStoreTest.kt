@@ -232,6 +232,22 @@ class MediaDraftStoreTest {
   }
 
   @Test
+  fun theSweepTakesExportsAKillLeftInTheCacheOnly() {
+    val cache = files()
+    val now = System.currentTimeMillis()
+    val hoursAgo = now - 2L * 60 * 60 * 1000
+    val oldExport = File(cache, "export-1.mp4.sealed").apply { writeBytes(byteArrayOf(1)); setLastModified(hoursAgo) }
+    val oldSave = File(cache, "save-1.mp4").apply { writeBytes(byteArrayOf(1)); setLastModified(hoursAgo) }
+    val running = File(cache, "export-2.mp4.sealed").apply { writeBytes(byteArrayOf(1)) }
+    val other = File(cache, "thumbnails.bin").apply { writeBytes(byteArrayOf(1)); setLastModified(hoursAgo) }
+    MediaDraftStore.dropLeftoverExports(cache, now)
+    assertFalse(oldExport.exists())
+    assertFalse(oldSave.exists())
+    assertTrue(running.exists())
+    assertTrue(other.exists())
+  }
+
+  @Test
   fun theSweepTakesPlainCopiesAndUnfinishedSealsAKillLeft() {
     val files = files()
     val name = nameOf("111", null)

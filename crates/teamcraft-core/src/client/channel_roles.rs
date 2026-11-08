@@ -12,9 +12,11 @@ use teamcraft_proto::{
 
 use super::Client;
 use crate::api::ServerApi;
+#[cfg(feature = "ui")]
+use crate::channel_roles::RoleKeyStanding;
 use crate::channel_roles::{
-  ChannelRoleState, ChannelRolesHead, CheckedRoleKey, MessageEntry, RoleKeyEvidence, RoleKeyStanding,
-  RoleVerifier, SignerAuthority,
+  ChannelRoleState, ChannelRolesHead, CheckedRoleKey, MessageEntry, RoleKeyEvidence, RoleVerifier,
+  SignerAuthority,
 };
 use crate::error::CoreError;
 use crate::records;
@@ -42,6 +44,7 @@ const CHANNEL_ROLES_FIRST_SIGHT_KEY: &str = "channel_roles_first_sight";
 /// The channels where a member's device and this one disagree, in [`Table::Workspace`].
 const CHANNEL_ROLES_ALARMED_KEY: &str = "channel_roles_alarmed";
 /// What a workspace admin's device can check of a channel's listed keys, in [`Table::Workspace`].
+#[cfg(feature = "ui")]
 const ROLE_KEY_STANDINGS_KEY_PREFIX: &str = "channel_role_keys/";
 /// How many channels are founded in one upkeep pass, so an update is no burst.
 const FOUNDINGS_PER_PASS: usize = 4;
@@ -892,6 +895,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// For a workspace admin's look at the channel's roles: what this device can check of the keys of
   /// everybody the server lists. A device that can't sign for the workspace leaves nothing here.
+  #[cfg(feature = "ui")]
   pub(crate) async fn note_role_key_standings(
     &mut self,
     conversation: ConversationId,
@@ -1036,10 +1040,12 @@ fn is_workspace_authority(authority: &SignerAuthority) -> bool {
 }
 
 /// Where the channels with an alarm about their role logs are kept, for the UI.
+#[cfg(feature = "ui")]
 pub(crate) fn channel_roles_alarmed_key() -> &'static str {
   CHANNEL_ROLES_ALARMED_KEY
 }
 
+#[cfg(feature = "ui")]
 pub(crate) fn role_key_standings_key(conversation: ConversationId) -> String {
   format!("{ROLE_KEY_STANDINGS_KEY_PREFIX}{conversation}")
 }

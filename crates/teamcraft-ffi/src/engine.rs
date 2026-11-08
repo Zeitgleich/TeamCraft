@@ -41,7 +41,7 @@ use teamcraft_core::store::{
   DEFAULT_MESSAGE_CACHE_BYTES, LocalStore as _, OverlayStore, SealedSqliteStore, SealedStoreLimits,
   StaticKeySource, TrackedStore,
 };
-use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand, FeedAnchor};
+use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand, EntryNeed, FeedAnchor};
 use teamcraft_core::{
   Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkCodeKind, LinkOffer,
   PendingEnrollment,
@@ -1585,11 +1585,10 @@ impl Engine {
   fn set_account(&mut self, user: UserId, device: DeviceId, fingerprint: String) {
     self.identity_fingerprint = fingerprint.clone();
     self.maybe_device_id = Some(device);
-    self.maybe_backend = Some(CoreChatBackend::new(
-      self.store.clone(),
-      user,
-      Box::new(SystemClock),
-    ));
+    self.maybe_backend = Some(
+      CoreChatBackend::new(self.store.clone(), user, Box::new(SystemClock))
+        .with_entry_need(EntryNeed::Unread),
+    );
     self.reads.know_account(user, fingerprint);
   }
 
@@ -2221,6 +2220,14 @@ mod tests {
           OpenError::Unreadable(StoreProblem::Damaged)
         ));
       }
+      // Not migrated yet is the app's to do, not a store to reset (the extension's refusal, #1198).
+      assert!(matches!(
+        open_error(CoreError::Store(StoreError::LayoutBehind {
+          found: 1,
+          supported: 5,
+        })),
+        OpenError::Failed(TeamCraftError::Storage(_))
+      ));
       // Busy or out of space: the data may be fine, so it stays a failure to try again.
       assert!(matches!(
         open_error(CoreError::Store(StoreError::Database(

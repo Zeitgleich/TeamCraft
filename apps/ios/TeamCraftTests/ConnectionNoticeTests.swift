@@ -90,6 +90,15 @@ final class ConnectionNoticeTests: XCTestCase {
     XCTAssertTrue(PushUpkeepSchedule.mayAttempt(lastAttemptAt: start, now: start.addingTimeInterval(600)))
   }
 
+  func testSyncingLineFollowsTheScopesCatchUpAndTheConnection() {
+    XCTAssertTrue(ConnectionNotice.isSyncing(isOnline: true, isCatchingUp: true, connection: .connected))
+    XCTAssertTrue(ConnectionNotice.isSyncing(isOnline: true, isCatchingUp: false, connection: .connecting))
+    XCTAssertFalse(ConnectionNotice.isSyncing(isOnline: true, isCatchingUp: false, connection: .connected))
+    XCTAssertFalse(ConnectionNotice.isSyncing(isOnline: true, isCatchingUp: false, connection: nil))
+    // Offline the banner speaks; a line would promise messages that can't come.
+    XCTAssertFalse(ConnectionNotice.isSyncing(isOnline: false, isCatchingUp: true, connection: .connecting))
+  }
+
   private func notice(
     isOnline: Bool, _ connection: ConnectionState?, _ grace: ConnectionGrace, at seconds: TimeInterval
   ) -> ConnectionNotice? {

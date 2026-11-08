@@ -239,7 +239,7 @@ a provider admin, on somebody with no account noted yet. It can put that admin's
 somebody this device never pinned, with a role the admin holds anyway. And it can list that admin's token, naming the
 victim's real user ID and key, under somebody on the roster with the same role, which notes the wrong account for them: their
 real tokens then read as contradictory, which the owners see, and that admin's later token without the role can remove
-them. The window closes for each person only with their first token that counts, and iOS publishes no tokens yet (below), so somebody who only uses an iPhone stays exposed until they use desktop, web or Android. Somebody already on the roster when this arrived has
+them. The window closes for each person only with their first token that counts. Somebody already on the roster when this arrived has
 no noted account until then, and until then no token takes their role away.
 
 **Who sets what the tokens mean.** The signed policy has a `role_signing` group: the mode, the role names, and the
@@ -365,12 +365,10 @@ doesn't know. They don't understand the marks and can't act on them, and an olde
 which the clients keep through it. Nobody needs to update at the same moment and nothing splits. The new gateway event is unknown to
 older apps, which ignore it.
 
-**Mobile.** The logic is in the shared core and runs on the phones' upkeep too. The Android app hands over its ID token
-(`TeamCraft::note_id_token`, and `take_id_token_request` for a new one), so it publishes evidence and signs like desktop and web.
-The iOS app doesn't yet: without a token it publishes no evidence and signs no roster change automatically (`ProviderTokens` is `None`)
-and keeps re-signing for freshness as before, so an iOS-only admin is in force once their account has been open somewhere else. Channel
+**Mobile.** The logic is in the shared core and runs on the phones' upkeep too. The Android and iOS apps hand over their ID token
+(`TeamCraft::note_id_token`, and `take_id_token_request` for a new one), so they publish evidence and sign like desktop and web. Channel
 role logs need no token: its upkeep founds them like every other app's (§4.6.1, "Founding at first sight"). The notification extension
-leaves upkeep to the app, and founding only reads the MLS group, it doesn't change it.
+leaves upkeep to the app, so it neither gets an ID token nor asks for one, and founding only reads the MLS group, it doesn't change it.
 
 ### 3.1.2 Tokens bound to a device: DPoP (issue #120)
 
@@ -3202,7 +3200,8 @@ from the join on once they are a guest, and gets the import's keys if the import
 ### 4.11 A channel's shared notes (issue #1221)
 
 A channel of a space has one page of notes (the "Notes" tab of its header: headings, paragraphs,
-bulleted and numbered lists, checklists) that its members edit together. It is end-to-end
+quotes, code blocks, bulleted and numbered lists, checklists, with bold, italic, struck-through and
+inline code text and links) that its members edit together. It is end-to-end
 encrypted like the channel's messages, and the server learns nothing it doesn't learn from a
 message: every change of the page *is* a message.
 
@@ -3213,6 +3212,35 @@ on every device, in any order and any number of times: concurrent typing in one 
 character by character, concurrent changes of a block's kind or check mark end with the same one
 winning everywhere, a block deleted on one device while another typed into it stays deleted.
 Offline edits are updates like any other and merge when they arrive.
+
+**Schema (issue #1456).** The root is `blocks`, a Y.Array of Y.Map. Block keys: `id` (string),
+`kind` (string: `paragraph`, `heading`, `heading2`, `heading3`, `bullet`, `numbered`, `check`,
+`quote`, `code`), `checked` (bool), `text` (Y.Text). Inline formatting is the Y.Text's own
+formatting: `bold`, `italic`, `strike`, `code` (`true`) and `link` (the address as a string), the
+names Quill and y-prosemirror use. A link is shown only when its address is a web address
+(`http://` or `https://`); whatever another member's client stored, no other scheme becomes a link.
+Formatting is ordinary Yjs content: concurrent formatting and typing merge like any other edit, and
+everything in this section about encryption, snapshots and history holds for it unchanged; the
+server still sees only encrypted messages of the same kind.
+
+The schema grows without breaking clients that don't know the new parts:
+
+- A kind a client doesn't know reads as a paragraph and its text stays; a formatting attribute it
+  doesn't know is left where it is and the text reads as plain.
+- A client that predates inline formatting reads a block's text without it. Its edits are text
+  insertions and removals, which leave the formatting of the text around them in place, so it
+  can't damage what it doesn't show. It sees a quote or code block as a paragraph: typing into one
+  whose text starts with a list or heading prefix (`# `, `- `, …) turns it into that kind on such a
+  client, as for any paragraph there, and its Enter and Backspace move text without the formatting.
+  The text itself stays, and the version history has the block as it was.
+- A later version must keep every block's Y.Text a sequence of characters: no embeds. All clients
+  address a block's text by its characters, and an embed would shift those offsets on clients that
+  don't know it. An inline object (a mention, a file reference) is text carrying an attribute.
+
+**Undo and redo** are per editor: yrs's `UndoManager` over the blocks, tracking only this editor's own
+transactions (updates from others are applied under an origin it ignores). An undo is an ordinary
+update that goes out like any edit, so other members' typing meanwhile stays and the history lists it.
+The stack lives as long as the open page.
 
 Three approaches were weighed. Their cost on the web is the code the browser downloads: a release
 `wasm32-unknown-unknown` build of a probe that creates, edits, encodes and merges a document
@@ -3669,12 +3697,24 @@ restored together with them on a new device.
   key bag is stored, uploads still pending, and which wraps exist (passphrase, passkey,
   organization). The server learns nothing new. When the recovery kit was last made is kept the
   same way (`recovery_key_set_at`, §6.5).
-- **User settings** (issue #945): theme, language, layout, notification words and the like, under
+- **User settings** (issue #945): language, layout, notification words and the like, under
   `settings`, one entry per setting: `{ value, version, writer }`, with the value opaque JSON to
   everything but the client that reads that key. The server sees neither names nor values. What is
-  synced and what stays on the device is listed in `teamcraft-ui/src/settings_sync.rs`; settings
-  the server enforces (push, do not disturb, mutes, read receipts) stay with the server and aren't
-  copied here.
+  synced and what stays on the device is listed in `teamcraft-ui/src/settings_sync.rs` (web and
+  desktop) and `teamcraft-client-api/src/mobile_settings.rs` (Android and iOS, the same keys and
+  values); settings the server enforces (push, do not disturb, conversation and space mutes, read
+  receipts) stay with the server and aren't copied here. Light, dark or as the system stays on
+  each device, since it follows the room and the screen; colour themes (#202) are meant to sync.
+  An entry an older client wrote for a key no client reads any more (`theme`) stays as an unknown
+  key.
+  - *Mobile:* the apps sync the list layout and grouping, animated images, sharing typing, the
+    mention rules (first name, `@channel`, keywords, the `@channel` confirmation) and call status
+    sounds. The send key, language, wallpaper colours, notification content, media downloads and
+    devices stay on the phone. The app hands its values to the core (`sync_settings`) at start,
+    when `settings_mark` moved after a store change, and 1.5 s after the user changed one, and
+    stores an opaque state (owner and per-setting bases) next to its settings. A phone holds one
+    account at a time, so with no owner on record its values count as this account's and are
+    offered, except keywords, which stay device-only as on web.
   - *Merge:* per setting the higher `version` wins, then the higher `writer` (the device ID). A
     change takes the version after the one its device holds. No clock is involved, unlike the rest
     of the account data, so a wrong device clock can't decide. The order is total, so every device
@@ -4031,8 +4071,10 @@ Details:
 - Wake-up kinds: `message`, `mention`, `call`, `dismiss` (a notification was read on another device, or
   a ring ended: remove it; silent, APNs background push / FCM normal priority, never to Web Push),
   `scheduled_seal` (above), `sync` (catch up in the background, silent, names nothing; above) and `test`
-  (diagnostics). Besides conversation, message, sender, thread and call IDs the sealed wake-up
-  carries the badge count and the send time; all of it is inside the ciphertext. What push services
+  (diagnostics), and `meeting_reminder` and `meeting_start` (a planned meeting's time, docs/meetings.md
+  "Starting"; alerts like a message, and a gateway is told `message`). Besides conversation, message,
+  sender, thread, call and meeting IDs the sealed wake-up carries the badge count, the send time and
+  a meeting's start; all of it is inside the ciphertext. What push services
   and a gateway additionally learn is the push type and priority: that a push was a silent withdrawal
   rather than an alert.
 - iOS calls go as mutable alerts on the app's topic, never as VoIP pushes: those need the separate
@@ -4718,12 +4760,23 @@ model or time). The recorder writes a seekable MP4 to a file, so a video is plai
 recorded and is sealed as soon as the recording ends, the plain file then deleted (a delete, not a
 wipe of the flash). The review, the editors and the thumbnails read the plaintext through the
 sealed file (photos decrypted in memory; videos through a decrypting Media3 `DataSource` for
-ExoPlayer and a `MediaDataSource` for the frame and length reads). Transformer and the upload read
-plain files only, so sending or saving a camera video opens it into a plain copy beside it for that
-long (`open-*`, the sent copy is plain like every file to send in `outgoing/<account>`); copies and
-unfinished seals a kill left go at the next start once they are an hour old. Opening a draft seals
-camera files of older versions (or of a recording a kill interrupted) and deletes what the draft
-doesn't name, such as a recording a kill cut off. Pictures are drawn again
+ExoPlayer and a `MediaDataSource` for the frame and length reads). Trimming, muting and scaling a
+camera video go through Transformer without a plain file (#1403): it reads the sealed file through
+that `DataSource`, and the one read Media3 does with a source of its own (the trim optimization's
+sample table) through a `content:` URI of a non-exported provider that decrypts as it is read, a
+descriptor from the platform's proxy file system (`StorageManager.openProxyFileDescriptor`) under a
+random token that exists for the length of the export; if that read fails, Transformer re-encodes
+the whole video instead. The output, for every video the flow edits or packs again, is sealed while
+it is muxed (`SealedMedia.SeekableWriter`, version 2 of the format: a muxer goes back to patch sizes,
+so a segment can be sealed more than once, and each carries a random nonce, its index and last flag
+in the associated data; only the segment being worked on is plaintext, in memory). What leaves that
+is what was always plain: the copy to send, decrypted straight into `outgoing/<account>` like every
+file to send, or the one the user saves to the gallery. An unedited camera video is decrypted
+straight into `outgoing/<account>` the same way. The decoders' and encoders' buffers hold frames in
+memory as they would for any video. Unfinished seals and exports a kill left (the exports sealed, in
+the cache) go at the next start once they are an hour old. Opening a draft seals camera files of
+older versions (or of a recording a kill interrupted) and deletes what the draft doesn't name, such
+as a recording a kill cut off. Pictures are drawn again
 before they are sent, without their metadata; videos are packed again (no re-encoding unless
 edited) with only their orientation, so no location or camera details go along. A video the device
 can't pack again, unedited, goes as it is, as a file sent from the file picker does.
@@ -4785,7 +4838,11 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   changed; the hash check is the same for every source, and a mismatch is fetched once more from the
   network before the update is dropped. Precompressed responses (`.br`/`.gz` next to the files) arrive
   decoded, so the hashes are those of the files as built; the variants are not part of the manifest.
-  The app is served from that cache, never from the network.
+  The app is served from that cache, never from the network. `/api/` is left alone, with one
+  exception: the brand's colors (`/api/v1/brand/theme.css`, docs/branding.md), which the page waits
+  for before its first paint, answer from the copy of the last start while the fresh one is
+  fetched for the next (#1465). They are colors of the same origin, outside the signed release
+  as they always were.
 - **Parts loaded when first used.** The app is split into wasm chunks that load when their part of
   the app first opens (#334). `release.json` lists them in `lazy` (the wasm files `index.html` and
   `sw.js` don't name, including the signed-in app's, and the UI's texts, one file per language of
@@ -4795,10 +4852,16 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   loaded (so guests never download the signed-in app), checks it against the signed hash in the
   version's verified file list and only then stores and serves it. Files only some people use are
   also listed in `on_demand` (the background effects' segmentation worker and model and the photo
-  backgrounds' full pictures, #439): the
+  backgrounds' full pictures, #439; and the files in the signed-in app's pack, below): the
   worker skips them in the background fetch. A server that edits `lazy` or `on_demand` only
   changes when a file is downloaded, never what runs. A chunk that doesn't match its hash isn't
-  served, and the pages warn as for a release that doesn't verify. A page of a release whose chunks
+  served, and the pages warn as for a release that doesn't verify.
+- **The signed-in app's pack (#1465).** The chunks the signed-in app needs at once are also joined
+  into one file of the release (`teamcraft-ui-session-<id>.pack`, in `lazy`), so a start fetches one
+  file instead of 866. It is a file like the others: listed in the signed manifest with its SHA-256,
+  and checked by the worker before it is stored or served. The chunk loader only cuts the pack at
+  the offsets of the release's own loader script, which is signed too; a chunk taken from it is
+  the same bytes as the file of that name, and a page whose pack doesn't arrive fetches the files. A page of a release whose chunks
   the server no longer has (a deploy since it loaded, before the background fetch) gets an error
   for that part of the app with a retry and a reload, which brings the new release.
 - **Failed updates.** An update that does not verify is dropped: the previous verified version keeps
@@ -4881,12 +4944,16 @@ So exactly one core owns a device's store at a time:
   cross-process lock and never advances the account's state: it opens a push with
   `notification_probe_for_push`, which shows what the store and the one fetched message give and,
   when that isn't enough, catches the conversation up on an overlay of the store in memory through a
-  read-only API, both thrown away afterwards (§7.2). It never saves MLS state. It writes its push bookkeeping
-  (received pushes, what it showed) and, on its first open after an update, the store's layout
-  migrations. Opening the client on the way (`Client::open`) can also write, when there is something
-  to write: the upload limit if it changed, catch-up marks a closed app left behind (dropped), removal
-  records and account data it finds new. It doesn't move the MLS record of a version before 1.0.9
-  (that takes several times the state in memory, and would keep the app out of the store): it doesn't
+  read-only API, both thrown away afterwards (§7.2). It never saves MLS state. It writes only its push
+  bookkeeping (received pushes, what it showed). Everything else that comes with opening a store is
+  the app's: the extension runs no step of the store's layout (the wipe's `VACUUM` would take memory
+  and time it doesn't have, and keep the app out of the store while it starts) and no upkeep, and
+  opening the client writes nothing either, not the upload limit, the catch-up marks (the app may be
+  catching up next to it), removal records or account data. A store that needs a layout step doesn't
+  open in the extension: found on a read-only connection, it shows a generic notification and stays
+  as it was for the app's next start (#1198). Marker steps change no table, so a store with only those
+  ahead still reads; the extension doesn't set them. Likewise it doesn't move the MLS record of a
+  version before 1.0.9 (that takes several times the state in memory, and would keep the app out of the store): it doesn't
   open then, shows a generic notification, and leaves the move to the app. Until 1.0.9 its core did
   catch a conversation up when the app wasn't syncing, writing MLS state next to the app's copy
   (issue #424 review). Should another process save MLS state anyway, the app's next MLS save sees it

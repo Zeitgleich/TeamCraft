@@ -4,8 +4,8 @@
 use teamcraft_db::{Conversation, StoredSpaceNotifications, StoredUserSettings};
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationNotificationSettings, DndSchedule, GatewayEvent,
-  MINUTES_PER_DAY, MessageId, NotificationLevel, NotificationSettings, PushMode, ReadReceipt,
-  ReadReceiptsResponse, SpaceId, SpaceNotificationSettings, UserId,
+  MAX_MEETING_REMINDER_MINUTES, MINUTES_PER_DAY, MessageId, NotificationLevel, NotificationSettings,
+  PushMode, ReadReceipt, ReadReceiptsResponse, SpaceId, SpaceNotificationSettings, UserId,
 };
 use time::OffsetDateTime;
 
@@ -47,6 +47,14 @@ pub async fn put_settings(
   if matches!(request.maybe_level, Some(NotificationLevel::Unknown(_))) {
     return Err(ApiError::InvalidRequest("unknown notification level".into()));
   }
+  if request
+    .maybe_meeting_reminder_minutes
+    .is_some_and(|minutes| minutes > MAX_MEETING_REMINDER_MINUTES)
+  {
+    return Err(ApiError::InvalidRequest(format!(
+      "a meeting reminder is at most {MAX_MEETING_REMINDER_MINUTES} minutes ahead"
+    )));
+  }
   let maybe_dnd_schedule = request
     .maybe_dnd_schedule
     .as_ref()
@@ -67,6 +75,15 @@ pub async fn put_settings(
       .or(previous.maybe_uses_desktop_attention),
     // Clients that don't know the level leave it out; that keeps the user's choice.
     maybe_level: request.maybe_level.or(previous.maybe_level),
+    maybe_meeting_reminder_minutes: request
+      .maybe_meeting_reminder_minutes
+      .map(i16::try_from)
+      .transpose()
+      .map_err(|_| ApiError::InvalidRequest("meeting reminder out of range".into()))?
+      .or(previous.maybe_meeting_reminder_minutes),
+    maybe_notifies_meeting_start: request
+      .maybe_notifies_meeting_start
+      .or(previous.maybe_notifies_meeting_start),
   };
   state
     .database
@@ -325,6 +342,10 @@ fn settings_response(
     maybe_uses_desktop_attention: Some(uses_desktop_attention(state, stored.maybe_uses_desktop_attention)),
     maybe_level: stored.maybe_level.clone(),
     maybe_default_level: Some(state.settings.get().notifications.default_level.clone()),
+    maybe_meeting_reminder_minutes: stored
+      .maybe_meeting_reminder_minutes
+      .and_then(|minutes| u16::try_from(minutes).ok()),
+    maybe_notifies_meeting_start: stored.maybe_notifies_meeting_start,
   })
 }
 
