@@ -287,9 +287,10 @@ alerting.
   normal priority (Doze delivers it in its next maintenance window, never wakes a dozing phone for it),
   APNs background push (iOS may defer or drop it), the TTL of a withdrawal. Through a push gateway only
   if its `/v1/info` lists the kind (push-gateway.md, "The contract").
-- **On the device.** The app runs its sync loop until the connection is up and caught up, at most a few
-  minutes (Android: WorkManager, needs a network; iOS: the background push's time), then stops it
-  unless the app is open (`TeamCraft::catch_up_in_background`). It shows nothing.
+- **On the device.** The app runs its sync loop until the connection is up and caught up, the
+  backlog of a busy conversation included (#1448), at most a few minutes (Android: WorkManager, needs
+  a network; iOS: the background push's time), then stops it unless the app is open
+  (`TeamCraft::catch_up_in_background`). It shows nothing.
 - **Cost.** At most 12 wake-ups an hour per user while messages arrive and the phone is idle, each a
   catch-up of what came since the last (a few conversations, round trips in parallel). The visible
   push for the same message is unchanged.

@@ -202,6 +202,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       client.drop_pending_work(conversation)?;
       client.store.delete_messages(conversation)?;
       client.forget_older_history(conversation)?;
+      super::messaging::forget_newest_controls(&client.store, conversation)?;
       crate::unseen_reactions::forget(&client.store, conversation)?;
       crate::integration_sources::forget_conversation(&client.store, conversation)?;
       let id = conversation.to_string();
