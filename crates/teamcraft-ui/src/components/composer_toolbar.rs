@@ -111,7 +111,7 @@ pub fn FormatToolbarPanel(active: Signal<ActiveFormats>, on_action: Callback<For
       role="toolbar"
       aria-label=move || i18n.t("composer-format")
       node_ref=toolbar
-      on:keydown=move |ev| move_focus(&ev, toolbar)
+      on:keydown=move |ev| move_toolbar_focus(&ev, toolbar)
     >
       {button(FormatAction::Inline(InlineStyle::Bold), Glyph::Text("B", "glyph-bold"))}
       {button(FormatAction::Inline(InlineStyle::Italic), Glyph::Text("I", "glyph-italic"))}
@@ -293,7 +293,7 @@ fn inline_index(style: InlineStyle) -> usize {
   }
 }
 
-fn shortcut_for(action: FormatAction) -> Option<Shortcut> {
+pub fn shortcut_for(action: FormatAction) -> Option<Shortcut> {
   FORMAT_SHORTCUTS
     .iter()
     .find(|(candidate, _)| *candidate == action)
@@ -376,7 +376,7 @@ fn style_class(format: BlockFormat) -> &'static str {
 }
 
 /// ← and → (Home, End) move between the toolbar's buttons, so Tab passes the toolbar in one step.
-fn move_focus(ev: &web_sys::KeyboardEvent, toolbar: NodeRef<html::Div>) {
+pub fn move_toolbar_focus(ev: &web_sys::KeyboardEvent, toolbar: NodeRef<html::Div>) {
   let step: i32 = match ev.key().as_str() {
     "ArrowRight" => 1,
     "ArrowLeft" => -1,

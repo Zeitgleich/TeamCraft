@@ -19,14 +19,16 @@ channel-tab-notes = Notizen
 
 ## Gemeinsame Notizen eines Kanals (Tab „Notizen“)
 canvas-page-label = Gemeinsame Notizen
-canvas-toolbar = Absatzformat
+canvas-toolbar = Formatierung
 canvas-kind-paragraph = Text
-canvas-kind-heading = Überschrift
 canvas-kind-bullet = Aufzählung
 canvas-kind-numbered = Nummerierte Liste
 canvas-kind-check = Checkliste
+canvas-undo = Rückgängig
+canvas-redo = Wiederholen
+canvas-link-remove = Link entfernen
 canvas-check-label = Erledigt
-canvas-placeholder = Notizen für diesen Kanal. Beginne eine Zeile mit # für eine Überschrift, - für eine Liste oder [] für eine Checkliste.
+canvas-placeholder = Notizen für diesen Kanal. Beginne eine Zeile mit # für eine Überschrift, - für eine Liste, [] für eine Checkliste oder > für ein Zitat.
 canvas-encrypted = Alle im Kanal sehen und bearbeiten diese Notizen; sie sind Ende-zu-Ende-verschlüsselt wie seine Nachrichten.
 canvas-read-only = Du kannst sie lesen; ändern können sie nur Mitglieder, die hier schreiben dürfen.
 canvas-loading-history = Frühere Änderungen werden geladen …
