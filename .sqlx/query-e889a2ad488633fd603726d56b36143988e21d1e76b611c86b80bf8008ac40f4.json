@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO storage_cleanup (s3_key, multipart_upload_id) VALUES ($1, $2)\n       ON CONFLICT (s3_key) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e889a2ad488633fd603726d56b36143988e21d1e76b611c86b80bf8008ac40f4"
+}

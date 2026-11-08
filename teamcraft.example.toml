@@ -42,6 +42,9 @@ readiness_timeout_ms = 2000
 # An API request that makes no progress this long (no answer, no new piece of its body) gets 503 and
 # Retry-After instead of hanging on a database connection that stopped answering. 0: no deadline.
 request_deadline_secs = 60
+# How often the object storage is asked whether it answers, in seconds (0: never). Clients move the
+# bytes with presigned URLs, so without this the server may not notice an outage or its end.
+storage_probe_secs = 10
 
 [oidc]
 # Required. Issuer of the OIDC provider (reference setup: a Keycloak realm). Must equal the `iss`

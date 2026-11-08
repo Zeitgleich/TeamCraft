@@ -48,6 +48,7 @@ mod share_link;
 mod snowflake;
 mod space;
 mod status;
+mod storage_cleanup;
 mod sync_heads;
 mod system_event;
 #[cfg(feature = "integration")]
@@ -129,6 +130,7 @@ pub use space::{
   NewSpace, NewSpaceMember, Space, SpaceChanges, SpaceListing, SpaceMember, SpaceView, StoredSpaceImage,
 };
 pub use status::StoredStatus;
+pub use storage_cleanup::StorageCleanup;
 pub use sync_heads::ConversationHeadRow;
 pub use system_event::{NewSystemEvent, StoredSystemEvent};
 pub use thread::{ConversationUnreadRow, FollowedThread, ThreadActivity, ThreadQuery, ThreadUnreadTotals};
