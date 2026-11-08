@@ -46,6 +46,7 @@ struct ConversationListView: View {
   @State private var dmFilter = ""
   /// A mute from the long-press menu the server didn't take (#903).
   @State private var isMuteFailed = false
+  @State private var maybeFilters: ConversationFiltersTarget?
   /// An entry-menu action the core or server refused (#1105, #322).
   @State private var maybeActionFailure: AppFailure?
   @State private var suspectDeletions: UInt32 = 0
@@ -78,6 +79,7 @@ struct ConversationListView: View {
         .navigationTitle(maybeHeaderSpace.map { Text($0.name) } ?? Text("chats_title"))
         .navigationBarTitleDisplayMode(maybeHeaderSpace == nil ? .automatic : .inline)
         .alert("dnd_save_failed", isPresented: $isMuteFailed) {}
+        .sheet(item: $maybeFilters) { ConversationFiltersView(conversationId: $0.id) }
         .alert("deletions_suspect \(suspectDeletions)", isPresented: isSuspectDeletionsShown) {}
         .task(id: shownSections.count) {
           let count = await model.takeSuspectDeletions()
@@ -329,6 +331,7 @@ struct ConversationListView: View {
                   readButton(for: conversation)
                   muteMenu(for: conversation)
                   levelMenu(for: conversation)
+                  Button("notify_filters_title", systemImage: "bell.badge") { maybeFilters = ConversationFiltersTarget(id: conversation.id) }
                   favoriteButton(for: conversation)
                   copyLinkButton(for: conversation)
                   leaveButton(for: conversation)

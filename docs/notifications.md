@@ -173,9 +173,9 @@ phones.
 **Where it is decided.** The push routing (`push::routing`) checks quiet hours right after the mute
 and evaluates them with its time zone database, so daylight saving time needs no client. The desktop
 and web notifier (`notifier::decide`) checks them again with the device's current offset, like the
-DND schedule, and applies `channel_mentions` to its own mention rules. Android shows what the push
+DND schedule, and applies `channel_mentions` to its own mention rules. Android and iOS show what the push
 routing let through. Changes reach the user's other devices like level and mute: the server holds
-them, desktop and web read them at start, Android with the dialog.
+them, desktop and web read them at start, Android and iOS with the dialog or sheet.
 
 ## E-mail digest of missed mentions
 
