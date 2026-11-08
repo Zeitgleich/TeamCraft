@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_client_api::message_sound::{MessageSound, OwnSoundLimits};
-use teamcraft_proto::{DndWindow, Weekday};
+use teamcraft_proto::{ChannelMentions, DndWindow, Weekday};
 
 use crate::attention::DEFAULT_ATTENTION_INPUT_SECS;
 use crate::model::UserId;
@@ -140,6 +140,25 @@ impl Default for ConversationNotify {
   }
 }
 
+/// A conversation's notification filters (notifications.md, "Per-conversation filters"). Kept apart
+/// from [`ConversationNotify`]: level and mute time can follow the space, these are always the
+/// conversation's own.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConversationFilters {
+  /// Whether `@channel`, `@here` and `@all` notify here.
+  pub channel_mentions: ChannelMentions,
+  /// Quiet hours in this device's time, during which the conversation acts muted; empty: none.
+  pub quiet_windows: Vec<DndWindow>,
+}
+
+impl ConversationFilters {
+  /// Whether the quiet hours silence the conversation at `unix_seconds`, given the UTC offset then.
+  pub fn is_quiet_at(&self, unix_seconds: i64, offset_minutes: i16) -> bool {
+    teamcraft_proto::windows_active_at(&self.quiet_windows, unix_seconds, offset_minutes)
+  }
+}
+
 /// Monday first, as the schedule editor lists them.
 pub const EVERY_DAY: [Weekday; 7] = [
   Weekday::Monday,
@@ -220,6 +239,8 @@ pub struct NotificationPrefs {
   pub maybe_dnd_until: Option<crate::model::TimestampMs>,
   /// Per conversation, keyed by the conversation ID as text.
   pub conversations: BTreeMap<String, ConversationNotify>,
+  /// Filters per conversation, keyed by the conversation ID as text; default ones are left out.
+  pub filters: BTreeMap<String, ConversationFilters>,
   /// Per space, keyed by the space ID as text. Its channels follow it unless they have an entry of
   /// their own; "mute space" is an entry with the level `Nothing` or a mute time.
   pub spaces: BTreeMap<String, ConversationNotify>,
@@ -267,6 +288,7 @@ impl Default for NotificationPrefs {
       dnd: DndSchedule::default(),
       maybe_dnd_until: None,
       conversations: BTreeMap::new(),
+      filters: BTreeMap::new(),
       spaces: BTreeMap::new(),
       plays_ringtone: true,
       shows_call_window: true,
@@ -312,6 +334,19 @@ impl NotificationPrefs {
       self.conversations.remove(id);
     } else {
       self.conversations.insert(id.to_owned(), value);
+    }
+  }
+
+  pub fn filters(&self, id: &str) -> ConversationFilters {
+    self.filters.get(id).cloned().unwrap_or_default()
+  }
+
+  /// Stores a conversation's filters; default ones are removed.
+  pub fn set_filters(&mut self, id: &str, value: ConversationFilters) {
+    if value == ConversationFilters::default() {
+      self.filters.remove(id);
+    } else {
+      self.filters.insert(id.to_owned(), value);
     }
   }
 

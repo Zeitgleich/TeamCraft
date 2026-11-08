@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT s.id, s.user_id, s.conversation_id, s.client_message_id, s.sender_device_id, s.thread_id,\n                s.mentioned_user_ids, s.is_urgent, s.content_key_id, s.ciphertext, s.mls_epoch, s.due_at,\n                s.version, s.hold_reason, s.held_at, COALESCE(h.epoch, 0) = s.mls_epoch AS \"is_epoch_current!\"\n         FROM scheduled_messages s\n         LEFT JOIN mls_epoch_heads h ON h.conversation_id = s.conversation_id\n         WHERE s.user_id = $1\n         ORDER BY s.due_at, s.id",
+  "query": "WITH claimed AS (\n           UPDATE scheduled_messages s\n           SET claimed_until = $1 + make_interval(secs => $2)\n           WHERE s.id IN (\n             SELECT id FROM scheduled_messages\n             WHERE hold_reason IS NULL AND due_at <= $1 AND (claimed_until IS NULL OR claimed_until <= $1)\n             ORDER BY due_at\n             LIMIT $3\n             FOR UPDATE SKIP LOCKED)\n           RETURNING s.*)\n         SELECT c.id, c.user_id, c.conversation_id, c.client_message_id, c.sender_device_id, c.thread_id,\n                c.mentioned_user_ids, c.is_urgent, c.is_channel_mention, c.content_key_id, c.ciphertext, c.mls_epoch, c.due_at,\n                c.version, c.hold_reason, c.held_at, COALESCE(h.epoch, 0) = c.mls_epoch AS \"is_epoch_current!\"\n         FROM claimed c\n         LEFT JOIN mls_epoch_heads h ON h.conversation_id = c.conversation_id\n         ORDER BY c.due_at, c.id",
   "describe": {
     "columns": [
       {
@@ -93,6 +93,17 @@
       },
       {
         "ordinal": 8,
+        "name": "is_channel_mention",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "scheduled_messages",
+            "name": "is_channel_mention"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
         "name": "content_key_id",
         "type_info": "Bytea",
         "origin": {
@@ -103,7 +114,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "ciphertext",
         "type_info": "Bytea",
         "origin": {
@@ -114,7 +125,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "mls_epoch",
         "type_info": "Int8",
         "origin": {
@@ -125,7 +136,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "due_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -136,7 +147,7 @@
         }
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
         "name": "version",
         "type_info": "Int8",
         "origin": {
@@ -147,7 +158,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "hold_reason",
         "type_info": "Text",
         "origin": {
@@ -158,7 +169,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "held_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -169,7 +180,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 16,
         "name": "is_epoch_current!",
         "type_info": "Bool",
         "origin": "Expression"
@@ -177,6 +188,8 @@
     ],
     "parameters": {
       "Left": [
+        "Timestamptz",
+        "Float8",
         "Int8"
       ]
     },
@@ -194,10 +207,11 @@
       false,
       false,
       false,
+      false,
       true,
       true,
       null
     ]
   },
-  "hash": "b51713a7d04479a22524616db0f230356a1fcbb1ba42fddce3db5fee683316f6"
+  "hash": "1a10a73dd7553f784a0b2792455cc99cdaff7ffceb3f4065263c9b78241080f3"
 }

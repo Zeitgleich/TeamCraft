@@ -308,7 +308,7 @@ fn ConversationItems(
   let delete_pending = PendingAction::new();
   view! {
     {move || match page.get() {
-      MenuPage::Notifications => view! { <NotificationsPage target=target page=page /> }.into_any(),
+      MenuPage::Notifications => view! { <NotificationsPage target=target page=page close=close /> }.into_any(),
       MenuPage::ConfirmLeave => view! {
         <p class="menu-confirm" id=format!("entry-menu-confirm-{conversation}")>
           {move || i18n.t_with("entry-menu-leave-last-member-confirm", &[("name", &name())])}
@@ -466,7 +466,7 @@ fn SpaceItems(space: SpaceId, page: RwSignal<MenuPage>, close: Callback<()>) -> 
   let hint_id = format!("entry-menu-leave-space-{space}");
   view! {
     {move || match page.get() {
-      MenuPage::Notifications => view! { <NotificationsPage target=target page=page /> }.into_any(),
+      MenuPage::Notifications => view! { <NotificationsPage target=target page=page close=close /> }.into_any(),
       MenuPage::ConfirmDelete => view! {
         <p class="menu-confirm" id=format!("entry-menu-confirm-{space}")>
           {move || i18n.t_with("entry-menu-delete-space-confirm", &[("name", &name()), ("count", &channel_count().to_string())])}
@@ -631,14 +631,14 @@ fn NotifyItems(target: NotifyTarget, page: RwSignal<MenuPage>, close: Callback<(
 
 /// The notification level and mute time, with the way back to the actions.
 #[component]
-fn NotificationsPage(target: NotifyTarget, page: RwSignal<MenuPage>) -> impl IntoView {
+fn NotificationsPage(target: NotifyTarget, page: RwSignal<MenuPage>, close: Callback<()>) -> impl IntoView {
   let i18n = use_i18n();
   view! {
     <button type="button" class="menu-item menu-back" role="menuitem" on:click=move |_| page.set(MenuPage::Actions)>
       <Icon name=IconName::ChevronLeft />
       <span class="menu-label">{move || i18n.t("back")}</span>
     </button>
-    <NotifyChoices target=target />
+    <NotifyChoices target=target on_close=close />
   }
 }
 

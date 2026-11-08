@@ -3,9 +3,9 @@ use utoipa::ToSchema;
 
 use crate::wire_enum::wire_enum;
 use crate::{
-  CategoryId, ChannelModeration, ChannelRole, ConversationId, ConversationKind, ConversationVisibility,
-  DeletedConversationSignature, HistoryPolicy, IdempotencyKey, MessageId, Permission, SpaceId, SpaceImage,
-  UnixMillis, UserId, UserSummary,
+  CategoryId, ChannelMentions, ChannelModeration, ChannelRole, ConversationId, ConversationKind,
+  ConversationVisibility, DeletedConversationSignature, HistoryPolicy, IdempotencyKey, MessageId, Permission,
+  QuietHours, SpaceId, SpaceImage, UnixMillis, UserId, UserSummary,
 };
 
 wire_enum! {
@@ -35,6 +35,12 @@ pub struct MyMembership {
   /// Level and mute time follow the space's setting (the member never chose their own).
   #[serde(default)]
   pub is_notification_inherited: bool,
+  /// Whether `@channel` counts as a mention here (notifications.md, "Per-conversation filters").
+  #[serde(default, skip_serializing_if = "ChannelMentions::is_default")]
+  pub channel_mentions: ChannelMentions,
+  /// When the conversation stays quiet as if muted.
+  #[serde(rename = "quiet_hours", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_quiet_hours: Option<QuietHours>,
   /// The reactions to the member's own messages they saw (notifications.md, "Reactions to my
   /// messages"). Missing from older servers: nothing seen.
   #[serde(default, skip_serializing_if = "ReactionsSeen::is_empty")]

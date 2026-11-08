@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.notifications
 
+import de.zeitgleich.teamcraft.core.QuietHours
 import java.time.Duration
 import java.time.Instant
 import java.time.LocalTime
@@ -110,6 +111,40 @@ data class DndEditor(
       )
     }
   }
+}
+
+/** A conversation's quiet hours as the dialog edits them (notifications.md, "Per-conversation filters"). */
+data class QuietHoursEditor(val ranges: List<DndRange> = emptyList()) {
+  val canAddRange: Boolean get() = ranges.size < DndEditor.MAX_WINDOWS
+  val isValid: Boolean get() = ranges.size <= DndEditor.MAX_WINDOWS && ranges.all { it.isValid }
+
+  /** What to save, in the device's zone and its offset at `now`; no ranges removes the quiet hours. */
+  fun toQuietHours(zone: ZoneId, now: Instant): QuietHours = QuietHours(
+    utcOffsetMinutes = zone.rules.getOffset(now).totalSeconds / SECONDS_PER_MINUTE,
+    maybeTimeZone = zone.id,
+    windows = ranges.map { it.toWindow() },
+  )
+
+  companion object {
+    private const val SECONDS_PER_MINUTE = 60
+
+    fun from(maybeQuietHours: QuietHours?): QuietHoursEditor =
+      QuietHoursEditor(maybeQuietHours?.windows.orEmpty().map(DndRange::fromWindow))
+  }
+}
+
+/** Whether `@channel` and `@here` notify in one conversation: the wire values. */
+object ChannelMentions {
+  const val DEFAULT = "default"
+  const val NOTIFY = "notify"
+  const val IGNORE = "ignore"
+  val KNOWN = listOf(DEFAULT, NOTIFY, IGNORE)
+
+  /** What a read value shows as: absent is the default; a value from a newer server shows as none of the three. */
+  fun shown(maybeValue: String?): String = maybeValue ?: DEFAULT
+
+  /** What to send back: a value this app doesn't know stays as the server has it (`null`). */
+  fun toSend(value: String): String? = value.takeIf { it in KNOWN }
 }
 
 /** When quick DND ends, computed in the device's zone so DST changes land on the wall clock. */

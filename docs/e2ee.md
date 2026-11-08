@@ -798,7 +798,9 @@ for months must keep fresh ones on the server:
 
 Plaintext metadata: conversation ID, sender user and device, timestamp, message ID (server Snowflake)
 and client message ID, thread ID, `content_key_id`, size, **list of mentioned user IDs** (needed for notifications, §7), the "urgent"
-flag. Reactions are encrypted messages, so not even reaction counts are visible.
+flag, and whether the text addresses the whole conversation (`is_channel_mention`: `@channel`,
+`@here` or `@all`, set by the sending device, for members who let those push them; notifications.md,
+"Per-conversation filters"). Reactions are encrypted messages, so not even reaction counts are visible.
 
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts, a
 channel's shared notes (§4.11).
@@ -4056,6 +4058,11 @@ Details:
   - *DND:* the weekly schedule, the allow list of people who break through, whether urgent messages
     do, and the IANA time zone (sent only while the schedule has ranges) are stored on the server, so
     that routing works with every device offline. The time zone says roughly where the user is.
+  - *Per-conversation filters:* per membership, whether `@channel` notifies (`default`, `notify`,
+    `ignore`) and quiet hours (weekly ranges with offset and IANA time zone), so routing honours them
+    with every device offline. Together with the `is_channel_mention` bit of a message the server
+    learns which messages address everybody; it could tell that from the mention list of a message
+    naming everybody before, but now also for messages naming nobody.
   - *Urgent breaks DND* (opt-in): with the option on, an urgent message reaches the user during DND, by
     default only in DMs and group DMs (`urgent_scope: direct`), so not everybody in a big channel can
     wake them; `everywhere` widens it. People on the allow list break through anyway.

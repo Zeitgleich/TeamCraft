@@ -162,6 +162,7 @@ pub const SERVER_PREFS: &[&str] = &[
   "notifications.maybe_meeting_reminder_minutes",
   "notifications.notifies_meeting_start",
   "notifications.conversations",
+  "notifications.filters",
   "notifications.spaces",
   "privacy.share_read_receipts",
 ];

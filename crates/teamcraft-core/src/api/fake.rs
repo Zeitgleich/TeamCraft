@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt;
 use teamcraft_proto::{
-  AddConversationMemberRequest, AddSpaceMemberRequest, Base64Bytes, ChannelModeration, ChannelRole,
-  ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationHead, ConversationId,
-  ConversationKind, ConversationMemberResponse, ConversationResponse, ConversationVisibility,
+  AddConversationMemberRequest, AddSpaceMemberRequest, Base64Bytes, ChannelMentions, ChannelModeration,
+  ChannelRole, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationHead,
+  ConversationId, ConversationKind, ConversationMemberResponse, ConversationResponse, ConversationVisibility,
   CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeviceActivity, DeviceId, DeviceResponse,
   ErrorCode, GatewayClientMessage, GatewayEvent, GatewayServerMessage, GetMeResponse, HistoryPolicy, Id,
   IdempotencyKey, IdentityKeyResponse, JoinPolicy, KeyBagResponse, KeyPackageStatusResponse,
@@ -2194,6 +2194,7 @@ fn sent_request(entry: &ScheduledMessageResponse) -> SendMessageRequest {
     maybe_thread_id: entry.maybe_thread_id,
     mentioned_user_ids: entry.mentioned_user_ids.clone(),
     is_urgent: entry.is_urgent,
+    is_channel_mention: entry.is_channel_mention,
   }
 }
 
@@ -4980,6 +4981,7 @@ impl ServerApi for FakeServerApi {
         ciphertext: request.sealed.ciphertext.clone(),
         mentioned_user_ids: request.sealed.mentioned_user_ids.clone(),
         is_urgent: request.sealed.is_urgent,
+        is_channel_mention: request.sealed.is_channel_mention,
         mls_epoch: request.sealed.mls_epoch,
         due_at: request.due_at,
         version: 1,
@@ -7101,6 +7103,8 @@ impl Conversation {
       maybe_last_read_message_id: self.read_positions.get(&me).copied(),
       maybe_muted_until: None,
       is_notification_inherited: false,
+      channel_mentions: ChannelMentions::Default,
+      maybe_quiet_hours: None,
       reactions_seen: self.reactions_seen.get(&me).cloned().unwrap_or_default(),
     });
     response
