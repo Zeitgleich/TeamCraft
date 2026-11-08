@@ -19,6 +19,12 @@ for argument in "$@"; do
     *) echo "unknown argument: ${argument}" >&2; exit 2 ;;
   esac
 done
+if [ "${PROFILE}" = "debug" ]; then
+  # Unoptimized, our crates' stack frames are huge: creating the keys overflowed a thread's stack
+  # on Android (#1504 on the web). opt-level 1 reuses the frames' slots; dependencies are
+  # optimized anyway ([profile.dev.package."*"]).
+  export CARGO_PROFILE_DEV_OPT_LEVEL=1
+fi
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 REPO_DIR="$(cd "${APP_DIR}/../.." && pwd)"

@@ -56,6 +56,12 @@ build() {
   export PATH="${ANDROID_NDK_HOME}/prebuilt/linux-x86_64/bin:${PATH}"
 
   cd "${REPO_DIR}"
+  if [ "${RUST_PROFILE}" = "dev" ]; then
+    # Unoptimized, our crates' stack frames are huge: creating the keys overflowed a thread's
+    # stack on a phone (as the web demo's did, #1504). opt-level 1 reuses the frames' slots;
+    # dependencies are optimized anyway ([profile.dev.package."*"]).
+    export CARGO_PROFILE_DEV_OPT_LEVEL=1
+  fi
   # Background effects' segmentation model, bundled as an asset (not in git; checksum-verified).
   crates/teamcraft-media/models/fetch.sh "${APP_DIR}/app/src/main/assets/models"
   abi_args=()
