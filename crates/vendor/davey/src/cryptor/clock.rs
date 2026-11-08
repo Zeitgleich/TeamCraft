@@ -1,6 +1,7 @@
 use std::time::Duration;
+// std::time::Instant panics on wasm32-unknown-unknown; web_time is std on native targets.
 #[cfg(not(test))]
-use std::time::Instant;
+use web_time::Instant;
 
 /// A monotonic clock shared between a decryptor and its cipher managers.
 /// In tests, time is frozen and only moves when advanced manually.

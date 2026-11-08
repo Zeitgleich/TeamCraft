@@ -1,4 +1,6 @@
-use std::{collections::HashMap, time::Instant};
+use std::collections::HashMap;
+// std::time::Instant panics on wasm32-unknown-unknown; web_time is std on native targets.
+use web_time::Instant;
 
 use tracing::{debug, warn};
 
