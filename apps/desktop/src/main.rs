@@ -281,6 +281,7 @@ fn main() -> anyhow::Result<()> {
       auth::commands::api_request,
       auth::commands::api_request_bytes,
       auth::commands::public_get,
+      auth::commands::crash_report_post,
       auth::commands::public_asset,
       auth::commands::avatar_download,
       auth::commands::avatar_upload,

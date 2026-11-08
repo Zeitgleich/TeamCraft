@@ -68,6 +68,8 @@ pub enum ToastAction {
     conversation: ConversationId,
     user: UserId,
   },
+  /// Opens the crash reports switch from the first-start notice (docs/crash-reports.md).
+  OpenCrashReportSettings,
 }
 
 impl ToastAction {
@@ -78,6 +80,7 @@ impl ToastAction {
       Self::OpenScreenSettings => "call-screen-settings-open",
       Self::UseAudioDevice => "call-audio-use",
       Self::RemoveFromMeeting { .. } => "meetings-remove-joined",
+      Self::OpenCrashReportSettings => "crash-reports-notice-settings",
     }
   }
 
@@ -1347,6 +1350,7 @@ impl AppState {
     match action {
       ToastAction::ChooseCamera => self.call.is_camera_menu_open.set(true),
       ToastAction::OpenScreenSettings => crate::external_links::open_screen_recording_settings(),
+      ToastAction::OpenCrashReportSettings => self.open_settings_at(SettingsTab::Security),
       ToastAction::RemoveFromMeeting { conversation, user } => {
         self.write(|backend| backend.remove_member(conversation, user));
       },
