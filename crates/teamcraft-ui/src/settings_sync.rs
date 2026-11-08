@@ -165,6 +165,7 @@ pub const SERVER_PREFS: &[&str] = &[
   "notifications.dnd",
   "notifications.maybe_dnd_until",
   "notifications.conversations",
+  "notifications.filters",
   "notifications.spaces",
   "privacy.share_read_receipts",
 ];
