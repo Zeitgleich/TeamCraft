@@ -10,6 +10,10 @@ use thiserror::Error;
 use url::{Host, Url};
 use utoipa::ToSchema;
 
+/// `POST`: the server relays one envelope to the instance's backend (docs/crash-reports.md).
+pub const CRASH_REPORTS_PATH: &str = "/api/v1/crash-reports";
+/// Largest envelope the relay takes, in bytes; the apps' reports are far smaller.
+pub const MAX_CRASH_ENVELOPE_BYTES: usize = 256 * 1024;
 /// Longest environment name, in characters.
 pub const MAX_CRASH_ENVIRONMENT_CHARS: usize = 64;
 
@@ -25,6 +29,14 @@ pub struct CrashReportSettings {
   pub sample_percent: u8,
   /// The environment the backend groups reports by (`production`, `staging`).
   pub environment: String,
+  /// People may turn reports off in their privacy settings. Off: reports are mandatory on this
+  /// instance and the switch shows that the organization requires them. Absent from older rows: on.
+  #[serde(default = "is_on")]
+  pub allows_opt_out: bool,
+  /// The apps say once, on the first start with reports on, that they send them. Off for an
+  /// operator who informs people another way (privacy policy, onboarding). Absent: on.
+  #[serde(default = "is_on")]
+  pub shows_notice: bool,
 }
 
 /// The part of [`CrashReportSettings`] the apps get in `GET /api/v1/server-info`, only while
@@ -34,6 +46,10 @@ pub struct CrashReportsInfo {
   pub dsn: String,
   pub sample_percent: u8,
   pub environment: String,
+  #[serde(default = "is_on")]
+  pub allows_opt_out: bool,
+  #[serde(default = "is_on")]
+  pub shows_notice: bool,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -85,6 +101,8 @@ impl Default for CrashReportSettings {
       dsn: String::new(),
       sample_percent: 100,
       environment: "production".to_owned(),
+      allows_opt_out: true,
+      shows_notice: true,
     }
   }
 }
@@ -110,8 +128,14 @@ impl CrashReportSettings {
       dsn: self.dsn.trim().to_owned(),
       sample_percent: self.sample_percent,
       environment: self.environment.clone(),
+      allows_opt_out: self.allows_opt_out,
+      shows_notice: self.shows_notice,
     })
   }
+}
+
+fn is_on() -> bool {
+  true
 }
 
 /// Lowercase ASCII letters, digits, `-`, `_` and `.`, 1 to [`MAX_CRASH_ENVIRONMENT_CHARS`].
@@ -233,6 +257,8 @@ mod tests {
         dsn: "https://abc@errors.example.com/2".to_owned(),
         sample_percent: 25,
         environment: "production".to_owned(),
+        allows_opt_out: true,
+        shows_notice: true,
       })
     );
     settings.sample_percent = 101;
@@ -247,8 +273,21 @@ mod tests {
   fn settings_keep_their_wire_names() {
     assert_eq!(
       serde_json::to_value(CrashReportSettings::default()).unwrap(),
-      serde_json::json!({ "is_enabled": false, "dsn": "", "sample_percent": 100, "environment": "production" })
+      serde_json::json!({
+        "is_enabled": false,
+        "dsn": "",
+        "sample_percent": 100,
+        "environment": "production",
+        "allows_opt_out": true,
+        "shows_notice": true,
+      })
     );
+    // A row stored before the two switches existed reads as both on.
+    let stored: CrashReportSettings = serde_json::from_value(serde_json::json!({
+      "is_enabled": true, "dsn": "https://k@errors.example.com/1", "sample_percent": 5, "environment": "prod",
+    }))
+    .unwrap();
+    assert!(stored.allows_opt_out && stored.shows_notice);
   }
 
   #[test]

@@ -282,6 +282,7 @@ fn is_unauthenticated_endpoint(path: &str) -> bool {
     || path == "/api/v1/push/web/subscription-change"
     || path == "/api/v1/auth/local/activate"
     || path == "/api/v1/auth/local/login"
+    || path == teamcraft_proto::CRASH_REPORTS_PATH
     || path.starts_with("/api/internal/")
 }
 

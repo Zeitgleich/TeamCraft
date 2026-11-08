@@ -114,15 +114,33 @@ account, the device or the instance, and it is rotated when the user turns repor
   `GET /api/v1/server-info` (`crash_reports`, absent while off), so store apps
   work for every instance without a rebuild. Off, or no DSN: nothing is captured or sent, and
   queued reports are dropped.
-- **User:** Settings → Privacy → "Send crash reports" (on by default when the admin enabled them),
-  with a link to this page. Turning it off drops the queued reports at once. The first start after
-  the admin enabled reports shows a short notice saying so, with the same switch.
+- **Mandatory or optional (admin):** "People may turn crash reports off" (on by default). Off:
+  reports are mandatory on this instance; the privacy switch stays on, disabled, and says that the
+  organization requires them. The operator then needs a legal basis of its own (for example
+  legitimate interest under GDPR art. 6(1)(f)) and tells people in its privacy policy; reports
+  carry no personal content either way (above).
+- **Notice (admin):** "Tell people on the first start" (on by default). On: the first start after
+  the admin enabled reports shows a short notice once, with a link to the privacy switch. Off for
+  an operator who informs people another way (privacy policy, onboarding).
+- **User:** Settings → Privacy → "Send crash reports" (on by default when the admin enabled them,
+  unless the instance makes them mandatory), with a link to this page. Turning it off drops the
+  queued reports at once and rotates the installation ID when turned on again.
 
 ## Sending and robustness
 
 - **Queued first.** A report is built and queued at once (a panic hook can't wait for the
   network); the shell stores the queue (desktop: a file next to the store, written in the hook;
   mobile and web: the local store) and sends it later.
+- **Through the app's own server.** The Rust apps post envelopes to
+  `POST /api/v1/crash-reports` of their TeamCraft server, which forwards them to the DSN in the
+  instance settings (8 s timeout, public https addresses only, at most 256 KiB, the public rate
+  limit). The web client's content security policy allows only its own origin, the desktop page
+  only the shell; the backend sees the server's address instead of every user's; and the apps need
+  no second origin through proxies and captive portals. The server learns nothing new: reports are
+  scrubbed on the device. Off: `404 crash_reports_off`, and the app drops its queue. The backend's
+  `429` comes back as `429` with its `Retry-After`; a backend that is down or fails is a `503` with
+  `Retry-After`; a backend's refusal is a `400` and the report is dropped. sentry-android sends its
+  JVM, NDK and ANR reports to the DSN directly (no CSP there).
 - **Bounded.** At most 20 reports and 512 KiB; the oldest drop out. A report older than 7 days or
   failed 8 times is dropped.
 - **A dead backend never slows the app.** Sends run in the background with a 10 s timeout
@@ -175,7 +193,7 @@ account, the device or the instance, and it is rotated when the user turns repor
 |--------------------------------------------------------------|----------------------------------|
 | This design, the core module (config, scrub, queue, panic)   | Done (first pull request)        |
 | Panic hooks (desktop, server, web, mobile core), JS errors   | Next                             |
-| Admin setting, served in `GET /api/v1/server-info`           | Done (second pull request)       |
+| Admin setting, served in `GET /api/v1/server-info`, relay    | Done (second pull request)       |
 | User opt-out, first notice                                   | Next                             |
 | Android SDK, symbol upload in the release workflow           | Next                             |
 | iOS (sentry-cocoa, dSYMs)                                    | Follow-up issue (needs a Mac)    |
