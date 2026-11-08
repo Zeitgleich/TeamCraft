@@ -332,7 +332,10 @@ each other. Its index is signed with a separate repository key (`FDROID_*` secre
    Play"). Testers enter the server address, or the organization sets it through managed configuration.
 3. Add the testers (an email list or a Google Group of employees) and share the opt-in link.
 4. Fill in the data safety form: messages are end-to-end encrypted, the server sees metadata
-   (e2ee.md §4.4); no ads, no analytics.
+   (e2ee.md §4.4); no ads, no analytics. "App info and performance → Crash logs" and
+   "Diagnostics" are collected, optional, not shared with third parties and not linked to the
+   user: only when the instance's admin enabled crash reports, sent to the operator's own backend
+   (docs/crash-reports.md).
 5. Android Auto: declare messaging and calling in the app's Play Console "Android Auto" setting.
    The calling category is beta and only allowed on Internal and Closed Testing tracks: keep the
    app there (a production release with the CALLING category is rejected until Google opens it).
