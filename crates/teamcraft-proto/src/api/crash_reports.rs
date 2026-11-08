@@ -30,6 +30,11 @@ pub struct CrashReportSettings {
   pub dsn: String,
   /// Percentage of handled errors that are sent; crashes are always sent.
   pub sample_percent: u8,
+  /// Percentage of measured operations (start, channel switch, send, sync) whose performance data
+  /// (`transaction` items) is sent, issue #1521. 100 while the team gathers data; meant to be
+  /// lowered as instances grow. Absent from older rows: 100.
+  #[serde(default = "all_percent")]
+  pub trace_percent: u8,
   /// The environment the backend groups reports by (`production`, `staging`).
   pub environment: String,
   /// People may turn reports off in their privacy settings. Off: reports are mandatory on this
@@ -60,6 +65,9 @@ wire_enum! {
 pub struct CrashReportsInfo {
   pub dsn: String,
   pub sample_percent: u8,
+  /// Share of measured operations sent as performance data. Absent (an older server): none.
+  #[serde(default)]
+  pub trace_percent: u8,
   pub environment: String,
   #[serde(default = "is_on")]
   pub allows_opt_out: bool,
@@ -73,6 +81,8 @@ pub enum CrashReportSettingsError {
   Dsn(#[from] DsnError),
   #[error("sample_percent must be between 0 and 100")]
   SamplePercent,
+  #[error("trace_percent must be between 0 and 100")]
+  TracePercent,
   #[error("environment must be 1 to 64 lowercase letters, digits, '-', '_' or '.'")]
   Environment,
   #[error("mode must be publisher, own or off")]
@@ -117,6 +127,7 @@ impl Default for CrashReportSettings {
       mode: CrashReportsMode::Publisher,
       dsn: String::new(),
       sample_percent: 100,
+      trace_percent: 100,
       environment: "production".to_owned(),
       allows_opt_out: true,
       shows_notice: true,
@@ -135,6 +146,9 @@ impl CrashReportSettings {
     }
     if self.sample_percent > 100 {
       return Err(CrashReportSettingsError::SamplePercent);
+    }
+    if self.trace_percent > 100 {
+      return Err(CrashReportSettingsError::TracePercent);
     }
     if !is_crash_environment(&self.environment) {
       return Err(CrashReportSettingsError::Environment);
@@ -161,6 +175,7 @@ impl CrashReportSettings {
     self.backend(maybe_publisher).map(|dsn| CrashReportsInfo {
       dsn: dsn.to_string(),
       sample_percent: self.sample_percent,
+      trace_percent: self.trace_percent,
       environment: self.environment.clone(),
       allows_opt_out: self.allows_opt_out,
       shows_notice: self.shows_notice,
@@ -170,6 +185,10 @@ impl CrashReportSettings {
 
 fn is_on() -> bool {
   true
+}
+
+fn all_percent() -> u8 {
+  100
 }
 
 /// Lowercase ASCII letters, digits, `-`, `_` and `.`, 1 to [`MAX_CRASH_ENVIRONMENT_CHARS`].
@@ -295,6 +314,7 @@ mod tests {
       Some(CrashReportsInfo {
         dsn: "https://pub@crashes.example.com/1".to_owned(),
         sample_percent: 100,
+        trace_percent: 100,
         environment: "production".to_owned(),
         allows_opt_out: true,
         shows_notice: true,
@@ -334,6 +354,9 @@ mod tests {
     assert_eq!(settings.check(), Err(CrashReportSettingsError::SamplePercent));
     assert_eq!(settings.info(Some(&publisher)), None);
     settings.sample_percent = 0;
+    settings.trace_percent = 101;
+    assert_eq!(settings.check(), Err(CrashReportSettingsError::TracePercent));
+    settings.trace_percent = 5;
     settings.environment = "Prod".to_owned();
     assert_eq!(settings.check(), Err(CrashReportSettingsError::Environment));
   }
@@ -346,10 +369,28 @@ mod tests {
         "mode": "publisher",
         "dsn": "",
         "sample_percent": 100,
+        "trace_percent": 100,
         "environment": "production",
         "allows_opt_out": true,
         "shows_notice": true,
       })
+    );
+  }
+
+  #[test]
+  fn older_rows_and_servers_get_their_trace_defaults() {
+    let row: CrashReportSettings = serde_json::from_value(serde_json::json!({
+      "mode": "publisher", "dsn": "", "sample_percent": 10, "environment": "production",
+    }))
+    .unwrap();
+    assert_eq!(row.trace_percent, 100);
+    let info: CrashReportsInfo = serde_json::from_value(serde_json::json!({
+      "dsn": "https://pub@crashes.example.com/1", "sample_percent": 10, "environment": "production",
+    }))
+    .unwrap();
+    assert_eq!(
+      info.trace_percent, 0,
+      "an older server asks for no performance data"
     );
   }
 

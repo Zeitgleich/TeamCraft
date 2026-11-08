@@ -245,6 +245,13 @@ const CRASH_REPORTS: &[FieldDef] = &[
     PERCENT,
     "settings-error-crash-percent",
   ),
+  ranged(
+    "trace_percent",
+    1,
+    (0, 100),
+    PERCENT,
+    "settings-error-crash-percent",
+  ),
   FieldDef {
     id: "environment",
     kind: Kind::Environment,
@@ -1249,6 +1256,7 @@ mod tests {
       ("mode", "own"),
       ("dsn", ""),
       ("sample_percent", "150"),
+      ("trace_percent", "101"),
       ("environment", "Prod"),
     ]
     .into_iter()
@@ -1259,11 +1267,13 @@ mod tests {
       Some(vec![
         ("dsn", "settings-error-dsn"),
         ("sample_percent", "settings-error-crash-percent"),
+        ("trace_percent", "settings-error-crash-percent"),
         ("environment", "settings-error-crash-environment"),
       ])
     );
     values.insert("dsn", "not a dsn".to_owned());
     values.insert("sample_percent", "10".to_owned());
+    values.insert("trace_percent", "5".to_owned());
     values.insert("environment", "staging".to_owned());
     assert_eq!(
       check(&kind("crash_reports"), &values).err(),

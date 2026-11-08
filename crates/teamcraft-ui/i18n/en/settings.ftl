@@ -733,6 +733,7 @@ settings-crash-mode-own = An own backend (the DSN below)
 settings-crash-mode-off = Nowhere: crash reports are off
 settings-f-dsn = DSN of the backend project
 settings-f-sample_percent = Share of handled errors sent (crashes are always sent)
+settings-f-trace_percent = Share of measured operations sent as performance data (start, channel switch, send, sync; lower it as the instance grows)
 settings-f-environment = Environment name
 settings-f-allows_opt_out = People may turn crash reports off in their privacy settings
 settings-f-shows_notice = Tell people on the first start that the app sends crash reports

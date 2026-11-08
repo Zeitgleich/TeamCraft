@@ -733,6 +733,7 @@ settings-crash-mode-own = Ein eigenes Backend (die DSN unten)
 settings-crash-mode-off = Nirgendwohin: Absturzberichte sind aus
 settings-f-dsn = DSN des Backend-Projekts
 settings-f-sample_percent = Anteil gesendeter behandelter Fehler (Abstürze werden immer gesendet)
+settings-f-trace_percent = Anteil gemessener Vorgänge, deren Leistungsdaten gesendet werden (Start, Kanalwechsel, Senden, Abgleich; mit wachsender Instanz senken)
 settings-f-environment = Name der Umgebung
 settings-f-allows_opt_out = Personen dürfen Absturzberichte in ihren Datenschutzeinstellungen abschalten
 settings-f-shows_notice = Beim ersten Start darauf hinweisen, dass die App Absturzberichte sendet

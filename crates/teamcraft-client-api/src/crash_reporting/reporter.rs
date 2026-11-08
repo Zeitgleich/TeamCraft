@@ -3,14 +3,26 @@
 //!
 //! No timers: shells flush on start, after a capture and when the connection comes back, so an
 //! idle app sends nothing (robustness.md, "Network while idle").
+//!
+//! Performance data (issue #1521) goes into a second queue with its own bounds, so a busy app's
+//! transactions never push a crash report out; a flush sends crash reports first and at most
+//! [`MAX_TRANSACTIONS_PER_FLUSH`] transactions.
 
 use super::event::{AppInfo, CrashEvent, CrashLevel, EventId, InstallationId};
 use super::queue::{CrashQueue, CrashQueueLimits, QueuedCrashReport};
 use super::scrub::scrub;
+use super::transaction::Transaction;
 use super::{
   CrashReportingConfig, CrashReportingConsent, CrashRequest, CrashSendOutcome, CrashTransport,
   ENVELOPE_CONTENT_TYPE,
 };
+
+/// Transactions sent per flush at most: one request each (the protocol takes one per envelope),
+/// so a flush stays short and the relay's per-address rate limit has room for crash reports.
+pub const MAX_TRANSACTIONS_PER_FLUSH: usize = 5;
+/// Queued transactions from which a shell flushes without waiting for one of the usual triggers:
+/// a busy session sends its data in small batches, an idle one sends nothing.
+pub const TRANSACTION_BATCH: usize = 5;
 
 /// Reports for one app process.
 #[derive(Clone, Debug)]
@@ -21,6 +33,10 @@ pub struct CrashReporter {
   consent: CrashReportingConsent,
   limits: CrashQueueLimits,
   queue: CrashQueue,
+  transaction_limits: CrashQueueLimits,
+  transactions: CrashQueue,
+  /// Transactions the current flush may still send ([`Self::begin_flush`]).
+  transactions_left: usize,
 }
 
 /// What [`CrashReporter::capture`] did with a report.
@@ -40,7 +56,15 @@ pub enum CaptureOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingSend {
   pub event_id: EventId,
+  pub kind: SendKind,
   pub request: CrashRequest,
+}
+
+/// Which queue an envelope came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SendKind {
+  CrashReport,
+  Transaction,
 }
 
 /// What a flush did.
@@ -62,7 +86,17 @@ impl CrashReporter {
       consent: CrashReportingConsent::default(),
       limits: CrashQueueLimits::default(),
       queue,
+      transaction_limits: CrashQueueLimits::transactions(),
+      transactions: CrashQueue::default(),
+      transactions_left: 0,
     }
+  }
+
+  /// The performance data the shell stored last time.
+  pub fn with_transactions(mut self, transactions: CrashQueue) -> Self {
+    self.transactions = transactions;
+    self.drop_queue_unless_active();
+    self
   }
 
   /// The instance's setting, from the instance config. `None` turns reports off and drops what
@@ -97,6 +131,56 @@ impl CrashReporter {
     &self.queue
   }
 
+  /// The performance data queue as it should be stored now.
+  pub fn transactions(&self) -> &CrashQueue {
+    &self.transactions
+  }
+
+  /// Whether an operation starting now is measured: reports are on and the trace rate keeps
+  /// `roll` (uniform in `[0, 1)`). Decided at the start, so an unsampled operation costs nothing.
+  pub fn should_trace(&self, roll: f64) -> bool {
+    self
+      .maybe_config
+      .as_ref()
+      .filter(|_| self.is_active())
+      .is_some_and(|config| config.trace_rate.keeps(roll))
+  }
+
+  /// Queues a finished transaction (sampled with [`Self::should_trace`] when it started). It needs
+  /// no scrubbing: it has no free text (transaction.rs).
+  pub fn capture_transaction(&mut self, transaction: &Transaction) -> CaptureOutcome {
+    let Some(config) = self.maybe_config.as_ref().filter(|_| self.is_active()) else {
+      return CaptureOutcome::Disabled;
+    };
+    if config.trace_rate.get() <= 0.0 {
+      return CaptureOutcome::SampledOut;
+    }
+    let created_at_ms = transaction_time_ms(transaction);
+    let report = QueuedCrashReport {
+      event_id: transaction.event_id(),
+      created_at_ms,
+      envelope: transaction.to_envelope(&self.app, &config.environment, self.installation),
+      attempts: 0,
+      next_attempt_at_ms: created_at_ms,
+    };
+    if self.transactions.push(report, &self.transaction_limits) {
+      CaptureOutcome::Queued
+    } else {
+      CaptureOutcome::TooLarge
+    }
+  }
+
+  /// Whether enough performance data is queued to flush without another trigger.
+  pub fn has_transaction_batch(&self) -> bool {
+    self.transactions.len() >= TRANSACTION_BATCH
+  }
+
+  /// Starts a flush: it may send up to [`MAX_TRANSACTIONS_PER_FLUSH`] transactions after the
+  /// crash reports. Without it [`Self::next_send`] hands out crash reports only.
+  pub fn begin_flush(&mut self) {
+    self.transactions_left = MAX_TRANSACTIONS_PER_FLUSH;
+  }
+
   /// Scrubs and queues a report. `roll` is a uniform random number in `[0, 1)` for sampling.
   pub fn capture(&mut self, event: CrashEvent, roll: f64) -> CaptureOutcome {
     let Some(config) = self.maybe_config.as_ref().filter(|_| self.is_active()) else {
@@ -120,35 +204,53 @@ impl CrashReporter {
     }
   }
 
-  /// The next envelope to send, if one is due and reports are on.
+  /// The next envelope to send, if one is due and reports are on: crash reports first, then
+  /// performance data while the flush has room for it.
   pub fn next_send(&mut self, now_ms: i64) -> Option<PendingSend> {
     let config = self.maybe_config.as_ref().filter(|_| self.is_active())?;
     self.queue.prune(now_ms, &self.limits);
-    let report = self.queue.next_due(now_ms)?;
-    Some(PendingSend {
+    self.transactions.prune(now_ms, &self.transaction_limits);
+    let (kind, report) = match self.queue.next_due(now_ms) {
+      Some(report) => (SendKind::CrashReport, report),
+      None if self.transactions_left > 0 => (SendKind::Transaction, self.transactions.next_due(now_ms)?),
+      None => return None,
+    };
+    let pending = PendingSend {
       event_id: report.event_id,
+      kind,
       request: CrashRequest {
         url: config.dsn.envelope_url(&self.app.version),
         content_type: ENVELOPE_CONTENT_TYPE,
         body: report.envelope.clone().into_bytes(),
       },
-    })
+    };
+    if kind == SendKind::Transaction {
+      self.transactions_left -= 1;
+    }
+    Some(pending)
   }
 
   /// Applies a send's result to the queue. Returns whether the flush should go on: after a
   /// failure or a rate limit it stops, so a dead backend gets one request per flush, not a storm.
   pub fn record_outcome(&mut self, event_id: EventId, outcome: CrashSendOutcome, now_ms: i64) -> bool {
+    let (queue, limits) = if self.queue.contains(event_id) {
+      (&mut self.queue, &self.limits)
+    } else {
+      (&mut self.transactions, &self.transaction_limits)
+    };
     match outcome {
       CrashSendOutcome::Accepted | CrashSendOutcome::Rejected => {
-        self.queue.remove(event_id);
+        queue.remove(event_id);
         true
       },
       CrashSendOutcome::RateLimited { retry_after } => {
+        // The backend (or the relay) limits the sender, not one kind of item.
         self.queue.pause(now_ms, retry_after);
+        self.transactions.pause(now_ms, retry_after);
         false
       },
       CrashSendOutcome::Unreachable => {
-        self.queue.record_failure(event_id, now_ms, &self.limits);
+        queue.record_failure(event_id, now_ms, limits);
         false
       },
     }
@@ -158,7 +260,8 @@ impl CrashReporter {
   /// sends. Shells that share it between tasks use [`Self::next_send`] and
   /// [`Self::record_outcome`] instead, so no lock is held while sending.
   pub async fn flush<T: CrashTransport>(&mut self, transport: &T, now_ms: i64) -> FlushSummary {
-    let before = self.queue.len();
+    self.begin_flush();
+    let before = self.queue.len() + self.transactions.len();
     let mut summary = FlushSummary::default();
     while let Some(pending) = self.next_send(now_ms) {
       let outcome = transport.send(pending.request).await;
@@ -169,7 +272,7 @@ impl CrashReporter {
         break;
       }
     }
-    summary.remaining = self.queue.len();
+    summary.remaining = self.queue.len() + self.transactions.len();
     summary.dropped = before.saturating_sub(summary.remaining + summary.sent);
     summary
   }
@@ -177,8 +280,15 @@ impl CrashReporter {
   fn drop_queue_unless_active(&mut self) {
     if !self.is_active() {
       self.queue.clear();
+      self.transactions.clear();
     }
   }
+}
+
+/// When a transaction ended, whole milliseconds, for the queue's age and backoff.
+fn transaction_time_ms(transaction: &Transaction) -> i64 {
+  // Precision: a time in milliseconds is far inside i64; the fraction doesn't matter here.
+  transaction.end_ms() as i64
 }
 
 #[cfg(test)]
@@ -336,6 +446,142 @@ mod tests {
           remaining: 0
         }
       );
+    }
+  }
+
+  mod transactions {
+    use super::super::super::{PerfOperation, PerfStatus, SampleRate, Transaction};
+    use super::*;
+
+    #[test]
+    fn sampling_follows_the_trace_rate_and_the_consent() {
+      let mut reporter = reporter(Some(traced(0.25)));
+      assert!(reporter.should_trace(0.1));
+      assert!(!reporter.should_trace(0.25));
+      reporter.set_consent(CrashReportingConsent::OptedOut);
+      assert!(!reporter.should_trace(0.0));
+      assert_eq!(
+        reporter.capture_transaction(&transaction(0)),
+        CaptureOutcome::Disabled
+      );
+      let mut untraced = reporter_with(config(1.0));
+      assert!(
+        !untraced.should_trace(0.0),
+        "an older server's config traces nothing"
+      );
+      assert_eq!(
+        untraced.capture_transaction(&transaction(0)),
+        CaptureOutcome::SampledOut
+      );
+    }
+
+    #[test]
+    fn crash_reports_go_first_and_a_flush_sends_a_bounded_number() {
+      let mut reporter = reporter(Some(traced(1.0)));
+      for index in 0..(MAX_TRANSACTIONS_PER_FLUSH as u8 + 3) {
+        assert_eq!(
+          reporter.capture_transaction(&transaction(100 + index)),
+          CaptureOutcome::Queued
+        );
+      }
+      assert!(reporter.has_transaction_batch());
+      reporter.capture(event(0, CrashLevel::Fatal), 0.0);
+      assert!(
+        reporter
+          .next_send(0)
+          .is_some_and(|pending| pending.kind == SendKind::CrashReport),
+        "crash reports go even outside a flush"
+      );
+      let transport = FakeTransport::answering([CrashSendOutcome::Accepted; 20]);
+      let summary = block_on(reporter.flush(&transport, 0));
+      assert_eq!(summary.sent, 1 + MAX_TRANSACTIONS_PER_FLUSH);
+      assert_eq!(summary.remaining, 3);
+      assert!(
+        reporter.next_send(0).is_none(),
+        "transactions wait for the next flush"
+      );
+    }
+
+    #[test]
+    fn transactions_never_push_a_crash_report_out() {
+      let mut reporter = reporter(Some(traced(1.0)));
+      reporter.capture(event(0, CrashLevel::Fatal), 0.0);
+      for index in 0..200 {
+        reporter.capture_transaction(&transaction(index));
+      }
+      assert_eq!(reporter.queue().len(), 1);
+      assert_eq!(
+        reporter.transactions().len(),
+        CrashQueueLimits::transactions().max_reports
+      );
+    }
+
+    #[test]
+    fn a_rate_limit_on_a_transaction_pauses_crash_reports_too() {
+      let mut reporter = reporter(Some(traced(1.0)));
+      reporter.capture_transaction(&transaction(1));
+      let transport = FakeTransport::answering([CrashSendOutcome::RateLimited {
+        retry_after: Duration::from_secs(60),
+      }]);
+      block_on(reporter.flush(&transport, 0));
+      reporter.capture(event(0, CrashLevel::Fatal), 0.0);
+      reporter.begin_flush();
+      assert!(reporter.next_send(59_000).is_none());
+      assert!(reporter.next_send(60_000).is_some());
+    }
+
+    #[test]
+    fn a_failed_transaction_backs_off_in_its_own_queue() {
+      let mut reporter = reporter(Some(traced(1.0)));
+      reporter.capture_transaction(&transaction(1));
+      let transport = FakeTransport::answering([CrashSendOutcome::Unreachable]);
+      block_on(reporter.flush(&transport, 0));
+      assert_eq!(reporter.transactions().len(), 1);
+      reporter.capture(event(0, CrashLevel::Fatal), 0.0);
+      assert!(
+        reporter
+          .next_send(1)
+          .is_some_and(|pending| pending.kind == SendKind::CrashReport),
+        "a crash report doesn't wait for a transaction's backoff"
+      );
+    }
+
+    #[test]
+    fn opting_out_drops_queued_transactions_and_a_stored_buffer_is_restored() {
+      let mut reporter = reporter(Some(traced(1.0)));
+      reporter.capture_transaction(&transaction(1));
+      let stored = reporter.transactions().clone();
+      reporter.set_consent(CrashReportingConsent::OptedOut);
+      assert!(reporter.transactions().is_empty());
+      let restored = reporter_with(traced(1.0)).with_transactions(stored);
+      assert_eq!(restored.transactions().len(), 1);
+    }
+
+    #[test]
+    fn the_envelope_is_a_transaction() {
+      let mut reporter = reporter(Some(traced(1.0)));
+      reporter.capture_transaction(&transaction(1));
+      reporter.begin_flush();
+      let pending = reporter.next_send(0).unwrap();
+      assert_eq!(pending.kind, SendKind::Transaction);
+      let body = String::from_utf8(pending.request.body).unwrap();
+      assert!(body.lines().nth(1).unwrap().contains(r#""type":"transaction""#));
+      assert!(body.contains(r#""transaction":"channel.switch""#));
+    }
+
+    fn traced(rate: f64) -> CrashReportingConfig {
+      CrashReportingConfig {
+        trace_rate: SampleRate::new(rate).unwrap(),
+        ..config(1.0)
+      }
+    }
+
+    fn reporter_with(config: CrashReportingConfig) -> CrashReporter {
+      reporter(Some(config))
+    }
+
+    fn transaction(index: u8) -> Transaction {
+      Transaction::start(PerfOperation::ChannelSwitch, -42.0, [index; 40]).finish(0.0, PerfStatus::Ok)
     }
   }
 
