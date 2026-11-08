@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use teamcraft_client_api::color_theme::ColorTheme;
 use teamcraft_client_api::message_sound::{MessageSound, OwnSoundLimits};
 use teamcraft_proto::{DndWindow, Weekday};
 
@@ -553,6 +554,9 @@ pub struct DisplayPrefs {
   /// Seconds at the bottom of the focused conversation before the "New messages" divider goes;
   /// `None` keeps it until the user sends, presses Esc or leaves (#321).
   pub maybe_divider_dwell_secs: Option<u16>,
+  /// The colours of the rail, sidebar, top bar and accent (#202); follows the account. Light or
+  /// dark stays the device's (`Settings::theme`).
+  pub color_theme: ColorTheme,
 }
 
 impl Default for DisplayPrefs {
@@ -565,6 +569,7 @@ impl Default for DisplayPrefs {
       zoom: Zoom::DEFAULT,
       text_size: TextSize::DEFAULT,
       maybe_divider_dwell_secs: Some(DEFAULT_DIVIDER_DWELL_SECS),
+      color_theme: ColorTheme::Brand,
     }
   }
 }

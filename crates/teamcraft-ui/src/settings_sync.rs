@@ -20,6 +20,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use teamcraft_client_api::color_theme::ColorTheme;
 use teamcraft_client_api::emoji_catalog::SkinTone;
 use teamcraft_client_api::failure::{ActionFailure, FailureKind};
 use teamcraft_client_api::settings_sync::{
@@ -55,6 +56,7 @@ const KEY_SHOW_JOIN_LEAVE: &str = "show_join_leave";
 const KEY_SKIN_TONE: &str = "emoji_skin_tone";
 const KEY_FAVORITE_ORDER: &str = "favorite_order";
 const KEY_BACKGROUND: &str = "calls.background";
+const KEY_COLOR_THEME: &str = "display.color_theme";
 /// Settings that say something about a person: what they watch for, and their conversations. They
 /// are lists, so an upload of an edited one carries everything in it.
 const PRIVATE_KEYS: [&str; 3] = [
@@ -117,6 +119,7 @@ synced_prefs! {
   "display.animated_images" => display.animated_images,
   "display.show_status_in_messages" => display.show_status_in_messages,
   "display.maybe_divider_dwell_secs" => display.maybe_divider_dwell_secs,
+  "display.color_theme" => display.color_theme,
   "sidebar.layout" => sidebar.layout,
   "sidebar.list_grouping" => sidebar.list_grouping,
   "sidebar.sort" => sidebar.sort,
@@ -433,10 +436,16 @@ fn next_retry(wait: Duration) -> Duration {
 /// Checks that strings can't express in their type. A background is a free-form slug, and an
 /// unknown one would read as no background at all.
 fn is_known_value(key: &str, value: &Value) -> bool {
-  key != KEY_BACKGROUND
-    || value
+  match key {
+    KEY_BACKGROUND => value
       .as_str()
-      .is_some_and(|slug| effect_slug(effect_from_slug(slug)) == slug)
+      .is_some_and(|slug| effect_slug(effect_from_slug(slug)) == slug),
+    // A newer client's theme: keep the one this device shows.
+    KEY_COLOR_THEME => value
+      .as_str()
+      .is_some_and(|text| !matches!(text.parse(), Ok(ColorTheme::Unknown(_)))),
+    _ => true,
+  }
 }
 
 impl LocalValues {
@@ -700,6 +709,19 @@ mod tests {
       assert_eq!(local.prefs.calls.background, "blur-light");
       assert!(local.adopt(KEY_BACKGROUND, &json!("none")));
       assert_eq!(local.prefs.calls.background, "none");
+    }
+
+    /// A colour theme follows the account (#202); a newer client's preset keeps the local one.
+    #[test]
+    fn a_color_theme_follows_unless_it_is_unknown_here() {
+      let mut local = values();
+      assert!(local.adopt(KEY_COLOR_THEME, &json!("preset:pine")));
+      assert!(!local.adopt(KEY_COLOR_THEME, &json!("preset:from-the-future")));
+      assert!(!local.adopt(KEY_COLOR_THEME, &json!(3)));
+      assert_eq!(local.prefs.display.color_theme.to_string(), "preset:pine");
+      let custom = "custom:#1b2233,#2f66e0,#2eb67d,#d1453b";
+      assert!(local.adopt(KEY_COLOR_THEME, &json!(custom)));
+      assert_eq!(local.prefs.display.color_theme.to_string(), custom);
     }
 
     /// Enums with a catch-all take any name; a sound setting of a newer client isn't "all".

@@ -78,7 +78,10 @@ pub fn App() -> impl IntoView {
   apply_text_size(settings);
   apply_language_attribute();
   apply_deleted_user_name(i18n);
-  crate::viewport::sync_theme_color(move || settings.theme.track());
+  crate::viewport::sync_theme_color(move || {
+    settings.theme.track();
+    settings.prefs.with(|prefs| prefs.display.color_theme.to_string());
+  });
   crate::brand::provide_brand(settings);
   provide_window_chrome();
   if tauri::is_available() {

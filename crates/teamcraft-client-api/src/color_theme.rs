@@ -351,6 +351,18 @@ impl ThemeColors {
     })
   }
 
+  /// A harmonious theme around one hue (0 to 360 degrees), for "Surprise me": a deep sidebar and a
+  /// lively selection of that hue, green presence and a red badge. The caller picks the hue.
+  pub fn from_hue(hue: f64) -> Self {
+    let hue = hue.rem_euclid(360.0);
+    Self {
+      navigation: Rgb::from_hsl(hue, 0.38, 0.17),
+      selection: Rgb::from_hsl(hue + 20.0, 0.62, 0.46),
+      presence: Rgb::from_hsl(150.0, 0.6, 0.42),
+      notification: Rgb::from_hsl(6.0, 0.68, 0.5),
+    }
+  }
+
   /// The share code: `#rrggbb,#rrggbb,#rrggbb,#rrggbb` (navigation, selection, presence,
   /// notifications).
   pub fn share_code(&self) -> String {
@@ -529,6 +541,25 @@ impl Rgb {
     };
     let ([r1, g1, b1], [r2, g2, b2]) = (self.0, other.0);
     Rgb([channel(r1, r2), channel(g1, g2), channel(b1, b2)])
+  }
+
+  /// From hue (degrees), saturation and lightness (0 to 1).
+  pub fn from_hsl(hue: f64, saturation: f64, lightness: f64) -> Self {
+    let hue = hue.rem_euclid(360.0) / 60.0;
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let second = chroma * (1.0 - (hue % 2.0 - 1.0).abs());
+    let (r, g, b) = match hue {
+      h if h < 1.0 => (chroma, second, 0.0),
+      h if h < 2.0 => (second, chroma, 0.0),
+      h if h < 3.0 => (0.0, chroma, second),
+      h if h < 4.0 => (0.0, second, chroma),
+      h if h < 5.0 => (second, 0.0, chroma),
+      _ => (chroma, 0.0, second),
+    };
+    let offset = lightness - chroma / 2.0;
+    // Invariant: each channel is between 0 and 1 before scaling, clamped anyway.
+    let channel = |value: f64| ((value + offset) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Self([channel(r), channel(g), channel(b)])
   }
 
   /// This colour if it passes, else the first step toward `target` that does (`target` itself at
@@ -795,6 +826,17 @@ mod tests {
         "{name}: {value}"
       );
     }
+  }
+
+  #[test]
+  fn hsl_and_hue_themes() {
+    assert_eq!(Rgb::from_hsl(0.0, 1.0, 0.5), Rgb([0xff, 0, 0]));
+    assert_eq!(Rgb::from_hsl(120.0, 1.0, 0.5), Rgb([0, 0xff, 0]));
+    assert_eq!(Rgb::from_hsl(240.0, 1.0, 0.5), Rgb([0, 0, 0xff]));
+    assert_eq!(Rgb::from_hsl(0.0, 0.0, 1.0), WHITE);
+    let theme = ThemeColors::from_hue(400.0);
+    assert_eq!(theme, ThemeColors::from_hue(40.0));
+    assert_eq!(theme.tokens(false).sidebar, theme.navigation);
   }
 
   #[test]
