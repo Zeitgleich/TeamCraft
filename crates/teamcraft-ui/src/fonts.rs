@@ -85,6 +85,12 @@ pub fn register_all() {
   }
 }
 
+/// The `font-family` value that shows `font` whatever the app's font is: the system's stack for the
+/// system font (a preview of it in the font menu).
+pub fn preview_stack(font: &UiFont) -> String {
+  font_stack(font).unwrap_or_else(|| SYSTEM_STACK.to_owned())
+}
+
 /// The `font-family` value of `font`, behind it the system's stack; `None` for the system font.
 pub fn font_stack(font: &UiFont) -> Option<String> {
   let family = family_name(font)?;
@@ -270,6 +276,7 @@ mod tests {
   fn stacks_put_the_font_before_the_system_one() {
     assert_eq!(font_stack(&UiFont::System), None);
     assert_eq!(font_stack(&UiFont::Unknown("new".into())), None);
+    assert!(preview_stack(&UiFont::System).starts_with("system-ui"));
     let inter = font_stack(&UiFont::Inter).unwrap();
     assert!(inter.starts_with(r#""TeamCraft Inter", system-ui"#), "{inter}");
     assert!(

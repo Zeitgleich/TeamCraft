@@ -1720,8 +1720,10 @@
   color: var(--text-muted);
 }
 
+/* Fixed to the window, so the card doesn't clip it; settings_font.rs places it at its button. */
 .set-font-menu {
-  top: calc(100% + 4px);
+  position: fixed;
+  z-index: 80;
   width: min(18.125rem, calc(100vw - 32px));
   max-height: min(26rem, 60vh);
   overflow-y: auto;
@@ -1777,14 +1779,11 @@
   color: var(--accent);
 }
 
-/* A narrow section stacks the row (above); the menu takes the width, under the button. */
+/* A narrow section stacks the row (above); the button takes the width. */
 @container (max-width: 520px) {
   .set-font,
   .set-font-button {
     width: 100%;
   }
 
-  .set-font-menu {
-    width: 100%;
-  }
 }
