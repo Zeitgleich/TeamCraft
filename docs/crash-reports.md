@@ -32,7 +32,7 @@ how sending stays out of the app's way, and how stack traces become readable (sy
 | Desktop, server   | `teamcraft_client_api::crash_reporting` (Rust panics)               | One scrubber for every Rust process; no SDK defaults  |
 | Web (wasm + page) | The same module, from the wasm panic hook and `window.onerror`       | No browser SDK: no JS bundle, no download size        |
 | Android           | sentry-android (JVM, NDK, ANR) + the core module for Rust panics    | NDK and ANR capture need the platform SDK             |
-| iOS               | sentry-cocoa (crashes, hangs, MetricKit): follow-up issue (needs Mac) | Same reason                                           |
+| iOS               | sentry-cocoa (crashes, app hangs, MetricKit)                        | Same reason                                           |
 
 The Rust `sentry` crate was not taken: its defaults collect what this note forbids (host name,
 loaded modules, environment variables, `SENTRY_*` overrides) and it has no browser transport, so the
@@ -56,8 +56,9 @@ KB gzipped) would also break the web download budget (robustness.md) for no gain
 | Platform             | desktop, web, android, ios or server; OS name and version                          |
 | Installation ID      | A random ID per installation, so a crash's reach can be counted (below)             |
 
-The Android SDK adds what it needs for its crashes: device model and OS version, ANR thread dumps,
-NDK registers and the loaded libraries' debug IDs, and its own scrubbed breadcrumbs (below).
+The platform SDKs add what they need for their crashes: device model and OS version, ANR and app
+hang thread dumps, NDK registers and the loaded libraries' debug IDs, MetricKit diagnostics on iOS,
+and the core's log lines as breadcrumbs, scrubbed (below).
 
 ## What is never sent
 
@@ -98,11 +99,47 @@ under security.md already (no content in logs or errors); reviews look for them.
 
 ### The Android SDK
 
-sentry-android is configured from the core's config and rules: `sendDefaultPii = false`,
-`attachScreenshot = false`, `attachViewHierarchy = false`, no session replay, no automatic HTTP or
-UI breadcrumbs, no user. Its `beforeSend` removes the message's quoted text and URL queries, drops
-`user` except the installation ID, `request`, `server_name` and `extra`, and its breadcrumbs come
-from the core's redacted ring only.
+sentry-android (`sentry-android-core` and `sentry-android-ndk`, flavor `full` only; the `libre`
+build carries no SDK and shows no switch) captures JVM crashes, ANRs and NDK crashes. Auto-init is
+off in the manifest and its start-up providers are removed; `crash/CrashReports.kt` starts it with
+`SentryAndroid.init` only while the signed-in server's `crash_reports` is set and the user didn't
+opt out (or the instance makes reports mandatory), and closes it when that ends.
+
+- **Where the setting comes from:** after every sign-in and on every return to the foreground (at
+  most once a minute), the app fetches `GET /api/v1/server-info` of its server and hands it to the
+  FFI's `crash_reports_config`, which checks it with `CrashReportingConfig::from_info` (an
+  unusable DSN or environment means off). Offline, or an answer that isn't a `200`, keeps the last
+  known setting. The setting is cached in app-private preferences (never backed up), so a crash
+  early in the next start is reported; changing the server forgets it.
+- **Options:** release `teamcraft@<version>`, the instance's environment, no personal data
+  (`dataCollection`: no user info, cookies, headers, query parameters, bodies or file paths), no
+  screenshot, view hierarchy, threads, session replay, tracing, profiling or sessions, and no
+  automatic breadcrumbs (activity, app and system events, network, user interaction, app
+  components); `beforeBreadcrumb` drops whatever else would add one. NDK and ANR capture are on.
+- **`beforeSend`** (`SentryEventScrub`): handled errors are sampled with the instance's rate
+  (crashes and ANRs always go; the SDK's own `sampleRate` is unset because it would sample crashes
+  too); `request`, `server_name`, `extra` and `logger` go; `user` is only the installation ID
+  (also set on the scope, which the NDK side syncs); exception values and the message pass
+  `CrashScrubber`, a port of the rules above (quoted text, then the debug log's redaction by
+  shape); the breadcrumbs are the last 50 lines of the core's redacted ring (`recent_log_lines`),
+  scrubbed again. A JVM test builds an event from a session full of secrets and asserts that the
+  serialized event contains none of them (`SentryEventScrubTest`).
+- **Symbols:** with `-Pteamcraft.proguardUuid=<uuid>` the `fullRelease` variant gets a generated
+  asset `sentry-debug-meta.properties` (`io.sentry.ProguardUuids=<uuid>`); without it nothing is
+  generated. See "Symbols" for the upload.
+
+### iOS
+
+sentry-cocoa (Swift Package Manager, product `Sentry`, the app target only; the notification and
+share extensions report nothing) is wired the same way: `TeamCraft/Model/CrashReports.swift` starts
+it with `SentrySDK.start` from the app delegate (the last known setting) and after every sign-in
+and return to the foreground (`server-info` through the same FFI check), and closes it when
+reports go off. Options: `sendDefaultPii`, `attachScreenshot`, `attachViewHierarchy`,
+`enableAutoBreadcrumbTracking`, `enableNetworkBreadcrumbs`, `enableCaptureFailedRequests`,
+`enableAutoPerformanceTracing` and `enableAutoSessionTracking` off; no tracing, profiling or
+replay (their defaults); `enableAppHangTracking` and `enableMetricKit` on. `beforeSend`
+(`CrashEventScrub`) and `CrashScrubber.swift` do what the Android side does, with the same test
+cases (`CrashScrubberTests`). The settings and the notice are the same as on Android.
 
 ## Installation ID
 
@@ -150,8 +187,8 @@ account, the device or the instance, and it is rotated when the user turns repor
   no second origin through proxies and captive portals. The server learns nothing new: reports are
   scrubbed on the device. Off: `404 crash_reports_off`, and the app drops its queue. The backend's
   `429` comes back as `429` with its `Retry-After`; a backend that is down or fails is a `503` with
-  `Retry-After`; a backend's refusal is a `400` and the report is dropped. sentry-android sends its
-  JVM, NDK and ANR reports to the DSN directly (no CSP there).
+  `Retry-After`; a backend's refusal is a `400` and the report is dropped. sentry-android and
+  sentry-cocoa send their reports to the DSN directly (no CSP there), with their own offline cache.
 - **Bounded.** At most 20 reports and 512 KiB; the oldest drop out. A report older than 7 days or
   failed 8 times is dropped.
 - **A dead backend never slows the app.** Sends run in the background with a 10 s timeout
@@ -225,6 +262,7 @@ account, the device or the instance, and it is rotated when the user turns repor
 | Panic hooks of the desktop shell and the server              | Done (fourth pull request)       |
 | Admin setting, served in `GET /api/v1/server-info`, relay    | Done (second pull request)       |
 | User opt-out, first-start notice (web and desktop page)      | Done (third pull request)        |
-| Android SDK, symbol upload in the release workflow           | Next                             |
-| iOS (sentry-cocoa, dSYMs)                                    | Next (device test: #1515)        |
+| Android SDK, symbol upload in the release workflow           | Done (fifth pull request)        |
+| iOS (sentry-cocoa), settings and notice                      | Written; Mac build: #1515        |
+| iOS dSYM upload, device test                                 | Next (#1515)                     |
 | GlitchTip in teamcraft-deploy                                | teamcraft-deploy                 |
