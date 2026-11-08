@@ -565,7 +565,7 @@ class CallController(
     if (hadOthersIn != state.conversationId || maybeAloneEnd?.isActive == true) return
     maybeAloneEnd = scope.launch {
       val isOneToOne = runCatching {
-        core.core().conversations().firstOrNull { it.id == state.conversationId }?.kind == ConversationKind.DIRECT
+        core.conversations().firstOrNull { it.id == state.conversationId }?.kind == ConversationKind.DIRECT
       }.getOrDefault(false)
       if (!isOneToOne) return@launch
       delay(ALONE_END_MS)
@@ -581,7 +581,7 @@ class CallController(
   /** The name of a conversation this device knows (the notes by their title); `null` for one it doesn't. */
   private suspend fun conversationNameOf(conversationId: String): String? =
     runCatching {
-      core.core().conversations().firstOrNull { it.id == conversationId }?.listName(context.getString(R.string.notes_title))
+      core.conversations().firstOrNull { it.id == conversationId }?.listName(context.getString(R.string.notes_title))
     }.getOrNull()
 
   /** The call screen of the running call, from a "Back to the call" outside it. */

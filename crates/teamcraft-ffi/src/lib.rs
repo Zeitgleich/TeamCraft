@@ -499,7 +499,7 @@ impl TeamCraft {
 
   /// Channels of every space and the user's DMs, as the sidebar lists them.
   pub async fn conversations(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {
-    self.read(|reads| reads.conversations()).await
+    self.read_queue()?.conversations().await
   }
 
   /// Where a share from another app can go: the conversations the user may post in, their notes

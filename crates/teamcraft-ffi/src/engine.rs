@@ -41,7 +41,7 @@ use teamcraft_core::store::{
   DEFAULT_MESSAGE_CACHE_BYTES, LocalStore as _, OverlayStore, SealedSqliteStore, SealedStoreLimits,
   StaticKeySource, TrackedStore,
 };
-use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand, FeedAnchor};
+use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand, EntryNeed, FeedAnchor};
 use teamcraft_core::{
   Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkCodeKind, LinkOffer,
   PendingEnrollment,
@@ -1585,11 +1585,10 @@ impl Engine {
   fn set_account(&mut self, user: UserId, device: DeviceId, fingerprint: String) {
     self.identity_fingerprint = fingerprint.clone();
     self.maybe_device_id = Some(device);
-    self.maybe_backend = Some(CoreChatBackend::new(
-      self.store.clone(),
-      user,
-      Box::new(SystemClock),
-    ));
+    self.maybe_backend = Some(
+      CoreChatBackend::new(self.store.clone(), user, Box::new(SystemClock))
+        .with_entry_need(EntryNeed::Unread),
+    );
     self.reads.know_account(user, fingerprint);
   }
 

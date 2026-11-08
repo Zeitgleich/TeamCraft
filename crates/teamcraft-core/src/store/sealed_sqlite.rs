@@ -358,6 +358,103 @@ mod tests {
   const ENTRIES: usize = 1100;
   const MESSAGES: u8 = 60;
 
+  /// Issue #1466: a reader waiting for a group of writes is seen by the group's thread, and has its
+  /// turn before the next group begins.
+  #[test]
+  fn a_waiting_reader_reads_between_two_groups() {
+    let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+    let store = std::sync::Arc::new(SealedSqliteStore::open_in_memory(&key).unwrap());
+    store.put(Table::Users, "1", b"before").unwrap();
+    store.begin_writes().unwrap();
+    assert!(!store.is_awaited(), "nobody waits yet");
+    store.put(Table::Users, "1", b"in the first group").unwrap();
+    let (answer, answered) = std::sync::mpsc::channel();
+    let reader = {
+      let store = store.clone();
+      std::thread::spawn(move || answer.send(store.get(Table::Users, "1").unwrap()).unwrap())
+    };
+    while !store.is_awaited() {
+      std::thread::yield_now();
+    }
+    store.end_writes().unwrap();
+    store.begin_writes().unwrap();
+    store.put(Table::Users, "1", b"in the second group").unwrap();
+    store.end_writes().unwrap();
+    // It had its turn between the two groups, not after both.
+    let read = answered.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+    assert_eq!(read.as_deref(), Some(&b"in the first group"[..]));
+    reader.join().unwrap();
+    assert!(!store.is_awaited());
+  }
+
+  /// Threads that read and write at once, some in groups that end early for the readers: every
+  /// write lands, nobody waits for ever.
+  #[test]
+  fn readers_and_writers_in_groups_take_turns() {
+    let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+    let store = std::sync::Arc::new(SealedSqliteStore::open_in_memory(&key).unwrap());
+    let threads: Vec<_> = (0..4)
+      .map(|thread| {
+        let store = store.clone();
+        std::thread::spawn(move || {
+          for n in 0..200 {
+            let key = format!("{thread}/{n}");
+            if thread % 2 == 0 {
+              crate::store::write_group(store.as_ref(), || {
+                store.put(Table::Users, &key, b"written")?;
+                if store.is_awaited() {
+                  return Ok::<_, StoreError>(());
+                }
+                store.put(Table::Users, &format!("{key}/more"), b"written")
+              })
+              .unwrap();
+            } else {
+              crate::store::read_together(store.as_ref(), || store.get(Table::Users, "0/0").map(|_| ()))
+                .unwrap();
+            }
+          }
+        })
+      })
+      .collect();
+    for thread in threads {
+      thread.join().unwrap();
+    }
+    assert!(store.get(Table::Users, "2/199").unwrap().is_some());
+    assert!(!store.is_awaited());
+  }
+
+  /// A read group holds no write lock: another connection (another process, the iOS notification
+  /// extension) writes meanwhile, and the group's own writes still land.
+  #[test]
+  fn a_read_group_lets_another_connection_write() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));
+    let app = SealedSqliteStore::open(&path, &key).unwrap();
+    let extension = SealedSqliteStore::open(&path, &key).unwrap();
+    app.put(Table::Users, "1", b"before").unwrap();
+    crate::store::read_together(&app, || {
+      assert_eq!(app.get(Table::Users, "1")?.as_deref(), Some(&b"before"[..]));
+      crate::store::write_group(&extension, || {
+        extension.put(Table::Users, "2", b"from the extension")
+      })?;
+      crate::store::write_group(&app, || app.put(Table::Users, "3", b"from the app"))?;
+      assert_eq!(app.get(Table::Users, "3")?.as_deref(), Some(&b"from the app"[..]));
+      Ok::<_, StoreError>(())
+    })
+    .unwrap();
+    assert_eq!(
+      app.get(Table::Users, "2").unwrap().as_deref(),
+      Some(&b"from the extension"[..])
+    );
+    assert_eq!(
+      extension.get(Table::Users, "3").unwrap().as_deref(),
+      Some(&b"from the app"[..])
+    );
+    drop((app, extension));
+    let _ = std::fs::remove_dir_all(directory);
+  }
+
   #[test]
   fn sealed_sqlite_behaves_like_a_store() {
     let key = StaticKeySource::new(SymmetricKey::generate(&mut OsRng));

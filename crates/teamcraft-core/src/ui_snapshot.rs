@@ -471,6 +471,7 @@ fn part_of<S: LocalStore>(
     maybe_mark,
     shared.users.get(&backend.me_id()),
     &shared.preferences,
+    backend.entry_need(),
   );
   ConversationChange {
     conversation: teamcraft_client_api::model::Conversation {

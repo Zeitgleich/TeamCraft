@@ -662,16 +662,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     state.value = AppState.SignedOut()
   }
 
-  suspend fun conversations(): List<ConversationItem> = read { conversations() } ?: emptyList()
+  /** The conversations as of the newest change, shared with every other screen that asks ([CoreRepository.conversations]). */
+  suspend fun conversations(): List<ConversationItem> = runCatching { graph.core.conversations() }.getOrNull() ?: emptyList()
 
   /** Where a share can go (notes first, then by last activity), or null when it can't be read. */
   suspend fun shareTargets(): List<ConversationItem>? = read { shareTargets() }
 
-  /**
-   * Reads the conversations, shows them, then reads their previews. One refresh at a time. A read
-   * that fails (the store still opening) keeps what is shown: an empty list would say "No direct
-   * messages yet" (#1371); the next change reads again.
-   */
   /** The user asked to read the chat list again: it shows as loading until the read ends. */
   fun retryChatList() = chatListState.update { it.copy(maybeReadFailure = null) }
 
@@ -690,8 +686,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     typingNamesState.value = typingNamesByConversation(places) { snapshot?.name(it).orEmpty() }
   }
 
+  /**
+   * Reads the conversations, shows them, then reads their previews. One refresh at a time. A read
+   * that fails (the store still opening) keeps what is shown: an empty list would say "No direct
+   * messages yet" (#1371); the next change reads again.
+   */
   suspend fun refreshChatList(myId: String) = chatListLock.withLock {
-    val conversations = read { conversations() }
+    val conversations = runCatching { graph.core.conversations() }.getOrNull()
     if (conversations == null) {
       // Cached rows stay; with none, the list says it could not be read instead of loading for ever.
       chatListState.update { if (it.maybeConversations == null) it.copy(maybeReadFailure = LoadFailure.OTHER) else it }
