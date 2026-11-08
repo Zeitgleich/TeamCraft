@@ -33,6 +33,14 @@ Photo backgrounds (assets/backgrounds/)
   Authors: Wilfredor, Lo, Mertbiol, Foto Miki (Foto Miki Digital), National Chiao Tung University,
   FelixM, Ted Moravec.
 
+Interface fonts (crates/teamcraft-ui/fonts/, apps/android/app/src/main/res/font/)
+  Inter, Google Sans Flex, IBM Plex Sans, Source Sans 3, Atkinson Hyperlegible Next, Lexend,
+  OpenDyslexic, Noto Sans and JetBrains Mono, for the font setting (#1494). Each under the SIL Open
+  Font License 1.1; IBM Plex ("Plex"), Source Sans 3 ("Source") and OpenDyslexic have Reserved Font
+  Names and are shipped unmodified, the others are subset by scripts/build-fonts.py. Versions,
+  sources and copyright holders: crates/teamcraft-ui/fonts/NOTICE.md; licence texts:
+  crates/teamcraft-ui/fonts/licenses/.
+
 Shipped with the apps, not stored in git
 ----------------------------------------
 

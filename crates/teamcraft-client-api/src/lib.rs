@@ -27,6 +27,7 @@ pub mod emoji_catalog;
 pub mod entry_rules;
 pub mod failure;
 pub mod files_query;
+pub mod font;
 pub mod join_request_alerts;
 pub mod links;
 pub mod list_load;

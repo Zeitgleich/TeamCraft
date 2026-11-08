@@ -19,6 +19,7 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::Account, "settings-profile-hours-show"),
   (SettingsTab::Account, "settings-holiday-own-region"),
   (SettingsTab::Appearance, "settings-theme"),
+  (SettingsTab::Appearance, "settings-font"),
   (SettingsTab::Appearance, "settings-color-theme"),
   (SettingsTab::Appearance, "settings-density"),
   (SettingsTab::Appearance, "settings-image-size"),
@@ -195,6 +196,7 @@ mod tests {
     let sources = [
       include_str!("settings_account.rs"),
       include_str!("settings_color_theme.rs"),
+      include_str!("settings_font.rs"),
       include_str!("settings_keyboard.rs"),
       include_str!("settings_notifications.rs"),
       include_str!("settings_security.rs"),

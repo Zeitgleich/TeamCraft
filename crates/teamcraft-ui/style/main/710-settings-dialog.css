@@ -1683,3 +1683,108 @@
   }
 }
 
+
+/* The font menu (#1494): a button showing the chosen font in its own face, and below it a list of
+   the fonts, each in its own face, grouped. It opens from the button (the popover's motion, from
+   its top right corner) and scrolls when it is taller than the space. */
+.set-font {
+  position: relative;
+  flex: none;
+}
+
+.set-font-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: 15rem;
+  max-width: 100%;
+  color: var(--text);
+  text-align: start;
+  cursor: pointer;
+}
+
+.set-font-button:active {
+  transform: scale(var(--press-scale));
+}
+
+.set-font-current {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.set-font-chevron {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-muted);
+}
+
+.set-font-menu {
+  top: calc(100% + 4px);
+  width: min(18.125rem, calc(100vw - 32px));
+  max-height: min(26rem, 60vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 0;
+}
+
+.set-font-menu:focus-visible {
+  outline: none;
+}
+
+.set-font-group + .set-font-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.set-font-group-title {
+  padding: 6px 14px 2px;
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  color: var(--text-muted);
+}
+
+.set-font-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 36px;
+  margin: 0 4px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-md);
+  cursor: pointer;
+}
+
+.set-font-option.is-active {
+  background: var(--accent-soft);
+}
+
+.set-font-option-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.set-font-check {
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  color: var(--accent);
+}
+
+/* A narrow section stacks the row (above); the menu takes the width, under the button. */
+@container (max-width: 520px) {
+  .set-font,
+  .set-font-button {
+    width: 100%;
+  }
+
+  .set-font-menu {
+    width: 100%;
+  }
+}

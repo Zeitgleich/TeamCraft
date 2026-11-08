@@ -104,6 +104,7 @@ class SettingsSync(
       confirmChannelOver = mentions.confirmChannelOver.coerceAtLeast(0).toUInt(),
       callStatusSounds = CallSoundPrefs.prefs(appContext).statusSounds,
       colorTheme = appearance.colorThemeValue.value,
+      font = appearance.fontValue.value,
     )
   }
 
@@ -146,6 +147,7 @@ class SettingsSync(
     }
     if (settings.callStatusSounds != before.callStatusSounds) CallSoundPrefs.prefs(appContext).setStatusSounds(settings.callStatusSounds)
     if (settings.colorTheme != before.colorTheme) appearance.setColorTheme(settings.colorTheme)
+    if (settings.font != before.font) appearance.setFont(settings.font)
   }
 
   private companion object {
