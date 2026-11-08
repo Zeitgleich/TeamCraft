@@ -14,19 +14,28 @@
 //! it is known to happen, and remembers a crash during the question for this WebKitGTK and
 //! GStreamer version where it isn't.
 //!
+//! A dead WebView2 browser process takes the whole webview with it, and a reload would only talk to
+//! the dead process: the window is destroyed and made again (#1401), at most
+//! [`MAX_BROWSER_RESTARTS`] times within [`BROWSER_WINDOW`]. When it keeps failing the user gets a
+//! message instead of an empty window. The client core and the call live in the shell and go on
+//! meanwhile.
+//!
 //! Each webview reports a dead page its own way: WebKitGTK's `web-process-terminated`, WKWebView's
 //! content process termination, WebView2's `ProcessFailed` (#1214, [`on_process_failed`]).
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_window_state::AppHandleExt;
 use teamcraft_client_api::calls::WebviewVideoMode;
 
 use crate::calls::CallHost;
+use crate::tray;
 
 /// Crashes this close together count as one problem that keeps coming back. A page takes seconds to
 /// load and to show a call's video again, so a crash loop is well inside it.
@@ -34,6 +43,14 @@ const CRASH_WINDOW: Duration = Duration::from_secs(60);
 /// How long a page that crashes with call video off waits before it loads again: the window stays
 /// usable between the crashes, should the app be usable at all.
 const LAST_RESORT_DELAY: Duration = Duration::from_secs(30);
+/// Browser process failures this close together count as one webview that cannot be kept alive. A
+/// new webview needs seconds to start, so this is wide enough to see a loop and short enough that a
+/// failure now and then (an update of the WebView2 runtime) never adds up.
+const BROWSER_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// How often the window is made anew within [`BROWSER_WINDOW`]; the failure after that is given up on.
+const MAX_BROWSER_RESTARTS: usize = 3;
+/// How long the old window gets to go away before a new one with its label can be made.
+const WINDOW_GONE_TIMEOUT: Duration = Duration::from_secs(5);
 /// In the app's config directory: the versions whose WebCodecs killed the page when asked.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const CRASHED_PROBE_FILE: &str = "webcodecs-crash.json";
@@ -45,10 +62,13 @@ const DMABUF_VARIABLE: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 pub struct WebviewRecovery {
   inner: Mutex<Inner>,
   maybe_probe_note: Option<ProbeNote>,
+  /// The main window is being made anew: the app must not exit when no window is left.
+  is_replacing_window: AtomicBool,
 }
 
 struct Inner {
   crashes: VecDeque<Instant>,
+  browser_failures: VecDeque<Instant>,
   mode: WebviewVideoMode,
   /// `isConfigSupported` questions the page has open: a crash now is probably theirs.
   open_probes: u32,
@@ -74,15 +94,26 @@ pub enum Reload {
   After(Duration),
 }
 
+/// What to do about a webview whose browser process is gone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserRecovery {
+  /// Destroy the window and make it again.
+  Recreate,
+  /// It keeps failing: tell the user.
+  GiveUp,
+}
+
 impl WebviewRecovery {
   fn new(mode: WebviewVideoMode, maybe_probe_note: Option<ProbeNote>) -> Self {
     Self {
       inner: Mutex::new(Inner {
         crashes: VecDeque::new(),
+        browser_failures: VecDeque::new(),
         mode,
         open_probes: 0,
       }),
       maybe_probe_note,
+      is_replacing_window: AtomicBool::new(false),
     }
   }
 
@@ -154,6 +185,17 @@ impl WebviewRecovery {
     reload
   }
 
+  /// The webview's browser process is gone: whether the window is made anew or the failure is given
+  /// up on after too many in a row.
+  pub fn browser_process_failed(&self, now: Instant) -> BrowserRecovery {
+    let mut inner = self.lock();
+    inner
+      .browser_failures
+      .retain(|failure| now.saturating_duration_since(*failure) < BROWSER_WINDOW);
+    inner.browser_failures.push_back(now);
+    browser_recovery(inner.browser_failures.len())
+  }
+
   fn lock(&self) -> MutexGuard<'_, Inner> {
     self.inner.lock().unwrap_or_else(PoisonError::into_inner)
   }
@@ -173,6 +215,15 @@ fn recovery(crashes: usize, was_probing: bool, mode: WebviewVideoMode) -> (Webvi
     Reload::Now
   };
   (mode.max(needed), reload)
+}
+
+/// What to do about the `failures`th browser process failure within [`BROWSER_WINDOW`].
+fn browser_recovery(failures: usize) -> BrowserRecovery {
+  if failures > MAX_BROWSER_RESTARTS {
+    BrowserRecovery::GiveUp
+  } else {
+    BrowserRecovery::Recreate
+  }
 }
 
 /// How a start's page may show video before anything has crashed in this run.
@@ -273,7 +324,8 @@ pub fn on_process_terminated(webview: &tauri::Webview) {
 enum Failure {
   /// The page is gone: it loads again, and the crash counts like one on Linux and macOS.
   PageLost,
-  /// The webview itself is gone; a reload would only talk to a dead browser process.
+  /// The webview itself is gone; a reload would only talk to a dead browser process. The window is
+  /// made anew.
   WebviewLost,
   /// The page still runs: a subframe or a helper process that WebView2 starts again by itself.
   PageRuns,
@@ -318,12 +370,14 @@ pub fn on_process_failed(
       let window = window.clone();
       reload_page(reload, move || window.reload());
     },
-    // Only a new window would bring it back (follow-up of #1214); the call goes on in the shell.
-    Failure::WebviewLost => tracing::error!(
-      ?maybe_reason,
-      ?maybe_exit_code,
-      "the webview's browser process ended; the window stays empty until the app restarts"
-    ),
+    Failure::WebviewLost => {
+      tracing::error!(
+        ?maybe_reason,
+        ?maybe_exit_code,
+        "the webview's browser process ended; making the window again"
+      );
+      recover_browser(window.app_handle());
+    },
     Failure::PageRuns => tracing::info!(
       ?kind,
       ?maybe_reason,
@@ -331,6 +385,118 @@ pub fn on_process_failed(
       "a webview helper process ended; the page goes on"
     ),
   }
+}
+
+/// The webview is gone with its browser process: the main window is made anew, or the user is told
+/// when that keeps failing.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn recover_browser(app: &AppHandle) {
+  let reload = recover(app);
+  let app = app.clone();
+  // Not from inside WebView2's event: the webview it belongs to is about to be destroyed.
+  tauri::async_runtime::spawn(async move {
+    if let Reload::After(delay) = reload {
+      tokio::time::sleep(delay).await;
+    }
+    replace_main_window(&app).await;
+  });
+}
+
+/// Destroys the main window and makes it again until it works or [`browser_recovery`] gives up.
+#[cfg_attr(not(windows), allow(dead_code))]
+async fn replace_main_window(app: &AppHandle) {
+  let recovery = app.state::<Arc<WebviewRecovery>>().inner().clone();
+  recovery.is_replacing_window.store(true, Ordering::SeqCst);
+  let mut maybe_was_visible = None;
+  loop {
+    match recovery.browser_process_failed(Instant::now()) {
+      BrowserRecovery::Recreate => {},
+      BrowserRecovery::GiveUp => {
+        recovery.is_replacing_window.store(false, Ordering::SeqCst);
+        tell_user_webview_is_gone(app);
+        return;
+      },
+    }
+    if let Some(window) = app.get_webview_window(tray::MAIN_WINDOW) {
+      maybe_was_visible = Some(window.is_visible().unwrap_or(true));
+      // The window state plugin writes it when the app exits, which this is not.
+      if let Err(error) = app.save_window_state(crate::window_state_flags()) {
+        tracing::debug!(%error, "could not save the window's size and place");
+      }
+      // No `close`: the page cannot hold it back to store drafts, it is gone.
+      if let Err(error) = window.destroy() {
+        tracing::warn!(%error, "could not destroy the window of the dead webview");
+      }
+    }
+    match wait_until_window_is_gone(app).await {
+      Ok(()) => {},
+      Err(()) => {
+        tracing::error!("the window of the dead webview did not go away");
+        continue;
+      },
+    }
+    match crate::create_main_window(app, maybe_was_visible.or(Some(true))) {
+      Ok(()) => {
+        recovery.is_replacing_window.store(false, Ordering::SeqCst);
+        tracing::info!("the main window is made again");
+        return;
+      },
+      Err(error) => {
+        tracing::error!(%error, "could not make the main window again");
+        // A moment for WebView2 to let go of what the dead process left behind.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+      },
+    }
+  }
+}
+
+/// A new window can take the label only after the runtime has let go of the old one.
+#[cfg_attr(not(windows), allow(dead_code))]
+async fn wait_until_window_is_gone(app: &AppHandle) -> Result<(), ()> {
+  let started = Instant::now();
+  while app.get_webview_window(tray::MAIN_WINDOW).is_some() {
+    if started.elapsed() > WINDOW_GONE_TIMEOUT {
+      return Err(());
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+  Ok(())
+}
+
+/// What the user reads when the webview cannot be kept running: a dialog, as the window has nothing
+/// to show it in.
+#[cfg_attr(not(windows), allow(dead_code))]
+const WEBVIEW_GONE_MESSAGE: &str = "TeamCraft kann seine Anzeige nicht mehr starten (WebView2 beendet sich immer wieder). \
+Bitte TeamCraft neu starten. Hilft das nicht, die WebView2-Runtime von Microsoft aktualisieren oder den Rechner neu starten.\n\n\
+TeamCraft cannot start its display any more (WebView2 keeps ending). Please restart TeamCraft. If that does not help, \
+update Microsoft's WebView2 runtime or restart the computer.";
+
+/// Tells the user in a dialog. Without a window the app has nothing left to show: it quits once the
+/// dialog is closed.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn tell_user_webview_is_gone(app: &AppHandle) {
+  use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+
+  tracing::error!("the webview keeps failing; telling the user");
+  let has_window = app.get_webview_window(tray::MAIN_WINDOW).is_some();
+  let app_to_quit = app.clone();
+  app
+    .dialog()
+    .message(WEBVIEW_GONE_MESSAGE)
+    .title("TeamCraft")
+    .kind(MessageDialogKind::Error)
+    .show(move |_| {
+      if !has_window {
+        app_to_quit.exit(1);
+      }
+    });
+}
+
+/// Whether the main window is being made anew, which keeps the app from quitting without a window.
+pub fn is_replacing_window(app: &AppHandle) -> bool {
+  app
+    .try_state::<Arc<WebviewRecovery>>()
+    .is_some_and(|recovery| recovery.is_replacing_window.load(Ordering::SeqCst))
 }
 
 /// Loads the page again now or after the delay of a crash loop.
@@ -568,6 +734,38 @@ mod tests {
     fn a_dead_or_hung_page_loads_again() {
       assert_eq!(failure(WebviewProcessKind::Render), Failure::PageLost);
       assert_eq!(failure(WebviewProcessKind::RenderUnresponsive), Failure::PageLost);
+    }
+
+    #[test]
+    fn a_dead_browser_process_gets_a_new_window_a_few_times_then_the_user_is_told() {
+      let recovery = recovery_without_note(WebviewVideoMode::Automatic);
+      let start = Instant::now();
+      let steps: Vec<_> = (0..5)
+        .map(|failure| recovery.browser_process_failed(start + Duration::from_secs(failure * 10)))
+        .collect();
+      assert_eq!(
+        steps,
+        vec![
+          BrowserRecovery::Recreate,
+          BrowserRecovery::Recreate,
+          BrowserRecovery::Recreate,
+          BrowserRecovery::GiveUp,
+          BrowserRecovery::GiveUp,
+        ]
+      );
+    }
+
+    #[test]
+    fn browser_failures_far_apart_never_add_up() {
+      let recovery = recovery_without_note(WebviewVideoMode::Automatic);
+      let start = Instant::now();
+      for failure in 0..20 {
+        assert_eq!(
+          recovery.browser_process_failed(start + BROWSER_WINDOW * failure),
+          BrowserRecovery::Recreate
+        );
+      }
+      assert!(recovery.lock().browser_failures.len() <= 1);
     }
 
     #[test]
