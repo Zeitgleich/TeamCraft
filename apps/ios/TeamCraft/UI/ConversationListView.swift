@@ -148,6 +148,7 @@ struct ConversationListView: View {
     // the channel browser shows its own.
     .joinNoteAlert(model, isActive: maybeBrowseTab == nil)
     .sheet(isPresented: $isShowingSettings) { SettingsView(account: account) }
+    .crashReportsNotice { isShowingSettings = true }
     .sheet(isPresented: $isShowingMeetings) { MeetingsView(account: account) }
     .sheet(isPresented: $isShowingDrafts) {
       DraftsAndSentView { place in
