@@ -22,6 +22,9 @@ path = "src/main.rs"
 base64.workspace = true
 teamcraft-crypto.workspace = true
 teamcraft-proto.workspace = true
+# The crash reports of the server's own panics (services/crash_reports.rs): the same envelope
+# builder and scrubber as the apps, so one set of privacy tests covers them.
+teamcraft-client-api = { path = "../teamcraft-client-api" }
 teamcraft-db.workspace = true
 teamcraft-ops = { workspace = true, features = ["metrics"] }
 # The retry policy shared with the clients (src/dependencies.rs).
