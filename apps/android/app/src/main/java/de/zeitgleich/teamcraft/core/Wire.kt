@@ -669,6 +669,31 @@ data class Meeting(
 @Serializable
 data class MeetingList(val meetings: List<Meeting> = emptyList())
 
+/**
+ * `GET /me/holiday-region` and the answer of `PUT` (#1450): whose public holidays the member's
+ * repeating meetings skip. [maybeRegion] is absent while the workspace's region applies.
+ */
+@Serializable
+data class HolidayRegion(
+  @SerialName("region") val maybeRegion: String? = null,
+  /** The workspace's region, which applies without an own one; empty: none. */
+  @SerialName("instance_region") val instanceRegion: String = "",
+  /** The workspace has a holiday calendar whose holidays are skipped as well. */
+  @SerialName("has_instance_feed") val hasInstanceFeed: Boolean = false,
+)
+
+/** `PUT /me/holiday-region`: no region (or an empty one) goes back to the workspace's. */
+@Serializable
+data class SetHolidayRegion(@SerialName("region") val maybeRegion: String? = null)
+
+/** The regions of the server's holiday table (`HOLIDAY_REGIONS`), in its order. */
+val HOLIDAY_REGIONS = listOf(
+  "DE", "DE-BW", "DE-BY", "DE-BE", "DE-BB", "DE-HB", "DE-HH", "DE-HE", "DE-MV", "DE-NI", "DE-NW", "DE-RP",
+  "DE-SL", "DE-SN", "DE-ST", "DE-SH", "DE-TH", "AT", "CH", "CH-AG", "CH-AI", "CH-AR", "CH-BE", "CH-BL",
+  "CH-BS", "CH-FR", "CH-GE", "CH-GL", "CH-GR", "CH-JU", "CH-LU", "CH-NE", "CH-NW", "CH-OW", "CH-SG", "CH-SH",
+  "CH-SO", "CH-SZ", "CH-TG", "CH-TI", "CH-UR", "CH-VD", "CH-VS", "CH-ZG", "CH-ZH",
+)
+
 /** Reads one string field of a JSON object answer, for small replies. */
 fun JsonElement.stringField(name: String): String? = (jsonObject[name] as? JsonPrimitive)?.content
 

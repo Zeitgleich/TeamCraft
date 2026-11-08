@@ -61,6 +61,7 @@ import de.zeitgleich.teamcraft.ui.media.MediaDraftStore
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.FileInfo
+import de.zeitgleich.teamcraft.core.HolidayRegion
 import de.zeitgleich.teamcraft.core.NetworkTrust
 import de.zeitgleich.teamcraft.core.OwnProfile
 import de.zeitgleich.teamcraft.core.PermalinkTarget
@@ -975,6 +976,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       errorText(failure)
     } catch (failure: IllegalStateException) {
       R.string.error_signed_out
+    }
+
+  /** Whose public holidays the member's repeating meetings skip; `null` when the server can't tell now. */
+  suspend fun loadHolidayRegion(): HolidayRegion? = readChat { holidayRegion() }
+
+  /**
+   * Picks the holiday region (`null`: the workspace's): what the server stores now, or the text
+   * that says why it wasn't saved. The meeting list reads the meetings afresh whenever it opens.
+   */
+  suspend fun trySetHolidayRegion(maybeRegion: String?): Pair<HolidayRegion?, Int?> =
+    try {
+      withContext(Dispatchers.Default) { chat.setHolidayRegion(maybeRegion) } to null
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: TeamCraftException.Core) {
+      null to R.string.holiday_save_failed
+    } catch (failure: TeamCraftException) {
+      null to errorText(failure)
+    } catch (failure: kotlinx.serialization.SerializationException) {
+      null to R.string.holiday_save_failed
+    } catch (failure: IllegalStateException) {
+      null to R.string.error_signed_out
     }
 
   /**
