@@ -155,6 +155,17 @@ the change, and people taken off the list are removed from the group.
    conversation (the room must be another one), and the conversation, like the DM, doesn't
    change.
 
+   **Latecomers** (issue #1321). Whoever starts or joins the conversation's call after it moved
+   (everybody followed, so the DM's call ended and theirs would be a new one) is pointed at the
+   room before joining: the pre-join screen (desktop, web), dialog (Android) and notice (iOS) say
+   "The call moved into 'Room', which is running now" with a button to open the room. The rule
+   (`teamcraft_client_api::notetaker::moved_call_hint`): the newest `call_moved` announced in the
+   conversation (a member of its encryption group sent it; the core reads the room, not the
+   server), the user is a member of that room (the core names no other, so nobody is pointed at a
+   room they can't open), the room's call has other people in it now (the server roster), and the
+   announcement is at most 3 hours old. The hint only opens the room; it joins nothing. The
+   announcement's call ID plays no part: after the move the old call is gone.
+
    | Condition                   | What happens                                                                                                                                                                                                                 |
    |-----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
    | The added person declines   | Their ring stops on that device; the others go on in the meeting room. A missed call is noted only if nobody answered at all.                                                                                                |

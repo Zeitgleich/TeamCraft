@@ -56,6 +56,7 @@ import de.zeitgleich.teamcraft.ui.PictureEdits
 import de.zeitgleich.teamcraft.ui.Pictures
 import androidx.compose.material3.Button
 import uniffi.teamcraft_ffi.CallPhase
+import uniffi.teamcraft_ffi.MovedCallHint
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -131,6 +132,7 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.Conversation
+import de.zeitgleich.teamcraft.core.HistoryGap
 import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.DraftFileItem
@@ -156,7 +158,10 @@ import de.zeitgleich.teamcraft.ui.EmojiInput
 import de.zeitgleich.teamcraft.ui.FeedSeed
 import de.zeitgleich.teamcraft.ui.FirstUnread
 import de.zeitgleich.teamcraft.ui.Mentions
+import de.zeitgleich.teamcraft.ui.GapRequest
 import de.zeitgleich.teamcraft.ui.PagedFeed
+import de.zeitgleich.teamcraft.ui.PlacedGap
+import de.zeitgleich.teamcraft.ui.placeGaps
 import de.zeitgleich.teamcraft.ui.PendingShare
 import de.zeitgleich.teamcraft.ui.TypingLine
 import de.zeitgleich.teamcraft.ui.shouldNotifyTyping
@@ -216,6 +221,8 @@ fun ConversationScreen(
     PagedFeed(PAGE, PAGE_BACK) { maybeOldest, older -> viewModel.readChat { tail(conversationId, maybeOldest, older) } }
   }
   var hasOlder by remember(conversationId) { mutableStateOf(maybeSeed?.hasOlder ?: false) }
+  // Holes in the history among the messages (issue #1438): a catch-up read the newest ones first.
+  var gaps by remember(conversationId) { mutableStateOf<List<HistoryGap>>(emptyList()) }
   var isLoadingOlder by remember(conversationId) { mutableStateOf(false) }
   // Older history the store doesn't hold: read when the feed reaches the store's end.
   var serverHistory by remember(conversationId) { mutableStateOf(ServerHistory.COMPLETE) }
@@ -240,6 +247,7 @@ fun ConversationScreen(
       val maybeSnapshot = viewModel.readChat { snapshot() }
       messages = tail
       hasOlder = maybeTail?.hasOlder ?: false
+      gaps = maybeTail?.gaps.orEmpty()
       extras = maybeExtras ?: extras
       snapshot = maybeSnapshot ?: snapshot
       // Read now: opened again, it starts at the end without an unread line.
@@ -282,7 +290,7 @@ fun ConversationScreen(
     topBar = {
       val typingPlaces by viewModel.typingPlaces.collectAsState()
       ConversationTopBar(snapshot, conversation, maybeNotified, maybeListed, onBack, typing = typingIn(typingPlaces, conversationId)) {
-        ConversationMenu(viewModel, conversationId, conversation, rights, onOpenFiles)
+        ConversationMenu(viewModel, conversationId, conversation, rights, onOpenFiles, onOpenConversation)
       }
     },
   ) {
@@ -324,6 +332,9 @@ fun ConversationScreen(
       onOpenConversation = onOpenConversation,
       unseenReactions = unseenReactions,
       onReactionsSeen = { seen -> viewModel.act(ChatActions.markReactionsSeen(conversationId, seen)) },
+      // Placed by the messages the core counted them among, before the notified one is added.
+      gaps = placeGaps(messages, gaps),
+      onFillGap = { request -> viewModel.act(ChatActions.fillHistoryGap(conversationId, request.gap.after, request.edge)) },
       older = OlderMessages(
         olderState(hasOlder, isLoadingOlder || isAskingServer, serverHistory),
         onRetry = { viewModel.act(ChatActions.loadOlderHistory(conversationId)) },
@@ -341,6 +352,7 @@ fun ConversationScreen(
           feed.older()?.let { tail ->
             messages = tail.messages
             hasOlder = tail.hasOlder
+            gaps = tail.gaps
           }
           isLoadingOlder = false
         }
@@ -512,6 +524,7 @@ private fun ConversationMenu(
   maybeConversation: Conversation?,
   rights: ConversationRights,
   onOpenFiles: () -> Unit,
+  onOpenConversation: (String) -> Unit,
 ) {
   val isFavorite = maybeConversation?.isFavorite == true
   val name = maybeConversation?.name.orEmpty()
@@ -536,10 +549,25 @@ private fun ConversationMenu(
       value = viewModel.isNotetakerInRunningCall(conversationId)
     }
     val runningCount by produceState(0, conversationId) { value = viewModel.runningCalls()[conversationId] ?: 0 }
-    PreJoinDialog(name, isNotetakerInCall, runningCount, onDismiss = { isPreparingCall = false }) { options ->
-      isPreparingCall = false
-      viewModel.startCall(conversationId, name, options)
+    // The call moved into a room the user is in, and that room's call runs now (issue #1321).
+    val maybeMoved by produceState<MovedCallHint?>(null, conversationId) {
+      value = viewModel.movedCallHint(conversationId)
     }
+    PreJoinDialog(
+      name,
+      isNotetakerInCall,
+      runningCount,
+      onDismiss = { isPreparingCall = false },
+      maybeMovedRoom = maybeMoved,
+      onOpenRoom = { room ->
+        isPreparingCall = false
+        onOpenConversation(room)
+      },
+      onJoin = { options ->
+        isPreparingCall = false
+        viewModel.startCall(conversationId, name, options)
+      },
+    )
   }
   IconButton(onClick = { isNotifying = true }) {
     if (maybeConversation?.isMuted == true) {
@@ -747,6 +775,8 @@ private fun MessageList(
   older: OlderMessages = OlderMessages.None,
   unseenReactions: UnseenReactions = UnseenReactions(),
   onReactionsSeen: (List<String>) -> Unit = {},
+  gaps: List<PlacedGap> = emptyList(),
+  onFillGap: (GapRequest) -> Unit = {},
 ) {
   var maybeSelected by remember { mutableStateOf<Message?>(null) }
   var maybeSelectedImage by remember { mutableStateOf<FileInfo?>(null) }
@@ -787,6 +817,8 @@ private fun MessageList(
     older = older,
     unseenReactions = unseenReactions,
     onReactionsSeen = onReactionsSeen,
+    gaps = gaps,
+    onFillGap = onFillGap,
   )
   maybeSelected?.let { message ->
     MessageActions(
@@ -1795,6 +1827,8 @@ internal fun PreJoinDialog(
   runningCount: Int,
   onDismiss: () -> Unit,
   onJoin: (CallOptions) -> Unit,
+  maybeMovedRoom: MovedCallHint? = null,
+  onOpenRoom: (String) -> Unit = {},
 ) {
   var isCameraOn by rememberSaveable { mutableStateOf(false) }
   var isMuted by rememberSaveable { mutableStateOf(false) }
@@ -1810,6 +1844,16 @@ internal fun PreJoinDialog(
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.padding(bottom = 8.dp),
           )
+        }
+        maybeMovedRoom?.let { moved ->
+          // Latecomers: the call went into a room that is running now (issue #1321).
+          Text(
+            stringResource(R.string.call_prejoin_moved, moved.roomName),
+            style = MaterialTheme.typography.bodyMedium,
+          )
+          TextButton(onClick = { onOpenRoom(moved.roomId) }, modifier = Modifier.padding(bottom = 8.dp)) {
+            Text(stringResource(R.string.event_call_moved_open))
+          }
         }
         if (isNotetakerInCall) {
           Text(

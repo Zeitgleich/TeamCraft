@@ -244,6 +244,26 @@ data class MessageTail(
   @SerialName("has_older") val hasOlder: Boolean,
   /** Received but not readable on this device yet (keys not arrived); placeholders in [messages]. */
   val undecrypted: Int = 0,
+  /** History this device never read between [messages], oldest first (issues #1156, #1438). */
+  val gaps: List<HistoryGap> = emptyList(),
+)
+
+/**
+ * A hole in the history among a [MessageTail]'s messages: a catch-up after a long absence read a
+ * busy conversation's newest page ahead of the rest, and reads the rest by itself; a reader who
+ * comes near asks for a page of it ([ChatActions.fillHistoryGap]).
+ */
+@Serializable
+data class HistoryGap(
+  /** The newest message before it: what a request names it by. */
+  val after: String,
+  /** How many of the tail's messages come before it (0: above the first). */
+  val index: Int,
+  /**
+   * How the conversation's last request for a hole stands, as [de.zeitgleich.teamcraft.ui.ServerHistory]
+   * says it (never `complete`).
+   */
+  val status: String,
 )
 
 @Serializable

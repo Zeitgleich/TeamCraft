@@ -56,7 +56,7 @@ pub use media_viewer::{
   AlbumLayout, MediaScope, MediaViewer, MediaViewerItem, MediaViewerLimits, MediaViewerState,
   OriginalDownload, album_layout, fetches_original_automatically, media_viewer_limits,
 };
-pub use notetaker::NotetakerAddition;
+pub use notetaker::{MovedCallHint, NotetakerAddition};
 pub use server_entry::{
   CheckedServer, ServerAddress, ServerEntryError, SignInOption, SignInPageInfo, StoredServer,
   check_server_info, normalize_server_address, sign_in_page, sso_only_sign_in_page, stored_server,
@@ -722,6 +722,30 @@ impl TeamCraft {
       .await
   }
 
+  /// [`Self::notification_preview_for_push`] that also shows the message after key changes and in a
+  /// conversation the store doesn't know yet (issue #839): when the store and the one fetched
+  /// message can't, it catches the conversation up on a probe, an in-memory overlay over the store
+  /// that is thrown away, through an API that refuses every call that would change something on the
+  /// server. Nothing is saved, nothing is sent, and the app processes the same messages later
+  /// (e2ee.md §7.2). Takes up to about 14 s and some MB more than the preview: for an extension
+  /// with the memory to spare.
+  pub async fn notification_probe_for_push(
+    &self,
+    payload: Vec<u8>,
+    utc_offset_minutes: i16,
+  ) -> Result<PushNotification, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(engine.notification_for_push(
+          payload,
+          utc_offset_minutes,
+          PushOpening::Received,
+          PushReader::ProbingExtension,
+        ))
+      })
+      .await
+  }
+
   /// [`Self::notification_for_push`] again for a wake-up whose first try could not read the
   /// message in time (`maybe_gap` timed out, not decrypted, no session): the app retries later to
   /// update the notification it already shows. Not counted as a received push in the diagnostics.
@@ -1098,6 +1122,20 @@ impl TeamCraft {
   pub async fn call_participants(&self, conversation_id: String) -> Result<Vec<String>, TeamCraftError> {
     self
       .call(move |engine| Box::pin(async move { engine.call_participants(&conversation_id).await }))
+      .await
+  }
+
+  /// Where the call of `conversation_id` went, for somebody who comes to it late (issue #1321): the
+  /// newest move announced in the conversation, if the user is a member of the room and the room's
+  /// call runs with others in it now, and the announcement is not hours old. The apps show "The
+  /// call moved into a room with the notetaker" with a way into the room before joining or starting
+  /// the conversation's call. `None` when there is nothing to point at. Never starts a call.
+  pub async fn moved_call_hint(
+    &self,
+    conversation_id: String,
+  ) -> Result<Option<MovedCallHint>, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.moved_call_hint(&conversation_id).await }))
       .await
   }
 

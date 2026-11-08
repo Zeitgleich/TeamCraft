@@ -61,6 +61,10 @@ struct ChatPane: View {
   @State private var maybeFeed: (conversationId: String, feed: PagedFeed)?
   @State private var hasOlder = false
   @State private var isLoadingOlder = false
+  /// Holes in the history among the messages (issue #1438): a catch-up read the newest ones first.
+  @State private var gaps: [HistoryGapItem] = []
+  /// A page of a hole was asked for; the next read says how it stands.
+  @State private var isFillingGap = false
   /// Older history the store doesn't hold: asked for when the feed reaches the store's end.
   @State private var serverHistory = OlderHistory.complete
   @State private var maybeKeyCatchUp: KeyCatchUpItem?
@@ -75,7 +79,7 @@ struct ChatPane: View {
   @State private var maybeReactionTarget: String?
   /// A call about to be joined whose running call has the notetaker in it: the user confirms
   /// after the notice (`true`: with video).
-  @State private var maybeNotetakerCall: Bool?
+  @State private var maybePreJoin: PreJoinNotice?
   /// Whether voice messages may be recorded here and how long (#204).
   @State private var voicePolicy = VoiceMessagePolicy.fallback
   @AppStorage("share_typing") private var isSharingTyping = true
@@ -254,11 +258,15 @@ struct ChatPane: View {
     .task(id: model.changeCount) {
       isSchedulingAllowed = await model.scheduledOverview()?.policy.isEnabled == true
     }
-    .alert("call_start", isPresented: notetakerCallBinding, presenting: maybeNotetakerCall) { withVideo in
-      Button("call_prejoin_join") { startCall(withVideo: withVideo) }
+    .alert("call_start", isPresented: preJoinBinding, presenting: maybePreJoin) { notice in
+      Button("call_prejoin_join") { startCall(withVideo: notice.withVideo) }
+      if let moved = notice.maybeMoved {
+        // The call moved into a room that runs now: latecomers go there (issue #1321).
+        Button("event_call_moved_open") { model.openConversationId = moved.roomId }
+      }
       Button("cancel", role: .cancel) {}
-    } message: { _ in
-      Text("call_prejoin_notetaker")
+    } message: { notice in
+      Text(verbatim: notice.message)
     }
     .alert("send_failed", isPresented: $isSendFailed) {
       Button("done", role: .cancel) {}
@@ -291,6 +299,7 @@ struct ChatPane: View {
     GeometryReader { geometry in
       let listWidth = max(geometry.size.width - Self.listPadding * 2, 0)
       let look = BubbleLook(listWidth: listWidth, showsSenders: showsSenders(conversation.kind), names: names)
+      let placedGaps = PlacedGaps(threadId == nil ? gaps : [], among: messages)
       ScrollViewReader { proxy in
         ScrollView {
           // One section per day: its date pill stays at the top while the day scrolls by.
@@ -313,16 +322,22 @@ struct ChatPane: View {
               .frame(maxWidth: .infinity)
               .padding(.vertical, 8)
             }
-            ForEach(feedSections(messages)) { section in
+            ForEach(placedGaps.above, id: \.after) { gap in gapRow(gap) }
+            ForEach(feedSections(messages, gaps: placedGaps)) { section in
               Section {
                 ForEach(section.entries) { entry in
-                  entryRow(entry, look: look, listWidth: listWidth)
-                    .onAppear {
-                      if entry.id == pageBackTriggerId { Task { await loadOlder() } }
-                      rowsOnScreen.insert(entry.id)
-                      reportSeenReactions()
-                    }
-                    .onDisappear { rowsOnScreen.remove(entry.id) }
+                  // One container whether or not a hole follows, so a row keeps its identity.
+                  VStack(alignment: .leading, spacing: 0) {
+                    entryRow(entry, look: look, listWidth: listWidth)
+                    ForEach(entry.gapsAfter, id: \.after) { gap in gapRow(gap) }
+                  }
+                  .onAppear {
+                    if entry.id == pageBackTriggerId { Task { await loadOlder() } }
+                    rowsOnScreen.insert(entry.id)
+                    reportSeenReactions()
+                    fillGapIfNear()
+                  }
+                  .onDisappear { rowsOnScreen.remove(entry.id) }
                 }
               } header: {
                 DayPill(date: section.day)
@@ -397,6 +412,56 @@ struct ChatPane: View {
     guard threadId == nil, canPageBack, !isLoadingOlder else { return }
     let isNear = messages.prefix(Self.olderAheadRows + 1).contains { rowsOnScreen.contains($0.id) }
     if isNear { Task { await loadOlder() } }
+  }
+
+  /// Asks for a page of a hole in the history once it comes within `olderAheadRows` of the rows on
+  /// screen (`gapToFill`, as web and desktop do). Not at the bottom of a list that scrolls, so
+  /// opening a conversation costs no extra request: the catch-up reads the hole by itself.
+  private func fillGapIfNear() {
+    guard threadId == nil, !isFillingGap, !gaps.isEmpty,
+      let firstVisible = messages.firstIndex(where: { rowsOnScreen.contains($0.id) }),
+      let lastVisible = messages.lastIndex(where: { rowsOnScreen.contains($0.id) }),
+      !isAtBottom || firstVisible == 0,
+      let request = gapToFill(gaps, firstVisible: firstVisible, lastVisible: lastVisible, ahead: Self.olderAheadRows)
+    else { return }
+    fillGap(request.gap, from: request.edge)
+  }
+
+  private func fillGap(_ gap: HistoryGapItem, from edge: GapEdge) {
+    isFillingGap = true
+    Task { await model.perform(.fillHistoryGap(conversationId: conversation.id, after: gap.after, edge: edge)) }
+  }
+
+  /// Where history this device hasn't read yet lies (issue #1438): a quiet loading line while the
+  /// catch-up or a request reads it, the failure with "Try again" when the last request failed.
+  @ViewBuilder
+  private func gapRow(_ gap: HistoryGapItem) -> some View {
+    if gap.status == .failed {
+      HStack {
+        Text("history_gap_failed")
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+        Button("older_history_retry") {
+          // From the side the reader is on now.
+          let firstVisible = messages.firstIndex(where: { rowsOnScreen.contains($0.id) }) ?? 0
+          fillGap(gap, from: gapEdge(gap, firstVisible: firstVisible))
+        }
+        .font(.footnote)
+      }
+      .frame(maxWidth: .infinity)
+      .padding(.vertical, 8)
+    } else {
+      HStack(spacing: 8) {
+        ProgressView()
+          .controlSize(.small)
+        Text("history_gap_loading")
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+      }
+      .accessibilityElement(children: .combine)
+      .frame(maxWidth: .infinity)
+      .padding(.vertical, 12)
+    }
   }
 
   private var names: MentionNames {
@@ -732,15 +797,18 @@ struct ChatPane: View {
       || (maybeEditing == nil && (!attachments.isEmpty || !sendableOtherFiles.isEmpty))
   }
 
-  private var notetakerCallBinding: Binding<Bool> {
-    Binding(get: { maybeNotetakerCall != nil }, set: { if !$0 { maybeNotetakerCall = nil } })
+  private var preJoinBinding: Binding<Bool> {
+    Binding(get: { maybePreJoin != nil }, set: { if !$0 { maybePreJoin = nil } })
   }
 
-  /// The call buttons: where the running call has the notetaker in it, the notice comes first, as on
-  /// the pre-join screens of desktop, web and Android (e2ee.md §8.2); otherwise the call starts.
+  /// The call buttons: where the running call has the notetaker in it, or the conversation's call
+  /// moved into a room that runs now, the notice comes first, as on the pre-join screens of
+  /// desktop, web and Android (e2ee.md §8.2, issue #1321); otherwise the call starts.
   private func prepareCall(withVideo: Bool) async {
-    if await model.isNotetakerInRunningCall(conversationId: conversation.id) {
-      maybeNotetakerCall = withVideo
+    let isNotetakerIn = await model.isNotetakerInRunningCall(conversationId: conversation.id)
+    let maybeMoved = await model.movedCallHint(conversationId: conversation.id)
+    if isNotetakerIn || maybeMoved != nil {
+      maybePreJoin = PreJoinNotice(withVideo: withVideo, isNotetakerIn: isNotetakerIn, maybeMoved: maybeMoved)
     } else {
       startCall(withVideo: withVideo)
     }
@@ -1195,8 +1263,11 @@ struct ChatPane: View {
       messages = page.messages
       extras = readExtras
       hasOlder = page.hasOlder
+      gaps = page.gaps
+      isFillingGap = false
       if let history = await model.olderHistory(conversationId: conversation.id) { serverHistory = history }
       pageBackIfNearOldest()
+      fillGapIfNear()
     }
     if conversation.unreadCount > 0 { await model.markRead(conversationId: conversation.id) }
     maybeKeyCatchUp = await model.keyCatchUp()
@@ -1222,6 +1293,7 @@ struct ChatPane: View {
     maybeFeed = (conversationId, feed)
     hasOlder = false
     serverHistory = .complete
+    gaps = []
     return feed
   }
 
@@ -1243,6 +1315,7 @@ struct ChatPane: View {
     messages = page.messages
     extras = readExtras
     hasOlder = page.hasOlder
+    gaps = page.gaps
   }
 
   private func reloadExtras() async {
@@ -1454,5 +1527,25 @@ struct SwipeToReply<Content: View>: View {
         isPastThreshold = false
         withAnimation(.spring(duration: 0.25)) { offset = 0 }
       }
+  }
+}
+
+/// What the call buttons say before joining: the running call has the notetaker in it, and/or the
+/// conversation's call moved into a room that runs now (issue #1321).
+struct PreJoinNotice {
+  let withVideo: Bool
+  let isNotetakerIn: Bool
+  let maybeMoved: MovedCallHint?
+
+  /// The sentences that apply, one paragraph each.
+  var message: String {
+    var lines: [String] = []
+    if let moved = maybeMoved {
+      lines.append(String(localized: "call_prejoin_moved \(moved.roomName)"))
+    }
+    if isNotetakerIn {
+      lines.append(String(localized: "call_prejoin_notetaker"))
+    }
+    return lines.joined(separator: "\n\n")
   }
 }

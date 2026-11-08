@@ -814,6 +814,12 @@ pub trait ChatBackend {
   fn notetaker_policy(&self) -> Option<teamcraft_proto::NotetakerPolicy> {
     None
   }
+  /// The newest move of the conversation's call into a meeting room that was announced in it (a
+  /// `CallMoved` event), with the room's name set only when the user is in the room (issue #1321).
+  /// The latecomers' hint is made from it ([`crate::notetaker::moved_call_hint`]).
+  fn moved_call(&self, _conversation: ConversationId) -> Option<crate::notetaker::MovedCall> {
+    None
+  }
   /// Asks the notetaker into the conversation's call or sends it away: an encrypted, hidden
   /// control message the notetaker reads (and decides on from the verified policy).
   fn request_notetaker(&self, _conversation: ConversationId, _request: teamcraft_proto::NotetakerRequest) {}

@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui
 
+import de.zeitgleich.teamcraft.core.HistoryGap
 import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageTail
 import kotlinx.coroutines.sync.Mutex
@@ -48,3 +49,36 @@ fun olderState(hasLocalOlder: Boolean, isReading: Boolean, serverHistory: String
   isLoading = isReading || (!hasLocalOlder && serverHistory == ServerHistory.LOADING),
   isFailed = !hasLocalOlder && serverHistory == ServerHistory.FAILED,
 )
+
+/** Which side of a hole in the history a page is read from (`GapEdge` in Rust). */
+object GapEdge {
+  /** Its oldest messages, after the row before it: the reader reads down towards it. */
+  const val OLDER = "older"
+
+  /** Its newest messages, before the row after it: the reader reads up towards it. */
+  const val NEWER = "newer"
+}
+
+/** A page of [gap] to ask the core for, read from [edge]. */
+data class GapRequest(val gap: HistoryGap, val edge: String)
+
+/**
+ * The side of a hole at feed row [row] the reader comes from, with [topVisible] the topmost row on
+ * screen (rows counted from the newest, as the reversed list holds them): from below the topmost
+ * row the reader reads down towards it, so what arrives continues what they look at.
+ */
+fun gapEdge(row: Int, topVisible: Int): String = if (row < topVisible) GapEdge.OLDER else GapEdge.NEWER
+
+/**
+ * The hole a feed asks a page of (issue #1438, as web and desktop do): the first, oldest first, whose
+ * row lies within [ahead] rows of those on screen ([bottomVisible] to [topVisible]); none while the
+ * conversation's last request is on its way or failed (that waits for "Try again" or the next
+ * connection). [gapRows] are the holes with their rows, counted from the newest.
+ */
+fun gapToFill(gapRows: List<Pair<Int, HistoryGap>>, bottomVisible: Int, topVisible: Int, ahead: Int): GapRequest? {
+  val (row, gap) = gapRows
+    .sortedByDescending { it.first }
+    .firstOrNull { (candidate, _) -> candidate in (bottomVisible - ahead)..(topVisible + ahead) } ?: return null
+  if (gap.status != ServerHistory.AVAILABLE) return null
+  return GapRequest(gap, gapEdge(row, topVisible))
+}

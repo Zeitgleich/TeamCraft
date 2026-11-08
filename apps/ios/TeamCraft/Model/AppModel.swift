@@ -685,7 +685,8 @@ final class AppModel {
         conversationId: conversationId, maybeOldestId: maybeOldest?.id, oldestSentAtMs: maybeOldest?.sentAtMs ?? 0,
         older: older)
     else { return nil }
-    return MessagePage(messages: page.messages.map { $0.namingDeletedAuthor() }, hasOlder: page.hasOlder)
+    return MessagePage(
+      messages: page.messages.map { $0.namingDeletedAuthor() }, hasOlder: page.hasOlder, gaps: page.gaps)
   }
 
   func thread(conversationId: String, threadId: String) async -> [MessageItem] {
@@ -1274,6 +1275,12 @@ final class AppModel {
       return false
     }
     return await notetakerInCall(conversationId: conversationId, participants: participants)?.isPresent ?? false
+  }
+
+  /// Where the call of `conversationId` moved to (issue #1321): the room the user is in whose call
+  /// runs now, for the notice before joining. `nil` when nothing moved, it is over or unreadable.
+  func movedCallHint(conversationId: String) async -> MovedCallHint? {
+    try? await core().movedCallHint(conversationId: conversationId)
   }
 
   /// "Add notetaker" where the call is: asked in where it is a member or the core could add it

@@ -252,7 +252,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let page = self.api.list_messages(conversation, &query).await?;
     let count = page.messages.len();
-    self.receive_page(page.messages)?;
+    self.receive_earlier_page(conversation, page.messages)?;
     Ok(count)
   }
 
@@ -276,7 +276,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let count = page.messages.len();
     let maybe_oldest = self.oldest_held(conversation)?;
     let (has_more, maybe_bounds) = (page.has_more, super::history_gaps::bounds(&page.messages));
-    self.receive_page(page.messages)?;
+    self.receive_earlier_page(conversation, page.messages)?;
     self.note_jump_page(conversation, cursor, maybe_bounds, has_more, maybe_oldest)?;
     Ok(count)
   }
@@ -375,7 +375,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Takes the controls of `conversation` from `from` on again, in their order, whose outcome
   /// depends on it: pins, bookmarks and channel role entries (issue #1423). A backlog read after
-  /// the newest page applied its older ones after the newer ones; the rest goes by its own order
+  /// the newest page applied its older ones after the newer ones, as does a page read before or
+  /// between what is held ([`Self::settle_ordered_controls`]); the rest goes by its own order
   /// (an edit by its ID, a deletion stays, a source change or a notetaker request by its time,
   /// canvas updates merge). A pin of a message not held stays waiting for it as before, where it
   /// is applied in its order (`apply_early_controls`).
@@ -503,6 +504,56 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
       Ok(())
     })
+  }
+
+  /// [`Self::receive_page`] for a page of `conversation` read out of order: before the messages
+  /// this device holds or between them (older history, a jump to a date and its holes). Its pins
+  /// and bookmarks were applied after newer ones, so those are taken again in their order
+  /// ([`Self::settle_ordered_controls`], issue #1438).
+  pub(super) fn receive_earlier_page(
+    &mut self,
+    conversation: ConversationId,
+    messages: Vec<MessageResponse>,
+  ) -> Result<(), CoreError> {
+    let received = received_ids(conversation, &messages);
+    self.atomically(|client| {
+      for message in messages {
+        client.receive_message(message)?;
+      }
+      client.settle_ordered_controls(conversation, &received)
+    })
+  }
+
+  /// After `received` (a page read out of order) was stored: when a pin or bookmarks message is
+  /// among them, takes the controls from the oldest of those on again in their order
+  /// ([`Self::replay_controls_from`]), so an older one doesn't overwrite a newer one that was read
+  /// first. `apply_control_with` writes both unconditionally; edits go by their ID already, and a
+  /// page without either costs no more than a lookup per message.
+  pub(super) fn settle_ordered_controls(
+    &self,
+    conversation: ConversationId,
+    received: &[(ClientMessageId, MessageId)],
+  ) -> Result<(), CoreError> {
+    let mut maybe_from: Option<MessageId> = None;
+    for (client_message_id, id) in received {
+      let is_ordered = self
+        .store
+        .message(conversation, *client_message_id)?
+        .is_some_and(|stored| {
+          stored.maybe_unreadable.is_none()
+            && matches!(
+              stored.content,
+              MessageContent::Pin { .. } | MessageContent::Bookmarks { .. }
+            )
+        });
+      if is_ordered {
+        maybe_from = Some(maybe_from.map_or(*id, |from| from.min(*id)));
+      }
+    }
+    match maybe_from {
+      Some(from) => self.replay_controls_from(conversation, from),
+      None => Ok(()),
+    }
   }
 
   /// Decrypts and stores a message from the server. Messages whose content key hasn't arrived yet
@@ -916,6 +967,19 @@ pub(super) fn undecrypted_key(message: &MessageResponse) -> String {
     message.conversation_id,
     message.client_message_id.to_hex()
   )
+}
+
+/// The IDs of the messages of `conversation` in a page, for
+/// [`Client::settle_ordered_controls`] once it is stored.
+pub(super) fn received_ids(
+  conversation: ConversationId,
+  messages: &[MessageResponse],
+) -> Vec<(ClientMessageId, MessageId)> {
+  messages
+    .iter()
+    .filter(|message| message.conversation_id == conversation)
+    .map(|message| (message.client_message_id, message.id))
+    .collect()
 }
 
 /// Decrypts a message with the content keys in `key_bag`, checking the sender device's signature

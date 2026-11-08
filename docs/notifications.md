@@ -354,8 +354,10 @@ audio, file name). How the core gets there, within `PUSH_PREVIEW_BUDGET` (7 s; F
    message from the store. Only the cancel-safe parts are cut at the deadline: following the groups
    (welcomes, MLS) starts only with 2 s left and then runs to completion, since a welcome spends the
    key package before the join is stored. The iOS notification extension runs next to the app and
-   must not advance its state, so it stops after step 2 (`notification_preview_for_push`; e2ee.md
-   §9.4).
+   must not advance its state: it catches the conversation up on a probe instead, an overlay of the
+   store in memory and a read-only API that are thrown away afterwards, within 14 s and 4 MB of
+   writes (`notification_probe_for_push`, issue #839; e2ee.md §7.2). With less than 12 MB of memory
+   to spare it stops after step 2 (`notification_preview_for_push`).
 
 Whatever is known by then is shown: "New message" under the sender's name when the text could not be
 read, never nothing. `PushNotification.maybe_gap` says why less was shown (no session, not decrypted,

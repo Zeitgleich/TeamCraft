@@ -13,6 +13,7 @@ pub mod fetch;
 mod http;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod proxy;
+mod read_only;
 #[cfg(not(target_arch = "wasm32"))]
 mod tls;
 #[cfg(target_arch = "wasm32")]
@@ -35,6 +36,7 @@ pub use http::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use http::{NativeSocket, open_call_socket};
+pub use read_only::ReadOnlyApi;
 use teamcraft_proto::DeleteConversationRequest;
 use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, AdminJoinRequestResponse, ClaimKeyPackagesRequest,

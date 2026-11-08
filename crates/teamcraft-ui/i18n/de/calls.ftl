@@ -345,6 +345,7 @@ call-notetaker-banner = Der Notetaker erstellt ein Transkript dieses Anrufs. Daz
 call-notetaker-badge = Notetaker im Anruf – Ton geht an OpenRouter
 call-notetaker-badge-detail = Solange der Notetaker im Anruf ist, erreicht ihn alles Gesagte und wird für das Transkript an OpenRouter und den Anbieter des Modells gesendet. Video und geteilte Bildschirme nutzt er nicht.
 prejoin-notetaker = Der Notetaker ist in diesem Anruf: Was du sagst, wird für ein Transkript an OpenRouter gesendet.
+prejoin-call-moved = Der Anruf ist in „{ $room }“ umgezogen, dort läuft er gerade.
 calls-mute-shortcut = Tastenkürzel zum Stummschalten
 calls-mute-shortcut-hint = Eine Tastenkombination, die dein Mikrofon im Anruf stumm- und wieder einschaltet, in jeder App.
 calls-mute-shortcut-key = Tastenkürzel

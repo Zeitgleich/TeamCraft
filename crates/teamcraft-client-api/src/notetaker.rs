@@ -6,7 +6,7 @@
 
 use teamcraft_proto::{MeetingId, NotetakerInviters, NotetakerPolicy};
 
-use crate::model::{Conversation, Space, UserId};
+use crate::model::{Conversation, ConversationId, Space, TimestampMs, UserId};
 
 /// What the call screen shows and offers about the notetaker.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -156,11 +156,88 @@ pub fn conversation_rights(
   ConversationRights::ManagesChannel { joins_space }
 }
 
+/// How long after the announcement "The call moved into a room" shows to latecomers (issue #1321).
+/// Calls rarely run longer; the hint also needs the room's call to run, so this only keeps an old
+/// announcement from pointing at a room whose call is a different one by now.
+pub const MOVED_CALL_HINT_MAX_AGE_MS: i64 = 3 * 60 * 60_000;
+
+/// A conversation's call that moved into a meeting room, as announced in the conversation (a
+/// `CallMoved` event), for the hint that sends latecomers there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MovedCall {
+  /// Who moved the call.
+  pub by: UserId,
+  /// The room, which the user is a member of: the core names no other (nobody is pointed at a
+  /// room they can't open).
+  pub room: ConversationId,
+  /// The room's name as the sidebar shows it.
+  pub room_name: String,
+  /// When the announcement was sent.
+  pub moved_at: TimestampMs,
+}
+
+/// The hint for somebody who comes to a conversation's call after it moved: `newest`, the newest
+/// move announced in the conversation, if its room's call is running with other people in it
+/// (`room_has_others`) and the announcement is younger than [`MOVED_CALL_HINT_MAX_AGE_MS`].
+///
+/// The announcement comes from a member of the conversation, who can point it at any room, but
+/// the hint offers only a room the user is a member of already (the core names no other), shows
+/// only while that room's call runs, and only opens the room: it joins nothing by itself.
+pub fn moved_call_hint(
+  newest: Option<MovedCall>,
+  room_has_others: bool,
+  now_ms: TimestampMs,
+) -> Option<MovedCall> {
+  newest.filter(|moved| {
+    room_has_others
+      && !moved.room_name.is_empty()
+      && now_ms.saturating_sub(moved.moved_at) <= MOVED_CALL_HINT_MAX_AGE_MS
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use teamcraft_proto::{Id, Snowflake};
 
   use super::*;
+
+  fn moved(room_name: &str, moved_at: i64) -> MovedCall {
+    MovedCall {
+      by: id(1),
+      room: id_of(5),
+      room_name: room_name.into(),
+      moved_at,
+    }
+  }
+
+  #[test]
+  fn latecomers_are_pointed_at_the_room_while_its_call_runs() {
+    let hint = moved_call_hint(Some(moved("Call with notetaker", 1_000)), true, 60_000);
+    assert_eq!(hint, Some(moved("Call with notetaker", 1_000)));
+  }
+
+  #[test]
+  fn no_hint_without_a_move_or_once_the_rooms_call_is_over() {
+    assert_eq!(moved_call_hint(None, true, 0), None);
+    assert_eq!(moved_call_hint(Some(moved("Room", 0)), false, 1_000), None);
+  }
+
+  #[test]
+  fn no_hint_for_a_room_the_user_is_not_in() {
+    assert_eq!(moved_call_hint(Some(moved("", 0)), true, 1_000), None);
+  }
+
+  #[test]
+  fn the_hint_goes_stale() {
+    let at = 10_000;
+    assert!(moved_call_hint(Some(moved("Room", at)), true, at + MOVED_CALL_HINT_MAX_AGE_MS).is_some());
+    assert_eq!(
+      moved_call_hint(Some(moved("Room", at)), true, at + MOVED_CALL_HINT_MAX_AGE_MS + 1),
+      None
+    );
+    // A clock a little behind the sender's doesn't hide it.
+    assert!(moved_call_hint(Some(moved("Room", at)), true, at - 5_000).is_some());
+  }
 
   #[test]
   fn a_member_asks_it_in_where_it_is_a_member_and_not_yet_in_the_call() {
