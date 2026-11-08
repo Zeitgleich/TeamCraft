@@ -162,6 +162,7 @@ fn as_message<'a>(input: &'a RingInput) -> PolicyInput<'a> {
     now: input.now,
     is_viewing: false,
     is_urgent: false,
+    mentions_me: false,
     utc_offset_minutes: input.utc_offset_minutes,
     maybe_dnd_until: input.maybe_dnd_until,
   }

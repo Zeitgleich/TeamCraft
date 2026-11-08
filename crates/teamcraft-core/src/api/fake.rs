@@ -20,14 +20,14 @@ use teamcraft_proto::{
   IdempotencyKey, IdentityKeyResponse, JoinPolicy, KeyBagResponse, KeyPackageStatusResponse,
   ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
   ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListScheduledMessagesResponse,
-  ListSpaceMembersResponse, ListSpacesResponse, MessageId, MessageResponse, MlsMessageId, MlsMessageKind,
-  MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel, PostMlsCommitRequest,
-  PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, Role,
-  ScheduleMessageRequest, ScheduledHoldReason, ScheduledMessageId, ScheduledMessageResponse,
-  SendMessageRequest, SendScheduledMessageResponse, SetPresenceRequest, SetReadPositionRequest, Snowflake,
-  SpaceHead, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, SyncHeadsResponse, UnixMillis,
-  UpdateConversationMemberRequest, UpdateScheduledMessageRequest, UploadIdentityKeyRequest,
-  UploadKeyPackagesRequest, UserId, UserKind, UserSummary,
+  ListSpaceMembersResponse, ListSpacesResponse, ListUserGroupRostersResponse, MessageId, MessageResponse,
+  MlsMessageId, MlsMessageKind, MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel,
+  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
+  RegisterDeviceRequest, Role, ScheduleMessageRequest, ScheduledHoldReason, ScheduledMessageId,
+  ScheduledMessageResponse, SendMessageRequest, SendScheduledMessageResponse, SetPresenceRequest,
+  SetReadPositionRequest, Snowflake, SpaceHead, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole,
+  SyncHeadsResponse, UnixMillis, UpdateConversationMemberRequest, UpdateScheduledMessageRequest,
+  UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserGroupRoster, UserId, UserKind, UserSummary,
 };
 use teamcraft_proto::{AdminJoinRequestChange, AdminJoinRequestResponse};
 use teamcraft_proto::{
@@ -127,6 +127,10 @@ pub struct FakeGateway {
 
 #[derive(Default)]
 struct State {
+  /// `GET /user-groups/rosters` as a real server answers it.
+  user_groups: Vec<UserGroupRoster>,
+  /// Users the groups are refused to (guests).
+  user_groups_refused: HashSet<UserId>,
   /// The identity provider's tokens each user's app holds (e2ee.md §3.1.3).
   provider_tokens: HashMap<UserId, String>,
   provider_access_tokens: HashMap<UserId, String>,
@@ -1702,6 +1706,16 @@ impl FakeServer {
     self.lock().maybe_delete_answer = Some((status, code));
   }
 
+  /// The groups the server answers `GET /user-groups/rosters` with from now on.
+  pub fn set_user_groups(&self, groups: Vec<UserGroupRoster>) {
+    self.lock().user_groups = groups;
+  }
+
+  /// Like a guest's: the groups are refused from now on.
+  pub fn refuse_user_groups_to(&self, user: UserId) {
+    self.lock().user_groups_refused.insert(user);
+  }
+
   pub fn publish_event(&self, users: &[UserId], event: &GatewayEvent) {
     self.lock().publish(users.iter().copied(), event);
   }
@@ -2811,6 +2825,16 @@ impl ServerApi for FakeServerApi {
   /// Every known user is in every fake space, except the outsiders.
   async fn list_space_members(&self, space: SpaceId) -> Result<ListSpaceMembersResponse, ApiError> {
     self.with(|state, _| state.space_members_answer(space))
+  }
+
+  async fn list_user_group_rosters(&self) -> Result<ListUserGroupRostersResponse, ApiError> {
+    let state = self.server.lock();
+    if state.user_groups_refused.contains(&self.user) {
+      return Err(ApiError::status(403, ErrorCode::Forbidden, "not for guests"));
+    }
+    Ok(ListUserGroupRostersResponse {
+      groups: state.user_groups.clone(),
+    })
   }
 
   async fn list_conversations(&self) -> Result<ListConversationsResponse, ApiError> {

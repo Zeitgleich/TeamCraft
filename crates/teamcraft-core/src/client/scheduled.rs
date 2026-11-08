@@ -548,11 +548,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     body: &str,
     meta: &crate::store::MessageMeta,
   ) -> MessageContent {
-    MessageContent::Text {
-      body: body.to_owned(),
-      mentions: self.ui_backend().mentions_in(conversation, body),
-      meta: meta.clone(),
-    }
+    self
+      .ui_backend()
+      .text_mentioning(conversation, body, meta.clone())
   }
 
   fn ui_backend(&self) -> CoreChatBackend<&S> {

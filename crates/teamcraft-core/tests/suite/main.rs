@@ -35,6 +35,7 @@ mod enrollment;
 mod files;
 mod first_add_back;
 mod first_sync;
+mod group_mentions;
 mod guest_meetings;
 mod import;
 mod key_packages;

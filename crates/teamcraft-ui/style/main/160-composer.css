@@ -352,6 +352,13 @@ ol.md-list {
   padding: 2px 6px 6px;
 }
 
+.composer-group-outside {
+  margin: 0 0 4px;
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  color: var(--text-muted);
+}
+
 .composer-hint {
   flex: 1;
   min-width: 0;

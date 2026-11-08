@@ -425,6 +425,8 @@ impl ChatBackend for RestChat {
       maybe_imported: None,
       maybe_source: None,
       maybe_placeholder: None,
+      group_mentions: Vec::new(),
+      mentions_me: false,
     };
     self
       .local_messages

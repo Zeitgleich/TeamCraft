@@ -115,9 +115,6 @@ fn GuestShell(
   let state = AppState::new(backend, settings, None);
   provide_context(state);
   provide_context(MeetingsHub::new(MeetingsClient::new(auth.clone())));
-  provide_context(crate::groups::GroupsHub::new(crate::rest::RestClient::new(
-    auth.clone(),
-  )));
   provide_context(crate::channel_policy::ChannelPolicyHub::new(
     crate::rest::RestClient::new(auth.clone()),
   ));

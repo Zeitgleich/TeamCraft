@@ -45,8 +45,8 @@ use crate::message_sounds::{MessageSounds, notification_sound};
 use crate::model::{ConversationId, TimestampMs, UserId};
 use crate::notification_pictures::picture_of;
 use crate::notifier::{
-  Decision, NotificationTitle, Notifier, PictureSubject, ReadWatcher, all_conversations,
-  needs_channel_confirmation, notifications_for,
+  Decision, NotificationTitle, Notifier, PictureSubject, ReadWatcher, all_conversations, group_mention_reach,
+  needs_channel_confirmation, needs_group_confirmation, notifications_for,
 };
 use crate::reactive::OwnerLiveness;
 use crate::settings::{Theme, load_string, store_string};
@@ -1013,6 +1013,13 @@ fn needs_confirmation(state: AppState, conversation: ConversationId, text: &str)
     .notifications
     .confirm_channel_over;
   needs_channel_confirmation(text, members, threshold)
+    || needs_group_confirmation(
+      &group_mention_reach(
+        text,
+        &state.read(|backend| backend.mentionable_groups(conversation)),
+      ),
+      threshold,
+    )
 }
 
 fn mark_read(state: AppState, conversation: ConversationId) {

@@ -225,6 +225,10 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.inner.list_conversations()
   }
 
+  fn list_user_group_rosters(&self) -> impl Future<Output = Result<ListUserGroupRostersResponse, ApiError>> {
+    self.inner.list_user_group_rosters()
+  }
+
   fn conversation(
     &self,
     conversation: ConversationId,

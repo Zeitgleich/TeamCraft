@@ -260,6 +260,9 @@ pub struct PolicyConfig {
 pub struct LimitsConfig {
   pub max_ciphertext_bytes: usize,
   pub max_mentions_per_message: usize,
+  /// IDs a message may name for a sender without `use_group_mentions` in the conversation: all the
+  /// server can enforce of that permission without reading the message (docs/e2ee.md §4.4).
+  pub max_mentions_without_group_mentions: usize,
   pub max_group_dm_participants: usize,
   pub max_name_length: usize,
   pub max_text_length: usize,
@@ -1509,7 +1512,8 @@ impl Default for LimitsConfig {
   fn default() -> Self {
     Self {
       max_ciphertext_bytes: 1024 * 1024,
-      max_mentions_per_message: 200,
+      max_mentions_per_message: teamcraft_proto::DEFAULT_MAX_MENTIONS_PER_MESSAGE,
+      max_mentions_without_group_mentions: teamcraft_proto::DEFAULT_MAX_MENTIONS_WITHOUT_GROUP_MENTIONS,
       max_group_dm_participants: 8,
       max_name_length: 100,
       max_text_length: 1000,

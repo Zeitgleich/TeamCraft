@@ -744,6 +744,8 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   });
 
   let body_text = message.body.clone();
+  let group_mentions = message.group_mentions.clone();
+  let mentions_me = message.mentions_me;
   let edit_draft = RwSignal::new(String::new());
   let start_edit_text = body_text.clone();
   Effect::new(move |_| {
@@ -925,11 +927,11 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
         .into_any();
       }
       if !is_long_body {
-        return view! { <RichText body=body_text.clone() me=me.username.clone() /> }.into_any();
+        return view! { <RichText body=body_text.clone() me=me.username.clone() group_mentions=group_mentions.clone() mentions_me=mentions_me /> }.into_any();
       }
       view! {
         <div class="msg-long" class:collapsed=move || !is_expanded.get()>
-          <RichText body=body_text.clone() me=me.username.clone() />
+          <RichText body=body_text.clone() me=me.username.clone() group_mentions=group_mentions.clone() mentions_me=mentions_me />
         </div>
         <button
           class="link-btn msg-expand"
@@ -1508,6 +1510,8 @@ mod tests {
       maybe_imported: None,
       maybe_source: None,
       maybe_placeholder: None,
+      group_mentions: Vec::new(),
+      mentions_me: false,
     }
   }
 }
