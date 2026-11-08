@@ -160,6 +160,7 @@ import de.zeitgleich.teamcraft.ui.PagedFeed
 import de.zeitgleich.teamcraft.ui.PendingShare
 import de.zeitgleich.teamcraft.ui.TypingLine
 import de.zeitgleich.teamcraft.ui.shouldNotifyTyping
+import de.zeitgleich.teamcraft.ui.typingIn
 import de.zeitgleich.teamcraft.ui.typingLine
 import de.zeitgleich.teamcraft.ui.entry
 import de.zeitgleich.teamcraft.ui.sensitiveClip
@@ -279,7 +280,8 @@ fun ConversationScreen(
   ChatScaffold(
     viewModel = viewModel,
     topBar = {
-      ConversationTopBar(snapshot, conversation, maybeNotified, maybeListed, onBack) {
+      val typingPlaces by viewModel.typingPlaces.collectAsState()
+      ConversationTopBar(snapshot, conversation, maybeNotified, maybeListed, onBack, typing = typingIn(typingPlaces, conversationId)) {
         ConversationMenu(viewModel, conversationId, conversation, rights, onOpenFiles)
       }
     },
@@ -345,7 +347,7 @@ fun ConversationScreen(
       },
     )
     NotifiedMessageRow(maybeNotified, isLoading = conversation == null || messages.isEmpty())
-    TypingIndicator(viewModel, conversationId, snapshot, changes)
+    TypingIndicator(viewModel, conversationId, snapshot)
     if (conversation?.canPost != false) {
       Composer(viewModel, conversationId, maybeThread = null, snapshot = snapshot, onSent = { sentCount++ })
     } else {
@@ -410,7 +412,7 @@ fun ThreadScreen(
       maybeFocusMessage = maybeFocusMessage,
       onOpenPermalink = onOpenPermalink,
     )
-    TypingIndicator(viewModel, conversationId, snapshot, changes)
+    TypingIndicator(viewModel, conversationId, snapshot, maybeThread = threadId)
     if (rights.canPost) {
       Composer(viewModel, conversationId, maybeThread = threadId, snapshot = snapshot, onSent = { sentCount++ })
     } else {
@@ -457,18 +459,14 @@ private fun FollowTransfers(extras: Map<String, MessageExtras>, reload: suspend 
 }
 
 /**
- * "Alice is typing…" above the composer. Re-read on every change (a typing frame is one) and
- * every couple of seconds while someone types, since indicators run out without an event.
+ * "Alice is typing…" above the composer: those typing in this place only, the conversation itself
+ * or, with [maybeThread], a reply in that thread (#882). Follows the view model's reading, which is
+ * made on every change and every couple of seconds while someone types.
  */
 @Composable
-private fun TypingIndicator(viewModel: MainViewModel, conversationId: String, snapshot: ChatSnapshot?, changes: Long) {
-  var typing by remember(conversationId) { mutableStateOf<List<String>>(emptyList()) }
-  LaunchedEffect(conversationId, changes) {
-    do {
-      typing = viewModel.readChat { query(ChatQueries.typingUsers(conversationId)).users } ?: emptyList()
-      if (typing.isNotEmpty()) delay(TYPING_POLL_MS)
-    } while (typing.isNotEmpty())
-  }
+private fun TypingIndicator(viewModel: MainViewModel, conversationId: String, snapshot: ChatSnapshot?, maybeThread: String? = null) {
+  val places by viewModel.typingPlaces.collectAsState()
+  val typing = typingIn(places, conversationId, maybeThread)
   val text = when (val line = typingLine(typing.map { snapshot?.name(it).orEmpty() })) {
     null -> return
     is TypingLine.One -> stringResource(R.string.typing_one, line.name)
@@ -1404,7 +1402,7 @@ internal fun Composer(
         val now = System.currentTimeMillis()
         if (isSharingTyping && shouldNotifyTyping(it, now, maybeLastTypingAt)) {
           maybeLastTypingAt = now
-          viewModel.act(ChatActions.typing(conversationId))
+          viewModel.act(ChatActions.typing(conversationId, maybeThread))
         }
       },
       canSend = canSend,
@@ -1875,9 +1873,6 @@ private val SEND_BUTTON_SIZE = 48.dp
 
 /** Emoji offered for a typed `:name`. */
 private const val MAX_EMOJI_SUGGESTIONS = 8
-
-/** How often the typing line is re-read while someone types (indicators last 6 s). */
-private const val TYPING_POLL_MS = 2000L
 
 /** How often a running upload or download is re-read. */
 private const val TRANSFER_POLL_MS = 1000L

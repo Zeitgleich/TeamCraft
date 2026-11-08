@@ -7425,6 +7425,22 @@
         }
       }
     },
+    "typing_direct": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "typing…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "schreibt …"
+          }
+        }
+      }
+    },
     "typing_one %@": {
       "localizations": {
         "en": {

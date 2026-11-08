@@ -140,6 +140,10 @@ final class AppModel {
   private(set) var isBusy = false
   /// Increments on every store change; screens re-read when it changes.
   private(set) var changeCount = 0
+  /// Everyone typing anywhere right now (#882): the chat list's rows, the header and the typing
+  /// lines each read their own place from it with `typingNames(in:conversation:thread:)`.
+  private(set) var typingNow: [TypingNow] = []
+  private var typingTask: Task<Void, Never>?
   /// Scheduled messages that wait for the user (docs/scheduled-messages.md).
   private(set) var scheduledAttentionCount = 0
   /// The conversation a notification asked to open.
@@ -1141,6 +1145,7 @@ final class AppModel {
   /// conversations that are read now go.
   private func storeDidChange() {
     changeCount += 1
+    followTyping()
     calls.storeDidChange()
     let wasConnected = connection?.isConnected == true
     setConnection(maybeCore?.connectionState())
@@ -1349,14 +1354,34 @@ final class AppModel {
     return people.namesById
   }
 
-  /// Names of the people typing in a conversation right now.
-  func typingNames(conversationId: String) async -> [String] {
-    guard let ids = await answer(.typingUsers(conversationId: conversationId))?.users, !ids.isEmpty else { return [] }
-    guard let json = try? await core().snapshot(), let people = Wire.decode(PeopleSnapshot.self, from: json) else {
-      return []
+  /// Reads who types anywhere, now and again every couple of seconds while someone does: typing
+  /// indicators run out without an event (#882). A change of the store starts the reading over.
+  private func followTyping() {
+    typingTask?.cancel()
+    typingTask = Task { [weak self] in
+      while !Task.isCancelled {
+        guard let self else { return }
+        let places = await self.readTyping()
+        if Task.isCancelled { return }
+        // Equal places don't notify: a row follows only its own place.
+        if self.typingNow != places { self.typingNow = places }
+        if places.isEmpty { return }
+        try? await Task.sleep(for: .seconds(2))
+      }
     }
+  }
+
+  /// Everyone typing anywhere right now, by name (the people whose names aren't known left out).
+  private func readTyping() async -> [TypingNow] {
+    let places = (await answer(.typingNow)?.typing ?? []).filter { !$0.users.isEmpty }
+    guard !places.isEmpty, let json = try? await core().snapshot(),
+      let people = Wire.decode(PeopleSnapshot.self, from: json)
+    else { return [] }
     let names = Dictionary((people.users ?? []).map { ($0.id, $0.displayName) }, uniquingKeysWith: { first, _ in first })
-    return ids.map { names[$0] ?? "" }.filter { !$0.isEmpty }
+    return places.compactMap { place in
+      let named = place.users.compactMap { names[$0] }.filter { !$0.isEmpty }
+      return named.isEmpty ? nil : TypingNow(conversation: place.conversation, maybeThread: place.maybeThread, names: named)
+    }
   }
 
   /// Who can be mentioned (lower-case usernames) and the user's own username, for highlighting.
