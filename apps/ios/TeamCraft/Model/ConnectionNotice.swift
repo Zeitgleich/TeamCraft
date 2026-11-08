@@ -42,6 +42,17 @@ enum ConnectionNotice: Equatable {
     }
   }
 
+  /// Whether the thin "loading new messages" line shows: the device has a network and either the
+  /// connection is being set up or the scope still has messages to come (`isCatchingUp`: this
+  /// conversation's mark in a conversation, any conversation's in the list; issue #1457, as on
+  /// Android). Offline the banner speaks instead.
+  static func isSyncing(isOnline: Bool, isCatchingUp: Bool, connection maybeConnection: ConnectionState?) -> Bool {
+    guard isOnline else { return false }
+    if isCatchingUp { return true }
+    if case .connecting = maybeConnection { return true }
+    return false
+  }
+
   /// Whether the app counts as not connected: no network, or the core is (re)connecting. Only then
   /// can the banner change with time alone (grace running out, a countdown), so only then does it
   /// need a clock; a connected app doesn't wake up every second.

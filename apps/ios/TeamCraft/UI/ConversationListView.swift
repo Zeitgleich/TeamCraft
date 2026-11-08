@@ -49,6 +49,8 @@ struct ConversationListView: View {
         .safeAreaInset(edge: .top, spacing: 0) {
           VStack(spacing: 0) {
             OfflineBanner()
+            // Any conversation with messages still to come (issue #1457).
+            SyncingLine(isCatchingUp: conversations.contains(where: \.isCatchingUp))
             if let progress = maybeFirstSync { FirstSyncBar(progress: progress) }
             NotificationPromptCard()
             if !isSearching && !conversations.isEmpty && !isList { tabPicker }
