@@ -474,7 +474,7 @@ impl Engine {
   }
 }
 
-fn to_json(value: &impl serde::Serialize) -> Result<String, TeamCraftError> {
+pub(crate) fn to_json(value: &impl serde::Serialize) -> Result<String, TeamCraftError> {
   serde_json::to_string(value).map_err(|error| TeamCraftError::Core(error.to_string()))
 }
 
