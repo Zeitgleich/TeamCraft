@@ -3947,8 +3947,9 @@ Details:
 
 - The NSE only needs content keys (simple symmetric decryption), not MLS state. This avoids the classic
   problem of the extension and the main app both advancing the same MLS ratchet. Incoming MLS
-  commits are left for the main app: the NSE opens pushes with `notification_preview_for_push`,
-  which never catches a conversation up (§7.2, §9.4).
+  commits are left for the main app: the NSE never saves MLS state. A push it can't read from the
+  store and the one fetched message is caught up on a probe that is thrown away
+  (`notification_probe_for_push`, §7.2, §9.4).
 - App and NSE still share the local database (App Group container + keychain access group). Like
   Threema's `ProcessCoordinator`, a cross-process lock ensures only one process syncs with the server at
   a time; Darwin notifications tell the other process to reload.
@@ -4080,30 +4081,53 @@ exactly what Apple and Google handle: a device token and ciphertext. Threat mode
 - The server authenticates to the gateway with an Ed25519 key pair of its own (not related to any
   user, device or MLS key); that key authenticates the *server* only and protects no content.
 
-### 7.2 iOS: catching a conversation up for a notification (design, not implemented)
+### 7.2 iOS: catching a conversation up for a notification (issue #839, implemented)
 
 The Android app catches a conversation up itself when a push names a sender the store does not know
-(`Client::catch_up_for_push`, §7 above). The iOS notification extension must not do that on its own:
-catching up advances MLS state (a welcome spends its key package; a commit moves the epoch), and an
-extension that is killed by the system at an arbitrary point, next to an app that may start at any time,
-could leave the shared store half-advanced or fork it from the app's copy. So today the extension stops
-after fetching and decrypting the one message and shows "New message from <name>" when that fails.
-Two options, in order of preference:
+(`Client::catch_up_for_push`, §7 above). The iOS notification extension must not do that on the
+account's state: catching up advances MLS state (a welcome spends its key package; a commit moves the
+epoch), and an extension that is killed by the system at an arbitrary point, next to an app that may
+start at any time, could leave the shared store half-advanced or fork it from the app's copy. From
+1.0.9 until this change it therefore stopped after fetching and decrypting the one message and showed "New
+message" (with the sender's name where known) for the first message of a new conversation, after
+every key change the app hadn't processed yet (a member or device removed, a member added "from
+joining on", the rotation every 7 days or 10,000 messages) and for a sender's new device.
 
-1. **The app catches up, the notification is updated.** The extension keeps the sealed wake-up in the
-   delivered notification's `userInfo`. When the app next runs (foreground, background refresh, or the
-   next push) it takes the cross-process lock, runs the normal sync, finds the pending wake-ups of
-   its delivered notifications, reopens them with the core and replaces the notification content with
-   the text. No new rights for the extension; the cost is that the text appears when the app runs.
-2. **The extension catches up under the lock.** The extension takes the cross-process lock for the whole
-   catch-up and the store records an "advance in progress" marker that a started app finishes or rolls
-   back before it syncs. Needs a crash-safe store protocol (each step idempotent, the welcome's key
-   package spent only after the join is stored), a time budget below the extension's 30 s with
-   `serviceExtensionTimeWillExpire` handled, and a memory check against the extension's limit. This
-   handles decryption keys in the extension, so it needs a security review before it ships.
+Since then the extension catches up on a **probe** (`notification_probe_for_push`,
+`teamcraft_core::push_probe`) when the store and the fetched message can't show the push:
 
-Both keep the push content-free and the keys in the shared Keychain access group; neither changes what
-the server sees.
+- **The store is an overlay** (`OverlayStore`) over the sealed store: reads go through, writes stay
+  in memory and go with it. It only ever calls the store's reads; groups of writes, purges and the
+  write tally stay in the overlay. Welcomes, commits and key bundles are processed there, so the
+  welcome's key package stays on disk and on the server, and the cursors stay where they were.
+  Written values are wiped when the overlay goes, as the memory store does.
+- **The server is read-only** (`ReadOnlyApi`): every method of `ServerApi` is either a read that is
+  passed on or a refusal that never leaves the device (commits, proposals and rejoin requests, key
+  packages, read positions, messages, the gateway, uploads; also downloads of files and pictures and
+  the identity provider's tokens, which a notification doesn't need). A method added to the trait
+  doesn't compile until it is sorted into one of them. A refusal is an error that is neither a
+  network failure to retry nor a server's 403 or 404, so the catch-up stops there with what it
+  learned.
+- **Bounded:** the probe follows the conversation's record, members, welcome and MLS backlog first,
+  then fetches the one message again; only if that still fails (a sender's new device) does it read
+  the messages and the senders' keys. Its writes may take 4 MB (`PROBE_OVERLAY_BYTES`, then they
+  fail like a full disk), the whole wake-up 14 s (`PUSH_PROBE_BUDGET`; the system gives the
+  extension about 30 s, the wait for the app's lock up to 8), and since everything is thrown away
+  it may be cut anywhere: what the overlay holds by then is shown. The extension's own client is
+  dropped before the probe's opens, so the MLS state is in memory once. The app calls the probe only
+  with 12 MB available (`os_proc_available_memory`), otherwise the preview without it.
+- What the notification shows is the same as for any push, and the push bookkeeping is written as
+  before (§9.4). The app later processes the same welcomes and commits from the server, as if the
+  probe hadn't run. The `PRAGMA data_version` check of the MLS save (§9.5) stays.
+
+Not chosen: letting the extension write again "only while the app isn't running", under a file
+lock. iOS ends suspended apps that hold locks on files in the App Group container (0xdead10cc), and
+a real second writer would need a generation counter and a targeted reload in the app of MLS state,
+sync state, key bag, conversations and device keys whenever it takes the lock.
+
+Neither the push nor the keys in the shared Keychain access group change; the server sees the same
+reads a catch-up makes (lists of the conversation's record, members, MLS queue and messages) and none
+of its writes.
 
 ## 8. Calls
 
@@ -4821,8 +4845,9 @@ So exactly one core owns a device's store at a time:
   the store, for example on Linux without a session bus. The OS releases it when the process ends.
 - **Mobile.** One app process. The iOS notification service extension opens the same store under a
   cross-process lock and never advances the account's state: it opens a push with
-  `notification_preview_for_push`, which shows what the store and the one fetched message give and
-  never catches the conversation up (§7.2). It never saves MLS state. It writes its push bookkeeping
+  `notification_probe_for_push`, which shows what the store and the one fetched message give and,
+  when that isn't enough, catches the conversation up on an overlay of the store in memory through a
+  read-only API, both thrown away afterwards (§7.2). It never saves MLS state. It writes its push bookkeeping
   (received pushes, what it showed) and, on its first open after an update, the store's layout
   migrations. Opening the client on the way (`Client::open`) can also write, when there is something
   to write: the upload limit if it changed, catch-up marks a closed app left behind (dropped), removal
