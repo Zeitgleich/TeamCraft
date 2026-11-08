@@ -128,6 +128,7 @@ synced_prefs! {
   "sidebar.is_grouped_by_space" => sidebar.is_grouped_by_space,
   "sidebar.reopen_last_conversation" => sidebar.reopen_last_conversation,
   "sidebar.shows_unreads_section" => sidebar.shows_unreads_section,
+  "sidebar.shows_space_dms" => sidebar.shows_space_dms,
   "composer.convert_emoticons" => composer.convert_emoticons,
   "composer.show_formatting" => composer.show_formatting,
   "privacy.share_typing" => privacy.share_typing,

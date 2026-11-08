@@ -60,6 +60,8 @@ enum ChatAction {
   /// The composer's unsent text, kept by the core (synced to the user's devices) so it survives the
   /// app being killed (issue #158). An empty body clears it.
   case setDraft(conversationId: String, maybeThreadId: String?, body: String)
+  /// What the conversation's composer replies to (#1115), kept on this device; nil forgets it.
+  case setDraftReply(conversationId: String, reply: ComposerReply?)
   /// Files go up with the draft as they are picked (#1220), each under its `maybeDraftId`, so the
   /// draft keeps them after the app was killed and the user's other devices show and send them.
   case attachDraftFiles(conversationId: String, maybeThreadId: String?, files: [PickedFile])
@@ -157,6 +159,15 @@ enum ChatAction {
         "action": "set_draft", "conversation": conversation,
         "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(), "body": body,
       ]
+    case .setDraftReply(let conversation, let maybeReply):
+      var reply: Any = NSNull()
+      if let chosen = maybeReply {
+        reply = [
+          "message": chosen.messageId,
+          "maybe_attachment": chosen.maybeAttachmentId.map { $0 as Any } ?? NSNull(),
+        ] as [String: Any]
+      }
+      object = ["action": "set_draft_reply", "conversation": conversation, "maybe_reply": reply]
     case .attachDraftFiles(let conversation, let maybeThread, let files):
       object = [
         "action": "attach_draft_files", "conversation": conversation,
@@ -273,6 +284,8 @@ enum ChatQuery {
   case drafts
   /// The files of one draft (#1220), decoded as `DraftFilesAnswer`.
   case draftFiles(conversationId: String, maybeThreadId: String?)
+  /// What the conversation's composer replies to, as a quote (#1115).
+  case draftReply(conversationId: String)
   /// The user's recent messages across the conversations (#1220).
   case sentMessages
 
@@ -314,6 +327,8 @@ enum ChatQuery {
       ])
     case .drafts:
       return jsonText(["kind": "drafts"])
+    case .draftReply(let conversation):
+      return jsonText(["kind": "draft_reply", "conversation": conversation])
     case .draftFiles(let conversation, let maybeThread):
       return jsonText([
         "kind": "draft_files", "conversation": conversation,

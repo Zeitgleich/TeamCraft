@@ -861,6 +861,11 @@ final class AppModel {
     await answer(.draft(conversationId: conversationId, maybeThreadId: threadId))?.maybeBody ?? ""
   }
 
+  /// What the composer of the conversation replies to, from before the app was killed (#1115).
+  func draftReply(conversationId: String) async -> ComposerReply? {
+    await answer(.draftReply(conversationId: conversationId))?.maybeReply.flatMap(ComposerReply.init(stored:))
+  }
+
   func drafts() async -> [DraftItem] {
     await answer(.drafts)?.drafts ?? []
   }
@@ -893,6 +898,14 @@ final class AppModel {
 
   func calls(spaceId: String) async -> [CallHistoryItem] {
     await answer(.spaceCallHistory(spaceId: spaceId))?.calls ?? []
+  }
+
+  /// The IDs of the DMs and group DMs the space shows (#701), as the core decided them.
+  func spaceDirectConversationIds(spaceId: String) async -> [String] {
+    guard let json = try? await core().snapshot(), let snapshot = Wire.decode(SpaceDirectSnapshot.self, from: json) else {
+      return []
+    }
+    return snapshot.spaces.first { $0.id == spaceId }?.directConversations ?? []
   }
 
   func roster(spaceId: String) async -> SpaceRoster? {
@@ -967,6 +980,9 @@ final class AppModel {
   func sceneBecameActive() async {
     foregroundGeneration += 1
     guard case .ready = phase else { return }
+    // The extension may have written while the app was suspended, and its notification not reached
+    // this process: the screens read again now (the core drops what the disk no longer holds, #1115).
+    storeDidChange()
     // The time in the background doesn't count: the reconnect gets the whole grace period.
     connectionGrace.appReturned(now: .now)
     await startSyncing()

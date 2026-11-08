@@ -25,6 +25,11 @@ if [ "${TRUNK_PROFILE:-debug}" = "release" ]; then
 else
   profile=debug
   profile_flag=""
+  # Unoptimized, Leptos views keep whole view trees in their stack frames (the composer's was
+  # 554 KB), more than wasm's 1 MiB stack: the stack pointer wrapped and every later call trapped
+  # with "memory access out of bounds" (#1504). opt-level 1 reuses the frames' slots; dependencies
+  # are optimized anyway ([profile.dev.package."*"]).
+  export CARGO_PROFILE_DEV_OPT_LEVEL=1
 fi
 features_flag=""
 if [ -n "${TEAMCRAFT_WEB_FEATURES:-}" ]; then

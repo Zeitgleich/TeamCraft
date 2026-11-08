@@ -222,6 +222,7 @@ pub fn build_snapshot(
       deleted_channel_count: space.deleted_channel_count,
       can_create_channels: space.can_create_channels,
       maybe_my_role: space.maybe_my_role.clone(),
+      direct_conversations: Vec::new(),
     })
     .collect();
 

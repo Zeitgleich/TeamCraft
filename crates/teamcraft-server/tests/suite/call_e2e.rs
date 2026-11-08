@@ -318,7 +318,8 @@ async fn meeting_host_controls_reach_the_participants_through_the_sfu() {
   }
   let controls = format!("/meetings/{meeting}/controls");
 
-  let muted = app.post(&host, &controls, json!({"action": "mute_all"})).await;
+  // The SFU reports the call to the server asynchronously: until it has, the server answers 404.
+  let muted = post_once_call_known(&app, &host, &controls, json!({"action": "mute_all"})).await;
   assert_eq!(muted.status, StatusCode::NO_CONTENT, "{}", muted.body);
   for call in [&mut carol_call, &mut dave_call] {
     wait_for(call, |event| matches!(event, CallEngineEvent::MutedByHost { .. })).await;
@@ -369,6 +370,23 @@ async fn meeting_host_controls_reach_the_participants_through_the_sfu() {
     after.body
   );
   app.stop().await;
+}
+
+/// Posts a host control, retrying while the server has not yet heard of the call from the SFU.
+async fn post_once_call_known(
+  app: &TestApp,
+  user: &TestUser,
+  path: &str,
+  body: serde_json::Value,
+) -> teamcraft_server::testing::Reply {
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+  loop {
+    let reply = app.post(user, path, body.clone()).await;
+    if reply.status != StatusCode::NOT_FOUND || tokio::time::Instant::now() >= deadline {
+      return reply;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
 }
 
 /// Requests a join token from the server and joins through the SFU with a test tone.

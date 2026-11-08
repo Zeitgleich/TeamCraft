@@ -37,6 +37,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.CallHistoryItem
@@ -53,8 +55,10 @@ import de.zeitgleich.teamcraft.ui.ListPhase
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.Read
 import de.zeitgleich.teamcraft.ui.listPhase
+import de.zeitgleich.teamcraft.ui.spaceDirectMessages
 import de.zeitgleich.teamcraft.ui.SpacePicture
 import kotlinx.coroutines.delay
+import uniffi.teamcraft_ffi.rowBadge
 
 /** How long a space's member list may load before the user is offered another try. */
 private const val ROSTER_DEADLINE_MS = 15_000L
@@ -62,6 +66,7 @@ private const val ROSTER_DEADLINE_MS = 15_000L
 /** The views of one space, in the order of the sidebar on the desktop. */
 enum class SpaceViewTab(@StringRes val label: Int) {
   People(R.string.space_tab_people),
+  DirectMessages(R.string.space_tab_direct_messages),
   Calls(R.string.space_tab_calls),
   Meetings(R.string.space_tab_meetings),
   Saved(R.string.space_tab_saved),
@@ -107,10 +112,45 @@ fun SpaceViewsScreen(viewModel: MainViewModel, initialSpaceId: String, onOpen: (
       }
       when (tab) {
         SpaceViewTab.People -> SpacePeople(viewModel, spaceId)
+        SpaceViewTab.DirectMessages ->
+          SpaceDirectMessages(viewModel, spaces.firstOrNull { it.id == spaceId }?.directConversations.orEmpty(), onOpen)
         SpaceViewTab.Calls -> SpaceCalls(viewModel, spaceId, snapshot)
         SpaceViewTab.Meetings -> SpaceMeetings(viewModel, spaceId)
         SpaceViewTab.Saved -> SpaceSaved(viewModel, spaceId, snapshot, onOpen)
         SpaceViewTab.Files -> SpaceFiles(viewModel, spaceId)
+      }
+    }
+  }
+}
+
+/**
+ * The DMs and group DMs with people of the space (#701), the most recent first. They are Home's
+ * conversations, shown here too; opening one opens it as from Home.
+ */
+@Composable
+private fun SpaceDirectMessages(viewModel: MainViewModel, ids: List<String>, onOpen: (String) -> Unit) {
+  val kept by viewModel.chatList.collectAsState()
+  val lastActivity = kept.previews.mapValues { it.value.preview.sentAt }
+  val conversations = spaceDirectMessages(kept.maybeConversations.orEmpty(), ids, lastActivity)
+  LazyColumn(Modifier.fillMaxSize()) {
+    if (conversations.isEmpty()) item { EmptyHint(stringResource(R.string.space_direct_messages_empty)) }
+    items(conversations, key = { it.id }) { conversation ->
+      Row(
+        Modifier.fillMaxWidth().clickable { onOpen(conversation.id) }.padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        ConversationAvatar(conversation)
+        Text(
+          conversation.name,
+          modifier = Modifier.weight(1f).padding(start = 12.dp),
+          style = MaterialTheme.typography.bodyLarge,
+          fontWeight = if (conversation.unreadCount > 0u || conversation.mentionCount > 0u) FontWeight.SemiBold else null,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+        rowBadge(conversation.unreadCount, conversation.mentionCount, conversation.isMuted)?.let { badge ->
+          RowCount(badge, conversation.isMuted)
+        }
       }
     }
   }
