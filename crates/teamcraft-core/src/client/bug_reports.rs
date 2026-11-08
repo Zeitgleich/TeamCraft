@@ -20,6 +20,7 @@ use crate::store::{LocalStore, MessageContent, Table};
 use crate::workspace::{RosterRole, WorkspaceState};
 
 /// The largest report text the core takes: the log's bound with room for the header.
+#[cfg(feature = "ui")]
 const MAX_REPORT_TEXT_BYTES: usize = 2 * 1024 * 1024;
 /// Reports that may wait on a device at once.
 pub const MAX_QUEUED_REPORTS: usize = 5;
