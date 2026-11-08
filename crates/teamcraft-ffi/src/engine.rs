@@ -1744,9 +1744,9 @@ impl Engine {
   }
 
   /// Runs `operation` on the client with syncing paused, then resumes it and tells the app.
-  pub(crate) async fn with_client<F>(&mut self, operation: F) -> Result<(), TeamCraftError>
+  pub(crate) async fn with_client<R, F>(&mut self, operation: F) -> Result<R, TeamCraftError>
   where
-    F: for<'a> FnOnce(&'a mut CoreClient) -> LocalFuture<'a, Result<(), teamcraft_core::CoreError>>,
+    F: for<'a> FnOnce(&'a mut CoreClient) -> LocalFuture<'a, Result<R, teamcraft_core::CoreError>>,
   {
     let was_running = matches!(self.client, ClientSlot::Running { .. });
     let mut client = self.take_client().await?;
@@ -2014,7 +2014,7 @@ fn enrollment_options(device_name: String, secret: EnrollmentSecret) -> Enrollme
   }
 }
 
-fn parse_ids<T: Id + std::str::FromStr>(texts: &[String]) -> Result<Vec<T>, TeamCraftError> {
+pub(crate) fn parse_ids<T: Id + std::str::FromStr>(texts: &[String]) -> Result<Vec<T>, TeamCraftError> {
   texts.iter().map(|text| parse_id(text)).collect()
 }
 

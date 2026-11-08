@@ -238,34 +238,16 @@ struct DndWindowEditor: View {
   }
 }
 
-/// Searches the directory for a person to let through DND.
+/// A person to let through DND: the app's people picker, one tap picks (#1534).
 struct PersonPickerView: View {
-  @Environment(AppModel.self) private var model
   @Environment(\.dismiss) private var dismiss
   let excluded: Set<String>
-  let onPick: (PersonSummary) -> Void
-
-  @State private var query = ""
-  @State private var people: [PersonSummary] = []
+  let onPick: (BrowseSnapshot.Person) -> Void
 
   var body: some View {
-    List(people.filter { !excluded.contains($0.id) }) { person in
-      Button {
-        onPick(person)
-        dismiss()
-      } label: {
-        VStack(alignment: .leading) {
-          Text(person.displayName)
-          if let username = person.username { Text(verbatim: "@\(username)").font(.caption).foregroundStyle(Theme.textMuted) }
-        }
-      }
-    }
-    .searchable(text: $query, prompt: Text("dnd_search_people"))
-    .task(id: query) {
-      // Waits for typing to pause before asking the server.
-      try? await Task.sleep(for: .milliseconds(300))
-      guard !Task.isCancelled else { return }
-      people = await model.searchPeople(query)
+    PeoplePicker(picked: .constant([]), excluded: excluded) { person in
+      onPick(person)
+      dismiss()
     }
     .navigationTitle("dnd_add_person")
     .navigationBarTitleDisplayMode(.inline)
