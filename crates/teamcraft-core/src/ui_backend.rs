@@ -44,6 +44,7 @@ use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 use teamcraft_client_api::receipts::{ReadIndicator, seen_by};
 use teamcraft_client_api::scheduled::ScheduledOverview;
 
+use crate::account_data::AccountData;
 use crate::client::history_gaps::{Gap, read_record as read_gaps_record};
 use crate::client::older_history::{is_failure_current, older_history_record};
 use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
@@ -881,22 +882,32 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// store's order. For the mobile apps' lists: asking per space read and decrypted every
   /// conversation and user record once per space.
   pub fn listed_conversations(&self, spaces: &BTreeSet<SpaceId>) -> Vec<Conversation> {
+    self.conversations_where(|conversation| {
+      conversation
+        .maybe_space_id
+        .is_some_and(|space| spaces.contains(&space))
+        || matches!(
+          conversation.kind,
+          ConversationKindProto::Dm | ConversationKindProto::Group
+        )
+    })
+  }
+
+  /// The entries of the stored conversations `is_listed` picks, in the store's order. One pass
+  /// reads the users, preferences and account data once and keeps the tallies it counted in one
+  /// group at the end: per conversation, they cost a decrypt and a disk wait each (issue #1466).
+  fn conversations_where(&self, is_listed: impl Fn(&ConversationResponse) -> bool) -> Vec<Conversation> {
     let users = self.summaries();
     let preferences = self.mention_preferences();
-    self
+    let account = self.account_data();
+    let conversations = self
       .conversations_raw()
       .iter()
-      .filter(|conversation| {
-        conversation
-          .maybe_space_id
-          .is_some_and(|space| spaces.contains(&space))
-          || matches!(
-            conversation.kind,
-            ConversationKindProto::Dm | ConversationKindProto::Group
-          )
-      })
-      .map(|conversation| self.to_conversation(conversation, &users, &preferences))
-      .collect()
+      .filter(|conversation| is_listed(conversation))
+      .map(|conversation| self.listed_conversation(conversation, &users, &preferences, &account))
+      .collect();
+    self.flush_entry_tallies();
+    conversations
   }
 
   pub(crate) fn conversations_raw(&self) -> Vec<ConversationResponse> {
@@ -973,24 +984,43 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .and_then(|status| CustomStatus::from_wire(&status))
   }
 
+  /// One conversation's entry, on its own: for a list, [`Self::conversations_where`] reads what
+  /// all entries share once.
   pub(crate) fn to_conversation(
     &self,
     response: &ConversationResponse,
     users: &BTreeMap<UserId, UserSummary>,
     preferences: &MentionPreferences,
   ) -> Conversation {
-    let account = self.read(crate::client::stored_account_data(&self.store));
+    let conversation = self.listed_conversation(response, users, preferences, &self.account_data());
+    self.flush_entry_tallies();
+    conversation
+  }
+
+  /// A conversation's entry from what a pass read once. Callers [`Self::flush_entry_tallies`]
+  /// when done.
+  fn listed_conversation(
+    &self,
+    response: &ConversationResponse,
+    users: &BTreeMap<UserId, UserSummary>,
+    preferences: &MentionPreferences,
+    account: &AccountData,
+  ) -> Conversation {
     let counts = self.entry_counts(
       response,
       account.unread_mark(response.id),
       users.get(&self.me),
       preferences,
     );
-    self.flush_entry_tallies();
     Conversation {
       maybe_draft_preview: account.draft_preview(response.id),
       ..self.conversation_view(response, users, counts.unread)
     }
+  }
+
+  /// The account data as stored (marks, drafts); the default when it doesn't read.
+  fn account_data(&self) -> AccountData {
+    self.read(crate::client::stored_account_data(&self.store))
   }
 
   /// What a conversation's sidebar entry counts, from the kept tally and only the rows it doesn't
@@ -1944,41 +1974,20 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   }
 
   fn space_conversations(&self, space: SpaceId) -> Vec<Conversation> {
-    let users = self.summaries();
-    let preferences = self.mention_preferences();
-    self
-      .conversations_raw()
-      .iter()
-      .filter(|conversation| conversation.maybe_space_id == Some(space))
-      .map(|conversation| self.to_conversation(conversation, &users, &preferences))
-      .collect()
+    self.conversations_where(|conversation| conversation.maybe_space_id == Some(space))
   }
 
   fn direct_conversations(&self) -> Vec<Conversation> {
-    let users = self.summaries();
-    let preferences = self.mention_preferences();
-    self
-      .conversations_raw()
-      .iter()
-      .filter(|conversation| {
-        matches!(
-          conversation.kind,
-          ConversationKindProto::Dm | ConversationKindProto::Group
-        )
-      })
-      .map(|conversation| self.to_conversation(conversation, &users, &preferences))
-      .collect()
+    self.conversations_where(|conversation| {
+      matches!(
+        conversation.kind,
+        ConversationKindProto::Dm | ConversationKindProto::Group
+      )
+    })
   }
 
   fn meeting_conversations(&self) -> Vec<Conversation> {
-    let users = self.summaries();
-    let preferences = self.mention_preferences();
-    self
-      .conversations_raw()
-      .iter()
-      .filter(|conversation| conversation.kind == ConversationKindProto::Meeting)
-      .map(|conversation| self.to_conversation(conversation, &users, &preferences))
-      .collect()
+    self.conversations_where(|conversation| conversation.kind == ConversationKindProto::Meeting)
   }
 
   fn conversation(&self, id: ConversationId) -> Option<Conversation> {

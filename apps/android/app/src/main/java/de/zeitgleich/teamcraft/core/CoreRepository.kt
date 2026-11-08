@@ -19,6 +19,7 @@ import de.zeitgleich.teamcraft.server.StoragePaths
 import uniffi.teamcraft_ffi.AppActivity
 import uniffi.teamcraft_ffi.AppConfig
 import uniffi.teamcraft_ffi.ConnectionState
+import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.EventListener
 import uniffi.teamcraft_ffi.TeamCraft
 import uniffi.teamcraft_ffi.TokenProvider
@@ -42,6 +43,8 @@ class CoreRepository(
   private val changes = MutableStateFlow(0L)
   private val generation = MutableStateFlow(0L)
   private val connection = MutableStateFlow<ConnectionState?>(null)
+  private val conversationsLock = Mutex()
+  private val keptConversations = KeptValue<List<ConversationItem>>()
 
   /** Increments whenever the local store changed; screens re-read on every value. */
   val changeCount: StateFlow<Long> = changes
@@ -112,6 +115,19 @@ class CoreRepository(
     core
   }
 
+  /**
+   * Every conversation as the chat list shows it, read once per change and shared by everyone who
+   * asks (the list, an open conversation's rights, the read watcher, calls): each read is a pass
+   * over the whole workspace, and one per asker kept the core's read thread busy for seconds after
+   * every change, so opening a chat waited behind them (#1466). A change while it is read makes the
+   * next caller read again.
+   */
+  suspend fun conversations(): List<ConversationItem> = conversationsLock.withLock {
+    val account = generation.value
+    val version = changes.value
+    keptConversations.at(account, version) ?: core().conversations().also { keptConversations.keep(account, version, it) }
+  }
+
   /** Closes the core; local data stays (it belongs to the account, not the session). */
   suspend fun close() = lock.withLock {
     maybeTokens?.maybeCore = null
@@ -126,6 +142,7 @@ class CoreRepository(
 
   /** Another account (or none) from now on; the screens re-read, as after a change. */
   private fun newGeneration() {
+    keptConversations.clear()
     generation.update { it + 1 }
     changes.update { it + 1 }
   }

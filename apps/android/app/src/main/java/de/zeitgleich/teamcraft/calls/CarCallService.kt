@@ -49,7 +49,7 @@ private class ContactsScreen(carContext: CarContext) : Screen(carContext) {
 
   init {
     lifecycleScope.launch {
-      maybeConversations = runCatching { graph.core.core().conversations() }.getOrDefault(emptyList())
+      maybeConversations = runCatching { graph.core.conversations() }.getOrDefault(emptyList())
         .filter { it.kind == ConversationKind.DIRECT || it.kind == ConversationKind.GROUP }
       invalidate()
     }

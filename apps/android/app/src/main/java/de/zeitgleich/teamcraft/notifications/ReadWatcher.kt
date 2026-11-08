@@ -28,7 +28,8 @@ class ReadWatcher(
 
   private suspend fun check() {
     val shown = notifier.shownConversationIds()
-    val conversations = runCatching { core.core().conversations() }.getOrNull() ?: return
+    // The chat list's read of this change when it ran already: no pass of its own (#1466).
+    val conversations = runCatching { core.conversations() }.getOrNull() ?: return
     val current = conversations.associate { it.id to (it.unreadCount + it.mentionCount).toInt() }
     ReadTransitions.becameRead(unread, current, shown).forEach(notifier::dismiss)
     unread = current

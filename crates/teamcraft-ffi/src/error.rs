@@ -9,7 +9,7 @@ use teamcraft_crypto::backup::BackupError;
 use teamcraft_crypto::key_bag::KeyBagError;
 use teamcraft_proto::ErrorCode;
 
-#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[derive(Clone, Debug, thiserror::Error, uniffi::Error)]
 #[uniffi(flat_error)]
 pub enum TeamCraftError {
   /// The server couldn't be reached; try again later.

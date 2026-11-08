@@ -435,11 +435,16 @@ fun ThreadScreen(
 
 /**
  * What the user may do in the conversation, read again with every change: a role or scheme change
- * on the server reaches the screen without reopening it (issue #758).
+ * on the server reaches the screen without reopening it (issue #758). It starts from the chat list
+ * already shown, and takes the list's read of each change ([MainViewModel.conversations]) instead
+ * of a pass of its own, which kept opening a chat waiting behind it (#1466).
  */
 @Composable
 private fun rememberRights(viewModel: MainViewModel, conversationId: String, changes: Long): ConversationRights {
-  var rights by remember(conversationId) { mutableStateOf(ConversationRights()) }
+  var rights by remember(conversationId) {
+    val maybeListed = viewModel.chatList.value.maybeConversations?.firstOrNull { it.id == conversationId }
+    mutableStateOf(ConversationRights.of(maybeListed))
+  }
   LaunchedEffect(changes, conversationId) {
     rights = ConversationRights.of(viewModel.conversations().firstOrNull { it.id == conversationId })
   }

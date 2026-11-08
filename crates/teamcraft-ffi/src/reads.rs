@@ -8,8 +8,8 @@
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use teamcraft_client_api::backend::{ChatBackend as _, SearchBackend as _};
@@ -54,9 +54,42 @@ type ReadJob = Box<dyn FnOnce(&mut Reads) + Send>;
 /// An action's answer: the engine ran what it queued for the client.
 pub(crate) type Dispatched = oneshot::Receiver<Result<(), TeamCraftError>>;
 
+/// Where a read's result goes.
+type Reply<R> = oneshot::Sender<Result<R, TeamCraftError>>;
+
 /// The read thread's queue. The thread ends once every handle on the queue is gone.
 #[derive(Clone)]
-pub(crate) struct ReadQueue(mpsc::Sender<ReadJob>);
+pub(crate) struct ReadQueue {
+  jobs: mpsc::Sender<ReadJob>,
+  /// The chat list's read, shared by everyone who asks while one waits to start (issue #1466).
+  conversations: Arc<SharedRead<Vec<ConversationItem>>>,
+}
+
+/// What a read does when its caller is gone before it starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WhenCallerGone {
+  /// A read: nobody wants the answer, so it isn't worth the thread's time (a cancelled coroutine,
+  /// a screen that moved on; issue #1466).
+  Skip,
+  /// An action's local half: what the user did happens, whether or not anyone waits for it.
+  Run,
+}
+
+/// A read that callers share while it waits on the queue: asking again before it started adds a
+/// caller to it instead of a second pass. Once it starts, the next ask queues a new pass, so nobody
+/// gets an answer older than their question.
+struct SharedRead<R> {
+  /// The callers of the pass that is queued and not started yet; `None` while none is.
+  maybe_waiting: Mutex<Option<Vec<Reply<R>>>>,
+}
+
+/// Where a [`SharedRead`] put a new caller.
+enum Joined {
+  /// No pass was waiting: the caller queues one.
+  First,
+  /// A pass waits already and answers this caller too.
+  Waiting,
+}
 
 /// The read thread's state.
 pub(crate) struct Reads {
@@ -120,25 +153,28 @@ impl ReadQueue {
         }
       })
       .map_err(|error| TeamCraftError::Core(error.to_string()))?;
-    Ok(Self(queue))
+    Ok(Self {
+      jobs: queue,
+      conversations: Arc::new(SharedRead::new()),
+    })
   }
 
-  /// Runs `job` on the read thread and waits for its result.
+  /// Runs `job` on the read thread and waits for its result. Skipped when the caller gave up
+  /// before it started.
   pub(crate) async fn read<R, F>(&self, job: F) -> Result<R, TeamCraftError>
   where
     R: Send + 'static,
     F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
   {
-    let (reply, answer) = oneshot::channel();
-    let queued = Instant::now();
-    let boxed: ReadJob = Box::new(move |reads| {
-      let started = Instant::now();
-      let result = job(reads);
-      logging::slow_read(std::any::type_name::<F>(), started - queued, started.elapsed());
-      // The caller may have given up waiting (cancelled coroutine); nothing to tell it then.
-      let _ = reply.send(result);
-    });
-    self.send(boxed)?;
+    let answer = self.queue(WhenCallerGone::Skip, job)?;
+    answer.await.map_err(|_| TeamCraftError::EngineStopped)?
+  }
+
+  /// The chat list ([`Reads::conversations`]): one pass for everyone who asks while one waits.
+  /// Each change notification makes several screens ask at once, and a pass reads every
+  /// conversation, so separate passes kept the thread busy and opening a chat waited (#1466).
+  pub(crate) async fn conversations(&self) -> Result<Vec<ConversationItem>, TeamCraftError> {
+    let answer = self.share(&self.conversations, |reads: &mut Reads| reads.conversations())?;
     answer.await.map_err(|_| TeamCraftError::EngineStopped)?
   }
 
@@ -149,12 +185,11 @@ impl ReadQueue {
     R: Send + 'static,
     F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
   {
-    let (value, dispatched) = self
-      .read(move |reads| {
-        let value = job(reads)?;
-        Ok((value, reads.dispatch()?))
-      })
-      .await?;
+    let answer = self.queue(WhenCallerGone::Run, move |reads| {
+      let value = job(reads)?;
+      Ok((value, reads.dispatch()?))
+    })?;
+    let (value, dispatched) = answer.await.map_err(|_| TeamCraftError::EngineStopped)??;
     dispatched.await.map_err(|_| TeamCraftError::EngineStopped)??;
     Ok(value)
   }
@@ -201,14 +236,116 @@ impl ReadQueue {
     });
   }
 
+  /// Queues `job` and answers where its result will arrive; queued at once, before anyone awaits.
+  fn queue<R, F>(
+    &self,
+    when_gone: WhenCallerGone,
+    job: F,
+  ) -> Result<oneshot::Receiver<Result<R, TeamCraftError>>, TeamCraftError>
+  where
+    R: Send + 'static,
+    F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
+  {
+    let (reply, answer) = oneshot::channel();
+    let queued = Instant::now();
+    let boxed: ReadJob = Box::new(move |reads| {
+      if when_gone == WhenCallerGone::Skip && reply.is_closed() {
+        return;
+      }
+      let started = Instant::now();
+      let result = job(reads);
+      logging::slow_read(std::any::type_name::<F>(), started - queued, started.elapsed());
+      // The caller may have given up waiting meanwhile (cancelled coroutine); nothing to tell it.
+      let _ = reply.send(result);
+    });
+    self.send(boxed)?;
+    Ok(answer)
+  }
+
+  /// Joins `shared`'s waiting pass, or queues one running `job`, and answers where the result will
+  /// arrive. The pass runs once for all its callers that still wait when it starts, and not at all
+  /// when none do.
+  fn share<R, F>(
+    &self,
+    shared: &Arc<SharedRead<R>>,
+    job: F,
+  ) -> Result<oneshot::Receiver<Result<R, TeamCraftError>>, TeamCraftError>
+  where
+    R: Clone + Send + 'static,
+    F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
+  {
+    let (reply, answer) = oneshot::channel();
+    if let Joined::Waiting = shared.join(reply) {
+      return Ok(answer);
+    }
+    let queued = Instant::now();
+    let pass = shared.clone();
+    let boxed: ReadJob = Box::new(move |reads| {
+      let callers = pass.start();
+      if callers.is_empty() {
+        return;
+      }
+      let started = Instant::now();
+      let result = job(reads);
+      logging::slow_read(std::any::type_name::<F>(), started - queued, started.elapsed());
+      for caller in callers {
+        // A caller may have given up waiting meanwhile; nothing to tell it then.
+        let _ = caller.send(result.clone());
+      }
+    });
+    if let Err(error) = self.send(boxed) {
+      // The pass will never run: its callers (this one, and any that joined meanwhile) hear so.
+      for caller in shared.start() {
+        let _ = caller.send(Err(TeamCraftError::EngineStopped));
+      }
+      return Err(error);
+    }
+    Ok(answer)
+  }
+
   /// The store turned out unreadable: nothing reads it any more.
   fn post(&self, job: impl FnOnce(&mut Reads) + Send + 'static) {
     // Refused only by a thread that ended, which has nobody left to tell.
-    let _ = self.0.send(Box::new(job));
+    let _ = self.jobs.send(Box::new(job));
   }
 
   fn send(&self, job: ReadJob) -> Result<(), TeamCraftError> {
-    self.0.send(job).map_err(|_| TeamCraftError::EngineStopped)
+    self.jobs.send(job).map_err(|_| TeamCraftError::EngineStopped)
+  }
+}
+
+impl<R> SharedRead<R> {
+  fn new() -> Self {
+    Self {
+      maybe_waiting: Mutex::new(None),
+    }
+  }
+
+  /// Adds a caller to the waiting pass, or starts the list of a new one.
+  fn join(&self, reply: Reply<R>) -> Joined {
+    let mut maybe_waiting = self.maybe_waiting.lock().unwrap_or_else(PoisonError::into_inner);
+    match maybe_waiting.as_mut() {
+      Some(callers) => {
+        callers.push(reply);
+        Joined::Waiting
+      },
+      None => {
+        *maybe_waiting = Some(vec![reply]);
+        Joined::First
+      },
+    }
+  }
+
+  /// The pass starts: its callers that still wait. Who asks from now on queues the next pass.
+  fn start(&self) -> Vec<Reply<R>> {
+    let mut callers = self
+      .maybe_waiting
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .take()
+      .unwrap_or_default();
+    callers.retain(|caller| !caller.is_closed());
+    callers
   }
 }
 
@@ -620,9 +757,72 @@ fn newest_written(rows: &[MessageView]) -> Option<&MessageView> {
 
 #[cfg(test)]
 mod tests {
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
   use teamcraft_client_api::model::{SystemEvent, id_from_raw};
+  use teamcraft_core::store::{SealedSqliteStore, StaticKeySource, TrackedStore};
+  use teamcraft_crypto::secret::SymmetricKey;
 
   use super::*;
+
+  /// Issue #1466: the read thread does no work nobody waits for, and one pass for many callers.
+  mod queue {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_read_whose_caller_is_gone_is_skipped() {
+      let (queue, release) = held_queue();
+      let runs = Arc::new(AtomicUsize::new(0));
+      drop(queue.queue(WhenCallerGone::Skip, counting(&runs, ())).unwrap());
+
+      release.send(()).unwrap();
+      queue.read(|_| Ok(())).await.unwrap();
+      assert_eq!(runs.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_action_runs_when_its_caller_is_gone() {
+      let (queue, release) = held_queue();
+      let runs = Arc::new(AtomicUsize::new(0));
+      drop(queue.queue(WhenCallerGone::Run, counting(&runs, ())).unwrap());
+
+      release.send(()).unwrap();
+      queue.read(|_| Ok(())).await.unwrap();
+      assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn callers_asking_while_a_pass_waits_share_it() {
+      let (queue, release) = held_queue();
+      let shared = Arc::new(SharedRead::new());
+      let runs = Arc::new(AtomicUsize::new(0));
+      let first = queue.share(&shared, counting(&runs, vec![1, 2])).unwrap();
+      let second = queue.share(&shared, counting(&runs, vec![3])).unwrap();
+
+      release.send(()).unwrap();
+      assert_eq!(first.await.unwrap().unwrap(), vec![1, 2]);
+      assert_eq!(second.await.unwrap().unwrap(), vec![1, 2]);
+      assert_eq!(runs.load(Ordering::SeqCst), 1);
+
+      // Asked after the pass started: a pass of its own, never an older answer.
+      let later = queue.share(&shared, counting(&runs, vec![4])).unwrap();
+      assert_eq!(later.await.unwrap().unwrap(), vec![4]);
+      assert_eq!(runs.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_shared_pass_nobody_waits_for_is_skipped() {
+      let (queue, release) = held_queue();
+      let shared = Arc::new(SharedRead::new());
+      let runs = Arc::new(AtomicUsize::new(0));
+      drop(queue.share(&shared, counting(&runs, vec![1])).unwrap());
+      drop(queue.share(&shared, counting(&runs, vec![2])).unwrap());
+
+      release.send(()).unwrap();
+      queue.read(|_| Ok(())).await.unwrap();
+      assert_eq!(runs.load(Ordering::SeqCst), 0);
+    }
+  }
 
   #[test]
   fn a_preview_skips_the_system_lines_after_the_last_written_message() {
@@ -655,6 +855,43 @@ mod tests {
     let rows = [row(1, MessageKind::System(SystemEvent::Joined))];
     assert!(newest_written(&rows).is_none());
     assert!(newest_written(&[]).is_none());
+  }
+
+  /// A read queue whose thread waits until the sender is used: what is queued meanwhile waits.
+  fn held_queue() -> (ReadQueue, mpsc::Sender<()>) {
+    let key_source = StaticKeySource::new(SymmetricKey::from_bytes([7; 32]));
+    let store = TrackedStore::new(Arc::new(SealedSqliteStore::open_in_memory(&key_source).unwrap()));
+    let (engine, _) = tokio_mpsc::unbounded_channel::<Job>();
+    let queue = ReadQueue::start(
+      store,
+      Arc::new(Quiet),
+      CatchUpFocus::default(),
+      engine.downgrade(),
+    )
+    .unwrap();
+    let (release, released) = mpsc::channel();
+    queue.post(move |_| {
+      let _ = released.recv();
+    });
+    (queue, release)
+  }
+
+  /// A job that counts its runs and answers `value`.
+  fn counting<R: Send + 'static>(
+    runs: &Arc<AtomicUsize>,
+    value: R,
+  ) -> impl FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static {
+    let runs = runs.clone();
+    move |_| {
+      runs.fetch_add(1, Ordering::SeqCst);
+      Ok(value)
+    }
+  }
+
+  struct Quiet;
+
+  impl EventListener for Quiet {
+    fn on_change(&self) {}
   }
 
   fn row(id: u64, kind: MessageKind) -> MessageView {
