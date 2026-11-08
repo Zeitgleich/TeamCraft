@@ -240,7 +240,7 @@ final class TokenRequestTransport: TokenEndpointTransport, @unchecked Sendable {
         status: UInt16(clamping: http?.statusCode ?? 0), body: data,
         nonce: http?.value(forHTTPHeaderField: "DPoP-Nonce"), date: http?.value(forHTTPHeaderField: "Date"))
     } catch {
-      throw DeviceProofError.NoAnswer(message: error.localizedDescription)
+      throw DeviceProofError.NoAnswer(reason: error.localizedDescription)
     }
   }
 }
