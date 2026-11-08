@@ -58,6 +58,7 @@ import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.DraftFiles
 import de.zeitgleich.teamcraft.ui.media.MediaDraftStore
+import de.zeitgleich.teamcraft.ui.media.SealedCaptures
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.FileInfo
@@ -1231,6 +1232,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val maybeStaged = stage(name, mediaType) { file.inputStream() }
     file.delete()
     maybeStaged
+  }
+
+  /**
+   * A sealed video of the media flow staged like a picked file: decrypted straight into the staging
+   * folder, the one plain copy it gets ([uri] stays as it is).
+   */
+  suspend fun stageSealedFile(name: String, mediaType: String, uri: Uri): PickedFile? = withContext(Dispatchers.IO) {
+    stage(cleanFileName(name), mediaType) { SealedCaptures.inputStream(getApplication<Application>(), uri) }
   }
 
   /** Copies into the core's staging folder, at most [MAX_IMPORT_BYTES]. */
