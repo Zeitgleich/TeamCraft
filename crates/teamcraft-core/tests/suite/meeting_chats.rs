@@ -519,6 +519,48 @@ mod call_moves {
   }
 
   #[tokio::test]
+  async fn the_dm_remembers_the_newest_move_for_latecomers() {
+    use teamcraft_client_api::backend::ChatBackend;
+
+    let (server, mut alice, mut bob, carol, _) = dm_call().await;
+    let dm = in_dm_call(&mut alice, &mut bob).await;
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    assert_eq!(
+      common::backend_of(&alice).moved_call(dm),
+      None,
+      "nothing moved yet"
+    );
+    let meeting = server.create_meeting_chat(alice_id, &[bob_id, carol_id]);
+    alice
+      .client
+      .move_call_to_meeting(dm, meeting, &[alice_id, bob_id], &[carol_id])
+      .await
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+
+    for peer in [&alice, &bob] {
+      let backend = common::backend_of(peer);
+      let moved = backend
+        .moved_call(dm)
+        .unwrap_or_else(|| panic!("{}: no move", peer.name));
+      assert_eq!((moved.by, moved.room), (alice_id, meeting), "{}", peer.name);
+      assert_eq!(
+        Some(moved.room_name),
+        backend
+          .conversation(meeting)
+          .map(|conversation| conversation.name),
+        "{}: named as the sidebar names it",
+        peer.name
+      );
+      assert!(moved.moved_at > 0, "{}", peer.name);
+    }
+  }
+
+  #[tokio::test]
   async fn the_dm_stays_as_it_was() {
     let (server, mut alice, mut bob, mut carol, _) = dm_call().await;
     let dm = in_dm_call(&mut alice, &mut bob).await;

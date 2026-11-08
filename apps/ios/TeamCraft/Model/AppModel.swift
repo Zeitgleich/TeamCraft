@@ -1276,6 +1276,12 @@ final class AppModel {
     return await notetakerInCall(conversationId: conversationId, participants: participants)?.isPresent ?? false
   }
 
+  /// Where the call of `conversationId` moved to (issue #1321): the room the user is in whose call
+  /// runs now, for the notice before joining. `nil` when nothing moved, it is over or unreadable.
+  func movedCallHint(conversationId: String) async -> MovedCallHint? {
+    try? await core().movedCallHint(conversationId: conversationId)
+  }
+
   /// "Add notetaker" where the call is: asked in where it is a member or the core could add it
   /// (a channel whose members the user manages, a meeting the user organizes); `.moveToRoom` where
   /// the call has to move into a room with it.

@@ -87,6 +87,7 @@ import uniffi.teamcraft_ffi.LeaveChoice
 import uniffi.teamcraft_ffi.LinkPlatform
 import uniffi.teamcraft_ffi.LinkRequestItem
 import uniffi.teamcraft_ffi.LoginBrand
+import uniffi.teamcraft_ffi.MovedCallHint
 import de.zeitgleich.teamcraft.core.LoadFailure
 import uniffi.teamcraft_ffi.FirstSyncItem
 import uniffi.teamcraft_ffi.KeyCatchUpItem
@@ -1258,6 +1259,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   suspend fun isNotetakerInRunningCall(conversationId: String): Boolean =
     read { notetakerInCall(conversationId, callParticipants(conversationId))?.isPresent } ?: false
+
+  /**
+   * Where the call of `conversationId` moved to, for the pre-join dialog (issue #1321): the room
+   * the user is in whose call runs now, or `null` when nothing moved or it is over.
+   */
+  suspend fun movedCallHint(conversationId: String): MovedCallHint? =
+    read { movedCallHint(conversationId) }
 
   /** Ask before `@channel` in conversations with more members than this (0 = never). */
   fun confirmChannelOver(): Int = graph.mentionPrefs.confirmChannelOver

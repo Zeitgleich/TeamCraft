@@ -3184,6 +3184,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     crate::notetaker::notetaker_policy(&self.store)
   }
 
+  fn moved_call(&self, conversation: ConversationId) -> Option<teamcraft_client_api::notetaker::MovedCall> {
+    self.ui_moved_call(conversation)
+  }
+
   fn request_notetaker(&self, conversation: ConversationId, request: teamcraft_proto::NotetakerRequest) {
     self.ui_request_notetaker(conversation, request);
   }

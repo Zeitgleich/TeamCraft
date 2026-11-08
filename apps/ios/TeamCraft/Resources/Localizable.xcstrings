@@ -1657,6 +1657,22 @@
         }
       }
     },
+    "call_prejoin_moved %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The call moved into “%@”, which is running now."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Anruf ist in „%@“ umgezogen, dort läuft er gerade."
+          }
+        }
+      }
+    },
     "call_prejoin_notetaker": {
       "localizations": {
         "en": {
