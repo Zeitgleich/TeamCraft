@@ -42,6 +42,7 @@ struct ChatPane: View {
   @State private var isTakingPhoto = false
   @State private var photoSelection: [PhotosPickerItem] = []
   @State private var isShowingFiles = false
+  @State private var isShowingFilters = false
   /// A channel's members with their roles (#1262); DMs and group DMs have no roles.
   @State private var isShowingMembers = false
   /// What the next message replies to; kept in the core with the draft (#1115).
@@ -270,6 +271,7 @@ struct ChatPane: View {
       ChatPane(conversation: conversation, threadId: target.threadId, account: account)
     }
     .navigationDestination(isPresented: $isShowingFiles) { FilesGalleryView(conversation: conversation) }
+    .sheet(isPresented: $isShowingFilters) { ConversationFiltersView(conversationId: conversation.id) }
     .photosPicker(
       isPresented: $isPickingPhoto, selection: $photoSelection, maxSelectionCount: 10,
       matching: .any(of: [.images, .videos])
@@ -898,6 +900,7 @@ struct ChatPane: View {
           Task { await model.setFavorite(conversationId: conversation.id, isFavorite: !conversation.isFavorite) }
         }
         ConversationMuteMenu(conversationId: conversation.id)
+        Button("notify_filters_title", systemImage: "bell.badge") { isShowingFilters = true }
         Button("files_title", systemImage: "folder") { isShowingFiles = true }
         if conversation.kind == .public || conversation.kind == .private {
           Button("members_title", systemImage: "person.2") { isShowingMembers = true }
