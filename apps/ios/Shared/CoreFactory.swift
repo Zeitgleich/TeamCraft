@@ -1,15 +1,44 @@
 import Foundation
 
-/// Hands the Rust core the access token of the keychain session (it asks on a thread of its own).
+/// What the token provider tells the core about the session's ID token. `TeamCraft` is the real one.
+protocol IdTokenReceiver: AnyObject {
+  func takeIdTokenRequest() -> Bool
+  func noteIdToken(idToken: String?)
+}
+
+extension TeamCraft: IdTokenReceiver {}
+
+/// Hands the Rust core the access token of the keychain session (it asks on a thread of its own),
+/// and the ID token that came along for role signing (docs/e2ee.md §3.1.3).
 final class VaultTokenProvider: TokenProvider, @unchecked Sendable {
   private let vault: SessionVault
+  /// Guards `weakReceiver`: the core's token thread may ask while `attach` runs.
+  private let lock = NSLock()
+  /// Weak: the core owns this provider, so it must not keep the core alive.
+  private weak var weakReceiver: IdTokenReceiver?
 
   init(vault: SessionVault) {
     self.vault = vault
   }
 
+  /// The core this provider supplies, from now until it is gone. Tells it the current ID token.
+  func attach(_ receiver: IdTokenReceiver) {
+    lock.withLock { weakReceiver = receiver }
+    receiver.noteIdToken(idToken: vault.currentIdToken())
+  }
+
+  /// A core that went away meanwhile only ends the ID token's part: the access token is still good.
   func accessToken() -> String? {
-    vault.currentAccessToken()
+    // Taken at most once per request of the core, so one request is one forced refresh.
+    let forceRefresh = receiver?.takeIdTokenRequest() == true
+    let token = vault.currentAccessToken(forceRefresh: forceRefresh)
+    receiver?.noteIdToken(idToken: vault.currentIdToken())
+    return token
+  }
+
+  /// Read anew for each use, so that a refresh in progress doesn't hold the core.
+  private var receiver: IdTokenReceiver? {
+    lock.withLock { weakReceiver }
   }
 }
 
@@ -57,9 +86,10 @@ struct CoreFactory {
 
   /// Opens the core for `account` (the OIDC subject) on the active server. The app creates the
   /// database key on first sign-in (`createKey`); the extension never does, and opens the store
-  /// with small caches (`isMemoryConstrained`, issue #155).
+  /// with small caches (`isMemoryConstrained`, issue #155). `runsUpkeep` is the app: its core gets
+  /// the ID token and can ask for a newer one; the extension leaves that work to the app.
   func open(
-    account: String, createKey: Bool, isMemoryConstrained: Bool = false, listener: EventListener
+    account: String, createKey: Bool, isMemoryConstrained: Bool = false, runsUpkeep: Bool, listener: EventListener
   ) throws -> TeamCraft {
     guard let server = servers.activeServer else { throw CoreFactoryError.noAccount }
     let keyName = Self.databaseKeyName(storageKey: server.address.storageKey, account: account)
@@ -83,7 +113,10 @@ struct CoreFactory {
       databaseKey: key,
       pushGatewayUrl: environment.pushGatewayURL?.absoluteString,
       isMemoryConstrained: isMemoryConstrained)
-    return try TeamCraft(config: config, tokens: VaultTokenProvider(vault: vault), listener: listener)
+    let tokens = VaultTokenProvider(vault: vault)
+    let core = try TeamCraft(config: config, tokens: tokens, listener: listener)
+    if runsUpkeep { tokens.attach(core) }
+    return core
   }
 
   /// Deletes the database key of `account` on the active server (sign-out).

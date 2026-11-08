@@ -1413,7 +1413,7 @@ final class AppModel {
     if let maybeCore { return maybeCore }
     guard let account = container.activeAccount, vault.hasSession else { throw CoreFactoryError.noAccount }
     let opened = try factory.open(
-      account: account, createKey: createsKey,
+      account: account, createKey: createsKey, runsUpkeep: true,
       listener: ClosureEventListener { [weak self] in
         Task { @MainActor in self?.storeDidChange() }
       })
