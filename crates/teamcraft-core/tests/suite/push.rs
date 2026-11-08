@@ -952,7 +952,7 @@ mod probe {
   use teamcraft_core::api::ReadOnlyApi;
   use teamcraft_core::clock::SystemClock;
   use teamcraft_core::push_probe::{PROBE_OVERLAY_BYTES, ProbeReport, probe_push};
-  use teamcraft_core::store::{MemoryStore, MessageContent, OverlayStore, StoreError, Table};
+  use teamcraft_core::store::{MemoryStore, MessageContent, OverlayStore, Table};
   use teamcraft_proto::{ListMessagesQuery, ListMlsMessagesQuery};
 
   /// Everything the store holds, written out: a probe leaves it exactly as it was.
@@ -1206,21 +1206,21 @@ mod probe {
     let sealed = wake_up_for(&server, &bob, &carol, dm, message);
     let stored_before = everything(&bob.store, &[dm]);
 
-    // So little that not even the client's opening fits: the probe fails, and the extension shows
-    // the preview it had.
+    // So little that no write of the catch-up fits (opening the client writes none, #1198): it stops
+    // at the first one, and the extension shows what it had.
     let overlay = OverlayStore::new(bob.store.as_ref(), 1);
-    let probed = probe_push(
+    let (preview, report) = probe_push(
       bob.api.clone(),
       &overlay,
       Box::new(SystemClock),
       settings(),
       &sealed,
     )
-    .await;
-    assert!(matches!(
-      probed,
-      Err(teamcraft_core::CoreError::Store(StoreError::QuotaExceeded))
-    ));
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(preview.maybe_gap.is_some(), "not read: {preview:?}");
+    assert_eq!(report.overlay_bytes, 0);
     drop(overlay);
     assert_eq!(everything(&bob.store, &[dm]), stored_before);
   }

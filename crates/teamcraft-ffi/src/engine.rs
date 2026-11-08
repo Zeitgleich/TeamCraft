@@ -2220,6 +2220,14 @@ mod tests {
           OpenError::Unreadable(StoreProblem::Damaged)
         ));
       }
+      // Not migrated yet is the app's to do, not a store to reset (the extension's refusal, #1198).
+      assert!(matches!(
+        open_error(CoreError::Store(StoreError::LayoutBehind {
+          found: 1,
+          supported: 5,
+        })),
+        OpenError::Failed(TeamCraftError::Storage(_))
+      ));
       // Busy or out of space: the data may be fine, so it stays a failure to try again.
       assert!(matches!(
         open_error(CoreError::Store(StoreError::Database(
