@@ -26,7 +26,7 @@ use teamcraft_core::clock::SystemClock;
 use teamcraft_core::records;
 use teamcraft_core::store::{
   LocalStore, MessageContent, SealedSqliteStore, StaticKeySource, StoredMessage, Table, TrackedStore,
-  write_group,
+  Unreadable, write_group,
 };
 use teamcraft_core::ui_backend::CoreChatBackend;
 use teamcraft_core::{ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
@@ -53,6 +53,14 @@ const DEFAULT_BIG_MESSAGES: i64 = 90_000;
 /// The sync's messages are numbered from here, after any seeded history.
 const SYNCED_FROM: i64 = 1_000_000;
 const SEED_BATCH: usize = 2_000;
+/// The newest messages of each big channel among which some wait for keys.
+const WAITING_ROWS: i64 = 2_000;
+/// Big channels nobody read on this account yet (an import), with no read position.
+const DEFAULT_BIG_NEVER_READ: i64 = 1;
+const CATCH_UP_EVERY: Duration = Duration::from_millis(250);
+const DECRYPTED_PER_BATCH: usize = 25;
+const OLDER_PER_BATCH: i64 = 10;
+const NEW_PER_BATCH: i64 = 5;
 /// Every other conversation has this many unread at its end, some of them mentioning the user.
 const UNREAD: i64 = 30;
 const PAGE: u32 = 50;
@@ -212,6 +220,190 @@ fn write(store: &Store, writes: impl FnOnce(&Store) -> Result<(), teamcraft_core
 }
 
 type Store = TrackedStore<Arc<SealedSqliteStore>>;
+
+/// The start of issue #1466: the app comes back after a while, the list's counts of its last run
+/// kept, and a catch-up starts at once. It decrypts messages that waited for their keys, loads
+/// older history into big channels, adds new messages and edits, through the store connection the
+/// reads use, while the read thread reads the chat list after every change and the user opens a
+/// chat now and then. The numbers: until the list shows, one list pass meanwhile, and how long
+/// opening a chat waits behind them (from the tap: a read thread does one thing at a time).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a measurement: run by hand with --release"]
+async fn measure_a_start_during_a_catch_up() {
+  let directory = std::env::temp_dir().join(format!("teamcraft-start-sync-{}", std::process::id()));
+  std::fs::create_dir_all(&directory).unwrap();
+  let seeded = Instant::now();
+  let me = seed(&directory).await;
+  let store = open_store(&directory);
+  let waiting = park_for_keys(&store);
+  eprintln!(
+    "seeded {CONVERSATIONS} conversations, {} waiting for keys, in {:?}",
+    waiting.len(),
+    seeded.elapsed()
+  );
+  let spaces: BTreeSet<SpaceId> = (0..SPACES).map(|space| id(900 + space)).collect();
+  {
+    let last_run = CoreChatBackend::new(store.clone(), me, Box::new(SystemClock));
+    last_run.listed_conversations(&spaces);
+  }
+  drop(store);
+
+  let store = open_store(&directory);
+  let backend = CoreChatBackend::new(store.clone(), me, Box::new(SystemClock));
+  let start = Instant::now();
+  backend.listed_conversations(&spaces);
+  eprintln!(
+    "list usable after the start            {:>9.1} ms",
+    ms(start.elapsed())
+  );
+
+  let length = Duration::from_secs(env_number("TEAMCRAFT_STORM_SECS", 30));
+  let is_over = Arc::new(AtomicBool::new(false));
+  let catch_up = CatchUp::start(store.clone(), waiting, is_over.clone());
+  let mut passes = Vec::new();
+  let mut opens = Vec::new();
+  let started = Instant::now();
+  let mut next_open = started + OPEN_EVERY;
+  let mut index = 0;
+  while started.elapsed() < length {
+    let pass = Instant::now();
+    backend.listed_conversations(&spaces);
+    passes.push(pass.elapsed());
+    if Instant::now() >= next_open {
+      let conversation = conversation_id(index % CONVERSATIONS);
+      index += 7;
+      let tail = backend.feed_tail(conversation, None, PAGE as usize);
+      assert!(!tail.messages.is_empty(), "no messages in a seeded conversation");
+      opens.push(next_open.elapsed());
+      next_open += OPEN_EVERY;
+      // Taps the user made while the thread was busy wait their turn.
+      next_open = next_open.max(Instant::now() - OPEN_EVERY);
+    }
+  }
+  is_over.store(true, Ordering::SeqCst);
+  let written = catch_up.join().unwrap();
+  passes.sort();
+  opens.sort();
+  eprintln!(
+    "list pass during the catch-up          p50 {:>8.1} ms, max {:>8.1} ms over {} passes",
+    ms(passes[passes.len() / 2]),
+    ms(passes[passes.len() - 1]),
+    passes.len()
+  );
+  eprintln!(
+    "opening a chat, from the tap           p50 {:>8.1} ms, p95 {:>8.1} ms, max {:>8.1} ms over {} opens",
+    ms(opens[opens.len() / 2]),
+    ms(opens[opens.len() * 95 / 100]),
+    ms(opens[opens.len() - 1]),
+    opens.len()
+  );
+  eprintln!("catch-up writes                        {written}");
+  drop(backend);
+  drop(store);
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// Messages of the big channels that came before their keys: every fourth of the newest
+/// [`WAITING_ROWS`] of each, stored unreadable. A never-read big channel has no read position.
+fn park_for_keys(store: &Store) -> Vec<StoredMessage> {
+  let mut waiting = Vec::new();
+  write(store, |store| {
+    for index in 0..big_chats() {
+      let history = history_of(index);
+      for n in (history.saturating_sub(WAITING_ROWS)..history).step_by(4) {
+        let readable = message(conversation_id(index), id(500 + (index + n) % PEOPLE), index, n);
+        let mut parked = readable.clone();
+        parked.content = MessageContent::Unknown;
+        parked.maybe_unreadable = Some(Unreadable::Waiting { since_ms: 1 });
+        store.upsert_message(&parked)?;
+        waiting.push(readable);
+      }
+      if index < env_number("TEAMCRAFT_STORM_BIG_NEVER_READ", DEFAULT_BIG_NEVER_READ) {
+        let record = channel_record(conversation_id(index), id(900), index, None);
+        records::put_json(
+          store,
+          Table::Conversations,
+          &conversation_id(index).to_string(),
+          &record,
+        )?;
+      }
+    }
+    Ok(())
+  });
+  waiting
+}
+
+/// What a catch-up writes, a batch every [`CATCH_UP_EVERY`]: keys came for some waiting messages,
+/// a page of older history of a big channel, new messages, edits.
+struct CatchUp;
+
+impl CatchUp {
+  fn start(
+    store: Store,
+    mut waiting: Vec<StoredMessage>,
+    is_over: Arc<AtomicBool>,
+  ) -> std::thread::JoinHandle<usize> {
+    std::thread::spawn(move || {
+      let mut written = 0;
+      let mut batch: i64 = 0;
+      while !is_over.load(Ordering::SeqCst) {
+        write(&store, |store| {
+          for message in waiting.drain(..DECRYPTED_PER_BATCH.min(waiting.len())) {
+            store.upsert_message(&message)?;
+            written += 1;
+          }
+          let big = batch % big_chats();
+          for k in 0..OLDER_PER_BATCH {
+            let mut older = message(conversation_id(big), id(500), big, 0);
+            older.maybe_server_id = Some(id(
+              1_000_000_000 + big * 10_000_000 - 1 - batch * OLDER_PER_BATCH - k,
+            ));
+            let mut client = [0x77; 16];
+            client[..8].copy_from_slice(&(batch * OLDER_PER_BATCH + k).to_be_bytes());
+            older.client_message_id = ClientMessageId::from_bytes(client);
+            older.sent_at_ms = 1_600_000_000_000 - batch * OLDER_PER_BATCH - k;
+            store.upsert_message(&older)?;
+            written += 1;
+          }
+          for k in 0..NEW_PER_BATCH {
+            let index = (batch * NEW_PER_BATCH + k) % CONVERSATIONS;
+            store.upsert_message(&message(
+              conversation_id(index),
+              id(500),
+              index,
+              SYNCED_FROM + batch,
+            ))?;
+            written += 1;
+          }
+          let edited = batch % CONVERSATIONS;
+          let mut edit = message(
+            conversation_id(edited),
+            id(500 + edited % PEOPLE),
+            edited,
+            history_of(edited) - 2,
+          );
+          edit.is_edited = true;
+          store.upsert_message(&edit)?;
+          written += 1;
+          Ok(())
+        });
+        batch += 1;
+        std::thread::sleep(CATCH_UP_EVERY);
+      }
+      written
+    })
+  }
+}
+
+fn open_store(directory: &std::path::Path) -> Store {
+  TrackedStore::new(Arc::new(
+    SealedSqliteStore::open(
+      &store_path(directory),
+      &StaticKeySource::new(SymmetricKey::from_bytes(KEY)),
+    )
+    .unwrap(),
+  ))
+}
 
 /// What a storm of changes did to opening a chat.
 struct Storm {

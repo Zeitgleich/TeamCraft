@@ -10,12 +10,16 @@
 //!
 //! What a read costs:
 //!
-//! | Since the tally was written                 | Read                                 |
-//! |---------------------------------------------|--------------------------------------|
-//! | Nothing                                     | The tally, the feed index's positions |
-//! | New messages at the end                     | Those rows                           |
-//! | A read position, a mark, mention rules, an edit | The rows from the read position  |
-//! | A row left or moved, older rows came in     | All of the conversation's rows       |
+//! | Since the tally was written                     | Read                                   |
+//! |-------------------------------------------------|----------------------------------------|
+//! | Nothing                                         | The tally, the feed index's positions  |
+//! | New messages at the end                         | Those rows                             |
+//! | A read position, a mark, mention rules, an edit | The rows from the read position        |
+//! | A row left or moved, older rows came in         | All rows; the rows from the read       |
+//! |                                                 | position for the unread counts alone   |
+//!
+//! A chat list needs the unread counts alone ([`EntryNeed::Unread`]): history older than the read
+//! position is never read for it, also when a sync rewrote it (issue #1466).
 //!
 //! Stores without a feed version (the in-memory one) count all rows every time.
 
@@ -37,6 +41,15 @@ const ROWS_PER_READ: usize = 256;
 const PLACED_GROUP: u8 = 0;
 /// What [`EntryTally::to_bytes`] writes first. Another one reads as no tally, so it is counted again.
 const TALLY_FORMAT: u64 = 1;
+/// The same record for a tally of the unread counts alone ([`EntryTally::is_unread_only`]): an
+/// older app reads it as none and counts again.
+const UNREAD_ONLY_FORMAT: u64 = 2;
+/// The newest rows the unread counts alone are read from at most: beyond them a badge says "99+"
+/// anyway, and a conversation never read (an import) holds tens of thousands (issue #1466).
+#[cfg(not(test))]
+const UNREAD_WINDOW_ROWS: usize = 2_000;
+#[cfg(test)]
+const UNREAD_WINDOW_ROWS: usize = 4;
 /// The numbers of a tally's record.
 const TALLY_WORDS: usize = 13;
 /// A tally's record: the numbers and the last counted row's client message ID.
@@ -58,6 +71,9 @@ pub(crate) struct EntryTally {
   maybe_last_activity: Option<TimestampMs>,
   /// [`unread_key`] of what the unread counts were decided by.
   unread_key: u64,
+  /// Only the unread counts hold, read from the newest rows ([`EntryNeed::Unread`]); a caller that
+  /// needs everything counts again.
+  is_unread_only: bool,
   unread_messages: u32,
   unread_mentions: u32,
 }
@@ -76,6 +92,24 @@ pub(crate) struct TallyInputs {
   pub(crate) unread_key: u64,
   /// No unread row sorts before it ([`read_boundary`]).
   pub(crate) maybe_boundary: Option<MessageOrder>,
+}
+
+/// What a caller needs of a conversation's counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryNeed {
+  /// Message count, last activity and unread counts (a snapshot whose feed knows its length).
+  Everything,
+  /// The unread counts alone (a chat list): older history than the read position is never read
+  /// for them, also when it was rewritten (issue #1466).
+  Unread,
+}
+
+/// What [`counted`] found.
+pub(crate) enum Counted {
+  /// All counts, and the tally that keeps them.
+  Kept(EntryCounts, EntryTally),
+  /// The unread counts alone, with nothing to keep them by (the feed holds pending rows only).
+  Unread(UnreadCounts),
 }
 
 /// One pass over rows in display order, adding them up.
@@ -203,7 +237,11 @@ impl EntryTally {
       .maybe_through
       .map_or((0, [0; 16]), |through| (through.value, through.client_message_id));
     let words: [u64; TALLY_WORDS] = [
-      TALLY_FORMAT,
+      if self.is_unread_only {
+        UNREAD_ONLY_FORMAT
+      } else {
+        TALLY_FORMAT
+      },
       self.version.generation,
       self.version.reshaped,
       self.version.edited,
@@ -235,9 +273,11 @@ impl EntryTally {
     for (word, number) in words.iter_mut().zip(numbers.as_chunks::<8>().0) {
       *word = u64::from_le_bytes(*number);
     }
-    if words[0] != TALLY_FORMAT {
-      return None;
-    }
+    let is_unread_only = match words[0] {
+      TALLY_FORMAT => false,
+      UNREAD_ONLY_FORMAT => true,
+      _ => return None,
+    };
     let maybe_importer = match words[4] {
       0 => None,
       raw => Some(UserId::from_snowflake(Snowflake::new(raw.cast_signed()).ok()?)),
@@ -259,31 +299,98 @@ impl EntryTally {
       unread_key: words[11],
       unread_messages: (words[12] >> 32) as u32,
       unread_mentions: words[12] as u32,
+      is_unread_only,
     })
   }
 }
 
-/// The counts of `conversation`, from `maybe_kept` where it holds, and the tally to keep.
+/// The counts of `conversation`, from `maybe_kept` where it holds. Where it doesn't, the unread
+/// counts alone ([`EntryNeed::Unread`]) are taken from the rows from the read position on, so a
+/// rewrite of older history (older messages coming in, a placeholder decrypted, a deletion) reads
+/// none of it, and a tally of them alone is kept.
 pub(crate) fn counted(
   store: &dyn LocalStore,
   conversation: ConversationId,
   inputs: &TallyInputs,
   maybe_kept: Option<EntryTally>,
+  need: EntryNeed,
   mut pass: EntryPass<'_>,
-) -> Result<(EntryCounts, EntryTally), StoreError> {
+) -> Result<Counted, StoreError> {
   let rows_now = store.feed_len(conversation)?;
   let maybe_holding = match maybe_kept {
     Some(kept) if kept.holds(store, conversation, inputs, rows_now)? => Some(kept),
     _ => None,
   };
-  match maybe_holding {
-    Some(kept) => counted_from(store, conversation, inputs, kept, rows_now, pass),
-    None => {
+  let maybe_holding = maybe_holding.filter(|kept| need == EntryNeed::Unread || !kept.is_unread_only);
+  if let Some(kept) = maybe_holding {
+    let (counts, tally) = counted_from(store, conversation, inputs, kept, rows_now, pass)?;
+    return Ok(Counted::Kept(counts, tally));
+  }
+  match need {
+    EntryNeed::Everything => {
       let mut progress = Progress::default();
       counted_whole(store, conversation, &mut pass, &mut progress)?;
-      Ok(progress.finish(inputs, pass.counts))
+      let (counts, tally) = progress.finish(inputs, pass.counts);
+      Ok(Counted::Kept(counts, tally))
     },
+    EntryNeed::Unread => counted_unread(store, conversation, inputs, rows_now, pass),
   }
+}
+
+/// The unread counts alone from the newest rows, and a tally that keeps just them. Without a placed
+/// row to keep them up to (only pending ones), nothing is kept.
+fn counted_unread(
+  store: &dyn LocalStore,
+  conversation: ConversationId,
+  inputs: &TallyInputs,
+  rows_now: usize,
+  mut pass: EntryPass<'_>,
+) -> Result<Counted, StoreError> {
+  let (unread, maybe_read_last) = unread_between(store, conversation, inputs, rows_now, true, &mut pass)?;
+  let maybe_last_placed = match maybe_read_last {
+    Some(last) => Some(last),
+    None => last_placed(store, conversation, rows_now)?,
+  };
+  let counts = EntryCounts {
+    unread,
+    ..EntryCounts::default()
+  };
+  if rows_now > 0 && maybe_last_placed.is_none() {
+    return Ok(Counted::Unread(unread));
+  }
+  let (maybe_through, rows) = maybe_last_placed.map_or((None, 0), |(through, rows)| (Some(through), rows));
+  let tally = EntryTally {
+    version: inputs.version,
+    maybe_importer: inputs.maybe_importer,
+    maybe_through,
+    rows,
+    messages: 0,
+    maybe_last_activity: None,
+    unread_key: inputs.unread_key,
+    unread_messages: unread.messages,
+    unread_mentions: unread.mentions,
+    is_unread_only: true,
+  };
+  Ok(Counted::Kept(counts, tally))
+}
+
+/// The newest placed row of the feed's first `rows_now` rows and its place, among the last few:
+/// pending rows sort after every placed one.
+fn last_placed(
+  store: &dyn LocalStore,
+  conversation: ConversationId,
+  rows_now: usize,
+) -> Result<Option<(Through, usize)>, StoreError> {
+  let start = rows_now.saturating_sub(ROWS_PER_READ);
+  let rows = store.feed_rows(conversation, start, rows_now - start)?;
+  Ok(
+    rows
+      .iter()
+      .enumerate()
+      .rev()
+      .find(|(_, row)| row.order().group == PLACED_GROUP)
+      .map(|(offset, row)| (Through::of(row.order()), start + offset + 1)),
+  )
 }
 
 /// The counts of `conversation` in a store that keeps no version: all its rows, every time.
@@ -346,6 +453,7 @@ impl Progress {
       unread_key: inputs.unread_key,
       unread_messages: kept.unread.messages,
       unread_mentions: kept.unread.mentions,
+      is_unread_only: false,
     };
     (counts, tally)
   }
@@ -365,8 +473,17 @@ fn counted_from(
   let unread = if is_unread_kept {
     kept.unread()
   } else {
-    unread_up_to(store, conversation, inputs, &kept, &mut pass)?
+    unread_between(
+      store,
+      conversation,
+      inputs,
+      kept.rows,
+      kept.is_unread_only,
+      &mut pass,
+    )?
+    .0
   };
+  let is_unread_only = kept.is_unread_only;
   pass.counts = EntryCounts {
     messages: kept.messages,
     maybe_last_activity: kept.maybe_last_activity,
@@ -402,18 +519,28 @@ fn counted_from(
       pass.take(row);
     }
   }
-  Ok(progress.finish(inputs, pass.counts))
+  let (counts, tally) = progress.finish(inputs, pass.counts);
+  Ok((
+    counts,
+    EntryTally {
+      is_unread_only,
+      ..tally
+    },
+  ))
 }
 
-/// The unread counts of the rows `kept` covers: those from the read position on.
-fn unread_up_to(
+/// The unread counts of the feed's first `end` rows: only those from the read position on are read,
+/// and `is_windowed` only the newest [`UNREAD_WINDOW_ROWS`] of them. Also the last placed row read
+/// and its place, where one was.
+fn unread_between(
   store: &dyn LocalStore,
   conversation: ConversationId,
   inputs: &TallyInputs,
-  kept: &EntryTally,
+  end: usize,
+  is_windowed: bool,
   pass: &mut EntryPass<'_>,
-) -> Result<UnreadCounts, StoreError> {
-  let mut at = match inputs.maybe_boundary {
+) -> Result<(UnreadCounts, Option<(Through, usize)>), StoreError> {
+  let from_boundary = match inputs.maybe_boundary {
     Some(boundary) => store
       .feed_ranks(conversation, &[boundary])?
       .first()
@@ -421,14 +548,27 @@ fn unread_up_to(
       .unwrap_or(0),
     None => 0,
   };
+  let mut at = if is_windowed {
+    from_boundary.max(end.saturating_sub(UNREAD_WINDOW_ROWS))
+  } else {
+    from_boundary
+  };
+  let mut maybe_last_placed = None;
   pass.counts = EntryCounts::default();
-  while at < kept.rows {
-    let rows = store.feed_rows(conversation, at, ROWS_PER_READ.min(kept.rows - at))?;
+  while at < end {
+    let rows = store.feed_rows(conversation, at, ROWS_PER_READ.min(end - at))?;
     if rows.is_empty() {
       break;
     }
+    let first = at;
     at += rows.len();
-    for row in &rows {
+    #[cfg(test)]
+    UNREAD_ROWS.with(|read| read.set(read.get() + rows.len()));
+    for (offset, row) in rows.iter().enumerate() {
+      let order = row.order();
+      if order.group == PLACED_GROUP {
+        maybe_last_placed = Some((Through::of(order), first + offset + 1));
+      }
       if row.is_event() {
         pass.note_earlier_events(store, conversation, row.order())?;
       }
@@ -437,7 +577,7 @@ fn unread_up_to(
       }
     }
   }
-  Ok(pass.counts.unread)
+  Ok((pass.counts.unread, maybe_last_placed))
 }
 
 /// The first place an unread row can be: at the "mark unread" mark, or after the read position.
@@ -489,6 +629,8 @@ pub(crate) fn kept_tally(store: &dyn LocalStore, conversation: ConversationId) -
 thread_local! {
   /// Passes over a conversation's whole feed on this thread.
   static WHOLE_PASSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+  /// Rows read for the unread counts from the read position on, on this thread.
+  static UNREAD_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -817,6 +959,101 @@ mod tests {
     assert_eq!(fixture.check(), 0, "only the unread counts are decided again");
   }
 
+  /// Issue #1466: a chat list shows the unread counts alone, which never read older history than
+  /// the read position, whatever was rewritten there.
+  mod unread_only {
+    use super::*;
+
+    #[test]
+    fn older_history_reads_only_the_unread_rows() {
+      let (store, _dir) = sealed_store();
+      let mut fixture = Fixture::new(store);
+      fixture.set_last_read(Some(4));
+      fixture.check();
+      fixture.write(&text(0, PEER, "older, loaded later"));
+      // Rows 5 and 6 are after the read position.
+      assert_eq!(fixture.check_unread(), (2, 0));
+      assert_eq!(fixture.check_unread(), (0, 0), "nothing changed: the scan holds");
+      fixture.write(&text(100, PEER, "new"));
+      assert_eq!(
+        fixture.check_unread(),
+        (0, 0),
+        "a new row is added to the kept unread counts"
+      );
+      fixture.reopen();
+      assert_eq!(fixture.check_unread(), (0, 0), "they are kept across a restart");
+      fixture.need = EntryNeed::Everything;
+      assert_eq!(
+        fixture.check(),
+        1,
+        "a caller that needs everything counts everything"
+      );
+    }
+
+    #[test]
+    fn a_conversation_never_read_reads_only_its_newest_rows() {
+      let (store, _dir) = sealed_store();
+      let mut fixture = Fixture::new(store);
+      for n in 7..=20 {
+        fixture.write(&text(n, PEER, "plain"));
+      }
+      fixture.need = EntryNeed::Unread;
+      let before = UNREAD_ROWS.with(std::cell::Cell::get);
+      let counts = fixture.counts();
+      assert_eq!(
+        UNREAD_ROWS.with(std::cell::Cell::get) - before,
+        UNREAD_WINDOW_ROWS
+      );
+      assert_eq!(counts.unread.messages, UNREAD_WINDOW_ROWS as u32);
+      fixture.write(&text(21, PEER, "@alice new"));
+      let counts = fixture.counts();
+      assert_eq!(counts.unread.messages, UNREAD_WINDOW_ROWS as u32 + 1);
+      assert_eq!(counts.unread.mentions, 1);
+    }
+
+    #[test]
+    fn a_rewrite_before_the_read_position_reads_no_row_before_it() {
+      let (store, _dir) = sealed_store();
+      let mut fixture = Fixture::new(store);
+      fixture.set_last_read(Some(4));
+      fixture.check();
+      let mut placeholder = text(2, PEER, "");
+      placeholder.content = MessageContent::Unknown;
+      placeholder.maybe_unreadable = Some(Unreadable::Waiting { since_ms: 1 });
+      fixture.write(&placeholder);
+      assert_eq!(fixture.check_unread(), (2, 0));
+      fixture.write(&text(2, PEER, "decrypted"));
+      assert_eq!(fixture.check_unread(), (2, 0));
+      fixture.remove(1);
+      assert_eq!(fixture.check_unread(), (2, 0));
+    }
+
+    #[test]
+    fn a_rewrite_after_the_read_position_counts_again() {
+      let (store, _dir) = sealed_store();
+      let mut fixture = Fixture::new(store);
+      fixture.set_last_read(Some(4));
+      fixture.check();
+      let mut deleted = text(5, PEER, "");
+      deleted.content = MessageContent::Deleted;
+      fixture.write(&deleted);
+      // A deleted message is no row any more: row 6 is left after the read position.
+      assert_eq!(fixture.check_unread(), (1, 0));
+      fixture.write(&edited(6, "now it says @alice"));
+      assert_eq!(fixture.check_unread(), (1, 0));
+      assert_eq!(fixture.counts().unread.mentions, 1);
+    }
+
+    #[test]
+    fn a_holding_tally_answers_without_a_scan() {
+      let (store, _dir) = sealed_store();
+      let mut fixture = Fixture::new(store);
+      fixture.check();
+      fixture.write(&text(100, PEER, "new"));
+      assert_eq!(fixture.check_unread(), (0, 0));
+    }
+  }
+
   mod record {
     use super::*;
 
@@ -839,6 +1076,7 @@ mod tests {
         unread_key: u64::MAX - 1,
         unread_messages: u32::MAX,
         unread_mentions: 5,
+        is_unread_only: false,
       };
       assert_eq!(EntryTally::from_bytes(&full.to_bytes()), Some(full));
       let empty = EntryTally {
@@ -851,6 +1089,7 @@ mod tests {
         unread_key: 0,
         unread_messages: 0,
         unread_mentions: 0,
+        is_unread_only: true,
       };
       assert_eq!(EntryTally::from_bytes(&empty.to_bytes()), Some(empty));
     }
@@ -867,12 +1106,13 @@ mod tests {
         unread_key: 0,
         unread_messages: 0,
         unread_mentions: 0,
+        is_unread_only: false,
       }
       .to_bytes();
       assert_eq!(EntryTally::from_bytes(&[]), None);
       assert_eq!(EntryTally::from_bytes(&bytes[..bytes.len() - 1]), None);
       let mut other_format = bytes;
-      other_format[0] = 2;
+      other_format[0] = 3;
       assert_eq!(EntryTally::from_bytes(&other_format), None);
     }
   }
@@ -1016,6 +1256,7 @@ mod tests {
     response: ConversationResponse,
     maybe_mark: Option<MessageId>,
     preferences: MentionPreferences,
+    need: EntryNeed,
   }
 
   impl<S: LocalStore> Fixture<S> {
@@ -1030,6 +1271,7 @@ mod tests {
         response: response(),
         maybe_mark: None,
         preferences: MentionPreferences::default(),
+        need: EntryNeed::Everything,
       };
       fixture.write(&text(1, PEER, "ping @alice"));
       for n in 2..=FIRST_ROWS {
@@ -1046,15 +1288,29 @@ mod tests {
       let counts = self.kept_counts();
       self.backend.flush_entry_tallies();
       let passes = WHOLE_PASSES.with(std::cell::Cell::get) - before;
-      let expected =
-        self
-          .mirror
-          .entry_counts(&self.response, self.maybe_mark, Some(&me()), &self.preferences);
-      assert_eq!(counts.messages, expected.messages);
-      assert_eq!(counts.maybe_last_activity, expected.maybe_last_activity);
+      let expected = self.mirror.entry_counts(
+        &self.response,
+        self.maybe_mark,
+        Some(&me()),
+        &self.preferences,
+        self.need,
+      );
+      if self.need == EntryNeed::Everything {
+        assert_eq!(counts.messages, expected.messages);
+        assert_eq!(counts.maybe_last_activity, expected.maybe_last_activity);
+      }
       assert_eq!(counts.unread.messages, expected.unread.messages);
       assert_eq!(counts.unread.mentions, expected.unread.mentions);
       passes
+    }
+
+    /// Like [`Self::check`], for the unread counts alone: the rows read for them, and whether the
+    /// whole feed was read.
+    fn check_unread(&mut self) -> (usize, usize) {
+      self.need = EntryNeed::Unread;
+      let rows_before = UNREAD_ROWS.with(std::cell::Cell::get);
+      let whole = self.check();
+      (UNREAD_ROWS.with(std::cell::Cell::get) - rows_before, whole)
     }
 
     fn counts(&self) -> EntryCounts {
@@ -1064,9 +1320,13 @@ mod tests {
     }
 
     fn kept_counts(&self) -> EntryCounts {
-      self
-        .backend
-        .entry_counts(&self.response, self.maybe_mark, Some(&me()), &self.preferences)
+      self.backend.entry_counts(
+        &self.response,
+        self.maybe_mark,
+        Some(&me()),
+        &self.preferences,
+        self.need,
+      )
     }
 
     fn reopen(&mut self) {

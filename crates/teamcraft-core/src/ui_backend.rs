@@ -50,7 +50,8 @@ use crate::client::older_history::{is_failure_current, older_history_record};
 use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
 use crate::client::{ForwardScope, bookmarks_key};
 use crate::clock::Clock;
-use crate::entry_tally::{self, EntryPass, EntryTally, TallyInputs};
+pub use crate::entry_tally::EntryNeed;
+use crate::entry_tally::{self, Counted, EntryPass, EntryTally, TallyInputs};
 use crate::error::CoreError;
 use crate::imported::{Authorship, ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
@@ -728,6 +729,8 @@ pub struct CoreChatBackend<S> {
   pub(crate) sent: RefCell<HashMap<ConversationId, crate::ui_drafts::KeptSent>>,
   /// Tallies counted and not kept yet ([`Self::flush_entry_tallies`]).
   entry_tallies: RefCell<BTreeMap<ConversationId, EntryTally>>,
+  /// What the snapshot's entries count ([`Self::with_entry_need`]).
+  entry_need: EntryNeed,
   /// The feed rows of the conversations read last, kept while their messages don't change.
   feeds: RefCell<Vec<(ConversationId, FeedView)>>,
   /// What paging an indexed feed needs of the conversations read last, kept likewise.
@@ -791,6 +794,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       activity: RefCell::default(),
       sent: RefCell::default(),
       entry_tallies: RefCell::default(),
+      entry_need: EntryNeed::Everything,
       feeds: RefCell::default(),
       layouts: RefCell::default(),
       older_requests: RefCell::default(),
@@ -805,6 +809,19 @@ impl<S: LocalStore> CoreChatBackend<S> {
   pub fn with_typing(mut self, typing: crate::TypingState) -> Self {
     self.typing = typing;
     self
+  }
+
+  /// What a snapshot's entries count. The mobile apps show no message count or last activity of
+  /// the snapshot ([`EntryNeed::Unread`]): their counts then never read history older than the
+  /// read position (issue #1466).
+  #[must_use]
+  pub fn with_entry_need(mut self, need: EntryNeed) -> Self {
+    self.entry_need = need;
+    self
+  }
+
+  pub(crate) fn entry_need(&self) -> EntryNeed {
+    self.entry_need
   }
 
   /// Reads the progress of file transfers from the client ([`crate::Client::transfers`]).
@@ -1006,11 +1023,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
     preferences: &MentionPreferences,
     account: &AccountData,
   ) -> Conversation {
+    // An entry shows the unread counts alone.
     let counts = self.entry_counts(
       response,
       account.unread_mark(response.id),
       users.get(&self.me),
       preferences,
+      EntryNeed::Unread,
     );
     Conversation {
       maybe_draft_preview: account.draft_preview(response.id),
@@ -1033,6 +1052,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     maybe_mark: Option<MessageId>,
     maybe_me: Option<&UserSummary>,
     preferences: &MentionPreferences,
+    need: EntryNeed,
   ) -> EntryCounts {
     let is_unread = self.unread_check(response, maybe_mark);
     let maybe_importer = self.importer();
@@ -1069,12 +1089,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
           maybe_boundary: entry_tally::read_boundary(maybe_mark, maybe_last_read),
         };
         let maybe_kept = entry_tally::kept_tally(&self.store, conversation);
-        entry_tally::counted(&self.store, conversation, &inputs, maybe_kept.clone(), pass).map(
-          |(counts, tally)| {
-            if maybe_kept.as_ref() != Some(&tally) {
-              self.entry_tallies.borrow_mut().insert(conversation, tally);
-            }
-            counts
+        entry_tally::counted(&self.store, conversation, &inputs, maybe_kept.clone(), need, pass).map(
+          |counted| match counted {
+            Counted::Kept(counts, tally) => {
+              if maybe_kept.as_ref() != Some(&tally) {
+                self.entry_tallies.borrow_mut().insert(conversation, tally);
+              }
+              counts
+            },
+            Counted::Unread(unread) => EntryCounts {
+              unread,
+              ..EntryCounts::default()
+            },
           },
         )
       },

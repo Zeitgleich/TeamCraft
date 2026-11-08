@@ -28,7 +28,7 @@ use teamcraft_core::prefetch::load_segment_prefetch;
 use teamcraft_core::push_guard;
 use teamcraft_core::push_preview::{device_push_content, push_content_mode};
 use teamcraft_core::transfers::Transfers;
-use teamcraft_core::ui_backend::CoreChatBackend;
+use teamcraft_core::ui_backend::{CoreChatBackend, EntryNeed};
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_proto::{ConversationId, ThreadId, UserId};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
@@ -214,7 +214,10 @@ impl ReadQueue {
         account.identity_fingerprint = identity_fingerprint;
         return;
       }
-      let backend = CoreChatBackend::new(reads.store.clone(), user, Box::new(SystemClock));
+      // The apps show no message count or last activity of the snapshot: their counts never read
+      // history older than the read position (issue #1466).
+      let backend = CoreChatBackend::new(reads.store.clone(), user, Box::new(SystemClock))
+        .with_entry_need(EntryNeed::Unread);
       reads.maybe_account = Some(ReadAccount {
         backend,
         snapshots: SnapshotCache::new(u64::try_from(SystemClock.now_ms()).unwrap_or_default()),
