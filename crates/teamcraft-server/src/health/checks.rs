@@ -17,7 +17,7 @@ const SFU_SILENT_AFTER: Duration = Duration::seconds(120);
 const SECONDS_PER_DAY: i64 = 86_400;
 
 /// Every check, in the order the console shows them.
-pub const ALL_CHECKS: [HealthCheckId; 13] = [
+pub const ALL_CHECKS: [HealthCheckId; 14] = [
   HealthCheckId::Database,
   HealthCheckId::ObjectStorage,
   HealthCheckId::IdentityProvider,
@@ -31,6 +31,7 @@ pub const ALL_CHECKS: [HealthCheckId; 13] = [
   HealthCheckId::Certificate,
   HealthCheckId::DiskSpace,
   HealthCheckId::HolidayFeed,
+  HealthCheckId::HolidayResync,
 ];
 
 /// When a background job is expected to run.
@@ -47,6 +48,8 @@ pub struct JobSchedules {
   pub maybe_oidc_sync: Option<JobSchedule>,
   pub maybe_retention: Option<JobSchedule>,
   pub maybe_partition_maintenance: Option<JobSchedule>,
+  /// The calendar events of series that skip holidays, written again when the holidays change.
+  pub maybe_holiday_resync: Option<JobSchedule>,
 }
 
 /// The media server as the server sees it.
@@ -81,6 +84,7 @@ pub struct Facts {
   pub oidc_sync_last_success: Option<OffsetDateTime>,
   pub retention_last_success: Option<OffsetDateTime>,
   pub partition_last_success: Option<OffsetDateTime>,
+  pub holiday_resync_last_success: Option<OffsetDateTime>,
   pub heartbeats: Heartbeats,
   pub holiday_feed: FeedHealth,
 }
@@ -138,6 +142,14 @@ pub fn observe(facts: &Facts) -> Vec<(HealthCheckId, Observation)> {
     (HealthCheckId::Certificate, certificate(facts)),
     (HealthCheckId::DiskSpace, disk(facts)),
     (HealthCheckId::HolidayFeed, holiday_feed(facts)),
+    (
+      HealthCheckId::HolidayResync,
+      job(
+        facts,
+        facts.schedules.maybe_holiday_resync,
+        facts.holiday_resync_last_success,
+      ),
+    ),
   ]
 }
 
@@ -627,6 +639,7 @@ mod tests {
       oidc_sync_last_success: None,
       retention_last_success: None,
       partition_last_success: None,
+      holiday_resync_last_success: None,
       heartbeats: Heartbeats::default(),
       holiday_feed: FeedHealth::NotConfigured,
     }

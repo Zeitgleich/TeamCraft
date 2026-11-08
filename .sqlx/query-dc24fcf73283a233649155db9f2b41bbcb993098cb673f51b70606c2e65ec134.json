@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT calendar_holidays FROM meetings WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "calendar_holidays",
+        "type_info": "TimestamptzArray",
+        "origin": {
+          "Table": {
+            "table": "meetings",
+            "name": "calendar_holidays"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "dc24fcf73283a233649155db9f2b41bbcb993098cb673f51b70606c2e65ec134"
+}

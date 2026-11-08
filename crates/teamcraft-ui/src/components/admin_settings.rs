@@ -15,6 +15,7 @@ use crate::components::admin_fields::{
 };
 use crate::form_errors::focus_first_invalid;
 use crate::i18n::use_i18n;
+use crate::meetings::holiday_region_key;
 use crate::state::use_app_state;
 
 const MIB: u64 = 1_048_576;
@@ -742,14 +743,6 @@ fn holiday_feed_text(
         &[("reason", &reason), ("kept", &kept)],
       )
     },
-  }
-}
-
-/// The i18n key that names a region of the holiday table (`settings-holiday-de-by`), or none.
-fn holiday_region_key(code: &str) -> String {
-  match code {
-    "" => "settings-holiday-none".to_owned(),
-    code => format!("settings-holiday-{}", code.to_lowercase()),
   }
 }
 

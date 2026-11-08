@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET holiday_region = $2\n         WHERE id = $1 AND holiday_region IS DISTINCT FROM $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "964db3b8e5be03dd0aa86d053ccd9b5e8ce8e2e8376c30d5f2962b403fc5c8c8"
+}

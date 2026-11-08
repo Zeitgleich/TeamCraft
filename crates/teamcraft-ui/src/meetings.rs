@@ -12,10 +12,11 @@ pub use teamcraft_client_api::meeting_invitees::{
 use teamcraft_client_api::model::SpaceId;
 use teamcraft_proto::{
   CancelScope, CreateGuestLinkRequest, CreateInstantMeetingRequest, CreateMeetingRequest, ErrorBody,
-  ErrorCode, GuestLinkResponse, IdempotencyKey, JoinMeetingRequest, JoinMeetingResponse, KnockByLinkResponse,
-  ListLobbyResponse, ListMeetingsResponse, LobbyEntry, LobbyState, LobbyStateResponse, MeetingControlAction,
-  MeetingControlRequest, MeetingId, MeetingInvitee, MeetingRecurrence, MeetingResponse, RecurrenceFrequency,
-  RestoreMeetingRequest, RsvpStatus, SetRsvpRequest, UnixMillis, UpdateMeetingRequest, Weekday,
+  ErrorCode, GuestLinkResponse, HolidayRegionResponse, IdempotencyKey, JoinMeetingRequest,
+  JoinMeetingResponse, KnockByLinkResponse, ListLobbyResponse, ListMeetingsResponse, LobbyEntry, LobbyState,
+  LobbyStateResponse, MeetingControlAction, MeetingControlRequest, MeetingId, MeetingInvitee,
+  MeetingRecurrence, MeetingResponse, RecurrenceFrequency, RestoreMeetingRequest, RsvpStatus,
+  SetHolidayRegionRequest, SetRsvpRequest, UnixMillis, UpdateMeetingRequest, Weekday,
 };
 
 use crate::auth::fetch::fetch;
@@ -95,6 +96,22 @@ impl MeetingsClient {
       meetings,
       maybe_clock,
     })
+  }
+
+  /// Whose public holidays the caller's series skip (#1441).
+  pub async fn holiday_region(&self) -> Result<HolidayRegionResponse, MeetingError> {
+    self.call(ApiMethod::Get, "/api/v1/me/holiday-region", None).await
+  }
+
+  /// Sets the caller's own holiday region; `None` goes back to the workspace's.
+  pub async fn set_holiday_region(
+    &self,
+    maybe_region: Option<String>,
+  ) -> Result<HolidayRegionResponse, MeetingError> {
+    let body = to_json(&SetHolidayRegionRequest { maybe_region })?;
+    self
+      .call(ApiMethod::Put, "/api/v1/me/holiday-region", Some(body))
+      .await
   }
 
   pub async fn create(&self, request: &CreateMeetingRequest) -> Result<MeetingResponse, MeetingError> {
@@ -1313,6 +1330,15 @@ impl MeetingError {
   /// Whether the server refused with this HTTP status.
   pub fn is_status(&self, expected: u16) -> bool {
     matches!(self, Self::Refused { status, .. } if *status == expected)
+  }
+}
+
+/// The i18n key that names a region of the holiday table (`settings-holiday-de-by`), or none
+/// for the empty code.
+pub fn holiday_region_key(code: &str) -> String {
+  match code {
+    "" => "settings-holiday-none".to_owned(),
+    code => format!("settings-holiday-{}", code.to_lowercase()),
   }
 }
 

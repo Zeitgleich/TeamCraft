@@ -95,7 +95,7 @@ schedule-unit-meetings = { $count ->
 }
 schedule-on-days = On
 schedule-skip-holidays = Skip public holidays
-schedule-skip-holidays-hint = Meetings on a public holiday of the region your admin set are left out. You can still keep one.
+schedule-skip-holidays-hint = Meetings on a public holiday of your region (Settings, Account) or else of the one your admin set are left out. You can still keep one.
 schedule-ends = Ends
 schedule-ends-never = Never
 schedule-ends-count = After

@@ -88,6 +88,8 @@ pub struct AppState {
   pub health: Arc<crate::health::HealthMonitor>,
   /// The holiday feed's last good copy and how fetching it goes (#1426).
   pub holiday_feed: Arc<crate::holidays::HolidayFeed>,
+  /// The runs asked for of the job that keeps calendar events current with the holidays (#1441).
+  pub holiday_resync: Arc<crate::holidays::resync::HolidayResync>,
 }
 
 /// Runtime settings handlers need, taken from the configuration.

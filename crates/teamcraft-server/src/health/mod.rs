@@ -183,6 +183,7 @@ impl HealthMonitor {
       partition_last_success: state
         .metrics
         .job_last_success(BackgroundJob::PartitionMaintenance),
+      holiday_resync_last_success: state.metrics.job_last_success(BackgroundJob::HolidayResync),
       heartbeats,
       holiday_feed: state.holiday_feed.health(&state.settings.get().holidays),
     }

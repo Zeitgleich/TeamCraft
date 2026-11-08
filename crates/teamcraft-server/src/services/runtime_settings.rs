@@ -125,6 +125,7 @@ pub async fn put_settings(
   }
   if key == RuntimeSettingsKey::Holidays {
     state.holiday_feed.settings_changed();
+    state.holiday_resync.holidays_changed();
   }
   audit::record(
     state,

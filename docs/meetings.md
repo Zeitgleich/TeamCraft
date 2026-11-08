@@ -261,22 +261,54 @@ the organizer's wall clock (#1053). The holidays come from a `HolidaySource`
   setting, and the health check `holiday_feed` fails once the copy is older than
   `holidays.feed_max_age_secs` (a week) or no fetch worked since the start.
 
-Without a region or a feed copy nothing is skipped.
+**Per organizer** (#1441): an organizer in another state or country picks a region of their own
+under Settings, Account, "Public holidays" (`GET`/`PUT /api/v1/me/holiday-region`, stored in
+`users.holiday_region`, one of the table's regions; absent or empty: the instance's region again).
+Their series skip that region's holidays instead of the instance's; the instance's feed counts on
+top of either, since it holds the company's own closing days. It is a setting of its own and not a
+profile field: the profile's update replaces every field, so apps that don't know the region
+would clear it, and the profile is what others see. Guests have none (403). The list asks for the
+regions of all organizers of the listed series in one query and builds one source per organizer;
+one series (its own page, restoring, ringing) reads its organizer's.
+
+Without a region (the organizer's or the instance's) or a feed copy nothing is skipped.
 
 A skipped meeting is listed like a cancelled one (`is_occurrence_cancelled`), marked
 `is_occurrence_holiday` ("Holiday"); the calendar event and the invitations have it as `EXDATE`
-(for the series' past and the next two years; every change of the meeting writes them anew), and
-it doesn't ring. Restoring it keeps that meeting (`meeting_kept_holidays`, at most 1000 per series);
-cancelling it is refused with 409, it is off already. Like `EXDATE`, skipped meetings count
-towards `COUNT`.
+(for the series' past and the next two years), and it doesn't ring. Restoring it keeps that
+meeting (`meeting_kept_holidays`, at most 1000 per series); cancelling it is refused with 409, it
+is off already. Like `EXDATE`, skipped meetings count towards `COUNT`.
 
-| Condition                              | What happens                                                                                       |
-|----------------------------------------|----------------------------------------------------------------------------------------------------|
-| No region set, or the region changes   | Lists and ringing follow at once; calendar events follow on the next change of each meeting        |
-| The feed is down, slow or not a calendar | The last good copy stays in use (also over a restart); the console and `holiday_feed` say so    |
-| The feed changes                       | Lists and ringing follow with the next fetch; calendar events on the next change of each meeting |
-| A holiday is also cancelled            | Listed as cancelled; restoring takes the cancellation back and keeps the meeting on the holiday    |
-| Old clients                            | They see a skipped meeting as cancelled and can restore it; changing the rule there turns skipping off |
+**Calendar events stay current** (#1441, `holidays/resync.rs`). Every write of a series' event
+records the holiday starts it left out (`meetings.calendar_holidays`). A background task walks
+the scheduled series that skip holidays and writes the event of each again whose holidays are
+not the recorded ones any more: a new feed copy with other dates, other holiday settings, an
+organizer's new region, or the two years ahead moving on. It runs 30 s after the console's
+holiday settings change, after a fetched feed copy differs from the one before, and after an
+organizer picks another region (their series only), so changes that come together are one run;
+otherwise once a week (10 % at random on top), and ten minutes after the start, which also catches
+what was asked for before a restart (the requests are only in memory, the records are not). It
+reads 50 series at a time with a second's pause between pages; a series whose event is current
+costs a few queries and no write, so a second run writes nothing. Each write takes the meeting's
+calendar lock and reads the meeting under it, the same lock every other write and the removal of
+the event take, so the task never puts back an older event over a change made meanwhile. Nothing
+else changes: the same `SEQUENCE`, and no mail, since the invitees' calendars follow the CalDAV
+event and an update mail per holiday change would be noise. A series whose event can't be
+written keeps its old record and is tried again by the next run, an hour later instead of a week;
+five failures in a row end a run (the calendar or the database is down). The weekly run's last
+success is the health check `holiday_resync` (late after three missed runs); without a calendar a
+run has nothing to do.
+
+| Condition                                | What happens                                                                                                                                           |
+|------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
+| No region set, or the region changes     | Lists and ringing follow at once; calendar events with the holiday task, 30 s later                                                                    |
+| An organizer picks another region        | Their lists and ringing follow at once; their series' calendar events 30 s later                                                                       |
+| The feed is down, slow or not a calendar | The last good copy stays in use (also over a restart); the console and `holiday_feed` say so                                                           |
+| The feed changes                         | Lists and ringing follow with the next fetch; calendar events with the task right after it                                                             |
+| The calendar is down for the task        | The events keep their old holidays; the task tries again after an hour; `holiday_resync` after three weeks                                             |
+| Restart while a run is asked for         | The run of the start, ten minutes later, compares every series and catches up                                                                          |
+| A holiday is also cancelled              | Listed as cancelled; restoring takes the cancellation back and keeps the meeting on the holiday                                                        |
+| Old clients                              | They see a skipped meeting as cancelled and can restore it; changing the rule there turns skipping off; the region isn't part of the profile they save |
 
 | Condition                        | What happens                                                                                                          |
 |----------------------------------|-----------------------------------------------------------------------------------------------------------------------|

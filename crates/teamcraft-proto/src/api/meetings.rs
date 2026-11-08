@@ -439,6 +439,28 @@ pub struct MeetingReplyResponse {
   pub applied: u32,
 }
 
+/// `GET /api/v1/me/holiday-region` and the answer of `PUT`: whose public holidays the caller's
+/// series skip (#1441). The instance's holiday feed counts on top of either region.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct HolidayRegionResponse {
+  /// The caller's own region, one of `HOLIDAY_REGIONS`; absent: the instance's.
+  #[serde(rename = "region", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_region: Option<String>,
+  /// The instance's region, which applies without one of the caller's own; empty: none.
+  #[serde(default)]
+  pub instance_region: String,
+  /// The instance has a holiday feed, whose holidays the series skip as well.
+  #[serde(default)]
+  pub has_instance_feed: bool,
+}
+
+/// `PUT /api/v1/me/holiday-region`: absent (or empty) goes back to the instance's region.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SetHolidayRegionRequest {
+  #[serde(rename = "region", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_region: Option<String>,
+}
+
 fn default_true() -> bool {
   true
 }
@@ -459,6 +481,25 @@ mod tests {
       }
     );
     assert!(serde_json::from_str::<MeetingInvitee>(r#"{"kind":"robot"}"#).is_err());
+  }
+
+  #[test]
+  fn the_holiday_region_is_absent_for_the_instances() {
+    let own: HolidayRegionResponse =
+      serde_json::from_str(r#"{"region":"DE-BY","instance_region":"DE"}"#).unwrap();
+    assert_eq!(own.maybe_region.as_deref(), Some("DE-BY"));
+    assert!(!own.has_instance_feed);
+    let instance = HolidayRegionResponse {
+      maybe_region: None,
+      instance_region: "AT".into(),
+      has_instance_feed: true,
+    };
+    assert_eq!(
+      serde_json::to_value(&instance).unwrap(),
+      serde_json::json!({"instance_region": "AT", "has_instance_feed": true})
+    );
+    let back: SetHolidayRegionRequest = serde_json::from_str("{}").unwrap();
+    assert!(back.maybe_region.is_none());
   }
 
   #[test]

@@ -59,6 +59,7 @@ pub enum BackgroundJob {
   DatabaseCheck,
   EmailDigest,
   GuestExpiry,
+  HolidayResync,
   KeyPackagePruning,
   OidcSync,
   PartitionMaintenance,
@@ -136,10 +137,11 @@ impl DpopOutcome {
 }
 
 impl BackgroundJob {
-  const ALL: [Self; 9] = [
+  const ALL: [Self; 10] = [
     Self::DatabaseCheck,
     Self::EmailDigest,
     Self::GuestExpiry,
+    Self::HolidayResync,
     Self::KeyPackagePruning,
     Self::OidcSync,
     Self::PartitionMaintenance,
@@ -153,6 +155,7 @@ impl BackgroundJob {
       Self::DatabaseCheck => "database_check",
       Self::EmailDigest => "email_digest",
       Self::GuestExpiry => "guest_expiry",
+      Self::HolidayResync => "holiday_resync",
       Self::KeyPackagePruning => "key_package_pruning",
       Self::OidcSync => "oidc_sync",
       Self::PartitionMaintenance => "partition_maintenance",
@@ -790,6 +793,7 @@ mod tests {
             "database_check",
             "email_digest",
             "guest_expiry",
+            "holiday_resync",
             "key_package_pruning",
             "oidc_sync",
             "partition_maintenance",

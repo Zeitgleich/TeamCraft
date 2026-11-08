@@ -1,11 +1,16 @@
-//! Settings > Account: the profile header (picture, name, user ID) and the profile details others
-//! see on the user's card (title, department, phone, time zone, working hours).
+//! Settings > Account: the profile header (picture, name, user ID), the profile details others
+//! see on the user's card (title, department, phone, time zone, working hours), and whose public
+//! holidays the user's repeating meetings skip.
 
 use leptos::prelude::*;
-use teamcraft_proto::{AvatarContentType, ErrorCode, ProfileResponse, UpdateProfileRequest, WorkingHours};
+use leptos::task::spawn_local;
+use teamcraft_proto::{
+  AvatarContentType, ErrorCode, HOLIDAY_REGIONS, HolidayRegionResponse, ProfileResponse,
+  UpdateProfileRequest, WorkingHours,
+};
 use wasm_bindgen::JsCast;
 
-use crate::clock::{local_time_zone, time_zone_names};
+use crate::clock::{local_time_zone, now_ms, time_zone_names};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::components::image_crop_dialog::{
@@ -19,9 +24,10 @@ use crate::feedback::{ActionFailure, FailureKind, PendingAction};
 use crate::form_errors::{FieldError, FieldErrors, FormErrors, focus_first_invalid};
 use crate::i18n::use_i18n;
 use crate::image_crop::check_pick;
+use crate::meetings::{MeetingsHub, holiday_region_key};
 use crate::prefs::EVERY_DAY;
 use crate::profiles::{MAX_AVATAR_BYTES, ProfileHub, use_profiles};
-use crate::reactive::SetIfAlive;
+use crate::reactive::{SetIfAlive, UpdateIfAlive};
 use crate::state::use_app_state;
 
 const PROFILE_FORM_ID: &str = "profile-form";
@@ -50,6 +56,7 @@ pub fn AccountSection() -> impl IntoView {
   view! {
     <ProfileHeader maybe_hub=Some(hub) />
     <ProfileDetails hub=hub />
+    {use_context::<MeetingsHub>().map(|meetings| view! { <HolidayRegionCard meetings=meetings /> })}
   }
   .into_any()
 }
@@ -470,6 +477,103 @@ fn ProfileDetails(hub: ProfileHub) -> impl IntoView {
         </button>
       </div>
     </form>
+  }
+}
+
+/// Whose public holidays the user's repeating meetings skip (#1441): a region of their own, for
+/// people in another state or country, or the workspace's. Saved as soon as it is picked; the
+/// workspace's holiday calendar counts on top of either.
+#[component]
+fn HolidayRegionCard(meetings: MeetingsHub) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let me = state.me().id;
+  let loaded: RwSignal<Option<HolidayRegionResponse>> = RwSignal::new(None);
+  let has_failed = RwSignal::new(false);
+  let saving = PendingAction::new();
+  spawn_local(async move {
+    match meetings.client().holiday_region().await {
+      Ok(response) => loaded.set_if_alive(Some(response)),
+      Err(error) => {
+        tracing::warn!(%error, "could not load the holiday region");
+        has_failed.set_if_alive(true);
+      },
+    }
+  });
+
+  let value = move || {
+    loaded
+      .get()
+      .and_then(|response| response.maybe_region)
+      .unwrap_or_default()
+  };
+  let hint = Signal::derive(move || {
+    if has_failed.get() {
+      return i18n.t("settings-holiday-own-unavailable");
+    }
+    let Some(response) = loaded.get() else {
+      return String::new();
+    };
+    let source = match response.maybe_region {
+      Some(_) => i18n.t("settings-holiday-own-hint"),
+      None => i18n.t_with(
+        "settings-holiday-own-instance-hint",
+        &[("region", &i18n.t(&holiday_region_key(&response.instance_region)))],
+      ),
+    };
+    if response.has_instance_feed {
+      format!("{source} {}", i18n.t("settings-holiday-own-feed"))
+    } else {
+      source
+    }
+  });
+  let on_change = move |ev: leptos::ev::Event| {
+    let choice = event_target_value(&ev);
+    let maybe_region = (!choice.is_empty()).then_some(choice);
+    saving.spawn(async move {
+      match meetings.client().set_holiday_region(maybe_region).await {
+        Ok(saved) => {
+          loaded.set_if_alive(Some(saved));
+          // Other occurrences are skipped now: the meeting list shows it.
+          meetings.refresh(me, now_ms()).await;
+          Ok(())
+        },
+        Err(error) => {
+          // Back to what is stored.
+          loaded.update_if_alive(|_| {});
+          Err(error.to_failure())
+        },
+      }
+    });
+  };
+
+  view! {
+    <SettingsCard heading="settings-holiday-own">
+      <SettingRow label="settings-holiday-own-region" live_hint=hint>
+        <select
+          class="input set-select"
+          aria-labelledby=format!("{}-label", row_id("settings-holiday-own-region"))
+          aria-describedby=format!("{}-hint", row_id("settings-holiday-own-region"))
+          aria-busy=move || saving.is_pending().then_some("true")
+          prop:disabled=move || loaded.get().is_none() || saving.is_pending()
+          prop:value=value
+          on:change=on_change
+        >
+          <option value="" selected=move || value().is_empty()>
+            {move || i18n.t("settings-holiday-own-instance")}
+          </option>
+          {HOLIDAY_REGIONS
+            .into_iter()
+            .map(|code| {
+              let key = holiday_region_key(code);
+              view! {
+                <option value=code selected=move || value() == code>{move || i18n.t(&key)}</option>
+              }
+            })
+            .collect_view()}
+        </select>
+      </SettingRow>
+    </SettingsCard>
   }
 }
 

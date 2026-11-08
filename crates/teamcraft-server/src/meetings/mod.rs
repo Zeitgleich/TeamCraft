@@ -7,6 +7,7 @@ pub mod guest_scope;
 pub mod ical;
 pub mod mailer;
 
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +21,9 @@ use crate::runtime::Slot;
 use caldav::CalendarStore;
 use guest::{GuestTokenError, GuestTokens};
 use mailer::Mailer;
+
+/// Locks the writes of calendar events are spread over; a meeting always takes the same one.
+const CALENDAR_WRITE_LOCKS: usize = 64;
 
 /// Configuration and backends of the meeting feature.
 pub struct MeetingService {
@@ -36,6 +40,9 @@ pub struct MeetingService {
   maybe_start_ring_lead: Option<Duration>,
   /// Token of the inbox handler that forwards RSVP e-mail; `None` disables that endpoint.
   maybe_inbox_token: Option<Vec<u8>>,
+  /// One write of a meeting's calendar event at a time (#1441): a write the holiday job reads the
+  /// meeting for can't overtake a change of the meeting and put an older event back.
+  calendar_writes: [tokio::sync::Mutex<()>; CALENDAR_WRITE_LOCKS],
 }
 
 /// The external systems a meeting service talks to; each may be empty, and admins can replace
@@ -96,6 +103,7 @@ impl MeetingService {
         .maybe_inbox_token
         .as_ref()
         .map(|token| token.expose_secret().as_bytes().to_vec()),
+      calendar_writes: std::array::from_fn(|_| tokio::sync::Mutex::new(())),
     })
   }
 
@@ -117,6 +125,16 @@ impl MeetingService {
   /// The calendar meetings are written to now, if any.
   pub fn calendar(&self) -> Option<Arc<dyn CalendarStore>> {
     self.calendar.get()
+  }
+
+  /// Waits until nobody else writes or removes the calendar event of `meeting`; the event is
+  /// the caller's until the guard drops. Hold it only around building and writing the event.
+  pub async fn lock_calendar_event(&self, meeting: MeetingId) -> tokio::sync::MutexGuard<'_, ()> {
+    let mut hasher = DefaultHasher::new();
+    meeting.hash(&mut hasher);
+    let stripes = u64::try_from(CALENDAR_WRITE_LOCKS).unwrap_or(1);
+    let index = usize::try_from(hasher.finish() % stripes).unwrap_or_default();
+    self.calendar_writes[index].lock().await
   }
 
   /// Where admins put a new calendar.

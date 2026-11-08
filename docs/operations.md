@@ -166,8 +166,8 @@ no error texts.**
 - `provider`: `apns`, `fcm`, `unifiedpush`, `webpush`.
 - `dependency`: `database`, `object_storage`, `identity_provider`, `push_gateway`, `sfu`, once in use.
   `state`: `ok`, `down`, `recovering`.
-- `job`: `database_check`, `email_digest`, `guest_expiry`, `key_package_pruning`, `oidc_sync`,
-  `partition_maintenance`, `retention`, `scheduled_messages`, `urgent_scheduler`.
+- `job`: `database_check`, `email_digest`, `guest_expiry`, `holiday_resync`, `key_package_pruning`,
+  `oidc_sync`, `partition_maintenance`, `retention`, `scheduled_messages`, `urgent_scheduler`.
 
 **Cost.** With the listener off, requests pay nothing for it. With it on, one request costs a look at
 the path's first segments, two label lookups and two atomic updates, whatever the size of the
@@ -200,6 +200,7 @@ nothing from any conversation, no addresses, no error texts.
 | `certificate`           | the served certificate expires within the limit (14 days)                       | the deployment's heartbeat, see below    |
 | `disk_space`            | the disk is fuller than the limit (85 %)                                        | the deployment's heartbeat, see below    |
 | `holiday_feed`          | the holiday feed's copy is older than `holidays.feed_max_age_secs` (7 days), or no fetch worked yet | with `holidays.feed_url` (console)       |
+| `holiday_resync`        | the job that writes calendar events again when holidays change missed three weekly runs (docs/meetings.md, "Holidays") | with `[meetings]`                        |
 
 **When a failure becomes an alert.** A background task evaluates the checks every
 `[health] check_interval_secs` (30). It reads what the server keeps anyway (breakers, push results,
