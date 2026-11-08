@@ -45,6 +45,11 @@ impl WindowChromeState {
       last_state: Mutex::new(None),
     }
   }
+
+  /// The title bar the window was created with.
+  pub fn title_bar(&self) -> TitleBar {
+    self.title_bar
+  }
 }
 
 /// The title bar the window should be created with.
