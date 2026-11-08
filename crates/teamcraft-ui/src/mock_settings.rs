@@ -223,6 +223,7 @@ impl SettingsMock {
       RuntimeSettingsSection::AppLinks(values) => self.runtime.app_links = values,
       RuntimeSettingsSection::HealthAlerts(values) => self.runtime.health_alerts = values,
       RuntimeSettingsSection::Holidays(values) => self.runtime.holidays = values,
+      RuntimeSettingsSection::CrashReports(values) => self.runtime.crash_reports = values,
       // A section a newer wire version added; the mock has nothing to store.
       #[allow(unreachable_patterns)]
       _ => return,
@@ -247,6 +248,7 @@ impl SettingsMock {
       RuntimeSettingsKey::AppLinks => self.runtime.app_links = defaults.app_links,
       RuntimeSettingsKey::HealthAlerts => self.runtime.health_alerts = defaults.health_alerts,
       RuntimeSettingsKey::Holidays => self.runtime.holidays = defaults.holidays,
+      RuntimeSettingsKey::CrashReports => self.runtime.crash_reports = defaults.crash_reports,
       _ => return,
     }
     self.set_source(key, SettingSource::Config);
@@ -331,6 +333,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
     token_binding: TokenBindingSettings::default(),
     app_links: teamcraft_proto::AppLinkSettings::default(),
     health_alerts: teamcraft_proto::HealthAlertSettings::default(),
+    crash_reports: teamcraft_proto::CrashReportSettings::default(),
     holidays: teamcraft_proto::HolidaySettings::default(),
     maybe_holiday_feed: None,
     server_rules: ServerRulesSettings {

@@ -9,7 +9,6 @@
 //! [`scrub`] before it is queued, breadcrumbs come only from the redacted debug log ring, and the
 //! only identifier is a random [`InstallationId`], never a user ID.
 
-mod dsn;
 mod event;
 mod panic;
 mod queue;
@@ -20,9 +19,10 @@ use std::future::Future;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use teamcraft_proto::{CrashReportsInfo, is_crash_environment};
+pub use teamcraft_proto::{Dsn, DsnError};
 use thiserror::Error;
 
-pub use dsn::{Dsn, DsnError};
 pub use event::{
   AppInfo, AppPlatform, CrashEvent, CrashLevel, ErrorSource, EventId, InstallationId, StackFrame,
 };
@@ -63,7 +63,7 @@ pub enum CrashReportingConsent {
 pub struct SampleRate(f64);
 
 /// The environment name the backend groups reports by (`production`, `staging`): lowercase ASCII
-/// letters, digits, `-`, `_` and `.`, 1 to [`Environment::MAX_CHARS`] characters.
+/// letters, digits, `-`, `_` and `.`, 1 to 64 characters.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Environment(String);
@@ -115,6 +115,16 @@ impl CrashReportingConfig {
       environment: Environment::new(environment)?,
     })
   }
+
+  /// From what `GET /api/v1/server-info` said; a server's value that doesn't check is ignored
+  /// (reports stay off) rather than trusted.
+  pub fn from_info(info: &CrashReportsInfo) -> Result<Self, CrashReportingError> {
+    Self::new(
+      &info.dsn,
+      f64::from(info.sample_percent) / 100.0,
+      &info.environment,
+    )
+  }
 }
 
 impl SampleRate {
@@ -159,15 +169,8 @@ impl From<SampleRate> for f64 {
 }
 
 impl Environment {
-  pub const MAX_CHARS: usize = 64;
-
   pub fn new(name: &str) -> Result<Self, CrashReportingError> {
-    let is_valid = !name.is_empty()
-      && name.len() <= Self::MAX_CHARS
-      && name
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'));
-    if is_valid {
+    if is_crash_environment(name) {
       Ok(Self(name.to_owned()))
     } else {
       Err(CrashReportingError::Environment)
@@ -244,6 +247,27 @@ mod tests {
       CrashReportingConfig::new("not a dsn", 1.0, "prod"),
       Err(CrashReportingError::Dsn(_))
     ));
+  }
+
+  #[test]
+  fn config_from_the_server_info() {
+    let info = CrashReportsInfo {
+      dsn: "https://abc123@errors.example.com/7".to_owned(),
+      sample_percent: 20,
+      environment: "production".to_owned(),
+    };
+    assert_eq!(
+      CrashReportingConfig::from_info(&info).unwrap().sample_rate.get(),
+      0.2
+    );
+    let hostile = CrashReportsInfo {
+      sample_percent: 200,
+      ..info
+    };
+    assert_eq!(
+      CrashReportingConfig::from_info(&hostile),
+      Err(CrashReportingError::SampleRate)
+    );
   }
 
   #[test]

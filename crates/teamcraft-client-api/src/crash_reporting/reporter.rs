@@ -242,7 +242,7 @@ mod tests {
       assert_eq!(
         pending.request.url,
         "https://key1@errors.example.com/9"
-          .parse::<super::super::super::Dsn>()
+          .parse::<teamcraft_proto::Dsn>()
           .unwrap()
           .envelope_url("1.0.9")
       );

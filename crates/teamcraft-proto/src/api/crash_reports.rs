@@ -1,5 +1,6 @@
-//! The DSN: where a backend takes reports, as the backend shows it
-//! (`https://<public key>@errors.example.com/<project>`).
+//! Crash reports (docs/crash-reports.md, issue #1508): the instance setting the admin console
+//! edits, what `GET /api/v1/server-info` tells the apps, and the DSN both sides validate the same
+//! way.
 
 use std::fmt;
 use std::str::FromStr;
@@ -7,6 +8,43 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::{Host, Url};
+use utoipa::ToSchema;
+
+/// Longest environment name, in characters.
+pub const MAX_CRASH_ENVIRONMENT_CHARS: usize = 64;
+
+/// Administration → Crash reports: where the apps send crash and error reports. Off by default;
+/// nothing is captured or sent until an admin sets a DSN and turns it on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CrashReportSettings {
+  pub is_enabled: bool,
+  /// The backend project's DSN (`https://<public key>@errors.example.com/<project>`); may stay
+  /// empty while reports are off.
+  pub dsn: String,
+  /// Percentage of handled errors that are sent; crashes are always sent.
+  pub sample_percent: u8,
+  /// The environment the backend groups reports by (`production`, `staging`).
+  pub environment: String,
+}
+
+/// The part of [`CrashReportSettings`] the apps get in `GET /api/v1/server-info`, only while
+/// reports are on. Public by design: the DSN's key only allows sending reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CrashReportsInfo {
+  pub dsn: String,
+  pub sample_percent: u8,
+  pub environment: String,
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum CrashReportSettingsError {
+  #[error("dsn: {0}")]
+  Dsn(#[from] DsnError),
+  #[error("sample_percent must be between 0 and 100")]
+  SamplePercent,
+  #[error("environment must be 1 to 64 lowercase letters, digits, '-', '_' or '.'")]
+  Environment,
+}
 
 /// Envelope protocol version sent with every request.
 const PROTOCOL_VERSION: u32 = 7;
@@ -38,6 +76,51 @@ pub enum DsnError {
   MissingProjectId,
   #[error("the DSN must not have a query or fragment")]
   HasQuery,
+}
+
+impl Default for CrashReportSettings {
+  fn default() -> Self {
+    Self {
+      is_enabled: false,
+      dsn: String::new(),
+      sample_percent: 100,
+      environment: "production".to_owned(),
+    }
+  }
+}
+
+impl CrashReportSettings {
+  /// Checks the values; a DSN is only required while reports are on.
+  pub fn check(&self) -> Result<(), CrashReportSettingsError> {
+    if self.is_enabled || !self.dsn.trim().is_empty() {
+      self.dsn.parse::<Dsn>()?;
+    }
+    if self.sample_percent > 100 {
+      return Err(CrashReportSettingsError::SamplePercent);
+    }
+    if !is_crash_environment(&self.environment) {
+      return Err(CrashReportSettingsError::Environment);
+    }
+    Ok(())
+  }
+
+  /// What the apps get: `None` while reports are off or the values don't check.
+  pub fn info(&self) -> Option<CrashReportsInfo> {
+    (self.is_enabled && self.check().is_ok()).then(|| CrashReportsInfo {
+      dsn: self.dsn.trim().to_owned(),
+      sample_percent: self.sample_percent,
+      environment: self.environment.clone(),
+    })
+  }
+}
+
+/// Lowercase ASCII letters, digits, `-`, `_` and `.`, 1 to [`MAX_CRASH_ENVIRONMENT_CHARS`].
+pub fn is_crash_environment(name: &str) -> bool {
+  !name.is_empty()
+    && name.len() <= MAX_CRASH_ENVIRONMENT_CHARS
+    && name
+      .chars()
+      .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'))
 }
 
 impl Dsn {
@@ -134,6 +217,39 @@ fn url_safe(text: &str) -> String {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn settings_need_a_dsn_only_while_on() {
+    let mut settings = CrashReportSettings::default();
+    assert!(settings.check().is_ok());
+    assert_eq!(settings.info(), None);
+    settings.is_enabled = true;
+    assert!(matches!(settings.check(), Err(CrashReportSettingsError::Dsn(_))));
+    settings.dsn = " https://abc@errors.example.com/2 ".to_owned();
+    settings.sample_percent = 25;
+    assert_eq!(
+      settings.info(),
+      Some(CrashReportsInfo {
+        dsn: "https://abc@errors.example.com/2".to_owned(),
+        sample_percent: 25,
+        environment: "production".to_owned(),
+      })
+    );
+    settings.sample_percent = 101;
+    assert_eq!(settings.check(), Err(CrashReportSettingsError::SamplePercent));
+    assert_eq!(settings.info(), None);
+    settings.sample_percent = 0;
+    settings.environment = "Prod".to_owned();
+    assert_eq!(settings.check(), Err(CrashReportSettingsError::Environment));
+  }
+
+  #[test]
+  fn settings_keep_their_wire_names() {
+    assert_eq!(
+      serde_json::to_value(CrashReportSettings::default()).unwrap(),
+      serde_json::json!({ "is_enabled": false, "dsn": "", "sample_percent": 100, "environment": "production" })
+    );
+  }
 
   #[test]
   fn parses_a_dsn_and_builds_the_envelope_url() {

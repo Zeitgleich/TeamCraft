@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::BrandResponse;
 use crate::wire_enum::wire_enum;
+use crate::{BrandResponse, CrashReportsInfo};
 
 /// Value of [`ServerInfoResponse::product`]; anything else is not a TeamCraft server.
 pub const SERVER_INFO_PRODUCT: &str = "teamcraft";
@@ -26,6 +26,10 @@ pub struct ServerInfoResponse {
   /// The brand of the host the request arrived on (as `GET /api/v1/brand`).
   pub brand: BrandResponse,
   pub sign_in: SignInInfo,
+  /// Where the apps send crash reports (docs/crash-reports.md); absent while the admin has them
+  /// off (and from older servers): the apps capture and send nothing.
+  #[serde(rename = "crash_reports", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_crash_reports: Option<CrashReportsInfo>,
 }
 
 wire_enum! {
@@ -191,6 +195,7 @@ mod tests {
         maybe_help_link: None,
         is_login_page_always_shown: true,
       },
+      maybe_crash_reports: None,
     }
   }
 }

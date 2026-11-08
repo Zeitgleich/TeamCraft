@@ -724,6 +724,15 @@ settings-error-health-backup-hours = Enter 1 to 720 hours.
 settings-error-health-days = Enter 1 to 365 days.
 settings-error-health-percent = Enter 50 to 99 percent.
 
+settings-group-crash_reports = Crash reports
+settings-group-crash_reports-hint = Where the apps send crash and error reports: a self-hosted backend that speaks the Sentry protocol, such as GlitchTip. Reports carry stack traces, versions and a random installation ID, never messages, names, file names or keys. People can turn them off in their privacy settings.
+settings-f-dsn = DSN of the backend project
+settings-f-sample_percent = Share of handled errors sent (crashes are always sent)
+settings-f-environment = Environment name
+settings-error-dsn = Enter the project's DSN, like https://key@errors.example.com/1.
+settings-error-crash-percent = Enter 0 to 100 percent.
+settings-error-crash-environment = Use 1 to 64 lowercase letters, digits, "-", "_" or ".".
+
 ## Report a problem (docs/bug-reports.md)
 report-menu = Report a problem…
 report-title = Report a problem
