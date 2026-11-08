@@ -1936,6 +1936,42 @@ mod tests {
       ));
     }
 
+    /// Issue #1198: a store of an old layout is not the extension's to migrate. It fails to open,
+    /// so the push shows the generic text, it stays as it was, and the app opens it as ever.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_notification_extension_leaves_an_old_store_to_the_app() {
+      const FIXTURE_KEY: [u8; 32] = [0x5a; 32];
+      let directory = TestDir::new("old-layout");
+      std::fs::copy(
+        concat!(
+          env!("CARGO_MANIFEST_DIR"),
+          "/../teamcraft-core/tests/fixtures/store/v1.0.2-sealed.db"
+        ),
+        directory.store(),
+      )
+      .unwrap();
+      let before = std::fs::read(directory.store()).unwrap();
+      let extension = AppConfig {
+        is_memory_constrained: true,
+        ..config(&directory, FIXTURE_KEY.to_vec())
+      };
+
+      let refused = TeamCraft::new(extension, Arc::new(NoTokens), Arc::new(Quiet));
+
+      assert!(matches!(refused, Err(TeamCraftError::Storage(_))));
+      assert_eq!(std::fs::read(directory.store()).unwrap(), before);
+      let app = TeamCraft::new(
+        config(&directory, FIXTURE_KEY.to_vec()),
+        Arc::new(NoTokens),
+        Arc::new(Quiet),
+      )
+      .unwrap();
+      assert!(matches!(
+        app.account_state().await.unwrap(),
+        AccountState::Ready { .. }
+      ));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn repeated_snapshots_agree() {
       let directory = TestDir::new("snapshots");

@@ -724,6 +724,10 @@ pub enum StoreError {
     "the local database is from a newer version of the app (layout {found}, this version reads up to {supported})"
   )]
   NewerSchema { found: i64, supported: i64 },
+  /// A process that leaves the layout to the app (the iOS notification extension) found steps only
+  /// the app runs (issue #1198). Nothing was changed, and the app migrates the store when it opens.
+  #[error("the app hasn't brought the local database up to date yet (layout {found} of {supported})")]
+  LayoutBehind { found: i64, supported: i64 },
   /// A write of a group failed, so none of the group's writes was kept.
   #[error("the local database did not save a group of changes: {0}")]
   GroupFailed(String),

@@ -106,6 +106,8 @@ final class NotificationService: UNNotificationServiceExtension {
   }
 
   /// Opens the core under the cross-process lock; `nil` if not signed in, locked out or failed.
+  /// A store that still needs a layout step fails here too: the extension doesn't migrate it (no
+  /// `VACUUM` under its limits, #1198) and the app does on its next start.
   private static func decrypt(_ sealed: Data) async -> PushNotification? {
     let container = SharedContainer()
     guard let account = container.activeAccount else { return nil }

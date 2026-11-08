@@ -4881,12 +4881,16 @@ So exactly one core owns a device's store at a time:
   cross-process lock and never advances the account's state: it opens a push with
   `notification_probe_for_push`, which shows what the store and the one fetched message give and,
   when that isn't enough, catches the conversation up on an overlay of the store in memory through a
-  read-only API, both thrown away afterwards (§7.2). It never saves MLS state. It writes its push bookkeeping
-  (received pushes, what it showed) and, on its first open after an update, the store's layout
-  migrations. Opening the client on the way (`Client::open`) can also write, when there is something
-  to write: the upload limit if it changed, catch-up marks a closed app left behind (dropped), removal
-  records and account data it finds new. It doesn't move the MLS record of a version before 1.0.9
-  (that takes several times the state in memory, and would keep the app out of the store): it doesn't
+  read-only API, both thrown away afterwards (§7.2). It never saves MLS state. It writes only its push
+  bookkeeping (received pushes, what it showed). Everything else that comes with opening a store is
+  the app's: the extension runs no step of the store's layout (the wipe's `VACUUM` would take memory
+  and time it doesn't have, and keep the app out of the store while it starts) and no upkeep, and
+  opening the client writes nothing either, not the upload limit, the catch-up marks (the app may be
+  catching up next to it), removal records or account data. A store that needs a layout step doesn't
+  open in the extension: found on a read-only connection, it shows a generic notification and stays
+  as it was for the app's next start (#1198). Marker steps change no table, so a store with only those
+  ahead still reads; the extension doesn't set them. Likewise it doesn't move the MLS record of a
+  version before 1.0.9 (that takes several times the state in memory, and would keep the app out of the store): it doesn't
   open then, shows a generic notification, and leaves the move to the app. Until 1.0.9 its core did
   catch a conversation up when the app wasn't syncing, writing MLS state next to the app's copy
   (issue #424 review). Should another process save MLS state anyway, the app's next MLS save sees it
