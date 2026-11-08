@@ -27,6 +27,7 @@ use teamcraft_core::pending_work::PendingWork;
 use teamcraft_core::prefetch::load_segment_prefetch;
 use teamcraft_core::push_guard;
 use teamcraft_core::push_preview::{device_push_content, push_content_mode};
+use teamcraft_core::store::read_together;
 use teamcraft_core::transfers::Transfers;
 use teamcraft_core::ui_backend::{CoreChatBackend, EntryNeed};
 use teamcraft_core::ui_snapshot::SnapshotCache;
@@ -256,7 +257,7 @@ impl ReadQueue {
         return;
       }
       let started = Instant::now();
-      let result = job(reads);
+      let result = reads.together(job);
       logging::slow_read(std::any::type_name::<F>(), started - queued, started.elapsed());
       // The caller may have given up waiting meanwhile (cancelled coroutine); nothing to tell it.
       let _ = reply.send(result);
@@ -289,7 +290,7 @@ impl ReadQueue {
         return;
       }
       let started = Instant::now();
-      let result = job(reads);
+      let result = reads.together(job);
       logging::slow_read(std::any::type_name::<F>(), started - queued, started.elapsed());
       for caller in callers {
         // A caller may have given up waiting meanwhile; nothing to tell it then.
@@ -353,6 +354,16 @@ impl<R> SharedRead<R> {
 }
 
 impl Reads {
+  /// Runs `job` as one look at the store ([`read_together`]): the engine's writes can't slip in
+  /// between its reads, each a wait of its own, and the disk is checked once (issue #1466).
+  fn together<R>(
+    &mut self,
+    job: impl FnOnce(&mut Self) -> Result<R, TeamCraftError>,
+  ) -> Result<R, TeamCraftError> {
+    let store = self.store.clone();
+    read_together(&store, || job(self))
+  }
+
   /// The app's first question on every start: answered from what the store says, without waiting
   /// for the client. `None`: this device isn't set up, which takes the engine and maybe the server.
   pub(crate) fn ready_account(&self) -> Option<AccountState> {

@@ -59,11 +59,14 @@ use crate::people_names::shown_name;
 use crate::records::{self, Draft};
 use crate::store::{
   BookmarkItem, ConversationEvent, FeedVersion, LocalStore, MessageContent, MessageEdge, MessageFilter,
-  MessageOrder, MessageSlot, StoredMessage, Table, Unreadable, write_group,
+  MessageOrder, MessageSlot, StoreError, StoredMessage, Table, Unreadable, read_together, write_group,
 };
 
 /// Rows read at a time when a list's anchor is looked for by its time ([`FeedAnchor`]).
 const ANCHOR_WALK_ROWS: usize = 64;
+/// How often the tallies of unread counts that follow the journal are handed to the store at most
+/// ([`CoreChatBackend::keep_followed_tallies_if_due`]).
+const FOLLOWED_KEEP_EVERY_MS: i64 = 5_000;
 
 /// Requests from the UI that need the server; the sync task drains and runs them.
 #[derive(Clone, Debug, PartialEq)]
@@ -734,6 +737,8 @@ pub struct CoreChatBackend<S> {
   /// The unread rows of conversations whose counts follow the store's journal of writes
   /// ([`EntryNeed::Unread`]): a change costs a read of what it changed (issue #1466).
   live_unread: RefCell<HashMap<ConversationId, LiveUnread>>,
+  /// When the tallies of followed counts were last handed to the store.
+  followed_kept_at: std::cell::Cell<Option<TimestampMs>>,
   /// The feed rows of the conversations read last, kept while their messages don't change.
   feeds: RefCell<Vec<(ConversationId, FeedView)>>,
   /// What paging an indexed feed needs of the conversations read last, kept likewise.
@@ -799,6 +804,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       entry_tallies: RefCell::default(),
       entry_need: EntryNeed::Everything,
       live_unread: RefCell::default(),
+      followed_kept_at: std::cell::Cell::new(None),
       feeds: RefCell::default(),
       layouts: RefCell::default(),
       older_requests: RefCell::default(),
@@ -918,6 +924,17 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// reads the users, preferences and account data once and keeps the tallies it counted in one
   /// group at the end: per conversation, they cost a decrypt and a disk wait each (issue #1466).
   fn conversations_where(&self, is_listed: impl Fn(&ConversationResponse) -> bool) -> Vec<Conversation> {
+    let listed = read_together(&self.store, || {
+      Ok::<_, StoreError>(self.conversations_listed(&is_listed))
+    });
+    // Only beginning or ending the look can fail, which the reads inside would have too.
+    listed.unwrap_or_else(|error| {
+      tracing::error!(%error, "local store read failed");
+      self.conversations_listed(&is_listed)
+    })
+  }
+
+  fn conversations_listed(&self, is_listed: &impl Fn(&ConversationResponse) -> bool) -> Vec<Conversation> {
     let users = self.summaries();
     let preferences = self.mention_preferences();
     let account = self.account_data();
@@ -1131,6 +1148,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
                   unread_key: inputs.unread_key,
                   cursor,
                   rows,
+                  maybe_unkept: None,
                 },
               );
             }
@@ -1177,17 +1195,37 @@ impl<S: LocalStore> CoreChatBackend<S> {
       lives.remove(&conversation);
       return None;
     };
+    let live = lives.get_mut(&conversation)?;
     if has_changed {
       match entry_tally::unread_kept_now(&self.store, conversation, inputs, unread) {
-        Ok(Some(tally)) => {
-          self.entry_tallies.borrow_mut().insert(conversation, tally);
-        },
-        Ok(None) => {},
+        Ok(maybe_tally) => live.maybe_unkept = maybe_tally,
         // The tally is a cache: the next start counts again.
         Err(error) => tracing::debug!(%error, "could not keep the unread counts"),
       }
     }
+    self.keep_followed_tallies_if_due(&mut lives);
     Some(unread)
+  }
+
+  /// Hands the tallies of followed counts to [`Self::flush_entry_tallies`] at most every
+  /// [`FOLLOWED_KEEP_EVERY_MS`]: they are only what the next start begins from, and a write group
+  /// on every pass of a catch-up waits for the disk and for the catch-up's own writes.
+  fn keep_followed_tallies_if_due(&self, lives: &mut HashMap<ConversationId, LiveUnread>) {
+    let now = self.clock.now_ms();
+    if self
+      .followed_kept_at
+      .get()
+      .is_some_and(|at| now.saturating_sub(at) < FOLLOWED_KEEP_EVERY_MS)
+    {
+      return;
+    }
+    let mut tallies = self.entry_tallies.borrow_mut();
+    for (conversation, live) in lives.iter_mut() {
+      if let Some(tally) = live.maybe_unkept.take() {
+        tallies.insert(*conversation, tally);
+      }
+    }
+    self.followed_kept_at.set(Some(now));
   }
 
   /// The feed's version, where reads can use the store's feed index and a tally can be kept.
@@ -3495,6 +3533,8 @@ struct LiveUnread {
   /// Where the journal stood when they were last brought up to date.
   cursor: u64,
   rows: UnreadRows,
+  /// A tally of them not handed to the store yet ([`CoreChatBackend::keep_followed_tallies_if_due`]).
+  maybe_unkept: Option<EntryTally>,
 }
 
 /// What a sidebar entry counts of a conversation ([`CoreChatBackend::entry_counts`]).

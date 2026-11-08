@@ -26,7 +26,7 @@ use teamcraft_core::clock::SystemClock;
 use teamcraft_core::records;
 use teamcraft_core::store::{
   LocalStore, MessageContent, SealedSqliteStore, StaticKeySource, StoredMessage, Table, TrackedStore,
-  Unreadable, write_group,
+  Unreadable, read_together, write_group,
 };
 use teamcraft_core::ui_backend::CoreChatBackend;
 use teamcraft_core::{ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
@@ -57,6 +57,8 @@ const SEED_BATCH: usize = 2_000;
 const WAITING_ROWS: i64 = 2_000;
 /// Big channels nobody read on this account yet (an import), with no read position.
 const DEFAULT_BIG_NEVER_READ: i64 = 1;
+/// As the engine's `GROUP_TURN_MS`: a group runs this long before it ends early for a read.
+const GROUP_TURN: Duration = Duration::from_millis(16);
 const CATCH_UP_EVERY: Duration = Duration::from_millis(250);
 const DECRYPTED_PER_BATCH: usize = 25;
 const OLDER_PER_BATCH: i64 = 10;
@@ -272,7 +274,11 @@ async fn measure_a_start_during_a_catch_up() {
     if Instant::now() >= next_open {
       let conversation = conversation_id(index % CONVERSATIONS);
       index += 7;
-      let tail = backend.feed_tail(conversation, None, PAGE as usize);
+      // As the read thread runs a job: one look at the store.
+      let tail = read_together(&store, || {
+        Ok::<_, teamcraft_core::store::StoreError>(backend.feed_tail(conversation, None, PAGE as usize))
+      })
+      .unwrap();
       assert!(!tail.messages.is_empty(), "no messages in a seeded conversation");
       opens.push(next_open.elapsed());
       next_open += OPEN_EVERY;
@@ -281,7 +287,8 @@ async fn measure_a_start_during_a_catch_up() {
     }
   }
   is_over.store(true, Ordering::SeqCst);
-  let written = catch_up.join().unwrap();
+  let (written, mut groups) = catch_up.join().unwrap();
+  groups.sort();
   passes.sort();
   opens.sort();
   eprintln!(
@@ -299,7 +306,12 @@ async fn measure_a_start_during_a_catch_up() {
     ms(opens[opens.len() - 1]),
     opens.len()
   );
-  eprintln!("catch-up writes                        {written}");
+  eprintln!(
+    "catch-up writes                        {written}, a group held for p50 {:.1} ms, p95 {:.1} ms, max {:.1} ms",
+    ms(groups[groups.len() / 2]),
+    ms(groups[groups.len() * 95 / 100]),
+    ms(groups[groups.len() - 1])
+  );
   drop(backend);
   drop(store);
   std::fs::remove_dir_all(&directory).unwrap();
@@ -344,55 +356,63 @@ impl CatchUp {
     store: Store,
     mut waiting: Vec<StoredMessage>,
     is_over: Arc<AtomicBool>,
-  ) -> std::thread::JoinHandle<usize> {
+  ) -> std::thread::JoinHandle<(usize, Vec<Duration>)> {
     std::thread::spawn(move || {
       let mut written = 0;
       let mut batch: i64 = 0;
+      let mut groups = Vec::new();
       while !is_over.load(Ordering::SeqCst) {
-        write(&store, |store| {
-          for message in waiting.drain(..DECRYPTED_PER_BATCH.min(waiting.len())) {
-            store.upsert_message(&message)?;
-            written += 1;
-          }
-          let big = batch % big_chats();
-          for k in 0..OLDER_PER_BATCH {
-            let mut older = message(conversation_id(big), id(500), big, 0);
-            older.maybe_server_id = Some(id(
-              1_000_000_000 + big * 10_000_000 - 1 - batch * OLDER_PER_BATCH - k,
-            ));
-            let mut client = [0x77; 16];
-            client[..8].copy_from_slice(&(batch * OLDER_PER_BATCH + k).to_be_bytes());
-            older.client_message_id = ClientMessageId::from_bytes(client);
-            older.sent_at_ms = 1_600_000_000_000 - batch * OLDER_PER_BATCH - k;
-            store.upsert_message(&older)?;
-            written += 1;
-          }
-          for k in 0..NEW_PER_BATCH {
-            let index = (batch * NEW_PER_BATCH + k) % CONVERSATIONS;
-            store.upsert_message(&message(
-              conversation_id(index),
-              id(500),
-              index,
-              SYNCED_FROM + batch,
-            ))?;
-            written += 1;
-          }
-          let edited = batch % CONVERSATIONS;
-          let mut edit = message(
-            conversation_id(edited),
-            id(500 + edited % PEOPLE),
-            edited,
-            history_of(edited) - 2,
-          );
-          edit.is_edited = true;
-          store.upsert_message(&edit)?;
-          written += 1;
-          Ok(())
-        });
+        let mut page: Vec<StoredMessage> = waiting.drain(..DECRYPTED_PER_BATCH.min(waiting.len())).collect();
+        let big = batch % big_chats();
+        for k in 0..OLDER_PER_BATCH {
+          let mut older = message(conversation_id(big), id(500), big, 0);
+          older.maybe_server_id = Some(id(
+            1_000_000_000 + big * 10_000_000 - 1 - batch * OLDER_PER_BATCH - k,
+          ));
+          let mut client = [0x77; 16];
+          client[..8].copy_from_slice(&(batch * OLDER_PER_BATCH + k).to_be_bytes());
+          older.client_message_id = ClientMessageId::from_bytes(client);
+          older.sent_at_ms = 1_600_000_000_000 - batch * OLDER_PER_BATCH - k;
+          page.push(older);
+        }
+        for k in 0..NEW_PER_BATCH {
+          let index = (batch * NEW_PER_BATCH + k) % CONVERSATIONS;
+          page.push(message(
+            conversation_id(index),
+            id(500),
+            index,
+            SYNCED_FROM + batch,
+          ));
+        }
+        let edited = batch % CONVERSATIONS;
+        let mut edit = message(
+          conversation_id(edited),
+          id(500 + edited % PEOPLE),
+          edited,
+          history_of(edited) - 2,
+        );
+        edit.is_edited = true;
+        page.push(edit);
+        // As the engine receives a page: in groups that end early while a read waits.
+        let mut page = page.into_iter().peekable();
+        while page.peek().is_some() {
+          let group = Instant::now();
+          write(&store, |store| {
+            for message in page.by_ref() {
+              store.upsert_message(&message)?;
+              written += 1;
+              if group.elapsed() >= GROUP_TURN && store.is_awaited() {
+                break;
+              }
+            }
+            Ok(())
+          });
+          groups.push(group.elapsed());
+        }
         batch += 1;
         std::thread::sleep(CATCH_UP_EVERY);
       }
-      written
+      (written, groups)
     })
   }
 }

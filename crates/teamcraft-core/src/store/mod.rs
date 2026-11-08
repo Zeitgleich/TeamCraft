@@ -862,6 +862,12 @@ pub trait LocalStore {
   fn written_cursor(&self) -> Option<u64> {
     None
   }
+  /// Whether another thread waits for this thread's open group of writes to end (the UI's reads,
+  /// issue #1466): a long group of independent steps (a page of received messages) ends early
+  /// then, and begins again after them. `false` for stores where nobody waits.
+  fn is_awaited(&self) -> bool {
+    false
+  }
   /// What of `conversation`'s messages was written or removed since `cursor`
   /// ([`Self::written_cursor`]), maybe more. `None` when the journal can't tell: it no longer holds
   /// what came after `cursor`, or another connection wrote meanwhile.
@@ -1072,6 +1078,18 @@ pub struct WriteTally {
   pub foreign: u64,
 }
 
+/// Runs `reads` as one look at the store: a group ([`LocalStore::begin_writes`]) that writes
+/// nothing, so many reads take the store's lock and check the disk once, and no other thread's
+/// group of writes slips in between them, each a wait of its own (a chat list pass, issue #1466).
+/// It holds the write lock while it runs: keep it short.
+pub fn read_together<S, T, E>(store: &S, reads: impl FnOnce() -> Result<T, E>) -> Result<T, E>
+where
+  S: LocalStore + ?Sized,
+  E: From<StoreError>,
+{
+  write_group(store, reads)
+}
+
 /// Runs `writes` as one group of writes ([`LocalStore::begin_writes`]). An error of `writes` doesn't
 /// undo what it wrote before; only a crash, a failed write of the group or a panic does.
 pub fn write_group<S, T, E>(store: &S, writes: impl FnOnce() -> Result<T, E>) -> Result<T, E>
@@ -1222,6 +1240,10 @@ macro_rules! forward_local_store {
 
       fn written_cursor(&self) -> Option<u64> {
         (**self).written_cursor()
+      }
+
+      fn is_awaited(&self) -> bool {
+        (**self).is_awaited()
       }
 
       fn written_since(&self, conversation: ConversationId, cursor: u64) -> Option<Vec<Written>> {

@@ -110,6 +110,10 @@ struct State<B> {
   /// Raised whenever the caches are dropped: part of every revision.
   epoch: u64,
   depth: u32,
+  /// Threads waiting in [`SealedStore::lock`] for another thread's group of writes to end: that
+  /// thread ends its group early where it can ([`LocalStore::is_awaited`]), and the next group
+  /// starts after them (issue #1466).
+  awaiting: u32,
   /// The thread whose group of writes is open; every other thread waits in [`SealedStore::lock`].
   maybe_group_owner: Option<ThreadIdStd>,
   /// The backend's tally when last looked at: a change means the disk moved under the caches.
@@ -374,6 +378,7 @@ impl<B: RecordBackend> SealedStore<B> {
         feed_versions: HashMap::new(),
         epoch: 0,
         depth: 0,
+        awaiting: 0,
         maybe_group_owner: None,
         maybe_tally,
         maybe_catalog: None,
@@ -825,12 +830,38 @@ impl<B: RecordBackend> SealedStore<B> {
   fn lock(&self) -> MutexGuard<'_, State<B>> {
     // A poisoned lock only means another thread panicked; the caches stay consistent with what
     // each step wrote.
-    let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let me = thread::current().id();
-    self
+    if !state.maybe_group_owner.is_some_and(|owner| owner != me) {
+      return state;
+    }
+    state.awaiting += 1;
+    let mut state = self
       .group_ended
       .wait_while(state, |state| {
         state.maybe_group_owner.is_some_and(|owner| owner != me)
+      })
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.awaiting -= 1;
+    // A group that waits for the awaiting to have their turn may begin.
+    self.group_ended.notify_all();
+    state
+  }
+
+  /// [`Self::lock`] for a thread that begins a group of writes: the threads that waited for the last
+  /// group go first, so a writer that ends its group to let them read doesn't take it back at once.
+  fn lock_to_begin(&self) -> MutexGuard<'_, State<B>> {
+    let state = self.lock();
+    if state.depth > 0 {
+      return state;
+    }
+    let me = thread::current().id();
+    // Checked again on every wake: another thread may have begun a group meanwhile.
+    self
+      .group_ended
+      .wait_while(state, |state| match state.maybe_group_owner {
+        Some(owner) => owner != me,
+        None => state.awaiting > 0,
       })
       .unwrap_or_else(|poisoned| poisoned.into_inner())
   }
@@ -1748,8 +1779,12 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     self.backend.purge_freed_soon();
   }
 
+  fn is_awaited(&self) -> bool {
+    self.lock().awaiting > 0
+  }
+
   fn begin_writes(&self) -> Result<(), StoreError> {
-    let mut state = self.lock();
+    let mut state = self.lock_to_begin();
     self.backend.begin_writes()?;
     if state.depth == 0 {
       // Looked at once the group holds the write lock: a commit of another process it waited for
