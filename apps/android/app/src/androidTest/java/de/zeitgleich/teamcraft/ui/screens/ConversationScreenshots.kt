@@ -55,7 +55,7 @@ class ConversationScreenshots {
       shoot("conversation-$theme", isDark) { viewModel -> ConversationSample(viewModel) }
       shoot("attach-$theme", isDark) { viewModel ->
         ConversationSample(viewModel)
-        AttachSheet(rememberAttachmentPickers(viewModel) {}, onDismiss = {})
+        AttachSheet(rememberAttachmentPickers(viewModel, onMediaFlow = {}) {}, onDismiss = {})
       }
     }
     shoot("conversation-landscape-light", isDark = false, isLandscape = true) { viewModel -> ConversationSample(viewModel) }

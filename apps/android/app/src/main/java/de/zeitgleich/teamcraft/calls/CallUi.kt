@@ -22,9 +22,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.PaddingValues
@@ -109,6 +113,15 @@ private val SELF_VIEW_MARGIN = 12.dp
 private val FILMSTRIP_TILE_WIDTH = 104.dp
 private val FILMSTRIP_TILE_HEIGHT = 78.dp
 private val TILE_SHAPE = RoundedCornerShape(20.dp)
+private val GRID_GAP = 8.dp
+
+/** Room above the grid for the top bar, and below it for the controls (#1488). */
+private val GRID_TOP_ROOM = 136.dp
+private val GRID_BOTTOM_ROOM = 112.dp
+
+/** Up to this many tiles share the screen; more scroll. */
+private const val GRID_FIXED_MAX = 6
+private const val SCROLLING_TILE_RATIO = 0.8f
 private const val SECONDS_PER_MINUTE = 60L
 private const val SECONDS_PER_HOUR = 3600L
 
@@ -154,6 +167,32 @@ private fun CallUiState.ownerOf(track: VideoTrackInfo): Person? =
     people().firstOrNull { it.userId == peer.userId }
   }
 
+/** What a tile of the grid shows (#1488). */
+private sealed interface StageTile {
+  class Camera(val track: VideoTrackInfo, val maybeOwner: Person?) : StageTile
+
+  class Avatar(val person: Person) : StageTile
+}
+
+/**
+ * The grid's tiles: each person once, with their camera when it is on (speakers first, as
+ * [people] orders them), then cameras nobody could be matched to. Alone or still connecting: the
+ * one being called.
+ */
+private fun stageTiles(ui: CallUiState): List<StageTile> {
+  val people = ui.people()
+  val cameras = ui.tracks.filterNot { it.isScreen }
+  val owners = cameras.associateWith { ui.ownerOf(it) }
+  val tiles = people.map { person ->
+    owners.entries.firstOrNull { it.value?.userId == person.userId }?.let { StageTile.Camera(it.key, person) } ?: StageTile.Avatar(person)
+  }
+  val unmatched = cameras.filter { owners[it] == null }.map { StageTile.Camera(it, null) }
+  return (tiles + unmatched).ifEmpty { listOf(StageTile.Avatar(Person("", ui.name, isSpeaking = false, isRejoining = false))) }
+}
+
+/** One column for one or two people (stacked, as a phone is tall), two from three on. */
+internal fun gridColumns(tileCount: Int): Int = if (tileCount <= 2) 1 else 2
+
 internal class CallUiActions(
   val onToggleControls: () -> Unit,
   val onInteraction: () -> Unit,
@@ -174,8 +213,8 @@ internal class CallUiActions(
 )
 
 /**
- * The in-call screen: an edge-to-edge dark stage with the others' video (one full-bleed, several
- * as a spotlight with a filmstrip) or a large avatar, the name, time and encryption chip on top,
+ * The in-call screen: an edge-to-edge dark stage with everybody as a tile of a grid (camera or
+ * avatar; a shared screen as a spotlight with a filmstrip), the name, time and encryption chip on top,
  * round controls at the bottom, and the self-view as a draggable corner picture. A tap on the
  * stage hides or shows the chrome.
  */
@@ -223,9 +262,10 @@ private fun Stage(ui: CallUiState, onToggleControls: () -> Unit, modifier: Modif
   val filmstrip = ordered.filter { it != spotlight }
   val toggleLabel = stringResource(R.string.call_toggle_controls)
   Box(modifier.clickable(onClickLabel = toggleLabel, onClick = onToggleControls)) {
-    if (spotlight == null) {
-      AvatarStage(ui)
-    } else {
+    // A shared screen gets the stage; otherwise everybody is a tile of the grid (#1488).
+    if (ordered.none { it.isScreen }) {
+      GridStage(ui)
+    } else if (spotlight != null) {
       VideoTile(spotlight, ui.frames[spotlight.streamId], ui.ownerOf(spotlight), Modifier.fillMaxSize(), ContentScale.Fit, RectangleShape)
       if (filmstrip.isNotEmpty()) {
         Filmstrip(filmstrip, ui, onPick = { maybeSpotlight = it.streamId.toLong() })
@@ -234,71 +274,100 @@ private fun Stage(ui: CallUiState, onToggleControls: () -> Unit, modifier: Modif
   }
 }
 
-/** Without video: the people in the call as avatars with their names; whoever speaks has a ring. */
-@OptIn(ExperimentalLayoutApi::class)
+/**
+ * The call as a grid (#1488): a tile with rounded corners per person, their camera when it is on,
+ * their avatar otherwise, and the name on the tile; whoever speaks has a ring. Up to six tiles
+ * share the screen; more scroll in two columns. The top bar and the controls keep their room.
+ */
 @Composable
-private fun AvatarStage(ui: CallUiState) {
-  val people = ui.people()
-  // Alone in the call (or still connecting): the one being called.
-  val shown = people.ifEmpty { listOf(Person("", ui.name, isSpeaking = false, isRejoining = false)) }
-  val size = when {
-    shown.size <= 1 -> 128.dp
-    shown.size <= 4 -> 96.dp
-    else -> 72.dp
+private fun GridStage(ui: CallUiState) {
+  val tiles = stageTiles(ui)
+  val columns = gridColumns(tiles.size)
+  val padding = PaddingValues(start = 12.dp, end = 12.dp, top = GRID_TOP_ROOM, bottom = GRID_BOTTOM_ROOM)
+  if (tiles.size > GRID_FIXED_MAX) {
+    LazyVerticalGrid(
+      columns = GridCells.Fixed(columns),
+      modifier = Modifier.fillMaxSize().safeDrawingPadding(),
+      contentPadding = padding,
+      horizontalArrangement = Arrangement.spacedBy(GRID_GAP),
+      verticalArrangement = Arrangement.spacedBy(GRID_GAP),
+    ) {
+      items(tiles.size) { index -> StageTileView(tiles[index], ui, Modifier.aspectRatio(SCROLLING_TILE_RATIO)) }
+    }
+    return
   }
   Column(
-    Modifier.fillMaxSize().padding(32.dp),
-    verticalArrangement = Arrangement.Center,
-    horizontalAlignment = Alignment.CenterHorizontally,
+    Modifier.fillMaxSize().safeDrawingPadding().padding(padding),
+    verticalArrangement = Arrangement.spacedBy(GRID_GAP),
   ) {
-    FlowRow(
-      horizontalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterHorizontally),
-      verticalArrangement = Arrangement.spacedBy(20.dp),
-    ) {
-      shown.forEach { person -> PersonAvatar(person, size) }
+    for (row in tiles.chunked(columns)) {
+      Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(GRID_GAP)) {
+        for (tile in row) StageTileView(tile, ui, Modifier.weight(1f).fillMaxHeight())
+        // A short last row keeps the tiles' width.
+        repeat(columns - row.size) { Spacer(Modifier.weight(1f)) }
+      }
     }
   }
 }
 
+/** One tile: a camera, or an avatar on a tinted card, with the name on it. */
 @Composable
-private fun PersonAvatar(person: Person, size: Dp) {
+private fun StageTileView(tile: StageTile, ui: CallUiState, modifier: Modifier) {
+  when (tile) {
+    is StageTile.Camera -> VideoTile(tile.track, ui.frames[tile.track.streamId], tile.maybeOwner, modifier, ContentScale.Crop, TILE_SHAPE)
+    is StageTile.Avatar -> AvatarTile(tile.person, modifier)
+  }
+}
+
+@Composable
+private fun AvatarTile(person: Person, modifier: Modifier) {
   val name = person.name
   val hue = ((name.hashCode() % 360 + 360) % 360).toFloat()
-  Column(
-    Modifier.width(size + 24.dp).alpha(if (person.isRejoining) 0.5f else 1f),
-    horizontalAlignment = Alignment.CenterHorizontally,
-    verticalArrangement = Arrangement.spacedBy(8.dp),
+  BoxWithConstraints(
+    modifier
+      .alpha(if (person.isRejoining) 0.5f else 1f)
+      .clip(TILE_SHAPE)
+      .background(Color.hsl(hue, 0.25f, 0.18f))
+      .border(
+        if (person.isSpeaking) 3.dp else 1.dp,
+        if (person.isSpeaking) SPEAKING_COLOR else Color.White.copy(alpha = 0.08f),
+        TILE_SHAPE,
+      ),
+    contentAlignment = Alignment.Center,
   ) {
-    Box {
-      UserAvatar(person.userId, Modifier.size(size).speakingRing(person.isSpeaking)) {
-        Box(
-          Modifier
-            .size(size)
-            .speakingRing(person.isSpeaking)
-            .background(Color.hsl(hue, 0.45f, 0.45f), CircleShape),
-          contentAlignment = Alignment.Center,
-        ) {
-          Text(
-            name.firstOrNull()?.uppercase() ?: "?",
-            color = Color.White,
-            fontSize = (size.value * 0.42f).sp,
-            fontWeight = FontWeight.Medium,
-          )
-        }
+    // As large as the tile allows, within reason: a lone tile's avatar isn't a poster.
+    val size = (minOf(maxWidth, maxHeight) * 0.45f).coerceIn(48.dp, 128.dp)
+    UserAvatar(person.userId, Modifier.size(size)) {
+      Box(Modifier.size(size).background(Color.hsl(hue, 0.45f, 0.45f), CircleShape), contentAlignment = Alignment.Center) {
+        Text(
+          name.firstOrNull()?.uppercase() ?: "?",
+          color = Color.White,
+          fontSize = (size.value * 0.42f).sp,
+          fontWeight = FontWeight.Medium,
+        )
       }
-      if (person.isMuted) MutedBadge(Modifier.align(Alignment.BottomEnd))
     }
-    val mutedName = stringResource(R.string.call_person_muted, name)
-    Text(
-      name,
-      color = Color.White,
-      style = MaterialTheme.typography.labelLarge,
-      maxLines = 1,
-      overflow = TextOverflow.Ellipsis,
-      textAlign = TextAlign.Center,
+    NameLabel(name, person.isMuted, Modifier.align(Alignment.BottomStart))
+  }
+}
+
+/** The name at the tile's bottom left, on a dark pill so it reads on any picture. */
+@Composable
+private fun NameLabel(name: String, isMuted: Boolean, modifier: Modifier) {
+  if (name.isEmpty()) return
+  val mutedName = stringResource(R.string.call_person_muted, name)
+  Row(
+    modifier
+      .padding(8.dp)
+      .background(Color.Black.copy(alpha = 0.55f), CircleShape)
+      .padding(horizontal = 8.dp, vertical = 2.dp)
       // Said as one: who, and that they are muted.
-      modifier = if (person.isMuted) Modifier.semantics { contentDescription = mutedName } else Modifier,
-    )
+      .then(if (isMuted) Modifier.semantics(mergeDescendants = true) { contentDescription = mutedName } else Modifier),
+    verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(4.dp),
+  ) {
+    if (isMuted) Icon(CallIcons.MicOff, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+    Text(name, color = Color.White, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
   }
 }
 
@@ -352,6 +421,7 @@ private fun VideoTile(
   val description = stringResource(if (track.isScreen) R.string.call_video_screen else R.string.call_video_camera)
   Box(
     modifier
+      .clip(shape)
       .background(Color.Black, shape)
       .border(
         if (maybeOwner?.isSpeaking == true) 3.dp else 1.dp,
@@ -370,30 +440,7 @@ private fun VideoTile(
         modifier = Modifier.fillMaxSize(),
       )
     }
-    if (maybeOwner != null && maybeOwner.name.isNotEmpty()) {
-      val mutedName = stringResource(R.string.call_person_muted, maybeOwner.name)
-      Row(
-        Modifier
-          .align(Alignment.BottomStart)
-          .padding(8.dp)
-          .background(Color.Black.copy(alpha = 0.55f), CircleShape)
-          .padding(horizontal = 8.dp, vertical = 2.dp)
-          .then(if (maybeOwner.isMuted) Modifier.semantics { contentDescription = mutedName } else Modifier),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-      ) {
-        if (maybeOwner.isMuted) {
-          Icon(CallIcons.MicOff, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
-        }
-        Text(
-          maybeOwner.name,
-          color = Color.White,
-          style = MaterialTheme.typography.labelMedium,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
-        )
-      }
-    }
+    if (maybeOwner != null) NameLabel(maybeOwner.name, maybeOwner.isMuted, Modifier.align(Alignment.BottomStart))
   }
 }
 
