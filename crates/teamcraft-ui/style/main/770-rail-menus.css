@@ -1,4 +1,4 @@
-/* ---- Rail menus: create and focus mode (issue #299) ---- */
+/* ---- Quick menus: create beside the rail, focus mode under the top bar (issue #299) ---- */
 
 /* Beside the rail, level with the button that opened it. */
 .popover.rail-menu {
@@ -10,11 +10,29 @@
   --popover-origin: top left;
 }
 
-/* At the rail's foot (Focus): above the button's bottom edge, growing up out of it. */
-.popover.rail-menu.opens-up {
-  top: auto;
-  bottom: var(--rail-menu-bottom, 0);
-  --popover-origin: bottom left;
+/* Under the top bar (Focus): hanging from the button, right edges in line, growing out of it. */
+.popover.rail-menu.opens-below {
+  left: auto;
+  right: var(--rail-menu-right, 0);
+  top: calc(var(--rail-menu-below, 0) + var(--space-2));
+  --popover-origin: top right;
+}
+
+.focus-menu {
+  position: relative;
+}
+
+/* While notifications are paused the button stays lit, so the pause can't be forgotten. */
+.icon-btn.on-dark.focus-btn.is-on {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .icon-btn.on-dark.focus-btn.is-on:hover {
+    background: var(--accent-strong);
+    color: var(--on-accent);
+  }
 }
 
 .rail-menu .menu-item {

@@ -6,7 +6,7 @@ use crate::channel_access::is_guest;
 use crate::components::count_badge::{BadgeTone, CountBadge};
 use crate::components::entry_menu::EntryMenuTrigger;
 use crate::components::icons::{Icon, IconName};
-use crate::components::rail_menus::{RailCreateMenu, RailFocusMenu};
+use crate::components::rail_menus::RailCreateMenu;
 use crate::components::space_tile::SpaceTileContent;
 use crate::entry_actions::MenuEntry;
 use crate::i18n::use_i18n;
@@ -22,8 +22,8 @@ const RAIL_BADGE_CAP: u32 = 99;
 /// the sidebar's place like a space's (#752; followed threads are one of its filters). In the
 /// grouped sidebar one entry stands for all spaces.
 ///
-/// Only the spaces (with "add space" at their end) scroll; the destinations above and Focus below
-/// stay in place (#652). Where spaces are scrolled out of sight, the scroller's edge fades.
+/// Only the spaces (with "add space" at their end) scroll; the destinations above stay in place
+/// (#652). Focus mode sits beside the account menu in the top bar (#299). Where spaces are scrolled out of sight, the scroller's edge fades.
 #[component]
 pub fn SpaceRail() -> impl IntoView {
   let state = use_app_state();
@@ -95,9 +95,6 @@ pub fn SpaceRail() -> impl IntoView {
         </Show>
       </div>
       </Show>
-      <div class="rail-bottom">
-        <RailFocusMenu />
-      </div>
     </nav>
   }
 }

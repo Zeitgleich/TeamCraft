@@ -18,15 +18,13 @@ use crate::auth::tauri;
 use crate::calls::{CallKind, CallPhase};
 use crate::clock::{now_ms, tomorrow_at};
 use crate::components::call_prejoin::call_heading;
-use crate::components::status_menu::{MORNING_MINUTE, MS_PER_HOUR};
+use crate::components::status_menu::{FOCUS_SHORT_MS, MORNING_MINUTE, MS_PER_HOUR};
 use crate::i18n::I18n;
 use crate::meetings::MeetingsHub;
 use crate::model::PresenceStatus;
 use crate::model::TimestampMs;
 use crate::state::{AppState, Overlay};
 
-/// "Pause notifications → For 30 minutes" (the focus button's shortest choice).
-const PAUSE_SHORT_MS: TimestampMs = 30 * 60_000;
 const MS_PER_MINUTE: u64 = 60_000;
 /// The shell's event when the update status changed (`updates::UPDATE_CHANGED_EVENT`).
 const UPDATE_CHANGED_EVENT: &str = "update-changed";
@@ -380,7 +378,7 @@ pub fn run(state: AppState, action: TrayAction) {
       Some(tomorrow_at(now_ms(), MORNING_MINUTE)),
     ),
     TrayAction::PauseNotificationsBriefly => {
-      state.set_presence_until(PresenceStatus::DoNotDisturb, Some(now_ms() + PAUSE_SHORT_MS));
+      state.set_presence_until(PresenceStatus::DoNotDisturb, Some(now_ms() + FOCUS_SHORT_MS));
     },
     // As pressing the focus button while it is on.
     TrayAction::ResumeNotifications => state.set_presence_until(PresenceStatus::Online, None),

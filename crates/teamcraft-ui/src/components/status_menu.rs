@@ -15,14 +15,16 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::profile_views::status_until_label;
 use crate::components::sheet::MenuSurface;
-use crate::i18n::use_i18n;
+use crate::i18n::{I18n, use_i18n};
 use crate::model::{CustomStatus, PresenceStatus, StatusExpiry, TimestampMs};
 use crate::session::use_session;
-use crate::state::{Overlay, SettingsTab, use_app_state};
+use crate::state::{AppState, Overlay, SettingsTab, use_app_state};
 
 /// "Until tomorrow morning" means 08:00 local time.
 pub(crate) const MORNING_MINUTE: u16 = 8 * 60;
 pub(crate) const MS_PER_HOUR: TimestampMs = 3_600_000;
+/// The shortest pause of notifications: focus button, account menu and tray offer it.
+pub(crate) const FOCUS_SHORT_MS: TimestampMs = 30 * 60_000;
 
 /// Suggestions while the workspace configured no presets of its own; the label is an i18n key.
 const STATUS_PRESETS: [(&str, &str); 4] = [
@@ -49,8 +51,7 @@ pub fn StatusMenu() -> impl IntoView {
 
   Effect::new(move |_| {
     if let Some(element) = menu.get() {
-      let selected = element.query_selector("[aria-checked='true']").ok().flatten();
-      let target = selected.or_else(|| element.query_selector("[role^='menuitem']").ok().flatten());
+      let target = element.query_selector("[role^='menuitem']").ok().flatten();
       if let Some(target) = target.and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok()) {
         drop(target.focus());
       }
@@ -81,19 +82,28 @@ pub fn StatusMenu() -> impl IntoView {
   };
   let set_presence = move |presence: PresenceStatus| set_presence_until(presence, None);
   let is_dnd = Memo::new(move |_| me.get().presence == PresenceStatus::DoNotDisturb);
-  let dnd_until_label = move || {
-    let until = state.settings.prefs.get().notifications.maybe_dnd_until?;
-    let now = now_ms();
-    if !is_dnd.get() || until <= now {
-      return None;
-    }
-    let locale = i18n.locale().tag();
-    let time = if local_day(until) == local_day(now) {
-      format_time(until, locale)
+  // "Set yourself as away" and "Appear offline" are switches: off again means available.
+  let toggle_presence = move |presence: PresenceStatus| {
+    if me.get_untracked().presence == presence {
+      set_presence(PresenceStatus::Online);
     } else {
-      format_date_time(until, locale)
-    };
-    Some(i18n.t_with("presence-dnd-until", &[("time", &time)]))
+      set_presence(presence);
+    }
+  };
+  let presence_switch = move |presence: PresenceStatus, key: &'static str| {
+    view! {
+      <button
+        class="menu-item"
+        role="menuitemcheckbox"
+        tabindex="-1"
+        aria-checked=move || (me.get().presence == presence).to_string()
+        on:click=move |_| toggle_presence(presence)
+      >
+        <PresenceDot presence=presence />
+        <span class="menu-label">{move || i18n.t(key)}</span>
+        {move || (me.get().presence == presence).then(|| view! { <Icon name=IconName::Check /> })}
+      </button>
+    }
   };
   let is_custom_open = RwSignal::new(false);
   let custom_until = RwSignal::new(format_local_datetime_input(now_ms() + MS_PER_HOUR));
@@ -155,83 +165,94 @@ pub fn StatusMenu() -> impl IntoView {
         </button>
         <div class="menu-sep" role="separator"></div>
       </Show>
-      {PresenceStatus::ALL
-        .into_iter()
-        .map(|presence| {
-          view! {
-            <button
-              class="menu-item"
-              role="menuitemradio"
-              tabindex="-1"
-              aria-checked=move || (me.get().presence == presence).to_string()
-              on:click=move |_| set_presence(presence)
-            >
-              <PresenceDot presence=presence />
-              <span class="menu-label">
-                {move || i18n.t(&format!("presence-{}", presence.slug()))}
-                {(presence == PresenceStatus::DoNotDisturb)
-                  .then(|| view! { <small>{move || i18n.t("presence-dnd-hint")}</small> })}
-              </span>
-              {move || (me.get().presence == presence).then(|| view! { <Icon name=IconName::Check /> })}
-            </button>
+      // Status, away, pause, profile, preferences, sign out (#299); the rest sits between the last two.
+      {presence_switch(PresenceStatus::Away, "presence-set-away")}
+      {presence_switch(PresenceStatus::Offline, "presence-appear-offline")}
+      <div class="menu-sub" role="group" aria-label=move || i18n.t("tray-pause-notifications")>
+        <div class="menu-group-title">
+          <Icon name=IconName::BellOff />
+          <span class="menu-label">
+            {move || i18n.t("tray-pause-notifications")}
+            {move || paused_until_label(state, i18n).map(|label| view! { <small>{label}</small> })}
+          </span>
+        </div>
+        <Show
+          when=move || is_dnd.get()
+          fallback=move || {
+            view! {
+              <button
+                class="menu-item"
+                role="menuitem"
+                tabindex="-1"
+                on:click=move |_| set_presence_until(PresenceStatus::DoNotDisturb, Some(now_ms() + FOCUS_SHORT_MS))
+              >
+                <span class="menu-label">{move || i18n.t("focus-30-minutes")}</span>
+              </button>
+              <button
+                class="menu-item"
+                role="menuitem"
+                tabindex="-1"
+                on:click=move |_| set_presence_until(PresenceStatus::DoNotDisturb, Some(now_ms() + MS_PER_HOUR))
+              >
+                <span class="menu-label">{move || i18n.t("presence-dnd-for-hour")}</span>
+              </button>
+              <button
+                class="menu-item"
+                role="menuitem"
+                tabindex="-1"
+                on:click=move |_| set_presence_until(PresenceStatus::DoNotDisturb, Some(tomorrow_at(now_ms(), MORNING_MINUTE)))
+              >
+                <span class="menu-label">{move || i18n.t("presence-dnd-until-morning")}</span>
+              </button>
+              <button
+                class="menu-item"
+                role="menuitem"
+                tabindex="-1"
+                aria-expanded=move || is_custom_open.get().to_string()
+                on:click=move |_| is_custom_open.update(|is_open| *is_open = !*is_open)
+              >
+                <span class="menu-label">{move || i18n.t("presence-dnd-custom")}</span>
+              </button>
+              <Show when=move || is_custom_open.get() fallback=|| ()>
+                <div class="field-row menu-custom-until">
+                  <label class="visually-hidden" for="dnd-custom-until">{move || i18n.t("presence-dnd-custom-label")}</label>
+                  <input
+                    id="dnd-custom-until"
+                    class="input grow"
+                    type="datetime-local"
+                    prop:value=move || custom_until.get()
+                    on:input=move |ev| custom_until.set(event_target_value(&ev))
+                    on:keydown=move |ev: web_sys::KeyboardEvent| {
+                      if ev.key() == "Enter" {
+                        ev.prevent_default();
+                        set_custom();
+                      }
+                    }
+                  />
+                  <button type="button" class="btn" on:click=move |_| set_custom()>
+                    {move || i18n.t("presence-dnd-custom-set")}
+                  </button>
+                </div>
+              </Show>
+            }
           }
-        })
-        .collect_view()}
-      <div class="menu-sub" role="group" aria-label=move || i18n.t("presence-dnd")>
-        {move || dnd_until_label().map(|label| view! { <div class="menu-user-sub">{label}</div> })}
-        <button
-          class="menu-item"
-          role="menuitem"
-          tabindex="-1"
-          on:click=move |_| set_presence_until(PresenceStatus::DoNotDisturb, Some(now_ms() + MS_PER_HOUR))
         >
-          <span class="menu-label">{move || i18n.t("presence-dnd-for-hour")}</span>
-        </button>
-        <button
-          class="menu-item"
-          role="menuitem"
-          tabindex="-1"
-          on:click=move |_| set_presence_until(PresenceStatus::DoNotDisturb, Some(tomorrow_at(now_ms(), MORNING_MINUTE)))
-        >
-          <span class="menu-label">{move || i18n.t("presence-dnd-until-morning")}</span>
-        </button>
-        <button
-          class="menu-item"
-          role="menuitem"
-          tabindex="-1"
-          aria-expanded=move || is_custom_open.get().to_string()
-          on:click=move |_| is_custom_open.update(|is_open| *is_open = !*is_open)
-        >
-          <span class="menu-label">{move || i18n.t("presence-dnd-custom")}</span>
-        </button>
-        <Show when=move || is_custom_open.get() fallback=|| ()>
-          <div class="field-row menu-custom-until">
-            <label class="visually-hidden" for="dnd-custom-until">{move || i18n.t("presence-dnd-custom-label")}</label>
-            <input
-              id="dnd-custom-until"
-              class="input grow"
-              type="datetime-local"
-              prop:value=move || custom_until.get()
-              on:input=move |ev| custom_until.set(event_target_value(&ev))
-              on:keydown=move |ev: web_sys::KeyboardEvent| {
-                if ev.key() == "Enter" {
-                  ev.prevent_default();
-                  set_custom();
-                }
-              }
-            />
-            <button type="button" class="btn" on:click=move |_| set_custom()>
-              {move || i18n.t("presence-dnd-custom-set")}
-            </button>
-          </div>
-        </Show>
-        <Show when=move || is_dnd.get() fallback=|| ()>
           <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| set_presence(PresenceStatus::Online)>
-            <span class="menu-label">{move || i18n.t("presence-dnd-end")}</span>
+            <span class="menu-label">{move || i18n.t("tray-resume-notifications")}</span>
           </button>
         </Show>
       </div>
       <div class="menu-sep" role="separator"></div>
+      <Show when=|| crate::profiles::use_profiles().is_some() fallback=|| ()>
+        <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.open_settings_at(SettingsTab::Account)>
+          <Icon name=IconName::User />
+          <span class="menu-label">{move || i18n.t("profile-edit-title")}</span>
+        </button>
+      </Show>
+      <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.open_settings()>
+        <Icon name=IconName::Sliders />
+        <span class="menu-label">{move || i18n.t("menu-settings")}</span>
+      </button>
       <Show when=move || is_admin.get() fallback=|| ()>
         <button
           class="menu-item"
@@ -253,16 +274,6 @@ pub fn StatusMenu() -> impl IntoView {
           </Show>
         </button>
       </Show>
-      <Show when=|| crate::profiles::use_profiles().is_some() fallback=|| ()>
-        <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.open_settings_at(SettingsTab::Account)>
-          <Icon name=IconName::User />
-          <span class="menu-label">{move || i18n.t("profile-edit-title")}</span>
-        </button>
-      </Show>
-      <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.open_settings()>
-        <Icon name=IconName::Sliders />
-        <span class="menu-label">{move || i18n.t("menu-settings")}</span>
-      </button>
       <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| state.overlay.set(Overlay::Shortcuts)>
         <Icon name=IconName::Keyboard />
         <span class="menu-label">{move || i18n.t("shortcuts-title")}</span>
@@ -274,6 +285,7 @@ pub fn StatusMenu() -> impl IntoView {
           <span class="menu-label">{move || i18n.t("report-menu")}</span>
         </button>
       </Show>
+      <div class="menu-sep" role="separator"></div>
       <button class="menu-item" role="menuitem" tabindex="-1" disabled title=move || i18n.t("admin-soon")>
         <Icon name=IconName::Users />
         <span class="menu-label">{move || i18n.t("menu-switch-account")}</span>
@@ -296,6 +308,29 @@ pub fn StatusMenu() -> impl IntoView {
       </button>
     </MenuSurface>
   }
+}
+
+/// "Until 14:30" (or a date and time when it ends on another day) while notifications are paused
+/// with an end; nothing while they aren't, or when the pause has no end.
+pub(crate) fn paused_until_label(state: AppState, i18n: I18n) -> Option<String> {
+  if state.me().presence != PresenceStatus::DoNotDisturb {
+    return None;
+  }
+  let until = state
+    .settings
+    .prefs
+    .with(|prefs| prefs.notifications.maybe_dnd_until)?;
+  let now = now_ms();
+  if until <= now {
+    return None;
+  }
+  let locale = i18n.locale().tag();
+  let time = if local_day(until) == local_day(now) {
+    format_time(until, locale)
+  } else {
+    format_date_time(until, locale)
+  };
+  Some(i18n.t_with("presence-dnd-until", &[("time", &time)]))
 }
 
 /// Dialog to set emoji, text and expiry of the custom status. Offers the workspace's presets (or

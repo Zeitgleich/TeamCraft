@@ -54,6 +54,7 @@ bottom-nav-you = Ich
 sidebar-label = Kanäle und Direktnachrichten
 sidebar-threads = Threads
 sidebar-unreads = Ungelesen
+sidebar-favorites-hint = Ziehe einen Kanal hierher oder wähle „Zu Favoriten hinzufügen“ in seinem Menü.
 sidebar-favorites = Favoriten
 sidebar-conversations = Unterhaltungen
 sidebar-archived = Archiviert
