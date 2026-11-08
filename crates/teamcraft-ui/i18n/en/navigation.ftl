@@ -54,6 +54,7 @@ bottom-nav-you = You
 sidebar-label = Channels and direct messages
 sidebar-threads = Threads
 sidebar-unreads = Unreads
+sidebar-favorites-hint = Drag a channel here, or choose “Add to favorites” in its menu.
 sidebar-favorites = Favorites
 sidebar-conversations = Conversations
 sidebar-archived = Archived

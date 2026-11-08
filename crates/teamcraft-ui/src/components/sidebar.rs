@@ -5,6 +5,7 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use crate::activity_place::ActivityFilter;
 use crate::channel_access::{can_create_channel_in, can_invite_to, is_guest};
 use crate::components::avatar::PresenceDot;
 use crate::components::channel_glyph::{ChannelGlyph, channel_fallback_icon};
@@ -26,6 +27,8 @@ use crate::sections::{
 use crate::settings::{load_json, store_json};
 use crate::state::{AppState, MainView, Overlay, use_app_state};
 
+/// The drag data of a sidebar row: its conversation's id, for dropping it on Favorites.
+const CONVERSATION_DRAG_TYPE: &str = "application/x-teamcraft-conversation";
 /// Sidebar sections and spaces the user collapsed, remembered on this device.
 const KEY_COLLAPSED_SECTIONS: &str = "teamcraft.sidebar_collapsed";
 const KEY_COLLAPSED_SPACES: &str = "teamcraft.sidebar_collapsed_spaces";
@@ -118,6 +121,11 @@ pub fn Sidebar() -> impl IntoView {
     }
   });
   hold_unread_while_open(state);
+  // An empty Favorites section says how to fill it, unless the list is being filtered (#299).
+  let has_favorites =
+    Memo::new(move |_| conversations.with(|list| list.iter().any(|conversation| conversation.is_favorite)));
+  let shows_favorites_hint =
+    Signal::derive(move || !has_favorites.get() && query.with(|query| query.trim().is_empty()));
   let sections = Memo::new(move |_| {
     build_sections(
       &listed.get(),
@@ -198,10 +206,18 @@ pub fn Sidebar() -> impl IntoView {
       <div class="sidebar-scroll">
         {move || {
           if is_grouped.get() {
-            view! { <GroupedSections grouped=grouped collapsed=collapsed collapsed_spaces=collapsed_spaces /> }
+            view! {
+              <GroupedSections
+                grouped=grouped
+                collapsed=collapsed
+                collapsed_spaces=collapsed_spaces
+                shows_favorites_hint=shows_favorites_hint
+              />
+            }
               .into_any()
           } else {
-            view! { <SectionList sections=sections.into() collapsed=collapsed /> }.into_any()
+            view! { <SectionList sections=sections.into() collapsed=collapsed shows_favorites_hint=shows_favorites_hint /> }
+              .into_any()
           }
         }}
       </div>
@@ -230,17 +246,29 @@ pub fn hold_unread_while_open(state: AppState) {
   });
 }
 
-/// The entries that are not about one space: calls, meetings, people, saved items. Home and the
-/// space sidebar both start with them; threads and activity are on the rail, search in the top bar.
+/// The entries that are not about one space: threads, calls, people, meetings, saved items. Home
+/// and the space sidebar both start with them; activity is on the rail, search in the top bar.
 #[component]
 pub fn GlobalEntries(entries: EntriesDisclosure, id: &'static str) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
 
+  let is_threads =
+    move || state.view.get() == MainView::Activity && state.activity_filter.get() == ActivityFilter::Threads;
   // One row of pills on a phone (#703), folded away there when the user chose so; a list on wide
   // layouts, which ignore the folding.
   view! {
     <div class="sb-entries" id=id class:is-collapsed=move || entries.is_collapsed.get()>
+      // Threads, calls and the directory first, in the same place in Home and every space (#299).
+      <button
+        class="sb-item sb-threads"
+        class:current=is_threads
+        aria-current=move || is_threads().then_some("page")
+        on:click=move |_| state.open_threads()
+      >
+        <Icon name=IconName::Threads />
+        <span class="sb-name">{move || i18n.t("sidebar-threads")}</span>
+      </button>
       <button
         class="sb-item sb-calls"
         class:current=move || state.view.get() == MainView::Calls
@@ -249,6 +277,15 @@ pub fn GlobalEntries(entries: EntriesDisclosure, id: &'static str) -> impl IntoV
       >
         <Icon name=IconName::Phone />
         <span class="sb-name">{move || i18n.t("sidebar-calls")}</span>
+      </button>
+      <button
+        class="sb-item"
+        class:current=move || state.view.get() == MainView::Directory
+        aria-current=move || (state.view.get() == MainView::Directory).then_some("page")
+        on:click=move |_| state.open_directory()
+      >
+        <Icon name=IconName::Users />
+        <span class="sb-name">{move || i18n.t("sidebar-people")}</span>
       </button>
       {use_context::<MeetingsHub>().map(|_| {
         view! {
@@ -263,15 +300,6 @@ pub fn GlobalEntries(entries: EntriesDisclosure, id: &'static str) -> impl IntoV
           </button>
         }
       })}
-      <button
-        class="sb-item"
-        class:current=move || state.view.get() == MainView::Directory
-        aria-current=move || (state.view.get() == MainView::Directory).then_some("page")
-        on:click=move |_| state.open_directory()
-      >
-        <Icon name=IconName::Users />
-        <span class="sb-name">{move || i18n.t("sidebar-people")}</span>
-      </button>
       <button
         class="sb-item"
         class:current=move || state.view.get() == MainView::Saved
@@ -486,10 +514,23 @@ pub fn ListFilterField(filter: ListFilter, id: &'static str, label_key: &'static
 /// change (new messages, unread counts, presence), so nothing on screen is built again that didn't
 /// change (issue #687). A section only goes when it has no channels left.
 #[component]
-fn SectionList(sections: Signal<Vec<Section>>, collapsed: RwSignal<HashSet<SectionKind>>) -> impl IntoView {
+fn SectionList(
+  sections: Signal<Vec<Section>>,
+  collapsed: RwSignal<HashSet<SectionKind>>,
+  /// Keeps an empty Favorites section, after Unreads, to show how to add favorites.
+  shows_favorites_hint: Signal<bool>,
+) -> impl IntoView {
+  let kinds = move || {
+    let mut kinds = sections.with(|sections| sections.iter().map(|section| section.kind).collect::<Vec<_>>());
+    if shows_favorites_hint.get() && !kinds.contains(&SectionKind::Favorites) {
+      let at = usize::from(kinds.first() == Some(&SectionKind::Unreads));
+      kinds.insert(at, SectionKind::Favorites);
+    }
+    kinds
+  };
   view! {
     <For
-      each=move || sections.with(|sections| sections.iter().map(|section| section.kind).collect::<Vec<_>>())
+      each=kinds
       key=|kind| *kind
       let:kind
     >
@@ -499,6 +540,7 @@ fn SectionList(sections: Signal<Vec<Section>>, collapsed: RwSignal<HashSet<Secti
 }
 
 /// The channels of the section of `kind`; the last ones once it is gone (it is about to be removed).
+/// Favorites can stay without any (its hint), so it never keeps the last ones.
 fn section_conversations(sections: Signal<Vec<Section>>, kind: SectionKind) -> Memo<Vec<Conversation>> {
   Memo::new(move |previous: Option<&Vec<Conversation>>| {
     sections
@@ -508,7 +550,7 @@ fn section_conversations(sections: Signal<Vec<Section>>, kind: SectionKind) -> M
           .find(|section| section.kind == kind)
           .map(|section| section.conversations.clone())
       })
-      .or_else(|| previous.cloned())
+      .or_else(|| previous.filter(|_| kind != SectionKind::Favorites).cloned())
       .unwrap_or_default()
   })
 }
@@ -519,10 +561,11 @@ fn GroupedSections(
   grouped: Memo<GroupedSidebar>,
   collapsed: RwSignal<HashSet<SectionKind>>,
   collapsed_spaces: RwSignal<HashSet<SpaceId>>,
+  shows_favorites_hint: Signal<bool>,
 ) -> impl IntoView {
   let top = Signal::derive(move || grouped.with(|grouped| grouped.top.clone()));
   view! {
-    <SectionList sections=top collapsed=collapsed />
+    <SectionList sections=top collapsed=collapsed shows_favorites_hint=shows_favorites_hint />
     <For
       each=move || grouped.with(|grouped| grouped.spaces.iter().map(|group| group.space).collect::<Vec<_>>())
       key=|space| *space
@@ -674,7 +717,15 @@ fn ConversationRows(conversations: Memo<Vec<Conversation>>) -> impl IntoView {
   let by_id = items_by_key(conversations.into(), |conv: &Conversation| conv.id);
   view! {
     <For each=move || conversations.get() key=|conv| conv.id let:conv>
-      <li><SidebarItem conversation=keyed_item(by_id, conv.id, conv) /></li>
+      {
+        let id = conv.id;
+        view! {
+          // Dragged onto Favorites, a channel becomes a favorite (#299).
+          <li draggable="true" on:dragstart=move |ev| start_conversation_drag(&ev, id)>
+            <SidebarItem conversation=keyed_item(by_id, id, conv) />
+          </li>
+        }
+      }
     </For>
   }
 }
@@ -718,8 +769,40 @@ fn SidebarSection(
   let phase = RwSignal::new(SectionPhase::Still);
 
   let state = use_app_state();
+  let is_drop_target = RwSignal::new(false);
+  // A channel dragged from another section onto Favorites becomes one (#299); reordering inside
+  // Favorites is FavoriteItems' own drag and carries no conversation.
+  let on_dragover = move |ev: leptos::ev::DragEvent| {
+    if kind == SectionKind::Favorites && carries_conversation(&ev) {
+      ev.prevent_default();
+      is_drop_target.set(true);
+    }
+  };
+  let on_drop = move |ev: leptos::ev::DragEvent| {
+    is_drop_target.set(false);
+    if kind != SectionKind::Favorites {
+      return;
+    }
+    let maybe_id = ev
+      .data_transfer()
+      .and_then(|transfer| transfer.get_data(CONVERSATION_DRAG_TYPE).ok())
+      .and_then(|text| text.parse::<ConversationId>().ok());
+    if let Some(id) = maybe_id {
+      ev.prevent_default();
+      state.write(|backend| backend.set_favorite(id, true));
+      collapsed.update(|set| {
+        set.remove(&SectionKind::Favorites);
+      });
+    }
+  };
   view! {
-    <section class="sb-section">
+    <section
+      class="sb-section"
+      class:is-drop-target=move || is_drop_target.get()
+      on:dragover=on_dragover
+      on:dragleave=move |_| is_drop_target.set(false)
+      on:drop=on_drop
+    >
       <div class="sb-section-row">
         <button
           class="sb-section-head"
@@ -770,7 +853,13 @@ fn SidebarSection(
         on:animationend=move |ev| end_phase(&ev, phase)
       >
         {if kind == SectionKind::Favorites {
-          view! { <FavoriteItems conversations=conversations /> }.into_any()
+          view! {
+            <FavoriteItems conversations=conversations />
+            <Show when=move || conversations.with(Vec::is_empty) fallback=|| ()>
+              <li class="sb-empty-hint">{move || i18n.t("sidebar-favorites-hint")}</li>
+            </Show>
+          }
+            .into_any()
         } else {
           view! { <ConversationRows conversations=conversations /> }.into_any()
         }}
@@ -858,6 +947,22 @@ fn FavoriteItems(conversations: Memo<Vec<Conversation>>) -> impl IntoView {
       }
     </For>
   }
+}
+
+fn start_conversation_drag(ev: &leptos::ev::DragEvent, conversation: ConversationId) {
+  if let Some(transfer) = ev.data_transfer() {
+    // Setting drag data on a fresh drag doesn't fail; without it the row is simply not dropped.
+    drop(transfer.set_data(CONVERSATION_DRAG_TYPE, &conversation.to_string()));
+    transfer.set_effect_allowed("link");
+  }
+}
+
+/// Whether a drag carries a sidebar row (its data can only be read on drop).
+fn carries_conversation(ev: &leptos::ev::DragEvent) -> bool {
+  ev.data_transfer().is_some_and(|transfer| {
+    let types = transfer.types();
+    (0..types.length()).any(|index| types.get(index).as_string().as_deref() == Some(CONVERSATION_DRAG_TYPE))
+  })
 }
 
 fn focus_sidebar_item(conversation: ConversationId) {
