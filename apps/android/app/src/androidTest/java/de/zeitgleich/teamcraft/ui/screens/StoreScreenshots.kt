@@ -89,7 +89,7 @@ class StoreScreenshots {
       Shot("call") { CallSample() }.takeIf { isCallWanted },
       Shot("join-call") { viewModel ->
         ChannelSample(viewModel)
-        PreJoinDialog(text.channelName, onDismiss = {}, onJoin = {})
+        PreJoinDialog(text.channelName, isNotetakerInCall = false, runningCount = 0, onDismiss = {}, onJoin = {})
       },
       Shot("settings", isDark = false) { viewModel ->
         SettingsScreen(viewModel, AppState.Ready(ME, ALEX, identityFingerprint = ""), onBack = {})
