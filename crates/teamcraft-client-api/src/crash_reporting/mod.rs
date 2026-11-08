@@ -26,7 +26,7 @@ use thiserror::Error;
 pub use event::{
   AppInfo, AppPlatform, CrashEvent, CrashLevel, ErrorSource, EventId, InstallationId, StackFrame,
 };
-pub use panic::{PanicParts, frames_from_backtrace};
+pub use panic::{MAX_PENDING_PANICS, PanicParts, PendingPanic, frames_from_backtrace};
 pub use queue::{CrashQueue, CrashQueueLimits, QueuedCrashReport};
 pub use reporter::{CaptureOutcome, CrashReporter, FlushSummary, PendingSend};
 pub use scrub::scrub;

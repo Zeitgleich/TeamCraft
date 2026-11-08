@@ -152,6 +152,20 @@ account, the device or the instance, and it is rotated when the user turns repor
   connection comes back. An app that doesn't crash sends nothing.
 - **Sampling.** Fatal reports are always sent; handled errors are sent with the admin's sample rate.
 
+## Processes without a page
+
+- **Desktop shell** (the core, calls, the shell's own code): its panic hook writes the panic
+  (message, location, backtrace, the shell's redacted log lines) to `crash-reports-pending.json` in
+  the app's data directory, at most five, synchronously (the process aborts right after). The page
+  takes them on its next start (`crash_reports_take_native`) and reports them like its own, with the
+  instance's setting and the user's choice, which the shell doesn't know.
+- **The server** reports its own panics straight to the DSN in its settings, when crash reports are
+  on: built and scrubbed in the hook, sent from a thread of its own (a panicking request never waits
+  for the backend), at most 20 per process and one per place in the code. No breadcrumbs: the
+  server keeps no debug log ring. Platform `server`, a random installation ID per start.
+- **Mobile core:** a Rust panic in the FFI reaches Kotlin or Swift as an exception, which the
+  platform SDK reports (with its `beforeSend` scrubbing).
+
 ## Symbols: readable stack traces
 
 | Platform         | What the report carries                       | Symbol upload (release workflow)                       |
@@ -193,7 +207,7 @@ account, the device or the instance, and it is rotated when the user turns repor
 |--------------------------------------------------------------|----------------------------------|
 | This design, the core module (config, scrub, queue, panic)   | Done (first pull request)        |
 | Web and desktop page: wasm panics, script errors             | Done (third pull request)        |
-| Panic hooks of the desktop shell, server, mobile core        | Next                             |
+| Panic hooks of the desktop shell and the server              | Done (fourth pull request)       |
 | Admin setting, served in `GET /api/v1/server-info`, relay    | Done (second pull request)       |
 | User opt-out, first-start notice (web and desktop page)      | Done (third pull request)        |
 | Android SDK, symbol upload in the release workflow           | Next                             |

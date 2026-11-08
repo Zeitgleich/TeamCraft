@@ -6,11 +6,17 @@
 //! and the apps need no second origin to reach through proxies and captive portals. The server
 //! learns nothing new: reports are scrubbed on the device and carry no content.
 
-use std::sync::Arc;
+use std::backtrace::Backtrace;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::Bytes;
 use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
+use teamcraft_client_api::crash_reporting::{
+  AppInfo, AppPlatform, CrashQueue, CrashReporter, CrashReportingConfig, EventId, InstallationId, PanicParts,
+};
 use teamcraft_proto::{Dsn, ErrorCode, MAX_CRASH_ENVELOPE_BYTES};
 use tracing::{debug, warn};
 use url::Url;
@@ -28,6 +34,8 @@ const DEFAULT_RETRY_AFTER_SECS: u64 = 60;
 /// Longest wait passed on to the apps.
 const MAX_RETRY_AFTER_SECS: u64 = 6 * 60 * 60;
 const ENVELOPE_CONTENT_TYPE: &str = "application/x-sentry-envelope";
+/// The server's own panics reported per process at most; one per place in the code.
+const MAX_SERVER_PANIC_REPORTS: u32 = 20;
 
 /// The HTTP client that forwards reports.
 pub struct CrashRelay {
@@ -93,6 +101,107 @@ pub async fn relay(state: &AppState, body: Bytes) -> Result<(), ApiError> {
       ApiError::Unavailable("the crash reports backend is not reachable".into())
     })?;
   answer(response.status().as_u16(), response.headers().get(RETRY_AFTER))
+}
+
+/// Reports the server's own panics to the backend in the instance settings, when crash reports
+/// are on (docs/crash-reports.md, "The server"). The report is built and scrubbed in the hook and
+/// sent from a thread of its own, so a panicking request never waits for the backend; at most
+/// [`MAX_SERVER_PANIC_REPORTS`] per process, one per place in the code. Called after the previous
+/// hook was installed (logging), which it keeps.
+pub fn install_panic_hook(state: AppState) {
+  let installation = InstallationId::from_random_bytes(random_bytes());
+  let seen = Mutex::new(HashSet::<(String, u32)>::new());
+  let sent = AtomicU32::new(0);
+  let previous = std::panic::take_hook();
+  std::panic::set_hook(Box::new(move |info| {
+    previous(info);
+    let Some(config) = state
+      .settings
+      .get()
+      .crash_reports
+      .info()
+      .and_then(|info| CrashReportingConfig::from_info(&info).ok())
+    else {
+      return;
+    };
+    let parts = PanicParts::from_hook(info, Backtrace::force_capture().to_string());
+    let place = parts
+      .maybe_location
+      .as_ref()
+      .map(|(file, line, _)| (file.clone(), *line))
+      .unwrap_or_default();
+    let is_new = seen.lock().is_ok_and(|mut seen| seen.insert(place));
+    if !is_new || sent.fetch_add(1, Ordering::Relaxed) >= MAX_SERVER_PANIC_REPORTS {
+      return;
+    }
+    let url = config.dsn.envelope_url(env!("CARGO_PKG_VERSION"));
+    let mut reporter = CrashReporter::new(server_app(), installation, CrashQueue::default());
+    reporter.set_config(Some(config));
+    let event = parts.into_event(EventId::from_random_bytes(random_bytes()), now_ms(), Vec::new());
+    reporter.capture(event, 0.0);
+    let Some(pending) = reporter.next_send(now_ms()) else {
+      return;
+    };
+    let allows_private = state.crash_relay.allows_private;
+    // A thread with its own runtime: the hook may run on a runtime thread that must not block.
+    let spawned = std::thread::Builder::new()
+      .name("crash-report".into())
+      .spawn(move || send_blocking(&url, pending.request.body, allows_private));
+    if let Err(error) = spawned {
+      warn!(%error, "could not start sending a crash report");
+    }
+  }));
+}
+
+fn send_blocking(url: &str, body: Vec<u8>, allows_private: bool) {
+  let Ok(parsed) = Url::parse(url) else {
+    return;
+  };
+  if !allows_private && check_public_url(&parsed).is_err() {
+    return;
+  }
+  let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+    return;
+  };
+  runtime.block_on(async move {
+    let Ok(relay) = CrashRelay::new(allows_private) else {
+      return;
+    };
+    let result = relay
+      .http
+      .post(parsed)
+      .header(CONTENT_TYPE, ENVELOPE_CONTENT_TYPE)
+      .body(body)
+      .send()
+      .await;
+    if let Err(error) = result {
+      debug!(error = %error.without_url(), "the server's crash report did not reach the backend");
+    }
+  });
+}
+
+fn server_app() -> AppInfo {
+  AppInfo {
+    version: env!("CARGO_PKG_VERSION").to_owned(),
+    platform: AppPlatform::Server,
+    os_name: std::env::consts::OS.to_owned(),
+    maybe_os_version: None,
+  }
+}
+
+fn random_bytes() -> [u8; 16] {
+  use rand_core::RngCore;
+  let mut bytes = [0; 16];
+  rand_core::OsRng.fill_bytes(&mut bytes);
+  bytes
+}
+
+fn now_ms() -> i64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_or(0, |elapsed| {
+      i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+    })
 }
 
 /// Maps the backend's answer to the app's: accepted, wait, drop the report, or try later.
