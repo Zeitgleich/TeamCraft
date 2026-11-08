@@ -270,6 +270,11 @@ profile field: the profile's update replaces every field, so apps that don't kno
 would clear it, and the profile is what others see. Guests have none (403). The list asks for the
 regions of all organizers of the listed series in one query and builds one source per organizer;
 one series (its own page, restoring, ringing) reads its organizer's.
+The Android and iOS apps (#1450) have the same row in their settings (Android: under the name,
+iOS: above the status), talking to the endpoint directly rather than through the FFI like the other
+`/me` settings; a pick is saved at once, the picker waits meanwhile and goes back on a failure, and
+the row is off while the device is offline. The meeting list reads the meetings whenever it is
+opened, so it shows the skipped occurrences without more.
 
 Without a region (the organizer's or the instance's) or a feed copy nothing is skipped.
 

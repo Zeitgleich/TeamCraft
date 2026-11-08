@@ -1774,9 +1774,23 @@ its holes, and the first sync's older history read pages out of order too: a pin
 message in such a page now takes the controls from it on again in their order (`replay_controls_from`),
 so an older one read later no longer undoes a newer one (`older_history.rs` tests).
 
+**The backlog after the sync** (issue #1448). The holes were read before the catch-up ended, so
+what comes after it in the full sync (membership changes waiting, the outbox, key packages, account
+data) and the session the connection keeps waited for them too; a phone sent to the background
+during that read started over with a fresh session. Every app's loop now reads the backlogs itself
+after the sync (`Client::read_backlogs_in_background`): a page per turn when nothing else is waiting,
+as the first sync's older history, the focused conversation first, a failed page again after 30 s
+or with the next connection, and what an earlier run left on the next start, also on a resumed
+session. A background wake-up of the phone (`RunnerCommand::CatchUp`) still waits for the backlog,
+but its session is kept before that read starts. Each hole's end still takes the order-sensitive
+controls again, and the conversation keeps its "catching up" mark until then. `catch_up.rs`: the
+sync ends with the newest page and the hole marked; the loop reads the rest in order, an older pin
+in it doesn't undo the newer unpin, and a backlog a cut-short catch-up left is read on without
+another catch-up. Without the loop (tests, tools) the catch-up reads them as before.
+
 Not measured end to end yet: the e2e scenario (`long_absence.rs`) with a live message during the
 catch-up and the issue's 12 h gap with 40 conversations needs the Linux network namespace
-(`scripts/e2e-network.sh`) and was rerun neither for #1021 nor for #1423.
+(`scripts/e2e-network.sh`) and was rerun neither for #1021 nor for #1423 nor for #1448.
 
 ### Local store: opening and reading a large account (issue #155)
 

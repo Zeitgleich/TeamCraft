@@ -16,7 +16,8 @@
 //! doesn't hold up the rest either (issue #1423): its MLS queue is read whole, its messages up to
 //! that many pages, then its newest page, and it counts as caught up for live events and the
 //! outbox. Its mark stays until the messages in between, its backlog, are read too: in order,
-//! after every conversation got that far, in this catch-up (`history_gaps.rs`).
+//! after every conversation got that far, in this catch-up, or after it from the host's loop where
+//! the host reads backlogs (`history_gaps.rs`, issue #1448).
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -214,10 +215,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.catch_up_each(waiting, &phases).await?;
     phases.lap("content", self.now_ms());
     self.trace_lap("catch-up: content");
-    // Boxed: only after a long absence, and it would otherwise sit in every catch-up's future.
-    Box::pin(self.catch_up_backlogs(conversations)).await?;
-    phases.lap("backlogs", self.now_ms());
-    self.trace_lap("catch-up: backlogs");
+    if self.background_backlogs.is_on {
+      // The host's loop reads them after the sync (issue #1448).
+      self.leave_backlogs_to_host(conversations)?;
+    } else {
+      // Boxed: only after a long absence, and it would otherwise sit in every catch-up's future.
+      Box::pin(self.catch_up_backlogs(conversations)).await?;
+      phases.lap("backlogs", self.now_ms());
+      self.trace_lap("catch-up: backlogs");
+    }
     tracing::info!(
       conversations = conversations.len(),
       total_ms = phases.total_ms(),
@@ -524,7 +530,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Reads the backlogs the catch-up of `conversations` left (and those a catch-up cut short left
   /// before), the focused conversation's first, each like a conversation's own catch-up: a failure
-  /// marks it for another try and the rest goes on. Each loses its mark once read.
+  /// marks it for another try and the rest goes on. Each loses its mark once read. Not where the
+  /// host reads them (`leave_backlogs_to_host`).
   async fn catch_up_backlogs(&mut self, conversations: &[ConversationId]) -> Result<(), CoreError> {
     let mut due = Vec::new();
     for conversation in conversations {
@@ -563,8 +570,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(());
     }
     self.read_backlog(conversation).await?;
-    self.retry_undecrypted(conversation)?;
-    self.learn_sender_keys(conversation).await
+    self.finish_backlog(conversation).await
   }
 
   /// One conversation's part of a catch-up, with its first pages possibly read ahead: its MLS
@@ -754,7 +760,7 @@ impl PhaseTimer {
   }
 }
 
-fn marker_key(conversation: ConversationId) -> String {
+pub(super) fn marker_key(conversation: ConversationId) -> String {
   format!("{CATCHING_UP_PREFIX}{conversation}")
 }
 

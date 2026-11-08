@@ -187,6 +187,17 @@ class ChatClient(
     WireJson.decodeFromString(PresenceList.serializer(), api("GET", "/presence?user_ids=$userId"))
       .presences.firstOrNull { it.userId == userId }?.state
 
+  /** Whose public holidays the member's repeating meetings skip (#1450). */
+  suspend fun holidayRegion(): HolidayRegion =
+    WireJson.decodeFromString(HolidayRegion.serializer(), api("GET", "/me/holiday-region"))
+
+  /** Picks [maybeRegion] (`null`: the workspace's); answers what is stored now. */
+  suspend fun setHolidayRegion(maybeRegion: String?): HolidayRegion =
+    WireJson.decodeFromString(
+      HolidayRegion.serializer(),
+      api("PUT", "/me/holiday-region", WireJson.encodeToString(SetHolidayRegion.serializer(), SetHolidayRegion(maybeRegion))),
+    )
+
   suspend fun meetings(): List<Meeting> =
     WireJson.decodeFromString(MeetingList.serializer(), api("GET", "/meetings")).meetings
 }
