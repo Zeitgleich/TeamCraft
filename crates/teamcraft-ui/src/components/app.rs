@@ -48,7 +48,7 @@ use crate::components::top_bar::TopBar;
 use crate::components::update_notice::UpdateNotice;
 use crate::components::window_controls::{WindowControls, provide_window_chrome};
 use crate::history::{Travel, travel};
-use crate::i18n::{provide_i18n, use_i18n};
+use crate::i18n::{I18n, provide_i18n, use_i18n};
 use crate::meetings::parse_guest_link;
 use crate::model::TimestampMs;
 use crate::model::{ConversationId, SpaceId};
@@ -169,6 +169,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   // A failed action is never silent (issue #322).
   crate::feedback::set_failure_sink(move |failure| state.show_failure(i18n, &failure));
   Effect::new(move |_| state.tell_suspect_deletions(i18n));
+  follow_crash_reports(state, settings, i18n);
   // Preferences the server enforces (push, do not disturb, mutes) follow the account on the server.
   if let Some(sync) = use_context::<StoredValue<NotificationSync, LocalStorage>>() {
     sync.get_value().start(settings);
@@ -1751,4 +1752,28 @@ fn is_document_visible() -> bool {
   web_sys::window()
     .and_then(|window| window.document())
     .is_some_and(|document| !document.hidden())
+}
+/// Crash reports (docs/crash-reports.md): the user's switch reaches the reporter, and the first
+/// start with reports on says so once, unless the instance turned the notice off.
+fn follow_crash_reports(state: AppState, settings: Settings, i18n: I18n) {
+  #[cfg(target_arch = "wasm32")]
+  {
+    Effect::new(move |_| {
+      let is_allowed = settings.prefs.with(|prefs| prefs.privacy.send_crash_reports);
+      crate::crash_reports::set_consent(is_allowed);
+    });
+    Effect::new(move |_| {
+      if crate::crash_reports::is_notice_due() {
+        crate::crash_reports::mark_notice_seen();
+        untrack(|| {
+          state.show_toast_with_action(
+            i18n.t("crash-reports-notice"),
+            ToastAction::OpenCrashReportSettings,
+          )
+        });
+      }
+    });
+  }
+  #[cfg(not(target_arch = "wasm32"))]
+  let _ = (state, settings, i18n);
 }

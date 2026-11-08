@@ -192,9 +192,10 @@ account, the device or the instance, and it is rotated when the user turns repor
 | Part                                                         | State                            |
 |--------------------------------------------------------------|----------------------------------|
 | This design, the core module (config, scrub, queue, panic)   | Done (first pull request)        |
-| Panic hooks (desktop, server, web, mobile core), JS errors   | Next                             |
+| Web and desktop page: wasm panics, script errors             | Done (third pull request)        |
+| Panic hooks of the desktop shell, server, mobile core        | Next                             |
 | Admin setting, served in `GET /api/v1/server-info`, relay    | Done (second pull request)       |
-| User opt-out, first notice                                   | Next                             |
+| User opt-out, first-start notice (web and desktop page)      | Done (third pull request)        |
 | Android SDK, symbol upload in the release workflow           | Next                             |
-| iOS (sentry-cocoa, dSYMs)                                    | Follow-up issue (needs a Mac)    |
+| iOS (sentry-cocoa, dSYMs)                                    | Next (device test: #1515)        |
 | GlitchTip in teamcraft-deploy                                | teamcraft-deploy                 |

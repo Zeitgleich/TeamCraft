@@ -77,6 +77,8 @@ pub mod motion;
 pub mod mute_shortcut;
 pub mod navigation;
 pub use teamcraft_client_api::notetaker;
+#[cfg(target_arch = "wasm32")]
+pub mod crash_reports;
 pub mod notification_pictures;
 pub mod notifier;
 pub mod notify_sync;
@@ -143,6 +145,9 @@ pub use components::app::App;
 
 /// Mounts the application into `<body>`. Called from the wasm entry point.
 pub fn mount() {
+  // Before the panic hook: a panic during start is reported too (docs/crash-reports.md).
+  #[cfg(target_arch = "wasm32")]
+  crash_reports::install();
   panic_overlay::install();
   // The UI's texts first (`init.js` fetched them next to the app, i18n.rs): no view ever shows a
   // message's key. Without them nothing mounts, and `init.js` shows the loading screen's failure.

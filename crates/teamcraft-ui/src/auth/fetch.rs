@@ -15,6 +15,9 @@ pub(crate) struct FetchResponse {
   pub maybe_date: Option<String>,
   /// `Age`: the answer comes out of a cache on the way, and its `Date` is that old.
   pub maybe_age: Option<String>,
+  /// `Retry-After`, as the server sent it (crash reports, which only the browser build sends).
+  #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+  pub maybe_retry_after: Option<String>,
   pub body: Vec<u8>,
 }
 
@@ -73,6 +76,7 @@ async fn fetch_with(
     maybe_dpop_nonce: response.headers().get(DPOP_NONCE_HEADER).ok().flatten(),
     maybe_date: response.headers().get("Date").ok().flatten(),
     maybe_age: response.headers().get("Age").ok().flatten(),
+    maybe_retry_after: response.headers().get("Retry-After").ok().flatten(),
     body: Uint8Array::new(&buffer).to_vec(),
   })
 }
