@@ -45,7 +45,7 @@ use wtransport::Connection;
 use crate::{
   auth::JoinGrant,
   config::SfuConfig,
-  dave_coordinator::{DaveCoordinator, DaveCoordinatorError, Outbound},
+  dave_coordinator::{DaveCoordinator, DaveCoordinatorError, DaveDeadlines, Outbound},
   forwarding::{Effect, ForwardError, Forwarder},
   rate_limit::TokenBucket,
   signaling::Outgoing,
@@ -544,7 +544,13 @@ impl Room {
       participants: HashMap::new(),
       latest_sessions: HashMap::new(),
       forwarder: Forwarder::new(config.forwarding),
-      dave: DaveCoordinator::new(call_id, config.dave_transition_deadline)?,
+      dave: DaveCoordinator::new(
+        call_id,
+        DaveDeadlines {
+          transition: config.dave_transition_deadline,
+          commit: config.dave_commit_deadline,
+        },
+      )?,
       next_stream_id: 1,
       decodable_announced: HashMap::new(),
     };
@@ -582,6 +588,7 @@ impl Room {
           participant_id,
           key_package.into_vec(),
           maybe_key_binding.map(Base64Bytes::into_vec),
+          now,
         )
         .map_err(|error| {
           warn!(participant_id = %participant_id, %error, "rejected key package");
@@ -602,7 +609,7 @@ impl Room {
         Ok(())
       },
       CallClientMessage::DaveTransitionReady { transition_id } => {
-        self.on_transition_ready(participant_id, transition_id);
+        self.on_transition_ready(participant_id, transition_id, now);
         Ok(())
       },
       CallClientMessage::Join { .. } => Err(ErrorBody::new(ErrorCode::ProtocolViolation, "already joined")),
@@ -790,7 +797,8 @@ impl Room {
   }
 
   /// Periodic work for one participant (every ~100 ms): re-runs its layer allocation, and executes
-  /// a DAVE transition whose deadline passed (any participant's timer does; the check is cheap).
+  /// a DAVE transition or starts the DAVE group over when a deadline passed (any participant's
+  /// timer does; the check is cheap).
   pub fn on_timer(&self, device_id: DeviceId, now: Instant) {
     let mut state = lock(&self.state);
     let effects = state.forwarder.on_timer(device_id, now);
@@ -809,6 +817,7 @@ impl Room {
     participant_id: DeviceId,
     key_package: Vec<u8>,
     maybe_key_binding: Option<Vec<u8>>,
+    now: Instant,
   ) -> Result<(), RoomError> {
     let mut state = lock(&self.state);
     let transition_mode = state
@@ -817,17 +826,20 @@ impl Room {
       .map_or(DaveTransitionMode::AtOnce, |participant| {
         participant.dave_transition_mode
       });
-    let outbound =
-      state
-        .dave
-        .on_key_package(participant_id, key_package, maybe_key_binding, transition_mode)?;
+    let outbound = state.dave.on_key_package(
+      participant_id,
+      key_package,
+      maybe_key_binding,
+      transition_mode,
+      now,
+    )?;
     state.dispatch(outbound);
     Ok(())
   }
 
-  pub fn on_transition_ready(&self, participant_id: DeviceId, transition_id: DaveTransitionId) {
+  pub fn on_transition_ready(&self, participant_id: DeviceId, transition_id: DaveTransitionId, now: Instant) {
     let mut state = lock(&self.state);
-    let outbound = state.dave.on_transition_ready(participant_id, transition_id);
+    let outbound = state.dave.on_transition_ready(participant_id, transition_id, now);
     state.dispatch(outbound);
   }
 
@@ -857,7 +869,7 @@ impl Room {
     } = joining;
     let participant_id = grant.device_id;
     let mut state = lock(&self.state);
-    let package = state.dave.external_sender_package()?;
+    let package = state.dave.external_sender_package();
     let outcome = match state.participants.get(&participant_id) {
       Some(existing) if existing.user_id != grant.user_id => {
         return Err(RoomError::AlreadyJoined(participant_id));
@@ -1022,7 +1034,7 @@ impl Room {
     state.apply(effects);
     // The device comes back with a new DAVE key package; until then the group re-keys without it
     // (e2ee.md §8: a lost device must not hold a current media key).
-    let outbound = state.dave.on_leave(participant_id);
+    let outbound = state.dave.on_leave(participant_id, now);
     state.dispatch(outbound);
     state.broadcast(CallEvent::ParticipantReconnecting {
       device_id: participant_id,
@@ -1287,7 +1299,7 @@ impl RoomState {
           b"replaced by a new connection",
         );
         // The new connection brings a new DAVE key package: the old leaf goes.
-        let outbound = self.dave.on_leave(participant_id);
+        let outbound = self.dave.on_leave(participant_id, now);
         self.dispatch(outbound);
         false
       },
@@ -1320,7 +1332,7 @@ impl RoomState {
       });
     }
     self.apply(removal.effects);
-    let outbound = self.dave.on_leave(participant_id);
+    let outbound = self.dave.on_leave(participant_id, now);
     self.dispatch(outbound);
     self.decodable_announced.remove(&participant_id);
     self.announce_decodable_codecs(None);

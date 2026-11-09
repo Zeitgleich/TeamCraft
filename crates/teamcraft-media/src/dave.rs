@@ -170,6 +170,11 @@ impl DaveParticipant {
     Ok(())
   }
 
+  /// Whether [`Self::set_external_sender`] ran; a session takes the external sender once.
+  pub fn has_external_sender(&self) -> bool {
+    self.session.group().is_some()
+  }
+
   /// A fresh key package to hand to the external sender.
   pub fn create_key_package(&mut self) -> Result<Vec<u8>, DaveError> {
     Ok(self.session.create_key_package()?)

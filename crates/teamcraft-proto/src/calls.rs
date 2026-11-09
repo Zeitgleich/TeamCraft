@@ -270,7 +270,9 @@ pub enum CallEvent {
   ActiveSpeakers {
     device_ids: Vec<DeviceId>,
   },
-  /// Serialized MLS `ExternalSender` the client installs before creating its key package.
+  /// Serialized MLS `ExternalSender` the client installs before creating its key package. Sent
+  /// again when the call's DAVE group starts over because nobody committed its proposals (#1555):
+  /// the client drops its DAVE session, keys included, and answers with a fresh key package.
   DaveExternalSender {
     package: Base64Bytes,
   },

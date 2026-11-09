@@ -68,6 +68,10 @@ pub struct SfuConfig {
   /// the SFU executes it anyway (#1544): a member that never answers would otherwise hold every
   /// joiner without keys until the clients' own fallback (5 s). Keep it well below that.
   pub dave_transition_deadline: Duration,
+  /// How long DAVE proposals wait for a member's commit before the call's group starts over
+  /// (#1555): a committer that is broken, hostile or refuses a joiner would otherwise stop every
+  /// later join and removal. Long enough for a client that first refreshes its roster.
+  pub dave_commit_deadline: Duration,
   /// The UDP socket's receive buffer. A big keyframe arrives as a burst of half a megabyte: a
   /// socket with the system's default buffer loses part of it while the SFU is busy, and with it
   /// the whole picture, for everyone watching.
@@ -212,6 +216,7 @@ impl Default for SfuConfig {
       shutdown_drain: Duration::from_secs(2),
       roster_interval: Duration::from_secs(30),
       dave_transition_deadline: Duration::from_secs(2),
+      dave_commit_deadline: Duration::from_secs(10),
       udp_receive_buffer_bytes: 4 * 1024 * 1024,
       fallback: FallbackConfig::default(),
     }

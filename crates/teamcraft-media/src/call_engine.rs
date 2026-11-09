@@ -1691,7 +1691,21 @@ impl CallEngine {
     self.uplink.set_demand_bps(maybe_demand);
   }
 
+  /// Installs the call's external sender and answers with a key package. Heard again, the SFU
+  /// starts the group over (#1555): the session goes, with its keys and the changes held for it,
+  /// and a fresh one (with a fresh signature key) answers.
   fn on_external_sender(&mut self, package: &[u8]) -> Result<(), CallEngineError> {
+    let Some(call_id) = self.call_id() else {
+      return Err(CallEngineError::Protocol("DAVE message before joined"));
+    };
+    if self.dave()?.has_external_sender() {
+      debug!("the SFU starts the DAVE group over");
+      self.held_dave.clear();
+      self.replace_dave(Some(DaveParticipant::new(
+        DaveParticipantId::from_device(self.config.device_id),
+        DaveCallId::from_call(call_id),
+      )?));
+    }
     let dave = self.dave()?;
     dave.set_external_sender(package)?;
     let key_package = dave.create_key_package()?;
@@ -3022,6 +3036,34 @@ mod tests {
         drain(&mut engine)
           .iter()
           .all(|output| !matches!(output, EngineOutput::Datagram(_)))
+      );
+    }
+
+    /// The SFU starts the group over (#1555): the external sender again drops the established
+    /// session, keys included, and a fresh one with a new signature key answers.
+    #[test]
+    fn the_external_sender_again_starts_a_fresh_session() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      let old_key = alice.maybe_dave.as_ref().unwrap().signature_public_key().to_vec();
+      let gateway = DaveExternalSender::new().unwrap();
+      let package = Base64Bytes::new(gateway.package().unwrap());
+
+      alice
+        .handle_signal(event(6, CallEvent::DaveExternalSender { package }), now)
+        .unwrap();
+
+      assert!(!alice.is_secured());
+      let (key_package, maybe_binding) = key_package_of(&mut alice);
+      assert!(!key_package.is_empty() && maybe_binding.is_some());
+      let new_key = alice.maybe_dave.as_ref().unwrap().signature_public_key();
+      assert_ne!(new_key, old_key.as_slice());
+      alice.send_audio(&frame(), now);
+      assert!(
+        drain(&mut alice)
+          .iter()
+          .all(|output| !matches!(output, EngineOutput::Datagram(_))),
+        "nothing leaves with the old key"
       );
     }
 
