@@ -27,6 +27,10 @@ const MAX_PROFILE_BYTES: u64 = 64 * 1024;
 
 /// A value of the policy store, reduced to what the settings can use.
 #[cfg(any(windows, target_os = "macos", test))]
+#[cfg_attr(
+  not(target_os = "macos"),
+  allow(dead_code, reason = "a registry value is never a boolean")
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PolicyValue {
   Text(String),
@@ -105,9 +109,7 @@ fn load_windows() -> Option<ManagedFile> {
   use windows_registry::{LOCAL_MACHINE, Type};
 
   // Local machine only: HKCU is writable by the user, so it could not hold a lock.
-  let Ok(key) = LOCAL_MACHINE.open(WINDOWS_KEY) else {
-    return None;
-  };
+  let key = LOCAL_MACHINE.open(WINDOWS_KEY).ok()?;
   let read = |name: &str| -> Option<PolicyValue> {
     let value = key.get_value(name).ok()?;
     Some(match value.ty() {
