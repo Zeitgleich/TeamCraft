@@ -164,16 +164,17 @@ Normal case: pull requests are merged into `main` as soon as they are done, and
 GitHub starts scheduled runs several hours late, so the release usually lands between 03:00 and
 06:00. The steps of [Release procedure](#release-procedure) are only done by hand for a candidate or a prerelease.
 
-| Situation                                                       | Result                                                                                |
-|-----------------------------------------------------------------|---------------------------------------------------------------------------------------|
-| No commit since the last release tag, or only docs / Markdown   | nothing (notice in the run)                                                           |
-| CI of `main` for the newest code change is queued or running   | run waits for it (at most 90 min), then goes on; red or not done in time: run fails   |
-| No CI run covers the newest code change (auto-merged PRs)      | run starts CI on `main` and waits for it                                              |
-| CI of `main` is red for the newest code change                 | run fails, nothing tagged; fix `main`, then run the workflow again                    |
-| The last tag has no published release                           | run fails: re-run it (`gh workflow run release.yml --ref vX.Y.Z -f publish=true`)    |
-| Tree version equals the last tag                                | patch bump commit on `main` (`scripts/bump-version.sh`), tag, release `X.Y.(Z+1)`      |
-| A pull request raised the tree's version above the last tag     | the tree is released as it is (minor / major releases: bump in a pull request)         |
-| Tree version is a prerelease (`-beta.N`)                        | run fails; release by hand                                                            |
+| Situation                                                                                | Result                                                                              |
+|------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------|
+| No commit since the last release tag, or only docs / Markdown                            | nothing (notice in the run)                                                         |
+| Every code change since the last tag passed the full CI in its pull request (`ci` label) | no wait for CI on `main`: tagged at once (`scripts/nightly-ci-covered.sh`)          |
+| Otherwise, CI of `main` for the newest code change is queued or running                  | run waits for it (at most 90 min), then goes on; red or not done in time: run fails |
+| Otherwise, no CI run covers the newest code change (auto-merged PRs)                     | run starts CI on `main` and waits for it                                            |
+| CI of `main` is red for the newest code change                                           | run fails, nothing tagged; fix `main`, then run the workflow again                  |
+| The last tag has no published release                                                    | run fails: re-run it (`gh workflow run release.yml --ref vX.Y.Z -f publish=true`)   |
+| Tree version equals the last tag                                                         | patch bump commit on `main` (`scripts/bump-version.sh`), tag, release `X.Y.(Z+1)`   |
+| A pull request raised the tree's version above the last tag                              | the tree is released as it is (minor / major releases: bump in a pull request)      |
+| Tree version is a prerelease (`-beta.N`)                                                 | run fails; release by hand                                                          |
 
 The bump commit (`Release X.Y.Z`, signed off by `github-actions[bot]`) is pushed to `main` directly
 and carries no skip marker. `main` requires the `ci-gate` check (repository ruleset; see AGENTS.md,

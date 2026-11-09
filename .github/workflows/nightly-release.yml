@@ -87,6 +87,7 @@ jobs:
         if: steps.changes.outputs.release == 'true'
         env:
           CODE_SHA: ${{ steps.changes.outputs.code_sha }}
+          LAST_TAG: ${{ steps.changes.outputs.last_tag }}
           CI_WAIT_MINUTES: 90
         run: |
           runs="$(gh run list --workflow ci.yml --branch main --limit 50 \
@@ -112,6 +113,13 @@ jobs:
               break
             fi
           done <<< "$runs"
+          # Nothing to wait for when every code change came through a pull request whose full CI
+          # was green: the release build compiles it all again. Only an unchecked change (a pull
+          # request without the `ci` label, a direct push) needs a run on main.
+          if scripts/nightly-ci-covered.sh "$LAST_TAG"; then
+            echo "::notice::every change since $LAST_TAG passed the full CI in its pull request; not waiting for CI on main"
+            exit 0
+          fi
           # PRs merged by the auto-merge workflow (GITHUB_TOKEN) start no push run on main, so the
           # newest code change may have no CI run at all: start one and wait for it.
           if [ -z "$run_id" ]; then
