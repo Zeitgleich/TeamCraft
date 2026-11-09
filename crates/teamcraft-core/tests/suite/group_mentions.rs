@@ -170,8 +170,88 @@ mod sending {
   }
 }
 
+mod admins {
+  use super::*;
+  use teamcraft_client_api::model::MentionableGroupKind;
+
+  #[tokio::test]
+  async fn admins_mentions_the_admins_in_the_conversation() {
+    let mut t = team().await;
+    let (alice, bob, dave) = (
+      t.alice.client.user_id(),
+      t.bob.client.user_id(),
+      t.dave.client.user_id(),
+    );
+    t.server.set_admin_ids(vec![alice, bob, dave]);
+    t.alice.client.full_sync().await.unwrap();
+    let (alice_ui, bob_ui) = (backend_of(&t.alice), backend_of(&t.bob));
+
+    let offered = alice_ui.mentionable_groups(t.channel);
+    let admins = offered.iter().find(|group| group.handle == "admins").unwrap();
+    assert_eq!(admins.kind, MentionableGroupKind::Admins);
+    assert_eq!(
+      admins.notified,
+      [bob],
+      "never the sender, never outside the channel"
+    );
+    assert_eq!(admins.outside_count, 1);
+
+    alice_ui.post_message(t.channel, None, "@admins the printer is on fire");
+    run_commands(&mut t.alice, &alice_ui).await;
+    settle(&mut [&mut t.alice, &mut t.bob]).await;
+    assert_eq!(stored_mentions(&t).await, [bob]);
+    let received = bob_ui
+      .messages(t.channel, 0, 10)
+      .into_iter()
+      .find(|m| m.body.contains("printer"))
+      .unwrap();
+    assert_eq!(received.group_mentions, ["admins"]);
+    assert!(received.mentions_me);
+  }
+
+  #[tokio::test]
+  async fn without_admin_ids_there_is_no_admins_group() {
+    let mut t = team().await;
+    let (alice, bob) = (t.alice.client.user_id(), t.bob.client.user_id());
+    // The instance switched `@admins` off, or the server predates it.
+    t.server.set_user_groups(vec![roster(1, "oncall", &[alice, bob])]);
+    t.alice.client.full_sync().await.unwrap();
+    let ui = backend_of(&t.alice);
+    assert!(
+      ui.mentionable_groups(t.channel)
+        .iter()
+        .all(|group| group.handle != "admins")
+    );
+
+    ui.post_message(t.channel, None, "@admins anyone?");
+    run_commands(&mut t.alice, &ui).await;
+    assert!(stored_mentions(&t).await.is_empty(), "@admins stays text");
+  }
+
+  #[tokio::test]
+  async fn a_stored_group_cannot_stand_in_for_the_built_in_one() {
+    let mut t = team().await;
+    let (alice, bob) = (t.alice.client.user_id(), t.bob.client.user_id());
+    // An older server let a group take the handle: the built-in meaning wins.
+    t.server.set_user_groups(vec![roster(1, "admins", &[alice, bob])]);
+    t.alice.client.full_sync().await.unwrap();
+    assert!(backend_of(&t.alice).mentionable_groups(t.channel).is_empty());
+  }
+}
+
 mod permission {
   use super::*;
+
+  #[tokio::test]
+  async fn without_the_permission_admins_is_not_offered_either() {
+    let mut t = team().await;
+    let (alice, bob) = (t.alice.client.user_id(), t.bob.client.user_id());
+    t.server.set_admin_ids(vec![alice, bob]);
+    t.server
+      .set_my_permissions(t.channel, Some(vec![Permission::CreatePost]));
+    t.alice.client.full_sync().await.unwrap();
+    assert!(backend_of(&t.alice).mentionable_groups(t.channel).is_empty());
+  }
 
   #[tokio::test]
   async fn without_the_permission_nothing_is_offered_or_expanded() {

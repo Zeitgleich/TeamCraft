@@ -151,6 +151,10 @@ data class Message(
    * the account's (docs/bridge.md, "Source identity"). The core sets it on a bot's message only.
    */
   @SerialName("source") val maybeSource: MessageSource? = null,
+  /** Handles of the groups the sender's device expanded (`accounting`), from the ciphertext (#206). */
+  @SerialName("group_mentions") val groupMentions: List<String> = emptyList(),
+  /** The sender named this user among the people to notify, by name or through a group. */
+  @SerialName("mentions_me") val mentionsMe: Boolean = false,
 ) {
   /** Outbox messages carry the pending bit in their ID until the server accepted them. */
   val isPending: Boolean get() = (id.toLongOrNull() ?: 0L) and PENDING_ID_BIT != 0L

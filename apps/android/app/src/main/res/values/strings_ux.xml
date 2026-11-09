@@ -132,10 +132,10 @@
   <string name="not_sent_delete">Delete</string>
 
   <!-- Typing indicator -->
-  <string name="typing_one">%1$s is typing…</string>
-  <string name="typing_two">%1$s and %2$s are typing…</string>
-  <string name="typing_several">Several people are typing…</string>
-  <string name="typing_direct">typing…</string>
+  <string name="typing_one">%1$s is typing</string>
+  <string name="typing_two">%1$s and %2$s are typing</string>
+  <string name="typing_several">Several people are typing</string>
+  <string name="typing_direct">typing</string>
   <string name="share_typing">Show others when I\'m typing</string>
   <string name="call_status_sounds">Call status sounds</string>
   <string name="call_status_sounds_hint">A soft tone repeats while your connection is lost; short tones tell when it is back or the call ended. Only you hear them, on the call\'s audio output.</string>

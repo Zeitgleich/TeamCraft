@@ -304,6 +304,7 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
       notifications.urgent_max_pushes = values.urgent_max_pushes;
       notifications.mobile_push_delay_secs = values.mobile_push_delay_secs;
       notifications.is_desktop_attention_enabled = values.is_desktop_attention_enabled;
+      notifications.is_admins_mention_enabled = values.is_admins_mention_enabled;
     },
     RuntimeSettingsSection::EmailDigest(values) => {
       let digest = &mut settings.notifications.email_digest;
@@ -335,6 +336,7 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
       limits.max_group_dm_participants = to_usize(values.max_group_dm_participants);
       limits.max_user_group_members = to_usize(values.max_user_group_members);
       limits.max_meeting_mails_per_user_per_hour = values.max_meeting_mails_per_user_per_hour;
+      limits.max_large_mentions_per_user_per_hour = values.max_large_mentions_per_user_per_hour;
     },
     RuntimeSettingsSection::Integration(values) => {
       settings.integration.default_retention_days = values.default_retention_days;
@@ -419,6 +421,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       urgent_max_pushes: notifications.urgent_max_pushes,
       mobile_push_delay_secs: notifications.mobile_push_delay_secs,
       is_desktop_attention_enabled: notifications.is_desktop_attention_enabled,
+      is_admins_mention_enabled: notifications.is_admins_mention_enabled,
     },
     email_digest: EmailDigestSettings {
       is_enabled: digest.is_enabled,
@@ -447,6 +450,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       max_group_dm_participants: to_u32(limits.max_group_dm_participants),
       max_user_group_members: to_u32(limits.max_user_group_members),
       max_meeting_mails_per_user_per_hour: limits.max_meeting_mails_per_user_per_hour,
+      max_large_mentions_per_user_per_hour: limits.max_large_mentions_per_user_per_hour,
     },
     integration: IntegrationSettings {
       default_retention_days: settings.integration.default_retention_days,
@@ -667,6 +671,12 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
       check_range(
         "max_meeting_mails_per_user_per_hour",
         u64::from(values.max_meeting_mails_per_user_per_hour),
+        0,
+        100_000,
+      )?;
+      check_range(
+        "max_large_mentions_per_user_per_hour",
+        u64::from(values.max_large_mentions_per_user_per_hour),
         0,
         100_000,
       )

@@ -105,7 +105,9 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: codeql-android
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Restore only: the 0.6 GB entry pushed the repository over its 10 GB cache budget; this
+          # scan is not time-critical, so it starts cold.
+          save-if: "false"
       - name: System libraries of the host build
         if: matrix.build == 'android'
         # The CI image's list (containers/ci.Containerfile) for this crate's -sys dependencies: ALSA

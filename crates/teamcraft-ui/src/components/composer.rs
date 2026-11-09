@@ -5,7 +5,7 @@ use wasm_bindgen::JsCast;
 use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, OutgoingMessage};
 use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::drafts::{DraftFileItem, DraftFileState, DraftFileTravel};
-use teamcraft_client_api::model::MentionableGroup;
+use teamcraft_client_api::model::{MentionableGroup, MentionableGroupKind};
 use teamcraft_client_api::scheduled::ScheduleCheck;
 use teamcraft_client_api::voice::RecordingStop;
 use teamcraft_proto::{ClientMessageId, DEFAULT_MAX_MENTIONS_PER_MESSAGE};
@@ -155,12 +155,18 @@ fn emoji_suggestions(query: &str, tone: SkinTone) -> Vec<Suggestion> {
     .collect()
 }
 
+/// What the picker shows for the built-in mentions, translated.
+struct BuiltInLabels {
+  channel: String,
+  admins: String,
+}
+
 /// People and groups whose name starts with, or contains, what was typed after `@`.
 fn mention_suggestions(
   query: &str,
   people: &[User],
   groups: &[MentionableGroup],
-  channel_label: &str,
+  labels: &BuiltInLabels,
 ) -> Vec<Suggestion> {
   let needle = query.to_lowercase();
   let rank = |names: &[&str]| -> Option<u8> {
@@ -185,7 +191,7 @@ fn mention_suggestions(
       Suggestion {
         insert: "channel".to_owned(),
         label: "@channel".to_owned(),
-        detail: channel_label.to_owned(),
+        detail: labels.channel.clone(),
         person: None,
         is_exact: false,
       },
@@ -209,12 +215,16 @@ fn mention_suggestions(
     }
   }
   for group in groups {
-    if let Some(score) = rank(&[&group.handle, &group.name]) {
+    let name = match group.kind {
+      MentionableGroupKind::Custom => &group.name,
+      MentionableGroupKind::Admins => &labels.admins,
+    };
+    if let Some(score) = rank(&[&group.handle, name]) {
       ranked.push((
         score,
         Suggestion {
           insert: group.handle.clone(),
-          label: group.name.clone(),
+          label: name.clone(),
           detail: format!("@{}", group.handle),
           person: None,
           is_exact: false,
@@ -949,7 +959,11 @@ pub fn Composer(
       TriggerKind::Mention => {
         let people = state.read(|backend| backend.users());
         let groups = state.read(|backend| backend.mentionable_groups(conversation));
-        mention_suggestions(&found.query, &people, &groups, &i18n.t("mention-channel"))
+        let labels = BuiltInLabels {
+          channel: i18n.t("mention-channel"),
+          admins: i18n.t("mention-admins"),
+        };
+        mention_suggestions(&found.query, &people, &groups, &labels)
       },
       TriggerKind::Emoji => emoji_suggestions(&found.query, state.settings.emoji_skin_tone.get_untracked()),
     };

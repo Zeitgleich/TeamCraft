@@ -216,6 +216,7 @@ pub async fn send_scheduled_now(
   {
     ReleaseOutcome::Released(outcome) => {
       if outcome.is_new {
+        messages::spend_large_mention(state, entry.user_id, mentions.len());
         let audience = messages::Audience {
           members,
           is_channel_mention: entry.is_channel_mention
@@ -328,6 +329,7 @@ async fn release_at_time(
   {
     ReleaseOutcome::Released(outcome) => {
       if outcome.is_new {
+        messages::spend_large_mention(state, entry.user_id, mentions.len());
         let audience = messages::Audience {
           members,
           is_channel_mention: entry.is_channel_mention && check.may_mention_channel,
@@ -525,6 +527,8 @@ async fn check_sealed(
     ));
   }
   messages::check_mention_count(state, caller, &access.target(), sealed.mentioned_user_ids.len())?;
+  // Checked here, where a device can wait and try again; spent when the server sends it.
+  messages::check_large_mention(state, caller.user.id, sealed.mentioned_user_ids.len())?;
   ensure_own_device(state, caller, sealed.device_id).await?;
   let current_epoch = state.database.current_epoch(conversation).await?;
   if sealed.mls_epoch != current_epoch {

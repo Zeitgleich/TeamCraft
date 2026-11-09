@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 use teamcraft_client_api::actions::{FileTransfer, MessagePriority, WorkspaceEvent};
+use teamcraft_client_api::emoji::jumbo_emoji_count;
 use teamcraft_client_api::log::{LogEntry, log_entries};
 use teamcraft_client_api::model::{ConversationId, MessageSource};
 use teamcraft_client_api::upload_pill::UploadPill;
@@ -951,6 +952,16 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
               <button class="btn btn-small" on:click=move |_| is_editing.set(false)>{i18n.t("cancel")}</button>
               <button class="btn btn-small btn-primary" on:click=move |_| save_edit()>{i18n.t("save")}</button>
             </div>
+          </div>
+        }
+        .into_any();
+      }
+      if let Some(count) = jumbo_emoji_count(&body_text) {
+        // Only 1 to 3 emoji: drawn larger, still real text for screen readers (#1603). The same
+        // check decides on Android and iOS.
+        return view! {
+          <div class=format!("msg-jumbo msg-jumbo-{count}")>
+            <RichText body=body_text.clone() me=me.username.clone() group_mentions=group_mentions.clone() mentions_me=mentions_me />
           </div>
         }
         .into_any();

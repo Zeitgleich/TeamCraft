@@ -49,6 +49,19 @@ pub async fn send_message(
     ));
   }
   check_mention_count(state, caller, &access.target(), request.mentioned_user_ids.len())?;
+  let is_importing = super::import::is_importing(state, caller.user.id);
+  if !is_importing
+    && let Err(refused) = check_large_mention(state, caller.user.id, request.mentioned_user_ids.len())
+  {
+    // A retry of a message stored before the budget ran out still gets its answer: it costs nothing.
+    let maybe_stored = state
+      .database
+      .get_message_by_client_id(conversation, request.client_message_id)
+      .await?;
+    if maybe_stored.is_none() {
+      return Err(refused);
+    }
+  }
   if !state
     .database
     .is_active_device_of(caller.user.id, request.device_id)
@@ -105,7 +118,7 @@ pub async fn send_message(
   if outcome.is_new {
     // The import account's announcements (people it added, a channel it archived) are part of
     // the import: synced quietly like the imported messages, never pushed (e2ee.md §4.10).
-    if super::import::is_importing(state, caller.user.id) {
+    if is_importing {
       deliver_quietly(
         state,
         &access.view.conversation.kind,
@@ -116,6 +129,7 @@ pub async fn send_message(
       )
       .await?;
     } else {
+      spend_large_mention(state, caller.user.id, mentioned.len());
       let audience = Audience {
         members,
         is_channel_mention: request.is_channel_mention
@@ -165,6 +179,36 @@ pub(super) fn check_mention_count(
     )));
   }
   Ok(())
+}
+
+/// Whether a message naming `count` people is a large mention (notifications.md, "Group
+/// mentions"): more than a sender without `use_group_mentions` may name.
+fn is_large_mention(state: &AppState, count: usize) -> bool {
+  count > state.settings.get().limits.max_mentions_without_group_mentions
+}
+
+/// Refuses a large mention with `429` while the sender's hourly budget is used up; the device's
+/// outbox sends it again later. Spends nothing: see [`spend_large_mention`].
+pub(super) fn check_large_mention(state: &AppState, sender: UserId, count: usize) -> Result<(), ApiError> {
+  if !is_large_mention(state, count) {
+    return Ok(());
+  }
+  let per_hour = state.settings.get().limits.max_large_mentions_per_user_per_hour;
+  state
+    .rate_limits
+    .check_large_mention(sender, per_hour, std::time::Instant::now())
+}
+
+/// Spends the budget for a large mention once the server stored it as a new message, so a retry
+/// of a message it already has costs nothing.
+pub(super) fn spend_large_mention(state: &AppState, sender: UserId, count: usize) {
+  if !is_large_mention(state, count) {
+    return;
+  }
+  let per_hour = state.settings.get().limits.max_large_mentions_per_user_per_hour;
+  state
+    .rate_limits
+    .spend_large_mention(sender, per_hour, std::time::Instant::now());
 }
 
 /// A thread's root, which must be a top-level message of the conversation, with threads turned on.

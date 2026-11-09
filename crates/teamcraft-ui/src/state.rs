@@ -2498,12 +2498,12 @@ mod tests {
     }
 
     #[test]
-    fn the_space_counts_its_dms_and_the_total_counts_them_once() {
+    fn the_space_lists_unread_dms_and_the_total_counts_them_once() {
       let state = test_state();
       let (space, _) = first_channel(&state);
       let channels = RailBadge::of(&state.read(|backend| backend.space_conversations(space)));
-      let with_dms = RailBadge::of(&state.space_list(space));
-      assert!(with_dms.count > channels.count);
+      let listed = RailBadge::of(&state.space_list(space));
+      assert!(listed.count > channels.count);
       let (everything, direct) = state.read(|backend| {
         let mut all: Vec<Conversation> = backend
           .spaces()

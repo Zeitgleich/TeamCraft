@@ -71,6 +71,20 @@ class MessageMarkupTest {
   }
 
   @Test
+  fun groupMentionsOfTheMessageAreHighlighted() {
+    val runs = MarkupLine(listOf(mention("accounting"), text(" "), mention("oncall")))
+    // The sender expanded @accounting, not @oncall; this user wasn't on the list.
+    val others = NAMES.copy(groupHandles = setOf("accounting"))
+    val shown = annotatedLine(runs, COLORS, others, handlers(), PERMALINK_LABEL)
+    assertTrue(shown.styleAt("@accounting").any { it.color == MENTION && it.fontWeight == FontWeight.Bold })
+    assertTrue(shown.styleAt("@accounting").none { it.background == MENTION_ME_BACKGROUND })
+    assertTrue(shown.styleAt("@oncall").none { it.fontWeight == FontWeight.Bold })
+    // Named through the group: highlighted like a mention of the user.
+    val mine = annotatedLine(runs, COLORS, others.copy(isMentionedThroughGroup = true), handlers(), PERMALINK_LABEL)
+    assertTrue(mine.styleAt("@accounting").any { it.background == MENTION_ME_BACKGROUND })
+  }
+
+  @Test
   fun linesOfAParagraphAreSeparatedByLineBreaks() {
     val text = annotatedLines(
       listOf(MarkupLine(listOf(text("one"))), MarkupLine(listOf(text("two")))),

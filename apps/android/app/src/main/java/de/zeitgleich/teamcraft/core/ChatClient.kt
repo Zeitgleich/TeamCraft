@@ -8,6 +8,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import uniffi.teamcraft_ffi.AddPeopleOutcome
+import uniffi.teamcraft_ffi.GroupMentionReachItem
+import uniffi.teamcraft_ffi.MentionableGroupItem
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CreateOutcome
@@ -193,6 +195,13 @@ class ChatClient(
       WireJson.encodeToString(ConversationNotificationSettings.serializer(), settings),
     )
   }
+
+  /** The user groups the composer offers after `@` here; none without `use_group_mentions` (#206). */
+  suspend fun mentionableGroups(conversation: String): List<MentionableGroupItem> = core().mentionableGroups(conversation)
+
+  /** Who the group mentions in [body] would notify here, for the hint and the confirmation. */
+  suspend fun groupMentionReach(conversation: String, body: String): GroupMentionReachItem =
+    core().groupMentionReach(conversation, body)
 
   /** The core's answer to whether the conversation's menu offers "Leave" (#1105). */
   suspend fun leaveChoice(conversation: String): LeaveChoice = core().conversationLeaveChoice(conversation)

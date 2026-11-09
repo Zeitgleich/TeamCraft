@@ -7686,13 +7686,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "typing…"
+            "value": "typing"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "schreibt …"
+            "value": "schreibt"
           }
         }
       }
@@ -7702,13 +7702,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ is typing…"
+            "value": "%@ is typing"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ schreibt …"
+            "value": "%@ schreibt"
           }
         }
       }
@@ -7718,13 +7718,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Several people are typing…"
+            "value": "Several people are typing"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mehrere Personen schreiben …"
+            "value": "Mehrere Personen schreiben"
           }
         }
       }
@@ -7734,13 +7734,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "%1$@ and %2$@ are typing…"
+            "value": "%1$@ and %2$@ are typing"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "%1$@ und %2$@ schreiben …"
+            "value": "%1$@ und %2$@ schreiben"
           }
         }
       }
@@ -18301,6 +18301,102 @@
           "stringUnit": {
             "state": "translated",
             "value": "Akzent, Nachrichten, Zähler"
+          }
+        }
+      }
+    },
+    "group_mention_admins": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Admins and owners"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Admins und Eigentümer"
+          }
+        }
+      }
+    },
+    "group_mention_people %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld person"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld people"
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Person"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Personen"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "group_mention_outside %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld member of the mentioned groups isn't in this conversation and won't be notified."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld members of the mentioned groups aren't in this conversation and won't be notified."
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Mitglied der erwähnten Gruppen ist nicht in dieser Unterhaltung und wird nicht benachrichtigt."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Mitglieder der erwähnten Gruppen sind nicht in dieser Unterhaltung und werden nicht benachrichtigt."
+                }
+              }
+            }
           }
         }
       }

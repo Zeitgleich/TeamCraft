@@ -384,6 +384,10 @@ pub struct LimitsConfig {
   /// are told in the app only) and space invitations may send per hour. At 0, invitations go without
   /// mail and can't be resent.
   pub max_meeting_mails_per_user_per_hour: u32,
+  /// Messages per hour one sender may send that name more people than
+  /// `max_mentions_without_group_mentions` (large group mentions); 0 = no limit. Over it a send is
+  /// refused with `429` and the device's outbox tries again later (notifications.md, "Group mentions").
+  pub max_large_mentions_per_user_per_hour: u32,
 }
 
 /// WebSocket gateway behaviour.
@@ -1273,6 +1277,9 @@ pub struct NotificationsConfig {
   /// reports; a connected, active desktop holds phone pushes back as presence would (works councils
   /// may want this; notifications.md, "Attention").
   pub is_desktop_attention_enabled: bool,
+  /// `@admins` mentions the active admins and owners (a built-in group in the rosters devices
+  /// expand from; notifications.md, "Group mentions"). Off: devices neither offer nor expand it.
+  pub is_admins_mention_enabled: bool,
   /// How long an "attentive" report of a desktop or web session counts. The session's gateway
   /// heartbeats renew it, so keep it above twice `[gateway] heartbeat_interval_secs`; a session that
   /// stops (sleep, crash, lost network) no longer holds pushes back.
@@ -1703,6 +1710,7 @@ impl Default for LimitsConfig {
       draft_file_retention_days: 30,
       max_draft_files_per_user: 200,
       max_meeting_mails_per_user_per_hour: 200,
+      max_large_mentions_per_user_per_hour: teamcraft_proto::DEFAULT_MAX_LARGE_MENTIONS_PER_USER_PER_HOUR,
     }
   }
 }
@@ -1808,6 +1816,7 @@ impl Default for NotificationsConfig {
       urgent_scheduler_interval_secs: 15,
       mobile_push_delay_secs: 120,
       is_desktop_attention_enabled: true,
+      is_admins_mention_enabled: true,
       attention_lease_secs: 75,
       desktop_activity_secs: 120,
       max_held_pushes_per_user: 100,
