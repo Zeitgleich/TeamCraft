@@ -24,9 +24,15 @@ all:
 **Tables:** the table button inserts an empty table with a header row; **Tab** and
 **Shift+Tab** move between its cells, and Tab in the last cell adds a row. A Markdown table you
 type or paste (`| Name | Due |`, then `|---|---:|`, then the rows) is sent as a table too, and so
-is a table copied from a web page or a spreadsheet. Wider tables scroll sideways in the message;
-very large ones (over 20 columns or 200 rows) stay text. Notifications and quotes show a table's
-rows as lines of text.
+is a table copied from a web page or a spreadsheet. Wider tables scroll sideways in the message,
+long ones scroll inside it under a header row that stays in view; very large ones (over 20 columns
+or 200 rows) stay text. Notifications and quotes show a table's rows as lines of text.
+
+Tables follow GitHub's rules, with two allowances for what scripts and bots write: a delimiter row
+among the rows (a bottom border, a line between groups) is a border, and text before the header's
+first `|` (`, | Name | Due |` over `|---|---|`) stays text above the table. A header with another
+number of cells than the delimiter row makes the whole block text; a single row of it never turns
+into a table of its own.
 
 Messages are stored as a safe Markdown subset, so they read well on every device. Pasted text from
 web pages or documents keeps only that formatting; no HTML is ever rendered. Underline that starts

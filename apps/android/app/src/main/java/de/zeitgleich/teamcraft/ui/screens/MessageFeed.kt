@@ -946,6 +946,7 @@ private fun bubbleColors(isMine: Boolean): BubbleColors {
         mentionMe = content,
         mentionMeBackground = content.copy(alpha = OWN_HIGHLIGHT_ALPHA),
         codeBackground = content.copy(alpha = OWN_HIGHLIGHT_ALPHA),
+        surface = container,
       ),
     )
   } else {
@@ -960,6 +961,7 @@ private fun bubbleColors(isMine: Boolean): BubbleColors {
         mentionMe = extra.mentionText,
         mentionMeBackground = extra.mentionBackground,
         codeBackground = scheme.onSurface.copy(alpha = CODE_BACKGROUND_ALPHA),
+        surface = scheme.surfaceContainerHighest,
       ),
     )
   }

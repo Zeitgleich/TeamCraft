@@ -172,9 +172,12 @@ pub fn parse_with(source: &str, limits: TableLimits) -> Vec<Block> {
     } else if let Some(info) = line.trim_start().strip_prefix("```") {
       let info = info.trim();
       maybe_fence = Some(((!info.is_empty()).then(|| info.to_owned()), Vec::new()));
-    } else if let Some((table, used)) = table_at(&lines[at - 1..], limits) {
-      blocks.push(Block::Table(table));
-      at += used - 1;
+    } else if let Some(found) = table_at(&lines, at - 1, limits) {
+      if let Some(lead) = found.maybe_lead {
+        push_line(&mut blocks, Line::Text(lead));
+      }
+      blocks.push(Block::Table(found.table));
+      at += found.used - 1;
     } else {
       push_line(&mut blocks, classify(line));
     }
@@ -244,29 +247,64 @@ fn classify(line: &str) -> Line<'_> {
   Line::Text(line)
 }
 
-/// The table `lines` start with and how many lines it takes: a header row with a `|`, a delimiter
-/// row with as many cells, then every following row with a `|` and no more cells (fewer are filled
-/// up with empty ones). Anything else, or a table over `limits`, is no table.
-fn table_at(lines: &[&str], limits: TableLimits) -> Option<(Table, usize)> {
-  let [header, delimiter, body @ ..] = lines else {
+/// A table found at a line: what [`table_at`] returns.
+struct FoundTable<'a> {
+  /// Text before the header row's first `|` that isn't a cell of the table (see [`table_at`]).
+  maybe_lead: Option<&'a str>,
+  table: Table,
+  /// Source lines the table takes, borders included.
+  used: usize,
+}
+
+/// The table starting at `lines[at]`, as GitHub reads one, with two allowances for what bots and
+/// scripts write:
+///
+/// - A header row with a `|`, then a delimiter row with as many cells, then every following row
+///   with a `|` and no more cells (fewer are filled up with empty ones). A longer row, a line
+///   without a `|`, a list, quote, heading or fence ends the table.
+/// - A delimiter row among the body rows (a bottom border, a separator between groups) is a border,
+///   not a row.
+/// - Text before the header's first `|`, when the delimiter row starts with a `|` and the header
+///   has exactly one cell more than it (`, | a | b |` over `|---|---|`), isn't a column: it stays a
+///   line of text before the table.
+/// - A table never starts right below a line that is a row itself (has a `|`): those lines are the
+///   rows of a block that isn't a table, so a row near its end that happens to sit over a border
+///   doesn't become a table of its own. The whole block is a table, or none of it is.
+///
+/// Anything else, or a table over `limits`, is no table.
+fn table_at<'a>(lines: &[&'a str], at: usize, limits: TableLimits) -> Option<FoundTable<'a>> {
+  let [header_line, delimiter, body @ ..] = lines.get(at..)? else {
     return None;
   };
-  if !matches!(classify(header), Line::Text(_)) {
+  if !matches!(classify(header_line), Line::Text(_)) || follows_row(lines, at) {
     return None;
   }
-  let header = row_cells(header)?;
   let alignments = delimiter_row(delimiter)?;
-  let columns = header.len();
-  if alignments.len() != columns || columns > limits.max_columns {
+  let columns = alignments.len();
+  let mut header = row_cells(header_line)?;
+  let mut maybe_lead = None;
+  let has_stray_lead = header.len() == columns + 1
+    && !header_line.trim_start().starts_with('|')
+    && delimiter.trim_start().starts_with('|');
+  if has_stray_lead {
+    let lead = header.remove(0);
+    maybe_lead = (!lead.is_empty()).then_some(lead);
+  }
+  if header.len() != columns || columns > limits.max_columns {
     return None;
   }
-  let raw_rows: Vec<Vec<&str>> = body
-    .iter()
-    .map_while(|line| {
-      let is_row_line = matches!(classify(line), Line::Text(_)) && !line.trim_start().starts_with("```");
-      row_cells(line).filter(|cells| is_row_line && cells.len() <= columns)
-    })
-    .collect();
+  let mut raw_rows: Vec<Vec<&str>> = Vec::new();
+  let mut used = 2;
+  for line in body {
+    let is_row_line = matches!(classify(line), Line::Text(_)) && !line.trim_start().starts_with("```");
+    let Some(cells) = row_cells(line).filter(|cells| is_row_line && cells.len() <= columns) else {
+      break;
+    };
+    used += 1;
+    if !delimiter_row(line).is_some_and(|border| border.len() == columns) {
+      raw_rows.push(cells);
+    }
+  }
   if raw_rows.len() > limits.max_rows {
     return None;
   }
@@ -280,7 +318,18 @@ fn table_at(lines: &[&str], limits: TableLimits) -> Option<(Table, usize)> {
     header: cells(&header),
     rows: raw_rows.iter().map(|row| cells(row)).collect(),
   };
-  Some((table, 2 + raw_rows.len()))
+  Some(FoundTable {
+    maybe_lead,
+    table,
+    used,
+  })
+}
+
+/// Whether the line above `lines[at]` is a line of text with a `|`: a row of the block above.
+fn follows_row(lines: &[&str], at: usize) -> bool {
+  at.checked_sub(1)
+    .and_then(|above| lines.get(above))
+    .is_some_and(|above| matches!(classify(above), Line::Text(_)) && row_cells(above).is_some())
 }
 
 /// The cells of a table row, trimmed, or `None` without an unescaped `|`. Pipes at the line's edges
@@ -368,8 +417,10 @@ pub fn readable_tables(source: &str) -> std::borrow::Cow<'_, str> {
   let mut is_in_fence = false;
   let mut at = 0;
   while let Some(&line) = lines.get(at) {
-    if !is_in_fence && let Some((table, used)) = table_at(&lines[at..], TableLimits::default()) {
+    if !is_in_fence && let Some(found) = table_at(&lines, at, TableLimits::default()) {
       has_table = true;
+      out.extend(found.maybe_lead.map(str::to_owned));
+      let table = found.table;
       out.extend(std::iter::once(&table.header).chain(&table.rows).map(|row| {
         row
           .iter()
@@ -378,7 +429,7 @@ pub fn readable_tables(source: &str) -> std::borrow::Cow<'_, str> {
           .collect::<Vec<_>>()
           .join(CELL_SEPARATOR)
       }));
-      at += used;
+      at += found.used;
       continue;
     }
     if is_in_fence {
@@ -403,19 +454,27 @@ pub fn literal_with_tables(plain: &str) -> Vec<Block> {
   let mut blocks: Vec<Block> = Vec::new();
   let mut at = 0;
   while let Some(&line) = lines.get(at) {
-    if let Some((table, used)) = table_at(&lines[at..], TableLimits::default()) {
-      blocks.push(Block::Table(table));
-      at += used;
+    if let Some(found) = table_at(&lines, at, TableLimits::default()) {
+      if let Some(lead) = found.maybe_lead {
+        push_literal(&mut blocks, lead);
+      }
+      blocks.push(Block::Table(found.table));
+      at += found.used;
       continue;
     }
-    let content = vec![Inline::Text(line.to_owned())];
-    match blocks.last_mut() {
-      Some(Block::Paragraph(lines)) => lines.push(content),
-      _ => blocks.push(Block::Paragraph(vec![content])),
-    }
+    push_literal(&mut blocks, line);
     at += 1;
   }
   blocks
+}
+
+/// Adds a literal line to the paragraph before it, or starts one.
+fn push_literal(blocks: &mut Vec<Block>, line: &str) {
+  let content = vec![Inline::Text(line.to_owned())];
+  match blocks.last_mut() {
+    Some(Block::Paragraph(lines)) => lines.push(content),
+    _ => blocks.push(Block::Paragraph(vec![content])),
+  }
 }
 
 pub fn parse_inline(text: &str) -> Vec<Inline> {
@@ -630,6 +689,12 @@ pub fn to_source(blocks: &[Block]) -> String {
       Block::Table(table) if !table.header.is_empty() => {
         if is_after_table {
           lines.push(String::new());
+        } else if let Some(above) = lines.last_mut()
+          && matches!(classify(above), Line::Text(_))
+          && row_cells(above).is_some()
+        {
+          // A table doesn't start below a row (table_at), so the line above keeps its pipes as text.
+          *above = escape_pipes(above);
         }
         let columns = table.header.len();
         lines.push(row_source(&table.header, columns));
@@ -679,9 +744,10 @@ pub fn to_source(blocks: &[Block]) -> String {
   lines.join("\n")
 }
 
-/// A table row in the subset, with `columns` cells (missing ones empty, extra ones left out).
+/// A table row in the subset, with `columns` cells (missing ones empty, extra ones left out). A row
+/// that would read as a border (every cell dashes) starts with an escaped character.
 fn row_source(row: &[Cell], columns: usize) -> String {
-  let cells: Vec<String> = (0..columns)
+  let mut cells: Vec<String> = (0..columns)
     .map(|column| {
       row
         .get(column)
@@ -689,6 +755,13 @@ fn row_source(row: &[Cell], columns: usize) -> String {
         .unwrap_or_default()
     })
     .collect();
+  let written = format!("| {} |", cells.join(" | "));
+  if delimiter_row(&written).is_none() {
+    return written;
+  }
+  if let Some(first) = cells.first_mut() {
+    first.insert(0, '\\');
+  }
   format!("| {} |", cells.join(" | "))
 }
 
@@ -1470,6 +1543,18 @@ mod tests {
   mod tables {
     use super::*;
 
+    /// What a status bot posts: text before, a stray `, ` before the header's first pipe, a bottom
+    /// border, text after.
+    const BOT_STATUS: &str = "Status: 2026-11-09 11:35\n\
+      , | Module | Start | End |Active|\n\
+      |--------|-------|-----|------|\n\
+      |  Module A  | 2026-11-09 11:15 |   -   | yes |\n\
+      |  Module B  | 2026-11-09 01:22 | 2026-11-09 02:32 | yes |\n\
+      |  Module C  | 2026-09-01 05:33 | 2026-09-01 05:33 | yes |\n\
+      |--------|-------|-----|------|\n\
+      \n\
+      The importer is active";
+
     #[test]
     fn a_table_with_header_alignment_and_rows() {
       let blocks = parse(
@@ -1720,6 +1805,143 @@ mod tests {
         assert_eq!(read.first(), Some(&table));
         assert_eq!(read.last(), Some(&table));
       }
+    }
+
+    #[test]
+    fn bot_output_is_one_table_with_text_around_it() {
+      let blocks = parse(BOT_STATUS);
+      let [
+        Block::Paragraph(before),
+        Block::Table(table),
+        Block::Paragraph(after),
+      ] = blocks.as_slice()
+      else {
+        panic!("{blocks:?}");
+      };
+      assert_eq!(before, &[vec![text("Status: 2026-11-09 11:35")], vec![text(",")]]);
+      assert_eq!(
+        table.header,
+        [
+          vec![text("Module")],
+          vec![text("Start")],
+          vec![text("End")],
+          vec![text("Active")]
+        ]
+      );
+      assert_eq!(table.rows.len(), 3);
+      assert_eq!(table.rows[2][0], [text("Module C")]);
+      assert_eq!(after.last(), Some(&vec![text("The importer is active")]));
+    }
+
+    #[test]
+    fn a_header_with_another_cell_count_is_no_table_at_all() {
+      // Pipe-framed header with a cell too many: no column to drop, so the block stays text, and
+      // its last row over the bottom border doesn't become a table of its own.
+      let source = "| x | a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n|---|---|\nafter";
+      assert!(!parse(source).iter().any(|block| matches!(block, Block::Table(_))));
+      assert_eq!(readable_tables(source), source);
+      assert!(
+        !literal_with_tables(source)
+          .iter()
+          .any(|block| matches!(block, Block::Table(_)))
+      );
+    }
+
+    #[test]
+    fn a_stray_lead_is_dropped_only_before_a_framed_delimiter() {
+      let table = |source: &str| {
+        parse(source).into_iter().find_map(|block| match block {
+          Block::Table(table) => Some(table),
+          _ => None,
+        })
+      };
+      assert_eq!(
+        table("x | a | b |\n|---|---|\n| 1 | 2 |").map(|t| t.rows.len()),
+        Some(1)
+      );
+      // Without the delimiter's leading pipe, or with a lead that is the second of two extra
+      // cells, the counts don't match.
+      assert_eq!(table("x | a | b |\n---|---\n| 1 | 2 |"), None);
+      assert_eq!(table("x | y | a | b |\n|---|---|\n| 1 | 2 |"), None);
+      // An empty lead leaves no text behind.
+      assert!(matches!(
+        parse(" | a | b |\n|---|---|").as_slice(),
+        [Block::Table(_)]
+      ));
+    }
+
+    #[test]
+    fn a_last_row_without_a_newline_is_a_row() {
+      for source in [
+        "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |",
+        "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n",
+        "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n|---|---|",
+      ] {
+        assert_eq!(only_table(source).rows.len(), 2, "{source:?}");
+      }
+    }
+
+    #[test]
+    fn separators_between_rows_are_borders() {
+      let table = only_table("| a | b |\n|---|---|\n| 1 | 2 |\n|:-|-:|\n| 3 | 4 |");
+      assert_eq!(
+        table.rows,
+        [
+          vec![vec![text("1")], vec![text("2")]],
+          vec![vec![text("3")], vec![text("4")]]
+        ]
+      );
+    }
+
+    #[test]
+    fn wrapped_rows_never_split_into_a_second_table() {
+      // A long row broken onto the next line: the pieces stay rows of the one table.
+      let blocks = parse("| a | b |\n|---|---|\n| 1 | a long\ncell |\n| 2 | 3 |\n|---|---|");
+      let [Block::Table(table)] = blocks.as_slice() else {
+        panic!("{blocks:?}");
+      };
+      assert_eq!(table.rows.len(), 3);
+      // Broken without a pipe on the next line, the table ends there and the rest stays text.
+      let blocks = parse("| a | b |\n|---|---|\n| 1 | a long\nwrapped text | x | y\n| 2 | 3 |\n|---|---|");
+      assert_eq!(
+        blocks
+          .iter()
+          .filter(|block| matches!(block, Block::Table(_)))
+          .count(),
+        1,
+        "{blocks:?}"
+      );
+    }
+
+    #[test]
+    fn previews_and_pastes_read_bot_output_like_messages() {
+      assert_eq!(
+        readable_tables(BOT_STATUS),
+        "Status: 2026-11-09 11:35\n,\nModule · Start · End · Active\nModule A · 2026-11-09 11:15 · - · yes\n\
+         Module B · 2026-11-09 01:22 · 2026-11-09 02:32 · yes\nModule C · 2026-09-01 05:33 · 2026-09-01 05:33 · yes\n\
+         \nThe importer is active"
+      );
+      let blocks = literal_with_tables(BOT_STATUS);
+      assert!(matches!(
+        blocks.as_slice(),
+        [Block::Paragraph(_), Block::Table(_), Block::Paragraph(_)]
+      ));
+    }
+
+    #[test]
+    fn rows_and_lines_that_look_like_borders_read_back() {
+      let blocks = vec![
+        Block::Paragraph(vec![vec![text("x | y")]]),
+        Block::Table(Table {
+          alignments: vec![Alignment::Default, Alignment::Default],
+          header: vec![vec![text("a")], vec![text("b")]],
+          rows: vec![
+            vec![vec![text("---")], vec![text(":-:")]],
+            vec![vec![text("1")], vec![text("2")]],
+          ],
+        }),
+      ];
+      assert_eq!(parse(&to_source(&blocks)), blocks);
     }
 
     fn only_table(source: &str) -> Table {

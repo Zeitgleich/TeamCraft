@@ -10,10 +10,13 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -21,8 +24,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -101,7 +109,7 @@ fun MessageBody(
           }
         }
         is MarkupBlock.Code -> CodeBlock(block.code, textColor, colors.codeBackground)
-        is MarkupBlock.Table -> MarkupTable(block, textColor, bodyStyle) { line ->
+        is MarkupBlock.Table -> MarkupTable(block, textColor, colors.surface, bodyStyle) { line ->
           remember(line, colors, names) { annotatedLine(line, colors, names, links, permalinkLabel) }
         }
       }
@@ -128,12 +136,15 @@ private fun CodeBlock(code: String, textColor: Color, background: Color) {
 
 /**
  * A table on hairlines, the header in semibold on a light fill. Columns are as wide as their widest
- * cell up to [MAX_CELL_WIDTH] (longer text wraps); wider than the bubble, the table scrolls sideways.
+ * cell up to [MAX_CELL_WIDTH] (longer text wraps); wider than the bubble, the table scrolls sideways,
+ * and the edge it can scroll towards fades out so the cut-off columns read as more to come. Taller
+ * than [MAX_TABLE_HEIGHT], it scrolls inside the bubble under a header row that stays in view (#1602).
  */
 @Composable
 private fun MarkupTable(
   table: MarkupBlock.Table,
   textColor: Color,
+  surface: Color,
   bodyStyle: TextStyle,
   styled: @Composable (MarkupLine) -> AnnotatedString,
 ) {
@@ -147,7 +158,17 @@ private fun MarkupTable(
     fontFeatureSettings = "tnum",
   )
   val shape = RoundedCornerShape(CODE_CORNER)
-  Box(Modifier.border(1.dp, line, shape).clip(shape).horizontalScroll(rememberScrollState())) {
+  val scroll = rememberScrollState()
+  val verticalScroll = rememberScrollState()
+  Box(
+    Modifier
+      .border(1.dp, line, shape)
+      .clip(shape)
+      .scrollEdgeFade(scroll)
+      .heightIn(max = MAX_TABLE_HEIGHT)
+      .horizontalScroll(scroll)
+      .verticalScroll(verticalScroll),
+  ) {
     Layout(
       content = {
         rows.forEachIndexed { rowIndex, cells ->
@@ -160,7 +181,10 @@ private fun MarkupTable(
               textAlign = textAlign(table.alignments.getOrNull(column)),
               modifier = Modifier
                 .drawBehind {
-                  if (isHeader) drawRect(headerFill)
+                  if (isHeader) {
+                    drawRect(surface)
+                    drawRect(headerFill)
+                  }
                   if (rowIndex < rows.lastIndex) {
                     drawLine(line, Offset(0f, size.height - 0.5f), Offset(size.width, size.height - 0.5f), 1.dp.toPx())
                   }
@@ -190,9 +214,12 @@ private fun MarkupTable(
       layout(widths.sum(), heights.sum()) {
         var y = 0
         for (row in 0 until rowCount) {
+          // The header row follows the vertical scroll and draws above the rows passing under it.
+          val isHeader = row == 0
+          val rowY = if (isHeader) verticalScroll.value else y
           var x = 0
           for (column in 0 until columns) {
-            placeables[row * columns + column].place(x, y)
+            placeables[row * columns + column].place(x, rowY, zIndex = if (isHeader) 1f else 0f)
             x += widths[column]
           }
           y += heights[row]
@@ -220,7 +247,28 @@ private val BLOCK_GAP = 6.dp
 private val BODY_TRACKING = 0.15.sp
 private val QUOTE_BAR = 3.dp
 private val CODE_CORNER = 8.dp
+/** Fades out the left and right edge of a sideways scroller while there is more content beyond it. */
+private fun Modifier.scrollEdgeFade(scroll: ScrollState): Modifier =
+  graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen).drawWithContent {
+    drawContent()
+    val fade = SCROLL_EDGE_FADE.toPx().coerceAtMost(size.width / 2)
+    if (scroll.canScrollBackward) {
+      drawRect(
+        Brush.horizontalGradient(listOf(Color.Black, Color.Transparent), startX = 0f, endX = fade),
+        blendMode = BlendMode.DstOut,
+      )
+    }
+    if (scroll.canScrollForward) {
+      drawRect(
+        Brush.horizontalGradient(listOf(Color.Transparent, Color.Black), startX = size.width - fade, endX = size.width),
+        blendMode = BlendMode.DstOut,
+      )
+    }
+  }
+
 private val MAX_CELL_WIDTH = 240.dp
+private val MAX_TABLE_HEIGHT = 480.dp
+private val SCROLL_EDGE_FADE = 32.dp
 private const val TABLE_LINE_ALPHA = 0.2f
 private const val TABLE_HEADER_ALPHA = 0.06f
 private const val QUOTE_BAR_ALPHA = 0.45f
