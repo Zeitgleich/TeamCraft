@@ -367,7 +367,9 @@ when it is full, which used to be the rarely read one that mattered.
   workflow starts, and it is created with `gh release create ci-deps --prerelease --latest=false`: it
   must never become "Latest" (the desktop updater reads `releases/latest/download/latest.json`).
   The release logic only looks at `v<major>.<minor>.<patch>` tags: `nightly-release.yml` (last tag and
-  its release), `scripts/package-site.sh` and `scripts/fdroid-repo.py` (tag patterns), so they skip it.
+  its release), `scripts/package-site.sh` and `scripts/fdroid-repo.py` (tag patterns), so they skip it. `packages.yml` and `google-play.yml` run on `release: published`, so their jobs
+  have an `if` on a `v*` tag: without it creating the mirror release builds the site and fails the
+  Pages deploy.
 - **Bumping GStreamer:** download the new files from gstreamer.freedesktop.org, compute their SHA-256,
   update `scripts/gstreamer-pins.env`, upload the files to the `ci-deps` release
   (`gh release upload ci-deps <files>`; keep the old ones until the old pins are gone from all
