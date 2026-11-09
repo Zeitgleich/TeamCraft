@@ -176,18 +176,21 @@ jobs:
             exit 0
           fi
           if [ "$BUMP" = true ]; then
-            # Main requires `ci-gate` (repository ruleset), also for this push. The bump only changes
-            # version numbers of a tree whose CI was checked above, so the gate is set by hand: the
-            # commit goes to a helper branch first (a status needs a commit GitHub knows), then main.
+            # The release is the tree whose CI was checked above, nothing merged after this run
+            # started: the bump commit sits on that tree and is what gets tagged. Main requires
+            # `ci-gate` (repository ruleset), also for this push. The bump only changes version
+            # numbers, so the gate is set by hand: a commit goes to a helper branch first (a status
+            # needs a commit GitHub knows), then main.
             helper="nightly/bump-$VERSION"
             checked="$(git rev-parse HEAD)"
+            scripts/bump-version.sh "$VERSION"
+            # No skip marker in this message: GitHub would skip the release for a tag on it.
+            git commit -s -a -m "Release $VERSION" -m "Version bump of the nightly release (docs/release.md)."
+            release_commit="$(git rev-parse HEAD)"
             pushed=false
-            # Waiting for CI takes minutes and pull requests keep landing meanwhile, so the push can
-            # be rejected (non-fast-forward). Then the bump is made again on the new main.
+            # Pull requests may have landed while CI was awaited. Then main gets the same bump on top
+            # of them, but the tag stays on the checked tree: later merges go into the next release.
             for attempt in 1 2 3 4 5; do
-              scripts/bump-version.sh "$VERSION"
-              # No skip marker in this message: GitHub would skip the release for a tag on it.
-              git commit -s -a -m "Release $VERSION" -m "Version bump of the nightly release (docs/release.md)."
               # Forced: a run that broke after this step leaves the helper behind with another commit.
               git push --force origin "HEAD:refs/heads/$helper"
               gh api "repos/$GH_REPO/statuses/$(git rev-parse HEAD)" -f state=success -f context=ci-gate \
@@ -200,18 +203,20 @@ jobs:
               # Not a race (e.g. the ruleset refused the push): nothing moved, so retrying won't help.
               [ "$(git rev-parse "origin/$DEFAULT_BRANCH")" != "$(git rev-parse HEAD~1)" ] \
                 || { echo "::error::push to $DEFAULT_BRANCH refused"; exit 1; }
-              echo "::warning::$DEFAULT_BRANCH moved while the release was prepared (attempt $attempt); bumping again on top of it"
+              echo "::warning::$DEFAULT_BRANCH moved while the release was prepared (attempt $attempt); the bump goes on top of it, the release stays at $checked"
+              echo "commits merged after this run started (next release):"
+              git log --oneline "$checked..origin/$DEFAULT_BRANCH"
               git reset -q --hard "origin/$DEFAULT_BRANCH"
               [ "$(scripts/check-versions.sh)" = "${LAST_TAG#v}" ] \
                 || { echo "::error::the version changed on $DEFAULT_BRANCH meanwhile; run this workflow again"; exit 1; }
-              echo "commits that came after the checked CI run:"
-              git log --oneline "$checked..HEAD"
-              scripts/nightly-notes.py --since "$LAST_TAG" > highlights.md
+              git cherry-pick "$release_commit"
             done
             [ "$pushed" = true ] || { echo "::error::$DEFAULT_BRANCH kept moving; run this workflow again"; exit 1; }
             git push origin --delete "$helper"
+            git checkout -q "$release_commit"
           fi
-          # Annotated: the message becomes the release highlights. The tagged commit is the one pushed.
+          # Annotated: the message becomes the release highlights. The tagged commit is the checked tree
+          # (plus its bump), also when main got the bump on top of later merges.
           git tag --cleanup=whitespace -a -F highlights.md "v$VERSION"
           git push origin "v$VERSION"
           # Not started by the tag push (GITHUB_TOKEN): start it on the tag; `publish` publishes the
