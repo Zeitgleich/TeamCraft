@@ -146,6 +146,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         live.applied += 1;
       }
       applied += 1;
+      self.hand_back_thread().await;
     }
     if applied > 0 {
       tracing::debug!(applied, "catch-up: live events applied");

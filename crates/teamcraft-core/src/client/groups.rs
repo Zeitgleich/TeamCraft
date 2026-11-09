@@ -1358,6 +1358,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             current_epoch: page.current_epoch,
           });
         }
+        // A commit is a tree to verify and merge: the next one waits for the UI's turn.
+        self.hand_back_thread().await;
       }
       if !page.has_more || page.messages.is_empty() {
         return Ok(CatchUp {

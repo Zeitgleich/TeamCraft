@@ -421,7 +421,7 @@ async fn the_runner_reads_the_backlog_before_it_says_caught_up() {
   // A fresh session, so the runner's connection catches up.
   server.expire_sessions();
   let Peer { client, store, .. } = carol;
-  let (runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  let (runner, handle) = SyncRunner::new(client, unpaced(), Box::new(|| {}));
   let (caught_up, is_caught_up) = futures_channel::oneshot::channel();
   assert!(handle.send(RunnerCommand::CatchUp(caught_up)));
   let stop = async {
@@ -438,6 +438,121 @@ async fn the_runner_reads_the_backlog_before_it_says_caught_up() {
 
 /// Alice's channel with Carol, "before" in it, read by Carol; Carol reads pages of five and two of
 /// them in order before the newest.
+/// Issue #1575: a host that runs the client on the UI's thread (web) asks for turns. A catch-up of
+/// several conversations then hands the thread back between them and within a page of messages, so
+/// the UI reads half-caught-up state meanwhile instead of waiting for the end; without turns the
+/// same catch-up (against a server that answers at once) never lets it in.
+#[tokio::test]
+async fn a_catch_up_hands_the_thread_back_between_conversations_and_within_a_page() {
+  for is_taking_turns in [false, true] {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let turns = ClientSettings {
+      maybe_thread_turn: is_taking_turns.then_some(Duration::ZERO),
+      ..settings()
+    };
+    let mut carol = Peer::enroll_with(server.add_user("Carol"), "Carol", turns).await;
+    let channels = channels_with(&mut alice, carol.client.user_id(), 4).await;
+    settle(&mut [&mut alice, &mut carol]).await;
+    carol.client.full_sync().await.unwrap();
+    for channel in &channels {
+      send_many(&mut alice, *channel, "away", 10).await;
+    }
+    let store = carol.store.clone();
+    let seen = std::cell::RefCell::new(Vec::new());
+    let ui = async {
+      #[allow(clippy::infinite_loop, reason = "the UI reads until the sync is done")]
+      loop {
+        let counts: Vec<usize> = channels
+          .iter()
+          .map(|channel| texts(&*store, *channel).len())
+          .collect();
+        seen.borrow_mut().push(counts);
+        tokio::task::yield_now().await;
+      }
+    };
+    {
+      let sync = std::pin::pin!(carol.client.full_sync());
+      let ui = std::pin::pin!(ui);
+      match futures_util::future::select(sync, ui).await {
+        futures_util::future::Either::Left((synced, _)) => synced.unwrap(),
+        futures_util::future::Either::Right((never, _)) => match never {},
+      }
+    }
+    for channel in &channels {
+      assert_eq!(texts(&*store, *channel).len(), 11, "every message arrived");
+    }
+    let seen = seen.into_inner();
+    // A conversation through and the next one not yet begun.
+    let between = seen
+      .iter()
+      .any(|counts| counts.contains(&11) && counts.contains(&1));
+    // A conversation part way through its page.
+    let within = seen
+      .iter()
+      .any(|counts| counts.iter().any(|count| (2..11).contains(count)));
+    assert_eq!(
+      (between, within),
+      (is_taking_turns, is_taking_turns),
+      "taking turns: {is_taking_turns}, the UI saw {} states",
+      seen.len()
+    );
+  }
+}
+
+/// Issue #1575: the native runner reads a backlog's pages paced, with a pause of at least
+/// [`RunnerSettings::background_page_gap`] between two, instead of back to back: the app's reads
+/// on their own thread queued up behind the engine's pages for the whole backlog.
+#[tokio::test(start_paused = true)]
+async fn the_runner_reads_a_backlog_paced() {
+  let (clock, _) = crate::common::TokioClock::new();
+  let (server, mut alice, carol, channel) = busy_channel_on(Box::new(clock)).await;
+  send_many(&mut alice, channel, "busy", 30).await;
+  server.expire_sessions();
+  let Peer { client, store, .. } = carol;
+  let settings = RunnerSettings::default();
+  let gap = settings.background_page_gap;
+  let (runner, handle) = SyncRunner::new(client, settings, Box::new(|| {}));
+  let (caught_up, is_caught_up) = futures_channel::oneshot::channel();
+  assert!(handle.send(RunnerCommand::CatchUp(caught_up)));
+  let watch = async {
+    let mut arrivals = Vec::new();
+    let mut held = texts(store.as_ref(), channel).len();
+    let started = tokio::time::Instant::now();
+    while held < 31 {
+      assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "the backlog never arrived"
+      );
+      tokio::time::sleep(Duration::from_millis(1)).await;
+      let now_held = texts(store.as_ref(), channel).len();
+      if now_held != held {
+        arrivals.push(tokio::time::Instant::now());
+        held = now_held;
+      }
+    }
+    is_caught_up.await.unwrap();
+    assert!(handle.send(RunnerCommand::Stop));
+    arrivals
+  };
+  let (arrivals, _) = tokio::join!(watch, runner.run());
+  // The catch-up's own pages come at once; the backlog's after it, a gap apart.
+  let backlog_pages = &arrivals[arrivals.len().saturating_sub(3)..];
+  assert!(backlog_pages.len() >= 2, "arrivals: {arrivals:?}");
+  for pair in backlog_pages.windows(2) {
+    assert!(pair[1] - pair[0] >= gap, "pages {:?} apart", pair[1] - pair[0]);
+  }
+}
+
+/// The runner's settings for a test whose clock stands still: backlog pages paced by it would never
+/// come due.
+fn unpaced() -> RunnerSettings {
+  RunnerSettings {
+    background_page_gap: Duration::ZERO,
+    ..RunnerSettings::default()
+  }
+}
+
 async fn busy_channel() -> (FakeServer, Peer, Peer, ConversationId) {
   busy_channel_on(clock()).await
 }
