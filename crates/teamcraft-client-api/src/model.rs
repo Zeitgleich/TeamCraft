@@ -55,25 +55,58 @@ pub fn root_message_of(thread: ThreadId) -> MessageId {
 /// Milliseconds since the Unix epoch.
 pub type TimestampMs = i64;
 
-/// Presence state a user chose or the system derived.
+/// Presence state a user chose or the system derived (issue #1578: the Teams-style list).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PresenceStatus {
+  /// "Available": the automatic state while a device is in use.
   Online,
-  Away,
+  /// Set by hand, and automatically during a call or a meeting. Notifications still come.
+  Busy,
+  /// Holds notifications back (urgent ones excepted, notifications.md).
   DoNotDisturb,
+  /// A short absence, set by hand.
+  BeRightBack,
+  Away,
+  /// Offline, or "appear offline" for the user themself.
   Offline,
 }
 
 impl PresenceStatus {
-  pub const ALL: [PresenceStatus; 4] = [Self::Online, Self::Away, Self::DoNotDisturb, Self::Offline];
+  /// Every status, in the order the status pickers list them on every platform.
+  pub const ALL: [PresenceStatus; 6] = [
+    Self::Online,
+    Self::Busy,
+    Self::DoNotDisturb,
+    Self::BeRightBack,
+    Self::Away,
+    Self::Offline,
+  ];
 
   /// CSS modifier and stable identifier.
   pub fn slug(self) -> &'static str {
     match self {
       Self::Online => "online",
-      Self::Away => "away",
+      Self::Busy => "busy",
       Self::DoNotDisturb => "dnd",
+      Self::BeRightBack => "brb",
+      Self::Away => "away",
       Self::Offline => "offline",
+    }
+  }
+}
+
+impl From<&teamcraft_proto::PresenceState> for PresenceStatus {
+  /// What the server reported, as shown. A state from a newer server is still somebody who is
+  /// there (its wire form names a legacy state alongside, so this is rare).
+  fn from(state: &teamcraft_proto::PresenceState) -> Self {
+    use teamcraft_proto::PresenceState;
+    match state {
+      PresenceState::Online | PresenceState::Unknown(_) => Self::Online,
+      PresenceState::Busy => Self::Busy,
+      PresenceState::DoNotDisturb => Self::DoNotDisturb,
+      PresenceState::BeRightBack => Self::BeRightBack,
+      PresenceState::Away => Self::Away,
+      PresenceState::Offline => Self::Offline,
     }
   }
 }

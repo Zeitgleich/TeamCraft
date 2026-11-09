@@ -44,7 +44,9 @@ pub struct User {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresencePreference {
   pub manual: ManualPresence,
-  pub maybe_dnd_until: Option<OffsetDateTime>,
+  /// When the manual choice ends and presence is automatic again (column `dnd_until`, named when
+  /// only do-not-disturb could end).
+  pub maybe_until: Option<OffsetDateTime>,
 }
 
 /// A user after sign-in, with whether the default memberships still have to be applied.
@@ -375,7 +377,7 @@ impl Database {
     .await?;
     Ok(PresencePreference {
       manual: ManualPresence::from(row.presence_pref),
-      maybe_dnd_until: row.dnd_until,
+      maybe_until: row.dnd_until,
     })
   }
 
@@ -388,7 +390,7 @@ impl Database {
       "UPDATE users SET presence_pref = $2, dnd_until = $3 WHERE id = $1",
       to_db(user),
       preference.manual.as_str(),
-      preference.maybe_dnd_until,
+      preference.maybe_until,
     )
     .execute(self.pool())
     .await?;

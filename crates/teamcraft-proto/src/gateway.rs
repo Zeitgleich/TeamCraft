@@ -352,6 +352,8 @@ pub enum GatewayEvent {
   },
   PresenceUpdate {
     user_id: UserId,
+    /// Busy and be-right-back go as online/away plus `detailed_state` for older clients.
+    #[serde(flatten, with = "crate::state_with_detail")]
     state: PresenceState,
     /// The user's custom status; absent if none (or just cleared).
     #[serde(rename = "status", default, skip_serializing_if = "Option::is_none")]
@@ -754,5 +756,23 @@ mod tests {
       serde_json::to_string(&event).unwrap(),
       r#"{"type":"presence_update","user_id":"2","state":"dnd"}"#
     );
+  }
+
+  #[test]
+  fn a_busy_presence_update_names_its_legacy_state_for_older_clients() {
+    let event = GatewayEvent::PresenceUpdate {
+      user_id: UserId::from_snowflake(Snowflake::new(2).unwrap()),
+      state: PresenceState::Busy,
+      maybe_status: None,
+    };
+    let json = r#"{"type":"presence_update","user_id":"2","state":"online","detailed_state":"busy"}"#;
+    assert_eq!(serde_json::to_string(&event).unwrap(), json);
+    assert!(matches!(
+      serde_json::from_str::<GatewayEvent>(json).unwrap(),
+      GatewayEvent::PresenceUpdate {
+        state: PresenceState::Busy,
+        ..
+      }
+    ));
   }
 }

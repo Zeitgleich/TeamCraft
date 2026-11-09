@@ -45,7 +45,10 @@ pub struct DirectoryPerson {
   pub maybe_title: Option<String>,
   #[serde(rename = "department", default, skip_serializing_if = "Option::is_none")]
   pub maybe_department: Option<String>,
-  /// As of this answer; clients follow people they know through the gateway.
+  /// As of this answer; clients follow people they know through the gateway. Busy and
+  /// be-right-back go as online/away plus `detailed_presence` for older clients.
+  #[serde(flatten, with = "crate::presence_with_detail")]
+  #[schema(inline)]
   pub presence: PresenceState,
 }
 

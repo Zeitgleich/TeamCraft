@@ -239,7 +239,9 @@ notification for what arrives over it. In order:
    The conversation's quiet hours count as a mute while they are on ("Per-conversation filters").
 2. **Do not disturb** (manual, timed, or the weekly schedule): suppresses the push unless an override
    applies: the sender is on the user's allow list, or the message is urgent and the user lets urgent
-   messages through. Overrides apply to manual and scheduled DND alike.
+   messages through. Overrides apply to manual and scheduled DND alike. It is the only status that
+   holds notifications back: *busy* (by hand or during a call or meeting), *be right back* and *away*
+   notify as usual (#1578).
 3. **Attention**: no push while a phone of the user is in the foreground (it gets the event live). While
    the user is *at a desktop or web session* (attentive, or recently active on it; see below), pushes to
    phones wait for the grace delay and go out only if the message is still unread then. Push mode

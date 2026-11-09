@@ -52,6 +52,14 @@
   color: var(--text-muted);
 }
 
+/* The current status under the name (#1578): its dot, its name, until when. */
+.menu-user-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+}
+
 .menu-sep {
   height: 1px;
   margin: 6px 0;
