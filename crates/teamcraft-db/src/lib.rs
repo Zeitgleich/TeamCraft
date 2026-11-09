@@ -30,6 +30,7 @@ mod invite;
 mod key_bag;
 mod key_package;
 mod last_seen;
+mod leavers;
 mod local_account;
 mod meeting;
 mod meeting_notice;
@@ -106,6 +107,7 @@ pub use invite::{AppliedInvite, Invite, NewInvite};
 pub use key_bag::{KeyBag, KeyBagOutcome};
 pub use key_package::{AddPackagesOutcome, ClaimedPackage, KeyPackageCounts, NewKeyPackage};
 pub use last_seen::StoredLastSeen;
+pub use leavers::{LeaverClaim, StoredLeaver};
 pub use local_account::{LOCAL_ISSUER, LocalAccount, SessionLimits, SessionState};
 pub use meeting::{
   AttendeeDiff, AttendeeKey, LobbyRow, MeetingChanges, NewAttendee, NewMeeting, SharedInviteClaim,

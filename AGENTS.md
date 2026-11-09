@@ -16,6 +16,7 @@ Read before changing behaviour:
 | [PLAN.md](PLAN.md)                                       | Feature catalog with priorities, roadmap                      |
 | [docs/e2ee.md](docs/e2ee.md)                             | Encryption, devices, backup, push, search, compliance         |
 | [docs/admin.md](docs/admin.md)                           | Roles, admin actions without content access                   |
+| [docs/provisioning.md](docs/provisioning.md)             | Joiners and leavers from the identity provider                |
 | [docs/telephony.md](docs/telephony.md)                   | SIP trunk, AI hotline, agents                                 |
 | [docs/notifications.md](docs/notifications.md)           | Threads, unread counts, notifications, urgent                 |
 | [docs/bridge.md](docs/bridge.md)                         | Integration bridge: webhooks and logs into encrypted channels |

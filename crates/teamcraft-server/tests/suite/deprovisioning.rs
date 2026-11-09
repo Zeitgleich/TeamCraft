@@ -781,3 +781,194 @@ mod health {
     app.stop().await;
   }
 }
+
+/// Leavers for the admins' apps (docs/provisioning.md §3): who the provider deactivated, the claims
+/// that keep two devices off the same person, and the end of the list with the removal.
+mod leavers {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_leaver_is_listed_claimed_by_one_device_and_gone_after_the_removal() {
+    let (app, provider) = rig!(vec![fake_user("sub-carol", &["member"])]);
+    let carol = member("carol");
+    let carol_id = user_id(&app, &carol).await;
+    channel_with(&app, &[&carol]).await;
+    let carol_device = register_device(&app, &carol).await;
+    user_id(&app, &admin()).await;
+    let laptop = register_device(&app, &admin()).await;
+    let phone = register_device(&app, &admin()).await;
+    let mut admin_socket = connect(&app, &admin(), &laptop).await;
+    assert!(list(&app, &laptop).await.is_empty());
+
+    provider.update("sub-carol", |user| user.is_enabled = false);
+    assert_eq!(sync_once(&app.state).await.unwrap().deactivated, 1);
+
+    // The admins' apps are told, and the list names her.
+    assert!(
+      receives(&mut admin_socket, "leaver_update").await,
+      "no leaver_update"
+    );
+    let listed = list(&app, &laptop).await;
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["user_id"], carol_id);
+    assert_eq!(listed[0]["is_claimed"], false);
+    assert!(listed[0]["deactivated_for_secs"].as_u64().unwrap() < 60);
+
+    // One device claims her; the other is refused and sees the claim, the first renews it.
+    assert_eq!(
+      claim(&app, &carol_id, &laptop).await.status,
+      StatusCode::NO_CONTENT
+    );
+    let refused = claim(&app, &carol_id, &phone).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+    assert_eq!(refused.error_code(), "leaver_claimed");
+    assert_eq!(list(&app, &phone).await[0]["is_claimed"], true);
+    assert_eq!(list(&app, &laptop).await[0]["is_claimed"], false);
+    assert_eq!(
+      claim(&app, &carol_id, &laptop).await.status,
+      StatusCode::NO_CONTENT
+    );
+    let audit = audit_of(&app, &carol_id).await;
+    let claimed = audit
+      .iter()
+      .find(|entry| entry["action"] == "leaver_removal_claimed")
+      .expect("a claim in the audit log");
+    assert_eq!(detail_of(claimed)["device_id"], laptop);
+
+    // The app's removal ends it: her device is revoked and her tokens stay refused.
+    let removed = app
+      .post(
+        &admin(),
+        &format!("/admin/users/{carol_id}/remove-from-chats"),
+        json!({}),
+      )
+      .await;
+    assert_eq!(removed.status, StatusCode::NO_CONTENT, "{}", removed.body);
+    assert!(list(&app, &laptop).await.is_empty());
+    assert_eq!(
+      claim(&app, &carol_id, &laptop).await.error_code(),
+      "user_not_found"
+    );
+    assert_eq!(app.get(&carol, "/me").await.error_code(), "account_deactivated");
+    let devices = app
+      .get(&admin(), &format!("/admin/users/{carol_id}/devices"))
+      .await;
+    assert_eq!(devices.body["devices"][0]["id"], carol_device);
+    assert_eq!(devices.body["devices"][0]["is_revoked"], true);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_claim_that_ran_out_is_taken_over() {
+    let (app, provider) = rig!(vec![fake_user("sub-carol", &["member"])]);
+    let carol = member("carol");
+    let carol_id = user_id(&app, &carol).await;
+    channel_with(&app, &[&carol]).await;
+    let laptop = register_device(&app, &admin()).await;
+    let phone = register_device(&app, &admin()).await;
+    provider.update("sub-carol", |user| user.is_enabled = false);
+    sync_once(&app.state).await.unwrap();
+    assert_eq!(
+      claim(&app, &carol_id, &laptop).await.status,
+      StatusCode::NO_CONTENT
+    );
+
+    // The laptop crashed: its lease ran out.
+    teamcraft_db::testing::sqlx::query(
+      "UPDATE leaver_removal_claims SET claimed_until = now() - interval '1 second'",
+    )
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+    assert_eq!(list(&app, &phone).await[0]["is_claimed"], false);
+    assert_eq!(
+      claim(&app, &carol_id, &phone).await.status,
+      StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+      claim(&app, &carol_id, &laptop).await.error_code(),
+      "leaver_claimed"
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn only_provider_leavers_are_listed_and_only_admins_with_their_own_device_claim() {
+    let (app, _provider) = rig!(vec![
+      fake_user("sub-carol", &["member"]),
+      fake_user("sub-dave", &["member"])
+    ]);
+    let carol = member("carol");
+    let dave = member("dave");
+    let carol_id = user_id(&app, &carol).await;
+    channel_with(&app, &[&carol, &dave]).await;
+    let laptop = register_device(&app, &admin()).await;
+    let dave_device = register_device(&app, &dave).await;
+
+    // An admin's deactivation by hand is no leaver: the admin removes as a second step.
+    let reply = app
+      .post(
+        &admin(),
+        &format!("/admin/users/{carol_id}/deactivate"),
+        json!({"note": ""}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    assert!(list(&app, &laptop).await.is_empty());
+    assert_eq!(
+      claim(&app, &carol_id, &laptop).await.error_code(),
+      "user_not_found"
+    );
+
+    // Members see nothing and claim nothing; an admin can't claim with somebody else's device.
+    let as_member = app.get(&dave, "/admin/leavers").await;
+    assert_eq!(as_member.status, StatusCode::FORBIDDEN);
+    let reply = app
+      .post(
+        &dave,
+        &format!("/admin/leavers/{carol_id}/claim"),
+        json!({"device_id": dave_device}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert_eq!(
+      claim(&app, &carol_id, &dave_device).await.status,
+      StatusCode::FORBIDDEN
+    );
+    app.stop().await;
+  }
+
+  async fn list(app: &TestApp, device: &str) -> Vec<Value> {
+    let reply = app
+      .get(&admin(), &format!("/admin/leavers?device_id={device}"))
+      .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    reply.body["leavers"].as_array().unwrap().clone()
+  }
+
+  async fn claim(app: &TestApp, user: &str, device: &str) -> teamcraft_server::testing::Reply {
+    app
+      .post(
+        &admin(),
+        &format!("/admin/leavers/{user}/claim"),
+        json!({"device_id": device}),
+      )
+      .await
+  }
+
+  /// Whether a gateway event of `kind` arrives before the socket goes quiet.
+  async fn receives(socket: &mut Socket, kind: &str) -> bool {
+    loop {
+      match tokio::time::timeout(Duration::from_secs(3), socket.next()).await {
+        Ok(Some(Ok(Message::Text(text)))) => {
+          let frame: Value = serde_json::from_str(&text).unwrap();
+          if frame["event"]["type"] == kind {
+            return true;
+          }
+        },
+        Ok(Some(Ok(_))) => {},
+        _ => return false,
+      }
+    }
+  }
+}

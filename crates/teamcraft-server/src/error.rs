@@ -77,6 +77,9 @@ pub enum ApiError {
   /// An admin tried to delete their own account.
   #[error("admins can't delete their own account")]
   CannotDeleteSelf,
+  /// Another device is removing this leaver from the encryption groups.
+  #[error("another device is removing this leaver")]
+  LeaverClaimed,
   /// Deleting the account would leave the workspace without an active admin.
   #[error("the workspace must keep at least one active admin")]
   LastAdmin,
@@ -411,6 +414,7 @@ impl ApiError {
       | Self::AdminJoinRequestTooSoon
       | Self::CallDeviceLimit { .. }
       | Self::CannotDeleteSelf
+      | Self::LeaverClaimed
       | Self::LastAdmin
       | Self::LastChannelAdmin
       | Self::LastMember
@@ -464,6 +468,7 @@ impl ApiError {
       Self::Conflict(_) => ErrorCode::Conflict,
       Self::LastOwner => ErrorCode::LastOwner,
       Self::CannotDeleteSelf => ErrorCode::CannotDeleteSelf,
+      Self::LeaverClaimed => ErrorCode::LeaverClaimed,
       Self::LastAdmin => ErrorCode::LastAdmin,
       Self::LastChannelAdmin => ErrorCode::LastChannelAdmin,
       Self::LastMember => ErrorCode::LastMember,
@@ -756,6 +761,11 @@ mod tests {
         ErrorCode::CannotDeleteSelf,
       ),
       (ApiError::LastAdmin, StatusCode::CONFLICT, ErrorCode::LastAdmin),
+      (
+        ApiError::LeaverClaimed,
+        StatusCode::CONFLICT,
+        ErrorCode::LeaverClaimed,
+      ),
       (
         ApiError::ImportNotAllowed,
         StatusCode::FORBIDDEN,

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM identity_provider_leavers WHERE user_id = $1) AS \"leaver!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "leaver!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2774800a13050f0f08578ad3d290854861434f6d494b52a67131a9f8f2f8c97b"
+}

@@ -39,6 +39,8 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     ))
     .routes(routes!(handlers::admin_assign_channel_owner_handler))
     .routes(routes!(handlers::admin_health_handler))
+    .routes(routes!(handlers::admin_list_leavers_handler))
+    .routes(routes!(handlers::admin_claim_leaver_handler))
     .routes(routes!(handlers::admin_oidc_sync_status_handler))
     .routes(routes!(handlers::admin_oidc_sync_preview_handler))
     .routes(routes!(handlers::admin_oidc_sync_confirm_brake_handler))

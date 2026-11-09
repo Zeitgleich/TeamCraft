@@ -3,6 +3,7 @@
 mod admin;
 mod admin_health;
 mod admin_join_requests;
+mod admin_leavers;
 mod admin_oidc_sync;
 mod admin_settings;
 mod announcements;
@@ -50,6 +51,7 @@ mod workspace;
 pub use admin::*;
 pub use admin_health::*;
 pub use admin_join_requests::*;
+pub use admin_leavers::*;
 pub use admin_oidc_sync::*;
 pub use admin_settings::*;
 pub use announcements::*;

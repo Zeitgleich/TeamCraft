@@ -145,6 +145,21 @@ policy-voice-messages = Sprachnachrichten
 policy-voice-messages-enabled = Sprachnachrichten erlauben
 policy-voice-messages-enabled-hint = Personen können im Eingabefeld eine Sprachnachricht aufnehmen. Sie wird wie jede Audiodatei Ende-zu-Ende-verschlüsselt gesendet. Aus: Die Aufnahmetaste fehlt; Audiodateien lassen sich weiterhin anhängen.
 policy-voice-messages-max = Längste Sprachnachricht
+policy-leavers = Personen, die gehen
+policy-leavers-hint = Deaktiviert oder löscht der Identity Provider jemanden, sperrt TeamCraft die Person sofort. Aus den verschlüsselten Chats entfernen kann sie nur die App eines Owners oder Admins, die die Entfernung signiert; die Apps der Mitglieder wechseln danach die Schlüssel.
+policy-leavers-automatic = Ausgeschiedene automatisch aus allen Chats entfernen
+policy-leavers-automatic-hint = Die App eines Owners oder Admins erledigt das selbst, sobald die Wartezeit vorbei ist. Owner und Admins werden so nie entfernt. Aus: Die Seite „Benutzer“ listet sie, und ein Admin entfernt sie von Hand.
+policy-leavers-grace = Wartezeit nach der Deaktivierung
+policy-leavers-at-once = Sofort
+policy-leavers-limit = Höchstens pro Gerät und Tag
+policy-leavers-people = { $count ->
+    [one] { $count } Person
+   *[other] { $count } Personen
+  }
+policy-hours = { $count ->
+    [one] { $count } Stunde
+   *[other] { $count } Stunden
+  }
 policy-recovery = Organisations-Wiederherstellung
 policy-recovery-hint = Erlaubt Admins, den Zugang wiederherzustellen, wenn jemand alle Geräte und den Passkey verliert.
 policy-recovery-members = Für Mitglieder erlauben

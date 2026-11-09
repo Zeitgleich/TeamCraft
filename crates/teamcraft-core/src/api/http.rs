@@ -816,6 +816,39 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn admin_list_leavers(
+    &self,
+    query: &teamcraft_proto::ListLeaversQuery,
+  ) -> Result<teamcraft_proto::ListLeaversResponse, ApiError> {
+    let mut params = Vec::new();
+    if let Some(after) = query.maybe_after {
+      params.push(format!("after={after}"));
+    }
+    if let Some(device) = query.maybe_device_id {
+      params.push(format!("device_id={device}"));
+    }
+    let query = if params.is_empty() {
+      String::new()
+    } else {
+      format!("?{}", params.join("&"))
+    };
+    self.get(&format!("/admin/leavers{query}")).await
+  }
+
+  async fn admin_claim_leaver(
+    &self,
+    user: UserId,
+    request: &teamcraft_proto::ClaimLeaverRequest,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response(
+        Method::POST,
+        &format!("/admin/leavers/{user}/claim"),
+        Some(request),
+      )
+      .await
+  }
+
   async fn admin_delete_user(&self, user: UserId) -> Result<(), ApiError> {
     self
       .send_without_response::<()>(Method::DELETE, &format!("/admin/users/{user}"), None)

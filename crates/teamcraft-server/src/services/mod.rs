@@ -34,6 +34,7 @@ pub mod inactivity;
 pub mod invites;
 pub mod key_bag;
 pub mod key_packages;
+pub mod leavers;
 pub mod local_accounts;
 pub mod mail_settings;
 pub mod meeting_admitters;

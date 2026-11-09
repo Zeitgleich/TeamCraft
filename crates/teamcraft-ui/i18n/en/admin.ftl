@@ -145,6 +145,21 @@ policy-voice-messages = Voice messages
 policy-voice-messages-enabled = Allow voice messages
 policy-voice-messages-enabled-hint = People can record a voice message in the composer. It is sent end-to-end encrypted like any audio file. Off: the record button is gone; audio files can still be attached.
 policy-voice-messages-max = Longest voice message
+policy-leavers = People who leave
+policy-leavers-hint = When the identity provider disables or deletes somebody, TeamCraft suspends them at once. Taking them out of the encrypted chats needs an owner's or admin's app, which signs the removal; the members' apps then change the keys.
+policy-leavers-automatic = Remove leavers from all chats automatically
+policy-leavers-automatic-hint = The app of an owner or admin does it on its own once the waiting time has passed. Owners and admins are never removed this way. Off: the Users page lists them, and an admin removes them by hand.
+policy-leavers-grace = Waiting time after the deactivation
+policy-leavers-at-once = At once
+policy-leavers-limit = At most per device and day
+policy-leavers-people = { $count ->
+    [one] { $count } person
+   *[other] { $count } people
+  }
+policy-hours = { $count ->
+    [one] { $count } hour
+   *[other] { $count } hours
+  }
 policy-recovery = Organization recovery
 policy-recovery-hint = Lets admins restore access when someone loses all devices and their passkey.
 policy-recovery-members = Allow for members

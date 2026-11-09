@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT l.user_id AS \"user_id!\", l.deactivated_at AS \"deactivated_at!\",\n                COALESCE(c.claimed_until > now() AND c.device_id IS DISTINCT FROM $2, false) AS \"is_claimed!\"\n         FROM identity_provider_leavers l\n         LEFT JOIN leaver_removal_claims c ON c.user_id = l.user_id\n         WHERE l.user_id > $1\n         ORDER BY l.user_id\n         LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "identity_provider_leavers",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "deactivated_at!",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "identity_provider_leavers",
+            "name": "deactivated_at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "is_claimed!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "1e820fbec26d9d2cc91237e377858178d9a0c920b146d7fc755c6f3e66d41d32"
+}

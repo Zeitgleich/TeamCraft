@@ -89,6 +89,8 @@ wire_enum! {
     LastOwner => "last_owner",
     /// An admin can't delete their own account.
     CannotDeleteSelf => "cannot_delete_self",
+    /// Another device is removing this leaver from the encryption groups (docs/provisioning.md §3.2).
+    LeaverClaimed => "leaver_claimed",
     /// Deleting the account would leave the workspace without an active admin.
     LastAdmin => "last_admin",
     /// The last channel admin of an active channel with others in it hands the role on first, or
@@ -357,6 +359,7 @@ mod tests {
       ErrorCode::VersionConflict,
       ErrorCode::LastOwner,
       ErrorCode::CannotDeleteSelf,
+      ErrorCode::LeaverClaimed,
       ErrorCode::LastAdmin,
       ErrorCode::CallDeviceLimit,
       ErrorCode::GuestDmNotAllowed,

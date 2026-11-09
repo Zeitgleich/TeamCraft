@@ -720,6 +720,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.note_role_evidence_update();
         Ok(())
       },
+      GatewayEvent::LeaverUpdate => {
+        self.note_leaver_update();
+        Ok(())
+      },
       GatewayEvent::ChannelRolesUpdate { conversation_id, .. } => {
         self.sync_channel_roles(conversation_id).await
       },
