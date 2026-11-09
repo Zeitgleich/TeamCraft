@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+use crate::admission::{Admission, admission};
 use crate::areas::{self, Place, lazy_area};
 use crate::calls::{CallKind, CallPhase, CallRequest};
 use crate::channel_access::ChannelAccess;
@@ -255,7 +256,7 @@ fn DeviceAccessBanner(conversation: ConversationId) -> impl IntoView {
             issue,
             MembershipIssue::EncryptionSetup { .. }
               | MembershipIssue::EncryptionSetupFailed
-              | MembershipIssue::WaitingForAdmission
+              | MembershipIssue::WaitingForAdmission { .. }
           )
         })
     })
@@ -366,7 +367,13 @@ fn MembershipIssueBanners(conversation: ConversationId, info: Memo<Option<Conver
           ),
           MembershipIssue::EncryptionSetup { .. } => ("status", i18n.t("dm-setup-pending"), None),
           MembershipIssue::EncryptionSetupFailed => ("alert", i18n.t("dm-setup-failed"), None),
-          MembershipIssue::WaitingForAdmission => ("status", i18n.t("waiting-for-admission"), None),
+          // Whether a member is online to let this device in, live from presence (issue #908).
+          MembershipIssue::WaitingForAdmission { .. } => {
+            let key = state
+              .read(|backend| admission(backend, conversation))
+              .map_or("waiting-for-admission", Admission::banner_text_key);
+            ("status", i18n.t(key), None)
+          },
           MembershipIssue::ImportInProgress { importer } => (
             "status",
             i18n.t_with("import-in-progress", &[("name", &name_of(importer))]),

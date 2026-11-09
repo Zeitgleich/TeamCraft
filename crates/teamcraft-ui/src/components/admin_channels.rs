@@ -5,6 +5,7 @@ use teamcraft_proto::{ChannelModeration, HistoryPolicy, Permission};
 use crate::admin::{
   AdminChannel, AdminChannelFilter, AdminChannelQuery, AdminLoad, SelfJoinOutcome, format_bytes,
 };
+use crate::admission::{Admission, admission};
 use crate::channel_access::ChannelAccess;
 use crate::clock::{format_relative, now_ms};
 use crate::components::admin_console::{ListMore, SectionHeader};
@@ -16,7 +17,7 @@ use crate::components::sliding_indicator::SlidingIndicator;
 use crate::components::workspace_dialogs::DeleteChannelSection;
 use crate::feedback::PendingAction;
 use crate::i18n::{I18n, use_i18n};
-use crate::model::{ConversationId, ConversationKind, MembershipIssue, UserId};
+use crate::model::{ConversationId, ConversationKind, UserId};
 use crate::reactive::use_debounced;
 use crate::state::{AppState, use_app_state};
 
@@ -525,14 +526,15 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
     </p>
     <div class="detail-actions">
       {move || {
-        // Only for an admin who isn't in the channel yet, or whose device no member let in (a
-        // refused self-join asks again from here, issue #907).
-        let join = admin_join_state(state, id);
-        (is_private && join != AdminJoinState::Joined).then(|| {
-          let label = match join {
-            AdminJoinState::Waiting => "admin-join-again",
-            AdminJoinState::NotMember | AdminJoinState::Joined => "admin-join",
-          };
+        // Only for an admin who isn't in the channel yet, or whose device no member let in within
+        // the retry interval (a refused self-join asks again from here, issues #907, #908). While
+        // the request is being taken care of there is nothing to press.
+        let label = match admin_join_state(state, id) {
+          AdminJoinState::NotMember => "admin-join",
+          AdminJoinState::Waiting(admission) if admission.can_ask_again() => "admin-join-again",
+          AdminJoinState::Waiting(_) | AdminJoinState::Joined => return None,
+        };
+        is_private.then(|| {
           view! {
             <button class="btn" on:click=move |_| outcome.set(Some(state.write(|backend| backend.admin_join_channel(id))))>
               {move || i18n.t(label)}
@@ -578,25 +580,18 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
       <DeleteChannelSection conversation=id on_deleted=Callback::new(move |()| state.write(|backend| backend.admin_refresh())) />
     </Show>
     <p class="status-line" role="status">
-      {move || {
-        outcome
-          .get()
-          .map(|result| match result {
-            SelfJoinOutcome::Joined => i18n.t("admin-join-done"),
-            SelfJoinOutcome::ApprovalRequested => i18n.t("admin-join-approval"),
-            SelfJoinOutcome::Disabled => i18n.t("admin-join-disabled"),
-          })
-      }}
+      {move || is_private.then(|| join_status_text(i18n, admin_join_state(state, id), outcome.get())).flatten()}
     </p>
   }
 }
 
-/// Where the admin viewing the console stands in a channel.
+/// Where the admin viewing the console stands in a channel, live: membership, presence and the
+/// self-add's progress come from gateway events (issue #908).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AdminJoinState {
   NotMember,
-  /// A member whose device asked to be let into the encryption group and waits.
-  Waiting,
+  /// A member on the server whose device asked to be let into the encryption group and waits.
+  Waiting(Admission),
   Joined,
 }
 
@@ -605,15 +600,32 @@ fn admin_join_state(state: AppState, channel: ConversationId) -> AdminJoinState 
     if backend.conversation(channel).is_none() {
       return AdminJoinState::NotMember;
     }
-    let is_waiting = backend
-      .membership_issues(channel)
-      .contains(&MembershipIssue::WaitingForAdmission);
-    if is_waiting {
-      AdminJoinState::Waiting
-    } else {
-      AdminJoinState::Joined
-    }
+    admission(backend, channel).map_or(AdminJoinState::Joined, AdminJoinState::Waiting)
   })
+}
+
+/// What the channel details say about the admin's join: what happens now, not that somebody has
+/// to decide, except under `owner_approval` where the owners really do (admin.md §2.4).
+fn join_status_text(
+  i18n: I18n,
+  join: AdminJoinState,
+  maybe_outcome: Option<SelfJoinOutcome>,
+) -> Option<String> {
+  match (join, maybe_outcome) {
+    (AdminJoinState::Waiting(admission), _) => Some(i18n.t(match admission {
+      Admission::Adding => "admin-join-adding",
+      Admission::NoMemberOnline => "admin-join-no-member-online",
+      Admission::NotYetAdded => "admin-join-not-yet",
+    })),
+    (AdminJoinState::Joined, _) => Some(i18n.t("admin-join-member")),
+    // The server hasn't listed the membership yet: the request is on its way.
+    (AdminJoinState::NotMember, Some(SelfJoinOutcome::Adding)) => Some(i18n.t("admin-join-adding")),
+    (AdminJoinState::NotMember, Some(SelfJoinOutcome::ApprovalRequested)) => {
+      Some(i18n.t("admin-join-approval"))
+    },
+    (AdminJoinState::NotMember, Some(SelfJoinOutcome::Disabled)) => Some(i18n.t("admin-join-disabled")),
+    (AdminJoinState::NotMember, None) => None,
+  }
 }
 
 /// Picks a new owner for a channel without one, from its members (admin.md §2.5).

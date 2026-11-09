@@ -44,11 +44,19 @@ pub fn is_waiting_for_admission(
   store: &impl LocalStore,
   conversation: ConversationId,
 ) -> Result<bool, CoreError> {
-  Ok(
-    store
-      .get(Table::SyncState, &self_add_key(conversation))?
-      .is_some(),
-  )
+  Ok(self_add_attempts(store, conversation)?.is_some())
+}
+
+/// How many self-adds this device posted to the conversation while it isn't in its encryption
+/// group: `None` when it doesn't wait. More than one means no member let it in within
+/// `self_add_retry` (refused, or nobody committed it), which the UI says (issue #908).
+pub fn self_add_attempts(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<Option<u32>, CoreError> {
+  let maybe_record: Option<SelfAddRecord> =
+    records::get_json(store, Table::SyncState, &self_add_key(conversation))?;
+  Ok(maybe_record.map(|record| record.attempts.max(1)))
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {

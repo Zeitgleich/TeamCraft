@@ -777,11 +777,11 @@ impl AdminBackend for MockBackend {
   fn admin_join_channel(&self, channel: ConversationId) -> SelfJoinOutcome {
     let mut ops = self.ops.borrow_mut();
     let outcome = match ops.policy.admin_self_join {
-      AdminSelfJoinWire::Visible => SelfJoinOutcome::Joined,
+      AdminSelfJoinWire::Visible => SelfJoinOutcome::Adding,
       AdminSelfJoinWire::OwnerApproval => SelfJoinOutcome::ApprovalRequested,
       AdminSelfJoinWire::Disabled | AdminSelfJoinWire::Unknown(_) => SelfJoinOutcome::Disabled,
     };
-    if outcome == SelfJoinOutcome::Joined
+    if outcome == SelfJoinOutcome::Adding
       && let Some(name) = ops
         .channels
         .iter()
@@ -1359,7 +1359,7 @@ mod tests {
   fn self_join_follows_the_policy() {
     let backend = MockBackend::new(NOW);
     let channel = id_from_raw(41);
-    assert_eq!(backend.admin_join_channel(channel), SelfJoinOutcome::Joined);
+    assert_eq!(backend.admin_join_channel(channel), SelfJoinOutcome::Adding);
     let (_, mut policy) = backend.workspace_policy();
     policy.admin_self_join = AdminSelfJoinWire::Disabled;
     backend.set_workspace_policy(policy);
