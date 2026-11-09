@@ -46,7 +46,7 @@ struct SpaceViewsView: View {
           ToolbarItem(placement: .principal) {
             HStack(spacing: 8) {
               SpacePictureView(spaceId: space.id, maybeVersion: space.maybeImageVersion, size: 28)
-              Text(space.name).font(.headline).lineLimit(1)
+              Text(space.name).font(.app(.headline)).lineLimit(1)
             }
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
@@ -118,7 +118,7 @@ private struct SpacePeopleList: View {
               VStack(alignment: .leading) {
                 Text(member.displayName)
                 if member.isGuest == true {
-                  Text("space_person_guest").font(.caption).foregroundStyle(Theme.textMuted)
+                  Text("space_person_guest").font(.app(.caption)).foregroundStyle(Theme.textMuted)
                 }
               }
             }
@@ -182,12 +182,12 @@ private struct SpaceCallsList: View {
     let name = names[call.conversation] ?? ""
     return HStack {
       VStack(alignment: .leading) {
-        Text(name).font(.headline)
+        Text(name).font(.app(.headline))
         HStack(spacing: 4) {
           Text(call.directionTitle)
           Text(call.startDate.formatted(date: .abbreviated, time: .shortened))
         }
-        .font(.subheadline)
+        .font(.app(.subheadline))
         .foregroundStyle(Theme.textMuted)
       }
       Spacer()
@@ -256,7 +256,7 @@ private struct SpaceSavedList: View {
               onOpen(item.message.conversation)
             } label: {
               VStack(alignment: .leading, spacing: 4) {
-                Text(item.listName).font(.caption).foregroundStyle(Theme.accent)
+                Text(item.listName).font(.app(.caption)).foregroundStyle(Theme.accent)
                 Text(item.message.body).lineLimit(3)
               }
             }

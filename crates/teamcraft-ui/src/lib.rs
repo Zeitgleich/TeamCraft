@@ -40,6 +40,7 @@ pub mod emoji_support;
 pub mod entry_actions;
 pub mod feed_motion;
 pub mod feedback;
+pub mod fonts;
 pub mod form_errors;
 pub mod gestures;
 // Shared with the mobile apps (through the FFI), so they live in the client API.

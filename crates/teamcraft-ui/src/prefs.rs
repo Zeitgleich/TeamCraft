@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use teamcraft_client_api::color_theme::ColorTheme;
 use teamcraft_client_api::files_query::{FileSort, StarredFile};
+use teamcraft_client_api::font::UiFont;
 use teamcraft_client_api::message_sound::{MessageSound, OwnSoundLimits};
 use teamcraft_proto::{ChannelMentions, DndWindow, Weekday};
 
@@ -597,6 +598,8 @@ pub struct DisplayPrefs {
   /// The colours of the rail, sidebar, top bar and accent (#202); follows the account. Light or
   /// dark stays the device's (`Settings::theme`).
   pub color_theme: ColorTheme,
+  /// The interface font (#1494, fonts.rs); follows the account.
+  pub font: UiFont,
 }
 
 impl Default for DisplayPrefs {
@@ -610,6 +613,7 @@ impl Default for DisplayPrefs {
       text_size: TextSize::DEFAULT,
       maybe_divider_dwell_secs: Some(DEFAULT_DIVIDER_DWELL_SECS),
       color_theme: ColorTheme::Brand,
+      font: UiFont::System,
     }
   }
 }

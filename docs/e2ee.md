@@ -3757,12 +3757,13 @@ restored together with them on a new device.
   values); settings the server enforces (push, do not disturb, conversation and space mutes, read
   receipts) stay with the server and aren't copied here. Light, dark or as the system stays on
   each device, since it follows the room and the screen; the colour theme (#202,
-  `display.color_theme`: `brand`, `preset:<id>` or `custom:<four hex colours>`) syncs.
+  `display.color_theme`: `brand`, `preset:<id>` or `custom:<four hex colours>`) and the interface
+  font (#1494, `display.font`: `system` or a font's id) sync.
   An entry an older client wrote for a key no client reads any more (`theme`) stays as an unknown
   key.
   - *Mobile:* the apps sync the list layout and grouping, animated images, sharing typing, the
     mention rules (first name, `@channel`, keywords, the `@channel` confirmation), call status
-    sounds and the colour theme. The send key, language, wallpaper colours, notification content, media downloads and
+    sounds, the colour theme and the font. The send key, language, wallpaper colours, notification content, media downloads and
     devices stay on the phone. The app hands its values to the core (`sync_settings`) at start,
     when `settings_mark` moved after a store change, and 1.5 s after the user changed one, and
     stores an opaque state (owner and per-setting bases) next to its settings. A phone holds one
@@ -4910,7 +4911,8 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   loaded (so guests never download the signed-in app), checks it against the signed hash in the
   version's verified file list and only then stores and serves it. Files only some people use are
   also listed in `on_demand` (the background effects' segmentation worker and model and the photo
-  backgrounds' full pictures, #439; and the files in the signed-in app's pack, below): the
+  backgrounds' full pictures, #439; the interface fonts, #1494; and the files in the signed-in
+  app's pack, below): the
   worker skips them in the background fetch. A server that edits `lazy` or `on_demand` only
   changes when a file is downloaded, never what runs. A chunk that doesn't match its hash isn't
   served, and the pages warn as for a release that doesn't verify.

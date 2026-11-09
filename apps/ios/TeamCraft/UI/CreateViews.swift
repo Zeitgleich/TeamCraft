@@ -74,7 +74,7 @@ private struct AccessOption: View {
     Label {
       VStack(alignment: .leading, spacing: 2) {
         Text(title)
-        Text(hint).font(.footnote).foregroundStyle(Theme.textMuted)
+        Text(hint).font(.app(.footnote)).foregroundStyle(Theme.textMuted)
       }
     } icon: {
       Image(systemName: symbol)

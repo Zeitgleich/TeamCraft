@@ -13,9 +13,9 @@ struct NotificationPromptCard: View {
     if model.pushStatus == .unknown && !hasAnswered {
       VStack(alignment: .leading, spacing: 8) {
         Label("notification_prompt_title", systemImage: "bell.fill")
-          .font(.headline)
+          .font(.app(.headline))
           .foregroundStyle(Theme.text)
-        Text("notification_prompt_text").font(.subheadline).foregroundStyle(Theme.textMuted)
+        Text("notification_prompt_text").font(.app(.subheadline)).foregroundStyle(Theme.textMuted)
         HStack {
           Spacer()
           Button("not_now") { hasAnswered = true }

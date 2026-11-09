@@ -231,7 +231,7 @@ struct ChatPane: View {
         } icon: {
           Image(systemName: "key")
         }
-        .font(.footnote)
+        .font(.app(.footnote))
         .foregroundStyle(Theme.textMuted)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal)
@@ -249,7 +249,7 @@ struct ChatPane: View {
             forward: { file in maybeForwardingImage = file }))
       if let line = typingText(typingNames(in: model.typingNow, conversation: conversation.id, thread: threadId)) {
         Text(line)
-          .font(.caption.italic())
+          .font(.app(.caption).italic())
           .foregroundStyle(Theme.textMuted)
           .lineLimit(1)
           .frame(maxWidth: .infinity, alignment: .leading)
@@ -360,10 +360,10 @@ struct ChatPane: View {
             if !hasOlder && serverHistory == .failed {
               HStack {
                 Text("older_history_failed")
-                  .font(.footnote)
+                  .font(.app(.footnote))
                   .foregroundStyle(.secondary)
                 Button("older_history_retry") { Task { await loadOlder() } }
-                  .font(.footnote)
+                  .font(.app(.footnote))
               }
               .frame(maxWidth: .infinity)
               .padding(.vertical, 8)
@@ -485,14 +485,14 @@ struct ChatPane: View {
     if gap.status == .failed {
       HStack {
         Text("history_gap_failed")
-          .font(.footnote)
+          .font(.app(.footnote))
           .foregroundStyle(.secondary)
         Button("older_history_retry") {
           // From the side the reader is on now.
           let firstVisible = messages.firstIndex(where: { rowsOnScreen.contains($0.id) }) ?? 0
           fillGap(gap, from: gapEdge(gap, firstVisible: firstVisible))
         }
-        .font(.footnote)
+        .font(.app(.footnote))
       }
       .frame(maxWidth: .infinity)
       .padding(.vertical, 8)
@@ -501,7 +501,7 @@ struct ChatPane: View {
         ProgressView()
           .controlSize(.small)
         Text("history_gap_loading")
-          .font(.footnote)
+          .font(.app(.footnote))
           .foregroundStyle(.secondary)
       }
       .accessibilityElement(children: .combine)
@@ -592,7 +592,7 @@ struct ChatPane: View {
       .padding(.vertical, 8)
       .background(.bar)
     } else {
-      Text(LocalizedStringKey(conversation.isArchived ? "read_only_archived" : "read_only_channel")).font(.footnote).foregroundStyle(Theme.textMuted).padding()
+      Text(LocalizedStringKey(conversation.isArchived ? "read_only_archived" : "read_only_channel")).font(.app(.footnote)).foregroundStyle(Theme.textMuted).padding()
     }
   }
 
@@ -616,7 +616,7 @@ struct ChatPane: View {
       } else {
         Button { Task { await submit() } } label: {
           Image(systemName: maybeEditing == nil ? "arrow.up" : "checkmark")
-            .font(.body.weight(.semibold))
+            .font(.app(.body).weight(.semibold))
             .foregroundStyle(canSubmit ? Theme.onAccent : Theme.textMuted)
             .frame(width: 44, height: 44)
             .background(canSubmit ? Theme.accent : Theme.surface, in: Circle())
@@ -683,7 +683,7 @@ struct ChatPane: View {
   /// An icon button inside the composer field: 44 pt to tap, in the muted colour.
   private func composerIcon(_ systemName: String) -> some View {
     Image(systemName: systemName)
-      .font(.body)
+      .font(.app(.body))
       .foregroundStyle(Theme.textMuted)
       .frame(width: 40, height: 44)
       .contentShape(Rectangle())
@@ -724,8 +724,8 @@ struct ChatPane: View {
       }
       VStack(alignment: .leading, spacing: 2) {
         Text("replying_to \(reply.authorName(from: displayNames))")
-          .font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
-        Text(verbatim: reply.excerpt).font(.caption).foregroundStyle(Theme.textMuted).lineLimit(1)
+          .font(.app(.caption).weight(.semibold)).foregroundStyle(Theme.accent)
+        Text(verbatim: reply.excerpt).font(.app(.caption)).foregroundStyle(Theme.textMuted).lineLimit(1)
       }
       Spacer()
       Button { maybeReply = nil } label: { Image(systemName: "xmark.circle.fill") }
@@ -758,7 +758,7 @@ struct ChatPane: View {
       .frame(width: 56, height: 56)
       .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
       .overlay(alignment: .bottomLeading) {
-        Image(systemName: "crop.rotate").font(.caption2).padding(4)
+        Image(systemName: "crop.rotate").font(.app(.caption2)).padding(4)
           .foregroundStyle(.white).background(.black.opacity(0.5), in: Circle()).padding(3)
       }
     }
@@ -778,7 +778,7 @@ struct ChatPane: View {
   private func fileChip(_ file: PickedFile) -> some View {
     Button { removeAttachment(file) } label: {
       Label(file.fileName, systemImage: "xmark.circle.fill")
-        .labelStyle(.titleAndIcon).font(.caption).lineLimit(1)
+        .labelStyle(.titleAndIcon).font(.app(.caption)).lineLimit(1)
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(Theme.accentSoft).clipShape(Capsule())
     }
@@ -805,7 +805,7 @@ struct ChatPane: View {
         }
         Image(systemName: "xmark.circle.fill")
       }
-      .font(.caption)
+      .font(.app(.caption))
       .padding(.horizontal, 10).padding(.vertical, 6)
       .background(Theme.accentSoft).clipShape(Capsule())
       .overlay(Capsule().stroke(maybeStatus == nil ? Color.clear : Theme.danger))
@@ -845,7 +845,7 @@ struct ChatPane: View {
   private var runningCallBanner: some View {
     HStack(spacing: 8) {
       Image(systemName: "phone.fill").foregroundStyle(.green)
-      Text("call_participants \(runningCallCount)").font(.subheadline)
+      Text("call_participants \(runningCallCount)").font(.app(.subheadline))
       Spacer()
       Button("call_prejoin_join") { Task { await prepareCall(withVideo: false) } }
         .buttonStyle(.borderedProminent)
@@ -1384,7 +1384,7 @@ struct ReactionJumpButton: View {
   var body: some View {
     Button(action: action) {
       Image(systemName: "heart")
-        .font(.body.weight(.semibold))
+        .font(.app(.body).weight(.semibold))
         // 44 pt: the smallest touch target the Human Interface Guidelines allow.
         .frame(width: 44, height: 44)
         .background(.regularMaterial)
@@ -1406,7 +1406,7 @@ struct JumpDownButton: View {
   var body: some View {
     Button(action: action) {
       Image(systemName: "chevron.down")
-        .font(.body.weight(.semibold))
+        .font(.app(.body).weight(.semibold))
         // 44 pt: the smallest touch target the Human Interface Guidelines allow.
         .frame(width: 44, height: 44)
         .background(.regularMaterial)
@@ -1487,7 +1487,7 @@ struct EditHistorySheet: View {
           VStack(alignment: .leading, spacing: 4) {
             Text(edit.body)
             Text(Date(timeIntervalSince1970: TimeInterval(edit.replacedAt) / 1000), style: .date)
-              .font(.caption).foregroundStyle(Theme.textMuted)
+              .font(.app(.caption)).foregroundStyle(Theme.textMuted)
           }
         }
         Text(current).fontWeight(.semibold)
@@ -1513,7 +1513,7 @@ struct EmojiSuggestionBar: View {
             ForEach(suggestions, id: \.emoji) { suggestion in
               Button { onPick(suggestion.emoji) } label: {
                 Text("\(suggestion.emoji) :\(suggestion.shortcode):")
-                  .font(.caption)
+                  .font(.app(.caption))
                   .padding(.horizontal, 10).padding(.vertical, 6)
                   .background(Theme.surface)
                   .clipShape(Capsule())

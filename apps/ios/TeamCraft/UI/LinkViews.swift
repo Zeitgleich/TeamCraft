@@ -151,16 +151,16 @@ private struct LinkRequestCard: View {
     LinkCardChrome(
       content: VStack(alignment: .leading, spacing: 8) {
         Label("link_prompt_title", systemImage: "iphone.and.arrow.forward")
-          .font(.headline)
+          .font(.app(.headline))
           .foregroundStyle(Theme.text)
         VStack(alignment: .leading, spacing: 2) {
           // Both are the new device's own claim, nothing checked them.
-          Text("link_prompt_says \(prompt.deviceName) \(prompt.platform.label)").font(.subheadline.weight(.semibold))
-          Text("link_prompt_unverified").font(.footnote).foregroundStyle(Theme.textMuted)
+          Text("link_prompt_says \(prompt.deviceName) \(prompt.platform.label)").font(.app(.subheadline).weight(.semibold))
+          Text("link_prompt_unverified").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
         }
-        Text("link_prompt_warning").font(.footnote).foregroundStyle(Theme.textMuted)
+        Text("link_prompt_warning").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
         if let error = maybeError {
-          Text(error).font(.footnote).foregroundStyle(Theme.danger)
+          Text(error).font(.app(.footnote)).foregroundStyle(Theme.danger)
         }
         HStack {
           Spacer()
@@ -250,7 +250,7 @@ struct ScanLinkCodeView: View {
             .ignoresSafeArea()
             .overlay(alignment: .bottom) {
               Text("scan_hint")
-                .font(.subheadline)
+                .font(.app(.subheadline))
                 .padding(10)
                 .background(.regularMaterial)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.radius))

@@ -11,7 +11,7 @@ struct ScheduledMessagesView: View {
   var body: some View {
     List {
       Section {
-        Text("scheduled_note").font(.footnote).foregroundStyle(Theme.textMuted)
+        Text("scheduled_note").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
       }
       let messages = maybeOverview?.messages ?? []
       if messages.isEmpty {
@@ -49,18 +49,18 @@ struct ScheduledMessagesView: View {
   private func row(_ message: ScheduledMessage) -> some View {
     VStack(alignment: .leading, spacing: 4) {
       if let name = message.listName {
-        Text(verbatim: name).font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
+        Text(verbatim: name).font(.app(.caption).weight(.semibold)).foregroundStyle(Theme.accent)
       } else {
-        Text("scheduled_unknown_conversation").font(.caption.weight(.semibold)).foregroundStyle(Theme.accent)
+        Text("scheduled_unknown_conversation").font(.app(.caption).weight(.semibold)).foregroundStyle(Theme.accent)
       }
       Text(ScheduleTimes.date(ms: message.dueAt), format: .dateTime.weekday().day().month().hour().minute())
-        .font(.subheadline.weight(.semibold))
+        .font(.app(.subheadline).weight(.semibold))
       Text(message.status.text)
-        .font(.caption)
+        .font(.app(.caption))
         .foregroundStyle(message.needsAttention ? Theme.danger : Theme.textMuted)
       if let removesAt = message.maybeRemovesAt, !message.isRemoved {
         Text("scheduled_removal_date \(ScheduleTimes.date(ms: removesAt).formatted(date: .abbreviated, time: .omitted))")
-          .font(.caption)
+          .font(.app(.caption))
           .foregroundStyle(Theme.danger)
       }
       // Selectable: for a message the server removed, copying the text is all that is left to do.
@@ -180,7 +180,7 @@ struct SendLaterSheet: View {
     NavigationStack {
       Form {
         Section {
-          Text("schedule_online_hint").font(.footnote).foregroundStyle(Theme.textMuted)
+          Text("schedule_online_hint").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
         }
         if let overview = maybeOverview {
           Section {
@@ -189,7 +189,7 @@ struct SendLaterSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                   Text(LocalizedStringKey(label))
                   Text(ScheduleTimes.date(ms: dueAtMs), format: .dateTime.weekday().day().month().hour().minute())
-                    .font(.caption)
+                    .font(.app(.caption))
                     .foregroundStyle(Theme.textMuted)
                 }
               }

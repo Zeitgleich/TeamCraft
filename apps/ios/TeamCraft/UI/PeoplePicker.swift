@@ -82,7 +82,7 @@ struct PersonLabel: View {
   var body: some View {
     VStack(alignment: .leading) {
       Text(verbatim: person.displayName).foregroundStyle(Theme.text)
-      Text(verbatim: "@" + person.username).font(.footnote).foregroundStyle(Theme.textMuted)
+      Text(verbatim: "@" + person.username).font(.app(.footnote)).foregroundStyle(Theme.textMuted)
     }
   }
 }

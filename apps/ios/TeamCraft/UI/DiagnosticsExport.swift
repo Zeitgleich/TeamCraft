@@ -15,7 +15,7 @@ struct DiagnosticsExportRow: View {
       Label {
         VStack(alignment: .leading, spacing: 2) {
           Text("export_diagnostics_title")
-          Text("export_diagnostics_summary").font(.caption).foregroundStyle(Theme.textMuted)
+          Text("export_diagnostics_summary").font(.app(.caption)).foregroundStyle(Theme.textMuted)
         }
       } icon: {
         Image(systemName: "square.and.arrow.up")

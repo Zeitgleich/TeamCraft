@@ -180,7 +180,7 @@ struct DndWindowSummary: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 2) {
       Text(DndWindowText.times(window))
-      Text(DndWindowText.days(window)).font(.caption).foregroundStyle(Theme.textMuted)
+      Text(DndWindowText.days(window)).font(.app(.caption)).foregroundStyle(Theme.textMuted)
     }
   }
 }

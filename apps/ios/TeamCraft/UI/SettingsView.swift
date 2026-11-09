@@ -29,7 +29,7 @@ struct SettingsView: View {
         Section {
           HStack(spacing: 12) {
             AvatarView(name: account.displayName, size: 44)
-            Text(account.displayName).font(.headline)
+            Text(account.displayName).font(.app(.headline))
           }
         }
         if let profile = maybeProfileJSON, OwnProfileDocument.canOverrideDisplayName(in: profile) {
@@ -78,6 +78,8 @@ struct SettingsView: View {
       }
       .navigationTitle("settings_title")
       .navigationBarTitleDisplayMode(.inline)
+      // A font chosen here applies to the app once Settings is gone (RootView).
+      .onDisappear { NotificationCenter.default.post(name: AppFont.mayHaveChanged, object: nil) }
       // The name changes through the profile update event; the profile is read again with it.
       .task(id: account.displayName) { maybeProfileJSON = await model.ownProfileJSON() }
       .toolbar {
@@ -212,7 +214,7 @@ private struct SettingsEntry: View {
     Label {
       VStack(alignment: .leading, spacing: 2) {
         Text(title)
-        Text(summary).font(.caption).foregroundStyle(Theme.textMuted)
+        Text(summary).font(.app(.caption)).foregroundStyle(Theme.textMuted)
       }
     } icon: {
       Image(systemName: icon)
@@ -260,13 +262,25 @@ private struct ChatsSettingsPage: View {
   @AppStorage(CallStatusSoundsSetting.key) private var statusSounds = CallStatusSoundsSetting.all.rawValue
   @AppStorage(OriginalDownloadSetting.key) private var originalDownload = OriginalDownloadSetting.fallback.rawValue
   @AppStorage(AnimatedImagesSetting.key) private var animatedImages = AnimatedImagesSetting.fallback.rawValue
+  @AppStorage(AppFont.key) private var appFontRaw = AppFont.system.rawValue
   @State private var prefetch = SegmentPrefetchMode.unmeteredOnly
   @State private var isPrefetchLoaded = false
+
+  private var appFont: AppFont { AppFont(rawValue: appFontRaw) ?? .system }
 
   var body: some View {
     Form {
       Section {
         Toggle("share_typing", isOn: $isSharingTyping)
+      }
+      Section {
+        NavigationLink { FontSettingsView() } label: {
+          LabeledContent("font") {
+            FontName(font: appFont)
+          }
+        }
+      } footer: {
+        Text("font_hint")
       }
       Section {
         Picker("chat_list_layout", selection: $chatListLayout) {
@@ -478,12 +492,12 @@ struct ApproveLinkView: View {
       case .enterCode:
         Section {
           if let notice = maybeNotice {
-            Text(notice).font(.footnote).foregroundStyle(Theme.danger)
+            Text(notice).font(.app(.footnote)).foregroundStyle(Theme.danger)
           }
           Text("approve_hint").foregroundStyle(Theme.textMuted)
           Button("approve_scan", systemImage: "qrcode.viewfinder") { isScanning = true }
             .disabled(isWorking)
-          Text("approve_new_phone_hint").font(.footnote).foregroundStyle(Theme.textMuted)
+          Text("approve_new_phone_hint").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
           VStack(alignment: .leading, spacing: 6) {
             TextField("approve_code", text: $code, axis: .vertical)
               .textInputAutocapitalization(.never)

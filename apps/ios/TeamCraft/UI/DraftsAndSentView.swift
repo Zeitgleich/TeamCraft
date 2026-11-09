@@ -96,7 +96,7 @@ struct DraftsAndSentView: View {
               }
               .buttonStyle(.plain)
             }
-            Text("sent_note").font(.caption).foregroundStyle(Theme.textMuted)
+            Text("sent_note").font(.app(.caption)).foregroundStyle(Theme.textMuted)
           }
         }
       } else {
@@ -126,9 +126,9 @@ private struct DraftRow: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 4) {
       HStack {
-        Text(verbatim: draft.listName).font(.caption).foregroundStyle(Theme.accent).lineLimit(1)
+        Text(verbatim: draft.listName).font(.app(.caption)).foregroundStyle(Theme.accent).lineLimit(1)
         Spacer()
-        Text(draft.editedDate, style: .relative).font(.caption).foregroundStyle(Theme.textMuted)
+        Text(draft.editedDate, style: .relative).font(.app(.caption)).foregroundStyle(Theme.textMuted)
       }
       if draft.maybeThread != nil {
         Group {
@@ -138,7 +138,7 @@ private struct DraftRow: View {
             Text("sent_in_thread")
           }
         }
-        .font(.caption)
+        .font(.app(.caption))
         .foregroundStyle(Theme.textMuted)
         .lineLimit(1)
       }
@@ -156,12 +156,12 @@ private struct SentRow: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 4) {
       HStack {
-        Text(verbatim: item.listName).font(.caption).foregroundStyle(Theme.accent).lineLimit(1)
+        Text(verbatim: item.listName).font(.app(.caption)).foregroundStyle(Theme.accent).lineLimit(1)
         Spacer()
-        Text(item.sentDate, style: .relative).font(.caption).foregroundStyle(Theme.textMuted)
+        Text(item.sentDate, style: .relative).font(.app(.caption)).foregroundStyle(Theme.textMuted)
       }
       if item.maybeThread != nil {
-        Text("sent_in_thread").font(.caption).foregroundStyle(Theme.textMuted)
+        Text("sent_in_thread").font(.app(.caption)).foregroundStyle(Theme.textMuted)
       }
       if !item.excerpt.isEmpty {
         Text(verbatim: item.excerpt).lineLimit(3)
@@ -181,7 +181,7 @@ private struct FileCountLabel: View {
     } icon: {
       Image(systemName: "paperclip")
     }
-    .font(.caption)
+    .font(.app(.caption))
     .foregroundStyle(Theme.textMuted)
   }
 }
