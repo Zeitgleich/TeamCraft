@@ -989,19 +989,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
-  /**
-   * "Cancel all" on a message's files going up (#1579). The core finds a file by its place among
-   * the message's pending files, and a cancel takes it out: the last goes first, one after another,
-   * so every place still names its file.
-   */
-  fun cancelUploads(files: List<FileInfo>) = viewModelScope.launch {
-    val last = files.sortedByDescending { it.fileId.removePrefix("pending-").toIntOrNull() ?: -1 }
-    for (file in last) {
-      tryAct(ChatActions.cancelUpload(file.conversation, file.message, file.fileId))?.let { failure ->
-        failures.value = failure
-        return@launch
-      }
-    }
+  /** The stop square of a message's upload pill: cancels all its files going up (#1579). */
+  fun cancelMessageUpload(conversation: String, message: String) = viewModelScope.launch {
+    tryAct(ChatActions.cancelMessageUpload(conversation, message))?.let { failures.value = it }
   }
 
   /**

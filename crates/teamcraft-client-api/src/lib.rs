@@ -63,6 +63,7 @@ pub mod snapshot_changes;
 pub mod space_scope;
 pub mod tray_menu;
 pub mod updates;
+pub mod upload_pill;
 pub mod video_playback;
 pub mod video_stats;
 pub mod voice;

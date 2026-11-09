@@ -1743,6 +1743,13 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  fn cancel_message_upload(&self, conversation: ConversationId, message: MessageId) {
+    self.act(ChatAction::CancelMessageUpload {
+      conversation,
+      message,
+    });
+  }
+
   fn discard_unsent(&self, conversation: ConversationId, message: MessageId) {
     self.act(ChatAction::DiscardUnsent {
       conversation,

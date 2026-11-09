@@ -287,11 +287,13 @@ object ChatActions {
     put("message", message)
   }
 
-  /** Stops one file of an own message that is still going up; the message goes without it. */
-  fun cancelUpload(conversation: String, message: String, fileId: String) = action("cancel_upload") {
+  /**
+   * Stops all files of an own message that is still going up (its one upload control): it goes out
+   * with its text only, or not at all when it has none.
+   */
+  fun cancelMessageUpload(conversation: String, message: String) = action("cancel_message_upload") {
     put("conversation", conversation)
     put("message", message)
-    put("file_id", fileId)
   }
 
   fun acknowledge(conversation: String, message: String) = action("acknowledge") {
