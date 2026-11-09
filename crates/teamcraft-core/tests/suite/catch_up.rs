@@ -302,6 +302,35 @@ async fn an_own_pin_sent_after_an_unpin_not_read_yet_stays() {
   assert!(is_pinned(&carol, channel, target), "the older unpin won");
 }
 
+/// Issue #1572: a page of a backlog read in the background wakes the UI only for the conversation on
+/// screen; for any other the UI hears of it once, when its backlog is read full. A wake per page had
+/// the web UI read everything again for every page of a long absence.
+#[tokio::test]
+async fn backlog_pages_wake_the_ui_only_for_the_conversation_on_screen() {
+  for is_on_screen in [false, true] {
+    let (_server, mut alice, mut carol, channel) = busy_channel().await;
+    carol.client.read_backlogs_in_background().unwrap();
+    send_many(&mut alice, channel, "a", 30).await;
+    carol.client.full_sync().await.unwrap();
+    if is_on_screen {
+      carol.client.catch_up_focus().set(channel);
+    }
+    let mut wakes = Vec::new();
+    while carol.client.is_background_history_due() {
+      wakes.push(carol.client.load_background_history_page().await);
+    }
+    assert!(wakes.len() > 2, "several pages: {wakes:?}");
+    let (last, pages) = wakes.split_last().unwrap();
+    assert!(*last, "the end of the backlog wakes the UI");
+    assert_eq!(
+      pages.iter().all(|wake| *wake),
+      is_on_screen,
+      "on screen: {is_on_screen}, wakes: {wakes:?}"
+    );
+    assert!(pages.iter().all(|wake| *wake == is_on_screen));
+  }
+}
+
 /// Issue #1448: with the host reading backlogs in the background, the sync ends after the newest
 /// page with the hole still marked, and the host's loop reads the rest, a page per turn, in order.
 #[tokio::test]
