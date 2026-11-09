@@ -91,6 +91,8 @@ pub struct AdminChannel {
   pub retention: Retention,
   pub history: HistoryPolicy,
   pub is_archived: bool,
+  /// Where the channel stands in the inactivity policy (issue #212); `None`: nothing to say.
+  pub maybe_inactivity: Option<teamcraft_proto::ChannelInactivityStatus>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -229,6 +231,20 @@ pub enum AuditAction {
   GuestExtended,
   ChannelDeleted,
   SpaceDeleted,
+  /// The inactivity policy told a channel's owners that it went quiet, or that it will be deleted.
+  InactivityNotice,
+  /// The inactivity policy archived a quiet channel.
+  ChannelAutoArchived,
+  /// The inactivity policy deleted a channel it had archived.
+  ChannelAutoDeleted,
+  /// Somebody kept a channel open for a while.
+  InactivitySnoozed,
+  /// A run of the inactivity policy stopped at its limit.
+  InactivityLimited,
+  /// A space was archived with its channels.
+  SpaceArchived,
+  /// A space was restored with the channels it had archived.
+  SpaceRestored,
   MemberAdded,
   MemberRemoved,
   MemberRoleChanged,
@@ -252,7 +268,7 @@ pub enum AuditAction {
 }
 
 impl AuditAction {
-  pub const ALL: [AuditAction; 31] = [
+  pub const ALL: [AuditAction; 38] = [
     Self::PolicyChanged,
     Self::RetentionChanged,
     Self::DeviceRemoved,
@@ -269,6 +285,13 @@ impl AuditAction {
     Self::GuestExtended,
     Self::ChannelDeleted,
     Self::SpaceDeleted,
+    Self::InactivityNotice,
+    Self::ChannelAutoArchived,
+    Self::ChannelAutoDeleted,
+    Self::InactivitySnoozed,
+    Self::InactivityLimited,
+    Self::SpaceArchived,
+    Self::SpaceRestored,
     Self::MemberAdded,
     Self::MemberRemoved,
     Self::MemberRoleChanged,
@@ -304,6 +327,13 @@ impl AuditAction {
       Self::GuestExtended => "guest-extended",
       Self::ChannelDeleted => "channel-deleted",
       Self::SpaceDeleted => "space-deleted",
+      Self::InactivityNotice => "inactivity-notice",
+      Self::ChannelAutoArchived => "channel-auto-archived",
+      Self::ChannelAutoDeleted => "channel-auto-deleted",
+      Self::InactivitySnoozed => "inactivity-snoozed",
+      Self::InactivityLimited => "inactivity-limited",
+      Self::SpaceArchived => "space-archived",
+      Self::SpaceRestored => "space-restored",
       Self::MemberAdded => "member-added",
       Self::MemberRemoved => "member-removed",
       Self::MemberRoleChanged => "member-role-changed",
@@ -880,6 +910,7 @@ mod tests {
       },
       history: HistoryPolicy::FromJoin,
       is_archived: false,
+      maybe_inactivity: None,
     };
     let owner = Some(UserId::from_snowflake(crate::model::Snowflake::new(2).unwrap()));
     let public = channel("Launch", ConversationKind::Public, 0, owner, NOW);

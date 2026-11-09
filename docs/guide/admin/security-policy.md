@@ -27,6 +27,7 @@ add the successor first and remove the old owner afterwards. See
 | Sessions              | require a second factor; maximum age; idle timeout                        | Server, at every request                                                                    |
 | Passwords             | shortest password of local accounts (8 to 128)                            | Server                                                                                      |
 | Guests                | allowed e-mail domains; DM scope; default expiry                          | Server                                                                                      |
+| Inactive channels     | off (default); notice, archive, keep-open, limit; optional delete         | Server (hourly job); owners get a mail first; docs/admin.md §3.1.3                          |
 | Directory             | display name format; full name; e-mail; own name allowed                  | Server, in every response that names a person                                               |
 | Statuses              | statuses on or off; custom statuses; away timeout; presets                | Server                                                                                      |
 | Threads               | threaded view on or off; follow threads people are mentioned in           | Server (threads off: replies are refused); the follow default is for people who never chose |

@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE conversations c SET archived_at = NULL, archive_origin = NULL, inactivity_notified_at = NULL,\n                inactivity_snoozed_until = COALESCE($2, c.inactivity_snoozed_until)\n         WHERE c.space_id = $1 AND c.archive_origin = 'space' AND c.deleted_at IS NULL\n           AND (NOT EXISTS (SELECT 1 FROM memberships m WHERE m.conversation_id = c.id)\n                OR EXISTS (SELECT 1 FROM memberships m WHERE m.conversation_id = c.id AND m.role = 'admin'))\n         RETURNING c.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "74a750405ba1cd9cad1d87d50f75fe2b52278c0daa33db3cdf5390a05cc3db94"
+}

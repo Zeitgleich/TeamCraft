@@ -489,6 +489,19 @@ with a warning in the bridge's log. Admins archive and restore from the
 channel's settings or the console (`PATCH /conversations/{id}`, audit `channel_archived`,
 `channel_restored`), with no group state involved.
 
+**Archiving a space archives its channels** (issue #212). `PATCH /spaces/{id}` with
+`is_archived: true` archives the space and, in the same transaction, every channel in it that is still
+open, so a half-archived space can't be left behind. Each channel gets the usual system line and
+webhook (`channel.archived`) and its members are told; the audit log has one entry, `space_archived`,
+with the number of channels (the channels that were archived before are not counted). Restoring the
+space (`is_archived: false`, audit `space_restored`) reverts exactly that: the channels the archive took
+along open again, while channels archived before, by hand or by the inactivity policy (§3.1.3), stay
+archived. A channel nobody can run (no channel admin among its members) can't be restored by a space
+(409 `channel_needs_admin` for the channel itself); it stays archived, and `space_restored` counts it in
+`left_archived` until a workspace admin assigns an owner. Archiving and restoring a space take
+`manage_space_properties`. Spaces archived before this existed have no marked channels: restoring them
+changes the space only.
+
 An archived channel left without an admin stays for its members: they read it and may leave. Restoring
 it takes an admin (409 `channel_needs_admin`): a workspace admin assigns an owner (below) or deletes it.
 Roles are signed, so the server can't make the restorer one. Archiving and restoring take
@@ -527,6 +540,74 @@ independent of the size of the instance:
   `GET /admin/users?ids=`, IDs separated by commas, at most 100 per request).
 - A 429 is honoured: the console reads nothing until `Retry-After` has passed (`retry_after_secs`
   in the body, for browsers behind proxies that strip headers), then reads once more.
+
+#### 3.1.3 Inactive channels (issue #212)
+
+Channels nobody writes in pile up. The signed workspace policy (`inactivity`, console: security,
+"Inactive channels") can have the server tell the owners, archive the channel later and, only if you
+ask for it, delete it much later. **It is off by default**: an instance whose policy does not name
+`inactivity` behaves exactly as before, and nothing is written, mailed or audited by the job while it
+is off. A policy signed by an older app that doesn't know the field also reads as off.
+
+The server is content-blind, so "quiet" is read from what it stores anyway: the time in the ID of the
+channel's newest message (replies in threads count), else the channel's creation. Nothing about the
+content, and no read state, is used. Only open channels of open spaces count; direct messages and group
+messages never do, nor channels with an import running.
+
+| Setting (`inactivity.`)         | Default            | Meaning                                                                                                    |
+|---------------------------------|--------------------|------------------------------------------------------------------------------------------------------------|
+| `is_enabled`                    | `false`            | Master switch                                                                                              |
+| `notice_after_days`             | 180                | Days without a message before the owners are told (1 to 3650)                                              |
+| `archive_after_more_days`       | 30                 | Days between the notice and the archiving; `0`: notices only, nothing is archived                          |
+| `snooze_days`                   | 90                 | What "keep open" defers by (1 to 365)                                                                      |
+| `max_per_run`                   | 10                 | Safety limit, below                                                                                        |
+| `delete_after_archived_days`    | absent: never      | Days after the policy archived a channel that it is deleted (14 to 3650); the only way it deletes content  |
+
+The job runs every `[inactivity] check_interval_secs` (default one hour):
+
+1. **Notice.** A channel quiet for `notice_after_days` gets one notice: a mail to its channel admins (its
+   space's admins if it has none), saying that the channel is archived in M days unless somebody writes in
+   it or an admin keeps it open. The mail names no channel and no person (`[inactivity]` texts in the
+   server file). Audit `channel_inactivity_notice`. **A notice nobody receives doesn't count**: with no
+   mail server, no address or no owner, nothing is recorded and the channel is never archived by the
+   policy; the console's "Inactive" filter still lists it.
+2. **Archive.** M days (`archive_after_more_days`) after the notice, if no message arrived since, the
+   channel is archived exactly like an archive by hand (system line "This channel was archived" without a
+   name, webhook, `ConversationUpdate`), audit `channel_auto_archived` (no actor; quiet days and notice
+   time in the detail). The check "no message since the notice" is part of the archiving statement, so a
+   message that races the job wins. Any message after a notice ends the quiet spell.
+3. **Snooze.** `POST /conversations/{id}/inactivity/snooze` (body `{"days": n}`, default `snooze_days`;
+   needs `manage_channel_properties`: channel admins, space admins, workspace admins and owners; audit
+   `channel_inactivity_snoozed`) defers everything until the snooze ends and forgets a notice already
+   sent. After it a channel that is still quiet is noticed afresh and gets the full M days, so a snooze
+   of 60 days with M = 30 defers the archiving by about 90. The console's channel page shows when a
+   channel is archived or deleted and has "Keep open". Restoring a channel by hand, or a space with its
+   channels, snoozes the restored channels for `snooze_days`, so they aren't archived again at the next
+   run.
+4. **Delete (retention step).** Only with `delete_after_archived_days`, and only channels **the policy
+   archived itself** that nobody restored: channels archived by hand or with a space are never deleted
+   by it. At `delete_after − 7` days after the archiving the owners are warned (mail, audit
+   `channel_inactivity_delete_notice`; no warning received by anybody, no deletion), and after the
+   warning has stood 7 days and `delete_after` has passed, the channel is deleted as with
+   `delete_channel` (§3.1.1; unsigned, so devices keep the history for a while) with audit
+   `channel_inactivity_deleted` (no actor). A snooze defers it; a restore ends it.
+5. **Old notices are repeated, not acted on.** A notice more than a period (at least 7 days) past the
+   date it led to is stale (the policy was off, the server down): it is sent again instead of archiving
+   or deleting on it, so turning the policy on again never acts on something old.
+
+**Safety limit.** One run notices at most `max_per_run` channels, archives at most that many, warns
+at most that many and deletes at most that many, quietest first. The rest wait for the next run;
+a run that held something back writes `inactivity_run_limited` with the counts, so switching the policy
+on for a large instance spreads over days instead of archiving it at once. The same switch off stops
+everything at once; what was archived stays archived until somebody restores it.
+
+**Local guest accounts.** `guests.deactivate_accounts_after_days` (absent: never, the default) deactivates
+a local guest account (one with a password of its own, that has signed in: a guest whose invite is
+still waiting for the first sign-in has no space yet and is left alone) that has belonged to no space for
+that long (1 to 3650 days): the account is deactivated as by an admin (§3.2.1, audit `user_deactivated` without
+an actor, the reason in its note), so it is reversible, nothing is deleted. The clock starts at the first
+run that sees the guest without a space and stops if they get one; at most `[guests]
+max_deactivations_per_run` (default 50) per run. §3.2.2 has the expiry that ends the memberships.
 
 ### 3.2 Users and guests
 
@@ -747,7 +828,9 @@ set in the console's security section; the server enforces them.
 - **At the expiry**, rechecked when the guest is removed, the guest leaves the space and its channels exactly as with a removal (§3.1.1,
   e2ee.md §4.6), audit `guest_expired`, and the guest, the sponsor if still in the space, and the space's admins are told. Their
   messages and files stay, under the retention rules like everybody's; nothing is deleted. The account
-  itself remains and signs in to whatever it still belongs to. It takes an admin to deactivate or delete it.
+  itself remains and signs in to whatever it still belongs to. An admin deactivates or deletes it, or, if
+  the policy says `guests.deactivate_accounts_after_days`, the server deactivates a local guest account
+  after that many days without a space (§3.1.3); the default is never.
 
 #### 3.2.3 Open invitations (issue #298)
 

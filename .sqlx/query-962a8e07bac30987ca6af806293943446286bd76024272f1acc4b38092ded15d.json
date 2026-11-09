@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT sm.user_id FROM conversations c\n         JOIN space_members sm ON sm.space_id = c.space_id AND sm.role = 'space_admin'\n         JOIN users u ON u.id = sm.user_id\n         WHERE c.id = $1 AND u.deactivated_at IS NULL\n         ORDER BY sm.user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "space_members",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "962a8e07bac30987ca6af806293943446286bd76024272f1acc4b38092ded15d"
+}

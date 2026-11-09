@@ -49,8 +49,8 @@ use teamcraft_server::services::scheduled_messages;
 use teamcraft_server::services::session::{self, PolicyHolder};
 use teamcraft_server::services::{
   admin, admin_join_requests, attachments, backgrounds, brand_mail, brands, calendar_settings, conversations,
-  email_digest, guests, key_packages, mail_settings, meeting_guests, meeting_notices, oidc, retention,
-  runtime_settings, storage_cleanup, urgent,
+  email_digest, guests, inactivity, key_packages, mail_settings, meeting_guests, meeting_notices, oidc,
+  retention, runtime_settings, storage_cleanup, urgent,
 };
 use teamcraft_server::state::{
   AppState, MeetingMailConfig, OidcSyncSettings, PushSettings, PushTtls, RetryPolicy, Settings,
@@ -244,6 +244,7 @@ async fn run() -> anyhow::Result<()> {
       web: config.web.clone(),
       security: config.security.clone(),
       guests: config.guests.clone(),
+      inactivity: config.inactivity.clone(),
       mail: config.mail.clone(),
       local_accounts: config.local_accounts.clone(),
       sign_in_page: config.sign_in_page.clone(),
@@ -351,6 +352,7 @@ async fn run() -> anyhow::Result<()> {
   spawn_scheduled_messages(state.clone());
   spawn_email_digests(state.clone());
   spawn_account_housekeeping(state.clone());
+  spawn_inactivity_housekeeping(state.clone());
   spawn_background_sweeper(state.clone());
   spawn_storage_probe(state.clone());
   spawn_partition_maintenance(state.clone(), config.server.partitions_ahead_months);
@@ -727,6 +729,28 @@ async fn load_runtime_settings(state: &AppState) -> anyhow::Result<()> {
     .await
     .context("loading the brands' mail servers")?;
   Ok(())
+}
+
+/// Looks for quiet channels (when the signed policy asks for it) and deactivates idle local guest
+/// accounts (likewise): notices, auto-archive and the retention step, each bounded per run (issue
+/// #212). Does nothing on an instance whose policy is off.
+fn spawn_inactivity_housekeeping(state: AppState) {
+  tokio::spawn(async move {
+    let period = Duration::from_secs(state.settings.get().inactivity.check_interval_secs.max(1));
+    let mut interval = tokio::time::interval(period);
+    loop {
+      interval.tick().await;
+      let now = time::OffsetDateTime::now_utc();
+      if let Err(error) = inactivity::run_once(&state, now).await {
+        warn!(%error, "running the inactivity policy failed");
+      }
+      match inactivity::deactivate_idle_guest_accounts(&state, now).await {
+        Ok(0) => {},
+        Ok(deactivated) => info!(deactivated, "deactivated idle local guest accounts"),
+        Err(error) => warn!(%error, "deactivating idle guest accounts failed"),
+      }
+    }
+  });
 }
 
 /// Warns about guests expiring soon, removes guests whose membership expired (and tells their
