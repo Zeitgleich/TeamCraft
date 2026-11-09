@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Administrative template for the TeamCraft desktop app (docs/operations.md "Preconfigured server on
+     managed computers"). Computer configuration only: the app reads HKLM and never a per-user key,
+     because "Lock server" is a security control. -->
+<policyDefinitions revision="1.0" schemaVersion="1.0">
+  <policyNamespaces>
+    <target prefix="teamcraft" namespace="Zeitgleich.Policies.TeamCraft" />
+    <using prefix="windows" namespace="Microsoft.Policies.Windows" />
+  </policyNamespaces>
+  <resources minRequiredRevision="1.0" />
+  <categories>
+    <category name="TeamCraft" displayName="$(string.TeamCraft)" />
+  </categories>
+  <policies>
+    <policy name="ServerUrl" class="Machine" displayName="$(string.ServerUrl)"
+            explainText="$(string.ServerUrl_Explain)"
+            key="Software\Policies\Zeitgleich\TeamCraft">
+      <parentCategory ref="TeamCraft" />
+      <supportedOn ref="windows:SUPPORTED_Windows10" />
+      <elements>
+        <text id="ServerUrlText" valueName="ServerUrl" required="true" />
+      </elements>
+    </policy>
+    <policy name="LockServer" class="Machine" displayName="$(string.LockServer)"
+            explainText="$(string.LockServer_Explain)"
+            key="Software\Policies\Zeitgleich\TeamCraft" valueName="LockServer">
+      <parentCategory ref="TeamCraft" />
+      <supportedOn ref="windows:SUPPORTED_Windows10" />
+      <enabledValue>
+        <decimal value="1" />
+      </enabledValue>
+      <disabledValue>
+        <decimal value="0" />
+      </disabledValue>
+    </policy>
+  </policies>
+</policyDefinitions>

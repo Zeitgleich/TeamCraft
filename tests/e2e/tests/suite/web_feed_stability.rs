@@ -518,7 +518,7 @@ fn assert_still(phase: &str, stats: FeedStats) {
 }
 
 /// Pumps Alice's other device (and Carol's) until it added the browser to the conversation's group.
-async fn wait_until_readable(alice: &mut Peer, carol: &mut Peer, page: &Page, shown: &str) {
+pub(crate) async fn wait_until_readable(alice: &mut Peer, carol: &mut Peer, page: &Page, shown: &str) {
   let deadline = Instant::now() + SET_UP_DEADLINE;
   let mut maybe_clear_since = None;
   loop {

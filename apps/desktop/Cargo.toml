@@ -103,6 +103,10 @@ webkit2gtk = "2.0.2"
 tauri-plugin-clipboard-manager = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# The managed server from a configuration profile (auth/policy.rs, #220): reads the machine-wide
+# property list, XML or binary (MIT; already in the lock file through Tauri's build-time code, so no
+# new crate).
+plist = { version = "1.10", default-features = false }
 # "Start at login" as a LaunchAgent (autostart.rs); the same plugin as on Windows.
 tauri-plugin-autostart = "2"
 teamcraft-media = { path = "../../crates/teamcraft-media", features = ["avfoundation", "gstreamer", "screencapturekit"] }
@@ -133,6 +137,9 @@ tauri-plugin-autostart = "2"
 user-idle-time = { version = "0.7", default-features = false }
 # Toasts with buttons and a reply field that can be replaced and withdrawn (WinRT; MIT/Apache-2.0,
 # the version the notification plugin already pulls in).
+# The managed server from the policy key in HKLM (auth/policy.rs, #220): a safe, read-only registry
+# API (MIT/Apache-2.0; already in the tree through the autostart plugin and hyper-util).
+windows-registry = "0.6"
 windows = { version = "0.62", features = ["Data_Xml_Dom", "Foundation", "Foundation_Collections", "UI_Notifications"] }
 
 [features]

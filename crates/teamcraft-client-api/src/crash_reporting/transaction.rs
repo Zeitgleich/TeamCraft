@@ -55,6 +55,13 @@ pub enum PerfOperation {
   /// A conversation opened (or the app back from a push) until its newest server message is in the
   /// store and shown: catches "the push came, the chat lacks it" behind a fast switch.
   CatchUp,
+  /// A page of older history asked for while the reader scrolls back, until its rows show; the
+  /// longest frame after they arrived says whether the list stalled on them.
+  OlderHistoryPage,
+  /// The reader scrolling back in a conversation, from the first scroll up until it rests: how
+  /// smooth it was, and how often the list had to move the scroll position under the reader
+  /// (#1595).
+  ScrollBack,
 }
 
 /// How an operation ended (the protocol's span status).
@@ -290,6 +297,8 @@ impl PerfOperation {
       Self::CallSetup => "call.setup",
       Self::MlsCommit => "mls.commit",
       Self::CatchUp => "conversation.catch_up",
+      Self::OlderHistoryPage => "history.older_page",
+      Self::ScrollBack => "feed.scroll_back",
     }
   }
 
@@ -303,6 +312,8 @@ impl PerfOperation {
       Self::FileUpload | Self::FileDownload => "file",
       Self::CallSetup => "call",
       Self::CatchUp => "sync",
+      Self::OlderHistoryPage => "ui.load",
+      Self::ScrollBack => "ui.scroll",
     }
   }
 }
@@ -490,6 +501,8 @@ mod tests {
       PerfOperation::CallSetup,
       PerfOperation::MlsCommit,
       PerfOperation::CatchUp,
+      PerfOperation::OlderHistoryPage,
+      PerfOperation::ScrollBack,
     ];
     let names: HashSet<&str> = all.iter().map(|operation| operation.name()).collect();
     assert_eq!(names.len(), all.len());

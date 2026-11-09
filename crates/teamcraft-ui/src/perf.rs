@@ -150,6 +150,33 @@ pub fn is_pending_for(operation: PerfOperation, key: &str) -> bool {
   })
 }
 
+/// A page of older history was asked for in conversation `key` (`history.older_page`): measured
+/// until its rows show ([`older_page_shown`]), or until the request says none come.
+pub fn begin_older_page(key: &str) {
+  begin_pending(PerfOperation::OlderHistoryPage, key);
+}
+
+/// The rows of the page asked for in `key` were handed to the UI at `handed_ms`, after a refresh
+/// that started at `refresh_ms`: the measure ends once the frame that shows them is painted, and
+/// records how long that frame took (`render_ms`): the stall a reader scrolling back would feel.
+pub fn older_page_shown(key: &str, refresh_ms: f64, handed_ms: f64) {
+  if !is_pending_for(PerfOperation::OlderHistoryPage, key) {
+    return;
+  }
+  with_pending(PerfOperation::OlderHistoryPage, key, |measure| {
+    measure.span_between("ui.refresh", "older_rows_read", refresh_ms, handed_ms);
+  });
+  let key = key.to_owned();
+  platform::after_next_paint(move || {
+    let shown_ms = now_ms();
+    with_pending(PerfOperation::OlderHistoryPage, &key, |measure| {
+      measure.span_between("ui.render", "older_rows_shown", handed_ms, shown_ms);
+      measure.measure("render_ms", shown_ms - handed_ms, PerfUnit::Millisecond);
+    });
+    end_pending(PerfOperation::OlderHistoryPage, &key, PerfStatus::Ok);
+  });
+}
+
 /// The signed-in start is done (the channel list is on screen): measures it from the page's
 /// navigation, with the start's parts (`crate::start_timing`) as its steps. Once per page.
 pub fn finish_start() {
@@ -252,8 +279,13 @@ impl Measure {
 
   /// Ends it now and queues it with the crash reports.
   pub fn finish(self, status: PerfStatus) {
+    self.finish_at(now_ms(), status);
+  }
+
+  /// Ends it at `end_ms` (an end noticed later, such as the last scroll event) and queues it.
+  pub fn finish_at(self, end_ms: f64, status: PerfStatus) {
     if let Some(transaction) = self.maybe_transaction {
-      platform::capture(transaction.finish(now_ms(), status));
+      platform::capture(transaction.finish(end_ms, status));
     }
   }
 }
@@ -347,6 +379,12 @@ mod platform {
       performance.time_origin() + performance.now()
     })
   }
+  /// Runs `callback` once the next frame was painted: its animation frame, then a task after it.
+  pub fn after_next_paint(callback: impl FnOnce() + 'static) {
+    leptos::prelude::request_animation_frame(move || {
+      leptos::prelude::set_timeout(callback, std::time::Duration::ZERO);
+    });
+  }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -370,6 +408,9 @@ mod platform {
   pub fn now_ms() -> f64 {
     0.0
   }
+
+  /// Natively nothing is painted, and nothing measured.
+  pub fn after_next_paint(_callback: impl FnOnce() + 'static) {}
 }
 
 #[cfg(test)]

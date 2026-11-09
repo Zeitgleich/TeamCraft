@@ -175,6 +175,20 @@ final class ChatModelTests: XCTestCase {
     XCTAssertNil(selectedSpace([], remembered: "e"))
   }
 
+  /// #1600: a DM, also one tied to a space, never marks a space; Chats counts it.
+  func testDMsNeverMarkASpace() {
+    let spaces = [HomeSpace(id: "Project A", name: "Project A"), HomeSpace(id: "Project B", name: "Project B")]
+    let list = [
+      item("1", "Amy", kind: .direct, space: "Project A", unread: 3, mentions: 1),
+      item("2", "Amy, Bob", kind: .group, unread: 2),
+      item("3", "general", space: "Project B", unread: 1, mentions: 1),
+    ]
+    let result = homeSpaces(spaces, conversations: list)
+    XCTAssertEqual(result[0], HomeSpace(id: "Project A", name: "Project A"))
+    XCTAssertEqual(result[1].mentionCount, 1)
+    XCTAssertTrue(result[1].hasUnread)
+  }
+
   /// #1526: grouped by space, the list names spaces without joined channels too, by name.
   func testTheListBySpaceListsEmptySpaces() {
     let sections = listSections([item("1", "general", space: "Project B"), item("2", "Amy", kind: .direct)], bySpace: true)
