@@ -63,6 +63,8 @@ const MEASURE_EPSILON: f32 = 0.5;
 const OLDER_AHEAD_ROWS: usize = 40;
 /// Rows above the first one on screen at which the state of that request shows.
 const OLDER_STATUS_ROWS: usize = 2;
+/// Placeholder rows of a conversation whose messages are on their way (#1573).
+const FEED_SKELETON_ROWS: usize = 6;
 
 thread_local! {
   /// IDs of the lists that are mounted: usually one, two while a call's chat panel (#936) shows
@@ -795,6 +797,12 @@ pub fn MessageList(
       && access.can_add_members()
   };
 
+  let is_known_empty = move || {
+    older_history.get() == OlderHistory::Complete
+      && !state
+        .read(|backend| backend.conversation(conversation))
+        .is_some_and(|conv| conv.is_catching_up)
+  };
   view! {
     <div class="message-list-wrap">
       {move || {
@@ -814,7 +822,8 @@ pub fn MessageList(
       }}
       <DateJumpPopover conversation=conversation menu=date_menu />
       // Over the list, not in it: a row that comes and goes would move what the reader looks at.
-      {move || match older_status() {
+      // An empty list shows its placeholder rows instead of the spinner; a failure shows anyway.
+      {move || match older_status().filter(|status| count.get() > 0 || *status != OlderHistory::Loading) {
         Some(OlderHistory::Loading) => Some(view! {
           <div class="older-history" role="status">
             <span class="spinner" aria-hidden="true"></span>
@@ -876,6 +885,15 @@ pub fn MessageList(
         <Show when=move || count.get() == 0 fallback=|| ()>
           // Alone in a new channel: the obvious next step is bringing the team in.
           {move || {
+            // "No messages yet" only once the server said so: while history or a catch-up is on
+            // its way the conversation is not empty, only not here yet (#1573).
+            if !is_known_empty() {
+              return view! {
+                <div class="feed-skeleton" role="status" aria-busy="true" aria-label=move || i18n.t("messages-loading")>
+                  {(0..FEED_SKELETON_ROWS).map(|_| view! { <MessageSkeleton /> }).collect_view()}
+                </div>
+              }.into_any();
+            }
             let maybe_action = is_alone_in_channel().then_some(EmptyAction {
               label_key: "channel-add-people",
               on_click: Callback::new(move |()| state.overlay.set(Overlay::AddToChannel(conversation))),
@@ -895,7 +913,7 @@ pub fn MessageList(
               &conversation.to_string(),
               crate::perf::PerfStatus::Ok,
             );
-            view! { <EmptyState icon=icon title_key=title_key body_key=body_key maybe_action=maybe_action /> }
+            view! { <EmptyState icon=icon title_key=title_key body_key=body_key maybe_action=maybe_action /> }.into_any()
           }}
         </Show>
         <div class="spacer" node_ref=top_spacer style:height=move || format!("{}px", window.get().pad_top)></div>
