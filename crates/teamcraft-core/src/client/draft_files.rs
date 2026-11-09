@@ -6,18 +6,21 @@
 //!
 //! A file waits on this device instead when the app attaches it to go up on send (phones, #1585),
 //! the server holds no drafts' files (an older version) or the drafts already carry
-//! [`MAX_DRAFT_FILES`]; it goes up with its message then.
+//! [`MAX_DRAFT_FILES`](crate::account_data::MAX_DRAFT_FILES); it goes up with its message then.
 
 #[cfg(feature = "ui")]
 use teamcraft_client_api::drafts::DraftFileTravel;
 use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, ThreadId};
 
 use super::Client;
+#[cfg(feature = "ui")]
+use super::files::save_pending_upload;
 use super::files::{
   PendingFile, PendingUpload, UploadPurpose, announced_attachment, pending_upload, queue_abandon,
-  save_pending_upload,
 };
-use crate::account_data::{AccountData, DraftFile, MAX_DRAFT_FILES, draft_files_budget};
+#[cfg(feature = "ui")]
+use crate::account_data::MAX_DRAFT_FILES;
+use crate::account_data::{AccountData, DraftFile, draft_files_budget};
 use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::records;
