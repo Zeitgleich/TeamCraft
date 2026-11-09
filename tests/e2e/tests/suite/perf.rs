@@ -21,6 +21,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use chromiumoxide::cdp::browser_protocol::emulation::{
+  ClearDeviceMetricsOverrideParams, SetDeviceMetricsOverrideParams,
+};
 use chromiumoxide::cdp::browser_protocol::network::{
   EnableParams as NetworkEnableParams, EventRequestWillBeSent, EventWebSocketFrameReceived,
   EventWebSocketFrameSent,
@@ -164,6 +167,7 @@ async fn the_web_client_stays_fast_and_lean_with_a_large_workspace() {
       let mut report = measure(&page, &seeded, &profile, scale).await;
       scroll_through_held_history(&page, &mut alice, &seeded, scale, &mut report).await;
       come_back_to_busy_channels(&page, &mut alice, &seeded, scale, &profile, &mut report).await;
+      watch_a_busy_conversation(&page, &mut alice, &seeded, &mut report).await;
       measure_catalog_build(&page, &seeded, &mut report).await;
       report.seconds_sign_in_and_unlock = first_setup;
       report.pss_mib_empty_browser = baseline;
@@ -276,6 +280,11 @@ struct Report {
   /// resize observer whose callback resized what it observes lays out again and again (issue #1575).
   layouts_per_switch: f64,
   switch_resize_observer_loops: f64,
+  /// An open conversation at its newest message while messages arrive, the composer grows line by
+  /// line and the window changes height (issue #1575): the page's layouts meanwhile, and the
+  /// "ResizeObserver loop" errors.
+  busy_conversation_layouts: f64,
+  busy_conversation_resize_observer_loops: f64,
   long_channel_open_ms: f64,
   long_channel_rows_in_dom: f64,
   long_channel_rows_after_scrolling_back: f64,
@@ -692,6 +701,50 @@ async fn come_back_to_busy_channels(
     .iter()
     .filter(|(_, line)| line.contains("gateway connection lost"))
     .count() as f64;
+}
+
+/// The list of an open conversation changes size the ways it does in use (issue #1575): messages
+/// arrive while the reader is at the newest one, the composer grows line by line and is cleared,
+/// and the window gets shorter and taller. Each of these resizes what the list's observer watches.
+async fn watch_a_busy_conversation(page: &Page, alice: &mut Peer, seeded: &Seeded, report: &mut Report) {
+  let (name, last) = &seeded.first_space_channels[1];
+  switch_to(page, name, last).await;
+  settle(page).await;
+  let layouts_before = metric(page, "LayoutCount").await;
+  let loops_before = resize_loops(page).await;
+  for index in 0..15 {
+    send(alice, seeded.channels[1], index).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
+  for line in 0..8 {
+    page
+      .evaluate(format!(
+        "(() => {{ const el = document.querySelector('[data-composer]'); el.focus(); \
+         document.execCommand('insertText', false, 'line {line}'); \
+         document.execCommand('insertLineBreak'); }})()"
+      ))
+      .await
+      .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+  }
+  page
+    .evaluate("(() => { const el = document.querySelector('[data-composer]'); el.focus(); document.execCommand('selectAll'); document.execCommand('delete'); })()")
+    .await
+    .unwrap();
+  for height in [700, 900, 600, 900] {
+    page
+      .execute(SetDeviceMetricsOverrideParams::new(1280, height, 1.0, false))
+      .await
+      .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+  }
+  page
+    .execute(ClearDeviceMetricsOverrideParams::default())
+    .await
+    .unwrap();
+  settle(page).await;
+  report.busy_conversation_layouts = metric(page, "LayoutCount").await - layouts_before;
+  report.busy_conversation_resize_observer_loops = resize_loops(page).await - loops_before;
 }
 
 async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> Report {
@@ -1593,6 +1646,11 @@ impl Report {
       ("switch_ms_max", self.switch_ms_max),
       ("layouts_per_switch", self.layouts_per_switch),
       ("switch_resize_observer_loops", self.switch_resize_observer_loops),
+      ("busy_conversation_layouts", self.busy_conversation_layouts),
+      (
+        "busy_conversation_resize_observer_loops",
+        self.busy_conversation_resize_observer_loops,
+      ),
       ("long_channel_open_ms", self.long_channel_open_ms),
       ("long_channel_rows_in_dom", self.long_channel_rows_in_dom),
       (
