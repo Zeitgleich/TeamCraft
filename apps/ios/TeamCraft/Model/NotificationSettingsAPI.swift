@@ -27,6 +27,14 @@ extension AppModel {
     _ = await request("PUT", "/me/notification-settings", body: body)
   }
 
+  /// Replaces the receipt settings (read and delivered), keeping the others.
+  func saveReceipts(read: Bool, delivered: Bool) async {
+    guard let current = await notificationSettingsJSON(),
+      let body = NotificationSettingsDocument.replacingReceipts(in: current, read: read, delivered: delivered)
+    else { return }
+    _ = await request("PUT", "/me/notification-settings", body: body)
+  }
+
   /// Quick DND until `date`; answers the end the server stored.
   func startDnd(until date: Date) async -> Date? {
     guard let answer = await request("PUT", "/me/presence", body: QuickDnd.requestBody(until: date)),

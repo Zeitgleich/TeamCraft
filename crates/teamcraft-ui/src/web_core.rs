@@ -1463,6 +1463,7 @@ impl Core {
         },
       }
       self.report_progress();
+      self.report_delivered().await;
       self.check_store();
       self.check_push().await;
       self.report_background_failures();
@@ -2974,6 +2975,13 @@ impl Core {
     // The upkeep may resync many conversations; heartbeats go on meanwhile.
     if self.connection.keep_alive(now, self.upkeep.tick(client)).await {
       notify_changed();
+    }
+  }
+
+  /// Tells the server how far the DMs this device stored reach (delivered ticks, issue #598).
+  async fn report_delivered(&mut self) {
+    if let Some(client) = self.client.as_mut() {
+      client.report_delivered(&mut self.connection, now_ms()).await;
     }
   }
 

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT u.auto_follow_mentioned_threads,\n                COALESCE(s.push_mode, 'away_only') AS \"push_mode!\", s.send_read_receipts, s.dnd_schedule,\n                s.uses_desktop_attention, s.notification_level, s.meeting_reminder_minutes,\n                s.notifies_meeting_start\n         FROM users u LEFT JOIN user_notification_settings s ON s.user_id = u.id\n         WHERE u.id = $1",
+  "query": "SELECT u.auto_follow_mentioned_threads,\n                COALESCE(s.push_mode, 'away_only') AS \"push_mode!\", s.send_read_receipts, s.dnd_schedule,\n                s.uses_desktop_attention, s.notification_level, s.meeting_reminder_minutes,\n                s.notifies_meeting_start, s.send_delivery_receipts\n         FROM users u LEFT JOIN user_notification_settings s ON s.user_id = u.id\n         WHERE u.id = $1",
   "describe": {
     "columns": [
       {
@@ -85,6 +85,17 @@
             "name": "notifies_meeting_start"
           }
         }
+      },
+      {
+        "ordinal": 8,
+        "name": "send_delivery_receipts",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "user_notification_settings",
+            "name": "send_delivery_receipts"
+          }
+        }
       }
     ],
     "parameters": {
@@ -100,8 +111,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "177721599686be2bc0809b87a939e91709ffb7f2240e49a8bc9ce7a492eb1dcc"
+  "hash": "44b5c8f99b92112df70a83163da9c72a092a184f2035cac8e8b70c0c696b0f56"
 }

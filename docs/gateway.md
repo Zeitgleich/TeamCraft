@@ -102,6 +102,7 @@ to everyone online when an admin changes it; `GET /api/v1/me` returns the curren
 | `typing`       | `typing_start` to the other members (members only, throttled to one per 3 s per conversation and thread) |
 | `set_activity` | the device is `active` or `idle`; feeds presence                                              |
 | `heartbeat`    | keeps the connection alive                                                                    |
+| `delivered`    | a device stored a DM's or group DM's messages up to `message_id`; may send `delivery_update` (notifications.md, "Delivered") |
 
 ## Presence
 

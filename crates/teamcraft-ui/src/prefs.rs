@@ -412,6 +412,8 @@ pub const DEFAULT_AWAY_AFTER_MINUTES: u32 = 15;
 #[serde(default)]
 pub struct PrivacyPrefs {
   pub share_read_receipts: bool,
+  /// Tell others in DMs and group DMs that their messages reached this user's devices (#598).
+  pub share_delivery_receipts: bool,
   pub share_typing: bool,
   /// Minutes of inactivity before status turns to away; `None` never.
   pub away_after_minutes: Option<u32>,
@@ -424,6 +426,7 @@ impl Default for PrivacyPrefs {
   fn default() -> Self {
     Self {
       share_read_receipts: true,
+      share_delivery_receipts: true,
       share_typing: true,
       away_after_minutes: Some(DEFAULT_AWAY_AFTER_MINUTES),
       send_crash_reports: true,

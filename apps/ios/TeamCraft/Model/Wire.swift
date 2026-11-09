@@ -124,6 +124,8 @@ struct MessageExtras: Decodable, Equatable, Sendable {
   let maybeForwarded: ForwardedFrom?
   /// An own message the other member of a DM read: two ticks instead of one (#769).
   let isRead: Bool?
+  /// An own message that reached a device of every other member: two grey ticks (#598).
+  let isDelivered: Bool?
   /// A membership or channel change someone made, shown as a line instead of a bubble.
   let maybeWorkspaceEvent: WorkspaceEvent?
 }

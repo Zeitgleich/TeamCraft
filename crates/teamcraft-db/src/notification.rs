@@ -16,6 +16,8 @@ pub struct StoredUserSettings {
   pub push_mode: String,
   /// `None`: the instance default applies.
   pub maybe_send_read_receipts: Option<bool>,
+  /// `None`: the instance default for receipts applies.
+  pub maybe_send_delivery_receipts: Option<bool>,
   /// The DND schedule as JSON text; the database does not interpret it.
   pub maybe_dnd_schedule: Option<String>,
   /// `None`: never chose (desktop attention is used).
@@ -34,6 +36,7 @@ impl Default for StoredUserSettings {
       maybe_auto_follow_mentioned_threads: None,
       push_mode: "away_only".into(),
       maybe_send_read_receipts: None,
+      maybe_send_delivery_receipts: None,
       maybe_dnd_schedule: None,
       maybe_uses_desktop_attention: None,
       maybe_level: None,
@@ -57,6 +60,16 @@ pub struct ReceiptRow {
   pub maybe_last_read: Option<MessageId>,
 }
 
+/// A member's delivered position in a DM or group DM, and whether they share it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeliveryRow {
+  pub user: UserId,
+  /// Whether the member sends delivery receipts (with the instance default for those who never chose).
+  pub is_sharing: bool,
+  /// The highest message ID a device of the member stored, if any reported one.
+  pub maybe_delivered: Option<MessageId>,
+}
+
 impl Database {
   /// The user's preferences, or the defaults if they never changed any.
   pub async fn get_user_notification_settings(&self, user: UserId) -> Result<StoredUserSettings, DbError> {
@@ -64,7 +77,7 @@ impl Database {
       r#"SELECT u.auto_follow_mentioned_threads,
                 COALESCE(s.push_mode, 'away_only') AS "push_mode!", s.send_read_receipts, s.dnd_schedule,
                 s.uses_desktop_attention, s.notification_level, s.meeting_reminder_minutes,
-                s.notifies_meeting_start
+                s.notifies_meeting_start, s.send_delivery_receipts
          FROM users u LEFT JOIN user_notification_settings s ON s.user_id = u.id
          WHERE u.id = $1"#,
       to_db(user),
@@ -76,6 +89,7 @@ impl Database {
         maybe_auto_follow_mentioned_threads: row.auto_follow_mentioned_threads,
         push_mode: row.push_mode,
         maybe_send_read_receipts: row.send_read_receipts,
+        maybe_send_delivery_receipts: row.send_delivery_receipts,
         maybe_dnd_schedule: row.dnd_schedule,
         maybe_uses_desktop_attention: row.uses_desktop_attention,
         maybe_level: row.notification_level.map(NotificationLevel::from),
@@ -102,14 +116,15 @@ impl Database {
     sqlx::query!(
       r#"INSERT INTO user_notification_settings
            (user_id, push_mode, send_read_receipts, dnd_schedule, uses_desktop_attention, notification_level,
-            meeting_reminder_minutes, notifies_meeting_start)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            meeting_reminder_minutes, notifies_meeting_start, send_delivery_receipts)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT (user_id) DO UPDATE SET push_mode = EXCLUDED.push_mode,
            send_read_receipts = EXCLUDED.send_read_receipts, dnd_schedule = EXCLUDED.dnd_schedule,
            uses_desktop_attention = EXCLUDED.uses_desktop_attention,
            notification_level = EXCLUDED.notification_level,
            meeting_reminder_minutes = EXCLUDED.meeting_reminder_minutes,
-           notifies_meeting_start = EXCLUDED.notifies_meeting_start, updated_at = now()"#,
+           notifies_meeting_start = EXCLUDED.notifies_meeting_start,
+           send_delivery_receipts = EXCLUDED.send_delivery_receipts, updated_at = now()"#,
       to_db(user),
       settings.push_mode,
       settings.maybe_send_read_receipts,
@@ -118,6 +133,7 @@ impl Database {
       settings.maybe_level.as_ref().map(NotificationLevel::as_str),
       settings.maybe_meeting_reminder_minutes,
       settings.maybe_notifies_meeting_start,
+      settings.maybe_send_delivery_receipts,
     )
     .execute(&mut *tx)
     .await?;
@@ -258,6 +274,37 @@ impl Database {
     .await?;
     // Someone who left the conversation has nothing to read.
     Ok(row.is_none_or(|row| row.has_read))
+  }
+
+  /// All members of the conversation with their delivered positions and whether they share them.
+  /// `default_is_enabled` applies to members who never chose.
+  pub async fn list_delivery_members(
+    &self,
+    conversation: ConversationId,
+    default_is_enabled: bool,
+  ) -> Result<Vec<DeliveryRow>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT m.user_id, m.last_delivered_message_id,
+                COALESCE(s.send_delivery_receipts, $2) AS "is_sharing!"
+         FROM memberships m
+         LEFT JOIN user_notification_settings s ON s.user_id = m.user_id
+         WHERE m.conversation_id = $1
+         ORDER BY m.user_id"#,
+      to_db(conversation),
+      default_is_enabled,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(DeliveryRow {
+          user: from_db(row.user_id)?,
+          is_sharing: row.is_sharing,
+          maybe_delivered: from_db_opt(row.last_delivered_message_id)?,
+        })
+      })
+      .collect()
   }
 
   /// Members of the conversation who send (and therefore may see) read receipts, with their read

@@ -90,6 +90,7 @@ pub(super) fn is_live_now(
       message.kind != MlsMessageKind::Welcome && caught_up.contains(&message.conversation_id)
     },
     GatewayEvent::ReadReceipt { conversation_id, .. }
+    | GatewayEvent::DeliveryUpdate { conversation_id, .. }
     | GatewayEvent::MessageAck { conversation_id, .. }
     | GatewayEvent::MembershipAdd { conversation_id, .. }
     | GatewayEvent::MembershipRemove { conversation_id, .. }

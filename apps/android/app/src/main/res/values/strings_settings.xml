@@ -24,6 +24,7 @@
   </plurals>
   <string name="meeting_notify_start">Notify me when a meeting starts</string>
   <string name="read_receipts">Send read receipts</string>
+  <string name="delivery_receipts">Send delivery receipts</string>
   <string name="auto_follow_threads">Follow threads I\'m mentioned in</string>
   <string name="custom_status_title">Custom status</string>
   <string name="custom_status_hint">What are you up to?</string>

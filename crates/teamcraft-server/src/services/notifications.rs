@@ -71,6 +71,10 @@ pub async fn put_settings(
     maybe_auto_follow_mentioned_threads: Some(request.auto_follow_mentioned_threads),
     push_mode: request.push_mode.as_str().to_owned(),
     maybe_send_read_receipts: Some(request.send_read_receipts),
+    // Clients from before delivered ticks leave it out; that keeps the user's choice.
+    maybe_send_delivery_receipts: request
+      .maybe_send_delivery_receipts
+      .or(previous.maybe_send_delivery_receipts),
     maybe_dnd_schedule,
     maybe_uses_desktop_attention: request
       .maybe_uses_desktop_attention
@@ -304,9 +308,15 @@ pub async fn get_read_receipts(
         .collect();
     }
   }
+  let maybe_delivered_up_to = if has_receipts(&access.view.conversation) {
+    super::delivery::delivered_up_to(state, conversation, caller.user.id).await?
+  } else {
+    None
+  };
   Ok(ReadReceiptsResponse {
     conversation_id: conversation,
     receipts,
+    maybe_delivered_up_to,
   })
 }
 
@@ -345,7 +355,7 @@ pub async fn publish_read_receipt(
 }
 
 /// Receipts exist only in DMs and group DMs.
-fn has_receipts(conversation: &Conversation) -> bool {
+pub(crate) fn has_receipts(conversation: &Conversation) -> bool {
   matches!(conversation.kind, ConversationKind::Dm | ConversationKind::Group)
 }
 
@@ -447,6 +457,11 @@ fn settings_response(
       .maybe_meeting_reminder_minutes
       .and_then(|minutes| u16::try_from(minutes).ok()),
     maybe_notifies_meeting_start: stored.maybe_notifies_meeting_start,
+    maybe_send_delivery_receipts: Some(
+      stored
+        .maybe_send_delivery_receipts
+        .unwrap_or(state.settings.get().notifications.read_receipts_default),
+    ),
   })
 }
 

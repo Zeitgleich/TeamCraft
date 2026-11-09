@@ -18,7 +18,7 @@ use std::time::Duration;
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use teamcraft_client_api::custom_status::set_request;
-use teamcraft_client_api::live::{LiveMarks, LiveReceipt, LiveSnapshot};
+use teamcraft_client_api::live::{LiveDelivered, LiveMarks, LiveReceipt, LiveSnapshot};
 use teamcraft_client_api::receipts::seen_by;
 use teamcraft_proto::{
   AnnouncementId, AnnouncementResponse, BridgeAddressResponse, CustomStatus as CustomStatusWire,
@@ -63,6 +63,9 @@ pub struct LiveServer {
   refresh_queued: Rc<Cell<bool>>,
 }
 
+/// A conversation's read positions per member, and how far every other member has its messages.
+type ReceiptsAnswer = (Vec<(UserId, MessageId)>, Option<MessageId>);
+
 /// The last answers of the server. Empty until the first refresh finishes.
 #[derive(Debug, Default)]
 pub struct LiveState {
@@ -73,6 +76,8 @@ pub struct LiveState {
   threads: Vec<ThreadWire>,
   presence: HashMap<UserId, UserPresence>,
   receipts: HashMap<ConversationId, Vec<(UserId, MessageId)>>,
+  /// How far every other member has the messages on a device (DMs and group DMs, #598).
+  delivered: HashMap<ConversationId, MessageId>,
   announcement: Option<AnnouncementResponse>,
   /// The marks of the core's last snapshot; `None` before the first.
   maybe_last_marks: Option<LiveMarks>,
@@ -81,6 +86,8 @@ pub struct LiveState {
   presence_seen: u64,
   /// The receipts of the last snapshot: unchanged ones are not applied again.
   last_receipts: Vec<LiveReceipt>,
+  /// The delivered positions of the last snapshot: unchanged ones are not applied again.
+  last_delivered: Vec<LiveDelivered>,
   /// The conversation whose receipts the UI showed last (the open DM): the only one whose
   /// receipts are read over REST, once per connection.
   maybe_receipts_shown: Option<ConversationId>,
@@ -112,6 +119,7 @@ struct Fetched {
   maybe_threads: Option<Vec<ThreadWire>>,
   presence: Vec<UserPresence>,
   receipts: HashMap<ConversationId, Vec<(UserId, MessageId)>>,
+  delivered: HashMap<ConversationId, MessageId>,
   maybe_announcement: Option<GetAnnouncementResponse>,
 }
 
@@ -194,10 +202,12 @@ impl LiveServer {
     };
     let announcement = self.get::<GetAnnouncementResponse>("/api/v1/announcement").await;
     let mut receipts = HashMap::new();
+    let mut delivered = HashMap::new();
     if let Some(conversation) = maybe_shown {
       self.state.borrow_mut().receipts_read.insert(conversation);
-      if let Some(read) = self.receipts(conversation).await {
+      if let Some((read, maybe_delivered)) = self.receipts(conversation).await {
         receipts.insert(conversation, read);
+        delivered.extend(maybe_delivered.map(|message| (conversation, message)));
       }
     }
     let fetched = Fetched {
@@ -206,6 +216,7 @@ impl LiveServer {
       maybe_threads: threads.map(|threads| threads.threads),
       presence,
       receipts,
+      delivered,
       maybe_announcement: announcement,
     };
     // Issue #246: an unchanged answer must not make the whole UI read the workspace again.
@@ -215,11 +226,14 @@ impl LiveServer {
   }
 
   async fn refresh_receipts(&self, conversation: ConversationId) {
-    let Some(receipts) = self.receipts(conversation).await else {
+    let Some((receipts, maybe_delivered)) = self.receipts(conversation).await else {
       return;
     };
     let fetched = Fetched {
       receipts: HashMap::from([(conversation, receipts)]),
+      delivered: maybe_delivered
+        .map(|message| HashMap::from([(conversation, message)]))
+        .unwrap_or_default(),
       ..Fetched::default()
     };
     if self.state.borrow_mut().merge(fetched) {
@@ -227,16 +241,16 @@ impl LiveServer {
     }
   }
 
-  async fn receipts(&self, conversation: ConversationId) -> Option<Vec<(UserId, MessageId)>> {
+  /// The members' read positions and how far every other member has the messages on a device.
+  async fn receipts(&self, conversation: ConversationId) -> Option<ReceiptsAnswer> {
     let path = format!("/api/v1/conversations/{conversation}/read-receipts");
     let response = self.get::<ReadReceiptsResponse>(&path).await?;
-    Some(
-      response
-        .receipts
-        .into_iter()
-        .map(|receipt| (receipt.user_id, receipt.message_id))
-        .collect(),
-    )
+    let receipts = response
+      .receipts
+      .into_iter()
+      .map(|receipt| (receipt.user_id, receipt.message_id))
+      .collect();
+    Some((receipts, response.maybe_delivered_up_to))
   }
 
   async fn refresh_announcement(&self) {
@@ -351,6 +365,24 @@ impl LiveServer {
   /// conversation is shown after a connection its receipts are read from the server once (events
   /// may have been missed); the UI reads again when they arrived.
   pub fn seen_by(&self, conversation: ConversationId, message: MessageId) -> Vec<UserId> {
+    self.note_receipts_shown(conversation);
+    let state = self.state.borrow();
+    state
+      .receipts
+      .get(&conversation)
+      .map_or_else(Vec::new, |receipts| seen_by(receipts, message))
+  }
+
+  /// The newest message every other member of a DM or group DM has on a device (#598); read from
+  /// the server with the receipts, like [`Self::seen_by`].
+  pub fn delivered_to_others(&self, conversation: ConversationId) -> Option<MessageId> {
+    self.note_receipts_shown(conversation);
+    self.state.borrow().delivered.get(&conversation).copied()
+  }
+
+  /// The UI shows the conversation's receipts: the first time after a connection they are read
+  /// from the server once.
+  fn note_receipts_shown(&self, conversation: ConversationId) {
     let is_unread = {
       let mut state = self.state.borrow_mut();
       state.maybe_receipts_shown = Some(conversation);
@@ -360,11 +392,6 @@ impl LiveServer {
       let live = self.clone();
       spawn_local(async move { live.refresh_receipts(conversation).await });
     }
-    let state = self.state.borrow();
-    state
-      .receipts
-      .get(&conversation)
-      .map_or_else(Vec::new, |receipts| seen_by(receipts, message))
   }
 
   /// Marks the conversation read in the local counts right away; the server confirms on refresh.
@@ -524,6 +551,9 @@ impl LiveState {
         is_changed = true;
       }
     }
+    for (conversation, message) in fetched.delivered {
+      is_changed |= self.note_delivered(conversation, message);
+    }
     if let Some(announcement) = fetched.maybe_announcement {
       is_changed |= replace_if_changed(&mut self.announcement, announcement.maybe_announcement);
     }
@@ -551,7 +581,26 @@ impl LiveState {
       self.apply_receipts(&live.receipts);
       self.last_receipts = live.receipts;
     }
+    if live.delivered != self.last_delivered {
+      for delivered in &live.delivered {
+        self.note_delivered(delivered.conversation, delivered.message);
+      }
+      self.last_delivered = live.delivered;
+    }
     follow_up(maybe_last_marks, live.marks)
+  }
+
+  /// Delivered positions only move forward; returns whether this one moved.
+  fn note_delivered(&mut self, conversation: ConversationId, message: MessageId) -> bool {
+    if self
+      .delivered
+      .get(&conversation)
+      .is_some_and(|known| *known >= message)
+    {
+      return false;
+    }
+    self.delivered.insert(conversation, message);
+    true
   }
 
   fn apply_receipts(&mut self, live: &[LiveReceipt]) {
@@ -819,6 +868,31 @@ mod tests {
           ..LiveFollowUp::default()
         }
       );
+    }
+
+    #[test]
+    fn delivered_only_moves_forward_from_snapshots_and_answers() {
+      let conversation: ConversationId = id_from_raw(7);
+      let mut state = LiveState::default();
+      let mut snapshot = live(Some(&[]), LiveMarks::default());
+      snapshot.delivered = vec![LiveDelivered {
+        conversation,
+        message: id_from_raw(9),
+      }];
+      state.apply_snapshot(snapshot);
+      assert_eq!(state.delivered.get(&conversation), Some(&id_from_raw(9)));
+      // A late REST answer with an older position changes nothing.
+      let older = Fetched {
+        delivered: HashMap::from([(conversation, id_from_raw(5))]),
+        ..Fetched::default()
+      };
+      assert!(!state.merge(older));
+      let newer = Fetched {
+        delivered: HashMap::from([(conversation, id_from_raw(12))]),
+        ..Fetched::default()
+      };
+      assert!(state.merge(newer));
+      assert_eq!(state.delivered.get(&conversation), Some(&id_from_raw(12)));
     }
 
     #[test]

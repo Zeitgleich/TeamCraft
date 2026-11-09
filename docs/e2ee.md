@@ -857,6 +857,26 @@ send at most one every 3 s while there is text in the composer, and none when th
 when I'm typing" off (a preference of each device, on by default). Nothing about typing is stored, on
 the server or the clients.
 
+Read and delivered positions are plaintext metadata (notifications.md, "Read receipts"). The server
+stores how far each member read (`read-position`, for unread counts and push) and, for DMs and group
+DMs, how far a device of each member stored the messages: after storing new messages a device sends a
+`delivered` gateway frame with the newest message ID it has (issue #598). That reveals nothing the
+server didn't already see, since it hands every device its messages (gateway events and history
+pages) and knows when. What other members learn is limited on purpose:
+
+- **Delivered is an aggregate.** A member is told one message ID per conversation, "every other
+  member has the messages up to here on at least one device" (`delivery_update`, `delivered_up_to`),
+  never who has what. In a DM that is the other person's state; in a group DM it doesn't say whose
+  device lagged.
+- **Reciprocal and per user.** `send_delivery_receipts` (and `send_read_receipts` for read
+  positions) is a per-user setting, default the instance's `[notifications] read_receipts_default`.
+  Whoever turns it off neither sends nor sees it; while any other member has it off, nobody in that
+  conversation sees the aggregate (their state is unknown, so the ticks never claim more than is
+  true).
+- **Bounded.** One position per membership (`memberships.last_delivered_message_id`), moved forward
+  only; nothing grows with the history.
+- Channels have no receipts of either kind.
+
 Directory data, not encrypted: the server has to show and route by it, so it holds it in plain text
 like the identity provider does. Space names, descriptions, colors and **pictures**; channel names,
 topics and **pictures**; people's profiles and avatars. A space or channel picture is uploaded to the
