@@ -96,16 +96,17 @@ final class DirectoryPager<Row: Identifiable> where Row.ID == String {
   }
 }
 
+// The generated types are public, so their conformances' witnesses must be too.
 extension DirectoryPersonItem: Identifiable {
-  var id: String { userId }
+  public var id: String { userId }
 }
 
 extension DirectoryChannelItem: Identifiable {
-  var id: String { conversationId }
+  public var id: String { conversationId }
 }
 
 extension DirectoryInvitationItem: Identifiable {
-  var id: String { invitationId }
+  public var id: String { invitationId }
 }
 
 /// The directory's calls through the core (#1337). The server decides what each list holds.
