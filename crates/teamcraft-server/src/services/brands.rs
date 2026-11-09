@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use axum::body::Bytes;
 use serde_json::json;
+use teamcraft_client_api::color_theme::ThemePolicy;
 use teamcraft_db::StoredBrandAsset;
 use teamcraft_proto::{
   AdminBrand, AdminBrandsResponse, BrandAssetSlot, BrandColors, BrandLinks, BrandMailSettings, BrandSettings,
@@ -47,6 +48,13 @@ pub async fn load(state: &AppState) -> Result<(), ApiError> {
       }
       is_served
     });
+    // A later build may drop a preset; that must not take the brand's host names with it.
+    if let Some(policy) = brand.config.maybe_theme_policy.clone()
+      && let Err(error) = ThemePolicy::check(&policy.into())
+    {
+      warn!(brand_id = %brand.config.id, %error, "the brand's stored theme policy is invalid; it is dropped");
+      brand.config.maybe_theme_policy = None;
+    }
   }
   match state.brands.check(&database) {
     Ok(registry) => state.brands.install(registry, database),
@@ -534,6 +542,11 @@ fn apply_settings(
   config.mail.maybe_sender_name = non_empty(settings.mail.maybe_sender_name);
   config.mail.maybe_from_address = non_empty(settings.mail.maybe_from_address);
   config.maybe_sso_label = non_empty(settings.maybe_sso_label);
+  // Absent: an older console that doesn't know the policy, so what is stored stays. Unrestricted is
+  // the same as having none, and that is how the editor removes one.
+  if let Some(policy) = settings.maybe_theme_policy {
+    config.maybe_theme_policy = (!policy.is_unrestricted()).then(|| policy.into());
+  }
   clear_file_names(&mut config);
   config
 }
@@ -563,6 +576,7 @@ fn settings_of(config: &BrandConfig) -> BrandSettings {
       maybe_from_address: config.mail.maybe_from_address.clone(),
     },
     maybe_sso_label: config.maybe_sso_label.clone(),
+    maybe_theme_policy: config.maybe_theme_policy.clone().map(Into::into),
   }
 }
 

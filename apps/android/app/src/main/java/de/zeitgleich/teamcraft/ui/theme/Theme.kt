@@ -17,8 +17,10 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.material3.ColorScheme
 import androidx.compose.ui.graphics.Color
+import uniffi.teamcraft_ffi.AppThemePolicy
 import uniffi.teamcraft_ffi.AppThemeTokens
 import uniffi.teamcraft_ffi.BrandAccent
+import uniffi.teamcraft_ffi.colorThemeEffective
 import uniffi.teamcraft_ffi.colorThemeTokens
 import uniffi.teamcraft_ffi.LoginBrand
 
@@ -110,6 +112,9 @@ private val DarkExtra = LightExtra.copy(
 
 val LocalTeamCraftColors = staticCompositionLocalOf { LightExtra }
 
+/** The brand's rules for colour themes (branding.md §5.1); `null` without a brand. */
+val LocalThemePolicy = staticCompositionLocalOf<AppThemePolicy?> { null }
+
 /**
  * The app's theme. [maybeBrand]: the server's brand, whose accent colors (branding.md §4) replace
  * TeamCraft's teal; status, danger and text colors stay the app's own.
@@ -123,8 +128,12 @@ fun TeamCraftTheme(maybeBrand: LoginBrand? = null, content: @Composable () -> Un
   val colorTheme by prefs.colorThemeValue.collectAsState()
   val font by prefs.fontValue.collectAsState()
   val typography = remember(font) { appFontFamily(font)?.let(TeamCraftTypography::withFontFamily) ?: TeamCraftTypography }
+  val maybePolicy = maybeBrand?.themePolicy
   // A chosen colour theme (#202): the accent, selection, badge and presence; surfaces stay neutral.
-  val maybeTheme = remember(colorTheme, isDark) { colorThemeTokens(colorTheme, isDark) }
+  // One the brand doesn't allow shows its default; the stored value stays (#1495).
+  val maybeTheme = remember(colorTheme, isDark, maybePolicy) {
+    colorThemeTokens(maybePolicy?.let { colorThemeEffective(colorTheme, it) } ?: colorTheme, isDark)
+  }
   val scheme = when {
     maybeTheme != null -> (if (isDark) Dark else Light).withTheme(maybeTheme)
     // The wallpaper's colors (Material You); the dark chrome and badges stay TeamCraft's.
@@ -141,6 +150,7 @@ fun TeamCraftTheme(maybeBrand: LoginBrand? = null, content: @Composable () -> Un
   CompositionLocalProvider(
     LocalTeamCraftColors provides extra,
     LocalStatusBarBackdrop provides backdrop,
+    LocalThemePolicy provides maybePolicy,
   ) {
     MaterialTheme(colorScheme = scheme, typography = typography, shapes = TeamCraftShapes, content = content)
   }

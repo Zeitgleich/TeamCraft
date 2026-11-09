@@ -156,7 +156,12 @@ pub fn provide_brand(settings: Settings) {
       Theme::Light => false,
       Theme::System => system_dark.get(),
     };
-    let theme = color_theme.get().css_properties(is_dark);
+    // The stored choice stays as it is; a brand that doesn't allow it shows its default (#1495).
+    let chosen = color_theme.get();
+    let theme = brand
+      .0
+      .with(|view| view.effective_theme(&chosen))
+      .css_properties(is_dark);
     apply_to_document(&brand.0.get(), &theme, is_dark);
   });
 
@@ -306,7 +311,7 @@ thread_local! {
   static APPLIED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Sets the brand's colors on `<html>`, then the user's colour theme over them (#202: a theme
+/// Sets the brand's colors on `<html>`, then the colour theme in force over them (#202: a theme
 /// replaces the brand's chrome colours, the brand stays the default), and the page title.
 fn apply_to_document(view: &BrandView, theme: &[(&'static str, String)], is_dark: bool) {
   let Some(document) = web_sys::window().and_then(|window| window.document()) else {

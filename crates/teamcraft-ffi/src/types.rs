@@ -466,6 +466,8 @@ pub struct LoginBrand {
   pub light: BrandAccent,
   /// The same for the dark theme.
   pub dark: BrandAccent,
+  /// The brand's default colour theme and what people may pick (docs/branding.md §5.1).
+  pub theme_policy: crate::color_theme::AppThemePolicy,
 }
 
 /// The brandable accent tokens (branding.md §4); absent keys keep the app's own colors.

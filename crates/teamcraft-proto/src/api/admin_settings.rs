@@ -12,8 +12,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::wire_enum::wire_enum;
 use crate::{
-  BrandAssetSlot, BrandColors, BrandLinks, ConversationId, CrashReportSettings, HealthAlertSettings,
-  NotificationLevel, SignInMethod, SpaceId, UnixMillis,
+  BrandAssetSlot, BrandColors, BrandLinks, BrandThemePolicy, ConversationId, CrashReportSettings,
+  HealthAlertSettings, NotificationLevel, SignInMethod, SpaceId, UnixMillis,
 };
 
 /// The application and bundle ID of the official apps.
@@ -171,6 +171,11 @@ pub struct BrandSettings {
   /// display name. Its icon is the `sso_icon` image.
   #[serde(rename = "sso_label", default, skip_serializing_if = "Option::is_none")]
   pub maybe_sso_label: Option<String>,
+  /// The default colour theme and which themes people may pick (docs/branding.md §5.1). In a
+  /// request, absent keeps the stored policy (an older console doesn't know it) and an unrestricted
+  /// one removes it. Absent in an answer: the brand has none.
+  #[serde(rename = "theme_policy", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_theme_policy: Option<BrandThemePolicy>,
 }
 
 /// The sender of mail that goes out as this brand.

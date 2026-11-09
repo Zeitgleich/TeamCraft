@@ -180,6 +180,7 @@ mod tests {
         login_title: Default::default(),
         login_text: Default::default(),
         links: Default::default(),
+        maybe_theme_policy: None,
       },
       sign_in: SignInInfo {
         issuer: "https://auth.example.com/realms/company".into(),

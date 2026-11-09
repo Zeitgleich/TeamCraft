@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use leptos::prelude::*;
+use teamcraft_client_api::color_theme::{ColorTheme, PRESETS, PresetGroup, Rgb, ThemeColors};
 use teamcraft_proto::{
   AdminBrand, AdminBrandsResponse, BrandAssetSlot, BrandColors, BrandLinks, BrandMailSettings, BrandSettings,
-  BrandSource, CreateBrandRequest, ServedHostname, UpdateBrandRequest, brand_color_properties,
-  is_brand_hex_color,
+  BrandSource, BrandThemePolicy, CreateBrandRequest, ServedHostname, UpdateBrandRequest,
+  brand_color_properties, is_brand_hex_color,
 };
 use wasm_bindgen_futures::JsFuture;
 
@@ -15,6 +16,7 @@ use crate::components::admin_fields::{
   Bound, CheckField, FieldErrors, TextAreaField, TextField, Validated, accept_or_refuse, bind, bind_bool,
   is_dns_name, is_email_address, is_email_domain, is_web_url, list_text, parse_list,
 };
+use crate::components::settings_color_theme::{Swatch, use_is_dark};
 use crate::form_errors::error_id;
 use crate::i18n::use_i18n;
 use crate::reactive::SetIfAlive;
@@ -38,6 +40,13 @@ const COLOR_KEYS: [&str; 7] = [
   "sidebar",
   "sidebar_current",
   "chrome",
+];
+/// The four colours of a custom default theme, in share code order: (i18n key, field).
+const THEME_COLOR_FIELDS: [(&str, &str); 4] = [
+  ("color-theme-navigation", "theme_custom_navigation"),
+  ("color-theme-selection", "theme_custom_selection"),
+  ("color-theme-presence", "theme_custom_presence"),
+  ("color-theme-notification", "theme_custom_notification"),
 ];
 const COLOR_FIELDS: [[&str; 7]; 2] = [
   [
@@ -78,6 +87,9 @@ const IMAGE_TYPES: [&str; 6] = [
   "image/x-icon",
   "image/vnd.microsoft.icon",
 ];
+
+/// The radios of the default theme share this name.
+const THEME_RADIO_GROUP: &str = "brand-default-theme";
 
 /// What the editor below the list shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -462,6 +474,11 @@ fn BrandEditor(
           <ColorColumn draft=draft show_errors=show_errors is_dark=true />
         </div>
       </fieldset>
+      <fieldset class="policy-group" prop:disabled=is_read_only>
+        <legend>{move || i18n.t("admin-brands-themes")}</legend>
+        <p class="muted-text small">{move || i18n.t("admin-brands-themes-hint")}</p>
+        <ThemePolicyFields draft=draft show_errors=show_errors />
+      </fieldset>
       {(!is_new)
         .then(|| view! { <BrandAssets id=colors_assets_id.clone() response=response is_read_only=is_read_only /> })}
       <div class="policy-footer">
@@ -611,23 +628,6 @@ fn ColorColumn(draft: RwSignal<BrandDraft>, show_errors: RwSignal<bool>, is_dark
     "admin-brands-colors-light"
   };
   let colors = Signal::derive(move || draft.with(|draft| draft.theme_colors(is_dark)));
-  let preview = NodeRef::<leptos::html::Div>::new();
-  // CSSOM properties, not a `style` attribute: the CSP (`style-src 'self'`) blocks those.
-  let applied = StoredValue::new(Vec::<&'static str>::new());
-  Effect::new(move || {
-    let properties = preview_properties(&colors.get());
-    let Some(element) = preview.get() else {
-      return;
-    };
-    let style = web_sys::HtmlElement::style(&element);
-    for property in applied.get_value() {
-      drop(style.remove_property(property));
-    }
-    for (property, value) in &properties {
-      drop(style.set_property(property, value));
-    }
-    applied.set_value(properties.into_iter().map(|(property, _)| property).collect());
-  });
   let checks = Signal::derive(move || contrast_checks(&colors.get()));
   view! {
     <div class="brand-color-column">
@@ -687,19 +687,7 @@ fn ColorColumn(draft: RwSignal<BrandDraft>, show_errors: RwSignal<bool>, is_dark
           }
         })
         .collect_view()}
-      <div class=if is_dark { "brand-preview is-dark" } else { "brand-preview" } node_ref=preview aria-hidden="true">
-        <div class="brand-preview-chrome"></div>
-        <div class="brand-preview-body">
-          <div class="brand-preview-sidebar">
-            <span class="brand-preview-current"></span>
-            <span></span>
-          </div>
-          <div class="brand-preview-main">
-            <span class="brand-preview-button">{move || i18n.t("admin-brands-preview-button")}</span>
-            <span class="brand-preview-soft">{move || i18n.t("admin-brands-preview-soft")}</span>
-          </div>
-        </div>
-      </div>
+      <BrandPreview properties=Signal::derive(move || preview_properties(&colors.get())) is_dark=is_dark />
       <ul class="brand-contrast small" aria-live="polite">
         {move || {
           checks
@@ -723,6 +711,232 @@ fn ColorColumn(draft: RwSignal<BrandDraft>, show_errors: RwSignal<bool>, is_dark
             .collect_view()
         }}
       </ul>
+    </div>
+  }
+}
+
+/// The brand's look as a small picture, from CSS custom properties.
+#[component]
+fn BrandPreview(properties: Signal<Vec<(&'static str, String)>>, is_dark: bool) -> impl IntoView {
+  let i18n = use_i18n();
+  let preview = NodeRef::<leptos::html::Div>::new();
+  // CSSOM properties, not a `style` attribute: the CSP (`style-src 'self'`) blocks those.
+  let applied = StoredValue::new(Vec::<&'static str>::new());
+  Effect::new(move || {
+    let properties = properties.get();
+    let Some(element) = preview.get() else {
+      return;
+    };
+    let style = web_sys::HtmlElement::style(&element);
+    for property in applied.get_value() {
+      drop(style.remove_property(property));
+    }
+    for (property, value) in &properties {
+      drop(style.set_property(property, value));
+    }
+    applied.set_value(properties.into_iter().map(|(property, _)| property).collect());
+  });
+  view! {
+    <div class=if is_dark { "brand-preview is-dark" } else { "brand-preview" } node_ref=preview aria-hidden="true">
+      <div class="brand-preview-chrome"></div>
+      <div class="brand-preview-body">
+        <div class="brand-preview-sidebar">
+          <span class="brand-preview-current"></span>
+          <span></span>
+        </div>
+        <div class="brand-preview-main">
+          <span class="brand-preview-button">{move || i18n.t("admin-brands-preview-button")}</span>
+          <span class="brand-preview-soft">{move || i18n.t("admin-brands-preview-soft")}</span>
+        </div>
+      </div>
+    </div>
+  }
+}
+
+/// The default colour theme of the brand and what its people may pick (docs/branding.md §5.1), with
+/// a live preview of the default in light and dark.
+#[component]
+fn ThemePolicyFields(draft: RwSignal<BrandDraft>, show_errors: RwSignal<bool>) -> impl IntoView {
+  let i18n = use_i18n();
+  let is_dark = use_is_dark();
+  let tile = move |choice: ThemeChoice| {
+    let picked = choice.clone();
+    (
+      Signal::derive(move || draft.with(|draft| draft.theme_default == choice)),
+      Callback::new(move |()| draft.update(|draft| draft.theme_default = picked.clone())),
+    )
+  };
+  let brand_colors = Signal::derive(move || draft.with(|draft| draft.brand_swatch(is_dark.get())));
+  let custom_colors = Signal::derive(move || draft.with(BrandDraft::custom_swatch));
+  let (is_brand, on_brand) = tile(ThemeChoice::Brand);
+  let (is_custom, on_custom) = tile(ThemeChoice::Custom);
+  let shows_custom = Signal::derive(move || draft.with(|draft| draft.theme_default == ThemeChoice::Custom));
+  let (is_custom_allowed, set_custom_allowed) = bind_bool(
+    draft,
+    |d| d.is_custom_theme_allowed,
+    |d, value| d.is_custom_theme_allowed = value,
+  );
+  let (is_every_preset_allowed, set_every_preset_allowed) = bind_bool(
+    draft,
+    |d| d.is_every_preset_allowed,
+    |d, value| d.is_every_preset_allowed = value,
+  );
+  let preview =
+    move |is_dark: bool| Signal::derive(move || draft.with(|draft| draft.default_theme_preview(is_dark)));
+  view! {
+    <h4>{move || i18n.t("admin-brands-theme-default")}</h4>
+    <div class="set-swatches" role="radiogroup" aria-label=move || i18n.t("admin-brands-theme-default")>
+      <div class="set-swatch-row">
+        <Swatch name="admin-brands-theme-brand-colors" group=THEME_RADIO_GROUP colors=brand_colors is_chosen=is_brand on_choose=on_brand is_dark />
+        <Swatch name="admin-brands-theme-own-colors" group=THEME_RADIO_GROUP colors=custom_colors is_chosen=is_custom on_choose=on_custom is_dark />
+      </div>
+      {PresetGroup::ALL
+        .into_iter()
+        .map(|group| {
+          let heading = format!("color-theme-group-{}", group.slug());
+          view! {
+            <h4 class="set-swatch-group">{move || i18n.t(&heading)}</h4>
+            <div class="set-swatch-row">
+              {PRESETS
+                .iter()
+                .filter(|preset| preset.group == group)
+                .map(|preset| {
+                  let name = format!("color-theme-{}", preset.id.as_str());
+                  let (is_chosen, on_choose) = tile(ThemeChoice::Preset(preset.id.as_str().to_owned()));
+                  view! {
+                    <Swatch name group=THEME_RADIO_GROUP colors=Signal::stored(preset.colors) is_chosen on_choose is_dark />
+                  }
+                })
+                .collect_view()}
+            </div>
+          }
+        })
+        .collect_view()}
+    </div>
+    <Show when=move || shows_custom.get()>
+      <div class="brand-theme-custom">
+        {THEME_COLOR_FIELDS
+          .into_iter()
+          .enumerate()
+          .map(|(index, (label, field))| view! { <ThemeColorField draft show_errors index label field /> })
+          .collect_view()}
+      </div>
+    </Show>
+    <div class="brand-colors">
+      <div class="brand-color-column">
+        <h4>{move || i18n.t("admin-brands-colors-light")}</h4>
+        <BrandPreview properties=preview(false) is_dark=false />
+      </div>
+      <div class="brand-color-column">
+        <h4>{move || i18n.t("admin-brands-colors-dark")}</h4>
+        <BrandPreview properties=preview(true) is_dark=true />
+      </div>
+    </div>
+    <p class="muted-text small">{move || i18n.t("admin-brands-theme-contrast-hint")}</p>
+    <h4>{move || i18n.t("admin-brands-theme-allowed")}</h4>
+    <CheckField
+      label="admin-brands-theme-allow-custom"
+      checked=is_custom_allowed
+      on_change=set_custom_allowed
+    />
+    <CheckField
+      label="admin-brands-theme-allow-all-presets"
+      hint="admin-brands-theme-allow-all-presets-hint"
+      checked=is_every_preset_allowed
+      on_change=set_every_preset_allowed
+    />
+    <Show when=move || !is_every_preset_allowed.get()>
+      <p class="muted-text small">{move || i18n.t("admin-brands-theme-allowed-hint")}</p>
+      <div class="brand-theme-presets">
+        {PresetGroup::ALL
+          .into_iter()
+          .map(|group| {
+            let heading = format!("color-theme-group-{}", group.slug());
+            view! {
+              <h5>{move || i18n.t(&heading)}</h5>
+              {PRESETS
+                .iter()
+                .filter(|preset| preset.group == group)
+                .map(|preset| {
+                  let id = preset.id.as_str();
+                  let label = format!("color-theme-{id}");
+                  view! {
+                    <label class="checkbox check-field">
+                      <input
+                        type="checkbox"
+                        prop:checked=move || draft.with(|draft| draft.allowed_presets.contains(id))
+                        on:change=move |ev| {
+                          let is_on = event_target_checked(&ev);
+                          draft.update(|draft| draft.set_preset_allowed(id, is_on));
+                        }
+                      />
+                      <span>{move || i18n.t(&label)}</span>
+                    </label>
+                  }
+                })
+                .collect_view()}
+            }
+          })
+          .collect_view()}
+      </div>
+    </Show>
+  }
+}
+
+/// One colour of a custom default theme: hex field, picker and error at the field (forms.md).
+#[component]
+fn ThemeColorField(
+  draft: RwSignal<BrandDraft>,
+  show_errors: RwSignal<bool>,
+  index: usize,
+  label: &'static str,
+  field: &'static str,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let id = format!("brand-theme-{field}");
+  let message_id = error_id(&id);
+  let value = Signal::derive(move || draft.with(|draft| draft.theme_custom[index].clone()));
+  let error = Signal::derive(move || {
+    if show_errors.get() {
+      draft.with(|draft| {
+        draft
+          .errors()
+          .into_iter()
+          .find(|(error_field, _)| *error_field == field)
+          .map(|(_, key)| key)
+      })
+    } else {
+      None
+    }
+  });
+  let picker_value = Signal::derive(move || expand_hex(&value.get()).unwrap_or_else(|| "#000000".to_owned()));
+  let set = move |text: String| draft.update(|draft| draft.theme_custom[index] = text);
+  view! {
+    <div class="field brand-color-field">
+      <label for=id.clone()>{move || i18n.t(label)}</label>
+      <div class="field-row">
+        <input
+          id=id.clone()
+          class="input"
+          translate="no"
+          placeholder="#1b2233"
+          aria-invalid=move || error.get().map(|_| "true")
+          aria-describedby={
+            let message_id = message_id.clone();
+            move || error.get().map(|_| message_id.clone())
+          }
+          prop:value=move || value.get()
+          on:input=move |ev| set(event_target_value(&ev))
+        />
+        <input
+          type="color"
+          class="brand-color-picker"
+          aria-label=move || i18n.t("admin-brands-color-picker")
+          prop:value=move || picker_value.get()
+          on:input=move |ev| set(event_target_value(&ev))
+        />
+      </div>
+      <p class="field-error" id=message_id.clone()>{move || error.get().map(|key| i18n.t(key))}</p>
     </div>
   }
 }
@@ -906,6 +1120,22 @@ struct BrandDraft {
   from_address: String,
   light: [String; 7],
   dark: [String; 7],
+  theme_default: ThemeChoice,
+  /// The typed colours of a custom default theme, in share code order.
+  theme_custom: [String; 4],
+  is_custom_theme_allowed: bool,
+  is_every_preset_allowed: bool,
+  /// The ids of the presets people may pick; used unless every preset is allowed.
+  allowed_presets: BTreeSet<String>,
+}
+
+/// The kind of default theme of a brand in the editor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ThemeChoice {
+  Brand,
+  /// A preset's id.
+  Preset(String),
+  Custom,
 }
 
 impl BrandDraft {
@@ -923,6 +1153,8 @@ impl BrandDraft {
     let (title_en, title_de, other_titles) = split_languages(&settings.login_title);
     let (text_en, text_de, other_texts) = split_languages(&settings.login_text);
     let optional = |maybe_text: &Option<String>| maybe_text.clone().unwrap_or_default();
+    let policy = settings.maybe_theme_policy.clone().unwrap_or_default();
+    let (theme_default, theme_custom) = theme_draft(&policy.default_theme);
     Self {
       is_new,
       new_id: String::new(),
@@ -948,6 +1180,18 @@ impl BrandDraft {
       from_address: optional(&settings.mail.maybe_from_address),
       light: colors_of(&settings.colors.light),
       dark: colors_of(&settings.colors.dark),
+      theme_default,
+      theme_custom,
+      is_custom_theme_allowed: policy.is_custom_allowed,
+      is_every_preset_allowed: policy.maybe_allowed_presets.is_none(),
+      // Unchecking "every preset" starts from all of them; people then take away what they don't want.
+      allowed_presets: match policy.maybe_allowed_presets {
+        Some(ids) => ids.into_iter().collect(),
+        None => PRESETS
+          .iter()
+          .map(|preset| preset.id.as_str().to_owned())
+          .collect(),
+      },
     }
   }
 
@@ -980,6 +1224,77 @@ impl BrandDraft {
         maybe_from_address: optional(&self.from_address),
       },
       maybe_sso_label: optional(&self.sso_label),
+      // Always sent: an unrestricted policy is how the editor removes one.
+      maybe_theme_policy: Some(self.theme_policy()),
+    }
+  }
+
+  fn theme_policy(&self) -> BrandThemePolicy {
+    BrandThemePolicy {
+      default_theme: self.default_theme().to_string(),
+      maybe_allowed_presets: (!self.is_every_preset_allowed).then(|| {
+        PRESETS
+          .iter()
+          .map(|preset| preset.id.as_str().to_owned())
+          .filter(|id| self.allowed_presets.contains(id))
+          .collect()
+      }),
+      is_custom_allowed: self.is_custom_theme_allowed,
+    }
+  }
+
+  /// The default theme as a theme; an invalid custom colour shows the brand's colours until fixed.
+  fn default_theme(&self) -> ColorTheme {
+    match &self.theme_default {
+      ThemeChoice::Brand => ColorTheme::Brand,
+      ThemeChoice::Preset(id) => format!("preset:{id}").parse().unwrap_or(ColorTheme::Brand),
+      ThemeChoice::Custom => ThemeColors::from_share_code(&self.theme_custom.join(","))
+        .map_or(ColorTheme::Brand, ColorTheme::Custom),
+    }
+  }
+
+  /// What the preview shows of the default theme: its colours with the contrast rules, or the
+  /// brand's own colours.
+  fn default_theme_preview(&self, is_dark: bool) -> Vec<(&'static str, String)> {
+    let Some(colors) = self.default_theme().colors() else {
+      return preview_properties(&self.theme_colors(is_dark));
+    };
+    let tokens = colors.tokens(is_dark);
+    let mut properties = tokens.css_properties();
+    // The preview's sidebar mixes `--nav` with white by `--sb-tint` (it can't inherit the app's);
+    // a theme has its sidebar colour ready.
+    properties.push(("--nav", tokens.sidebar.to_string()));
+    properties.push(("--sb-tint", "100%".to_owned()));
+    properties
+  }
+
+  /// The tile of the brand's own colours.
+  fn brand_swatch(&self, is_dark: bool) -> ThemeColors {
+    let typed = |key: &str| {
+      self
+        .theme_colors(is_dark)
+        .into_iter()
+        .find(|(name, _)| *name == key)
+        .and_then(|(_, value)| value.trim().parse::<Rgb>().ok())
+    };
+    let product = default_custom_colors();
+    ThemeColors {
+      navigation: typed("sidebar").unwrap_or(product.navigation),
+      selection: typed("sidebar_current").unwrap_or(product.selection),
+      ..product
+    }
+  }
+
+  /// The tile of a custom default: the typed colours while they are valid.
+  fn custom_swatch(&self) -> ThemeColors {
+    ThemeColors::from_share_code(&self.theme_custom.join(",")).unwrap_or_else(|_| default_custom_colors())
+  }
+
+  fn set_preset_allowed(&mut self, id: &str, is_on: bool) {
+    if is_on {
+      self.allowed_presets.insert(id.to_owned());
+    } else {
+      self.allowed_presets.remove(id);
     }
   }
 
@@ -1067,7 +1382,49 @@ impl Validated for BrandDraft {
         }
       }
     }
+    if self.theme_default == ThemeChoice::Custom {
+      for ((_, field), typed) in THEME_COLOR_FIELDS.into_iter().zip(&self.theme_custom) {
+        if typed.trim().parse::<Rgb>().is_err() {
+          errors.push((field, "admin-error-color"));
+        }
+      }
+    }
     errors
+  }
+}
+
+/// A stored default theme as the editor shows it: the kind and the custom colours (the product's when
+/// the stored theme has none).
+fn theme_draft(default_theme: &str) -> (ThemeChoice, [String; 4]) {
+  let Ok(theme) = default_theme.parse::<ColorTheme>();
+  let colors = match &theme {
+    ColorTheme::Custom(colors) => *colors,
+    _ => default_custom_colors(),
+  };
+  let choice = match &theme {
+    ColorTheme::Preset(id) => ThemeChoice::Preset(id.as_str().to_owned()),
+    ColorTheme::Custom(_) => ThemeChoice::Custom,
+    ColorTheme::Brand | ColorTheme::Unknown(_) => ThemeChoice::Brand,
+  };
+  let hex = |color: Rgb| color.to_string();
+  (
+    choice,
+    [
+      hex(colors.navigation),
+      hex(colors.selection),
+      hex(colors.presence),
+      hex(colors.notification),
+    ],
+  )
+}
+
+/// The product's own colours, where a custom default theme starts.
+fn default_custom_colors() -> ThemeColors {
+  ThemeColors {
+    navigation: Rgb([0x1a, 0x24, 0x34]),
+    selection: Rgb([0x00, 0x64, 0xfc]),
+    presence: Rgb([0x2e, 0xb6, 0x7d]),
+    notification: Rgb([0xc8, 0x44, 0x1d]),
   }
 }
 
@@ -1261,6 +1618,7 @@ mod tests {
         },
         mail: BrandMailSettings::default(),
         maybe_sso_label: None,
+        maybe_theme_policy: None,
       },
       assets: Vec::new(),
       maybe_updated_at: None,
@@ -1331,7 +1689,65 @@ mod tests {
     let draft = BrandDraft::from_brand(&original);
     assert!(draft.errors().is_empty());
     assert_eq!(draft.title_en, "Welcome");
-    assert_eq!(draft.to_settings(), original.settings);
+    // The editor always sends the policy: unrestricted is the same as none.
+    assert_eq!(
+      draft.to_settings(),
+      BrandSettings {
+        maybe_theme_policy: Some(BrandThemePolicy::default()),
+        ..original.settings
+      }
+    );
+  }
+
+  #[test]
+  fn a_theme_policy_round_trips_through_the_draft() {
+    let mut original = brand();
+    let policy = BrandThemePolicy {
+      default_theme: "custom:#112233,#445566,#778899,#aabbcc".into(),
+      maybe_allowed_presets: Some(vec!["harbor".into(), "pine".into()]),
+      is_custom_allowed: false,
+    };
+    original.settings.maybe_theme_policy = Some(policy.clone());
+    let draft = BrandDraft::from_brand(&original);
+    assert_eq!(draft.theme_default, ThemeChoice::Custom);
+    assert!(draft.errors().is_empty());
+    assert_eq!(draft.theme_policy(), policy);
+
+    let mut preset = BrandDraft::from_brand(&original);
+    preset.theme_default = ThemeChoice::Preset("harbor".into());
+    assert_eq!(preset.theme_policy().default_theme, "preset:harbor");
+    preset.set_preset_allowed("pine", false);
+    assert_eq!(
+      preset.theme_policy().maybe_allowed_presets,
+      Some(vec!["harbor".to_owned()])
+    );
+    preset.is_every_preset_allowed = true;
+    assert_eq!(preset.theme_policy().maybe_allowed_presets, None);
+  }
+
+  #[test]
+  fn invalid_default_theme_colours_are_reported_at_their_field() {
+    let mut draft = BrandDraft::from_brand(&brand());
+    draft.theme_default = ThemeChoice::Custom;
+    draft.theme_custom[2] = "#ggg".into();
+    assert!(
+      draft
+        .errors()
+        .into_iter()
+        .any(|(field, key)| field == "theme_custom_presence" && key == "admin-error-color")
+    );
+    // Until then the preview falls back to the brand's colours.
+    assert_eq!(draft.default_theme(), ColorTheme::Brand);
+  }
+
+  #[test]
+  fn the_preview_of_a_default_theme_comes_from_the_contrast_checked_tokens() {
+    let mut draft = BrandDraft::from_brand(&brand());
+    draft.theme_default = ThemeChoice::Custom;
+    draft.theme_custom = ["#ffffff", "#ffffff", "#ffffff", "#ffffff"].map(str::to_owned);
+    let colors = draft.custom_swatch();
+    let tokens = colors.tokens(false).css_properties();
+    assert!(draft.default_theme_preview(false).starts_with(&tokens));
   }
 
   #[test]
@@ -1493,6 +1909,17 @@ mod tests {
       "admin-brands-contrast-on-accent",
       "admin-brands-contrast-default-text",
       "admin-brands-contrast-warning",
+      "admin-brands-themes",
+      "admin-brands-themes-hint",
+      "admin-brands-theme-default",
+      "admin-brands-theme-brand-colors",
+      "admin-brands-theme-own-colors",
+      "admin-brands-theme-contrast-hint",
+      "admin-brands-theme-allowed",
+      "admin-brands-theme-allowed-hint",
+      "admin-brands-theme-allow-custom",
+      "admin-brands-theme-allow-all-presets",
+      "admin-brands-theme-allow-all-presets-hint",
       "admin-brands-images",
       "admin-brands-images-hint",
       "admin-brands-images-unavailable",

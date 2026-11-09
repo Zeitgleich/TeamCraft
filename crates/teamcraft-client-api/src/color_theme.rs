@@ -16,11 +16,17 @@
 //! The choice follows the account (settings sync, e2ee.md §6.4) as a short string
 //! ([`ColorTheme`]'s wire form); light/dark stays per device. A custom theme can be shared as a
 //! short code of four hex colours ([`ThemeColors::share_code`]).
+//!
+//! A brand can set the default theme and limit what people may pick ([`ThemePolicy`], issue #1495).
+//! A theme the policy doesn't allow is shown as the default here, and the choice stays as it is,
+//! since another brand may allow it.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use teamcraft_proto::BrandThemePolicy;
 
 /// WCAG AA for normal text.
 const TEXT_CONTRAST: f64 = 4.5;
@@ -119,6 +125,27 @@ pub struct ThemeTokens {
   pub badge: Rgb,
 }
 
+/// The default theme of a brand and what its people may pick (docs/branding.md §5.1). [`Default`]
+/// restricts nothing, which is what a server without a policy means.
+///
+/// A default theme is colours like any other: its tokens come from [`ThemeColors::tokens`], so an
+/// admin's default can't make text unreadable either.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemePolicy {
+  /// What [`ColorTheme::Brand`] and a theme that isn't allowed show.
+  pub default_theme: ColorTheme,
+  pub allowed_presets: AllowedPresets,
+  pub is_custom_allowed: bool,
+}
+
+/// Which presets a policy allows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AllowedPresets {
+  All,
+  /// Preset ids this build knows.
+  Only(BTreeSet<String>),
+}
+
 /// A built-in theme.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Preset {
@@ -153,6 +180,15 @@ pub enum ColorThemeError {
   NotHex,
   #[error("the share code is too long")]
   TooLong,
+}
+
+/// Why an admin's theme policy was refused.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ThemePolicyError {
+  #[error("default_theme must be `brand`, `preset:<id>` of a known preset or `custom:<four colours>`")]
+  UnknownDefaultTheme,
+  #[error("allowed_presets names a preset that doesn't exist")]
+  UnknownPreset,
 }
 
 /// The built-in themes, in the order of the settings. Original names and colours.
@@ -300,6 +336,115 @@ impl ColorTheme {
       .colors()
       .map(|colors| colors.tokens(is_dark).css_properties())
       .unwrap_or_default()
+  }
+}
+
+impl ThemePolicy {
+  /// The policy of a brand as the client takes it: what this build doesn't know (a newer server's
+  /// preset) is left out, and a default it doesn't know shows the brand's colours.
+  pub fn from_wire(policy: &BrandThemePolicy) -> Self {
+    let Ok(default_theme) = policy.default_theme.parse();
+    Self {
+      default_theme: match default_theme {
+        ColorTheme::Unknown(_) => ColorTheme::Brand,
+        known => known,
+      },
+      allowed_presets: match &policy.maybe_allowed_presets {
+        None => AllowedPresets::All,
+        Some(ids) => AllowedPresets::Only(
+          ids
+            .iter()
+            .filter(|id| Preset::find(id).is_some())
+            .cloned()
+            .collect(),
+        ),
+      },
+      is_custom_allowed: policy.is_custom_allowed,
+    }
+  }
+
+  /// The policy as the server would send it.
+  pub fn to_wire(&self) -> BrandThemePolicy {
+    BrandThemePolicy {
+      default_theme: self.default_theme.to_string(),
+      maybe_allowed_presets: match &self.allowed_presets {
+        AllowedPresets::All => None,
+        AllowedPresets::Only(ids) => Some(ids.iter().cloned().collect()),
+      },
+      is_custom_allowed: self.is_custom_allowed,
+    }
+  }
+
+  /// Checks an admin's policy (console and configuration file): the default must be a real theme
+  /// and every allowed preset a preset of this build.
+  pub fn check(policy: &BrandThemePolicy) -> Result<(), ThemePolicyError> {
+    if matches!(policy.default_theme.parse(), Ok(ColorTheme::Unknown(_))) {
+      return Err(ThemePolicyError::UnknownDefaultTheme);
+    }
+    let are_known = policy
+      .maybe_allowed_presets
+      .iter()
+      .flatten()
+      .all(|id| Preset::find(id).is_some());
+    if !are_known {
+      return Err(ThemePolicyError::UnknownPreset);
+    }
+    Ok(())
+  }
+
+  pub fn allows_preset(&self, id: &str) -> bool {
+    match &self.allowed_presets {
+      AllowedPresets::All => true,
+      AllowedPresets::Only(ids) => ids.contains(id),
+    }
+  }
+
+  /// Whether people can pick anything besides the default.
+  pub fn has_choices(&self) -> bool {
+    self.is_custom_allowed
+      || match &self.allowed_presets {
+        AllowedPresets::All => !PRESETS.is_empty(),
+        AllowedPresets::Only(ids) => !ids.is_empty(),
+      }
+  }
+
+  /// What a person's choice comes to here: the choice if this policy allows it, else the server's
+  /// default ([`ColorTheme::Brand`]). The stored choice is the caller's and stays as it is.
+  pub fn in_force(&self, chosen: &ColorTheme) -> ColorTheme {
+    // Without a policy everything is as before it existed, a newer client's value included.
+    if *self == Self::default() {
+      return chosen.clone();
+    }
+    let is_allowed = match chosen {
+      ColorTheme::Brand => true,
+      ColorTheme::Preset(id) => self.allows_preset(id.as_str()),
+      ColorTheme::Custom(_) => self.is_custom_allowed,
+      ColorTheme::Unknown(_) => false,
+    };
+    if is_allowed {
+      chosen.clone()
+    } else {
+      ColorTheme::Brand
+    }
+  }
+
+  /// The theme to show for a person's choice: [`Self::in_force`], with the server's default
+  /// replaced by the policy's default theme.
+  pub fn effective(&self, chosen: &ColorTheme) -> ColorTheme {
+    match self.in_force(chosen) {
+      ColorTheme::Brand => self.default_theme.clone(),
+      in_force => in_force,
+    }
+  }
+}
+
+impl Default for ThemePolicy {
+  fn default() -> Self {
+    Self {
+      default_theme: ColorTheme::Brand,
+      allowed_presets: AllowedPresets::All,
+      is_custom_allowed: true,
+    }
   }
 }
 
@@ -859,7 +1004,7 @@ mod tests {
       assert_eq!(tokens.badge, colors.notification);
     }
 
-    fn assert_readable(tokens: &ThemeTokens, is_dark: bool, colors: &ThemeColors) {
+    pub(super) fn assert_readable(tokens: &ThemeTokens, is_dark: bool, colors: &ThemeColors) {
       let context = format!("{} dark={is_dark}", colors.share_code());
       for (text, background) in [
         (tokens.chrome_text, tokens.chrome),
@@ -921,6 +1066,117 @@ mod tests {
     let theme = ThemeColors::from_hue(400.0);
     assert_eq!(theme, ThemeColors::from_hue(40.0));
     assert_eq!(theme.tokens(false).navigation, theme.navigation);
+  }
+
+  fn policy(default_theme: &str, presets: Option<&[&str]>, is_custom_allowed: bool) -> ThemePolicy {
+    ThemePolicy::from_wire(&BrandThemePolicy {
+      default_theme: default_theme.to_owned(),
+      maybe_allowed_presets: presets.map(|ids| ids.iter().map(|id| (*id).to_owned()).collect()),
+      is_custom_allowed,
+    })
+  }
+
+  fn theme(value: &str) -> ColorTheme {
+    value.parse().unwrap()
+  }
+
+  #[test]
+  fn without_a_policy_every_choice_stays_as_it_was() {
+    let none = ThemePolicy::default();
+    for value in [
+      "brand",
+      "preset:pine",
+      "custom:#112233,#445566,#778899,#aabbcc",
+      "preset:from-a-newer-client",
+    ] {
+      assert_eq!(none.in_force(&theme(value)), theme(value));
+      assert_eq!(none.effective(&theme(value)), theme(value));
+    }
+    assert_eq!(ThemePolicy::default().to_wire(), BrandThemePolicy::default());
+  }
+
+  #[test]
+  fn a_choice_the_policy_no_longer_allows_shows_the_default_and_nothing_else_changes() {
+    let fixed = policy("preset:harbor", Some(&["pine"]), false);
+    let stored = theme("preset:paper");
+    assert_eq!(fixed.effective(&stored), theme("preset:harbor"));
+    assert_eq!(fixed.in_force(&stored), ColorTheme::Brand);
+    // The stored value is untouched; under a brand that allows it, it shows again.
+    assert_eq!(stored, theme("preset:paper"));
+    assert_eq!(ThemePolicy::default().effective(&stored), stored);
+    // Allowed ones stay, the default stays the default, custom and unknown fall back.
+    assert_eq!(fixed.effective(&theme("preset:pine")), theme("preset:pine"));
+    assert_eq!(fixed.effective(&ColorTheme::Brand), theme("preset:harbor"));
+    assert_eq!(
+      fixed.effective(&theme("custom:#112233,#445566,#778899,#aabbcc")),
+      theme("preset:harbor")
+    );
+    assert_eq!(
+      fixed.effective(&theme("preset:from-a-newer-client")),
+      theme("preset:harbor")
+    );
+  }
+
+  #[test]
+  fn a_policy_without_choices_is_a_fixed_look() {
+    assert!(!policy("brand", Some(&[]), false).has_choices());
+    assert!(policy("brand", Some(&[]), true).has_choices());
+    assert!(policy("brand", Some(&["pine"]), false).has_choices());
+    assert!(policy("brand", None, false).has_choices());
+  }
+
+  #[test]
+  fn what_this_build_does_not_know_stays_out_of_the_policy() {
+    let newer = policy("preset:from-the-future", Some(&["pine", "from-the-future"]), true);
+    assert_eq!(newer.default_theme, ColorTheme::Brand);
+    assert!(newer.allows_preset("pine"));
+    assert!(!newer.allows_preset("from-the-future"));
+  }
+
+  #[test]
+  fn an_admin_policy_is_checked() {
+    let good = BrandThemePolicy {
+      default_theme: "custom:#000000,#000000,#000000,#000000".into(),
+      maybe_allowed_presets: Some(vec!["pine".into()]),
+      is_custom_allowed: false,
+    };
+    assert_eq!(ThemePolicy::check(&good), Ok(()));
+    assert_eq!(
+      ThemePolicy::check(&BrandThemePolicy {
+        default_theme: "preset:nope".into(),
+        ..good.clone()
+      }),
+      Err(ThemePolicyError::UnknownDefaultTheme)
+    );
+    assert_eq!(
+      ThemePolicy::check(&BrandThemePolicy {
+        default_theme: "custom:#000,#000,#000,#000".into(),
+        ..good.clone()
+      }),
+      Err(ThemePolicyError::UnknownDefaultTheme)
+    );
+    assert_eq!(
+      ThemePolicy::check(&BrandThemePolicy {
+        maybe_allowed_presets: Some(vec!["nope".into()]),
+        ..good
+      }),
+      Err(ThemePolicyError::UnknownPreset)
+    );
+  }
+
+  #[test]
+  fn even_a_hostile_default_theme_is_held_to_the_contrast_rules() {
+    for code in [
+      "custom:#ffffff,#ffffff,#ffffff,#ffffff",
+      "custom:#000000,#000000,#000000,#000000",
+      "custom:#ffff00,#ffff00,#ffff00,#ffff00",
+    ] {
+      let chosen = policy(code, Some(&[]), false).effective(&ColorTheme::Brand);
+      let colors = chosen.colors().unwrap();
+      for is_dark in [false, true] {
+        contrast::assert_readable(&colors.tokens(is_dark), is_dark, &colors);
+      }
+    }
   }
 
   #[test]

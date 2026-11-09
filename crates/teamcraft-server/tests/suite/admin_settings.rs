@@ -247,6 +247,143 @@ mod permissions {
 mod brand_settings {
   use super::*;
 
+  fn with_policy(mut settings: Value, policy: Value) -> Value {
+    settings["theme_policy"] = policy;
+    settings
+  }
+
+  #[tokio::test]
+  async fn a_theme_policy_is_per_brand_served_with_the_brand_and_survives_a_restart() {
+    let app = app!(branded());
+    let bob = admin();
+    let fixed =
+      json!({"default_theme": "preset:harbor", "allowed_presets": ["pine"], "is_custom_allowed": false});
+    let created = app
+      .post(
+        &bob,
+        "/admin/brands",
+        json!({"id": "c", "settings": with_policy(brand_settings("Brand C", &[HOST_C]), fixed.clone())}),
+      )
+      .await;
+    assert_eq!(created.status, StatusCode::OK, "{}", created.body);
+    assert_eq!(find_brand(&created.body, "c")["settings"]["theme_policy"], fixed);
+
+    let (_, public) = public_brand(&app, HOST_C).await;
+    assert_eq!(public["theme_policy"], fixed);
+    // Only this brand: the other one has none, exactly as before the policy existed.
+    let (_, other) = public_brand(&app, HOST_A).await;
+    assert!(other.get("theme_policy").is_none(), "{other}");
+
+    // A restart reads it back from the database.
+    let config_only = app.state.brands.check(&[]).unwrap();
+    app.state.brands.install(config_only, Vec::new());
+    brands::load(&app.state).await.unwrap();
+    assert_eq!(public_brand(&app, HOST_C).await.1["theme_policy"], fixed);
+
+    // The first paint already has the default theme's colours.
+    let css = app
+      .http
+      .get(format!("{}/api/v1/brand/theme.css", app.base_url))
+      .header("Host", HOST_C)
+      .send()
+      .await
+      .unwrap()
+      .text()
+      .await
+      .unwrap();
+    assert!(css.contains("--chrome:"), "{css}");
+
+    // An editor that doesn't know the policy leaves it alone.
+    let older = app
+      .put(
+        &bob,
+        "/admin/brands/c",
+        json!({"settings": brand_settings("Brand C", &[HOST_C])}),
+      )
+      .await;
+    assert_eq!(older.status, StatusCode::OK, "{}", older.body);
+    assert_eq!(public_brand(&app, HOST_C).await.1["theme_policy"], fixed);
+
+    // An unrestricted policy removes it.
+    let cleared = app
+      .put(
+        &bob,
+        "/admin/brands/c",
+        json!({"settings": with_policy(brand_settings("Brand C", &[HOST_C]), json!({"default_theme": "brand", "is_custom_allowed": true}))}),
+      )
+      .await;
+    assert_eq!(cleared.status, StatusCode::OK, "{}", cleared.body);
+    assert!(
+      find_brand(&cleared.body, "c")["settings"]
+        .get("theme_policy")
+        .is_none()
+    );
+    assert!(public_brand(&app, HOST_C).await.1.get("theme_policy").is_none());
+    assert!(
+      audit_actions(&app, &bob)
+        .await
+        .contains(&"brand_updated".to_owned())
+    );
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn an_invalid_theme_policy_is_refused() {
+    let app = app!(branded());
+    let bob = admin();
+    for (policy, reason) in [
+      (json!({"default_theme": "preset:nope"}), "unknown default preset"),
+      (json!({"default_theme": "ink"}), "unknown default kind"),
+      (
+        json!({"default_theme": "custom:#000,#000,#000,#000"}),
+        "custom colours that are not canonical",
+      ),
+      (
+        json!({"allowed_presets": ["pine", "nope"]}),
+        "unknown allowed preset",
+      ),
+    ] {
+      let response = app
+        .post(
+          &bob,
+          "/admin/brands",
+          json!({"id": "c", "settings": with_policy(brand_settings("Brand C", &[HOST_C]), policy)}),
+        )
+        .await;
+      assert_eq!(response.status, StatusCode::BAD_REQUEST, "{reason}");
+    }
+    // Nothing was stored.
+    assert!(public_brand(&app, HOST_C).await.1.get("theme_policy").is_none());
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn only_who_manages_the_workspace_sets_a_theme_policy() {
+    let app = app!(branded());
+    let (bob, carol) = (admin(), member("carol"));
+    let policy = json!({"default_theme": "preset:harbor", "allowed_presets": [], "is_custom_allowed": false});
+    let body =
+      json!({"id": "c", "settings": with_policy(brand_settings("Brand C", &[HOST_C]), policy.clone())});
+
+    let as_member = app.post(&carol, "/admin/brands", body.clone()).await;
+    assert_eq!(as_member.status, StatusCode::FORBIDDEN);
+    assert!(public_brand(&app, HOST_C).await.1.get("theme_policy").is_none());
+
+    let as_admin = app.post(&bob, "/admin/brands", body).await;
+    assert_eq!(as_admin.status, StatusCode::OK, "{}", as_admin.body);
+    assert_eq!(public_brand(&app, HOST_C).await.1["theme_policy"], policy);
+
+    let as_owner = app
+      .put(
+        &owner(),
+        "/admin/brands/c",
+        json!({"settings": with_policy(brand_settings("Brand C", &[HOST_C]), json!({"default_theme": "brand", "is_custom_allowed": false}))}),
+      )
+      .await;
+    assert_eq!(as_owner.status, StatusCode::OK, "{}", as_owner.body);
+    app.stop().await;
+  }
+
   #[tokio::test]
   async fn configured_brands_are_read_only_until_taken_over_and_come_back_when_deleted() {
     let app = app!(branded());

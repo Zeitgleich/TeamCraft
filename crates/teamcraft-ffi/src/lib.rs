@@ -1412,6 +1412,7 @@ pub fn login_brand(response_json: String, server_url: String, language: String) 
     },
     light: brand_accent(brand.properties(false)),
     dark: brand_accent(brand.properties(true)),
+    theme_policy: color_theme::AppThemePolicy::from_policy(&brand.theme_policy),
   })
 }
 
