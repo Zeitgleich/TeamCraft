@@ -4990,13 +4990,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Cancel"
+            "value": "Cancel upload"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Abbrechen"
+            "value": "Hochladen abbrechen"
           }
         }
       }
@@ -5049,6 +5049,38 @@
         }
       }
     },
+    "file_upload_processing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Processing…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wird vorbereitet …"
+          }
+        }
+      }
+    },
+    "file_upload_progress %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ / %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ / %2$@"
+          }
+        }
+      }
+    },
     "file_upload_stalled": {
       "localizations": {
         "en": {
@@ -5077,22 +5109,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Der Dateispeicher ist gerade nicht erreichbar. Versuche es gleich noch einmal."
-          }
-        }
-      }
-    },
-    "file_uploading": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Uploading…"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Wird hochgeladen …"
           }
         }
       }

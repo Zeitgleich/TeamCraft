@@ -70,7 +70,6 @@ struct AttachmentView: View {
       } else {
         mediaButton
       }
-      if file.transfer.isCancellable { UploadActions(file: file) }
     }
     .quickLookPreview($maybePreviewURL)
     .alert("video_unplayable", isPresented: $isPreviewRefused) { Button("done", role: .cancel) {} }
@@ -211,7 +210,9 @@ struct AttachmentView: View {
       }
       .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
       .overlay(alignment: .bottom) {
-        if let progress = file.transfer.maybeProgress { ProgressView(value: progress).padding(4) }
+        if file.transfer.state == "downloading", let progress = file.transfer.maybeProgress {
+          ProgressView(value: progress).padding(4)
+        }
       }
       .contentShape(Rectangle())
   }
@@ -225,7 +226,9 @@ struct AttachmentView: View {
       .overlay { Image(uiImage: animation.maybeFrame ?? image).resizable().scaledToFill() }
       .clipShape(RoundedRectangle(cornerRadius: bubbleMediaCornerRadius, style: .continuous))
       .overlay(alignment: .bottom) {
-        if let progress = file.transfer.maybeProgress { ProgressView(value: progress).padding(6) }
+        if file.transfer.state == "downloading", let progress = file.transfer.maybeProgress {
+          ProgressView(value: progress).padding(6)
+        }
       }
       .overlay(alignment: .bottomLeading) {
         if file.transfer.state == "failed" || file.transfer.state == "upload_failed" {
@@ -294,39 +297,20 @@ struct AttachmentView: View {
   }
 }
 
-/// Progress, failure or the hint to tap, under a file's name.
+/// A download's progress, a failure or the hint to tap, under a file's name; an upload's progress is
+/// the message's one `UploadControl`.
 struct FileStateLine: View {
   let file: FileInfo
 
   var body: some View {
     switch file.transfer.state {
-    case "uploading", "downloading":
+    case "downloading":
       VStack(alignment: .leading, spacing: 2) {
-        if file.transfer.isRetrying {
-          // Retried by itself, as on desktop and web (#742): quiet; the words are for VoiceOver.
-          ProgressView().accessibilityLabel(Text("file_upload_retrying"))
-        } else if let progress = file.transfer.maybeProgress {
-          ProgressView(value: progress)
-        } else {
-          ProgressView()
-        }
-        if file.transfer.state == "uploading" {
-          if !file.transfer.isRetrying {
-            Text(TransferText.progress(file.transfer)).font(.app(.caption2)).foregroundStyle(Theme.textMuted)
-              .accessibilityLabel(Text("file_uploading"))
-          }
-        } else {
-          Text("file_downloading").font(.app(.caption2)).foregroundStyle(Theme.textMuted)
-        }
+        if let progress = file.transfer.maybeProgress { ProgressView(value: progress) } else { ProgressView() }
+        Text("file_downloading").font(.app(.caption2)).foregroundStyle(Theme.textMuted)
       }
     case "failed", "upload_failed":
       Text("file_failed").font(.app(.caption2)).foregroundStyle(Theme.danger)
-    case "upload_stalled":
-      if file.transfer.isStorageUnavailable {
-        Text("file_upload_storage_unavailable").font(.app(.caption2)).foregroundStyle(Theme.danger)
-      } else {
-        Text("file_upload_stalled").font(.app(.caption2)).foregroundStyle(Theme.danger)
-      }
     case "remote":
       Text("file_tap_to_download").font(.app(.caption2)).foregroundStyle(Theme.textMuted)
     default:
@@ -335,41 +319,122 @@ struct FileStateLine: View {
   }
 }
 
-/// Under an own file going up: cancel; after it stopped: try again or cancel.
-struct UploadActions: View {
+/// The one control of a message's upload, as on Android, desktop and web: a ring for all its files
+/// with a stop square that cancels them, and "Processing…" or "3.2 MB / 70 MB" next to it; "Try
+/// again" once it stopped. Over pictures a translucent pill in their corner, under documents a row.
+struct UploadControl: View {
   @Environment(AppModel.self) private var model
-  let file: FileInfo
+  let files: [FileInfo]
+  let pill: UploadPill
+  var isOnMedia = true
 
   var body: some View {
-    HStack(spacing: 12) {
-      if file.transfer.state == "upload_stalled" {
-        Button("not_sent_retry") {
-          Task { await model.perform(.retrySend(conversationId: file.conversation, messageId: file.message)) }
+    content
+      .font(.app(.caption).weight(.semibold))
+      .monospacedDigit()
+      .lineLimit(1)
+      .padding(.leading, 2)
+      .padding(.trailing, isFailed ? 2 : 12)
+      .frame(minHeight: 36)
+      .foregroundStyle(isOnMedia ? Color.white : Color.primary)
+      .background {
+        if isOnMedia {
+          Capsule().fill(.ultraThinMaterial).environment(\.colorScheme, .dark)
+        } else {
+          Capsule().fill(Color.primary.opacity(0.1))
         }
       }
-      Button("file_cancel_upload", role: .destructive) {
-        Task {
-          await model.perform(
-            .cancelUpload(conversationId: file.conversation, messageId: file.message, fileId: file.fileId))
+      .padding(isOnMedia ? 6 : 0)
+      .animation(.snappy, value: isFailed)
+  }
+
+  @ViewBuilder
+  private var content: some View {
+    switch pill {
+    case .failed(let isStorageUnavailable):
+      HStack(spacing: 0) {
+        Button(action: retry) {
+          Label("retry", systemImage: "arrow.up").padding(.horizontal, 8).frame(minHeight: 32)
         }
+        .accessibilityHint(Text(isStorageUnavailable ? "file_upload_storage_unavailable" : "file_upload_stalled"))
+        Button(action: cancel) {
+          Image(systemName: "xmark").font(.app(.caption2).weight(.bold)).frame(width: 32, height: 32)
+        }
+        .accessibilityLabel(Text("file_cancel_upload"))
+      }
+      .buttonStyle(.plain)
+    default:
+      HStack(spacing: 4) {
+        Button(action: cancel) { UploadRing(maybeFraction: pill.maybeFraction) }
+          .buttonStyle(.plain)
+          .accessibilityLabel(Text("file_cancel_upload"))
+        label
       }
     }
-    .font(.app(.caption).weight(.semibold))
+  }
+
+  private var isFailed: Bool {
+    if case .failed = pill { return true }
+    return false
+  }
+
+  @ViewBuilder
+  private var label: some View {
+    switch pill {
+    case .processing: Text("file_upload_processing")
+    case .retrying: Text("file_upload_retrying")
+    case .sending(let done, let total):
+      Text("file_upload_progress \(FileSizeText.format(done)) \(FileSizeText.format(total))")
+    case .failed: EmptyView()
+    }
+  }
+
+  private func cancel() {
+    let pending = UploadPill.cancellable(files)
+    Task {
+      // One after another, last first: the core finds a pending file by its place.
+      for file in pending {
+        await model.perform(
+          .cancelUpload(conversationId: file.conversation, messageId: file.message, fileId: file.fileId))
+      }
+    }
+  }
+
+  private func retry() {
+    guard let file = files.first else { return }
+    Task { await model.perform(.retrySend(conversationId: file.conversation, messageId: file.message)) }
   }
 }
 
-/// How far a transfer got: bytes for large files ("12 MB / 48 MB"), percent for small ones.
-enum TransferText {
-  static let largeBytes: Int64 = 1024 * 1024
+/// An upload's ring with a stop square in the middle: filled to how far the files got, or a quarter
+/// arc that turns before the first byte. It eases to each value; with Reduce Motion it doesn't move.
+struct UploadRing: View {
+  @Environment(\.accessibilityReduceMotion) private var isMotionReduced
+  let maybeFraction: Double?
+  @State private var isTurning = false
 
-  static func progress(_ transfer: FileTransfer) -> String {
-    let done = transfer.doneBytes ?? 0
-    let total = transfer.totalBytes ?? 0
-    if total >= largeBytes {
-      return "\(FileSizeText.format(done)) / \(FileSizeText.format(total))"
+  var body: some View {
+    ZStack {
+      Circle().stroke(lineWidth: 2.5).opacity(0.3)
+      if let fraction = maybeFraction {
+        Circle()
+          .trim(from: 0, to: fraction)
+          .stroke(style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+          .rotationEffect(.degrees(-90))
+          .animation(isMotionReduced ? nil : .easeOut(duration: 0.3), value: fraction)
+      } else {
+        Circle()
+          .trim(from: 0, to: 0.25)
+          .stroke(style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+          .rotationEffect(.degrees(isTurning ? 270 : -90))
+          .animation(isMotionReduced ? nil : .linear(duration: 1).repeatForever(autoreverses: false), value: isTurning)
+          .onAppear { isTurning = true }
+      }
+      RoundedRectangle(cornerRadius: 2, style: .continuous).frame(width: 9, height: 9)
     }
-    let percent = total > 0 ? done * 100 / total : 0
-    return "\(percent) %"
+    .frame(width: 26, height: 26)
+    .frame(width: 32, height: 32)
+    .contentShape(Circle())
   }
 }
 

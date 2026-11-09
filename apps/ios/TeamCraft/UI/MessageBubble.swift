@@ -217,7 +217,12 @@ struct MessageBubble: View {
           .bubbleStretch()
       }
       if !images.isEmpty && !isDeleted {
-        media.padding(.top, hasHeader ? 4 : 0)
+        // While the files go up, one control for all of them (Signal-style), in the pictures' corner.
+        media
+          .overlay(alignment: .topLeading) {
+            if let pill = maybeUpload { UploadControl(files: files, pill: pill) }
+          }
+          .padding(.top, hasHeader ? 4 : 0)
       }
       if let placeholder = message.maybePlaceholder {
         PlaceholderLine(placeholder: placeholder)
@@ -237,7 +242,15 @@ struct MessageBubble: View {
       if !isDeleted {
         ForEach(otherFiles) { file in
           // A video's poster spans the bubble like a picture.
-          AttachmentView(file: file, maybeMediaWidth: file.isVideo ? mediaWidth : nil, isInBubble: true).padding(.top, 4)
+          AttachmentView(file: file, maybeMediaWidth: file.isVideo ? mediaWidth : nil, isInBubble: true)
+            .overlay(alignment: .topLeading) {
+              if let pill = maybeUpload, file.id == maybeUploadVideo?.id { UploadControl(files: files, pill: pill) }
+            }
+            .padding(.top, 4)
+        }
+        // Documents only: the upload's control is a row under them.
+        if let pill = maybeUpload, images.isEmpty, maybeUploadVideo == nil {
+          UploadControl(files: files, pill: pill, isOnMedia: false).padding(.horizontal, textInset).padding(.top, 4)
         }
         if let preview = maybeExtras?.maybeLinkPreview {
           LinkPreviewCard(preview: preview, isInBubble: true).padding(.top, 4).bubbleStretch()
@@ -269,6 +282,11 @@ struct MessageBubble: View {
   private var images: [FileInfo] { files.filter { $0.isImage && $0.maybeThumbnailData != nil } }
   private var otherFiles: [FileInfo] { files.filter { file in !images.contains(file) } }
   private var isDeleted: Bool { maybeExtras?.isDeleted == true }
+  private var maybeUpload: UploadPill? { isDeleted ? nil : UploadPill.of(files) }
+  /// Without pictures, the upload's pill sits on the first video's poster.
+  private var maybeUploadVideo: FileInfo? {
+    images.isEmpty ? otherFiles.first { $0.isVideo && $0.maybeThumbnailData != nil } : nil
+  }
   private var hasHeader: Bool { showsName || maybeExtras?.maybeForwarded != nil || maybeExtras?.maybeReply != nil }
 
   private var hasText: Bool {
