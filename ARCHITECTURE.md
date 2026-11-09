@@ -354,6 +354,14 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - Same code runs natively and compiled to WASM in the browser.
 - No unencrypted fallback. Verification codes per call and per participant.
 - The SFU sees RTP headers and an unencrypted audio-level header extension, never media payload.
+- **Transitions (#1541, `davey` 0.2.0):** a commit or welcome doesn't switch keys by itself. Each
+  member installs the new epoch's decryption keys, answers `dave_transition_ready` with the
+  commit's `transition_id`, and switches its encryption key on the SFU's `dave_execute_transition`,
+  which the SFU sends once every member is ready or gone (Discord's opcodes 29/30, 23, 22). So no
+  receiver misses frames at an epoch change. A client that hears no execution switches by itself
+  after 5 s; the founding commit and clients from before (`join` without
+  `dave_transition_mode: coordinated`) switch at once. There is no downgrade (opcode 21): the
+  protocol version stays 1. Details and what the SFU can and can't do: e2ee.md §8, "Transitions".
 
 ### 6.3 SFU
 

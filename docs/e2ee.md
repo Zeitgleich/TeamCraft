@@ -4292,6 +4292,45 @@ calls are verified with no extra prompts, and the DAVE privacy code and per-memb
 remain available for out-of-band comparison. Meeting guests without an account get an ephemeral
 key and are shown as "Guest (unverified)".
 
+**What a member checks in a welcome and a commit** (`davey` 0.2.0, #1541). A welcome is accepted
+only for this call's MLS group (the group ID is the call's), for the device's latest key package,
+with this call's external sender, and when every member it names is on the roster the device trusts
+plus the device itself (`recognized_user_ids`; without a trusted roster the SFU's participant list,
+reported as an untrusted roster, as for proposals). No group may hold two leaves of one device: a
+proposal, welcome or commit that would is refused. Proposals must be the external sender's Add or
+Remove proposals for the current epoch in plaintext; a commit must be a member's commit for the
+current epoch that references queued proposals only. A device accepts a commit from its own leaf
+only if it is byte for byte the commit it sent (openmls 0.9 would stage a mismatching one without an
+update path; `crates/vendor/davey/VENDORED.md`, change 2).
+
+**Transitions** (#1541). Processing a commit or welcome changes no frame key by itself. The member
+*prepares* the transition: it installs the new epoch's decryption keys at once (and keeps the
+previous epoch's for 10 s, so frames still under way decrypt) and only then switches its own
+encryption key, when the transition is *executed*. The SFU numbers every commit after the founding
+one with a transition id (DAVE's `transition_id`, never 0), sent with the commit and the welcome to
+each member that joined with `dave_transition_mode: coordinated`. Each of them answers
+`dave_transition_ready` once it has the keys; when all of them have (or left), the SFU sends
+`dave_execute_transition` and they switch together, so no receiver misses frames at the change.
+Without an id (the founding commit, an older SFU, a member from before #1541) the member prepares
+and executes at once, as before.
+
+The SFU's say in this is about timing only. It can't make a member encrypt with a key the member
+didn't derive from its own MLS state, and executing a transition it never prepared does nothing. It
+can delay an execution, but a member that hears none executes by itself 5 s after preparing
+(`DAVE_TRANSITION_TIMEOUT`), so a lost message or a member that never gets ready can't keep the call
+on the previous epoch's key; holding back the Remove proposal of a departed member altogether is
+something the SFU as external sender could do already. There is no downgrade: TeamCraft has no
+counterpart of DAVE's `prepare_transition` to protocol version 0 (opcode 21), and the engine always
+prepares version 1, so the SFU can't switch a call to unencrypted media.
+
+**Nonces.** Every frame's AES-GCM nonce comes from the sender's per-epoch key ratchet and a counter.
+Installing the current epoch's key again (a repeated prepare for the same epoch) continues that
+counter; before `davey` 0.2.0 it restarted it and so reused nonces under one key. Tests in
+`teamcraft-media` (`dave.rs`) and in the vendored crate check that it doesn't. Receivers track
+missing nonces (at most 1000) and refuse a nonce that was used. Frames that fail for want of a key,
+for an invalid nonce or for authentication are counted by cause (`DaveFrameStats`); the counts go
+into the call's statistics and the log line at its end (numbers only).
+
 **Meeting links** (docs/meetings.md, "Links"; §4.6, "Meeting guests"). A meeting's link is
 `<base>/meeting/<token>#v=<organizer's key fingerprint>`: the token is random (192 bits) and only
 lets its holder knock at the lobby; the fragment is public data. Members already in the meeting
