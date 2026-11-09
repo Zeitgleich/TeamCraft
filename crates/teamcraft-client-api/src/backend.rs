@@ -1339,6 +1339,9 @@ pub trait AdminBackend {
   /// Archives or restores a channel the admin may not be in; a server record (e2ee.md §4.10), so
   /// no group state is involved.
   fn admin_set_channel_archived(&self, _channel: ConversationId, _is_archived: bool) {}
+  /// Keeps a channel open for the policy's snooze period: the inactivity policy leaves it alone
+  /// (issue #212). A server record, like archiving.
+  fn admin_snooze_channel(&self, _channel: ConversationId) {}
   /// Why the signed policy cannot be changed here (not an owner, no encryption keys on this device).
   fn policy_edit_blocker(&self) -> Option<crate::admin::PolicyBlocker> {
     None

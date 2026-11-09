@@ -101,7 +101,7 @@ pub async fn list_conversations(
   Ok(ListAdminConversationsResponse {
     conversations: rows
       .iter()
-      .map(|row| conversation_summary(row, &policy.retention))
+      .map(|row| conversation_summary(row, &policy.retention, &policy.inactivity))
       .collect(),
     has_more,
   })
@@ -755,7 +755,11 @@ fn space_summary(row: &AdminSpaceRow) -> AdminSpaceSummary {
   }
 }
 
-fn conversation_summary(row: &AdminConversationRow, policy: &RetentionPolicy) -> AdminConversationSummary {
+fn conversation_summary(
+  row: &AdminConversationRow,
+  policy: &RetentionPolicy,
+  inactivity: &teamcraft_proto::InactivityPolicy,
+) -> AdminConversationSummary {
   AdminConversationSummary {
     id: row.id,
     maybe_space_id: row.maybe_space,
@@ -774,6 +778,7 @@ fn conversation_summary(row: &AdminConversationRow, policy: &RetentionPolicy) ->
       row.space_retention,
       policy,
     )),
+    maybe_inactivity: super::inactivity::status_of(inactivity, row),
   }
 }
 

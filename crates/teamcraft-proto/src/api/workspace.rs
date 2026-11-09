@@ -331,6 +331,15 @@ pub struct GuestPolicy {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_dm_only_with_shared_conversations: Option<bool>,
+  /// Deactivate a local guest account this many days after it belongs to no space any more (its
+  /// memberships expired or were removed); reversible, the account is not deleted. Absent: never,
+  /// the account stays until an admin acts (admin.md §3.2.2).
+  #[serde(
+    rename = "deactivate_accounts_after_days",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_deactivate_accounts_after_days: Option<u32>,
 }
 
 impl GuestPolicy {
@@ -675,6 +684,9 @@ pub struct WorkspacePolicy {
   pub threads: ThreadPolicy,
   #[serde(default)]
   pub guests: GuestPolicy,
+  /// What happens to channels nobody writes in (issue #212); off when absent.
+  #[serde(default)]
+  pub inactivity: crate::InactivityPolicy,
   #[serde(default)]
   pub passwords: PasswordPolicy,
   #[serde(default)]
@@ -904,6 +916,7 @@ impl Default for WorkspacePolicy {
       presence: PresencePolicy::default(),
       threads: ThreadPolicy::default(),
       guests: GuestPolicy::default(),
+      inactivity: crate::InactivityPolicy::default(),
       passwords: PasswordPolicy::default(),
       notifications: NotificationDefaults::default(),
       call_backgrounds: CallBackgroundPolicy::default(),

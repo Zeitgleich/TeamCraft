@@ -27,6 +27,7 @@ use crate::model::{
   ConversationId, ConversationKind, GapEdge, HistoryGap, Message, OlderHistory, TimestampMs, as_chat_message,
 };
 use crate::reactive::SetIfAlive;
+use crate::scroll_perf::ScrollBackWatch;
 use crate::state::{AppState, Overlay, use_app_state};
 use crate::unread_divider::{DividerEvent, DwellClock, ReadMarkerGate};
 
@@ -58,6 +59,9 @@ const ESTIMATED_PILL_HEIGHT_PX: f64 = 22.0;
 const DIVIDER_CONTEXT_PX: f64 = 48.0;
 /// Heights differing by less than this are treated as equal, which ends the measure loop.
 const MEASURE_EPSILON: f32 = 0.5;
+/// How long after the last scroll event the list counts as resting: a wheel's smooth scrolling
+/// sends one per frame while it runs.
+const SCROLL_REST: Duration = Duration::from_millis(150);
 /// Rows above the first one on screen at which the list asks for older history: a few screens
 /// ahead, so a reader scrolling back doesn't meet the end of what is here.
 const OLDER_AHEAD_ROWS: usize = 40;
@@ -310,6 +314,15 @@ pub fn MessageList(
   let prepended_in_heights = StoredValue::new(prepended.get_untracked());
   // What the top spacer grew by and the scroll position has not followed yet.
   let unfollowed_px = StoredValue::new(0.0_f64);
+  // How far the feed's position (`scroll_top`, from the row heights) is ahead of the element's
+  // scroll position. While the reader scrolls, rows above them that arrive or change height are
+  // made up for in the top spacer, not in the scroll position: setting that ends the smooth
+  // scrolling of a mouse wheel in WebKit, so scrolling up stuttered and jumped wherever rows were
+  // new (#1595). Settled into the scroll position once scrolling rests, or near the top.
+  let drift_px = StoredValue::new(0.0_f64);
+  let settle_generation = StoredValue::new(0_u32);
+  // Scrolling back as a performance measure: smooth or not, and what the list corrected meanwhile.
+  let scroll_back = StoredValue::new_local(ScrollBackWatch::default());
 
   let window = Memo::new(move |_| {
     layout_rev.track();
@@ -330,8 +343,66 @@ pub fn MessageList(
   // After a programmatic scroll: the window follows, and the next scroll event compares against it.
   let note_position = move |element: &web_sys::Element| {
     let top = exact_scroll_top(element);
-    scroll_top.set(top);
+    scroll_top.set(top + drift_px.get_value());
     last_top.set_value(top);
+  };
+  // The top spacer as the window and the drift say, before anything can be painted.
+  let set_top_spacer = move || {
+    if let Some(spacer) = top_spacer.get_untracked() {
+      let height = format!(
+        "{}px",
+        (window.get_untracked().pad_top - drift_px.get_value()).max(0.0)
+      );
+      // Refused only for a malformed property; the spacer's effect sets it anyway.
+      let _ = web_sys::HtmlElement::style(&spacer).set_property("height", &height);
+    }
+  };
+  // Moves the drift into the scroll position: the spacer grows by it and the position follows, in
+  // one go, so nothing on screen moves.
+  let settle_drift = move || {
+    let drift = drift_px.get_value();
+    let Some(element) = container.get_untracked() else {
+      return;
+    };
+    if drift == 0.0 {
+      return;
+    }
+    drift_px.set_value(0.0);
+    set_top_spacer();
+    element.scroll_by_with_x_and_y(0.0, drift);
+    note_position(&element);
+  };
+  // Settles the drift once scrolling rests; every scroll event postpones it.
+  let settle_when_resting = move || {
+    let generation = settle_generation.try_update_value(|generation| {
+      *generation += 1;
+      *generation
+    });
+    set_timeout(
+      move || {
+        if is_live(list_id) && settle_generation.try_get_value() == generation {
+          settle_drift();
+        }
+      },
+      SCROLL_REST,
+    );
+  };
+  // Rows above the reader changed the feed by `shift`: made up for in the spacer, or, when it is
+  // too short for that, in the scroll position.
+  let follow_above = move |shift: f64| {
+    let drift = drift_px.get_value() + shift;
+    let is_spacer_long_enough = window.get_untracked().pad_top - drift >= 0.0;
+    scroll_back.with_value(|watch| watch.corrected(!is_spacer_long_enough));
+    if is_spacer_long_enough {
+      drift_px.set_value(drift);
+      set_top_spacer();
+    } else {
+      settle_drift();
+      if let Some(element) = container.get_untracked() {
+        element.scroll_by_with_x_and_y(0.0, shift);
+      }
+    }
+    settle_when_resting();
   };
 
   // Jump to a message (date, search, link): it goes near the top, with a little context above.
@@ -343,6 +414,7 @@ pub fn MessageList(
       return;
     }
     let top: f32 = heights.with_value(|heights| heights.iter().take(index).sum());
+    settle_drift();
     if let Some(element) = container.get_untracked() {
       pending_align.set_value(Some((index, ALIGN_PASSES)));
       stick_to_bottom.set(false);
@@ -410,10 +482,9 @@ pub fn MessageList(
       layout_rev.update(|rev| *rev += 1);
       defer_while_alive(list_id, scroll_to_bottom);
     } else {
-      // Relative, so the fraction of the position survives (#642): rows above the one at the top
-      // changed height, the rows on screen stay where they are.
+      // Rows above the one at the top changed height, the rows on screen stay where they are.
       if shift_above_anchor != 0.0 {
-        container_element.scroll_by_with_x_and_y(0.0, shift_above_anchor);
+        follow_above(shift_above_anchor);
       }
       // The next scroll event compares with this at once; the window follows between frames, so
       // the rows it adds are measured and corrected before they are painted.
@@ -462,11 +533,8 @@ pub fn MessageList(
       unfollowed_px.set_value(0.0);
       scroll_top.update(|top| *top += unfollowed);
       // Together, before anything can be painted: the spacer's own effect may run after this one.
-      if let (Some(element), Some(spacer)) = (container.get_untracked(), top_spacer.get_untracked()) {
-        let height = format!("{}px", window.get_untracked().pad_top);
-        // Refused only for a malformed property; the spacer's effect sets it anyway.
-        let _ = web_sys::HtmlElement::style(&spacer).set_property("height", &height);
-        element.scroll_by_with_x_and_y(0.0, unfollowed);
+      follow_above(unfollowed);
+      if let Some(element) = container.get_untracked() {
         note_position(&element);
       }
     }
@@ -507,18 +575,28 @@ pub fn MessageList(
   // Until the list took its opening position it stands at the top, whatever the reader will see.
   let is_positioned = RwSignal::new(false);
   Effect::new(move |_| {
-    if !is_positioned.get() || older_history.get() != OlderHistory::Available {
+    // Read here, not from the memo: asked again after every change, also one that leaves the
+    // answer as it was (a page without a row to show).
+    let is_available = state.read(|backend| backend.older_history(conversation)) == OlderHistory::Available;
+    if !is_positioned.get() || !is_available {
       return;
     }
     let first_visible = window.get().first_visible;
     let fits = heights.with_value(|heights| f64::from(heights.iter().sum::<f32>())) <= viewport.get();
     if asks_for_older(first_visible, stick_to_bottom.get(), fits) {
-      state.write(|backend| backend.load_older_history(conversation));
+      // A request, not a change: the page tells the UI once its rows are here. Telling it now too
+      // re-read everything shown while the reader scrolls, a stall per page (#1595).
+      untrack(|| state.read(|backend| backend.load_older_history(conversation)));
     }
   });
+  // At the top with more to read, a page is on its way: it is asked for as soon as the reader is
+  // near the oldest row, so "available" there means "loading".
   let older_status = move || {
     let is_near = window.get().first_visible < OLDER_STATUS_ROWS;
-    is_near.then(|| older_history.get())
+    is_near.then(|| match older_history.get() {
+      OlderHistory::Available => OlderHistory::Loading,
+      status => status,
+    })
   };
   // A jump to a date can leave a hole between the rows held (#1156). Near one, a page of it comes
   // from the server, from the reader's side, so what the reader looks at stays where it is. Asked
@@ -529,15 +607,30 @@ pub fn MessageList(
       return;
     }
     let window = window.get();
-    let Some((gap, edge)) = gap_near(&gaps.get(), &window, OLDER_AHEAD_ROWS) else {
+    // Read here, not from the memo, like older history above.
+    let gaps = state.read(|backend| backend.history_gaps(conversation));
+    let Some((gap, edge)) = gap_near(&gaps, &window, OLDER_AHEAD_ROWS) else {
       return;
     };
     let fits = heights.with_value(|heights| f64::from(heights.iter().sum::<f32>())) <= viewport.get();
     if gap.status == OlderHistory::Available && (!stick_to_bottom.get() || fits) {
-      state.write(|backend| backend.fill_history_gap(conversation, gap, edge));
+      // A request, not a change, like older history above.
+      untrack(|| state.read(|backend| backend.fill_history_gap(conversation, gap, edge)));
     }
   });
-  let gap_status = move || gap_near(&gaps.get(), &window.get(), 0);
+  // At a hole whose page can be read, that page is on its way (asked for as above).
+  let gap_status = move || {
+    gap_near(&gaps.get(), &window.get(), 0).map(|(gap, edge)| match gap.status {
+      OlderHistory::Available => (
+        HistoryGap {
+          status: OlderHistory::Loading,
+          ..gap
+        },
+        edge,
+      ),
+      _ => (gap, edge),
+    })
+  };
   // The pages beyond the rendered rows load ahead, so scrolling into them doesn't wait (#1050).
   // Asked again after every change too, like the rows read theirs: a backend keeps what is read.
   Effect::new(move |_| {
@@ -706,13 +799,25 @@ pub fn MessageList(
     };
     let top = exact_scroll_top(&element);
     let bottom_gap = f64::from(element.scroll_height()) - top - f64::from(element.client_height());
-    scroll_top.set(top);
-    viewport.set(f64::from(element.client_height()));
+    let height = f64::from(element.client_height());
+    scroll_top.set(top + drift_px.get_value());
+    viewport.set(height);
+    // Near the top the spacer runs out (or the feed starts) before the element's top: settled now.
+    let drift = drift_px.get_value();
+    let spacer = window.get_untracked().pad_top - drift;
+    if (drift > 0.0 && spacer < height) || (drift < 0.0 && top + drift < height) {
+      scroll_back.with_value(|watch| watch.corrected(true));
+      settle_drift();
+    } else if drift != 0.0 {
+      settle_when_resting();
+    }
     // Fades the floating day out 1 s after the last scroll event (opacity only). A position the
     // list set itself (`note_position`) is no scrolling to show the day for.
     if (top - last_top.get_value()).abs() > f64::from(MEASURE_EPSILON) {
       is_scrolling.set(true);
     }
+    let is_up = top < last_top.get_value() - f64::from(MEASURE_EPSILON);
+    scroll_back.with_value(|watch| watch.scrolled(top, is_up));
     let generation = scroll_generation.try_update_value(|generation| {
       *generation += 1;
       *generation
@@ -721,6 +826,7 @@ pub fn MessageList(
       move || {
         if scroll_generation.try_get_value() == generation {
           is_scrolling.set_if_alive(false);
+          scroll_back.try_with_value(|watch| watch.rested(height));
           remember_reading(state, conversation, stick_to_bottom, window);
         }
       },
@@ -916,7 +1022,7 @@ pub fn MessageList(
             view! { <EmptyState icon=icon title_key=title_key body_key=body_key maybe_action=maybe_action /> }.into_any()
           }}
         </Show>
-        <div class="spacer" node_ref=top_spacer style:height=move || format!("{}px", window.get().pad_top)></div>
+        <div class="spacer" node_ref=top_spacer style:height=move || format!("{}px", (window.get().pad_top - drift_px.get_value()).max(0.0))></div>
         <div class="rows" node_ref=rows>
           <For each=positions key=|position| *position let:position>
             <RowSlot conversation=conversation position=position prepended=prepended is_chat=is_chat motion=motion />

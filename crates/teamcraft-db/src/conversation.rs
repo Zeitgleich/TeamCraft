@@ -400,6 +400,10 @@ impl Database {
            history_policy = COALESCE($8, history_policy),
            archived_at = CASE WHEN $9::boolean IS NULL THEN archived_at
                               WHEN $9 THEN COALESCE(archived_at, now()) ELSE NULL END,
+           -- Restored by hand: no longer the policy's or the space's to revert or delete.
+           archive_origin = CASE WHEN $9::boolean IS FALSE THEN NULL ELSE archive_origin END,
+           inactivity_notified_at = CASE WHEN $9::boolean IS FALSE OR ($9 AND archived_at IS NULL) THEN NULL
+                                         ELSE inactivity_notified_at END,
            member_denied = COALESCE($10, member_denied),
            guest_denied = COALESCE($11, guest_denied),
            is_integration = COALESCE($12, is_integration)

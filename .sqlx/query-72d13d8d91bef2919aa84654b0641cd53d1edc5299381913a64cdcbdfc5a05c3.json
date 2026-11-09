@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.user_id FROM memberships m JOIN users u ON u.id = m.user_id\n         WHERE m.conversation_id = $1 AND m.role = 'admin' AND u.deactivated_at IS NULL\n         ORDER BY m.user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "72d13d8d91bef2919aa84654b0641cd53d1edc5299381913a64cdcbdfc5a05c3"
+}

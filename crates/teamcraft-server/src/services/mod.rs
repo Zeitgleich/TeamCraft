@@ -30,6 +30,7 @@ pub mod guests;
 pub mod holiday_regions;
 pub mod identity;
 pub mod import;
+pub mod inactivity;
 pub mod invites;
 pub mod key_bag;
 pub mod key_packages;

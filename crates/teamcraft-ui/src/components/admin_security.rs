@@ -24,6 +24,16 @@ const GUEST_NOTICE_SCHEDULES: [(&str, &[u32]); 4] = [
   ("off", &[]),
 ];
 const SPONSOR_EXTENSION_DAYS: [u32; 6] = [120, 30, 90, 180, 365, 0];
+/// Idle local guest accounts are deactivated this many days after their last space; `u32::MAX` never.
+const GUEST_DEACTIVATE_DAYS: [u32; 5] = [u32::MAX, 14, 30, 90, 180];
+/// Inactive channels (issue #212): days of quiet before the owners are told.
+const INACTIVITY_NOTICE_DAYS: [u32; 5] = [90, 180, 365, 540, 730];
+/// Days between the notice and the archiving; `0`: notices only.
+const INACTIVITY_ARCHIVE_DAYS: [u32; 5] = [0, 14, 30, 60, 90];
+const INACTIVITY_SNOOZE_DAYS: [u32; 5] = [30, 60, 90, 180, 365];
+const INACTIVITY_MAX_PER_RUN: [u32; 5] = [5, 10, 25, 50, 100];
+/// Days after the archiving that a channel is deleted; `u32::MAX` never.
+const INACTIVITY_DELETE_DAYS: [u32; 5] = [u32::MAX, 30, 90, 180, 365];
 const APPROVALS: [u8; 2] = [2, 3];
 /// The longest voice message offered, in minutes.
 const VOICE_MINUTES: [u16; 6] = [1, 2, 5, 10, 30, 60];
@@ -118,6 +128,45 @@ pub fn SecuritySection() -> impl IntoView {
       })
       .collect()
   });
+  let days_options = |values: &'static [u32], special: Option<(u32, &'static str)>| {
+    Signal::derive(move || {
+      values
+        .iter()
+        .map(|days| {
+          let label = match special {
+            Some((value, key)) if value == *days => i18n.t(key),
+            _ => i18n.t_count("policy-days", *days as usize),
+          };
+          (days.to_string(), label)
+        })
+        .collect::<Vec<_>>()
+    })
+  };
+  let guest_deactivate_options = days_options(
+    &GUEST_DEACTIVATE_DAYS,
+    Some((u32::MAX, "policy-guest-deactivate-never")),
+  );
+  let inactivity_notice_options = days_options(&INACTIVITY_NOTICE_DAYS, None);
+  let inactivity_archive_options = days_options(
+    &INACTIVITY_ARCHIVE_DAYS,
+    Some((0, "policy-inactivity-notice-only")),
+  );
+  let inactivity_snooze_options = days_options(&INACTIVITY_SNOOZE_DAYS, None);
+  let inactivity_limit_options = Signal::derive(move || {
+    INACTIVITY_MAX_PER_RUN
+      .into_iter()
+      .map(|count| {
+        (
+          count.to_string(),
+          i18n.t_count("policy-inactivity-channels", count as usize),
+        )
+      })
+      .collect::<Vec<_>>()
+  });
+  let inactivity_delete_options = days_options(
+    &INACTIVITY_DELETE_DAYS,
+    Some((u32::MAX, "policy-inactivity-delete-never")),
+  );
   let dm_options = Signal::derive(move || {
     [
       ("default", "policy-server-default"),
@@ -398,6 +447,86 @@ pub fn SecuritySection() -> impl IntoView {
           }
         />
         <p class="muted-text small">{move || i18n.t("policy-guest-sponsor-extension-hint")}</p>
+        <SelectRow
+          id="policy-guest-deactivate"
+          label=Signal::derive(move || i18n.t("policy-guest-deactivate"))
+          options=guest_deactivate_options
+          selected=Signal::derive(move || {
+            draft.get().guests.maybe_deactivate_accounts_after_days.unwrap_or(u32::MAX).to_string()
+          })
+          on_select=move |value: String| {
+            let days = value.parse::<u32>().unwrap_or(u32::MAX);
+            policy.edit(|p| p.guests.maybe_deactivate_accounts_after_days = (days != u32::MAX).then_some(days));
+          }
+        />
+        <p class="muted-text small">{move || i18n.t("policy-guest-deactivate-hint")}</p>
+      </fieldset>
+
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+        <legend>{move || i18n.t("policy-inactivity")}</legend>
+        <p class="muted-text small">{move || i18n.t("policy-inactivity-hint")}</p>
+        <CheckRow
+          name="inactivity_enabled"
+          label=Signal::derive(move || i18n.t("policy-inactivity-enable"))
+          hint=Signal::derive(move || i18n.t("policy-inactivity-enable-hint"))
+          checked=Signal::derive(move || draft.get().inactivity.is_enabled)
+          on_change=move |value| policy.edit(|p| p.inactivity.is_enabled = value)
+        />
+        <SelectRow
+          id="policy-inactivity-notice"
+          label=Signal::derive(move || i18n.t("policy-inactivity-notice"))
+          options=inactivity_notice_options
+          selected=Signal::derive(move || draft.get().inactivity.notice_after_days.to_string())
+          on_select=move |value: String| {
+            let days = value.parse::<u32>().unwrap_or(teamcraft_proto::DEFAULT_INACTIVITY_NOTICE_DAYS);
+            policy.edit(|p| p.inactivity.notice_after_days = days);
+          }
+        />
+        <SelectRow
+          id="policy-inactivity-archive"
+          label=Signal::derive(move || i18n.t("policy-inactivity-archive"))
+          options=inactivity_archive_options
+          selected=Signal::derive(move || draft.get().inactivity.archive_after_more_days.to_string())
+          on_select=move |value: String| {
+            let days = value.parse::<u32>().unwrap_or(teamcraft_proto::DEFAULT_INACTIVITY_ARCHIVE_DAYS);
+            policy.edit(|p| p.inactivity.archive_after_more_days = days);
+          }
+        />
+        <p class="muted-text small">{move || i18n.t("policy-inactivity-archive-hint")}</p>
+        <SelectRow
+          id="policy-inactivity-snooze"
+          label=Signal::derive(move || i18n.t("policy-inactivity-snooze"))
+          options=inactivity_snooze_options
+          selected=Signal::derive(move || draft.get().inactivity.snooze_days.to_string())
+          on_select=move |value: String| {
+            let days = value.parse::<u32>().unwrap_or(teamcraft_proto::DEFAULT_INACTIVITY_SNOOZE_DAYS);
+            policy.edit(|p| p.inactivity.snooze_days = days);
+          }
+        />
+        <SelectRow
+          id="policy-inactivity-limit"
+          label=Signal::derive(move || i18n.t("policy-inactivity-limit"))
+          options=inactivity_limit_options
+          selected=Signal::derive(move || draft.get().inactivity.max_per_run.to_string())
+          on_select=move |value: String| {
+            let count = value.parse::<u32>().unwrap_or(teamcraft_proto::DEFAULT_INACTIVITY_MAX_PER_RUN);
+            policy.edit(|p| p.inactivity.max_per_run = count);
+          }
+        />
+        <p class="muted-text small">{move || i18n.t("policy-inactivity-limit-hint")}</p>
+        <SelectRow
+          id="policy-inactivity-delete"
+          label=Signal::derive(move || i18n.t("policy-inactivity-delete"))
+          options=inactivity_delete_options
+          selected=Signal::derive(move || {
+            draft.get().inactivity.maybe_delete_after_archived_days.unwrap_or(u32::MAX).to_string()
+          })
+          on_select=move |value: String| {
+            let days = value.parse::<u32>().unwrap_or(u32::MAX);
+            policy.edit(|p| p.inactivity.maybe_delete_after_archived_days = (days != u32::MAX).then_some(days));
+          }
+        />
+        <p class="muted-text small">{move || i18n.t("policy-inactivity-delete-hint")}</p>
       </fieldset>
 
       <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>

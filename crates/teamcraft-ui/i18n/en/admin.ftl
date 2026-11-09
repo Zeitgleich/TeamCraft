@@ -1108,3 +1108,40 @@ policy-bug-reports-admins-hint = Everyone with a role in the workspace's signed 
 policy-bug-reports-named = These people
 policy-bug-reports-named-hint = For example the people who look after TeamCraft. Until you pick someone, reports go to the owners and admins.
 policy-bug-reports-chosen = Recipients of problem reports
+
+## Inactive channels and idle guest accounts (issue #212)
+policy-guest-deactivate = Deactivate a local guest account after its last space ended
+policy-guest-deactivate-never = Never
+policy-guest-deactivate-hint = Applies to guests with a password of their own that belong to no space any more. The account is only deactivated, not deleted, and an admin can reactivate it.
+policy-inactivity = Inactive channels
+policy-inactivity-hint = The server only sees when the last message was stored, never what it says. Off by default: nothing is noticed, archived or deleted until you turn it on.
+policy-inactivity-enable = Look after channels nobody writes in
+policy-inactivity-enable-hint = The owners of a quiet channel get a mail first. The channel is archived later only if nobody writes in it or keeps it open. Channels nobody can be told about are left alone.
+policy-inactivity-notice = Tell the owners after this long without a message
+policy-inactivity-archive = Archive after the notice
+policy-inactivity-archive-hint = Archived channels stay readable and an admin can restore them. With "notices only" nothing is archived.
+policy-inactivity-notice-only = Notices only, never archive
+policy-inactivity-snooze = Keeping a channel open lasts
+policy-inactivity-limit = Most channels per run
+policy-inactivity-limit-hint = A safety limit for noticing, archiving and deleting each, per hourly run. The audit log says when it held something back.
+policy-inactivity-channels = { $count ->
+    [one] { $count } channel
+   *[other] { $count } channels
+  }
+policy-inactivity-delete = Delete channels the policy archived
+policy-inactivity-delete-never = Never
+policy-inactivity-delete-hint = The only way this policy deletes messages. It deletes only channels it archived itself and nobody restored, and the owners are warned 7 days before. Cannot be undone.
+admin-inactivity-notified = The owners were told that this channel is quiet.
+admin-inactivity-archive-on = Archived on { $date } unless somebody writes in it or keeps it open.
+admin-inactivity-archived = Archived automatically because it was quiet.
+admin-inactivity-delete-on = Deleted on { $date } unless somebody restores it or postpones the deletion.
+admin-inactivity-kept-open = Kept open until { $date }.
+admin-inactivity-keep-open = Keep open
+admin-inactivity-postpone-delete = Postpone deletion
+audit-inactivity-notice = Owners told about a quiet channel
+audit-channel-auto-archived = Quiet channel archived
+audit-channel-auto-deleted = Archived channel deleted
+audit-inactivity-snoozed = Channel kept open
+audit-inactivity-limited = Inactivity run stopped at its limit
+audit-space-archived = Space archived with its channels
+audit-space-restored = Space restored

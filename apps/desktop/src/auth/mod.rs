@@ -15,6 +15,7 @@ mod callback_page;
 pub mod commands;
 mod local;
 mod loopback;
+mod policy;
 pub mod servers;
 mod store;
 #[cfg(test)]

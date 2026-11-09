@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT u.id FROM users u\n         WHERE u.kind = 'guest' AND u.memberless_since <= $1\n           AND u.deactivated_at IS NULL AND u.deleted_at IS NULL\n           AND EXISTS (SELECT 1 FROM local_accounts a WHERE a.user_id = u.id AND a.password_hash IS NOT NULL)\n           AND EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id)\n           AND NOT EXISTS (SELECT 1 FROM space_members m WHERE m.user_id = u.id)\n         ORDER BY u.memberless_since, u.id LIMIT $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6d6de3dfe543d9b936c8cdd114fd5dab9c842641285dbaf216a15ceb4ebf7f19"
+}

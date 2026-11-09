@@ -1108,3 +1108,40 @@ policy-bug-reports-admins-hint = Alle mit einer Rolle in der signierten Admin-Li
 policy-bug-reports-named = Diese Personen
 policy-bug-reports-named-hint = Zum Beispiel die Personen, die TeamCraft betreuen. Solange du niemanden wählst, gehen Meldungen an Eigentümer und Admins.
 policy-bug-reports-chosen = Empfänger von Problemmeldungen
+
+## Inaktive Kanäle und ungenutzte Gastkonten (Issue #212)
+policy-guest-deactivate = Lokales Gastkonto deaktivieren, nachdem sein letzter Space endete
+policy-guest-deactivate-never = Nie
+policy-guest-deactivate-hint = Gilt für Gäste mit eigenem Passwort, die keinem Space mehr angehören. Das Konto wird nur deaktiviert, nicht gelöscht, und ein Admin kann es wieder aktivieren.
+policy-inactivity = Inaktive Kanäle
+policy-inactivity-hint = Der Server sieht nur, wann die letzte Nachricht gespeichert wurde, nie ihren Inhalt. Standardmäßig aus: Nichts wird angekündigt, archiviert oder gelöscht, bis du es einschaltest.
+policy-inactivity-enable = Kanäle im Blick behalten, in denen niemand schreibt
+policy-inactivity-enable-hint = Die Verantwortlichen eines ruhigen Kanals bekommen zuerst eine E-Mail. Der Kanal wird später nur archiviert, wenn niemand darin schreibt oder ihn offen hält. Kanäle, bei denen niemand benachrichtigt werden kann, bleiben unberührt.
+policy-inactivity-notice = Verantwortliche informieren nach so langer Zeit ohne Nachricht
+policy-inactivity-archive = Nach dem Hinweis archivieren
+policy-inactivity-archive-hint = Archivierte Kanäle bleiben lesbar, und ein Admin kann sie wiederherstellen. Bei „Nur Hinweise“ wird nichts archiviert.
+policy-inactivity-notice-only = Nur Hinweise, nie archivieren
+policy-inactivity-snooze = „Offen halten“ gilt für
+policy-inactivity-limit = Höchstens so viele Kanäle pro Durchlauf
+policy-inactivity-limit-hint = Eine Sicherung für Hinweise, Archivieren und Löschen, je stündlichem Durchlauf. Das Audit-Log zeigt, wenn sie etwas zurückgehalten hat.
+policy-inactivity-channels = { $count ->
+    [one] { $count } Kanal
+   *[other] { $count } Kanäle
+  }
+policy-inactivity-delete = Kanäle löschen, die die Regel archiviert hat
+policy-inactivity-delete-never = Nie
+policy-inactivity-delete-hint = Der einzige Weg, auf dem diese Regel Nachrichten löscht. Gelöscht werden nur Kanäle, die sie selbst archiviert hat und die niemand wiederhergestellt hat; die Verantwortlichen werden 7 Tage vorher gewarnt. Nicht rückgängig zu machen.
+admin-inactivity-notified = Die Verantwortlichen wurden informiert, dass dieser Kanal ruhig ist.
+admin-inactivity-archive-on = Wird am { $date } archiviert, sofern niemand darin schreibt oder ihn offen hält.
+admin-inactivity-archived = Automatisch archiviert, weil er ruhig war.
+admin-inactivity-delete-on = Wird am { $date } gelöscht, sofern ihn niemand wiederherstellt oder die Löschung verschiebt.
+admin-inactivity-kept-open = Bleibt offen bis { $date }.
+admin-inactivity-keep-open = Offen halten
+admin-inactivity-postpone-delete = Löschung verschieben
+audit-inactivity-notice = Verantwortliche über ruhigen Kanal informiert
+audit-channel-auto-archived = Ruhiger Kanal archiviert
+audit-channel-auto-deleted = Archivierter Kanal gelöscht
+audit-inactivity-snoozed = Kanal offen gehalten
+audit-inactivity-limited = Durchlauf der Inaktivitätsregel an der Grenze gestoppt
+audit-space-archived = Space mit seinen Kanälen archiviert
+audit-space-restored = Space wiederhergestellt

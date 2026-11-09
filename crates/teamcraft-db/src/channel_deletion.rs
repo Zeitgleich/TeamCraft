@@ -38,6 +38,8 @@ pub struct ChannelFacts {
   pub is_channel: bool,
   pub is_private: bool,
   pub is_archived: bool,
+  /// The inactivity policy archived it (issue #212), and nobody restored it since.
+  pub is_archived_by_policy: bool,
   pub is_imported: bool,
   pub maybe_importer: Option<UserId>,
   pub members: Vec<(UserId, ChannelRole)>,
@@ -430,6 +432,7 @@ async fn lock_facts(
 ) -> Result<Option<ChannelFacts>, DbError> {
   let row = sqlx::query!(
     r#"SELECT kind, visibility, archived_at IS NOT NULL AS "is_archived!", importer_user_id,
+              COALESCE(archive_origin = 'inactivity', false) AS "is_archived_by_policy!",
               imported_through_message_id, deleted_at IS NOT NULL AS "is_deleted!"
        FROM conversations WHERE id = $1"#,
     to_db(conversation),
@@ -457,6 +460,7 @@ async fn lock_facts(
     is_channel: row.kind == "channel",
     is_private: row.visibility == "private",
     is_archived: row.is_archived,
+    is_archived_by_policy: row.is_archived_by_policy,
     is_imported: row.imported_through_message_id.is_some(),
     maybe_importer: from_db_opt(row.importer_user_id)?,
     members: members
