@@ -151,6 +151,8 @@ enum NotificationSettingsDocument {
   static let scheduleKey = "dnd_schedule"
   static let reminderMinutesKey = "meeting_reminder_minutes"
   static let notifiesStartKey = "notifies_meeting_start"
+  static let readReceiptsKey = "send_read_receipts"
+  static let deliveryReceiptsKey = "send_delivery_receipts"
   /// What somebody who never chose gets (the server's default too).
   static let defaultReminderMinutes = 5
 
@@ -168,6 +170,24 @@ enum NotificationSettingsDocument {
     guard var object = dictionary(json) else { return nil }
     object[reminderMinutesKey] = minutes
     object[notifiesStartKey] = notifiesStart
+    guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return nil }
+    return String(decoding: data, as: UTF8.self)
+  }
+
+  /// Whether the user sends read and delivery receipts; on where the server says nothing.
+  static func receipts(in json: String) -> (read: Bool, delivered: Bool) {
+    let object = dictionary(json) ?? [:]
+    return (
+      read: object[readReceiptsKey] as? Bool ?? true,
+      delivered: object[deliveryReceiptsKey] as? Bool ?? true
+    )
+  }
+
+  /// The document with both receipt settings in place; `nil` if `json` isn't an object.
+  static func replacingReceipts(in json: String, read: Bool, delivered: Bool) -> String? {
+    guard var object = dictionary(json) else { return nil }
+    object[readReceiptsKey] = read
+    object[deliveryReceiptsKey] = delivered
     guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return nil }
     return String(decoding: data, as: UTF8.self)
   }

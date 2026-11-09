@@ -1,0 +1,48 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.user_id, m.last_delivered_message_id,\n                COALESCE(s.send_delivery_receipts, $2) AS \"is_sharing!\"\n         FROM memberships m\n         LEFT JOIN user_notification_settings s ON s.user_id = m.user_id\n         WHERE m.conversation_id = $1\n         ORDER BY m.user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "last_delivered_message_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "memberships",
+            "name": "last_delivered_message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "is_sharing!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "89bf4eff455953f9517a6553351c8a50718009c547830da360349c985586553b"
+}

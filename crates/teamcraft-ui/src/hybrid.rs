@@ -1229,6 +1229,13 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
       .map_or_else(Vec::new, |live| live.seen_by(conversation, message))
   }
 
+  fn delivered_to_others(&self, conversation: ConversationId) -> Option<MessageId> {
+    self
+      .maybe_live
+      .as_ref()
+      .and_then(|live| live.delivered_to_others(conversation))
+  }
+
   fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
     self.chat.typing_users(conversation)
   }

@@ -16,6 +16,7 @@ mod calls;
 mod catch_up;
 mod channel_roles;
 mod custom_status;
+mod delivered;
 pub mod devices;
 pub mod direct_uploads;
 pub mod disk_downloads;
@@ -400,6 +401,8 @@ pub struct Client<A, S> {
   group_loads: u64,
   sync: SyncState,
   typing: crate::typing::TypingState,
+  /// Delivered reports waiting for the gateway (delivered ticks, issue #598).
+  delivered: delivered::DeliveredReports,
   /// Refusals of earlier user actions found by a background flush, for the host to show
   /// ([`Client::take_background_failures`]).
   background_failures: Vec<CoreError>,
@@ -619,6 +622,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       group_loads: 0,
       sync,
       typing: Default::default(),
+      delivered: Default::default(),
       background_failures: Vec::new(),
       transfers: crate::transfers::Transfers::new(),
       held_upload_progress: None,

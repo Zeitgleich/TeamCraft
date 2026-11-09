@@ -190,6 +190,13 @@ fun NotificationSettingsSection(viewModel: MainViewModel) {
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
       Switch(
+        checked = current.maybeSendDeliveryReceipts ?: true,
+        onCheckedChange = { save(current.copy(maybeSendDeliveryReceipts = it)) },
+      )
+      Text(stringResource(R.string.delivery_receipts), style = MaterialTheme.typography.bodyMedium)
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Switch(
         checked = current.autoFollowMentionedThreads,
         onCheckedChange = { save(current.copy(autoFollowMentionedThreads = it)) },
       )

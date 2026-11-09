@@ -1525,6 +1525,13 @@ private fun Footer(
         tint = colors.content,
         modifier = Modifier.size(14.dp),
       )
+      // A device of every other member has it: two muted ticks (issue #598).
+      maybeExtras?.isDelivered == true -> Icon(
+        painterResource(R.drawable.ic_done_all),
+        contentDescription = stringResource(R.string.message_delivered),
+        tint = colors.muted,
+        modifier = Modifier.size(14.dp),
+      )
       else -> Icon(Icons.Filled.Done, contentDescription = stringResource(R.string.message_sent), tint = colors.muted, modifier = Modifier.size(14.dp))
     }
   }
@@ -1532,10 +1539,10 @@ private fun Footer(
 
 /**
  * Whether the list's footer has anything to say: pinned, priority, edited, or an own message that
- * is still sending, failed or was read. The plain "sent" tick alone isn't worth a line.
+ * is still sending, failed, was delivered or read. The plain "sent" tick alone isn't worth a line.
  */
 private fun hasFooterMarks(message: Message, maybeExtras: MessageExtras?, isMine: Boolean): Boolean =
-  (isMine && (message.isPending || maybeExtras?.isSendFailed == true || maybeExtras?.isRead == true)) || message.isEdited || maybeExtras?.isPinned == true || maybeExtras?.priority == "urgent" || maybeExtras?.priority == "important"
+  (isMine && (message.isPending || maybeExtras?.isSendFailed == true || maybeExtras?.isRead == true || maybeExtras?.isDelivered == true)) || message.isEdited || maybeExtras?.isPinned == true || maybeExtras?.priority == "urgent" || maybeExtras?.priority == "important"
 
 @Composable
 private fun FooterLabel(text: String, color: Color, isBold: Boolean = false) {

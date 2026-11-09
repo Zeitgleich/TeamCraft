@@ -221,6 +221,7 @@ message-show-more = Mehr anzeigen
 message-show-less = Weniger anzeigen
 message-sending = Wird gesendet …
 message-status-sent = Gesendet
+message-status-delivered = Zugestellt
 message-status-read = Gelesen
 message-not-sent = Noch nicht gesendet, wird automatisch wiederholt
 message-send-failed = Nicht gesendet

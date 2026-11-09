@@ -229,6 +229,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         },
       }
       self.report_progress();
+      self.report_delivered().await;
       self.answer_drained();
       self.answer_caught_up();
     }
@@ -453,6 +454,12 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     if !self.connection.send(now, &message).await {
       tracing::debug!("device activity not reported");
     }
+  }
+
+  /// Tells the server how far the DMs this device stored reach (delivered ticks, issue #598).
+  async fn report_delivered(&mut self) {
+    let now = self.client.now_ms();
+    self.client.report_delivered(&mut self.connection, now).await;
   }
 
   /// Starts the next due upload, if none runs; drops a running one whose file was cancelled (or its

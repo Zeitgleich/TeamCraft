@@ -2,7 +2,7 @@
 //! its own; the UI only tells the user when a message is taking longer than usual. How others' reads
 //! show is shared with the mobile apps through teamcraft-client-api.
 
-pub use teamcraft_client_api::receipts::{ReadIndicator, is_read_by_all};
+pub use teamcraft_client_api::receipts::{ReadIndicator, is_delivered, is_read_by_all};
 
 use crate::model::{MessageId, TimestampMs, is_pending};
 

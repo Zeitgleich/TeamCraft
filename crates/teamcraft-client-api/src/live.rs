@@ -3,7 +3,7 @@
 //! instead of polling the server for it.
 
 use serde::{Deserialize, Serialize};
-pub use teamcraft_proto::live::{AnnouncedPresence, LiveMarks, LiveReceipt, RevisedPresence};
+pub use teamcraft_proto::live::{AnnouncedPresence, LiveDelivered, LiveMarks, LiveReceipt, RevisedPresence};
 use teamcraft_proto::{ThreadSummary, UnreadResponse};
 
 /// What the core knows right now. The UI reads it on every change the core reports.
@@ -22,6 +22,10 @@ pub struct LiveSnapshot {
   /// How far other members of DMs have read, from `read_receipt` events.
   #[serde(default)]
   pub receipts: Vec<LiveReceipt>,
+  /// How far every other member of DMs and group DMs has the messages on a device, from
+  /// `delivery_update` events (issue #598).
+  #[serde(default)]
+  pub delivered: Vec<LiveDelivered>,
   #[serde(default)]
   pub marks: LiveMarks,
 }

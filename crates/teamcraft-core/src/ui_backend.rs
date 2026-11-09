@@ -984,6 +984,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
     (ReadIndicator::of(view_kind(&response)) == ReadIndicator::Ticks).then(|| self.members(conversation))
   }
 
+  /// How far every other member has the conversation on a device (delivered ticks, issue #598).
+  pub(crate) fn delivered_up_to(&self, conversation: ConversationId) -> Option<MessageId> {
+    self.read(crate::read_state::delivered_to_others(&self.store, conversation))
+  }
+
   /// How far each other member read, as far as this device heard (gateway events and
   /// [`CoreCommand::RefreshReadReceipts`]).
   pub(crate) fn read_receipts(&self, conversation: ConversationId) -> Vec<(UserId, MessageId)> {
@@ -2940,6 +2945,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     seen_by(&self.read_receipts(conversation), message)
   }
 
+  fn delivered_to_others(&self, conversation: ConversationId) -> Option<MessageId> {
+    self.read(crate::read_state::delivered_to_others(&self.store, conversation))
+  }
+
   fn refresh_read_receipts(&self, conversation: ConversationId) {
     // Receipts exist only in DMs and group DMs: a channel's answer would always be empty.
     let has_receipts = self.conversations_raw().iter().any(|response| {
@@ -2961,6 +2970,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       threads: self.read(crate::read_state::threads(&self.store)),
       presence: self.read(crate::read_state::announced_presence(&self.store)),
       receipts: self.read(crate::read_state::all_read_receipts(&self.store)),
+      delivered: self.read(crate::read_state::all_delivered_to_others(&self.store)),
       marks: self.read(crate::read_state::marks(&self.store)),
     })
   }

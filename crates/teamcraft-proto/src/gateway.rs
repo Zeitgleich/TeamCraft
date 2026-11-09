@@ -68,6 +68,13 @@ pub enum GatewayClientMessage {
   Attention {
     is_attentive: bool,
   },
+  /// A device of the user stored the messages of a DM or group DM up to `message_id` (delivered
+  /// ticks, issue #598). Sent once per conversation when the stored newest message moves forward;
+  /// older servers ignore it.
+  Delivered {
+    conversation_id: ConversationId,
+    message_id: MessageId,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -239,6 +246,13 @@ pub enum GatewayEvent {
     user_id: UserId,
     message_id: MessageId,
   },
+  /// Every other member of a DM or group DM has the conversation's messages up to `message_id` on
+  /// at least one device (delivered ticks, issue #598). An aggregate, not per member; sent only to
+  /// members who share delivery themselves, and only while all others do.
+  DeliveryUpdate {
+    conversation_id: ConversationId,
+    message_id: MessageId,
+  },
   /// The user's unread and mention counts of a conversation changed because their read position
   /// moved (on any of their devices). Sent only to that user. New messages raise the counts without
   /// this event: clients count them from `message_create` (notifications.md, "Unread counts").
@@ -386,6 +400,14 @@ impl fmt::Debug for GatewayClientMessage {
       Self::Attention { is_attentive } => f
         .debug_struct("Attention")
         .field("is_attentive", is_attentive)
+        .finish(),
+      Self::Delivered {
+        conversation_id,
+        message_id,
+      } => f
+        .debug_struct("Delivered")
+        .field("conversation_id", conversation_id)
+        .field("message_id", message_id)
         .finish(),
       Self::Unknown => f.write_str("Unknown"),
     }
@@ -648,6 +670,28 @@ mod tests {
       max_attachment_bytes: 1024,
     };
     let json = r#"{"type":"attachment_limit_update","max_attachment_bytes":1024}"#;
+    assert_eq!(serde_json::to_string(&event).unwrap(), json);
+    assert_eq!(serde_json::from_str::<GatewayEvent>(json).unwrap(), event);
+  }
+
+  #[test]
+  fn delivery_frames_have_a_stable_wire_format() {
+    let message_id = MessageId::from_snowflake(Snowflake::new(9).unwrap());
+    let frame = GatewayClientMessage::Delivered {
+      conversation_id: conversation(),
+      message_id,
+    };
+    let json = r#"{"type":"delivered","conversation_id":"7","message_id":"9"}"#;
+    assert_eq!(serde_json::to_string(&frame).unwrap(), json);
+    assert!(matches!(
+      serde_json::from_str::<GatewayClientMessage>(json).unwrap(),
+      GatewayClientMessage::Delivered { message_id: parsed, .. } if parsed == message_id
+    ));
+    let event = GatewayEvent::DeliveryUpdate {
+      conversation_id: conversation(),
+      message_id,
+    };
+    let json = r#"{"type":"delivery_update","conversation_id":"7","message_id":"9"}"#;
     assert_eq!(serde_json::to_string(&event).unwrap(), json);
     assert_eq!(serde_json::from_str::<GatewayEvent>(json).unwrap(), event);
   }

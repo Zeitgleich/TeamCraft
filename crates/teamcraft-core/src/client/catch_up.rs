@@ -599,7 +599,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Senders this device has no verified key for yet (it isn't in the group, or just joined).
     self.learn_sender_keys(conversation).await?;
     self.note_content_seen(conversation);
-    Ok(())
+    self.note_delivered(conversation)
   }
 
   /// Reads the first page of each conversation's MLS queue and messages at once. Failures are
