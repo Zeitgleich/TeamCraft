@@ -6,7 +6,7 @@ Type in the composer and press **Enter** (or **Ctrl/Cmd+Enter**, a setting under
 Display); **Shift+Enter** starts a new line. The composer shows formatting as it will look in the
 message. **Aa** shows the **formatting toolbar** (Settings > Writing keeps it on): bold, italic,
 underline, strikethrough, text style (normal text, headings 1–3), link, numbered and bulleted list,
-quote, inline code and code block. Hover a button to see its shortcut; **Ctrl/Cmd+/** lists them
+quote, inline code, code block and table. Hover a button to see its shortcut; **Ctrl/Cmd+/** lists them
 all:
 
 | Format                | Shortcut (⌘ instead of Ctrl on macOS) | Or type                  |
@@ -20,6 +20,13 @@ all:
 | Inline code           | Ctrl+E                                | `` `code` ``             |
 | Code block            | Ctrl+Alt+C                            | ```` ``` ```` at a start |
 | Normal text, headings | Ctrl+Alt+0 to Ctrl+Alt+3              | `# ` to `### `           |
+
+**Tables:** the table button inserts an empty table with a header row; **Tab** and
+**Shift+Tab** move between its cells, and Tab in the last cell adds a row. A Markdown table you
+type or paste (`| Name | Due |`, then `|---|---:|`, then the rows) is sent as a table too, and so
+is a table copied from a web page or a spreadsheet. Wider tables scroll sideways in the message;
+very large ones (over 20 columns or 200 rows) stay text. Notifications and quotes show a table's
+rows as lines of text.
 
 Messages are stored as a safe Markdown subset, so they read well on every device. Pasted text from
 web pages or documents keeps only that formatting; no HTML is ever rendered. Underline that starts

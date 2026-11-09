@@ -119,6 +119,7 @@ composer-file-unstaged = { $name } konnte nicht zum Senden vorbereitet werden.
 permalink-label = Nachricht in { $name }
 permalink-unavailable = Link zu einer Unterhaltung, in der du nicht Mitglied bist
 permalink-hidden = Nachrichtenlink
+message-table-label = Tabelle
 
 # Composer: mentions, slash commands, formatting
 mention-channel = Alle in dieser Unterhaltung benachrichtigen
@@ -130,6 +131,7 @@ format-italic = Kursiv
 format-strike = Durchgestrichen
 format-code = Code
 format-code-block = Codeblock
+format-table = Tabelle
 format-underline = Unterstrichen
 format-style = Textstil
 format-paragraph = Normaler Text

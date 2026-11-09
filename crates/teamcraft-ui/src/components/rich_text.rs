@@ -2,7 +2,7 @@ use leptos::prelude::*;
 
 use crate::highlight::{TokenKind, highlight};
 use crate::i18n::use_i18n;
-use crate::markdown::{self, Block, Inline, ListKind, PERMALINK_PREFIX};
+use crate::markdown::{self, Alignment, Block, Inline, ListKind, PERMALINK_PREFIX, Table};
 use crate::state::use_app_state;
 
 /// How to show the `@words` of a body.
@@ -25,6 +25,7 @@ pub fn RichText(
   #[prop(optional)]
   mentions_me: bool,
 ) -> impl IntoView {
+  let i18n = use_i18n();
   let blocks = markdown::parse(&body);
   let me = StoredValue::new(MentionMarks {
     me,
@@ -78,8 +79,54 @@ pub fn RichText(
         }
         .into_any()
       },
+      Block::Table(table) => render_table(table, me.get_value(), i18n.t("message-table-label")),
     })
     .collect_view()
+}
+
+/// A table scrolls sideways inside the bubble when it is wider; the wrapper takes the focus so the
+/// keyboard can scroll it too.
+fn render_table(table: Table, me: MentionMarks, label: String) -> AnyView {
+  let Table {
+    alignments,
+    header,
+    rows,
+  } = table;
+  let align = move |column: usize| match alignments.get(column).copied().unwrap_or_default() {
+    Alignment::Default => "",
+    Alignment::Left => "md-align-left",
+    Alignment::Center => "md-align-center",
+    Alignment::Right => "md-align-right",
+  };
+  let head = header
+    .into_iter()
+    .enumerate()
+    .map(
+      |(column, cell)| view! { <th scope="col" class=align(column)>{render_inlines(cell, me.clone())}</th> },
+    )
+    .collect_view();
+  let body = rows
+    .into_iter()
+    .map(|row| {
+      let cells = row
+        .into_iter()
+        .enumerate()
+        .map(|(column, cell)| view! { <td class=align(column)>{render_inlines(cell, me.clone())}</td> })
+        .collect_view();
+      view! { <tr>{cells}</tr> }
+    })
+    .collect_view();
+  view! {
+    <div class="md-table-wrap" role="region" tabindex="0" aria-label=label>
+      <table class="md-table">
+        <thead>
+          <tr>{head}</tr>
+        </thead>
+        <tbody>{body}</tbody>
+      </table>
+    </div>
+  }
+  .into_any()
 }
 
 /// Lines of a paragraph or quote, with a line break between them.

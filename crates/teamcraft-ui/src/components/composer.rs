@@ -1050,6 +1050,7 @@ pub fn Composer(
         open_link_dialog();
         return;
       },
+      FormatAction::Table => composer_editor::insert_table(&element),
     }
     after_edit();
   };
@@ -1207,6 +1208,15 @@ pub fn Composer(
       && !has_modifier
       && let Some(element) = editor.get_untracked()
       && composer_editor::leave_block_at_start(&element)
+    {
+      ev.prevent_default();
+      after_edit();
+      return;
+    }
+    if ev.key() == "Tab"
+      && !(ev.alt_key() || ev.ctrl_key() || ev.meta_key())
+      && let Some(element) = editor.get_untracked()
+      && composer_editor::move_between_cells(&element, ev.shift_key())
     {
       ev.prevent_default();
       after_edit();

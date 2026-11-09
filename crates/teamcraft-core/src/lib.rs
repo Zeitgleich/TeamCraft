@@ -43,6 +43,7 @@ pub mod push_probe;
 pub mod push_subscription;
 pub mod push_text;
 pub mod read_state;
+pub mod readable_text;
 pub mod records;
 pub mod retry;
 pub mod role_signing;

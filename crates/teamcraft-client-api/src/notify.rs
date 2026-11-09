@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::markdown::{self, Block, Inline};
+use crate::markdown::{self, Inline};
 use crate::model::{MentionableGroup, UserId};
 
 pub use teamcraft_proto::{CHANNEL_MENTIONS, addresses_everyone};
@@ -94,13 +94,8 @@ pub fn is_group_handle(handle: &str) -> bool {
 pub fn mentioned_handles(body: &str) -> Vec<String> {
   let mut found = Vec::new();
   for block in markdown::parse(body) {
-    match block {
-      Block::Paragraph(lines) | Block::Quote(lines) => {
-        lines.iter().for_each(|line| collect_handles(line, &mut found));
-      },
-      Block::Heading { content, .. } => collect_handles(&content, &mut found),
-      Block::List { items, .. } => items.iter().for_each(|item| collect_handles(item, &mut found)),
-      Block::Code { .. } => {},
+    for line in block.inline_lines() {
+      collect_handles(line, &mut found);
     }
   }
   found
@@ -201,6 +196,10 @@ mod tests {
       Vec::<String>::new()
     );
     assert_eq!(mentioned_handles("- @team\n- @team"), ["team"]);
+    assert_eq!(
+      mentioned_handles("| who | what |\n|---|---|\n| @oncall | `@team` |"),
+      ["oncall"]
+    );
     assert_eq!(mentioned_handles("mail me@team.example"), Vec::<String>::new());
     assert!(mentioned_handles("@x").is_empty(), "shorter than any handle");
   }
