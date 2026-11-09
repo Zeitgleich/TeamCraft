@@ -396,9 +396,9 @@ impl ApiError {
       | Self::RecoveryPassphraseNotAllowed
       | Self::DisplayNameOverrideNotAllowed
       | Self::MfaRequired => StatusCode::FORBIDDEN,
-      Self::Auth(AuthError::KeysUnavailable(_) | AuthError::DpopReplayCacheFull) => {
-        StatusCode::SERVICE_UNAVAILABLE
-      },
+      Self::Auth(
+        AuthError::KeysUnavailable(_) | AuthError::ProviderDown(_) | AuthError::DpopReplayCacheFull,
+      ) => StatusCode::SERVICE_UNAVAILABLE,
       Self::Auth(AuthError::DpopUserLimit) => StatusCode::TOO_MANY_REQUESTS,
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
       Self::NotAChannel
@@ -449,7 +449,9 @@ impl ApiError {
       Self::GuestDmNotAllowed => ErrorCode::GuestDmNotAllowed,
       Self::ImportNotAllowed => ErrorCode::ImportNotAllowed,
       Self::ImportWindowFull => ErrorCode::ImportWindowFull,
-      Self::Auth(AuthError::KeysUnavailable(_) | AuthError::DpopReplayCacheFull) => ErrorCode::Unavailable,
+      Self::Auth(
+        AuthError::KeysUnavailable(_) | AuthError::ProviderDown(_) | AuthError::DpopReplayCacheFull,
+      ) => ErrorCode::Unavailable,
       Self::Auth(AuthError::DpopUserLimit) => ErrorCode::RateLimited,
       Self::Auth(AuthError::Dpop(refusal)) => refusal.error_code(),
       Self::NotFound { code, .. } => code.clone(),
@@ -496,6 +498,7 @@ impl ApiError {
       Self::RateLimited { retry_after_secs }
       | Self::Busy { retry_after_secs, .. }
       | Self::DependencyDown { retry_after_secs, .. } => Some(*retry_after_secs),
+      Self::Auth(AuthError::ProviderDown(open)) => Some(open.retry_after.as_secs().max(1)),
       Self::Auth(AuthError::DpopUserLimit) => Some(DPOP_USER_LIMIT_RETRY_AFTER_SECS),
       Self::Database(error) if error.is_transient() => Some(DATABASE_RETRY_AFTER_SECS),
       _ if self.status() == StatusCode::SERVICE_UNAVAILABLE => Some(UNAVAILABLE_RETRY_AFTER_SECS),
@@ -519,9 +522,9 @@ impl ApiError {
   /// Client-facing text. Internal details stay in the logs.
   pub fn public_message(&self) -> String {
     match self {
-      Self::Auth(AuthError::KeysUnavailable(_) | AuthError::DpopReplayCacheFull) => {
-        "authentication is temporarily unavailable".into()
-      },
+      Self::Auth(
+        AuthError::KeysUnavailable(_) | AuthError::ProviderDown(_) | AuthError::DpopReplayCacheFull,
+      ) => "authentication is temporarily unavailable".into(),
       Self::Database(error) if error.is_transient() => "the service is busy, try again".into(),
       Self::Database(_) | Self::Internal(_) => "internal server error".into(),
       Self::Unavailable(_) => "the service is not available".into(),
@@ -549,7 +552,7 @@ impl IntoResponse for ApiError {
       StatusCode::INTERNAL_SERVER_ERROR | StatusCode::SERVICE_UNAVAILABLE
     ) && !matches!(
       self,
-      Self::DependencyDown { .. } | Self::Auth(AuthError::DpopReplayCacheFull)
+      Self::DependencyDown { .. } | Self::Auth(AuthError::ProviderDown(_) | AuthError::DpopReplayCacheFull)
     ) {
       error!(error = %self, "request failed");
     }
@@ -844,6 +847,14 @@ mod tests {
       (
         ApiError::from(AuthError::KeysUnavailable("x".into())),
         UNAVAILABLE_RETRY_AFTER_SECS,
+      ),
+      // The identity provider's breaker: until its next probe, not a flat wait.
+      (
+        ApiError::from(AuthError::from(CircuitOpen {
+          dependency: DependencyName::IdentityProvider,
+          retry_after: std::time::Duration::from_secs(7),
+        })),
+        7,
       ),
       (
         ApiError::Busy {

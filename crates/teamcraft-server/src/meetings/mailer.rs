@@ -44,6 +44,12 @@ impl OutgoingMail {
 /// Sends invitation e-mail.
 pub trait Mailer: Send + Sync {
   fn send<'a>(&'a self, mail: &'a OutgoingMail) -> BoxFuture<'a, Result<(), MailError>>;
+
+  /// Sends also while the server is left alone after an outage
+  /// ([`crate::runtime::mail_status::MailTransport`]): a test mail always asks the server.
+  fn attempt<'a>(&'a self, mail: &'a OutgoingMail) -> BoxFuture<'a, Result<(), MailError>> {
+    self.send(mail)
+  }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -57,7 +63,7 @@ pub enum MailError {
   #[error("the mail server could not be reached: {0}")]
   Unreachable(String),
   /// A mail server that was just unreachable gets a moment before it is tried again
-  /// ([`crate::runtime::brand_mail::BrandTransport`]).
+  /// ([`crate::runtime::mail_status::MailTransport`]).
   #[error("the mail server could not be reached a moment ago and is not tried again yet")]
   Paused,
 }
