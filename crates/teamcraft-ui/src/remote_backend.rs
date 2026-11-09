@@ -25,6 +25,7 @@ use teamcraft_client_api::actions::{
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
 use teamcraft_client_api::files_query::{FilesPage, FilesQuery};
+use teamcraft_client_api::links::{LinkPage, links_page};
 use teamcraft_client_api::model::{
   Conversation, ConversationId, CustomStatus, GapEdge, HistoryGap, InviteId, JoinableSpace, Message,
   MessageId, MessageKind, OlderHistory, PendingInvite, PresenceStatus, Space, SpaceId, SpaceRole,
@@ -1784,6 +1785,14 @@ impl ChatBackend for RemoteChat {
       ChatAnswer::MediaPage { page } => Some(page),
       // An answer of another kind (an older core): nothing to page through.
       _ => Some(MediaPage::default()),
+    }
+  }
+
+  fn conversation_links(&self, conversation: ConversationId, limit: usize) -> Option<LinkPage> {
+    match self.ask(ChatQuery::ConversationLinks { conversation, limit })? {
+      ChatAnswer::LinkPage { page } => Some(page),
+      // An answer of another kind (an older core): the scan through the messages it serves.
+      _ => Some(links_page(self, conversation, limit)),
     }
   }
 

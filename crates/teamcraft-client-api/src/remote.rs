@@ -1692,6 +1692,12 @@ pub enum ChatQuery {
     anchor: MediaAnchor,
     max_messages: usize,
   },
+  /// The newest links of a conversation ([`ChatBackend::conversation_links`]): the core reads them
+  /// through its index (issue #609).
+  ConversationLinks {
+    conversation: ConversationId,
+    limit: usize,
+  },
   ShareLinks {
     conversation: ConversationId,
     message: MessageId,
@@ -1868,6 +1874,9 @@ pub enum ChatAnswer {
   },
   MediaPage {
     page: MediaPage,
+  },
+  LinkPage {
+    page: crate::links::LinkPage,
   },
   ShareLinks {
     links: Vec<ShareLink>,
@@ -2139,6 +2148,12 @@ impl ChatQuery {
           .conversation_media(conversation, anchor, max_messages)
           .unwrap_or_default(),
       },
+      Self::ConversationLinks { conversation, limit } => ChatAnswer::LinkPage {
+        // The core reads its own store and always answers.
+        page: backend
+          .conversation_links(conversation, limit)
+          .unwrap_or_default(),
+      },
       Self::ShareLinks {
         conversation,
         message,
@@ -2303,6 +2318,13 @@ mod tests {
           sort: FileSort::Name,
           starred: Vec::new(),
           max_files: 60,
+        },
+      ),
+      (
+        r#"{"kind":"conversation_links","conversation":"9","limit":30}"#,
+        ChatQuery::ConversationLinks {
+          conversation: id_from_raw(9),
+          limit: 30,
         },
       ),
     ] {

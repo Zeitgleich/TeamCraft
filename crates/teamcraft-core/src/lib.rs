@@ -75,6 +75,8 @@ mod ui_files_page;
 #[cfg(feature = "ui")]
 pub mod ui_join_requests;
 #[cfg(feature = "ui")]
+mod ui_links;
+#[cfg(feature = "ui")]
 mod ui_people;
 #[cfg(feature = "ui")]
 mod ui_search;

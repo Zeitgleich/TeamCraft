@@ -12,7 +12,7 @@ use teamcraft_client_api::model::{
 };
 use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
 use teamcraft_client_api::scheduled::{ScheduledMessage, ScheduledOverview, ScheduledStatus, status_of};
-use teamcraft_proto::{Base64Bytes, ClientMessageId, SourceChange, SourceId};
+use teamcraft_proto::{Base64Bytes, ClientMessageId, LinkPreviewPolicy, SourceChange, SourceId};
 
 use crate::client::previews::queue_preview;
 use crate::client::scheduled::{message_priority, read_list};
@@ -893,22 +893,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     extras.wants_acknowledgement = meta.wants_acknowledgement;
     extras.is_silent = meta.is_silent;
     extras.is_also_in_channel = meta.is_also_in_channel;
-    // Receivers enforce the domain list too (e2ee.md §12): previews of disallowed links are dropped.
-    let policy = self.verified_policy().link_previews;
-    extras.maybe_link_preview = meta
-      .maybe_link_preview
-      .as_ref()
-      .filter(|preview| url::Url::parse(&preview.url).is_ok_and(|url| is_allowed(&policy, &url)))
-      .map(|preview| LinkPreview {
-        url: preview.url.clone(),
-        maybe_title: preview.maybe_title.clone(),
-        maybe_description: preview.maybe_description.clone(),
-        maybe_site_name: preview.maybe_site_name.clone(),
-        maybe_image: preview
-          .maybe_image
-          .as_ref()
-          .map(|image| image.as_slice().to_vec()),
-      });
+    extras.maybe_link_preview = shown_link_preview(meta, &self.verified_policy().link_previews);
   }
 
   /// One of the user's own text messages.
@@ -963,6 +948,25 @@ impl Ticks {
       _ => false,
     }
   }
+}
+
+/// The sender's preview of a link in `meta`, when the workspace allows previews of its domain:
+/// receivers enforce the domain list too (e2ee.md §12), so previews of disallowed links are dropped.
+pub(crate) fn shown_link_preview(meta: &MessageMeta, policy: &LinkPreviewPolicy) -> Option<LinkPreview> {
+  meta
+    .maybe_link_preview
+    .as_ref()
+    .filter(|preview| url::Url::parse(&preview.url).is_ok_and(|url| is_allowed(policy, &url)))
+    .map(|preview| LinkPreview {
+      url: preview.url.clone(),
+      maybe_title: preview.maybe_title.clone(),
+      maybe_description: preview.maybe_description.clone(),
+      maybe_site_name: preview.maybe_site_name.clone(),
+      maybe_image: preview
+        .maybe_image
+        .as_ref()
+        .map(|image| image.as_slice().to_vec()),
+    })
 }
 
 /// What a reader sees of the picture a reply quotes. The quoted message's own thumbnail wins while

@@ -720,6 +720,9 @@ pub enum Attached {
   Document,
   /// Any file: what the Files view lists (issue #1509).
   Any,
+  /// No file: a web link in the text ([`teamcraft_proto::web_links`]) of a message the channel
+  /// shows (not a reply only in its thread), what the Files & links tab lists (issue #609).
+  Link,
 }
 
 /// Media types the image viewer shows: pictures and videos.
@@ -1563,6 +1566,12 @@ impl StoredMessage {
 
   /// A listed server message with an attachment of `kind`.
   pub fn has_attached(&self, kind: Attached) -> bool {
+    if kind == Attached::Link {
+      // Only what the tab lists: a reply only in its thread isn't, as the channel doesn't show it.
+      return self.maybe_server_id.is_some()
+        && self.is_feed_row()
+        && matches!(&self.content, MessageContent::Text { body, .. } if teamcraft_proto::web_links::has_web_link(body));
+    }
     let attachments: &[AttachmentRef] = match &self.content {
       MessageContent::File { attachment } => std::slice::from_ref(attachment),
       MessageContent::Text { meta, .. } => &meta.attachments,
@@ -1574,6 +1583,7 @@ impl StoredMessage {
         Attached::Media => is_media_type(&attachment.media_type),
         Attached::Document => !is_media_type(&attachment.media_type),
         Attached::Any => true,
+        Attached::Link => false,
       })
   }
 
@@ -1738,6 +1748,7 @@ pub(crate) mod tests {
     replies_also_sent_to_the_conversation_are_listed_in_both(store);
     groups_of_writes_nest_and_are_read_at_once(store);
     attached_messages_are_paged_from_a_message_outwards(store);
+    messages_with_web_links_are_listed_newest_first(store);
     admin_joins_show_only_as_lines_from_commits(store);
     server_changes_show_only_as_lines(store);
     edge_server_ids_skip_lines_pending_messages_and_placeholders(store);
@@ -2121,6 +2132,79 @@ pub(crate) mod tests {
         .unwrap()
         .is_empty(),
       "other conversations have their own"
+    );
+    store.delete_messages(conversation).unwrap();
+  }
+
+  /// Issue #609: the Files & links tab pages through the messages whose text has a web link.
+  fn messages_with_web_links_are_listed_newest_first(store: &impl LocalStore) {
+    let conversation = id(22);
+    let text = |body: &str| MessageContent::Text {
+      body: body.into(),
+      mentions: Vec::new(),
+      meta: Default::default(),
+    };
+    let bodies = [
+      "See https://example.com/a.",
+      "no link",
+      "HTTP://EXAMPLE.ORG/upper",
+      // Has the marker a store may look for, but no web link.
+      "ftp://example.com/file and app://open",
+      "[docs](https://example.com/docs)",
+      "edited away below: https://example.com/old",
+    ];
+    for (client, body) in (1..=6u8).zip(bodies) {
+      let mut stored = message(
+        conversation,
+        client,
+        Some(i64::from(client) * 10),
+        None,
+        i64::from(client),
+      );
+      stored.content = text(body);
+      store.upsert_message(&stored).unwrap();
+    }
+    let mut edited = message(conversation, 6, Some(60), None, 6);
+    edited.content = text("no link any more");
+    store.upsert_message(&edited).unwrap();
+    let mut deleted = message(conversation, 7, Some(70), None, 7);
+    deleted.content = text("https://example.com/deleted");
+    store.upsert_message(&deleted).unwrap();
+    deleted.content = MessageContent::Deleted;
+    store.upsert_message(&deleted).unwrap();
+    let mut pending = message(conversation, 8, None, None, 8);
+    pending.content = text("https://example.com/unsent");
+    store.upsert_message(&pending).unwrap();
+    let mut thread_only = message(conversation, 10, Some(100), Some(10), 10);
+    thread_only.content = text("in the thread: https://example.com/thread");
+    store.upsert_message(&thread_only).unwrap();
+    let mut file = message(conversation, 9, Some(90), None, 9);
+    file.content = media_content("application/pdf");
+    store.upsert_message(&file).unwrap();
+
+    let servers = |range, limit| -> Vec<i64> {
+      store
+        .attached_messages(conversation, Attached::Link, range, limit)
+        .unwrap()
+        .iter()
+        .map(|stored| Id::snowflake(stored.maybe_server_id.unwrap()).get())
+        .collect()
+    };
+    assert_eq!(
+      servers(AttachedRange::Older(None), 10),
+      [50, 30, 10],
+      "no text without a web link, no edited-away, deleted, unsent, thread-only or file message"
+    );
+    assert_eq!(servers(AttachedRange::Older(None), 2), [50, 30]);
+    assert_eq!(servers(AttachedRange::Older(Some(id(30))), 10), [10]);
+    assert_eq!(servers(AttachedRange::Newer(None), 1), [10]);
+    assert!(
+      store
+        .attached_messages(conversation, Attached::Any, AttachedRange::Older(None), 10)
+        .unwrap()
+        .iter()
+        .all(|stored| stored.maybe_server_id == Some(id(90))),
+      "a link is no file"
     );
     store.delete_messages(conversation).unwrap();
   }

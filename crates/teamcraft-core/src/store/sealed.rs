@@ -2500,6 +2500,48 @@ mod tests {
       assert_eq!(files(Attached::Media), [picture.client_message_id]);
     }
 
+    /// Issue #609: a catalog of version 3 knows no links. The store builds it again when it opens,
+    /// and the Files & links tab then finds the messages with web links through the index.
+    #[test]
+    fn a_catalog_from_before_the_links_index_gets_it() {
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      fill(&store);
+      let mut linked = numbered(1, MESSAGES_PER_CONVERSATION);
+      linked.content = crate::store::MessageContent::Text {
+        body: "See https://example.com/plan".into(),
+        mentions: Vec::new(),
+        meta: Default::default(),
+      };
+      store.upsert_message(&linked).unwrap();
+      let old_generation = store.read_catalog_state().unwrap().unwrap().generation();
+      // What a version-3 build wrote: the same entries without the links bit.
+      let old_state = format!(r#"{{"state":"complete","generation":{old_generation},"version":3}}"#);
+      store
+        .grouped(|_| store.write_named(CATALOG_TABLE, META_KEY, old_state.as_bytes()))
+        .unwrap();
+      drop(store);
+
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      let state = store.read_catalog_state().unwrap().unwrap();
+      assert!(matches!(
+        state,
+        CatalogState::Complete {
+          version: CATALOG_VERSION,
+          ..
+        }
+      ));
+      assert_ne!(state.generation(), old_generation, "built again");
+      let linked_ids: Vec<_> = store
+        .attached_messages(id(1), Attached::Link, AttachedRange::Older(None), 10)
+        .unwrap()
+        .into_iter()
+        .map(|stored| stored.client_message_id)
+        .collect();
+      assert_eq!(linked_ids, [linked.client_message_id]);
+    }
+
     /// What building the catalog again for version 3 costs on a large store (#1509): every record
     /// is opened once. A measurement, not a check:
     /// `cargo test --release -p teamcraft-core --all-features --lib -- --ignored --nocapture
