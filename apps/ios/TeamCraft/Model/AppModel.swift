@@ -236,6 +236,8 @@ final class AppModel {
   @ObservationIgnored private var syncStops = 0
   @ObservationIgnored private let storeChanges = StoreChangeNotifier()
   @ObservationIgnored private var maybeCore: TeamCraft?
+  @ObservationIgnored private var maybeSettingsSync: SettingsSyncer?
+  @ObservationIgnored private var settingsDefaultsObserver: NSObjectProtocol?
   /// Pictures of spaces on disk, by version (AppModel+SpacePictures.swift).
   @ObservationIgnored let spacePictureStore = SpacePictureStore(
     directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -952,6 +954,25 @@ final class AppModel {
   /// The core keeps them in the store, so the notification extension applies them too.
   func setMentionSettings(_ settings: MentionSettings) async {
     try? await core().setMentionSettings(settings: settings)
+    settingsSyncer().localMayHaveChanged()
+  }
+
+  /// The sync of the settings that follow the account (#1483); made on first use, and it watches the
+  /// app's settings stores from then on.
+  func settingsSyncer() -> SettingsSyncer {
+    if let maybeSettingsSync { return maybeSettingsSync }
+    let stores = AppSettingsStores(
+      readMentions: { [weak self] in await self?.mentionSettings() ?? AppSettingsStores.defaultMentions },
+      writeMentions: { [weak self] settings in try? await self?.core().setMentionSettings(settings: settings) })
+    let syncer = SettingsSyncer(stores: stores, openCore: { [weak self] in self?.maybeCore })
+    maybeSettingsSync = syncer
+    // Any change of the app's UserDefaults; the syncer tells the user's own from its writes.
+    settingsDefaultsObserver = NotificationCenter.default.addObserver(
+      forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+    ) { _ in
+      MainActor.assumeIsolated { syncer.localMayHaveChanged() }
+    }
+    return syncer
   }
 
   func segmentPrefetch() async -> SegmentPrefetchMode {
@@ -1185,6 +1206,7 @@ final class AppModel {
   /// conversations that are read now go.
   private func storeDidChange() {
     changeCount += 1
+    if maybeCore != nil { settingsSyncer().storeDidChange() }
     followTyping()
     calls.storeDidChange()
     let wasConnected = connection?.isConnected == true
@@ -1465,6 +1487,7 @@ final class AppModel {
       })
     maybeCore = opened
     setConnection(opened.connectionState())
+    settingsSyncer().start()
     return opened
   }
 
