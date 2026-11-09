@@ -19,8 +19,8 @@ use teamcraft_media::{
   rtp::{AudioLevel, PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc},
 };
 use teamcraft_proto::{
-  Base64Bytes, CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, ErrorCode,
-  MediaCapabilities,
+  Base64Bytes, CallClientMessage, CallEvent, CallId, CallServerMessage, DaveTransitionId, DaveTransitionMode,
+  DeviceId, ErrorCode, MediaCapabilities,
 };
 use teamcraft_sfu::{
   auth::DevTokenVerifier,
@@ -72,6 +72,7 @@ async fn invalid_join_token_is_rejected() {
     &CallClientMessage::Join {
       token: "forged".into(),
       capabilities: MediaCapabilities::default(),
+      dave_transition_mode: DaveTransitionMode::AtOnce,
     },
   )
   .await
@@ -98,6 +99,7 @@ async fn a_ping_is_answered_without_taking_an_event_number() {
     &CallClientMessage::Join {
       token,
       capabilities: MediaCapabilities::default(),
+      dave_transition_mode: DaveTransitionMode::Coordinated,
     },
   )
   .await
@@ -284,6 +286,7 @@ async fn run_client(
     &CallClientMessage::Join {
       token,
       capabilities: MediaCapabilities::default(),
+      dave_transition_mode: DaveTransitionMode::Coordinated,
     },
   )
   .await
@@ -443,11 +446,32 @@ fn handle_event(
           .unwrap();
       }
     },
-    CallEvent::DaveAnnounceCommit { epoch, commit } => {
+    // Commits and welcomes after the founding one carry a transition (#1541): the client says it
+    // is ready and switches its encryption key on the SFU's execution.
+    CallEvent::DaveAnnounceCommit {
+      epoch,
+      commit,
+      maybe_transition_id,
+    } => {
       assert_eq!(state.dave.maybe_epoch(), Some(DaveEpoch(epoch)));
-      state.dave.process_commit(commit.as_slice()).unwrap();
+      assert!(state.dave.process_commit(commit.as_slice()).unwrap());
+      prepare(&mut state.dave, maybe_transition_id, outgoing);
     },
-    CallEvent::DaveWelcome { welcome, .. } => state.dave.process_welcome(welcome.as_slice()).unwrap(),
+    CallEvent::DaveWelcome {
+      welcome,
+      maybe_transition_id,
+      ..
+    } => {
+      let roster: Vec<_> = PARTICIPANTS
+        .iter()
+        .map(|(id, _)| DaveParticipantId(*id))
+        .collect();
+      state.dave.process_welcome(welcome.as_slice(), &roster).unwrap();
+      prepare(&mut state.dave, maybe_transition_id, outgoing);
+    },
+    CallEvent::DaveExecuteTransition { transition_id } => {
+      state.dave.execute_transition(transition_id).unwrap();
+    },
     CallEvent::ParticipantJoined { participant } => {
       state
         .senders_by_stream
@@ -460,6 +484,19 @@ fn handle_event(
   if state.dave.is_ready() && state.dave.participant_ids().len() == PARTICIPANTS.len() {
     // The receiver only stops listening after the first signal; later sends are harmless.
     let _ = group_ready.send(());
+  }
+}
+
+fn prepare(
+  dave: &mut DaveParticipant,
+  maybe_transition_id: Option<DaveTransitionId>,
+  outgoing: &mpsc::UnboundedSender<CallClientMessage>,
+) {
+  dave.prepare_transition(maybe_transition_id).unwrap();
+  if let Some(transition_id) = maybe_transition_id {
+    outgoing
+      .send(CallClientMessage::DaveTransitionReady { transition_id })
+      .unwrap();
   }
 }
 

@@ -1417,6 +1417,7 @@ async fn run_media(
       frames_received = stats.frames_received,
       camera = ?stats.camera,
       screen = ?stats.screen,
+      encryption = ?stats.encryption,
       "left the call"
     ),
     Err(NativeCallError::ConnectionLost) => {

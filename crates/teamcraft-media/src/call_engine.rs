@@ -26,9 +26,9 @@ use std::time::Duration;
 use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage, DaveKeyBinding,
-  DeviceId, ErrorBody, ErrorCode, LEGACY_SIMULCAST_LAYERS, MAX_SIMULCAST_LAYERS, MediaCapabilities,
-  MediaStreamId, ScreenAudioTrack, TransportFeedback, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId,
-  VideoTrack, VideoTrackKind,
+  DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode, LEGACY_SIMULCAST_LAYERS,
+  MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack, TransportFeedback, UserId,
+  VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -41,7 +41,9 @@ use crate::call_auth::{CallKeyAuthenticator, CallKeyError};
 use crate::call_resilience::CallTransport;
 use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame};
 use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId};
-use crate::dave::{DaveCallId, DaveError, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind};
+use crate::dave::{
+  DaveCallId, DaveError, DaveFrameStats, DaveParticipant, DaveParticipantId, FrameCodec, MediaKind,
+};
 use crate::rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc};
 use crate::uplink_layers::{OwnTrack, UplinkLayers, UplinkPolicy, probe_demand_bps};
 use crate::video::EncodedVideoFrame;
@@ -54,6 +56,12 @@ const MAX_DATAGRAM_BYTES: usize = 1200;
 /// receiver and track (`KeyframeRequestConfig`), so none is wasted. A keyframe of a big screen
 /// takes a while to arrive; asking faster would only produce more of them.
 const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
+/// A prepared DAVE transition whose execution the SFU doesn't announce within this time is
+/// executed anyway (#1541): a lost message or a member that never says it's ready must not keep
+/// this device on the previous epoch's key. Long enough for every member to process a commit on a
+/// slow link; DAVE keeps the previous epoch's decryption keys for 10 s, so receivers that fall
+/// behind still decrypt.
+const DAVE_TRANSITION_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One call from this device's point of view.
 pub struct CallEngine {
@@ -102,6 +110,11 @@ pub struct CallEngine {
   /// Tracks other devices publish.
   remote_video: HashMap<StreamId, IncomingVideo>,
   maybe_dave: Option<DaveParticipant>,
+  /// The DAVE transition prepared here whose execution is awaited, with the time it is executed
+  /// without the SFU (set on the first timer tick after preparing).
+  maybe_pending_transition: Option<PendingTransition>,
+  /// Frame failures of the DAVE sessions before the current one (a rejoin starts a new one).
+  earlier_dave_stats: DaveFrameStats,
   maybe_trusted_roster: Option<BTreeSet<DeviceId>>,
   maybe_authenticator: Option<Arc<dyn CallKeyAuthenticator>>,
   /// DAVE keys of other members from verified call key bindings (e2ee.md §8).
@@ -301,6 +314,8 @@ pub struct CallStats {
   pub camera: VideoStats,
   pub screen: VideoStats,
   pub maybe_privacy_code: Option<String>,
+  /// Frames DAVE couldn't encrypt or decrypt over the whole call, by cause.
+  pub encryption: DaveFrameStats,
 }
 
 /// One kind of video (camera or screen) during a call. Encoded pictures count per layer: a
@@ -385,6 +400,14 @@ struct PendingPublication {
   adapts_bitrate: bool,
 }
 
+/// A prepared DAVE transition waiting for [`CallEvent::DaveExecuteTransition`].
+#[derive(Debug, Clone, Copy)]
+struct PendingTransition {
+  id: DaveTransitionId,
+  /// When it is executed without the SFU; `None` until the first timer tick sets it.
+  maybe_deadline: Option<Instant>,
+}
+
 /// What the SFU's `joined` says about the call when this device comes back.
 struct RejoinedState {
   participants: Vec<CallParticipant>,
@@ -440,6 +463,8 @@ impl CallEngine {
       maybe_sfu_layer_limit: None,
       remote_video: HashMap::new(),
       maybe_dave: None,
+      maybe_pending_transition: None,
+      earlier_dave_stats: DaveFrameStats::default(),
       maybe_trusted_roster: None,
       maybe_authenticator: None,
       verified_keys: HashMap::new(),
@@ -470,6 +495,7 @@ impl CallEngine {
     self.signal(CallClientMessage::Join {
       token,
       capabilities: self.config.capabilities.clone(),
+      dave_transition_mode: DaveTransitionMode::Coordinated,
     });
   }
 
@@ -482,12 +508,12 @@ impl CallEngine {
     match self.phase {
       Phase::Joined { call_id, .. } => {
         self.phase = Phase::Reconnecting { call_id };
-        self.maybe_dave = None;
+        self.replace_dave(None);
         self.event(CallEngineEvent::Reconnecting);
       },
       Phase::Rejoining { call_id } => {
         self.phase = Phase::Reconnecting { call_id };
-        self.maybe_dave = None;
+        self.replace_dave(None);
       },
       Phase::Idle | Phase::Joining | Phase::Reconnecting { .. } => {},
     }
@@ -518,6 +544,7 @@ impl CallEngine {
     self.signal(CallClientMessage::Join {
       token,
       capabilities: self.config.capabilities.clone(),
+      dave_transition_mode: DaveTransitionMode::Coordinated,
     });
   }
 
@@ -1077,9 +1104,40 @@ impl CallEngine {
   }
 
   /// Periodic work (every ~100 ms): reports arrival times of received datagrams to the SFU.
-  pub fn on_timer(&mut self, _now: Instant) {
+  pub fn on_timer(&mut self, now: Instant) {
     if let Some(feedback) = self.downlink_feedback.take_feedback() {
       self.signal(CallClientMessage::TransportFeedback { feedback });
+    }
+    self.execute_overdue_transition(now);
+  }
+
+  /// Frames DAVE couldn't encrypt or decrypt during this call, by cause (all its DAVE sessions).
+  pub fn encryption_stats(&self) -> DaveFrameStats {
+    let mut stats = self.earlier_dave_stats;
+    if let Some(dave) = &self.maybe_dave {
+      stats += dave.frame_stats();
+    }
+    stats
+  }
+
+  /// A transition the SFU didn't execute in time is executed here (`DAVE_TRANSITION_TIMEOUT`).
+  fn execute_overdue_transition(&mut self, now: Instant) {
+    let Some(pending) = &mut self.maybe_pending_transition else {
+      return;
+    };
+    match pending.maybe_deadline {
+      None => pending.maybe_deadline = Some(now + DAVE_TRANSITION_TIMEOUT),
+      Some(deadline) if now >= deadline => {
+        let id = pending.id;
+        warn!(
+          transition_id = id.0.get(),
+          "the SFU didn't execute a DAVE transition in time"
+        );
+        if let Err(error) = self.execute_transition(id) {
+          warn!(%error, "executing an overdue DAVE transition failed");
+        }
+      },
+      Some(_) => {},
     }
   }
 
@@ -1151,7 +1209,8 @@ impl CallEngine {
       CallEvent::DaveExternalSender { package } => self.on_external_sender(package.as_slice()),
       change @ (CallEvent::DaveProposals { .. }
       | CallEvent::DaveAnnounceCommit { .. }
-      | CallEvent::DaveWelcome { .. }) => self.on_dave_change(change),
+      | CallEvent::DaveWelcome { .. }
+      | CallEvent::DaveExecuteTransition { .. }) => self.on_dave_change(change),
       CallEvent::TransportFeedback { feedback } => {
         self.on_uplink_feedback(&feedback, now);
         Ok(())
@@ -1241,10 +1300,10 @@ impl CallEngine {
     };
     // Muted from the start: the others see it from the first moment.
     self.announce_mute();
-    self.maybe_dave = Some(DaveParticipant::new(
+    self.replace_dave(Some(DaveParticipant::new(
       DaveParticipantId::from_device(self.config.device_id),
       DaveCallId::from_call(call_id),
-    )?);
+    )?));
     for other in &participants {
       self.add_participant(*other);
     }
@@ -1286,10 +1345,10 @@ impl CallEngine {
       self.is_mute_announced = !self.is_muted;
       self.announce_mute();
     }
-    self.maybe_dave = Some(DaveParticipant::new(
+    self.replace_dave(Some(DaveParticipant::new(
       DaveParticipantId::from_device(self.config.device_id),
       DaveCallId::from_call(call_id),
-    )?);
+    )?));
     self.reconcile_participants(state.participants);
     self.reconcile_remote_video(&state.video_tracks);
     self.reconcile_screen_audio(&state.screen_audio_tracks);
@@ -1687,24 +1746,94 @@ impl CallEngine {
         self.verify_bindings(&key_bindings)?;
         self.on_proposals(epoch, proposals.as_slice(), &expected_participants)
       },
-      CallEvent::DaveAnnounceCommit { commit, .. } => {
-        self.dave()?.process_commit(commit.as_slice())?;
+      CallEvent::DaveAnnounceCommit {
+        commit,
+        maybe_transition_id,
+        ..
+      } => {
+        if !self.dave()?.process_commit(commit.as_slice())? {
+          debug!("ignoring a DAVE commit without a group to apply it to");
+          return Ok(());
+        }
         self.verify_members()?;
-        self.report_secured();
-        Ok(())
+        self.prepare_transition(maybe_transition_id)
       },
       CallEvent::DaveWelcome {
         welcome,
         key_bindings,
+        maybe_transition_id,
       } => {
         self.verify_bindings(&key_bindings)?;
-        self.dave()?.process_welcome(welcome.as_slice())?;
+        let recognized = self.recognized_participants();
+        self.dave()?.process_welcome(welcome.as_slice(), &recognized)?;
         self.verify_members()?;
-        self.report_secured();
-        Ok(())
+        self.prepare_transition(maybe_transition_id)
       },
+      CallEvent::DaveExecuteTransition { transition_id } => self.execute_transition(transition_id),
       _ => Ok(()),
     }
+  }
+
+  /// Installs the new epoch's decryption keys. Without a transition id the encryption key
+  /// switches too; with one, the SFU hears that this device is ready and executes the transition
+  /// once every member is (DAVE opcodes 23 and 22).
+  fn prepare_transition(
+    &mut self,
+    maybe_transition_id: Option<DaveTransitionId>,
+  ) -> Result<(), CallEngineError> {
+    self.dave()?.prepare_transition(maybe_transition_id)?;
+    match maybe_transition_id {
+      None => self.report_secured(),
+      Some(transition_id) => {
+        self.maybe_pending_transition = Some(PendingTransition {
+          id: transition_id,
+          maybe_deadline: None,
+        });
+        self.signal(CallClientMessage::DaveTransitionReady { transition_id });
+      },
+    }
+    Ok(())
+  }
+
+  /// Switches the encryption key to the epoch prepared for `transition_id`. An unknown or
+  /// already executed transition changes nothing.
+  fn execute_transition(&mut self, transition_id: DaveTransitionId) -> Result<(), CallEngineError> {
+    if self
+      .maybe_pending_transition
+      .is_some_and(|pending| pending.id == transition_id)
+    {
+      self.maybe_pending_transition = None;
+    }
+    if self.dave()?.execute_transition(transition_id)? {
+      self.report_secured();
+    }
+    Ok(())
+  }
+
+  /// The participants a welcome may name: the trusted roster and this device, or without one the
+  /// SFU's participants (said with [`CallEngineEvent::UntrustedRoster`], as for proposals).
+  fn recognized_participants(&mut self) -> Vec<DaveParticipantId> {
+    let devices: Vec<DeviceId> = match &self.maybe_trusted_roster {
+      Some(roster) => roster.iter().copied().collect(),
+      None => {
+        self.event(CallEngineEvent::UntrustedRoster);
+        self.participants.keys().copied().collect()
+      },
+    };
+    devices
+      .into_iter()
+      .chain(std::iter::once(self.config.device_id))
+      .map(DaveParticipantId::from_device)
+      .collect()
+  }
+
+  /// A new DAVE session (or none while away): what the old one counted is kept for the call's
+  /// stats, and a transition prepared in it is void.
+  fn replace_dave(&mut self, maybe_dave: Option<DaveParticipant>) {
+    if let Some(old) = std::mem::replace(&mut self.maybe_dave, maybe_dave) {
+      self.earlier_dave_stats += old.frame_stats();
+    }
+    self.maybe_pending_transition = None;
   }
 
   /// Verifies relayed call key bindings and remembers the bound keys.
@@ -4538,7 +4667,17 @@ mod tests {
         })
         .unwrap();
       alice
-        .handle_signal(event(4, CallEvent::DaveAnnounceCommit { epoch: 0, commit }), now)
+        .handle_signal(
+          event(
+            4,
+            CallEvent::DaveAnnounceCommit {
+              epoch: 0,
+              commit,
+              maybe_transition_id: None,
+            },
+          ),
+          now,
+        )
         .unwrap();
       assert!(drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::UnauthenticatedKeys)));
     }
@@ -4601,6 +4740,7 @@ mod tests {
       let welcome = CallEvent::DaveWelcome {
         welcome,
         key_bindings: Vec::new(),
+        maybe_transition_id: None,
       };
       let result = bob.handle_signal(event(3, welcome), now);
       assert!(matches!(result, Err(CallEngineError::UnverifiedMember(member)) if member == device(1)));
@@ -4706,7 +4846,115 @@ mod tests {
     }
   }
 
+  mod dave_transitions {
+    use super::*;
+
+    const TRANSITION: DaveTransitionId = DaveTransitionId(std::num::NonZeroU16::new(3).unwrap());
+
+    /// With a transition id, both say they're ready and switch only on the SFU's execution
+    /// (#1541); media flows from then on.
+    #[test]
+    fn keys_switch_when_the_sfu_executes() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = paired(now, Some(TRANSITION));
+      for engine in [&mut alice, &mut bob] {
+        let outputs = drain(engine);
+        assert!(
+          outputs.contains(&EngineOutput::Signal(CallClientMessage::DaveTransitionReady {
+            transition_id: TRANSITION
+          }))
+        );
+        assert!(
+          !outputs
+            .iter()
+            .any(|output| matches!(output, EngineOutput::Event(CallEngineEvent::Secured { .. })))
+        );
+        assert!(
+          !engine.is_secured(),
+          "nothing to encrypt with before the execution"
+        );
+      }
+
+      let execute = CallEvent::DaveExecuteTransition {
+        transition_id: TRANSITION,
+      };
+      alice.handle_signal(event(6, execute.clone()), now).unwrap();
+      bob.handle_signal(event(4, execute), now).unwrap();
+
+      for engine in [&mut alice, &mut bob] {
+        assert!(engine.is_secured());
+        assert!(
+          drain(engine)
+            .iter()
+            .any(|output| matches!(output, EngineOutput::Event(CallEngineEvent::Secured { .. })))
+        );
+      }
+      assert_eq!(alice.privacy_code(), bob.privacy_code());
+      assert_audio_flows(&mut alice, &mut bob, now);
+      assert_eq!(alice.encryption_stats(), DaveFrameStats::default());
+    }
+
+    /// An execution that never comes (a lost message, a member that never gets ready) doesn't
+    /// keep the call on the old keys: the engine executes on its own after the timeout.
+    #[test]
+    fn an_overdue_transition_is_executed_without_the_sfu() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = paired(now, Some(TRANSITION));
+      for engine in [&mut alice, &mut bob] {
+        engine.on_timer(now);
+        engine.on_timer(now + DAVE_TRANSITION_TIMEOUT - Duration::from_millis(1));
+        assert!(!engine.is_secured());
+        engine.on_timer(now + DAVE_TRANSITION_TIMEOUT);
+        assert!(engine.is_secured());
+      }
+      drain(&mut alice);
+      drain(&mut bob);
+      assert_audio_flows(&mut alice, &mut bob, now);
+
+      // A late execution changes nothing.
+      alice
+        .handle_signal(
+          event(
+            6,
+            CallEvent::DaveExecuteTransition {
+              transition_id: TRANSITION,
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      assert!(drain(&mut alice).is_empty());
+    }
+
+    fn assert_audio_flows(sender: &mut CallEngine, receiver: &mut CallEngine, now: Instant) {
+      sender.send_audio(&frame(), now);
+      let datagrams: Vec<Vec<u8>> = drain(sender)
+        .into_iter()
+        .filter_map(|output| match output {
+          EngineOutput::Datagram(bytes) => Some(bytes),
+          _ => None,
+        })
+        .collect();
+      assert_eq!(datagrams.len(), 1);
+      receiver.handle_datagram(&datagrams[0], now);
+      assert!(
+        drain(receiver)
+          .iter()
+          .any(|output| matches!(output, EngineOutput::Event(CallEngineEvent::AudioFrame { .. })))
+      );
+    }
+  }
+
   fn secured_pair(now: Instant) -> (CallEngine, CallEngine) {
+    let (mut alice, mut bob) = paired(now, None);
+    assert!(alice.is_secured() && bob.is_secured());
+    drain(&mut alice);
+    drain(&mut bob);
+    (alice, bob)
+  }
+
+  /// Alice founds the group with Bob; the commit and the welcome carry `maybe_transition_id`.
+  fn paired(now: Instant, maybe_transition_id: Option<DaveTransitionId>) -> (CallEngine, CallEngine) {
     let authenticators = authenticators(&[1, 2]);
     let gateway = DaveExternalSender::new().unwrap();
     let mut alice = joined_engine(1, &[], &gateway, Some(&authenticators[&1]), now);
@@ -4740,16 +4988,24 @@ mod tests {
       .unwrap();
     let (commit, welcome) = take_commit(&mut alice);
     alice
-      .handle_signal(event(5, CallEvent::DaveAnnounceCommit { epoch: 0, commit }), now)
+      .handle_signal(
+        event(
+          5,
+          CallEvent::DaveAnnounceCommit {
+            epoch: 0,
+            commit,
+            maybe_transition_id,
+          },
+        ),
+        now,
+      )
       .unwrap();
     let welcome = CallEvent::DaveWelcome {
       welcome,
       key_bindings: vec![binding(1, alice_binding.unwrap())],
+      maybe_transition_id,
     };
     bob.handle_signal(event(3, welcome), now).unwrap();
-    assert!(alice.is_secured() && bob.is_secured());
-    drain(&mut alice);
-    drain(&mut bob);
     (alice, bob)
   }
 
