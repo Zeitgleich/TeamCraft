@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
@@ -56,6 +57,7 @@ fun MentionSettingsSection(viewModel: MainViewModel) {
       },
       label = { Text(stringResource(R.string.mention_keywords)) },
       supportingText = { Text(stringResource(R.string.mention_keywords_hint)) },
+      keyboardOptions = textKeyboard(KeyboardCapitalization.None),
       modifier = Modifier.fillMaxWidth(),
     )
     // Saved as typed; an empty field keeps the last count and says what it takes.
