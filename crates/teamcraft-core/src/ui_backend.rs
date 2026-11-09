@@ -4134,12 +4134,7 @@ fn role_appointer(
 }
 
 fn presence_status(state: PresenceState) -> PresenceStatus {
-  match state {
-    PresenceState::Online => PresenceStatus::Online,
-    PresenceState::Away => PresenceStatus::Away,
-    PresenceState::DoNotDisturb => PresenceStatus::DoNotDisturb,
-    PresenceState::Offline | PresenceState::Unknown(_) => PresenceStatus::Offline,
-  }
+  PresenceStatus::from(&state)
 }
 
 /// Avatar colour derived from the ID, stable across devices.

@@ -465,6 +465,19 @@ impl<S: TokenStore> AuthService<S> {
     self.cancel.notify_waiters();
   }
 
+  /// Takes the scopes the active server announces now for the next sign-in. The session and the
+  /// stored token stay: the token's key doesn't depend on the scopes.
+  pub fn set_scopes(&self, scopes: Vec<String>) {
+    if let Some(server) = self
+      .server
+      .write()
+      .unwrap_or_else(PoisonError::into_inner)
+      .as_mut()
+    {
+      server.scopes = scopes;
+    }
+  }
+
   /// Asks `origin` how to sign in to it (`GET /api/v1/server-info`) and checks the answer. Nothing
   /// changes until the user confirms; redirects are reported, never followed.
   pub async fn probe_server(&self, origin: &ServerOrigin) -> Result<CheckedServer, ServerProbeError> {

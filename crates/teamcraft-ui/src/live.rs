@@ -679,12 +679,7 @@ pub fn thread_summary(entry: &ThreadWire, messages: &[Message]) -> Option<Thread
 }
 
 pub fn presence_status(state: &PresenceState) -> PresenceStatus {
-  match state {
-    PresenceState::Online => PresenceStatus::Online,
-    PresenceState::Away => PresenceStatus::Away,
-    PresenceState::DoNotDisturb => PresenceStatus::DoNotDisturb,
-    PresenceState::Offline | PresenceState::Unknown(_) => PresenceStatus::Offline,
-  }
+  PresenceStatus::from(state)
 }
 
 /// The status with its end resolved in the user's time zone ("today" ends at local midnight), on
@@ -1043,14 +1038,19 @@ mod tests {
   }
 
   #[test]
-  fn unknown_presence_is_offline() {
+  fn unknown_presence_is_somebody_who_is_there() {
     assert_eq!(
       presence_status(&PresenceState::Unknown("x".into())),
-      PresenceStatus::Offline
+      PresenceStatus::Online
     );
     assert_eq!(
       presence_status(&PresenceState::DoNotDisturb),
       PresenceStatus::DoNotDisturb
+    );
+    assert_eq!(presence_status(&PresenceState::Busy), PresenceStatus::Busy);
+    assert_eq!(
+      presence_status(&PresenceState::BeRightBack),
+      PresenceStatus::BeRightBack
     );
   }
 

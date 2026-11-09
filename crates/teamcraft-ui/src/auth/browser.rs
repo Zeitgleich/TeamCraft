@@ -259,6 +259,7 @@ impl BrowserAuth {
     match self.refresh().await {
       Ok(()) => return Ok(true),
       // Nothing saved, or the session was revoked or expired: the provider decides below.
+      // (Reported where it was decided, in `refresh_when`.)
       Err(AuthError::NotSignedIn) => {},
       // Offline or the server is down: the saved tokens stay for the next start.
       Err(error) => return Err(error),
@@ -402,7 +403,17 @@ impl BrowserAuth {
     let sign_in = self.sign_in().await?;
     self.drop_tokens_of_another_provider(&sign_in);
     let _turn = token_vault::refresh_turn().await;
-    let maybe_saved = token_vault::load(&sign_in.issuer, &sign_in.client_id).await;
+    let maybe_saved = match token_vault::load(&sign_in.issuer, &sign_in.client_id).await {
+      Ok(maybe_saved) => maybe_saved,
+      // This tab's own tokens still do; another tab's newer ones are looked for next time.
+      Err(_) if self.tokens.borrow().is_some() => None,
+      // On start an unreadable vault is not a missing sign-in: the tokens stay for the next try,
+      // and the user isn't sent to the provider's login page for it.
+      Err(error) => {
+        super::report_lost_sign_in("web: the saved sign-in can't be read");
+        return Err(AuthError::Network(error.to_string()));
+      },
+    };
     let plan = token_vault::plan_refresh(self.tokens.borrow().as_ref(), maybe_saved, now_ms(), is_forced);
     let (refresh, maybe_subject, maybe_bound_key, is_shared) = match plan {
       RefreshPlan::Adopt(tokens) => {
@@ -415,7 +426,13 @@ impl BrowserAuth {
         maybe_bound_key,
         is_shared,
       } => (token, maybe_subject, maybe_bound_key, is_shared),
-      RefreshPlan::NotSignedIn => return Err(AuthError::NotSignedIn),
+      RefreshPlan::NotSignedIn => {
+        // Signed in before in this browser, and nothing saved any more: lost, not signed out.
+        if local_get(SIGNED_IN_HINT_KEY).is_some() {
+          super::report_lost_sign_in("web: signed in before, no saved sign-in");
+        }
+        return Err(AuthError::NotSignedIn);
+      },
     };
     let discovery = self.discovery().await?;
     let client = self.client(&discovery, &redirect_uri()?, &sign_in)?;
@@ -424,7 +441,7 @@ impl BrowserAuth {
         Ok(prover) => (Some(prover), ProofFallback::None),
         Err(AuthError::KeyLost) => {
           // The refresh token only works with that key. Nothing can bring it back.
-          tracing::warn!("the DPoP key of this sign-in is gone");
+          super::report_lost_sign_in("web: the DPoP key of this sign-in is gone");
           self.tokens.replace(None);
           if is_shared {
             token_vault::forget().await;
@@ -464,6 +481,7 @@ impl BrowserAuth {
         // other answers (`temporarily_unavailable`, `server_error`) and network errors keep it for
         // the next try (issue #667).
         if is_session_over(&error) {
+          super::report_lost_sign_in("web: the provider refused the refresh token");
           self.tokens.replace(None);
           if is_shared {
             token_vault::forget().await;

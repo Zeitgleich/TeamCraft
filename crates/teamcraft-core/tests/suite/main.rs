@@ -61,6 +61,7 @@ mod people_directory;
 mod push;
 mod push_guard;
 mod queries;
+mod reads_during_catch_up;
 mod recovery_kit;
 mod removal_followups;
 mod role_signing;

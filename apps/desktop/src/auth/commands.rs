@@ -307,7 +307,10 @@ pub async fn auth_login(
   // The user asked: a keychain that refused moments ago is asked again.
   vault.allow_retry();
   let look = look.unwrap_or_default();
-  let maybe_profile = servers.directory.active();
+  let maybe_profile = match servers.directory.active() {
+    Some(profile) => Some(with_current_scopes(profile, &servers, &service).await),
+    None => None,
+  };
   // The sign-in screen's fresh answer wins over the profile saved at the last server check, so a
   // changed admin setting applies to installed apps too.
   let request = LoginRequest {
@@ -344,6 +347,39 @@ pub async fn auth_login(
     tracing::warn!(%error, "could not remember the account for the next sign-in");
   }
   Ok(())
+}
+
+/// `profile` with the scopes its server announces now. The profile keeps what the server said when
+/// it was added, so an app added before the server asked for `offline_access` signed in without it
+/// for good, and every sign-in ended with the provider's browser session (hours instead of months).
+/// Without an answer, or when the provider or client changed (that goes through the server entry
+/// again), the saved profile stays.
+async fn with_current_scopes(
+  profile: ServerProfile,
+  servers: &ServerState,
+  service: &Service,
+) -> ServerProfile {
+  let fresh = match service.probe_server(&profile.origin).await {
+    Ok(checked) => checked.profile,
+    Err(error) => {
+      tracing::debug!(%error, "could not ask the server for its current sign-in scopes");
+      return profile;
+    },
+  };
+  if fresh.issuer != profile.issuer || fresh.client_id != profile.client_id || fresh.scopes == profile.scopes
+  {
+    return profile;
+  }
+  tracing::info!(scopes = ?fresh.scopes, "the server asks for other sign-in scopes now");
+  let updated = ServerProfile {
+    scopes: fresh.scopes,
+    ..profile
+  };
+  if let Err(error) = servers.directory.activate(updated.clone()) {
+    tracing::warn!(%error, "could not save the server's current sign-in scopes");
+  }
+  service.set_scopes(updated.scopes.clone());
+  updated
 }
 
 /// Signs in a local account. The password goes straight into a secret and is never logged; errors

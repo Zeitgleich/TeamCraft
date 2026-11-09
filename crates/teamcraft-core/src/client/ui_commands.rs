@@ -130,14 +130,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       } => {
         let manual = match presence {
           PresenceStatus::Online => ManualPresence::Auto,
-          PresenceStatus::Away => ManualPresence::Away,
+          PresenceStatus::Busy => ManualPresence::Busy,
           PresenceStatus::DoNotDisturb => ManualPresence::DoNotDisturb,
+          PresenceStatus::BeRightBack => ManualPresence::BeRightBack,
+          PresenceStatus::Away => ManualPresence::Away,
           PresenceStatus::Offline => ManualPresence::Invisible,
         };
         let request = SetPresenceRequest {
-          // Only do-not-disturb ends by itself.
+          // Every manual status may end by itself ("Reset after", issue #1578); automatic can't.
           maybe_until: maybe_until
-            .filter(|_| manual == ManualPresence::DoNotDisturb)
+            .filter(|_| manual != ManualPresence::Auto)
             .map(UnixMillis),
           manual,
         };

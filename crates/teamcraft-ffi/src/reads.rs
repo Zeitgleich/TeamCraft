@@ -683,8 +683,14 @@ impl Reads {
     Ok(())
   }
 
-  pub(crate) fn set_presence(&self, presence: Presence) -> Result<(), TeamCraftError> {
-    self.backend()?.set_presence(presence.into());
+  pub(crate) fn set_presence(
+    &self,
+    presence: Presence,
+    maybe_until_ms: Option<i64>,
+  ) -> Result<(), TeamCraftError> {
+    self
+      .backend()?
+      .set_presence_until(presence.into(), maybe_until_ms);
     Ok(())
   }
 

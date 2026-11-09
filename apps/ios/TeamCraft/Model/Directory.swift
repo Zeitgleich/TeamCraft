@@ -219,13 +219,3 @@ enum InviteRules {
       && !text.contains(where: \.isWhitespace)
   }
 }
-
-/// The directory's presence (`online`, `dnd`, …) as a color.
-func directoryPresenceColor(_ wire: String) -> Color {
-  switch wire {
-  case "online": return .green
-  case "away": return .orange
-  case "dnd": return .red
-  default: return Color.secondary.opacity(0.5)
-  }
-}

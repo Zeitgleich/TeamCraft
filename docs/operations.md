@@ -959,10 +959,26 @@ Recommended provider settings (Keycloak):
 | Realm settings → Tokens → Revoke Refresh Token         | Off, or on with "Refresh token max reuse" at least 1: a reused token then doesn't end the session  |
 | Realm settings → Tokens → Access token lifespan        | 5 to 15 minutes; the apps refresh a minute ahead                                                   |
 
+Sign-in settings (scopes) are the server's answer at the time an app added the server; the desktop
+app asks the server again before each browser sign-in and takes its current scopes, so a server that
+added `offline_access` later reaches installed apps too. Before that fix (issue #1589) a desktop app
+added under such a server signed in without `offline_access` for good and had to sign in again once
+the provider's browser session ended (in Keycloak's `CODE_TO_TOKEN` events: `refresh_token_type`
+`Refresh` instead of `Offline`, redirect `http://127.0.0.1:<port>/callback`).
+
+The web app reads its saved sign-in from IndexedDB on every start. A home-screen web app on iOS that
+the system ended in the background can get IndexedDB errors on its first reads after the next launch;
+the app tries again a few times and, if it still can't read, keeps the sign-in and says the server is
+unreachable instead of sending the user to the login page (issue #1589). In Keycloak such a loss
+looks like many offline sessions of one user that were never refreshed (Users → user → Sessions:
+"Last access" equals "Started"), each opened by a new sign-in without a refused refresh before it.
+
 To find out why someone was signed out: the client log names the error code (`session_ended`,
 `session_timed_out`, or a refresh refused with `invalid_grant`); the server logs back-channel logouts
-and the audit log records them (`oidc_backchannel_logout`); Keycloak's events (Realm settings →
-Events, "Save events" on) show `REFRESH_TOKEN_ERROR` with `invalid_refresh_token` for a reused token.
+and the audit log records them (`oidc_backchannel_logout`); the apps send a `LostSignIn` crash report
+(docs/crash-reports.md) when crash reports are on; Keycloak's events (Realm settings →
+Events, "Save events" on, with `REFRESH_TOKEN` and `REFRESH_TOKEN_ERROR` among the saved types: a
+custom list may leave them out) show `REFRESH_TOKEN_ERROR` with `invalid_refresh_token` for a reused token.
 
 Up to 1.0.3 the server ended every session of the user on any back-channel logout, since Keycloak
 names the subject in each logout token as well: signing out (or "sign in again", which signs out

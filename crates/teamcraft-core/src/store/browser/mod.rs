@@ -10,6 +10,7 @@ mod vault;
 
 pub use browser_key::{browser_database_key, browser_database_key_without_upgrade};
 pub use dpop_key::{browser_dpop_prover, browser_dpop_prover_or_new};
+pub use idb::{IdbFailureHook, set_failure_hook as set_idb_failure_hook};
 pub use indexed_db::{IndexedDbRecords, IndexedDbStore};
 pub use own_sound::{own_sound_delete, own_sound_get, own_sound_put};
 pub use vault::{vault_delete, vault_get, vault_put};

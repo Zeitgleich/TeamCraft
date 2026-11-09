@@ -885,8 +885,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     graph.notifier.dismiss(conversationId)
   }
 
-  fun setPresence(presence: Presence) = viewModelScope.launch {
-    runCatching { graph.core.core().setPresence(presence) }
+  /** Sets the status; with [maybeUntil] it is automatic again from then ("Reset after", #1578). */
+  fun setPresence(presence: Presence, maybeUntil: java.time.Instant? = null) = viewModelScope.launch {
+    runCatching {
+      val core = graph.core.core()
+      if (maybeUntil == null) core.setPresence(presence) else core.setPresenceUntil(presence, maybeUntil.toEpochMilli())
+    }
   }
 
   /** `{origin}/c/{id}` of a conversation on the active server, if it has a web address (#1105). */

@@ -103,15 +103,26 @@ pub fn menu_model(input: &TrayInput, t: &dyn Fn(&str) -> String) -> TrayMenuMode
       t("tray-status-available"),
       is(PresenceStatus::Online),
     ),
+    // The account menu's list, in its order and words (#1578).
     TrayEntry::choice(
-      TrayAction::StatusAway,
-      t("presence-away"),
-      is(PresenceStatus::Away),
+      TrayAction::StatusBusy,
+      t("status-pick-busy"),
+      is(PresenceStatus::Busy),
     ),
     TrayEntry::choice(
       TrayAction::StatusDoNotDisturb,
-      t("presence-dnd"),
+      t("status-pick-dnd"),
       is(PresenceStatus::DoNotDisturb),
+    ),
+    TrayEntry::choice(
+      TrayAction::StatusBeRightBack,
+      t("status-pick-brb"),
+      is(PresenceStatus::BeRightBack),
+    ),
+    TrayEntry::choice(
+      TrayAction::StatusAway,
+      t("status-pick-away"),
+      is(PresenceStatus::Away),
     ),
     TrayEntry::choice(
       TrayAction::StatusOffline,
@@ -367,6 +378,8 @@ pub fn run(state: AppState, action: TrayAction) {
   let call = state.call;
   match action {
     TrayAction::StatusOnline => state.set_presence_until(PresenceStatus::Online, None),
+    TrayAction::StatusBusy => state.set_presence_until(PresenceStatus::Busy, None),
+    TrayAction::StatusBeRightBack => state.set_presence_until(PresenceStatus::BeRightBack, None),
     TrayAction::StatusAway => state.set_presence_until(PresenceStatus::Away, None),
     TrayAction::StatusOffline => state.set_presence_until(PresenceStatus::Offline, None),
     TrayAction::StatusDoNotDisturb => state.set_presence_until(PresenceStatus::DoNotDisturb, None),
@@ -476,16 +489,18 @@ mod tests {
     assert_eq!(model.call_state, TrayCallState::Idle);
     let list = keys(&model);
     assert_eq!(
-      &list[..4],
+      &list[..6],
       [
         "[ ] status_online",
-        "[x] status_away",
+        "[ ] status_busy",
         "[ ] status_do_not_disturb",
+        "[ ] status_be_right_back",
+        "[x] status_away",
         "[ ] status_offline",
       ]
     );
-    assert_eq!(list[4], "set_custom_status");
-    assert_eq!(&list[5..], &TAIL);
+    assert_eq!(list[6], "set_custom_status");
+    assert_eq!(&list[7..], &TAIL);
   }
 
   #[test]
@@ -494,7 +509,7 @@ mod tests {
     input.are_statuses_enabled = false;
     let list = keys(&menu_model(&input, &|key| key.to_owned()));
     assert!(!list.iter().any(|line| line == "set_custom_status"));
-    assert_eq!(&list[4..], &TAIL);
+    assert_eq!(&list[6..], &TAIL);
   }
 
   #[test]
@@ -530,7 +545,7 @@ mod tests {
     let paused = keys(&menu_model(&input(PresenceStatus::DoNotDisturb), &|key| {
       key.to_owned()
     }));
-    assert_eq!(&paused[5..8], ["-", "resume_notifications", "-"]);
+    assert_eq!(&paused[7..10], ["-", "resume_notifications", "-"]);
     assert!(!paused.iter().any(|line| line.starts_with('>')));
   }
 

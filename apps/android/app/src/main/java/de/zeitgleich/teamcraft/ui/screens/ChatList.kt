@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.PresenceDot
+import de.zeitgleich.teamcraft.ui.presenceLabel
 import androidx.compose.ui.semantics.heading
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -1751,10 +1753,9 @@ internal fun ConversationAvatar(conversation: ConversationItem) {
           .align(Alignment.BottomEnd)
           .size(12.dp)
           .background(MaterialTheme.colorScheme.background, CircleShape)
-          .padding(2.dp)
-          .background(presenceColor(presence), CircleShape)
           .semantics { contentDescription = description },
-      )
+        contentAlignment = Alignment.Center,
+      ) { PresenceDot(presence, size = 8.dp) }
     }
   }
 }
@@ -1791,20 +1792,6 @@ private fun NotesAvatar() {
       modifier = Modifier.size(22.dp),
     )
   }
-}
-
-private fun presenceColor(presence: Presence): Color = when (presence) {
-  Presence.ONLINE -> Color(0xFF2E9E5B)
-  Presence.AWAY -> Color(0xFFE0A030)
-  Presence.DO_NOT_DISTURB -> Color(0xFFD0453A)
-  Presence.OFFLINE -> Color(0xFF8A8F98)
-}
-
-private fun presenceLabel(presence: Presence): Int = when (presence) {
-  Presence.ONLINE -> R.string.presence_online
-  Presence.AWAY -> R.string.presence_away
-  Presence.DO_NOT_DISTURB -> R.string.presence_dnd
-  Presence.OFFLINE -> R.string.presence_peer_offline
 }
 
 /**
