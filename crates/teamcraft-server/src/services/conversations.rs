@@ -10,7 +10,7 @@ use teamcraft_proto::{
   CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeleteConversationRequest, GatewayEvent,
   GuestDmStart, HistoryPolicy, ListConversationsQuery, ListConversationsResponse, MoveChannelRequest,
   Permission, SignedChannelDeletion, SpaceId, SpaceRole, SystemEventKind, Target, UpdateConversationRequest,
-  UserId,
+  UserId, WebhookEventKind,
 };
 
 use super::access::{
@@ -196,6 +196,15 @@ pub async fn create_channel(
       [caller.user.id],
       &GatewayEvent::ConversationUpdate { conversation_id: id },
     );
+    crate::webhooks::emit_for_conversation(
+      state,
+      WebhookEventKind::ChannelCreated,
+      id,
+      Some(caller.user.id),
+      None,
+      None,
+    )
+    .await;
   }
   get_conversation(state, caller, created.id).await
 }
@@ -729,6 +738,15 @@ pub async fn delete_channel(
     return Err(ApiError::conversation_not_found());
   };
   announce_deleted(state, id, &members, request.maybe_signed_deletion).await;
+  crate::webhooks::emit_for_conversation(
+    state,
+    WebhookEventKind::ChannelDeleted,
+    id,
+    Some(caller.user.id),
+    None,
+    None,
+  )
+  .await;
   Ok(())
 }
 

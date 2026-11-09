@@ -29,7 +29,8 @@ use teamcraft_proto::{
   CALL_JOIN_TOKEN_AUDIENCE, CallEndCause, CallId, CallJoinClaims, CallJoinTokenResponse, CallRosterEntry,
   CallStateResponse, ChannelRole, ConversationId, ConversationKind, CreateCallJoinTokenRequest,
   DependencyName, DeviceId, GatewayEvent, ListRunningCallsResponse, MoveCallRequest, SfuControlAction,
-  SfuControlRequest, SfuParticipantReport, SfuRosterReport, UnixMillis, UserId,
+  SfuControlRequest, SfuParticipantReport, SfuRosterReport, UnixMillis, UserId, WebhookEventData,
+  WebhookEventKind,
 };
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -1238,6 +1239,7 @@ pub async fn report_joined(state: &AppState, report: SfuParticipantReport) -> Re
       .try_into()
       .unwrap_or(i64::MAX),
   );
+  let is_channel = conversation.conversation.kind == ConversationKind::Channel;
   calls.note_kind(conversation_id, report.call_id, conversation.conversation.kind);
   let change = calls.participant_joined(conversation_id, entry, rings, now);
   let members = state.database.conversation_member_ids(conversation_id).await?;
@@ -1257,6 +1259,19 @@ pub async fn report_joined(state: &AppState, report: SfuParticipantReport) -> Re
           participants: snapshot.participants.clone(),
         },
       );
+      if is_channel {
+        crate::webhooks::emit(
+          state,
+          WebhookEventKind::CallStarted,
+          WebhookEventData {
+            maybe_conversation_id: Some(conversation_id),
+            maybe_actor_id: Some(report.user_id),
+            maybe_subject_id: None,
+            maybe_call_id: Some(snapshot.call_id),
+          },
+        )
+        .await;
+      }
       if snapshot.is_ringing {
         start_ringing(state, calls, &snapshot, &members);
       }
@@ -1573,6 +1588,15 @@ async fn publish_leave(
           cause: CallEndCause::LastLeft,
         },
       );
+      crate::webhooks::emit_for_conversation(
+        state,
+        WebhookEventKind::CallEnded,
+        conversation_id,
+        None,
+        None,
+        Some(call_id),
+      )
+      .await;
     },
     LeaveChange::EndedForBoth {
       conversation_id,
