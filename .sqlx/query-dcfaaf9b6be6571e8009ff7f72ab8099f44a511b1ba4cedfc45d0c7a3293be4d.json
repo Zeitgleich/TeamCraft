@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE webhook_deliveries SET attempts = attempts + 1\n         WHERE webhook_id = $1 AND event_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dcfaaf9b6be6571e8009ff7f72ab8099f44a511b1ba4cedfc45d0c7a3293be4d"
+}

@@ -19,7 +19,7 @@ use teamcraft_server::auth::{
   HttpJwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator, ValidatorOptions,
 };
 use teamcraft_server::brand::{BrandInputs, BrandStore};
-use teamcraft_server::config::{CONFIG_PATH_ENV, Config, DatabaseConfig};
+use teamcraft_server::config::{CONFIG_PATH_ENV, Config, DatabaseConfig, WebhooksConfig};
 use teamcraft_server::dependencies::{Dependencies, DependencyOptions, TokioClock};
 use teamcraft_server::drain::Drain;
 use teamcraft_server::error::ApiError;
@@ -245,6 +245,16 @@ async fn run() -> anyhow::Result<()> {
       sign_in_page: config.sign_in_page.clone(),
       presence: config.presence.clone(),
       shares: config.shares.clone(),
+      // Each worker holds a pooled connection while it sends: at most half the pool.
+      webhooks: WebhooksConfig {
+        workers: config.webhooks.workers.clamp(
+          1,
+          usize::try_from(config.database.max_connections / 2)
+            .unwrap_or(1)
+            .max(1),
+        ),
+        ..config.webhooks.clone()
+      },
       maybe_organization_claim: config.oidc.maybe_organization_claim.clone(),
       sign_in: SignInSettings::new(
         config.oidc.issuer.clone(),
@@ -302,6 +312,10 @@ async fn run() -> anyhow::Result<()> {
       teamcraft_server::services::crash_reports::CrashRelay::new(false)
         .context("building the crash reports relay client")?,
     ),
+    webhooks: Arc::new(
+      teamcraft_server::webhooks::WebhookDispatcher::new(&config.webhooks)
+        .context("building the webhook client")?,
+    ),
   };
   with_startup_retries("loading the settings", startup_deadline, || {
     load_runtime_settings(&state)
@@ -348,6 +362,7 @@ async fn run() -> anyhow::Result<()> {
   calls::adopt_running_calls(&state).await;
   // Wake-ups that failed for a temporary reason, also those queued before a restart.
   spawn_retry_workers(&state);
+  teamcraft_server::webhooks::spawn_workers(&state);
   let app = serve_metrics(&state, &config.metrics).context("[metrics]")?;
 
   let listener = bind_listener(config.server.listen_addr)

@@ -19,6 +19,7 @@ Read before changing behaviour:
 | [docs/telephony.md](docs/telephony.md)                   | SIP trunk, AI hotline, agents                                 |
 | [docs/notifications.md](docs/notifications.md)           | Threads, unread counts, notifications, urgent                 |
 | [docs/bridge.md](docs/bridge.md)                         | Integration bridge: webhooks and logs into encrypted channels |
+| [docs/webhooks.md](docs/webhooks.md)                     | Outgoing webhooks: signed metadata events to external systems |
 | [docs/meetings.md](docs/meetings.md)                     | Meetings, invitations, guests and lobby                       |
 | [docs/scheduled-messages.md](docs/scheduled-messages.md) | Send later: client-held, what the server learns               |
 | [docs/bug-reports.md](docs/bug-reports.md)               | Report a problem: encrypted delivery, redacted debug log      |

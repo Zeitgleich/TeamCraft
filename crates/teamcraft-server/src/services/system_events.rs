@@ -22,8 +22,13 @@ pub async fn emit(
   maybe_actor: Option<UserId>,
   maybe_subject: Option<UserId>,
 ) {
+  let maybe_webhook_event = crate::webhooks::event_for_system(&kind);
   if let Err(error) = try_emit(state, conversation, kind, maybe_actor, maybe_subject).await {
     warn!(%error, conversation_id = %conversation, "writing a system event failed");
+  }
+  if let Some(event) = maybe_webhook_event {
+    crate::webhooks::emit_for_conversation(state, event, conversation, maybe_actor, maybe_subject, None)
+      .await;
   }
 }
 

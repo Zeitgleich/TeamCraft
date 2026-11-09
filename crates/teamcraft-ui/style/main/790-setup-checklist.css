@@ -125,3 +125,9 @@
 .integration-copy-row { display: flex; gap: var(--space-2); align-items: center; }
 .integration-copy-row .input { flex: 1; min-width: 0; }
 
+
+/* Outgoing webhooks (docs/webhooks.md): long URLs wrap instead of widening the page. */
+.webhook-card .webhook-url { overflow-wrap: anywhere; margin: 0; }
+.webhook-health { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-1) var(--space-3); margin: 0; }
+.webhook-health dt { color: var(--text-muted); }
+.webhook-health dd { margin: 0; overflow-wrap: anywhere; }

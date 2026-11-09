@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM webhook_delivery_log\n       WHERE webhook_id = $1\n         AND id < (SELECT MIN(id) FROM (\n                     SELECT id FROM webhook_delivery_log WHERE webhook_id = $1\n                     ORDER BY id DESC LIMIT $2) newest)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "61ff948b749e61d8bffdea48f1aadba47f3b6db054e29698fd1cbe6d5381eb15"
+}

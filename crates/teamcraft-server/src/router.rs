@@ -7,6 +7,7 @@ mod admin;
 mod admin_brands;
 mod admin_settings;
 mod admin_users;
+mod admin_webhooks;
 mod announcements;
 mod attachments;
 mod auth;
@@ -94,6 +95,7 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
     .merge(admin::routes())
     .merge(admin_brands::routes())
     .merge(admin_settings::routes())
+    .merge(admin_webhooks::routes())
     .merge(admin_users::routes())
     .merge(announcements::routes())
     .merge(attachments::routes())

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE webhooks\n         SET consecutive_failures = consecutive_failures + 1,\n             paused_until = CASE WHEN $2::bigint IS NULL THEN paused_until\n                                 ELSE now() + $2::bigint * interval '1 millisecond' END,\n             last_failure_at = now(), last_error = $3, dropped_count = dropped_count + 1\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cc0911acb4606631b50b9ddfe2649da1b16a4ba21711305cdc97558d3cdcf5ad"
+}

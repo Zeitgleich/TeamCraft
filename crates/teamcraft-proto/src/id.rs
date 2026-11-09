@@ -263,6 +263,14 @@ define_id!(
   /// A push wake-up waiting in the server's retry queue after a temporary failure.
   PushRetryId
 );
+define_id!(
+  /// An outgoing webhook an admin configured (docs/webhooks.md).
+  WebhookId
+);
+define_id!(
+  /// An event told to webhooks; the receivers' idempotency key (`webhook-id`).
+  WebhookEventId
+);
 
 #[cfg(test)]
 mod tests {

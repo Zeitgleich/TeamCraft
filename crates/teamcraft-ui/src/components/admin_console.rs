@@ -20,6 +20,7 @@ use crate::components::admin_security::SecuritySection;
 use crate::components::admin_settings::SettingsSection;
 use crate::components::admin_updates::UpdatesPolicySection;
 use crate::components::admin_users::UsersSection;
+use crate::components::admin_webhooks::WebhooksSection;
 use crate::components::icons::{Icon, IconName};
 use crate::components::roster_banner::RosterBanner;
 use crate::history::back_or_home;
@@ -98,6 +99,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           {nav_item(AdminSection::Health, IconName::Activity)}
           {nav_item(AdminSection::Instance, IconName::Monitor)}
           {nav_item(AdminSection::Integrations, IconName::Terminal)}
+          {nav_item(AdminSection::Webhooks, IconName::Link)}
           {nav_item(AdminSection::Notetaker, IconName::Compose)}
           {nav_item(AdminSection::Import, IconName::Download)}
           {nav_item(AdminSection::Audit, IconName::List)}
@@ -133,6 +135,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
           AdminSection::Retention => view! { <RetentionSection /> }.into_any(),
           AdminSection::Updates => view! { <UpdatesPolicySection /> }.into_any(),
           AdminSection::Integrations => view! { <IntegrationsSection /> }.into_any(),
+          AdminSection::Webhooks => view! { <WebhooksSection /> }.into_any(),
           AdminSection::Notetaker => view! { <NotetakerSection /> }.into_any(),
           AdminSection::Import => view! { <ImportSection /> }.into_any(),
           AdminSection::Audit => view! { <AuditSection /> }.into_any(),

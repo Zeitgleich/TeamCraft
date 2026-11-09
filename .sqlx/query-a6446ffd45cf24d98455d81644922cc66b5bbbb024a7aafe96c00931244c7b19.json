@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE webhooks\n         SET consecutive_failures = 0, paused_until = NULL, last_success_at = now()\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a6446ffd45cf24d98455d81644922cc66b5bbbb024a7aafe96c00931244c7b19"
+}
