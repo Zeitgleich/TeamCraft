@@ -235,7 +235,7 @@ struct MessageBubble: View {
           .padding(.horizontal, textInset)
           .padding(.top, 3)
       } else if hasText {
-        MessageBodyView(text: message.body, colors: markupColors, names: look.names)
+        MessageBodyView(text: message.body, colors: markupColors, names: look.names.forMessage(message))
           .padding(.horizontal, textInset)
           .padding(.top, 3)
       }
