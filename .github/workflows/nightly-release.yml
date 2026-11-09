@@ -79,46 +79,58 @@ jobs:
           echo "$(git rev-list --count "$last_tag..HEAD") commits since $last_tag"
           git log -1 --format='code_sha=%H' "$last_tag..HEAD" -- . ':!docs' ':!*.md' >> "$GITHUB_OUTPUT"
       # The newest code change must be covered by a green CI run on main: a run of that commit or of
-      # a later one (a later commit contains the earlier one). Anything else stops the release.
+      # a later one (a later commit contains the earlier one). A run that is still queued or running
+      # is waited for (the 22:00 run often meets the CI of the last merges); a red one stops the
+      # release.
       - name: CI of main is green
         if: steps.changes.outputs.release == 'true'
         env:
           CODE_SHA: ${{ steps.changes.outputs.code_sha }}
         run: |
           runs="$(gh run list --workflow ci.yml --branch main --limit 50 \
-            --json headSha,status,conclusion --jq '.[] | [.headSha, .status, .conclusion] | @tsv')"
-          verdict=""
-          while IFS=$'\t' read -r sha status conclusion; do
+            --json databaseId,headSha,status,conclusion \
+            --jq '.[] | [.databaseId, .headSha, .status, .conclusion] | @tsv')"
+          run_id=""
+          run_sha=""
+          while IFS=$'\t' read -r id sha status conclusion; do
             [ -n "$sha" ] || continue
             # Newest first: the first run that contains the code change decides.
             if git merge-base --is-ancestor "$CODE_SHA" "$sha" 2>/dev/null; then
-              verdict="$status/$conclusion ($sha)"
-              [ "$status" = completed ] && [ "$conclusion" = success ] && { echo "CI green: $verdict"; exit 0; }
+              if [ "$status" = completed ] && [ "$conclusion" = success ]; then
+                echo "CI green: run $id ($sha)"
+                exit 0
+              fi
+              if [ "$status" = completed ]; then
+                echo "::error::CI of main is red for ${CODE_SHA}: run $id ended with ${conclusion} ($sha). Fix or re-run CI (gh workflow run ci.yml --ref main), then run this workflow again."
+                exit 1
+              fi
+              run_id="$id"
+              run_sha="$sha"
+              echo "::notice::CI run $id on main is ${status}; waiting for it"
               break
             fi
           done <<< "$runs"
           # PRs merged by the auto-merge workflow (GITHUB_TOKEN) start no push run on main, so the
           # newest code change may have no CI run at all: start one and wait for it.
-          if [ -z "$verdict" ]; then
+          if [ -z "$run_id" ]; then
             echo "::notice::no CI run on main covers ${CODE_SHA}; starting one"
-            head="$(git rev-parse HEAD)"
+            run_sha="$(git rev-parse HEAD)"
             gh workflow run ci.yml --ref main
-            run_id=""
             for _ in $(seq 1 30); do
               sleep 10
               run_id="$(gh run list --workflow ci.yml --branch main --event workflow_dispatch --limit 10 \
-                --json databaseId,headSha --jq ".[] | select(.headSha == \"$head\") | .databaseId" | head -n 1)"
+                --json databaseId,headSha --jq ".[] | select(.headSha == \"$run_sha\") | .databaseId" | head -n 1)"
               [ -n "$run_id" ] && break
             done
             [ -n "$run_id" ] || { echo "::error::the CI run on main didn't start"; exit 1; }
-            echo "waiting for CI run $run_id"
-            if gh run watch "$run_id" --exit-status --interval 60 > /dev/null; then
-              echo "CI green: run $run_id ($head)"
-              exit 0
-            fi
-            verdict="$(gh run view "$run_id" --json status,conclusion --jq '.status + "/" + .conclusion') ($head)"
           fi
-          echo "::error::CI of main is not green for ${CODE_SHA}: ${verdict}. Fix or re-run CI (gh workflow run ci.yml --ref main), then run this workflow again."
+          echo "waiting for CI run $run_id"
+          if gh run watch "$run_id" --exit-status --interval 60 > /dev/null; then
+            echo "CI green: run $run_id ($run_sha)"
+            exit 0
+          fi
+          verdict="$(gh run view "$run_id" --json status,conclusion --jq '.status + "/" + .conclusion')"
+          echo "::error::CI of main is not green for ${CODE_SHA}: run $run_id ${verdict} (${run_sha}). Fix or re-run CI (gh workflow run ci.yml --ref main), then run this workflow again."
           exit 1
       - name: Version
         if: steps.changes.outputs.release == 'true'

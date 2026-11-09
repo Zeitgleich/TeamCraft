@@ -167,7 +167,9 @@ GitHub starts scheduled runs several hours late, so the release usually lands be
 | Situation                                                       | Result                                                                                |
 |-----------------------------------------------------------------|---------------------------------------------------------------------------------------|
 | No commit since the last release tag, or only docs / Markdown   | nothing (notice in the run)                                                           |
-| CI of `main` is not green for the newest code change           | run fails, nothing tagged; fix `main`, then run the workflow again                    |
+| CI of `main` for the newest code change is queued or running   | run waits for it, then goes on (or fails if it ends red)                              |
+| No CI run covers the newest code change (auto-merged PRs)      | run starts CI on `main` and waits for it                                              |
+| CI of `main` is red for the newest code change                 | run fails, nothing tagged; fix `main`, then run the workflow again                    |
 | The last tag has no published release                           | run fails: re-run it (`gh workflow run release.yml --ref vX.Y.Z -f publish=true`)    |
 | Tree version equals the last tag                                | patch bump commit on `main` (`scripts/bump-version.sh`), tag, release `X.Y.(Z+1)`      |
 | A pull request raised the tree's version above the last tag     | the tree is released as it is (minor / major releases: bump in a pull request)         |
