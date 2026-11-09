@@ -12,6 +12,7 @@ use teamcraft_client_api::model::{ConversationId, Id, MessageId, ThreadId, UserI
 
 use crate::imported::Authorship;
 use crate::read_state;
+use crate::readable_text::readable_text;
 use crate::store::{LocalStore, MessageContent, StoredMessage};
 use crate::ui_backend::{CoreChatBackend, CoreCommand, ui_message_id};
 
@@ -412,7 +413,10 @@ fn text_of(stored: &StoredMessage) -> Option<String> {
 }
 
 pub(crate) fn shorten(text: &str) -> String {
-  let single_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+  let single_line = readable_text(text)
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ");
   if single_line.chars().count() <= EXCERPT_CHARS {
     return single_line;
   }

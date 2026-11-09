@@ -409,7 +409,52 @@ struct MessageBodyView: View {
         Text(code).font(.app(.callout).monospaced()).fixedSize().padding(.horizontal, 10).padding(.vertical, 8)
       }
       .background(colors.codeBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    case .table(let alignments, let header, let rows):
+      tableView(alignments: alignments, header: header, rows: rows)
     }
+  }
+
+  /// A table on hairlines, the header in a semibold weight on a light fill; wider than the bubble it
+  /// scrolls sideways. Cells wrap at a readable width instead of stretching a long text.
+  private func tableView(alignments: [MarkupAlignment], header: [MarkupLine], rows: [MarkupRow]) -> some View {
+    let alignment = { (column: Int) -> Alignment in
+      switch column < alignments.count ? alignments[column] : .natural {
+      case .natural, .left: return .leading
+      case .center: return .center
+      case .right: return .trailing
+      }
+    }
+    let cell = { (line: MarkupLine, column: Int, isHeader: Bool) -> AnyView in
+      AnyView(
+        Text(styled([line]))
+          .font(isHeader ? .app(.callout).weight(.semibold) : .app(.callout))
+          .monospacedDigit()
+          .fixedSize(horizontal: false, vertical: true)
+          .frame(maxWidth: 240, alignment: alignment(column))
+          .padding(.horizontal, 10)
+          .padding(.vertical, 5)
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment(column))
+          .background(isHeader ? HierarchicalShapeStyle.primary.opacity(0.06) : HierarchicalShapeStyle.primary.opacity(0))
+      )
+    }
+    return ScrollView(.horizontal, showsIndicators: false) {
+      Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+        GridRow {
+          ForEach(Array(header.enumerated()), id: \.offset) { column, line in cell(line, column, true) }
+        }
+        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+          Divider()
+          GridRow {
+            ForEach(Array(row.cells.enumerated()), id: \.offset) { column, line in cell(line, column, false) }
+          }
+        }
+      }
+      .fixedSize()
+    }
+    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(HierarchicalShapeStyle.primary.opacity(0.2), lineWidth: 1))
+    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel(Text("message_table_label"))
   }
 
   private func styled(_ lines: [MarkupLine]) -> AttributedString {

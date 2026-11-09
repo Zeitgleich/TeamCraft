@@ -18,6 +18,7 @@ use crate::api::ServerApi;
 use crate::client::decrypt_plaintext;
 use crate::error::CoreError;
 use crate::people_names::shown_name;
+use crate::readable_text::readable_text;
 use crate::records;
 use crate::store::{LocalStore, Table};
 
@@ -575,7 +576,9 @@ fn participant_name(
     .map(shown_name)
 }
 
-fn truncate(text: &str) -> String {
+/// The body as the notification shows it (tables as lines of cells), cut to its length.
+fn truncate(body: &str) -> String {
+  let text = readable_text(body);
   match text.char_indices().nth(MAX_PREVIEW_CHARS) {
     Some((cut, _)) => format!("{}…", &text[..cut]),
     None => text.to_string(),
@@ -697,6 +700,19 @@ mod tests {
     assert_eq!(
       content_preview(&shown(&text(" ", MessageMeta::default()))),
       PreviewContent::Unavailable
+    );
+  }
+
+  #[test]
+  fn tables_are_shown_as_rows_of_cells() {
+    let table = MessageContent::Text {
+      body: "Due:\n| Name | Due |\n|---|---|\n| Project A | Friday |".into(),
+      mentions: Vec::new(),
+      meta: MessageMeta::default(),
+    };
+    assert_eq!(
+      content_preview(&shown(&table)),
+      PreviewContent::Text("Due:\nName · Due\nProject A · Friday".into())
     );
   }
 
