@@ -1374,6 +1374,7 @@ impl FrameTurn {
       on_change();
       let turn = std::rc::Rc::clone(self);
       // The next frame's callbacks run before its resize rounds: the first round there is new.
+      // async-ok: the observer's own cell, not a signal.
       request_animation_frame(move || turn.has_run.set(false));
       return;
     }
