@@ -896,6 +896,54 @@ In Keycloak, `http://127.0.0.1/*` as a valid redirect URI covers the desktop app
 `app_redirect_uris` lists them, an app built with another redirect URI (a self-build with its own app
 ID) tells its user that the server is not set up for it instead of failing at the provider.
 
+### Preconfigured server on managed computers
+
+A company can preset the server of the desktop app and, optionally, lock the app to it. With a preset,
+the entry screen is filled in with the address (the user still confirms the server's name and logo); with
+the lock, the desktop app accepts no other server, and an account stored for another server is removed on
+the next start. The settings are `server_url` (an address as a user would type it) and `lock_server`
+(`true` or `false`, default `false`; a lock without an address does nothing).
+
+**Precedence** (issue #220; the one place that states it is `ManagedServer::load` in
+`apps/desktop/src/auth/servers.rs`). The first source that names a server wins, and the lock comes from
+that same source, never from a lower one:
+
+| # | Source                                                                          | Locks |
+|---|---------------------------------------------------------------------------------|-------|
+| 1 | Operating system policy: Windows registry, macOS configuration profile (below)  | yes   |
+| 2 | `desktop.json` (macOS and Linux only; Windows reads the registry instead)       | yes   |
+| 3 | Environment variable `TEAMCRAFT_SERVER_URL`                                      | no    |
+| 4 | A default compiled into a self-built app (`TEAMCRAFT_DEFAULT_SERVER_URL`)       | no    |
+
+Because the lock is a security control, only machine-wide locations that an ordinary user cannot write
+are read for 1 and 2: `HKEY_LOCAL_MACHINE` (never `HKEY_CURRENT_USER`), `/Library/Managed Preferences`
+(never `~/Library/Preferences`), and a `desktop.json` in `/etc/teamcraft/` or
+`/Library/Application Support/TeamCraft/` that root owns, in a folder only root can change. Anything
+else is ignored (a log line says so). A malformed value (wrong type, unreadable file) is ignored with a
+log line and never stops the app from starting; the other value and the lower sources still apply.
+
+| Platform     | Location                                                     | Server                | Lock                            |
+|--------------|--------------------------------------------------------------|-----------------------|---------------------------------|
+| Windows      | `HKLM\Software\Policies\Zeitgleich\TeamCraft`                | `ServerUrl` (REG_SZ)  | `LockServer` (REG_DWORD 1 or 0) |
+| macOS        | `/Library/Managed Preferences/de.zeitgleich.teamcraft.plist` | `server_url` (string) | `lock_server` (boolean)         |
+| macOS, Linux | `desktop.json`                                               | `server_url` (string) | `lock_server` (boolean)         |
+
+- **Windows, group policy:** copy `apps/desktop/packaging/windows/policy/TeamCraft.admx` to
+  `C:\Windows\PolicyDefinitions` (or the domain's central store) and `en-US\TeamCraft.adml` to its
+  `en-US` folder; the settings appear under Computer Configuration → Administrative Templates →
+  TeamCraft. Without the template, set the two values in the registry key directly, for example
+  `reg add HKLM\Software\Policies\Zeitgleich\TeamCraft /v ServerUrl /t REG_SZ /d team.example.com /f`
+  and `reg add HKLM\Software\Policies\Zeitgleich\TeamCraft /v LockServer /t REG_DWORD /d 1 /f`; any
+  deployment tool that writes these registry values does the same.
+- **macOS, MDM:** deliver a configuration profile with a Custom Settings (`com.apple.ManagedClient.preferences`)
+  payload for the preference domain `de.zeitgleich.teamcraft` with the keys `server_url` (string) and
+  `lock_server` (boolean) at the computer level; the MDM client writes the file above. A profile
+  for users only (`/Library/Managed Preferences/<user>/`) is not read.
+- **Not done yet:** an MSI property that writes the registry values at install time (`msiexec /i
+  TeamCraft.msi SERVERURL=... LOCKSERVER=1`) needs a WiX fragment in the bundle that can only be
+  verified on a Windows build; until then set the registry values with the template, `reg add` or a
+  deployment script.
+
 **Staying signed in.** The apps ask for `offline_access` (`[oidc] app_scopes`), so each device gets a
 long-lived refresh token and stays signed in; the provider's client must allow that scope (Keycloak:
 Clients → client → Client scopes → `offline_access`, optional is enough) and its offline session idle

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitionResources revision="1.0" schemaVersion="1.0">
+  <displayName>TeamCraft</displayName>
+  <description>Settings for the TeamCraft desktop app</description>
+  <resources>
+    <stringTable>
+      <string id="TeamCraft">TeamCraft</string>
+      <string id="ServerUrl">Server address</string>
+      <string id="ServerUrl_Explain">The server the TeamCraft desktop app signs in to, for example team.example.com or https://team.example.com. The app shows it as the preset address on first start.
+
+If "Lock server" is also enabled, users can use no other server.
+
+This setting wins over a desktop.json file and the TEAMCRAFT_SERVER_URL environment variable.</string>
+      <string id="LockServer">Lock server</string>
+      <string id="LockServer_Explain">When enabled together with "Server address", users cannot sign in to any other server, and an account on another server is removed from the app on its next start.
+
+Has no effect without "Server address".</string>
+    </stringTable>
+    <presentationTable>
+      <presentation id="ServerUrl">
+        <textBox refId="ServerUrlText">
+          <label>Server address:</label>
+        </textBox>
+      </presentation>
+      <presentation id="LockServer" />
+    </presentationTable>
+  </resources>
+</policyDefinitionResources>
