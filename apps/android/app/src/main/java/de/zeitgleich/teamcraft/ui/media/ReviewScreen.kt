@@ -67,6 +67,7 @@ import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import de.zeitgleich.teamcraft.ui.screens.textKeyboard
 import kotlinx.coroutines.flow.distinctUntilChanged
 import de.zeitgleich.teamcraft.R
 
@@ -270,6 +271,7 @@ private fun CaptionRow(caption: String, isSending: Boolean, onCaption: (String) 
         textStyle = MaterialTheme.typography.bodyLarge.merge(TextStyle(color = Color.White)),
         cursorBrush = SolidColor(Color.White),
         maxLines = 5,
+        keyboardOptions = textKeyboard(),
         modifier = Modifier.fillMaxWidth().semantics { contentDescription = label },
       )
     }

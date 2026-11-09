@@ -31,6 +31,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
@@ -70,6 +72,7 @@ internal fun CompactSearchField(
       value = value,
       onValueChange = onChange,
       singleLine = true,
+      keyboardOptions = textKeyboard(KeyboardCapitalization.None, ImeAction.Search),
       textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onSurface),
       cursorBrush = SolidColor(colors.primary),
       modifier = Modifier.fillMaxWidth().heightIn(min = FIELD_HEIGHT).focusRequester(focusRequester).semantics { contentDescription = placeholder },
