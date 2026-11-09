@@ -768,6 +768,13 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.conversation_files(conversation)
   }
 
+  fn files_page(
+    &self,
+    query: &teamcraft_client_api::files_query::FilesQuery<'_>,
+  ) -> Option<teamcraft_client_api::files_query::FilesPage> {
+    self.chat.files_page(query)
+  }
+
   fn conversation_media(
     &self,
     conversation: ConversationId,

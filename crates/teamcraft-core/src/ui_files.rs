@@ -22,7 +22,7 @@ use crate::error::CoreError;
 use crate::imported::Authorship;
 use crate::records;
 use crate::store::{
-  AttachmentRef, ImageDimensions, LocalStore, MediaRange, MessageMeta, StoredMessage, Table,
+  Attached, AttachedRange, AttachmentRef, ImageDimensions, LocalStore, MessageMeta, StoredMessage, Table,
 };
 use crate::transfers::Transfers;
 use crate::ui_backend::{CoreChatBackend, CoreCommand, RedactedText, imported_author_view, ui_message_id};
@@ -114,30 +114,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           .maybe_thumbnail
           .as_ref()
           .map(|png| png.as_slice().to_vec()),
-        transfer: match self.read(transfer_state(self.store_ref(), attachment.attachment_id)) {
-          // Opened (the picture, the viewer) or saved right now: how far it got.
-          _ if self.transfers().progress(attachment.attachment_id).is_some() => {
-            let maybe_progress = self.transfers().progress(attachment.attachment_id);
-            FileTransfer::Downloading {
-              done_bytes: maybe_progress.map_or(0, |progress| progress.of_size(attachment.size_bytes)),
-              total_bytes: attachment.size_bytes,
-            }
-          },
-          None => FileTransfer::Remote,
-          Some(TransferState::Downloading { total_bytes }) => FileTransfer::Downloading {
-            done_bytes: 0,
-            total_bytes,
-          },
-          // A download whose file is gone (wiped at sign-out, cleared by the system) is remote
-          // again.
-          Some(TransferState::Local { path }) if std::path::Path::new(&path).is_file() => {
-            FileTransfer::Local { path }
-          },
-          Some(TransferState::Local { .. }) => FileTransfer::Remote,
-          Some(TransferState::Failed { reason }) => FileTransfer::Failed {
-            reason: failure_view(reason),
-          },
-        },
+        transfer: self.download_view(attachment.attachment_id, attachment.size_bytes),
         maybe_sender,
         maybe_sent_at,
         maybe_imported_author: maybe_imported_author.clone(),
@@ -153,6 +130,34 @@ impl<S: LocalStore> CoreChatBackend<S> {
       })
       .chain(failed)
       .collect()
+  }
+
+  /// Where the bytes of a received file are: not here, coming, saved, or failed.
+  pub(crate) fn download_view(&self, attachment: AttachmentId, size_bytes: u64) -> FileTransfer {
+    match self.read(transfer_state(self.store_ref(), attachment)) {
+      // Opened (the picture, the viewer) or saved right now: how far it got.
+      _ if self.transfers().progress(attachment).is_some() => {
+        let maybe_progress = self.transfers().progress(attachment);
+        FileTransfer::Downloading {
+          done_bytes: maybe_progress.map_or(0, |progress| progress.of_size(size_bytes)),
+          total_bytes: size_bytes,
+        }
+      },
+      None => FileTransfer::Remote,
+      Some(TransferState::Downloading { total_bytes }) => FileTransfer::Downloading {
+        done_bytes: 0,
+        total_bytes,
+      },
+      // A download whose file is gone (wiped at sign-out, cleared by the system) is remote
+      // again.
+      Some(TransferState::Local { path }) if std::path::Path::new(&path).is_file() => {
+        FileTransfer::Local { path }
+      },
+      Some(TransferState::Local { .. }) => FileTransfer::Remote,
+      Some(TransferState::Failed { reason }) => FileTransfer::Failed {
+        reason: failure_view(reason),
+      },
+    }
   }
 
   /// Stores the message right away and leaves the files to the engine, which uploads them and
@@ -276,10 +281,20 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
     // One more than asked for tells whether there are more beyond.
     let older = |from: Option<MessageId>, count: usize| {
-      self.media_messages(conversation, MediaRange::Older(from), count.saturating_add(1))
+      self.attached_messages(
+        conversation,
+        Attached::Media,
+        AttachedRange::Older(from),
+        count.saturating_add(1),
+      )
     };
     let newer = |from: MessageId, count: usize| {
-      self.media_messages(conversation, MediaRange::Newer(from), count.saturating_add(1))
+      self.attached_messages(
+        conversation,
+        Attached::Media,
+        AttachedRange::Newer(Some(from)),
+        count.saturating_add(1),
+      )
     };
     let maybe_anchor_message = match anchor {
       MediaAnchor::Around(around) => self.media_message(conversation, around),
@@ -333,16 +348,17 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
   }
 
-  fn media_messages(
+  fn attached_messages(
     &self,
     conversation: ConversationId,
-    range: MediaRange,
+    kind: Attached,
+    range: AttachedRange,
     limit: usize,
   ) -> Vec<StoredMessage> {
     self.read(
       self
         .store_ref()
-        .media_messages(conversation, range, limit)
+        .attached_messages(conversation, kind, range, limit)
         .map_err(CoreError::from),
     )
   }

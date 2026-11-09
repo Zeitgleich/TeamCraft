@@ -268,7 +268,8 @@ rest of a function; about seventy places carry one, among them: store open and c
 (`catch_up_conversations`, `catch_up_conversation`, `catch_up_read_first_pages`, `mls_catch_up`,
 `mls_process`, `mls_decrypt_batch`, `catch_up_messages`, `history_gap_fill`, `join_welcomes`),
 sending and groups (`send_entry`, `seal_message`, `commit_change`, `post_commit`), files
-(`file_upload`, `file_download_decrypt`, `file_encrypt`, `thumbnail_make`), push
+(`file_upload`, `file_download_decrypt`, `file_encrypt`, `thumbnail_make`, the Files view's page
+`files_page`), push
 (`push_notification`, `push_preview`, `push_catch_up`) and upkeep. Steps under 5 ms are not kept;
 until a measure asks, a step costs one atomic load. Mobile gets them through the FFI with the queue
 jobs; the web page reads its own core's ring; the desktop shell times each request of the page

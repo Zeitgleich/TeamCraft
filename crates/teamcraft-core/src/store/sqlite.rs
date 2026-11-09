@@ -18,8 +18,8 @@ use super::sql_group::{
 use super::sqlite_log::{LOG_PRAGMAS, PurgeState};
 use super::sqlite_wipe::wipe_free_pages;
 use super::{
-  DatabaseKeySource, FeedChange, FeedVersion, LocalStore, MediaRange, MessageEdge, MessageFilter,
-  MessageOrder, MessageSlot, StoreError, StoredMessage, Table, WriteTally,
+  Attached, AttachedRange, DatabaseKeySource, FeedChange, FeedVersion, LocalStore, MessageEdge,
+  MessageFilter, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, WriteTally,
 };
 
 /// The layout steps of this store, in order ([`run_migrations`]). Released 1.0 databases carry
@@ -51,10 +51,12 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
   },
 ];
 /// How a message record spells the media type of a picture or a video (`AttachmentRef`, compact JSON):
-/// the bytes [`SqlCipherStore::media_messages`] looks for.
+/// the bytes [`SqlCipherStore::attached_messages`] looks for.
 const MEDIA_IMAGE_MARKER: &[u8] = br#""media_type":"image/"#;
 const MEDIA_VIDEO_MARKER: &[u8] = br#""media_type":"video/"#;
-/// Rows a media query reads at a time at least.
+/// How a message record spells any attachment (`AttachmentRef`, compact JSON).
+const ATTACHMENT_MARKER: &[u8] = br#""attachment_id":"#;
+/// Rows an attachments query reads at a time at least.
 const MEDIA_SCAN_BATCH: usize = 64;
 /// IDs a query of the feed's reactions or replies names at most at once.
 const IDS_PER_QUERY: usize = 256;
@@ -531,20 +533,25 @@ impl LocalStore for SqlCipherStore {
     Ok(messages)
   }
 
-  /// Walks the order index from the range's start and tests the records' bytes for a picture or
-  /// video type, without decoding them: only matches are decoded (and checked again, as a text can
-  /// contain the same words). Stops at `limit`, so a page costs what it returns plus the messages
-  /// without media in between.
-  fn media_messages(
+  /// Walks the order index from the range's start and tests the records' bytes for an attachment
+  /// (of a picture or video type for media), without decoding them: only matches are decoded (and
+  /// checked again, as a text can contain the same words). Stops at `limit`, so a page costs what it
+  /// returns plus the messages without such attachments in between.
+  fn attached_messages(
     &self,
     conversation: ConversationId,
-    range: MediaRange,
+    kind: Attached,
+    range: AttachedRange,
     limit: usize,
   ) -> Result<Vec<StoredMessage>, StoreError> {
     let inner = self.lock();
     let (comparison, order, mut maybe_cursor) = match range {
-      MediaRange::Older(maybe_from) => ("<", "DESC", maybe_from.map(|from| from.snowflake().get())),
-      MediaRange::Newer(from) => (">", "ASC", Some(from.snowflake().get())),
+      AttachedRange::Older(maybe_from) => ("<", "DESC", maybe_from.map(|from| from.snowflake().get())),
+      AttachedRange::Newer(maybe_from) => (">", "ASC", maybe_from.map(|from| from.snowflake().get())),
+    };
+    let [first_marker, second_marker] = match kind {
+      Attached::Media => [MEDIA_IMAGE_MARKER, MEDIA_VIDEO_MARKER],
+      Attached::Document | Attached::Any => [ATTACHMENT_MARKER, ATTACHMENT_MARKER],
     };
     let batch = i64::try_from(limit.saturating_mul(2).max(MEDIA_SCAN_BATCH)).unwrap_or(i64::MAX);
     let mut found = Vec::new();
@@ -562,8 +569,8 @@ impl LocalStore for SqlCipherStore {
       let mut statement = inner.connection.prepare(&sql).map_err(database_error)?;
       let mut values = vec![
         Value::Integer(conversation.snowflake().get()),
-        Value::Blob(MEDIA_IMAGE_MARKER.to_vec()),
-        Value::Blob(MEDIA_VIDEO_MARKER.to_vec()),
+        Value::Blob(first_marker.to_vec()),
+        Value::Blob(second_marker.to_vec()),
       ];
       values.extend(maybe_cursor.map(Value::Integer));
       let rows: Vec<(i64, Vec<u8>)> = statement
@@ -575,7 +582,7 @@ impl LocalStore for SqlCipherStore {
       for (sort_value, record) in rows {
         maybe_cursor = Some(sort_value);
         let message = decode_message(&record)?;
-        if message.has_media() {
+        if message.has_attached(kind) {
           found.push(message);
           if found.len() == limit {
             break;

@@ -39,6 +39,13 @@
   width: auto;
 }
 
+/* Name and size order only the files loaded so far (#1509): said once, quietly, above the list. */
+.files-sort-note {
+  margin: 0 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
 /* The star of a file: outlined until starred, then filled in the star colour. */
 .file-star[aria-pressed="true"] {
   color: var(--star);
@@ -47,3 +54,4 @@
 .file-star[aria-pressed="true"] .icon {
   fill: currentColor;
 }
+

@@ -277,6 +277,7 @@ files-sort-newest = Neueste zuerst
 files-sort-oldest = Älteste zuerst
 files-sort-name = Name
 files-sort-largest = Größte zuerst
+files-sort-loaded = Sortiert unter den neuesten Dateien. Weiter unten lädt mehr.
 files-star = Markieren
 files-unstar = Markierung entfernen
 files-star-limit = Du kannst bis zu { $max } Dateien markieren. Entferne eine Markierung, um eine weitere hinzuzufügen.

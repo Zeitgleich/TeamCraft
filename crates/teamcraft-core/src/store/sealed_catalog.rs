@@ -22,7 +22,7 @@ use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId, ThreadId};
 
 use super::lru::Lru;
 use super::sealed_index::{HeapBytes, IndexNodes, IndexPage, IndexRoot};
-use super::{MessageFilter, MessageOrder, StoreError, StoredMessage};
+use super::{Attached, MessageFilter, MessageOrder, StoreError, StoredMessage};
 
 /// The reserved table the catalog's records are entries of.
 pub(crate) const CATALOG_TABLE: &str = "_catalog";
@@ -40,9 +40,10 @@ pub(crate) const FEED_KIND: &str = "f";
 pub(crate) const RELATIONS_KIND: &str = "x";
 /// Prefix of a conversation's [`super::FeedVersion`] counts.
 pub(crate) const FEED_VERSION_KIND: &str = "v";
-/// What a complete catalog holds. A store with an older one builds it again when it opens: the
-/// build only adds what is missing. 1: tables and messages; 2: feeds and relations.
-pub(crate) const CATALOG_VERSION: u32 = 2;
+/// What a complete catalog holds. A store with an older one builds it again when it opens.
+/// 1: tables and messages; 2: feeds and relations; 3: which messages have files and documents
+/// ([`MessageFlags::FILES`], issue #1509).
+pub(crate) const CATALOG_VERSION: u32 = 3;
 
 /// How far the catalog of a store is built, and its generation (random, so a catalog built again
 /// never meets nodes of an earlier one). A store written before the catalog existed builds it when
@@ -92,6 +93,10 @@ impl MessageFlags {
   const ALSO_IN_CHANNEL: u8 = 2;
   const MEDIA: u8 = 4;
   const UNREADABLE: u8 = 8;
+  /// Has any file: the Files view lists it (catalog version 3).
+  const FILES: u8 = 16;
+  /// Has a file that is no picture or video (catalog version 3).
+  const DOCUMENTS: u8 = 32;
 }
 
 /// An entry of a conversation's relations index: what a message relates to, then the message.
@@ -245,6 +250,8 @@ impl MessageEntry {
       (message.is_hidden(), MessageFlags::HIDDEN),
       (message.is_also_in_channel(), MessageFlags::ALSO_IN_CHANNEL),
       (message.has_media(), MessageFlags::MEDIA),
+      (message.has_attached(Attached::Any), MessageFlags::FILES),
+      (message.has_attached(Attached::Document), MessageFlags::DOCUMENTS),
       (message.maybe_unreadable.is_some(), MessageFlags::UNREADABLE),
     ] {
       if is_set {
@@ -284,8 +291,14 @@ impl MessageEntry {
       .map(MessageId::from_snowflake)
   }
 
-  pub(crate) fn has_media(self) -> bool {
-    self.has(MessageFlags::MEDIA)
+  /// Whether the message has an attachment of `kind`; the message itself decides
+  /// ([`StoredMessage::has_attached`]), this only preselects.
+  pub(crate) fn has_attached(self, kind: Attached) -> bool {
+    self.has(match kind {
+      Attached::Media => MessageFlags::MEDIA,
+      Attached::Document => MessageFlags::DOCUMENTS,
+      Attached::Any => MessageFlags::FILES,
+    })
   }
 
   fn has(self, flag: u8) -> bool {
