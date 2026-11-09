@@ -64,6 +64,10 @@ pub struct SfuConfig {
   /// moved between devices), so a leave the server never heard of can't keep a device in a call
   /// for good. One small request per interval; the server drops what the SFU no longer has.
   pub roster_interval: Duration,
+  /// How long an announced DAVE transition waits for its members' `dave_transition_ready` before
+  /// the SFU executes it anyway (#1544): a member that never answers would otherwise hold every
+  /// joiner without keys until the clients' own fallback (5 s). Keep it well below that.
+  pub dave_transition_deadline: Duration,
   /// The UDP socket's receive buffer. A big keyframe arrives as a burst of half a megabyte: a
   /// socket with the system's default buffer loses part of it while the SFU is busy, and with it
   /// the whole picture, for everyone watching.
@@ -207,6 +211,7 @@ impl Default for SfuConfig {
       rejoin: RejoinLimit::default(),
       shutdown_drain: Duration::from_secs(2),
       roster_interval: Duration::from_secs(30),
+      dave_transition_deadline: Duration::from_secs(2),
       udp_receive_buffer_bytes: 4 * 1024 * 1024,
       fallback: FallbackConfig::default(),
     }

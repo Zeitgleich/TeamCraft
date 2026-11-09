@@ -371,6 +371,11 @@ the server itself is down.
   about 5 s instead of at once. Rooms, locks and host removals live in the SFU's memory and start
   fresh; the server's meeting admission still applies to every rejoin. Desktop and mobile apps of
   version 1.0.2 and older end the call on "going away" (a browser tab rejoins).
+- In an encrypted call, every membership change waits until each member says it has the new keys,
+  for at most `TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS` (default 2000); then the SFU switches
+  everyone over and logs `executing a DAVE transition before every member is ready` with the
+  count. Keep it well below the apps' own 5 s fallback. Occasional lines are normal (a slow phone);
+  many point at a client that doesn't answer.
 - The SFU reports its whole call roster to the server at start and every
   `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS` (default 30); the server drops participants the SFU no
   longer has (after `[calls] roster_grace_secs`, default 60, while the SFU is fresh from a restart)

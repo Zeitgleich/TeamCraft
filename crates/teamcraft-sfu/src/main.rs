@@ -128,6 +128,9 @@ async fn run() -> anyhow::Result<()> {
   if let Some(interval) = env_duration_secs("TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS")? {
     config.roster_interval = interval;
   }
+  if let Some(deadline) = env_duration_millis("TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS")? {
+    config.dave_transition_deadline = deadline;
+  }
   if let Some(bytes) = env_count("TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES")? {
     config.udp_receive_buffer_bytes = bytes;
   }
@@ -348,6 +351,17 @@ fn env_duration_secs(name: &str) -> anyhow::Result<Option<Duration>> {
         .parse()
         .with_context(|| format!("{name} is not a number of seconds"))?,
     ))),
+    Err(_) => Ok(None),
+  }
+}
+
+fn env_duration_millis(name: &str) -> anyhow::Result<Option<Duration>> {
+  match std::env::var(name) {
+    Ok(value) => {
+      Ok(Some(Duration::from_millis(value.parse().with_context(|| {
+        format!("{name} is not a number of milliseconds")
+      })?)))
+    },
     Err(_) => Ok(None),
   }
 }
