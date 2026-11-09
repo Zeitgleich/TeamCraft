@@ -254,13 +254,26 @@ enum MutePreset: String, CaseIterable, Identifiable {
 }
 
 /// A conversation's notification settings (`GET/PUT /conversations/{id}/notification-settings`).
+/// `PUT` replaces level and mute time and keeps `channel_mentions` and `quiet_hours` where it
+/// doesn't carry them; a `channel_mentions` this version doesn't know is never sent back.
 enum ConversationMute {
+  static let channelMentionsKey = "channel_mentions"
+
+  /// Leaves out a `channel_mentions` the app doesn't know, so the server keeps its own.
+  static func withoutUnknownChannelMentions(_ object: [String: Any]) -> [String: Any] {
+    guard case .unknown = ChannelMentionsSetting(wire: object[channelMentionsKey]) else { return object }
+    var copy = object
+    copy.removeValue(forKey: channelMentionsKey)
+    return copy
+  }
+
   /// The settings with a new mute time (`nil`: unmuted); level kept, no longer inherited from the
   /// space (the user chose for this conversation). `nil` if `json` isn't an object.
   static func body(current json: String, mutedUntil maybeDate: Date?) -> String? {
     guard var object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] else {
       return nil
     }
+    object = withoutUnknownChannelMentions(object)
     if object["level"] == nil { object["level"] = "all" }
     object["is_inherited"] = false
     if let date = maybeDate {
@@ -277,6 +290,7 @@ enum ConversationMute {
     guard var object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any] else {
       return nil
     }
+    object = withoutUnknownChannelMentions(object)
     object["level"] = level
     object["is_inherited"] = false
     return jsonText(object)

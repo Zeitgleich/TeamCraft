@@ -39,7 +39,7 @@ struct SignInView: View {
             .frame(maxWidth: .infinity, minHeight: 88)
         }
         Label("sign_in_e2ee_note", systemImage: "lock.fill")
-          .font(.footnote)
+          .font(.app(.footnote))
           .foregroundStyle(Theme.textMuted)
           .multilineTextAlignment(.center)
         footer(brand)
@@ -74,7 +74,7 @@ struct SignInView: View {
         Text("app_name")
       }
     }
-    .font(.largeTitle.bold())
+    .font(.app(.largeTitle).bold())
     .multilineTextAlignment(.center)
     .accessibilityAddTraits(.isHeader)
     Group {
@@ -195,7 +195,7 @@ struct SignInView: View {
         )
         .textContentType(.oneTimeCode)
         .keyboardType(.numberPad)
-        .font(.body.monospacedDigit())
+        .font(.app(.body).monospacedDigit())
         .focused($maybeFocus, equals: .code)
         .accessibilityFocused($maybeAccessibilityFocus, equals: .code)
         .fieldError(errors[.code]?.message)
@@ -247,7 +247,7 @@ struct SignInView: View {
           Link("sign_in_help_link", destination: url)
         }
       }
-      .font(.footnote)
+      .font(.app(.footnote))
     }
   }
 
@@ -261,7 +261,7 @@ struct SignInView: View {
           .disabled(model.isBusy)
       }
     }
-    .font(.footnote)
+    .font(.app(.footnote))
     if let links = brand.brand?.links { BrandLinkRow(links: links) }
   }
 
@@ -329,7 +329,7 @@ private struct SignInActionButton<Content: View>: View {
 
   private var label: some View {
     content()
-      .font(.headline)
+      .font(.app(.headline))
       .frame(maxWidth: .infinity)
       .padding(.vertical, 4)
   }
@@ -341,7 +341,7 @@ private struct OrDivider: View {
     HStack(spacing: 12) {
       line
       Text("sign_in_or")
-        .font(.footnote)
+        .font(.app(.footnote))
         .foregroundStyle(Theme.textMuted)
       line
     }
@@ -379,7 +379,7 @@ private struct BrandLinkRow: View {
       HStack(spacing: 16) { linkButtons(entries) }
       VStack(spacing: 8) { linkButtons(entries) }
     }
-    .font(.footnote)
+    .font(.app(.footnote))
   }
 
   @ViewBuilder

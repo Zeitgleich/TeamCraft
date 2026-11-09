@@ -82,12 +82,21 @@ class CallMoves(
     val snapshot = readSnapshot() ?: return null
     val conversation = snapshot.conversation(conversationId)?.takeIf { it.isDirect } ?: return null
     // The DM's own members are offered nowhere: those who aren't in the call join it from the DM.
-    val members = conversation.memberIds + snapshot.me.id
-    val candidates = snapshot.users
-      .filter { it.id !in members && !it.isBot }
-      .sortedBy { it.displayName.lowercase() }
-    return AddPeopleChoice(conversationId, snapshot.me.id, candidates)
+    val members = (conversation.memberIds + snapshot.me.id).toSet()
+    return AddPeopleChoice(conversationId, snapshot.me.id, members)
   }
+
+  /** The store's change counter: the directory's answer to [searchPeople] arrives as a change. */
+  val changes: StateFlow<Long> get() = core.changeCount
+
+  /** The app's one people search (#1534), for the "Add people" picker. */
+  suspend fun searchPeople(query: String, limit: Int): List<User>? =
+    try {
+      withContext(Dispatchers.Default) { chat.searchPeople(query, limit) }
+    } catch (failure: TeamCraftException) {
+      // Offline or signed out: the picker keeps what it showed.
+      null
+    }
 
   /**
    * Starts the meeting room with the people in the call and `added`, and moves the call there.
@@ -309,8 +318,8 @@ class CallMoves(
   }
 }
 
-/** Who can be added to a DM or group DM call. */
-data class AddPeopleChoice(val conversationId: String, val myUserId: String, val candidates: List<User>)
+/** A DM or group DM call people can be added to; its [members] (the user too) aren't offered. */
+data class AddPeopleChoice(val conversationId: String, val myUserId: String, val members: Set<String>)
 
 /**
  * A move of the call announced in the conversation's group, with names for the banner.

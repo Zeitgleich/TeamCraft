@@ -228,6 +228,14 @@
   <string name="list_failed_timeout">No answer came in time.</string>
   <string name="list_failed_other">Couldn\'t load this.</string>
   <string name="search_incomplete">History is still syncing, so results may be incomplete.</string>
+  <!-- Interface font (#1494); font names themselves are not translated -->
+  <string name="font">Font</string>
+  <string name="font_hint">The typeface of the whole app. Follows your account.</string>
+  <string name="font_system">System font</string>
+  <string name="font_group_suggested">Suggested</string>
+  <string name="font_group_sans">More sans-serif fonts</string>
+  <string name="font_group_readability">Easier reading</string>
+  <string name="font_group_monospace">Monospaced</string>
   <!-- Colour themes (#202) -->
   <string name="color_theme">Colours</string>
   <string name="color_theme_hint">Accent, selections, badges and the online dot. Messages always stay on white or dark grey. Follows your account; light or dark stays with this device.</string>

@@ -14,11 +14,11 @@ struct StoreRecoveryView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: Theme.spacing) {
         Image(systemName: "externaldrive.badge.exclamationmark")
-          .font(.largeTitle)
+          .font(.app(.largeTitle))
           .foregroundStyle(Theme.danger)
           .accessibilityHidden(true)
         Text(title)
-          .font(.title.bold())
+          .font(.app(.title).bold())
           .accessibilityAddTraits(.isHeader)
         Text(message).foregroundStyle(Theme.textMuted)
         if let failure { Text(failure.message).foregroundStyle(Theme.danger) }

@@ -11,33 +11,16 @@ struct AddPeopleView: View {
 
   @State private var requestKey = newRequestKey()
   @State private var snapshot: BrowseSnapshot?
-  @State private var query = ""
   @State private var picked: [String] = []
   @State private var isAdding = false
   @State private var maybeFailure: AppFailure?
 
   var body: some View {
     NavigationStack {
-      List {
-        if let failure = maybeFailure {
-          Section {
-            Label(failure.message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(Theme.danger)
-          }
-        }
-        Section {
-          ForEach(candidates) { person in
-            PersonPickRow(person: person, picked: $picked).disabled(isAdding)
-          }
-        } footer: {
-          Text("call_add_people_hint")
-        }
-      }
-      .overlay {
-        if snapshot != nil && candidates.isEmpty {
-          Text("call_add_people_none").multilineTextAlignment(.center).foregroundStyle(Theme.textMuted).padding(32)
-        }
-      }
-      .searchable(text: $query)
+      PeoplePicker(
+        picked: $picked, excluded: snapshot?.notAddableToCall(in: conversationId) ?? [], isEnabled: !isAdding,
+        maybeFooter: "call_add_people_hint", maybeFailure: maybeFailure?.message
+      )
       .safeAreaInset(edge: .bottom) { addButton }
       .navigationTitle("call_add_people")
       .navigationBarTitleDisplayMode(.inline)
@@ -49,10 +32,6 @@ struct AddPeopleView: View {
     }
     .interactiveDismissDisabled(isAdding)
     .task(id: model.changeCount) { snapshot = await model.browseSnapshot() }
-  }
-
-  private var candidates: [BrowseSnapshot.Person] {
-    snapshot?.addablePeople(to: conversationId, matching: query) ?? []
   }
 
   @ViewBuilder

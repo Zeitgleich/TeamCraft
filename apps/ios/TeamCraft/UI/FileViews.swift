@@ -203,7 +203,7 @@ struct AttachmentView: View {
         if let hidden = maybeHiddenCount {
           // The pictures beyond the album's tiles; they open in the viewer.
           Text(verbatim: "+\(hidden)")
-            .font(.title2.weight(.semibold))
+            .font(.app(.title2).weight(.semibold))
             .foregroundStyle(.white)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black.opacity(0.45))
@@ -250,8 +250,8 @@ struct AttachmentView: View {
     HStack(spacing: 10) {
       FileThumbnail(file: file, side: 56)
       VStack(alignment: .leading, spacing: 2) {
-        Text(file.fileName).font(.subheadline.weight(.semibold)).lineLimit(2)
-        Text(FileSizeText.format(file.sizeBytes)).font(.caption)
+        Text(file.fileName).font(.app(.subheadline).weight(.semibold)).lineLimit(2)
+        Text(FileSizeText.format(file.sizeBytes)).font(.app(.caption))
           .foregroundStyle(isInBubble ? AnyShapeStyle(HierarchicalShapeStyle.secondary) : AnyShapeStyle(Theme.textMuted))
         FileStateLine(file: file)
       }
@@ -312,23 +312,23 @@ struct FileStateLine: View {
         }
         if file.transfer.state == "uploading" {
           if !file.transfer.isRetrying {
-            Text(TransferText.progress(file.transfer)).font(.caption2).foregroundStyle(Theme.textMuted)
+            Text(TransferText.progress(file.transfer)).font(.app(.caption2)).foregroundStyle(Theme.textMuted)
               .accessibilityLabel(Text("file_uploading"))
           }
         } else {
-          Text("file_downloading").font(.caption2).foregroundStyle(Theme.textMuted)
+          Text("file_downloading").font(.app(.caption2)).foregroundStyle(Theme.textMuted)
         }
       }
     case "failed", "upload_failed":
-      Text("file_failed").font(.caption2).foregroundStyle(Theme.danger)
+      Text("file_failed").font(.app(.caption2)).foregroundStyle(Theme.danger)
     case "upload_stalled":
       if file.transfer.isStorageUnavailable {
-        Text("file_upload_storage_unavailable").font(.caption2).foregroundStyle(Theme.danger)
+        Text("file_upload_storage_unavailable").font(.app(.caption2)).foregroundStyle(Theme.danger)
       } else {
-        Text("file_upload_stalled").font(.caption2).foregroundStyle(Theme.danger)
+        Text("file_upload_stalled").font(.app(.caption2)).foregroundStyle(Theme.danger)
       }
     case "remote":
-      Text("file_tap_to_download").font(.caption2).foregroundStyle(Theme.textMuted)
+      Text("file_tap_to_download").font(.app(.caption2)).foregroundStyle(Theme.textMuted)
     default:
       EmptyView()
     }
@@ -354,7 +354,7 @@ struct UploadActions: View {
         }
       }
     }
-    .font(.caption.weight(.semibold))
+    .font(.app(.caption).weight(.semibold))
   }
 }
 
@@ -383,7 +383,7 @@ struct FileThumbnail: View {
       if let image = ThumbnailCache.image(for: file) {
         Image(uiImage: image).resizable().scaledToFill()
       } else {
-        Image(systemName: icon).font(.title2).foregroundStyle(Theme.textMuted)
+        Image(systemName: icon).font(.app(.title2)).foregroundStyle(Theme.textMuted)
           .frame(maxWidth: .infinity, maxHeight: .infinity).background(Theme.accentSoft)
       }
     }
@@ -461,13 +461,13 @@ struct LinkPreviewCard: View {
           .clipShape(RoundedRectangle(cornerRadius: 8))
       }
       if let site = preview.maybeSiteName {
-        Text(site).font(.caption).foregroundStyle(muted)
+        Text(site).font(.app(.caption)).foregroundStyle(muted)
       }
       if let title = preview.maybeTitle {
-        Text(title).font(.subheadline.weight(.semibold)).lineLimit(2)
+        Text(title).font(.app(.subheadline).weight(.semibold)).lineLimit(2)
       }
       if let description = preview.maybeDescription {
-        Text(description).font(.caption).foregroundStyle(muted).lineLimit(3)
+        Text(description).font(.app(.caption)).foregroundStyle(muted).lineLimit(3)
       }
     }
     .frame(maxWidth: .infinity, alignment: .leading)
@@ -578,8 +578,8 @@ struct FilesGalleryView: View {
     } label: {
       VStack(alignment: .leading, spacing: 4) {
         FileThumbnail(file: file, side: 110)
-        Text(file.fileName).font(.caption).lineLimit(1)
-        Text(FileSizeText.format(file.sizeBytes)).font(.caption2).foregroundStyle(Theme.textMuted)
+        Text(file.fileName).font(.app(.caption)).lineLimit(1)
+        Text(FileSizeText.format(file.sizeBytes)).font(.app(.caption2)).foregroundStyle(Theme.textMuted)
         FileStateLine(file: file)
       }
       .frame(width: 110, alignment: .leading)

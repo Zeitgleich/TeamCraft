@@ -16,12 +16,12 @@ struct FieldMessage: View {
       } icon: {
         Image(systemName: "exclamationmark.circle.fill").accessibilityHidden(true)
       }
-      .font(.footnote)
+      .font(.app(.footnote))
       .foregroundStyle(Theme.danger)
       .frame(maxWidth: .infinity, alignment: .leading)
     } else if let maybeHint {
       Text(maybeHint)
-        .font(.footnote)
+        .font(.app(.footnote))
         .foregroundStyle(Theme.textMuted)
         .frame(maxWidth: .infinity, alignment: .leading)
     }

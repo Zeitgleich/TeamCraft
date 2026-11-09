@@ -367,7 +367,7 @@ fn failure_of(error: &DirectUploadError) -> FilesFailure {
 /// The whole way through, against the core's fake server: a form arrives at the endpoint, the
 /// worker uploads its files, and a member of the channel decrypts the message and the files.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
   use teamcraft_core::ClientSettings;
   use teamcraft_core::api::fake::{FakeGateway, FakeServer, FakeServerApi};
   use teamcraft_core::clock::SystemClock;
@@ -387,7 +387,7 @@ mod tests {
   use crate::spool::SpoolDir;
   use crate::worker::{Worker, WorkerSettings};
 
-  type TestClient = Client<FakeServerApi, Arc<MemoryStore>>;
+  pub(crate) type TestClient = Client<FakeServerApi, Arc<MemoryStore>>;
 
   const TOKEN: &str = "files-token-0123456789";
   const FORM_TYPE: &str = "multipart/form-data; boundary=XyZ";
@@ -669,7 +669,7 @@ mod tests {
   }
 
   /// The bridge's configuration with one source for `channel`; `listen` adds to `[listen]`.
-  fn bridge_config(channel: ConversationId, listen: &str) -> BridgeConfig {
+  pub(crate) fn bridge_config(channel: ConversationId, listen: &str) -> BridgeConfig {
     let spool = scratch_dir(&format!("spool-{channel}"));
     BridgeConfig::from_toml(&format!(
       r#"
@@ -807,7 +807,8 @@ mod tests {
   }
 
   /// alice's channel with the bot in it; the bot has joined its encryption group.
-  async fn channel_with_bot() -> (FakeServer, TestClient, FakeGateway, TestClient, ConversationId) {
+  pub(crate) async fn channel_with_bot() -> (FakeServer, TestClient, FakeGateway, TestClient, ConversationId)
+  {
     let server = FakeServer::new();
     let mut alice = enroll(server.add_user("alice")).await;
     let mut bot = enroll(server.add_user("bot")).await;

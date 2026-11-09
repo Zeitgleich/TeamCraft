@@ -55,7 +55,7 @@ struct PrimaryButtonStyle: ButtonStyle {
 
   func makeBody(configuration: Configuration) -> some View {
     configuration.label
-      .font(.headline)
+      .font(.app(.headline))
       .frame(maxWidth: .infinity)
       .padding(.vertical, 14)
       .background(Theme.accent.opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.4))
@@ -93,7 +93,7 @@ struct CountBadge: View {
 
   var body: some View {
     Text(count > 99 ? "99+" : "\(count)")
-      .font(.caption2.weight(.bold))
+      .font(.app(.caption2).weight(.bold))
       .foregroundStyle(tone == .mention ? Color.white : Theme.textMuted)
       .padding(.horizontal, 7)
       .padding(.vertical, 2)
@@ -111,7 +111,7 @@ struct RowCountBadge: View {
 
   var body: some View {
     Text(badge.label)
-      .font(.caption2.weight(.bold))
+      .font(.app(.caption2).weight(.bold))
       .monospacedDigit()
       .foregroundStyle(badge.tone == .red ? Color.white : Theme.textMuted)
       .padding(.horizontal, 7)

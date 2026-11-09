@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Search
@@ -124,8 +125,8 @@ internal fun SpaceSwitcherTitle(space: HomeSpace, hasNewElsewhere: Boolean, onCl
 
 /**
  * Every space the user belongs to (#1526): its mark, its name and what is new in it; a tap selects
- * it. "Browse spaces" follows where the user may join spaces (not guests). Creating a space stays on
- * desktop and web, where the workspace role is known.
+ * it. "Browse spaces" follows where the user may join spaces (not guests), "New space" where the
+ * workspace role allows creating one (#1534).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -136,6 +137,8 @@ internal fun SpaceSwitcherSheet(
   onSelect: (String) -> Unit,
   onBrowse: () -> Unit,
   onDismiss: () -> Unit,
+  canCreate: Boolean = false,
+  onCreate: () -> Unit = {},
 ) {
   val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = spaces.size > 6)
   ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet) {
@@ -149,8 +152,18 @@ internal fun SpaceSwitcherSheet(
       items(spaces, key = { it.id }) { space ->
         SpaceSwitcherRow(space, isSelected = space.id == maybeSelectedId) { onSelect(space.id) }
       }
+      if (canBrowse || canCreate) item(key = "divider") { HorizontalDivider(Modifier.padding(vertical = Spacing.xs)) }
+      if (canCreate) {
+        item(key = "create") {
+          ListItem(
+            headlineContent = { Text(stringResource(R.string.create_space)) },
+            leadingContent = { Icon(Icons.Filled.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+            colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+            modifier = Modifier.clickable(role = Role.Button, onClick = onCreate),
+          )
+        }
+      }
       if (canBrowse) {
-        item(key = "divider") { HorizontalDivider(Modifier.padding(vertical = Spacing.xs)) }
         item(key = "browse") {
           ListItem(
             headlineContent = { Text(stringResource(R.string.spaces_browse)) },

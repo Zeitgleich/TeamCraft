@@ -130,6 +130,7 @@ impl ReadQueue {
     let (queue, jobs) = mpsc::channel::<ReadJob>();
     std::thread::Builder::new()
       .name("teamcraft-reads".into())
+      .stack_size(crate::engine::THREAD_STACK_BYTES)
       .spawn(move || {
         let mut reads = Reads {
           store,

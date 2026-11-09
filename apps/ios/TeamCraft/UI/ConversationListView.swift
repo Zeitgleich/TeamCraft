@@ -33,6 +33,16 @@ struct ConversationListView: View {
   /// opens, never per change (#1466).
   @State private var snapshotSpaces: [HomeSpace] = []
   @State private var isSwitchingSpace = false
+  /// Spaces where the user may create channels, and whether new spaces (#1534): asked when the
+  /// "New" menu or the switcher opens, so a role changed meanwhile counts.
+  @State private var channelSpaceIds: Set<String> = []
+  @State private var canCreateSpaces = false
+  @State private var maybeNewChannelSpace: SpaceChoice?
+  @State private var isCreatingSpace = false
+  /// "New space" was picked in the switcher: its sheet comes once the switcher is gone.
+  @State private var createsSpaceNext = false
+  /// Bumped after a space was made here: it has no channel yet, so the list wouldn't read it.
+  @State private var createdSpaces = 0
   /// The space Home of the spaces layout shows, remembered on this device as on Android.
   @AppStorage("home_selected_space") private var rememberedSpaceId = ""
   /// Home, DMs and Activity (#1488), as on Android.
@@ -46,6 +56,7 @@ struct ConversationListView: View {
   @State private var dmFilter = ""
   /// A mute from the long-press menu the server didn't take (#903).
   @State private var isMuteFailed = false
+  @State private var maybeFilters: ConversationFiltersTarget?
   /// An entry-menu action the core or server refused (#1105, #322).
   @State private var maybeActionFailure: AppFailure?
   @State private var suspectDeletions: UInt32 = 0
@@ -78,6 +89,7 @@ struct ConversationListView: View {
         .navigationTitle(maybeHeaderSpace.map { Text($0.name) } ?? Text("chats_title"))
         .navigationBarTitleDisplayMode(maybeHeaderSpace == nil ? .automatic : .inline)
         .alert("dnd_save_failed", isPresented: $isMuteFailed) {}
+        .sheet(item: $maybeFilters) { ConversationFiltersView(conversationId: $0.id) }
         .alert("deletions_suspect \(suspectDeletions)", isPresented: isSuspectDeletionsShown) {}
         .task(id: shownSections.count) {
           let count = await model.takeSuspectDeletions()
@@ -147,11 +159,16 @@ struct ConversationListView: View {
     // the list's spaces change or the switcher opens (#1526).
     .task(
       id: SpacesRead(
-        userId: account.userId, count: conversations.count, spaceIds: listedSpaceIds, isSwitching: isSwitchingSpace)
+        userId: account.userId, count: conversations.count, spaceIds: listedSpaceIds, isSwitching: isSwitchingSpace,
+        created: createdSpaces)
     ) {
       guard let snapshot = await model.browseSnapshot() else { return }
       canBrowseChannels = snapshot.canBrowseChannels
       snapshotSpaces = (snapshot.spaces ?? []).map { HomeSpace(id: $0.id, name: $0.name, maybeImageVersion: $0.maybeImageVersion) }
+      channelSpaceIds = Set((snapshot.spaces ?? []).filter(\.offersChannelCreation).map(\.id))
+    }
+    .task(id: isSwitchingSpace) {
+      if canBrowseChannels { canCreateSpaces = await model.canCreateSpaces() }
     }
     .task(id: model.changeCount) {
       conversations = await model.conversations()
@@ -209,10 +226,29 @@ struct ConversationListView: View {
     .sheet(item: $maybeBrowseTab, onDismiss: { maybeBrowseSpaceId = nil }) { tab in
       BrowseView(tab: tab, maybeInitialSpaceId: maybeBrowseSpaceId) { conversationId in selection = conversationId }
     }
-    .sheet(isPresented: $isSwitchingSpace) {
+    .sheet(
+      isPresented: $isSwitchingSpace,
+      onDismiss: {
+        if createsSpaceNext {
+          createsSpaceNext = false
+          isCreatingSpace = true
+        }
+      }
+    ) {
       SpaceSwitcherView(
-        spaces: spaces, selectedId: maybeSelectedSpace?.id, canBrowse: canBrowseChannels
+        spaces: spaces, selectedId: maybeSelectedSpace?.id, canBrowse: canBrowseChannels,
+        onCreate: canCreateSpaces ? { createsSpaceNext = true } : nil
       ) { spaceId in
+        rememberedSpaceId = spaceId
+        tab = .home
+      }
+    }
+    .sheet(item: $maybeNewChannelSpace) { space in
+      NewChannelView(spaceId: space.id, spaceName: space.name) { conversationId in selection = conversationId }
+    }
+    .sheet(isPresented: $isCreatingSpace) {
+      NewSpaceView { spaceId in
+        createdSpaces += 1
         rememberedSpaceId = spaceId
         tab = .home
       }
@@ -329,6 +365,7 @@ struct ConversationListView: View {
                   readButton(for: conversation)
                   muteMenu(for: conversation)
                   levelMenu(for: conversation)
+                  Button("notify_filters_title", systemImage: "bell.badge") { maybeFilters = ConversationFiltersTarget(id: conversation.id) }
                   favoriteButton(for: conversation)
                   copyLinkButton(for: conversation)
                   leaveButton(for: conversation)
@@ -443,7 +480,7 @@ struct ConversationListView: View {
               .font(.system(size: 20))
               .frame(height: 26)
               .overlay(alignment: .topTrailing) { TabBadgeMark(count: badge.count, hasNew: badge.hasNew) }
-            Text(tabLabel(item)).font(.caption2)
+            Text(tabLabel(item)).font(.app(.caption2))
           }
           .frame(maxWidth: .infinity, minHeight: 49)
           .foregroundStyle(shownTab == item ? Theme.accent : Theme.textMuted)
@@ -489,19 +526,53 @@ struct ConversationListView: View {
     }
   }
 
-  /// New message, bottom right in the theme's color (#1488).
+  /// Bottom right in the theme's color (#1488). On Home a menu of what can be started (#1534): a
+  /// message, a channel in the space Home shows, a space, browsing; on the DMs a new message.
+  @ViewBuilder
   private var composeButton: some View {
-    Button { maybeBrowseTab = .people } label: {
-      Image(systemName: "square.and.pencil")
-        .font(.title2.weight(.semibold))
-        .foregroundStyle(.white)
-        .frame(width: 56, height: 56)
-        .background(Theme.accent, in: .rect(cornerRadius: 16))
-        .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
+    if shownTab == .home {
+      Menu {
+        Button("dm_new", systemImage: "square.and.pencil") { maybeBrowseTab = .people }
+        if let space = maybeChannelSpace {
+          Button("create_channel_in_menu \(space.name)", systemImage: "number") {
+            maybeNewChannelSpace = SpaceChoice(id: space.id, name: space.name)
+          }
+        }
+        if canCreateSpaces {
+          Button("create_space", systemImage: "square.grid.2x2") { isCreatingSpace = true }
+        }
+        if canBrowseChannels {
+          Button("browse_channels", systemImage: "magnifyingglass") { browseChannels(in: maybeChannelSpace?.id) }
+        }
+      } label: {
+        composeMark(symbol: "plus")
+      }
+      .task { if canBrowseChannels { canCreateSpaces = await model.canCreateSpaces() } }
+      .padding(16)
+      .accessibilityLabel(Text("create_new"))
+    } else {
+      Button { maybeBrowseTab = .people } label: { composeMark(symbol: "square.and.pencil") }
+        .buttonStyle(.plain)
+        .padding(16)
+        .accessibilityLabel(Text("new_chat"))
     }
-    .buttonStyle(.plain)
-    .padding(16)
-    .accessibilityLabel(Text("new_chat"))
+  }
+
+  private func composeMark(symbol: String) -> some View {
+    Image(systemName: symbol)
+      .font(.app(.title2).weight(.semibold))
+      .foregroundStyle(.white)
+      .frame(width: 56, height: 56)
+      .background(Theme.accent, in: .rect(cornerRadius: 16))
+      .shadow(color: .black.opacity(0.18), radius: 8, y: 4)
+  }
+
+  /// Where "New channel" of the menu creates one: the space Home shows, or in the list layout the
+  /// only space where the user may; else each space's menu has it.
+  private var maybeChannelSpace: HomeSpace? {
+    if let selected = maybeSelectedSpace { return channelSpaceIds.contains(selected.id) ? selected : nil }
+    let creatable = spaces.filter { channelSpaceIds.contains($0.id) }
+    return isList && creatable.count == 1 ? creatable.first : nil
   }
 
   /// The quick-access cards on top of Home (#1488): drafts, scheduled messages and meetings, each
@@ -655,7 +726,7 @@ struct ConversationListView: View {
         Button { toggleCollapsed(key) } label: {
           HStack(spacing: 8) {
             Image(systemName: "chevron.down")
-              .font(.footnote.weight(.semibold))
+              .font(.app(.footnote).weight(.semibold))
               .rotationEffect(.degrees(isCollapsed ? -90 : 0))
             if section.isSpace, let spaceId = section.spaceId {
               SpacePictureView(spaceId: spaceId, maybeVersion: section.spaceImageVersion)
@@ -720,7 +791,12 @@ struct ConversationListView: View {
         }
       }
       if canBrowseChannels {
-        Button("browse_channels", systemImage: "plus") { browseChannels(in: spaceId) }
+        Button("browse_channels", systemImage: "magnifyingglass") { browseChannels(in: spaceId) }
+      }
+      if channelSpaceIds.contains(spaceId) {
+        Button("channel_create", systemImage: "number") {
+          maybeNewChannelSpace = SpaceChoice(id: spaceId, name: name)
+        }
       }
     }
     Menu {
@@ -856,6 +932,7 @@ private struct SpacesRead: Hashable {
   let count: Int
   let spaceIds: Set<String>
   let isSwitching: Bool
+  let created: Int
 }
 
 struct ConversationRow: View {
@@ -891,20 +968,20 @@ struct ConversationRow: View {
             // After the name on the same line, so every row is as high as the others; it shortens
             // first (#1346).
             Text(verbatim: space)
-              .font(.caption)
+              .font(.app(.caption))
               .foregroundStyle(Theme.textMuted)
               .lineLimit(1)
               .truncationMode(.tail)
               .layoutPriority(-1)
           }
           if conversation.isMuted {
-            Image(systemName: "bell.slash").font(.caption).foregroundStyle(Theme.textMuted)
+            Image(systemName: "bell.slash").font(.app(.caption)).foregroundStyle(Theme.textMuted)
               .accessibilityLabel(Text("chat_muted"))
           }
           Spacer()
           if callCount > 0 {
             Label("\(callCount)", systemImage: "phone.fill")
-              .font(.caption2.weight(.semibold))
+              .font(.app(.caption2).weight(.semibold))
               .foregroundStyle(.white)
               .padding(.horizontal, 6)
               .padding(.vertical, 1)
@@ -918,13 +995,13 @@ struct ConversationRow: View {
           }
           if let preview = maybePreview {
             Text(listTime(preview.sentDate))
-              .font(.caption)
+              .font(.app(.caption))
               .foregroundStyle(isUnread ? Theme.accent : Theme.textMuted)
           }
         }
         HStack {
           previewText
-            .font(.subheadline)
+            .font(.app(.subheadline))
             .foregroundStyle(isUnread ? Theme.text : Theme.textMuted)
             .lineLimit(1)
           Spacer()
@@ -1019,7 +1096,7 @@ extension ConversationItem {
 struct BotBadge: View {
   var body: some View {
     Text("badge_bot")
-      .font(.caption2.weight(.semibold))
+      .font(.app(.caption2).weight(.semibold))
       .foregroundStyle(Theme.textMuted)
       .padding(.horizontal, 4)
       .padding(.vertical, 1)
@@ -1041,8 +1118,8 @@ struct SearchResultsView: View {
       List(hits, id: \.message.id) { hit in
         Button { onSelect(hit) } label: {
           VStack(alignment: .leading, spacing: 2) {
-            Text(hit.listName).font(.caption).foregroundStyle(Theme.textMuted)
-            Text(verbatim: hit.message.shownAuthorName).font(.subheadline.weight(.semibold))
+            Text(hit.listName).font(.app(.caption)).foregroundStyle(Theme.textMuted)
+            Text(verbatim: hit.message.shownAuthorName).font(.app(.subheadline).weight(.semibold))
             Text(hit.message.body).lineLimit(3)
           }
         }
@@ -1106,7 +1183,7 @@ struct FirstSyncBar: View {
             ProgressView().controlSize(.mini)
           }
         }
-        .font(.footnote)
+        .font(.app(.footnote))
         .foregroundStyle(.secondary)
         if let fraction = progress.maybeFraction {
           ProgressView(value: Double(fraction))
@@ -1145,10 +1222,10 @@ private struct QuickAccessCardLabel: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 4) {
-      Image(systemName: symbol).font(.body.weight(.semibold))
-      Text(title).font(.subheadline.weight(.semibold)).lineLimit(1)
+      Image(systemName: symbol).font(.app(.body).weight(.semibold))
+      Text(title).font(.app(.subheadline).weight(.semibold)).lineLimit(1)
       Text(status)
-        .font(.caption)
+        .font(.app(.caption))
         .fontWeight(isHighlighted ? .semibold : .regular)
         .foregroundStyle(isHighlighted ? Theme.accent : Theme.textMuted)
         .lineLimit(1)
@@ -1171,7 +1248,7 @@ private struct TabBadgeMark: View {
   var body: some View {
     if count > 0 {
       Text(count > 99 ? "99+" : "\(count)")
-        .font(.caption2.weight(.bold))
+        .font(.app(.caption2).weight(.bold))
         .foregroundStyle(.white)
         .padding(.horizontal, 5)
         .frame(minWidth: 18, minHeight: 18)

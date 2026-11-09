@@ -27,8 +27,8 @@ enum class ChatListGrouping {
 /**
  * "Use the colors of the wallpaper" (Material You, Android 12+) instead of the TeamCraft colors.
  * A device setting, off by default so the app looks like desktop and web; a colour theme other
- * than the server's default takes precedence. The layout of the conversations and the colour theme
- * follow the account (#945, #202).
+ * than the server's default takes precedence. The layout of the conversations, the colour theme and
+ * the font follow the account (#945, #202, #1494).
  */
 class AppearancePrefs private constructor(context: Context) {
   private val prefs = context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -56,6 +56,23 @@ class AppearancePrefs private constructor(context: Context) {
     if (value == colorTheme.value) return
     prefs.edit().putString(KEY_COLOR_THEME, value).apply()
     colorTheme.value = value
+    LocalSettingChanges.changed()
+  }
+
+  private val font = sharedFont ?: MutableStateFlow(
+    prefs.getString(KEY_FONT, null) ?: DEFAULT_FONT,
+  ).also { sharedFont = it }
+
+  /**
+   * The interface font (#1494) by its wire name (`system`, `inter`, …, `AppFonts.kt`). Follows the
+   * account; a name this app doesn't ship shows the system font.
+   */
+  val fontValue: StateFlow<String> = font
+
+  fun setFont(value: String) {
+    if (value == font.value) return
+    prefs.edit().putString(KEY_FONT, value).apply()
+    font.value = value
     LocalSettingChanges.changed()
   }
 
@@ -91,15 +108,20 @@ class AppearancePrefs private constructor(context: Context) {
     private const val KEY_LAYOUT = "chat_list_layout"
     private const val KEY_GROUPING = "chat_list_grouping"
     private const val KEY_COLOR_THEME = "color_theme"
+    private const val KEY_FONT = "font"
 
     /** The server's brand colours, or the app's own without a brand. */
     const val DEFAULT_COLOR_THEME = "brand"
+
+    /** The system's interface font. */
+    const val DEFAULT_FONT = "system"
 
     /** One flow per process: every screen and the theme see the same value. */
     private var shared: MutableStateFlow<Boolean>? = null
     private var sharedLayout: MutableStateFlow<ChatListLayout>? = null
     private var sharedGrouping: MutableStateFlow<ChatListGrouping>? = null
     private var sharedColorTheme: MutableStateFlow<String>? = null
+    private var sharedFont: MutableStateFlow<String>? = null
 
     val isSupported: Boolean get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 

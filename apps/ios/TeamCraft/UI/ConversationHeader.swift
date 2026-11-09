@@ -12,19 +12,19 @@ struct ConversationHeader: View {
       avatar
       VStack(alignment: .leading, spacing: 0) {
         Text(conversation.listName)
-          .font(.headline)
+          .font(.app(.headline))
           .lineLimit(1)
         if conversation.kind == .direct, !typingNames.isEmpty {
           HStack(spacing: 6) {
             TypingDots()
             Text("typing_direct").italic()
           }
-          .font(.caption)
+          .font(.app(.caption))
           .foregroundStyle(Theme.accent)
           .lineLimit(1)
         } else if let subtitle {
           subtitle
-            .font(.caption)
+            .font(.app(.caption))
             .foregroundStyle(Theme.textMuted)
             .lineLimit(1)
         }

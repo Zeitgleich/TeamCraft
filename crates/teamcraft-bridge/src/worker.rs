@@ -8,12 +8,16 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use teamcraft_core::api::{GatewayConnection, ServerApi};
+use teamcraft_core::api::{ApiError, ServerApi};
 use teamcraft_core::client::direct_uploads::estimated_message_bytes;
+use teamcraft_core::clock::{Clock, SystemClock};
+use teamcraft_core::connection::{
+  ConnectionSettings, ConnectionState, ConnectionStatus, ConnectionSupervisor,
+};
 use teamcraft_core::store::{AttachmentRef, LocalStore};
 use teamcraft_core::{Client, CoreError, HistoryScan};
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, GatewayClientMessage, SourceIdentity, SourcePictureHash, UserId,
+  Base64Bytes, ConversationId, GatewayServerMessage, SourceIdentity, SourcePictureHash, UserId,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -25,10 +29,6 @@ use crate::sources::{Source, SourceKey, SourceRegistry};
 
 /// How often the worker looks at timers, the gateway and the outbox.
 const TICK: Duration = Duration::from_millis(200);
-/// Keep-alive for the gateway (the server expects one every 30 seconds).
-const HEARTBEAT: Duration = Duration::from_secs(20);
-const RECONNECT_BACKOFF_MIN: Duration = Duration::from_secs(1);
-const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Messages for channels the bot has no group for yet wait here; the oldest are dropped beyond this.
 const MAX_WAITING_MESSAGES: usize = 1000;
 /// After the server refused a message with the picture, the next one that carries it waits this
@@ -95,11 +95,12 @@ pub struct Worker<A: ServerApi, S: LocalStore> {
   sent_pictures: HashMap<SourceKey, SentPicture>,
   files: FileJobs,
   settings: WorkerSettings,
-  gateway: Option<A::Gateway>,
+  /// The gateway connection: backoff with jitter, heartbeats, dead-connection detection and the
+  /// "sign in again" state, the same as in the apps.
+  connection: ConnectionSupervisor<A::Gateway>,
+  /// The state last logged, to log only changes.
+  logged_state: ConnectionState,
   waiting: VecDeque<Outgoing>,
-  next_connect: Instant,
-  backoff: Duration,
-  last_heartbeat: Instant,
   last_index: Instant,
   last_flush: Instant,
 }
@@ -122,14 +123,17 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       sent_pictures: HashMap::new(),
       files: FileJobs::new(settings.max_file_messages),
       settings,
-      gateway: None,
+      connection: ConnectionSupervisor::new(ConnectionSettings::default(), ConnectionStatus::new()),
+      logged_state: ConnectionState::Connecting,
       waiting: VecDeque::new(),
-      next_connect: now,
-      backoff: RECONNECT_BACKOFF_MIN,
-      last_heartbeat: now,
       last_index: now,
       last_flush: now,
     }
+  }
+
+  /// The gateway connection's state, readable while the worker runs.
+  pub fn connection_status(&self) -> ConnectionStatus {
+    self.connection.status()
   }
 
   /// Runs until every sender of submissions is gone, then sends what is left.
@@ -139,19 +143,29 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
 
   /// Like [`Self::run`], but also stops once `stop` resolves (the drain timeout at shutdown ran
   /// out): what is queued is sent, uploads under way are given up and their producers get `503`.
-  pub async fn run_until(mut self, stop: impl Future<Output = ()>) -> Client<A, S> {
+  pub async fn run_until(self, stop: impl Future<Output = ()>) -> Client<A, S> {
+    // On the heap: the loop's state is large, and callers (tests on small stacks) hold this future.
+    Box::pin(self.run_loop(stop)).await
+  }
+
+  async fn run_loop(mut self, stop: impl Future<Output = ()>) -> Client<A, S> {
     // The store already holds what the bridge learned before a restart.
     self.refresh_sources().await;
     let mut tick = tokio::time::interval(TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tokio::pin!(stop);
     loop {
+      let mut is_ticked = false;
       tokio::select! {
         submission = self.receiver.recv() => match submission {
           Some(submission) => self.accept(submission).await,
           None => break,
         },
-        _ = tick.tick() => self.on_tick().await,
+        frame = self.connection.receive() => Box::pin(self.on_frame(frame)).await,
+        _ = tick.tick() => {
+          Box::pin(self.on_tick()).await;
+          is_ticked = true;
+        },
         sent = self.files.sent() => {
           if let Some(uploaded) = self.files.finish_step(&mut self.client, sent).await {
             self.send_uploaded(uploaded).await;
@@ -161,6 +175,10 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
           info!("stopping before every request was answered");
           break;
         },
+      }
+      if is_ticked && Box::pin(self.connect_gateway(&mut stop)).await {
+        info!("stopping before every request was answered");
+        break;
       }
       self.files.advance(&mut self.client).await;
     }
@@ -219,12 +237,18 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     for batch in self.batcher.take_due(now) {
       self.send(batch.key.0, batch.text, batch.mentions).await;
     }
-    self.keep_gateway(now).await;
+    self.connection.on_tick(now_ms()).await;
+    self.log_connection_state();
     if now.saturating_duration_since(self.last_flush) >= Duration::from_secs(1) {
       self.last_flush = now;
       self.refresh_sources().await;
       self.retry_waiting().await;
-      if let Err(error) = self.client.flush_outbox().await {
+      // The heartbeats go on while the outbox is sent.
+      let flushed = self
+        .connection
+        .keep_alive(now_ms(), Box::pin(self.client.flush_outbox()))
+        .await;
+      if let Err(error) = flushed {
         debug!(%error, "flushing the outbox failed");
       }
     }
@@ -232,7 +256,11 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       && now.saturating_duration_since(self.last_index) >= interval
     {
       self.last_index = now;
-      match self.client.publish_index_segments().await {
+      let published = self
+        .connection
+        .keep_alive(now_ms(), Box::pin(self.client.publish_index_segments()))
+        .await;
+      match published {
         Ok(0) => {},
         Ok(count) => info!(count, "published search index segments"),
         Err(error) => warn!(%error, "publishing search index segments failed"),
@@ -257,7 +285,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     };
     let mut active = Vec::new();
     for conversation in conversations {
-      if self.gateway.is_some() {
+      if self.connection.is_connected() {
         self.scan_history(conversation, app_sources.history_pages).await;
       }
       match self.channel_sources(conversation) {
@@ -307,44 +335,50 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     }
   }
 
-  /// Connects (with backoff), processes what the server sent, and sends heartbeats.
-  async fn keep_gateway(&mut self, now: Instant) {
-    if self.gateway.is_none() {
-      if now < self.next_connect {
-        return;
-      }
-      match self.client.connect_gateway().await {
-        Ok((connection, outcome)) => {
-          info!(?outcome, "gateway connected");
-          self.gateway = Some(connection);
-          self.backoff = RECONNECT_BACKOFF_MIN;
-          self.last_heartbeat = now;
-        },
-        Err(error) => {
-          warn!(%error, retry_in = ?self.backoff, "gateway connection failed");
-          self.next_connect = now + self.backoff;
-          self.backoff = (self.backoff * 2).min(RECONNECT_BACKOFF_MAX);
-          return;
-        },
-      }
-    }
-    let Some(connection) = self.gateway.as_mut() else {
-      return;
+  /// Connects when an attempt is due (the supervisor keeps the backoff, the handshake deadlines and
+  /// the catch-up after a reconnect). Returns `true` if `stop` resolved meanwhile: a handshake or a
+  /// long catch-up must not delay the shutdown.
+  async fn connect_gateway(&mut self, stop: impl Future<Output = ()> + Unpin) -> bool {
+    let connect = Box::pin(self.connection.connect_if_due(&mut self.client));
+    let has_stopped = tokio::select! {
+      biased;
+      () = stop => true,
+      _ = connect => false,
     };
-    if let Err(error) = self.client.pump(connection).await {
-      warn!(%error, "gateway connection lost");
-      self.gateway = None;
-      self.next_connect = now + RECONNECT_BACKOFF_MIN;
+    self.log_connection_state();
+    has_stopped
+  }
+
+  /// Applies what the gateway sent; a lost connection is replaced after the backoff.
+  async fn on_frame(&mut self, frame: Option<Result<GatewayServerMessage, ApiError>>) {
+    self.connection.on_frame(&mut self.client, frame).await;
+    self.log_connection_state();
+  }
+
+  /// Says what the connection is doing when that changed. A refused token is the one state that
+  /// needs the operator (the supervisor does not retry with the same token, and the bridge's token
+  /// is fixed until a restart), so it is logged as such.
+  fn log_connection_state(&mut self) {
+    let state = self.connection.state();
+    if state == self.logged_state {
       return;
     }
-    if now.saturating_duration_since(self.last_heartbeat) >= HEARTBEAT {
-      self.last_heartbeat = now;
-      if let Some(connection) = self.gateway.as_mut()
-        && let Err(error) = connection.send(&GatewayClientMessage::Heartbeat).await
-      {
-        warn!(%error, "heartbeat failed");
-        self.gateway = None;
-      }
+    self.logged_state = state;
+    match state {
+      ConnectionState::SignInRequired { reason } => warn!(
+        ?reason,
+        "the server refused the bridge's access token; the gateway stays disconnected until the token \
+         is fixed and the bridge restarted"
+      ),
+      ConnectionState::Connected => info!("gateway connected"),
+      ConnectionState::Slow => info!("gateway connected, but the link is slow"),
+      ConnectionState::Offline { retry_at_ms, .. } => {
+        debug!(
+          retry_at_ms,
+          "gateway offline; the next attempt follows the backoff"
+        );
+      },
+      ConnectionState::Connecting => {},
     }
   }
 
@@ -503,6 +537,11 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
   }
 }
 
+/// The supervisor's time: the clock the bridge's client runs on.
+fn now_ms() -> i64 {
+  SystemClock.now_ms()
+}
+
 /// An alert gets the mentioned people's names in front and their IDs as metadata.
 pub(crate) fn alert_text(text: String, is_alert: bool, mentions: &Mentions) -> (String, Vec<UserId>) {
   if !is_alert || mentions.users.is_empty() {
@@ -603,4 +642,164 @@ fn picture_fits(picture_bytes: usize, room: usize) -> bool {
 
 fn is_picture_due(maybe_sent: Option<&SentPicture>, sha256: SourcePictureHash, now: Instant) -> bool {
   maybe_sent.is_none_or(|sent| sent.sha256 != sha256 || now >= sent.next_due)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod gateway_tests {
+  use std::time::Duration;
+
+  use teamcraft_core::store::{MessageContent, MessageFilter};
+  use tokio::sync::{mpsc, oneshot};
+
+  use super::*;
+  use crate::app::worker_settings;
+  use crate::file_jobs::tests::{TestClient, bridge_config, channel_with_bot};
+
+  struct Running {
+    worker: Worker<teamcraft_core::api::fake::FakeServerApi, Arc<teamcraft_core::store::MemoryStore>>,
+    status: ConnectionStatus,
+    // Keeps the queue open: the worker ends when every sender is gone.
+    _sender: mpsc::Sender<Submission>,
+  }
+
+  fn worker_for(bot: TestClient, channel: ConversationId) -> Running {
+    let config = bridge_config(channel, "");
+    let (sender, receiver) = mpsc::channel(16);
+    let settings = WorkerSettings {
+      index_interval: None,
+      ..worker_settings(&config)
+    };
+    let worker = Worker::new(bot, SourceRegistry::new(&config), receiver, settings);
+    Running {
+      status: worker.connection_status(),
+      worker,
+      _sender: sender,
+    }
+  }
+
+  async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    for _ in 0..200 {
+      if done() {
+        return;
+      }
+      tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting until {what}");
+  }
+
+  fn texts(client: &TestClient, channel: ConversationId) -> Vec<String> {
+    client
+      .store()
+      .messages(channel, MessageFilter::TopLevel)
+      .unwrap()
+      .into_iter()
+      .filter_map(|message| match message.content {
+        MessageContent::Text { body, .. } => Some(body),
+        _ => None,
+      })
+      .collect()
+  }
+
+  #[tokio::test]
+  async fn a_dropped_connection_is_replaced_and_catches_up() {
+    let (server, mut alice, mut alice_gateway, bot, channel) = channel_with_bot().await;
+    let bot_user = bot.user_id();
+    let before = server.gateway_connect_count();
+    let Running {
+      worker,
+      status,
+      _sender,
+    } = worker_for(bot, channel);
+    let (stop, stopped) = oneshot::channel::<()>();
+    let script = async {
+      wait_until("the bridge is connected", || {
+        server.gateway_connect_count() == before + 1 && status.get() == ConnectionState::Connected
+      })
+      .await;
+      server.drop_gateways(bot_user);
+      wait_until("the bridge reconnected", || {
+        server.gateway_connect_count() > before + 1
+      })
+      .await;
+      alice
+        .send_text(channel, None, "after the reconnect")
+        .await
+        .unwrap();
+      alice.pump(&mut alice_gateway).await.unwrap();
+      tokio::time::sleep(Duration::from_millis(500)).await;
+      let _ = stop.send(());
+    };
+    let (bot, ()) = tokio::join!(
+      worker.run_until(async {
+        let _ = stopped.await;
+      }),
+      script
+    );
+    assert!(
+      texts(&bot, channel)
+        .iter()
+        .any(|text| text == "after the reconnect")
+    );
+  }
+
+  #[tokio::test]
+  async fn a_refused_token_is_a_state_and_is_not_offered_again() {
+    let (server, _alice, _gateway, bot, channel) = channel_with_bot().await;
+    server.set_signed_out(bot.user_id(), true);
+    let Running {
+      worker,
+      status,
+      _sender,
+    } = worker_for(bot, channel);
+    let (stop, stopped) = oneshot::channel::<()>();
+    let script = async {
+      wait_until("the token is refused", || {
+        matches!(status.get(), ConnectionState::SignInRequired { .. })
+      })
+      .await;
+      // Several ticks and well past the first backoff: no second attempt with the same token.
+      tokio::time::sleep(Duration::from_millis(2_500)).await;
+      assert_eq!(server.gateway_refusal_count(), 1);
+      assert!(matches!(status.get(), ConnectionState::SignInRequired { .. }));
+      let _ = stop.send(());
+    };
+    tokio::join!(
+      worker.run_until(async {
+        let _ = stopped.await;
+      }),
+      script
+    );
+  }
+
+  #[tokio::test]
+  async fn the_shutdown_does_not_wait_for_a_silent_server() {
+    let (server, _alice, _gateway, bot, channel) = channel_with_bot().await;
+    server.set_gateway_silent(bot.user_id(), true);
+    let Running {
+      worker,
+      status,
+      _sender,
+    } = worker_for(bot, channel);
+    let (stop, stopped) = oneshot::channel::<()>();
+    let script = async {
+      // The handshake is under way and would wait for `hello` for 30 seconds.
+      tokio::time::sleep(Duration::from_millis(600)).await;
+      assert_eq!(status.get(), ConnectionState::Connecting);
+      let stopped_at = std::time::Instant::now();
+      let _ = stop.send(());
+      stopped_at
+    };
+    let (_, stopped_at) = tokio::join!(
+      worker.run_until(async {
+        let _ = stopped.await;
+      }),
+      script
+    );
+    assert!(
+      stopped_at.elapsed() < Duration::from_secs(5),
+      "{:?}",
+      stopped_at.elapsed()
+    );
+  }
 }

@@ -97,8 +97,11 @@ for readable lines with levels use `-o short-iso` as plain text, or `-o cat` for
 - **Search index:** the bridge has the plaintext, so it publishes the index segments of its channels
   (closed months, e2ee.md §10) itself, once an hour by default.
 - **No channel yet:** messages for a channel the bot hasn't been added to wait (up to 1000) and go
-  out once it joins. A lost connection is retried with backoff; sends that fail stay in the
-  encrypted outbox of the local store.
+  out once it joins. The gateway connection is kept by the same supervisor as in the apps: a lost
+  or silent connection is replaced with jittered backoff (reset only after it stayed up 30 s), and
+  the catch-up after a reconnect brings in what was missed. Sends that fail stay in the encrypted
+  outbox of the local store. If the server refuses the bot's access token, the bridge logs a
+  warning and stops trying until it is restarted with a working token.
 - Tokens are part of the URL, so treat the URL as the credential: unknown tokens get `404`, the
   bridge knows only their SHA-256 and compares it in constant time, and the listener is loopback
   unless you open it.

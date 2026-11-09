@@ -120,6 +120,8 @@ fun SpaceEntryMenu(
   onDismiss: () -> Unit,
   maybeOnOpenView: ((SpaceViewTab) -> Unit)? = null,
   maybeOnBrowse: (() -> Unit)? = null,
+  /** "New channel" in this space, where the user may create one (#1534). */
+  maybeOnNewChannel: (() -> Unit)? = null,
 ) {
   var maybeMenu by remember(spaceId) { mutableStateOf<uniffi.teamcraft_ffi.SpaceMenuItem?>(null) }
   var isMuting by remember(spaceId) { mutableStateOf(false) }
@@ -152,7 +154,17 @@ fun SpaceEntryMenu(
         },
       )
     }
-    if (menu != null && (maybeOnOpenView != null || maybeOnBrowse != null)) HorizontalDivider()
+    maybeOnNewChannel?.let { onNewChannel ->
+      DropdownMenuItem(
+        text = { Text(stringResource(R.string.channel_create)) },
+        leadingIcon = { Icon(painterResource(R.drawable.ic_tag), contentDescription = null) },
+        onClick = {
+          onDismiss()
+          onNewChannel()
+        },
+      )
+    }
+    if (menu != null && (maybeOnOpenView != null || maybeOnBrowse != null || maybeOnNewChannel != null)) HorizontalDivider()
     if (menu != null) {
       for (entry in spaceMenu(menu.hasUnread, menu.leave, menu.canDelete)) {
         EntryMenuItem(entry, lastAdminHint = R.string.entry_leave_last_space_admin) {

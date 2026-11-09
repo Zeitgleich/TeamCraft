@@ -130,22 +130,22 @@ struct PictureViewer: View {
   private var topBar: some View {
     HStack(spacing: 4) {
       Button { dismiss() } label: {
-        Image(systemName: "xmark").font(.body.weight(.semibold)).frame(width: 44, height: 44)
+        Image(systemName: "xmark").font(.app(.body).weight(.semibold)).frame(width: 44, height: 44)
       }
       .accessibilityLabel(Text("picture_close"))
       VStack(alignment: .leading, spacing: 1) {
         if let name = senderName {
-          Text(name).font(.subheadline.weight(.semibold)).lineLimit(1)
+          Text(name).font(.app(.subheadline).weight(.semibold)).lineLimit(1)
         }
         if let date = sentDate {
-          Text(date.formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+          Text(date.formatted(date: .abbreviated, time: .shortened)).font(.app(.caption)).foregroundStyle(.secondary)
         }
       }
       .accessibilityElement(children: .combine)
       Spacer(minLength: 8)
       if let index = model.currentIndex, model.items.count > 1 {
         Text("picture_position \(index + 1) \(model.items.count)")
-          .font(.footnote.monospacedDigit())
+          .font(.app(.footnote).monospacedDigit())
           .foregroundStyle(.secondary)
           .padding(.trailing, 12)
       }
@@ -334,23 +334,23 @@ private struct PicturePage: View {
     case .onRequest:
       Button(action: onFetch) {
         Label(loadLabel, systemImage: "arrow.down.circle")
-          .font(.subheadline.weight(.semibold))
+          .font(.app(.subheadline).weight(.semibold))
           .padding(.horizontal, 14).padding(.vertical, 8)
           .background(.ultraThinMaterial, in: Capsule())
       }
       .foregroundStyle(.white)
     case .failed:
       VStack(spacing: 8) {
-        Text("picture_load_failed").font(.subheadline).multilineTextAlignment(.center)
+        Text("picture_load_failed").font(.app(.subheadline)).multilineTextAlignment(.center)
         Button("picture_try_again", action: onFetch)
-          .font(.subheadline.weight(.semibold))
+          .font(.app(.subheadline).weight(.semibold))
           .buttonStyle(.borderedProminent)
       }
       .foregroundStyle(.white)
       .padding(14)
       .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     case .unreadable:
-      Text("picture_unreadable").font(.subheadline)
+      Text("picture_unreadable").font(.app(.subheadline))
         .foregroundStyle(.white)
         .padding(.horizontal, 14).padding(.vertical, 8)
         .background(.ultraThinMaterial, in: Capsule())

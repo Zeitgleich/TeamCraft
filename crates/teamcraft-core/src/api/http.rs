@@ -123,7 +123,7 @@ const UNACKNOWLEDGED_TIMEOUT: Duration = Duration::from_secs(45);
 /// Silence after which the gateway connection counts as dead: two heartbeat intervals (25 s, plus
 /// up to one runner tick) and room for a slow round trip. The apps' `ConnectionSupervisor` detects
 /// silence itself, with the interval from `hello`; this is the transport's backstop for clients that
-/// drive the connection on their own (the integration bridge).
+/// drive the connection on their own (the notetaker and the import tool).
 const GATEWAY_SILENCE_LIMIT_MS: i64 = 50_000;
 
 /// Supplies a valid OIDC access token. The app owns login and refresh; the core only asks.

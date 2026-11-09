@@ -14,6 +14,7 @@ mod calls;
 mod channel_roles;
 mod color_theme;
 mod crash_reports;
+mod creating;
 mod device_proofs;
 mod engine;
 mod error;
