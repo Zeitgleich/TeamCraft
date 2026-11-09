@@ -562,7 +562,12 @@ pub(crate) fn register_switch<'a>(
 /// place joins are paced (#1227): a join whose turn is near waits for it here, holding nothing but
 /// its unjoined slot; one whose turn is further off is refused with the time to wait.
 pub(crate) async fn admit(shared: &Shared, first: CallClientMessage, handle: ParticipantHandle) -> Admission {
-  let CallClientMessage::Join { token, capabilities } = first else {
+  let CallClientMessage::Join {
+    token,
+    capabilities,
+    dave_transition_mode,
+  } = first
+  else {
     return Admission::Refused(Refusal {
       code: ErrorCode::ProtocolViolation,
       text: "expected join".to_owned(),
@@ -609,7 +614,13 @@ pub(crate) async fn admit(shared: &Shared, first: CallClientMessage, handle: Par
   // In `joined`, for this session only: a client on the fallback moves it to QUIC with it (#1309).
   let maybe_switch_secret = SwitchSecret::random();
   let maybe_wire_secret = maybe_switch_secret.as_ref().map(SwitchSecret::to_wire);
-  let (room, session_id, outcome) = match shared.rooms.join(grant, capabilities, handle, maybe_wire_secret) {
+  let (room, session_id, outcome) = match shared.rooms.join(
+    grant,
+    capabilities,
+    dave_transition_mode,
+    handle,
+    maybe_wire_secret,
+  ) {
     Ok(joined) => joined,
     Err(error) => {
       let code = match error {

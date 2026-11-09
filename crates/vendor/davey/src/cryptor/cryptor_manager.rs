@@ -1,19 +1,17 @@
 #![allow(clippy::map_entry)]
 use std::{
-  cmp::max,
+  cmp::min,
   collections::{HashMap, VecDeque},
   sync::Arc,
   time::Duration,
 };
-// std::time::Instant panics on wasm32-unknown-unknown; web_time is std on native targets.
-use web_time::Instant;
 use tracing::{debug, trace, warn};
 
 use crate::errors::ExpiringCipherError;
 
 use super::{CIPHER_EXPIRY, MAX_MISSING_NONCES};
 
-use super::{aead_cipher::AeadCipher, hash_ratchet::HashRatchet, *};
+use super::{aead_cipher::AeadCipher, clock::Clock, hash_ratchet::HashRatchet, *};
 
 pub fn compute_wrapped_generation(oldest: u32, generation: u32) -> u32 {
   // Assume generation is greater than or equal to oldest, this may be wrong in a few cases but
@@ -27,7 +25,7 @@ pub fn compute_wrapped_generation(oldest: u32, generation: u32) -> u32 {
   factor * GENERATION_WRAP + generation
 }
 
-fn compute_wrapped_big_nonce(generation: u32, nonce: u32) -> u64 {
+pub fn compute_wrapped_big_nonce(generation: u32, nonce: u32) -> u64 {
   // Remove the generation bits from the nonce
   let masked_nonce = (nonce as u64) & ((1 << RATCHET_GENERATION_SHIFT_BITS) - 1);
   // Add the wrapped generation bits back in
@@ -40,7 +38,7 @@ struct ExpiringCipher {
 }
 
 pub struct CipherManager {
-  clock: Arc<Instant>,
+  clock: Arc<Clock>,
   key_ratchet: HashRatchet,
   cryptor_generations: HashMap<u32, ExpiringCipher>,
   ratchet_creation: Duration,
@@ -52,7 +50,7 @@ pub struct CipherManager {
 }
 
 impl CipherManager {
-  pub fn new(clock: Arc<Instant>, key_ratchet: HashRatchet) -> Self {
+  pub fn new(clock: Arc<Clock>, key_ratchet: HashRatchet) -> Self {
     let ratchet_creation: Duration = clock.as_ref().elapsed();
     Self {
       clock,
@@ -67,14 +65,20 @@ impl CipherManager {
     }
   }
 
-  pub fn can_process_nonce(&self, generation: u32, nonce: u32) -> bool {
-    if self.newest_processed_nonce.is_none() {
-      return true;
-    }
+  fn expected_nonce(&self) -> u64 {
+    self
+      .newest_processed_nonce
+      .map_or(0, |newest_processed_nonce| newest_processed_nonce + 1)
+  }
 
+  pub fn can_process_nonce(&self, generation: u32, nonce: u32) -> bool {
     let wrapped_big_nonce = compute_wrapped_big_nonce(generation, nonce);
-    wrapped_big_nonce > self.newest_processed_nonce.unwrap()
-      || self.missing_nonces.contains(&wrapped_big_nonce)
+    wrapped_big_nonce >= self.expected_nonce()
+      || self
+        .missing_nonces
+        .iter()
+        .rev()
+        .any(|&x| x == wrapped_big_nonce)
   }
 
   pub fn get_cipher(&mut self, generation: u32) -> Option<&mut AeadCipher> {
@@ -129,26 +133,20 @@ impl CipherManager {
   }
 
   pub fn report_cipher_success(&mut self, generation: u32, nonce: u32) {
+    let expected_nonce = self.expected_nonce();
     let wrapped_big_nonce = compute_wrapped_big_nonce(generation, nonce);
 
     // Add any missing nonces to the queue
-    if self.newest_processed_nonce.is_none() {
-      self.newest_processed_nonce = Some(wrapped_big_nonce);
-    } else if wrapped_big_nonce > self.newest_processed_nonce.unwrap() {
-      let oldest_missing_nonce = wrapped_big_nonce.saturating_sub(MAX_MISSING_NONCES);
+    if wrapped_big_nonce >= expected_nonce {
+      let missing_nonces = min(wrapped_big_nonce - expected_nonce, MAX_MISSING_NONCES);
 
       while !self.missing_nonces.is_empty()
-        && self.missing_nonces.front().unwrap() < &oldest_missing_nonce
+        && self.missing_nonces.len() as u64 + missing_nonces > MAX_MISSING_NONCES
       {
         self.missing_nonces.pop_front();
       }
 
-      // If we're missing a lot, we don't want to add everything since newestProcessedNonce_
-      let missing_range_start = max(
-        oldest_missing_nonce,
-        self.newest_processed_nonce.unwrap() + 1,
-      );
-      for i in missing_range_start..wrapped_big_nonce {
+      for i in (wrapped_big_nonce - missing_nonces)..wrapped_big_nonce {
         self.missing_nonces.push_back(i);
       }
 
@@ -157,7 +155,8 @@ impl CipherManager {
     } else if let Some(index) = self
       .missing_nonces
       .iter()
-      .position(|&x| x == wrapped_big_nonce)
+      // Reverse search since the nonce is most likely to be at the back of the queue
+      .rposition(|&x| x == wrapped_big_nonce)
     {
       self.missing_nonces.remove(index);
     }
@@ -174,7 +173,11 @@ impl CipherManager {
     for (cryptor_generation, cryptor) in self.cryptor_generations.iter_mut() {
       if cryptor_generation < &self.newest_generation {
         trace!("Updating expiry for cryptor, generation: {cryptor_generation}");
-        cryptor.expiry = Some(expiry_time)
+        cryptor.expiry = Some(
+          cryptor
+            .expiry
+            .map_or(expiry_time, |expiry| expiry.min(expiry_time)),
+        );
       }
     }
   }
@@ -237,7 +240,15 @@ impl CipherManager {
   }
 
   pub fn update_expiry(&mut self, expiry: Duration) {
-    self.ratchet_expiry = Some(expiry);
+    self.ratchet_expiry = Some(
+      self
+        .ratchet_expiry
+        .map_or(expiry, |current| current.min(expiry)),
+    );
+  }
+
+  pub fn domain_identity(&self) -> &[u8] {
+    self.key_ratchet.domain_identity()
   }
 
   pub fn is_expired(&self) -> bool {

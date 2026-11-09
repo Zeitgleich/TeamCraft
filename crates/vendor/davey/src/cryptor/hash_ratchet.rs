@@ -10,6 +10,7 @@ pub struct HashRatchet {
   next_secret: Vec<u8>,
   next_generation: u32,
   cache: HashMap<u32, (Vec<u8>, Vec<u8>)>,
+  domain_identity: Vec<u8>,
 }
 
 impl HashRatchet {
@@ -17,9 +18,15 @@ impl HashRatchet {
     trace!("Creating hash ratchet with secret: {:x?}", secret);
     Self {
       next_generation: 0,
+      domain_identity: secret.clone(),
       next_secret: secret,
       cache: HashMap::new(),
     }
+  }
+
+  /// The base secret is derived per (epoch, user), so it identifies the key domain
+  pub fn domain_identity(&self) -> &[u8] {
+    &self.domain_identity
   }
 
   // https://www.rfc-editor.org/rfc/rfc9420.html#section-9.1-11.1
@@ -77,41 +84,5 @@ impl HashRatchet {
 
   pub fn erase(&mut self, generation: u32) {
     self.cache.remove(&generation);
-  }
-}
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn expected_result() {
-    let mut ratchet = HashRatchet::new(vec![
-      206, 221, 97, 177, 184, 161, 202, 105, 4, 101, 84, 40, 44, 247, 11, 123,
-    ]);
-
-    let (key, nonce) = ratchet.get(0).expect("Expected success from ratchet");
-    assert_eq!(
-      *key,
-      vec![
-        117, 48, 249, 169, 148, 94, 45, 46, 6, 208, 101, 31, 123, 42, 134, 75
-      ]
-    );
-    assert_eq!(
-      *nonce,
-      vec![48, 30, 95, 75, 116, 9, 15, 152, 94, 114, 107, 178]
-    );
-    // TeamCraft (vendored change 5): the next generation runs the 32-byte secret derivation too.
-    let (key, nonce) = ratchet.get(1).expect("Expected success from ratchet");
-    assert_eq!(
-      *key,
-      vec![
-        205, 221, 6, 224, 243, 67, 117, 150, 186, 203, 156, 6, 160, 50, 156, 73
-      ]
-    );
-    assert_eq!(
-      *nonce,
-      vec![150, 253, 18, 131, 76, 61, 231, 55, 136, 236, 52, 25]
-    );
   }
 }

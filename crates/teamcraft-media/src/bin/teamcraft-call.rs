@@ -105,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
     audible_frames_played = stats.audible_frames_played,
     privacy_code = stats.maybe_privacy_code.as_deref().unwrap_or("-"),
     video_frames_decoded = decoded.load(std::sync::atomic::Ordering::Relaxed),
+    encryption = ?stats.encryption,
     "call statistics"
   );
   Ok(())

@@ -1180,6 +1180,7 @@ async fn run_call(
   state.sessions.close_all();
   let mut stats = state.stats;
   stats.maybe_privacy_code = engine.privacy_code();
+  stats.encryption = engine.encryption_stats();
   info!(?stats, "call ended");
   result.map(|()| stats)
 }

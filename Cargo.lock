@@ -2200,7 +2200,7 @@ checksum = "11c0bd7d22989969a619bae09147b992a6aa7f31dd4f9d9af6345f533744781f"
 
 [[package]]
 name = "davey"
-version = "0.1.5"
+version = "0.2.0"
 dependencies = [
  "aead",
  "aes 0.8.4",
@@ -2214,6 +2214,7 @@ dependencies = [
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
+ "openmls_traits",
  "p256",
  "rand 0.8.8",
  "scrypt",
