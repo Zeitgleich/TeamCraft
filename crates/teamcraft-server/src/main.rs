@@ -126,6 +126,11 @@ async fn run() -> anyhow::Result<()> {
     .validate()
     .map_err(anyhow::Error::msg)
     .context("checking [limits]")?;
+  config
+    .integration
+    .validate()
+    .map_err(anyhow::Error::msg)
+    .context("checking [integration]")?;
   let brands = BrandStore::new(BrandInputs {
     branding: config.branding.clone(),
     config_brands: config.brands.clone(),

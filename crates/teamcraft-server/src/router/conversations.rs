@@ -33,6 +33,7 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
       handlers::list_channel_role_log_handler,
       handlers::append_channel_role_log_handler
     ))
+    .routes(routes!(handlers::get_bridge_address_handler))
     .routes(routes!(handlers::join_conversation_handler))
     .routes(routes!(
       handlers::list_conversation_members_handler,

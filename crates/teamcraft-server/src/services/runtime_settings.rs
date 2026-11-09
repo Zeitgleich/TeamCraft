@@ -5,15 +5,16 @@
 use serde_json::json;
 use teamcraft_db::StoredSetting;
 use teamcraft_proto::{
-  AppLinkSettings, CrashReportSettings, DpopPolicy, EmailDigestSettings, GatewayEvent, HealthAlertSettings,
-  HolidaySettings, IntegrationSettings, LimitSettings, LocalAccountSettings, MailTextSettings,
-  MeetingMailSettings, NotificationLevel, NotificationRuntimeSettings, Permission, RuntimeSettingsKey,
-  RuntimeSettingsResponse, RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource,
-  ShareSettings, SignInMethod, SignInPageSettings, Target,
+  AppLinkSettings, BridgeAddressResponse, ConversationId, CrashReportSettings, DpopPolicy,
+  EmailDigestSettings, GatewayEvent, HealthAlertSettings, HolidaySettings, IntegrationSettings,
+  LimitSettings, LocalAccountSettings, MailTextSettings, MeetingMailSettings, NotificationLevel,
+  NotificationRuntimeSettings, Permission, RuntimeSettingsKey, RuntimeSettingsResponse,
+  RuntimeSettingsSection, RuntimeSettingsState, ServerRulesSettings, SettingSource, ShareSettings,
+  SignInMethod, SignInPageSettings, Target, check_bridge_public_url,
 };
 use tracing::{error, warn};
 
-use super::access::require;
+use super::access::{load_conversation, require};
 use super::audit;
 use super::convert::unix_millis;
 use crate::auth::{AuthenticatedUser, public_origins};
@@ -111,6 +112,7 @@ pub async fn put_settings(
 ) -> Result<RuntimeSettingsResponse, ApiError> {
   require(state, caller, Permission::ManageWorkspace, &Target::Instance)?;
   validate(&section)?;
+  let section = normalize(section);
   check_token_binding_is_safe(state, caller, &section)?;
   let key = section.key();
   let value = serde_json::to_string(&section).map_err(|error| ApiError::Internal(error.to_string()))?;
@@ -137,6 +139,37 @@ pub async fn put_settings(
   )
   .await?;
   response(state).await
+}
+
+/// The bridge public URL as it is stored: without trailing slashes. Valid by now.
+fn normalize(mut section: RuntimeSettingsSection) -> RuntimeSettingsSection {
+  if let RuntimeSettingsSection::Integration(values) = &mut section
+    && let Some(url) = &values.maybe_bridge_public_url
+    && let Ok(normalized) = check_bridge_public_url(url)
+  {
+    values.maybe_bridge_public_url = Some(normalized);
+  }
+  section
+}
+
+/// The bridge's public address for the people who may configure a channel's integrations (the
+/// "Connect a source" section). Channel admins usually are no instance admins and can't read the
+/// settings, so this is the one value they get, and only this one.
+pub async fn get_bridge_address(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  conversation: ConversationId,
+) -> Result<BridgeAddressResponse, ApiError> {
+  let access = load_conversation(state, caller, conversation).await?;
+  require(
+    state,
+    caller,
+    Permission::ManageChannelProperties,
+    &access.target(),
+  )?;
+  Ok(BridgeAddressResponse {
+    maybe_public_url: state.settings.get().integration.maybe_bridge_public_url.clone(),
+  })
 }
 
 /// Tells everyone online the new attachment limit if the settings changed it, so that clients
@@ -305,6 +338,10 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
     },
     RuntimeSettingsSection::Integration(values) => {
       settings.integration.default_retention_days = values.default_retention_days;
+      settings
+        .integration
+        .maybe_bridge_public_url
+        .clone_from(&values.maybe_bridge_public_url);
     },
     RuntimeSettingsSection::LocalAccounts(values) => {
       let local = &mut settings.local_accounts;
@@ -413,6 +450,7 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
     },
     integration: IntegrationSettings {
       default_retention_days: settings.integration.default_retention_days,
+      maybe_bridge_public_url: settings.integration.maybe_bridge_public_url.clone(),
     },
     local_accounts: LocalAccountSettings {
       is_enabled: local.is_enabled,
@@ -633,12 +671,20 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
         100_000,
       )
     },
-    RuntimeSettingsSection::Integration(values) => check_range(
-      "default_retention_days",
-      u64::from(values.default_retention_days),
-      0,
-      36_500,
-    ),
+    RuntimeSettingsSection::Integration(values) => {
+      check_range(
+        "default_retention_days",
+        u64::from(values.default_retention_days),
+        0,
+        36_500,
+      )?;
+      match &values.maybe_bridge_public_url {
+        Some(url) => check_bridge_public_url(url)
+          .map(drop)
+          .map_err(|error| ApiError::InvalidRequest(format!("bridge_public_url: {error}"))),
+        None => Ok(()),
+      }
+    },
     RuntimeSettingsSection::LocalAccounts(values) => {
       check_range(
         "activation_ttl_hours",
@@ -941,9 +987,14 @@ mod tests {
       &mut settings,
       &RuntimeSettingsSection::Integration(IntegrationSettings {
         default_retention_days: 7,
+        maybe_bridge_public_url: Some("https://bridge.example.com".into()),
       }),
     );
     assert_eq!(settings.integration.default_retention_days, 7);
+    assert_eq!(
+      settings.integration.maybe_bridge_public_url.as_deref(),
+      Some("https://bridge.example.com")
+    );
     assert_eq!(
       settings.notifications.read_receipts_default,
       Settings::default().notifications.read_receipts_default

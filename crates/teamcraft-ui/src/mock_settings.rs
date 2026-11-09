@@ -383,6 +383,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
     },
     integration: IntegrationSettings {
       default_retention_days: 30,
+      maybe_bridge_public_url: None,
     },
     local_accounts: LocalAccountSettings {
       is_enabled: true,

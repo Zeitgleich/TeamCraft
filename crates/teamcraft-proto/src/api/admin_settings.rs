@@ -594,6 +594,17 @@ pub struct LimitSettings {
 pub struct IntegrationSettings {
   /// Retention of integration channels in days; 0 = none.
   pub default_retention_days: u32,
+  /// Where producers reach an integration bridge that runs on its own host (docs/bridge.md): the
+  /// base of its `/hooks/` and `/ingest/` URLs. `https`, or `http` for loopback; no credentials,
+  /// query or fragment ([`check_bridge_public_url`](crate::check_bridge_public_url)). Channel
+  /// admins read it through `GET /api/v1/conversations/{id}/bridge-address`. Absent: none, and the
+  /// apps offer the instance's own host name and the loopback default.
+  #[serde(
+    rename = "bridge_public_url",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_bridge_public_url: Option<String>,
 }
 
 /// Rules for local (password) accounts. They need `[local_accounts]` with a session secret in the
@@ -804,6 +815,7 @@ mod tests {
   fn sections_are_tagged_with_their_name() {
     let section = RuntimeSettingsSection::Integration(IntegrationSettings {
       default_retention_days: 30,
+      maybe_bridge_public_url: None,
     });
     assert_eq!(
       serde_json::to_string(&section).unwrap(),

@@ -697,6 +697,10 @@ impl ChatBackend for MockBackend {
     true
   }
 
+  fn bridge_public_url(&self, _conversation: ConversationId) -> Option<String> {
+    self.ops.borrow().bridge_public_url()
+  }
+
   fn add_integration_source(
     &self,
     conversation: ConversationId,

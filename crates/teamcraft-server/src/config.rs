@@ -1039,12 +1039,30 @@ pub struct IntegrationConfig {
   /// Retention of a channel that becomes an integration channel, in days; `0` sets none. A
   /// channel's own setting wins.
   pub default_retention_days: u32,
+  /// Where producers reach a bridge that runs on its own host: the base of its `/hooks/` and
+  /// `/ingest/` URLs, shown in a channel's "Connect a source" section. `https`, or `http` for a
+  /// loopback host; no credentials, query or fragment. Unset: the apps offer the instance's host
+  /// name and the loopback default. The admin console changes it at runtime.
+  #[serde(rename = "bridge_public_url")]
+  pub maybe_bridge_public_url: Option<String>,
+}
+
+impl IntegrationConfig {
+  /// Rejects a bridge public URL the apps could not build working URLs from.
+  pub fn validate(&self) -> Result<(), String> {
+    if let Some(url) = &self.maybe_bridge_public_url {
+      teamcraft_proto::check_bridge_public_url(url)
+        .map_err(|error| format!("integration.bridge_public_url: {error}"))?;
+    }
+    Ok(())
+  }
 }
 
 impl Default for IntegrationConfig {
   fn default() -> Self {
     Self {
       default_retention_days: 30,
+      maybe_bridge_public_url: None,
     }
   }
 }
