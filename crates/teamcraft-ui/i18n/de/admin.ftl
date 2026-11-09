@@ -773,6 +773,64 @@ admin-integrations-config = Bridge-Konfiguration (teamcraft-bridge.toml)
 admin-integrations-reveal-done = Ich habe es gespeichert
 admin-integrations-next-steps = Danach: den Bot zu den Kanälen hinzufügen, die er bedient (Kanaleinstellungen, Integrationen), und die Bridge einmal starten, damit sie ihr Gerät einrichtet.
 
+## Outgoing webhooks (docs/webhooks.md)
+admin-nav-webhooks = Webhooks
+admin-webhooks-title = Webhooks
+admin-webhooks-subtitle = Andere Systeme (Ticketsystem, CI, Chat-Ops) benachrichtigen, wenn Channels angelegt oder archiviert werden, Personen beitreten oder gehen, oder Anrufe beginnen und enden. Gesendet werden nur IDs und Zeiten: nie Namen oder Nachrichten und nichts über Direktnachrichten.
+admin-webhooks-secret-title = Signaturschlüssel
+admin-webhooks-secret-once = Jetzt kopieren: Er wird nur einmal angezeigt. Der Empfänger prüft damit den Header webhook-signature (Standard Webhooks). Ein neuer Schlüssel ersetzt diesen sofort.
+admin-webhooks-secret = Schlüssel
+admin-webhooks-secrets-unavailable = Webhooks brauchen einen Einstellungsschlüssel, um ihre Schlüssel zu speichern ([secrets] in der Konfigurationsdatei).
+admin-webhooks-new = Neuer Webhook
+admin-webhooks-url-hint = Die URL muss https nutzen und auf eine öffentliche Adresse zeigen; Adressen im eigenen Netz des Servers werden abgelehnt.
+admin-webhooks-url-hint-private = Dieser Server erlaubt Ziele in privaten Netzen und unverschlüsseltes http ([webhooks] allow_private_targets).
+admin-webhooks-create = Webhook hinzufügen
+admin-webhooks-empty = Noch keine Webhooks.
+admin-webhooks-status-on = Aktiv
+admin-webhooks-status-off = Aus
+admin-webhooks-status-failing = Fehlerhaft
+admin-webhooks-queued = { $count ->
+    [one] { $count } Ereignis wartet
+   *[other] { $count } Ereignisse warten
+  }
+admin-webhooks-dropped = { $count ->
+    [one] { $count } verworfen
+   *[other] { $count } verworfen
+  }
+admin-webhooks-last-success = Zuletzt zugestellt
+admin-webhooks-last-failure = Letzter Fehler
+admin-webhooks-paused-until = Nächster Versuch
+admin-webhooks-events = Ereignisse
+admin-webhooks-edit = Bearbeiten
+admin-webhooks-test = Test senden
+admin-webhooks-test-ok = Das Testereignis wurde angenommen.
+admin-webhooks-rotate = Neuer Schlüssel
+admin-webhooks-deliveries = Zustellungen
+admin-webhooks-deliveries-empty = Noch nichts gesendet.
+admin-webhooks-delete = Löschen
+admin-webhooks-delete-confirm = Mit wartenden Ereignissen löschen
+admin-webhooks-col-time = Zeit
+admin-webhooks-col-attempt = Versuch
+admin-webhooks-col-result = Ergebnis
+admin-webhooks-outcome-delivered = Zugestellt
+admin-webhooks-outcome-retrying = Fehlgeschlagen, wird wiederholt
+admin-webhooks-outcome-failed = Fehlgeschlagen, verworfen
+admin-webhooks-url = URL
+admin-webhooks-description = Beschreibung
+admin-webhooks-description-hint = Optional: Wer die Ereignisse empfängt, für die Admins.
+admin-webhooks-enabled = Ereignisse senden
+admin-webhooks-error-description = Eine Zeile mit höchstens 200 Zeichen.
+admin-webhooks-error-events = Mindestens ein Ereignis auswählen.
+admin-webhooks-event-channel-created = Channel angelegt
+admin-webhooks-event-channel-archived = Channel archiviert
+admin-webhooks-event-channel-unarchived = Channel wiederhergestellt
+admin-webhooks-event-channel-deleted = Channel gelöscht
+admin-webhooks-event-member-joined = Mitglied beigetreten
+admin-webhooks-event-member-left = Mitglied gegangen
+admin-webhooks-event-call-started = Anruf begonnen
+admin-webhooks-event-call-ended = Anruf beendet
+admin-webhooks-event-ping = Test
+
 ## Notetaker (admin.md §3.7)
 admin-nav-import = Import
 admin-import-title = Import

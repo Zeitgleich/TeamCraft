@@ -1370,6 +1370,31 @@ pub trait AdminBackend {
   fn save_calendar_settings(&self, _request: UpdateCalendarSettingsRequest) {}
   fn reset_calendar_settings(&self) {}
   fn test_calendar(&self) {}
+  /// The outgoing webhooks; loaded once the console shows their page, `None` until then.
+  fn admin_webhooks(&self) -> Option<teamcraft_proto::AdminWebhooksResponse> {
+    None
+  }
+  fn create_webhook(&self, _request: teamcraft_proto::CreateWebhookRequest) {}
+  fn update_webhook(&self, _id: teamcraft_proto::WebhookId, _request: teamcraft_proto::UpdateWebhookRequest) {
+  }
+  fn delete_webhook(&self, _id: teamcraft_proto::WebhookId) {}
+  fn rotate_webhook_secret(&self, _id: teamcraft_proto::WebhookId) {}
+  /// Sends the test event; the answer shows as [`Self::last_settings_test`].
+  fn test_webhook(&self, _id: teamcraft_proto::WebhookId) {}
+  /// The latest delivery attempts of a webhook; loaded on the first ask.
+  fn webhook_deliveries(
+    &self,
+    _id: teamcraft_proto::WebhookId,
+  ) -> Option<teamcraft_proto::WebhookDeliveriesResponse> {
+    None
+  }
+  /// The secret of the webhook just created or rotated: shown once, until dismissed.
+  fn revealed_webhook_secret(
+    &self,
+  ) -> Option<(teamcraft_proto::WebhookId, teamcraft_proto::WebhookSecretText)> {
+    None
+  }
+  fn dismiss_webhook_secret(&self) {}
   /// The answer of the last mail or calendar test of this console session.
   fn last_settings_test(&self) -> Option<(SettingsTestKind, SettingsTestResponse)> {
     None

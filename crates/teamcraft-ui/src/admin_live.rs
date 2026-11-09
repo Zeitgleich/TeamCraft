@@ -146,6 +146,15 @@ pub struct AdminData {
   notetaker: Option<teamcraft_proto::AdminNotetakerResponse>,
   has_asked_notetaker: bool,
   calendar: Option<AdminCalendarSettingsResponse>,
+  /// Loaded when the console shows the webhooks page; dropped after every change, so it is read
+  /// again.
+  webhooks: Option<teamcraft_proto::AdminWebhooksResponse>,
+  has_asked_webhooks: bool,
+  webhook_deliveries: HashMap<teamcraft_proto::WebhookId, teamcraft_proto::WebhookDeliveriesResponse>,
+  /// Logs asked for since the last change: a refused one is not asked again on every render.
+  asked_webhook_deliveries: HashSet<teamcraft_proto::WebhookId>,
+  /// The secret of the webhook just created or rotated, until the admin dismisses it.
+  revealed_webhook_secret: Option<(teamcraft_proto::WebhookId, teamcraft_proto::WebhookSecretText)>,
   runtime: Option<RuntimeSettingsResponse>,
   last_test: Option<(SettingsTestKind, SettingsTestResponse)>,
   /// `data:` URLs of brand images by `{brand}/{slot}`; loaded when the editor shows them.
@@ -655,6 +664,100 @@ impl AdminLive {
 
   pub fn last_settings_test(&self) -> Option<(SettingsTestKind, SettingsTestResponse)> {
     self.data.borrow().last_test.clone()
+  }
+
+  /// The webhooks; loaded once the console shows their page, and again after each change.
+  pub fn admin_webhooks(&self) -> Option<teamcraft_proto::AdminWebhooksResponse> {
+    let maybe_webhooks = self.data.borrow().webhooks.clone();
+    // Once until the next change: a refusal must not ask again on every render.
+    let is_first_ask = !std::mem::replace(&mut self.data.borrow_mut().has_asked_webhooks, true);
+    if maybe_webhooks.is_none() && is_first_ask {
+      self.load(
+        "webhooks".to_owned(),
+        "/api/v1/admin/webhooks".to_owned(),
+        Loaded::Webhooks,
+      );
+    }
+    maybe_webhooks
+  }
+
+  pub fn create_webhook(&self, request: teamcraft_proto::CreateWebhookRequest) {
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.send_stored(
+        ApiMethod::Post,
+        "/api/v1/admin/webhooks".to_owned(),
+        Some(body),
+        Stored::Webhooks { has_secret: true },
+      );
+    }
+  }
+
+  pub fn update_webhook(
+    &self,
+    id: teamcraft_proto::WebhookId,
+    request: teamcraft_proto::UpdateWebhookRequest,
+  ) {
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.send_stored(
+        ApiMethod::Put,
+        format!("/api/v1/admin/webhooks/{id}"),
+        Some(body),
+        Stored::Webhooks { has_secret: false },
+      );
+    }
+  }
+
+  pub fn delete_webhook(&self, id: teamcraft_proto::WebhookId) {
+    self.send_stored(
+      ApiMethod::Delete,
+      format!("/api/v1/admin/webhooks/{id}"),
+      None,
+      Stored::Webhooks { has_secret: false },
+    );
+  }
+
+  pub fn rotate_webhook_secret(&self, id: teamcraft_proto::WebhookId) {
+    self.send_stored(
+      ApiMethod::Post,
+      format!("/api/v1/admin/webhooks/{id}/secret"),
+      Some("{}".to_owned()),
+      Stored::Webhooks { has_secret: true },
+    );
+  }
+
+  pub fn test_webhook(&self, id: teamcraft_proto::WebhookId) {
+    self.run_settings_test(
+      SettingsTestKind::Webhook(id),
+      format!("/api/v1/admin/webhooks/{id}/test"),
+      "{}".to_owned(),
+    );
+  }
+
+  pub fn webhook_deliveries(
+    &self,
+    id: teamcraft_proto::WebhookId,
+  ) -> Option<teamcraft_proto::WebhookDeliveriesResponse> {
+    let maybe_log = self.data.borrow().webhook_deliveries.get(&id).cloned();
+    let is_first_ask = self.data.borrow_mut().asked_webhook_deliveries.insert(id);
+    if maybe_log.is_none() && is_first_ask {
+      self.load(
+        format!("webhook-deliveries-{id}"),
+        format!("/api/v1/admin/webhooks/{id}/deliveries"),
+        Loaded::WebhookDeliveries(id),
+      );
+    }
+    maybe_log
+  }
+
+  pub fn revealed_webhook_secret(
+    &self,
+  ) -> Option<(teamcraft_proto::WebhookId, teamcraft_proto::WebhookSecretText)> {
+    self.data.borrow().revealed_webhook_secret.clone()
+  }
+
+  pub fn dismiss_webhook_secret(&self) {
+    self.data.borrow_mut().revealed_webhook_secret = None;
+    self.changed();
   }
 
   pub fn runtime_settings(&self) -> Option<RuntimeSettingsResponse> {
@@ -1456,6 +1559,16 @@ impl AdminLive {
         .fetch::<teamcraft_proto::AdminNotetakerResponse>(&path, &mut errors)
         .await
         .map(|settings| Box::new(move |data: &mut AdminData| data.notetaker = Some(settings)) as Store),
+      Loaded::Webhooks => self
+        .fetch::<teamcraft_proto::AdminWebhooksResponse>(&path, &mut errors)
+        .await
+        .map(|webhooks| Box::new(move |data: &mut AdminData| data.webhooks = Some(webhooks)) as Store),
+      Loaded::WebhookDeliveries(id) => self
+        .fetch::<teamcraft_proto::WebhookDeliveriesResponse>(&path, &mut errors)
+        .await
+        .map(|log| {
+          Box::new(move |data: &mut AdminData| drop(data.webhook_deliveries.insert(id, log))) as Store
+        }),
     };
     {
       let mut data = self.data.borrow_mut();
@@ -1782,6 +1895,7 @@ impl AdminLive {
   }
 
   async fn run_settings_test_now(&self, kind: SettingsTestKind, path: String, body: String) {
+    let is_webhook = matches!(kind, SettingsTestKind::Webhook(_));
     let outcome = match self.auth.api_request(ApiMethod::Post, &path, Some(body)).await {
       Ok(response) if response.status < 300 => serde_json::from_str::<SettingsTestResponse>(&response.body)
         .unwrap_or_else(|error| SettingsTestResponse {
@@ -1797,7 +1911,15 @@ impl AdminLive {
         maybe_error: Some(error.to_string()),
       },
     };
-    self.data.borrow_mut().last_test = Some((kind, outcome));
+    {
+      let mut data = self.data.borrow_mut();
+      data.last_test = Some((kind, outcome));
+      if is_webhook {
+        // The test is in the delivery log now.
+        data.webhook_deliveries.clear();
+        data.asked_webhook_deliveries.clear();
+      }
+    }
     self.changed();
     // Mail tests change the delivery status shown next to the form.
     self.queue_refresh();
@@ -1964,6 +2086,10 @@ pub enum Stored {
   Calendar,
   Runtime,
   Notetaker,
+  /// A webhook was changed: the list is read again; `has_secret` answers carry a new secret.
+  Webhooks {
+    has_secret: bool,
+  },
 }
 
 /// What on-demand data a load is for.
@@ -1973,6 +2099,8 @@ pub enum Loaded {
   Members(ConversationId),
   Devices(UserId),
   Notetaker,
+  Webhooks,
+  WebhookDeliveries(teamcraft_proto::WebhookId),
 }
 
 /// Stores a loaded value in the cache.
@@ -1992,6 +2120,16 @@ impl Stored {
       Self::Calendar => data.calendar = Some(serde_json::from_str(body)?),
       Self::Runtime => data.runtime = Some(serde_json::from_str(body)?),
       Self::Notetaker => data.notetaker = Some(serde_json::from_str(body)?),
+      Self::Webhooks { has_secret } => {
+        data.webhooks = None;
+        data.has_asked_webhooks = false;
+        data.webhook_deliveries.clear();
+        data.asked_webhook_deliveries.clear();
+        if has_secret {
+          let answer: teamcraft_proto::WebhookSecretResponse = serde_json::from_str(body)?;
+          data.revealed_webhook_secret = Some((answer.webhook.id, answer.secret));
+        }
+      },
     }
     Ok(())
   }
@@ -2071,6 +2209,7 @@ impl Reads {
       AdminSection::Backgrounds
       | AdminSection::Updates
       | AdminSection::Integrations
+      | AdminSection::Webhooks
       | AdminSection::Notetaker => Self::POLICY,
     }
   }

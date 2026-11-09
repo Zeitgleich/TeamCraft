@@ -2022,6 +2022,65 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
+  fn admin_webhooks(&self) -> Option<teamcraft_proto::AdminWebhooksResponse> {
+    self.maybe_admin.as_ref().and_then(|admin| admin.admin_webhooks())
+  }
+
+  fn create_webhook(&self, request: teamcraft_proto::CreateWebhookRequest) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.create_webhook(request);
+    }
+  }
+
+  fn update_webhook(&self, id: teamcraft_proto::WebhookId, request: teamcraft_proto::UpdateWebhookRequest) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.update_webhook(id, request);
+    }
+  }
+
+  fn delete_webhook(&self, id: teamcraft_proto::WebhookId) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.delete_webhook(id);
+    }
+  }
+
+  fn rotate_webhook_secret(&self, id: teamcraft_proto::WebhookId) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.rotate_webhook_secret(id);
+    }
+  }
+
+  fn test_webhook(&self, id: teamcraft_proto::WebhookId) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.test_webhook(id);
+    }
+  }
+
+  fn webhook_deliveries(
+    &self,
+    id: teamcraft_proto::WebhookId,
+  ) -> Option<teamcraft_proto::WebhookDeliveriesResponse> {
+    self
+      .maybe_admin
+      .as_ref()
+      .and_then(|admin| admin.webhook_deliveries(id))
+  }
+
+  fn revealed_webhook_secret(
+    &self,
+  ) -> Option<(teamcraft_proto::WebhookId, teamcraft_proto::WebhookSecretText)> {
+    self
+      .maybe_admin
+      .as_ref()
+      .and_then(|admin| admin.revealed_webhook_secret())
+  }
+
+  fn dismiss_webhook_secret(&self) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.dismiss_webhook_secret();
+    }
+  }
+
   fn last_settings_test(&self) -> Option<(SettingsTestKind, SettingsTestResponse)> {
     self
       .maybe_admin

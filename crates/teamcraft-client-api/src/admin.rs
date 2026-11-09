@@ -1,7 +1,7 @@
 //! View models of the administration console. Admins see metadata only: nothing here carries message
 //! content (admin.md §2.1).
 
-use teamcraft_proto::{HistoryPolicy, JoinPolicy, Role};
+use teamcraft_proto::{HistoryPolicy, JoinPolicy, Role, WebhookId};
 
 use crate::model::{ConversationId, ConversationKind, DeviceId, SpaceId, TimestampMs, User, UserId};
 
@@ -329,6 +329,8 @@ pub enum SettingsTestKind {
   Calendar,
   /// The own mail server of the brand with this id.
   BrandMail(String),
+  /// The test event sent to one webhook.
+  Webhook(WebhookId),
 }
 
 /// Why the policy form is read-only.
@@ -776,6 +778,8 @@ pub enum AdminSection {
   Instance,
   /// Bots for the integration bridge (docs/bridge.md).
   Integrations,
+  /// Outgoing webhooks: URLs told about channel events (docs/webhooks.md).
+  Webhooks,
   /// The AI notetaker of calls (e2ee.md §8.2): signed policy and the API key.
   Notetaker,
   /// History from another chat (admin.md §3.8): the signed import account and period.
@@ -784,7 +788,7 @@ pub enum AdminSection {
 }
 
 impl AdminSection {
-  pub const ALL: [AdminSection; 19] = [
+  pub const ALL: [AdminSection; 20] = [
     Self::Channels,
     Self::Users,
     Self::Permissions,
@@ -801,6 +805,7 @@ impl AdminSection {
     Self::Health,
     Self::Instance,
     Self::Integrations,
+    Self::Webhooks,
     Self::Notetaker,
     Self::Import,
     Self::Audit,
@@ -824,6 +829,7 @@ impl AdminSection {
       Self::Health => "health",
       Self::Instance => "instance",
       Self::Integrations => "integrations",
+      Self::Webhooks => "webhooks",
       Self::Notetaker => "notetaker",
       Self::Import => "import",
       Self::Audit => "audit",
