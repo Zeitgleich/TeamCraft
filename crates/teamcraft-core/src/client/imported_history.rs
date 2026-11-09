@@ -57,7 +57,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           Some(oldest) if page.has_more => PagingPosition::Before(oldest),
           _ => PagingPosition::Beginning,
         };
-        self.receive_page(page.messages)?;
+        self.receive_page(page.messages).await?;
         (count, position)
       },
       Err(error) if error.is_retry_later() => return Err(error.into()),

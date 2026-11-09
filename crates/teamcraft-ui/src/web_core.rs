@@ -1699,7 +1699,8 @@ impl Core {
         Box::new(SystemClock),
         ClientSettings::default()
           .with_notes_to_self()
-          .with_capped_catch_up(),
+          .with_capped_catch_up()
+          .with_thread_turns(),
       )
     });
     let maybe_client = match opened {
@@ -1734,7 +1735,8 @@ impl Core {
       Box::new(SystemClock),
       ClientSettings::default()
         .with_notes_to_self()
-        .with_capped_catch_up(),
+        .with_capped_catch_up()
+        .with_thread_turns(),
       Argon2Settings::default(),
     )
     .await;
@@ -2129,7 +2131,9 @@ impl Core {
       self.api(),
       store,
       Box::new(SystemClock),
-      ClientSettings::default().with_capped_catch_up(),
+      ClientSettings::default()
+        .with_capped_catch_up()
+        .with_thread_turns(),
       device_name,
       // The key bag is wrapped with a random secret nobody keeps: the cheapest setting is plenty.
       Argon2Settings {
@@ -2177,7 +2181,8 @@ impl Core {
         Box::new(SystemClock),
         ClientSettings::default()
           .with_notes_to_self()
-          .with_capped_catch_up(),
+          .with_capped_catch_up()
+          .with_thread_turns(),
         options,
       )
       .await

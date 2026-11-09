@@ -109,6 +109,14 @@ pub(crate) fn slow_read(job: &str, waited: Duration, ran: Duration) {
   }
 }
 
+/// Logs a query of the app's that ran long, by its kind (issue #1575): a "slow read" line names
+/// only `query`, and the UI asks for many kinds through it.
+pub(crate) fn slow_query(kind: String, ran: Duration) {
+  if ran >= SLOW_JOB {
+    tracing::info!(target: LIFECYCLE, kind, ran_ms = ran.as_millis(), "slow query");
+  }
+}
+
 /// Logs how `step` ended (the error's variant and message on failure) and passes the result on.
 pub(crate) fn outcome<T>(
   step: LifecycleStep,
