@@ -5,7 +5,9 @@ use std::pin::Pin;
 
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use teamcraft_crypto::attachment::{AttachmentKey, DEFAULT_CHUNK_SIZE, encrypt_attachment, encrypted_len};
+use teamcraft_crypto::attachment::{
+  AttachmentKey, DEFAULT_CHUNK_SIZE, EncryptedAttachment, encrypt_attachment, encrypted_len,
+};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_crypto::share_link::create_fragment;
@@ -932,14 +934,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     file: &mut PendingFile,
   ) -> Result<(AttachmentRef, BlobRequest, TransferGuard), UploadError> {
     let _step = crate::timing::step("file_encrypt");
-    let content = read_source(&file.source, file.size_bytes)
+    let SealedFile {
+      content_len,
+      maybe_made,
+      maybe_dimensions,
+      encrypted,
+    } = seal_file(file, self.settings.makes_thumbnails)
       .await
       .map_err(|()| UploadError::Failed(TransferFailure::LocalFile))?;
-    let maybe_made = if self.settings.makes_thumbnails {
-      crate::thumbnail::make_thumbnail(&content, &file.media_type).await
-    } else {
-      None
-    };
     let maybe_thumbnail = maybe_made.or_else(|| {
       file
         .maybe_thumbnail
@@ -947,15 +949,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .filter(|thumbnail| thumbnail.as_slice().len() <= MAX_APP_THUMBNAIL_BYTES)
         .map(|thumbnail| thumbnail.as_slice().to_vec())
     });
-    // Receivers reserve the picture's space before anything loads (issue #316).
-    let maybe_dimensions = crate::thumbnail::image_dimensions(&content, &file.media_type)
-      .map(|(width, height)| ImageDimensions { width, height });
     if file.maybe_thumbnail.is_none() {
       file.maybe_thumbnail = maybe_thumbnail.clone().map(Base64Bytes::new);
     }
     file.maybe_dimensions = file.maybe_dimensions.or(maybe_dimensions);
-    let encrypted = encrypt_attachment(&content, DEFAULT_CHUNK_SIZE, &mut OsRng)
-      .map_err(|_| UploadError::Failed(TransferFailure::LocalFile))?;
     let size_bytes = encrypted.ciphertext.len() as u64;
     let slot = match file.maybe_slot.take() {
       // A URL that expired while the file waited out an outage would only cost one more round.
@@ -978,7 +975,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       ciphertext_sha256: Base64Bytes::new(encrypted.ciphertext_sha256.to_vec()),
       file_name: file.file_name.clone(),
       media_type: file.media_type.clone(),
-      size_bytes: content.len() as u64,
+      size_bytes: content_len,
       maybe_thumbnail: maybe_thumbnail.map(Base64Bytes::new),
       maybe_dimensions,
       maybe_duration_ms: file.maybe_duration_ms,
@@ -1699,6 +1696,79 @@ fn remove_staged(staging: &std::path::Path, source: &UploadSource) {
 
 #[cfg(target_arch = "wasm32")]
 fn remove_staged(_staging: &std::path::Path, _source: &UploadSource) {}
+
+/// A file read, encrypted and measured for its upload, with the thumbnail made from it.
+struct SealedFile {
+  content_len: u64,
+  maybe_made: Option<Vec<u8>>,
+  maybe_dimensions: Option<ImageDimensions>,
+  encrypted: EncryptedAttachment,
+}
+
+/// Reads, thumbnails and encrypts `file`. Natively on a blocking thread (#1579): this is seconds of
+/// work for a big photo on a phone, and on the engine's thread it held up every other job (the app's
+/// sends and reads included) while a share's files went up one after another.
+#[cfg(not(target_arch = "wasm32"))]
+async fn seal_file(file: &PendingFile, makes_thumbnails: bool) -> Result<SealedFile, ()> {
+  let source = file.source.clone();
+  let (size_bytes, media_type) = (file.size_bytes, file.media_type.clone());
+  // Only a browser's picked file is read asynchronously; it never gets here natively.
+  let maybe_read = match &source {
+    UploadSource::Picked { .. } => Some(read_source(&source, size_bytes).await?),
+    UploadSource::Bytes { .. } | UploadSource::Path { .. } => None,
+  };
+  tokio::task::spawn_blocking(move || {
+    let content = match maybe_read {
+      Some(content) => content,
+      None => read_source_now(&source)?,
+    };
+    let maybe_made = if makes_thumbnails && crate::thumbnail::is_image(&media_type) {
+      crate::thumbnail::thumbnail(&content, &media_type)
+    } else {
+      None
+    };
+    seal_content(content, maybe_made, &media_type)
+  })
+  .await
+  .map_err(|error| tracing::warn!(%error, "the file's encryption stopped"))?
+}
+
+/// [`seal_file`] in the browser: the page's codecs are asynchronous and there is one thread.
+#[cfg(target_arch = "wasm32")]
+async fn seal_file(file: &PendingFile, makes_thumbnails: bool) -> Result<SealedFile, ()> {
+  let content = read_source(&file.source, file.size_bytes).await?;
+  let maybe_made = if makes_thumbnails {
+    crate::thumbnail::make_thumbnail(&content, &file.media_type).await
+  } else {
+    None
+  };
+  seal_content(content, maybe_made, &file.media_type)
+}
+
+fn seal_content(content: Vec<u8>, maybe_made: Option<Vec<u8>>, media_type: &str) -> Result<SealedFile, ()> {
+  // Receivers reserve the picture's space before anything loads (issue #316).
+  let maybe_dimensions = crate::thumbnail::image_dimensions(&content, media_type)
+    .map(|(width, height)| ImageDimensions { width, height });
+  let encrypted = encrypt_attachment(&content, DEFAULT_CHUNK_SIZE, &mut OsRng).map_err(|_| ())?;
+  Ok(SealedFile {
+    content_len: content.len() as u64,
+    maybe_made,
+    maybe_dimensions,
+    encrypted,
+  })
+}
+
+/// A file's bytes, read on the calling (blocking) thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn read_source_now(source: &UploadSource) -> Result<Vec<u8>, ()> {
+  match source {
+    UploadSource::Bytes { bytes } => Ok(bytes.as_slice().to_vec()),
+    UploadSource::Path { path } => std::fs::read(path).map_err(|error| {
+      tracing::warn!(%error, "could not read a file to upload");
+    }),
+    UploadSource::Picked { .. } => Err(()),
+  }
+}
 
 async fn read_source(source: &UploadSource, size_bytes: u64) -> Result<Vec<u8>, ()> {
   match source {

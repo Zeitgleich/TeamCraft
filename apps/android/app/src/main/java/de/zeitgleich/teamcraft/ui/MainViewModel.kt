@@ -57,6 +57,9 @@ import de.zeitgleich.teamcraft.auth.isSsoOnly
 import de.zeitgleich.teamcraft.auth.localSignInErrorText
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatActions
+import de.zeitgleich.teamcraft.core.ComposerSend
+import de.zeitgleich.teamcraft.core.ComposerSendState
+import de.zeitgleich.teamcraft.core.SendAttempt
 import de.zeitgleich.teamcraft.core.DraftFiles
 import de.zeitgleich.teamcraft.ui.media.MediaDraftStore
 import de.zeitgleich.teamcraft.ui.media.SealedCaptures
@@ -251,6 +254,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   val goneDraftFiles = mutableStateListOf<String>()
 
+  private val sendAttempts = SendAttemptPrefs(application)
+
+  /** Where each composer's send stands (#1579): pending, failed with a retry, or nothing. */
+  val composerSend = ComposerSend(sendAttempts)
+
   /** Staged files whose draft copy is being made, so a second call doesn't attach them twice. */
   private val draftAttaching = mutableSetOf<String>()
 
@@ -259,7 +267,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /** The one voice recording of the app (#204). */
   val voice = VoiceRecorderModel(application, viewModelScope, isInCall) {
-    runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull()
+    runCatching { graph.core.uploadStagingDir() }.getOrNull()
   }
 
   /** The one player of voice messages (#204). */
@@ -955,6 +963,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   /**
+   * Sends a composer's message as [attempt] (#1579). In the view model's scope: leaving the
+   * conversation doesn't stop it. [onSent] runs once the core has the message; a failure stays on
+   * the composer ([ComposerSend]) with its reason, for a retry with the same message ID.
+   */
+  fun sendFromComposer(key: String, attempt: SendAttempt, action: String, onSent: () -> Unit) = viewModelScope.launch {
+    @StringRes val maybeFailure = try {
+      tryAct(action)
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: RuntimeException) {
+      // Anything else the bridge throws must still reach the user, not end the send in silence.
+      Log.w(TAG, "send failed: ${failure.javaClass.simpleName}")
+      R.string.error_generic
+    }
+    if (maybeFailure == null) {
+      composerSend.succeeded(key, attempt)
+      onSent()
+    } else {
+      composerSend.failed(key, attempt, maybeFailure)
+    }
+  }
+
+  /**
    * Runs [action] for a form and returns why it failed (null on success), so the form shows the
    * refusal at its field and stays open with the input (forms.md, "Submitting").
    */
@@ -1140,11 +1171,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val fresh = pickedFiles[key].orEmpty().filter { it.maybeDraft == null && draftAttaching.add(it.path) }
     if (fresh.isEmpty()) return@launch
     try {
-      val maybeStaging = withContext(Dispatchers.IO) { runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() }
+      val maybeStaging = withContext(Dispatchers.IO) { runCatching { graph.core.uploadStagingDir() }.getOrNull() }
       val staging = maybeStaging ?: return@launch
       val prepared = withContext(Dispatchers.IO) { fresh.map { it to DraftFiles.copyFor(it, staging) } }
-      // Back on the main thread: the composer may have sent or removed some meanwhile.
-      val merged = DraftFiles.merge(pickedFiles[key].orEmpty(), prepared)
+      // Back on the main thread: the composer may have sent or removed some meanwhile. While its
+      // send runs, the files go with the message: the draft doesn't take them as well (#1579).
+      val isSending = composerSend.state(key) is ComposerSendState.Sending
+      val merged = DraftFiles.merge(if (isSending) emptyList() else pickedFiles[key].orEmpty(), prepared)
       if (merged.attached.isNotEmpty()) pickedFiles[key] = merged.files
       if (merged.dropped.isNotEmpty()) {
         withContext(Dispatchers.IO) { merged.dropped.forEach { deleteStaged(it.path) } }
@@ -1184,7 +1217,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /** Deletes a staged copy; only files in the account's staging folder are the app's to delete. */
   private suspend fun deleteStaged(path: String) {
-    val directory = runCatching { File(graph.core.core().uploadStagingDir()).canonicalFile }.getOrNull() ?: return
+    val directory = runCatching { graph.core.uploadStagingDir().canonicalFile }.getOrNull() ?: return
     val staged = File(path).canonicalFile
     if (staged.parentFile == directory) staged.delete()
   }
@@ -1241,7 +1274,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   suspend fun importSharedFile(share: StagedShare, file: StagedShareFile): PickedFile? = withContext(Dispatchers.IO) {
     val source = shares.inbox.fileOf(share, file)
     val name = cleanFileName(file.name).ifBlank { "file" }
-    val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return@withContext null
+    val directory = runCatching { graph.core.uploadStagingDir() }.getOrNull() ?: return@withContext null
     val target = File(directory, "${System.nanoTime()}-${name.replace('/', '_')}")
     if (source.renameTo(target)) {
       withVideoPoster(PickedFile(fileName = name, mediaType = file.mediaType, path = target.absolutePath))
@@ -1261,6 +1294,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /** What waits to be shared doesn't outlive the session on this device. */
   private suspend fun forgetWaitingShares() {
+    sendAttempts.wipe()
     shares.stopCopies()
     withContext(Dispatchers.IO) { shares.inbox.wipe() }
     shares.forgetHandedOver()
@@ -1301,7 +1335,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    * moved when it can be, else copied and deleted.
    */
   suspend fun stageMovedFile(name: String, mediaType: String, file: File): PickedFile? = withContext(Dispatchers.IO) {
-    val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return@withContext null
+    val directory = runCatching { graph.core.uploadStagingDir() }.getOrNull() ?: return@withContext null
     val target = File(directory, "${System.nanoTime()}-${cleanFileName(name).replace('/', '_')}")
     if (file.length() <= MAX_IMPORT_BYTES && file.renameTo(target)) {
       return@withContext withVideoPoster(PickedFile(fileName = name, mediaType = mediaType, path = target.absolutePath))
@@ -1322,7 +1356,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Copies into the core's staging folder, at most [MAX_IMPORT_BYTES]. */
   private suspend fun stage(name: String, type: String, open: () -> InputStream?): PickedFile? {
     // The core deletes the copy once it is uploaded (or failed for good).
-    val directory = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull() ?: return null
+    val directory = runCatching { graph.core.uploadStagingDir() }.getOrNull() ?: return null
     val target = File(directory, "${System.nanoTime()}-${name.replace('/', '_')}")
     val isCopied = runCatching {
       open()?.use { input -> target.outputStream().use { copyAtMost(input, it, MAX_IMPORT_BYTES) } } ?: false
@@ -1350,7 +1384,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    * Where the media flow's camera writes (`media-flow-captures-…` folders): the core's staging
    * folder, wiped at sign-out with the other plaintext copies. `null` while no account is open.
    */
-  suspend fun mediaCapturesRoot(): File? = runCatching { File(graph.core.core().uploadStagingDir()) }.getOrNull()
+  suspend fun mediaCapturesRoot(): File? = runCatching { graph.core.uploadStagingDir() }.getOrNull()
 
   /** Conversations with a call running now and how many people are in each (issue #1352). */
   suspend fun runningCalls(): Map<String, Int> =

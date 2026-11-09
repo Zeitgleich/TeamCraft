@@ -75,7 +75,7 @@ pub trait PictureCodec {
 /// the browser.
 pub async fn make_thumbnail(bytes: &[u8], media_type: &str) -> Option<Vec<u8>> {
   let _step = crate::timing::step("thumbnail_make");
-  if !essence(media_type).starts_with("image/") {
+  if !is_image(media_type) {
     return None;
   }
   #[cfg(target_arch = "wasm32")]
@@ -86,6 +86,11 @@ pub async fn make_thumbnail(bytes: &[u8], media_type: &str) -> Option<Vec<u8>> {
   {
     thumbnail(bytes, media_type)
   }
+}
+
+/// Whether a file of `media_type` is a picture a thumbnail is made of.
+pub fn is_image(media_type: &str) -> bool {
+  essence(media_type).starts_with("image/")
 }
 
 /// [`PictureCodec::without_metadata`] as the platform does it (see [`make_thumbnail`]).
