@@ -4,24 +4,34 @@ import SwiftUI
 /// chosen one outlined), or a custom theme of four colours with hex fields, a theme code to copy and
 /// paste, and "Surprise me". The same choices as Android's picker. A choice applies at once, to the
 /// open screens too, and follows the account (`SettingsSyncer`). The colours of every theme come from
-/// the core; this only shows them.
+/// the core; this only shows them. The brand decides what is on offer and what the default is
+/// (#1495): a stored choice it doesn't allow is shown as the default and only ever replaced by the
+/// person picking something else.
 struct ColorThemeSettingsView: View {
   private let theme = ColorThemeModel.shared
   @Environment(\.colorScheme) private var colorScheme
-  @State private var isCustom = ColorThemeModel.shared.value.hasPrefix(ColorThemeSetting.customPrefix)
+  @State private var wantsCustom = ColorThemeModel.shared.inForce.hasPrefix(ColorThemeSetting.customPrefix)
+
+  private var isCustom: Bool { wantsCustom && theme.canCustomize }
 
   var body: some View {
     Form {
       Section {
-        Picker("color_theme", selection: $isCustom) {
-          Text("color_theme_presets").tag(false)
-          Text("color_theme_custom").tag(true)
+        if theme.canCustomize {
+          Picker("color_theme", selection: $wantsCustom) {
+            Text("color_theme_presets").tag(false)
+            Text("color_theme_custom").tag(true)
+          }
+          .pickerStyle(.segmented)
+          .labelsHidden()
+          .accessibilityLabel(Text("color_theme"))
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .accessibilityLabel(Text("color_theme"))
       } footer: {
-        Text("color_theme_hint")
+        VStack(alignment: .leading, spacing: 6) {
+          Text("color_theme_hint")
+          if theme.isWithheld { Text("color_theme_withheld") }
+          if !theme.hasChoices { Text("color_theme_fixed") }
+        }
       }
       if isCustom {
         CustomColorThemeSections(theme: theme)
@@ -31,10 +41,10 @@ struct ColorThemeSettingsView: View {
     }
     .navigationTitle("color_theme")
     .navigationBarTitleDisplayMode(.inline)
-    .onChange(of: isCustom) { _, isCustom in
+    .onChange(of: wantsCustom) { _, wantsCustom in
       // Custom starts from what is on screen, so the switch itself changes nothing visible.
-      guard isCustom, !theme.value.hasPrefix(ColorThemeSetting.customPrefix) else { return }
-      let colors = colorThemeColors(value: theme.value) ?? ColorThemeSetting.productColors
+      guard wantsCustom, !theme.inForce.hasPrefix(ColorThemeSetting.customPrefix) else { return }
+      let colors = colorThemeColors(value: theme.effectiveValue) ?? ColorThemeSetting.productColors
       if let value = colorThemeCustom(colors: colors) { theme.choose(value) }
     }
   }
@@ -47,14 +57,15 @@ struct ColorThemeSettingsView: View {
   ]
 
   @ViewBuilder private var presetSections: some View {
-    let presets = colorThemePresets()
+    let presets = colorThemePresets().filter { theme.allowsPreset(id: $0.id) }
     let isDark = colorScheme == .dark
+    let maybeDefaultTokens = theme.maybePolicy.flatMap { colorThemeTokens(value: $0.defaultValue, isDark: isDark) }
     Section {
       grid {
         ThemeSwatch(
           name: Text("color_theme_brand"),
-          colors: ThemeSwatch.productColors(isDark: isDark),
-          isSelected: !theme.isThemed
+          colors: maybeDefaultTokens.map(ThemeSwatch.Colors.init(tokens:)) ?? ThemeSwatch.productColors(isDark: isDark),
+          isSelected: theme.inForce == ColorThemeSetting.defaultValue || !theme.isThemed
         ) { theme.choose(ColorThemeSetting.defaultValue) }
       }
     }
@@ -67,10 +78,8 @@ struct ColorThemeSettingsView: View {
               if let tokens = colorThemeTokens(value: preset.value, isDark: isDark) {
                 ThemeSwatch(
                   name: ColorThemePresetName.text(for: preset.id),
-                  colors: ThemeSwatch.Colors(
-                    navigation: tokens.chrome, selected: tokens.selected,
-                    presence: tokens.presence, badge: tokens.badge),
-                  isSelected: theme.value == preset.value
+                  colors: ThemeSwatch.Colors(tokens: tokens),
+                  isSelected: theme.inForce == preset.value
                 ) { theme.choose(preset.value) }
               }
             }
@@ -95,6 +104,17 @@ private struct ThemeSwatch: View {
     let selected: UInt32
     let presence: UInt32
     let badge: UInt32
+
+    init(navigation: UInt32, selected: UInt32, presence: UInt32, badge: UInt32) {
+      self.navigation = navigation
+      self.selected = selected
+      self.presence = presence
+      self.badge = badge
+    }
+
+    init(tokens: AppThemeTokens) {
+      self.init(navigation: tokens.chrome, selected: tokens.selected, presence: tokens.presence, badge: tokens.badge)
+    }
   }
 
   let name: Text
