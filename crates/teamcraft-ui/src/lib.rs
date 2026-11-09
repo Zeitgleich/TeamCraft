@@ -15,6 +15,7 @@ pub use teamcraft_client_api::{admin, backend, model, search, security};
 
 pub mod activity_place;
 pub mod admin_live;
+pub mod admission;
 pub mod app_links;
 pub mod areas;
 pub mod attention;

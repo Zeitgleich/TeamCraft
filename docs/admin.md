@@ -207,9 +207,24 @@ signature (freshness above).
 
 An admin could add *themselves* to a private channel and read what is posted there from then on. A
 self-join asks only for the history from the join on: members' apps refuse a signed self-add that
-asks for more, whatever the workspace default (e2ee.md §4.7). Until a member's app lets the admin's
-device in, the channel says it waits and the device asks again on its own; the console's button then
-reads "Request access again" and is gone once the admin is in. That is allowed, but never silent:
+asks for more, whatever the workspace default (e2ee.md §4.7). Under `visible` nobody decides: the
+server can't add a device to the encryption group, so the app of a member who is online commits the
+signed self-add, which takes seconds (with a bridge in the channel, always). The channel details in
+Administration → Channels show what happens, live from gateway events (membership, presence), never
+polled (issue #908):
+
+- **Adding you to the channel**: a member is online; the button is gone meanwhile.
+- **No member is online**: the admin is added as soon as one is. The request is kept in the device's
+  store, also across restarts and while the admin's device is offline, and posted again on its own.
+- **Not added yet**: members were online, but none committed the self-add within `self_add_retry`
+  (30 minutes, doubling up to a day), perhaps refused (an outdated app, a policy it read
+  differently, issue #907). The app asks again on its own; "Request access again" asks at once.
+- **You are a member**: the device is in the group; the button is gone.
+
+The channel itself shows the same as a banner. Only `owner_approval` is a wait for people, and says
+so. Why the admin's app doesn't join by an MLS external commit instead, so that no member had to be
+online: e2ee.md §4.6, "An admin's self-join is committed by a member". That is allowed, but never
+silent:
 
 - Per instance setting `admin_self_join` for private channels:
   - `visible` (default) – allowed; members see "Paul joined this channel as a workspace admin"

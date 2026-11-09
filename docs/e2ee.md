@@ -1177,6 +1177,46 @@ its own. See [admin.md](admin.md) §2.
   refuses that commit, falls out and is added back into the group with the admin ("Falling out
   and coming back", below). This version never commits what an older one refuses, so the group
   doesn't split either way.
+- **An admin's self-join is committed by a member, not by an external commit** (issue #908,
+  evaluated, not adopted). Under `admin_self_join = visible` nobody decides, but a member's device
+  still has to commit the signed self-add, so with every member offline the admin waits. An MLS
+  external commit from the group's `GroupInfo` would let the admin's device join alone. It doesn't
+  hold up against the threat model, for four reasons:
+  - **No floor for the `GroupInfo`.** A further device refuses a `GroupInfo` older than the last key
+    switch its user's devices saw (above). An admin who was never in the group has no such floor, so
+    the server could hand out an old `GroupInfo` whose tree still holds a member removed since and
+    fork the admin into a group with them. Whatever the admin writes there, the removed member reads,
+    and the "joined as a workspace admin" line appears only in the fork. A signed "this is the
+    current epoch" from a member would close this, and needs a member online, which is what the
+    external commit was meant to avoid.
+  - **The refusal must hold.** Members enforce `owner_approval`, `disabled`, a fresh roster and the
+    `from_join` share (§4.7) by not committing. An external commit is sequenced by the server before
+    any member judged it, and openmls merges it on the joiner's side at once. Members that refuse it
+    can't undo it: they fall out of the group, and the only device that merged it is the admin's
+    ("Falling out and coming back", below), or in a strict channel they stop at that epoch until an
+    admin's rewind (§4.6.2). So a hostile or just outdated admin client could split or pause every
+    private channel it is not allowed into. Today a refused self-add changes nothing for the members.
+  - **It gains little.** A `from_join` addition switches the content key (§4.2). The joiner can't
+    have the current one and must not, so it could write only with a key it made, and read nothing
+    until a member's app handled the commit. Every member who writes is online and handles it first,
+    so the admin reads from the same moment as with a member's commit. The external commit would only
+    let the admin post into a channel nobody reads at that time.
+  - **The `GroupInfo` would go to non-members.** The server serves it to the group's members only. For
+    an external self-join it would serve it to every instance admin it lists in the channel, under
+    every setting (the policy check would be the server's word): the tree's devices and identity
+    certificates, which the server knows anyway, and the epoch's external public key, which lets
+    anybody with an accepted credential start the join. The server learns nothing new; the admin
+    learns the member devices before the members let them in.
+
+  The line every member writes stays unforgeable either way: it comes from the verified commit
+  (admin.md §2.4.2), and an external commit would carry the same signed change in its authenticated
+  data. Revisit once membership commits are signed per channel (§4.6.2, issue #878) and a member's
+  device can publish a signed, fresh epoch statement the joiner checks. Until then the admin's app
+  says what happens instead of waiting: "Adding you" while a member is online, "No member is online;
+  you are added when one is" when none is (from presence, gateway events), "You are a member" once
+  its device is in the group, and after `self_add_retry` without a commit that the request may have
+  been refused, with "Request access again" (admin.md §2.4). The request is kept in the device's store
+  and posted again on its own, also after a restart or while the admin's device was offline.
 - **Deactivation suspends, removal rotates keys** (admin.md §3.2.1). Deactivating an account changes
   no group: the user's devices stay members and new messages are still encrypted to them, so a
   reactivation needs no recovery and no re-adding. The server refuses the account every request
@@ -2923,8 +2963,9 @@ encryption, and what does and does not hold:
   private; then the usual default for roster members applies, which is what a private add would give them.
 - **Self-joins** sign `from_join` for themselves, and a member's client refuses to commit a signed self-add
   that asks for more (a modified client can't talk the group into showing it the past). The joiner
-  never hears of a refusal: until a member lets it in, its device shows "waiting to be let into this
-  channel" and posts the self-add again after `self_add_retry` (30 minutes, doubling up to a day),
+  never hears of a refusal: until a member lets it in, its device shows that it is being added (or
+  that no member is online, or, after a retry, that the request may have been refused, issue #908)
+  and posts the self-add again after `self_add_retry` (30 minutes, doubling up to a day),
   so a self-add refused by one version or policy goes through once the members accept it (issue
   #907).
 - **`history_policy` in the conversion request** is therefore a *hint* the server stores and shows (and

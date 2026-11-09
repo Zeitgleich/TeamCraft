@@ -200,8 +200,9 @@ impl AdminSelfJoin {
 /// Outcome of an admin adding themselves to a private channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelfJoinOutcome {
-  /// Joined; members see a system message with an admin badge.
-  Joined,
+  /// The signed self-add is on its way: a member's app adds the admin's device, and members see a
+  /// line with an admin badge (admin.md §2.4). Nobody decides; the console shows the live state.
+  Adding,
   /// A channel owner has to approve first.
   ApprovalRequested,
   Disabled,

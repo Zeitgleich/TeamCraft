@@ -659,7 +659,7 @@ async fn an_admin_joins_by_themselves_under_the_default_full_history() {
 mod refused_self_join {
   use std::sync::Arc;
 
-  use teamcraft_core::client::is_waiting_for_admission;
+  use teamcraft_core::client::{is_waiting_for_admission, self_add_attempts};
   use teamcraft_core::clock::ManualClock;
   use teamcraft_core::store::Table;
 
@@ -700,10 +700,13 @@ mod refused_self_join {
   #[tokio::test]
   async fn a_refused_self_add_waits_longer_after_each_attempt() {
     let (clock, mut alice, mut bob, mut carol, channel) = refused().await;
+    assert_eq!(self_add_attempts(&bob.store, channel).unwrap(), Some(1));
     clock.advance(retry_ms());
     assert_eq!(bob.client.retry_due_self_adds().await.unwrap(), 1);
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
     assert!(!bob.client.has_group(channel).unwrap(), "refused again");
+    // The UI says the request wasn't taken up (issue #908).
+    assert_eq!(self_add_attempts(&bob.store, channel).unwrap(), Some(2));
 
     clock.advance(retry_ms());
     assert_eq!(
@@ -740,6 +743,7 @@ mod refused_self_join {
     settle(&mut [&mut alice, &mut bob, &mut carol]).await;
     assert!(bob.client.has_group(channel).unwrap());
     assert!(!is_waiting_for_admission(&bob.store, channel).unwrap());
+    assert_eq!(self_add_attempts(&bob.store, channel).unwrap(), None);
   }
 
   /// Alice owns the workspace, Bob is an admin whose self-join to Carol's private channel the

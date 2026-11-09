@@ -476,8 +476,12 @@ pub enum MembershipIssue {
   EncryptionSetupFailed,
   /// This device asked to be let into a channel's encryption group (a join, an admin's self-join)
   /// and no member has let it in yet; it asks again on its own (issue #907). Only messages from
-  /// the join on become readable.
-  WaitingForAdmission,
+  /// the join on become readable. `attempts` counts the requests posted; more than one means no
+  /// member let it in within the retry interval (issue #908).
+  WaitingForAdmission {
+    #[serde(default = "one_attempt")]
+    attempts: u32,
+  },
   /// The import account is in this DM or notes while it imports their history (e2ee.md §4.10):
   /// it can read what is written here until the import is finished.
   ImportInProgress { importer: UserId },
@@ -485,6 +489,11 @@ pub enum MembershipIssue {
   ReadByOutsider { user: UserId },
   #[serde(other)]
   Unknown,
+}
+
+/// What a `WaitingForAdmission` from a version before issue #908 meant: one request so far.
+fn one_attempt() -> u32 {
+  1
 }
 
 /// What kind of conversation a sidebar entry is.

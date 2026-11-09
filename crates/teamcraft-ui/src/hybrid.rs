@@ -1748,7 +1748,7 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     match admin.policy().admin_self_join {
       teamcraft_proto::AdminSelfJoin::Visible => {
         self.chat.admin_add_self(channel);
-        SelfJoinOutcome::Joined
+        SelfJoinOutcome::Adding
       },
       // The channel's owners decide (admin.md §2.4).
       teamcraft_proto::AdminSelfJoin::OwnerApproval => {
