@@ -390,14 +390,8 @@ struct UploadControl: View {
   }
 
   private func cancel() {
-    let pending = UploadPill.cancellable(files)
-    Task {
-      // One after another, last first: the core finds a pending file by its place.
-      for file in pending {
-        await model.perform(
-          .cancelUpload(conversationId: file.conversation, messageId: file.message, fileId: file.fileId))
-      }
-    }
+    guard let file = files.first else { return }
+    Task { await model.perform(.cancelMessageUpload(conversationId: file.conversation, messageId: file.message)) }
   }
 
   private func retry() {

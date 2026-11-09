@@ -59,13 +59,6 @@ sealed interface UploadPill {
       }
     }
 
-    /**
-     * The files a "Cancel" stops, last first: the core finds a pending file by its place, so
-     * cancelling the last ones first keeps the places of the others.
-     */
-    fun cancellable(files: List<FileInfo>): List<FileInfo> =
-      files.filter { it.transfer.isCancellable }.sortedByDescending { it.fileId.removePrefix("pending-").toIntOrNull() ?: -1 }
-
     private const val UPLOADING = "uploading"
     private const val STALLED = "upload_stalled"
     private const val FAILED_FOR_GOOD = "upload_failed"

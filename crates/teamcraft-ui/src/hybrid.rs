@@ -760,6 +760,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.cancel_upload(conversation, message, file_id);
   }
 
+  fn cancel_message_upload(&self, conversation: ConversationId, message: MessageId) {
+    self.chat.cancel_message_upload(conversation, message);
+  }
+
   fn acknowledge(&self, conversation: ConversationId, message: MessageId) {
     self.chat.acknowledge(conversation, message);
   }

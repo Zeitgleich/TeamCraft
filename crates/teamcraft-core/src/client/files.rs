@@ -1521,12 +1521,41 @@ pub fn cancel_pending_file(
   if let Some(attachment) = announced_attachment(&file) {
     queue_abandon(store, attachment)?;
   }
+  save_or_drop_upload(store, &upload)
+}
+
+/// Stops all files of an own message that is still going up (the one control of its upload): the
+/// unfinished ones are given up on the server and the finished ones left out, so the message goes
+/// out with its text only, or not at all when it has none. `false` when nothing of it is pending
+/// any more (it went out meanwhile).
+pub fn cancel_pending_upload(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  message: ClientMessageId,
+) -> Result<bool, CoreError> {
+  let Some(mut upload) = pending_upload(store, conversation, message)? else {
+    return Ok(false);
+  };
+  for file in upload.files.drain(..) {
+    if file.maybe_done.is_none()
+      && let Some(attachment) = announced_attachment(&file)
+    {
+      queue_abandon(store, attachment)?;
+    }
+  }
+  save_or_drop_upload(store, &upload)
+}
+
+/// Keeps a pending upload that lost files while something of its message is left; otherwise drops
+/// the message, which nobody else has seen.
+fn save_or_drop_upload(store: &impl LocalStore, upload: &PendingUpload) -> Result<bool, CoreError> {
+  let (conversation, message) = (upload.conversation_id, upload.client_message_id);
   let has_text = store.message(conversation, message)?.is_some_and(
     |stored| matches!(&stored.content, MessageContent::Text { body, .. } if !body.trim().is_empty()),
   );
   if !upload.files.is_empty() || has_text {
     // Completed by the host's next upload step when the rest is up.
-    save_pending_upload(store, &upload)?;
+    save_pending_upload(store, upload)?;
     return Ok(true);
   }
   crate::store::write_group(store, || {

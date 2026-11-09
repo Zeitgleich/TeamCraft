@@ -15,8 +15,8 @@ use crate::client::disk_downloads::{DownloadRecord, DownloadStatus, download_rec
 use crate::client::draft_files::note_sent_draft_file;
 use crate::client::files::{
   PendingFile, PendingUpload, RetryCause, TransferFailure, TransferState, UploadPurpose, UploadRetry,
-  UploadSource, attachments_of, cancel_pending_file, failed_uploads, pending_upload, save_pending_upload,
-  share_links, transfer_state,
+  UploadSource, attachments_of, cancel_pending_file, cancel_pending_upload, failed_uploads, pending_upload,
+  save_pending_upload, share_links, transfer_state,
 };
 use crate::error::CoreError;
 use crate::imported::Authorship;
@@ -254,6 +254,17 @@ impl<S: LocalStore> CoreChatBackend<S> {
       Ok(true) => self.command(CoreCommand::UploadFiles),
       Ok(false) => {},
       Err(error) => tracing::error!(%error, "could not cancel the upload"),
+    }
+  }
+
+  pub(crate) fn ui_cancel_message_upload(&self, conversation: ConversationId, message: MessageId) {
+    let Some(stored) = self.find_stored(conversation, message) else {
+      return;
+    };
+    match cancel_pending_upload(self.store_ref(), conversation, stored.client_message_id) {
+      Ok(true) => self.command(CoreCommand::UploadFiles),
+      Ok(false) => {},
+      Err(error) => tracing::error!(%error, "could not cancel the message's upload"),
     }
   }
 

@@ -923,6 +923,10 @@ pub enum ChatAction {
     message: MessageId,
     file_id: String,
   },
+  CancelMessageUpload {
+    conversation: ConversationId,
+    message: MessageId,
+  },
   DownloadFile {
     conversation: ConversationId,
     message: MessageId,
@@ -1383,6 +1387,10 @@ impl ChatAction {
         message,
         file_id,
       } => backend.cancel_upload(conversation, message, &file_id),
+      Self::CancelMessageUpload {
+        conversation,
+        message,
+      } => backend.cancel_message_upload(conversation, message),
       Self::DownloadFile {
         conversation,
         message,
@@ -2621,6 +2629,16 @@ mod tests {
         conversation: id_from_raw(7),
         message: id_from_raw(9),
         file_id: "pending-1".into(),
+      }
+    );
+    let cancel_all: ChatAction =
+      serde_json::from_str(r#"{"action":"cancel_message_upload","conversation":"7","message":"9"}"#)
+        .expect("parse");
+    assert_eq!(
+      cancel_all,
+      ChatAction::CancelMessageUpload {
+        conversation: id_from_raw(7),
+        message: id_from_raw(9),
       }
     );
     // Extras from an older core have no send or read state: not failed, not read.

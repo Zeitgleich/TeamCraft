@@ -54,23 +54,13 @@ final class UploadPillTests: XCTestCase {
     XCTAssertEqual(UploadPill.of([try file(uploading(9 * mb, 4 * mb), size: 4 * mb)])?.maybeFraction, 1)
   }
 
-  func testCancelStopsTheLastFilesFirst() throws {
-    let files = [
-      try file(uploading(0, mb), size: mb, id: "pending-0"),
-      try file(#"{"state":"remote"}"#, size: mb, id: "17"),
-      try file(uploading(0, mb), size: mb, id: "pending-2"),
-      try file(#"{"state":"upload_stalled","reason":"network"}"#, size: mb, id: "pending-1"),
-    ]
-    XCTAssertEqual(UploadPill.cancellable(files).map(\.fileId), ["pending-2", "pending-1", "pending-0"])
-  }
-
   private func uploading(_ done: Int64, _ total: Int64, failedAttempts: Int = 0) -> String {
     #"{"state":"uploading","done_bytes":\#(done),"total_bytes":\#(total),"failed_attempts":\#(failedAttempts)}"#
   }
 
-  private func file(_ transfer: String, size: Int64, id: String = "pending-0") throws -> FileInfo {
+  private func file(_ transfer: String, size: Int64) throws -> FileInfo {
     let json = """
-      {"conversation":"1","message":"2","file_id":"\(id)","file_name":"photo.jpg","media_type":"image/jpeg",
+      {"conversation":"1","message":"2","file_id":"pending-0","file_name":"photo.jpg","media_type":"image/jpeg",
       "size_bytes":\(size),"transfer":\(transfer)}
       """
     return try XCTUnwrap(Wire.decode(FileInfo.self, from: json))

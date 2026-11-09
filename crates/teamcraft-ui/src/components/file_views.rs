@@ -63,7 +63,7 @@ const LARGE_TRANSFER_BYTES: u64 = 1024 * 1024;
 pub fn MessageFiles(files: Vec<FileInfo>, upload: Signal<Option<UploadPill>>) -> impl IntoView {
   let maybe_upload = files
     .first()
-    .map(|file| MessageUpload::new(&files, file.conversation, file.message));
+    .map(|file| MessageUpload::new(file.conversation, file.message));
   // Files that finished uploading and are not transferring right now can be saved together.
   let downloadable: Vec<FileInfo> = files
     .iter()
@@ -249,42 +249,21 @@ struct MessageUpload {
   state: AppState,
   conversation: ConversationId,
   message: MessageId,
-  /// The files still going up, last first: the core finds a pending file by its place, so
-  /// cancelling the last ones first keeps the places of the others.
-  pending_ids: StoredValue<Vec<String>>,
 }
 
 impl MessageUpload {
-  fn new(files: &[FileInfo], conversation: ConversationId, message: MessageId) -> Self {
-    let mut pending: Vec<(usize, String)> = files
-      .iter()
-      .filter(|file| {
-        matches!(
-          file.transfer,
-          FileTransfer::Uploading { .. } | FileTransfer::UploadStalled { .. }
-        )
-      })
-      .filter_map(|file| {
-        let index = file.file_id.strip_prefix("pending-")?.parse::<usize>().ok()?;
-        Some((index, file.file_id.clone()))
-      })
-      .collect();
-    pending.sort_unstable_by_key(|(index, _)| std::cmp::Reverse(*index));
+  fn new(conversation: ConversationId, message: MessageId) -> Self {
     Self {
       state: use_app_state(),
       conversation,
       message,
-      pending_ids: StoredValue::new(pending.into_iter().map(|(_, id)| id).collect()),
     }
   }
 
   fn cancel(self) {
-    let ids = self.pending_ids.get_value();
-    self.state.write(|backend| {
-      for file_id in &ids {
-        backend.cancel_upload(self.conversation, self.message, file_id);
-      }
-    });
+    self
+      .state
+      .write(|backend| backend.cancel_message_upload(self.conversation, self.message));
   }
 
   fn retry(self) {

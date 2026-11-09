@@ -44,19 +44,9 @@ enum UploadPill: Equatable {
     return hasFailedAttempts ? .retrying : .processing
   }
 
-  /// The files a "Cancel" stops, last first: the core finds a pending file by its place, so
-  /// cancelling the last ones first keeps the places of the others.
-  static func cancellable(_ files: [FileInfo]) -> [FileInfo] {
-    files.filter(\.transfer.isCancellable).sorted { place($0) > place($1) }
-  }
-
   /// How far the files got, 0...1; nil while the ring turns without a value.
   var maybeFraction: Double? {
     guard case .sending(let done, let total) = self, total > 0 else { return nil }
     return min(1, max(0, Double(done) / Double(total)))
-  }
-
-  private static func place(_ file: FileInfo) -> Int {
-    Int(file.fileId.replacingOccurrences(of: "pending-", with: "")) ?? -1
   }
 }

@@ -652,6 +652,9 @@ pub trait ChatBackend {
   /// [`crate::actions::FileInfo`]): the message goes out without it, or not at all when nothing is
   /// left of it.
   fn cancel_upload(&self, _conversation: ConversationId, _message: MessageId, _file_id: &str) {}
+  /// Stops all files of an own message that is still going up (its one upload control): the
+  /// message goes out with its text only, or not at all when it has none.
+  fn cancel_message_upload(&self, _conversation: ConversationId, _message: MessageId) {}
 
   // Files.
 

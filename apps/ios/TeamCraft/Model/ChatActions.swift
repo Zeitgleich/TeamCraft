@@ -31,8 +31,9 @@ enum ChatAction {
   /// An own message the server rejected: send it again, or drop it.
   case retrySend(conversationId: String, messageId: String)
   case discardUnsent(conversationId: String, messageId: String)
-  /// Stops one file of an own message that is still going up; the message goes without it.
-  case cancelUpload(conversationId: String, messageId: String, fileId: String)
+  /// Stops all files of an own message that is still going up (its one upload control): it goes out
+  /// with its text only, or not at all when it has none.
+  case cancelMessageUpload(conversationId: String, messageId: String)
   case joinChannel(conversationId: String)
   /// Leaves a channel (never a DM); the core sends it once the connection is back.
   case leaveChannel(conversationId: String, deletesIfLast: Bool)
@@ -112,8 +113,8 @@ enum ChatAction {
       object = ["action": "retry_send", "conversation": conversation, "message": message]
     case .discardUnsent(let conversation, let message):
       object = ["action": "discard_unsent", "conversation": conversation, "message": message]
-    case .cancelUpload(let conversation, let message, let file):
-      object = ["action": "cancel_upload", "conversation": conversation, "message": message, "file_id": file]
+    case .cancelMessageUpload(let conversation, let message):
+      object = ["action": "cancel_message_upload", "conversation": conversation, "message": message]
     case .joinChannel(let conversation):
       object = ["action": "join_channel", "conversation": conversation]
     case .refreshCallHistory:

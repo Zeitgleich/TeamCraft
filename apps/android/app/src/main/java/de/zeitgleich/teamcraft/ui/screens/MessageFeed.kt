@@ -1210,7 +1210,9 @@ private fun Bubble(
   val corners = bubbleCorners(isMine, entry.isContinuation, entry.isGroupEnd)
   val shape = RoundedCornerShape(corners.topStart, corners.topEnd, corners.bottomEnd, corners.bottomStart)
   val files = maybeExtras?.files.orEmpty()
-  val images = files.filter { it.isImage && it.maybeThumbnail != null }
+  // A picture going up whose thumbnail isn't made yet still takes its place in the album, so the
+  // message doesn't show file rows until the thumbnails come.
+  val images = files.filter { it.isImage && (it.maybeThumbnail != null || it.transfer.isCancellable) }
   val videos = files.filter { it.isVideo && it.maybeThumbnail != null }
   val others = files - images.toSet() - videos.toSet()
   val isDeleted = maybeExtras?.isDeleted == true
@@ -1692,11 +1694,11 @@ private fun UploadControl(
             modifier = Modifier.padding(start = 4.dp),
           )
         }
-        IconButton(onClick = { viewModel.cancelUploads(files) }, modifier = Modifier.size(32.dp)) {
+        IconButton(onClick = { viewModel.cancelMessageUpload(files.first().conversation, files.first().message) }, modifier = Modifier.size(32.dp)) {
           Icon(painterResource(R.drawable.ic_close), contentDescription = stringResource(R.string.file_cancel_upload), modifier = Modifier.size(16.dp))
         }
       } else {
-        UploadStopRing(pill.maybeFraction, content) { viewModel.cancelUploads(files) }
+        UploadStopRing(pill.maybeFraction, content) { viewModel.cancelMessageUpload(files.first().conversation, files.first().message) }
         Text(
           label,
           style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
@@ -1836,8 +1838,8 @@ fun openLink(context: Context, url: String) {
  */
 @Composable
 private fun ImagePreview(file: FileInfo, bubbleMax: Dp, onOpen: (FileInfo) -> Unit) {
-  val thumbnail = file.maybeThumbnail?.bytes ?: return
-  val ratio = remember(thumbnail) { Pictures.aspectRatio(thumbnail) ?: DEFAULT_PREVIEW_RATIO }
+  val maybeThumbnail = file.maybeThumbnail?.bytes
+  val ratio = remember(maybeThumbnail) { maybeThumbnail?.let { Pictures.aspectRatio(it) } ?: DEFAULT_PREVIEW_RATIO }
     .coerceIn(MIN_PREVIEW_RATIO, MAX_PREVIEW_RATIO)
   val width = minOf(bubbleMax - BUBBLE_MEDIA_PADDING * 2, PREVIEW_MAX_HEIGHT * ratio)
   Box(

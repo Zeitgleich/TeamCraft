@@ -58,24 +58,13 @@ class UploadPillTest {
     assertEquals(1f, UploadPill.of(listOf(file(uploading(9 * MB, 4 * MB), 4 * MB)))?.maybeFraction)
   }
 
-  @Test
-  fun cancelStopsTheLastFilesFirst() {
-    val files = listOf(
-      file(uploading(0, MB), MB, id = "pending-0"),
-      file(FileTransfer("remote"), MB, id = "17"),
-      file(uploading(0, MB), MB, id = "pending-2"),
-      file(FileTransfer("upload_stalled", reason = "network"), MB, id = "pending-1"),
-    )
-    assertEquals(listOf("pending-2", "pending-1", "pending-0"), UploadPill.cancellable(files).map { it.fileId })
-  }
-
   private fun uploading(done: Long, total: Long, failedAttempts: Int = 0) =
     FileTransfer("uploading", doneBytes = done, totalBytes = total, failedAttempts = failedAttempts)
 
-  private fun file(transfer: FileTransfer, size: Long, id: String = "pending-0") = FileInfo(
+  private fun file(transfer: FileTransfer, size: Long) = FileInfo(
     conversation = "1",
     message = "2",
-    fileId = id,
+    fileId = "pending-0",
     fileName = "photo.jpg",
     mediaType = "image/jpeg",
     sizeBytes = size,
