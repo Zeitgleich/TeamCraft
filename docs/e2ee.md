@@ -4317,9 +4317,13 @@ and executes at once, as before.
 The SFU's say in this is about timing only. It can't make a member encrypt with a key the member
 didn't derive from its own MLS state, and executing a transition it never prepared does nothing. It
 can delay an execution, but a member that hears none executes by itself 5 s after preparing
-(`DAVE_TRANSITION_TIMEOUT`), so a lost message or a member that never gets ready can't keep the call
-on the previous epoch's key; holding back the Remove proposal of a departed member altogether is
-something the SFU as external sender could do already. There is no downgrade: TeamCraft has no
+(`DAVE_TRANSITION_TIMEOUT`). A transition prepared while another still waits keeps the earlier
+one's deadline, so chaining commits (forcing rejoins, say) doesn't push the switch back: at most
+5 s after a member left the group in the UI, nobody encrypts with a key it holds. Until then the
+departed member could still decrypt media it gets; an honest SFU no longer forwards any to it. The
+SFU executes once every member is ready or gone, or earlier, when the next commit is due (the
+previous execution goes out first); it has no deadline of its own for a member that never says it is
+ready, the members' 5 s cover that. There is no downgrade: TeamCraft has no
 counterpart of DAVE's `prepare_transition` to protocol version 0 (opcode 21), and the engine always
 prepares version 1, so the SFU can't switch a call to unencrypted media.
 

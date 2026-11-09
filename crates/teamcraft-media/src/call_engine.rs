@@ -1785,9 +1785,15 @@ impl CallEngine {
     match maybe_transition_id {
       None => self.report_secured(),
       Some(transition_id) => {
+        // A transition prepared while another waits keeps the earlier one's deadline: otherwise an
+        // SFU that withholds executions and keeps forcing commits could keep this device on an
+        // epoch key a removed member still holds. When it runs out, the newest one is executed.
+        let maybe_deadline = self
+          .maybe_pending_transition
+          .and_then(|pending| pending.maybe_deadline);
         self.maybe_pending_transition = Some(PendingTransition {
           id: transition_id,
-          maybe_deadline: None,
+          maybe_deadline,
         });
         self.signal(CallClientMessage::DaveTransitionReady { transition_id });
       },
@@ -4892,6 +4898,22 @@ mod tests {
       assert_eq!(alice.privacy_code(), bob.privacy_code());
       assert_audio_flows(&mut alice, &mut bob, now);
       assert_eq!(alice.encryption_stats(), DaveFrameStats::default());
+    }
+
+    /// A transition prepared while another waits doesn't start the timeout afresh: an SFU that
+    /// withholds executions and keeps forcing commits can't hold the device on the old key.
+    #[test]
+    fn a_newer_transition_keeps_the_earlier_deadline() {
+      let now = Instant::now();
+      let (mut alice, _bob) = paired(now, Some(TRANSITION));
+      alice.on_timer(now);
+      let newer = DaveTransitionId(std::num::NonZeroU16::new(4).unwrap());
+      alice.prepare_transition(Some(newer)).unwrap();
+      alice.on_timer(now + DAVE_TRANSITION_TIMEOUT - Duration::from_millis(1));
+      assert!(!alice.is_secured());
+      alice.on_timer(now + DAVE_TRANSITION_TIMEOUT);
+      assert!(alice.is_secured(), "executed on the first transition's deadline");
+      assert!(alice.maybe_pending_transition.is_none());
     }
 
     /// An execution that never comes (a lost message, a member that never gets ready) doesn't

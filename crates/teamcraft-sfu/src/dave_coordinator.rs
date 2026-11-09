@@ -650,6 +650,58 @@ mod tests {
       harness.assert_all_exchange_frames(&[1, 2, 3]);
     }
 
+    /// The next commit doesn't wait behind a transition in flight: its execution goes out first,
+    /// once to each recipient, ahead of the next commit on the same ordered stream.
+    #[test]
+    fn the_next_commit_executes_the_previous_transition_first() {
+      let mut harness = Harness::new();
+      harness.join(1);
+      harness.join(2);
+      harness.holds_ready.insert(device(2));
+      harness.join(3);
+      assert_eq!(harness.executions_to(1), 0);
+
+      harness.join(4);
+
+      let first_id = harness
+        .delivered
+        .iter()
+        .find_map(|outbound| match outbound.event {
+          CallEvent::DaveExecuteTransition { transition_id } => Some(transition_id),
+          _ => None,
+        })
+        .unwrap();
+      for id in 1..=3 {
+        let events: Vec<&CallEvent> = harness
+          .delivered
+          .iter()
+          .filter(|outbound| outbound.recipient == device(id))
+          .map(|outbound| &outbound.event)
+          .collect();
+        let executed = events
+          .iter()
+          .position(|event| matches!(event, CallEvent::DaveExecuteTransition { transition_id } if *transition_id == first_id))
+          .unwrap();
+        let next_commit = events
+          .iter()
+          .position(|event| {
+            matches!(event, CallEvent::DaveAnnounceCommit { maybe_transition_id: Some(next), .. } if *next != first_id)
+          })
+          .unwrap();
+        assert!(
+          executed < next_commit,
+          "member {id} executes before the next commit"
+        );
+        let executions = events
+          .iter()
+          .filter(|event| matches!(event, CallEvent::DaveExecuteTransition { transition_id } if *transition_id == first_id))
+          .count();
+        assert_eq!(executions, 1, "member {id}");
+      }
+      harness.release_ready();
+      harness.assert_all_exchange_frames(&[1, 2, 3, 4]);
+    }
+
     /// A member that leaves before it is ready doesn't hold the others up.
     #[test]
     fn a_member_leaving_unblocks_the_execution() {
