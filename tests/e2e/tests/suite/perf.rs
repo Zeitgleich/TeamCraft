@@ -93,7 +93,13 @@ const LONG_TASK_RECORDER: &str = "window.__longTasks = [0, 0, 0];
       window.__longTasks[2] = Math.max(window.__longTasks[2], entry.duration);
       window.__longTaskList.push([Math.round(entry.startTime), Math.round(entry.duration)]);
     }
-  }).observe({ type: 'longtask', buffered: true });";
+  }).observe({ type: 'longtask', buffered: true });
+  window.__resizeLoops = 0;
+  window.addEventListener('error', event => {
+    if (String(event.message).includes('ResizeObserver loop')) {
+      window.__resizeLoops += 1;
+    }
+  });";
 /// Reads the raw database key the way the page does (docs/e2ee.md §9.1): any script of the origin
 /// can. Hex, for the harness to derive the lookup ID of the catalog's state.
 const READ_DATABASE_KEY: &str = "(async () => {
@@ -266,6 +272,10 @@ struct Report {
   switch_ms_p50: f64,
   switch_ms_p95: f64,
   switch_ms_max: f64,
+  /// Layouts of the page per channel switch, and "ResizeObserver loop" errors over the switches: a
+  /// resize observer whose callback resized what it observes lays out again and again (issue #1575).
+  layouts_per_switch: f64,
+  switch_resize_observer_loops: f64,
   long_channel_open_ms: f64,
   long_channel_rows_in_dom: f64,
   long_channel_rows_after_scrolling_back: f64,
@@ -777,6 +787,8 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   // Channel switches between the short channels of the first space.
   let short_channels = &seeded.first_space_channels[1..];
   let mut times = Vec::new();
+  let layouts_before = metric(page, "LayoutCount").await;
+  let loops_before = resize_loops(page).await;
   for index in 0..SWITCHES {
     let (name, last) = &short_channels[index % short_channels.len()];
     times.push(switch_to(page, name, last).await);
@@ -785,6 +797,8 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
   report.switch_ms_p50 = percentile(&times, 50);
   report.switch_ms_p95 = percentile(&times, 95);
   report.switch_ms_max = times.last().copied().unwrap_or(0.0);
+  report.layouts_per_switch = (metric(page, "LayoutCount").await - layouts_before) / SWITCHES as f64;
+  report.switch_resize_observer_loops = resize_loops(page).await - loops_before;
   collect_garbage(page).await;
   report.js_heap_mib_after_first_switches = metric(page, "JSHeapUsedSize").await / MIB;
 
@@ -1375,6 +1389,14 @@ async fn switch_within(page: &Page, name: &str, last: &str, timeout: Duration) -
   evaluate_value(page, script).await.as_f64().unwrap()
 }
 
+/// "ResizeObserver loop" errors since the page was loaded (`LONG_TASK_RECORDER`).
+async fn resize_loops(page: &Page) -> f64 {
+  evaluate_value(page, "window.__resizeLoops || 0".into())
+    .await
+    .as_f64()
+    .unwrap_or(0.0)
+}
+
 async fn rows_in_dom(page: &Page) -> f64 {
   evaluate_value(
     page,
@@ -1569,6 +1591,8 @@ impl Report {
       ("switch_ms_p50", self.switch_ms_p50),
       ("switch_ms_p95", self.switch_ms_p95),
       ("switch_ms_max", self.switch_ms_max),
+      ("layouts_per_switch", self.layouts_per_switch),
+      ("switch_resize_observer_loops", self.switch_resize_observer_loops),
       ("long_channel_open_ms", self.long_channel_open_ms),
       ("long_channel_rows_in_dom", self.long_channel_rows_in_dom),
       (

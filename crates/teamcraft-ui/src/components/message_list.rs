@@ -1324,14 +1324,22 @@ fn is_window_focused() -> bool {
 /// Calls `on_change` whenever one of the `targets` changes size (the rendered rows, the scrolling
 /// list around them): after layout, before the frame is painted, unless the list that asked for it
 /// was unmounted in the meantime.
+///
+/// At most once per frame: `on_change` measures rows and moves the list, which renders other rows
+/// and resizes the targets again. The browser hands that resize to the observer within the same
+/// frame, the list moved again, and so on until it gives up ("ResizeObserver loop completed with
+/// undelivered notifications", one layout per round). A resize that comes from the list's own
+/// correction waits for the next frame instead, and the frame is painted with the first round's
+/// correction.
 fn observe_size_changes<const N: usize>(
   list_id: u64,
   targets: [NodeRef<html::Div>; N],
   on_change: impl Fn() + Copy + 'static,
 ) {
+  let turn = std::rc::Rc::new(FrameTurn::default());
   let callback = Closure::<dyn FnMut()>::new(move || {
     if is_live(list_id) {
-      on_change();
+      turn.run(list_id, on_change);
     }
   });
   let Ok(observer) = web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()) else {
@@ -1349,6 +1357,35 @@ fn observe_size_changes<const N: usize>(
   on_cleanup(move || {
     handle.try_with_value(|(observer, _)| observer.disconnect());
   });
+}
+
+/// Whether a frame's resize round already ran ([`observe_size_changes`]), and whether a later
+/// round of the same frame waits for the next one.
+#[derive(Default)]
+struct FrameTurn {
+  has_run: std::cell::Cell<bool>,
+  is_waiting: std::cell::Cell<bool>,
+}
+
+impl FrameTurn {
+  /// Runs `on_change` now if it hasn't run in this frame, otherwise once on the next frame.
+  fn run(self: &std::rc::Rc<Self>, list_id: u64, on_change: impl Fn() + Copy + 'static) {
+    if !self.has_run.replace(true) {
+      on_change();
+      let turn = std::rc::Rc::clone(self);
+      // The next frame's callbacks run before its resize rounds: the first round there is new.
+      request_animation_frame(move || turn.has_run.set(false));
+      return;
+    }
+    if self.is_waiting.replace(true) {
+      return;
+    }
+    let turn = std::rc::Rc::clone(self);
+    defer_while_alive(list_id, move || {
+      turn.is_waiting.set(false);
+      on_change();
+    });
+  }
 }
 
 /// Wrapper that carries the row index for measuring and re-renders only when its own data changes.
