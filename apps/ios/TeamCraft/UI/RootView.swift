@@ -3,6 +3,10 @@ import SwiftUI
 /// The top level: server entry, sign-in, enrollment or the chats, by the account's state.
 struct RootView: View {
   @Environment(AppModel.self) private var model
+  /// The interface font the views were built with (#1494). A font chosen in Settings applies when
+  /// Settings closes: the screens are built again, which a change underneath the open sheet would
+  /// close.
+  @State private var appliedFont = AppFont.current
 
   var body: some View {
     ZStack {
@@ -26,6 +30,7 @@ struct RootView: View {
         OrgRecoveryView(progress: progress, failure: failure)
       case .ready(let account):
         ConversationListView(account: account)
+          .id(appliedFont)
           // A new device asks to be linked: a card on every signed-in device (docs/e2ee.md §5).
           .overlay(alignment: .top) { LinkPromptOverlay() }
       case .failed(let failure):
@@ -35,6 +40,10 @@ struct RootView: View {
       }
       // The animated mark while the core starts, handing over to whatever screen comes next (#463).
       LoadingMarkOverlay(isLoading: isStarting)
+    }
+    .font(.app(.body))
+    .onReceive(NotificationCenter.default.publisher(for: AppFont.mayHaveChanged)) { _ in
+      if AppFont.current != appliedFont { appliedFont = AppFont.current }
     }
     .overlay { if model.isBusy { BusyOverlay() } }
     .overlay(alignment: .top) {

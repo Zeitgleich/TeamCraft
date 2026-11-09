@@ -59,8 +59,8 @@ struct MeetingRow: View {
 
   var body: some View {
     VStack(alignment: .leading, spacing: 8) {
-      Text(meeting.title).font(.headline)
-      Text(timeText).font(.subheadline).foregroundStyle(Theme.textMuted)
+      Text(meeting.title).font(.app(.headline))
+      Text(timeText).font(.app(.subheadline)).foregroundStyle(Theme.textMuted)
       HStack {
         Button("meeting_join") {
           onJoin()

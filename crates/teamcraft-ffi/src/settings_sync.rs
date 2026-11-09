@@ -27,6 +27,9 @@ pub struct SyncedAppSettings {
   pub call_status_sounds: CallStatusSounds,
   /// The colour theme (#202), as stored: `color_theme_tokens` turns it into colours.
   pub color_theme: String,
+  /// The interface font (#1494), as stored: its wire name (`system`, `inter`, …); an unknown one
+  /// shows the system font.
+  pub font: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -141,6 +144,9 @@ impl From<SyncedAppSettings> for MobileSettings {
       color_theme: match app.color_theme.parse() {
         Ok(theme) => theme,
       },
+      font: match app.font.parse() {
+        Ok(font) => font,
+      },
     }
   }
 }
@@ -172,6 +178,7 @@ impl From<MobileSettings> for SyncedAppSettings {
         CallStatusSoundsApi::All | CallStatusSoundsApi::Unknown => CallStatusSounds::All,
       },
       color_theme: settings.color_theme.to_string(),
+      font: settings.font.to_string(),
     }
   }
 }

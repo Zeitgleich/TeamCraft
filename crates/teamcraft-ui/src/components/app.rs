@@ -76,6 +76,7 @@ pub fn App() -> impl IntoView {
   apply_density(settings);
   apply_zoom(settings);
   apply_text_size(settings);
+  crate::fonts::apply_font(settings);
   apply_language_attribute();
   apply_deleted_user_name(i18n);
   crate::viewport::sync_theme_color(move || {

@@ -25,7 +25,6 @@
   <string name="call_prejoin_moved">The call moved into “%1$s”, which is running now.</string>
   <string name="call_add_people">Add people</string>
   <string name="call_add_hint">The call moves into a new meeting room with everybody in it. The direct messages stay as they are; the people you add don\'t see them.</string>
-  <string name="call_add_nobody">There is nobody else to add.</string>
   <string name="call_add">Add to the call</string>
   <string name="call_meeting_title">Call</string>
   <string name="call_move_offer">%1$s moved the call into a meeting room and added %2$s.</string>

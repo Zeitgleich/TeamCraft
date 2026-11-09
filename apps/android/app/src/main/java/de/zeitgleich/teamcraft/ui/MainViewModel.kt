@@ -81,11 +81,14 @@ import de.zeitgleich.teamcraft.server.isServerAllowed
 import de.zeitgleich.teamcraft.server.serverEntryErrorText
 import de.zeitgleich.teamcraft.server.transportErrorText
 import uniffi.teamcraft_ffi.AccountState
+import uniffi.teamcraft_ffi.AddPeopleOutcome
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CheckedServer
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
+import uniffi.teamcraft_ffi.CreateOutcome
+import de.zeitgleich.teamcraft.ui.forms.CreateResult
 import uniffi.teamcraft_ffi.LeaveChoice
 import uniffi.teamcraft_ffi.LinkPlatform
 import uniffi.teamcraft_ffi.LinkRequestItem
@@ -966,6 +969,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       // Signed out meanwhile: the sign-in screen replaces the form.
       R.string.error_signed_out
     }
+
+  /**
+   * Runs a create call of a form (#1534): the new conversation's or space's ID, a refusal of the
+   * name for its field, or why it failed otherwise. The form stays open unless it was created.
+   */
+  suspend fun tryCreate(create: suspend ChatClient.() -> CreateOutcome): CreateResult =
+    try {
+      when (val outcome = withContext(Dispatchers.Default) { chat.create() }) {
+        is CreateOutcome.Created -> CreateResult.Created(outcome.id)
+        is CreateOutcome.NameRefused -> CreateResult.NameRefused
+        is CreateOutcome.NotAllowed -> CreateResult.Failed(R.string.create_not_allowed)
+      }
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: TeamCraftException) {
+      CreateResult.Failed(errorText(failure))
+    } catch (failure: IllegalStateException) {
+      CreateResult.Failed(R.string.error_signed_out)
+    }
+
+  /** Adds people to a channel (#1534); answers why it failed, or null once everybody is in. */
+  @StringRes
+  suspend fun tryAddPeople(conversation: String, users: List<String>): Int? =
+    try {
+      when (withContext(Dispatchers.Default) { chat.addPeopleToChannel(conversation, users) }) {
+        AddPeopleOutcome.ADDED -> null
+        AddPeopleOutcome.NOT_IN_SPACE -> R.string.members_add_not_in_space
+        AddPeopleOutcome.NOT_ALLOWED -> R.string.create_not_allowed
+      }
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: TeamCraftException) {
+      errorText(failure)
+    } catch (failure: IllegalStateException) {
+      R.string.error_signed_out
+    }
+
+  /** Whether "New space" shows; false while the server can't tell (offline). */
+  suspend fun canCreateSpaces(): Boolean = readChat { canCreateSpaces() } ?: false
 
   /**
    * Saves the member's own name (`null`: the sign-in name). Answers the string to show at the field

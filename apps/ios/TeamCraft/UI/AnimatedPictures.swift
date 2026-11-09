@@ -257,7 +257,7 @@ struct AnimationButton: View {
   var body: some View {
     Button(action: action) {
       Image(systemName: isMoving ? "pause.fill" : "play.fill")
-        .font(.footnote.weight(.semibold))
+        .font(.app(.footnote).weight(.semibold))
         .foregroundStyle(.white)
         .frame(width: 32, height: 32)
         .background(.ultraThinMaterial, in: Circle())
@@ -277,7 +277,7 @@ struct AnimationBadge: View {
 
   var body: some View {
     text
-      .font(.caption2.weight(.bold))
+      .font(.app(.caption2).weight(.bold))
       .foregroundStyle(.white)
       .padding(.horizontal, 6).padding(.vertical, 1)
       .background(Color.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 4, style: .continuous))

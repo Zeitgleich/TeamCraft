@@ -31,6 +31,8 @@
     <link data-trunk rel="copy-dir" href="vendor/pdfjs-6.4.299" data-target-path="pdfjs-6.4.299" />
     <link data-trunk rel="copy-file" href="pdf-viewer.mjs" data-target-path="pdfjs-6.4.299" />
     <!-- Thumbnails of the photo backgrounds, loaded lazily by the picker. The full pictures are added to the web release only (scripts/add-background-photos.sh); the desktop app compiles them in. -->
+    <!-- The interface fonts (#1494, src/fonts.rs), loaded only when someone picks one or opens the font menu. -->
+    <link data-trunk rel="copy-dir" href="fonts" data-target-path="fonts" />
     <link data-trunk rel="copy-dir" href="../../assets/backgrounds/thumbs" data-target-path="backgrounds/thumbs" />
     <!-- The app's wasm is built, split into lazily loaded chunks and started by scripts/build-app.sh (a
          Trunk hook, #334): Trunk can't split wasm. loader.js drives the loading screen below. -->

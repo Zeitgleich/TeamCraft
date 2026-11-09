@@ -34,10 +34,10 @@ struct SpaceSwitcherTitle: View {
       HStack(spacing: 6) {
         SpaceMark(spaceId: space.id, name: space.name, maybeImageVersion: space.maybeImageVersion, size: 24)
         Text(space.name)
-          .font(.headline)
+          .font(.app(.headline))
           .lineLimit(1)
         Image(systemName: "chevron.down")
-          .font(.caption.weight(.bold))
+          .font(.app(.caption).weight(.bold))
           .foregroundStyle(.secondary)
           .overlay(alignment: .topTrailing) {
             if hasNewElsewhere {
@@ -62,6 +62,8 @@ struct SpaceSwitcherView: View {
   let spaces: [HomeSpace]
   let selectedId: String?
   let canBrowse: Bool
+  /// "New space", where the workspace role allows it (#1534); the switcher closes first.
+  var onCreate: (() -> Void)?
   let onSelect: (String) -> Void
 
   var body: some View {
@@ -89,15 +91,25 @@ struct SpaceSwitcherView: View {
           .buttonStyle(.plain)
           .accessibilityAddTraits(space.id == selectedId ? .isSelected : [])
         }
-        if canBrowse {
+        if canBrowse || onCreate != nil {
           Section {
-            NavigationLink {
-              BrowseSpacesView { spaceId in
-                onSelect(spaceId)
+            if let onCreate {
+              Button {
                 dismiss()
+                onCreate()
+              } label: {
+                Label("create_space", systemImage: "plus")
               }
-            } label: {
-              Label("spaces_browse", systemImage: "magnifyingglass")
+            }
+            if canBrowse {
+              NavigationLink {
+                BrowseSpacesView { spaceId in
+                  onSelect(spaceId)
+                  dismiss()
+                }
+              } label: {
+                Label("spaces_browse", systemImage: "magnifyingglass")
+              }
             }
           }
         }
@@ -122,7 +134,7 @@ struct SpaceBadgeMark: View {
   var body: some View {
     if space.mentionCount > 0 {
       Text(verbatim: "\(space.mentionCount)")
-        .font(.caption2.weight(.bold))
+        .font(.app(.caption2).weight(.bold))
         .foregroundStyle(.white)
         .padding(.horizontal, 6)
         .frame(minWidth: 18, minHeight: 18)
@@ -175,9 +187,9 @@ struct BrowseSpacesView: View {
       VStack(alignment: .leading, spacing: 2) {
         Text(space.name).lineLimit(1)
         if let description = space.maybeDescription, !description.isEmpty {
-          Text(description).font(.footnote).foregroundStyle(Theme.textMuted).lineLimit(2)
+          Text(description).font(.app(.footnote)).foregroundStyle(Theme.textMuted).lineLimit(2)
         }
-        Text("space_member_count \(space.memberCount ?? 0)").font(.footnote).foregroundStyle(Theme.textMuted)
+        Text("space_member_count \(space.memberCount ?? 0)").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
       }
       Spacer(minLength: 8)
       Button("space_join") { join(space) }

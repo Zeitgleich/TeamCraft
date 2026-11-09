@@ -27,7 +27,7 @@ struct VideoViewer: View {
       Button {
         dismiss()
       } label: {
-        Image(systemName: "xmark").font(.body.weight(.semibold)).frame(width: 44, height: 44)
+        Image(systemName: "xmark").font(.app(.body).weight(.semibold)).frame(width: 44, height: 44)
       }
       .foregroundStyle(.white)
       .accessibilityLabel(Text("picture_close"))
@@ -326,7 +326,7 @@ struct VideoBadge: View {
     let size = FileSizeText.format(file.sizeBytes)
     let text = file.maybeDurationMs.map { "\(VideoDurationText.format(milliseconds: $0)) · \(size)" } ?? size
     Text(verbatim: text)
-      .font(.caption2)
+      .font(.app(.caption2))
       .foregroundStyle(.white)
       .padding(.horizontal, 6).padding(.vertical, 2)
       .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 6))

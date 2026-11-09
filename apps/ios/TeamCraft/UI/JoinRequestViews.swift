@@ -56,11 +56,11 @@ struct JoinRequestCard: View {
   var body: some View {
     let isPending = model.pendingJoinKeys.contains(JoinRequests.key(request))
     VStack(alignment: .leading, spacing: 8) {
-      Text(summary).font(.body).foregroundStyle(Theme.text)
-      Text(note).font(.footnote).foregroundStyle(Theme.textMuted)
+      Text(summary).font(.app(.body)).foregroundStyle(Theme.text)
+      Text(note).font(.app(.footnote)).foregroundStyle(Theme.textMuted)
       if isApprovable {
         Toggle("join_request_share_history", isOn: $sharesHistory)
-          .font(.subheadline)
+          .font(.app(.subheadline))
           .tint(Theme.accent)
           .disabled(isPending)
       }

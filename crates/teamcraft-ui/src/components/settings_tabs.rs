@@ -15,6 +15,7 @@ use crate::components::call_video::can_choose_speakers;
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::copy_and_confirm;
 use crate::components::settings_color_theme::ColorThemeCard;
+use crate::components::settings_font::FontRow;
 use crate::components::settings_rows::{
   SegmentedRow, SelectRow, SettingRow, SettingsCard, SwitchRow, row_id, slug_options,
 };
@@ -46,6 +47,7 @@ pub fn AppearanceSection() -> impl IntoView {
 
   view! {
     <SettingsCard heading="settings-theme">
+      <FontRow />
       <ThemeTiles />
     </SettingsCard>
     <ColorThemeCard />

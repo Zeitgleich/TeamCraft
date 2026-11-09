@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="create_new">Neu</string>
+  <string name="create_message_hint">Eine Direktnachricht oder eine Gruppe</string>
+  <string name="create_channel_in">In %1$s</string>
+  <string name="create_browse_hint">Kanälen deiner Spaces beitreten</string>
+  <string name="create_space">Neuer Space</string>
+  <string name="create_space_hint">Für ein Team, ein Projekt oder ein Thema</string>
+  <string name="create_description_label">Beschreibung (optional)</string>
+  <string name="create_name_too_long">Höchstens 100 Zeichen.</string>
+  <string name="create_name_invalid">Entferne Zeilenumbrüche und andere Steuerzeichen.</string>
+  <string name="create_description_too_long">Höchstens 1000 Zeichen.</string>
+  <string name="create_name_refused">Der Server hat diesen Namen nicht angenommen. Versuch einen kürzeren ohne Sonderzeichen.</string>
+  <string name="create_not_allowed">Du kannst das hier nicht mehr erstellen. Vielleicht hat sich deine Rolle geändert.</string>
+  <string name="create_channel_submit">Kanal erstellen</string>
+  <string name="create_channel_title">Neuer Kanal in %1$s</string>
+  <string name="channel_access_label">Wer beitreten kann</string>
+  <string name="channel_access_public">Öffentlich</string>
+  <string name="channel_access_public_hint">Alle im Space können ihn finden und beitreten.</string>
+  <string name="channel_access_private">Privat</string>
+  <string name="channel_access_private_hint">Nur hinzugefügte Personen sehen ihn.</string>
+  <string name="space_name_label">Name des Space</string>
+  <string name="space_name_missing">Gib einen Namen für den Space ein.</string>
+  <string name="space_access_open">Offen</string>
+  <string name="space_access_open_hint">Alle im Workspace können beitreten.</string>
+  <string name="space_access_invite">Nur mit Einladung</string>
+  <string name="space_access_invite_hint">Personen treten bei, wenn sie eingeladen werden.</string>
+  <string name="create_space_submit">Space erstellen</string>
+  <string name="members_add">Personen hinzufügen</string>
+  <string name="members_add_submit">Hinzufügen</string>
+  <string name="members_add_not_in_space">Jemand ist noch nicht im Space dieses Kanals. Ein Space-Admin kann die Person zuerst einladen.</string>
+  <plurals name="members_add_count">
+    <item quantity="one">%d Person hinzufügen</item>
+    <item quantity="other">%d Personen hinzufügen</item>
+  </plurals>
+</resources>

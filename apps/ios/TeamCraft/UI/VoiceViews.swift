@@ -45,7 +45,7 @@ struct VoiceCard: View {
         VStack(alignment: .leading, spacing: 4) {
           waveform.frame(height: 28)
           HStack {
-            Text(verbatim: timeText).font(.caption.monospacedDigit()).foregroundStyle(Theme.textMuted)
+            Text(verbatim: timeText).font(.app(.caption).monospacedDigit()).foregroundStyle(Theme.textMuted)
             Spacer(minLength: 8)
             speedButton
           }
@@ -95,7 +95,7 @@ struct VoiceCard: View {
         if state == .loading {
           ProgressView().tint(Theme.onAccent)
         } else {
-          Image(systemName: state == .playing ? "pause.fill" : "play.fill").font(.body.weight(.semibold))
+          Image(systemName: state == .playing ? "pause.fill" : "play.fill").font(.app(.body).weight(.semibold))
         }
       }
       .foregroundStyle(Theme.onAccent)
@@ -135,7 +135,7 @@ struct VoiceCard: View {
       player.cycleSpeed()
     } label: {
       Text(verbatim: player.speed.label)
-        .font(.caption.weight(.semibold).monospacedDigit())
+        .font(.app(.caption).weight(.semibold).monospacedDigit())
         .padding(.horizontal, 8).padding(.vertical, 4)
         .frame(minWidth: 44, minHeight: 32)
         .background(Theme.accentSoft, in: Capsule())
@@ -149,11 +149,11 @@ struct VoiceCard: View {
   private var failure: some View {
     switch state {
     case .failed(.unplayable):
-      Text("voice_unplayable").font(.caption2).foregroundStyle(Theme.danger)
+      Text("voice_unplayable").font(.app(.caption2)).foregroundStyle(Theme.danger)
     case .failed(.unavailable):
       HStack(spacing: 8) {
-        Text("voice_unavailable").font(.caption2).foregroundStyle(Theme.danger)
-        Button("retry") { player.toggle(file, model: model) }.font(.caption.weight(.semibold))
+        Text("voice_unavailable").font(.app(.caption2)).foregroundStyle(Theme.danger)
+        Button("retry") { player.toggle(file, model: model) }.font(.app(.caption).weight(.semibold))
       }
     default:
       EmptyView()
@@ -179,7 +179,7 @@ struct VoiceRecordButton: View {
 
   var body: some View {
     Image(systemName: "mic.fill")
-      .font(.body.weight(.semibold))
+      .font(.app(.body).weight(.semibold))
       .foregroundStyle(isRecording ? Theme.onAccent : Theme.textMuted)
       .frame(width: 44, height: 44)
       .background(isRecording ? Theme.danger : Theme.surface, in: Circle())
@@ -255,10 +255,10 @@ struct VoiceHoldHint: View {
     HStack(spacing: 10) {
       RecordingDot()
       Text(verbatim: VideoDurationText.format(milliseconds: recorder.elapsedMs))
-        .font(.body.monospacedDigit())
+        .font(.app(.body).monospacedDigit())
       Spacer(minLength: 4)
-      Label("voice_slide_cancel", systemImage: "chevron.left").font(.footnote).foregroundStyle(Theme.textMuted)
-      Image(systemName: "lock").font(.footnote).foregroundStyle(Theme.textMuted)
+      Label("voice_slide_cancel", systemImage: "chevron.left").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
+      Image(systemName: "lock").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
         .accessibilityLabel(Text("voice_slide_lock"))
     }
     .padding(.horizontal, 12)
@@ -314,7 +314,7 @@ struct VoiceRecorderBar: View {
       discardButton
       RecordingDot()
       Text(verbatim: VideoDurationText.format(milliseconds: recorder.elapsedMs))
-        .font(.body.monospacedDigit())
+        .font(.app(.body).monospacedDigit())
         .accessibilityLabel(Text("voice_recording"))
         .accessibilityValue(Text(verbatim: VideoDurationText.format(milliseconds: recorder.elapsedMs)))
       WaveformBars(
@@ -342,13 +342,13 @@ struct VoiceRecorderBar: View {
         discardButton
         WaveformBars(heights: voiceWaveformHeights(waveform: Data(take.waveform), count: 32), progress: 0)
           .frame(height: 28)
-        Text(verbatim: VideoDurationText.format(milliseconds: take.durationMs)).font(.body.monospacedDigit())
+        Text(verbatim: VideoDurationText.format(milliseconds: take.durationMs)).font(.app(.body).monospacedDigit())
         sendButton
       }
       .accessibilityElement(children: .contain)
       .accessibilityLabel(Text("voice_take \(VideoDurationText.format(milliseconds: take.durationMs))"))
       if let stop = take.maybeStop {
-        Text(Self.stopText(stop)).font(.caption).foregroundStyle(Theme.textMuted)
+        Text(Self.stopText(stop)).font(.app(.caption)).foregroundStyle(Theme.textMuted)
       }
     }
   }
@@ -367,7 +367,7 @@ struct VoiceRecorderBar: View {
     Button {
       recorder.discard()
     } label: {
-      Image(systemName: "trash").font(.body).foregroundStyle(Theme.danger).frame(width: 44, height: 44)
+      Image(systemName: "trash").font(.app(.body)).foregroundStyle(Theme.danger).frame(width: 44, height: 44)
     }
     .buttonStyle(.plain)
     .accessibilityLabel(Text("voice_discard"))
@@ -389,7 +389,7 @@ struct VoiceRecorderBar: View {
 
   private func roundIcon(_ systemName: String, filled: Bool) -> some View {
     Image(systemName: systemName)
-      .font(.body.weight(.semibold))
+      .font(.app(.body).weight(.semibold))
       .foregroundStyle(filled ? Theme.onAccent : Theme.text)
       .frame(width: 44, height: 44)
       .background(filled ? Theme.accent : Theme.surface, in: Circle())
@@ -398,7 +398,7 @@ struct VoiceRecorderBar: View {
 
   private func notice(_ text: LocalizedStringKey, @ViewBuilder actions: () -> some View) -> some View {
     VStack(alignment: .leading, spacing: 8) {
-      Label(text, systemImage: "mic").font(.subheadline)
+      Label(text, systemImage: "mic").font(.app(.subheadline))
       HStack(spacing: 16) {
         Spacer()
         actions()

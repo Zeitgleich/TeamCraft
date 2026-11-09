@@ -14,10 +14,18 @@ struct ChannelMembersView: View {
   @State private var maybeShown: ChannelRolesReviewItem?
   @State private var isSigning = false
   @State private var maybeMessageKey: String?
+  /// "Add people", where the server says the user may (#1534).
+  @State private var canAdd = false
+  @State private var isAdding = false
 
   var body: some View {
     NavigationStack {
       List {
+        if canAdd {
+          Section {
+            Button("members_add", systemImage: "person.badge.plus") { isAdding = true }
+          }
+        }
         if let info = maybeInfo {
           if info.hasRoleAlarm {
             Section { hint("channel_roles_alarm") }
@@ -40,7 +48,7 @@ struct ChannelMembersView: View {
                 // Only where the verified role log says who appointed the role (issue #1246).
                 if let appointer = member.maybeAppointer {
                   Text(verbatim: ChannelMembers.appointedByLine(appointer))
-                    .font(.footnote).foregroundStyle(Theme.textMuted)
+                    .font(.app(.footnote)).foregroundStyle(Theme.textMuted)
                 }
               }
             }
@@ -55,7 +63,13 @@ struct ChannelMembersView: View {
     }
     // The members and the signed roles are read afresh while the section is open.
     .task(id: conversationId) { await model.refreshChannelMembers(conversationId) }
-    .task(id: model.changeCount) { maybeInfo = await model.channelMembers(conversationId) ?? maybeInfo }
+    .task(id: model.changeCount) {
+      maybeInfo = await model.channelMembers(conversationId) ?? maybeInfo
+      canAdd = await model.browseSnapshot()?.conversations?.first { $0.id == conversationId }?.canAddMembers ?? canAdd
+    }
+    .sheet(isPresented: $isAdding) {
+      AddChannelMembersView(conversationId: conversationId, memberIds: maybeInfo?.members.map(\.userId) ?? [])
+    }
   }
 
   @ViewBuilder
@@ -70,7 +84,7 @@ struct ChannelMembersView: View {
         let names = ChannelMembers.droppedNames(
           shown.dropped, unknown: String(localized: "channel_roles_review_unknown"))
         Text(String(format: String(localized: "channel_roles_review_dropped"), names))
-          .font(.footnote).foregroundStyle(Theme.textMuted)
+          .font(.app(.footnote)).foregroundStyle(Theme.textMuted)
       }
       if let refusal = shown.maybeRefusal { status(ChannelMembers.refusalKey(refusal)) }
       let hasChanged = channelRolesReviewHasChanged(shown: shown, maybeLive: live)
@@ -120,7 +134,7 @@ struct ChannelMembersView: View {
   }
 
   private func hint(_ key: String) -> some View {
-    Text(LocalizedStringKey(key)).font(.footnote).foregroundStyle(Theme.textMuted)
+    Text(LocalizedStringKey(key)).font(.app(.footnote)).foregroundStyle(Theme.textMuted)
   }
 
   private func status(_ key: String) -> some View {
@@ -129,7 +143,7 @@ struct ChannelMembersView: View {
 
   private func badge(_ key: String, isWarning: Bool = false) -> some View {
     Text(LocalizedStringKey(key))
-      .font(.caption2.weight(.medium))
+      .font(.app(.caption2).weight(.medium))
       .padding(.horizontal, 6)
       .padding(.vertical, 2)
       .foregroundStyle(isWarning ? Theme.mentionText : Theme.accentStrong)

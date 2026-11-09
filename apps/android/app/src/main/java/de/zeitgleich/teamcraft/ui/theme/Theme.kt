@@ -121,6 +121,8 @@ fun TeamCraftTheme(maybeBrand: LoginBrand? = null, content: @Composable () -> Un
   val prefs = remember { AppearancePrefs.prefs(context) }
   val isDynamic by prefs.isDynamicColor.collectAsState()
   val colorTheme by prefs.colorThemeValue.collectAsState()
+  val font by prefs.fontValue.collectAsState()
+  val typography = remember(font) { appFontFamily(font)?.let(TeamCraftTypography::withFontFamily) ?: TeamCraftTypography }
   // A chosen colour theme (#202): the accent, selection, badge and presence; surfaces stay neutral.
   val maybeTheme = remember(colorTheme, isDark) { colorThemeTokens(colorTheme, isDark) }
   val scheme = when {
@@ -140,7 +142,7 @@ fun TeamCraftTheme(maybeBrand: LoginBrand? = null, content: @Composable () -> Un
     LocalTeamCraftColors provides extra,
     LocalStatusBarBackdrop provides backdrop,
   ) {
-    MaterialTheme(colorScheme = scheme, typography = TeamCraftTypography, shapes = TeamCraftShapes, content = content)
+    MaterialTheme(colorScheme = scheme, typography = typography, shapes = TeamCraftShapes, content = content)
   }
 }
 
