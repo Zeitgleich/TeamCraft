@@ -250,7 +250,6 @@ struct ChatAnswer: Decodable, Sendable {
   let maybeReply: ReplyPreview?
   let olderHistory: OlderHistory?
   var calls: [CallHistoryItem]?
-  var roster: SpaceRoster?
   var items: [SavedItem]?
   var overview: ScheduledOverview?
   var drafts: [DraftItem]?

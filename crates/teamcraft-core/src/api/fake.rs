@@ -2251,6 +2251,109 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  /// People by name, a page of [`DIRECTORY_PAGE`] at a time; `after` is the last user's ID. Filters
+  /// on title and department match nothing: the fake keeps no profiles.
+  async fn directory_people(
+    &self,
+    query: &teamcraft_proto::DirectoryPeopleQuery,
+  ) -> Result<teamcraft_proto::DirectoryPeopleResponse, ApiError> {
+    let needle = query.query.trim().to_lowercase();
+    let maybe_after: Option<UserId> = query.maybe_after.as_deref().and_then(|after| after.parse().ok());
+    self.with(|state, _| {
+      let mut people: Vec<teamcraft_proto::DirectoryPerson> = state
+        .users
+        .values()
+        .filter(|user| user.kind != teamcraft_proto::UserKind::Bot)
+        .filter(|user| query.maybe_kind.as_ref().is_none_or(|kind| &user.kind == kind))
+        .filter(|_| query.maybe_title.is_none() && query.maybe_department.is_none())
+        .filter(|user| {
+          query
+            .maybe_organization
+            .as_ref()
+            .is_none_or(|organization| user.maybe_organization.as_ref() == Some(organization))
+        })
+        .filter(|user| user.display_name.to_lowercase().contains(&needle))
+        .filter(|user| maybe_after.is_none_or(|after| user.id > after))
+        .map(|user| teamcraft_proto::DirectoryPerson {
+          user: user.clone(),
+          maybe_title: None,
+          maybe_department: None,
+          presence: teamcraft_proto::PresenceState::Offline,
+        })
+        .collect();
+      let maybe_next_after =
+        (people.len() > DIRECTORY_PAGE).then(|| people[DIRECTORY_PAGE - 1].user.id.to_string());
+      people.truncate(DIRECTORY_PAGE);
+      Ok(teamcraft_proto::DirectoryPeopleResponse {
+        people,
+        maybe_next_after,
+      })
+    })
+  }
+
+  async fn directory_filters(
+    &self,
+    _query: &teamcraft_proto::DirectoryFiltersQuery,
+  ) -> Result<teamcraft_proto::DirectoryFiltersResponse, ApiError> {
+    self.with(|state, _| {
+      let organizations: BTreeSet<String> = state
+        .users
+        .values()
+        .filter_map(|user| user.maybe_organization.clone())
+        .collect();
+      Ok(teamcraft_proto::DirectoryFiltersResponse {
+        organizations: organizations.into_iter().collect(),
+        departments: Vec::new(),
+        titles: Vec::new(),
+      })
+    })
+  }
+
+  /// The fake keeps no channel directory: always one empty page.
+  async fn directory_channels(
+    &self,
+    _query: &teamcraft_proto::DirectoryChannelsQuery,
+  ) -> Result<teamcraft_proto::DirectoryChannelsResponse, ApiError> {
+    Ok(teamcraft_proto::DirectoryChannelsResponse {
+      channels: Vec::new(),
+      maybe_next_after: None,
+    })
+  }
+
+  /// Every open invitation, newest first, in one page.
+  async fn directory_invitations(
+    &self,
+    query: &teamcraft_proto::DirectoryInvitationsQuery,
+  ) -> Result<teamcraft_proto::DirectoryInvitationsResponse, ApiError> {
+    self.with(|state, _| {
+      let invitations = state
+        .invites
+        .iter()
+        .rev()
+        .filter(|invite| query.maybe_space_id.is_none_or(|space| invite.space_id == space))
+        .filter_map(|invite| {
+          let sponsor = state.users.get(&invite.sponsor_user_id)?.clone();
+          let space_name = state.spaces.get(&invite.space_id)?.name.clone();
+          Some(teamcraft_proto::DirectoryInvitation {
+            id: invite.id,
+            space_id: invite.space_id,
+            space_name,
+            email: invite.email.clone(),
+            role: invite.role.clone(),
+            sponsor,
+            maybe_expires_at: invite.maybe_expires_at,
+            is_expired: false,
+            can_resend: true,
+          })
+        })
+        .collect();
+      Ok(teamcraft_proto::DirectoryInvitationsResponse {
+        invitations,
+        maybe_next_after: None,
+      })
+    })
+  }
+
   async fn search_users(&self, query: &str) -> Result<teamcraft_proto::SearchUsersResponse, ApiError> {
     let needle = query.trim().to_lowercase();
     self.with(|state, _| {
@@ -4721,6 +4824,20 @@ impl ServerApi for FakeServerApi {
           .cloned()
           .collect(),
       })
+    })
+  }
+
+  async fn resend_invite(&self, space: SpaceId, invite: teamcraft_proto::InviteId) -> Result<(), ApiError> {
+    self.with(|state, _| {
+      if state
+        .invites
+        .iter()
+        .any(|candidate| candidate.id == invite && candidate.space_id == space)
+      {
+        Ok(())
+      } else {
+        Err(ApiError::status(404, ErrorCode::InviteNotFound, "no such invite"))
+      }
     })
   }
 

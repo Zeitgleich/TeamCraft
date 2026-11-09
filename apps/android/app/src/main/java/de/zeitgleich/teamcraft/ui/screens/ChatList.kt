@@ -436,6 +436,10 @@ fun ChatListScreen(
         maybeCreating = null
         onNavigate(maybeChannelSpace?.let { "browse?space=${it.id}" } ?: "browse")
       },
+      onDirectory = {
+        maybeCreating = null
+        onNavigate("directory")
+      },
       onDismiss = { maybeCreating = null },
     )
     CreateStep.Channel -> {

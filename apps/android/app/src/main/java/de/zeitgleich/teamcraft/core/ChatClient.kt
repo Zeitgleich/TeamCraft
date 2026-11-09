@@ -11,6 +11,15 @@ import uniffi.teamcraft_ffi.AddPeopleOutcome
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CreateOutcome
+import uniffi.teamcraft_ffi.DirectoryChannelsPage
+import uniffi.teamcraft_ffi.DirectoryFilterChoices
+import uniffi.teamcraft_ffi.DirectoryInvitationsPage
+import uniffi.teamcraft_ffi.DirectoryPeopleKind
+import uniffi.teamcraft_ffi.DirectoryPeoplePage
+import uniffi.teamcraft_ffi.DirectoryPeopleRequest
+import uniffi.teamcraft_ffi.InvitationOutcome
+import uniffi.teamcraft_ffi.InviteOutcome
+import uniffi.teamcraft_ffi.InvitePeopleInput
 import uniffi.teamcraft_ffi.LeaveChoice
 import uniffi.teamcraft_ffi.NewChannelInput
 import uniffi.teamcraft_ffi.NewSpaceInput
@@ -120,6 +129,27 @@ class ChatClient(
   /** Adds people to a channel, to its space first where the user may (#1534). */
   suspend fun addPeopleToChannel(conversation: String, users: List<String>): AddPeopleOutcome =
     core().addPeopleToChannel(conversation, users)
+
+  /** One page of the directory's people (#1337), from the server. */
+  suspend fun directoryPeople(request: DirectoryPeopleRequest): DirectoryPeoplePage = core().directoryPeople(request)
+
+  /** The values the people filters offer, for [kind] and a space (empty for all). */
+  suspend fun directoryFilters(kind: DirectoryPeopleKind, spaceId: String): DirectoryFilterChoices =
+    core().directoryFilters(kind, spaceId)
+
+  suspend fun directoryChannels(query: String, spaceId: String, after: String): DirectoryChannelsPage =
+    core().directoryChannels(query, spaceId, after)
+
+  suspend fun directoryInvitations(query: String, spaceId: String, after: String): DirectoryInvitationsPage =
+    core().directoryInvitations(query, spaceId, after)
+
+  suspend fun invitePeople(input: InvitePeopleInput): InviteOutcome = core().invitePeople(input)
+
+  suspend fun resendInvitation(spaceId: String, invitationId: String): InvitationOutcome =
+    core().resendInvitation(spaceId, invitationId)
+
+  suspend fun revokeInvitation(spaceId: String, invitationId: String): InvitationOutcome =
+    core().revokeInvitation(spaceId, invitationId)
 
   /** The files of a draft (#1220), in the order they were attached. */
   suspend fun draftFiles(conversation: String, maybeThread: String?): List<DraftFileItem> =

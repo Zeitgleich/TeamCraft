@@ -197,8 +197,6 @@ object ChatActions {
 
   fun markRead(conversation: String) = action("mark_read") { put("conversation", conversation) }
 
-  fun refreshSpaceRoster(space: String) = action("refresh_space_roster") { put("space", space) }
-
   fun refreshCallHistory() = action("refresh_call_history") {}
 
   /** The user pressed "Try again" on a list that could not be read ([ChatQueries.listLoad]). */
@@ -424,8 +422,6 @@ object ChatQueries {
   fun spaceFiles(space: String) = query("space_files") { put("space", space) }
 
   fun spaceCallHistory(space: String) = query("space_call_history") { put("space", space) }
-
-  fun spaceMembers(space: String) = query("space_members") { put("space", space) }
 
   fun scheduledMessages() = query("scheduled_messages") {}
 

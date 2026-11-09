@@ -60,6 +60,10 @@ use teamcraft_proto::{
   PutMeetingAdmittersRequest,
 };
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest, UserEnrollmentResponse};
+use teamcraft_proto::{
+  DirectoryChannelsQuery, DirectoryChannelsResponse, DirectoryFiltersQuery, DirectoryFiltersResponse,
+  DirectoryInvitationsQuery, DirectoryInvitationsResponse, DirectoryPeopleQuery, DirectoryPeopleResponse,
+};
 use teamcraft_proto::{ExpiringGuestResponse, ExtendGuestRequest, ListExpiringGuestsResponse};
 use teamcraft_proto::{
   ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
@@ -421,6 +425,63 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   async fn search_users(&self, query: &str) -> Result<SearchUsersResponse, ApiError> {
     let encoded: String = url::form_urlencoded::byte_serialize(query.as_bytes()).collect();
     self.get(&format!("/users?query={encoded}")).await
+  }
+
+  async fn directory_people(
+    &self,
+    query: &DirectoryPeopleQuery,
+  ) -> Result<DirectoryPeopleResponse, ApiError> {
+    let parameters = encoded_query(&[
+      ("query", Some(query.query.clone())),
+      (
+        "kind",
+        query.maybe_kind.as_ref().map(|kind| kind.as_str().to_owned()),
+      ),
+      ("organization", query.maybe_organization.clone()),
+      ("department", query.maybe_department.clone()),
+      ("title", query.maybe_title.clone()),
+      ("space_id", query.maybe_space_id.map(|space| space.to_string())),
+      ("after", query.maybe_after.clone()),
+    ]);
+    self.get(&format!("/directory/people{parameters}")).await
+  }
+
+  async fn directory_filters(
+    &self,
+    query: &DirectoryFiltersQuery,
+  ) -> Result<DirectoryFiltersResponse, ApiError> {
+    let parameters = encoded_query(&[
+      (
+        "kind",
+        query.maybe_kind.as_ref().map(|kind| kind.as_str().to_owned()),
+      ),
+      ("space_id", query.maybe_space_id.map(|space| space.to_string())),
+    ]);
+    self.get(&format!("/directory/filters{parameters}")).await
+  }
+
+  async fn directory_channels(
+    &self,
+    query: &DirectoryChannelsQuery,
+  ) -> Result<DirectoryChannelsResponse, ApiError> {
+    let parameters = encoded_query(&[
+      ("query", Some(query.query.clone())),
+      ("space_id", query.maybe_space_id.map(|space| space.to_string())),
+      ("after", query.maybe_after.clone()),
+    ]);
+    self.get(&format!("/directory/channels{parameters}")).await
+  }
+
+  async fn directory_invitations(
+    &self,
+    query: &DirectoryInvitationsQuery,
+  ) -> Result<DirectoryInvitationsResponse, ApiError> {
+    let parameters = encoded_query(&[
+      ("query", Some(query.query.clone())),
+      ("space_id", query.maybe_space_id.map(|space| space.to_string())),
+      ("after", query.maybe_after.map(|invite| invite.to_string())),
+    ]);
+    self.get(&format!("/directory/invitations{parameters}")).await
   }
 
   async fn register_device(&self, request: &RegisterDeviceRequest) -> Result<DeviceResponse, ApiError> {
@@ -1261,6 +1322,16 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   async fn delete_invite(&self, space: SpaceId, invite: InviteId) -> Result<(), ApiError> {
     self
       .send_without_response::<()>(Method::DELETE, &format!("/spaces/{space}/invites/{invite}"), None)
+      .await
+  }
+
+  async fn resend_invite(&self, space: SpaceId, invite: InviteId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::POST,
+        &format!("/spaces/{space}/invites/{invite}/resend"),
+        None,
+      )
       .await
   }
 
@@ -2732,9 +2803,38 @@ fn query_string(parameters: &[(&str, Option<String>)]) -> String {
   }
 }
 
+/// `?a=1&b=two%20words` from the present parameters, escaped: for free text such as a search.
+fn encoded_query(parameters: &[(&str, Option<String>)]) -> String {
+  let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+  for (name, maybe_value) in parameters {
+    if let Some(value) = maybe_value {
+      serializer.append_pair(name, value);
+    }
+  }
+  let pairs = serializer.finish();
+  if pairs.is_empty() {
+    String::new()
+  } else {
+    format!("?{pairs}")
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn encoded_queries_escape_free_text_and_skip_absent_parameters() {
+    assert_eq!(encoded_query(&[("query", None)]), "");
+    assert_eq!(
+      encoded_query(&[
+        ("query", Some("Ann & Bo".into())),
+        ("title", None),
+        ("department", Some("R&D".into())),
+      ]),
+      "?query=Ann+%26+Bo&department=R%26D"
+    );
+  }
 
   #[cfg(not(target_arch = "wasm32"))]
   #[test]

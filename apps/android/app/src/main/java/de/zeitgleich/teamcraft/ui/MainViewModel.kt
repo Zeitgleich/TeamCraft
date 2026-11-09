@@ -1080,6 +1080,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** The failure to show, taken so that only one screen shows it; `null` when another took it. */
   fun takeFailure(): Int? = failures.getAndUpdate { null }
 
+  /**
+   * Asks the server for one page of a directory list (#1337): the page, or why it failed, so the
+   * list can say so and offer another try.
+   */
+  suspend fun <T> fetchPage(block: suspend ChatClient.() -> T): PageAnswer<T> =
+    try {
+      PageAnswer.Loaded(withContext(Dispatchers.Default) { chat.block() })
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: TeamCraftException) {
+      PageAnswer.Failed(if (failure is TeamCraftException.Network) LoadFailure.NETWORK else LoadFailure.OTHER)
+    } catch (failure: IllegalStateException) {
+      PageAnswer.Failed(LoadFailure.OTHER)
+    }
+
+  /**
+   * Runs a directory action (invite, resend, revoke): its outcome, or the text of why it failed
+   * when the server didn't answer it.
+   */
+  suspend fun <T> tryDirectoryAction(block: suspend ChatClient.() -> T): ActionAnswer<T> =
+    try {
+      ActionAnswer.Answered(withContext(Dispatchers.Default) { chat.block() })
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: TeamCraftException) {
+      ActionAnswer.Failed(errorText(failure))
+    } catch (failure: IllegalStateException) {
+      ActionAnswer.Failed(R.string.error_signed_out)
+    }
+
   /** Runs a read; `null` when the core can't answer (not enrolled, gone). */
   suspend fun <T> readChat(block: suspend ChatClient.() -> T): T? =
     try {
@@ -1831,3 +1861,17 @@ private const val MAX_FILE_NAME_CHARS = 255
 /** How many removed or sent draft files the composers keep hidden ([MainViewModel.goneDraftFiles]). */
 private const val MAX_GONE_DRAFT_FILES = 256
 private const val BIDI_CONTROLS = "\u061C\u200E\u200F\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069"
+
+/** A page of a server list, or why it could not be read. */
+sealed interface PageAnswer<out T> {
+  data class Loaded<T>(val value: T) : PageAnswer<T>
+
+  data class Failed(val failure: LoadFailure) : PageAnswer<Nothing>
+}
+
+/** The server's answer to an action, or the text of why there was none. */
+sealed interface ActionAnswer<out T> {
+  data class Answered<T>(val value: T) : ActionAnswer<T>
+
+  data class Failed(@StringRes val text: Int) : ActionAnswer<Nothing>
+}

@@ -80,6 +80,34 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.inner.search_users(query)
   }
 
+  fn directory_people(
+    &self,
+    query: &DirectoryPeopleQuery,
+  ) -> impl Future<Output = Result<DirectoryPeopleResponse, ApiError>> {
+    self.inner.directory_people(query)
+  }
+
+  fn directory_filters(
+    &self,
+    query: &DirectoryFiltersQuery,
+  ) -> impl Future<Output = Result<DirectoryFiltersResponse, ApiError>> {
+    self.inner.directory_filters(query)
+  }
+
+  fn directory_channels(
+    &self,
+    query: &DirectoryChannelsQuery,
+  ) -> impl Future<Output = Result<DirectoryChannelsResponse, ApiError>> {
+    self.inner.directory_channels(query)
+  }
+
+  fn directory_invitations(
+    &self,
+    query: &DirectoryInvitationsQuery,
+  ) -> impl Future<Output = Result<DirectoryInvitationsResponse, ApiError>> {
+    self.inner.directory_invitations(query)
+  }
+
   fn register_device(
     &self,
     _request: &RegisterDeviceRequest,
@@ -431,6 +459,10 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
 
   fn delete_invite(&self, _space: SpaceId, _invite: InviteId) -> impl Future<Output = Result<(), ApiError>> {
     self.refused("delete_invite")
+  }
+
+  fn resend_invite(&self, _space: SpaceId, _invite: InviteId) -> impl Future<Output = Result<(), ApiError>> {
+    self.refused("resend_invite")
   }
 
   fn update_space_member(

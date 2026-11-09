@@ -920,10 +920,6 @@ final class AppModel {
     return snapshot.spaces.first { $0.id == spaceId }?.directConversations ?? []
   }
 
-  func roster(spaceId: String) async -> SpaceRoster? {
-    await answer(.spaceMembers(spaceId: spaceId))?.roster
-  }
-
   // MARK: Meetings
 
   /// The user's meetings that haven't ended, soonest first.
