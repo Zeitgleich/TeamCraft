@@ -167,7 +167,7 @@ GitHub starts scheduled runs several hours late, so the release usually lands be
 | Situation                                                       | Result                                                                                |
 |-----------------------------------------------------------------|---------------------------------------------------------------------------------------|
 | No commit since the last release tag, or only docs / Markdown   | nothing (notice in the run)                                                           |
-| CI of `main` for the newest code change is queued or running   | run waits for it, then goes on (or fails if it ends red)                              |
+| CI of `main` for the newest code change is queued or running   | run waits for it (at most 90 min), then goes on; red or not done in time: run fails   |
 | No CI run covers the newest code change (auto-merged PRs)      | run starts CI on `main` and waits for it                                              |
 | CI of `main` is red for the newest code change                 | run fails, nothing tagged; fix `main`, then run the workflow again                    |
 | The last tag has no published release                           | run fails: re-run it (`gh workflow run release.yml --ref vX.Y.Z -f publish=true`)    |

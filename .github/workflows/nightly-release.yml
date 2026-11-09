@@ -80,12 +80,14 @@ jobs:
           git log -1 --format='code_sha=%H' "$last_tag..HEAD" -- . ':!docs' ':!*.md' >> "$GITHUB_OUTPUT"
       # The newest code change must be covered by a green CI run on main: a run of that commit or of
       # a later one (a later commit contains the earlier one). A run that is still queued or running
-      # is waited for (the 22:00 run often meets the CI of the last merges); a red one stops the
-      # release.
+      # is waited for, at most CI_WAIT_MINUTES (the scheduled run often meets the CI of the last
+      # merges); a red one stops the release. Only commits on main when this run started count: runs
+      # of later merges aren't in this checkout (`merge-base` can't see them) and are never waited for.
       - name: CI of main is green
         if: steps.changes.outputs.release == 'true'
         env:
           CODE_SHA: ${{ steps.changes.outputs.code_sha }}
+          CI_WAIT_MINUTES: 90
         run: |
           runs="$(gh run list --workflow ci.yml --branch main --limit 50 \
             --json databaseId,headSha,status,conclusion \
@@ -124,8 +126,8 @@ jobs:
             done
             [ -n "$run_id" ] || { echo "::error::the CI run on main didn't start"; exit 1; }
           fi
-          echo "waiting for CI run $run_id"
-          if gh run watch "$run_id" --exit-status --interval 60 > /dev/null; then
+          echo "waiting for CI run $run_id (at most ${CI_WAIT_MINUTES} minutes)"
+          if timeout "${CI_WAIT_MINUTES}m" gh run watch "$run_id" --exit-status --interval 60 > /dev/null; then
             echo "CI green: run $run_id ($run_sha)"
             exit 0
           fi
