@@ -34,12 +34,18 @@ const KEY_CONFIG: &str = "teamcraft.crash_reports.config";
 const KEY_NOTICE_SEEN: &str = "teamcraft.crash_reports.notice_seen";
 /// Script errors reported per page life at most: a loop of the same error can't fill the queue.
 const MAX_SCRIPT_ERRORS: u32 = 5;
+/// Lost sign-ins reported per page life at most.
+const MAX_SIGN_OUT_REPORTS: u32 = 3;
+/// IndexedDB failures reported per page life at most: a broken store fails on every access.
+const MAX_STORAGE_REPORTS: u32 = 5;
 
 thread_local! {
   static REPORTER: RefCell<Option<CrashReporter>> = const { RefCell::new(None) };
   static IS_FLUSHING: Cell<bool> = const { Cell::new(false) };
   static IS_DEAD: Cell<bool> = const { Cell::new(false) };
   static SCRIPT_ERRORS: Cell<u32> = const { Cell::new(0) };
+  static SIGN_OUT_REPORTS: Cell<u32> = const { Cell::new(0) };
+  static STORAGE_REPORTS: Cell<u32> = const { Cell::new(0) };
   static STATUS: RwSignal<Option<CrashReportsStatus>> = RwSignal::new(None);
 }
 
@@ -66,6 +72,7 @@ pub fn install() {
   ));
   publish_status(&reporter);
   REPORTER.with(|cell| *cell.borrow_mut() = Some(reporter));
+  teamcraft_core::store::set_idb_failure_hook(capture_storage_error);
   listen_to_window();
   wasm_bindgen_futures::spawn_local(refresh_config());
 }
@@ -322,6 +329,26 @@ fn listen_to_window() {
   on_pagehide.forget();
 }
 
+/// The app lost a sign-in the user didn't end (a refused or missing saved sign-in, a lost device
+/// key, a vault that can't be read). `reason` is a fixed text naming the path, without content;
+/// the breadcrumbs carry the redacted debug log that led there. A warning, so it is sampled like
+/// other handled errors. Queued at once: the page may go to the identity provider right after.
+pub fn capture_lost_sign_in(reason: &'static str) {
+  if SIGN_OUT_REPORTS.with(|count| count.replace(count.get() + 1)) >= MAX_SIGN_OUT_REPORTS {
+    return;
+  }
+  capture_handled("LostSignIn", reason.to_owned());
+}
+
+/// IndexedDB failed (`teamcraft_core::store::IdbFailureHook`): the operation and the
+/// `DOMException` name, both fixed identifiers.
+fn capture_storage_error(operation: &'static str, error_name: &str) {
+  if STORAGE_REPORTS.with(|count| count.replace(count.get() + 1)) >= MAX_STORAGE_REPORTS {
+    return;
+  }
+  capture_handled("IndexedDbError", format!("{operation}: {error_name}"));
+}
+
 fn capture_script_error(error_type: &str, message: String, frames: Vec<StackFrame>) {
   // After a panic the wasm instance is dead; the browser's "unreachable" error is the panic itself.
   if IS_DEAD.with(Cell::get)
@@ -337,6 +364,24 @@ fn capture_script_error(error_type: &str, message: String, frames: Vec<StackFram
     error_type: error_type.to_owned(),
     message,
     frames,
+    breadcrumbs: breadcrumbs(),
+  };
+  with_reporter(|reporter| reporter.capture(event, random_roll()));
+  store_queue();
+  flush();
+}
+
+/// A handled problem of the app's own code, as a sampled warning without a stack trace: the
+/// breadcrumbs (the redacted debug log) tell what led there. Queued at once.
+fn capture_handled(error_type: &str, message: String) {
+  let event = CrashEvent {
+    event_id: event_id(),
+    timestamp_ms: now_ms(),
+    level: CrashLevel::Warning,
+    source: ErrorSource::Rust,
+    error_type: error_type.to_owned(),
+    message,
+    frames: Vec::new(),
     breadcrumbs: breadcrumbs(),
   };
   with_reporter(|reporter| reporter.capture(event, random_roll()));

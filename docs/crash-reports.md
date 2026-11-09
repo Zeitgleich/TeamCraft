@@ -202,6 +202,25 @@ account, the device or the instance, and it is rotated when the user turns repor
   connection comes back. An app that doesn't crash sends nothing.
 - **Sampling.** Fatal reports are always sent; handled errors are sent with the admin's sample rate.
 
+### Lost sign-ins
+
+A sign-in that the user didn't end and that the app loses is reported as a handled warning of type
+`LostSignIn` (desktop and web page, `auth::report_lost_sign_in`), so "I have to sign in all the
+time" shows up without a bug report. The message is one of a few fixed texts naming the path: the
+provider refused the stored or refresh token (`invalid_grant`), the web page was signed in before
+and has no saved sign-in any more, its saved sign-in can't be read (IndexedDB failed after
+retries), or the DPoP key of the sign-in is gone. The breadcrumbs (the redacted debug log) show
+what led there. At most three per page life, sampled like other handled errors; it is queued before
+the page goes to the identity provider and sent on the next start.
+
+### Storage failures
+
+Every IndexedDB failure of the page (`teamcraft_core::store::IdbFailureHook`) is a handled warning
+of type `IndexedDbError` with the operation and the `DOMException` name (`request: UnknownError`),
+never the exception's message, which may name a database or a key. `VersionError` (a newer app
+upgraded the database) and `ConstraintError` (a key another page stored first) are expected and
+not reported. At most five per page life; the service worker reports none.
+
 ## Processes without a page
 
 - **Desktop shell** (the core, calls, the shell's own code): its panic hook writes the panic
