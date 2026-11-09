@@ -518,8 +518,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let can_hold_drafts = self.draft_file_retention_days().is_some();
     'uploads: for mut upload in pending {
       match upload.purpose {
-        // Goes up with its message, when it is sent.
-        UploadPurpose::Draft { is_local: true, .. } => continue,
+        // Goes up with its message, when it is sent; the composer shows its thumbnail meanwhile.
+        UploadPurpose::Draft { is_local: true, .. } => {
+          self.preview_waiting_draft_file(&mut upload).await?;
+          continue;
+        },
         UploadPurpose::Draft { .. } if !can_hold_drafts => continue,
         UploadPurpose::Draft { .. } => upload.files.iter_mut().for_each(|file| file.is_held = true),
         UploadPurpose::Message => self.keep_held_files(&mut upload).await?,
@@ -1077,6 +1080,32 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       Err(error) => Err(UploadError::Retry(CoreError::Api(error))),
     }
+  }
+
+  /// Makes the thumbnail and reads the size of a picture that waits on this device for its send
+  /// (#1585), so the composer shows it, also after a restart. Nothing is announced or uploaded. A
+  /// file that isn't a picture the core reads keeps waiting as it is.
+  async fn preview_waiting_draft_file(&mut self, upload: &mut PendingUpload) -> Result<(), CoreError> {
+    let Some(file) = upload.files.first_mut() else {
+      return Ok(());
+    };
+    if !crate::thumbnail::is_image(&file.media_type)
+      || !self.settings.makes_thumbnails
+      || file.maybe_thumbnail.is_some()
+      || !self.previewed_draft_files.insert(upload.client_message_id)
+    {
+      return Ok(());
+    }
+    let Some(preview) = preview_picture(file).await else {
+      return Ok(());
+    };
+    file.maybe_dimensions = file.maybe_dimensions.or(Some(preview.dimensions));
+    file.maybe_thumbnail = preview.maybe_thumbnail.map(Base64Bytes::new);
+    // Removed or sent while the thumbnail was made: not brought back.
+    if pending_upload(&self.store, upload.conversation_id, upload.client_message_id)?.is_some() {
+      save_pending_upload(&self.store, upload)?;
+    }
+    Ok(())
   }
 
   /// Whether `upload` is a draft's file the user removed meanwhile (its record is gone). What the
@@ -1784,6 +1813,52 @@ fn seal_content(content: Vec<u8>, maybe_made: Option<Vec<u8>>, media_type: &str)
     maybe_made,
     maybe_dimensions,
     encrypted,
+  })
+}
+
+/// A waiting picture's preview (#1585): its upright size and, where the core can make one, its
+/// thumbnail.
+struct PicturePreview {
+  dimensions: ImageDimensions,
+  maybe_thumbnail: Option<Vec<u8>>,
+}
+
+/// Reads `file` and makes its [`PicturePreview`]; `None` when it can't be read or isn't a picture
+/// the core reads. Natively on a blocking thread, like [`seal_file`]: decoding a big photo takes
+/// seconds on a phone.
+#[cfg(not(target_arch = "wasm32"))]
+async fn preview_picture(file: &PendingFile) -> Option<PicturePreview> {
+  let source = file.source.clone();
+  let media_type = file.media_type.clone();
+  let maybe_read = match &source {
+    UploadSource::Picked { .. } => Some(read_source(&source, file.size_bytes).await.ok()?),
+    UploadSource::Bytes { .. } | UploadSource::Path { .. } => None,
+  };
+  tokio::task::spawn_blocking(move || {
+    let content = match maybe_read {
+      Some(content) => content,
+      None => read_source_now(&source).ok()?,
+    };
+    let (width, height) = crate::thumbnail::image_dimensions(&content, &media_type)?;
+    Some(PicturePreview {
+      dimensions: ImageDimensions { width, height },
+      maybe_thumbnail: crate::thumbnail::thumbnail(&content, &media_type),
+    })
+  })
+  .await
+  .map_err(|error| tracing::warn!(%error, "the picture's preview stopped"))
+  .ok()
+  .flatten()
+}
+
+/// [`preview_picture`] in the browser: the page's codecs are asynchronous and there is one thread.
+#[cfg(target_arch = "wasm32")]
+async fn preview_picture(file: &PendingFile) -> Option<PicturePreview> {
+  let content = read_source(&file.source, file.size_bytes).await.ok()?;
+  let (width, height) = crate::thumbnail::image_dimensions(&content, &file.media_type)?;
+  Some(PicturePreview {
+    dimensions: ImageDimensions { width, height },
+    maybe_thumbnail: crate::thumbnail::make_thumbnail(&content, &file.media_type).await,
   })
 }
 

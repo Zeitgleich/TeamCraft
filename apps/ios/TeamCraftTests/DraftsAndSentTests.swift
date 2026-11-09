@@ -91,6 +91,7 @@ final class DraftsAndSentTests: XCTestCase {
     let json = try object(ChatAction.attachDraftFiles(conversationId: "7", maybeThreadId: "9", files: [file]).json)
     XCTAssertEqual(json["action"] as? String, "attach_draft_files")
     XCTAssertEqual(json["maybe_thread"] as? String, "9")
+    XCTAssertEqual(json["travel"] as? String, "on_send")
     let sent = try XCTUnwrap((json["files"] as? [[String: Any]])?.first)
     XCTAssertEqual(sent["draft_id"] as? String, "0123456789abcdef0123456789abcdef")
     XCTAssertEqual((sent["source"] as? [String: Any])?["path"] as? String, "/uploads/a.png")

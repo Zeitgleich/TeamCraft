@@ -1201,8 +1201,8 @@ internal fun Composer(
   val draftSave = remember(conversationId, maybeThread) { DraftSave() }
   // Kept in the view model: picked files survive looking at another conversation (until sent).
   var files by viewModel.pickedFiles.entry(viewModel.pickedKey(conversationId, maybeThread), emptyList())
-  // Picked files go up with the draft as they come in (#1220): it keeps them after the app was
-  // killed, and the user's other devices show and send them.
+  // Picked files join the draft as they come in (#1220): it keeps them after the app was killed.
+  // They stay on this phone and go up on Send (#1585).
   LaunchedEffect(files) {
     if (files.any { it.maybeDraft == null }) viewModel.attachPickedToDraft(conversationId, maybeThread)
   }

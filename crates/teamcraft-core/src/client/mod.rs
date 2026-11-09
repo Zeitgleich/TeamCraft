@@ -75,7 +75,7 @@ pub mod workspace_admin;
 pub(crate) use account::ACCOUNT_DATA_KEY;
 pub(crate) use workspace::WORKSPACE_KEY;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub use abandoned::SIGN_OUT_REVOKE_PATIENCE;
 pub use account::stored_account_data;
@@ -427,6 +427,9 @@ pub struct Client<A, S> {
   transfers: crate::transfers::Transfers,
   /// The progress of a large file between two of its parts, so it stays listed.
   held_upload_progress: Option<crate::transfers::TransferGuard>,
+  /// Drafts' files waiting for their send whose thumbnail this run tried to make (#1585), so a
+  /// picture the core can't read isn't read again on every upload pass.
+  previewed_draft_files: HashSet<teamcraft_proto::ClientMessageId>,
   /// The browser's picked files may include some no upload needs any more (at start, after an
   /// upload finished).
   is_picked_sweep_due: bool,
@@ -646,6 +649,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       background_failures: Vec::new(),
       transfers: crate::transfers::Transfers::new(),
       held_upload_progress: None,
+      previewed_draft_files: HashSet::new(),
       is_picked_sweep_due: true,
       maybe_call_sink: None,
       link_requests: Default::default(),

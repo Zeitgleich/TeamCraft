@@ -25,7 +25,7 @@ use crate::calls::{
   OrgBackgroundRule, OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall,
   ScreenContentMode, ScreenShareResolution, VideoQuality,
 };
-use crate::drafts::{DraftFileItem, DraftItem, DraftReply, SentItem};
+use crate::drafts::{DraftFileItem, DraftFileTravel, DraftItem, DraftReply, SentItem};
 use crate::files_query::{FileKind, FileScope, FileSort, FilesQuery, StarredFile};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::live::LiveSnapshot;
@@ -861,6 +861,8 @@ pub enum ChatAction {
     #[serde(default)]
     maybe_thread: Option<ThreadId>,
     files: Vec<OutgoingFile>,
+    #[serde(default)]
+    travel: DraftFileTravel,
   },
   RemoveDraftFile {
     conversation: ConversationId,
@@ -1347,7 +1349,8 @@ impl ChatAction {
         conversation,
         maybe_thread,
         files,
-      } => backend.attach_draft_files(conversation, maybe_thread, files),
+        travel,
+      } => backend.attach_draft_files(conversation, maybe_thread, files, travel),
       Self::RemoveDraftFile {
         conversation,
         maybe_thread,
@@ -2498,6 +2501,33 @@ mod tests {
       }),
       r#"{"answer":"history_gaps","gaps":[{"after":"5","index":2,"status":"loading"}],"total":3}"#
     );
+  }
+
+  #[test]
+  fn attaching_draft_files_defaults_to_traveling_with_the_draft() {
+    let action: ChatAction =
+      serde_json::from_str(r#"{"action":"attach_draft_files","conversation":"7","files":[]}"#)
+        .expect("parse");
+    assert!(matches!(
+      action,
+      ChatAction::AttachDraftFiles {
+        travel: DraftFileTravel::WithDraft,
+        ..
+      }
+    ));
+    let action: ChatAction = serde_json::from_str(
+      r#"{"action":"attach_draft_files","conversation":"7","files":[],"travel":"on_send"}"#,
+    )
+    .expect("parse");
+    assert!(matches!(
+      action,
+      ChatAction::AttachDraftFiles {
+        travel: DraftFileTravel::OnSend,
+        ..
+      }
+    ));
+    let unknown: DraftFileTravel = serde_json::from_str(r#""with_the_team""#).expect("parse");
+    assert_eq!(unknown, DraftFileTravel::Unknown);
   }
 
   #[test]

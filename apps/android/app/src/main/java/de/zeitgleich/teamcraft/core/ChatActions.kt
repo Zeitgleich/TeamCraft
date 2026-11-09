@@ -21,7 +21,7 @@ data class PickedFile(
   val maybeThumbnail: ByteArray? = null,
   val maybeDurationMs: Long? = null,
   val maybeWaveform: List<Int>? = null,
-  /** In the composer's draft (#1220): it went up with the draft, and its message takes it from there. */
+  /** In the composer's draft (#1220): kept with it on this device, and its message takes it from there. */
   val maybeDraft: DraftCopy? = null,
 )
 
@@ -57,6 +57,9 @@ data class SendOptions(
   /** Chosen by the composer when a retry must be the same message (a scheduled one). */
   val maybeClientMessageId: String? = null,
 )
+
+/** When a draft's files go up on phones (#1585): with their message, not as they are picked. */
+const val DRAFT_FILE_TRAVEL = "on_send"
 
 /**
  * Builds the core's `ChatAction` messages (teamcraft-client-api `remote`, tagged by `action`).
@@ -251,11 +254,16 @@ object ChatActions {
     )
   }
 
-  /** Files go up with the draft as they are picked (#1220); each carries its [DraftCopy]. */
+  /**
+   * Files join the draft as they are picked (#1220); each carries its [DraftCopy]. On a phone they
+   * wait on the device and go up only when the message is sent (#1585): no mobile data for files
+   * the user may still edit or drop. The draft's text still syncs.
+   */
   fun attachDraftFiles(conversation: String, maybeThread: String?, files: List<PickedFile>) = action("attach_draft_files") {
     put("conversation", conversation)
     put("maybe_thread", maybeThread.json())
     put("files", buildJsonArray { files.forEach { add(outgoingFile(it)) } })
+    put("travel", DRAFT_FILE_TRAVEL)
   }
 
   /** Takes a file out of the draft on every device of the user; the server deletes it. */

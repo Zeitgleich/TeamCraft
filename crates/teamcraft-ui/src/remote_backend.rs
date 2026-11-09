@@ -1630,11 +1630,13 @@ impl ChatBackend for RemoteChat {
     conversation: ConversationId,
     maybe_thread: Option<ThreadId>,
     files: Vec<teamcraft_client_api::actions::OutgoingFile>,
+    travel: teamcraft_client_api::drafts::DraftFileTravel,
   ) {
     self.act(ChatAction::AttachDraftFiles {
       conversation,
       maybe_thread,
       files,
+      travel,
     });
   }
 

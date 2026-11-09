@@ -10,7 +10,7 @@ use std::sync::Arc;
 use common::{Peer, TestClient, backend_of, link_device, run_commands, settle};
 use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, OutgoingMessage};
 use teamcraft_client_api::backend::ChatBackend;
-use teamcraft_client_api::drafts::DraftFileState;
+use teamcraft_client_api::drafts::{DraftFileState, DraftFileTravel};
 use teamcraft_client_api::model::Message;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::clock::ManualClock;
@@ -26,6 +26,7 @@ async fn a_drafts_files_travel_to_the_other_device_and_go_out_from_there_unchang
     channel,
     None,
     vec![file("notes.txt", b"sand"), file("plan.txt", b"dunes")],
+    DraftFileTravel::WithDraft,
   );
   assert!(
     phone_ui
@@ -84,7 +85,12 @@ async fn a_drafts_files_travel_to_the_other_device_and_go_out_from_there_unchang
 async fn a_file_removed_on_one_device_is_given_up_and_another_sends_without_it() {
   let (server, mut phone, mut laptop, mut bob, channel) = setup(Some(30)).await;
   let phone_ui = backend_of(&phone);
-  phone_ui.attach_draft_files(channel, None, vec![file("draft.txt", b"maybe")]);
+  phone_ui.attach_draft_files(
+    channel,
+    None,
+    vec![file("draft.txt", b"maybe")],
+    DraftFileTravel::WithDraft,
+  );
   run_commands(&mut phone, &phone_ui).await;
   phone.client.sync_account_data().await.unwrap();
   laptop.sync_account_data().await.unwrap();
@@ -113,7 +119,12 @@ async fn a_file_removed_on_one_device_is_given_up_and_another_sends_without_it()
 async fn an_older_server_keeps_a_drafts_files_on_the_device_until_they_are_sent() {
   let (server, mut phone, _laptop, mut bob, channel) = setup(None).await;
   let phone_ui = backend_of(&phone);
-  phone_ui.attach_draft_files(channel, None, vec![file("local.txt", b"here only")]);
+  phone_ui.attach_draft_files(
+    channel,
+    None,
+    vec![file("local.txt", b"here only")],
+    DraftFileTravel::WithDraft,
+  );
   run_commands(&mut phone, &phone_ui).await;
   let attached = phone_ui.draft_files(channel, None);
   assert_eq!(attached[0].state, DraftFileState::OnThisDevice);
@@ -141,7 +152,12 @@ async fn an_older_server_keeps_a_drafts_files_on_the_device_until_they_are_sent(
 async fn a_file_sent_while_still_going_up_continues_as_the_messages_and_is_kept() {
   let (server, mut phone, _laptop, mut bob, channel) = setup(Some(30)).await;
   let phone_ui = backend_of(&phone);
-  phone_ui.attach_draft_files(channel, None, vec![file("quick.txt", b"fast")]);
+  phone_ui.attach_draft_files(
+    channel,
+    None,
+    vec![file("quick.txt", b"fast")],
+    DraftFileTravel::WithDraft,
+  );
   let attached = phone_ui.draft_files(channel, None);
   // Sent before the upload step ran.
   phone_ui.send_message(message(channel, "", drafts_files(&attached)));
@@ -166,7 +182,7 @@ async fn a_send_that_overtakes_its_files_attachment_sends_the_file_once() {
   picked.maybe_draft_id = Some("0123456789abcdef0123456789abcdef".into());
   // The desktop app's actions may reach the core out of order: the send comes first.
   phone_ui.send_message(message(channel, "", vec![picked.clone()]));
-  phone_ui.attach_draft_files(channel, None, vec![picked]);
+  phone_ui.attach_draft_files(channel, None, vec![picked], DraftFileTravel::WithDraft);
   run_commands(&mut phone, &phone_ui).await;
   settle(&mut [&mut phone, &mut bob]).await;
   assert!(
@@ -207,7 +223,12 @@ async fn a_file_the_server_wont_keep_yet_waits_without_holding_up_other_messages
     .unwrap();
   settle(&mut [&mut alice, &mut bob]).await;
   let alice_ui = backend_of(&alice);
-  alice_ui.attach_draft_files(channel, None, vec![file("held.txt", b"held")]);
+  alice_ui.attach_draft_files(
+    channel,
+    None,
+    vec![file("held.txt", b"held")],
+    DraftFileTravel::WithDraft,
+  );
   run_commands(&mut alice, &alice_ui).await;
   let attached = alice_ui.draft_files(channel, None);
 
@@ -237,7 +258,12 @@ async fn a_file_the_server_wont_keep_yet_waits_without_holding_up_other_messages
 async fn a_file_removed_while_it_goes_up_stays_removed() {
   let (server, mut phone, _laptop, _bob, channel) = setup(Some(30)).await;
   let phone_ui = backend_of(&phone);
-  phone_ui.attach_draft_files(channel, None, vec![file("second thoughts.txt", b"no")]);
+  phone_ui.attach_draft_files(
+    channel,
+    None,
+    vec![file("second thoughts.txt", b"no")],
+    DraftFileTravel::WithDraft,
+  );
   let attached = phone_ui.draft_files(channel, None);
   // The host drives the upload; the user removes the file while its blob is on the way.
   let mut upload = phone
@@ -268,7 +294,7 @@ async fn a_file_held_too_long_shows_expired_and_goes_up_again_from_where_it_was_
   let phone_ui = backend_of(&phone);
   let mut picked = file("old.txt", b"from last month");
   picked.maybe_draft_id = Some("00112233445566778899aabbccddeeff".into());
-  phone_ui.attach_draft_files(channel, None, vec![picked.clone()]);
+  phone_ui.attach_draft_files(channel, None, vec![picked.clone()], DraftFileTravel::WithDraft);
   run_commands(&mut phone, &phone_ui).await;
   let first_upload = server.attachment_ids();
 
@@ -298,6 +324,65 @@ async fn a_file_held_too_long_shows_expired_and_goes_up_again_from_where_it_was_
     bob_ui.message_extras(channel, &[received.id])[0].files[0].file_name,
     "old.txt"
   );
+}
+
+#[tokio::test]
+async fn files_attached_to_go_up_on_send_wait_on_the_device_and_go_up_with_their_message() {
+  let (server, mut phone, mut laptop, mut bob, channel) = setup(Some(30)).await;
+  let phone_ui = backend_of(&phone);
+  phone_ui.attach_draft_files(
+    channel,
+    None,
+    vec![picture("photo 1.png"), file("notes.txt", b"two")],
+    DraftFileTravel::OnSend,
+  );
+  run_commands(&mut phone, &phone_ui).await;
+  phone.client.upload_pending().await.unwrap();
+  assert!(
+    server.attachment_ids().is_empty(),
+    "nothing announced or uploaded before the send"
+  );
+  phone.client.sync_account_data().await.unwrap();
+  laptop.sync_account_data().await.unwrap();
+  assert!(
+    ui_of(&laptop).draft_files(channel, None).is_empty(),
+    "the files don't travel to the other devices"
+  );
+
+  // The app was killed: a new adapter over the same store still has them.
+  let restarted = CoreChatBackend::new(
+    phone.store.clone(),
+    phone.client.user_id(),
+    Box::new(ManualClock::new(1_800_000_000_000)),
+  );
+  let attached = restarted.draft_files(channel, None);
+  let names: Vec<&str> = attached.iter().map(|item| item.file_name.as_str()).collect();
+  assert_eq!(names, ["photo 1.png", "notes.txt"]);
+  assert!(
+    attached
+      .iter()
+      .all(|item| item.state == DraftFileState::OnThisDevice)
+  );
+  assert!(
+    attached[0].maybe_thumbnail.is_some(),
+    "the waiting picture shows its thumbnail"
+  );
+
+  restarted.send_message(message(channel, "both", drafts_files(&attached)));
+  run_commands(&mut phone, &restarted).await;
+  settle(&mut [&mut phone, &mut bob]).await;
+  let uploaded = server.attachment_ids();
+  assert_eq!(uploaded.len(), 2, "each file went up once, with its message");
+  assert!(
+    uploaded.iter().all(|id| !server.is_held(*id)),
+    "a message's files, not a draft's"
+  );
+  assert!(restarted.draft_files(channel, None).is_empty());
+  let bob_ui = backend_of(&bob);
+  let received = last(&bob_ui, channel);
+  let files = bob_ui.message_extras(channel, &[received.id])[0].files.clone();
+  let names: Vec<&str> = files.iter().map(|file| file.file_name.as_str()).collect();
+  assert_eq!(names, ["photo 1.png", "notes.txt"]);
 }
 
 /// Alice's phone and laptop and Bob in one channel; the server holds drafts' files for
@@ -372,6 +457,16 @@ fn file(name: &str, bytes: &[u8]) -> OutgoingFile {
     maybe_duration_ms: None,
     maybe_waveform: None,
     maybe_draft_id: None,
+  }
+}
+
+fn picture(name: &str) -> OutgoingFile {
+  let image = image::RgbImage::from_pixel(64, 48, image::Rgb([200, 40, 40]));
+  let mut bytes = std::io::Cursor::new(Vec::new());
+  image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+  OutgoingFile {
+    media_type: "image/png".into(),
+    ..file(name, &bytes.into_inner())
   }
 }
 
