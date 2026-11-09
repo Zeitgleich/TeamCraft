@@ -275,6 +275,9 @@ the identity of mail the server sends. Every generated link uses the first host 
 today: invitation and activation e-mail, the mention digest, meeting invitations (iMIP, join links,
 CalDAV events) and share links. Push texts follow when they carry brand names.
 
+A brand can have its own mail server (admin.md §6.2). Mail of that brand then goes through it, with
+the brand's sender and no fallback to the instance's server when it fails.
+
 ## 7. Spaces and brands
 
 A space can carry an optional brand tag (`brand_id`). It is a default theme hint: when a user opens a

@@ -8,6 +8,16 @@ use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::to_db;
 
+/// A brand's own mail server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredBrandMailServer {
+  pub brand_id: String,
+  /// JSON text.
+  pub value: String,
+  /// Encrypted with the server's settings key; never plaintext.
+  pub maybe_sealed_secret: Option<Vec<u8>>,
+}
+
 /// One stored setting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredSetting {
@@ -117,6 +127,70 @@ impl Database {
   /// Removes a setting, so the configuration file's value applies again. `false` if there was none.
   pub async fn delete_server_setting(&self, name: &str) -> Result<bool, DbError> {
     let result = sqlx::query!("DELETE FROM server_settings WHERE name = $1", name)
+      .execute(self.pool())
+      .await?;
+    Ok(result.rows_affected() > 0)
+  }
+
+  pub async fn stored_brand_mail_servers(&self) -> Result<Vec<StoredBrandMailServer>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT brand_id, value::text AS "value!", sealed_secret FROM brand_mail_servers ORDER BY brand_id"#
+    )
+    .fetch_all(self.pool())
+    .await?;
+    Ok(
+      rows
+        .into_iter()
+        .map(|row| StoredBrandMailServer {
+          brand_id: row.brand_id,
+          value: row.value,
+          maybe_sealed_secret: row.sealed_secret,
+        })
+        .collect(),
+    )
+  }
+
+  pub async fn brand_mail_server(&self, brand_id: &str) -> Result<Option<StoredBrandMailServer>, DbError> {
+    let row = sqlx::query!(
+      r#"SELECT brand_id, value::text AS "value!", sealed_secret FROM brand_mail_servers WHERE brand_id = $1"#,
+      brand_id,
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    Ok(row.map(|row| StoredBrandMailServer {
+      brand_id: row.brand_id,
+      value: row.value,
+      maybe_sealed_secret: row.sealed_secret,
+    }))
+  }
+
+  /// Creates or replaces a brand's own mail server.
+  pub async fn put_brand_mail_server(
+    &self,
+    brand_id: &str,
+    value: &str,
+    maybe_sealed_secret: Option<&[u8]>,
+    updated_by: UserId,
+  ) -> Result<(), DbError> {
+    sqlx::query!(
+      r#"INSERT INTO brand_mail_servers (brand_id, value, sealed_secret, updated_by, updated_at)
+         VALUES ($1, $2::text::jsonb, $3, $4, now())
+         ON CONFLICT (brand_id) DO UPDATE
+         SET value = EXCLUDED.value, sealed_secret = EXCLUDED.sealed_secret,
+             updated_by = EXCLUDED.updated_by, updated_at = now()"#,
+      brand_id,
+      value,
+      maybe_sealed_secret,
+      to_db(updated_by),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(())
+  }
+
+  /// Removes a brand's own mail server; `false` if it had none.
+  pub async fn delete_brand_mail_server(&self, brand_id: &str) -> Result<bool, DbError> {
+    let result = sqlx::query!("DELETE FROM brand_mail_servers WHERE brand_id = $1", brand_id)
       .execute(self.pool())
       .await?;
     Ok(result.rows_affected() > 0)

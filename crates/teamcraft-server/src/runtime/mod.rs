@@ -2,6 +2,7 @@
 //! transport and the calendar store. Readers take a cheap snapshot (`Arc`) and never hold a lock
 //! across an await; writers replace the whole value.
 
+pub mod brand_mail;
 pub mod mail_status;
 pub mod settings_key;
 

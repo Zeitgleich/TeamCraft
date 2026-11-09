@@ -5,13 +5,13 @@ use std::collections::BTreeMap;
 
 use teamcraft_proto::{
   AdminBrand, AdminBrandsResponse, AdminCalendarSettingsResponse, AdminMailSettingsResponse, BrandAssetSlot,
-  BrandColors, BrandLinks, BrandMailSettings, BrandSettings, BrandSource, CalDavSettings, CreateBrandRequest,
-  EmailDigestSettings, IntegrationSettings, LimitSettings, LocalAccountSettings, MailDeliveryStatus,
-  MailTextSettings, MeetingMailSettings, NotificationRuntimeSettings, RuntimeSettingsKey,
+  BrandColors, BrandLinks, BrandMailServer, BrandMailSettings, BrandSettings, BrandSource, CalDavSettings,
+  CreateBrandRequest, EmailDigestSettings, IntegrationSettings, LimitSettings, LocalAccountSettings,
+  MailDeliveryStatus, MailTextSettings, MeetingMailSettings, NotificationRuntimeSettings, RuntimeSettingsKey,
   RuntimeSettingsResponse, RuntimeSettingsSection, RuntimeSettingsState, SecretUpdate, ServedHostname,
   ServerRulesSettings, SettingSource, SettingsTestResponse, ShareSettings, SignInMethod, SignInPageSettings,
-  SmtpSecurityMode, SmtpSettings, TokenBindingSettings, UnixMillis, UpdateBrandRequest,
-  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest,
+  SmtpSecurityMode, SmtpSettings, TokenBindingSettings, UnixMillis, UpdateBrandMailServerRequest,
+  UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateMailSettingsRequest,
 };
 
 use crate::admin::SettingsTestKind;
@@ -57,6 +57,7 @@ impl SettingsMock {
           .collect(),
         is_image_upload_available: true,
         max_asset_bytes: 512 * 1024,
+        can_store_secrets: true,
       },
       mail: AdminMailSettingsResponse {
         source: SettingSource::Config,
@@ -95,6 +96,22 @@ impl SettingsMock {
       },
     };
     mock.sync_hostnames();
+    // One brand with a mail server of its own, as a multi-brand instance has them.
+    if let Some(brand) = mock.database_brand_mut("brand-b") {
+      brand.settings.mail.maybe_sender_name = Some("Brand B Team".to_owned());
+      brand.settings.mail.maybe_from_address = Some("chat@brand-b.example.com".to_owned());
+      brand.maybe_mail_server = Some(BrandMailServer {
+        host: "smtp.brand-b.example.com".to_owned(),
+        port: 587,
+        security: SmtpSecurityMode::StartTls,
+        maybe_username: Some("chat".to_owned()),
+        has_password: true,
+        status: MailDeliveryStatus {
+          maybe_last_success_at: Some(UnixMillis(now - 7_200_000)),
+          ..MailDeliveryStatus::default()
+        },
+      });
+    }
     mock
   }
 
@@ -111,6 +128,7 @@ impl SettingsMock {
       settings: request.settings,
       assets: Vec::new(),
       maybe_updated_at: None,
+      maybe_mail_server: None,
     });
     self.sync_hostnames();
   }
@@ -161,6 +179,60 @@ impl SettingsMock {
         brand.assets.push(slot);
       }
     }
+  }
+
+  /// Like the server: an empty host removes the brand's own server, an update may leave the
+  /// password out.
+  pub(super) fn save_brand_mail_server(&mut self, id: &str, request: UpdateBrandMailServerRequest) {
+    if request.host.trim().is_empty() {
+      self.remove_brand_mail_server(id);
+      return;
+    }
+    let Some(brand) = self.database_brand_mut(id) else {
+      return;
+    };
+    let had_password = brand
+      .maybe_mail_server
+      .as_ref()
+      .is_some_and(|server| server.has_password);
+    brand.maybe_mail_server = Some(BrandMailServer {
+      host: request.host.trim().to_ascii_lowercase(),
+      port: request.port,
+      security: request.security,
+      maybe_username: request.maybe_username,
+      has_password: has_password_after(&request.password, had_password),
+      status: MailDeliveryStatus::default(),
+    });
+  }
+
+  pub(super) fn remove_brand_mail_server(&mut self, id: &str) {
+    if let Some(brand) = self.database_brand_mut(id) {
+      brand.maybe_mail_server = None;
+    }
+  }
+
+  pub(super) fn record_brand_test_mail(&mut self, id: &str, now: i64) {
+    let is_ok = self.database_brand_mut(id).is_some_and(|brand| {
+      brand.maybe_mail_server.as_mut().is_some_and(|server| {
+        server.status.maybe_last_success_at = Some(UnixMillis(now));
+        true
+      })
+    });
+    self.last_test = Some((
+      SettingsTestKind::BrandMail(id.to_owned()),
+      SettingsTestResponse {
+        is_ok,
+        maybe_error: (!is_ok).then(|| "this brand has no mail server of its own".to_owned()),
+      },
+    ));
+  }
+
+  fn database_brand_mut(&mut self, id: &str) -> Option<&mut AdminBrand> {
+    self
+      .brands
+      .brands
+      .iter_mut()
+      .find(|brand| brand.id == id && brand.source == BrandSource::Database)
   }
 
   pub(super) fn save_mail(&mut self, request: UpdateMailSettingsRequest) {
@@ -319,6 +391,7 @@ fn demo_brand(id: &str, name: &str, source: BrandSource, is_default: bool, hosts
     },
     assets: Vec::new(),
     maybe_updated_at: None,
+    maybe_mail_server: None,
   }
 }
 

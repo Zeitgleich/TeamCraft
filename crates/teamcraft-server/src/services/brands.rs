@@ -19,7 +19,7 @@ use tracing::{error, warn};
 use super::access::require;
 use super::audit;
 use super::convert::unix_millis;
-use super::storage_cleanup;
+use super::{brand_mail, storage_cleanup};
 use crate::auth::AuthenticatedUser;
 use crate::brand::{Brand, BrandAsset, BrandError, DatabaseBrand, StoredAsset, normalize_host, sniff_image};
 use crate::config::{BrandColorsConfig, BrandConfig};
@@ -119,12 +119,19 @@ pub async fn update_brand(
       request.is_default,
       request.settings,
     );
+    if config.mail.maybe_from_address.is_none() && state.brand_mail.transport(id).is_some() {
+      return Err(ApiError::InvalidRequest(
+        "a brand with its own mail server needs a sender address".into(),
+      ));
+    }
     database[index].config = config.clone();
     database[index].updated_at = OffsetDateTime::now_utc();
     clear_other_defaults(&mut database, id, config.is_default);
     let registry = state.brands.check(&database).map_err(invalid)?;
     store_brand(state, caller, &config).await?;
     state.brands.install(registry, database);
+    // The transport's sender is this brand's.
+    brand_mail::load(state).await?;
   }
   audit::record(
     state,
@@ -152,6 +159,8 @@ pub async fn delete_brand(
     let registry = state.brands.check(&database).map_err(invalid)?;
     let keys = state.database.delete_brand(id).await?.unwrap_or_default();
     state.brands.install(registry, database);
+    // The brand's own mail server is gone with it.
+    brand_mail::load(state).await?;
     delete_objects(state, &keys).await;
   }
   audit::record(
@@ -349,13 +358,13 @@ pub async fn delete_asset(
   Ok(response(state))
 }
 
-fn response(state: &AppState) -> AdminBrandsResponse {
+pub(super) fn response(state: &AppState) -> AdminBrandsResponse {
   let registry = state.brands.current();
   AdminBrandsResponse {
     brands: registry
       .brands()
       .into_iter()
-      .map(|brand| admin_brand(brand))
+      .map(|brand| admin_brand(state, brand))
       .collect(),
     served_hostnames: registry
       .served_hostnames()
@@ -367,10 +376,11 @@ fn response(state: &AppState) -> AdminBrandsResponse {
       .collect(),
     is_image_upload_available: state.maybe_blob_store.is_some(),
     max_asset_bytes: state.brands.inputs().branding.max_asset_bytes,
+    can_store_secrets: state.maybe_settings_key.is_some(),
   }
 }
 
-fn admin_brand(brand: &Brand) -> AdminBrand {
+fn admin_brand(state: &AppState, brand: &Brand) -> AdminBrand {
   AdminBrand {
     id: brand.id.clone(),
     source: brand.source.clone(),
@@ -379,6 +389,10 @@ fn admin_brand(brand: &Brand) -> AdminBrand {
     settings: settings_of(&brand.config),
     assets: brand.asset_slots(),
     maybe_updated_at: brand.maybe_updated_at.map(unix_millis),
+    maybe_mail_server: state
+      .brand_mail
+      .transport(&brand.id)
+      .map(|transport| transport.to_response()),
   }
 }
 
@@ -465,7 +479,11 @@ async fn store_brand(
 }
 
 /// Where a database brand is in the list; configuration and built-in brands are read-only.
-fn database_index(state: &AppState, database: &[DatabaseBrand], id: &str) -> Result<usize, ApiError> {
+pub(super) fn database_index(
+  state: &AppState,
+  database: &[DatabaseBrand],
+  id: &str,
+) -> Result<usize, ApiError> {
   if let Some(index) = database.iter().position(|brand| brand.config.id == id) {
     return Ok(index);
   }

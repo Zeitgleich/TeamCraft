@@ -1117,7 +1117,7 @@ The `[push.apns]` block is only rendered when `apns_key` is a secret.
 | FCM service account key               | `[push.fcm] service_account`               | create a new key in Firebase, switch, then delete the old one; no gap             |
 | OIDC server client secret             | `[oidc.sync] client_secret`                | rotate in the identity provider, then restart the server                          |
 | Database password, S3 keys            | `[database]`, `[storage]`                  | change at the provider, then in the configuration, then restart                   |
-| SMTP and CalDAV passwords             | Administration → Mail / Calendar           | change at the provider, then enter the new one in the console; no restart         |
+| SMTP and CalDAV passwords             | Administration → Mail / Calendar / Brands  | change at the provider, then enter the new one in the console; no restart         |
 | Settings key                          | `[secrets] key` or `key_path`              | a new key makes the stored SMTP and CalDAV passwords unreadable: enter them again |
 
 Prefer environment variables or files for secrets (`TEAMCRAFT_...`), not the TOML file; never commit

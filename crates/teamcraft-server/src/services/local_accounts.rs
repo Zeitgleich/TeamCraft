@@ -118,10 +118,6 @@ pub async fn create_local_guest(
 ) -> Result<LocalGuestResponse, ApiError> {
   let local = local_auth(state)?;
   let _ = local;
-  let mailer = state
-    .mailer
-    .get()
-    .ok_or_else(|| ApiError::Unavailable("no mail server is configured".into()))?;
   let access = load_space(state, caller, space).await?;
   require_member_management(state, caller, &SpaceRole::Guest, &access.target())?;
   if access.view.space.is_archived {
@@ -129,6 +125,13 @@ pub async fn create_local_guest(
   }
   let email = normalize_email(&request.email)?;
   check_guest_domain(state, &email)?;
+  // Refused before anything is created: an account nobody can activate is no use.
+  let inviter_brand = super::invites::inviter_brand(state, &caller.user.id).await;
+  let brands = state.brands.current();
+  let brand = brands.for_recipient(&email, &inviter_brand);
+  let mailer = state
+    .mailer_for(brand)
+    .ok_or_else(|| ApiError::Unavailable("no mail server is configured".into()))?;
   let display_name = request.display_name.trim().to_owned();
   if display_name.is_empty() || display_name.chars().count() > MAX_DISPLAY_NAME_CHARS {
     return Err(ApiError::InvalidRequest("invalid display_name".into()));
@@ -183,9 +186,6 @@ pub async fn create_local_guest(
   )
   .await?;
 
-  let inviter_brand = super::invites::inviter_brand(state, &caller.user.id).await;
-  let brands = state.brands.current();
-  let brand = brands.for_recipient(&email, &inviter_brand);
   let url = format!(
     "{}/activate#token={token}",
     brand.base_url(&state.settings.get().mail.public_base_url)
@@ -236,15 +236,17 @@ pub async fn reissue_activation(
   user: UserId,
 ) -> Result<LocalGuestResponse, ApiError> {
   let _ = local_auth(state)?;
-  let mailer = state
-    .mailer
-    .get()
-    .ok_or_else(|| ApiError::Unavailable("no mail server is configured".into()))?;
   let account = state
     .database
     .get_local_account(user)
     .await?
     .ok_or_else(ApiError::user_not_found)?;
+  let inviter_brand = super::invites::inviter_brand(state, &caller.user.id).await;
+  let brands = state.brands.current();
+  let brand = brands.for_recipient(&account.login, &inviter_brand);
+  let mailer = state
+    .mailer_for(brand)
+    .ok_or_else(|| ApiError::Unavailable("no mail server is configured".into()))?;
   let token = new_one_time_token(&mut OsRng);
   let activation_expires_at = OffsetDateTime::now_utc()
     + Duration::hours(i64::from(
@@ -266,9 +268,6 @@ pub async fn reissue_activation(
     &json!({}),
   )
   .await?;
-  let inviter_brand = super::invites::inviter_brand(state, &caller.user.id).await;
-  let brands = state.brands.current();
-  let brand = brands.for_recipient(&account.login, &inviter_brand);
   let url = format!(
     "{}/activate#token={token}",
     brand.base_url(&state.settings.get().mail.public_base_url)

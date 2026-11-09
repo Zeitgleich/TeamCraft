@@ -1922,6 +1922,24 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
+  fn save_brand_mail_server(&self, id: String, request: teamcraft_proto::UpdateBrandMailServerRequest) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.save_brand_mail_server(&id, &request);
+    }
+  }
+
+  fn remove_brand_mail_server(&self, id: String) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.remove_brand_mail_server(&id);
+    }
+  }
+
+  fn send_brand_test_mail(&self, id: String, request: SendTestMailRequest) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.send_brand_test_mail(&id, request);
+    }
+  }
+
   fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
     self.maybe_admin.as_ref().and_then(|admin| admin.mail_settings())
   }

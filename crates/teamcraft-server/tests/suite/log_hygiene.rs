@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use common::*;
 use reqwest::Method;
 use serde_json::json;
-use teamcraft_server::config::{MailTexts, MeetingsConfig};
+use teamcraft_server::config::{MailTexts, MeetingsConfig, UnknownHostPolicy};
 use teamcraft_server::testing::{FakeCalendar, FakeMailer, TestApp};
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -40,6 +40,7 @@ impl<'a> MakeWriter<'a> for Capture {
 
 const PUSH_TOKEN: &str = "push-token-SECRET-0123456789";
 const PUSH_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+const BRAND_MAIL_PASSWORD: &str = "brand-mail-password-SECRET";
 const CIPHERTEXT: &str = "c2VjcmV0LWNpcGhlcnRleHQtMDEyMzQ1Njc4OQ==";
 
 #[tokio::test]
@@ -66,8 +67,16 @@ async fn credentials_and_ciphertext_do_not_appear_in_trace_level_logs() {
     mail_texts: MailTexts::default(),
   };
   let mailer = Arc::new(FakeMailer::default());
-  let Some(app) =
-    TestApp::start_with_meetings(&config, Arc::new(FakeCalendar::default()), mailer.clone()).await
+  let Some(app) = TestApp::start_with_meetings_and_settings(
+    &config,
+    Arc::new(FakeCalendar::default()),
+    mailer.clone(),
+    |settings| {
+      settings.branding.served_hostnames = vec!["chat.a.example.com".into()];
+      settings.branding.unknown_host = UnknownHostPolicy::Default;
+    },
+  )
+  .await
   else {
     return;
   };
@@ -163,6 +172,36 @@ async fn credentials_and_ciphertext_do_not_appear_in_trace_level_logs() {
   app
     .post(&alice, &format!("/meetings/link/{link_token}/knock"), json!({}))
     .await;
+  // A brand's mail server password, set and then used by a test mail (nobody listens on port 1).
+  app
+    .post(
+      &admin_user,
+      "/admin/brands",
+      json!({"id": "brand-a", "settings": {"display_name": "Brand A", "hostnames": ["chat.a.example.com"],
+             "mail": {"from_address": "chat@a.example.com"}}}),
+    )
+    .await;
+  let mail_server = app
+    .put(
+      &admin_user,
+      "/admin/brands/brand-a/mail-server",
+      json!({"host": "127.0.0.1", "port": 1, "security": "none", "username": "chat",
+             "password": {"action": "set", "value": BRAND_MAIL_PASSWORD}}),
+    )
+    .await;
+  assert_eq!(
+    mail_server.status,
+    reqwest::StatusCode::OK,
+    "{}",
+    mail_server.body
+  );
+  app
+    .post(
+      &admin_user,
+      "/admin/brands/brand-a/mail-server/test",
+      json!({"to_address": "someone@example.org"}),
+    )
+    .await;
   app
     .http
     .post(format!("{}/api/internal/v1/meetings/replies", app.base_url))
@@ -194,6 +233,7 @@ async fn credentials_and_ciphertext_do_not_appear_in_trace_level_logs() {
     ("meeting link token", link_token.as_str()),
     ("guest session token", guest_token.as_str()),
     ("inbox token", "inbox-token-SECRET"),
+    ("brand mail password", BRAND_MAIL_PASSWORD),
     ("guest token secret", "0123456789abcdef0123456789abcdef"),
   ] {
     assert!(!logs.contains(secret), "{what} appears in the logs");

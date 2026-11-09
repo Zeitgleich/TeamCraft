@@ -181,6 +181,13 @@ mod permissions {
       ),
       (Method::DELETE, "/admin/brands/a", None),
       (Method::POST, "/admin/brands/a/take-over", None),
+      (
+        Method::PUT,
+        "/admin/brands/a/mail-server",
+        Some(json!({"host": "smtp.a.example.com", "port": 587, "security": "start_tls"})),
+      ),
+      (Method::DELETE, "/admin/brands/a/mail-server", None),
+      (Method::POST, "/admin/brands/a/mail-server/test", Some(json!({}))),
       (Method::GET, "/admin/brands/a/assets/logo", None),
       (Method::DELETE, "/admin/brands/a/assets/logo", None),
       (Method::GET, "/admin/settings/mail", None),

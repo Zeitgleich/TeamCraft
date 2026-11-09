@@ -10,6 +10,7 @@ pub mod attachments;
 pub mod audit;
 pub mod backgrounds;
 pub mod bots;
+pub mod brand_mail;
 pub mod brands;
 pub mod calendar_settings;
 pub mod call_history;
