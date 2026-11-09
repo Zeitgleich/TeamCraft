@@ -1,0 +1,39 @@
+name: Cache prune
+
+# Keeps the Actions cache under the repository's 10 GB budget by deleting what main's newer caches
+# superseded (scripts/prune-caches.sh). After each CI run on main, since that is when a Rust cache
+# gets a new key; daily as a safety net.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: List what would be deleted, delete nothing
+        type: boolean
+        default: false
+
+concurrency:
+  group: cache-prune
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry-run && '--dry-run' || '' }}
+        run: scripts/prune-caches.sh $DRY_RUN | tee -a "$GITHUB_STEP_SUMMARY"
