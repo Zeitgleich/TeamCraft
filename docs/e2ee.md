@@ -1053,6 +1053,14 @@ in addition, through `is_draft`, that a file was attached to a draft and not (ye
 the keep when it was sent; not the draft's text, nor which message carried the file. Servers that publish no `draft_file_retention_days`
 in `GET /me` hold none: there a draft's files wait on the device and go up with the message.
 
+On phones (Android, iOS) a draft's files don't go up when they are attached (#1585): the app attaches them
+with `travel: on_send` (`DraftFileTravel::OnSend` of `AttachDraftFiles`), so they wait on the device like
+the files above, survive the app being killed, and go up with the message when the user taps Send; a
+picture edited before sending goes up only as edited. Mobile data isn't spent on files the user may still
+change or drop, and the server learns of them only as a message's files. The draft's text still travels
+in the account data; the files don't show on the user's other devices. Desktop and web attach with
+`with_draft`, the default, and keep the behaviour above.
+
 #### 4.5.0 Previews of files
 
 A received `.md`, `.html` or `.pdf` file, or a text file (`.txt`, `.log`, `.json`, `.csv`, `.yaml`, `.toml`,

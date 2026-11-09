@@ -2,7 +2,7 @@
 //! sending them with their message. See `client::draft_files` for how they travel.
 
 use teamcraft_client_api::actions::OutgoingFile;
-use teamcraft_client_api::drafts::{DraftFileItem, DraftFileState};
+use teamcraft_client_api::drafts::{DraftFileItem, DraftFileState, DraftFileTravel};
 use teamcraft_client_api::model::{ConversationId, ThreadId};
 use teamcraft_proto::ClientMessageId;
 
@@ -24,6 +24,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     conversation: ConversationId,
     maybe_thread: Option<ThreadId>,
     files: Vec<OutgoingFile>,
+    travel: DraftFileTravel,
   ) {
     let files: Vec<(Option<ClientMessageId>, PendingFile)> = files
       .into_iter()
@@ -45,6 +46,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       conversation,
       maybe_thread,
       files,
+      travel,
       self.now_ms(),
     );
     if !self.read(attached).is_empty() {

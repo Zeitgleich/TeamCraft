@@ -162,6 +162,9 @@ enum ChatAction {
       object = [
         "action": "attach_draft_files", "conversation": conversation,
         "maybe_thread": maybeThread.map { $0 as Any } ?? NSNull(), "files": files.map(\.object),
+        // On a phone the draft's files go up when the message is sent, not as they are picked
+        // (#1585): no mobile data for files the user may still edit or drop.
+        "travel": "on_send",
       ]
     case .removeDraftFile(let conversation, let maybeThread, let id):
       object = [

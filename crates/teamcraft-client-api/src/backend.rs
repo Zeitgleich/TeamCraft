@@ -36,7 +36,7 @@ use crate::calls::{
 use crate::calls::{
   CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
 };
-use crate::drafts::{DraftFileItem, DraftItem, DraftReply, SentItem};
+use crate::drafts::{DraftFileItem, DraftFileTravel, DraftItem, DraftReply, SentItem};
 use crate::files_query::{FilesPage, FilesQuery};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::model::{
@@ -584,13 +584,16 @@ pub trait ChatBackend {
   /// Keeps what the conversation's composer replies to, so it survives the app being killed
   /// (#1115); `None` forgets it. Stays on this device, unlike the draft's text.
   fn set_draft_reply(&self, _conversation: ConversationId, _maybe_reply: Option<DraftReply>) {}
-  /// Attaches files to the draft (#1220): they go up at once, so they travel with the draft to the
-  /// user's other devices. Sending them names them with [`crate::actions::FileSource::Draft`].
+  /// Attaches files to the draft (#1220). With [`DraftFileTravel::WithDraft`] they go up at once,
+  /// so they travel with the draft to the user's other devices; with [`DraftFileTravel::OnSend`]
+  /// they wait on this device and go up with their message (#1585). Sending them names them with
+  /// [`crate::actions::FileSource::Draft`].
   fn attach_draft_files(
     &self,
     _conversation: ConversationId,
     _maybe_thread: Option<ThreadId>,
     _files: Vec<OutgoingFile>,
+    _travel: DraftFileTravel,
   ) {
   }
   /// The files attached to the draft, in the order they were attached.

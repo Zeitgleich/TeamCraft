@@ -4,7 +4,7 @@ use wasm_bindgen::JsCast;
 
 use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, OutgoingMessage};
 use teamcraft_client_api::admin::format_bytes;
-use teamcraft_client_api::drafts::{DraftFileItem, DraftFileState};
+use teamcraft_client_api::drafts::{DraftFileItem, DraftFileState, DraftFileTravel};
 use teamcraft_client_api::model::MentionableGroup;
 use teamcraft_client_api::scheduled::ScheduleCheck;
 use teamcraft_client_api::voice::RecordingStop;
@@ -410,7 +410,14 @@ pub fn Composer(
   let gone_ids = StoredValue::new(Vec::<String>::new());
   let attach_to_draft = move |file: PendingFile| {
     if let Some(upload) = draft_upload(&file) {
-      state.write(|backend| backend.attach_draft_files(conversation, maybe_thread, vec![upload]));
+      state.write(|backend| {
+        backend.attach_draft_files(
+          conversation,
+          maybe_thread,
+          vec![upload],
+          DraftFileTravel::WithDraft,
+        )
+      });
       return;
     }
     let FileContent::Large(picked) = file.content.clone() else {
@@ -436,7 +443,14 @@ pub fn Composer(
       if is_waiting == Some(true)
         && let Some(upload) = draft_upload(&staged)
       {
-        state.try_write(|backend| backend.attach_draft_files(conversation, maybe_thread, vec![upload]));
+        state.try_write(|backend| {
+          backend.attach_draft_files(
+            conversation,
+            maybe_thread,
+            vec![upload],
+            DraftFileTravel::WithDraft,
+          )
+        });
       }
     });
   };

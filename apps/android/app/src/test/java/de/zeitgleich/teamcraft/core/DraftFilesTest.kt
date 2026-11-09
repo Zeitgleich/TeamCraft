@@ -25,12 +25,13 @@ class DraftFilesTest {
   }
 
   @Test
-  fun attachingNamesEachFileWithItsDraftIdAndTheCoresCopy() {
+  fun attachingNamesEachFileWithItsDraftIdAndTheCoresCopyAndKeepsItOnThePhoneUntilSend() {
     val file = PickedFile("a.png", "image/png", "/staging/1-a.png", maybeDraft = copy)
     val json = Json.parseToJsonElement(ChatActions.attachDraftFiles("7", "9", listOf(file))).jsonObject
     assertEquals("attach_draft_files", json["action"]!!.jsonPrimitive.content)
     assertEquals("7", json["conversation"]!!.jsonPrimitive.content)
     assertEquals("9", json["maybe_thread"]!!.jsonPrimitive.content)
+    assertEquals("on_send", json["travel"]!!.jsonPrimitive.content)
     val sent = json["files"]!!.jsonArray[0].jsonObject
     assertEquals(copy.id, sent["draft_id"]!!.jsonPrimitive.content)
     assertEquals("/staging/draft-0123", sent["source"]!!.jsonObject["path"]!!.jsonPrimitive.content)

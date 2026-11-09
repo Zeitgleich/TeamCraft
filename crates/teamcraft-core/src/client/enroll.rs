@@ -5,7 +5,7 @@
 //! (e2ee.md §3.1): [`PendingEnrollment::fingerprint`] is written to the OIDC user attribute
 //! (see [`crate::attestation`]), the refreshed ID token comes back as `maybe_attestation`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rand_core::OsRng;
 use teamcraft_crypto::backup::{
@@ -213,6 +213,7 @@ impl PendingEnrollment {
       background_failures: Vec::new(),
       transfers: crate::transfers::Transfers::new(),
       held_upload_progress: None,
+      previewed_draft_files: HashSet::new(),
       is_picked_sweep_due: true,
       maybe_call_sink: None,
       link_requests: Default::default(),

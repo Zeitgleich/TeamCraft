@@ -1150,6 +1150,7 @@ impl ChatBackend for MockBackend {
     conversation: ConversationId,
     maybe_thread: Option<ThreadId>,
     files: Vec<teamcraft_client_api::actions::OutgoingFile>,
+    _travel: teamcraft_client_api::drafts::DraftFileTravel,
   ) {
     let mut state = self.state.borrow_mut();
     for file in files {

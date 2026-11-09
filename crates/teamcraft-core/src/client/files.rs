@@ -516,8 +516,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let can_hold_drafts = self.draft_file_retention_days().is_some();
     'uploads: for mut upload in pending {
       match upload.purpose {
-        // Goes up with its message, when it is sent.
-        UploadPurpose::Draft { is_local: true, .. } => continue,
+        // Goes up with its message, when it is sent; the composer shows its thumbnail meanwhile.
+        UploadPurpose::Draft { is_local: true, .. } => {
+          self.preview_waiting_draft_file(&mut upload).await?;
+          continue;
+        },
         UploadPurpose::Draft { .. } if !can_hold_drafts => continue,
         UploadPurpose::Draft { .. } => upload.files.iter_mut().for_each(|file| file.is_held = true),
         UploadPurpose::Message => self.keep_held_files(&mut upload).await?,
@@ -1084,6 +1087,38 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Whether `upload` is a draft's file the user removed meanwhile (its record is gone). What the
   /// server announced for it in the meantime is given up.
+  /// Makes the thumbnail and reads the size of a picture that waits on this device for its send
+  /// (#1585), so the composer shows it, also after a restart. Nothing is announced or uploaded. A
+  /// file that isn't a picture the core reads keeps waiting as it is.
+  async fn preview_waiting_draft_file(&mut self, upload: &mut PendingUpload) -> Result<(), CoreError> {
+    let Some(file) = upload.files.first_mut() else {
+      return Ok(());
+    };
+    let is_picture = file.media_type.starts_with("image/");
+    if !is_picture
+      || !self.settings.makes_thumbnails
+      || file.maybe_thumbnail.is_some()
+      || !self.previewed_draft_files.insert(upload.client_message_id)
+    {
+      return Ok(());
+    }
+    let Ok(content) = read_source(&file.source, file.size_bytes).await else {
+      return Ok(());
+    };
+    let Some((width, height)) = crate::thumbnail::image_dimensions(&content, &file.media_type) else {
+      return Ok(());
+    };
+    file.maybe_dimensions = file.maybe_dimensions.or(Some(ImageDimensions { width, height }));
+    file.maybe_thumbnail = crate::thumbnail::make_thumbnail(&content, &file.media_type)
+      .await
+      .map(Base64Bytes::new);
+    // Removed or sent while the thumbnail was made: not brought back.
+    if pending_upload(&self.store, upload.conversation_id, upload.client_message_id)?.is_some() {
+      save_pending_upload(&self.store, upload)?;
+    }
+    Ok(())
+  }
+
   fn is_removed_draft_upload(&self, upload: &PendingUpload) -> Result<bool, CoreError> {
     if upload.purpose.is_message()
       || pending_upload(&self.store, upload.conversation_id, upload.client_message_id)?.is_some()
