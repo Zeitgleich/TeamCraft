@@ -138,6 +138,12 @@ class PushDecisionTest {
   }
 
   @Test
+  fun aDismissNamingAMeetingTakesThatMeetingsNoticeDown() {
+    val wakeUp = push(PushNotificationKind.DISMISS, maybeMessageId = null).copy(maybeMeetingId = "9")
+    assertEquals(PushDecision.RemoveMeeting("9"), PushDecision.of(wakeUp))
+  }
+
+  @Test
   fun aTestPushShowsTheConfirmation() {
     assertEquals(PushDecision.ShowTest(1_000L), PushDecision.of(push(PushNotificationKind.TEST, maybeSentAtMs = 1_000L)))
   }

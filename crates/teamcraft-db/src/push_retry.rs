@@ -166,7 +166,8 @@ impl Database {
   }
 
   /// Removes what a withdrawal sent to the device makes pointless: the queued ring of the call it
-  /// names, or the queued messages of the conversation (or thread) up to the message it names.
+  /// names, the queued messages of the conversation (or thread) up to the message it names, or the
+  /// queued reminder and start notice of the meeting occurrence it names.
   /// Rows another worker is sending right now are left alone. Returns how many were removed.
   pub async fn delete_superseded_push_retries(
     &self,
@@ -180,13 +181,17 @@ impl Database {
            WHERE device_id = $1
              AND ((kind = 'call' AND call_id = $2)
                OR (kind IN ('message', 'mention') AND conversation_id = $3 AND message_id <= $4
-                   AND thread_id IS NOT DISTINCT FROM $5))
+                   AND thread_id IS NOT DISTINCT FROM $5)
+               OR (kind IN ('meeting_reminder', 'meeting_start') AND meeting_id = $6
+                   AND meeting_starts_at_ms = $7))
            FOR UPDATE SKIP LOCKED)"#,
       to_db(device),
       dismiss.maybe_call_id.map(to_db),
       to_db(dismiss.conversation_id),
       dismiss.maybe_message_id.map(to_db),
       dismiss.maybe_thread_id.map(to_db),
+      dismiss.maybe_meeting.map(|meeting| to_db(meeting.meeting_id)),
+      dismiss.maybe_meeting.map(|meeting| meeting.starts_at.0),
     )
     .execute(self.pool())
     .await?;

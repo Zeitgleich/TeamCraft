@@ -43,6 +43,35 @@ async fn a_withdrawal_fetches_and_shows_nothing() {
 }
 
 #[tokio::test]
+async fn a_withdrawal_of_a_meeting_notice_names_the_meeting_and_no_conversation() {
+  let (server, alice, mut bob, channel) = channel_with_two().await;
+  let meeting = teamcraft_proto::PushMeeting {
+    meeting_id: teamcraft_proto::MeetingId::from_snowflake(teamcraft_proto::Snowflake::new(55).unwrap()),
+    starts_at: UnixMillis(MONDAY_NOON_MS),
+  };
+  let dismiss = PushWakeUp {
+    kind: PushKind::Dismiss,
+    conversation_id: ConversationId::from_snowflake(teamcraft_proto::Snowflake::ZERO),
+    maybe_message_id: None,
+    maybe_sender_id: None,
+    maybe_meeting: Some(meeting),
+    ..wake_up(
+      &alice,
+      channel,
+      MessageId::from_snowflake(teamcraft_proto::Snowflake::new(1).unwrap()),
+    )
+  };
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &seal(&server, &bob, &dismiss))
+    .await
+    .unwrap();
+  assert_eq!(preview.content, PreviewContent::Unavailable);
+  assert_eq!(preview.wake_up.kind, PushKind::Dismiss);
+  assert_eq!(preview.wake_up.maybe_meeting, Some(meeting));
+  assert!(!push_guard::is_duplicate(bob.store.as_ref(), &dismiss).unwrap());
+  settle(&mut [&mut bob]).await;
+}
+
+#[tokio::test]
 async fn a_ring_in_a_known_conversation_is_verified_so_it_can_be_answered() {
   let (server, alice, mut bob, channel) = channel_with_two().await;
   let ring = PushWakeUp {

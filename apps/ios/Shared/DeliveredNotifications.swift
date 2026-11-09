@@ -6,15 +6,19 @@ import UserNotifications
 enum DeliveredNotifications {
   static func all(in center: UNUserNotificationCenter = .current()) async -> [DeliveredPush] {
     await center.deliveredNotifications().map {
-      DeliveredPush(identifier: $0.request.identifier, userInfo: $0.request.content.userInfo)
+      DeliveredPush(
+        identifier: $0.request.identifier, userInfo: $0.request.content.userInfo,
+        maybeThreadIdentifier: $0.request.content.threadIdentifier)
     }
   }
 
-  /// A `dismiss` wake-up: the conversation or thread was read elsewhere, or a ring ended.
+  /// A `dismiss` wake-up: the conversation or thread was read elsewhere, a ring ended, or a meeting's
+  /// notice was dealt with elsewhere.
   static func apply(dismiss notification: PushNotification, in center: UNUserNotificationCenter = .current()) async {
     let target = DismissTarget(
       conversationId: notification.conversationId, maybeThreadId: notification.maybeThreadId,
-      maybeMessageId: notification.maybeMessageId, maybeCallId: notification.maybeCallId)
+      maybeMessageId: notification.maybeMessageId, maybeCallId: notification.maybeCallId,
+      maybeMeetingId: notification.maybeMeetingId)
     let identifiers = NotificationMatcher.identifiers(await all(in: center), dismissing: target)
     if !identifiers.isEmpty { center.removeDeliveredNotifications(withIdentifiers: identifiers) }
     await setBadge(notification.maybeBadge, in: center)

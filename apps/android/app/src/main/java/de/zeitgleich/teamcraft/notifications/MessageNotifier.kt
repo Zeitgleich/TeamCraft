@@ -423,6 +423,8 @@ class MessageNotifier(
       else -> context.getString(R.string.meeting_notification_soon_unnamed, minutes)
     }
     val conversationId = notification.conversationId
+    val maybeMeetingId = notification.maybeMeetingId
+    val maybeStartsAtMs = notification.maybeMeetingStartsAtMs
     val builder = NotificationCompat.Builder(context, NotificationChannels.MEETINGS)
       .setSmallIcon(R.drawable.ic_notification)
       .setContentTitle(title)
@@ -438,12 +440,36 @@ class MessageNotifier(
         Intent(context, CallActivity::class.java)
           .setAction(CallActivity.ACTION_ANSWER)
           .putExtra(CallActivity.EXTRA_CONVERSATION_ID, conversationId)
+          .apply {
+            // Joining tells the server, so the user's other phones take their notice down.
+            if (maybeMeetingId != null && maybeStartsAtMs != null) {
+              putExtra(CallActivity.EXTRA_MEETING_ID, maybeMeetingId)
+              putExtra(CallActivity.EXTRA_MEETING_STARTS_AT_MS, maybeStartsAtMs)
+            }
+          }
           .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
       )
       builder.addAction(R.drawable.ic_notification, context.getString(R.string.meeting_join), join)
     }
+    // Swiped away (the system tells the app without a permission): the same report as Join.
+    if (maybeMeetingId != null && maybeStartsAtMs != null) {
+      val dismissed = NotificationActionReceiver.meetingDismissedIntent(context, conversationId, maybeMeetingId, maybeStartsAtMs)
+      builder.setDeleteIntent(
+        PendingIntent.getBroadcast(
+          context,
+          maybeMeetingId.hashCode(),
+          dismissed,
+          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        ),
+      )
+    }
     postSafely(MEETING_TAG_PREFIX + (notification.maybeMeetingId ?: conversationId), MEETING_ID, builder.build())
+  }
+
+  /** A meeting's notice was dealt with on another device (a `dismiss` wake-up): takes it down. */
+  fun removeMeeting(meetingId: String) {
+    manager.cancel(MEETING_TAG_PREFIX + meetingId, MEETING_ID)
   }
 
   /** The diagnostics' test push arrived. */

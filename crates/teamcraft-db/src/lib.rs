@@ -109,7 +109,7 @@ pub use meeting::{
   AttendeeDiff, AttendeeKey, LobbyRow, MeetingChanges, NewAttendee, NewMeeting, SharedInviteClaim,
   StoredAttendee, StoredMeeting, StoredMeetingInvite,
 };
-pub use meeting_notice::{MeetingNoticeKind, MeetingNoticeRecipient};
+pub use meeting_notice::{MeetingNoticeDismissal, MeetingNoticeKind, MeetingNoticeRecipient};
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};
 pub use mls::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};
 pub use notification::{DeliveryRow, ReceiptRow, StoredSpaceNotifications, StoredUserSettings};

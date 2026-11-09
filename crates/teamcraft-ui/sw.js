@@ -665,6 +665,22 @@ self.addEventListener('notificationclick', (event) => {
   event.waitUntil(clickNotification(event));
 });
 
+// The user closed a notification without opening it: a meeting's notice is reported, so the user's
+// other phones take theirs down. Best effort; the push code does nothing for other notifications.
+self.addEventListener('notificationclose', (event) => {
+  event.waitUntil(closeNotification(event));
+});
+
+async function closeNotification(event) {
+  if (!hasPushCode()) return;
+  try {
+    await loadPush();
+    await wasm_bindgen.handleNotificationClose(event, await databaseName());
+  } catch (error) {
+    console.warn('notification close not handled by the push code', error);
+  }
+}
+
 async function clickNotification(event) {
   if (hasPushCode()) {
     try {

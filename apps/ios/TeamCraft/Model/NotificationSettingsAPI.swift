@@ -18,6 +18,14 @@ extension AppModel {
     return await request("PUT", "/me/notification-settings", body: body) != nil
   }
 
+  /// Tells the server that a meeting's notice was joined from or cleared on this phone, so the
+  /// user's other phones take theirs down (`POST /meetings/{id}/notices/dismiss`). Best effort: an
+  /// offline phone or an occurrence the server no longer knows changes nothing here.
+  func reportMeetingNoticeDealtWith(meetingId: String, startsAtMs: Int64) async {
+    let path = "/meetings/\(Self.queryEscaped(meetingId))/notices/dismiss"
+    _ = await request("POST", path, body: "{\"starts_at\":\(startsAtMs)}")
+  }
+
   /// Replaces the meeting reminder settings, keeping the others.
   func saveMeetingReminder(minutes: Int, notifiesStart: Bool) async {
     guard let current = await notificationSettingsJSON(),

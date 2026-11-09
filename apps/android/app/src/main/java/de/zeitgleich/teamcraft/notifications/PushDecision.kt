@@ -66,6 +66,12 @@ sealed interface PushDecision {
     val maybeBadge: UInt?,
   ) : PushDecision
 
+  /**
+   * A meeting's notice was dealt with on another device (joined, swiped away): take its
+   * notification down (tag `meeting:<id>`). Names the meeting only; an older app removes nothing.
+   */
+  data class RemoveMeeting(val meetingId: String) : PushDecision
+
   /** The diagnostics' test push arrived: a short confirmation. */
   data class ShowTest(val maybeSentAtMs: Long?) : PushDecision
 
@@ -109,6 +115,7 @@ sealed interface PushDecision {
     }
 
     private fun dismiss(notification: PushNotification): PushDecision {
+      notification.maybeMeetingId?.let { return RemoveMeeting(it) }
       notification.maybeCallId?.let { return StopRinging(it, notification.maybeBadge) }
       return RemoveRead(
         conversationId = notification.conversationId,
