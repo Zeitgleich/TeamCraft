@@ -55,3 +55,29 @@
   fill: currentColor;
 }
 
+/* ---- The Files place's sidebar (#1510): filters, then the scopes ---- */
+
+.files-kinds {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: var(--space-1);
+}
+
+.files-scope-title {
+  margin: 0;
+}
+
+.files-scopes [role="group"] {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* A space's tile at the size of a row's icon, as under the list layout's list. */
+.files-scopes .space-tile {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  font-size: var(--text-2xs);
+}

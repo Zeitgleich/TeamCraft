@@ -285,6 +285,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   // sidebar stays, with its scroll position and filter (#1151).
   let sidebar_place = Memo::new(move |_| match (rail.get(), state.is_list_layout()) {
     (RailEntry::Activity, _) => SidebarPlace::Activity,
+    (RailEntry::Files, _) => SidebarPlace::Files,
     (_, true) => SidebarPlace::List,
     (RailEntry::Chats, false) => SidebarPlace::Chats,
     (RailEntry::Space, false) => SidebarPlace::Space,
@@ -307,6 +308,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         RailEntry::Chats => "home",
         RailEntry::Space => "space",
         RailEntry::Activity => "activity",
+        RailEntry::Files => "files",
       }
       class:has-bottom-nav=move || has_bottom_nav(state)
     >
@@ -345,6 +347,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             SidebarPlace::List => view! { <HomeSidebar is_list=true /> }.into_any(),
             SidebarPlace::Space => view! { <Sidebar /> }.into_any(),
             SidebarPlace::Activity => lazy_area(Place::Sidebar, || areas::activity_list(())),
+            SidebarPlace::Files => lazy_area(Place::Sidebar, || areas::files_sidebar(())),
           }}
           // Drag the sidebar's edge to resize it (#842); the phone layout has its own panes.
           <Show when=move || !state.is_compact() fallback=|| ()>
@@ -1537,6 +1540,8 @@ enum SidebarPlace {
   List,
   Space,
   Activity,
+  /// The Files view's filters and scopes (#1510).
+  Files,
 }
 
 /// Two reports from the same input: no input for "Away after" marks this device idle (the server

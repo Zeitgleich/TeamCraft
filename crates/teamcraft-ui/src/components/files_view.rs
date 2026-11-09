@@ -1,6 +1,6 @@
-//! The files the user can see: the "Files" entry of the sidebar (issue #301). Inside a space those of
-//! its conversations (#954), elsewhere those of all spaces, channels and direct messages. Filtered by
-//! kind, sorted, with starred files, a page at a time (`teamcraft_client_api::files_query`). It reads
+//! The files the user can see: the Files place on the rail (issues #301, #1510). Everywhere, or one
+//! space's (#954), as its sidebar (`files_sidebar.rs`) chooses. Filtered by kind, sorted, with
+//! starred files, a page at a time (`teamcraft_client_api::files_query`). It reads
 //! what the device already holds; nothing is fetched, so the server learns nothing about what is
 //! looked at. The core reads a page through its index of messages with files and keeps it until a
 //! file comes or goes (#1509), so the view reads on every change instead of on a timer.
@@ -12,11 +12,10 @@ use teamcraft_client_api::files_query::{
 };
 use wasm_bindgen::JsCast;
 
-use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::file_views::{FileCard, FileStar};
+use crate::components::files_sidebar::kind_label_key;
 use crate::components::icons::IconName;
-use crate::components::page::ScopedSpaceName;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
@@ -29,12 +28,27 @@ pub fn FilesView() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let prefs = state.settings.prefs;
-  let kind = RwSignal::new(FileKind::All);
+  let kind = state.files_kind;
   let pages = RwSignal::new(1_usize);
-  let scope = Memo::new(move |_| match state.maybe_scoped_space() {
-    Some(space) => FileScope::Space(space),
-    None => FileScope::Everything,
+  let spaces = Memo::new(move |_| state.read(|backend| backend.spaces()));
+  // A space the user left meanwhile shows everything again.
+  let scope = Memo::new(move |_| match state.files_scope.get() {
+    FileScope::Space(space) if spaces.with(|all| all.iter().any(|candidate| candidate.id == space)) => {
+      FileScope::Space(space)
+    },
+    FileScope::Space(_) | FileScope::Everything => FileScope::Everything,
   });
+  let scope_name = Memo::new(move |_| match scope.get() {
+    FileScope::Space(space) => spaces.with(|all| {
+      all
+        .iter()
+        .find(|candidate| candidate.id == space)
+        .map(|found| found.name.clone())
+    }),
+    FileScope::Everything => None,
+  });
+  // Phones have no sidebar beside the list: the header has the filters and scopes there.
+  let is_compact = Memo::new(move |_| state.is_compact());
   let sort = Memo::new(move |_| prefs.with(|all| all.files.sort));
   let starred = Memo::new(move |_| prefs.with(|all| all.files.starred.clone()));
   // Another filter, order or space starts at the first page again.
@@ -97,12 +111,12 @@ pub fn FilesView() -> impl IntoView {
   view! {
     <section class="files-view" aria-label=move || i18n.t("files-title")>
       <header class="panel-header files-view-header">
-        <CompactBack />
         <div class="panel-title">
           <h1>{move || i18n.t("files-title")}</h1>
-          <ScopedSpaceName />
+          {move || scope_name.get().map(|name| view! { <span class="panel-subtitle" translate="no">{name}</span> })}
         </div>
         <div class="files-view-controls">
+          <Show when=move || is_compact.get() fallback=|| ()>
           <div class="segmented" role="group" aria-label=move || i18n.t("files-filter")>
             <SlidingIndicator />
             {FileKind::ALL
@@ -116,6 +130,36 @@ pub fn FilesView() -> impl IntoView {
               })
               .collect_view()}
           </div>
+          <div class="files-sort">
+            <label for="files-scope">{move || i18n.t("files-scope")}</label>
+            <select
+              id="files-scope"
+              class="input"
+              on:change=move |ev| {
+                let value = event_target_value(&ev);
+                let next = spaces
+                  .get_untracked()
+                  .into_iter()
+                  .find(|space| space.id.to_string() == value)
+                  .map_or(FileScope::Everything, |space| FileScope::Space(space.id));
+                state.files_scope.set(next);
+              }
+            >
+              <option value="" selected=move || scope.get() == FileScope::Everything>
+                {move || i18n.t("files-scope-everywhere")}
+              </option>
+              <For each=move || spaces.get() key=|space| (space.id, space.name.clone()) let:space>
+                <option
+                  value=space.id.to_string()
+                  selected=move || scope.get() == FileScope::Space(space.id)
+                  translate="no"
+                >
+                  {space.name.clone()}
+                </option>
+              </For>
+            </select>
+          </div>
+          </Show>
           <div class="files-sort">
             <label for="files-sort">{move || i18n.t("files-sort")}</label>
             <select
@@ -165,15 +209,6 @@ pub fn FilesView() -> impl IntoView {
         </Show>
       </div>
     </section>
-  }
-}
-
-fn kind_label_key(kind: FileKind) -> &'static str {
-  match kind {
-    FileKind::All => "files-filter-all",
-    FileKind::Media => "files-filter-media",
-    FileKind::Documents => "files-filter-documents",
-    FileKind::Starred => "files-filter-starred",
   }
 }
 
@@ -240,7 +275,12 @@ mod tests {
       "files-sort",
       "files-sort-loaded",
     ]);
-    keys.extend(["files-starred-empty-title", "files-starred-empty"]);
+    keys.extend([
+      "files-starred-empty-title",
+      "files-starred-empty",
+      "files-scope",
+      "files-scope-everywhere",
+    ]);
     for key in keys {
       assert!(en.contains(&format!("\n{key} = ")), "{key}");
     }

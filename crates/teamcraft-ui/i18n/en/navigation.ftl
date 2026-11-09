@@ -20,6 +20,8 @@ rail-activity = Activity
 rail-activity-tip = Mentions of you, replies in threads you follow and reactions to your messages
 rail-activity-unread = Activity, { $count } unread
 rail-activity-mentions = Activity, { $count } unread, including mentions
+rail-files = Files
+rail-files-tip = Every file and picture shared with you, by kind and by space
 chats-title = Chats
 chats-filter = Filter chats
 home-filters = Show
@@ -191,7 +193,6 @@ rail-focus-short = Focus
 focus-30-minutes = For 30 minutes
 
 # Files view and setup checklist (issue #301)
-sidebar-files = Files
 sidebar-shortcuts = Shortcuts
 setup-title = Set up your workspace
 setup-progress = { $done } of { $total }

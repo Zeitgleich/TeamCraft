@@ -43,6 +43,7 @@ use crate::components::downloads_menu::DownloadsButton;
 use crate::components::drafts_view::DraftsView;
 use crate::components::emoji_picker::EmojiPickerPanel;
 use crate::components::file_preview::FilePreview;
+use crate::components::files_sidebar::FilesSidebar;
 use crate::components::files_view::FilesView;
 use crate::components::guest_meeting::{GuestMeeting, GuestSession};
 use crate::components::home::NewMessageDialog;
@@ -251,6 +252,8 @@ areas! {
   scheduled(_unit: ()) => places: view! { <ScheduledView /> };
   drafts(_unit: ()) => places: view! { <DraftsView /> };
   files(_unit: ()) => places: view! { <FilesView /> };
+  /// The Files place's sidebar: its filters and scopes (#1510).
+  files_sidebar(_unit: ()) => places: view! { <FilesSidebar /> };
   call_history(_unit: ()) => places: view! { <CallsView /> };
   pins(conversation: ConversationId) => places: view! { <PinsPanel conversation=conversation /> };
   members(conversation: ConversationId) => places: view! { <MembersPanel conversation=conversation /> };

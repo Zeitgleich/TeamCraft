@@ -29,6 +29,7 @@ use crate::toast_timer::{Hold, ToastClock};
 use crate::unread_divider::{DividerEvent, next_divider};
 use crate::viewport::{CompactDepth, CompactPane, Layout, current_layout};
 use teamcraft_client_api::actions::{NewChannel, NewSpace, PermalinkTarget};
+use teamcraft_client_api::files_query::{FileKind, FileScope};
 use teamcraft_proto::{MeetingId, Role};
 
 /// How many of the newest messages are searched for the first unread one.
@@ -159,6 +160,16 @@ pub enum RailEntry {
   Space,
   /// Activity (#752): mentions, reactions and followed threads; the sidebar is its list.
   Activity,
+  /// Files (#1510): every file the user can see; the sidebar holds its filters and scopes.
+  Files,
+}
+
+impl RailEntry {
+  /// A place of its own beside Chats and the spaces (Activity, Files): going there remembers where
+  /// the user came from, and going back restores it.
+  pub fn is_destination(self) -> bool {
+    matches!(self, Self::Activity | Self::Files)
+  }
 }
 
 /// A place in the app: the rail's entry, its space and what the main column showed.
@@ -334,8 +345,12 @@ pub struct AppState {
   pub overlay: RwSignal<Overlay>,
   /// The filter of the activity list; "Threads" is one of them (#752).
   pub activity_filter: RwSignal<ActivityFilter>,
-  /// Where the user was when they went to Activity, restored when they go back to it.
-  before_activity: StoredValue<Option<Place>>,
+  /// Where the user was when they went to Activity or Files, restored when they go back to it.
+  before_destination: StoredValue<Option<Place>>,
+  /// The filter of the Files view (#1510): its sidebar and, on phones, its header set it.
+  pub files_kind: RwSignal<FileKind>,
+  /// Whose files the Files view lists: everything, or one space's (#1510).
+  pub files_scope: RwSignal<FileScope>,
   /// The video playing inside its message row; one at a time (#483).
   pub active_inline_video: RwSignal<Option<MediaKey>>,
   /// The one audio player of the app; one attachment plays at a time (#802).
@@ -452,7 +467,8 @@ fn compact_depth_for(view: MainView, panel: SidePanel) -> CompactDepth {
   match compact_pane_for(view, panel) {
     CompactPane::Panel => CompactDepth::Panel,
     CompactPane::List => CompactDepth::TopLevel,
-    CompactPane::Main if view == MainView::GettingStarted => CompactDepth::TopLevel,
+    // Files is a tab of the bottom navigation (#1510), its list the page itself.
+    CompactPane::Main if matches!(view, MainView::GettingStarted | MainView::Files) => CompactDepth::TopLevel,
     CompactPane::Main => CompactDepth::Page,
   }
 }
@@ -481,7 +497,9 @@ impl AppState {
       panel: RwSignal::new(SidePanel::Closed),
       overlay: RwSignal::new(Overlay::None),
       activity_filter: RwSignal::new(ActivityFilter::default()),
-      before_activity: StoredValue::new(None),
+      before_destination: StoredValue::new(None),
+      files_kind: RwSignal::new(FileKind::All),
+      files_scope: RwSignal::new(FileScope::Everything),
       active_inline_video: RwSignal::new(None),
       audio: AudioPlayer::new(),
       voice: crate::voice_recorder::VoiceRecorder::new(),
@@ -739,7 +757,7 @@ impl AppState {
   /// Switches the sidebar to a space (all spaces in the grouped sidebar). Lands in its first channel
   /// unless the open page isn't tied to a space (threads, search, …) or already belongs to it.
   pub fn open_space(&self, space: SpaceId) {
-    if self.return_from_activity(RailEntry::Space, Some(space)) {
+    if self.return_from_destination(RailEntry::Space, Some(space)) {
       return;
     }
     self.space.set(space);
@@ -776,7 +794,7 @@ impl AppState {
 
   /// Shows Chats: the DM it had open last (#498), or the page's start when there is none.
   pub fn open_chats(&self) {
-    if self.return_from_activity(RailEntry::Chats, None) {
+    if self.return_from_destination(RailEntry::Chats, None) {
       return;
     }
     self.rail.set(RailEntry::Chats);
@@ -817,21 +835,21 @@ impl AppState {
     }
   }
 
-  /// Going from Activity back to the place the user came from (#752) shows what was open there.
-  /// `true` when that is where `rail` (and `maybe_space`) lead and it was restored. Phones open
-  /// their lists instead, as from any tab.
-  fn return_from_activity(&self, rail: RailEntry, maybe_space: Option<SpaceId>) -> bool {
-    if self.rail.get_untracked() != RailEntry::Activity || self.is_compact() {
+  /// Going from Activity or Files back to the place the user came from (#752, #1510) shows what
+  /// was open there. `true` when that is where `rail` (and `maybe_space`) lead and it was
+  /// restored. Phones open their lists instead, as from any tab.
+  fn return_from_destination(&self, rail: RailEntry, maybe_space: Option<SpaceId>) -> bool {
+    if !self.rail.get_untracked().is_destination() || self.is_compact() {
       return false;
     }
-    let Some(place) = self.before_activity.get_value() else {
+    let Some(place) = self.before_destination.get_value() else {
       return false;
     };
     let is_same_place = place.rail == rail && maybe_space.is_none_or(|space| space == place.space);
     if !is_same_place {
       return false;
     }
-    self.before_activity.set_value(None);
+    self.before_destination.set_value(None);
     self.space.set(place.space);
     self.rail.set(place.rail);
     match place.view {
@@ -839,7 +857,7 @@ impl AppState {
         self.open_conversation(id)
       },
       // A conversation that is gone meanwhile: the place opens as it would anyway.
-      MainView::Conversation(_) | MainView::Activity => return false,
+      MainView::Conversation(_) | MainView::Activity | MainView::Files => return false,
       view => {
         self.view.set(view);
         self.panel.set(SidePanel::Closed);
@@ -848,7 +866,7 @@ impl AppState {
     true
   }
 
-  /// The space the People, Calls, Meetings, Saved and Files views are scoped to (#954): the one the
+  /// The space the People, Calls, Meetings and Saved views are scoped to (#954): the one the
   /// sidebar is showing. `None` where no single space is selected, so they show everything: on
   /// Home, in Activity, in the grouped sidebar, which lists all spaces together, and in the list
   /// layout, where opening a channel moves the rail but the sidebar stays the one list (#1151).
@@ -1732,7 +1750,11 @@ impl AppState {
     is_it
   }
 
+  /// Files as a place (#1510): its filters and scopes take the sidebar's place, the list fills the
+  /// main column. The place the user came from stays as it was for going back.
   pub fn open_files(&self) {
+    self.remember_place_before_destination();
+    self.rail.set(RailEntry::Files);
     self.view.set(MainView::Files);
     self.panel.set(SidePanel::Closed);
     self.overlay.set(Overlay::None);
@@ -1741,18 +1763,24 @@ impl AppState {
   /// Activity as a place (#752): its list takes the sidebar's place, like Chats or a space; the
   /// main column waits for an entry. The place the user came from stays as it was for going back.
   pub fn open_activity(&self) {
+    self.remember_place_before_destination();
+    self.rail.set(RailEntry::Activity);
+    self.view.set(MainView::Activity);
+    self.panel.set(SidePanel::Closed);
+    self.overlay.set(Overlay::None);
+  }
+
+  /// Notes where the user is before Activity or Files, unless they come from the other one: going
+  /// back from either returns to the place they left Chats or a space from.
+  fn remember_place_before_destination(&self) {
     let rail = self.rail.get_untracked();
-    if rail != RailEntry::Activity {
-      self.before_activity.set_value(Some(Place {
+    if !rail.is_destination() {
+      self.before_destination.set_value(Some(Place {
         rail,
         space: self.space.get_untracked(),
         view: self.view.get_untracked(),
       }));
     }
-    self.rail.set(RailEntry::Activity);
-    self.view.set(MainView::Activity);
-    self.panel.set(SidePanel::Closed);
-    self.overlay.set(Overlay::None);
   }
 
   /// Opens what an activity entry points at beside the activity list, which stays: the rail keeps
@@ -3256,6 +3284,37 @@ mod tests {
     }
   }
 
+  mod files_place {
+    use super::*;
+
+    /// #1510: Files is a place on the rail; going back restores what was open before.
+    #[test]
+    fn files_is_a_place_and_going_back_restores_the_channel() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      state.open_files();
+      assert_eq!(state.rail.get(), RailEntry::Files);
+      assert_eq!(state.view.get(), MainView::Files);
+      assert_eq!(state.route(), Route::Files);
+      state.open_space(space);
+      assert_eq!(state.rail.get(), RailEntry::Space);
+      assert_eq!(state.view.get(), MainView::Conversation(channel));
+    }
+
+    #[test]
+    fn activity_and_files_keep_the_place_left_first() {
+      let state = test_state();
+      let (space, channel) = first_channel(&state);
+      state.open_conversation(channel);
+      state.open_activity();
+      state.open_files();
+      state.open_activity();
+      state.open_space(space);
+      assert_eq!(state.view.get(), MainView::Conversation(channel));
+    }
+  }
+
   mod compact {
     use super::*;
 
@@ -3272,6 +3331,12 @@ mod tests {
         state.compact_pane(),
         CompactPane::List,
         "Activity's list is its sidebar"
+      );
+      state.open_files();
+      assert_eq!(
+        state.compact_depth(),
+        CompactDepth::TopLevel,
+        "Files is a tab (#1510)"
       );
       state.open_conversation(conversation);
       assert_eq!(state.compact_depth(), CompactDepth::Page);

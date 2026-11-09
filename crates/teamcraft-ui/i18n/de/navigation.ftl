@@ -20,6 +20,8 @@ rail-activity = Aktivität
 rail-activity-tip = Erwähnungen, Antworten in Threads, denen du folgst, und Reaktionen auf deine Nachrichten
 rail-activity-unread = Aktivität, { $count } ungelesen
 rail-activity-mentions = Aktivität, { $count } ungelesen, auch Erwähnungen
+rail-files = Dateien
+rail-files-tip = Alle Dateien und Bilder, die mit dir geteilt wurden, nach Art und nach Bereich
 chats-title = Chats
 chats-filter = Chats filtern
 home-filters = Anzeigen
@@ -191,7 +193,6 @@ rail-focus-short = Fokus
 focus-30-minutes = Für 30 Minuten
 
 # Dateien-Ansicht und Einrichtungs-Checkliste (Issue #301)
-sidebar-files = Dateien
 sidebar-shortcuts = Schnellzugriffe
 setup-title = Arbeitsbereich einrichten
 setup-progress = { $done } von { $total }
