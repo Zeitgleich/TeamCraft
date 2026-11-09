@@ -4,6 +4,7 @@
 //! have a server of its own ([`super::brand_mail`]); the checks of a server are shared.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rand_core::OsRng;
 use secrecy::{ExposeSecret, SecretString};
@@ -23,7 +24,7 @@ use crate::config::{SmtpConfig, SmtpSecurity};
 use crate::error::ApiError;
 use crate::meetings::ical::Method;
 use crate::meetings::mailer::{Mailer, OutgoingMail, SmtpMailer};
-use crate::runtime::mail_status::TrackedMailer;
+use crate::runtime::mail_status::MailTransport;
 use crate::state::AppState;
 
 /// Row in `server_settings`; also the associated data of the sealed password.
@@ -55,9 +56,10 @@ pub async fn load(state: &AppState) -> Result<(), ApiError> {
   };
   let maybe_mailer = match maybe_config {
     Some(config) => match SmtpMailer::new(&config) {
-      Ok(mailer) => Some(Arc::new(TrackedMailer::new(
+      Ok(mailer) => Some(Arc::new(MailTransport::new(
         Arc::new(mailer),
         Arc::clone(&state.mail_status),
+        Duration::from_secs(config.timeout_secs),
       )) as Arc<dyn Mailer>),
       Err(error) => {
         error!(%error, "the mail server settings are unusable; no mail is sent");
@@ -172,7 +174,7 @@ pub async fn send_test_mail(
     maybe_from_address: None,
   }
   .as_brand(brand);
-  let result = mailer.send(&mail).await;
+  let result = mailer.attempt(&mail).await;
   if let Err(error) = &result {
     warn!(%error, "the test mail failed");
   }

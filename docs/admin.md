@@ -1263,9 +1263,9 @@ notices, the brand of the recipient's domain or else the inviter's for invitatio
 the organizer's for meeting invitations. Each server is a transport of its own. A broken one fails
 only its own brand's mail and shows that at the brand, and its mail **never** moves to the instance's
 server, which would send with the wrong SPF and DKIM. Jobs that mail many people run one queue per
-server side by side; one mail is limited to three network timeouts, and a server that could not be
-reached is left alone for a minute (those mails fail at once and take their usual failure path, a
-test mail still asks the server). A changed server is in force at once, without a restart.
+server side by side. On every server, the instance's own too (#743), one mail is limited to three
+network timeouts, and a server that could not be reached is left alone for a minute (those mails
+fail at once and take their usual failure path, a test mail still asks the server). A changed server is in force at once, without a restart.
 
 The CalDAV calendar of meetings has URL, account, password and the
 optional free/busy URL template, and a connection test; it needs `[meetings]`.

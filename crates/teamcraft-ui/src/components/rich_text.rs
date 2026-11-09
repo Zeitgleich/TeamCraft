@@ -1,9 +1,13 @@
 use leptos::prelude::*;
+use wasm_bindgen::JsCast;
 
 use crate::highlight::{TokenKind, highlight};
 use crate::i18n::use_i18n;
 use crate::markdown::{self, Alignment, Block, Inline, ListKind, PERMALINK_PREFIX, Table};
 use crate::state::use_app_state;
+
+/// The CSS variable that moves a table's header row down to the message list's top edge.
+const HEAD_SHIFT_PROPERTY: &str = "--md-head-shift";
 
 /// How to show the `@words` of a body.
 #[derive(Clone)]
@@ -127,6 +131,57 @@ fn render_table(table: Table, me: MentionMarks, label: String) -> AnyView {
     </div>
   }
   .into_any()
+}
+
+/// Header rows of the tables in a scrolling message list stay at its top edge while their table
+/// scrolls past (#1602). A table's wrapper scrolls sideways, which would hold a `position: sticky`
+/// header to the wrapper, so the list calls this on every scroll and the header moves by
+/// `--md-head-shift`. Only tables crossing the top edge are shifted; a shifted one that left it is
+/// reset. Work per scroll is one rect per table the list has rendered.
+pub fn place_sticky_table_headers(list: &web_sys::Element) {
+  let Ok(wraps) = list.query_selector_all(".md-table-wrap") else {
+    return;
+  };
+  let edge = list.get_bounding_client_rect().top();
+  for index in 0..wraps.length() {
+    let Some(wrap) = wraps
+      .item(index)
+      .and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+      continue;
+    };
+    let style = wrap.style();
+    // A style property that can't be set leaves the header where it is: nothing to report.
+    match header_shift(&wrap, edge) {
+      Some(shift) => {
+        let _ = style.set_property(HEAD_SHIFT_PROPERTY, &format!("{shift}px"));
+      },
+      None
+        if !style
+          .get_property_value(HEAD_SHIFT_PROPERTY)
+          .unwrap_or_default()
+          .is_empty() =>
+      {
+        let _ = style.remove_property(HEAD_SHIFT_PROPERTY);
+      },
+      None => {},
+    }
+  }
+}
+
+/// How far a table's header row moves down to stay at `edge`, or `None` while the table's top is
+/// below the edge or the table is gone above it. The header never leaves its table.
+fn header_shift(wrap: &web_sys::HtmlElement, edge: f64) -> Option<f64> {
+  let rect = wrap.get_bounding_client_rect();
+  if rect.top() >= edge || rect.bottom() <= edge {
+    return None;
+  }
+  let head_height = wrap
+    .query_selector("thead")
+    .ok()
+    .flatten()
+    .map_or(0.0, |head| head.get_bounding_client_rect().height());
+  Some((edge - rect.top()).min(rect.height() - head_height).max(0.0))
 }
 
 /// Lines of a paragraph or quote, with a line break between them.

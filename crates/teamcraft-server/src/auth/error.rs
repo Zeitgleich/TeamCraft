@@ -27,6 +27,10 @@ pub enum AuthError {
   AccountDeleted,
   #[error("signing keys unavailable: {0}")]
   KeysUnavailable(String),
+  /// The identity provider's breaker is open and no keys are cached: 503 with `Retry-After` until
+  /// its next probe (#743).
+  #[error("signing keys unavailable: {0}")]
+  ProviderDown(crate::dependencies::CircuitOpen),
   /// The token is fine as a token, but not without a valid DPoP proof (RFC 9449).
   #[error(transparent)]
   Dpop(#[from] DpopRefusal),
@@ -40,7 +44,7 @@ pub enum AuthError {
 
 impl From<crate::dependencies::CircuitOpen> for AuthError {
   fn from(open: crate::dependencies::CircuitOpen) -> Self {
-    Self::KeysUnavailable(open.to_string())
+    Self::ProviderDown(open)
   }
 }
 

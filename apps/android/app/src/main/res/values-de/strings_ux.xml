@@ -126,10 +126,10 @@
   <string name="not_sent_delete">Löschen</string>
 
   <!-- Typing indicator -->
-  <string name="typing_one">%1$s schreibt …</string>
-  <string name="typing_two">%1$s und %2$s schreiben …</string>
-  <string name="typing_several">Mehrere Personen schreiben …</string>
-  <string name="typing_direct">schreibt …</string>
+  <string name="typing_one">%1$s schreibt</string>
+  <string name="typing_two">%1$s und %2$s schreiben</string>
+  <string name="typing_several">Mehrere Personen schreiben</string>
+  <string name="typing_direct">schreibt</string>
   <string name="share_typing">Anderen zeigen, wenn ich schreibe</string>
   <string name="call_status_sounds">Statustöne im Anruf</string>
   <string name="call_status_sounds_hint">Ein leiser Ton wiederholt sich, solange deine Verbindung unterbrochen ist; kurze Töne zeigen, wenn sie wieder steht oder der Anruf beendet ist. Nur du hörst sie, über die Audioausgabe des Anrufs.</string>

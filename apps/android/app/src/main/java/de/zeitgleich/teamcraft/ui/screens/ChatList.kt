@@ -1664,7 +1664,7 @@ private fun PreviewLine(conversation: ConversationItem, maybeEntry: ChatListEntr
   }
 }
 
-/** "typing…" or "Alice is typing…" in the preview's place, after three pulsing dots. */
+/** "typing" or "Alice is typing" in the preview's place, after three pulsing dots. */
 @Composable
 private fun TypingPreview(text: String) {
   Row(verticalAlignment = Alignment.CenterVertically) {

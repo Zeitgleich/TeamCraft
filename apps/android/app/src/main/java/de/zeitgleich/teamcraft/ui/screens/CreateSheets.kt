@@ -15,7 +15,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
@@ -55,7 +54,6 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatClient
@@ -262,7 +260,7 @@ private fun CreateFormSheet(
         singleLine = true,
         isError = shown[CreateField.NAME] != null,
         supportingText = supportingText(shown[CreateField.NAME]),
-        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Next),
+        keyboardOptions = textKeyboard(imeAction = ImeAction.Next),
         modifier = Modifier
           .fillMaxWidth()
           .focusRequester(requesters.getValue(CreateField.NAME))
@@ -276,7 +274,7 @@ private fun CreateFormSheet(
         minLines = 2,
         isError = shown[CreateField.DESCRIPTION] != null,
         supportingText = supportingText(shown[CreateField.DESCRIPTION]),
-        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+        keyboardOptions = textKeyboard(),
         modifier = Modifier
           .fillMaxWidth()
           .focusRequester(requesters.getValue(CreateField.DESCRIPTION))

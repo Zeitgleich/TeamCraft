@@ -7494,13 +7494,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "typing…"
+            "value": "typing"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "schreibt …"
+            "value": "schreibt"
           }
         }
       }
@@ -7510,13 +7510,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ is typing…"
+            "value": "%@ is typing"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@ schreibt …"
+            "value": "%@ schreibt"
           }
         }
       }
@@ -7526,13 +7526,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Several people are typing…"
+            "value": "Several people are typing"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mehrere Personen schreiben …"
+            "value": "Mehrere Personen schreiben"
           }
         }
       }
@@ -7542,13 +7542,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "%1$@ and %2$@ are typing…"
+            "value": "%1$@ and %2$@ are typing"
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "%1$@ und %2$@ schreiben …"
+            "value": "%1$@ und %2$@ schreiben"
           }
         }
       }
