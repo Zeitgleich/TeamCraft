@@ -102,6 +102,7 @@ pub mod remote_backend;
 pub mod remote_calls;
 pub mod rest;
 pub mod route;
+pub mod scroll_perf;
 pub mod search_scope;
 pub mod sections;
 pub mod server_backend;

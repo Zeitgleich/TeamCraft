@@ -55,6 +55,7 @@ pub enum PerfMeasure {
   FileDownload,
   CallSetup,
   CatchUp,
+  OlderHistoryPage,
 }
 
 /// The transaction name and operation of a measure (`channel.switch`, `navigation`).
@@ -75,6 +76,7 @@ pub fn perf_measure_name(measure: PerfMeasure) -> PerfMeasureName {
     PerfMeasure::FileDownload => PerfOperation::FileDownload,
     PerfMeasure::CallSetup => PerfOperation::CallSetup,
     PerfMeasure::CatchUp => PerfOperation::CatchUp,
+    PerfMeasure::OlderHistoryPage => PerfOperation::OlderHistoryPage,
   };
   PerfMeasureName {
     name: operation.name().to_owned(),
