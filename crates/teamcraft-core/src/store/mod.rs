@@ -6,6 +6,7 @@
 
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod browser;
+mod commit_journal;
 #[cfg(all(
   test,
   feature = "sqlcipher",
@@ -15,6 +16,8 @@ pub(crate) mod browser;
 mod fixtures;
 mod footprint;
 mod key_source;
+#[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+mod lane;
 #[cfg(not(target_arch = "wasm32"))]
 mod lock;
 mod lru;
@@ -55,9 +58,12 @@ pub use browser::{
   browser_database_key_without_upgrade, browser_dpop_prover, browser_dpop_prover_or_new, own_sound_delete,
   own_sound_get, own_sound_put, set_idb_failure_hook, vault_delete, vault_get, vault_put,
 };
+pub use commit_journal::{CommitJournal, CommitStamp};
 pub use key_source::{DatabaseKeySource, KeySourceError, StaticKeySource};
 #[cfg(not(target_arch = "wasm32"))]
 pub use key_source::{KeystoreThreadError, run_outside_runtime};
+#[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+pub use lane::LaneStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use lock::StoreLock;
 pub use memory::MemoryStore;
@@ -891,6 +897,22 @@ pub trait LocalStore {
   fn is_awaited(&self) -> bool {
     false
   }
+
+  /// The commit a reading connection's snapshot holds (issue #1476, [`CommitJournal`]). `None`: the
+  /// store reads what its writes left as soon as they are made.
+  fn snapshot_commit(&self) -> Option<u64> {
+    None
+  }
+
+  /// The number of the last commit this store's writing connection made. `None`: commits aren't
+  /// numbered.
+  fn last_commit(&self) -> Option<u64> {
+    None
+  }
+
+  /// A reading connection takes a new snapshot and follows the commits since its last look, so it
+  /// sees every commit made before the call ([`Self::snapshot_commit`] moves up to them).
+  fn renew_snapshot(&self) {}
   /// Begins a read group ([`read_together`]): the reads up to [`Self::end_reads`] see one snapshot
   /// of the disk, and other threads of this process wait for it like for a group of writes, while
   /// other processes (the iOS notification extension) still write. Groups of writes may nest in it.
@@ -1295,6 +1317,18 @@ macro_rules! forward_local_store {
 
       fn is_awaited(&self) -> bool {
         (**self).is_awaited()
+      }
+
+      fn snapshot_commit(&self) -> Option<u64> {
+        (**self).snapshot_commit()
+      }
+
+      fn last_commit(&self) -> Option<u64> {
+        (**self).last_commit()
+      }
+
+      fn renew_snapshot(&self) {
+        (**self).renew_snapshot();
       }
 
       fn begin_reads(&self) -> Result<(), StoreError> {

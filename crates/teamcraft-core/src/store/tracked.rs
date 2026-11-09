@@ -17,10 +17,17 @@
 //! no longer listed for this user or whose history goes (purged, e2ee.md §4.6;
 //! [`TrackedStore::take_media_purges`]). The latter is a record in the same group of writes, so a
 //! purge interrupted by a crash is finished by the next start (#1161).
+//!
+//! Over a store whose commits are numbered ([`LocalStore::last_commit`]: the app's writing
+//! connection beside reading ones, issue #1476), the notes and the journal of a group of writes
+//! are published only once it committed, and a reader whose snapshot is older than what it takes
+//! takes a new one first ([`LocalStore::renew_snapshot`]): it never takes a note of a write its
+//! snapshot doesn't hold, and keeps nothing derived from a conversation the open group changes.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::thread::{self, ThreadId as ThreadIdStd};
 
 use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, ThreadId, UserId};
 
@@ -72,6 +79,28 @@ pub struct TrackedStore<S> {
   journal: Arc<Mutex<Journal>>,
   /// [`WriteTally::foreign`] when the changes were last taken.
   seen_foreign: Arc<AtomicU64>,
+  /// Commits are numbered: notes of a group wait for its commit ([`GroupNotes`]).
+  is_numbered: bool,
+  /// The notes of the open group of writes, until it ends.
+  group: Arc<Mutex<GroupNotes>>,
+  /// The number of the newest commit whose notes were published: a reader's snapshot must hold it
+  /// before the reader takes them.
+  published: Arc<AtomicU64>,
+}
+
+/// The notes of the open group of writes over a store with numbered commits, held back until the
+/// group ends: a reader on another connection would take them before its snapshot can hold the
+/// writes.
+#[derive(Debug, Default)]
+struct GroupNotes {
+  /// The thread whose group is open; the store lets no other thread write meanwhile.
+  maybe_owner: Option<ThreadIdStd>,
+  depth: u32,
+  changes: Vec<Change>,
+  /// Messages written, and whether the write may have added or taken away a file.
+  written: Vec<(ConversationId, Written, bool)>,
+  /// Conversations the group wrote to: a reader keeps nothing derived from them meanwhile.
+  conversations: BTreeSet<ConversationId>,
 }
 
 /// The newest writes of messages, by number: a reader that keeps its own number since asks what
@@ -155,6 +184,21 @@ enum Change {
   Nothing,
 }
 
+impl GroupNotes {
+  fn is_mine(&self) -> bool {
+    self.depth > 0 && self.maybe_owner == Some(thread::current().id())
+  }
+
+  /// The owner's group ends one level; the notes once it ended.
+  fn end(&mut self) -> Option<Self> {
+    if !self.is_mine() {
+      return None;
+    }
+    self.depth -= 1;
+    (self.depth == 0).then(|| std::mem::take(self))
+  }
+}
+
 impl Journal {
   /// Writes kept at most; older ones are no longer told apart.
   const MAX_ENTRIES: usize = 8_192;
@@ -209,6 +253,7 @@ impl<S: LocalStore> TrackedStore<S> {
   /// never kept; `0` keeps none.
   pub fn with_message_cache(inner: S, max_size_bytes: usize) -> Self {
     Self {
+      is_numbered: inner.last_commit().is_some(),
       inner,
       changes: Arc::default(),
       removed_renditions: Arc::default(),
@@ -222,6 +267,21 @@ impl<S: LocalStore> TrackedStore<S> {
       })),
       journal: Arc::default(),
       seen_foreign: Arc::default(),
+      group: Arc::default(),
+      published: Arc::default(),
+    }
+  }
+
+  /// The same notes, journal and caches over another view of the same store: a read thread's
+  /// [`super::LaneStore`] beside the engine's.
+  pub fn sharing(&self, inner: S) -> Self
+  where
+    S: Clone,
+  {
+    Self {
+      is_numbered: inner.last_commit().is_some(),
+      inner,
+      ..self.clone()
     }
   }
 
@@ -337,6 +397,7 @@ impl<S: LocalStore> TrackedStore<S> {
   pub fn take_changes(&self) -> StoreChanges {
     let is_foreign = self.take_foreign_commit();
     let mut changes = std::mem::take(&mut *self.lock());
+    self.catch_up();
     if is_foreign {
       changes.is_foreign = true;
       changes.is_everything = true;
@@ -356,6 +417,17 @@ impl<S: LocalStore> TrackedStore<S> {
   }
 
   fn note(&self, change: Change) {
+    if self.is_numbered {
+      let mut group = self.group();
+      if group.is_mine() {
+        group.changes.push(change);
+        return;
+      }
+    }
+    self.publish_change(change);
+  }
+
+  fn publish_change(&self, change: Change) {
     let mut changes = self.lock();
     match change {
       Change::Conversation(conversation) => {
@@ -435,6 +507,150 @@ impl<S: LocalStore> TrackedStore<S> {
     self.journal().follow_disk(maybe_tally);
   }
 
+  /// Notes that a message (or a whole conversation) was written, before the write: inside a group
+  /// over numbered commits, once the group ends.
+  fn note_written(&self, conversation: ConversationId, written: Written, touches_files: bool) {
+    if self.is_numbered {
+      let mut group = self.group();
+      if group.is_mine() {
+        group.written.push((conversation, written, touches_files));
+        group.conversations.insert(conversation);
+        return;
+      }
+    }
+    let mut journal = self.journal();
+    journal.note(conversation, written);
+    journal.attachments += u64::from(touches_files);
+  }
+
+  /// Runs `write` as a group of writes over numbered commits, so its notes are published after its
+  /// commit; as it is otherwise.
+  fn grouped<T>(&self, write: impl FnOnce() -> Result<T, StoreError>) -> Result<T, StoreError> {
+    if self.is_numbered {
+      super::write_group(self, write)
+    } else {
+      write()
+    }
+  }
+
+  /// A reader takes a new snapshot if notes were published of commits its snapshot doesn't hold.
+  /// Called after taking them: what was published before is covered by the number read here.
+  fn catch_up(&self) {
+    if let Some(seen) = self.inner.snapshot_commit()
+      && seen < self.published.load(Ordering::SeqCst)
+    {
+      self.inner.renew_snapshot();
+    }
+  }
+
+  /// Whether a reader may keep what it derives from `conversation` now: no open group wrote to it,
+  /// and its snapshot holds every published commit.
+  fn may_keep(&self, conversation: ConversationId) -> bool {
+    let Some(seen) = self.inner.snapshot_commit() else {
+      return true;
+    };
+    !self.group().conversations.contains(&conversation) && seen >= self.published.load(Ordering::SeqCst)
+  }
+
+  /// The group of writes ends: its notes are published, after its commit's number.
+  fn publish(&self, notes: GroupNotes) {
+    if let Some(committed) = self.inner.last_commit() {
+      self.published.fetch_max(committed, Ordering::SeqCst);
+    }
+    if !notes.written.is_empty() {
+      let mut journal = self.journal();
+      for (conversation, written, touches_files) in notes.written {
+        journal.note(conversation, written);
+        journal.attachments += u64::from(touches_files);
+      }
+    }
+    for change in notes.changes {
+      self.publish_change(change);
+    }
+  }
+
+  fn delete_grouped(&self, table: Table, key: &str) -> Result<(), StoreError> {
+    if table == Table::Conversations
+      && let Ok(conversation) = key.parse::<ConversationId>()
+    {
+      self.note_removed_conversation(conversation)?;
+    }
+    if table == Table::Conversations {
+      self.inner.delete(Table::EntryTallies, key)?;
+      if let Ok(conversation) = key.parse::<ConversationId>() {
+        self
+          .inner
+          .delete(Table::Account, &draft_reply_key(conversation))?;
+      }
+    }
+    self.inner.delete(table, key)?;
+    self.note(classify(table, key));
+    Ok(())
+  }
+
+  fn upsert_message_grouped(&self, message: &StoredMessage) -> Result<(), StoreError> {
+    // Only a deletion takes files away (an edit changes the text); only then is the old one read.
+    let mut touches_files = !attachments(&message.content).is_empty();
+    if matches!(message.content, MessageContent::Deleted)
+      && let Some(old) = self
+        .inner
+        .message(message.conversation_id, message.client_message_id)?
+    {
+      touches_files |= !attachments(&old.content).is_empty();
+      self.note_removed([old]);
+    }
+    self.note_written(
+      message.conversation_id,
+      Written::Message(message.client_message_id),
+      touches_files,
+    );
+    self.inner.upsert_message(message)?;
+    // After the write: a commit of another process before it is counted by now.
+    self.follow_disk();
+    self.cache().upsert(message);
+    self.note(Change::Conversation(message.conversation_id));
+    Ok(())
+  }
+
+  fn delete_messages_grouped(&self, conversation: ConversationId) -> Result<(), StoreError> {
+    // Not read message by message: a big channel would be held in memory whole.
+    self.note_removed_conversation(conversation)?;
+    self.note_written(conversation, Written::Conversation, true);
+    self.inner.delete_messages(conversation)?;
+    self
+      .inner
+      .delete(Table::EntryTallies, &conversation.to_string())?;
+    // After the write: a commit of another process before it is counted by now.
+    self.follow_disk();
+    self.cache().remove_conversation(conversation);
+    self.note(Change::Conversation(conversation));
+    Ok(())
+  }
+
+  fn delete_message_grouped(
+    &self,
+    conversation: ConversationId,
+    client_message_id: ClientMessageId,
+  ) -> Result<(), StoreError> {
+    let mut touches_files = false;
+    if let Some(old) = self.inner.message(conversation, client_message_id)? {
+      touches_files = !attachments(&old.content).is_empty();
+      self.note_removed([old]);
+    }
+    self.note_written(conversation, Written::Message(client_message_id), touches_files);
+    self.inner.delete_message(conversation, client_message_id)?;
+    // After the write: a commit of another process before it is counted by now.
+    self.follow_disk();
+    self.cache().remove(conversation, client_message_id);
+    self.note(Change::Conversation(conversation));
+    Ok(())
+  }
+
+  fn group(&self) -> std::sync::MutexGuard<'_, GroupNotes> {
+    // Invariant-free data: at worst a note is published early or a reader reads again.
+    self.group.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+
   fn journal(&self) -> std::sync::MutexGuard<'_, Journal> {
     // Invariant-free data: at worst a reader reads again what it keeps.
     self.journal.lock().unwrap_or_else(PoisonError::into_inner)
@@ -468,28 +684,15 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     if change != Change::Nothing && self.inner.get(table, key)?.as_deref() == Some(value) {
       return Ok(());
     }
-    self.inner.put(table, key, value)?;
-    self.note(change);
-    Ok(())
+    self.grouped(|| {
+      self.inner.put(table, key, value)?;
+      self.note(change);
+      Ok(())
+    })
   }
 
   fn delete(&self, table: Table, key: &str) -> Result<(), StoreError> {
-    if table == Table::Conversations
-      && let Ok(conversation) = key.parse::<ConversationId>()
-    {
-      self.note_removed_conversation(conversation)?;
-    }
-    if table == Table::Conversations {
-      self.inner.delete(Table::EntryTallies, key)?;
-      if let Ok(conversation) = key.parse::<ConversationId>() {
-        self
-          .inner
-          .delete(Table::Account, &draft_reply_key(conversation))?;
-      }
-    }
-    self.inner.delete(table, key)?;
-    self.note(classify(table, key));
-    Ok(())
+    self.grouped(|| self.delete_grouped(table, key))
   }
 
   fn list(&self, table: Table) -> Result<Vec<(String, Vec<u8>)>, StoreError> {
@@ -501,29 +704,7 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   }
 
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
-    // Only a deletion takes files away (an edit changes the text); only then is the old one read.
-    let mut touches_files = !attachments(&message.content).is_empty();
-    if matches!(message.content, MessageContent::Deleted)
-      && let Some(old) = self
-        .inner
-        .message(message.conversation_id, message.client_message_id)?
-    {
-      touches_files |= !attachments(&old.content).is_empty();
-      self.note_removed([old]);
-    }
-    let mut journal = self.journal();
-    journal.note(
-      message.conversation_id,
-      Written::Message(message.client_message_id),
-    );
-    journal.attachments += u64::from(touches_files);
-    drop(journal);
-    self.inner.upsert_message(message)?;
-    // After the write: a commit of another process before it is counted by now.
-    self.follow_disk();
-    self.cache().upsert(message);
-    self.note(Change::Conversation(message.conversation_id));
-    Ok(())
+    self.grouped(|| self.upsert_message_grouped(message))
   }
 
   fn message(
@@ -581,7 +762,10 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
 
   fn message_revision(&self, conversation: ConversationId) -> Option<u64> {
     self.follow_disk();
-    Some(self.cache().revision(conversation))
+    self.catch_up();
+    let revision = self.cache().revision(conversation);
+    // Checked after the revision is read: a write that moved it is still open, or published.
+    self.may_keep(conversation).then_some(revision)
   }
 
   fn visit_messages(
@@ -619,9 +803,12 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
       }
       cache.revision(conversation)
     };
+    self.catch_up();
     let all = self.inner.messages(conversation, MessageFilter::All)?;
     read(&all);
-    self.cache().fill(conversation, revision, all);
+    if self.may_keep(conversation) {
+      self.cache().fill(conversation, revision, all);
+    }
     Ok(())
   }
 
@@ -685,7 +872,9 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   }
 
   fn written_cursor(&self) -> Option<u64> {
-    Some(self.journal().next)
+    let next = self.journal().next;
+    self.catch_up();
+    Some(next)
   }
 
   fn attachments_cursor(&self) -> Option<u64> {
@@ -709,25 +898,13 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   fn written_since(&self, conversation: ConversationId, cursor: u64) -> Option<Vec<Written>> {
     // Another connection's commit since the last write is found now.
     self.follow_disk();
-    self.journal().since(conversation, cursor)
+    let maybe_written = self.journal().since(conversation, cursor);
+    self.catch_up();
+    maybe_written
   }
 
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
-    // Not read message by message: a big channel would be held in memory whole.
-    self.note_removed_conversation(conversation)?;
-    let mut journal = self.journal();
-    journal.note(conversation, Written::Conversation);
-    journal.attachments += 1;
-    drop(journal);
-    self.inner.delete_messages(conversation)?;
-    self
-      .inner
-      .delete(Table::EntryTallies, &conversation.to_string())?;
-    // After the write: a commit of another process before it is counted by now.
-    self.follow_disk();
-    self.cache().remove_conversation(conversation);
-    self.note(Change::Conversation(conversation));
-    Ok(())
+    self.grouped(|| self.delete_messages_grouped(conversation))
   }
 
   fn delete_message(
@@ -735,21 +912,7 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     conversation: ConversationId,
     client_message_id: ClientMessageId,
   ) -> Result<(), StoreError> {
-    let mut touches_files = false;
-    if let Some(old) = self.inner.message(conversation, client_message_id)? {
-      touches_files = !attachments(&old.content).is_empty();
-      self.note_removed([old]);
-    }
-    let mut journal = self.journal();
-    journal.note(conversation, Written::Message(client_message_id));
-    journal.attachments += u64::from(touches_files);
-    drop(journal);
-    self.inner.delete_message(conversation, client_message_id)?;
-    // After the write: a commit of another process before it is counted by now.
-    self.follow_disk();
-    self.cache().remove(conversation, client_message_id);
-    self.note(Change::Conversation(conversation));
-    Ok(())
+    self.grouped(|| self.delete_message_grouped(conversation, client_message_id))
   }
 
   fn purge_freed(&self) -> Result<(), StoreError> {
@@ -761,10 +924,19 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   }
 
   fn begin_writes(&self) -> Result<(), StoreError> {
-    self.inner.begin_writes()
+    // The store's group is this thread's from here on: no other thread writes until it ends.
+    self.inner.begin_writes()?;
+    if self.is_numbered {
+      let mut group = self.group();
+      group.maybe_owner = Some(thread::current().id());
+      group.depth += 1;
+    }
+    Ok(())
   }
 
   fn end_writes(&self) -> Result<(), StoreError> {
+    // Taken before the store's group ends: the next thread's group may begin right after it.
+    let maybe_notes = self.is_numbered.then(|| self.group().end()).flatten();
     // The group may be rolled back: the cache may then hold writes the disk doesn't. That holds for
     // a panic out of the inner store too (its catalog flush rolls the group back and resumes the
     // panic), which skips everything after the call; the guard forgets the cache on the way out
@@ -776,6 +948,10 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     };
     let ended = self.inner.end_writes();
     guard.is_armed = ended.is_err();
+    // Published also after a rollback: a reader then reads again what didn't change.
+    if let Some(notes) = maybe_notes {
+      self.publish(notes);
+    }
     ended
   }
 
