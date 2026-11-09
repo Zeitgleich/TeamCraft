@@ -2272,6 +2272,36 @@ walks the index's entries (no decryption) and opens only those messages. What is
 is walking 50,000 entries of the large conversation's index. The catalog is built again once when a
 store of version 3 opens, at the cost measured for version 3 above.
 
+### Catching up on the page's only thread (issue #1575)
+
+On web the core runs on the page's only thread. A catch-up after a long absence decrypts and writes
+conversation after conversation, and the server's answers often come faster than the work, so the
+UI's input, its reads of the core and its paints waited until the catch-up was done. The client now
+hands the thread back every 30 ms (`ClientSettings::with_thread_turns`, web only): between two
+conversations, welcomes, member lists, MLS queue entries and live events, and within a page of
+messages. Native hosts have a thread for the engine and one for reads; there the backlog's pages
+are paced instead (`RunnerSettings::background_page_gap`, at least the page's own time and 100 ms).
+
+Measured with `tests/e2e` `perf.rs`, phase `come_back_to_many_conversations` (small scale: 22
+channels with 150 new messages each, all read in the catch-up itself; the browser's CPU slowed
+down 4×, `PERF_CATCH_UP_CPU_SLOWDOWN`, because this machine is faster than the reporter's), on
+one machine, 2026-11-09:
+
+| Coming back to 22 conversations with 150 new messages each | Before   | After   |
+|------------------------------------------------------------|----------|---------|
+| Content phase of the catch-up                              | 11.7 s   | 6.9 s   |
+| Main-thread tasks over 100 ms in the content phase         | 52       | 8       |
+| Longest main-thread task in the content phase              | 310 ms   | 169 ms  |
+| Main-thread tasks over 50 ms, page load until caught up    | 120      | 61      |
+| Their total                                                | 18.4 s   | 7.1 s   |
+| Channel switch while it catches up, p95                    | 663 ms   | 311 ms  |
+
+What is left is not the catch-up's own work: the start of the page (the module, the store) and the
+UI's own reads after each wake. On a large store (the reporter's has about 97,000 records, and the
+lag shows on fast machines too), the UI's snapshot updates and entry counts cost far more than here;
+GlitchTip shows `snapshot_update` up to 5 s and `entry_counts` around 350 ms. Those are reads, not
+the catch-up, and are tracked on their own.
+
 ### Web bundle size
 
 Two budgets, both on the **compressed** wasm (issue #910's follow-up, 2026-10-31). The strict one
