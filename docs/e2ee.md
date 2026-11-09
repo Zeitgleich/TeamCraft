@@ -849,6 +849,8 @@ modified client without the permission can still name up to that many people, or
 ciphertext for the text it shows, which only changes how that word looks. Anybody a mention names is
 visible to the conversation as `mentioned_user_ids` always was, so a group mention shows other members
 who of them it named, as any mention does; no more of the group than that, and guests read no groups.
+The built-in `@admins` works the same way: the rosters list the active admins and owners as `admin_ids`
+(members only, and only while the instance allows `@admins`), and the device expands from that list.
 
 Typing indicators are plaintext metadata too: a `typing` gateway frame tells the server that a user
 types in a conversation, and for a reply in which thread (thread IDs are visible metadata anyway), never

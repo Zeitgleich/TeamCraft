@@ -44,9 +44,10 @@ use crate::error::TeamCraftError;
 use crate::logging;
 use crate::perf_jobs::{self, PerfJobKind};
 use crate::types::{
-  AccountState, ChatPreviewItem, ConversationItem, FirstSyncItem, FirstSyncStageItem, KeyCatchUpItem,
-  LeaveChoice, MentionSettings, MessageItem, MessagePage, NotificationContentSettings, NotifiedConversation,
-  Presence, PushDiagnosticsInfo, SearchHitItem, SegmentPrefetchMode, SpaceMenuItem, share_targets,
+  AccountState, ChatPreviewItem, ConversationItem, FirstSyncItem, FirstSyncStageItem, GroupMentionReachItem,
+  KeyCatchUpItem, LeaveChoice, MentionSettings, MentionableGroupItem, MessageItem, MessagePage,
+  NotificationContentSettings, NotifiedConversation, Presence, PushDiagnosticsInfo, SearchHitItem,
+  SegmentPrefetchMode, SpaceMenuItem, share_targets,
 };
 
 /// How many of a conversation's newest rows a chat list preview looks through for a message people
@@ -670,6 +671,34 @@ impl Reads {
 
   /// Whether the conversation's menu offers "Leave" (#1105). Channel roles are read afresh while
   /// they are not known, so a later ask has the last-admin answer.
+  /// The groups the composer offers after `@` here: none without `use_group_mentions` (issue #206).
+  pub(crate) fn mentionable_groups(
+    &self,
+    conversation_id: &str,
+  ) -> Result<Vec<MentionableGroupItem>, TeamCraftError> {
+    let backend = self.backend()?;
+    let id = parse_id(conversation_id)?;
+    Ok(backend.mentionable_groups(id).iter().map(Into::into).collect())
+  }
+
+  /// Who the group mentions in `body` would notify here, as sending would expand them.
+  pub(crate) fn group_mention_reach(
+    &self,
+    conversation_id: &str,
+    body: &str,
+  ) -> Result<GroupMentionReachItem, TeamCraftError> {
+    if !body.contains('@') {
+      return Ok(GroupMentionReachItem::default());
+    }
+    let backend = self.backend()?;
+    let id = parse_id(conversation_id)?;
+    let reach = teamcraft_client_api::notify::group_mention_reach(body, &backend.mentionable_groups(id));
+    Ok(GroupMentionReachItem {
+      notified_count: u32::try_from(reach.notified.len()).unwrap_or(u32::MAX),
+      outside_count: reach.outside_count,
+    })
+  }
+
   pub(crate) fn conversation_leave_choice(
     &self,
     conversation_id: &str,

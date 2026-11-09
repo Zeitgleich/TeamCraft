@@ -16,7 +16,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub(crate) async fn refresh_user_groups(&mut self) {
     let rosters = match self.api.list_user_group_rosters().await {
       Ok(rosters) => rosters,
-      Err(error) if refuses_groups(&error) => ListUserGroupRostersResponse { groups: Vec::new() },
+      Err(error) if refuses_groups(&error) => ListUserGroupRostersResponse::default(),
       Err(error) => {
         tracing::debug!(%error, "could not read the user groups");
         return;

@@ -342,6 +342,7 @@ const NOTIFICATIONS: &[FieldDef] = &[
   count("urgent_max_pushes"),
   amount("mobile_push_delay_secs", 1, U64_MAX, SECONDS),
   flag("is_desktop_attention_enabled"),
+  flag("is_admins_mention_enabled"),
 ];
 const EMAIL_DIGEST: &[FieldDef] = &[
   flag("is_enabled"),
@@ -370,6 +371,7 @@ const LIMITS: &[FieldDef] = &[
   count("max_group_dm_participants"),
   count("max_user_group_members"),
   count("max_meeting_mails_per_user_per_hour"),
+  count("max_large_mentions_per_user_per_hour"),
 ];
 const INTEGRATION: &[FieldDef] = &[
   amount("default_retention_days", 1, U32_MAX, DAYS),

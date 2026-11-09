@@ -12,6 +12,14 @@ pub const DEFAULT_MAX_MENTIONS_PER_MESSAGE: usize = 200;
 /// that permission (docs/e2ee.md §4.4).
 pub const DEFAULT_MAX_MENTIONS_WITHOUT_GROUP_MENTIONS: usize = 10;
 
+/// Default of `limits.max_large_mentions_per_user_per_hour`: messages per hour and sender that may
+/// name more people than [`DEFAULT_MAX_MENTIONS_WITHOUT_GROUP_MENTIONS`] (notifications.md, "Group
+/// mentions").
+pub const DEFAULT_MAX_LARGE_MENTIONS_PER_USER_PER_HOUR: u32 = 30;
+
+/// The handle of the built-in group of the instance's admins and owners.
+pub const ADMINS_GROUP_HANDLE: &str = "admins";
+
 /// `POST /api/v1/conversations/{id}/messages`. The server stores the ciphertext without reading
 /// it; only routing metadata is visible (ARCHITECTURE.md §4.4). Re-sending the same
 /// `client_message_id` returns the stored message instead of creating a second one.

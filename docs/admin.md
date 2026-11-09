@@ -859,12 +859,17 @@ device (e2ee.md §4.4). Admins limit who may do that with `use_group_mentions` (
 scheme and channel moderation). The server can't read which handle a message mentions, so what it enforces
 differs from what devices do:
 
-| Who enforces it | What                                                                                                                          |
-|-----------------|-------------------------------------------------------------------------------------------------------------------------------|
-| The apps        | No suggestion and no expansion without the permission                                                                         |
-| The server      | At most `[limits] max_mentions_without_group_mentions` (default 10) mentioned people per message without the permission       |
-| The server      | At most `[limits] max_mentions_per_message` (default 200) for everybody; mentioned people must be members of the conversation |
-| Nobody          | Whether a list of people really came from a group, or was typed: a modified client can name up to the limit                   |
+| Who enforces it | What                                                                                                                           |
+|-----------------|--------------------------------------------------------------------------------------------------------------------------------|
+| The apps        | No suggestion and no expansion without the permission                                                                          |
+| The server      | At most `[limits] max_mentions_without_group_mentions` (default 10) mentioned people per message without the permission        |
+| The server      | At most `[limits] max_mentions_per_message` (default 200) for everybody; mentioned people must be members of the conversation  |
+| The server      | At most `limits.max_large_mentions_per_user_per_hour` (default 30, `0` off) messages per hour naming more than the first limit |
+| Nobody          | Whether a list of people really came from a group, or was typed: a modified client can name up to the limit                    |
+
+`@admins` is a built-in group of the active admins and owners (notifications.md, "Group mentions"); the
+notification setting `is_admins_mention_enabled` (admin console, default on) switches it off. Members
+(not guests) then learn who the admins are from the rosters, as they would by mentioning them.
 
 Group membership stays visible only to whom it already was: members of the workspace, never guests.
 

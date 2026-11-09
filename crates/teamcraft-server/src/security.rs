@@ -55,6 +55,9 @@ pub struct RateLimits {
   /// E-mails the meetings of one organizer may still send, refilled over an hour. A quota, not a
   /// rate limit: it applies even when rate limits are switched off.
   mail_budgets: Mutex<HashMap<UserId, Bucket>>,
+  /// Messages naming many people one sender may still send, refilled over an hour
+  /// (notifications.md, "Group mentions"). A quota like `mail_budgets`.
+  large_mention_budgets: Mutex<HashMap<UserId, Bucket>>,
   /// Addresses the import account sent an authenticated request from, until when they pass the
   /// per-address limit: the address limit runs before authentication, so the importer's address is
   /// learned from its requests.
@@ -67,6 +70,7 @@ impl RateLimits {
       config: config.clone(),
       buckets: Mutex::new(HashMap::new()),
       mail_budgets: Mutex::new(HashMap::new()),
+      large_mention_budgets: Mutex::new(HashMap::new()),
       import_addresses: Mutex::new(HashMap::new()),
     }
   }
@@ -94,22 +98,55 @@ impl RateLimits {
   /// Spends `count` e-mails of the user's hourly budget of `per_hour`. `false` (and nothing spent)
   /// if the budget does not cover them all.
   pub fn spend_mails(&self, user: UserId, count: u32, per_hour: u32) -> bool {
-    let capacity = f64::from(per_hour);
-    let now = Instant::now();
     let mut budgets = self.mail_budgets.lock().unwrap_or_else(PoisonError::into_inner);
-    let bucket = budgets.entry(user).or_insert(Bucket {
-      tokens: capacity,
-      updated_at: now,
-    });
-    let elapsed = now.saturating_duration_since(bucket.updated_at).as_secs_f64();
-    bucket.tokens = (bucket.tokens + elapsed * capacity / 3600.0).min(capacity);
-    bucket.updated_at = now;
+    let bucket = hourly_bucket(&mut budgets, user, per_hour, Instant::now());
     let needed = f64::from(count);
     if bucket.tokens >= needed {
       bucket.tokens -= needed;
       true
     } else {
       false
+    }
+  }
+
+  /// Fails with 429 while the user's hourly budget of `per_hour` messages naming many people is
+  /// used up; spends nothing (a retry the server already stored must stay free, so the send spends
+  /// with [`Self::spend_large_mention`] once it stored a new message). `0` is no limit.
+  pub fn check_large_mention(&self, user: UserId, per_hour: u32, now: Instant) -> Result<(), ApiError> {
+    if per_hour == 0 {
+      return Ok(());
+    }
+    let mut budgets = self
+      .large_mention_budgets
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner);
+    let bucket = hourly_bucket(&mut budgets, user, per_hour, now);
+    if bucket.tokens >= 1.0 {
+      Ok(())
+    } else {
+      Err(retry_after(bucket.tokens, f64::from(per_hour) / 60.0))
+    }
+  }
+
+  /// Spends one message of the budget [`Self::check_large_mention`] checks. Never below empty:
+  /// two sends that passed the check at once both go out.
+  pub fn spend_large_mention(&self, user: UserId, per_hour: u32, now: Instant) {
+    if per_hour == 0 {
+      return;
+    }
+    let mut budgets = self
+      .large_mention_budgets
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner);
+    let bucket = hourly_bucket(&mut budgets, user, per_hour, now);
+    bucket.tokens = (bucket.tokens - 1.0).max(0.0);
+    // A sender's full bucket is the same as none: forget those, so the map holds active senders only.
+    if budgets.len() > SWEEP_THRESHOLD {
+      let capacity = f64::from(per_hour);
+      budgets.retain(|_, bucket| {
+        refill_hourly(bucket, capacity, now);
+        bucket.tokens < capacity
+      });
     }
   }
 
@@ -204,6 +241,28 @@ impl RateLimits {
     // The buckets are plain numbers, so a poisoned lock is still consistent.
     self.buckets.lock().unwrap_or_else(PoisonError::into_inner)
   }
+}
+
+/// The user's bucket of an hourly quota, refilled up to now; a new one starts full.
+fn hourly_bucket(
+  budgets: &mut HashMap<UserId, Bucket>,
+  user: UserId,
+  per_hour: u32,
+  now: Instant,
+) -> &mut Bucket {
+  let capacity = f64::from(per_hour);
+  let bucket = budgets.entry(user).or_insert(Bucket {
+    tokens: capacity,
+    updated_at: now,
+  });
+  refill_hourly(bucket, capacity, now);
+  bucket
+}
+
+fn refill_hourly(bucket: &mut Bucket, capacity: f64, now: Instant) {
+  let elapsed = now.saturating_duration_since(bucket.updated_at).as_secs_f64();
+  bucket.tokens = (bucket.tokens + elapsed * capacity / 3600.0).min(capacity);
+  bucket.updated_at = now;
 }
 
 fn refill(bucket: &mut Bucket, per_minute: f64, now: Instant) {

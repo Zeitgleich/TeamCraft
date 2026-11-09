@@ -15,6 +15,7 @@ import androidx.compose.ui.text.withStyle
 import uniffi.teamcraft_ffi.MarkupLine
 import uniffi.teamcraft_ffi.MarkupRun
 import uniffi.teamcraft_ffi.MarkupRunKind
+import de.zeitgleich.teamcraft.core.Message
 
 /** How message permalinks start (the core's format, teamcraft-client-api `markdown`). */
 const val PERMALINK_PREFIX = "teamcraft:/c/"
@@ -33,8 +34,25 @@ data class MarkupColors(
   val surface: Color = Color.Transparent,
 )
 
-/** Who can be mentioned, to tell `@alice` from an e-mail-like word. */
-data class MentionNames(val usernames: Set<String>, val myUsername: String)
+/**
+ * Who can be mentioned, to tell `@alice` from an e-mail-like word. [groupHandles] are the groups
+ * the message's sender expanded (issue #206): those `@words` show as group mentions, like a
+ * mention of the user when the message's list names them ([isMentionedThroughGroup]).
+ */
+data class MentionNames(
+  val usernames: Set<String>,
+  val myUsername: String,
+  val groupHandles: Set<String> = emptySet(),
+  val isMentionedThroughGroup: Boolean = false,
+) {
+  /** These names with the group mentions of [message]; the same object for most messages. */
+  fun forMessage(message: Message): MentionNames =
+    if (message.groupMentions.isEmpty()) {
+      this
+    } else {
+      copy(groupHandles = message.groupMentions.toSet(), isMentionedThroughGroup = message.mentionsMe)
+    }
+}
 
 /** What a tapped link does. */
 class LinkHandlers(
@@ -118,12 +136,13 @@ private fun AnnotatedString.Builder.appendRun(
     is MarkupRunKind.Link -> appendLink(kind, run.text, colors, links, permalinkLabel)
     is MarkupRunKind.Mention -> {
       val name = kind.name.lowercase()
-      val isMe = name == names.myUsername.lowercase() || name in CHANNEL_MENTIONS
+      val isGroup = name in names.groupHandles
+      val isMe = name == names.myUsername.lowercase() || name in CHANNEL_MENTIONS || (isGroup && names.isMentionedThroughGroup)
       when {
         isMe -> withStyle(SpanStyle(color = colors.mentionMe, background = colors.mentionMeBackground, fontWeight = FontWeight.Bold)) {
           append(run.text)
         }
-        name in names.usernames -> withStyle(SpanStyle(color = colors.mention, fontWeight = FontWeight.Bold)) { append(run.text) }
+        isGroup || name in names.usernames -> withStyle(SpanStyle(color = colors.mention, fontWeight = FontWeight.Bold)) { append(run.text) }
         // Not a member's name (an address, a handle elsewhere): plain text.
         else -> append(run.text)
       }

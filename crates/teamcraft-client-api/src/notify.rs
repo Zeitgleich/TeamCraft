@@ -178,6 +178,7 @@ mod tests {
 
   fn group(handle: &str, notified: &[UserId], outside_count: u32) -> MentionableGroup {
     MentionableGroup {
+      kind: crate::model::MentionableGroupKind::Custom,
       handle: handle.to_owned(),
       name: handle.to_owned(),
       notified: notified.to_vec(),

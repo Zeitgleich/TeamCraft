@@ -57,6 +57,9 @@ struct ChatPane: View {
   @State private var isSendFailed = false
   @State private var isScheduleTooLarge = false
   @State private var mentionNames: (usernames: Set<String>, me: String) = ([], "")
+  /// The groups the composer offers after `@` here (issue #206), and who the text's reach.
+  @State private var mentionableGroups: [MentionableGroupItem] = []
+  @State private var groupReach = GroupMentionReachItem(notifiedCount: 0, outsideCount: 0)
   @State private var maybeHighlighted: String?
   @State private var isPermalinkMissing = false
   @State private var displayNames: [String: String] = [:]
@@ -122,7 +125,13 @@ struct ChatPane: View {
       await reload()
       await reloadDraftFiles()
       runningCallCount = await model.runningCalls()[conversation.id] ?? 0
+      mentionableGroups = await model.mentionableGroups(conversation.id)
       await followTransfers()
+    }
+    .task(id: draft) {
+      groupReach = draft.contains("@")
+        ? await model.groupMentionReach(conversation.id, body: draft)
+        : GroupMentionReachItem(notifiedCount: 0, outsideCount: 0)
     }
     .task {
       mentionNames = await model.mentionNames()
@@ -582,6 +591,12 @@ struct ChatPane: View {
       VStack(alignment: .leading, spacing: 6) {
         if let reply = maybeReply { replyBar(reply) }
         EmojiSuggestionBar(text: draft) { emoji in draft = completeEmoji(in: draft, with: emoji) }
+        GroupMentionBar(text: draft, groups: mentionableGroups) { handle in draft = completeMention(in: draft, handle: handle) }
+        if groupReach.outsideCount > 0 {
+          Text("group_mention_outside \(Int(groupReach.outsideCount))")
+            .font(.app(.caption))
+            .foregroundStyle(Theme.textMuted)
+        }
         if !attachments.isEmpty || !otherFiles.isEmpty { attachmentChips }
         if VoiceRecorder.shared.showsBar(for: draftKey) {
           VoiceRecorderBar(owner: draftKey) { Task { await sendVoice() } }
@@ -1523,6 +1538,39 @@ struct EmojiSuggestionBar: View {
                   .padding(.horizontal, 10).padding(.vertical, 6)
                   .background(Theme.surface)
                   .clipShape(Capsule())
+              }
+              .buttonStyle(.plain)
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Groups to mention after `@` (issue #206), each with how many it notifies here.
+struct GroupMentionBar: View {
+  let text: String
+  let groups: [MentionableGroupItem]
+  let onPick: (String) -> Void
+
+  var body: some View {
+    if let query = activeMentionQuery(text) {
+      let adminsName = String(localized: "group_mention_admins")
+      let shown = groupSuggestions(query: query, groups: groups, adminsName: adminsName)
+      if !shown.isEmpty {
+        ScrollView(.horizontal, showsIndicators: false) {
+          HStack(spacing: 6) {
+            ForEach(shown, id: \.handle) { group in
+              Button { onPick(group.handle) } label: {
+                HStack(spacing: 4) {
+                  Text(verbatim: "@\(group.handle) · \(shownGroupName(group, adminsName: adminsName)) ·")
+                  Text("group_mention_people \(Int(group.notifiedCount))")
+                }
+                .font(.app(.caption))
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(Theme.surface)
+                .clipShape(Capsule())
               }
               .buttonStyle(.plain)
             }
