@@ -294,11 +294,12 @@ fn RailBadgeView(badge: Memo<RailBadge>) -> impl IntoView {
   }
 }
 
-/// What the rail entry of `space` counts: what its sidebar lists, its channels and the DMs with its
-/// people (#701). Chats counts those DMs too; the app's badge counts each conversation once. It
-/// reads through `state`, so a memo of it follows every new or read message.
+/// What the rail entry of `space` counts: its own channels, never the DMs its sidebar lists with
+/// them (#701). A DM shows in every space, so counting it there put the same number on every tile
+/// (#1600); Chats counts it, and the app's badge counts each conversation once. It reads through
+/// `state`, so a memo of it follows every new or read message.
 fn space_badge(state: AppState, space: SpaceId) -> RailBadge {
-  RailBadge::of(&state.with_mutes(state.space_list(space)))
+  RailBadge::of(&state.with_mutes(state.read(|backend| backend.space_conversations(space))))
 }
 
 #[component]
@@ -441,25 +442,51 @@ mod tests {
     );
   }
 
-  /// #701: with the setting on, the space's badge counts the DMs it lists too (the demo's people
-  /// are in every space).
+  /// #1600: a space lists the DMs with its people (#701), but its badge leaves them to Chats, or
+  /// one unread DM would mark every space.
   #[test]
-  fn a_space_counts_the_dms_it_lists() {
+  fn a_space_does_not_count_the_dms_it_lists() {
     let (_, state) = demo_state();
-    let (_, other) = spaces(state);
-    let channels = space_badge(state, other);
+    let (open, other) = spaces(state);
+    let before = (space_badge(state, open), space_badge(state, other));
     state
       .settings
       .prefs
       .update(|prefs| prefs.sidebar.shows_space_dms = true);
     let dms =
       RailBadge::of(&state.with_mutes(state.read(|backend| backend.space_direct_conversations(other))));
-    assert!(dms.count > 0);
+    assert!(dms.count > 0, "the demo has an unread DM the space lists");
+    assert_eq!((space_badge(state, open), space_badge(state, other)), before);
+  }
+
+  #[test]
+  fn a_new_message_in_a_channel_marks_only_its_space() {
+    let (mock, state) = demo_state();
+    let (open, other) = spaces(state);
+    // Settles the demo first: the open channel is read once the backend changes.
+    state.backend_changed();
+    let before = (space_badge(state, open), space_badge(state, other));
+    mock.receive(channel(state, other, "general"), false);
+    state.backend_changed();
+    assert_eq!(space_badge(state, open), before.0);
+    assert_eq!(space_badge(state, other).count, before.1.count + 1);
+  }
+
+  #[test]
+  fn a_mention_in_a_channel_counts_for_its_space() {
+    let (mock, state) = demo_state();
+    let (open, other) = spaces(state);
+    // Settles the demo first: the open channel is read once the backend changes.
+    state.backend_changed();
+    let before = (space_badge(state, open), space_badge(state, other));
+    mock.receive(channel(state, other, "general"), true);
+    state.backend_changed();
+    assert_eq!(space_badge(state, open), before.0);
     assert_eq!(
       space_badge(state, other),
       RailBadge {
-        count: channels.count + dms.count,
-        mention_count: channels.mention_count + dms.mention_count
+        count: before.1.count + 1,
+        mention_count: before.1.mention_count + 1
       }
     );
   }

@@ -283,6 +283,20 @@ class ConversationSectionsTest {
     assertEquals(false, hasNewElsewhere(result, "s-Project A"))
   }
 
+  /** #1600: a DM, also one tied to a space, never marks a space; Chats counts it. */
+  @Test
+  fun dmsNeverMarkASpace() {
+    val spaces = listOf(HomeSpace("s-Project A", "Project A"), HomeSpace("s-Project B", "Project B"))
+    val conversations = listOf(
+      item("1", "Amy", ConversationKind.DIRECT, space = "Project A", unread = 3u, mentions = 1u),
+      item("2", "Amy, Bob", ConversationKind.GROUP, unread = 2u),
+      item("3", "general", ConversationKind.PUBLIC, space = "Project B", unread = 1u, mentions = 1u),
+    )
+    val result = homeSpaces(spaces, conversations)
+    assertEquals(HomeSpace("s-Project A", "Project A"), result[0])
+    assertEquals(HomeSpace("s-Project B", "Project B", mentionCount = 1, hasUnread = true), result[1])
+  }
+
   @Test
   fun theRememberedSpaceIsKeptWhileTheUserIsInIt() {
     val spaces = listOf(HomeSpace("a", "Alpha"), HomeSpace("b", "Beta"))
