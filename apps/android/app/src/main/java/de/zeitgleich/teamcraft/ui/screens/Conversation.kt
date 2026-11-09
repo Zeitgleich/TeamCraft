@@ -240,7 +240,13 @@ fun ConversationScreen(
   val rights = rememberRights(viewModel, conversationId, changes)
   // Performance data: whether the conversation caught up with the server once open (#1521).
   val catchUp = remember(conversationId) { CatchUpMeasure(conversationId, System.currentTimeMillis()) }
-  DisposableEffect(catchUp) { onDispose { catchUp.dispose() } }
+  DisposableEffect(catchUp) {
+    onDispose {
+      catchUp.dispose()
+      // Left before the page showed: says nothing about its speed.
+      Perf.cancel(PerfMeasure.OLDER_HISTORY_PAGE, conversationId)
+    }
+  }
   LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { catchUp.resumed() }
   // Performance data: from opening the conversation until its messages are read (issue #1521).
   DisposableEffect(conversationId) {
@@ -276,6 +282,10 @@ fun ConversationScreen(
       // Read now: opened again, it starts at the end without an unread line.
       viewModel.keepFeedSeed(conversationId, FeedSeed(messages, hasOlder, extras, FirstUnread.None))
       serverHistory = viewModel.readChat { query(ChatQueries.olderHistory(conversationId)).olderHistory } ?: serverHistory
+      if (Perf.isRunning(PerfMeasure.OLDER_HISTORY_PAGE, conversationId) && serverHistory != ServerHistory.LOADING) {
+        // The page asked for is shown, or none came (history.older_page).
+        Perf.end(PerfMeasure.OLDER_HISTORY_PAGE, conversationId, isOk = serverHistory != ServerHistory.FAILED)
+      }
       isAskingServer = false
       maybeKeyCatchUp = viewModel.keyCatchUp()
       // After the messages: once the store has the notified one, the core no longer names it.
@@ -371,6 +381,7 @@ fun ConversationScreen(
         if (!hasOlder) {
           // The core answers in the store: the change that follows says how it went.
           isAskingServer = true
+          Perf.begin(PerfMeasure.OLDER_HISTORY_PAGE, conversationId)
           viewModel.act(ChatActions.loadOlderHistory(conversationId))
           return@OlderMessages
         }
