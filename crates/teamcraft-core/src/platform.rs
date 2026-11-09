@@ -1,5 +1,5 @@
 //! The few runtime services that differ between native targets (tokio) and the browser (the
-//! JavaScript event loop driven by `wasm-bindgen-futures`): timers.
+//! JavaScript event loop driven by `wasm-bindgen-futures`): timers, and handing the thread back.
 //!
 //! Everything else in the engine is plain `async` without `Send` bounds, so the same code runs on a
 //! single-threaded browser executor.
@@ -11,12 +11,23 @@ pub async fn sleep(duration: Duration) {
   imp::sleep(duration).await;
 }
 
+/// Lets everything else that waits for the thread run before the caller goes on: in the browser
+/// the event loop (the UI's input, its reads of the core, a paint, issue #1575), natively the other
+/// tasks of the executor.
+pub async fn yield_now() {
+  imp::yield_now().await;
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
   use std::time::Duration;
 
   pub(super) async fn sleep(duration: Duration) {
     tokio::time::sleep(duration).await;
+  }
+
+  pub(super) async fn yield_now() {
+    tokio::task::yield_now().await;
   }
 }
 
@@ -64,6 +75,12 @@ mod imp {
       _callback: callback,
     }
     .await;
+  }
+
+  /// A task of its own (a zero timeout), not a microtask: the browser handles input and paints
+  /// in between, which a resolved promise wouldn't let it.
+  pub(super) async fn yield_now() {
+    sleep(Duration::ZERO).await;
   }
 
   impl Future for Sleep {

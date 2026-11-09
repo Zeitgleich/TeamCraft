@@ -396,18 +396,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     });
     // Read newest first: an older pin or bookmarks message mustn't win (issue #1438).
     let received = super::messaging::received_ids(conversation, &page.messages);
-    self.receive_in_groups(page.messages, |client| {
-      client.settle_ordered_controls(conversation, &received)?;
-      if let Some(before) = maybe_next {
-        records::put_json(
-          &client.store,
-          Table::SyncState,
-          &key,
-          &OlderCursor { before, loaded },
-        )?;
-      }
-      Ok(())
-    })?;
+    self
+      .receive_in_groups(page.messages, |client| {
+        client.settle_ordered_controls(conversation, &received)?;
+        if let Some(before) = maybe_next {
+          records::put_json(
+            &client.store,
+            Table::SyncState,
+            &key,
+            &OlderCursor { before, loaded },
+          )?;
+        }
+        Ok(())
+      })
+      .await?;
     Ok(match maybe_next {
       Some(_) => PageOutcome::More,
       None => PageOutcome::Finished { loaded },

@@ -112,8 +112,11 @@ impl Reads {
   }
 
   pub(crate) fn query_json(&self, query: &str) -> Result<String, TeamCraftError> {
-    let query: ChatQuery = from_json(query)?;
-    to_json(&query.answer(self.backend()?))
+    let started = std::time::Instant::now();
+    let parsed: ChatQuery = from_json(query)?;
+    let answer = to_json(&parsed.answer(self.backend()?));
+    crate::logging::slow_query(query_kind(query), started.elapsed());
+    answer
   }
 
   /// An action that only needs the backend ([`needs_client`]): its local half.
@@ -458,6 +461,15 @@ pub(crate) fn from_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T,
 
 /// The download URL and size of `GET /users/{id}/avatar`'s answer; refuses a type that is not a
 /// picture and a URL that is not `https` (`http` only if `is_plain_http_allowed`).
+/// Which kind of query `json` is, for a log line (never its content: a search's text, a name).
+fn query_kind(json: &str) -> String {
+  #[derive(serde::Deserialize)]
+  struct Kind {
+    kind: String,
+  }
+  serde_json::from_str::<Kind>(json).map_or_else(|_| "unknown".to_owned(), |kind| kind.kind)
+}
+
 fn avatar_location(answer: &str, is_plain_http_allowed: bool) -> Result<(String, u64), TeamCraftError> {
   let location: AvatarResponse =
     serde_json::from_str(answer).map_err(|error| TeamCraftError::Core(error.to_string()))?;

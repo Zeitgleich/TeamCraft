@@ -65,6 +65,7 @@ mod sources;
 mod sync;
 mod sync_progress;
 mod sync_trace;
+mod thread_turns;
 #[cfg(feature = "ui")]
 mod ui_commands;
 pub mod upload_parts;
@@ -343,6 +344,11 @@ pub struct ClientSettings {
   /// #1448); meanwhile the feed shows a hole there (`history_gaps.rs`). The MLS queue is always read
   /// whole. `None` (default): every page in order, at once, for hosts whose feed shows no holes.
   pub catch_up_message_pages: Option<u32>,
+  /// For a host whose client shares its thread with the UI (the browser's only thread, issue
+  /// #1575): long work (a catch-up, a page of history, a backlog) hands the thread back at least
+  /// this often, so the UI's input and reads are answered meanwhile. `None` (default): a host with
+  /// a thread of its own for the client, where readers have their own thread too.
+  pub maybe_thread_turn: Option<std::time::Duration>,
   /// Make the user's notes to self (a DM with themself) once a sync finds there is none. Off by
   /// default; the apps turn it on with [`ClientSettings::with_notes_to_self`].
   pub creates_notes_to_self: bool,
@@ -380,7 +386,18 @@ impl ClientSettings {
     self.catch_up_message_pages = Some(CATCH_UP_MESSAGE_PAGES);
     self
   }
+
+  /// The settings of a host that runs the client on the UI's thread (web): long work hands the
+  /// thread back every [`THREAD_TURN`].
+  pub fn with_thread_turns(mut self) -> Self {
+    self.maybe_thread_turn = Some(THREAD_TURN);
+    self
+  }
 }
+
+/// [`ClientSettings::maybe_thread_turn`] of the web app: below the 50 ms of a "long task", so the
+/// UI's input waits for at most one turn plus its own work.
+pub const THREAD_TURN: std::time::Duration = std::time::Duration::from_millis(30);
 
 /// [`ClientSettings::catch_up_message_pages`] of the apps that show holes: 200 messages at the
 /// default page size, which is more than most conversations get in a day, and four round trips.
@@ -452,6 +469,8 @@ pub struct Client<A, S> {
   /// What one pass over a conversation's MLS queue read for all its entries (issue #972); `None`
   /// outside of a pass, where each entry reads afresh.
   maybe_backlog_reads: Option<groups::BacklogReads>,
+  /// When the client last handed its thread back ([`Self::hand_back_thread`]).
+  thread_turn_began_ms: i64,
   /// Events of a resume replay still to come: the counters are read once it has drained, because
   /// `GET /unread` already counts the missed messages the replay delivers (issue #183).
   maybe_replay_left: Option<u64>,
@@ -566,6 +585,7 @@ impl Default for ClientSettings {
       upload_retry: files::UploadRetrySettings::default(),
       catch_up_concurrency: 6,
       catch_up_message_pages: None,
+      maybe_thread_turn: None,
       creates_notes_to_self: false,
       makes_thumbnails: true,
       // A day: a user who comes back to a failed setup soon picks up its registration.
@@ -641,6 +661,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
       maybe_backlog_reads: None,
+      thread_turn_began_ms: i64::MIN,
       maybe_replay_left: None,
       maybe_on_answered: None,
       maybe_live_catch_up: None,

@@ -206,3 +206,11 @@ pub fn detect(config: AppConfig) -> Rc<dyn Authenticator> {
     auth
   }
 }
+
+/// A sign-in the user didn't end is gone: worth a crash report (docs/crash-reports.md), so lost
+/// sign-ins show up without anybody filing a bug. `reason` is a fixed text, never content.
+pub(crate) fn report_lost_sign_in(reason: &'static str) {
+  tracing::warn!(reason, "lost the sign-in");
+  #[cfg(target_arch = "wasm32")]
+  crate::crash_reports::capture_lost_sign_in(reason);
+}

@@ -225,6 +225,7 @@ impl PendingEnrollment {
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
       maybe_backlog_reads: None,
+      thread_turn_began_ms: i64::MIN,
       maybe_replay_left: None,
       maybe_on_answered: None,
       maybe_live_catch_up: None,

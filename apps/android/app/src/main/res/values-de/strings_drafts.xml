@@ -20,4 +20,9 @@
   <string name="composer_draft_file_failed">Nicht hochgeladen</string>
   <string name="composer_draft_file_expired">Abgelaufen</string>
   <string name="composer_draft_files_expired">Eine Datei in diesem Entwurf wurde zu lange aufbewahrt und ist weg. Entferne sie oder hänge sie neu an.</string>
+  <!-- #1579: the composer's send, while the core takes it and when it didn't. -->
+  <string name="composer_sending">Wird gesendet …</string>
+  <string name="composer_send_failed">Nicht gesendet: %1$s</string>
+  <string name="composer_send_failed_dismiss">Schließen</string>
+  <string name="composer_file_uploading">Wird hochgeladen</string>
 </resources>

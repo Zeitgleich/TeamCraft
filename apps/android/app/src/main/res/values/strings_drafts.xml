@@ -20,4 +20,9 @@
   <string name="composer_draft_file_failed">Not uploaded</string>
   <string name="composer_draft_file_expired">Expired</string>
   <string name="composer_draft_files_expired">A file in this draft was kept too long and is gone. Remove it, or attach it again.</string>
+  <!-- #1579: the composer's send, while the core takes it and when it didn't. -->
+  <string name="composer_sending">Sending…</string>
+  <string name="composer_send_failed">Not sent: %1$s</string>
+  <string name="composer_send_failed_dismiss">Close</string>
+  <string name="composer_file_uploading">Uploading</string>
 </resources>
