@@ -25,8 +25,8 @@ use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::clock::SystemClock;
 use teamcraft_core::records;
 use teamcraft_core::store::{
-  LocalStore, MessageContent, SealedSqliteStore, StaticKeySource, StoredMessage, Table, TrackedStore,
-  Unreadable, read_together, write_group,
+  CommitJournal, LaneStore, LocalStore, MessageContent, SealedSqliteStore, SealedStoreLimits,
+  StaticKeySource, StoredMessage, Table, TrackedStore, Unreadable, read_together, write_group,
 };
 use teamcraft_core::ui_backend::CoreChatBackend;
 use teamcraft_core::{ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
@@ -353,6 +353,77 @@ async fn measure_a_list_pass_after_another_connections_commit() {
     ms(cold[COLD_PASSES - 1])
   );
   drop((backend, store, other));
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// Issue #1476: the same passes on a read connection of its own, while the app's writing
+/// connection commits between them. The writer stages what it changed, so the reader keeps the rest
+/// of its caches: the passes should cost what the warm ones of the test above do, not the cold ones.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "a measurement: run by hand with --release"]
+async fn measure_a_list_pass_on_a_read_connection_after_the_writers_commit() {
+  let directory = std::env::temp_dir().join(format!("teamcraft-lane-pass-{}", std::process::id()));
+  std::fs::create_dir_all(&directory).unwrap();
+  let me = seed(&directory).await;
+  let key_source = StaticKeySource::new(SymmetricKey::from_bytes(KEY));
+  let journal = CommitJournal::new();
+  let writer = Arc::new(SealedSqliteStore::open(&store_path(&directory), &key_source).unwrap());
+  writer.publish_commits(Arc::clone(&journal));
+  let reader = SealedSqliteStore::open_reader(
+    &store_path(&directory),
+    &key_source,
+    SealedStoreLimits::default(),
+    journal,
+  )
+  .unwrap();
+  let engine = TrackedStore::new(LaneStore::writer(Arc::clone(&writer)));
+  let lane = engine.sharing(LaneStore::reader(Arc::clone(&writer), Arc::new(reader)));
+  let backend = CoreChatBackend::new(lane.clone(), me, Box::new(SystemClock));
+  let spaces: BTreeSet<SpaceId> = (0..SPACES).map(|space| id(900 + space)).collect();
+  read_together(&lane, || {
+    backend.listed_conversations(&spaces);
+    Ok::<_, teamcraft_core::store::StoreError>(())
+  })
+  .unwrap();
+  let (mut warm, mut after_record, mut after_message) = (Vec::new(), Vec::new(), Vec::new());
+  let pass = |into: &mut Vec<Duration>| {
+    let started = Instant::now();
+    read_together(&lane, || {
+      backend.listed_conversations(&spaces);
+      Ok::<_, teamcraft_core::store::StoreError>(())
+    })
+    .unwrap();
+    into.push(started.elapsed());
+  };
+  for n in 0..COLD_PASSES {
+    pass(&mut warm);
+    engine
+      .put(Table::SyncState, "lane-pass", &n.to_le_bytes())
+      .unwrap();
+    pass(&mut after_record);
+    let index = i64::try_from(n).unwrap() % CONVERSATIONS;
+    engine
+      .upsert_message(&message(
+        conversation_id(index),
+        id(500 + index % PEOPLE),
+        index,
+        SYNCED_FROM + i64::try_from(n).unwrap(),
+      ))
+      .unwrap();
+    pass(&mut after_message);
+  }
+  for passes in [&mut warm, &mut after_record, &mut after_message] {
+    passes.sort();
+  }
+  eprintln!(
+    "list pass on a read connection, warm: p50 {:.1} ms; after the writer's commit of a record: p50 {:.1} ms, max {:.1} ms; of a message: p50 {:.1} ms, max {:.1} ms",
+    ms(warm[COLD_PASSES / 2]),
+    ms(after_record[COLD_PASSES / 2]),
+    ms(after_record[COLD_PASSES - 1]),
+    ms(after_message[COLD_PASSES / 2]),
+    ms(after_message[COLD_PASSES - 1])
+  );
+  drop((backend, lane, engine, writer));
   std::fs::remove_dir_all(&directory).unwrap();
 }
 

@@ -681,10 +681,11 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   /// is neither written nor noted.
   fn put(&self, table: Table, key: &str, value: &[u8]) -> Result<(), StoreError> {
     let change = classify(table, key);
-    if change != Change::Nothing && self.inner.get(table, key)?.as_deref() == Some(value) {
-      return Ok(());
-    }
+    // Compared inside the group: a reading connection's snapshot may be older than the record.
     self.grouped(|| {
+      if change != Change::Nothing && self.inner.get(table, key)?.as_deref() == Some(value) {
+        return Ok(());
+      }
       self.inner.put(table, key, value)?;
       self.note(change);
       Ok(())
