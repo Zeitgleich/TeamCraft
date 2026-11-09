@@ -4,7 +4,9 @@
   flex: none;
   width: var(--sidebar-w);
   background: var(--sb-bg);
-  color: var(--chrome-text);
+  /* The hairline that sets a light sidebar off from the white content; none in dark mode. */
+  box-shadow: inset -1px 0 0 var(--sb-border);
+  color: var(--sb-text);
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -62,7 +64,7 @@
   font-size: var(--text-lg);
   letter-spacing: var(--tracking-lg);
   font-weight: var(--weight-bold);
-  color: var(--chrome-strong);
+  color: var(--sb-strong);
 }
 
 .sidebar-scroll {
@@ -90,7 +92,7 @@
 
 @media (hover: hover) and (pointer: fine) {
   .sb-section-head:hover {
-    color: var(--chrome-strong);
+    color: var(--sb-strong);
   }
 }
 
@@ -129,12 +131,12 @@
 @media (hover: hover) and (pointer: fine) {
   .sb-item:hover {
     background: var(--sb-hover);
-    color: var(--chrome-strong);
+    color: var(--sb-strong);
   }
 }
 
 .sb-item.unread {
-  color: var(--chrome-strong);
+  color: var(--sb-strong);
   font-weight: var(--weight-bold);
 }
 
@@ -259,10 +261,13 @@
   width: 18px;
 }
 
-.sidebar :focus-visible,
 .space-rail :focus-visible,
 .top-bar :focus-visible {
   outline-color: var(--chrome-strong);
+}
+
+.sidebar :focus-visible {
+  outline-color: var(--sb-strong);
 }
 
 

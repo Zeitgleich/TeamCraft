@@ -185,9 +185,14 @@ Color keys map to the UI tokens:
 | `accent_strong`   | `--accent-strong`     |
 | `on_accent`       | `--on-accent`         |
 | `accent_soft`     | `--accent-soft`       |
-| `sidebar`         | `--sb-bg`             |
+| `sidebar`         | `--nav`               |
 | `sidebar_current` | `--sb-current`        |
 | `chrome`          | `--chrome`            |
+
+`sidebar` is the navigation colour. In dark mode it is the sidebar; in light mode the sidebar is a
+light tint of it (`--sb-tint`, 8 % in white) with dark text, set off from the content by a hairline,
+and the colour itself belongs on the rail and the top bar (`chrome`). The sidebar's text colours
+read at 4.5:1 on a tint of any colour, so a brand can't make them unreadable.
 
 Other tokens (danger, presence colors, text) are not brandable: status colors keep their meaning.
 

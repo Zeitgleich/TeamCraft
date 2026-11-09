@@ -86,7 +86,9 @@ pub const BRAND_COLOR_TOKENS: &[(&str, &[&str])] = &[
   ("accent_strong", &["--accent-strong"]),
   ("on_accent", &["--on-accent"]),
   ("accent_soft", &["--accent-soft"]),
-  ("sidebar", &["--sb-bg"]),
+  // The navigation colour: the sidebar in dark mode, a light tint of it in light mode
+  // (000-tokens.css).
+  ("sidebar", &["--nav"]),
   ("sidebar_current", &["--sb-current"]),
   ("chrome", &["--chrome"]),
 ];
