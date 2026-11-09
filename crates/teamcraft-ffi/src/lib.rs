@@ -93,8 +93,9 @@ use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
 pub use types::{
   AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ChatPreviewItem, ConnectionState,
-  ConversationItem, ConversationKind, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem, KeyCatchUpItem,
-  LeaveChoice, LinkPlatform, LinkRequestItem, LoginBrand, MentionSettings, MessageItem, MessagePage,
+  ConversationItem, ConversationKind, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem,
+  GroupMentionReachItem, KeyCatchUpItem, LeaveChoice, LinkPlatform, LinkRequestItem, LoginBrand,
+  MentionSettings, MentionableGroupItem, MentionableGroupKindItem, MessageItem, MessagePage,
   NetworkInterception, NetworkProxy, NotificationAttachmentKind, NotificationContent,
   NotificationContentSettings, NotificationGap, NotificationSuppression, NotifiedConversation,
   NotifiedMessage, OrgRecoveryStart, PendingWorkItem, PlaceholderItem, Presence, PushDiagnosticsInfo,
@@ -648,6 +649,29 @@ impl TeamCraft {
   /// §4.6); 0 otherwise. The app tells the user once.
   pub async fn take_suspect_deletions(&self) -> Result<u32, TeamCraftError> {
     self.act_locally(|reads| reads.take_suspect_deletions()).await
+  }
+
+  /// The user groups the composer offers after `@` in a conversation, `@admins` included while
+  /// the instance allows it; empty without `use_group_mentions` there (issue #206).
+  pub async fn mentionable_groups(
+    &self,
+    conversation_id: String,
+  ) -> Result<Vec<MentionableGroupItem>, TeamCraftError> {
+    self
+      .read(move |reads| reads.mentionable_groups(&conversation_id))
+      .await
+  }
+
+  /// Who the group mentions in `body` would notify in a conversation: the composer's hint about
+  /// members outside it, and the confirmation through [`needs_group_confirmation`].
+  pub async fn group_mention_reach(
+    &self,
+    conversation_id: String,
+    body: String,
+  ) -> Result<GroupMentionReachItem, TeamCraftError> {
+    self
+      .read(move |reads| reads.group_mention_reach(&conversation_id, &body))
+      .await
   }
 
   /// Whether the conversation's long-press menu offers "Leave" (#1105).
@@ -1452,6 +1476,20 @@ pub fn needs_channel_confirmation(body: String, member_count: u32, confirm_over:
     usize::try_from(member_count).unwrap_or(usize::MAX),
     confirm_over,
   )
+}
+
+/// Whether group mentions notifying `notified_count` people should be confirmed first, with the
+/// same setting as `@channel` (`confirm_over`; `0` never asks).
+#[uniffi::export]
+pub fn needs_group_confirmation(notified_count: u32, confirm_over: u32) -> bool {
+  confirm_over != 0 && notified_count > confirm_over
+}
+
+/// The most people one message names; a group mention reaching more notifies only the first ones
+/// (the confirmation says so).
+#[uniffi::export]
+pub fn max_mentions_per_message() -> u32 {
+  u32::try_from(teamcraft_proto::DEFAULT_MAX_MENTIONS_PER_MESSAGE).unwrap_or(u32::MAX)
 }
 
 /// Where Cisco's OpenH264 for this phone is downloaded from (receiving video needs it; it can't be

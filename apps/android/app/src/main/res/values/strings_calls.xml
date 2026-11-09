@@ -46,6 +46,21 @@
     <item quantity="one">This message notifies %d member.</item>
     <item quantity="other">This message notifies all %d members.</item>
   </plurals>
+  <string name="group_mention_confirm_title">Notify the groups?</string>
+  <plurals name="group_mention_confirm">
+    <item quantity="one">This message notifies %d person in the mentioned groups.</item>
+    <item quantity="other">This message notifies %d people in the mentioned groups.</item>
+  </plurals>
+  <string name="group_mention_confirm_capped">This message notifies only the first %1$d of the %2$d people in the mentioned groups.</string>
+  <plurals name="group_mention_outside">
+    <item quantity="one">%d member of the mentioned groups isn\'t in this conversation and won\'t be notified.</item>
+    <item quantity="other">%d members of the mentioned groups aren\'t in this conversation and won\'t be notified.</item>
+  </plurals>
+  <plurals name="group_mention_people">
+    <item quantity="one">%d person</item>
+    <item quantity="other">%d people</item>
+  </plurals>
+  <string name="group_mention_admins">Admins and owners</string>
   <string name="mention_title">Mentions on this device</string>
   <string name="mention_first_name">My first name counts as a mention</string>
   <string name="mention_channel">Notify me for @channel, @here and @all</string>

@@ -185,6 +185,10 @@ import uniffi.teamcraft_ffi.NotifiedConversation
 import uniffi.teamcraft_ffi.emojiConvert
 import uniffi.teamcraft_ffi.emojiSuggestions
 import uniffi.teamcraft_ffi.needsChannelConfirmation
+import uniffi.teamcraft_ffi.needsGroupConfirmation
+import uniffi.teamcraft_ffi.maxMentionsPerMessage
+import uniffi.teamcraft_ffi.GroupMentionReachItem
+import uniffi.teamcraft_ffi.MentionableGroupItem
 import android.os.Build
 
 /** Quick reactions in the action sheet. */
@@ -1319,6 +1323,15 @@ internal fun Composer(
   }
   val maybeQuery = Mentions.activeQuery(text)
   val members = snapshot?.conversation(conversationId)?.memberIds?.mapNotNull { snapshot.user(it) } ?: emptyList()
+  // The groups the user may mention here (#206), read again whenever an `@` starts.
+  val groups by produceState(emptyList<MentionableGroupItem>(), conversationId, maybeQuery != null) {
+    value = viewModel.mentionableGroups(conversationId)
+  }
+  // Who the text's group mentions reach: the hint about members outside the conversation.
+  val reach by produceState(NO_REACH, conversationId, text) {
+    value = if ('@' in text) viewModel.groupMentionReach(conversationId, text) else NO_REACH
+  }
+  val mentionScope = rememberCoroutineScope()
   fun sendOptions(sending: List<PickedFile>, fromDraft: List<DraftFileItem> = emptyList()) = SendOptions(
     maybeThread = maybeThread,
     maybeReplyTo = maybeReply?.messageId,
@@ -1415,6 +1428,68 @@ internal fun Composer(
     onSent()
   }
   var isConfirmingChannel by remember { mutableStateOf(false) }
+  // Group mentions that notify more people than the @channel setting allows unasked: how many.
+  var maybeConfirmingGroups by remember { mutableStateOf<UInt?>(null) }
+  maybeConfirmingGroups?.let { notified ->
+    val count = notified.coerceAtMost(Int.MAX_VALUE.toUInt()).toInt()
+    val cap = maxMentionsPerMessage().toInt()
+    AlertDialog(
+      onDismissRequest = {
+        maybeConfirmingGroups = null
+        maybeSendLaterAt = null
+      },
+      title = { Text(stringResource(R.string.group_mention_confirm_title)) },
+      text = {
+        Text(
+          if (count > cap) {
+            stringResource(R.string.group_mention_confirm_capped, cap, count)
+          } else {
+            pluralStringResource(R.plurals.group_mention_confirm, count, count)
+          },
+        )
+      },
+      confirmButton = {
+        TextButton(onClick = {
+          maybeConfirmingGroups = null
+          val maybeAt = maybeSendLaterAt
+          if (maybeAt != null) schedule(maybeAt) else send()
+        }) { Text(stringResource(R.string.send)) }
+      },
+      dismissButton = {
+        TextButton(onClick = {
+          maybeConfirmingGroups = null
+          maybeSendLaterAt = null
+        }) { Text(stringResource(R.string.cancel)) }
+      },
+    )
+  }
+
+  /**
+   * Sends (or schedules for [maybeAt]) after the confirmations the text needs: @channel, or group
+   * mentions notifying more people than the same setting (#206). The reach is read for this text.
+   */
+  fun confirmThenSend(maybeAt: Long?) {
+    val confirmOver = viewModel.confirmChannelOver().toUInt()
+    val go = { if (maybeAt != null) schedule(maybeAt) else send() }
+    if (needsChannelConfirmation(text, members.size.toUInt(), confirmOver)) {
+      maybeSendLaterAt = maybeAt
+      isConfirmingChannel = true
+      return
+    }
+    if ('@' !in text) return go()
+    val checked = text
+    mentionScope.launch {
+      val notified = viewModel.groupMentionReach(conversationId, checked).notifiedCount
+      // Typed on while it was read: the next tap asks again for the new text.
+      if (text != checked) return@launch
+      if (needsGroupConfirmation(notified, confirmOver)) {
+        maybeSendLaterAt = maybeAt
+        maybeConfirmingGroups = notified
+      } else {
+        go()
+      }
+    }
+  }
   if (isConfirmingChannel) {
     AlertDialog(
       onDismissRequest = { isConfirmingChannel = false },
@@ -1441,10 +1516,7 @@ internal fun Composer(
   // The record button stands in for the send button while there is nothing to send; a recording
   // or take of this composer keeps it whatever the policy says now.
   val showsVoice = voice.isActive || (voicePolicy.enabled && !canSend && !isSending)
-  fun trySend() {
-    val confirmOver = viewModel.confirmChannelOver().toUInt()
-    if (needsChannelConfirmation(text, members.size.toUInt(), confirmOver)) isConfirmingChannel = true else send()
-  }
+  fun trySend() = confirmThenSend(null)
   Column(Modifier.fillMaxWidth()) {
     EmojiSuggestions(text) { emoji -> text = EmojiInput.complete(text, emoji) }
     if (maybeQuery != null) {
@@ -1454,6 +1526,24 @@ internal fun Composer(
           modifier = Modifier.fillMaxWidth().clickable { text = Mentions.complete(text, user) }.padding(horizontal = 16.dp, vertical = 8.dp),
         )
       }
+      val adminsName = stringResource(R.string.group_mention_admins)
+      Mentions.groupSuggestions(maybeQuery, groups, adminsName).forEach { group ->
+        val notified = group.notifiedCount.coerceAtMost(Int.MAX_VALUE.toUInt()).toInt()
+        Text(
+          "@${group.handle} · ${Mentions.shownName(group, adminsName)} · " +
+            pluralStringResource(R.plurals.group_mention_people, notified, notified),
+          modifier = Modifier.fillMaxWidth().clickable { text = Mentions.complete(text, group.handle) }.padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+      }
+    }
+    if (reach.outsideCount > 0u) {
+      val outside = reach.outsideCount.coerceAtMost(Int.MAX_VALUE.toUInt()).toInt()
+      Text(
+        pluralStringResource(R.plurals.group_mention_outside, outside, outside),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+      )
     }
     maybeReply?.let { reply ->
       Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1626,13 +1716,7 @@ internal fun Composer(
       viewModel = viewModel,
       onPick = { dueAtMs ->
         isSendLaterOpen = false
-        val confirmOver = viewModel.confirmChannelOver().toUInt()
-        if (needsChannelConfirmation(text, members.size.toUInt(), confirmOver)) {
-          maybeSendLaterAt = dueAtMs
-          isConfirmingChannel = true
-        } else {
-          schedule(dueAtMs)
-        }
+        confirmThenSend(dueAtMs)
       },
       onDismiss = { isSendLaterOpen = false },
     )
@@ -2100,3 +2184,6 @@ private const val TRANSFER_POLL_MS = 1000L
 
 /** Drafts are saved (and synced to the user's other devices) after typing pauses this long. */
 private const val DRAFT_SAVE_DELAY_MS = 800L
+
+/** No group mention in the text: nobody to hint at or confirm. */
+private val NO_REACH = GroupMentionReachItem(0u, 0u)

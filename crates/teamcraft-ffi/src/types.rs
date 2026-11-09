@@ -298,6 +298,64 @@ pub struct MessageItem {
   /// the app shows the bot's. Defaulted, so items the apps build need no change.
   #[uniffi(default = None)]
   pub maybe_source_picture_sha256: Option<String>,
+  /// Handles of the user groups the sender's device expanded (`accounting`, `admins`), from inside
+  /// the ciphertext: the app shows those `@words` as group mentions (issue #206). Defaulted, so
+  /// items the apps build need no change.
+  #[uniffi(default = [])]
+  pub group_mentions: Vec<String>,
+  /// The sender named this user among the people to notify (by `@username` or through a group):
+  /// the app highlights the group mention like a mention of the user. Defaulted.
+  #[uniffi(default = false)]
+  pub mentions_me: bool,
+}
+
+/// A user group the composer offers after `@` in a conversation (issue #206): only where the user
+/// may mention groups, and a mention of it notifies `notified_count` people there.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MentionableGroupItem {
+  /// What follows the `@`.
+  pub handle: String,
+  /// The group's name; for [`MentionableGroupKindItem::Admins`] the app shows its own translation.
+  pub name: String,
+  pub kind: MentionableGroupKindItem,
+  /// The group's members in the conversation, without the user.
+  pub notified_count: u32,
+  /// The group's members outside the conversation, who a mention doesn't reach (the hint).
+  pub outside_count: u32,
+}
+
+/// What kind of group a [`MentionableGroupItem`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MentionableGroupKindItem {
+  /// Maintained by admins.
+  Custom,
+  /// The built-in `@admins`: the instance's admins and owners.
+  Admins,
+}
+
+/// Who the group mentions in a text reach (issue #206), for the hint and the confirmation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct GroupMentionReachItem {
+  /// People the groups mentioned in the text notify, each once.
+  pub notified_count: u32,
+  /// Members of those groups outside the conversation, who aren't notified.
+  pub outside_count: u32,
+}
+
+impl From<&teamcraft_client_api::model::MentionableGroup> for MentionableGroupItem {
+  fn from(group: &teamcraft_client_api::model::MentionableGroup) -> Self {
+    use teamcraft_client_api::model::MentionableGroupKind;
+    Self {
+      handle: group.handle.clone(),
+      name: group.name.clone(),
+      kind: match group.kind {
+        MentionableGroupKind::Custom => MentionableGroupKindItem::Custom,
+        MentionableGroupKind::Admins => MentionableGroupKindItem::Admins,
+      },
+      notified_count: u32::try_from(group.notified.len()).unwrap_or(u32::MAX),
+      outside_count: group.outside_count,
+    }
+  }
 }
 
 /// Why a message shows as a placeholder ([`MessageItem::maybe_placeholder`]).
@@ -900,6 +958,8 @@ impl MessageItem {
           reacted_by_me: reaction.reacted_by_me,
         })
         .collect(),
+      group_mentions: message.group_mentions.clone(),
+      mentions_me: message.mentions_me,
       // Somebody without an account here is shown like a deleted account (e2ee.md §4.10).
       is_author_deleted: maybe_author.is_some_and(|author| author.is_deleted)
         || matches!(

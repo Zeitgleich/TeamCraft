@@ -1300,10 +1300,10 @@ private fun Bubble(
             color = colors.muted,
           )
           isTextOnly && images.isEmpty() && videos.isEmpty() -> TextWithTime(
-            body = { MessageBody(message.body, colors.content, colors.markup, look.names, onOpenPermalink) },
+            body = { MessageBody(message.body, colors.content, colors.markup, look.names.forMessage(message), onOpenPermalink) },
             time = { Footer(message, maybeExtras, colors, isMine) },
           )
-          hasText -> MessageBody(message.body, colors.content, colors.markup, look.names, onOpenPermalink)
+          hasText -> MessageBody(message.body, colors.content, colors.markup, look.names.forMessage(message), onOpenPermalink)
         }
         if (!isDeleted) {
           others.forEach { file ->
