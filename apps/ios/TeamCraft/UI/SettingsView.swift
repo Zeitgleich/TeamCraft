@@ -53,6 +53,9 @@ struct SettingsView: View {
           NavigationLink { ChatsSettingsPage() } label: {
             SettingsEntry(title: "settings_chats_title", summary: "settings_chats_summary", icon: "bubble.left.and.bubble.right")
           }
+          NavigationLink { ColorThemeSettingsView() } label: {
+            SettingsEntry(title: "color_theme", summary: "color_theme_summary", icon: "paintpalette")
+          }
           NavigationLink { SecuritySettingsPage(account: account) } label: {
             SettingsEntry(title: "settings_security_title", summary: "settings_security_summary", icon: "lock.shield")
           }

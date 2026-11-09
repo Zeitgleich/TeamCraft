@@ -153,17 +153,17 @@ final class SettingsSyncer {
 }
 
 /// The settings in the app's stores: `UserDefaults` for the ones Settings → Chats keeps there, the
-/// core for the mention rules. What iOS has no setting for yet (`@channel` confirmation count, colour
-/// theme, font) is carried as the sync last returned it, so another device's value isn't overwritten.
+/// core for the mention rules. What iOS has no setting for yet (`@channel` confirmation count, font) is
+/// carried as the sync last returned it, so another device's value isn't overwritten. The colour theme
+/// (#1493) is a setting here (Settings → Colours); its value is kept as it is, also one this build
+/// doesn't know, which shows the default colours and stays until the user chooses another theme.
 @MainActor
 final class AppSettingsStores: SettingsSyncStores {
   static let stateKey = "settings_sync_state"
   static let confirmChannelOverKey = "settings_sync_confirm_channel_over"
-  static let colorThemeKey = "settings_sync_color_theme"
   static let fontKey = "settings_sync_font"
   /// The record's defaults for the settings iOS doesn't have.
   static let defaultConfirmChannelOver: UInt32 = 10
-  static let defaultColorTheme = "brand"
   static let defaultFont = "system"
   static let defaultMentions = MentionSettings(isFirstNameMention: true, doChannelMentionsNotify: true, keywords: [])
 
@@ -199,7 +199,7 @@ final class AppSettingsStores: SettingsSyncStores {
       confirmChannelOver: defaults.object(forKey: Self.confirmChannelOverKey) == nil
         ? Self.defaultConfirmChannelOver : UInt32(clamping: defaults.integer(forKey: Self.confirmChannelOverKey)),
       callStatusSounds: CallStatusSoundsSetting.stored(defaults.string(forKey: CallStatusSoundsSetting.key)).sounds,
-      colorTheme: defaults.string(forKey: Self.colorThemeKey) ?? Self.defaultColorTheme,
+      colorTheme: ColorThemeSetting.stored(in: defaults),
       font: defaults.string(forKey: Self.fontKey) ?? Self.defaultFont
     )
   }
@@ -224,7 +224,7 @@ final class AppSettingsStores: SettingsSyncStores {
       defaults.set(settings.confirmChannelOver, forKey: Self.confirmChannelOverKey)
     }
     if settings.colorTheme != before.colorTheme {
-      defaults.set(settings.colorTheme, forKey: Self.colorThemeKey)
+      defaults.set(settings.colorTheme, forKey: ColorThemeSetting.key)
     }
     if settings.font != before.font {
       defaults.set(settings.font, forKey: Self.fontKey)
