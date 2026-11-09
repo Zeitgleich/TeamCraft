@@ -29,6 +29,8 @@ data class MarkupColors(
   val mentionMe: Color,
   val mentionMeBackground: Color,
   val codeBackground: Color,
+  /** What the markup sits on (the bubble): under a table's header row while rows scroll beneath it. */
+  val surface: Color = Color.Transparent,
 )
 
 /** Who can be mentioned, to tell `@alice` from an e-mail-like word. */

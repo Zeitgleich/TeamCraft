@@ -12,18 +12,29 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
@@ -46,6 +57,7 @@ import uniffi.teamcraft_ffi.MarkupLine
 import uniffi.teamcraft_ffi.MarkupListKind
 import uniffi.teamcraft_ffi.isOpenableLink
 import uniffi.teamcraft_ffi.messageMarkup
+import kotlin.math.roundToInt
 
 /**
  * A message body in the shared Markdown subset, rendered like desktop and web (issue #704):
@@ -101,7 +113,7 @@ fun MessageBody(
           }
         }
         is MarkupBlock.Code -> CodeBlock(block.code, textColor, colors.codeBackground)
-        is MarkupBlock.Table -> MarkupTable(block, textColor, bodyStyle) { line ->
+        is MarkupBlock.Table -> MarkupTable(block, textColor, colors.surface, bodyStyle) { line ->
           remember(line, colors, names) { annotatedLine(line, colors, names, links, permalinkLabel) }
         }
       }
@@ -128,12 +140,15 @@ private fun CodeBlock(code: String, textColor: Color, background: Color) {
 
 /**
  * A table on hairlines, the header in semibold on a light fill. Columns are as wide as their widest
- * cell up to [MAX_CELL_WIDTH] (longer text wraps); wider than the bubble, the table scrolls sideways.
+ * cell up to [MAX_CELL_WIDTH] (longer text wraps); wider than the bubble, the table scrolls sideways,
+ * and the edge it can scroll towards fades out so the cut-off columns read as more to come. In a
+ * feed, the header row stays at the feed's top edge while the table scrolls past it (#1602).
  */
 @Composable
 private fun MarkupTable(
   table: MarkupBlock.Table,
   textColor: Color,
+  surface: Color,
   bodyStyle: TextStyle,
   styled: @Composable (MarkupLine) -> AnnotatedString,
 ) {
@@ -147,7 +162,9 @@ private fun MarkupTable(
     fontFeatureSettings = "tnum",
   )
   val shape = RoundedCornerShape(CODE_CORNER)
-  Box(Modifier.border(1.dp, line, shape).clip(shape).horizontalScroll(rememberScrollState())) {
+  val scroll = rememberScrollState()
+  val maybeStickyEdge = LocalStickyEdge.current
+  Box(Modifier.border(1.dp, line, shape).clip(shape).scrollEdgeFade(scroll).horizontalScroll(scroll)) {
     Layout(
       content = {
         rows.forEachIndexed { rowIndex, cells ->
@@ -160,7 +177,10 @@ private fun MarkupTable(
               textAlign = textAlign(table.alignments.getOrNull(column)),
               modifier = Modifier
                 .drawBehind {
-                  if (isHeader) drawRect(headerFill)
+                  if (isHeader) {
+                    drawRect(surface)
+                    drawRect(headerFill)
+                  }
                   if (rowIndex < rows.lastIndex) {
                     drawLine(line, Offset(0f, size.height - 0.5f), Offset(size.width, size.height - 0.5f), 1.dp.toPx())
                   }
@@ -187,12 +207,17 @@ private fun MarkupTable(
       val placeables = measurables.mapIndexed { index, cell ->
         cell.measure(Constraints.fixed(widths[index % columns], heights[index / columns]))
       }
-      layout(widths.sum(), heights.sum()) {
+      val height = heights.sum()
+      layout(widths.sum(), height) {
+        val headerShift = stickyShift(maybeStickyEdge, coordinates, height - (heights.firstOrNull() ?: 0))
         var y = 0
         for (row in 0 until rowCount) {
+          // The header row stays at the feed's edge and draws above the rows passing under it.
+          val isHeader = row == 0
+          val rowY = if (isHeader) headerShift else y
           var x = 0
           for (column in 0 until columns) {
-            placeables[row * columns + column].place(x, y)
+            placeables[row * columns + column].place(x, rowY, zIndex = if (isHeader) 1f else 0f)
             x += widths[column]
           }
           y += heights[row]
@@ -220,7 +245,55 @@ private val BLOCK_GAP = 6.dp
 private val BODY_TRACKING = 0.15.sp
 private val QUOTE_BAR = 3.dp
 private val CODE_CORNER = 8.dp
+/** Fades out the left and right edge of a sideways scroller while there is more content beyond it. */
+private fun Modifier.scrollEdgeFade(scroll: ScrollState): Modifier =
+  graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen).drawWithContent {
+    drawContent()
+    val fade = SCROLL_EDGE_FADE.toPx().coerceAtMost(size.width / 2)
+    if (scroll.canScrollBackward) {
+      drawRect(
+        Brush.horizontalGradient(listOf(Color.Black, Color.Transparent), startX = 0f, endX = fade),
+        blendMode = BlendMode.DstOut,
+      )
+    }
+    if (scroll.canScrollForward) {
+      drawRect(
+        Brush.horizontalGradient(listOf(Color.Transparent, Color.Black), startX = size.width - fade, endX = size.width),
+        blendMode = BlendMode.DstOut,
+      )
+    }
+  }
+
+/**
+ * How far a table's header row moves down to stay at the feed's top edge while the table scrolls past
+ * it, at most [maxShift] (the header never leaves its table). Read while placing: [StickyEdge.observeScroll]
+ * places the header again on every scroll step, without composing or measuring again.
+ */
+private fun stickyShift(maybeEdge: StickyEdge?, maybeTable: LayoutCoordinates?, maxShift: Int): Int {
+  val edge = maybeEdge ?: return 0
+  edge.observeScroll()
+  val feed = edge.maybeFeed ?: return 0
+  val table = maybeTable ?: return 0
+  if (!feed.isAttached || !table.isAttached) return 0
+  val top = feed.localPositionOf(table, Offset.Zero).y
+  return (-top).roundToInt().coerceIn(0, maxOf(maxShift, 0))
+}
+
+/**
+ * The scrolling feed messages sit in, for the header rows of their tables (#1602). The feed sets
+ * [maybeFeed] when it is placed; [observeScroll] reads its scroll position, so a table placing its
+ * header follows each scroll step.
+ */
+class StickyEdge(val observeScroll: () -> Unit) {
+  /** State, so tables placed before the feed's first placement are placed again once it is known. */
+  var maybeFeed: LayoutCoordinates? by mutableStateOf(null)
+}
+
+/** The feed of the messages below, or none outside a feed (no sticky header there). */
+val LocalStickyEdge = staticCompositionLocalOf<StickyEdge?> { null }
+
 private val MAX_CELL_WIDTH = 240.dp
+private val SCROLL_EDGE_FADE = 32.dp
 private const val TABLE_LINE_ALPHA = 0.2f
 private const val TABLE_HEADER_ALPHA = 0.06f
 private const val QUOTE_BAR_ALPHA = 0.45f
