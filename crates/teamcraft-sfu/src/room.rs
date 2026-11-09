@@ -544,7 +544,7 @@ impl Room {
       participants: HashMap::new(),
       latest_sessions: HashMap::new(),
       forwarder: Forwarder::new(config.forwarding),
-      dave: DaveCoordinator::new(call_id)?,
+      dave: DaveCoordinator::new(call_id, config.dave_transition_deadline)?,
       next_stream_id: 1,
       decodable_announced: HashMap::new(),
     };
@@ -597,6 +597,7 @@ impl Room {
           epoch,
           commit.into_vec(),
           maybe_welcome.map(Base64Bytes::into_vec),
+          now,
         );
         Ok(())
       },
@@ -788,11 +789,14 @@ impl Room {
     state.apply(effects);
   }
 
-  /// Periodic work for one participant (every ~100 ms): re-runs its layer allocation.
+  /// Periodic work for one participant (every ~100 ms): re-runs its layer allocation, and executes
+  /// a DAVE transition whose deadline passed (any participant's timer does; the check is cheap).
   pub fn on_timer(&self, device_id: DeviceId, now: Instant) {
     let mut state = lock(&self.state);
     let effects = state.forwarder.on_timer(device_id, now);
     state.apply(effects);
+    let outbound = state.dave.on_timer(now);
+    state.dispatch(outbound);
   }
 
   /// Feedback on the datagrams `sender` sent since the last call, for its uplink estimation.
@@ -833,11 +837,12 @@ impl Room {
     epoch: u64,
     commit: Vec<u8>,
     maybe_welcome: Option<Vec<u8>>,
+    now: Instant,
   ) {
     let mut state = lock(&self.state);
     let outbound = state
       .dave
-      .on_commit(participant_id, DaveEpoch(epoch), commit, maybe_welcome);
+      .on_commit(participant_id, DaveEpoch(epoch), commit, maybe_welcome, now);
     state.dispatch(outbound);
   }
 

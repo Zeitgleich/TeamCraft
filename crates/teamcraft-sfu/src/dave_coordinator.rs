@@ -11,16 +11,23 @@
 //! Every later commit carries a transition id (DAVE opcodes 29/30 with `transition_id`) for the
 //! members that joined with [`DaveTransitionMode::Coordinated`]: they install the new epoch's
 //! decryption keys, say they are ready, and the coordinator executes the transition (opcode 22)
-//! once all of them are, or have left. Only then do they encrypt with the new key, so nobody
+//! once all of them are, or have left, or its deadline passed (a straggler that never says it is
+//! ready holds nobody up for longer). Only then do they encrypt with the new key, so nobody
 //! misses frames at the switch. Clients from before transitions get no id and switch at once. The
 //! founding commit has none either: nobody encrypted before it. The coordinator's word decides
 //! nothing about keys: a client that hears no execution switches on its own after a while.
 //!
-//! Pure state machine: every input returns the messages to send, so it is tested without network.
+//! The next proposals wait until the announced transition was executed (#1544): proposing at once
+//! would make the next commit flush the execution before most members are ready, and they'd lose
+//! frames at the switch. The execution's deadline bounds that wait.
+//!
+//! Pure state machine: every input returns the messages to send, and time comes in as an argument
+//! ([`DaveCoordinator::on_timer`]), so it is tested without network or clock.
 
 use std::{
   collections::{BTreeSet, HashMap},
   num::NonZeroU16,
+  time::{Duration, Instant},
 };
 
 use teamcraft_media::dave::{DaveEpoch, DaveError, DaveExternalSender, DaveLeafIndex, DaveParticipantId};
@@ -28,13 +35,15 @@ use teamcraft_proto::{
   Base64Bytes, CallEvent, CallId, DaveKeyBinding, DaveTransitionId, DaveTransitionMode, DeviceId, IdError,
 };
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::ids::{dave_call_id, dave_participant_id, device_id_from_dave};
 
 /// DAVE membership state of one call.
 pub struct DaveCoordinator {
   call_id: CallId,
+  /// How long an announced transition waits for its members' ready before it is executed anyway.
+  transition_deadline: Duration,
   external_sender: DaveExternalSender,
   /// `None` until the group is founded (and again after everyone left).
   maybe_epoch: Option<DaveEpoch>,
@@ -70,6 +79,8 @@ struct Execution {
   recipients: BTreeSet<DeviceId>,
   /// Of those, the ones that haven't said they're ready.
   awaiting: BTreeSet<DeviceId>,
+  /// When it is executed whether or not everyone is ready.
+  deadline: Instant,
 }
 
 /// Proposals sent for `epoch`, waiting for the first commit.
@@ -95,9 +106,11 @@ pub enum DaveCoordinatorError {
 }
 
 impl DaveCoordinator {
-  pub fn new(call_id: CallId) -> Result<Self, DaveCoordinatorError> {
+  /// A coordinator that executes each transition at most `transition_deadline` after announcing it.
+  pub fn new(call_id: CallId, transition_deadline: Duration) -> Result<Self, DaveCoordinatorError> {
     Ok(Self {
       call_id,
+      transition_deadline,
       external_sender: DaveExternalSender::new()?,
       maybe_epoch: None,
       leaves: Vec::new(),
@@ -149,6 +162,7 @@ impl DaveCoordinator {
     epoch: DaveEpoch,
     commit: Vec<u8>,
     maybe_welcome: Option<Vec<u8>>,
+    now: Instant,
   ) -> Vec<Outbound> {
     let Some(transition) = &self.maybe_transition else {
       debug!(?participant_id, "commit without a transition in flight");
@@ -164,7 +178,7 @@ impl DaveCoordinator {
     let Some(transition) = self.maybe_transition.take() else {
       return Vec::new();
     };
-    let mut outbound = self.apply(transition, commit, maybe_welcome);
+    let mut outbound = self.apply(transition, commit, maybe_welcome, now);
     outbound.extend(self.start_transition());
     outbound
   }
@@ -188,7 +202,24 @@ impl DaveCoordinator {
       return Vec::new();
     }
     execution.awaiting.remove(&participant_id);
-    self.execute_when_ready()
+    let mut outbound = self.execute_when_ready();
+    outbound.extend(self.start_transition());
+    outbound
+  }
+
+  /// Periodic check (the room's timer): executes a transition whose deadline passed, logging how
+  /// many members weren't ready, and starts the proposals that waited for it.
+  pub fn on_timer(&mut self, now: Instant) -> Vec<Outbound> {
+    let is_overdue = self
+      .maybe_execution
+      .as_ref()
+      .is_some_and(|execution| now >= execution.deadline);
+    if !is_overdue {
+      return Vec::new();
+    }
+    let mut outbound = self.execute_now();
+    outbound.extend(self.start_transition());
+    outbound
   }
 
   /// A participant left the call (or its connection dropped).
@@ -232,7 +263,8 @@ impl DaveCoordinator {
   }
 
   fn start_transition(&mut self) -> Vec<Outbound> {
-    if self.maybe_transition.is_some() {
+    // One change at a time: proposals wait while a commit or an execution is outstanding.
+    if self.maybe_transition.is_some() || self.maybe_execution.is_some() {
       return Vec::new();
     }
     match self.maybe_epoch {
@@ -314,8 +346,10 @@ impl DaveCoordinator {
     transition: Transition,
     commit: Vec<u8>,
     maybe_welcome: Option<Vec<u8>>,
+    now: Instant,
   ) -> Vec<Outbound> {
-    // One transition at a time: the previous one goes now, before the next epoch's commit.
+    // Proposals wait for the previous execution, so there is none here; should one be left, it goes
+    // now, before the next epoch's commit on the same ordered streams.
     let mut outbound = self.execute_now();
     let maybe_id = self.next_transition_id(&transition);
     // Members before the joiners are placed get the commit; joiners get the welcome instead.
@@ -381,6 +415,7 @@ impl DaveCoordinator {
         id,
         awaiting: recipients.clone(),
         recipients,
+        deadline: now + self.transition_deadline,
       });
       outbound.extend(self.execute_when_ready());
     }
@@ -433,7 +468,12 @@ impl DaveCoordinator {
       return Vec::new();
     };
     if !execution.awaiting.is_empty() {
-      debug!(call_id = %self.call_id, waiting = execution.awaiting.len(), "executing a transition before everyone is ready");
+      // A count only: which members lag says nothing useful in a log and is nobody else's business.
+      info!(
+        call_id = %self.call_id,
+        not_ready = execution.awaiting.len(),
+        "executing a DAVE transition before every member is ready"
+      );
     }
     execution
       .recipients
@@ -515,6 +555,7 @@ mod tests {
   use super::*;
 
   const FRAME: &[u8] = &[0x78, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+  const DEADLINE: Duration = Duration::from_secs(2);
 
   mod membership {
     use super::*;
@@ -650,56 +691,155 @@ mod tests {
       harness.assert_all_exchange_frames(&[1, 2, 3]);
     }
 
-    /// The next commit doesn't wait behind a transition in flight: its execution goes out first,
-    /// once to each recipient, ahead of the next commit on the same ordered stream.
+    /// The next proposals wait until the transition in flight was executed (#1544), so its members
+    /// switch once they are ready rather than when the next commit happens to arrive.
     #[test]
-    fn the_next_commit_executes_the_previous_transition_first() {
+    fn the_next_proposals_wait_for_the_execution() {
       let mut harness = Harness::new();
       harness.join(1);
       harness.join(2);
       harness.holds_ready.insert(device(2));
       harness.join(3);
-      assert_eq!(harness.executions_to(1), 0);
+      let before = harness.delivered.len();
 
       harness.join(4);
 
-      let first_id = harness
-        .delivered
-        .iter()
-        .find_map(|outbound| match outbound.event {
-          CallEvent::DaveExecuteTransition { transition_id } => Some(transition_id),
-          _ => None,
-        })
-        .unwrap();
+      assert_eq!(
+        harness.delivered.len(),
+        before,
+        "no proposals while 2 isn't ready"
+      );
+      assert_eq!(harness.executions_to(1), 0);
+      harness.release_ready();
+
+      let first_id = harness.first_execution_id().unwrap();
       for id in 1..=3 {
-        let events: Vec<&CallEvent> = harness
-          .delivered
-          .iter()
-          .filter(|outbound| outbound.recipient == device(id))
-          .map(|outbound| &outbound.event)
-          .collect();
+        let events = harness.events_to(id);
         let executed = events
           .iter()
           .position(|event| matches!(event, CallEvent::DaveExecuteTransition { transition_id } if *transition_id == first_id))
           .unwrap();
-        let next_commit = events
+        let next_proposals = events
           .iter()
-          .position(|event| {
-            matches!(event, CallEvent::DaveAnnounceCommit { maybe_transition_id: Some(next), .. } if *next != first_id)
-          })
+          .rposition(|event| matches!(event, CallEvent::DaveProposals { .. }))
           .unwrap();
         assert!(
-          executed < next_commit,
-          "member {id} executes before the next commit"
+          executed < next_proposals,
+          "member {id} executes before the next proposals"
         );
-        let executions = events
-          .iter()
-          .filter(|event| matches!(event, CallEvent::DaveExecuteTransition { transition_id } if *transition_id == first_id))
-          .count();
-        assert_eq!(executions, 1, "member {id}");
       }
-      harness.release_ready();
       harness.assert_all_exchange_frames(&[1, 2, 3, 4]);
+    }
+
+    /// A member that never says it is ready holds the transition until the deadline only, then
+    /// everyone switches and the joiner can talk (#1544).
+    #[test]
+    fn a_straggler_is_executed_over_at_the_deadline() {
+      let mut harness = Harness::new();
+      harness.join(1);
+      harness.join(2);
+      harness.holds_ready.insert(device(2));
+      harness.join(3);
+
+      harness.advance(DEADLINE - Duration::from_millis(1));
+      assert_eq!(harness.executions_to(3), 0, "before the deadline");
+      harness.advance(Duration::from_millis(1));
+
+      for id in 1..=3 {
+        assert_eq!(harness.executions_to(id), 1, "member {id}");
+      }
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
+      // The straggler's late ready and further ticks change nothing.
+      let delivered = harness.delivered.len();
+      harness.release_ready();
+      harness.advance(DEADLINE);
+      assert_eq!(harness.delivered.len(), delivered);
+    }
+
+    /// A straggler delays a waiting join by at most one deadline per transition.
+    #[test]
+    fn a_straggler_delays_the_next_join_by_the_deadline_only() {
+      let mut harness = Harness::new();
+      harness.join(1);
+      harness.join(2);
+      harness.holds_ready.insert(device(2));
+      harness.join(3);
+      harness.join(4);
+      assert!(harness.events_to(4).is_empty(), "4 waits");
+
+      harness.advance(DEADLINE);
+      assert!(
+        harness
+          .events_to(4)
+          .iter()
+          .any(|event| matches!(event, CallEvent::DaveWelcome { .. })),
+        "4 is welcomed after one deadline"
+      );
+      harness.advance(DEADLINE);
+      harness.assert_all_exchange_frames(&[1, 2, 3, 4]);
+      assert_eq!(harness.coordinator.maybe_epoch(), Some(DaveEpoch(3)));
+    }
+
+    /// Joins and leaves while a transition waits are batched into the next one and converge.
+    #[test]
+    fn churn_during_a_transition_converges() {
+      let mut harness = Harness::new();
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      harness.holds_ready.insert(device(3));
+      harness.join(4);
+      harness.join(5);
+      harness.leave(1);
+      harness.join(6);
+      harness.leave(5);
+      assert_eq!(
+        harness.coordinator.maybe_epoch(),
+        Some(DaveEpoch(3)),
+        "nothing new proposed yet"
+      );
+
+      harness.release_ready();
+
+      harness.assert_all_exchange_frames(&[2, 3, 4, 6]);
+      assert_eq!(
+        harness.coordinator.maybe_epoch(),
+        Some(DaveEpoch(4)),
+        "one batched commit"
+      );
+      assert!(harness.coordinator.maybe_execution.is_none());
+    }
+
+    /// The straggler leaving ends the wait at once, and the change it caused follows.
+    #[test]
+    fn the_straggler_leaving_releases_the_waiting_join() {
+      let mut harness = Harness::new();
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      harness.holds_ready.insert(device(2));
+      harness.join(4);
+      harness.join(5);
+      assert!(harness.events_to(5).is_empty());
+
+      harness.leave(2);
+      harness.holds_ready.clear();
+      harness.held_ready.clear();
+      harness.deliver_all();
+
+      harness.assert_all_exchange_frames(&[1, 3, 4, 5]);
+    }
+
+    /// Transition ids count up to 65535 and continue at 1, never 0.
+    #[test]
+    fn transition_ids_wrap_to_one() {
+      let mut harness = Harness::new();
+      harness.join(1);
+      harness.join(2);
+      harness.coordinator.last_transition_id = u16::MAX;
+      harness.join(3);
+      assert_eq!(harness.first_execution_id().unwrap().0.get(), 1);
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
     }
 
     /// A member that leaves before it is ready doesn't hold the others up.
@@ -872,19 +1012,19 @@ mod tests {
       assert!(
         harness
           .coordinator
-          .on_commit(device(2), DaveEpoch(0), vec![1], Some(vec![2]))
+          .on_commit(device(2), DaveEpoch(0), vec![1], Some(vec![2]), Instant::now())
           .is_empty()
       );
       assert!(
         harness
           .coordinator
-          .on_commit(device(1), DaveEpoch(5), vec![1], Some(vec![2]))
+          .on_commit(device(1), DaveEpoch(5), vec![1], Some(vec![2]), Instant::now())
           .is_empty()
       );
       assert!(
         harness
           .coordinator
-          .on_commit(device(1), DaveEpoch(0), vec![1], None)
+          .on_commit(device(1), DaveEpoch(0), vec![1], None, Instant::now())
           .is_empty()
       );
     }
@@ -902,6 +1042,8 @@ mod tests {
     held_ready: Vec<(DeviceId, DaveTransitionId)>,
     /// Every event delivered, in order, by recipient.
     delivered: Vec<Outbound>,
+    /// The simulated clock; moves only with [`Self::advance`].
+    now: Instant,
   }
 
   impl Harness {
@@ -911,14 +1053,39 @@ mod tests {
 
     fn with_mode(mode: DaveTransitionMode) -> Self {
       Self {
-        coordinator: DaveCoordinator::new(call()).unwrap(),
+        coordinator: DaveCoordinator::new(call(), DEADLINE).unwrap(),
         clients: BTreeMap::new(),
         queue: VecDeque::new(),
         mode,
         holds_ready: BTreeSet::new(),
         held_ready: Vec::new(),
         delivered: Vec::new(),
+        now: Instant::now(),
       }
+    }
+
+    /// Moves the clock on and runs the room timer once.
+    fn advance(&mut self, by: Duration) {
+      self.now += by;
+      let outbound = self.coordinator.on_timer(self.now);
+      self.queue.extend(outbound);
+      self.deliver_all();
+    }
+
+    fn events_to(&self, id: u64) -> Vec<&CallEvent> {
+      self
+        .delivered
+        .iter()
+        .filter(|outbound| outbound.recipient == device(id))
+        .map(|outbound| &outbound.event)
+        .collect()
+    }
+
+    fn first_execution_id(&self) -> Option<DaveTransitionId> {
+      self.delivered.iter().find_map(|outbound| match outbound.event {
+        CallEvent::DaveExecuteTransition { transition_id } => Some(transition_id),
+        _ => None,
+      })
     }
 
     fn new_client(&self, id: u64) -> DaveParticipant {
@@ -1011,10 +1178,13 @@ mod tests {
               .map(|id| dave_participant_id(*id))
               .collect();
             if let Some(commit) = client.process_proposals(proposals.as_slice(), &expected).unwrap() {
-              let outbound =
-                self
-                  .coordinator
-                  .on_commit(recipient, DaveEpoch(epoch), commit.commit, commit.maybe_welcome);
+              let outbound = self.coordinator.on_commit(
+                recipient,
+                DaveEpoch(epoch),
+                commit.commit,
+                commit.maybe_welcome,
+                self.now,
+              );
               self.queue.extend(outbound);
             }
             None

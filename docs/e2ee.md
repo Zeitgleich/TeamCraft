@@ -4320,11 +4320,18 @@ didn't derive from its own MLS state, and executing a transition it never prepar
 can delay an execution, but a member that hears none executes by itself 5 s after preparing
 (`DAVE_TRANSITION_TIMEOUT`). A transition prepared while another still waits keeps the earlier
 one's deadline, so chaining commits (forcing rejoins, say) doesn't push the switch back: at most
-5 s after a member left the group in the UI, nobody encrypts with a key it holds. Until then the
+5 s after the commit that removes a member (up to one SFU deadline, below, more after it left in
+the UI), nobody encrypts with a key it holds. Until then the
 departed member could still decrypt media it gets; an honest SFU no longer forwards any to it. The
-SFU executes once every member is ready or gone, or earlier, when the next commit is due (the
-previous execution goes out first); it has no deadline of its own for a member that never says it is
-ready, the members' 5 s cover that. There is no downgrade: TeamCraft has no
+SFU executes once every member is ready or gone, or when its own deadline passed
+(`TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS`, default 2 s, checked on the room's 100 ms timer;
+#1544), so a member that never says it is ready (a hostile one, one whose welcome waits for a roster
+refresh) holds a joiner without keys for 2 s, not for the members' 5 s. It logs how many members
+weren't ready, never which. The next proposals wait until the transition in flight was executed,
+so the next commit no longer forces an execution before most members are ready (frames lost at the
+switch at a busy meeting start); joins and leaves meanwhile are batched into the next transition.
+A removal therefore reaches the group up to one deadline later; the SFU stops forwarding media to a
+departed member at once. There is no downgrade: TeamCraft has no
 counterpart of DAVE's `prepare_transition` to protocol version 0 (opcode 21), and the engine always
 prepares version 1, so the SFU can't switch a call to unencrypted media.
 
