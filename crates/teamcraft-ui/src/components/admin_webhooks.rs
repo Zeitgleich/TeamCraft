@@ -111,6 +111,7 @@ fn WebhookCard(webhook: AdminWebhook, editing: RwSignal<Option<WebhookId>>) -> i
   let i18n = use_i18n();
   let id = webhook.id;
   let is_confirming_delete = RwSignal::new(false);
+  let is_confirming_rotate = RwSignal::new(false);
   let is_showing_log = RwSignal::new(false);
   let is_testing = RwSignal::new(false);
   let test_result = Memo::new(move |_| {
@@ -211,9 +212,29 @@ fn WebhookCard(webhook: AdminWebhook, editing: RwSignal<Option<WebhookId>>) -> i
         >
           {move || i18n.t("admin-webhooks-test")}
         </button>
-        <button type="button" class="btn btn-small" on:click=move |_| state.write(|backend| backend.rotate_webhook_secret(id))>
-          {move || i18n.t("admin-webhooks-rotate")}
-        </button>
+        <Show
+          when=move || is_confirming_rotate.get()
+          fallback=move || view! {
+            <button type="button" class="btn btn-small" on:click=move |_| is_confirming_rotate.set(true)>
+              {move || i18n.t("admin-webhooks-rotate")}
+            </button>
+          }
+        >
+          <span class="muted-text small" role="status">{move || i18n.t("admin-webhooks-rotate-warning")}</span>
+          <button
+            type="button"
+            class="btn btn-small btn-danger"
+            on:click=move |_| {
+              is_confirming_rotate.set(false);
+              state.write(|backend| backend.rotate_webhook_secret(id));
+            }
+          >
+            {move || i18n.t("admin-webhooks-rotate-confirm")}
+          </button>
+          <button type="button" class="btn btn-small" on:click=move |_| is_confirming_rotate.set(false)>
+            {move || i18n.t("cancel")}
+          </button>
+        </Show>
         <button
           type="button"
           class="btn btn-small btn-quiet"
@@ -595,6 +616,8 @@ mod tests {
       "admin-webhooks-test",
       "admin-webhooks-test-ok",
       "admin-webhooks-rotate",
+      "admin-webhooks-rotate-warning",
+      "admin-webhooks-rotate-confirm",
       "admin-webhooks-deliveries",
       "admin-webhooks-deliveries-empty",
       "admin-webhooks-delete",

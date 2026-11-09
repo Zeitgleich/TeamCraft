@@ -281,6 +281,75 @@ async fn a_delivery_cut_off_by_a_crash_is_sent_again_after_the_restart() {
 }
 
 #[tokio::test]
+async fn a_hanging_target_does_not_hold_up_new_events() {
+  let Some(app) = start(|_| {}).await else {
+    return;
+  };
+  let receiver = Receiver::start().await;
+  let (webhook, _) = create(&app, &receiver.url, &ALL_EVENTS).await;
+  emit(
+    &app.state,
+    WebhookEventKind::MemberJoined,
+    WebhookEventData::default(),
+  )
+  .await;
+  receiver.hang(true);
+  let state = app.state.clone();
+  let in_flight = tokio::spawn(async move { deliver_next(&state).await });
+  receiver.wait_for(1).await;
+  // The delivery holds its claim; a new event (a join, a new channel) must not wait for it.
+  tokio::time::timeout(
+    Duration::from_secs(2),
+    emit(
+      &app.state,
+      WebhookEventKind::MemberLeft,
+      WebhookEventData::default(),
+    ),
+  )
+  .await
+  .expect("the event was held up by the delivery in flight");
+  assert_eq!(
+    app
+      .state
+      .database
+      .count_webhook_deliveries(webhook.parse().unwrap())
+      .await
+      .unwrap(),
+    2
+  );
+  receiver.hang(false);
+  assert!(in_flight.await.unwrap().unwrap());
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn a_new_url_starts_with_an_empty_queue() {
+  let Some(app) = start(|_| {}).await else {
+    return;
+  };
+  let receiver = Receiver::start().await;
+  let (webhook, _) = create(&app, &receiver.url, &ALL_EVENTS).await;
+  emit(
+    &app.state,
+    WebhookEventKind::ChannelCreated,
+    WebhookEventData::default(),
+  )
+  .await;
+  let other = Receiver::start().await;
+  let reply = app
+    .put(
+      &admin(),
+      &format!("/admin/webhooks/{webhook}"),
+      json!({"url": other.url, "events": ["channel.created"], "is_enabled": true}),
+    )
+    .await;
+  assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+  assert_eq!(reply.body["health"]["queued"], 0);
+  assert!(!deliver_next(&app.state).await.unwrap());
+  app.stop().await;
+}
+
+#[tokio::test]
 async fn disabling_a_webhook_empties_its_queue_and_stops_new_events() {
   let Some(app) = start(|_| {}).await else {
     return;

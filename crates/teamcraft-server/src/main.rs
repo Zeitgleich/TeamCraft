@@ -19,7 +19,7 @@ use teamcraft_server::auth::{
   HttpJwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator, ValidatorOptions,
 };
 use teamcraft_server::brand::{BrandInputs, BrandStore};
-use teamcraft_server::config::{CONFIG_PATH_ENV, Config, DatabaseConfig};
+use teamcraft_server::config::{CONFIG_PATH_ENV, Config, DatabaseConfig, WebhooksConfig};
 use teamcraft_server::dependencies::{Dependencies, DependencyOptions, TokioClock};
 use teamcraft_server::drain::Drain;
 use teamcraft_server::error::ApiError;
@@ -245,7 +245,16 @@ async fn run() -> anyhow::Result<()> {
       sign_in_page: config.sign_in_page.clone(),
       presence: config.presence.clone(),
       shares: config.shares.clone(),
-      webhooks: config.webhooks.clone(),
+      // Each worker holds a pooled connection while it sends: at most half the pool.
+      webhooks: WebhooksConfig {
+        workers: config.webhooks.workers.clamp(
+          1,
+          usize::try_from(config.database.max_connections / 2)
+            .unwrap_or(1)
+            .max(1),
+        ),
+        ..config.webhooks.clone()
+      },
       maybe_organization_claim: config.oidc.maybe_organization_claim.clone(),
       sign_in: SignInSettings::new(
         config.oidc.issuer.clone(),

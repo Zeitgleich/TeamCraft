@@ -1251,7 +1251,9 @@ pub struct WebhooksConfig {
   /// and use plain `http`. Off by default: a console admin must not reach the server's own network
   /// through a webhook (SSRF). Only the operator of the machine can turn it on.
   pub allow_private_targets: bool,
-  /// Delivery workers; each holds a database connection while it sends.
+  /// Delivery workers; each holds a database connection (in an open transaction) while it sends,
+  /// so at most half of `[database].max_connections` are started. A database
+  /// `idle_in_transaction_session_timeout` must be longer than `request_timeout_secs`.
   pub workers: usize,
   /// Time to connect to a target.
   pub connect_timeout_secs: u64,

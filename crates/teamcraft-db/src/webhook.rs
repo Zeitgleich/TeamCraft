@@ -127,9 +127,16 @@ impl Database {
   }
 
   /// Changes a webhook. Disabling it empties its queue: events of the time it was off are not
-  /// sent later in a burst. Returns whether it exists.
+  /// sent later in a burst. A new URL empties it too: a new receiver gets no events from before it.
+  /// Returns whether it exists.
   pub async fn update_webhook(&self, id: WebhookId, change: &WebhookChange<'_>) -> Result<bool, DbError> {
     let mut transaction = self.pool().begin().await?;
+    let maybe_old = sqlx::query!("SELECT url FROM webhooks WHERE id = $1 FOR UPDATE", to_db(id))
+      .fetch_optional(&mut *transaction)
+      .await?;
+    let Some(old) = maybe_old else {
+      return Ok(false);
+    };
     let result = sqlx::query!(
       r#"UPDATE webhooks
          SET url = $2, description = $3, events = $4, is_enabled = $5, updated_at = now(),
@@ -147,7 +154,7 @@ impl Database {
     if result.rows_affected() == 0 {
       return Ok(false);
     }
-    if !change.is_enabled {
+    if !change.is_enabled || old.url != change.url {
       sqlx::query!("DELETE FROM webhook_deliveries WHERE webhook_id = $1", to_db(id))
         .execute(&mut *transaction)
         .await?;
@@ -266,7 +273,8 @@ impl Database {
   }
 
   /// Claims the oldest delivery of an enabled webhook that is not backing off and has no delivery
-  /// in flight, if any.
+  /// in flight, if any. The webhook row gets `FOR NO KEY UPDATE`, not `FOR UPDATE`: new deliveries'
+  /// foreign-key checks take `FOR KEY SHARE` on it, and must not wait for the send in flight.
   pub async fn claim_webhook_delivery(&self) -> Result<Option<WebhookDeliveryClaim>, DbError> {
     let mut transaction = self.pool().begin().await?;
     let maybe_row = sqlx::query!(
@@ -277,7 +285,8 @@ impl Database {
          WHERE w.is_enabled AND (w.paused_until IS NULL OR w.paused_until <= now())
          ORDER BY d.event_id
          LIMIT 1
-         FOR UPDATE OF d, w SKIP LOCKED"#,
+         FOR UPDATE OF d SKIP LOCKED
+         FOR NO KEY UPDATE OF w SKIP LOCKED"#,
     )
     .fetch_optional(&mut *transaction)
     .await?;

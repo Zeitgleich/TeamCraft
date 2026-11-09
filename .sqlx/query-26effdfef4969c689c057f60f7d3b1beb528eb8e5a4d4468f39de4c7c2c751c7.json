@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT d.webhook_id, d.event_id, d.event_kind, d.payload, d.attempts, w.url, w.sealed_secret,\n                w.consecutive_failures\n         FROM webhook_deliveries d\n         JOIN webhooks w ON w.id = d.webhook_id\n         WHERE w.is_enabled AND (w.paused_until IS NULL OR w.paused_until <= now())\n         ORDER BY d.event_id\n         LIMIT 1\n         FOR UPDATE OF d, w SKIP LOCKED",
+  "query": "SELECT d.webhook_id, d.event_id, d.event_kind, d.payload, d.attempts, w.url, w.sealed_secret,\n                w.consecutive_failures\n         FROM webhook_deliveries d\n         JOIN webhooks w ON w.id = d.webhook_id\n         WHERE w.is_enabled AND (w.paused_until IS NULL OR w.paused_until <= now())\n         ORDER BY d.event_id\n         LIMIT 1\n         FOR UPDATE OF d SKIP LOCKED\n         FOR NO KEY UPDATE OF w SKIP LOCKED",
   "describe": {
     "columns": [
       {
@@ -106,5 +106,5 @@
       false
     ]
   },
-  "hash": "97fbef1f6e5b6eb8df07348ab88daeb6e0203800e1d6cece2021d9637f8bcb76"
+  "hash": "26effdfef4969c689c057f60f7d3b1beb528eb8e5a4d4468f39de4c7c2c751c7"
 }
