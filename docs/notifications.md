@@ -251,17 +251,17 @@ attached at sending: who is in the group later doesn't change who was mentioned.
 
 ### Group mentions under real-world conditions
 
-| Condition                   | What happens                                                                                                                                                     |
-|-----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Offline sender              | The core expands from its stored copy of the rosters; the message waits in the outbox with its list.                                                             |
-| Stale rosters               | The copy is refreshed on every connect and on `user_group_update`; a role change refreshes `admin_ids` the same way. A mention uses the copy at sending.         |
-| Server restart              | The hourly budget refills (in memory, bounded by the number of senders); rosters are read again on reconnect.                                                    |
-| Retry after a lost response | The idempotency key finds the stored message; the budget isn't spent twice.                                                                                      |
-| Over the budget             | `429` with `Retry-After`: the outbox backs off and resends; the message shows as pending meanwhile.                                                              |
-| Large groups                | Confirmation above `confirm_channel_over`; at most `max_mentions_per_message` people per message; the roster read is one request per connect, not one per group. |
-| Multi-device                | Each device expands from its own copy; receivers only use the list on the message, so devices never disagree about who was mentioned.                            |
-| Older clients and servers   | An older client shows the handle as text and still counts the mention; a newer core against an older server finds no `admin_ids` and offers no `@admins`.        |
-| Guests                      | Read no rosters, so they never suggest or expand groups, `@admins` included.                                                                                     |
+| Condition                   | What happens                                                                                                                                                                          |
+|-----------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Offline sender              | The core expands from its stored copy of the rosters; the message waits in the outbox with its list.                                                                                  |
+| Stale rosters               | The copy is refreshed on every connect and on `user_group_update`; `admin_ids` too, so a role change shows from the next connect or group change. A mention uses the copy at sending. |
+| Server restart              | The hourly budget refills (in memory, bounded by the number of senders); rosters are read again on reconnect.                                                                         |
+| Retry after a lost response | The idempotency key finds the stored message; the budget isn't spent twice.                                                                                                           |
+| Over the budget             | `429` with `Retry-After`: the outbox backs off and resends; the message shows as pending meanwhile.                                                                                   |
+| Large groups                | Confirmation above `confirm_channel_over`; at most `max_mentions_per_message` people per message; the roster read is one request per connect, not one per group.                      |
+| Multi-device                | Each device expands from its own copy; receivers only use the list on the message, so devices never disagree about who was mentioned.                                                 |
+| Older clients and servers   | An older client shows the handle as text and still counts the mention; a newer core against an older server finds no `admin_ids` and offers no `@admins`.                             |
+| Guests                      | Read no rosters, so they never suggest or expand groups, `@admins` included.                                                                                                          |
 
 ## Push routing
 

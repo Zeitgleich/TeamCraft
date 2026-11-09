@@ -47,7 +47,16 @@ pub async fn list_user_group_rosters(
   for (group, user) in state.database.list_active_user_group_members().await? {
     members.entry(group).or_default().push(user);
   }
+  // notifications.md, "Group mentions": `@admins` is no stored group, so it follows role changes.
+  let admin_ids = if state.settings.get().notifications.is_admins_mention_enabled {
+    let mut ids = state.database.list_active_admin_ids().await?;
+    ids.sort_unstable();
+    ids
+  } else {
+    Vec::new()
+  };
   Ok(ListUserGroupRostersResponse {
+    admin_ids,
     groups: groups
       .into_iter()
       .map(|group| UserGroupRoster {

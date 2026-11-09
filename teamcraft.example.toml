@@ -258,6 +258,9 @@ max_draft_files_per_user = 200
 # E-mails per person and hour from their meetings (the rest of the invitees are told in the app only)
 # and space invitations. At 0, invitations go without mail and can't be resent.
 max_meeting_mails_per_user_per_hour = 200
+# Messages per hour one sender may send that name more people than max_mentions_without_group_mentions
+# (large group mentions); over it the send waits in the device's outbox. 0 = no limit.
+max_large_mentions_per_user_per_hour = 30
 
 # WebSocket gateway at /api/v1/gateway.
 [gateway]
@@ -342,6 +345,9 @@ mobile_push_delay_secs = 120
 # Desktop and web sessions report whether the user looks at them (transitions only, kept in memory,
 # never stored or logged); off: they don't, and an active desktop holds pushes back like presence.
 is_desktop_attention_enabled = true
+# @admins mentions the active admins and owners (a built-in group); off: the apps neither offer nor
+# expand it.
+is_admins_mention_enabled = true
 # How long an "attentive" report counts; the session's gateway heartbeats renew it (keep it above
 # twice [gateway] heartbeat_interval_secs).
 attention_lease_secs = 75
