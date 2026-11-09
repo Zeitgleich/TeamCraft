@@ -47,6 +47,7 @@ use teamcraft_proto::{
 use crate::auth::Authenticator;
 use crate::auth::tauri::{call, listen, listen_text};
 use crate::feedback::{ActionFailure, ActionTicket, report_background_failure, report_failure};
+use crate::perf::{PerfOperation, PerfStatus};
 use crate::route::Route;
 
 /// Messages fetched per request. Feeds are read in 2-row windows by the list, so pages keep the
@@ -770,6 +771,7 @@ impl RemoteChat {
   /// changed, and tells the UI only when something differs: a change elsewhere in the core costs
   /// no re-render, and a change in one conversation no re-read of the others (issue #246).
   async fn refresh(&self) {
+    let refresh_ms = crate::perf::now_ms();
     let since = self.mirror.borrow().cursor;
     let changes = match call::<SnapshotChanges>("core_snapshot_changes", &json!({ "since": since })).await {
       Ok(changes) => changes,
@@ -813,7 +815,12 @@ impl RemoteChat {
       || threads.into_iter().any(|is_changed| is_changed)
       || answers.into_iter().any(|is_changed| is_changed);
     if is_changed {
+      let handed_ms = crate::perf::now_ms();
       self.changed();
+      // Rows of a page of older history moved in: its measure ends once they are painted.
+      for (conversation, _) in &plan.moved {
+        crate::perf::older_page_shown(&conversation.to_string(), refresh_ms, handed_ms);
+      }
     }
   }
 
@@ -2583,14 +2590,33 @@ impl ChatBackend for RemoteChat {
   }
 
   fn load_older_history(&self, conversation: ConversationId) {
+    // One page at a time: the list asks again on every change while the reader is near the top.
+    if !matches!(
+      self.older_history(conversation),
+      OlderHistory::Available | OlderHistory::Failed
+    ) {
+      return;
+    }
     if let Some(feed) = self.mirror.borrow_mut().feeds.get_mut(&conversation) {
       feed.is_expecting_older = true;
       feed.is_asking_older = true;
     }
+    let key = conversation.to_string();
+    crate::perf::begin_older_page(&key);
     let backend = self.clone();
     spawn_local(async move {
       let action = ChatAction::LoadOlderHistory { conversation };
-      match core_action(action).await {
+      let asked_ms = crate::perf::now_ms();
+      let outcome = core_action(action).await;
+      crate::perf::with_pending(PerfOperation::OlderHistoryPage, &key, |measure| {
+        let status = if outcome.is_ok() {
+          PerfStatus::Ok
+        } else {
+          PerfStatus::Error
+        };
+        measure.span("core.action", "load_older_history", asked_ms, status);
+      });
+      match outcome {
         Ok(()) => {
           // Read after the core took the action, so it says how this request stands.
           let query = ChatQuery::OlderHistory { conversation };
@@ -2603,7 +2629,19 @@ impl ChatBackend for RemoteChat {
       if let Some(feed) = backend.mirror.borrow_mut().feeds.get_mut(&conversation) {
         feed.is_asking_older = false;
       }
-      backend.changed();
+      // The refresh that moves the page's rows in tells the UI; telling it here as well re-read
+      // everything shown once more per page, while the reader scrolls (#1595). Told here when no
+      // rows come: no more history, a failure, a page whose messages wait for their keys.
+      let status = backend.older_history(conversation);
+      if status != OlderHistory::Loading {
+        // No rows come: the measure ends here, a failure as one.
+        let perf_status = match status {
+          OlderHistory::Failed => PerfStatus::Error,
+          _ => PerfStatus::Ok,
+        };
+        crate::perf::end_pending(PerfOperation::OlderHistoryPage, &key, perf_status);
+        backend.changed();
+      }
     });
   }
 
@@ -2648,6 +2686,14 @@ impl ChatBackend for RemoteChat {
   }
 
   fn fill_history_gap(&self, conversation: ConversationId, gap: HistoryGap, edge: GapEdge) {
+    // One page at a time, as for older history: asked for, or its rows on their way.
+    let is_waiting = self
+      .history_gaps(conversation)
+      .iter()
+      .any(|gap| gap.status == OlderHistory::Loading);
+    if is_waiting {
+      return;
+    }
     if let Some(feed) = self.mirror.borrow_mut().feeds.get_mut(&conversation) {
       feed.maybe_gap_rows = Some(GapRows {
         index: gap.index,
@@ -2675,7 +2721,14 @@ impl ChatBackend for RemoteChat {
       if let Some(feed) = backend.mirror.borrow_mut().feeds.get_mut(&conversation) {
         feed.is_asking_gap = false;
       }
-      backend.changed();
+      // As for older history: the refresh that moves the rows in tells the UI.
+      let is_rows_coming = backend
+        .history_gaps(conversation)
+        .iter()
+        .any(|gap| gap.status == OlderHistory::Loading);
+      if !is_rows_coming {
+        backend.changed();
+      }
     });
   }
 

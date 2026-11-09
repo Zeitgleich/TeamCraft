@@ -112,6 +112,7 @@ struct ChatPane: View {
     }
     .onDisappear {
       Perf.cancel(.channelSwitch, key: conversation.id)
+      Perf.cancel(.olderHistoryPage, key: conversation.id)
       maybeCatchUp?.dispose()
     }
     .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
@@ -1304,6 +1305,10 @@ struct ChatPane: View {
       observePerf(page.messages, gaps: page.gaps)
       isFillingGap = false
       if let history = await model.olderHistory(conversationId: conversation.id) { serverHistory = history }
+      if serverHistory != .loading && Perf.isRunning(.olderHistoryPage, key: conversation.id) {
+        // The page asked for is shown, or none came (history.older_page).
+        Perf.end(.olderHistoryPage, key: conversation.id, isOk: serverHistory != .failed)
+      }
       pageBackIfNearOldest()
       fillGapIfNear()
     }
@@ -1341,6 +1346,7 @@ struct ChatPane: View {
       // The core answers in the store: the change that follows says how it went.
       if serverHistory != .complete && serverHistory != .loading {
         serverHistory = .loading
+        Perf.begin(.olderHistoryPage, key: conversation.id)
         await model.perform(.loadOlderHistory(conversationId: conversation.id))
       }
       return
