@@ -1,12 +1,12 @@
 /* Markdown tables in messages and in the composer (#1565). Quiet hairlines, a header told apart by
    weight and a light fill, numbers in even columns. A table wider than the bubble scrolls sideways
-   inside it instead of widening the message; a longer one than the cap scrolls inside it too, under
-   a header that stays in view (#1602). Vertical scrolling chains on to the feed at either end. */
+   inside it instead of widening the message. While a long table scrolls past the top of the message
+   list, its header row stays there (#1602): the list moves it by --md-head-shift, since the
+   sideways scroller would hold a `position: sticky` header to itself. */
 .md-table-wrap {
   max-width: 100%;
-  max-height: min(70vh, 36rem);
   margin: 4px 0 0;
-  overflow: auto;
+  overflow-x: auto;
   overscroll-behavior-x: contain;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -60,11 +60,11 @@
   font-weight: var(--weight-semibold);
 }
 
-/* A sticky cell's own border scrolls away under border-collapse; the inset shadow draws the line. */
+/* A moved cell leaves its border behind under border-collapse; the inset shadow moves with it. */
 .md-table thead th {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 1;
+  transform: translateY(var(--md-head-shift, 0));
   border-bottom: none;
   box-shadow: inset 0 -1px 0 var(--border);
 }

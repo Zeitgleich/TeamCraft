@@ -99,6 +99,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -441,8 +442,18 @@ fun MessageFeed(
       minOf(maxWidth * BUBBLE_WIDTH_SHARE, BUBBLE_MAX_WIDTH)
     }
     val look = FeedLook(bubbleMax = bubbleMax, showsSenders = showsSenders, names = names, isList = isList, isCompact = isCompact)
-    CompositionLocalProvider(LocalFeedMotion provides feedMotion) {
-      LazyColumn(Modifier.fillMaxSize(), state = listState, reverseLayout = true) {
+    val stickyEdge = remember(listState) {
+      StickyEdge {
+        listState.firstVisibleItemIndex
+        listState.firstVisibleItemScrollOffset
+      }
+    }
+    CompositionLocalProvider(LocalFeedMotion provides feedMotion, LocalStickyEdge provides stickyEdge) {
+      LazyColumn(
+        Modifier.fillMaxSize().onGloballyPositioned { stickyEdge.maybeFeed = it },
+        state = listState,
+        reverseLayout = true,
+      ) {
         // Rows of one kind reuse each other's layout when they scroll in.
         items(items, key = { it.key }, contentType = { it.contentType }) { item ->
           when (item) {
