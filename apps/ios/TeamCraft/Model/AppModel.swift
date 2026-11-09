@@ -5,8 +5,9 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-/// Why something failed, as the screens show it (translated per case).
-enum AppFailure: Equatable {
+/// Why something failed, as the screens show it (translated per case). An `Error`, so calls can
+/// answer `Result<_, AppFailure>` (the directory's invitations).
+enum AppFailure: Error, Equatable {
   case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, callMoveRefused, callDeviceLimit, callEncryptionPending, generic
   case tooLarge
   case backupOutOfMemory, backupTooNew, backupDamaged
