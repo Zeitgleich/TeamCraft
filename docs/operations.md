@@ -374,7 +374,7 @@ the server itself is down.
 - In an encrypted call, every membership change waits until each member says it has the new keys,
   for at most `TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS` (default 2000); then the SFU switches
   everyone over and logs `executing a DAVE transition before every member is ready` with the
-  count. Keep it well below the apps' own 5 s fallback. Occasional lines are normal (a slow phone);
+  count. At most 4000: the apps switch by themselves after 5 s. Occasional lines are normal (a slow phone);
   many point at a client that doesn't answer.
 - The SFU reports its whole call roster to the server at start and every
   `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS` (default 30); the server drops participants the SFU no

@@ -77,6 +77,8 @@ use wtransport::Identity;
 
 /// Where the fallback listens unless `TEAMCRAFT_SFU_FALLBACK_BIND` says otherwise.
 const DEFAULT_FALLBACK_ADDR: &str = "127.0.0.1:8082";
+/// Upper bound for `TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS`, below the clients' 5 s fallback.
+const MAX_DAVE_TRANSITION_DEADLINE: Duration = Duration::from_secs(4);
 
 fn main() -> ExitCode {
   if std::env::args().nth(1).as_deref() == Some("healthcheck") {
@@ -129,6 +131,12 @@ async fn run() -> anyhow::Result<()> {
     config.roster_interval = interval;
   }
   if let Some(deadline) = env_duration_millis("TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS")? {
+    // At or above the clients' own 5 s fallback it would only hold queued changes back.
+    anyhow::ensure!(
+      deadline <= MAX_DAVE_TRANSITION_DEADLINE,
+      "TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS must be at most {}",
+      MAX_DAVE_TRANSITION_DEADLINE.as_millis()
+    );
     config.dave_transition_deadline = deadline;
   }
   if let Some(bytes) = env_count("TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES")? {

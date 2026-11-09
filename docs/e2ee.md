@@ -4320,7 +4320,8 @@ didn't derive from its own MLS state, and executing a transition it never prepar
 can delay an execution, but a member that hears none executes by itself 5 s after preparing
 (`DAVE_TRANSITION_TIMEOUT`). A transition prepared while another still waits keeps the earlier
 one's deadline, so chaining commits (forcing rejoins, say) doesn't push the switch back: at most
-5 s after a member left the group in the UI, nobody encrypts with a key it holds. Until then the
+5 s after the commit that removes a member (up to one SFU deadline, below, more after it left in
+the UI), nobody encrypts with a key it holds. Until then the
 departed member could still decrypt media it gets; an honest SFU no longer forwards any to it. The
 SFU executes once every member is ready or gone, or when its own deadline passed
 (`TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS`, default 2 s, checked on the room's 100 ms timer;
