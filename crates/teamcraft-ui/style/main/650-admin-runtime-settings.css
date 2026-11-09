@@ -118,7 +118,15 @@
   gap: 6px;
   width: 30%;
   padding: 8px;
-  background: var(--sb-bg);
+  /* As in the app (000-tokens.css): a light tint of the navigation colour, the colour itself in the
+     dark. The brand's colours are set on the preview, so the tint is mixed here, not inherited. */
+  background: color-mix(in srgb, var(--nav) var(--sb-tint), #ffffff);
+  box-shadow: inset -1px 0 0 rgba(0, 0, 0, 0.08);
+}
+
+.brand-preview.is-dark .brand-preview-sidebar {
+  background: var(--nav);
+  box-shadow: none;
 }
 
 .brand-preview-sidebar span {

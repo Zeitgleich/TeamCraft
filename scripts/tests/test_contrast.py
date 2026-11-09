@@ -1,7 +1,8 @@
 """Contrast of the colour tokens of the UI stylesheet, light and dark (issues #361, #362).
 
 WCAG 2.x contrast ratios: 4.5:1 for text (1.4.3), 3:1 for control edges, icons and focus rings
-(1.4.11, 2.4.11). Pairs whose foreground or background is not a plain hex token are not covered.
+(1.4.11, 2.4.11). Tokens are hex colours, `var()` references or `color-mix(in srgb, …)` of them;
+pairs with anything else (rgba layers) are not covered.
 """
 import pathlib
 import re
@@ -21,6 +22,8 @@ PAIRS = [
     ("on-danger", "danger", TEXT, "danger button"),
     ("sb-dim", "sb-bg", TEXT, "muted channel in the sidebar"),
     ("sb-muted", "sb-bg", TEXT, "channel in the sidebar"),
+    ("sb-text", "sb-bg", TEXT, "text in the sidebar"),
+    ("sb-strong", "sb-bg", TEXT, "unread channel in the sidebar"),
     ("border-strong", "surface", NON_TEXT, "field, switch and checkbox edges"),
     ("border-strong", "bg", NON_TEXT, "field edges on the page background"),
     ("star", "surface", NON_TEXT, "favourite star when on"),
@@ -28,7 +31,12 @@ PAIRS = [
     ("focus", "bg", NON_TEXT, "focus ring on the page background"),
     ("focus", "surface-2", NON_TEXT, "focus ring on a hovered row"),
 ]
+# The light sidebar is a tint of the brand's or theme's navigation colour (`--nav`): its text has to
+# read on the tint of any colour a brand may set.
+SIDEBAR_TEXT = ["sb-text", "sb-strong", "sb-muted", "sb-dim"]
+NAVIGATION_EXTREMES = ["#000000", "#ffffff", "#ff0000", "#00ff00", "#0000ff", "#808080", "#123456"]
 DECLARATION = re.compile(r"(--[\w-]+)\s*:\s*([^;]+);")
+COLOR_MIX = re.compile(r"color-mix\(in srgb,\s*(.+?)\s+(var\([^)]+\)|[\d.]+%)\s*,\s*(.+)\)$")
 
 
 class ContrastTest(unittest.TestCase):
@@ -37,6 +45,15 @@ class ContrastTest(unittest.TestCase):
 
     def test_dark_tokens(self):
         self.check_theme("dark", themes()["dark"])
+
+    def test_the_light_sidebar_reads_on_a_tint_of_any_navigation_colour(self):
+        light = themes()["light"]
+        for navigation in NAVIGATION_EXTREMES:
+            values = {**light, "--nav": navigation}
+            for foreground in SIDEBAR_TEXT:
+                with self.subTest(navigation=navigation, foreground=foreground):
+                    ratio = contrast(resolve(values, foreground), resolve(values, "sb-bg"))
+                    self.assertGreaterEqual(ratio, TEXT, f"{foreground}: {ratio:.2f}:1 on a tint of {navigation}")
 
     def test_both_dark_blocks_agree(self):
         css = STYLESHEET.read_text(encoding="utf-8")
@@ -71,10 +88,25 @@ def tokens(text):
 
 
 def resolve(values, name):
-    value = values[f"--{name}"]
-    while value.startswith("var("):
-        value = values[value[4:].split(")")[0].split(",")[0].strip()]
+    """The token as `#rrggbb`, following `var()` and mixing `color-mix(in srgb, a p%, b)`."""
+    return evaluate(values, values[f"--{name}"])
+
+
+def evaluate(values, value):
+    value = value.strip()
+    if value.startswith("var("):
+        return evaluate(values, values[value[4:].split(")")[0].split(",")[0].strip()])
+    mix = COLOR_MIX.match(value)
+    if mix:
+        first, amount, second = mix.groups()
+        share = float(evaluate(values, amount).rstrip("%")) / 100
+        a, b = rgb(evaluate(values, first)), rgb(evaluate(values, second))
+        return "#" + "".join(f"{round(x * share + y * (1 - share)):02x}" for x, y in zip(a, b))
     return value
+
+
+def rgb(hex_colour):
+    return [int(hex_colour[i:i + 2], 16) for i in (1, 3, 5)]
 
 
 def contrast(first, second):

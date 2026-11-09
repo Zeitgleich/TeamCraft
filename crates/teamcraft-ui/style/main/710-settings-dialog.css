@@ -1022,7 +1022,8 @@
 
 .set-theme-preview {
   --tile-bg: var(--tile-light-bg);
-  --tile-rail: #1a2434;
+  --tile-rail: #111926;
+  --tile-side: #eff0f1;
   --tile-line: #dddddd;
   --tile-strong: #566175;
   --tile-bubble: #dff3f1;
@@ -1038,6 +1039,7 @@
 .set-theme-preview.is-dark {
   --tile-bg: var(--tile-dark-bg);
   --tile-rail: #101010;
+  --tile-side: #141414;
   --tile-line: #363636;
   --tile-strong: var(--tile-mid);
   --tile-bubble: #123a38;
@@ -1047,10 +1049,11 @@
   background: linear-gradient(135deg, var(--tile-light-bg) 50%, var(--tile-dark-bg) 50%);
 }
 
+/* The rail in the chrome colour, then the sidebar: light in light mode, dark in dark mode. */
 .set-theme-rail {
   flex: none;
   width: 22%;
-  background: var(--tile-rail);
+  background: linear-gradient(90deg, var(--tile-rail) 0 32%, var(--tile-side) 32%);
 }
 
 .set-theme-body {
@@ -1156,6 +1159,7 @@
 }
 
 .set-swatch-tile {
+  --sw-chrome: var(--chrome);
   --sw-nav: var(--sb-bg);
   --sw-sel: var(--sb-current);
   --sw-dot: var(--online);
@@ -1166,10 +1170,11 @@
   flex-direction: column;
   gap: 6px;
   aspect-ratio: 16 / 10;
-  padding: 10px 9px;
+  padding: 10px 9px 10px 21px;
   overflow: hidden;
   border-radius: var(--radius-md);
-  background: var(--sw-nav);
+  /* The rail's strip in the chrome colour, then the sidebar, as the theme paints them. */
+  background: linear-gradient(90deg, var(--sw-chrome) 0 12px, var(--sw-nav) 12px);
   box-shadow: inset 0 0 0 1px var(--border);
   transition: transform var(--dur-fast) var(--ease-standard);
 }
@@ -1201,7 +1206,7 @@
 }
 
 .set-swatch-dot {
-  left: 9px;
+  left: 21px;
   background: var(--sw-dot);
 }
 

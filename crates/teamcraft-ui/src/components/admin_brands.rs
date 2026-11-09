@@ -1312,11 +1312,7 @@ mod tests {
       ("chrome", "red; background:url(x)".to_owned()),
       ("sidebar", "#123".to_owned()),
     ]);
-    let expected = [
-      ("--accent", "#0b7f78"),
-      ("--focus", "#0b7f78"),
-      ("--sb-bg", "#123"),
-    ];
+    let expected = [("--accent", "#0b7f78"), ("--focus", "#0b7f78"), ("--nav", "#123")];
     assert_eq!(
       properties,
       expected.map(|(property, value)| (property, value.to_owned()))
