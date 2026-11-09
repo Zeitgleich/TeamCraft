@@ -402,13 +402,20 @@ fn build_bundle<'a>(
 }
 
 /// The web app's texts: the start language from `init.js`, others fetched when asked for.
+/// Whether a fetched file of texts is an HTML page (the server's fallback for a file it lacks)
+/// rather than Fluent, which never starts with `<`.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn is_app_page(text: &str) -> bool {
+  text.trim_start().starts_with('<')
+}
+
 #[cfg(target_arch = "wasm32")]
 mod web {
   use js_sys::{Promise, Reflect};
   use wasm_bindgen::{JsCast, JsValue};
   use wasm_bindgen_futures::JsFuture;
 
-  use super::{BUNDLES, Locale, install};
+  use super::{BUNDLES, Locale, install, is_app_page};
 
   /// `init.js`'s fetch of the start language: a promise of `{ tag, text }`.
   const START: &str = "teamcraftTranslations";
@@ -460,21 +467,21 @@ mod web {
       .map_err(describe)?
       .dyn_into()
       .map_err(describe)?;
-    // A file the server no longer has comes back as the app's page (its fallback), with 200.
-    let is_page = response
-      .headers()
-      .get("content-type")
-      .ok()
-      .flatten()
-      .is_some_and(|kind| kind.starts_with("text/html"));
-    if !response.ok() || is_page {
+    if !response.ok() {
       return Err(format!("{url}: HTTP {}", response.status()));
     }
-    JsFuture::from(response.text().map_err(describe)?)
+    let text = JsFuture::from(response.text().map_err(describe)?)
       .await
       .map_err(describe)?
       .as_string()
-      .ok_or_else(|| "the file is no text".to_owned())
+      .ok_or_else(|| "the file is no text".to_owned())?;
+    // A file the server no longer has comes back as the app's page (its fallback), with 200. Judged
+    // by the content, not the content type: the desktop app's asset protocol serves `.ftl` as
+    // `text/html` (an extension it doesn't know), which stopped 1.0.26 from starting.
+    if is_app_page(&text) {
+      return Err(format!("{url}: the app's page instead of texts"));
+    }
+    Ok(text)
   }
 
   fn describe(error: JsValue) -> String {
@@ -501,6 +508,14 @@ mod tests {
 
   /// The console's texts (`scripts/finish-loader.sh` makes them a file of their own on the web).
   const ADMIN_FILE: &str = "admin.ftl";
+
+  #[test]
+  fn a_page_is_no_file_of_texts() {
+    assert!(is_app_page("<!doctype html>\n<html>"));
+    assert!(is_app_page("\n  <html lang=\"en\">"));
+    assert!(!is_app_page("\nskip-to-content = Skip to content\n"));
+    assert!(!is_app_page("# A comment\ncancel = Cancel <now>\n"));
+  }
 
   #[test]
   fn translations_parse_without_errors() {
