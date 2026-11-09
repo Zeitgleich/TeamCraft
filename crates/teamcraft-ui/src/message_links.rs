@@ -5,7 +5,7 @@
 
 use leptos::prelude::GetUntracked;
 
-use crate::markdown::{self, Block, Inline};
+use crate::markdown::{self, Inline};
 use crate::model::root_message_of;
 use crate::route::Route;
 
@@ -17,13 +17,8 @@ pub const MAX_PREVIEWS: usize = 3;
 pub fn message_links_in(body: &str, own_hosts: &[String]) -> Vec<String> {
   let mut links = Vec::new();
   for block in markdown::parse(body) {
-    let lines = match block {
-      Block::Paragraph(lines) | Block::Quote(lines) | Block::List { items: lines, .. } => lines,
-      Block::Heading { content, .. } => vec![content],
-      Block::Code { .. } => continue,
-    };
-    for line in lines {
-      collect_links(&line, own_hosts, &mut links);
+    for line in block.inline_lines() {
+      collect_links(line, own_hosts, &mut links);
     }
   }
   links

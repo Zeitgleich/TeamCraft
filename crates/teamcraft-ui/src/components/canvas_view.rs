@@ -819,6 +819,8 @@ impl Canvas {
       },
       CanvasAction::Format(FormatAction::Block(format)) => self.toggle_kind(kind_of(format)),
       CanvasAction::Format(FormatAction::Link) => self.open_link_dialog(),
+      // A page has no tables; its toolbar doesn't offer one.
+      CanvasAction::Format(FormatAction::Table) => {},
     }
   }
 
