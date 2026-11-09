@@ -79,6 +79,11 @@ impl OpsState {
     }
   }
 
+  /// The "bridge public URL" of the instance settings, for the channel's source section.
+  pub(super) fn bridge_public_url(&self) -> Option<String> {
+    self.settings.runtime.integration.maybe_bridge_public_url.clone()
+  }
+
   fn record(&mut self, now: TimestampMs, action: AuditAction, target: &str, detail: &str) {
     self.next_audit_id += 1;
     self.audit.push(AuditEntry {

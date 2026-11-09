@@ -922,6 +922,13 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.can_manage_integration_sources()
   }
 
+  fn bridge_public_url(&self, conversation: ConversationId) -> Option<String> {
+    self
+      .maybe_live
+      .as_ref()
+      .and_then(|live| live.bridge_public_url(conversation))
+  }
+
   fn add_integration_source(
     &self,
     conversation: ConversationId,

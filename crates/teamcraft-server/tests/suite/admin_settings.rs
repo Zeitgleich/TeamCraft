@@ -900,6 +900,129 @@ mod instance_settings {
     app.stop().await;
   }
 
+  fn integration_section(url: Option<&str>) -> Value {
+    let mut values = json!({"default_retention_days": 30});
+    if let Some(url) = url {
+      values["bridge_public_url"] = json!(url);
+    }
+    json!({"section": "integration", "values": values})
+  }
+
+  #[tokio::test]
+  async fn the_bridge_public_url_is_checked_stored_without_a_trailing_slash_and_reset() {
+    let app = app!(TestApp::start());
+    let bob = admin();
+    let initial = app.get(&bob, "/admin/settings").await;
+    assert!(initial.body["integration"].get("bridge_public_url").is_none());
+
+    for bad in [
+      "http://bridge.example.com",
+      "https://user:pw@bridge.example.com",
+      "https://bridge.example.com/#top",
+      "https://bridge.example.com/?a=1",
+      "bridge.example.com",
+      "ftp://bridge.example.com",
+      "",
+    ] {
+      let refused = app
+        .put(&bob, "/admin/settings", integration_section(Some(bad)))
+        .await;
+      assert_eq!(refused.status, StatusCode::BAD_REQUEST, "{bad}: {}", refused.body);
+    }
+    assert_eq!(app.state.settings.get().integration.maybe_bridge_public_url, None);
+
+    for (typed, stored) in [
+      ("https://bridge.example.com/", "https://bridge.example.com"),
+      ("http://127.0.0.1:8088", "http://127.0.0.1:8088"),
+      ("http://localhost:8088/", "http://localhost:8088"),
+    ] {
+      let saved = app
+        .put(&bob, "/admin/settings", integration_section(Some(typed)))
+        .await;
+      assert_eq!(saved.status, StatusCode::OK, "{typed}: {}", saved.body);
+      assert_eq!(saved.body["integration"]["bridge_public_url"], stored);
+      assert_eq!(
+        app
+          .state
+          .settings
+          .get()
+          .integration
+          .maybe_bridge_public_url
+          .as_deref(),
+        Some(stored)
+      );
+    }
+    // Saving without it clears it; the group goes back to the file on reset.
+    let cleared = app.put(&bob, "/admin/settings", integration_section(None)).await;
+    assert!(cleared.body["integration"].get("bridge_public_url").is_none());
+    app
+      .put(
+        &bob,
+        "/admin/settings",
+        integration_section(Some("https://bridge.example.com")),
+      )
+      .await;
+    let reset = app.delete(&bob, "/admin/settings/integration").await;
+    assert!(reset.body["integration"].get("bridge_public_url").is_none());
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn only_people_who_manage_a_channel_read_the_bridge_address_and_only_that() {
+    let app = app!(TestApp::start());
+    let (alice, bob) = (owner(), admin());
+    let (carol, dave, erin, gus) = (member("carol"), member("dave"), member("erin"), guest("gus"));
+    let space = create_space(&app, &alice, "Team", "invite_only").await;
+    for user in [&carol, &dave, &erin] {
+      let id = user_id(&app, user).await;
+      add_space_member(&app, &alice, &space, &id, "member").await;
+    }
+    // Carol created the channel, so she manages it; Dave and the guest are plain members; Erin is
+    // in the space but not in the private channel. None of them is an instance admin.
+    let channel = create_channel(&app, &carol, &space, "ops", "private").await;
+    add_channel_member(&app, &carol, &channel, &user_id(&app, &dave).await).await;
+    let path = format!("/conversations/{channel}/bridge-address");
+
+    // Nothing set: an empty answer, not an error.
+    let unset = app.get(&carol, &path).await;
+    assert_eq!(unset.status, StatusCode::OK, "{}", unset.body);
+    assert_eq!(unset.body, json!({}));
+
+    let saved = app
+      .put(
+        &bob,
+        "/admin/settings",
+        integration_section(Some("https://bridge.example.com/")),
+      )
+      .await;
+    assert_eq!(saved.status, StatusCode::OK, "{}", saved.body);
+
+    let read = app.get(&carol, &path).await;
+    assert_eq!(read.status, StatusCode::OK, "{}", read.body);
+    assert_eq!(read.body, json!({"public_url": "https://bridge.example.com"}));
+    // The channel's owner is no instance admin: the settings stay closed to them.
+    assert_eq!(
+      app.get(&carol, "/admin/settings").await.status,
+      StatusCode::FORBIDDEN
+    );
+
+    assert_eq!(app.get(&dave, &path).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(app.get(&erin, &path).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(app.get(&gus, &path).await.status, StatusCode::NOT_FOUND);
+    let anonymous = app
+      .http
+      .get(format!("{}/api/v1{path}", app.base_url))
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+    // A change reaches the next read at once.
+    app.put(&bob, "/admin/settings", integration_section(None)).await;
+    assert_eq!(app.get(&carol, &path).await.body, json!({}));
+    app.stop().await;
+  }
+
   #[tokio::test]
   async fn the_attachment_limit_is_published_to_members_and_changes_reach_them_at_once() {
     let app = app!(TestApp::start());

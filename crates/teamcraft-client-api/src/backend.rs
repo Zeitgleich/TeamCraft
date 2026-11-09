@@ -817,6 +817,13 @@ pub trait ChatBackend {
   fn can_manage_integration_sources(&self) -> bool {
     false
   }
+  /// The "bridge public URL" the instance's admins set: where producers reach a bridge on its own
+  /// host, offered in the channel's "Connect a source" section. Only people who manage the channel
+  /// get it from the server; `None` for anybody else, while it is being read, and when none is
+  /// set. Without one the section offers the instance's host name and the loopback default.
+  fn bridge_public_url(&self, _conversation: ConversationId) -> Option<String> {
+    None
+  }
   /// Announces a new source in the channel: an encrypted, hidden control message the bridge reads.
   fn add_integration_source(
     &self,

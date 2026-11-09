@@ -39,6 +39,11 @@ journalctl -f | curl -T - -H 'Content-Type: text/plain' http://127.0.0.1:8088/in
 (plain text or NDJSON). The token in the URL is the credential and decides the channel. The listener
 is loopback by default; if you open it, use a firewall or TLS proxy.
 
+A bridge that producers reach on its own host name needs that address in the app once: set
+**Administration → Settings → Integrations → Bridge public URL** (`https://bridge.example.com`,
+`http` only for localhost). A channel's "Connect a source" section then offers it as "At the
+configured address" and selects it first; see [docs/bridge.md](../../bridge.md#where-producers-reach-the-bridge).
+
 Log lines are batched into one message per second (or 64 KB). Sources have a rate limit (600/min by
 default); alert levels and `danger` webhook attachments can @mention people.
 
