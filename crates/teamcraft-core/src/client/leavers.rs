@@ -250,5 +250,11 @@ fn is_on_roster(workspace: &WorkspaceState, user: UserId) -> bool {
 /// remove (an admin's app leaves an admin account to an owner's).
 fn is_taken(error: &ApiError) -> bool {
   matches!(error.error_code(), Some(ErrorCode::LeaverClaimed))
-    || matches!(error, ApiError::Status { status: 403 | 404, .. })
+    || matches!(
+      error,
+      ApiError::Status {
+        status: 403 | 404,
+        ..
+      }
+    )
 }
