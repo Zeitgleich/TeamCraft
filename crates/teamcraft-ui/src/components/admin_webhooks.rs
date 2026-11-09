@@ -161,7 +161,7 @@ fn WebhookCard(webhook: AdminWebhook, editing: RwSignal<Option<WebhookId>>) -> i
       <h3 class="webhook-url" translate="no">{url}</h3>
       {(!description.is_empty()).then(|| view! { <p class="muted-text">{description}</p> })}
       <p class="small">
-        <span class="badge" class:badge-guest=is_failing>{move || i18n.t(status_key)}</span>
+        <span class="badge" class:badge-failing=is_failing>{move || i18n.t(status_key)}</span>
         " "
         <span class="muted-text">
           {move || i18n.t_count("admin-webhooks-queued", usize::try_from(queued).unwrap_or(usize::MAX))}
