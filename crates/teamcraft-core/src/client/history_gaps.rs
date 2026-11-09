@@ -339,7 +339,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       record.maybe_backlog = None;
     }
     write_record(&self.store, conversation, &record)?;
-    self.note_sync_progress();
+    // A page fills a hole only the conversation on screen shows; elsewhere the UI hears of the
+    // backlog once it is read full. A wake per page had the UI read everything again for every page
+    // of a long absence, which kept the browser's only thread busy for minutes (issue #1572).
+    if self.catch_up_focus.get() == Some(conversation) {
+      self.note_sync_progress();
+    }
     Ok(BacklogStep::More)
   }
 

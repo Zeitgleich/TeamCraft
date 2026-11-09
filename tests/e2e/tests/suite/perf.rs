@@ -157,6 +157,7 @@ async fn the_web_client_stays_fast_and_lean_with_a_large_workspace() {
       eprintln!("seeded the {} workspace in {:?}", scale.name, started.elapsed());
       let mut report = measure(&page, &seeded, &profile, scale).await;
       scroll_through_held_history(&page, &mut alice, &seeded, scale, &mut report).await;
+      come_back_to_busy_channels(&page, &mut alice, &seeded, scale, &profile, &mut report).await;
       measure_catalog_build(&page, &seeded, &mut report).await;
       report.seconds_sign_in_and_unlock = first_setup;
       report.pss_mib_empty_browser = baseline;
@@ -187,6 +188,9 @@ struct Scale {
   messages: usize,
   long_channel_messages: usize,
   images: usize,
+  /// Messages each busy channel gets while Carol is away the last time, beyond what a capped
+  /// catch-up reads (issue #1572).
+  backlog_messages: usize,
   idle: Duration,
   is_regression_check: bool,
 }
@@ -314,6 +318,17 @@ struct Report {
   catalog_resume_percent_at_reload: f64,
   catalog_resume_first_percent_after: f64,
   seconds_catalog_resume_to_channel_list: f64,
+  /// Coming back to busy channels whose backlogs are read in the background (issue #1572):
+  /// switches between quiet channels meanwhile, from the page load until the browser went quiet,
+  /// and the page's main-thread tasks over 50 ms in that time.
+  backlog_switch_ms_p50: f64,
+  backlog_switch_ms_p95: f64,
+  backlog_switch_ms_max: f64,
+  seconds_backlog_until_settled: f64,
+  backlog_long_task_count: f64,
+  backlog_long_task_total_ms: f64,
+  backlog_longest_task_ms: f64,
+  backlog_gateway_connections_lost: f64,
 }
 
 impl Scale {
@@ -326,6 +341,7 @@ impl Scale {
         messages: 100_000,
         long_channel_messages: 20_000,
         images: 200,
+        backlog_messages: 2_000,
         idle: Duration::from_secs(300),
         is_regression_check: false,
       },
@@ -336,6 +352,7 @@ impl Scale {
         messages: 60,
         long_channel_messages: 30,
         images: 2,
+        backlog_messages: 250,
         idle: Duration::from_secs(10),
         is_regression_check: false,
       },
@@ -346,6 +363,7 @@ impl Scale {
         messages: 3_000,
         long_channel_messages: 1_500,
         images: 12,
+        backlog_messages: 600,
         idle: Duration::from_secs(60),
         is_regression_check: true,
       },
@@ -607,6 +625,63 @@ async fn scroll_through_held_history(
   report.steady_scroll_long_tasks = steady[4];
   report.steady_scroll_longest_task_ms = steady[5];
   report.steady_scroll_frames_moving_backwards = steady[6];
+}
+
+/// Coming back after weeks away from busy channels (issue #1572). Every channel of the first space
+/// but the long one and two quiet ones grows by more than a capped catch-up reads (200 messages),
+/// so the rest of each is read in the background, a page at a time. Meanwhile Carol switches
+/// between the quiet channels, which got nothing new; measured until the browser went quiet.
+/// `PERF_BACKLOG_MESSAGES` sets the messages per busy channel.
+async fn come_back_to_busy_channels(
+  page: &Page,
+  alice: &mut Peer,
+  seeded: &Seeded,
+  scale: Scale,
+  profile: &str,
+  report: &mut Report,
+) {
+  page.goto("about:blank").await.unwrap();
+  let quiet = &seeded.first_space_channels[1..3];
+  let busy = &seeded.channels[3..seeded.first_space_channels.len()];
+  // PERF_BACKLOG_MESSAGES=n: a longer absence than the scale's.
+  let messages = std::env::var("PERF_BACKLOG_MESSAGES")
+    .ok()
+    .and_then(|value| value.parse().ok())
+    .unwrap_or(scale.backlog_messages);
+  for index in 0..messages {
+    for channel in busy {
+      send(alice, *channel, index).await;
+    }
+  }
+  let started = Instant::now();
+  let log = watch_catch_up_log(page, started).await;
+  page
+    .evaluate(format!("location.href = '{WEB_ORIGIN}/?backend=server'"))
+    .await
+    .unwrap();
+  come_back(page, &quiet[0].0).await;
+  let mut times = Vec::with_capacity(BUSY_SWITCHES);
+  for index in 0..BUSY_SWITCHES {
+    let (name, last) = &quiet[index % quiet.len()];
+    times.push(switch_within(page, name, last, Duration::from_secs(280)).await);
+  }
+  times.sort_by(f64::total_cmp);
+  report.backlog_switch_ms_p50 = percentile(&times, 50);
+  report.backlog_switch_ms_p95 = percentile(&times, 95);
+  report.backlog_switch_ms_max = times.last().copied().unwrap_or(0.0);
+  wait_until_done(page).await;
+  wait_until_browser_settled(profile).await;
+  report.seconds_backlog_until_settled = started.elapsed().as_secs_f64();
+  let long_tasks = evaluate_value(page, "window.__longTasks || [0, 0, 0]".into()).await;
+  report.backlog_long_task_count = long_tasks[0].as_f64().unwrap_or(0.0);
+  report.backlog_long_task_total_ms = long_tasks[1].as_f64().unwrap_or(0.0);
+  report.backlog_longest_task_ms = long_tasks[2].as_f64().unwrap_or(0.0);
+  report.backlog_gateway_connections_lost = log
+    .lock()
+    .unwrap()
+    .iter()
+    .filter(|(_, line)| line.contains("gateway connection lost"))
+    .count() as f64;
 }
 
 async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> Report {
@@ -1593,6 +1668,20 @@ impl Report {
       (
         "seconds_catalog_resume_to_channel_list",
         self.seconds_catalog_resume_to_channel_list,
+      ),
+      ("backlog_switch_ms_p50", self.backlog_switch_ms_p50),
+      ("backlog_switch_ms_p95", self.backlog_switch_ms_p95),
+      ("backlog_switch_ms_max", self.backlog_switch_ms_max),
+      (
+        "seconds_backlog_until_settled",
+        self.seconds_backlog_until_settled,
+      ),
+      ("backlog_long_task_count", self.backlog_long_task_count),
+      ("backlog_long_task_total_ms", self.backlog_long_task_total_ms),
+      ("backlog_longest_task_ms", self.backlog_longest_task_ms),
+      (
+        "backlog_gateway_connections_lost",
+        self.backlog_gateway_connections_lost,
       ),
     ]
   }
