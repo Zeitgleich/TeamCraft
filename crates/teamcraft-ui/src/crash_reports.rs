@@ -34,6 +34,13 @@ const KEY_CONFIG: &str = "teamcraft.crash_reports.config";
 const KEY_NOTICE_SEEN: &str = "teamcraft.crash_reports.notice_seen";
 /// Script errors reported per page life at most: a loop of the same error can't fill the queue.
 const MAX_SCRIPT_ERRORS: u32 = 5;
+/// Browser warnings that reach `window.onerror` without anything having failed: a ResizeObserver
+/// whose callback changed the layout again (the browser delivers the rest next frame). Sentry's own
+/// SDK drops them too.
+const BROWSER_NOISE: [&str; 2] = [
+  "ResizeObserver loop completed with undelivered notifications",
+  "ResizeObserver loop limit exceeded",
+];
 
 thread_local! {
   static REPORTER: RefCell<Option<CrashReporter>> = const { RefCell::new(None) };
@@ -275,6 +282,9 @@ fn listen_to_window() {
     return;
   };
   let on_error = Closure::<dyn Fn(web_sys::ErrorEvent)>::new(|event: web_sys::ErrorEvent| {
+    if is_browser_noise(&event.message()) {
+      return;
+    }
     let frame = StackFrame {
       maybe_function: None,
       maybe_file: Some(event.filename()).filter(|file| !file.is_empty()),
@@ -320,6 +330,10 @@ fn listen_to_window() {
   on_online.forget();
   on_hidden.forget();
   on_pagehide.forget();
+}
+
+fn is_browser_noise(message: &str) -> bool {
+  BROWSER_NOISE.iter().any(|noise| message.contains(noise))
 }
 
 fn capture_script_error(error_type: &str, message: String, frames: Vec<StackFrame>) {
