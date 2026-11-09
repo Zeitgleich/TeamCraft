@@ -558,6 +558,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         })
       }}
       <crate::components::add_to_call::CallMoveBanner />
+      <crate::components::call_encryption::EncryptionFailureBanner request=request />
       <NotetakerBanner conversation=request.conversation notetaker=notetaker is_asked=notetaker_invite.is_asked />
       <div class="call-body">
         <div class="call-stage-wrap">{stage}</div>

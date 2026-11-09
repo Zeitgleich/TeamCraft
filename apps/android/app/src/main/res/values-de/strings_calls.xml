@@ -84,6 +84,11 @@
     <item quantity="one">Mitglied</item>
     <item quantity="other">Mitglieder</item>
   </plurals>
+  <string name="call_encryption_failed">Dein Gerät konnte nicht in die Verschlüsselung des Anrufs aufgenommen werden, du hörst also niemanden und wirst nicht gehört. Andere im Anruf können dieses Gerät eventuell nicht überprüfen. Leg auf und ruf aus der Unterhaltung zurück.</string>
+  <plurals name="call_encryption_retry_in">
+    <item quantity="one">Du kannst in %d Minute zurückrufen.</item>
+    <item quantity="other">Du kannst in %d Minuten zurückrufen.</item>
+  </plurals>
   <string name="call_join_failed_title">Anruf nicht verbunden</string>
   <string name="call_join_failed">Der Beitritt zum Anruf hat nicht geklappt. Ruf aus der Unterhaltung zurück.</string>
   <string name="call_join_failed_microphone">TeamCraft braucht das Mikrofon, um einem Anruf beizutreten. Erlaube es und ruf dann aus der Unterhaltung zurück.</string>

@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.calls
 
 import android.graphics.Bitmap
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
@@ -22,22 +23,21 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -56,10 +56,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -67,9 +69,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
@@ -81,8 +83,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -97,6 +99,7 @@ import androidx.compose.ui.unit.sp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.UserAvatar
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import uniffi.teamcraft_ffi.CallEndReason
 import uniffi.teamcraft_ffi.CallPhase
@@ -239,6 +242,7 @@ internal fun InCallContent(
       }
       Column(Modifier.weight(1f).padding(horizontal = 16.dp), verticalArrangement = Arrangement.Bottom) {
         StatusHint(ui.maybeState)
+        EncryptionFailureBanner(ui.maybeState, actions.onHangUp)
         banner()
       }
       AnimatedVisibility(
@@ -568,6 +572,53 @@ private fun StatusHint(maybeState: CallStateInfo?) {
   ) {
     Text(stringResource(textRes), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.labelLarge)
   }
+}
+
+/**
+ * This device couldn't be added to the call's encryption (#1555): no media flows, so the user
+ * hears why, how long until calling back may work (counted from when this showed), and can hang up.
+ */
+@Composable
+private fun EncryptionFailureBanner(maybeState: CallStateInfo?, onHangUp: () -> Unit) {
+  val retryAfterSecs = maybeState?.maybeEncryptionRetryAfterSecs ?: return
+  val shownAt = remember(retryAfterSecs) { SystemClock.elapsedRealtime() }
+  var now by remember { mutableLongStateOf(shownAt) }
+  val minutesLeft = encryptionRetryMinutesLeft(retryAfterSecs.toLong(), shownAt, now)
+  // Ticks only while a wait is shown.
+  LaunchedEffect(shownAt, minutesLeft > 0) {
+    while (minutesLeft > 0) {
+      delay(1_000)
+      now = SystemClock.elapsedRealtime()
+    }
+  }
+  Surface(
+    color = Color.Black.copy(alpha = 0.75f),
+    contentColor = Color.White,
+    shape = MaterialTheme.shapes.medium,
+    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp).semantics { liveRegion = LiveRegionMode.Assertive },
+  ) {
+    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+        Icon(Icons.Filled.Warning, contentDescription = null, modifier = Modifier.size(20.dp))
+        Text(stringResource(R.string.call_encryption_failed), style = MaterialTheme.typography.bodyMedium)
+      }
+      if (minutesLeft > 0) {
+        Text(
+          pluralStringResource(R.plurals.call_encryption_retry_in, minutesLeft, minutesLeft),
+          style = MaterialTheme.typography.bodySmall,
+        )
+      }
+      TextButton(onClick = onHangUp, modifier = Modifier.align(Alignment.End)) {
+        Text(stringResource(R.string.call_hang_up), color = Color.White)
+      }
+    }
+  }
+}
+
+/** Whole minutes until calling back may work, rounded up; 0 once it may. */
+internal fun encryptionRetryMinutesLeft(retryAfterSecs: Long, shownAtMs: Long, nowMs: Long): Int {
+  val leftMs = shownAtMs + retryAfterSecs * 1_000 - nowMs
+  return if (leftMs <= 0) 0 else ((leftMs + 59_999) / 60_000).toInt()
 }
 
 @Composable

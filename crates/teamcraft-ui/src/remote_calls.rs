@@ -619,6 +619,7 @@ mod tests {
         is_on_limited_network: false,
         maybe_moved_to: None,
         maybe_joined_at: None,
+        maybe_encryption_failure: None,
       }),
       incoming: Vec::new(),
       running: vec![RunningCall {

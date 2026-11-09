@@ -549,6 +549,7 @@ impl Room {
         DaveDeadlines {
           transition: config.dave_transition_deadline,
           commit: config.dave_commit_deadline,
+          refusal: config.dave_refusal_window,
         },
       )?,
       next_stream_id: 1,

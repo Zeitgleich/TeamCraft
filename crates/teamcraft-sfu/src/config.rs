@@ -72,6 +72,10 @@ pub struct SfuConfig {
   /// (#1555): a committer that is broken, hostile or refuses a joiner would otherwise stop every
   /// later join and removal. Long enough for a client that first refreshes its roster.
   pub dave_commit_deadline: Duration,
+  /// How long a joiner whose DAVE proposals stalled keeps its strikes, and a refused one stays
+  /// refused, reconnects included (#1555): a device nobody accepts costs the call two restarts
+  /// per window, not per reconnect.
+  pub dave_refusal_window: Duration,
   /// The UDP socket's receive buffer. A big keyframe arrives as a burst of half a megabyte: a
   /// socket with the system's default buffer loses part of it while the SFU is busy, and with it
   /// the whole picture, for everyone watching.
@@ -217,6 +221,7 @@ impl Default for SfuConfig {
       roster_interval: Duration::from_secs(30),
       dave_transition_deadline: Duration::from_secs(2),
       dave_commit_deadline: Duration::from_secs(10),
+      dave_refusal_window: Duration::from_secs(300),
       udp_receive_buffer_bytes: 4 * 1024 * 1024,
       fallback: FallbackConfig::default(),
     }

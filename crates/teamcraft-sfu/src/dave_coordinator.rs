@@ -25,9 +25,10 @@
 //! joiner) don't wedge the call: the group starts over. Members hear the external sender again,
 //! drop their session and come back with fresh key packages; the joiners of the stalled proposals
 //! keep theirs but get a strike, are proposed alone and only after everyone else, and are refused
-//! after a second stall. A broken member is repaired by its fresh session, a joiner its members
-//! won't accept is kept out, and a member that left is no longer in any group with a current key.
-//! Each joiner costs at most two restarts.
+//! after a second stall, and told so. A broken member is repaired by its fresh session, a joiner
+//! its members won't accept is kept out, and a member that left is no longer in any group with a
+//! current key. Strikes and refusals outlast reconnects for a while, so each joiner costs at most
+//! two restarts per refusal window.
 //!
 //! Pure state machine: every input returns the messages to send, and time comes in as an argument
 //! ([`DaveCoordinator::on_timer`]), so it is tested without network or clock.
@@ -49,6 +50,8 @@ use crate::ids::{dave_call_id, dave_participant_id, device_id_from_dave};
 
 /// Stalls a joiner may be part of before it is refused (#1555).
 const STRIKE_LIMIT: u8 = 2;
+/// Most devices with strikes a call remembers; beyond it the one whose strikes expire first goes.
+const MAX_SUSPECTS: usize = 256;
 
 /// DAVE membership state of one call.
 pub struct DaveCoordinator {
@@ -74,10 +77,9 @@ pub struct DaveCoordinator {
   last_transition_id: u16,
   /// The announced transition waiting for its members to be ready.
   maybe_execution: Option<Execution>,
-  /// Joiners of stalled proposals, by how many stalls they were part of; cleared once they are in.
-  strikes: HashMap<DeviceId, u8>,
-  /// Joiners refused after [`STRIKE_LIMIT`] stalls, until their connection goes.
-  refused: BTreeSet<DeviceId>,
+  /// Joiners of stalled proposals (at most [`MAX_SUSPECTS`]), kept across their reconnects until
+  /// the refusal window after their last stall passed; cleared once they are in.
+  suspects: HashMap<DeviceId, Suspect>,
   /// Members told to start over whose new key package hasn't arrived; joiners with a strike wait
   /// for them, at most until `maybe_restart_deadline`.
   restarting: BTreeSet<DeviceId>,
@@ -91,6 +93,23 @@ pub struct DaveDeadlines {
   pub transition: Duration,
   /// How long proposals wait for a commit before the group starts over (#1555).
   pub commit: Duration,
+  /// How long a joiner's strikes count after its last stall, and so how long a refused joiner
+  /// stays refused, reconnects included.
+  pub refusal: Duration,
+}
+
+/// A joiner whose proposals stalled.
+#[derive(Debug, Clone, Copy)]
+struct Suspect {
+  strikes: u8,
+  /// When the strikes are forgotten (and a refusal lifts).
+  until: Instant,
+}
+
+impl Suspect {
+  fn is_refused(self) -> bool {
+    self.strikes >= STRIKE_LIMIT
+  }
 }
 
 /// One message to deliver over a participant's signaling stream.
@@ -134,8 +153,6 @@ pub enum DaveCoordinatorError {
   InvalidParticipantId(#[from] IdError),
   #[error("participant {0:?} already has a key package in the group or queue")]
   AlreadyKnown(DeviceId),
-  #[error("participant {0:?} was refused after its proposals stalled twice; it may join again")]
-  Refused(DeviceId),
 }
 
 impl DaveCoordinator {
@@ -157,8 +174,7 @@ impl DaveCoordinator {
       transition_modes: HashMap::new(),
       last_transition_id: 0,
       maybe_execution: None,
-      strikes: HashMap::new(),
-      refused: BTreeSet::new(),
+      suspects: HashMap::new(),
       restarting: BTreeSet::new(),
       maybe_restart_deadline: None,
     })
@@ -170,6 +186,7 @@ impl DaveCoordinator {
   }
 
   /// A participant's key package arrived; `transition_mode` is what its connection's `join` said.
+  /// A refused device hears so again instead.
   pub fn on_key_package(
     &mut self,
     participant_id: DeviceId,
@@ -185,8 +202,17 @@ impl DaveCoordinator {
         actual,
       });
     }
-    if self.refused.contains(&participant_id) {
-      return Err(DaveCoordinatorError::Refused(participant_id));
+    self.forget_expired_suspects(now);
+    if let Some(suspect) = self
+      .suspects
+      .get(&participant_id)
+      .filter(|suspect| suspect.is_refused())
+    {
+      debug!(?participant_id, "key package of a refused device");
+      return Ok(vec![refusal(
+        participant_id,
+        suspect.until.saturating_duration_since(now),
+      )]);
     }
     if self.is_known(participant_id) {
       return Err(DaveCoordinatorError::AlreadyKnown(participant_id));
@@ -224,9 +250,9 @@ impl DaveCoordinator {
       return Vec::new();
     };
     // The joiners are in and the committer works: whatever stalled before is behind them.
-    self.strikes.remove(&participant_id);
+    self.suspects.remove(&participant_id);
     for (joiner, _) in &transition.joiners {
-      self.strikes.remove(joiner);
+      self.suspects.remove(joiner);
     }
     let mut outbound = self.apply(transition, commit, maybe_welcome, now);
     outbound.extend(self.start_transition(now));
@@ -262,6 +288,7 @@ impl DaveCoordinator {
   /// many members weren't ready; starts the group over when proposals found no committer in time
   /// (#1555); and starts the proposals that waited.
   pub fn on_timer(&mut self, now: Instant) -> Vec<Outbound> {
+    self.forget_expired_suspects(now);
     let mut outbound = Vec::new();
     if self
       .maybe_execution
@@ -289,14 +316,12 @@ impl DaveCoordinator {
     outbound
   }
 
-  /// A participant left the call (or its connection dropped). A refused joiner may try again with
-  /// its next connection.
+  /// A participant left the call (or its connection dropped). Its strikes stay: a reconnect
+  /// doesn't buy a joiner nobody accepts two more restarts.
   pub fn on_leave(&mut self, participant_id: DeviceId, now: Instant) -> Vec<Outbound> {
     self.waiting.retain(|(id, _)| *id != participant_id);
     self.key_bindings.remove(&participant_id);
     self.transition_modes.remove(&participant_id);
-    self.strikes.remove(&participant_id);
-    self.refused.remove(&participant_id);
     self.restarting.remove(&participant_id);
     let mut outbound = Vec::new();
     if let Some(execution) = &mut self.maybe_execution {
@@ -360,7 +385,7 @@ impl DaveCoordinator {
     let founder_index = self
       .waiting
       .iter()
-      .position(|(id, _)| !self.strikes.contains_key(id))
+      .position(|(id, _)| !self.suspects.contains_key(id))
       .unwrap_or(0);
     let founder = self.waiting.remove(founder_index);
     let joiners = self.take_batch();
@@ -379,10 +404,10 @@ impl DaveCoordinator {
   /// none, one with a strike, alone, so a stall is its own (#1555). Those wait while members that
   /// start over are still expected.
   fn take_batch(&mut self) -> Vec<(DeviceId, Vec<u8>)> {
-    let strikes = &self.strikes;
+    let known = &self.suspects;
     let (clean, mut suspects): (Vec<_>, Vec<_>) = std::mem::take(&mut self.waiting)
       .into_iter()
-      .partition(|(id, _)| !strikes.contains_key(id));
+      .partition(|(id, _)| !known.contains_key(id));
     if !clean.is_empty() || suspects.is_empty() || !self.restarting.is_empty() {
       self.waiting = suspects;
       return clean;
@@ -449,28 +474,24 @@ impl DaveCoordinator {
   /// hostile or refusing a joiner it can't verify. Their proposals can't be taken back, so the
   /// group starts over: members get the external sender again and answer with fresh sessions,
   /// which repairs a broken one; the joiners keep their key packages with a strike, and are
-  /// refused at the second. A count only goes into the log.
+  /// refused (and told) at the second. A count only goes into the log.
   fn restart(&mut self, now: Instant) -> Vec<Outbound> {
     let Some(transition) = self.maybe_transition.take() else {
       return Vec::new();
     };
     let mut requeued = Vec::new();
-    let mut refused = 0_usize;
+    let mut outbound = Vec::new();
     for (joiner, key_package) in transition.joiners {
-      if transition.departed_joiners.contains(&joiner) {
-        continue;
-      }
-      let strikes = self.strikes.entry(joiner).or_insert(0);
-      *strikes = strikes.saturating_add(1);
-      if *strikes >= STRIKE_LIMIT {
-        self.strikes.remove(&joiner);
+      // A joiner that left (and maybe came back on a new connection) still stalled them.
+      if self.strike(joiner, now).is_refused() {
+        self.waiting.retain(|(id, _)| *id != joiner);
         self.key_bindings.remove(&joiner);
-        self.refused.insert(joiner);
-        refused += 1;
-      } else {
+        outbound.push(refusal(joiner, self.deadlines.refusal));
+      } else if !transition.departed_joiners.contains(&joiner) {
         requeued.push((joiner, key_package));
       }
     }
+    let refused = outbound.len();
     let members: Vec<DeviceId> = self.members().collect();
     warn!(
       call_id = %self.call_id,
@@ -488,15 +509,40 @@ impl DaveCoordinator {
     self.waiting = requeued;
     self.restarting = members.iter().copied().collect();
     self.maybe_restart_deadline = Some(now + self.deadlines.commit);
-    members
-      .into_iter()
-      .map(|recipient| Outbound {
-        recipient,
-        event: CallEvent::DaveExternalSender {
-          package: Base64Bytes::new(self.external_sender_package.clone()),
-        },
-      })
-      .collect()
+    outbound.extend(members.into_iter().map(|recipient| Outbound {
+      recipient,
+      event: CallEvent::DaveExternalSender {
+        package: Base64Bytes::new(self.external_sender_package.clone()),
+      },
+    }));
+    outbound
+  }
+
+  /// Gives a joiner of stalled proposals a strike that counts for the refusal window. A full map
+  /// makes room by forgetting the suspect whose strikes would expire first.
+  fn strike(&mut self, joiner: DeviceId, now: Instant) -> Suspect {
+    if !self.suspects.contains_key(&joiner) && self.suspects.len() >= MAX_SUSPECTS {
+      let maybe_oldest = self
+        .suspects
+        .iter()
+        .min_by_key(|(_, suspect)| suspect.until)
+        .map(|(id, _)| *id);
+      if let Some(oldest) = maybe_oldest {
+        self.suspects.remove(&oldest);
+      }
+    }
+    let until = now + self.deadlines.refusal;
+    let suspect = self
+      .suspects
+      .entry(joiner)
+      .or_insert(Suspect { strikes: 0, until });
+    suspect.strikes = suspect.strikes.saturating_add(1);
+    suspect.until = until;
+    *suspect
+  }
+
+  fn forget_expired_suspects(&mut self, now: Instant) {
+    self.suspects.retain(|_, suspect| now < suspect.until);
   }
 
   fn apply(
@@ -704,6 +750,18 @@ impl DaveCoordinator {
   }
 }
 
+/// Tells a refused device so, and when a key package may be taken again.
+fn refusal(recipient: DeviceId, retry_after: Duration) -> Outbound {
+  // Rounded up: a retry at the given second must not be refused again.
+  let secs = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
+  Outbound {
+    recipient,
+    event: CallEvent::DaveRefused {
+      retry_after_secs: u32::try_from(secs).unwrap_or(u32::MAX),
+    },
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -715,6 +773,7 @@ mod tests {
   const FRAME: &[u8] = &[0x78, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
   const DEADLINE: Duration = Duration::from_secs(2);
   const COMMIT_DEADLINE: Duration = Duration::from_secs(10);
+  const REFUSAL_WINDOW: Duration = Duration::from_secs(300);
 
   mod membership {
     use super::*;
@@ -1149,15 +1208,11 @@ mod tests {
         assert_eq!(harness.restarts_to(id), 2, "member {id}");
       }
       harness.assert_all_exchange_frames(&[1, 2, 3]);
-      let key_package = harness.new_client(4).create_key_package().unwrap();
-      let refused = harness.coordinator.on_key_package(
-        device(4),
-        key_package,
-        None,
-        DaveTransitionMode::Coordinated,
-        harness.now,
+      assert_eq!(
+        harness.refusals_to(4),
+        vec![300],
+        "the refused joiner is told, with the window"
       );
-      assert!(matches!(refused, Err(DaveCoordinatorError::Refused(_))));
 
       harness.advance(COMMIT_DEADLINE);
       assert_eq!(harness.restarts_to(1), 2, "no further restarts");
@@ -1182,11 +1237,75 @@ mod tests {
       harness.advance(COMMIT_DEADLINE);
 
       assert_eq!(harness.restarts_to(1), 2);
-      assert!(harness.coordinator.refused.contains(&device(3)));
+      assert_eq!(harness.refusals_to(3).len(), 1);
       assert!(harness.coordinator.maybe_transition.is_none());
-      // A new connection may try again.
-      harness.leave(3);
-      assert!(harness.coordinator.refused.is_empty());
+    }
+
+    /// A refused device that reconnects is refused again at once, with the time left, and costs
+    /// nobody a restart; once the window passed it is proposed again (and refused after two more
+    /// stalls).
+    #[test]
+    fn a_refused_device_that_reconnects_restarts_nothing_within_the_window() {
+      let mut harness = Harness::new();
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      harness.unverifiable.insert(device(4));
+      harness.join(4);
+      harness.advance(COMMIT_DEADLINE);
+      harness.advance(COMMIT_DEADLINE);
+      assert_eq!(harness.restarts_to(1), 2);
+
+      harness.advance(Duration::from_secs(60));
+      harness.leave(4);
+      harness.join(4);
+      harness.advance(COMMIT_DEADLINE);
+      harness.advance(COMMIT_DEADLINE);
+
+      assert_eq!(harness.restarts_to(1), 2, "no restart within the window");
+      // Refused at 20 s, back at 80 s.
+      assert_eq!(*harness.refusals_to(4).last().unwrap(), 300 - 60);
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
+
+      harness.advance(REFUSAL_WINDOW);
+      harness.leave(4);
+      harness.join(4);
+      harness.advance(COMMIT_DEADLINE);
+      assert_eq!(harness.restarts_to(1), 3, "proposed again after the window");
+    }
+
+    /// A strike survives a reconnect: the joiner's next stall refuses it.
+    #[test]
+    fn a_strike_outlasts_a_reconnect() {
+      let mut harness = Harness::new();
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      harness.unverifiable.insert(device(4));
+      harness.join(4);
+      harness.advance(COMMIT_DEADLINE);
+      harness.leave(4);
+      harness.join(4);
+      harness.advance(COMMIT_DEADLINE);
+
+      assert_eq!(harness.restarts_to(1), 2);
+      assert_eq!(harness.refusals_to(4), vec![300]);
+    }
+
+    /// The suspects a call remembers are bounded; the one whose strikes expire first goes.
+    #[test]
+    fn suspects_are_bounded() {
+      let mut harness = Harness::new();
+      let now = harness.now;
+      for raw in 0..MAX_SUSPECTS + 10 {
+        let at = now + Duration::from_millis(u64::try_from(raw).unwrap());
+        harness
+          .coordinator
+          .strike(device(1000 + u64::try_from(raw).unwrap()), at);
+      }
+      assert_eq!(harness.coordinator.suspects.len(), MAX_SUSPECTS);
+      assert!(!harness.coordinator.suspects.contains_key(&device(1000)));
+      assert!(harness.coordinator.suspects.contains_key(&device(1000 + 265)));
     }
 
     /// A commit that was on its way when the group started over arrives before the member's new
@@ -1418,6 +1537,7 @@ mod tests {
           DaveDeadlines {
             transition: DEADLINE,
             commit: COMMIT_DEADLINE,
+            refusal: REFUSAL_WINDOW,
           },
         )
         .unwrap(),
@@ -1605,6 +1725,7 @@ mod tests {
             );
             None
           },
+          CallEvent::DaveRefused { .. } => None,
           CallEvent::DaveExternalSender { .. } => {
             // The group starts over: a fresh session answers, like the engine.
             if !self.ignores_restart.contains(&recipient) {
@@ -1649,6 +1770,19 @@ mod tests {
         )
         .unwrap();
       self.queue.extend(outbound);
+    }
+
+    fn refusals_to(&self, id: u64) -> Vec<u32> {
+      self
+        .delivered
+        .iter()
+        .filter_map(|outbound| match outbound.event {
+          CallEvent::DaveRefused { retry_after_secs } if outbound.recipient == device(id) => {
+            Some(retry_after_secs)
+          },
+          _ => None,
+        })
+        .collect()
     }
 
     fn restarts_to(&self, id: u64) -> usize {

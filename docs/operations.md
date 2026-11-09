@@ -380,8 +380,9 @@ the server itself is down.
 - If no member commits a membership change within `TEAMCRAFT_SFU_DAVE_COMMIT_DEADLINE_SECS`
   (default 10), the SFU starts the call's DAVE group over and logs `no member committed the DAVE
   proposals in time; starting the group over` with counts (docs/e2ee.md §8, #1555). Members hear a
-  short gap; a joiner whose proposals stall twice is refused until it reconnects. Repeated lines
-  for one call point at a broken or hostile client.
+  short gap; a joiner whose proposals stall twice is refused, and told so, for
+  `TEAMCRAFT_SFU_DAVE_REFUSAL_WINDOW_SECS` (default 300), reconnects included. Repeated lines
+  for one call point at a broken or hostile client, or a device the others can't verify.
 - The SFU reports its whole call roster to the server at start and every
   `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS` (default 30); the server drops participants the SFU no
   longer has (after `[calls] roster_grace_secs`, default 60, while the SFU is fresh from a restart)

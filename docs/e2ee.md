@@ -4441,13 +4441,25 @@ SFU starts the group over when no commit arrived within `TEAMCRAFT_SFU_DAVE_COMM
 - The joiners of the stalled proposals keep their key packages, with a strike. A device with a
   strike never founds the new group while one without can, and is proposed alone, after every
   member that started over came back (or one deadline passed), so a further stall is its own. At
-  its second strike it is refused (`refused`, error `invalid_key_package` to a later key package)
-  until its connection goes; a joiner that gets in loses its strikes.
+  its second strike it is refused and told so: `dave_refused` with `retry_after_secs`. Strikes and
+  refusals belong to the device, not its connection: they last
+  `TEAMCRAFT_SFU_DAVE_REFUSAL_WINDOW_SECS` (default 300) after the last stall, reconnects
+  included, so a device nobody accepts costs the call two restarts per window, not per reconnect.
+  A key package of a refused device within the window is answered with `dave_refused` (the time
+  left), and restarts nothing. A joiner that gets in loses its strikes. A call remembers at most
+  256 such devices; beyond that the one whose strikes expire first goes.
+- The refused device stays in the call without media keys, and its user sees why: "Your device
+  couldn't be added to the call's encryption", with Leave, and Try again once the window passed
+  (web and desktop; the Android app says when calling back may work). An SFU that never says so
+  (an older one, a lost message) is covered by the engine's own safety net: with others in the
+  call, a key package that brings no secured media within 60 s (`ENCRYPTION_SETUP_TIMEOUT`, above
+  the longest wait the SFU allows a joiner with one strike) shows the same failure, with no wait.
+  Alone in a call nothing counts: nobody could add the device.
 - A commit sent before the restart can't be taken for one of the new group: a member's signaling
   stream is ordered, so it reaches the SFU before that member's new key package, while the member
   isn't a committer of anything.
 
-Each joiner thus costs the call at most two restarts, each a gap of a round trip or two in the
+Each joiner thus costs the call at most two restarts per refusal window, each a gap of a round trip or two in the
 members' media; the SFU logs counts only. The SFU learns nothing new and gains no power: it could
 always drop media or force rejoins, and the new group is built with the same checks (expected
 participants, key bindings, trusted roster) as the first. One hostile member that is the only

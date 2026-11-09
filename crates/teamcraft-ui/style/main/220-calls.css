@@ -1395,6 +1395,31 @@
   margin-left: auto;
 }
 
+.call-encryption-failed {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 8px 20px 0;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--call-notice-bg);
+  color: var(--call-notice-text);
+  font-size: var(--text-sm);
+}
+
+.call-encryption-failed p {
+  flex: 1;
+  min-width: 12rem;
+  margin: 0;
+}
+
+.call-encryption-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
 .prejoin-notetaker {
   margin: 8px 0 0;
 }
