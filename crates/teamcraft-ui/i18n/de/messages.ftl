@@ -59,11 +59,11 @@ thread-replies-divider = Antworten
 
 ## Einrichtung der Schlüssel
 message-seen-by = Gesehen von { $names }
-typing-one = { $name } schreibt …
-typing-two = { $first } und { $second } schreiben …
-typing-several = Mehrere Personen schreiben …
+typing-one = { $name } schreibt
+typing-two = { $first } und { $second } schreiben
+typing-several = Mehrere Personen schreiben
 # In der Chatliste und unter dem Namen einer Direktnachricht, solange die andere Person schreibt.
-typing-direct = schreibt …
+typing-direct = schreibt
 
 # ---- Meetings ----
 composer-confirm-channel = Diese Nachricht benachrichtigt alle in dieser Unterhaltung ({ $count } Personen). Trotzdem senden?

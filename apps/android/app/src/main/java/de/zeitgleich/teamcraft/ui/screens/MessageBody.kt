@@ -56,6 +56,7 @@ import uniffi.teamcraft_ffi.MarkupBlock
 import uniffi.teamcraft_ffi.MarkupLine
 import uniffi.teamcraft_ffi.MarkupListKind
 import uniffi.teamcraft_ffi.isOpenableLink
+import uniffi.teamcraft_ffi.jumboEmojiScale
 import uniffi.teamcraft_ffi.messageMarkup
 import kotlin.math.roundToInt
 
@@ -81,12 +82,20 @@ fun MessageBody(
   val permalinkLabel = stringResource(R.string.message_link_label)
   // bodyLarge with chat-style tracking: the scale's 0.5 sp reads airy in a bubble.
   val bodyStyle = MaterialTheme.typography.bodyLarge.copy(color = textColor, letterSpacing = BODY_TRACKING)
+  // Only 1-3 emoji: drawn larger (jumbomoji, #1603); the core decides, as on web, desktop and iOS.
+  // sp keeps following the user's font scale.
+  val jumbo = remember(body) { jumboEmojiScale(body) }
+  val paragraphStyle = if (jumbo > 1f) {
+    bodyStyle.copy(fontSize = bodyStyle.fontSize * jumbo, lineHeight = bodyStyle.fontSize * jumbo * JUMBO_LINE_HEIGHT)
+  } else {
+    bodyStyle
+  }
   Column(modifier, verticalArrangement = Arrangement.spacedBy(BLOCK_GAP)) {
     for (block in blocks) {
       when (block) {
         is MarkupBlock.Paragraph -> Text(
           remember(block, colors, names) { annotatedLines(block.lines, colors, names, links, permalinkLabel) },
-          style = bodyStyle,
+          style = paragraphStyle,
         )
         is MarkupBlock.Heading -> Text(
           remember(block, colors, names) { annotatedLine(block.line, colors, names, links, permalinkLabel) },
@@ -243,6 +252,9 @@ private fun headingStyle(level: Int): TextStyle = when (level) {
 
 private val BLOCK_GAP = 6.dp
 private val BODY_TRACKING = 0.15.sp
+
+/** Line height of jumbomoji as a multiple of their font size. */
+private const val JUMBO_LINE_HEIGHT = 1.2f
 private val QUOTE_BAR = 3.dp
 private val CODE_CORNER = 8.dp
 /** Fades out the left and right edge of a sideways scroller while there is more content beyond it. */

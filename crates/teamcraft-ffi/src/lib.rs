@@ -1393,6 +1393,14 @@ pub fn emoji_convert(text: String) -> String {
   teamcraft_client_api::emoji::convert(&text)
 }
 
+/// How much larger than body text a message of only 1-3 emoji is drawn (`2.5` for one), or `1.0`
+/// for any other text (jumbomoji, #1603). The same check as on web and desktop.
+#[uniffi::export]
+pub fn jumbo_emoji_scale(text: String) -> f32 {
+  teamcraft_client_api::emoji::jumbo_emoji_count(&text)
+    .map_or(1.0, teamcraft_client_api::emoji::jumbo_emoji_scale)
+}
+
 /// The sign-in screen's brand (docs/branding.md §5) from the server's `GET /api/v1/brand` answer,
 /// checked like on every platform: image URLs only of the brand endpoint on `server_url`, https
 /// links only. `None` for an unusable answer (the app shows its own name).
