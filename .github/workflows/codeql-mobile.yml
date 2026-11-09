@@ -150,10 +150,8 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: manual
           queries: security-extended
-          # Agent skills and settings, partly third-party code copied as published; not shipped.
-          config: |
-            paths-ignore:
-              - .claude
+          # Excluded paths and why: .github/codeql/codeql-config.yml.
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Build the Kotlin app (both flavors)
         if: matrix.build == 'android'
