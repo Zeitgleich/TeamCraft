@@ -24,6 +24,8 @@ use teamcraft_sfu::server::{CALL_PATH, Sfu};
 use tokio::net::UdpSocket;
 use wtransport::Identity;
 
+use crate::common::secured::wait_for_same_epoch;
+
 const CALL_ID: u64 = 41;
 const ALICE: u64 = 1;
 const BOB: u64 = 2;
@@ -73,11 +75,7 @@ async fn old_socket_unusable_after_a_change_moves_to_a_new_socket_without_rejoin
   let relay = Relay::start(sfu_port).await;
   let mut alice = join(relay.port(), hash, ALICE, None).await;
   let mut bob = join(sfu_port, hash, BOB, None).await;
-  wait_for(&mut alice, |event| {
-    matches!(event, CallEngineEvent::Secured { .. })
-  })
-  .await;
-  wait_for(&mut bob, |event| matches!(event, CallEngineEvent::Secured { .. })).await;
+  wait_for_same_epoch(&mut alice, &mut bob).await;
 
   // The new network can't carry the old socket's packets (its interface is gone).
   relay.cut_off_client();
@@ -93,6 +91,7 @@ async fn old_socket_unusable_after_a_change_moves_to_a_new_socket_without_rejoin
         CallEngineEvent::Reconnecting
           | CallEngineEvent::ParticipantReconnecting(_)
           | CallEngineEvent::ParticipantLeft(_)
+          | CallEngineEvent::Secured { .. }
       ),
       "{event:?}"
     );
@@ -103,9 +102,8 @@ async fn old_socket_unusable_after_a_change_moves_to_a_new_socket_without_rejoin
     "{}",
     relay.downstream_after_cut_off()
   );
-  let alice_stats = alice.leave().await.unwrap();
-  let bob_stats = bob.leave().await.unwrap();
-  assert_eq!(alice_stats.maybe_privacy_code, bob_stats.maybe_privacy_code);
+  alice.leave().await.unwrap();
+  bob.leave().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -128,20 +126,16 @@ async fn network_gone_after_a_change_rejoins_on_a_fresh_ticket() {
   alice.network_changed();
   wait_for(&mut alice, |event| *event == CallEngineEvent::Reconnecting).await;
   wait_for(&mut alice, |event| *event == CallEngineEvent::Reconnected).await;
-  wait_for(&mut alice, |event| {
-    matches!(event, CallEngineEvent::Secured { .. })
-  })
-  .await;
   assert_eq!(tickets.issued.load(Ordering::Relaxed), 1);
   // Bob stays in the call with Alice; the group re-keyed.
-  let bob_events = collect(&mut bob, Duration::from_secs(1)).await;
+  let mut bob_events = wait_for_same_epoch(&mut alice, &mut bob).await;
+  bob_events.extend(collect(&mut bob, Duration::from_secs(1)).await);
   assert!(
     !bob_events.contains(&CallEngineEvent::ParticipantLeft(id_of::<DeviceId>(ALICE))),
     "{bob_events:?}"
   );
-  let alice_stats = alice.leave().await.unwrap();
-  let bob_stats = bob.leave().await.unwrap();
-  assert_eq!(alice_stats.maybe_privacy_code, bob_stats.maybe_privacy_code);
+  alice.leave().await.unwrap();
+  bob.leave().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

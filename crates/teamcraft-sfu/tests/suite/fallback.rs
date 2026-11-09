@@ -61,6 +61,8 @@ const BOB: u64 = 2;
 const FALLBACK_AFTER: Duration = Duration::from_millis(500);
 const CALL_DURATION: Duration = Duration::from_secs(4);
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+/// One audio frame: what the clients send of their test tone.
+const AUDIO_FRAME: Duration = Duration::from_millis(20);
 /// Starts every video frame in these tests. DAVE must keep it from the SFU and the wire.
 const PLAINTEXT_MARKER: &[u8; 16] = b"PLAINTEXT-MARKER";
 const VIDEO_FRAME_BYTES: usize = 800;
@@ -793,10 +795,15 @@ mod slow_reader {
   /// Both ends' buffers are pinned small, so the pipe holds a few KiB whatever the kernel would
   /// autotune: the stall is reached after a bounded number of pings, not after a wall-clock
   /// deadline that a loaded runner can miss. The test waits for the drop itself.
+  ///
+  /// The write timeout has to be shorter than the kernel's zero-window probes, which come at least
+  /// 200 ms apart (#1556). Pongs are tiny, and a buffer that is full of them still takes a few more
+  /// bytes with each probe. Every write then finishes within one probe interval: with a longer
+  /// timeout hardly any ran into it, and the drop took from seconds to over two minutes.
   #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
   async fn a_client_that_stops_reading_is_dropped() {
     let mut config = SfuConfig::default();
-    config.fallback.write_timeout = Duration::from_millis(500);
+    config.fallback.write_timeout = Duration::from_millis(100);
     config.fallback.socket_send_buffer_bytes = 4096;
     config.reconnect_grace = Duration::ZERO;
     let sfu = start_sfu(config).await;
@@ -1338,18 +1345,33 @@ struct CallReport {
   video_latencies: Vec<Duration>,
   is_marker_seen: bool,
   was_secured: bool,
+  /// Audio frames of the part of the call that both were in for sure, see [`Self::heard_enough`].
+  frames_while_both_in: u64,
 }
 
 impl CallReport {
   fn assert_media_flowed(&self) {
     assert!(self.was_secured, "DAVE keys were not agreed: {self:?}");
-    assert!(self.alice_audio_received > self.bob_audio_sent / 2, "{self:?}");
-    assert!(self.bob_audio_received > self.alice_audio_sent / 2, "{self:?}");
+    assert!(
+      self.heard_enough(self.alice_audio_received, self.bob_audio_sent),
+      "{self:?}"
+    );
+    assert!(
+      self.heard_enough(self.bob_audio_received, self.alice_audio_sent),
+      "{self:?}"
+    );
     assert!(self.video_frames_sent > 10, "{self:?}");
     assert!(
       self.video_frames_received > self.video_frames_sent / 2,
       "{self:?}"
     );
+  }
+
+  /// Over half of what was sent while both were in the call. `sent` counts from the sender's own
+  /// join, and a loaded runner can take seconds to bring the other one in after it: in a call that
+  /// took 15 s instead of 8 s, Bob had sent twice what Alice was there to hear (#1556).
+  fn heard_enough(&self, received: u64, sent: u64) -> bool {
+    received > sent.min(self.frames_while_both_in) / 2
   }
 
   fn summary(&self) -> String {
@@ -1623,7 +1645,10 @@ async fn run_call_from(
   duration: Duration,
   is_secured: bool,
 ) -> CallReport {
-  let mut report = CallReport::default();
+  let mut report = CallReport {
+    frames_while_both_in: (duration.as_millis() / AUDIO_FRAME.as_millis()) as u64,
+    ..CallReport::default()
+  };
   let layers = vec![VideoLayerInfo {
     layer: 0,
     width: 640,

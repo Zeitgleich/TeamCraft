@@ -352,6 +352,15 @@ impl SendSideEstimator {
     self.maybe_demand_bps = maybe_demand_bps;
   }
 
+  /// The packets sent so far left on another path (a session moved to another connection, #1309):
+  /// their feedback says nothing about the path from now on. What was still queued on the old
+  /// connection is lost or arrives after the new path's packets overtook it, and is reported as
+  /// lost either way; taken for the new path's loss, that cut a call's camera off right after the
+  /// move (#1556). Call it with [`Self::measure_afresh`].
+  pub fn forget_sent(&mut self) {
+    self.sent.clear();
+  }
+
   /// The sender starts sending far more than so far (a camera in a call that sent only sound):
   /// what the estimate learned from the smaller traffic says little about the path. It grew only
   /// as far as that traffic let it, and one lossy or jittery moment cut it to what the sound got
@@ -956,6 +965,39 @@ mod tests {
       assert!(before > BweConfig::default().start_bps);
       sim.estimator.measure_afresh();
       assert_eq!(sim.estimator.estimate_bps(), before);
+    }
+
+    /// Issue #1556: right after a move to another path, the feedback on what was still queued on
+    /// the old one reports it lost. That is not loss of the new path.
+    #[test]
+    fn what_was_sent_on_the_old_path_does_not_count_after_a_path_change() {
+      let start = Instant::now();
+      let mut estimator = SendSideEstimator::new(BweConfig::default());
+      let old_path: Vec<TransportSeq> = (0..10u32)
+        .map(|index| estimator.on_send(100, start + Duration::from_millis(u64::from(index) * 20)))
+        .collect();
+      let moved_at = start + Duration::from_millis(200);
+      estimator.forget_sent();
+      estimator.measure_afresh();
+      let first_new = estimator.on_send(100, moved_at);
+      assert_eq!(first_new.0, old_path[9].0.wrapping_add(1), "numbered on");
+
+      // The old path's packets went missing, the new path's first one arrived.
+      let mut arrivals_us = vec![None; old_path.len()];
+      arrivals_us.push(Some(210_000));
+      let feedback = TransportFeedback {
+        base_seq: old_path[0].0,
+        arrivals_us,
+      };
+      let now = moved_at + Duration::from_millis(100);
+      let estimate = estimator.on_feedback(&feedback, now, start);
+
+      assert!(
+        estimator.loss_ratio() < f64::EPSILON,
+        "{}",
+        estimator.loss_ratio()
+      );
+      assert!(estimate >= BweConfig::default().start_bps, "{estimate}");
     }
   }
 
