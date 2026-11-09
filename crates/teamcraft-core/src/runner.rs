@@ -18,6 +18,7 @@ use crate::api::{ApiError, ServerApi};
 use crate::client::Client;
 use crate::client::files::BlobUpload;
 use crate::client::notify_sync_progress_during;
+use crate::clock::{rewound, sleep_ms_until};
 use crate::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor, NetworkChanges};
 use crate::downloads::{Downloads, Finished};
 use crate::pending_work::PendingWork;
@@ -256,7 +257,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     };
     // Never longer than a tick: after the wall clock went back, deadlines lie in the "future" by
     // the jump, and the tick notices the jump and moves them (robustness.md, "Time").
-    let until_ms = deadline.saturating_sub(now).clamp(0, millis(self.settings.tick));
+    let until_ms = sleep_ms_until(deadline, now, self.settings.tick);
     // A catch-up's backlogs and a first sync's older history: at once, but only after everything
     // the select below looks at first (commands, frames, network changes, transfers).
     let until_ms = if self.is_background_history_due() {
@@ -382,10 +383,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   async fn on_tick(&mut self) {
     let now = self.client.now_ms();
     self.connection.on_tick(now).await;
-    if self.next_tick_ms.saturating_sub(now) > millis(self.settings.tick) {
-      // The clock went back: the upkeep runs now, not after the jump.
-      self.next_tick_ms = now;
-    }
+    self.next_tick_ms = rewound(self.next_tick_ms, now, self.settings.tick);
     if now < self.next_tick_ms {
       // Woken for the connection only.
       return;
@@ -413,9 +411,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   async fn load_background_history(&mut self) {
     let now = self.client.now_ms();
     // The wall clock went back: the pause counts from now, not from the time before the jump.
-    if self.next_background_page_ms.saturating_sub(now) > millis(self.settings.tick) {
-      self.next_background_page_ms = now;
-    }
+    self.next_background_page_ms = rewound(self.next_background_page_ms, now, self.settings.tick);
     if !self.is_background_history_due() || now < self.next_background_page_ms {
       return;
     }
