@@ -10,6 +10,8 @@ import android.text.format.Formatter
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
@@ -37,6 +39,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -59,6 +62,7 @@ import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SmallFloatingActionButton
@@ -68,8 +72,8 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -86,8 +90,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -96,14 +102,16 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontStyle
@@ -113,18 +121,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import java.io.File
-import java.time.Instant
-import java.time.LocalDate
-import java.time.ZoneId
-import kotlin.math.roundToInt
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.first
 import de.zeitgleich.teamcraft.R
-import de.zeitgleich.teamcraft.ui.MessageLayout
-import de.zeitgleich.teamcraft.ui.MessageLayoutPrefs
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.FileInfo
@@ -134,63 +131,75 @@ import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.ReplyAttachmentPreview
 import de.zeitgleich.teamcraft.core.ReplyPreview
-import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.core.UnseenReactions
-import de.zeitgleich.teamcraft.ui.avatarColorOfHue
-import de.zeitgleich.teamcraft.ui.OlderState
-import de.zeitgleich.teamcraft.ui.DividerOnScreen
-import de.zeitgleich.teamcraft.ui.FeedItem
-import de.zeitgleich.teamcraft.ui.FeedScrollAction
-import de.zeitgleich.teamcraft.ui.FeedScrollEvent
-import de.zeitgleich.teamcraft.ui.FeedScrollState
-import de.zeitgleich.teamcraft.ui.FirstUnread
-import de.zeitgleich.teamcraft.ui.GapRequest
-import de.zeitgleich.teamcraft.ui.MainViewModel
-import de.zeitgleich.teamcraft.ui.PlacedGap
-import de.zeitgleich.teamcraft.ui.ServerHistory
-import de.zeitgleich.teamcraft.ui.gapEdge
-import de.zeitgleich.teamcraft.ui.gapToFill
-import de.zeitgleich.teamcraft.ui.MarkupColors
-import de.zeitgleich.teamcraft.ui.MentionNames
+import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.ui.AUTO_FETCH_SETTLE_MS
 import de.zeitgleich.teamcraft.ui.AnimationBadge
 import de.zeitgleich.teamcraft.ui.AnimationButton
 import de.zeitgleich.teamcraft.ui.AnimationRead
 import de.zeitgleich.teamcraft.ui.AnimationView
+import de.zeitgleich.teamcraft.ui.DividerOnScreen
+import de.zeitgleich.teamcraft.ui.FeedItem
 import de.zeitgleich.teamcraft.ui.FeedMotion
+import de.zeitgleich.teamcraft.ui.FeedScrollAction
+import de.zeitgleich.teamcraft.ui.FeedScrollEvent
+import de.zeitgleich.teamcraft.ui.FeedScrollState
+import de.zeitgleich.teamcraft.ui.FirstUnread
+import de.zeitgleich.teamcraft.ui.GapRequest
 import de.zeitgleich.teamcraft.ui.LocalFeedMotion
 import de.zeitgleich.teamcraft.ui.MAX_AUTO_ANIMATION_BYTES
+import de.zeitgleich.teamcraft.ui.MainViewModel
+import de.zeitgleich.teamcraft.ui.MarkupColors
 import de.zeitgleich.teamcraft.ui.MediaPrefs
+import de.zeitgleich.teamcraft.ui.MentionNames
+import de.zeitgleich.teamcraft.ui.MessageLayout
+import de.zeitgleich.teamcraft.ui.MessageLayoutPrefs
+import de.zeitgleich.teamcraft.ui.OlderState
 import de.zeitgleich.teamcraft.ui.PictureTarget
+import de.zeitgleich.teamcraft.ui.Pictures
+import de.zeitgleich.teamcraft.ui.PlacedGap
 import de.zeitgleich.teamcraft.ui.PlayChoice
+import de.zeitgleich.teamcraft.ui.ServerHistory
+import de.zeitgleich.teamcraft.ui.SourceAvatar
+import de.zeitgleich.teamcraft.ui.SystemLine
+import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
+import de.zeitgleich.teamcraft.ui.UploadPill
+import de.zeitgleich.teamcraft.ui.UserAvatar
 import de.zeitgleich.teamcraft.ui.animationFetchBudget
 import de.zeitgleich.teamcraft.ui.animationLabel
-import de.zeitgleich.teamcraft.ui.isAnimationType
-import de.zeitgleich.teamcraft.ui.isAppResumed
-import de.zeitgleich.teamcraft.ui.mayBeAnimated
-import de.zeitgleich.teamcraft.ui.rememberAnimation
-import de.zeitgleich.teamcraft.ui.rememberMotionReduced
-import de.zeitgleich.teamcraft.ui.wantsToMove
-import de.zeitgleich.teamcraft.ui.Pictures
-import de.zeitgleich.teamcraft.ui.SourceAvatar
-import de.zeitgleich.teamcraft.ui.UserAvatar
-import de.zeitgleich.teamcraft.ui.THUMBNAIL_DECODE_PX
+import de.zeitgleich.teamcraft.ui.avatarColorOfHue
 import de.zeitgleich.teamcraft.ui.bubbleCorners
 import de.zeitgleich.teamcraft.ui.dayShowsYear
 import de.zeitgleich.teamcraft.ui.decideFeedScroll
 import de.zeitgleich.teamcraft.ui.feedItems
+import de.zeitgleich.teamcraft.ui.gapEdge
+import de.zeitgleich.teamcraft.ui.gapToFill
+import de.zeitgleich.teamcraft.ui.isAnimationType
+import de.zeitgleich.teamcraft.ui.isAppResumed
 import de.zeitgleich.teamcraft.ui.isNearBottom
 import de.zeitgleich.teamcraft.ui.localizedText
+import de.zeitgleich.teamcraft.ui.mayBeAnimated
 import de.zeitgleich.teamcraft.ui.newerMessages
 import de.zeitgleich.teamcraft.ui.pinnedDay
 import de.zeitgleich.teamcraft.ui.reactionsInView
+import de.zeitgleich.teamcraft.ui.rememberAnimation
+import de.zeitgleich.teamcraft.ui.rememberMotionReduced
 import de.zeitgleich.teamcraft.ui.rememberThumbnail
 import de.zeitgleich.teamcraft.ui.rowOf
 import de.zeitgleich.teamcraft.ui.showsSenders
-import de.zeitgleich.teamcraft.ui.SystemLine
 import de.zeitgleich.teamcraft.ui.systemLine
-import de.zeitgleich.teamcraft.ui.thumbnailKey
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
+import de.zeitgleich.teamcraft.ui.thumbnailKey
+import de.zeitgleich.teamcraft.ui.wantsToMove
+import java.io.File
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import uniffi.teamcraft_ffi.AlbumLayout
 import uniffi.teamcraft_ffi.albumLayout
 import uniffi.teamcraft_ffi.isOpenableLink
@@ -225,9 +234,6 @@ private val BUBBLE_MAX_WIDTH = 520.dp
 
 /** The tallest an image preview gets; its width is the bubble's (#315, #704). */
 private val PREVIEW_MAX_HEIGHT = 340.dp
-
-/** From this size on, an upload's progress is told in bytes ("12 MB / 48 MB"), below in percent. */
-private const val LARGE_TRANSFER_BYTES = 1024L * 1024L
 
 /** Panoramas and tall screenshots are cut to these shapes (width over height) rather than shrunk to a line. */
 private const val MIN_PREVIEW_RATIO = 0.6f
@@ -1249,14 +1255,24 @@ private fun Bubble(
       maybeExtras?.maybeReply?.let { reply ->
         ReplyQuote(reply, message.conversation, snapshot, extras, colors, onOpenPicture, Modifier.padding(top = 2.dp).fillMaxWidth())
       }
+      // While the files go up, one control for all of them (Signal-style): a pill in the corner of
+      // the pictures (or the first video), or a row under documents.
+      val maybeUpload = if (isDeleted) null else UploadPill.of(files)
+      val hasMedia = !isDeleted && (images.isNotEmpty() || videos.isNotEmpty())
       if (images.isNotEmpty() && !isDeleted) {
         Box(Modifier.padding(top = if (showsName || maybeExtras?.maybeReply != null) 4.dp else 0.dp)) {
           if (images.size >= 2) ImageGrid(images, look.bubbleMax, onOpenFile, onLongPressImage) else ImagePreview(images.first(), look.bubbleMax, onOpenFile)
+          maybeUpload?.let { UploadControl(viewModel, files, it, colors, isOnMedia = true, Modifier.align(Alignment.TopStart)) }
         }
       }
       if (!isDeleted) {
-        videos.forEach { file ->
-          Box(Modifier.padding(top = 4.dp)) { VideoPreview(file, look.bubbleMax, onOpenFile) }
+        videos.forEachIndexed { index, file ->
+          Box(Modifier.padding(top = 4.dp)) {
+            VideoPreview(file, look.bubbleMax, onOpenFile)
+            if (index == 0 && images.isEmpty()) {
+              maybeUpload?.let { UploadControl(viewModel, files, it, colors, isOnMedia = true, Modifier.align(Alignment.TopStart)) }
+            }
+          }
         }
       }
       Column(textPadding.padding(top = if (look.isList) 2.dp else BUBBLE_TEXT_PADDING_V - BUBBLE_MEDIA_PADDING)) {
@@ -1280,12 +1296,10 @@ private fun Bubble(
           }
           maybeExtras?.maybeLinkPreview?.let { LinkPreviewCard(it, colors) }
         }
-        // Files still going up: one line for all of them (#1579), not a bare "Cancel" row per
-        // file; one that stopped keeps its own line with the reason and "Try again".
-        val uploading = files.filter { it.transfer.state == "uploading" }
-        if (uploading.size >= 2) UploadsLine(viewModel, uploading, colors) else uploading.forEach { UploadLine(viewModel, it, colors) }
-        files.filter { it.transfer.state == "upload_stalled" || it.transfer.state == "upload_failed" }.forEach { file ->
-          UploadLine(viewModel, file, colors)
+        if (!hasMedia) maybeUpload?.let { UploadControl(viewModel, files, it, colors, isOnMedia = false, Modifier.padding(top = 4.dp)) }
+        // A file that failed for good: the message went out without it.
+        if (!isDeleted && files.any { it.transfer.state == "upload_failed" }) {
+          Text(stringResource(R.string.file_failed), color = colors.content, style = MaterialTheme.typography.labelSmall)
         }
         when {
           // The time is next to the name; only markers and the own message's state are left.
@@ -1627,89 +1641,109 @@ private fun NotSentLine(viewModel: MainViewModel, message: Message) {
 }
 
 /**
- * An own file going up, as on desktop and web (#742): quiet while it goes up or retries by itself (a
- * small ring and cancel; how far, or "retrying", only for TalkBack); stopped: why, retry, cancel.
+ * The one control of a message's upload, as on desktop and web: a ring for all its files with a
+ * stop square that cancels them, and "Processing…" or "3.2 MB / 70 MB" next to it; "Try again" once
+ * it stopped. Over pictures a translucent pill in their corner, under documents a row in the bubble.
+ * The ring eases to each new value; with animations off in the system it jumps (Compose follows the
+ * animator duration scale).
  */
 @Composable
-private fun UploadLine(viewModel: MainViewModel, file: FileInfo, colors: BubbleColors) {
+private fun UploadControl(
+  viewModel: MainViewModel,
+  files: List<FileInfo>,
+  pill: UploadPill,
+  colors: BubbleColors,
+  isOnMedia: Boolean,
+  modifier: Modifier,
+) {
   val context = LocalContext.current
-  val cancel: () -> Unit = { viewModel.act(ChatActions.cancelUpload(file.conversation, file.message, file.fileId)) }
-  Row(verticalAlignment = Alignment.CenterVertically) {
-    when (file.transfer.state) {
-      "uploading" -> {
-        val transfer = file.transfer
-        val label = if (transfer.isRetrying) {
-          stringResource(R.string.file_upload_retrying)
-        } else if (transfer.totalBytes >= LARGE_TRANSFER_BYTES) {
-          "${Formatter.formatShortFileSize(context, transfer.doneBytes)} / ${Formatter.formatShortFileSize(context, transfer.totalBytes)}"
-        } else {
-          "${if (transfer.totalBytes > 0) transfer.doneBytes * 100 / transfer.totalBytes else 0} %"
+  val content = if (isOnMedia) Color.White else colors.content
+  val background = if (isOnMedia) Color.Black.copy(alpha = UPLOAD_PILL_SCRIM) else colors.content.copy(alpha = QUOTE_BACKGROUND_ALPHA)
+  val label = when (pill) {
+    UploadPill.Processing -> stringResource(R.string.file_upload_processing)
+    UploadPill.Retrying -> stringResource(R.string.file_upload_retrying)
+    is UploadPill.Sending -> stringResource(
+      R.string.file_upload_progress,
+      Formatter.formatShortFileSize(context, pill.doneBytes),
+      Formatter.formatShortFileSize(context, pill.totalBytes),
+    )
+    is UploadPill.Failed -> stringResource(if (pill.isStorageUnavailable) R.string.file_upload_storage_unavailable else R.string.file_upload_stalled)
+  }
+  Surface(color = background, contentColor = content, shape = CircleShape, modifier = modifier.padding(if (isOnMedia) 6.dp else 0.dp)) {
+    Row(
+      verticalAlignment = Alignment.CenterVertically,
+      modifier = Modifier.heightIn(min = 36.dp).padding(start = 2.dp, end = if (pill is UploadPill.Failed) 2.dp else 12.dp),
+    ) {
+      if (pill is UploadPill.Failed) {
+        Row(
+          verticalAlignment = Alignment.CenterVertically,
+          modifier = Modifier
+            .clip(CircleShape)
+            .clickable(role = Role.Button) { viewModel.act(ChatActions.retrySend(files.first().conversation, files.first().message)) }
+            .semantics { stateDescription = label }
+            .padding(start = 8.dp, end = 10.dp)
+            .heightIn(min = 32.dp),
+        ) {
+          Icon(painterResource(R.drawable.ic_arrow_upward), contentDescription = null, modifier = Modifier.size(18.dp))
+          Text(
+            stringResource(R.string.retry),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(start = 4.dp),
+          )
         }
-        val ring = Modifier.padding(start = 4.dp).size(16.dp).semantics { contentDescription = label }
-        val maybeProgress = transfer.maybeProgress
-        if (maybeProgress == null || transfer.isRetrying) {
-          CircularProgressIndicator(ring, color = colors.content, strokeWidth = 2.dp)
-        } else {
-          CircularProgressIndicator(progress = { maybeProgress }, modifier = ring, color = colors.content, strokeWidth = 2.dp)
+        IconButton(onClick = { viewModel.cancelUploads(files) }, modifier = Modifier.size(32.dp)) {
+          Icon(painterResource(R.drawable.ic_close), contentDescription = stringResource(R.string.file_cancel_upload), modifier = Modifier.size(16.dp))
         }
-        // A failed attempt says so at once, not only after the core gives up (#1355): a ring that
-        // keeps turning without a word reads as stuck.
-        // Which file it is, so the row doesn't read as a bare "Cancel".
+      } else {
+        UploadStopRing(pill.maybeFraction, content) { viewModel.cancelUploads(files) }
         Text(
-          if (transfer.isRetrying) label else file.fileName,
-          color = colors.content,
-          style = MaterialTheme.typography.labelSmall,
+          label,
+          style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
-          modifier = Modifier.padding(start = 6.dp).weight(1f, fill = false),
+          modifier = Modifier.padding(start = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
         )
-        TextButton(onClick = cancel) { Text(stringResource(R.string.file_cancel_upload), color = colors.content) }
       }
-      "upload_stalled" -> {
-        val reason = if (file.transfer.isStorageUnavailable) R.string.file_upload_storage_unavailable else R.string.file_upload_stalled
-        Text(
-          stringResource(reason),
-          color = colors.content,
-          style = MaterialTheme.typography.labelSmall,
-          modifier = Modifier.weight(1f, fill = false),
-        )
-        TextButton(onClick = { viewModel.act(ChatActions.retrySend(file.conversation, file.message)) }) {
-          Text(stringResource(R.string.retry), color = colors.content)
-        }
-        TextButton(onClick = cancel) { Text(stringResource(R.string.file_cancel_upload), color = colors.content) }
-      }
-      else -> Text(stringResource(R.string.file_failed), color = colors.content, style = MaterialTheme.typography.labelSmall)
     }
   }
 }
 
-/**
- * Several files of one message going up (#1579): how many, one ring for all of them, and "Cancel
- * all". How far they got is the bytes of all of them together.
- */
+/** The ring of an upload with a stop square in the middle; a tap cancels the message's upload. */
 @Composable
-private fun UploadsLine(viewModel: MainViewModel, files: List<FileInfo>, colors: BubbleColors) {
-  val doneBytes = files.sumOf { it.transfer.doneBytes }
-  val totalBytes = files.sumOf { it.transfer.totalBytes }
-  val text = pluralStringResource(R.plurals.file_uploads_running, files.size, files.size)
-  Row(verticalAlignment = Alignment.CenterVertically) {
-    val ring = Modifier.padding(start = 4.dp).size(16.dp)
-    if (totalBytes > 0) {
-      CircularProgressIndicator(progress = { doneBytes.toFloat() / totalBytes }, modifier = ring, color = colors.content, strokeWidth = 2.dp)
+private fun UploadStopRing(maybeFraction: Float?, color: Color, onCancel: () -> Unit) {
+  val cancelLabel = stringResource(R.string.file_cancel_upload)
+  Box(
+    contentAlignment = Alignment.Center,
+    modifier = Modifier
+      .size(32.dp)
+      .clip(CircleShape)
+      .clickable(role = Role.Button, onClick = onCancel)
+      .semantics { contentDescription = cancelLabel },
+  ) {
+    val ring = Modifier.size(26.dp)
+    if (maybeFraction == null) {
+      CircularProgressIndicator(ring, color = color, strokeWidth = 2.5.dp, trackColor = color.copy(alpha = UPLOAD_TRACK_ALPHA), strokeCap = StrokeCap.Round)
     } else {
-      CircularProgressIndicator(ring, color = colors.content, strokeWidth = 2.dp)
+      val shown by animateFloatAsState(maybeFraction, animationSpec = tween(UPLOAD_RING_MS), label = "upload ring")
+      CircularProgressIndicator(
+        progress = { shown },
+        modifier = ring,
+        color = color,
+        strokeWidth = 2.5.dp,
+        trackColor = color.copy(alpha = UPLOAD_TRACK_ALPHA),
+        strokeCap = StrokeCap.Round,
+        gapSize = 0.dp,
+      )
     }
-    Text(
-      text,
-      color = colors.content,
-      style = MaterialTheme.typography.labelSmall,
-      maxLines = 1,
-      overflow = TextOverflow.Ellipsis,
-      modifier = Modifier.padding(start = 6.dp).weight(1f, fill = false),
-    )
-    TextButton(onClick = { viewModel.cancelUploads(files) }) { Text(stringResource(R.string.file_cancel_uploads), color = colors.content) }
+    Box(Modifier.size(9.dp).background(color, RoundedCornerShape(2.dp)))
   }
 }
+
+/** The upload pill's shade over a picture, its ring's track, and how long the ring eases to a value. */
+private const val UPLOAD_PILL_SCRIM = 0.5f
+private const val UPLOAD_TRACK_ALPHA = 0.3f
+private const val UPLOAD_RING_MS = 300
 
 /**
  * The quoted message at the top of a reply's bubble: an accent bar, the author in the accent, one
@@ -1863,7 +1897,7 @@ private fun FileCard(file: FileInfo, colors: BubbleColors, onOpen: (FileInfo) ->
         Text(Formatter.formatShortFileSize(context, file.sizeBytes), style = MaterialTheme.typography.labelSmall, color = colors.muted)
       }
     }
-    file.transfer.maybeProgress?.let { progress ->
+    file.transfer.maybeProgress?.takeIf { file.transfer.state == "downloading" }?.let { progress ->
       LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().padding(top = 6.dp))
     }
     if (file.transfer.state == "failed") {
@@ -2023,11 +2057,11 @@ internal fun Thumbnail(file: FileInfo, contentScale: ContentScale) {
   }
 }
 
-/** The picture with an upload's or download's progress along its bottom edge. */
+/** The picture with a download's progress along its bottom edge (an upload's is the message's pill). */
 @Composable
 private fun BoxScope.TransferOverlay(file: FileInfo, picture: @Composable () -> Unit) {
   picture()
-  file.transfer.maybeProgress?.let { progress ->
+  file.transfer.maybeProgress?.takeIf { file.transfer.state == "downloading" }?.let { progress ->
     LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().align(Alignment.BottomCenter))
   }
 }
