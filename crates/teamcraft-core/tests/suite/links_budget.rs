@@ -10,7 +10,7 @@
 //! (`links::links_page`: messages newest first until the page is full); "after" is the core's read
 //! of its link index (`conversation_links`). The after runs go first, so the peak memory each adds
 //! is its own.
-#![cfg(feature = "ui")]
+#![cfg(all(feature = "ui", feature = "sealed-sqlite"))]
 #![allow(clippy::print_stderr, reason = "the numbers are what this test is for")]
 #![allow(clippy::unwrap_used)]
 
