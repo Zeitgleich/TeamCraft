@@ -385,6 +385,12 @@ struct MessageBodyView: View {
   let text: String
   let colors: MarkupColors
   let names: MentionNames
+  /// The body size in points, scaled with Dynamic Type; jumbomoji multiply it.
+  @ScaledMetric(relativeTo: .body) private var bodySize: CGFloat = 17
+
+  /// How much larger than body text this message is drawn: only 1-3 emoji get more than 1 (#1603).
+  /// The core decides, as on web, desktop and Android.
+  private var jumbo: CGFloat { CGFloat(jumboEmojiScale(text: text)) }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 6) {
@@ -399,7 +405,7 @@ struct MessageBodyView: View {
   private func blockView(_ block: MarkupBlock) -> some View {
     switch block {
     case .paragraph(let lines):
-      Text(styled(lines)).font(.app(.body))
+      Text(styled(lines)).font(jumbo > 1 ? .system(size: bodySize * jumbo) : .app(.body))
     case .heading(let level, let line):
       Text(styled([line])).font(headingFont(level))
         .accessibilityAddTraits(.isHeader)
