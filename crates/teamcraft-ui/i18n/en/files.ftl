@@ -67,6 +67,7 @@ file-cancel-upload = Cancel upload
 file-progress-percent = { $percent } %
 file-progress-bytes = { $done } / { $total }
 file-upload-retrying = Retrying…
+file-upload-processing = Processing…
 file-upload-failed = Upload failed
 file-upload-storage-unavailable = The file storage is unavailable right now. The file goes out by itself when it is back.
 file-upload-unreadable = The file could not be read any more. Attach it again.

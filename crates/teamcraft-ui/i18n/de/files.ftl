@@ -67,6 +67,7 @@ file-cancel-upload = Hochladen abbrechen
 file-progress-percent = { $percent } %
 file-progress-bytes = { $done } / { $total }
 file-upload-retrying = Wird erneut versucht …
+file-upload-processing = Wird vorbereitet…
 file-upload-failed = Hochladen fehlgeschlagen
 file-upload-storage-unavailable = Der Dateispeicher ist gerade nicht erreichbar. Die Datei wird automatisch gesendet, sobald er wieder da ist.
 file-upload-unreadable = Die Datei ließ sich nicht mehr lesen. Hänge sie erneut an.

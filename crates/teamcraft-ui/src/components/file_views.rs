@@ -21,6 +21,7 @@ use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::files_query::MAX_STARRED_FILES;
 use teamcraft_client_api::links::{LINKS_PER_PAGE, LinkInfo};
 use teamcraft_client_api::media_viewer::{AlbumGrid, MAX_ALBUM_TILES};
+use teamcraft_client_api::upload_pill::UploadPill;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
@@ -56,9 +57,13 @@ const LARGE_TRANSFER_BYTES: u64 = 1024 * 1024;
 
 /// The files attached to one message: pictures and videos inline (one large, several in a grid),
 /// everything else as cards. Pictures still going up show where they will be, from their local
-/// thumbnail.
+/// thumbnail. While they go up, one control for all of them (`upload`): a pill in the pictures'
+/// corner, or a row under documents.
 #[component]
-pub fn MessageFiles(files: Vec<FileInfo>) -> impl IntoView {
+pub fn MessageFiles(files: Vec<FileInfo>, upload: Signal<Option<UploadPill>>) -> impl IntoView {
+  let maybe_upload = files
+    .first()
+    .map(|file| MessageUpload::new(&files, file.conversation, file.message));
   // Files that finished uploading and are not transferring right now can be saved together.
   let downloadable: Vec<FileInfo> = files
     .iter()
@@ -77,6 +82,7 @@ pub fn MessageFiles(files: Vec<FileInfo>) -> impl IntoView {
   let (media, cards): (Vec<FileInfo>, Vec<FileInfo>) = files
     .into_iter()
     .partition(|file| MediaKey::of(file).is_some() || is_media_upload(file));
+  let has_media = !media.is_empty();
   let media = match media.len() {
     0 => ().into_any(),
     1 => media
@@ -86,6 +92,17 @@ pub fn MessageFiles(files: Vec<FileInfo>) -> impl IntoView {
       .into_any(),
     _ => view! { <MediaGrid files=media /> }.into_any(),
   };
+  let control = move |place: UploadPlace| {
+    maybe_upload.map(|actions| view! { <UploadControl upload=upload actions=actions place=place /> })
+  };
+  let media = has_media.then(|| {
+    view! {
+      <div class="msg-media">
+        {media}
+        {control(UploadPlace::Corner)}
+      </div>
+    }
+  });
   view! {
     <div class="msg-files">
       {media}
@@ -93,8 +110,187 @@ pub fn MessageFiles(files: Vec<FileInfo>) -> impl IntoView {
         true => view! { <AudioCard file=file /> }.into_any(),
         false => view! { <FileCard file=file /> }.into_any(),
       }).collect_view()}
+      {(!has_media).then(|| control(UploadPlace::Row))}
       {download_all}
     </div>
+  }
+}
+
+/// The same files with the bytes of uploads left out, so a view built from them changes when a
+/// transfer changes state, not on every chunk (the [`UploadControl`] follows the bytes).
+pub fn without_upload_bytes(files: &[FileInfo]) -> Vec<FileInfo> {
+  files
+    .iter()
+    .cloned()
+    .map(|mut file| {
+      if let FileTransfer::Uploading { .. } = file.transfer {
+        file.transfer = FileTransfer::Uploading {
+          done_bytes: 0,
+          total_bytes: 0,
+          failed_attempts: 0,
+        };
+      }
+      file
+    })
+    .collect()
+}
+
+/// Where a message's one upload control sits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UploadPlace {
+  /// A translucent pill in the top-start corner of the picture or album.
+  Corner,
+  /// A compact row in the bubble, under documents.
+  Row,
+}
+
+/// The one control of a message's upload (Signal-style): a ring for all its files with a stop
+/// square that cancels them, and "Processing…" or "3.2 MB / 70 MB" next to it; "Try again" once
+/// it stopped. Gone when the files are up. The ring follows `upload` without being built again, so
+/// it fills smoothly.
+#[component]
+fn UploadControl(
+  upload: Signal<Option<UploadPill>>,
+  actions: MessageUpload,
+  place: UploadPlace,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let is_failed = move || matches!(upload.get(), Some(UploadPill::Failed { .. }));
+  let label = move || match upload.get() {
+    Some(UploadPill::Processing) | None => i18n.t("file-upload-processing"),
+    Some(UploadPill::Retrying) => i18n.t("file-upload-retrying"),
+    Some(UploadPill::Sending {
+      done_bytes,
+      total_bytes,
+    }) => i18n.t_with(
+      "file-progress-bytes",
+      &[
+        ("done", &format_bytes(done_bytes)),
+        ("total", &format_bytes(total_bytes)),
+      ],
+    ),
+    Some(UploadPill::Failed { reason }) => i18n.t(stall_key(reason)),
+  };
+  // The ring's share as a dash offset: 0 is full, 100 empty (the circle's path length is 100).
+  let offset = move || {
+    let fraction = upload.get().and_then(UploadPill::fraction).unwrap_or(0.0);
+    format!("{:.2}", 100.0 - fraction * 100.0)
+  };
+  let is_turning = move || upload.get().is_some_and(|pill| pill.fraction().is_none());
+  let going_up = move || {
+    view! {
+      <button
+        type="button"
+        class="upload-stop"
+        aria-label=move || i18n.t("file-cancel-upload")
+        data-tip=move || i18n.t("file-cancel-upload")
+        on:click=move |ev| {
+          ev.stop_propagation();
+          actions.cancel();
+        }
+      >
+        <svg class="upload-ring" class:is-turning=is_turning viewBox="0 0 36 36" aria-hidden="true">
+          <circle class="upload-ring-track" cx="18" cy="18" r="16" />
+          <circle class="upload-ring-fill" cx="18" cy="18" r="16" pathLength="100" stroke-dashoffset=offset />
+        </svg>
+        <span class="upload-stop-square" aria-hidden="true"></span>
+      </button>
+      <span class="upload-pill-text" role="status">{label}</span>
+    }
+  };
+  let failed = move || {
+    view! {
+      <button
+        type="button"
+        class="upload-retry"
+        data-tip=label
+        on:click=move |ev| {
+          ev.stop_propagation();
+          actions.retry();
+        }
+      >
+        <Icon name=IconName::ArrowUp />
+        <span>{move || i18n.t("file-retry")}</span>
+      </button>
+      <span class="visually-hidden" role="alert">{label}</span>
+      <button
+        type="button"
+        class="upload-dismiss"
+        aria-label=move || i18n.t("file-cancel-upload")
+        data-tip=move || i18n.t("file-cancel-upload")
+        on:click=move |ev| {
+          ev.stop_propagation();
+          actions.cancel();
+        }
+      >
+        <Icon name=IconName::Close />
+      </button>
+    }
+  };
+  view! {
+    <Show when=move || upload.get().is_some() fallback=|| ()>
+      <div
+        class="upload-pill"
+        class:is-corner=place == UploadPlace::Corner
+        class:is-row=place == UploadPlace::Row
+        class:is-failed=is_failed
+      >
+        <Show when=is_failed fallback=going_up>
+          {failed}
+        </Show>
+      </div>
+    </Show>
+  }
+}
+
+/// What a message's upload control does: cancel all its files, or try again at once.
+#[derive(Clone, Copy)]
+struct MessageUpload {
+  state: AppState,
+  conversation: ConversationId,
+  message: MessageId,
+  /// The files still going up, last first: the core finds a pending file by its place, so
+  /// cancelling the last ones first keeps the places of the others.
+  pending_ids: StoredValue<Vec<String>>,
+}
+
+impl MessageUpload {
+  fn new(files: &[FileInfo], conversation: ConversationId, message: MessageId) -> Self {
+    let mut pending: Vec<(usize, String)> = files
+      .iter()
+      .filter(|file| {
+        matches!(
+          file.transfer,
+          FileTransfer::Uploading { .. } | FileTransfer::UploadStalled { .. }
+        )
+      })
+      .filter_map(|file| {
+        let index = file.file_id.strip_prefix("pending-")?.parse::<usize>().ok()?;
+        Some((index, file.file_id.clone()))
+      })
+      .collect();
+    pending.sort_unstable_by_key(|(index, _)| std::cmp::Reverse(*index));
+    Self {
+      state: use_app_state(),
+      conversation,
+      message,
+      pending_ids: StoredValue::new(pending.into_iter().map(|(_, id)| id).collect()),
+    }
+  }
+
+  fn cancel(self) {
+    let ids = self.pending_ids.get_value();
+    self.state.write(|backend| {
+      for file_id in &ids {
+        backend.cancel_upload(self.conversation, self.message, file_id);
+      }
+    });
+  }
+
+  fn retry(self) {
+    self
+      .state
+      .write(|backend| backend.retry_send(self.conversation, self.message));
   }
 }
 
@@ -169,8 +365,8 @@ fn is_media_upload(file: &FileInfo) -> bool {
 }
 
 /// A picture of a message that is still going up: its local thumbnail where the sent picture will
-/// be, at the same size, so nothing moves when it is sent. Over it a turning ring while it goes up,
-/// or why it stopped and "Try again".
+/// be, at the same size, so nothing moves when it is sent. Only a file that failed for good says so
+/// on its tile; the progress is the message's one [`UploadControl`].
 #[component]
 fn UploadTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   let state = use_app_state();
@@ -203,40 +399,13 @@ fn UploadTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
       .map(|(_, height)| format!("{height}px"))
       .unwrap_or_default()
   };
-  let actions = FileActions::new(state, &file);
   let name = file.file_name.clone();
   let picture = match maybe_src {
     Some(src) => view! { <img src=src alt=name class="is-preview" draggable="false" /> }.into_any(),
     None => view! { <span class="media-placeholder"><Icon name=file_icon(Some(kind)) /></span> }.into_any(),
   };
+  // Going up or stalled: the message's one control over the pictures says so, not each tile.
   let status = match file.transfer {
-    FileTransfer::Uploading {
-      done_bytes,
-      total_bytes,
-      failed_attempts,
-    // Quiet while it goes up or retries by itself (#742): a small ring in the corner around the
-    // cancel button; the words are for screen readers.
-    } if done_bytes < total_bytes || total_bytes == 0 => view! {
-      <span class="upload-progress">
-        <TransferRing done_bytes=done_bytes total_bytes=total_bytes />
-        <span class="visually-hidden" role="status">{upload_label(i18n, done_bytes, total_bytes, failed_attempts)}</span>
-        <CancelUploadButton actions=actions />
-      </span>
-    }
-    .into_any(),
-    FileTransfer::UploadStalled { reason } => view! {
-      <span class="upload-state is-failed" role="alert">
-        <span>{move || i18n.t(stall_key(reason, StallPlace::Tile))}</span>
-        <span class="upload-actions">
-          <button class="btn btn-small" on:click=move |_| actions.retry_upload()>
-            <Icon name=IconName::Rotate />
-            <span>{move || i18n.t("file-retry")}</span>
-          </button>
-          <CancelUploadButton actions=actions />
-        </span>
-      </span>
-    }
-    .into_any(),
     FileTransfer::UploadFailed { reason } => {
       let key = match reason {
         FileFailure::TooLarge => "file-too-large",
@@ -281,22 +450,6 @@ pub(crate) fn TransferRing(done_bytes: u64, total_bytes: u64) -> impl IntoView {
   }
 }
 
-/// "Cancel" on a file that is still going up.
-#[component]
-fn CancelUploadButton(actions: FileActions) -> impl IntoView {
-  let i18n = use_i18n();
-  view! {
-    <button
-      class="icon-btn upload-cancel"
-      aria-label=move || i18n.t("file-cancel-upload")
-      data-tip=move || i18n.t("file-cancel-upload")
-      on:click=move |_| actions.cancel_upload()
-    >
-      <Icon name=IconName::Close />
-    </button>
-  }
-}
-
 /// A transfer's progress in words: bytes of large files ("12 MB / 48 MB"), percent of small ones.
 fn transfer_label(i18n: I18n, done_bytes: u64, total_bytes: u64) -> String {
   if total_bytes >= LARGE_TRANSFER_BYTES {
@@ -312,14 +465,6 @@ fn transfer_label(i18n: I18n, done_bytes: u64, total_bytes: u64) -> String {
     "file-progress-percent",
     &[("percent", &percent_of(done_bytes, total_bytes).to_string())],
   )
-}
-
-/// An upload's progress in words; before its first bytes after a failed attempt, that it is retried.
-fn upload_label(i18n: I18n, done_bytes: u64, total_bytes: u64, failed_attempts: u32) -> String {
-  match (done_bytes, failed_attempts) {
-    (0, 1..) => i18n.t("file-upload-retrying"),
-    _ => transfer_label(i18n, done_bytes, total_bytes),
-  }
 }
 
 fn percent_of(done_bytes: u64, total_bytes: u64) -> u64 {
@@ -1177,21 +1322,8 @@ pub(crate) fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> 
   let i18n = use_i18n();
   match transfer {
     FileTransfer::Remote => ().into_any(),
-    FileTransfer::Uploading {
-      done_bytes,
-      total_bytes,
-      failed_attempts,
-    } => {
-      let (done, total) = (*done_bytes, *total_bytes);
-      view! {
-        <span class="file-transfer">
-          <progress class="file-progress" max=total.max(1) value=done aria-label=move || i18n.t("file-progress")></progress>
-          <span class="file-state">{upload_label(i18n, done, total, *failed_attempts)}</span>
-          <CancelUploadButton actions=actions />
-        </span>
-      }
-      .into_any()
-    },
+    // The message's one upload control (a row under the cards) tells how far they got.
+    FileTransfer::Uploading { .. } | FileTransfer::UploadStalled { .. } => ().into_any(),
     FileTransfer::Downloading {
       done_bytes,
       total_bytes,
@@ -1214,15 +1346,6 @@ pub(crate) fn transfer_status(transfer: &FileTransfer, actions: FileActions) -> 
       view! {
         <span class="file-error" role="alert">{move || i18n.t(key)}</span>
         <button class="link-btn" on:click=move |_| actions.download()>{move || i18n.t("file-retry")}</button>
-      }
-      .into_any()
-    },
-    FileTransfer::UploadStalled { reason } => {
-      let key = stall_key(*reason, StallPlace::Card);
-      view! {
-      <span class="file-error" role="alert">{move || i18n.t(key)}</span>
-      <button class="link-btn" on:click=move |_| actions.retry_upload()>{move || i18n.t("file-retry")}</button>
-      <button class="link-btn" on:click=move |_| actions.cancel_upload()>{move || i18n.t("file-cancel-upload")}</button>
       }
       .into_any()
     },
@@ -1577,21 +1700,6 @@ impl FileActions {
     };
     self.state.show_brief_toast(self.i18n.t(key));
   }
-
-  /// Stops the file's upload; the message goes out without it.
-  fn cancel_upload(self) {
-    let file_id = self.file_id.get_value();
-    self
-      .state
-      .write(|backend| backend.cancel_upload(self.conversation, self.message, &file_id));
-  }
-
-  /// "Retry" on an upload that stopped retrying by itself; the message waits for it.
-  fn retry_upload(self) {
-    self
-      .state
-      .write(|backend| backend.retry_send(self.conversation, self.message));
-  }
 }
 
 /// The card under a message that contains a link.
@@ -1788,20 +1896,11 @@ fn file_icon(maybe_kind: Option<MediaKind>) -> IconName {
   }
 }
 
-/// Where a stalled upload is shown: over its picture (short) or on a file card (with the note
-/// that the message waits).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StallPlace {
-  Tile,
-  Card,
-}
-
 /// Why an upload stopped retrying by itself, in words (#742).
-fn stall_key(reason: FileFailure, place: StallPlace) -> &'static str {
-  match (reason, place) {
-    (FileFailure::StorageUnavailable, _) => "file-upload-storage-unavailable",
-    (_, StallPlace::Tile) => "file-upload-failed",
-    (_, StallPlace::Card) => "file-upload-stalled",
+fn stall_key(reason: FileFailure) -> &'static str {
+  match reason {
+    FileFailure::StorageUnavailable => "file-upload-storage-unavailable",
+    _ => "file-upload-stalled",
   }
 }
 
@@ -1861,19 +1960,10 @@ mod tests {
 
   #[test]
   fn a_stalled_upload_says_when_the_storage_is_down() {
-    for place in [StallPlace::Tile, StallPlace::Card] {
-      assert_eq!(
-        stall_key(FileFailure::StorageUnavailable, place),
-        "file-upload-storage-unavailable"
-      );
-    }
     assert_eq!(
-      stall_key(FileFailure::Network, StallPlace::Tile),
-      "file-upload-failed"
+      stall_key(FileFailure::StorageUnavailable),
+      "file-upload-storage-unavailable"
     );
-    assert_eq!(
-      stall_key(FileFailure::Network, StallPlace::Card),
-      "file-upload-stalled"
-    );
+    assert_eq!(stall_key(FileFailure::Network), "file-upload-stalled");
   }
 }
