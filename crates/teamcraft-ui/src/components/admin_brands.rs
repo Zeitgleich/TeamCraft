@@ -9,6 +9,7 @@ use teamcraft_proto::{
 use wasm_bindgen_futures::JsFuture;
 
 use crate::admin::format_bytes;
+use crate::components::admin_brand_mail::BrandMailServerForm;
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_fields::{
   Bound, CheckField, FieldErrors, TextAreaField, TextField, Validated, accept_or_refuse, bind, bind_bool,
@@ -351,6 +352,8 @@ fn BrandEditor(
     "admin-brands-delete"
   };
   let colors_assets_id = id.clone();
+  let has_mail_server_form = !is_new && !is_read_only;
+  let mail_server_id = id.clone();
 
   view! {
     <form id=EDITOR_ID class="brand-editor" on:submit=save>
@@ -506,6 +509,8 @@ fn BrandEditor(
       {can_take_over
         .then(|| view! { <p class="muted-text small">{move || i18n.t("admin-brands-take-over-hint")}</p> })}
     </form>
+    {has_mail_server_form
+      .then(|| view! { <BrandMailServerForm brand_id=mail_server_id.clone() response=response /> })}
   }
 }
 
@@ -1259,6 +1264,7 @@ mod tests {
       },
       assets: Vec::new(),
       maybe_updated_at: None,
+      maybe_mail_server: None,
     }
   }
 

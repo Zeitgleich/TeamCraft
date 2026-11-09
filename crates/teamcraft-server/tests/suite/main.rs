@@ -14,6 +14,7 @@ mod authz;
 mod backgrounds;
 mod bots;
 mod brand;
+mod brand_mail;
 mod brand_shares;
 mod caldav_calcraft;
 mod call_e2e;

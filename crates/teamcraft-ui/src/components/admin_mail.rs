@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use teamcraft_proto::{
-  SecretUpdate, SendTestMailRequest, SettingSource, SmtpSecurityMode, SmtpSettings,
-  UpdateMailSettingsRequest, WriteOnlySecret,
+  AdminBrand, MailDeliveryStatus, SecretUpdate, SendTestMailRequest, SettingSource, SmtpSecurityMode,
+  SmtpSettings, UnixMillis, UpdateMailSettingsRequest, WriteOnlySecret,
 };
 
 use crate::admin::{AdminSection, SettingsTestKind};
@@ -16,9 +16,9 @@ use crate::i18n::use_i18n;
 use crate::state::use_app_state;
 
 const FORM_ID: &str = "admin-mail-form";
-const DEFAULT_PORT: u16 = 587;
-const MAX_TEXT_CHARS: usize = 200;
-const SECURITY_MODES: [(&str, &str); 3] = [
+pub(super) const DEFAULT_PORT: u16 = 587;
+pub(super) const MAX_TEXT_CHARS: usize = 200;
+pub(super) const SECURITY_MODES: [(&str, &str); 3] = [
   ("start_tls", "admin-mail-security-start-tls"),
   ("tls", "admin-mail-security-tls"),
   ("none", "admin-mail-security-none"),
@@ -34,8 +34,6 @@ pub fn MailSection() -> impl IntoView {
   let smtp = Memo::new(move |_| current.get().and_then(|mail| mail.maybe_smtp));
   let draft = RwSignal::new(MailDraft::from_settings(smtp.get_untracked().as_ref()));
   let show_errors = RwSignal::new(false);
-  let test_to = RwSignal::new(String::new());
-  let is_testing = RwSignal::new(false);
   // Follow the server when the stored settings change (after a save or a reset).
   Effect::new(move |previous: Option<()>| {
     let latest = smtp.get();
@@ -47,18 +45,6 @@ pub fn MailSection() -> impl IntoView {
   let can_store_secrets = Memo::new(move |_| current.get().is_some_and(|mail| mail.can_store_secrets));
   let source = Memo::new(move |_| current.get().map_or(SettingSource::Config, |mail| mail.source));
   let has_password = Memo::new(move |_| smtp.get().is_some_and(|smtp| smtp.has_password));
-  let test_result = Memo::new(move |_| {
-    state
-      .read(|backend| backend.last_settings_test())
-      .filter(|(kind, _)| *kind == SettingsTestKind::Mail)
-      .map(|(_, response)| response)
-  });
-  Effect::new(move |_| {
-    if test_result.get().is_some() {
-      is_testing.set(false);
-    }
-  });
-
   let host = bind(draft, show_errors, "host", |d| &d.host, |d| &mut d.host);
   let port = bind(draft, show_errors, "port", |d| &d.port, |d| &mut d.port);
   let username = bind(
@@ -111,23 +97,12 @@ pub fn MailSection() -> impl IntoView {
       state.write(|backend| backend.save_mail_settings(request));
     }
   };
-  let send_test = move |_| {
-    let to = test_to.get_untracked();
-    let to = to.trim();
-    if !to.is_empty() && !is_email_address(to) {
-      return;
-    }
-    is_testing.set(true);
-    let request = SendTestMailRequest {
-      maybe_to_address: (!to.is_empty()).then(|| to.to_owned()),
-    };
-    state.write(|backend| backend.send_test_mail(request));
-  };
-  let test_address_error = Signal::derive(move || {
-    let to = test_to.get();
-    let to = to.trim();
-    (!to.is_empty() && !is_email_address(to)).then_some("admin-error-email")
+  let status = Signal::derive(move || {
+    current
+      .get()
+      .map_or_else(MailDeliveryStatus::default, |mail| mail.status)
   });
+  let on_send = Callback::new(move |request| state.write(|backend| backend.send_test_mail(request)));
 
   view! {
     <SectionHeader
@@ -230,61 +205,72 @@ pub fn MailSection() -> impl IntoView {
     </form>
     <section class="policy-group policy-form" aria-label=move || i18n.t("admin-mail-status")>
       <h3>{move || i18n.t("admin-mail-status")}</h3>
-      <MailStatus current=current />
-      <p class="muted-text small">{move || i18n.t("admin-mail-test-hint")}</p>
-      <TextField
-        id="mail-test-to"
-        label="admin-mail-test-to"
-        input_type="email"
-        value=test_to
-        on_input=Callback::new(move |text: String| test_to.set(text))
-        error=test_address_error
+      <MailDelivery
+        field_id="mail-test-to"
+        kind=SettingsTestKind::Mail
+        status=status
+        can_test=Signal::derive(move || smtp.get().is_some())
+        on_send=on_send
       />
-      <button
-        type="button"
-        class="btn"
-        prop:disabled=move || smtp.get().is_none() || is_testing.get()
-        on:click=send_test
-      >
-        {move || i18n.t("admin-mail-test-send")}
-      </button>
-      <p class="muted-text small" role="status" aria-live="polite">
-        {move || {
-          if is_testing.get() {
-            i18n.t("admin-test-running")
-          } else {
-            match test_result.get() {
-              Some(response) if response.is_ok => i18n.t("admin-test-ok"),
-              Some(response) => {
-                i18n.t_with("admin-test-failed", &[("detail", &response.maybe_error.unwrap_or_default())])
-              },
-              None => String::new(),
-            }
-          }
-        }}
-      </p>
     </section>
     <BrandSenders />
   }
 }
 
+/// How mail through one transport went, and a test mail through it.
 #[component]
-fn MailStatus(current: Memo<Option<teamcraft_proto::AdminMailSettingsResponse>>) -> impl IntoView {
+pub(super) fn MailDelivery(
+  field_id: &'static str,
+  kind: SettingsTestKind,
+  #[prop(into)] status: Signal<MailDeliveryStatus>,
+  #[prop(into)] can_test: Signal<bool>,
+  on_send: Callback<SendTestMailRequest>,
+) -> impl IntoView {
+  let state = use_app_state();
   let i18n = use_i18n();
-  let time = move |maybe_at: Option<teamcraft_proto::UnixMillis>| match maybe_at {
+  let test_to = RwSignal::new(String::new());
+  let is_testing = RwSignal::new(false);
+  let test_result = Memo::new(move |_| {
+    state
+      .read(|backend| backend.last_settings_test())
+      .filter(|(tested, _)| *tested == kind)
+      .map(|(_, response)| response)
+  });
+  Effect::new(move |_| {
+    if test_result.get().is_some() {
+      is_testing.set(false);
+    }
+  });
+  let send_test = move |_| {
+    let to = test_to.get_untracked();
+    let to = to.trim();
+    if !to.is_empty() && !is_email_address(to) {
+      return;
+    }
+    is_testing.set(true);
+    on_send.run(SendTestMailRequest {
+      maybe_to_address: (!to.is_empty()).then(|| to.to_owned()),
+    });
+  };
+  let test_address_error = Signal::derive(move || {
+    let to = test_to.get();
+    let to = to.trim();
+    (!to.is_empty() && !is_email_address(to)).then_some("admin-error-email")
+  });
+  let time = move |maybe_at: Option<UnixMillis>| match maybe_at {
     Some(at) => format_date_time(at.0, i18n.locale().tag()),
     None => i18n.t("admin-mail-never"),
   };
   view! {
     <dl class="settings-status">
       <dt>{move || i18n.t("admin-mail-last-success")}</dt>
-      <dd>{move || time(current.get().and_then(|mail| mail.status.maybe_last_success_at))}</dd>
+      <dd>{move || time(status.get().maybe_last_success_at)}</dd>
       <dt>{move || i18n.t("admin-mail-last-failure")}</dt>
-      <dd>{move || time(current.get().and_then(|mail| mail.status.maybe_last_failure_at))}</dd>
+      <dd>{move || time(status.get().maybe_last_failure_at)}</dd>
       {move || {
-        current
+        status
           .get()
-          .and_then(|mail| mail.status.maybe_last_error)
+          .maybe_last_error
           .map(|error| {
             view! {
               <dt>{i18n.t("admin-mail-last-error")}</dt>
@@ -293,10 +279,46 @@ fn MailStatus(current: Memo<Option<teamcraft_proto::AdminMailSettingsResponse>>)
           })
       }}
     </dl>
+    <p class="muted-text small">{move || i18n.t("admin-mail-test-hint")}</p>
+    <TextField
+      id=field_id
+      label="admin-mail-test-to"
+      input_type="email"
+      value=test_to
+      on_input=Callback::new(move |text: String| test_to.set(text))
+      error=test_address_error
+    />
+    <button
+      type="button"
+      class="btn"
+      prop:disabled=move || !can_test.get() || is_testing.get()
+      on:click=send_test
+    >
+      {move || i18n.t("admin-mail-test-send")}
+    </button>
+    <p class="muted-text small" role="status" aria-live="polite">
+      {move || {
+        if is_testing.get() {
+          i18n.t("admin-test-running")
+        } else if !can_test.get() {
+          // The server this result was about is gone.
+          String::new()
+        } else {
+          match test_result.get() {
+            Some(response) if response.is_ok => i18n.t("admin-test-ok"),
+            Some(response) => {
+              i18n.t_with("admin-test-failed", &[("detail", &response.maybe_error.unwrap_or_default())])
+            },
+            None => String::new(),
+          }
+        }
+      }}
+    </p>
   }
 }
 
-/// Which sender each brand uses; edited in the brand itself.
+/// Which sender and mail server each brand uses, and how its own server is doing; edited in the
+/// brand itself.
 #[component]
 fn BrandSenders() -> impl IntoView {
   let state = use_app_state();
@@ -320,6 +342,7 @@ fn BrandSenders() -> impl IntoView {
               <th>{move || i18n.t("admin-brands-name")}</th>
               <th>{move || i18n.t("admin-mail-from-address")}</th>
               <th>{move || i18n.t("admin-mail-from-name")}</th>
+              <th>{move || i18n.t("admin-mail-brand-server")}</th>
             </tr>
           </thead>
           <tbody>
@@ -332,6 +355,8 @@ fn BrandSenders() -> impl IntoView {
                 .map(|brand| {
                   let own = brand.settings.mail.maybe_from_address.clone();
                   let is_own = own.is_some();
+                  let server = server_label(&brand).unwrap_or_else(|| i18n.t("admin-mail-brand-server-instance"));
+                  let delivery = delivery_label(&brand, i18n.locale().tag(), |key, args| i18n.t_with(key, args));
                   view! {
                     <tr>
                       <td>{brand.settings.display_name.clone()}</td>
@@ -340,6 +365,10 @@ fn BrandSenders() -> impl IntoView {
                         {(!is_own).then(|| view! { <span class="muted-text small">{" "}{i18n.t("admin-mail-sender-default")}</span> })}
                       </td>
                       <td>{brand.settings.mail.maybe_sender_name.clone().unwrap_or_default()}</td>
+                      <td>
+                        <span translate="no">{server}</span>
+                        {(!delivery.is_empty()).then(|| view! { <div class="muted-text small">{delivery.clone()}</div> })}
+                      </td>
                     </tr>
                   }
                 })
@@ -352,6 +381,35 @@ fn BrandSenders() -> impl IntoView {
         {move || i18n.t("admin-mail-open-brands")}
       </button>
     </section>
+  }
+}
+
+/// The brand's own mail server as `host:port`; none: it uses the instance's.
+fn server_label(brand: &AdminBrand) -> Option<String> {
+  brand
+    .maybe_mail_server
+    .as_ref()
+    .map(|server| format!("{}:{}", server.host, server.port))
+}
+
+/// How the brand's own mail server is doing; empty for a brand on the instance's server, whose
+/// delivery is shown above the table.
+fn delivery_label(
+  brand: &AdminBrand,
+  locale: &str,
+  translate: impl Fn(&str, &[(&str, &str)]) -> String,
+) -> String {
+  let Some(server) = &brand.maybe_mail_server else {
+    return String::new();
+  };
+  let status = &server.status;
+  match (status.maybe_last_failure_at, status.maybe_last_success_at) {
+    (Some(failure), maybe_success) if maybe_success.is_none_or(|success| failure.0 > success.0) => translate(
+      "admin-mail-brand-delivery-failed",
+      &[("time", &format_date_time(failure.0, locale))],
+    ),
+    (_, Some(_)) => translate("admin-mail-brand-delivery-ok", &[]),
+    _ => translate("admin-mail-brand-delivery-unknown", &[]),
   }
 }
 
@@ -445,7 +503,7 @@ pub fn secret_update(typed: &str, is_clearing: bool, can_store_secrets: bool) ->
 }
 
 /// Whether a mail host is a DNS name or an IP address.
-fn is_plausible_host(host: &str) -> bool {
+pub(super) fn is_plausible_host(host: &str) -> bool {
   is_dns_name(&host.to_ascii_lowercase()) || host.parse::<std::net::IpAddr>().is_ok()
 }
 
@@ -506,6 +564,51 @@ mod tests {
   }
 
   #[test]
+  fn each_brand_says_which_server_it_uses_and_how_that_one_is_doing() {
+    let brand = |maybe_status: Option<MailDeliveryStatus>| AdminBrand {
+      id: "a".into(),
+      source: teamcraft_proto::BrandSource::Database,
+      is_default: false,
+      is_overriding_config: false,
+      settings: teamcraft_proto::BrandSettings::default(),
+      assets: Vec::new(),
+      maybe_updated_at: None,
+      maybe_mail_server: maybe_status.map(|status| teamcraft_proto::BrandMailServer {
+        host: "smtp.a.example.com".into(),
+        port: 587,
+        security: SmtpSecurityMode::StartTls,
+        maybe_username: None,
+        has_password: false,
+        status,
+      }),
+    };
+    let key_only = |key: &str, _: &[(&str, &str)]| key.to_owned();
+    assert_eq!(server_label(&brand(None)), None);
+    assert_eq!(delivery_label(&brand(None), "en", key_only), "");
+    let own = brand(Some(MailDeliveryStatus::default()));
+    assert_eq!(server_label(&own).as_deref(), Some("smtp.a.example.com:587"));
+    assert_eq!(
+      delivery_label(&own, "en", key_only),
+      "admin-mail-brand-delivery-unknown"
+    );
+    let at = |success: Option<i64>, failure: Option<i64>| {
+      brand(Some(MailDeliveryStatus {
+        maybe_last_success_at: success.map(UnixMillis),
+        maybe_last_failure_at: failure.map(UnixMillis),
+        maybe_last_error: None,
+      }))
+    };
+    assert_eq!(
+      delivery_label(&at(Some(2), Some(1)), "en", key_only),
+      "admin-mail-brand-delivery-ok"
+    );
+    assert_eq!(
+      delivery_label(&at(Some(1), Some(2)), "en", key_only),
+      "admin-mail-brand-delivery-failed"
+    );
+  }
+
+  #[test]
   fn hosts_may_be_names_or_addresses() {
     assert!(is_plausible_host("smtp.example.com"));
     assert!(is_plausible_host("192.0.2.10"));
@@ -544,6 +647,11 @@ mod tests {
       "admin-mail-senders-hint",
       "admin-mail-sender-default",
       "admin-mail-open-brands",
+      "admin-mail-brand-server",
+      "admin-mail-brand-server-instance",
+      "admin-mail-brand-delivery-failed",
+      "admin-mail-brand-delivery-ok",
+      "admin-mail-brand-delivery-unknown",
       "admin-brands-name",
       "admin-settings-loading",
       "admin-secrets-unavailable",

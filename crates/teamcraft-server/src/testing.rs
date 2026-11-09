@@ -566,6 +566,7 @@ impl TestApp {
       maybe_meetings: maybe_meetings.map(Arc::new),
       mailer: Arc::new(Slot::new(maybe_mailer)),
       mail_status: Arc::new(MailStatus::default()),
+      brand_mail: Arc::default(),
       maybe_settings_key: Some(Arc::new(test_settings_key())),
       settings_lock: Arc::default(),
       maybe_local: settings

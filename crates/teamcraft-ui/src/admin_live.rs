@@ -530,6 +530,36 @@ impl AdminLive {
     );
   }
 
+  pub fn save_brand_mail_server(&self, id: &str, request: &teamcraft_proto::UpdateBrandMailServerRequest) {
+    self.send_brands(
+      ApiMethod::Put,
+      format!("/api/v1/admin/brands/{id}/mail-server"),
+      request,
+      None,
+    );
+  }
+
+  pub fn remove_brand_mail_server(&self, id: &str) {
+    self.send_stored(
+      ApiMethod::Delete,
+      format!("/api/v1/admin/brands/{id}/mail-server"),
+      None,
+      Stored::Brands {
+        maybe_forgotten: None,
+      },
+    );
+  }
+
+  pub fn send_brand_test_mail(&self, id: &str, request: SendTestMailRequest) {
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.run_settings_test(
+        SettingsTestKind::BrandMail(id.to_owned()),
+        format!("/api/v1/admin/brands/{id}/mail-server/test"),
+        body,
+      );
+    }
+  }
+
   pub fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
     self.data.borrow().mail.clone()
   }
@@ -583,7 +613,11 @@ impl AdminLive {
 
   pub fn send_test_mail(&self, request: SendTestMailRequest) {
     if let Ok(body) = serde_json::to_string(&request) {
-      self.run_settings_test(SettingsTestKind::Mail, "/api/v1/admin/settings/mail/test", body);
+      self.run_settings_test(
+        SettingsTestKind::Mail,
+        "/api/v1/admin/settings/mail/test".to_owned(),
+        body,
+      );
     }
   }
 
@@ -614,7 +648,7 @@ impl AdminLive {
   pub fn test_calendar(&self) {
     self.run_settings_test(
       SettingsTestKind::Calendar,
-      "/api/v1/admin/settings/calendar/test",
+      "/api/v1/admin/settings/calendar/test".to_owned(),
       "{}".to_owned(),
     );
   }
@@ -1742,13 +1776,13 @@ impl AdminLive {
   }
 
   /// A connection test: its answer, or the refusal, is kept for the console to show.
-  fn run_settings_test(&self, kind: SettingsTestKind, path: &'static str, body: String) {
+  fn run_settings_test(&self, kind: SettingsTestKind, path: String, body: String) {
     self.data.borrow_mut().last_test = None;
     self.run(AdminTask::SettingsTest { kind, path, body });
   }
 
-  async fn run_settings_test_now(&self, kind: SettingsTestKind, path: &'static str, body: String) {
-    let outcome = match self.auth.api_request(ApiMethod::Post, path, Some(body)).await {
+  async fn run_settings_test_now(&self, kind: SettingsTestKind, path: String, body: String) {
+    let outcome = match self.auth.api_request(ApiMethod::Post, &path, Some(body)).await {
       Ok(response) if response.status < 300 => serde_json::from_str::<SettingsTestResponse>(&response.body)
         .unwrap_or_else(|error| SettingsTestResponse {
           is_ok: false,
@@ -1907,7 +1941,7 @@ pub enum AdminTask {
   /// A connection test.
   SettingsTest {
     kind: SettingsTestKind,
-    path: &'static str,
+    path: String,
     body: String,
   },
   /// A brand image for the editor.
@@ -2509,7 +2543,12 @@ pub fn action_from_wire(action: &str) -> AuditAction {
     | "brand_taken_over"
     | "brand_asset_set"
     | "brand_asset_removed" => AuditAction::BrandChanged,
-    "mail_settings_updated" | "mail_settings_reset" | "mail_test_sent" => AuditAction::MailSettingsChanged,
+    "mail_settings_updated"
+    | "mail_settings_reset"
+    | "mail_test_sent"
+    | "brand_mail_server_updated"
+    | "brand_mail_server_removed"
+    | "brand_mail_test_sent" => AuditAction::MailSettingsChanged,
     "calendar_settings_updated" | "calendar_settings_reset" | "calendar_test" => {
       AuditAction::CalendarSettingsChanged
     },

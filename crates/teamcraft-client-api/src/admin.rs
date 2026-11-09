@@ -323,10 +323,12 @@ impl AuditAction {
 }
 
 /// Which connection a settings test checked.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingsTestKind {
   Mail,
   Calendar,
+  /// The own mail server of the brand with this id.
+  BrandMail(String),
 }
 
 /// Why the policy form is read-only.

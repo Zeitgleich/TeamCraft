@@ -460,6 +460,35 @@ impl AdminBackend for MockBackend {
     ops.record(self.now, AuditAction::BrandChanged, &id, "image removed");
   }
 
+  fn save_brand_mail_server(&self, id: String, request: teamcraft_proto::UpdateBrandMailServerRequest) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.save_brand_mail_server(&id, request);
+    ops.record(
+      self.now,
+      AuditAction::MailSettingsChanged,
+      &id,
+      "own mail server updated",
+    );
+  }
+
+  fn remove_brand_mail_server(&self, id: String) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.remove_brand_mail_server(&id);
+    ops.record(
+      self.now,
+      AuditAction::MailSettingsChanged,
+      &id,
+      "own mail server removed",
+    );
+  }
+
+  fn send_brand_test_mail(&self, id: String, _request: SendTestMailRequest) {
+    let mut ops = self.ops.borrow_mut();
+    let now = self.now;
+    ops.settings.record_brand_test_mail(&id, now);
+    ops.record(now, AuditAction::MailSettingsChanged, &id, "test sent");
+  }
+
   fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
     Some(self.ops.borrow().settings.mail.clone())
   }

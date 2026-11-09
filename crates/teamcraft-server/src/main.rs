@@ -48,7 +48,7 @@ use teamcraft_server::services::presence::{self, refresh_presence};
 use teamcraft_server::services::scheduled_messages;
 use teamcraft_server::services::session::{self, PolicyHolder};
 use teamcraft_server::services::{
-  admin, admin_join_requests, attachments, backgrounds, brands, calendar_settings, conversations,
+  admin, admin_join_requests, attachments, backgrounds, brand_mail, brands, calendar_settings, conversations,
   email_digest, guests, key_packages, mail_settings, meeting_guests, meeting_notices, oidc, retention,
   runtime_settings, storage_cleanup, urgent,
 };
@@ -222,6 +222,7 @@ async fn run() -> anyhow::Result<()> {
     maybe_local: build_local_auth(&config)?.map(Arc::new),
     mailer,
     mail_status: Arc::new(MailStatus::default()),
+    brand_mail: Arc::default(),
     maybe_settings_key: maybe_settings_key.map(Arc::new),
     settings_lock: Arc::default(),
     dpop: Arc::default(),
@@ -701,6 +702,10 @@ async fn load_runtime_settings(state: &AppState) -> anyhow::Result<()> {
     .await
     .context("loading the calendar settings")?;
   brands::load(state).await.context("loading the brands")?;
+  // After the brands: a brand's transport sends as that brand.
+  brand_mail::load(state)
+    .await
+    .context("loading the brands' mail servers")?;
   Ok(())
 }
 

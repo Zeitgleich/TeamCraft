@@ -998,6 +998,7 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 | Call backgrounds                         | `POST /admin/backgrounds`, `POST /admin/backgrounds/{id}/complete`, `DELETE /admin/backgrounds/{id}`; everybody: `GET /org-backgrounds/{id}/download` |
 | Brands (§6)                              | `GET/POST /admin/brands`, `PUT/DELETE /admin/brands/{id}`, `POST /admin/brands/{id}/take-over`, `GET/PUT/DELETE /admin/brands/{id}/assets/{slot}` |
 | Mail server (§6.2)                       | `GET/PUT/DELETE /admin/settings/mail`, `POST /admin/settings/mail/test`            |
+| A brand's own mail server (§6.2)         | `PUT/DELETE /admin/brands/{id}/mail-server`, `POST /admin/brands/{id}/mail-server/test`; read in `GET /admin/brands` |
 | Calendar (§6.2)                          | `GET/PUT/DELETE /admin/settings/calendar`, `POST /admin/settings/calendar/test`    |
 | Instance settings (§6.3)                 | `GET/PUT /admin/settings`, `DELETE /admin/settings/{section}`                      |
 | Deactivate, reactivate, remove (§3.2.1)  | `POST /admin/users/{id}/deactivate`, `.../reactivate`, `.../remove-from-chats`      |
@@ -1061,11 +1062,33 @@ widen what the web client may load and talk to.
 
 ### 6.2 Mail server and calendar
 
-All mail the server sends (invitations, activations, digests, meeting invitations, test mail) goes
-through one SMTP server: host, port, security (STARTTLS, TLS, or none for a server on the same
-machine only), user, password, default sender address and name. Brands may have their own sender
-(§6.1). The page shows the delivery status since the start (last success, last failure and its
-error) and sends a test mail. The CalDAV calendar of meetings has URL, account, password and the
+Mail the server sends (invitations, activations, digests, guest notices, meeting invitations, test
+mail) goes through one SMTP server: host, port, security (STARTTLS, TLS, or none for a server on the
+same machine only), user, password, default sender address and name. Brands may have their own
+sender (§6.1). The page shows the delivery status since the start (last success, last failure and
+its error) and sends a test mail. "Mail per brand" lists each brand's sender, the server its mail
+goes through and how a brand's own server is doing.
+
+**A brand's own mail server.** Brands of different organizations often need their own relay, SPF and
+DKIM. The brand editor has an "Own mail server" section: host, port, security, user and password,
+with its own test mail and delivery status. The checks are those of the instance's server. The
+sender stays in the brand's settings, and a brand needs a sender address before it can have a
+server. An empty host (or `DELETE`) means the brand uses the instance's server, as without one. Only
+database brands have one: take a configuration brand over first (§6.1). Deleting a brand deletes its
+server. Instance admins (`manage_workspace`) read and change it, like the instance's server; changes
+and test mails are in the audit log (`brand_mail_server_updated`, `brand_mail_server_removed`,
+`brand_mail_test_sent`), never the password.
+
+The mail of a brand takes the brand's server: the recipient's home brand for digests and guest
+notices, the brand of the recipient's domain or else the inviter's for invitations and activations,
+the organizer's for meeting invitations. Each server is a transport of its own. A broken one fails
+only its own brand's mail and shows that at the brand, and its mail **never** moves to the instance's
+server, which would send with the wrong SPF and DKIM. Jobs that mail many people run one queue per
+server side by side; one mail is limited to three network timeouts, and a server that could not be
+reached is left alone for a minute (those mails fail at once and take their usual failure path, a
+test mail still asks the server). A changed server is in force at once, without a restart.
+
+The CalDAV calendar of meetings has URL, account, password and the
 optional free/busy URL template, and a connection test; it needs `[meetings]`.
 
 **Passwords are write-only.** They are never sent back (the console sees "has password"). Before they

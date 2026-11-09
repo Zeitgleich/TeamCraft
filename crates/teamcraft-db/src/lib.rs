@@ -124,7 +124,7 @@ pub use scheduled_message::{
   NewScheduledMessage, ReleaseOutcome, ScheduleOutcome, ScheduledUpdateOutcome, SealedParts, StaleWakes,
   StoredScheduledMessage,
 };
-pub use server_settings::{StoredBrand, StoredBrandAsset, StoredSetting};
+pub use server_settings::{StoredBrand, StoredBrandAsset, StoredBrandMailServer, StoredSetting};
 pub use share_link::{NewShareLink, ShareLink, ShareTarget};
 pub use snowflake::{Clock, SnowflakeError, SnowflakeGenerator, SystemClock};
 pub use space::{

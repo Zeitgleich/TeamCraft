@@ -2,6 +2,8 @@
 //! (who is mentioned in which message, who has read what), never content, so the mail can only say
 //! how many mentions wait. Nothing about channels, senders or text goes into it.
 
+use std::collections::HashMap;
+
 use teamcraft_db::{DueDigest, StoredEmailDigest};
 use teamcraft_proto::{EmailDigestResponse, Id, MessageId, SetEmailDigestRequest, UserId};
 use time::{Duration, OffsetDateTime};
@@ -14,6 +16,7 @@ use crate::config::EmailDigestConfig;
 use crate::error::ApiError;
 use crate::meetings::ical::Method;
 use crate::meetings::mailer::OutgoingMail;
+use crate::runtime::brand_mail::{MailRoute, run_per_route};
 use crate::state::AppState;
 
 /// Digests looked at per scheduler run; a busy instance catches up on the next run.
@@ -52,7 +55,7 @@ pub async fn put_settings(
         "this server does not send e-mail digests".into(),
       ));
     }
-    if !has_email(state, caller.user.id).await? {
+    if !has_address_and_server(state, caller.user.id).await? {
       return Err(ApiError::Conflict("the account has no e-mail address".into()));
     }
   }
@@ -70,12 +73,13 @@ pub async fn put_settings(
 }
 
 /// Looks at every digest that is due: mails the number of mentions that are still unread after the
-/// grace period, then waits for the next interval. Returns how many mails were sent.
+/// grace period, then waits for the next interval. One queue per mail server, side by side: a
+/// brand's server that hangs holds up only that brand's digests. Returns how many mails were sent.
 pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, ApiError> {
   let config = &state.settings.get().notifications.email_digest;
-  let (true, Some(mailer)) = (config.is_enabled, state.mailer.get()) else {
+  if !config.is_enabled || !state.can_send_mail() {
     return Ok(0);
-  };
+  }
   let due = state.database.list_due_email_digests(now, BATCH_SIZE).await?;
   if due.is_empty() {
     return Ok(0);
@@ -83,8 +87,36 @@ pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, Api
   let users: Vec<UserId> = due.iter().map(|digest| digest.user).collect();
   let emails = state.database.get_user_emails(&users).await?;
   let upto = MessageId::from_snowflake(snowflake_floor(now - Duration::seconds(secs(config.grace_secs))));
+  let brands = state.brands.current();
+  let queued = due
+    .into_iter()
+    .map(|digest| {
+      let route = emails.get(&digest.user).map_or(MailRoute::Instance, |address| {
+        state.mail_route(brands.for_email(address))
+      });
+      (route, digest)
+    })
+    .collect();
+  let emails = &emails;
+  let results = run_per_route(queued, |queue| run_queue(state, emails, upto, now, queue)).await;
   let mut sent = 0;
-  for digest in due {
+  for result in results {
+    sent += result?;
+  }
+  Ok(sent)
+}
+
+/// The digests of one mail server, one after the other.
+async fn run_queue(
+  state: &AppState,
+  emails: &HashMap<UserId, String>,
+  upto: MessageId,
+  now: OffsetDateTime,
+  queue: Vec<DueDigest>,
+) -> Result<usize, ApiError> {
+  let config = &state.settings.get().notifications.email_digest;
+  let mut sent = 0;
+  for digest in queue {
     let next_check_at = now + interval_of(config, &digest);
     let count = state
       .database
@@ -98,9 +130,17 @@ pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, Api
         .await?;
       continue;
     };
-    // The digest goes out as the recipient's home brand: sender name and link host.
+    // The digest goes out as the recipient's home brand: sender name, link host and mail server.
     let brands = state.brands.current();
     let brand = brands.for_email(address);
+    let Some(mailer) = state.mailer_for(brand) else {
+      // No server for this brand; the others go on, and this one is looked at again later.
+      state
+        .database
+        .finish_email_digest_check(digest.user, digest.watermark, now + RETRY_AFTER, None)
+        .await?;
+      continue;
+    };
     let (subject, text) = compose(state, brand, count);
     let mail = OutgoingMail {
       to_address: address.clone(),
@@ -164,16 +204,23 @@ async fn response(
     is_enabled: stored.is_enabled,
     interval_minutes,
     min_interval_minutes: min_interval_minutes(config),
-    is_available: is_sending(state) && has_email(state, user).await?,
+    is_available: is_sending(state) && has_address_and_server(state, user).await?,
   })
 }
 
 fn is_sending(state: &AppState) -> bool {
-  state.settings.get().notifications.email_digest.is_enabled && state.mailer.is_set()
+  state.settings.get().notifications.email_digest.is_enabled && state.can_send_mail()
 }
 
-async fn has_email(state: &AppState, user: UserId) -> Result<bool, ApiError> {
-  Ok(state.database.get_user_emails(&[user]).await?.contains_key(&user))
+/// Whether this person's digest has an address to go to and a mail server to go out by.
+async fn has_address_and_server(state: &AppState, user: UserId) -> Result<bool, ApiError> {
+  let emails = state.database.get_user_emails(&[user]).await?;
+  let brands = state.brands.current();
+  Ok(
+    emails
+      .get(&user)
+      .is_some_and(|address| state.mailer_for(brands.for_email(address)).is_some()),
+  )
 }
 
 fn min_interval_minutes(config: &EmailDigestConfig) -> u32 {

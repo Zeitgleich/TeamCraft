@@ -14,8 +14,8 @@ use teamcraft_proto::{
   AdminMailSettingsResponse, AnnouncementResponse, AttachmentId, BackgroundId, BrandAssetSlot, CategoryId,
   ChannelModeration, CreateBrandRequest, HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role,
   RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, ScheduledMessageId, SchemeChange,
-  SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest,
-  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
+  SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse, UpdateBrandMailServerRequest,
+  UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use crate::actions::{
@@ -1350,6 +1350,11 @@ pub trait AdminBackend {
   }
   fn upload_brand_asset(&self, _id: String, _slot: BrandAssetSlot, _bytes: Vec<u8>, _content_type: String) {}
   fn delete_brand_asset(&self, _id: String, _slot: BrandAssetSlot) {}
+  /// Sets a brand's own mail server; an empty host removes it.
+  fn save_brand_mail_server(&self, _id: String, _request: UpdateBrandMailServerRequest) {}
+  /// Back to the instance's mail server.
+  fn remove_brand_mail_server(&self, _id: String) {}
+  fn send_brand_test_mail(&self, _id: String, _request: SendTestMailRequest) {}
   fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
     None
   }

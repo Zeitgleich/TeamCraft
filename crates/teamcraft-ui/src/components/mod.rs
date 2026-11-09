@@ -5,6 +5,7 @@ pub mod add_to_call;
 pub mod admin_announcement;
 pub mod admin_audit;
 pub mod admin_backgrounds;
+pub mod admin_brand_mail;
 pub mod admin_brands;
 pub mod admin_calendar;
 pub mod admin_channels;
