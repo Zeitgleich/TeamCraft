@@ -263,9 +263,12 @@ impl SessionControl {
       },
       Err(AuthError::KeyLost) => self.signed_out_with_problem(LoginProblem::DeviceKeyLost).await,
       // The provider refused the stored sign-in: say so instead of a bare sign-in screen.
-      Err(AuthError::Denied(_)) => self
-        .state
-        .set_if_alive(SessionState::SignedOut(Some(LoginProblem::SessionExpired))),
+      Err(AuthError::Denied(_)) => {
+        crate::auth::report_lost_sign_in("the provider refused the stored sign-in");
+        self
+          .state
+          .set_if_alive(SessionState::SignedOut(Some(LoginProblem::SessionExpired)));
+      },
       // It refused in its redirect: the end of a refused session's round trip, or of a sign-in.
       // Either way nobody is signed in, so no pictures stay (#749).
       Err(error @ AuthError::AuthorizationRefused(_)) => {
@@ -948,7 +951,11 @@ fn restore_verdict(outcome: Result<bool, AuthError>) -> RestoreVerdict {
     Ok(true) => RestoreVerdict::SignedIn,
     Ok(false) => RestoreVerdict::Over(None),
     // The provider refused the stored sign-in, or nothing is stored any more.
-    Err(AuthError::Denied(_) | AuthError::NotSignedIn) => {
+    Err(error @ (AuthError::Denied(_) | AuthError::NotSignedIn)) => {
+      // The web reports a missing or refused sign-in where it decides it (`auth::browser`).
+      if matches!(error, AuthError::Denied(_)) {
+        crate::auth::report_lost_sign_in("the provider refused the stored sign-in");
+      }
       RestoreVerdict::Over(Some(LoginProblem::SessionExpired))
     },
     Err(error @ (AuthError::StateMismatch | AuthError::AuthorizationRefused(_) | AuthError::KeyLost)) => {
