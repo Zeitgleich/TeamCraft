@@ -1,29 +1,25 @@
-//! The files the user can see: the "Files" entry of the sidebar (issue #301). Inside a space those of
-//! its conversations (#954), elsewhere those of all spaces, channels and direct messages. Filtered by
-//! kind, sorted, with starred files, a page at a time (`teamcraft_client_api::files_query`). It reads
+//! The files the user can see: the Files place on the rail (issues #301, #1510). Everywhere, or one
+//! space's (#954), as its sidebar (`files_sidebar.rs`) chooses. Filtered by kind, sorted, with
+//! starred files, a page at a time (`teamcraft_client_api::files_query`). It reads
 //! what the device already holds; nothing is fetched, so the server learns nothing about what is
-//! looked at.
+//! looked at. The core reads a page through its index of messages with files and keeps it until a
+//! file comes or goes (#1509), so the view reads on every change instead of on a timer.
 
 use leptos::prelude::*;
 use teamcraft_client_api::files_query::{
-  FILES_PAGE_SIZE, FileKind, FileScope, FileSort, FilesQuery, MAX_STARRED_FILES, StarredFile, files_page,
+  FILES_PAGE_SIZE, FileKind, FileScope, FileSort, FilesPage, FilesQuery, MAX_STARRED_FILES, StarredFile,
   toggle_star,
 };
 use wasm_bindgen::JsCast;
 
-use crate::components::compact_back::CompactBack;
 use crate::components::empty_state::EmptyState;
 use crate::components::file_views::{FileCard, FileStar};
-use crate::components::icons::IconName;
-use crate::components::page::ScopedSpaceName;
-use crate::components::sliding_indicator::SlidingIndicator;
+use crate::components::files_sidebar::kind_label_key;
+use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
-use crate::reactive::use_interval_while_visible;
+use crate::model::Space;
 use crate::state::use_app_state;
 
-/// New files arrive without an event this view hears, so it looks again this often while it is
-/// open and visible.
-const REFRESH_MS: u64 = 15_000;
 /// How far above the end of the list the next page comes in, in pixels.
 const PAGE_AHEAD_PX: i32 = 800;
 
@@ -32,14 +28,27 @@ pub fn FilesView() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let prefs = state.settings.prefs;
-  let kind = RwSignal::new(FileKind::All);
+  let kind = state.files_kind;
   let pages = RwSignal::new(1_usize);
-  let reload = RwSignal::new(0_u32);
-  use_interval_while_visible(REFRESH_MS, move || reload.update(|count| *count += 1));
-  let scope = Memo::new(move |_| match state.maybe_scoped_space() {
-    Some(space) => FileScope::Space(space),
-    None => FileScope::Everything,
+  let spaces = Memo::new(move |_| state.read(|backend| backend.spaces()));
+  // A space the user left meanwhile shows everything again.
+  let scope = Memo::new(move |_| match state.files_scope.get() {
+    FileScope::Space(space) if spaces.with(|all| all.iter().any(|candidate| candidate.id == space)) => {
+      FileScope::Space(space)
+    },
+    FileScope::Space(_) | FileScope::Everything => FileScope::Everything,
   });
+  let scope_name = Memo::new(move |_| match scope.get() {
+    FileScope::Space(space) => spaces.with(|all| {
+      all
+        .iter()
+        .find(|candidate| candidate.id == space)
+        .map(|found| found.name.clone())
+    }),
+    FileScope::Everything => None,
+  });
+  // Phones have no sidebar beside the list: the header has the filters and scopes there.
+  let is_compact = Memo::new(move |_| state.is_compact());
   let sort = Memo::new(move |_| prefs.with(|all| all.files.sort));
   let starred = Memo::new(move |_| prefs.with(|all| all.files.starred.clone()));
   // Another filter, order or space starts at the first page again.
@@ -51,8 +60,8 @@ pub fn FilesView() -> impl IntoView {
       pages.set(1);
     }
   });
-  let page = Memo::new(move |_| {
-    reload.track();
+  // `None` only while a desktop core reads the first page; then the list stays as it was.
+  let page = Memo::new(move |previous: Option<&FilesPage>| {
     let (scope, kind, sort, max_files) = (scope.get(), kind.get(), sort.get(), pages.get() * FILES_PAGE_SIZE);
     // A star only reads again while the starred files are listed.
     let starred_now = if kind == FileKind::Starred {
@@ -60,23 +69,22 @@ pub fn FilesView() -> impl IntoView {
     } else {
       Vec::new()
     };
-    // Read again on a timer, when the view opens and when the query changes, not on every change of
-    // the workspace.
-    untrack(|| {
-      state.read(|backend| {
-        files_page(
-          backend,
-          &FilesQuery {
-            scope,
-            kind,
-            sort,
-            starred: &starred_now,
-            max_files,
-          },
-        )
+    // Read on every change: the core answers from the page it keeps until a file comes or goes.
+    state
+      .read(|backend| {
+        backend.files_page(&FilesQuery {
+          scope,
+          kind,
+          sort,
+          starred: &starred_now,
+          max_files,
+        })
       })
-    })
+      .or_else(|| previous.cloned())
+      .unwrap_or_default()
   });
+  let is_sorted_among_loaded =
+    Memo::new(move |_| kind.get() != FileKind::Starred && !sort.get().is_by_time());
   let on_scroll = move |ev: leptos::ev::Event| {
     if page.with_untracked(|page| page.has_more) && is_near_end(&ev) {
       pages.update(|pages| *pages += 1);
@@ -103,51 +111,57 @@ pub fn FilesView() -> impl IntoView {
   view! {
     <section class="files-view" aria-label=move || i18n.t("files-title")>
       <header class="panel-header files-view-header">
-        <CompactBack />
         <div class="panel-title">
           <h1>{move || i18n.t("files-title")}</h1>
-          <ScopedSpaceName />
+          {move || scope_name.get().map(|name| view! { <span class="panel-subtitle" translate="no">{name}</span> })}
         </div>
-        <div class="files-view-controls">
-          <div class="segmented" role="group" aria-label=move || i18n.t("files-filter")>
-            <SlidingIndicator />
+        // Wide layouts choose the filter and the scope in the sidebar; the order stays here.
+        <Show when=move || !is_compact.get() fallback=|| ()>
+          <div class="files-sort">
+            <label for="files-sort">{move || i18n.t("files-sort")}</label>
+            <SortSelect id="files-sort" class="input" />
+          </div>
+        </Show>
+      </header>
+      // Phones have no sidebar beside the list: the filters scroll in one row of pills, the scope
+      // and the order are two menus under them, as in the Photos and Files apps.
+      <Show when=move || is_compact.get() fallback=|| ()>
+        <div class="files-phone-bar">
+          <div class="files-chips" role="group" aria-label=move || i18n.t("files-filter")>
             {FileKind::ALL
               .into_iter()
               .map(|value| {
                 view! {
-                  <button aria-pressed=move || (kind.get() == value).to_string() on:click=move |_| kind.set(value)>
+                  <button
+                    type="button"
+                    class="files-chip"
+                    aria-pressed=move || (kind.get() == value).to_string()
+                    on:click=move |_| kind.set(value)
+                  >
                     {move || i18n.t(kind_label_key(value))}
                   </button>
                 }
               })
               .collect_view()}
           </div>
-          <div class="files-sort">
-            <label for="files-sort">{move || i18n.t("files-sort")}</label>
-            <select
-              id="files-sort"
-              class="input"
-              on:change=move |ev| {
-                if let Some(value) = sort_from_slug(&event_target_value(&ev)) {
-                  prefs.update(|all| all.files.sort = value);
-                }
-              }
-            >
-              {FileSort::ALL
-                .into_iter()
-                .map(|value| {
-                  view! {
-                    <option value=sort_slug(value) selected=move || sort.get() == value>
-                      {move || i18n.t(sort_label_key(value))}
-                    </option>
-                  }
-                })
-                .collect_view()}
-            </select>
+          <div class="files-menus">
+            <label class="files-menu">
+              <span class="visually-hidden">{move || i18n.t("files-scope")}</span>
+              <ScopeSelect scope=scope spaces=spaces />
+              <Icon name=IconName::ChevronDown />
+            </label>
+            <label class="files-menu">
+              <span class="visually-hidden">{move || i18n.t("files-sort")}</span>
+              <SortSelect id="files-sort-phone" class="" />
+              <Icon name=IconName::ChevronDown />
+            </label>
           </div>
         </div>
-      </header>
+      </Show>
       <div class="files-view-body panel-scroll" on:scroll=on_scroll>
+        <Show when=move || is_sorted_among_loaded.get() fallback=|| ()>
+          <p class="files-sort-note">{move || i18n.t("files-sort-loaded")}</p>
+        </Show>
         <div class="files-list">
           <For
             each=move || page.with(|page| page.files.clone())
@@ -171,12 +185,61 @@ pub fn FilesView() -> impl IntoView {
   }
 }
 
-fn kind_label_key(kind: FileKind) -> &'static str {
-  match kind {
-    FileKind::All => "files-filter-all",
-    FileKind::Media => "files-filter-media",
-    FileKind::Documents => "files-filter-documents",
-    FileKind::Starred => "files-filter-starred",
+/// The order of the list, remembered per account.
+#[component]
+fn SortSelect(id: &'static str, class: &'static str) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let prefs = state.settings.prefs;
+  let sort = Memo::new(move |_| prefs.with(|all| all.files.sort));
+  view! {
+    <select
+      id=id
+      class=class
+      on:change=move |ev| {
+        if let Some(value) = sort_from_slug(&event_target_value(&ev)) {
+          prefs.update(|all| all.files.sort = value);
+        }
+      }
+    >
+      {FileSort::ALL
+        .into_iter()
+        .map(|value| {
+          view! {
+            <option value=sort_slug(value) selected=move || sort.get() == value>
+              {move || i18n.t(sort_label_key(value))}
+            </option>
+          }
+        })
+        .collect_view()}
+    </select>
+  }
+}
+
+/// Whose files, on phones: everywhere or one space's.
+#[component]
+fn ScopeSelect(scope: Memo<FileScope>, spaces: Memo<Vec<Space>>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  view! {
+    <select on:change=move |ev| {
+      let value = event_target_value(&ev);
+      let next = spaces
+        .get_untracked()
+        .into_iter()
+        .find(|space| space.id.to_string() == value)
+        .map_or(FileScope::Everything, |space| FileScope::Space(space.id));
+      state.files_scope.set(next);
+    }>
+      <option value="" selected=move || scope.get() == FileScope::Everything>
+        {move || i18n.t("files-scope-everywhere")}
+      </option>
+      <For each=move || spaces.get() key=|space| (space.id, space.name.clone()) let:space>
+        <option value=space.id.to_string() selected=move || scope.get() == FileScope::Space(space.id) translate="no">
+          {space.name.clone()}
+        </option>
+      </For>
+    </select>
   }
 }
 
@@ -236,8 +299,19 @@ mod tests {
     let en = include_str!("../../i18n/en/files.ftl");
     let mut keys: Vec<&str> = FileKind::ALL.into_iter().map(kind_label_key).collect();
     keys.extend(FileSort::ALL.into_iter().map(sort_label_key));
-    keys.extend(["files-star", "files-unstar", "files-star-limit", "files-sort"]);
-    keys.extend(["files-starred-empty-title", "files-starred-empty"]);
+    keys.extend([
+      "files-star",
+      "files-unstar",
+      "files-star-limit",
+      "files-sort",
+      "files-sort-loaded",
+    ]);
+    keys.extend([
+      "files-starred-empty-title",
+      "files-starred-empty",
+      "files-scope",
+      "files-scope-everywhere",
+    ]);
     for key in keys {
       assert!(en.contains(&format!("\n{key} = ")), "{key}");
     }

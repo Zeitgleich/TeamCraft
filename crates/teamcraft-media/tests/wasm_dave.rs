@@ -32,7 +32,11 @@ fn two_participants_exchange_frames() {
     .unwrap()
     .unwrap();
   alice.process_commit(&commit.commit).unwrap();
-  bob.process_welcome(&commit.maybe_welcome.unwrap()).unwrap();
+  alice.prepare_transition(None).unwrap();
+  bob
+    .process_welcome(&commit.maybe_welcome.unwrap(), &[ALICE, BOB])
+    .unwrap();
+  bob.prepare_transition(None).unwrap();
 
   for _ in 0..3 {
     let encrypted = alice

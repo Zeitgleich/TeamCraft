@@ -1,5 +1,5 @@
-//! The bottom navigation of the compact layout (phones): Chats, Activity, Spaces and You, as in the
-//! Android app. It shows on the top-level pages; a conversation, thread or other page has a back
+//! The bottom navigation of the compact layout (phones): Chats, Activity, Files, Spaces and You;
+//! Files is the web's own (#1510), the Android app has its files per space. It shows on the top-level pages; a conversation, thread or other page has a back
 //! button instead.
 
 use leptos::prelude::*;
@@ -52,6 +52,9 @@ pub fn BottomNav() -> impl IntoView {
   let is_activity = Signal::derive(move || {
     state.overlay.get() != Overlay::StatusMenu && state.rail.get() == RailEntry::Activity
   });
+  let is_files = Signal::derive(move || {
+    state.overlay.get() != Overlay::StatusMenu && state.rail.get() == RailEntry::Files
+  });
   let is_spaces = Signal::derive(move || {
     state.overlay.get() != Overlay::StatusMenu
       && state.rail.get() == RailEntry::Space
@@ -82,6 +85,17 @@ pub fn BottomNav() -> impl IntoView {
         on_open=Callback::new(move |()| state.open_activity())
       >
         <Icon name=IconName::Bell />
+      </NavTab>
+      <NavTab
+        label_key="rail-files"
+        is_current=is_files
+        count=Signal::derive(|| 0)
+        on_open=Callback::new(move |()| {
+          state.close_overlay();
+          state.open_files();
+        })
+      >
+        <Icon name=IconName::Folder />
       </NavTab>
       // The list layout has the channels under Chats and no list of its own for them (#1151).
       <Show when=move || !is_list_layout.get() fallback=|| ()>

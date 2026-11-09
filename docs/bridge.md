@@ -421,13 +421,22 @@ false` turns app-managed sources off for such a bridge.
 
 The channel section's "Where the bridge runs" switch picks the base of the URLs it shows:
 
-| Choice             | URLs                                                       | When                                                                                                                          |
-|--------------------|------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|
-| On this server     | `https://<instance host>/hooks/<token>`, `/ingest/<token>` | The deployment runs the bridge (teamcraft-deploy role `teamcraft_bridge`); its proxy routes both paths to the loopback bridge |
-| On its own machine | `http://127.0.0.1:8088/hooks/<token>`, `/ingest/<token>`   | The bridge runs next to the producers on its default listener; use its own address instead if you opened the listener         |
+| Choice                    | URLs                                                       | When                                                                                                                          |
+|---------------------------|------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|
+| On this server            | `https://<instance host>/hooks/<token>`, `/ingest/<token>` | The deployment runs the bridge (teamcraft-deploy role `teamcraft_bridge`); its proxy routes both paths to the loopback bridge |
+| On its own machine        | `http://127.0.0.1:8088/hooks/<token>`, `/ingest/<token>`   | The bridge runs next to the producers on its default listener; use its own address instead if you opened the listener         |
+| At the configured address | `<bridge public URL>/hooks/<token>`, `/ingest/<token>`     | The bridge runs on its own public host; an admin set its address (below). Only offered while one is set                       |
 
-The first is the default. The app does not check whether a bridge answers there: on an instance
-without the bridge role the instance's host name has no `/hooks/` route.
+"On this server" is the default; while a bridge public URL is set, "At the configured address" is.
+The app does not check whether a bridge answers there: on an instance without the bridge role the
+instance's host name has no `/hooks/` route.
+
+**Bridge public URL.** An admin sets it under Administration → Settings → Integrations, or in the
+configuration file (`[integration] bridge_public_url`, the seed): `https://bridge.example.com`, with
+`http` only for localhost and no user name, query or fragment (docs/admin.md §6.3). The bridge's own
+proxy has to route `/hooks/` and `/ingest/` there. Channel admins, who can't read the admin
+settings, get the value from `GET /api/v1/conversations/{id}/bridge-address`, which requires the
+right to manage the channel and returns only this setting.
 
 ## Bots
 

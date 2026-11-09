@@ -20,9 +20,9 @@ use teamcraft_media::rtp::{AudioLevel, RtpTimestamp};
 use teamcraft_media::uplink_layers::UplinkPolicy;
 use teamcraft_media::video::EncodedVideoFrame;
 use teamcraft_proto::{
-  AudioCodec, CallClientMessage, CallEvent, CallId, DeviceId, Id, MediaCapabilities, MediaStreamId,
-  SFU_GOING_AWAY_CLOSE_CODE, Snowflake, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId,
-  VideoTrackKind,
+  AudioCodec, CallClientMessage, CallEvent, CallId, DaveTransitionMode, DeviceId, Id, MediaCapabilities,
+  MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, Snowflake, UserId, VideoCodec, VideoLayerInfo,
+  VideoPublicationId, VideoTrackKind,
 };
 use teamcraft_sfu::auth::JoinGrant;
 use teamcraft_sfu::config::SfuConfig;
@@ -759,8 +759,12 @@ impl Network {
     while let Some(output) = self.client_mut(id).engine.poll_output() {
       has_moved = true;
       match output {
-        EngineOutput::Signal(CallClientMessage::Join { capabilities, .. }) => {
-          maybe_outcome = Some(self.connect(id, capabilities));
+        EngineOutput::Signal(CallClientMessage::Join {
+          capabilities,
+          dave_transition_mode,
+          ..
+        }) => {
+          maybe_outcome = Some(self.connect(id, capabilities, dave_transition_mode));
         },
         EngineOutput::Signal(message) => {
           let Some(connection) = &self.client(id).maybe_connection else {
@@ -813,7 +817,12 @@ impl Network {
     has_moved
   }
 
-  fn connect(&mut self, id: i64, capabilities: MediaCapabilities) -> JoinOutcome {
+  fn connect(
+    &mut self,
+    id: i64,
+    capabilities: MediaCapabilities,
+    dave_transition_mode: DaveTransitionMode,
+  ) -> JoinOutcome {
     let link = Arc::new(MemoryLink::default());
     let (signal_tx, signals) = mpsc::channel(1024);
     let handle = ParticipantHandle {
@@ -826,7 +835,10 @@ impl Network {
       device_id: device(id),
       maybe_conversation_id: None,
     };
-    let (room, session, outcome) = self.rooms.join(grant, capabilities, handle, None).unwrap();
+    let (room, session, outcome) = self
+      .rooms
+      .join(grant, capabilities, dave_transition_mode, handle, None)
+      .unwrap();
     self.client_mut(id).maybe_connection = Some(MemoryConnection {
       link,
       signals,

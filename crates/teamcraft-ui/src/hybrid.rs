@@ -768,6 +768,13 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.conversation_files(conversation)
   }
 
+  fn files_page(
+    &self,
+    query: &teamcraft_client_api::files_query::FilesQuery<'_>,
+  ) -> Option<teamcraft_client_api::files_query::FilesPage> {
+    self.chat.files_page(query)
+  }
+
   fn conversation_media(
     &self,
     conversation: ConversationId,
@@ -920,6 +927,13 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn can_manage_integration_sources(&self) -> bool {
     self.chat.can_manage_integration_sources()
+  }
+
+  fn bridge_public_url(&self, conversation: ConversationId) -> Option<String> {
+    self
+      .maybe_live
+      .as_ref()
+      .and_then(|live| live.bridge_public_url(conversation))
   }
 
   fn add_integration_source(

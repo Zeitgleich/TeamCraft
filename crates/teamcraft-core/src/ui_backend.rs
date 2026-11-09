@@ -20,6 +20,7 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::calls::{
   BackgroundImageInfo, OrgBackgroundInfo, OrgBackgroundRule, OrgBackgrounds,
 };
+use teamcraft_client_api::files_query::{FilesPage, FilesQuery};
 use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup, GapEdge,
@@ -736,6 +737,8 @@ pub struct CoreChatBackend<S> {
   pub(crate) sent: RefCell<HashMap<ConversationId, crate::ui_drafts::KeptSent>>,
   /// Each space's members as a set, kept while its stored member list doesn't change (#701).
   pub(crate) space_members_kept: RefCell<HashMap<SpaceId, crate::space_dms::KeptMembers>>,
+  /// The Files view's page last read, kept while no message with files changes (#1509).
+  pub(crate) files_page_kept: RefCell<Option<crate::ui_files_page::KeptFilesPage>>,
   /// Tallies counted and not kept yet ([`Self::flush_entry_tallies`]).
   entry_tallies: RefCell<BTreeMap<ConversationId, EntryTally>>,
   /// What the snapshot's entries count ([`Self::with_entry_need`]).
@@ -808,6 +811,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       activity: RefCell::default(),
       sent: RefCell::default(),
       space_members_kept: RefCell::default(),
+      files_page_kept: RefCell::default(),
       entry_tallies: RefCell::default(),
       entry_need: EntryNeed::Everything,
       live_unread: RefCell::default(),
@@ -3015,6 +3019,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   }
   fn conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {
     self.ui_conversation_files(conversation)
+  }
+
+  fn files_page(&self, query: &FilesQuery<'_>) -> Option<FilesPage> {
+    Some(self.ui_files_page(query))
   }
 
   fn conversation_media(

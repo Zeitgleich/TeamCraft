@@ -16,8 +16,8 @@ use teamcraft_media::{
   rtp::{PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc},
 };
 use teamcraft_proto::{
-  CallClientMessage, CallEvent, CallServerMessage, MediaCapabilities, MediaStreamId, TransportFeedback,
-  VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
+  CallClientMessage, CallEvent, CallServerMessage, DaveTransitionMode, MediaCapabilities, MediaStreamId,
+  TransportFeedback, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
 };
 use teamcraft_sfu::{
   auth::DevTokenVerifier,
@@ -193,6 +193,7 @@ impl Client {
       .send(CallClientMessage::Join {
         token: format!("dev:{CALL_ID}:{device}:{device}"),
         capabilities,
+        dave_transition_mode: DaveTransitionMode::AtOnce,
       })
       .await;
     client

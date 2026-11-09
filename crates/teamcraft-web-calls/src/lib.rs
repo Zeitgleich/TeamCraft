@@ -1679,6 +1679,7 @@ async fn run_media(
     tracing::info!(
       frames_sent = stats.frames_sent,
       frames_received = stats.frames_received,
+      encryption = ?stats.encryption,
       "left the call"
     );
   });

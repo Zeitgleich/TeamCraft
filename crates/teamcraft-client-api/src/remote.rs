@@ -26,6 +26,7 @@ use crate::calls::{
   ScreenContentMode, ScreenShareResolution, VideoQuality,
 };
 use crate::drafts::{DraftFileItem, DraftItem, DraftReply, SentItem};
+use crate::files_query::{FileKind, FileScope, FileSort, FilesQuery, StarredFile};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::live::LiveSnapshot;
 use crate::model::{
@@ -1564,6 +1565,17 @@ pub enum ChatQuery {
   SpaceFiles {
     space: SpaceId,
   },
+  /// A page of the Files view ([`crate::files_query`]): the core reads only what the page shows
+  /// (issue #1509).
+  FilesPage {
+    scope: FileScope,
+    /// The [`FilesQuery::kind`]; `kind` names the query.
+    filter: FileKind,
+    sort: FileSort,
+    #[serde(default)]
+    starred: Vec<StarredFile>,
+    max_files: usize,
+  },
   /// The calls in one space's conversations, by the shared rule.
   SpaceCallHistory {
     space: SpaceId,
@@ -1850,6 +1862,10 @@ pub enum ChatAnswer {
   Files {
     files: Vec<FileInfo>,
   },
+  FilesPage {
+    files: Vec<FileInfo>,
+    has_more: bool,
+  },
   MediaPage {
     page: MediaPage,
   },
@@ -2091,6 +2107,28 @@ impl ChatQuery {
       Self::SpaceFiles { space } => ChatAnswer::Files {
         files: crate::space_scope::files_of_space(backend, space),
       },
+      Self::FilesPage {
+        scope,
+        filter,
+        sort,
+        starred,
+        max_files,
+      } => {
+        // The core reads its own store and always answers.
+        let page = backend
+          .files_page(&FilesQuery {
+            scope,
+            kind: filter,
+            sort,
+            starred: &starred,
+            max_files,
+          })
+          .unwrap_or_default();
+        ChatAnswer::FilesPage {
+          files: page.files,
+          has_more: page.has_more,
+        }
+      },
       Self::ConversationMedia {
         conversation,
         anchor,
@@ -2256,6 +2294,16 @@ mod tests {
       (
         r#"{"kind":"space_call_history","space":"7"}"#,
         ChatQuery::SpaceCallHistory { space },
+      ),
+      (
+        r#"{"kind":"files_page","scope":{"space":"7"},"filter":"media","sort":"name","max_files":60}"#,
+        ChatQuery::FilesPage {
+          scope: FileScope::Space(space),
+          filter: FileKind::Media,
+          sort: FileSort::Name,
+          starred: Vec::new(),
+          max_files: 60,
+        },
       ),
     ] {
       let query: ChatQuery = serde_json::from_str(json).unwrap();

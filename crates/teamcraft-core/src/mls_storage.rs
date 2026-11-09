@@ -568,7 +568,9 @@ mod tests {
   use teamcraft_proto::{ClientMessageId, ConversationId, MessageId};
 
   use super::*;
-  use crate::store::{MediaRange, MemoryStore, MessageEdge, MessageFilter, StoreError, StoredMessage};
+  use crate::store::{
+    Attached, AttachedRange, MemoryStore, MessageEdge, MessageFilter, StoreError, StoredMessage,
+  };
 
   #[test]
   fn entry_keys_round_trip_and_never_name_the_old_record() {
@@ -1410,13 +1412,14 @@ mod tests {
       self.cache.messages(conversation, filter)
     }
 
-    fn media_messages(
+    fn attached_messages(
       &self,
       conversation: ConversationId,
-      range: MediaRange,
+      kind: Attached,
+      range: AttachedRange,
       limit: usize,
     ) -> Result<Vec<StoredMessage>, StoreError> {
-      self.cache.media_messages(conversation, range, limit)
+      self.cache.attached_messages(conversation, kind, range, limit)
     }
 
     fn message_by_server_id(

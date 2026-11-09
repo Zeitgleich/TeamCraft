@@ -363,6 +363,10 @@ body_many = "You were mentioned {count} times while you were away.\n\nOpen TeamC
 [integration]
 # Days; 0 sets no retention. A channel's own retention setting wins.
 default_retention_days = 30
+# Where producers reach a bridge that runs on its own host (docs/bridge.md): the base of its /hooks/
+# and /ingest/ URLs, offered in a channel's "Connect a source" section. https, or http for localhost;
+# no user name, query or #fragment. Unset by default; the admin console can change it at runtime.
+# bridge_public_url = "https://bridge.example.com"
 
 # Guests: external people with a sponsor and an expiry (PLAN.md §12).
 [guests]

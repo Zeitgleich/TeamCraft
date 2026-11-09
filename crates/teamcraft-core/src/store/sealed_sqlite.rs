@@ -386,7 +386,7 @@ mod tests {
   const HELPER_BATCH: &str = "TEAMCRAFT_TEST_KILLED_BUILD_BATCH";
   /// Entries and messages of the store the build is killed on: with the catalog's own records
   /// more than two batches.
-  const ENTRIES: usize = 1100;
+  const ENTRIES: usize = 8_400;
   const MESSAGES: u8 = 60;
 
   /// Issue #1466: a reader waiting for a group of writes is seen by the group's thread, and has its
@@ -1565,7 +1565,7 @@ mod tests {
   fn a_build_killed_before_a_batch_commits_loses_nothing() {
     use std::os::unix::process::ExitStatusExt as _;
 
-    // Batches of 512 records: the build needs three, and dies in the first or the second.
+    // Batches of 4,096 records: the build needs three, and dies in the first or the second.
     for dies_in_batch in [1, 2] {
       let directory = scratch_dir();
       let path = directory.join("store.db");

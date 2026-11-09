@@ -988,6 +988,7 @@ async fn run_call(
   let video = sinks.video.totals();
   (stats.camera, stats.screen) = (video.camera, video.screen);
   stats.maybe_privacy_code = engine.privacy_code();
+  stats.encryption = engine.encryption_stats();
   info!(?stats, "call ended");
   result.map(|()| stats)
 }

@@ -418,3 +418,5 @@ channel-sources-bridge-instance = Auf diesem Server
 channel-sources-bridge-loopback = Auf eigenem Rechner
 channel-sources-bridge-instance-hint = Die Bridge läuft neben dem Server (Deployment-Option teamcraft_bridge); Quellen senden an die Adresse dieses Servers.
 channel-sources-bridge-loopback-hint = Die Bridge läuft neben den Quellen und lauscht auf ihrer lokalen Standardadresse. Wurde ihr Listener geöffnet, die eigene Adresse der Bridge verwenden.
+channel-sources-bridge-configured = Unter der eingestellten Adresse
+channel-sources-bridge-configured-hint = Die Bridge läuft auf einem eigenen Host, Quellen senden an { $url }, die Adresse, die die Admins eingestellt haben.

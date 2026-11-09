@@ -121,6 +121,7 @@ fn Swatch(
       <span
         class="set-swatch-tile"
         aria-hidden="true"
+        style:--sw-chrome=move || color(|tokens| tokens.chrome)
         style:--sw-nav=move || color(|tokens| tokens.sidebar)
         style:--sw-sel=move || color(|tokens| tokens.selected)
         style:--sw-dot=move || color(|tokens| tokens.presence)
@@ -339,7 +340,7 @@ fn brand_theme_colors(view: &BrandView, is_dark: bool) -> ThemeColors {
     product.navigation
   };
   ThemeColors {
-    navigation: token("--sb-bg").unwrap_or(default_nav),
+    navigation: token("--nav").unwrap_or(default_nav),
     selection: token("--sb-current").unwrap_or(product.selection),
     ..product
   }

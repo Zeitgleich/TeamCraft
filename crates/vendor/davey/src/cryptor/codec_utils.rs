@@ -5,7 +5,7 @@ use tracing::warn;
 use super::{
   Codec,
   frame_processors::OutboundFrameProcessor,
-  leb128::{leb128_size, read_leb128, write_leb128},
+  leb128::{LEB128_MAX_SIZE, leb128_size, read_leb128, write_leb128},
 };
 
 const NALU_SHORT_START_SEQUENCE_SIZE: usize = 3;
@@ -307,25 +307,24 @@ pub fn process_frame_av1(processor: &mut OutboundFrameProcessor, frame: &[u8]) -
       return false;
     }
 
-    let obu_payload_size: usize;
-    if obu_has_size {
+    let obu_payload_size: usize = if obu_has_size {
       let Some((obu_payload_size_explicit, leb128_size)) = read_leb128(&frame[i..]) else {
         warn!("Malformed AV1 frame: invalid LEB128 size");
         return false;
       };
-      obu_payload_size = obu_payload_size_explicit as usize;
       i += leb128_size;
+
+      if obu_payload_size_explicit > (frame.len() - i) as u64 {
+        warn!("Malformed AV1 frame: payload overflows frame");
+        return false;
+      }
+      obu_payload_size_explicit as usize
     } else {
       // If the size is not present, the OBU extends to the end of the frame.
-      obu_payload_size = frame.len() - i;
-    }
+      frame.len() - i
+    };
 
     let obu_payload_index = i;
-
-    if i + obu_payload_size > frame.len() {
-      warn!("Malformed AV1 frame: payload overflows frame");
-      return false;
-    }
 
     i += obu_payload_size;
 
@@ -356,9 +355,10 @@ pub fn process_frame_av1(processor: &mut OutboundFrameProcessor, frame: &[u8]) -
     // write the OBU payload size unencrypted if it was present and we didn't rewrite
     // without it
     if obu_has_size && !rewritten_without_size {
-      let mut leb128_buffer = vec![0u8; leb128_size(obu_payload_size as u64)];
-      write_leb128(obu_payload_size as u64, leb128_buffer.as_mut_slice());
-      processor.add_unencrypted_bytes(&leb128_buffer);
+      let mut leb128_buffer = [0u8; LEB128_MAX_SIZE];
+      let leb128_buffer = &mut leb128_buffer[..leb128_size(obu_payload_size as u64)];
+      write_leb128(obu_payload_size as u64, leb128_buffer);
+      processor.add_unencrypted_bytes(leb128_buffer);
     }
 
     // add the OBU payload, encrypted

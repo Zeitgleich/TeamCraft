@@ -71,6 +71,8 @@ mod ui_drafts;
 #[cfg(feature = "ui")]
 mod ui_files;
 #[cfg(feature = "ui")]
+mod ui_files_page;
+#[cfg(feature = "ui")]
 pub mod ui_join_requests;
 #[cfg(feature = "ui")]
 mod ui_people;

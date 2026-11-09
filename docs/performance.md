@@ -2053,7 +2053,8 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
   app and 25 kB in the service worker, which doesn't carry the build (27 kB less). It is needed
   from the first page on, so it can't move to a chunk; the guest budget went from 5.6 to 5.7 MB.
 - **Migration:** a store written before builds its catalog once, when the app opens it: every
-  record is decrypted once (what every start did before), in batches of 512 records, each a group of
+  record is decrypted once (what every start did before), in batches of 4,096 records (512 before
+  #1509), each a group of
   writes that saves its progress, so a build that is killed goes on after its last batch. Tested on
   the released 1.0.9 fixture and on a 4,500-message store stopped after two batches
   (`store::sealed::tests::catalog`). A damaged or inconsistent catalog is built again the same way,
@@ -2214,6 +2215,41 @@ read, so every message is unread. What a read costs since a tally was written:
 
 A tally is checked against a version the store writes in the group of the messages, so it is never
 updated by hand and can't drift; one written before a crash means counting the difference.
+
+### Files view on a large workspace (issue #1509)
+
+`crates/teamcraft-ffi/tests/files_budget.rs` measures the Files view through the API the apps call:
+a sealed store with 300 conversations and 100,000 messages (half in one), every 20th message with a
+file (5,191 files). Release build on a desktop machine.
+
+| Measured                                               | Result     |
+|--------------------------------------------------------|------------|
+| Before: every conversation's files, every 15 s         | 1564 ms    |
+| After: first page of all files, first read             | 443 ms     |
+| After: three pages, documents, media oldest, by name   | 28–34 ms   |
+| After: the same page again, nothing changed            | 2 ms (p50) |
+
+Before, the open view read and decrypted every message of every conversation on a 15-second timer.
+Now the sealed catalog (version 3) marks the messages with files and with documents, the core merges
+the conversations newest first and reads only the messages the page shows plus about one per
+conversation, and keeps the page until a message with files is written or removed
+(`LocalStore::attachments_cursor`): the view reads on every change, no timer. The first read includes
+building the conversation list for the first time in the process (the sidebar has done that by the
+time anyone opens Files). Sorting by name or size orders the newest files loaded so far; the view
+says so. The core times the page as the step `files_page`.
+
+The catalog's version 3 is built again once when a store of an earlier version opens
+(`measure_the_catalog_rebuild` in `store/sealed.rs`, 101,801 records, release, desktop). Each batch
+of the build rewrites the index nodes it touched, so the batch size decided the cost:
+
+| Build batch                    | 100,000 messages in 300 conversations |
+|--------------------------------|---------------------------------------|
+| 512 records (before)           | 10.3 s (101 µs per record)            |
+| 4,096 records (now)            | 2.6 s (25 µs per record)              |
+| 16,384 records (not taken)     | 1.3 s (13 µs per record)              |
+
+4,096 keeps a batch's records to a few MiB on a phone; the web build still yields between batches
+and shows its progress.
 
 ### Web bundle size
 

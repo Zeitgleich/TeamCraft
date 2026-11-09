@@ -1110,13 +1110,30 @@ Groups that are stored and reset as a whole:
 | `email_digest`   | on/off, default and shortest interval, grace period, subjects and texts                                                                       |
 | `shares`         | on/off, default and longest expiry, download cap, links per user                                                                              |
 | `limits`         | mentioned people per message (`max_mentions_per_message`, `max_mentions_without_group_mentions`), attachment size and per-user total, avatar and background sizes, backgrounds per user, group DM size, user group size, meeting mails per hour |
-| `integration`    | default retention of integration channels                                                                                                     |
+| `integration`    | default retention of integration channels; the bridge public URL (below)                                                                      |
 | `local_accounts` | on/off (off: the form disappears, `/auth/local/*` answers 403 `local_accounts_disabled`, sessions end), second factor required, activation and session lifetime, failed attempts, lockout |
 | `sign_in_page`   | which methods the sign-in page offers (SSO, e-mail and password) and in which order; help text per language; help link; whether every sign-in shows the identity provider's login page |
 | `mail_texts`     | invitation and activation mail                                                                                                                |
 | `meeting_mail`   | most invitees; invitation, update and cancellation mail                                                                                       |
 | `token_binding`  | DPoP: off, optional (default) or required; proof age, clock leeway, nonce rotation, replay cache size in all and per account (e2ee.md §3.1.2) |
 | `holidays`       | the region (DE, AT, CH and their states or cantons) and an iCalendar feed whose public holidays repeating meetings can skip, how often the feed is fetched and when its copy counts as stale (none by default; organizers can pick a region of their own; docs/meetings.md, "Holidays") |
+
+**Bridge public URL** (`integration.bridge_public_url`, `[integration] bridge_public_url`, empty by
+default): where producers reach an integration bridge that runs on its own host, such as
+`https://bridge.example.com`. It is the base of `/hooks/<token>` and `/ingest/<token>`. `https`, or
+`http` for localhost, 127.0.0.0/8 and `::1`; no user name or password, no query and no fragment; a
+path is kept (a proxy may mount the bridge under one) and trailing slashes are dropped. A refused
+value shows its error at the field, and the server checks it again. Nothing in it is secret, but
+channel admins are not instance admins and can't read these settings, so the server answers
+`GET /api/v1/conversations/{id}/bridge-address` (`{"public_url": "..."}`, or `{}` when none is set)
+for whoever has `ManageChannelProperties` on that channel: owners and channel admins get 200,
+plain members 403, non-members 404. That call holds this one value and no other setting. While one
+is set the channel's "Connect a source" section offers it as a third choice, "At the configured
+address", and selects it first; without one only "On this server" and "On its own machine" show
+(docs/bridge.md, "Where producers reach the bridge"). The apps read it when the section opens and
+again after a refresh, so a changed address shows without a restart. It is stored like the other
+groups (a `settings.integration` row), without a migration; a group stored by an older server simply
+has none.
 
 **Signed or not.** Settings that member clients must be able to verify against a compromised server
 are part of the owner-signed workspace policy (§2.3) and are edited there: `admin_self_join`, org

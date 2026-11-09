@@ -12,7 +12,21 @@ enum CallStatusSoundsSetting: String {
   static let key = "call_status_sounds"
 
   static var current: CallStatusSoundsSetting {
-    UserDefaults.standard.string(forKey: key).flatMap(CallStatusSoundsSetting.init(rawValue:)) ?? .all
+    stored(UserDefaults.standard.string(forKey: key))
+  }
+
+  /// The stored choice; nothing (or something unknown) is `all`.
+  static func stored(_ maybeRaw: String?) -> CallStatusSoundsSetting {
+    maybeRaw.flatMap(CallStatusSoundsSetting.init(rawValue:)) ?? .all
+  }
+
+  /// The stored name of a choice of the core's type (the account's settings sync, #1483).
+  static func raw(_ sounds: CallStatusSounds) -> String {
+    switch sounds {
+    case .all: return CallStatusSoundsSetting.all.rawValue
+    case .ownOnly: return CallStatusSoundsSetting.ownOnly.rawValue
+    case .off: return CallStatusSoundsSetting.off.rawValue
+    }
   }
 
   var sounds: CallStatusSounds {

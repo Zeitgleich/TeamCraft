@@ -19,7 +19,7 @@
 //!
 //! Media flows as QUIC datagrams (`teamcraft-media::datagram`), not through these types.
 
-use std::fmt;
+use std::{fmt, num::NonZeroU16};
 
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +43,32 @@ pub const SFU_SWITCHED_CLOSE_CODE: u32 = 0x4806;
 
 /// Bytes of the secret that lets a session move to another connection ([`CallEvent::Joined`]).
 pub const SWITCH_SECRET_BYTES: usize = 32;
+
+/// A DAVE transition: the switch of every member's encryption key to a new epoch (DAVE's
+/// `transition_id`, e2ee.md §8). Members install the new epoch's decryption keys when they get the
+/// commit or welcome that carries it, say so with [`CallClientMessage::DaveTransitionReady`], and
+/// encrypt with the new key from [`CallEvent::DaveExecuteTransition`] on, so no receiver misses
+/// frames at the switch. Never 0: DAVE's id 0 means "switch at once", which is a commit or welcome
+/// without an id here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct DaveTransitionId(pub NonZeroU16);
+
+/// How a client applies DAVE transitions, announced with [`CallClientMessage::Join`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaveTransitionMode {
+  /// Clients from before #1541: every commit and welcome switches the encryption key at once. The
+  /// SFU sends them no transition ids and waits for nothing from them.
+  #[default]
+  AtOnce,
+  /// The client takes [`DaveTransitionId`]s: it answers [`CallClientMessage::DaveTransitionReady`]
+  /// and switches on [`CallEvent::DaveExecuteTransition`].
+  Coordinated,
+  /// A newer mode this SFU doesn't know; treated as [`Self::AtOnce`].
+  #[serde(other)]
+  Unknown,
+}
 
 /// Claims of a call join token: a JWT signed by `teamcraft-server` (EdDSA) and verified by the
 /// SFU with the server's public key. Short-lived (about a minute); the SFU checks it once on join.
@@ -76,6 +102,9 @@ pub enum CallClientMessage {
     /// Older clients omit it and are treated as audio-only.
     #[serde(default)]
     capabilities: MediaCapabilities,
+    /// How the client applies DAVE transitions. Older clients omit it: [`DaveTransitionMode::AtOnce`].
+    #[serde(default)]
+    dave_transition_mode: DaveTransitionMode,
   },
   /// The client's DAVE key package, sent after [`CallEvent::DaveExternalSender`].
   DaveKeyPackage {
@@ -89,6 +118,12 @@ pub enum CallClientMessage {
     epoch: u64,
     commit: Base64Bytes,
     maybe_welcome: Option<Base64Bytes>,
+  },
+  /// The client processed the commit or welcome of `transition_id` and holds the new epoch's
+  /// decryption keys (DAVE opcode 23). Sent only by clients that joined with
+  /// [`DaveTransitionMode::Coordinated`]; older SFUs ignore it.
+  DaveTransitionReady {
+    transition_id: DaveTransitionId,
   },
   /// Starts sending a video track; the SFU answers with [`CallEvent::VideoPublished`], whose track
   /// echoes `maybe_publication_id` (#929). Older clients send none; older SFUs ignore it.
@@ -249,16 +284,33 @@ pub enum CallEvent {
     #[serde(default)]
     key_bindings: Vec<DaveKeyBinding>,
   },
-  /// The selected commit for `epoch`; members move to `epoch + 1`.
+  /// The selected commit for `epoch`; members move to `epoch + 1` (DAVE opcode 29).
   DaveAnnounceCommit {
     epoch: u64,
     commit: Base64Bytes,
+    /// The transition that switches the encryption key to the new epoch; the client answers
+    /// [`CallClientMessage::DaveTransitionReady`] and switches on
+    /// [`CallEvent::DaveExecuteTransition`]. Without one (older SFUs, clients that don't support
+    /// transitions, the group's first epoch) the client switches at once.
+    #[serde(rename = "transition_id", default, skip_serializing_if = "Option::is_none")]
+    maybe_transition_id: Option<DaveTransitionId>,
   },
+  /// DAVE opcode 30.
   DaveWelcome {
     welcome: Base64Bytes,
     /// Call key bindings of the group's other members.
     #[serde(default)]
     key_bindings: Vec<DaveKeyBinding>,
+    /// As in [`CallEvent::DaveAnnounceCommit`].
+    #[serde(rename = "transition_id", default, skip_serializing_if = "Option::is_none")]
+    maybe_transition_id: Option<DaveTransitionId>,
+  },
+  /// Every member that got the transition's commit or welcome is ready (or gone): switch the
+  /// encryption key now (DAVE opcode 22). A client that never hears it switches on its own after
+  /// a while. TeamCraft has no counterpart of opcode 21: calls never downgrade to unencrypted
+  /// media.
+  DaveExecuteTransition {
+    transition_id: DaveTransitionId,
   },
   /// A video track was published (also sent to its publisher, which learns the stream id).
   VideoPublished {
@@ -363,10 +415,15 @@ pub struct MediaStreamId(pub u32);
 impl fmt::Debug for CallClientMessage {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Self::Join { capabilities, .. } => f
+      Self::Join {
+        capabilities,
+        dave_transition_mode,
+        ..
+      } => f
         .debug_struct("Join")
         .field("token", &"[redacted]")
         .field("capabilities", capabilities)
+        .field("dave_transition_mode", dave_transition_mode)
         .finish(),
       Self::DaveKeyPackage {
         key_package,
@@ -385,6 +442,10 @@ impl fmt::Debug for CallClientMessage {
         .field("epoch", epoch)
         .field("commit", commit)
         .field("maybe_welcome", maybe_welcome)
+        .finish(),
+      Self::DaveTransitionReady { transition_id } => f
+        .debug_struct("DaveTransitionReady")
+        .field("transition_id", transition_id)
         .finish(),
       Self::PublishVideo {
         kind,
@@ -451,6 +512,7 @@ mod tests {
       CallClientMessage::Join {
         token: "t".into(),
         capabilities: MediaCapabilities::default(),
+        dave_transition_mode: DaveTransitionMode::AtOnce,
       }
     );
     let subscribe = CallClientMessage::Subscribe {
@@ -469,6 +531,79 @@ mod tests {
     assert_eq!(
       serde_json::to_string(&commit).unwrap(),
       r#"{"type":"dave_commit","epoch":3,"commit":"AQI=","maybe_welcome":null}"#
+    );
+  }
+
+  /// DAVE transitions (#1541): the id is a number, absent without a transition, and older peers'
+  /// messages still read.
+  #[test]
+  fn dave_transition_wire_format() {
+    let transition_id = DaveTransitionId(NonZeroU16::new(7).unwrap());
+    let ready = CallClientMessage::DaveTransitionReady { transition_id };
+    assert_eq!(
+      serde_json::to_string(&ready).unwrap(),
+      r#"{"type":"dave_transition_ready","transition_id":7}"#
+    );
+    let execute = CallEvent::DaveExecuteTransition { transition_id };
+    assert_eq!(
+      serde_json::to_string(&execute).unwrap(),
+      r#"{"type":"dave_execute_transition","transition_id":7}"#
+    );
+    let announce = CallEvent::DaveAnnounceCommit {
+      epoch: 2,
+      commit: Base64Bytes::new(vec![1]),
+      maybe_transition_id: Some(transition_id),
+    };
+    assert_eq!(
+      serde_json::to_string(&announce).unwrap(),
+      r#"{"type":"dave_announce_commit","epoch":2,"commit":"AQ==","transition_id":7}"#
+    );
+    // An older SFU's commit and welcome have no transition: apply them at once.
+    let old: CallEvent =
+      serde_json::from_str(r#"{"type":"dave_announce_commit","epoch":2,"commit":"AQ=="}"#).unwrap();
+    assert!(matches!(
+      old,
+      CallEvent::DaveAnnounceCommit {
+        maybe_transition_id: None,
+        ..
+      }
+    ));
+    let welcome = CallEvent::DaveWelcome {
+      welcome: Base64Bytes::new(vec![1]),
+      key_bindings: Vec::new(),
+      maybe_transition_id: None,
+    };
+    assert_eq!(
+      serde_json::to_string(&welcome).unwrap(),
+      r#"{"type":"dave_welcome","welcome":"AQ==","key_bindings":[]}"#
+    );
+    // Id 0 means "at once" in DAVE; here that is an absent id, so 0 is malformed.
+    assert!(
+      serde_json::from_str::<CallEvent>(r#"{"type":"dave_execute_transition","transition_id":0}"#).is_err()
+    );
+    // Older clients don't say how they apply transitions: at once. A newer mode reads as unknown.
+    let join: CallClientMessage = serde_json::from_str(r#"{"type":"join","token":"t"}"#).unwrap();
+    assert!(matches!(
+      join,
+      CallClientMessage::Join {
+        dave_transition_mode: DaveTransitionMode::AtOnce,
+        ..
+      }
+    ));
+    let join: CallClientMessage =
+      serde_json::from_str(r#"{"type":"join","token":"t","dave_transition_mode":"batched"}"#).unwrap();
+    assert!(matches!(
+      join,
+      CallClientMessage::Join {
+        dave_transition_mode: DaveTransitionMode::Unknown,
+        ..
+      }
+    ));
+    // An older SFU or client skips the new messages.
+    assert_eq!(
+      serde_json::from_str::<CallClientMessage>(r#"{"type":"dave_transition_ready","transition_id":7}"#)
+        .unwrap(),
+      ready
     );
   }
 
@@ -802,6 +937,7 @@ mod tests {
     let join = CallClientMessage::Join {
       token: "secret-token".into(),
       capabilities: MediaCapabilities::default(),
+      dave_transition_mode: DaveTransitionMode::Coordinated,
     };
     assert!(!format!("{join:?}").contains("secret-token"));
   }

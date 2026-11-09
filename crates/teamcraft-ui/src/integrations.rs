@@ -31,6 +31,21 @@ pub enum BridgeLocation {
   Instance,
   /// Next to the producers, on its default loopback address.
   Loopback,
+  /// On its own host, at the "bridge public URL" the instance's admins set. Only offered while one
+  /// is set.
+  Configured,
+}
+
+impl BridgeLocation {
+  /// What the section selects at first: the configured address when there is one, else the
+  /// instance's host name.
+  pub fn default_for(maybe_configured: Option<&str>) -> Self {
+    if maybe_configured.is_some_and(|url| !url.trim().is_empty()) {
+      Self::Configured
+    } else {
+      Self::Instance
+    }
+  }
 }
 
 /// The bots of the instance, for the admin console. Provided as context after sign-in.
@@ -155,13 +170,18 @@ pub fn bridge_config(server_url: &str, bot_name: &str) -> String {
   )
 }
 
-/// Where producers reach the bridge: the instance's address (`server_url`) or the loopback default.
-/// Without a known instance address the loopback default is the only usable answer.
-pub fn bridge_base_url(location: BridgeLocation, server_url: &str) -> String {
+/// Where producers reach the bridge: the instance's address (`server_url`), the address the admins
+/// configured, or the loopback default. Without a known instance address the loopback default is
+/// the only usable answer for the first; the second falls back to the first when none is set.
+pub fn bridge_base_url(location: BridgeLocation, server_url: &str, maybe_configured: Option<&str>) -> String {
   let server = server_url.trim().trim_end_matches('/');
+  let configured = maybe_configured.map_or("", |url| url.trim().trim_end_matches('/'));
   match location {
-    BridgeLocation::Instance if !server.is_empty() => server.to_owned(),
-    BridgeLocation::Instance | BridgeLocation::Loopback => DEFAULT_BRIDGE_URL.to_owned(),
+    BridgeLocation::Configured if !configured.is_empty() => configured.to_owned(),
+    BridgeLocation::Instance | BridgeLocation::Configured if !server.is_empty() => server.to_owned(),
+    BridgeLocation::Instance | BridgeLocation::Configured | BridgeLocation::Loopback => {
+      DEFAULT_BRIDGE_URL.to_owned()
+    },
   }
 }
 
@@ -254,7 +274,7 @@ mod tests {
 
   #[test]
   fn a_bridge_on_the_instance_is_reached_through_its_host_name() {
-    let base = bridge_base_url(BridgeLocation::Instance, "https://chat.example.com/");
+    let base = bridge_base_url(BridgeLocation::Instance, "https://chat.example.com/", None);
     assert_eq!(base, "https://chat.example.com");
     assert_eq!(webhook_url(&base, "t"), "https://chat.example.com/hooks/t");
     assert_eq!(ingest_url(&base, "t"), "https://chat.example.com/ingest/t");
@@ -264,10 +284,48 @@ mod tests {
   fn a_local_bridge_or_an_unknown_instance_uses_the_loopback_default() {
     let server = "https://chat.example.com";
     assert_eq!(
-      bridge_base_url(BridgeLocation::Loopback, server),
+      bridge_base_url(BridgeLocation::Loopback, server, None),
       DEFAULT_BRIDGE_URL
     );
-    assert_eq!(bridge_base_url(BridgeLocation::Instance, " "), DEFAULT_BRIDGE_URL);
+    assert_eq!(
+      bridge_base_url(BridgeLocation::Instance, " ", None),
+      DEFAULT_BRIDGE_URL
+    );
+  }
+
+  #[test]
+  fn a_bridge_on_its_own_host_uses_the_configured_address() {
+    let server = "https://chat.example.com";
+    let configured = Some("https://bridge.example.com/");
+    let base = bridge_base_url(BridgeLocation::Configured, server, configured);
+    assert_eq!(base, "https://bridge.example.com");
+    assert_eq!(webhook_url(&base, "t"), "https://bridge.example.com/hooks/t");
+    assert_eq!(ingest_url(&base, "t"), "https://bridge.example.com/ingest/t");
+    // The other two choices ignore it.
+    assert_eq!(
+      bridge_base_url(BridgeLocation::Instance, server, configured),
+      server
+    );
+    assert_eq!(
+      bridge_base_url(BridgeLocation::Loopback, server, configured),
+      DEFAULT_BRIDGE_URL
+    );
+    // Nothing set (or it went away meanwhile): the instance's address.
+    assert_eq!(bridge_base_url(BridgeLocation::Configured, server, None), server);
+    assert_eq!(
+      bridge_base_url(BridgeLocation::Configured, server, Some(" ")),
+      server
+    );
+  }
+
+  #[test]
+  fn the_configured_address_is_the_default_while_one_is_set() {
+    assert_eq!(BridgeLocation::default_for(None), BridgeLocation::Instance);
+    assert_eq!(BridgeLocation::default_for(Some("")), BridgeLocation::Instance);
+    assert_eq!(
+      BridgeLocation::default_for(Some("https://bridge.example.com")),
+      BridgeLocation::Configured
+    );
   }
 
   #[test]

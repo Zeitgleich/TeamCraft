@@ -38,16 +38,29 @@
   --skin-tone-dark: #7c533e;
   --shadow: 0 8px 28px rgba(16, 24, 40, 0.18);
 
+  /* The rail and the top bar: the theme's or brand's colour, with light text, in both modes. */
   --chrome: #111926;
   --chrome-text: #c6cfdd;
   --chrome-strong: #ffffff;
-  --sb-bg: #1a2434;
-  --sb-hover: rgba(255, 255, 255, 0.07);
+  /* The navigation colour of the theme or brand (brand key `sidebar`). In light mode the sidebar is
+     a light tint of it, set off from the white content by a hairline; in dark mode it is the
+     sidebar itself. Every text colour below reads at 4.5:1 on a tint of any colour. */
+  --nav: #1a2434;
+  --sb-tint: 8%;
+  --sb-bg: color-mix(in srgb, var(--nav) var(--sb-tint), #ffffff);
+  --sb-border: rgba(0, 0, 0, 0.08);
+  --sb-text: #2c3038;
+  --sb-strong: #141414;
+  --sb-hover: rgba(0, 0, 0, 0.06);
+  /* Quiet fills on the sidebar: chips, inputs, dividers. */
+  --sb-fill: rgba(0, 0, 0, 0.05);
+  --sb-fill-strong: rgba(0, 0, 0, 0.09);
+  --sb-edge: rgba(0, 0, 0, 0.12);
   /* 3:1 against --sb-bg in both themes and 4.5:1 with white text. */
   --sb-current: #0064fc;
-  --sb-muted: #9aa6ba;
+  --sb-muted: #4b515c;
   /* Muted channels: dimmer than --sb-muted but still 4.5:1 on --sb-bg; the bell-off icon says why. */
-  --sb-dim: #8d99ae;
+  --sb-dim: #5c626c;
   /* White text on it needs 4.5:1 (WCAG AA). */
   --badge-bg: #c8441d;
   /* The system red of Apple's badges (#715): the rail's space tiles. */
@@ -121,6 +134,8 @@
   --radius: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
+  /* The band of chrome colour right of and below the workspace card (020-shell.css). */
+  --frame-gap: 6px;
   --radius-pill: 999px;
 
   /* Motion (issue #273): three durations and three curves. Only transform and opacity animate
@@ -230,8 +245,18 @@
     --field-bg: #2c2c2c;
     --field-bg-hover: #343434;
     --chrome: #101010;
-    --sb-bg: #141414;
+    --nav: #141414;
+    --sb-bg: var(--nav);
+    --sb-border: transparent;
+    --sb-text: #c6cfdd;
+    --sb-strong: #ffffff;
+    --sb-hover: rgba(255, 255, 255, 0.07);
+    --sb-fill: rgba(255, 255, 255, 0.08);
+    --sb-fill-strong: rgba(255, 255, 255, 0.14);
+    --sb-edge: rgba(255, 255, 255, 0.14);
     --sb-current: #0064fc;
+    --sb-muted: #9aa6ba;
+    --sb-dim: #8d99ae;
     --lvl-debug: #8591a4;
     --lvl-info: #6db3f2;
     --lvl-warn: #f0b04a;
@@ -274,8 +299,18 @@
   --field-bg: #2c2c2c;
   --field-bg-hover: #343434;
   --chrome: #101010;
-  --sb-bg: #141414;
+  --nav: #141414;
+  --sb-bg: var(--nav);
+  --sb-border: transparent;
+  --sb-text: #c6cfdd;
+  --sb-strong: #ffffff;
+  --sb-hover: rgba(255, 255, 255, 0.07);
+  --sb-fill: rgba(255, 255, 255, 0.08);
+  --sb-fill-strong: rgba(255, 255, 255, 0.14);
+  --sb-edge: rgba(255, 255, 255, 0.14);
   --sb-current: #0064fc;
+  --sb-muted: #9aa6ba;
+  --sb-dim: #8d99ae;
   --lvl-debug: #8591a4;
   --lvl-info: #6db3f2;
   --lvl-warn: #f0b04a;

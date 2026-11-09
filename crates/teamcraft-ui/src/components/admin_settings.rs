@@ -4,7 +4,7 @@ use leptos::prelude::*;
 use serde_json::{Map, Value, json};
 use teamcraft_proto::{
   Dsn, HOLIDAY_REGIONS, HolidayFeedError, HolidayFeedStatus, RuntimeSettingsKey, RuntimeSettingsResponse,
-  RuntimeSettingsSection, SettingSource, Snowflake, is_crash_environment,
+  RuntimeSettingsSection, SettingSource, Snowflake, check_bridge_public_url, is_crash_environment,
 };
 
 use crate::clock::{format_relative, now_ms};
@@ -84,6 +84,9 @@ enum Kind {
   MapText,
   /// An https link that may be empty (none).
   Link,
+  /// The public address of the integration bridge (docs/bridge.md): https, or http for localhost;
+  /// no credentials, query or fragment; empty means none.
+  BridgeUrl,
   /// Where crash reports go, one of [`CRASH_MODE_CHOICES`].
   CrashMode,
   /// A crash reports DSN (docs/crash-reports.md); empty unless reports go to an own backend.
@@ -368,7 +371,13 @@ const LIMITS: &[FieldDef] = &[
   count("max_user_group_members"),
   count("max_meeting_mails_per_user_per_hour"),
 ];
-const INTEGRATION: &[FieldDef] = &[amount("default_retention_days", 1, U32_MAX, DAYS)];
+const INTEGRATION: &[FieldDef] = &[
+  amount("default_retention_days", 1, U32_MAX, DAYS),
+  FieldDef {
+    id: "bridge_public_url",
+    kind: Kind::BridgeUrl,
+  },
+];
 const LOCAL_ACCOUNTS: &[FieldDef] = &[
   flag("is_enabled"),
   flag("require_totp"),
@@ -589,6 +598,19 @@ fn FieldRow(
       }
       .into_any()
     },
+    Kind::BridgeUrl => view! {
+      <TextField
+        id=leak_key(dom_id)
+        label=label
+        input_type="url"
+        placeholder="https://bridge.example.com"
+        hint="settings-hint-bridge_public_url"
+        value=value
+        on_input=on_input
+        error=error
+      />
+    }
+    .into_any(),
     Kind::Methods => {
       let i18n = use_i18n();
       let dom_id = leak_key(dom_id);
@@ -921,6 +943,7 @@ fn value_text(kind: Kind, maybe_value: Option<&Value>) -> String {
     | Kind::Area
     | Kind::MapText
     | Kind::Link
+    | Kind::BridgeUrl
     | Kind::Level
     | Kind::DpopPolicy
     | Kind::CrashMode
@@ -1026,6 +1049,12 @@ fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
       "" => Ok(Value::Null),
       link if link.starts_with("https://") && is_web_url(link) => Ok(Value::String(link.to_owned())),
       _ => Err("admin-error-url"),
+    },
+    Kind::BridgeUrl => match typed.trim() {
+      "" => Ok(Value::Null),
+      url => check_bridge_public_url(url)
+        .map(Value::String)
+        .map_err(|_| "settings-error-bridge-url"),
     },
     Kind::Methods => {
       let choice = METHOD_CHOICES
@@ -1255,6 +1284,51 @@ mod tests {
     assert_eq!(
       check(&kind("integration"), &values).err(),
       Some(vec![("default_retention_days", "admin-error-number")])
+    );
+  }
+
+  #[test]
+  fn the_bridge_public_url_is_none_or_a_checked_address() {
+    let sent = |text: &str| {
+      let values = typed(&[("default_retention_days", "30"), ("bridge_public_url", text)]);
+      match check(&kind("integration"), &values) {
+        Ok(RuntimeSettingsSection::Integration(values)) => Ok(values.maybe_bridge_public_url),
+        Ok(_) => panic!("wrong section"),
+        Err(errors) => Err(errors),
+      }
+    };
+    assert_eq!(sent(""), Ok(None));
+    assert_eq!(sent("  "), Ok(None));
+    assert_eq!(
+      sent(" https://bridge.example.com/ "),
+      Ok(Some("https://bridge.example.com".to_owned()))
+    );
+    assert_eq!(
+      sent("http://127.0.0.1:8088"),
+      Ok(Some("http://127.0.0.1:8088".to_owned()))
+    );
+    for bad in [
+      "http://bridge.example.com",
+      "https://user:pw@bridge.example.com",
+      "https://bridge.example.com/#x",
+      "https://bridge.example.com/?a=1",
+      "bridge.example.com",
+    ] {
+      assert_eq!(
+        sent(bad),
+        Err(vec![("bridge_public_url", "settings-error-bridge-url")]),
+        "{bad}"
+      );
+    }
+    let response_json =
+      json!({"default_retention_days": 30, "bridge_public_url": "https://bridge.example.com"});
+    assert_eq!(
+      value_text(Kind::BridgeUrl, lookup(&response_json, "bridge_public_url")),
+      "https://bridge.example.com"
+    );
+    assert_eq!(
+      value_text(Kind::BridgeUrl, lookup(&json!({}), "bridge_public_url")),
+      ""
     );
   }
 

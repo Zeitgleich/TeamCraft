@@ -76,6 +76,7 @@ pub mod entry_menu;
 pub mod file_drop;
 pub mod file_preview;
 pub mod file_views;
+pub mod files_sidebar;
 pub mod files_view;
 pub mod first_sync_bar;
 pub mod getting_started;

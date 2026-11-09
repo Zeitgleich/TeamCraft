@@ -21,8 +21,8 @@ use teamcraft_client_api::custom_status::set_request;
 use teamcraft_client_api::live::{LiveMarks, LiveReceipt, LiveSnapshot};
 use teamcraft_client_api::receipts::seen_by;
 use teamcraft_proto::{
-  AnnouncementId, AnnouncementResponse, CustomStatus as CustomStatusWire, GetAnnouncementResponse,
-  ListPresenceResponse, ListThreadsResponse, PresenceState, ReadReceiptsResponse,
+  AnnouncementId, AnnouncementResponse, BridgeAddressResponse, CustomStatus as CustomStatusWire,
+  GetAnnouncementResponse, ListPresenceResponse, ListThreadsResponse, PresenceState, ReadReceiptsResponse,
   ThreadSummary as ThreadWire, UnreadResponse, UserPresence,
 };
 
@@ -86,6 +86,10 @@ pub struct LiveState {
   maybe_receipts_shown: Option<ConversationId>,
   /// Conversations whose receipts were read since the last connection, or are being read.
   receipts_read: HashSet<ConversationId>,
+  /// The bridge public URL the server answered per channel (only people who manage the channel
+  /// get an answer), and the channels asked since the last refresh, or being asked.
+  bridge_urls: HashMap<ConversationId, String>,
+  bridge_urls_asked: HashSet<ConversationId>,
 }
 
 /// What the UI still has to read from the server after a core snapshot.
@@ -172,6 +176,8 @@ impl LiveServer {
       let mut state = self.state.borrow_mut();
       // Receipts may have been missed since they were read: read again when shown.
       state.receipts_read.clear();
+      // A setting an admin changed meanwhile is read again the next time it is shown.
+      state.bridge_urls_asked.clear();
       (state.is_core_fed, state.maybe_receipts_shown)
     };
     let (unread, threads, presence) = if is_core_fed {
@@ -242,6 +248,41 @@ impl LiveServer {
       if is_changed {
         self.changed();
       }
+    }
+  }
+
+  /// The bridge public URL for the channel's "Connect a source" section: what the server last
+  /// said (`None`: none is set, or the user may not read it, or it isn't read yet). The first ask
+  /// starts the read; a change shows through the change notifier.
+  pub fn bridge_public_url(&self, conversation: ConversationId) -> Option<String> {
+    let (maybe_url, is_new) = {
+      let mut state = self.state.borrow_mut();
+      let is_new = state.bridge_urls_asked.insert(conversation);
+      (state.bridge_urls.get(&conversation).cloned(), is_new)
+    };
+    if is_new {
+      let live = self.clone();
+      spawn_local(async move { live.refresh_bridge_url(conversation).await });
+    }
+    maybe_url
+  }
+
+  async fn refresh_bridge_url(&self, conversation: ConversationId) {
+    let path = format!("/api/v1/conversations/{conversation}/bridge-address");
+    let Some(address) = self.get::<BridgeAddressResponse>(&path).await else {
+      // Asked again with the next read.
+      self.state.borrow_mut().bridge_urls_asked.remove(&conversation);
+      return;
+    };
+    let is_changed = {
+      let mut state = self.state.borrow_mut();
+      match address.maybe_public_url {
+        Some(url) => state.bridge_urls.insert(conversation, url.clone()) != Some(url),
+        None => state.bridge_urls.remove(&conversation).is_some(),
+      }
+    };
+    if is_changed {
+      self.changed();
     }
   }
 

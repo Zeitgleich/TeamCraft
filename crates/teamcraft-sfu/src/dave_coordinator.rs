@@ -8,12 +8,25 @@
 //! The first two participants found the group: the earlier one keeps its pending single-member
 //! group (epoch 0) and commits the other's Add proposal.
 //!
+//! Every later commit carries a transition id (DAVE opcodes 29/30 with `transition_id`) for the
+//! members that joined with [`DaveTransitionMode::Coordinated`]: they install the new epoch's
+//! decryption keys, say they are ready, and the coordinator executes the transition (opcode 22)
+//! once all of them are, or have left. Only then do they encrypt with the new key, so nobody
+//! misses frames at the switch. Clients from before transitions get no id and switch at once. The
+//! founding commit has none either: nobody encrypted before it. The coordinator's word decides
+//! nothing about keys: a client that hears no execution switches on its own after a while.
+//!
 //! Pure state machine: every input returns the messages to send, so it is tested without network.
 
-use std::collections::{BTreeSet, HashMap};
+use std::{
+  collections::{BTreeSet, HashMap},
+  num::NonZeroU16,
+};
 
 use teamcraft_media::dave::{DaveEpoch, DaveError, DaveExternalSender, DaveLeafIndex, DaveParticipantId};
-use teamcraft_proto::{Base64Bytes, CallEvent, CallId, DaveKeyBinding, DeviceId, IdError};
+use teamcraft_proto::{
+  Base64Bytes, CallEvent, CallId, DaveKeyBinding, DaveTransitionId, DaveTransitionMode, DeviceId, IdError,
+};
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -34,6 +47,12 @@ pub struct DaveCoordinator {
   key_bindings: HashMap<DeviceId, Vec<u8>>,
   pending_removals: Vec<DaveLeafIndex>,
   maybe_transition: Option<Transition>,
+  /// How each device with a key package applies transitions (from its `join`).
+  transition_modes: HashMap<DeviceId, DaveTransitionMode>,
+  /// The last transition id handed out; ids count up from 1 and wrap, skipping 0.
+  last_transition_id: u16,
+  /// The announced transition waiting for its members to be ready.
+  maybe_execution: Option<Execution>,
 }
 
 /// One message to deliver over a participant's signaling stream.
@@ -41,6 +60,16 @@ pub struct DaveCoordinator {
 pub struct Outbound {
   pub recipient: DeviceId,
   pub event: CallEvent,
+}
+
+/// An announced commit's transition, waiting until every coordinated member is ready.
+#[derive(Debug)]
+struct Execution {
+  id: DaveTransitionId,
+  /// Coordinated members that got the commit or welcome; they hear the execution.
+  recipients: BTreeSet<DeviceId>,
+  /// Of those, the ones that haven't said they're ready.
+  awaiting: BTreeSet<DeviceId>,
 }
 
 /// Proposals sent for `epoch`, waiting for the first commit.
@@ -76,6 +105,9 @@ impl DaveCoordinator {
       key_bindings: HashMap::new(),
       pending_removals: Vec::new(),
       maybe_transition: None,
+      transition_modes: HashMap::new(),
+      last_transition_id: 0,
+      maybe_execution: None,
     })
   }
 
@@ -84,12 +116,13 @@ impl DaveCoordinator {
     Ok(self.external_sender.package()?)
   }
 
-  /// A participant's key package arrived.
+  /// A participant's key package arrived; `transition_mode` is what its connection's `join` said.
   pub fn on_key_package(
     &mut self,
     participant_id: DeviceId,
     key_package: Vec<u8>,
     maybe_key_binding: Option<Vec<u8>>,
+    transition_mode: DaveTransitionMode,
   ) -> Result<Vec<Outbound>, DaveCoordinatorError> {
     let actual = device_id_from_dave(self.external_sender.key_package_participant(&key_package)?)?;
     if actual != participant_id {
@@ -104,6 +137,7 @@ impl DaveCoordinator {
     if let Some(binding) = maybe_key_binding {
       self.key_bindings.insert(participant_id, binding);
     }
+    self.transition_modes.insert(participant_id, transition_mode);
     self.waiting.push((participant_id, key_package));
     Ok(self.start_transition())
   }
@@ -135,10 +169,39 @@ impl DaveCoordinator {
     outbound
   }
 
+  /// A member installed the keys of `transition_id`. The last one to do so executes it.
+  pub fn on_transition_ready(
+    &mut self,
+    participant_id: DeviceId,
+    transition_id: DaveTransitionId,
+  ) -> Vec<Outbound> {
+    let Some(execution) = &mut self.maybe_execution else {
+      debug!(?participant_id, "transition ready without a transition in flight");
+      return Vec::new();
+    };
+    if execution.id != transition_id {
+      debug!(
+        ?participant_id,
+        transition_id = transition_id.0.get(),
+        "ignoring ready for another transition"
+      );
+      return Vec::new();
+    }
+    execution.awaiting.remove(&participant_id);
+    self.execute_when_ready()
+  }
+
   /// A participant left the call (or its connection dropped).
   pub fn on_leave(&mut self, participant_id: DeviceId) -> Vec<Outbound> {
     self.waiting.retain(|(id, _)| *id != participant_id);
     self.key_bindings.remove(&participant_id);
+    self.transition_modes.remove(&participant_id);
+    let mut outbound = Vec::new();
+    if let Some(execution) = &mut self.maybe_execution {
+      execution.recipients.remove(&participant_id);
+      execution.awaiting.remove(&participant_id);
+      outbound = self.execute_when_ready();
+    }
     if let Some(leaf_index) = self.leaf_of(participant_id) {
       self.leaves[leaf_index] = None;
       let leaf = DaveLeafIndex(u32::try_from(leaf_index).unwrap_or(u32::MAX));
@@ -159,7 +222,8 @@ impl DaveCoordinator {
     if self.leaves.iter().all(Option::is_none) {
       self.reset_group();
     }
-    self.start_transition()
+    outbound.extend(self.start_transition());
+    outbound
   }
 
   /// Current epoch of the group, if founded.
@@ -251,17 +315,21 @@ impl DaveCoordinator {
     commit: Vec<u8>,
     maybe_welcome: Option<Vec<u8>>,
   ) -> Vec<Outbound> {
+    // One transition at a time: the previous one goes now, before the next epoch's commit.
+    let mut outbound = self.execute_now();
+    let maybe_id = self.next_transition_id(&transition);
     // Members before the joiners are placed get the commit; joiners get the welcome instead.
-    let mut outbound: Vec<Outbound> = self
-      .members()
-      .map(|recipient| Outbound {
+    let members: Vec<DeviceId> = self.members().collect();
+    for recipient in members {
+      outbound.push(Outbound {
         recipient,
         event: CallEvent::DaveAnnounceCommit {
           epoch: transition.epoch.0,
           commit: Base64Bytes::new(commit.clone()),
+          maybe_transition_id: self.transition_for(recipient, maybe_id),
         },
-      })
-      .collect();
+      });
+    }
     let mut welcomed = Vec::new();
     for (joiner, _) in &transition.joiners {
       let leaf_index = self.place(*joiner);
@@ -283,6 +351,7 @@ impl DaveCoordinator {
           event: CallEvent::DaveWelcome {
             welcome: Base64Bytes::new(welcome.clone()),
             key_bindings: self.bindings_of(others),
+            maybe_transition_id: self.transition_for(joiner, maybe_id),
           },
         });
       }
@@ -291,7 +360,91 @@ impl DaveCoordinator {
       self.leaves.pop();
     }
     self.maybe_epoch = Some(DaveEpoch(transition.epoch.0 + 1));
+    if let Some(id) = maybe_id {
+      let recipients: BTreeSet<DeviceId> = outbound
+        .iter()
+        .filter(|message| {
+          matches!(
+            message.event,
+            CallEvent::DaveAnnounceCommit {
+              maybe_transition_id: Some(_),
+              ..
+            } | CallEvent::DaveWelcome {
+              maybe_transition_id: Some(_),
+              ..
+            }
+          )
+        })
+        .map(|message| message.recipient)
+        .collect();
+      self.maybe_execution = Some(Execution {
+        id,
+        awaiting: recipients.clone(),
+        recipients,
+      });
+      outbound.extend(self.execute_when_ready());
+    }
     outbound
+  }
+
+  /// A fresh id for a commit's transition; none for the founding commit (nobody encrypted before
+  /// it) or when no member takes transitions.
+  fn next_transition_id(&mut self, transition: &Transition) -> Option<DaveTransitionId> {
+    let is_founding = transition.epoch == DaveEpoch(0);
+    let has_coordinated = self
+      .members()
+      .chain(transition.joiners.iter().map(|(id, _)| *id))
+      .any(|device| self.is_coordinated(device));
+    if is_founding || !has_coordinated {
+      return None;
+    }
+    self.last_transition_id = self.last_transition_id.checked_add(1).unwrap_or(1);
+    // Invariant: the counter is at least 1 here.
+    NonZeroU16::new(self.last_transition_id).map(DaveTransitionId)
+  }
+
+  fn transition_for(
+    &self,
+    recipient: DeviceId,
+    maybe_id: Option<DaveTransitionId>,
+  ) -> Option<DaveTransitionId> {
+    maybe_id.filter(|_| self.is_coordinated(recipient))
+  }
+
+  fn is_coordinated(&self, device: DeviceId) -> bool {
+    self.transition_modes.get(&device) == Some(&DaveTransitionMode::Coordinated)
+  }
+
+  /// Executes the transition in flight once nobody it waits for is left.
+  fn execute_when_ready(&mut self) -> Vec<Outbound> {
+    if self
+      .maybe_execution
+      .as_ref()
+      .is_some_and(|execution| execution.awaiting.is_empty())
+    {
+      return self.execute_now();
+    }
+    Vec::new()
+  }
+
+  /// Executes the transition in flight, if any, ready or not.
+  fn execute_now(&mut self) -> Vec<Outbound> {
+    let Some(execution) = self.maybe_execution.take() else {
+      return Vec::new();
+    };
+    if !execution.awaiting.is_empty() {
+      debug!(call_id = %self.call_id, waiting = execution.awaiting.len(), "executing a transition before everyone is ready");
+    }
+    execution
+      .recipients
+      .into_iter()
+      .map(|recipient| Outbound {
+        recipient,
+        event: CallEvent::DaveExecuteTransition {
+          transition_id: execution.id,
+        },
+      })
+      .collect()
   }
 
   /// Puts a new member into the leftmost blank leaf and returns its index.
@@ -310,6 +463,7 @@ impl DaveCoordinator {
     self.maybe_epoch = None;
     self.leaves.clear();
     self.pending_removals.clear();
+    self.maybe_execution = None;
     if let Some(transition) = self.maybe_transition.take() {
       let mut requeued: Vec<_> = transition
         .joiners
@@ -354,7 +508,7 @@ impl DaveCoordinator {
 
 #[cfg(test)]
 mod tests {
-  use std::collections::{BTreeMap, VecDeque};
+  use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
   use teamcraft_media::dave::{DaveParticipant, FrameCodec, MediaKind};
 
@@ -463,6 +617,173 @@ mod tests {
     }
   }
 
+  mod transitions {
+    use super::*;
+
+    /// The founding commit switches at once; later ones wait for every member's ready, then
+    /// everyone hears the execution once (#1541).
+    #[test]
+    fn later_commits_execute_once_everyone_is_ready() {
+      let mut harness = Harness::new();
+      harness.join(1);
+      harness.join(2);
+      assert!(harness.delivered.iter().all(|outbound| !matches!(
+        outbound.event,
+        CallEvent::DaveAnnounceCommit {
+          maybe_transition_id: Some(_),
+          ..
+        } | CallEvent::DaveWelcome {
+          maybe_transition_id: Some(_),
+          ..
+        }
+      )));
+      harness.holds_ready.insert(device(2));
+      harness.join(3);
+      assert_eq!(harness.executions_to(1), 0, "member 2 isn't ready yet");
+      assert_eq!(harness.executions_to(3), 0);
+
+      harness.release_ready();
+
+      for id in 1..=3 {
+        assert_eq!(harness.executions_to(id), 1);
+      }
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
+    }
+
+    /// The next commit doesn't wait behind a transition in flight: its execution goes out first,
+    /// once to each recipient, ahead of the next commit on the same ordered stream.
+    #[test]
+    fn the_next_commit_executes_the_previous_transition_first() {
+      let mut harness = Harness::new();
+      harness.join(1);
+      harness.join(2);
+      harness.holds_ready.insert(device(2));
+      harness.join(3);
+      assert_eq!(harness.executions_to(1), 0);
+
+      harness.join(4);
+
+      let first_id = harness
+        .delivered
+        .iter()
+        .find_map(|outbound| match outbound.event {
+          CallEvent::DaveExecuteTransition { transition_id } => Some(transition_id),
+          _ => None,
+        })
+        .unwrap();
+      for id in 1..=3 {
+        let events: Vec<&CallEvent> = harness
+          .delivered
+          .iter()
+          .filter(|outbound| outbound.recipient == device(id))
+          .map(|outbound| &outbound.event)
+          .collect();
+        let executed = events
+          .iter()
+          .position(|event| matches!(event, CallEvent::DaveExecuteTransition { transition_id } if *transition_id == first_id))
+          .unwrap();
+        let next_commit = events
+          .iter()
+          .position(|event| {
+            matches!(event, CallEvent::DaveAnnounceCommit { maybe_transition_id: Some(next), .. } if *next != first_id)
+          })
+          .unwrap();
+        assert!(
+          executed < next_commit,
+          "member {id} executes before the next commit"
+        );
+        let executions = events
+          .iter()
+          .filter(|event| matches!(event, CallEvent::DaveExecuteTransition { transition_id } if *transition_id == first_id))
+          .count();
+        assert_eq!(executions, 1, "member {id}");
+      }
+      harness.release_ready();
+      harness.assert_all_exchange_frames(&[1, 2, 3, 4]);
+    }
+
+    /// A member that leaves before it is ready doesn't hold the others up.
+    #[test]
+    fn a_member_leaving_unblocks_the_execution() {
+      let mut harness = Harness::new();
+      harness.join(1);
+      harness.join(2);
+      harness.holds_ready.insert(device(2));
+      harness.join(3);
+      assert_eq!(harness.executions_to(3), 0);
+
+      harness.leave(2);
+      harness.holds_ready.clear();
+      harness.held_ready.clear();
+      harness.deliver_all();
+
+      assert!(harness.executions_to(3) >= 1);
+      harness.assert_all_exchange_frames(&[1, 3]);
+    }
+
+    /// Clients from before transitions get no ids and switch at once; the coordinated ones still
+    /// get theirs and don't wait for the old ones.
+    #[test]
+    fn clients_without_transitions_switch_at_once() {
+      let mut harness = Harness::new();
+      harness.join(1);
+      harness.join_with_mode(2, DaveTransitionMode::AtOnce);
+      harness.deliver_all();
+      harness.join(3);
+
+      let ids_to = |id: u64| {
+        harness
+          .delivered
+          .iter()
+          .filter_map(|outbound| match &outbound.event {
+            CallEvent::DaveAnnounceCommit {
+              maybe_transition_id, ..
+            }
+            | CallEvent::DaveWelcome {
+              maybe_transition_id, ..
+            } if outbound.recipient == device(id) => Some(*maybe_transition_id),
+            _ => None,
+          })
+          .collect::<Vec<_>>()
+      };
+      assert!(ids_to(2).iter().all(Option::is_none));
+      assert!(ids_to(3).iter().all(Option::is_some));
+      assert_eq!(harness.executions_to(2), 0);
+      assert_eq!(harness.executions_to(1), 1);
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
+    }
+
+    /// Only clients from before transitions: nothing changes for them.
+    #[test]
+    fn a_call_of_old_clients_has_no_transitions() {
+      let mut harness = Harness::with_mode(DaveTransitionMode::AtOnce);
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      assert!(
+        harness
+          .delivered
+          .iter()
+          .all(|outbound| !matches!(outbound.event, CallEvent::DaveExecuteTransition { .. }))
+      );
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
+    }
+
+    #[test]
+    fn ready_for_another_transition_is_ignored() {
+      let mut harness = Harness::new();
+      harness.join(1);
+      harness.join(2);
+      let stranger = DaveTransitionId(NonZeroU16::new(999).unwrap());
+      assert!(
+        harness
+          .coordinator
+          .on_transition_ready(device(1), stranger)
+          .is_empty()
+      );
+    }
+  }
+
   mod bindings {
     use super::*;
 
@@ -516,7 +837,10 @@ mod tests {
       let mut harness = Harness::new();
       let mut client = harness.new_client(5);
       let key_package = client.create_key_package().unwrap();
-      let result = harness.coordinator.on_key_package(device(6), key_package, None);
+      let result =
+        harness
+          .coordinator
+          .on_key_package(device(6), key_package, None, DaveTransitionMode::Coordinated);
       assert!(matches!(
         result,
         Err(DaveCoordinatorError::ParticipantMismatch { .. })
@@ -533,7 +857,10 @@ mod tests {
         .unwrap()
         .create_key_package()
         .unwrap();
-      let result = harness.coordinator.on_key_package(device(1), key_package, None);
+      let result =
+        harness
+          .coordinator
+          .on_key_package(device(1), key_package, None, DaveTransitionMode::Coordinated);
       assert!(matches!(result, Err(DaveCoordinatorError::AlreadyKnown(_))));
     }
 
@@ -563,19 +890,34 @@ mod tests {
     }
   }
 
-  /// Simulated clients connected to a coordinator through in-memory queues.
+  /// Simulated clients connected to a coordinator through in-memory queues. Clients join with
+  /// `mode` unless [`Self::join_with_mode`] says otherwise, and answer transitions like the engine.
   struct Harness {
     coordinator: DaveCoordinator,
     clients: BTreeMap<DeviceId, DaveParticipant>,
     queue: VecDeque<Outbound>,
+    mode: DaveTransitionMode,
+    /// Ready messages are held here instead of sent while set (a slow member).
+    holds_ready: BTreeSet<DeviceId>,
+    held_ready: Vec<(DeviceId, DaveTransitionId)>,
+    /// Every event delivered, in order, by recipient.
+    delivered: Vec<Outbound>,
   }
 
   impl Harness {
     fn new() -> Self {
+      Self::with_mode(DaveTransitionMode::Coordinated)
+    }
+
+    fn with_mode(mode: DaveTransitionMode) -> Self {
       Self {
         coordinator: DaveCoordinator::new(call()).unwrap(),
         clients: BTreeMap::new(),
         queue: VecDeque::new(),
+        mode,
+        holds_ready: BTreeSet::new(),
+        held_ready: Vec::new(),
+        delivered: Vec::new(),
       }
     }
 
@@ -593,14 +935,44 @@ mod tests {
     }
 
     fn join_without_delivery(&mut self, id: u64) {
+      self.join_with_mode(id, self.mode);
+    }
+
+    fn join_with_mode(&mut self, id: u64, mode: DaveTransitionMode) {
       let mut client = self.new_client(id);
       let key_package = client.create_key_package().unwrap();
       self.clients.insert(device(id), client);
       let outbound = self
         .coordinator
-        .on_key_package(device(id), key_package, Some(vec![u8::try_from(id).unwrap()]))
+        .on_key_package(
+          device(id),
+          key_package,
+          Some(vec![u8::try_from(id).unwrap()]),
+          mode,
+        )
         .unwrap();
       self.queue.extend(outbound);
+    }
+
+    /// Sends the ready messages held back so far.
+    fn release_ready(&mut self) {
+      self.holds_ready.clear();
+      for (recipient, transition_id) in std::mem::take(&mut self.held_ready) {
+        let outbound = self.coordinator.on_transition_ready(recipient, transition_id);
+        self.queue.extend(outbound);
+      }
+      self.deliver_all();
+    }
+
+    fn executions_to(&self, id: u64) -> usize {
+      self
+        .delivered
+        .iter()
+        .filter(|outbound| {
+          outbound.recipient == device(id)
+            && matches!(outbound.event, CallEvent::DaveExecuteTransition { .. })
+        })
+        .count()
     }
 
     fn leave(&mut self, id: u64) {
@@ -620,10 +992,14 @@ mod tests {
     /// Delivers the first queued message.
     fn deliver_one(&mut self) {
       if let Some(Outbound { recipient, event }) = self.queue.pop_front() {
+        self.delivered.push(Outbound {
+          recipient,
+          event: event.clone(),
+        });
         let Some(client) = self.clients.get_mut(&recipient) else {
           return;
         };
-        match event {
+        let maybe_transition = match event {
           CallEvent::DaveProposals {
             epoch,
             proposals,
@@ -641,10 +1017,46 @@ mod tests {
                   .on_commit(recipient, DaveEpoch(epoch), commit.commit, commit.maybe_welcome);
               self.queue.extend(outbound);
             }
+            None
           },
-          CallEvent::DaveAnnounceCommit { commit, .. } => client.process_commit(commit.as_slice()).unwrap(),
-          CallEvent::DaveWelcome { welcome, .. } => client.process_welcome(welcome.as_slice()).unwrap(),
+          CallEvent::DaveAnnounceCommit {
+            commit,
+            maybe_transition_id,
+            ..
+          } => {
+            assert!(client.process_commit(commit.as_slice()).unwrap());
+            Some(maybe_transition_id)
+          },
+          CallEvent::DaveWelcome {
+            welcome,
+            maybe_transition_id,
+            ..
+          } => {
+            let roster: Vec<_> = self.clients.keys().map(|id| dave_participant_id(*id)).collect();
+            let client = self.clients.get_mut(&recipient).unwrap();
+            client.process_welcome(welcome.as_slice(), &roster).unwrap();
+            Some(maybe_transition_id)
+          },
+          CallEvent::DaveExecuteTransition { transition_id } => {
+            assert!(
+              client.execute_transition(transition_id).unwrap(),
+              "executes a prepared transition"
+            );
+            None
+          },
           other => panic!("unexpected event {other:?}"),
+        };
+        if let Some(maybe_transition_id) = maybe_transition {
+          let client = self.clients.get_mut(&recipient).unwrap();
+          client.prepare_transition(maybe_transition_id).unwrap();
+          if let Some(transition_id) = maybe_transition_id {
+            if self.holds_ready.contains(&recipient) {
+              self.held_ready.push((recipient, transition_id));
+            } else {
+              let outbound = self.coordinator.on_transition_ready(recipient, transition_id);
+              self.queue.extend(outbound);
+            }
+          }
         }
       }
     }

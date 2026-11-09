@@ -275,7 +275,13 @@ mod tests {
       maybe_conversation_id: None,
     };
     let (room, session_id, _) = rooms
-      .join(grant, MediaCapabilities::default(), handle, None)
+      .join(
+        grant,
+        MediaCapabilities::default(),
+        teamcraft_proto::DaveTransitionMode::Coordinated,
+        handle,
+        None,
+      )
       .unwrap();
     let target = SwitchTarget {
       room,

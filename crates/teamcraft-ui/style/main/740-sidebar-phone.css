@@ -12,7 +12,7 @@
 
 :root[data-layout="compact"] .sidebar-head .sb-filter-toggle[aria-expanded="true"] {
   background: var(--sb-hover);
-  color: var(--chrome-strong);
+  color: var(--sb-strong);
 }
 
 /* The chevron right after the title folds the entries away (and back), remembered on the device:
@@ -48,7 +48,7 @@
   display: inline-grid;
   min-width: 32px;
   margin-inline-end: auto;
-  color: var(--chrome-text);
+  color: var(--sb-text);
 }
 
 :root[data-layout="compact"] .sb-entries-toggle .icon {
@@ -95,8 +95,8 @@
   padding: 0 var(--space-3);
   gap: var(--space-2);
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--chrome-text);
+  background: var(--sb-fill);
+  color: var(--sb-text);
   font-size: var(--text-sm);
   letter-spacing: 0;
   font-weight: var(--weight-semibold);

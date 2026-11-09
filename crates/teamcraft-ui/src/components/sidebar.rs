@@ -319,15 +319,7 @@ pub fn GlobalEntries(entries: EntriesDisclosure, id: &'static str) -> impl IntoV
         <Icon name=IconName::Compose />
         <span class="sb-name">{move || i18n.t("sidebar-drafts")}</span>
       </button>
-      <button
-        class="sb-item"
-        class:current=move || state.view.get() == MainView::Files
-        aria-current=move || (state.view.get() == MainView::Files).then_some("page")
-        on:click=move |_| state.open_files()
-      >
-        <Icon name=IconName::Paperclip />
-        <span class="sb-name">{move || i18n.t("sidebar-files")}</span>
-      </button>
+      // Files is a place on the rail (#1510), not an entry here: one way there.
     </div>
   }
 }

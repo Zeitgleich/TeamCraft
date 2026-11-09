@@ -55,8 +55,8 @@ use super::sealed_catalog::{
 };
 use super::sealed_index::{self, Direction};
 use super::{
-  FeedChange, FeedVersion, LocalStore, MediaRange, MessageEdge, MessageFilter, MessageOrder, MessageSlot,
-  StoreError, StoredMessage, Table, WriteTally,
+  Attached, AttachedRange, FeedChange, FeedVersion, LocalStore, MessageEdge, MessageFilter, MessageOrder,
+  MessageSlot, StoreError, StoredMessage, Table, WriteTally,
 };
 use crate::push_preview::ShownMessage;
 use crate::timing::{Mark, TimedKind};
@@ -64,7 +64,10 @@ use crate::timing::{Mark, TimedKind};
 const ENTRY_NAMESPACE: &str = "entry";
 const MESSAGE_NAMESPACE: &str = "message";
 /// Records decrypted per batch while an old store's catalog is built: one group of writes each.
-const CATALOG_BATCH: usize = 512;
+/// Each batch rewrites the index nodes it touched, about one per conversation, so larger batches
+/// build faster: 100,000 messages in 300 conversations took 10 s at 512, 2.6 s at 4,096 and 1.3 s
+/// at 16,384 (#1509, release, desktop). 4,096 keeps a batch's records to a few MiB on phones.
+const CATALOG_BATCH: usize = 4096;
 /// Entries of an index checked against their records for the edge of a conversation; all of them
 /// failing means the catalog is built again anyway.
 const EDGE_CANDIDATES: usize = 8;
@@ -1626,17 +1629,19 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     Some((state.epoch << 32) | (writes & u64::from(u32::MAX)))
   }
 
-  /// Walks the index from the range's start, reading only the messages with media it returns.
-  fn media_messages(
+  /// Walks the index from the range's start, reading only the messages with attachments it returns.
+  fn attached_messages(
     &self,
     conversation: ConversationId,
-    range: MediaRange,
+    kind: Attached,
+    range: AttachedRange,
     limit: usize,
   ) -> Result<Vec<StoredMessage>, StoreError> {
     let (from, direction) = match range {
-      MediaRange::Older(Some(from)) => (Bound::Excluded(MessageKey::first_at(from)), Direction::Backward),
-      MediaRange::Older(None) => (Bound::Unbounded, Direction::Backward),
-      MediaRange::Newer(from) => (Bound::Excluded(MessageKey::last_at(from)), Direction::Forward),
+      AttachedRange::Older(Some(from)) => (Bound::Excluded(MessageKey::first_at(from)), Direction::Backward),
+      AttachedRange::Older(None) => (Bound::Unbounded, Direction::Backward),
+      AttachedRange::Newer(Some(from)) => (Bound::Excluded(MessageKey::last_at(from)), Direction::Forward),
+      AttachedRange::Newer(None) => (Bound::Unbounded, Direction::Forward),
     };
     self.reading(|state| {
       let mut found = 0;
@@ -1644,12 +1649,12 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
         if found == limit {
           return None;
         }
-        let is_media = entry.has_media();
-        found += usize::from(is_media);
-        Some(is_media)
+        let is_attached = entry.has_attached(kind);
+        found += usize::from(is_attached);
+        Some(is_attached)
       })?;
       let mut messages = self.load_messages(state, conversation, &keys)?;
-      messages.retain(StoredMessage::has_media);
+      messages.retain(|message| message.has_attached(kind));
       Ok(messages)
     })
   }
@@ -2049,7 +2054,7 @@ mod tests {
   use std::sync::Mutex;
 
   use super::*;
-  use crate::store::tests::{exercise_store, id, message};
+  use crate::store::tests::{exercise_store, id, media_content, message};
 
   const CONVERSATIONS: i64 = 3;
   const MESSAGES_PER_CONVERSATION: i64 = 1_500;
@@ -2446,6 +2451,103 @@ mod tests {
           ..
         })
       ));
+    }
+
+    /// Issue #1509: a catalog of version 2 knows no files. The store builds it again when it opens,
+    /// and the Files view then finds documents and pictures through the index.
+    #[test]
+    fn a_catalog_from_before_the_files_index_gets_it() {
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      fill(&store);
+      let mut document = numbered(1, MESSAGES_PER_CONVERSATION);
+      document.content = media_content("application/pdf");
+      let mut picture = numbered(1, MESSAGES_PER_CONVERSATION + 1);
+      picture.content = media_content("image/png");
+      store.upsert_message(&document).unwrap();
+      store.upsert_message(&picture).unwrap();
+      let old_generation = store.read_catalog_state().unwrap().unwrap().generation();
+      let old_state = format!(r#"{{"state":"complete","generation":{old_generation},"version":2}}"#);
+      store
+        .grouped(|_| store.write_named(CATALOG_TABLE, META_KEY, old_state.as_bytes()))
+        .unwrap();
+      drop(store);
+
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      let state = store.read_catalog_state().unwrap().unwrap();
+      assert!(matches!(
+        state,
+        CatalogState::Complete {
+          version: CATALOG_VERSION,
+          ..
+        }
+      ));
+      assert_ne!(state.generation(), old_generation, "built again");
+      let files = |kind| {
+        store
+          .attached_messages(id(1), kind, AttachedRange::Older(None), 10)
+          .unwrap()
+          .into_iter()
+          .map(|stored| stored.client_message_id)
+          .collect::<Vec<_>>()
+      };
+      assert_eq!(
+        files(Attached::Any),
+        [picture.client_message_id, document.client_message_id]
+      );
+      assert_eq!(files(Attached::Document), [document.client_message_id]);
+      assert_eq!(files(Attached::Media), [picture.client_message_id]);
+    }
+
+    /// What building the catalog again for version 3 costs on a large store (#1509): every record
+    /// is opened once. A measurement, not a check:
+    /// `cargo test --release -p teamcraft-core --all-features --lib -- --ignored --nocapture
+    /// measure_the_catalog_rebuild`.
+    #[test]
+    #[ignore = "a measurement: run by hand with --release"]
+    #[allow(clippy::print_stderr, reason = "the numbers are what this test is for")]
+    fn measure_the_catalog_rebuild() {
+      const MESSAGES: i64 = 100_000;
+      const CONVERSATIONS: i64 = 300;
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      for start in (0..MESSAGES).step_by(1_000) {
+        crate::store::write_group(&store, || {
+          for n in start..start + 1_000 {
+            let mut stored = numbered(n % CONVERSATIONS, n);
+            if n % 20 == 0 {
+              stored.content = media_content("application/pdf");
+            }
+            store.upsert_message(&stored)?;
+          }
+          Ok::<_, StoreError>(())
+        })
+        .unwrap();
+      }
+      let generation = store.read_catalog_state().unwrap().unwrap().generation();
+      let old_state = format!(r#"{{"state":"complete","generation":{generation},"version":2}}"#);
+      store
+        .grouped(|_| store.write_named(CATALOG_TABLE, META_KEY, old_state.as_bytes()))
+        .unwrap();
+      drop(store);
+      let records_total = records.map.lock().unwrap().len();
+      let started = std::time::Instant::now();
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      let elapsed = started.elapsed();
+      eprintln!(
+        "catalog 2 -> 3: {records_total} records in {:.0} ms, {:.1} us per record",
+        elapsed.as_secs_f64() * 1000.0,
+        elapsed.as_secs_f64() * 1e6 / f64::from(u32::try_from(records_total).unwrap())
+      );
+      assert_eq!(
+        store
+          .attached_messages(id(0), Attached::Document, AttachedRange::Older(None), 1)
+          .unwrap()
+          .len(),
+        1
+      );
     }
 
     /// A row the feed lists whose message says otherwise is left out, and the catalog is built again.

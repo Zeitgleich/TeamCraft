@@ -15,6 +15,25 @@
   min-height: 0;
 }
 
+/* The rail and the top bar frame the workspace: sidebar, messages and side panel lie on the chrome
+   as one card, with a thin band of the chrome colour to the right and below and rounded outer
+   corners (the sidebar's left ones, or the main area's in views without a sidebar; the last pane's
+   right ones). Phones show one pane at a time, edge to edge. */
+:root:not([data-layout="compact"]) .app-body {
+  padding: 0 var(--frame-gap) var(--frame-gap) 0;
+  background: var(--chrome);
+}
+
+:root:not([data-layout="compact"]) .app-body > .space-rail + :is(.sidebar, .main) {
+  border-top-left-radius: var(--radius-md);
+  border-bottom-left-radius: var(--radius-md);
+}
+
+:root:not([data-layout="compact"]) .app-body > :is(.main, .side-panel):last-child {
+  border-top-right-radius: var(--radius-md);
+  border-bottom-right-radius: var(--radius-md);
+}
+
 .main {
   flex: 1;
   min-width: 0;
