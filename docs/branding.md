@@ -239,7 +239,7 @@ brand's host, so its links can open in an installed app ([app-links.md](app-link
 
 The brand's colours are the **default theme** of every client of that brand. Each user can replace
 them with a colour theme of their own (Settings > Appearance > Colours on web and desktop, Settings >
-Chats on Android):
+Chats on Android, Settings > Colours on iOS):
 
 - **Server default:** the brand's colours (or the product's without a brand).
 - **Presets:** built-in themes in groups (calm, bright sidebars, vivid, accessibility: red–green and
