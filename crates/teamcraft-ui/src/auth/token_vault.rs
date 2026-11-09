@@ -30,6 +30,21 @@ const REFRESH_LOCK: &str = "teamcraft-auth-refresh";
 /// lock longer hangs, and a stuck sign-in is worse than a rare second refresh.
 #[cfg(target_arch = "wasm32")]
 const LOCK_PATIENCE: Duration = Duration::from_secs(20);
+/// The pauses before reading the vault again after IndexedDB failed. A home-screen web app on iOS
+/// that the system ended in the background often gets an IndexedDB error on its first reads after
+/// the next launch; taking that for "nothing saved" signed it out on every open.
+#[cfg(target_arch = "wasm32")]
+const READ_RETRY_PAUSES: [Duration; 3] = [
+  Duration::from_millis(150),
+  Duration::from_millis(500),
+  Duration::from_millis(1_500),
+];
+
+/// The vault could not be read right now (IndexedDB refused or failed). Says nothing about the
+/// sign-in: the saved tokens may well be there, so nobody is signed out for it.
+#[derive(Debug, thiserror::Error)]
+#[error("the saved sign-in can't be read now: {0}")]
+pub(super) struct VaultUnreadable(String);
 
 #[derive(Clone)]
 pub(super) struct Tokens {
@@ -186,25 +201,27 @@ pub(super) async fn refresh_turn() -> RefreshTurn {
 
 /// The saved tokens, if they belong to this provider and client. `issuer` and `client_id` come from
 /// the server, under the refresh lock: tokens of another provider are of no use any more.
-pub(super) async fn load(issuer: &str, client_id: &str) -> Option<Tokens> {
-  let saved = read_saved().await?;
+/// [`VaultUnreadable`] when IndexedDB failed even after a few tries: not the same as nothing saved.
+pub(super) async fn load(issuer: &str, client_id: &str) -> Result<Option<Tokens>, VaultUnreadable> {
+  let Some(saved) = read_saved().await? else {
+    return Ok(None);
+  };
   if saved.issuer != issuer || saved.client_id != client_id {
     forget().await;
-    return None;
+    return Ok(None);
   }
-  Some(tokens_of(saved))
+  Ok(Some(tokens_of(saved)))
 }
 
 /// [`load`] that changes nothing, for what a cached record claims: without the lock, and a record
 /// that doesn't match says nothing against the tokens.
 pub(super) async fn peek(issuer: &str, client_id: &str) -> Option<Tokens> {
-  let saved = read_saved().await?;
+  let saved = read_saved().await.ok()??;
   (saved.issuer == issuer && saved.client_id == client_id).then(|| tokens_of(saved))
 }
 
-async fn read_saved() -> Option<Saved> {
-  let bytes = vault_read(TOKENS_SLOT).await?;
-  decode(&bytes)
+async fn read_saved() -> Result<Option<Saved>, VaultUnreadable> {
+  Ok(vault_read(TOKENS_SLOT).await?.and_then(|bytes| decode(&bytes)))
 }
 
 fn tokens_of(saved: Saved) -> Tokens {
@@ -246,7 +263,7 @@ pub(super) async fn forget() {
 
 /// The account saved for the next start, if it reads.
 pub(super) async fn load_account() -> Option<CachedAccount> {
-  let bytes = vault_read(ACCOUNT_SLOT).await?;
+  let bytes = vault_read(ACCOUNT_SLOT).await.ok()??;
   serde_json::from_slice(&bytes)
     .inspect_err(|_| tracing::debug!("the cached account does not read"))
     .ok()
@@ -271,13 +288,24 @@ fn decode(bytes: &[u8]) -> Option<Saved> {
     .ok()
 }
 
+/// The sealed value of `slot`, read again after a pause while IndexedDB fails
+/// ([`READ_RETRY_PAUSES`]).
 #[cfg(target_arch = "wasm32")]
-async fn vault_read(slot: &str) -> Option<Zeroizing<Vec<u8>>> {
-  teamcraft_core::store::vault_get(VAULT_DATABASE, slot)
-    .await
-    .inspect_err(|error| tracing::warn!(%error, "could not read the saved sign-in"))
-    .ok()
-    .flatten()
+async fn vault_read(slot: &str) -> Result<Option<Zeroizing<Vec<u8>>>, VaultUnreadable> {
+  let mut pauses = READ_RETRY_PAUSES.iter();
+  loop {
+    match teamcraft_core::store::vault_get(VAULT_DATABASE, slot).await {
+      Ok(found) => return Ok(found),
+      Err(error) => {
+        let Some(pause) = pauses.next() else {
+          tracing::warn!(%error, "could not read the saved sign-in; keeping it for the next try");
+          return Err(VaultUnreadable(error.to_string()));
+        };
+        tracing::warn!(%error, "could not read the saved sign-in, trying again");
+        teamcraft_core::platform::sleep(*pause).await;
+      },
+    }
+  }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -302,8 +330,8 @@ const TOKENS_SLOT: &str = "";
 const ACCOUNT_SLOT: &str = "";
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn vault_read(_slot: &str) -> Option<Zeroizing<Vec<u8>>> {
-  None
+async fn vault_read(_slot: &str) -> Result<Option<Zeroizing<Vec<u8>>>, VaultUnreadable> {
+  Ok(None)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

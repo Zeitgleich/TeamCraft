@@ -18,6 +18,25 @@ pub(crate) const KEYS: &str = "keys";
 const SCHEMA_VERSION: u32 = 4;
 /// How long deleting the database may wait for other pages to close it.
 const DELETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Failures the browser reports in the normal course of things, not worth a report: a newer app
+/// version upgraded the database (handled as [`StoreError::NewerSchema`]), and `add` refusing a key
+/// another page stored first.
+const EXPECTED_FAILURES: [&str; 2] = ["VersionError", "ConstraintError"];
+
+/// Told about every IndexedDB failure: the operation and the `DOMException` name (`UnknownError`,
+/// `InvalidStateError`, …), never its message, which may name a database or a key. The page sets it
+/// to send crash reports, so storage trouble (a home-screen app on iOS losing IndexedDB after a
+/// relaunch) shows up without a bug report.
+pub type IdbFailureHook = fn(operation: &'static str, error_name: &str);
+
+thread_local! {
+  static FAILURE_HOOK: std::cell::Cell<Option<IdbFailureHook>> = const { std::cell::Cell::new(None) };
+}
+
+/// Sets the [`IdbFailureHook`] of this thread (the page; the service worker has none).
+pub fn set_failure_hook(hook: IdbFailureHook) {
+  FAILURE_HOOK.with(|slot| slot.set(Some(hook)));
+}
 
 /// How a database is opened.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,7 +140,10 @@ pub(crate) async fn request_result(request: &IdbRequest) -> Result<JsValue, Stor
   request.set_onerror(None);
   match outcome {
     Ok(Ok(())) => request.result().map_err(|error| js_error("request", &error)),
-    _ => Err(StoreError::Database(dom_error(request.error().ok().flatten()))),
+    _ => Err(StoreError::Database(dom_error(
+      "request",
+      request.error().ok().flatten(),
+    ))),
   }
 }
 
@@ -140,11 +162,18 @@ pub(crate) async fn transaction_done(transaction: &IdbTransaction) -> Result<(),
   transaction.set_onabort(None);
   match outcome {
     Ok(Ok(())) => Ok(()),
-    _ => Err(StoreError::Database(dom_error(transaction.error()))),
+    _ => Err(StoreError::Database(dom_error(
+      "transaction",
+      transaction.error(),
+    ))),
   }
 }
 
-pub(crate) fn js_error(context: &str, error: &JsValue) -> StoreError {
+pub(crate) fn js_error(context: &'static str, error: &JsValue) -> StoreError {
+  let name = error
+    .dyn_ref::<web_sys::DomException>()
+    .map_or_else(|| "Error".to_owned(), web_sys::DomException::name);
+  note_failure(context, &name);
   StoreError::Database(format!(
     "IndexedDB {context}: {}",
     crate::platform::describe_js_error(error)
@@ -191,9 +220,22 @@ fn factory() -> Result<IdbFactory, StoreError> {
     .map_err(|_| StoreError::Database("IndexedDB is not available".into()))
 }
 
-fn dom_error(maybe_error: Option<web_sys::DomException>) -> String {
+fn dom_error(operation: &'static str, maybe_error: Option<web_sys::DomException>) -> String {
+  let name = maybe_error
+    .as_ref()
+    .map_or_else(|| "Unknown".to_owned(), web_sys::DomException::name);
+  note_failure(operation, &name);
   maybe_error.map_or_else(
     || "IndexedDB operation failed".into(),
     |error| format!("{}: {}", error.name(), error.message()),
   )
+}
+
+fn note_failure(operation: &'static str, error_name: &str) {
+  if EXPECTED_FAILURES.contains(&error_name) {
+    return;
+  }
+  if let Some(hook) = FAILURE_HOOK.with(std::cell::Cell::get) {
+    hook(operation, error_name);
+  }
 }
