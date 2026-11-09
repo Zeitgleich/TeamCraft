@@ -11,6 +11,10 @@ use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::{from_db, from_db_opt, to_db};
 
+/// The advisory lock class of a device's retry queue (two-key form, its own key space): queuing
+/// for one device waits for another queuing for it, so the count before the insert is current.
+const QUEUE_LOCK_CLASS: i32 = 0x7072_7471;
+
 /// A wake-up that failed for a temporary reason, to be tried again.
 #[derive(Debug, Clone)]
 pub struct NewPushRetry {
@@ -48,9 +52,19 @@ pub struct PushRetryClaim {
 
 impl Database {
   /// Queues the wake-up unless the device already has `max_per_device` waiting (an outage must
-  /// not grow the table without bound). Returns whether it was queued.
+  /// not grow the table without bound). Returns whether it was queued. Wake-ups for the same device
+  /// queue one after the other: concurrent ones would each count the queue before the other's
+  /// insert and go over the cap together (#1569).
   pub async fn enqueue_push_retry(&self, retry: &NewPushRetry, max_per_device: u32) -> Result<bool, DbError> {
     let wake_up = &retry.wake_up;
+    let mut transaction = self.pool().begin().await?;
+    sqlx::query!(
+      "SELECT pg_advisory_xact_lock($1, hashint8($2))",
+      QUEUE_LOCK_CLASS,
+      to_db(retry.device),
+    )
+    .execute(&mut *transaction)
+    .await?;
     let result = sqlx::query!(
       r#"INSERT INTO push_retries
            (id, user_id, device_id, is_user_endpoint, kind, conversation_id, message_id, sender_id,
@@ -82,8 +96,9 @@ impl Database {
       wake_up.maybe_meeting.map(|meeting| to_db(meeting.meeting_id)),
       wake_up.maybe_meeting.map(|meeting| meeting.starts_at.0),
     )
-    .execute(self.pool())
+    .execute(&mut *transaction)
     .await?;
+    transaction.commit().await?;
     Ok(result.rows_affected() == 1)
   }
 

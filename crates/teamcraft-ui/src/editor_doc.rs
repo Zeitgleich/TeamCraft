@@ -8,7 +8,9 @@
 //!
 //! Pure Rust, so the sanitizer and the round trip are tested natively; `composer_editor` does the DOM.
 
-use crate::markdown::{self, Block, Inline, ListKind, MAX_HEADING_LEVEL};
+use crate::markdown::{
+  self, Alignment, Block, Cell, Inline, ListKind, MAX_HEADING_LEVEL, Table, TableLimits,
+};
 
 /// Elements dropped together with everything inside them.
 const DROPPED_TAGS: [&str; 22] = [
@@ -52,6 +54,10 @@ const MONOSPACE_FONTS: [&str; 6] = [
   "source code",
 ];
 
+/// The table the composer's table button inserts: a header and two rows of two columns.
+const SKELETON_COLUMNS: usize = 2;
+const SKELETON_ROWS: usize = 2;
+
 /// Zero-width characters the editor uses to place the caret; never part of the message.
 pub(crate) const CARET_MARKERS: [char; 2] = ['\u{200B}', '\u{FEFF}'];
 
@@ -73,6 +79,8 @@ pub struct DomElement {
   pub maybe_start: Option<String>,
   /// `data-language`, or the `language-…` class of pasted code.
   pub maybe_language: Option<String>,
+  /// A table cell's alignment: `data-align`, or the `align` attribute of pasted HTML.
+  pub maybe_align: Option<String>,
   pub children: Vec<DomNode>,
 }
 
@@ -141,6 +149,15 @@ pub fn to_html(nodes: &[DomNode]) -> String {
     write_html(&mut out, node);
   }
   out
+}
+
+/// An empty table for the user to fill in.
+pub fn table_skeleton() -> Table {
+  Table {
+    alignments: vec![Alignment::Default; SKELETON_COLUMNS],
+    header: vec![Cell::new(); SKELETON_COLUMNS],
+    rows: vec![vec![Cell::new(); SKELETON_COLUMNS]; SKELETON_ROWS],
+  }
 }
 
 /// The block format typed at the start of a line, when the space after it is typed: `-` and `*`
@@ -253,6 +270,7 @@ struct Run {
 enum Out {
   Line(LineKind, Vec<Run>),
   Code(Option<String>, String),
+  Table(Table),
 }
 
 struct Builder {
@@ -325,6 +343,13 @@ impl Builder {
         );
         self.flush(kind);
       },
+      "table" if context.kind == LineKind::Text => match self.table(element, context) {
+        Some(table) => {
+          self.flush(context.kind);
+          self.out.push(Out::Table(table));
+        },
+        None => self.block(element, context, context.kind),
+      },
       "blockquote" => self.block(element, context, LineKind::Quote),
       "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
         let level = tag[1..]
@@ -354,6 +379,86 @@ impl Builder {
         );
       },
     }
+  }
+
+  /// A table of data as a table of the subset: at least two rows (the first is the header) and two
+  /// columns, within the default limits, each cell a line. A layout table (one column, cells with
+  /// code, a table inside) is read as lines, as before tables existed.
+  fn table(&self, element: &DomElement, context: &Context) -> Option<Table> {
+    let mut rows = Vec::new();
+    table_rows(&element.children, &mut rows);
+    let columns = rows.iter().map(|row| row.len()).max().unwrap_or(0);
+    let limits = TableLimits::default();
+    if rows.len() < 2 || rows.len() - 1 > limits.max_rows || !(2..=limits.max_columns).contains(&columns) {
+      return None;
+    }
+    let mut read_rows: Vec<Vec<Cell>> = Vec::with_capacity(rows.len());
+    for row in &rows {
+      let mut cells = row
+        .iter()
+        .map(|cell| self.cell(cell, context))
+        .collect::<Option<Vec<Cell>>>()?;
+      cells.resize(columns, Cell::new());
+      read_rows.push(cells);
+    }
+    let alignments = (0..columns)
+      .map(|column| {
+        rows[0]
+          .get(column)
+          .map_or(Alignment::Default, |cell| cell_alignment(cell))
+      })
+      .collect();
+    let mut read_rows = read_rows.into_iter();
+    let header = read_rows.next().unwrap_or_default();
+    Some(Table {
+      alignments,
+      header,
+      rows: read_rows.collect(),
+    })
+  }
+
+  /// A cell's content as one line: its lines joined by a space. `None` for anything but lines.
+  fn cell(&self, cell: &DomElement, context: &Context) -> Option<Cell> {
+    if has_descendant(&cell.children, &["table", "pre"]) {
+      return None;
+    }
+    let mut builder = Builder {
+      whitespace: self.whitespace,
+      out: Vec::new(),
+      runs: Vec::new(),
+      lists: Vec::new(),
+    };
+    let cell_context = Context {
+      kind: LineKind::Text,
+      style: context.style.clone(),
+    };
+    builder.walk(&cell.children, &cell_context);
+    builder.flush(LineKind::Text);
+    let mut runs: Vec<Run> = Vec::new();
+    for out in builder.out {
+      let Out::Line(_, line) = out else {
+        return None;
+      };
+      if line.is_empty() {
+        continue;
+      }
+      if !runs.is_empty() {
+        runs.push(Run {
+          text: " ".to_owned(),
+          style: Style::default(),
+        });
+      }
+      runs.extend(line);
+    }
+    // White space at the cell's edges isn't part of it (the subset trims cells).
+    if let Some(first) = runs.first_mut() {
+      first.text = first.text.trim_start().to_owned();
+    }
+    if let Some(last) = runs.last_mut() {
+      last.text = last.text.trim_end().to_owned();
+    }
+    runs.retain(|run| !run.text.is_empty());
+    Some(inlines(&runs))
   }
 
   fn block(&mut self, element: &DomElement, context: &Context, kind: LineKind) {
@@ -431,6 +536,69 @@ impl Builder {
     if !runs.is_empty() {
       self.out.push(Out::Line(kind, runs));
     }
+  }
+}
+
+/// The rows of a table, each as its cells, through `thead`, `tbody` and `tfoot`.
+fn table_rows<'a>(nodes: &'a [DomNode], rows: &mut Vec<Vec<&'a DomElement>>) {
+  for node in nodes {
+    let DomNode::Element(element) = node else {
+      continue;
+    };
+    match element.tag.as_str() {
+      "thead" | "tbody" | "tfoot" => table_rows(&element.children, rows),
+      "tr" => rows.push(
+        element
+          .children
+          .iter()
+          .filter_map(|cell| match cell {
+            DomNode::Element(cell) if matches!(cell.tag.as_str(), "td" | "th") => Some(cell),
+            _ => None,
+          })
+          .collect(),
+      ),
+      _ => {},
+    }
+  }
+}
+
+fn has_descendant(nodes: &[DomNode], tags: &[&str]) -> bool {
+  nodes.iter().any(|node| match node {
+    DomNode::Element(element) => {
+      tags.contains(&element.tag.as_str()) || has_descendant(&element.children, tags)
+    },
+    DomNode::Text(_) => false,
+  })
+}
+
+/// A cell's alignment from `data-align` / `align`, or a `text-align` in its style.
+fn cell_alignment(cell: &DomElement) -> Alignment {
+  let maybe_from_style = cell.maybe_style.as_deref().and_then(|css| {
+    css.split(';').find_map(|declaration| {
+      let (property, value) = declaration.split_once(':')?;
+      (property.trim().eq_ignore_ascii_case("text-align")).then(|| value.trim().to_ascii_lowercase())
+    })
+  });
+  match cell
+    .maybe_align
+    .as_deref()
+    .map(str::to_ascii_lowercase)
+    .or(maybe_from_style)
+    .as_deref()
+  {
+    Some("left" | "start") => Alignment::Left,
+    Some("center") => Alignment::Center,
+    Some("right" | "end") => Alignment::Right,
+    _ => Alignment::Default,
+  }
+}
+
+fn alignment_attribute(alignment: Alignment) -> Option<String> {
+  match alignment {
+    Alignment::Default => None,
+    Alignment::Left => Some("left".to_owned()),
+    Alignment::Center => Some("center".to_owned()),
+    Alignment::Right => Some("right".to_owned()),
   }
 }
 
@@ -539,6 +707,10 @@ fn group(out: Vec<Out>) -> Vec<Block> {
     let (kind, runs) = match item {
       Out::Code(maybe_language, code) => {
         blocks.push(Block::Code { maybe_language, code });
+        continue;
+      },
+      Out::Table(table) => {
+        blocks.push(Block::Table(table));
         continue;
       },
       Out::Line(kind, runs) => (kind, runs),
@@ -696,7 +868,37 @@ fn block_node(block: &Block) -> DomNode {
       },
       ..DomElement::default()
     }),
+    Block::Table(table) => table_node(table),
   }
+}
+
+/// A table with editable cells; each cell carries its column's alignment.
+fn table_node(table: &Table) -> DomNode {
+  let row = |cells: &[Cell], tag: &str| {
+    element(
+      "tr",
+      cells
+        .iter()
+        .enumerate()
+        .map(|(column, cell)| {
+          DomNode::Element(DomElement {
+            tag: tag.to_owned(),
+            maybe_align: alignment_attribute(table.alignments.get(column).copied().unwrap_or_default()),
+            children: line_children(cell),
+            ..DomElement::default()
+          })
+        })
+        .collect(),
+    )
+  };
+  let mut children = vec![element("thead", vec![row(&table.header, "th")])];
+  if !table.rows.is_empty() {
+    children.push(element(
+      "tbody",
+      table.rows.iter().map(|cells| row(cells, "td")).collect(),
+    ));
+  }
+  element("table", children)
 }
 
 fn inline_node(inline: &Inline) -> DomNode {
@@ -728,6 +930,7 @@ fn write_html(out: &mut String, node: &DomNode) {
         ("href", &element.maybe_href),
         ("start", &element.maybe_start),
         ("data-language", &element.maybe_language),
+        ("data-align", &element.maybe_align),
       ] {
         if let Some(value) = maybe_value {
           out.push(' ');
@@ -928,6 +1131,75 @@ mod tests {
     }
 
     #[test]
+    fn data_tables_stay_tables() {
+      let nodes = vec![el(
+        "table",
+        vec![
+          el(
+            "thead",
+            vec![el(
+              "tr",
+              vec![
+                el("th", vec![text(" Name ")]),
+                aligned("th", "right", vec![text("Due")]),
+                styled("th", "text-align: center", vec![text("State")]),
+              ],
+            )],
+          ),
+          el(
+            "tbody",
+            vec![el(
+              "tr",
+              vec![
+                el("td", vec![el("b", vec![text("Project A")])]),
+                el("td", vec![el("p", vec![text("Fri")]), el("p", vec![text("day")])]),
+                el("td", vec![text("a | b")]),
+              ],
+            )],
+          ),
+        ],
+      )];
+      assert_eq!(
+        paste_source(&nodes),
+        "| Name | Due | State |\n| --- | ---: | :---: |\n| **Project A** | Fri day | a \\| b |"
+      );
+    }
+
+    #[test]
+    fn layout_tables_are_read_as_lines() {
+      // One column, or a table inside a cell, is page layout (mail), not data.
+      let one_column = vec![el(
+        "table",
+        vec![
+          el("tr", vec![el("td", vec![text("a")])]),
+          el("tr", vec![el("td", vec![text("b")])]),
+        ],
+      )];
+      assert_eq!(paste_source(&one_column), "a\nb");
+      let nested = vec![el(
+        "table",
+        vec![
+          el("tr", vec![el("td", vec![text("a")]), el("td", vec![text("b")])]),
+          el(
+            "tr",
+            vec![
+              el(
+                "td",
+                vec![el("table", vec![el("tr", vec![el("td", vec![text("c")])])])],
+              ),
+              el("td", vec![text("d")]),
+            ],
+          ),
+        ],
+      )];
+      assert!(
+        !to_blocks(&nested, Whitespace::Collapse)
+          .iter()
+          .any(|block| matches!(block, Block::Table(_)))
+      );
+    }
+
+    #[test]
     fn pasted_html_is_rebuilt_escaped() {
       let blocks = vec![Block::Paragraph(vec![vec![
         Inline::Text("<b>\"x\" & 'y'</b>".into()),
@@ -963,6 +1235,7 @@ mod tests {
         "```\n```",
         "two  spaces and https://example.com/a_b and snake_case",
         "\\*literal\\* stars",
+        "| a | **b** |\n| :--- | ---: |\n| `1` |  |\nafter",
       ] {
         let shown = from_blocks(&parse(source));
         assert_eq!(
@@ -1001,6 +1274,15 @@ mod tests {
     fn newlines_in_text_break_lines() {
       let nodes = vec![el("p", vec![text("a\nb")])];
       assert_eq!(to_source(&to_blocks(&nodes, Whitespace::Preserve)), "a\nb");
+    }
+
+    #[test]
+    fn the_table_skeleton_is_sent_as_a_table() {
+      let shown = from_blocks(&[Block::Table(table_skeleton())]);
+      assert_eq!(
+        to_source(&to_blocks(&shown, Whitespace::Preserve)),
+        "|  |  |\n| --- | --- |\n|  |  |\n|  |  |"
+      );
     }
 
     #[test]
@@ -1186,6 +1468,21 @@ mod tests {
             tagged(&mut out, tag, &items);
           },
           Block::Code { code, .. } => tagged(&mut out, "pre", &format!("<code>{code}</code>")),
+          Block::Table(table) => {
+            let row = |cells: &[Vec<Inline>], tag: &str| -> String {
+              let cells: String = cells
+                .iter()
+                .map(|cell| format!("<{tag}>{}</{tag}>", inlines_html(cell)))
+                .collect();
+              format!("<tr>{cells}</tr>")
+            };
+            let body: String = table.rows.iter().map(|cells| row(cells, "td")).collect();
+            tagged(
+              &mut out,
+              "table",
+              &format!("<thead>{}</thead><tbody>{body}</tbody>", row(&table.header, "th")),
+            );
+          },
         }
       }
       out
@@ -1304,6 +1601,16 @@ mod tests {
     DomNode::Element(DomElement {
       tag: tag.to_owned(),
       maybe_style: Some(css.to_owned()),
+      children,
+      ..DomElement::default()
+    })
+  }
+
+  /// A cell with an `align` attribute.
+  fn aligned(tag: &str, align: &str, children: Vec<DomNode>) -> DomNode {
+    DomNode::Element(DomElement {
+      tag: tag.to_owned(),
+      maybe_align: Some(align.to_owned()),
       children,
       ..DomElement::default()
     })

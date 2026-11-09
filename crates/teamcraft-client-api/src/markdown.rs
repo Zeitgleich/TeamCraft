@@ -1,7 +1,8 @@
 //! A small, safe Markdown subset for message bodies. It produces a tree the UI turns into elements, so
 //! no HTML string is ever injected. Supported: paragraphs, `#` headings, `>` quotes, `-` and `1.`
-//! lists, fenced code, `code`, **bold**, _italic_, __underline__, ~~strike~~, http(s) links (bare or
-//! `[label](url)`) and @mentions. Everything else is text.
+//! lists, fenced code, GitHub-style tables (`| a | b |` over a `|---|:---:|` delimiter row, cells
+//! holding inline content), `code`, **bold**, _italic_, __underline__, ~~strike~~, http(s) links
+//! (bare or `[label](url)`) and @mentions. Everything else is text.
 //!
 //! [`to_source`] writes a tree back into this format; the composer's editor stores what the user
 //! formatted through it, so `parse(to_source(blocks))` reads back the same text with the same
@@ -23,6 +24,13 @@ const MAX_LIST_NUMBER_DIGITS: usize = 9;
 const LONG_MESSAGE_LINES: usize = 14;
 const LONG_MESSAGE_CHARS: usize = 1_400;
 
+/// The table size [`parse`] accepts by default; a bigger table stays text.
+const DEFAULT_MAX_TABLE_COLUMNS: usize = 20;
+const DEFAULT_MAX_TABLE_ROWS: usize = 200;
+
+/// Between the cells of a table row where a table is shown as one line of text (previews).
+const CELL_SEPARATOR: &str = " · ";
+
 /// Emphasis from the outside in, the order the composer's editor nests it in.
 const EMPHASIS: [Mark; 4] = [Mark::Underline, Mark::Bold, Mark::Strike, Mark::Italic];
 
@@ -43,6 +51,40 @@ pub enum Block {
     maybe_language: Option<String>,
     code: String,
   },
+  /// A header row over a delimiter row (`|---|:---:|`), then body rows.
+  Table(Table),
+}
+
+/// One line of inline content: a cell of a table.
+pub type Cell = Vec<Inline>;
+
+/// A table: every row has one cell per column, the header too.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Table {
+  /// One per column, from the delimiter row.
+  pub alignments: Vec<Alignment>,
+  pub header: Vec<Cell>,
+  pub rows: Vec<Vec<Cell>>,
+}
+
+/// How a column's cells are aligned: `---` (as the reader's language runs), `:---`, `:---:`, `---:`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Alignment {
+  #[default]
+  Default,
+  Left,
+  Center,
+  Right,
+}
+
+/// The biggest table that is read as one; a bigger block stays text, as before tables existed, so a
+/// pasted spreadsheet can't turn into a huge element tree. Clients pass their setting to
+/// [`parse_with`]; [`parse`] uses the defaults.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TableLimits {
+  pub max_columns: usize,
+  /// Body rows, without the header.
+  pub max_rows: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,11 +119,46 @@ enum Line<'a> {
   Item(ListKind, &'a str),
 }
 
+impl Block {
+  /// Every line of inline content in the block, table cells included; none in code.
+  pub fn inline_lines(&self) -> Vec<&[Inline]> {
+    match self {
+      Self::Paragraph(lines) | Self::Quote(lines) | Self::List { items: lines, .. } => {
+        lines.iter().map(Vec::as_slice).collect()
+      },
+      Self::Heading { content, .. } => vec![content.as_slice()],
+      Self::Code { .. } => Vec::new(),
+      Self::Table(table) => std::iter::once(&table.header)
+        .chain(&table.rows)
+        .flatten()
+        .map(Vec::as_slice)
+        .collect(),
+    }
+  }
+}
+
+impl Default for TableLimits {
+  fn default() -> Self {
+    Self {
+      max_columns: DEFAULT_MAX_TABLE_COLUMNS,
+      max_rows: DEFAULT_MAX_TABLE_ROWS,
+    }
+  }
+}
+
 pub fn parse(source: &str) -> Vec<Block> {
+  parse_with(source, TableLimits::default())
+}
+
+/// [`parse`] with the table size this client allows.
+pub fn parse_with(source: &str, limits: TableLimits) -> Vec<Block> {
   let mut blocks: Vec<Block> = Vec::new();
   let mut maybe_fence: Option<(Option<String>, Vec<&str>)> = None;
+  let lines: Vec<&str> = source.lines().collect();
+  let mut at = 0;
 
-  for line in source.lines() {
+  while let Some(&line) = lines.get(at) {
+    at += 1;
     if let Some((language, mut code_lines)) = maybe_fence.take() {
       if line.trim_end() == "```" {
         blocks.push(Block::Code {
@@ -95,6 +172,9 @@ pub fn parse(source: &str) -> Vec<Block> {
     } else if let Some(info) = line.trim_start().strip_prefix("```") {
       let info = info.trim();
       maybe_fence = Some(((!info.is_empty()).then(|| info.to_owned()), Vec::new()));
+    } else if let Some((table, used)) = table_at(&lines[at - 1..], limits) {
+      blocks.push(Block::Table(table));
+      at += used - 1;
     } else {
       push_line(&mut blocks, classify(line));
     }
@@ -162,6 +242,180 @@ fn classify(line: &str) -> Line<'_> {
     return Line::Item(ListKind::Numbered { start }, text);
   }
   Line::Text(line)
+}
+
+/// The table `lines` start with and how many lines it takes: a header row with a `|`, a delimiter
+/// row with as many cells, then every following row with a `|` and no more cells (fewer are filled
+/// up with empty ones). Anything else, or a table over `limits`, is no table.
+fn table_at(lines: &[&str], limits: TableLimits) -> Option<(Table, usize)> {
+  let [header, delimiter, body @ ..] = lines else {
+    return None;
+  };
+  if !matches!(classify(header), Line::Text(_)) {
+    return None;
+  }
+  let header = row_cells(header)?;
+  let alignments = delimiter_row(delimiter)?;
+  let columns = header.len();
+  if alignments.len() != columns || columns > limits.max_columns {
+    return None;
+  }
+  let raw_rows: Vec<Vec<&str>> = body
+    .iter()
+    .map_while(|line| {
+      let is_row_line = matches!(classify(line), Line::Text(_)) && !line.trim_start().starts_with("```");
+      row_cells(line).filter(|cells| is_row_line && cells.len() <= columns)
+    })
+    .collect();
+  if raw_rows.len() > limits.max_rows {
+    return None;
+  }
+  let cells = |raw: &[&str]| -> Vec<Cell> {
+    (0..columns)
+      .map(|column| raw.get(column).map(|cell| cell_inlines(cell)).unwrap_or_default())
+      .collect()
+  };
+  let table = Table {
+    alignments,
+    header: cells(&header),
+    rows: raw_rows.iter().map(|row| cells(row)).collect(),
+  };
+  Some((table, 2 + raw_rows.len()))
+}
+
+/// The cells of a table row, trimmed, or `None` without an unescaped `|`. Pipes at the line's edges
+/// are optional; `\|` is a pipe in a cell, also inside code.
+fn row_cells(line: &str) -> Option<Vec<&str>> {
+  let line = line.trim();
+  let mut cells = Vec::new();
+  let mut start = 0;
+  let mut is_escaped = false;
+  for (at, ch) in line.char_indices() {
+    if is_escaped {
+      is_escaped = false;
+    } else if ch == '\\' {
+      is_escaped = true;
+    } else if ch == '|' {
+      cells.push(&line[start..at]);
+      start = at + 1;
+    }
+  }
+  if cells.is_empty() {
+    return None;
+  }
+  let ends_with_pipe = start == line.len();
+  cells.push(&line[start..]);
+  if line.starts_with('|') {
+    cells.remove(0);
+  }
+  if ends_with_pipe {
+    cells.pop();
+  }
+  (!cells.is_empty()).then(|| cells.into_iter().map(str::trim).collect())
+}
+
+/// The column alignments of a delimiter row (`| --- | :--: |`).
+fn delimiter_row(line: &str) -> Option<Vec<Alignment>> {
+  row_cells(line)?
+    .into_iter()
+    .map(|cell| {
+      let maybe_after_colon = cell.strip_prefix(':');
+      let is_left = maybe_after_colon.is_some();
+      let rest = maybe_after_colon.unwrap_or(cell);
+      let maybe_dashes = rest.strip_suffix(':');
+      let is_right = maybe_dashes.is_some();
+      let dashes = maybe_dashes.unwrap_or(rest);
+      if dashes.is_empty() || !dashes.bytes().all(|byte| byte == b'-') {
+        return None;
+      }
+      Some(match (is_left, is_right) {
+        (false, false) => Alignment::Default,
+        (true, false) => Alignment::Left,
+        (true, true) => Alignment::Center,
+        (false, true) => Alignment::Right,
+      })
+    })
+    .collect()
+}
+
+/// A cell's inline content: `\|` is a pipe, also inside code, which is verbatim otherwise.
+fn cell_inlines(raw: &str) -> Cell {
+  let mut unescaped = String::with_capacity(raw.len());
+  let mut chars = raw.chars();
+  while let Some(ch) = chars.next() {
+    if ch != '\\' {
+      unescaped.push(ch);
+      continue;
+    }
+    match chars.next() {
+      Some('|') => unescaped.push('|'),
+      Some(next) => {
+        unescaped.push('\\');
+        unescaped.push(next);
+      },
+      None => unescaped.push('\\'),
+    }
+  }
+  parse_inline(&unescaped)
+}
+
+/// `source` with every table written as lines of text, the cells of a row separated by a dot: for
+/// notifications and reply previews, which show the source otherwise. Without a table, as it was.
+pub fn readable_tables(source: &str) -> std::borrow::Cow<'_, str> {
+  let lines: Vec<&str> = source.lines().collect();
+  let mut out: Vec<String> = Vec::new();
+  let mut has_table = false;
+  let mut is_in_fence = false;
+  let mut at = 0;
+  while let Some(&line) = lines.get(at) {
+    if !is_in_fence && let Some((table, used)) = table_at(&lines[at..], TableLimits::default()) {
+      has_table = true;
+      out.extend(std::iter::once(&table.header).chain(&table.rows).map(|row| {
+        row
+          .iter()
+          .map(|cell| plain_text(cell))
+          .filter(|text| !text.is_empty())
+          .collect::<Vec<_>>()
+          .join(CELL_SEPARATOR)
+      }));
+      at += used;
+      continue;
+    }
+    if is_in_fence {
+      is_in_fence = line.trim_end() != "```";
+    } else {
+      is_in_fence = line.trim_start().starts_with("```");
+    }
+    out.push(line.to_owned());
+    at += 1;
+  }
+  if has_table {
+    std::borrow::Cow::Owned(out.join("\n"))
+  } else {
+    std::borrow::Cow::Borrowed(source)
+  }
+}
+
+/// Pasted plain text: every line literal, except the Markdown tables in it, which stay tables (a
+/// table copied from a message or a Markdown file).
+pub fn literal_with_tables(plain: &str) -> Vec<Block> {
+  let lines: Vec<&str> = plain.lines().collect();
+  let mut blocks: Vec<Block> = Vec::new();
+  let mut at = 0;
+  while let Some(&line) = lines.get(at) {
+    if let Some((table, used)) = table_at(&lines[at..], TableLimits::default()) {
+      blocks.push(Block::Table(table));
+      at += used;
+      continue;
+    }
+    let content = vec![Inline::Text(line.to_owned())];
+    match blocks.last_mut() {
+      Some(Block::Paragraph(lines)) => lines.push(content),
+      _ => blocks.push(Block::Paragraph(vec![content])),
+    }
+    at += 1;
+  }
+  blocks
 }
 
 pub fn parse_inline(text: &str) -> Vec<Inline> {
@@ -361,11 +615,38 @@ pub fn is_allowed_link(url: &str) -> bool {
 /// rest of the line keeps its formatting.
 pub fn to_source(blocks: &[Block]) -> String {
   let mut lines: Vec<String> = Vec::new();
+  let mut is_after_table = false;
   for block in blocks {
     match block {
       Block::Paragraph(paragraph) => {
-        lines.extend(paragraph.iter().map(|line| escape_line_start(&line_source(line))));
+        let mut written: Vec<String> = paragraph
+          .iter()
+          .map(|line| escape_line_start(&line_source(line)))
+          .collect();
+        escape_table_lookalikes(&mut written, is_after_table);
+        lines.extend(written);
       },
+      // A table right after a table would continue it; an empty line ends it.
+      Block::Table(table) if !table.header.is_empty() => {
+        if is_after_table {
+          lines.push(String::new());
+        }
+        let columns = table.header.len();
+        lines.push(row_source(&table.header, columns));
+        let delimiters: Vec<&str> = (0..columns)
+          .map(
+            |column| match table.alignments.get(column).copied().unwrap_or_default() {
+              Alignment::Default => "---",
+              Alignment::Left => ":---",
+              Alignment::Center => ":---:",
+              Alignment::Right => "---:",
+            },
+          )
+          .collect();
+        lines.push(format!("| {} |", delimiters.join(" | ")));
+        lines.extend(table.rows.iter().map(|row| row_source(row, columns)));
+      },
+      Block::Table(_) => {},
       Block::Heading { level, content } => {
         let level = (*level).clamp(1, MAX_HEADING_LEVEL);
         lines.push(format!(
@@ -393,8 +674,53 @@ pub fn to_source(blocks: &[Block]) -> String {
         lines.push("```".to_owned());
       },
     }
+    is_after_table = matches!(block, Block::Table(table) if !table.header.is_empty());
   }
   lines.join("\n")
+}
+
+/// A table row in the subset, with `columns` cells (missing ones empty, extra ones left out).
+fn row_source(row: &[Cell], columns: usize) -> String {
+  let cells: Vec<String> = (0..columns)
+    .map(|column| {
+      row
+        .get(column)
+        .map(|cell| escape_pipes(&line_source(cell)))
+        .unwrap_or_default()
+    })
+    .collect();
+  format!("| {} |", cells.join(" | "))
+}
+
+/// Paragraph lines that would read as a table (a line with a `|` over a delimiter row) or as a row
+/// of the table just before keep their pipes as text.
+fn escape_table_lookalikes(lines: &mut [String], is_after_table: bool) {
+  for index in 0..lines.len() {
+    let is_header = lines
+      .get(index + 1)
+      .is_some_and(|next| delimiter_row(next).is_some());
+    let is_row = index == 0 && is_after_table;
+    if (is_header || is_row) && row_cells(&lines[index]).is_some() {
+      lines[index] = escape_pipes(&lines[index]);
+    }
+  }
+}
+
+/// Every `|` that isn't escaped yet written as `\|`.
+fn escape_pipes(source: &str) -> String {
+  let mut out = String::with_capacity(source.len());
+  let mut is_escaped = false;
+  for ch in source.chars() {
+    if is_escaped {
+      is_escaped = false;
+    } else if ch == '\\' {
+      is_escaped = true;
+    } else if ch == '|' {
+      out.push('\\');
+    }
+    out.push(ch);
+  }
+  out
 }
 
 /// One line of inline content in the subset. Tries the nested form with the lightest escaping first
@@ -1141,6 +1467,273 @@ mod tests {
     }
   }
 
+  mod tables {
+    use super::*;
+
+    #[test]
+    fn a_table_with_header_alignment_and_rows() {
+      let blocks = parse(
+        "before\n| Name | Status | Due |\n|:-----|:------:|----:|\n| Project A | **open** | `Friday` |\nafter",
+      );
+      assert_eq!(
+        blocks,
+        [
+          Block::Paragraph(vec![vec![text("before")]]),
+          Block::Table(Table {
+            alignments: vec![Alignment::Left, Alignment::Center, Alignment::Right],
+            header: vec![vec![text("Name")], vec![text("Status")], vec![text("Due")]],
+            rows: vec![vec![
+              vec![text("Project A")],
+              vec![Inline::Bold(vec![text("open")])],
+              vec![Inline::Code("Friday".into())],
+            ]],
+          }),
+          Block::Paragraph(vec![vec![text("after")]]),
+        ]
+      );
+    }
+
+    #[test]
+    fn outer_pipes_are_optional_and_alignment_defaults() {
+      let table = only_table("a | b\n--- | ---\n1 | 2");
+      assert_eq!(table.alignments, [Alignment::Default, Alignment::Default]);
+      assert_eq!(table.rows, [vec![vec![text("1")], vec![text("2")]]]);
+    }
+
+    #[test]
+    fn mentions_and_links_in_cells() {
+      let table = only_table("| who | where |\n|---|---|\n| @sam | [docs](https://example.com/d) |");
+      assert_eq!(table.rows[0][0], [Inline::Mention("sam".into())]);
+      assert_eq!(
+        table.rows[0][1],
+        [Inline::LabeledLink {
+          url: "https://example.com/d".into(),
+          label: "docs".into()
+        }]
+      );
+    }
+
+    #[test]
+    fn escaped_pipes_stay_in_the_cell() {
+      let table = only_table("| a | b |\n|---|---|\n| x \\| y | `p\\|q` |");
+      assert_eq!(table.rows[0][0], [text("x | y")]);
+      assert_eq!(table.rows[0][1], [Inline::Code("p|q".into())]);
+    }
+
+    #[test]
+    fn short_rows_are_filled_and_long_rows_end_the_table() {
+      let blocks = parse("| a | b |\n|---|---|\n| 1 |\n| 2 | 3 | 4 |");
+      let [Block::Table(table), Block::Paragraph(rest)] = blocks.as_slice() else {
+        panic!("{blocks:?}");
+      };
+      assert_eq!(table.rows, [vec![vec![text("1")], vec![]]]);
+      assert_eq!(rest, &[vec![text("| 2 | 3 | 4 |")]]);
+    }
+
+    #[test]
+    fn a_line_without_a_pipe_ends_the_table() {
+      let blocks = parse("| a |\n|---|\n| 1 |\nplain\n- item");
+      assert!(matches!(
+        blocks.as_slice(),
+        [Block::Table(_), Block::Paragraph(_), Block::List { .. }]
+      ));
+    }
+
+    #[test]
+    fn near_misses_stay_text() {
+      for source in [
+        // No delimiter row.
+        "| a | b |\n| 1 | 2 |",
+        // Delimiter row with another number of cells.
+        "| a | b |\n|---|",
+        // Not a delimiter row.
+        "| a | b |\n|---|-x-|",
+        "| a | b |\n|:|---|",
+        // No pipe in the header.
+        "a\n|---|",
+        // The header is a list item.
+        "- a | b\n|---|---|",
+        "a \\| b\n|---|",
+        "",
+      ] {
+        assert!(
+          !parse(source).iter().any(|block| matches!(block, Block::Table(_))),
+          "{source:?} should be text"
+        );
+      }
+    }
+
+    #[test]
+    fn oversized_tables_stay_text() {
+      let limits = TableLimits {
+        max_columns: 2,
+        max_rows: 2,
+      };
+      let has_table = |source: &str| {
+        parse_with(source, limits)
+          .iter()
+          .any(|block| matches!(block, Block::Table(_)))
+      };
+      assert!(has_table("| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |"));
+      assert!(!has_table("| a | b | c |\n|---|---|---|"));
+      assert!(!has_table(
+        "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |"
+      ));
+      let wide = format!("|{}\n|{}", " a |".repeat(21), "---|".repeat(21));
+      assert!(!parse(&wide).iter().any(|block| matches!(block, Block::Table(_))));
+    }
+
+    #[test]
+    fn tables_in_code_stay_code() {
+      assert!(matches!(
+        parse("```\n| a |\n|---|\n```").as_slice(),
+        [Block::Code { .. }]
+      ));
+    }
+
+    #[test]
+    fn readable_tables_for_previews() {
+      assert_eq!(
+        readable_tables("hi\n| Name | Due |\n|---|---|\n| **A** | Friday |\n|  | x |\nbye"),
+        "hi\nName · Due\nA · Friday\nx\nbye"
+      );
+      assert!(matches!(
+        readable_tables("no | table"),
+        std::borrow::Cow::Borrowed("no | table")
+      ));
+      assert_eq!(
+        readable_tables("```\n| a |\n|---|\n```"),
+        "```\n| a |\n|---|\n```"
+      );
+    }
+
+    #[test]
+    fn pasted_plain_text_keeps_tables_and_literal_lines() {
+      let blocks = literal_with_tables("**not bold**\n| a | b |\n|---|---|\n| 1 | 2 |\n# no heading");
+      let [
+        Block::Paragraph(before),
+        Block::Table(table),
+        Block::Paragraph(after),
+      ] = blocks.as_slice()
+      else {
+        panic!("{blocks:?}");
+      };
+      assert_eq!(before, &[vec![text("**not bold**")]]);
+      assert_eq!(table.rows, [vec![vec![text("1")], vec![text("2")]]]);
+      assert_eq!(after, &[vec![text("# no heading")]]);
+    }
+
+    mod round_trip {
+      use super::*;
+
+      #[test]
+      fn canonical_tables_read_back_the_same() {
+        for source in [
+          "| a | b |\n| --- | --- |\n| 1 | 2 |",
+          "| Name | Status | Due |\n| :--- | :---: | ---: |\n| Project A | **open** | `Friday` |",
+          "| a |  |\n| --- | --- |\n|  | 2 |",
+          "before\n| a | b |\n| --- | --- |\nafter",
+        ] {
+          assert_eq!(to_source(&parse(source)), source, "{source}");
+        }
+      }
+
+      #[test]
+      fn pipes_and_markup_in_cells() {
+        let blocks = vec![Block::Table(Table {
+          alignments: vec![Alignment::Center, Alignment::Default],
+          header: vec![vec![text("a | b")], vec![Inline::Code("x|y".into())]],
+          rows: vec![
+            vec![
+              vec![Inline::Bold(vec![text("bold | pipe")])],
+              vec![text("C:\\"), text(" and \\|")],
+            ],
+            vec![vec![text("**literal**")], vec![]],
+          ],
+        })];
+        let source = to_source(&blocks);
+        let read = parse(&source);
+        let [Block::Table(table)] = read.as_slice() else {
+          panic!("{source:?} isn't one table");
+        };
+        let [Block::Table(expected)] = blocks.as_slice() else {
+          unreachable!();
+        };
+        assert_eq!(table.alignments, expected.alignments);
+        for (read, expected) in std::iter::once(&table.header)
+          .chain(&table.rows)
+          .zip(std::iter::once(&expected.header).chain(&expected.rows))
+        {
+          for (read, expected) in read.iter().zip(expected) {
+            assert_eq!(pieces(read), pieces(expected), "via {source:?}");
+          }
+        }
+      }
+
+      #[test]
+      fn ragged_rows_are_written_with_one_cell_per_column() {
+        let blocks = vec![Block::Table(Table {
+          alignments: vec![],
+          header: vec![vec![text("a")], vec![text("b")]],
+          rows: vec![
+            vec![vec![text("1")]],
+            vec![vec![text("2")], vec![text("3")], vec![text("4")]],
+          ],
+        })];
+        assert_eq!(
+          to_source(&blocks),
+          "| a | b |\n| --- | --- |\n| 1 |  |\n| 2 | 3 |"
+        );
+      }
+
+      #[test]
+      fn paragraphs_that_look_like_tables_stay_paragraphs() {
+        let blocks = vec![Block::Paragraph(vec![
+          vec![text("a | b")],
+          vec![text("--- | ---")],
+          vec![text("1 | 2")],
+        ])];
+        assert_eq!(parse(&to_source(&blocks)), blocks);
+      }
+
+      #[test]
+      fn a_paragraph_after_a_table_stays_a_paragraph() {
+        let blocks = vec![
+          Block::Table(Table {
+            alignments: vec![Alignment::Default],
+            header: vec![vec![text("a")]],
+            rows: vec![],
+          }),
+          Block::Paragraph(vec![vec![text("x | y")], vec![text("z")]]),
+        ];
+        assert_eq!(parse(&to_source(&blocks)), blocks);
+      }
+
+      #[test]
+      fn two_tables_in_a_row_stay_apart() {
+        let table = Block::Table(Table {
+          alignments: vec![Alignment::Default],
+          header: vec![vec![text("a")]],
+          rows: vec![vec![vec![text("1")]]],
+        });
+        let read = parse(&to_source(&[table.clone(), table.clone()]));
+        assert_eq!(read.first(), Some(&table));
+        assert_eq!(read.last(), Some(&table));
+      }
+    }
+
+    fn only_table(source: &str) -> Table {
+      match parse(source).as_slice() {
+        [Block::Table(table)] => table.clone(),
+        other => panic!("one table expected: {other:?}"),
+      }
+    }
+
+    fn text(content: &str) -> Inline {
+      Inline::Text(content.into())
+    }
+  }
+
   mod round_trip {
     use super::*;
 
@@ -1425,7 +2018,7 @@ mod tests {
         match block {
           Block::Heading { content, .. } => content,
           Block::Quote(lines) | Block::Paragraph(lines) | Block::List { items: lines, .. } => &lines[0],
-          Block::Code { .. } => &[],
+          Block::Code { .. } | Block::Table(_) => &[],
         }
       }
     }

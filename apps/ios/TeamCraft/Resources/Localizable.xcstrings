@@ -9953,6 +9953,22 @@
         }
       }
     },
+    "message_table_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Table"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tabelle"
+          }
+        }
+      }
+    },
     "message_sent": {
       "localizations": {
         "en": {

@@ -20,6 +20,8 @@ pub enum FormatAction {
   Inline(InlineStyle),
   Block(BlockFormat),
   Link,
+  /// Inserts a small table to fill in (the composer only).
+  Table,
 }
 
 /// Formatting shortcuts (Slack's where it has one: Ctrl+K stays the quick switcher).
@@ -179,6 +181,7 @@ pub fn FormatToolbarPanel(active: Signal<ActiveFormats>, on_action: Callback<For
       <span class="format-sep" aria-hidden="true"></span>
       {button(FormatAction::Inline(InlineStyle::Code), Glyph::Icon(IconName::Code))}
       {button(FormatAction::Block(BlockFormat::CodeBlock), Glyph::Icon(IconName::CodeBlock))}
+      {button(FormatAction::Table, Glyph::Icon(IconName::Table))}
     </div>
   }
 }
@@ -313,7 +316,7 @@ fn format_button(
   let is_pressed = move || match action {
     FormatAction::Inline(style) => active.get().has(style),
     FormatAction::Block(format) => active.get().block == format,
-    FormatAction::Link => false,
+    FormatAction::Link | FormatAction::Table => false,
   };
   let tooltip = move || match maybe_shortcut {
     Some(shortcut) => format!("{} ({})", i18n.t(label), shortcut_text(&shortcut, i18n.locale())),
@@ -329,7 +332,9 @@ fn format_button(
       class="format-btn"
       tabindex=if is_first { "0" } else { "-1" }
       aria-label=move || i18n.t(label)
-      aria-pressed=move || (action != FormatAction::Link).then(|| is_pressed().to_string())
+      aria-pressed=move || {
+        (!matches!(action, FormatAction::Link | FormatAction::Table)).then(|| is_pressed().to_string())
+      }
       aria-keyshortcuts=maybe_shortcut.map(|shortcut| shortcut.aria(Platform::current()))
       title=tooltip
       on:mousedown=|ev| ev.prevent_default()
@@ -349,6 +354,7 @@ pub fn action_label(action: FormatAction) -> &'static str {
     FormatAction::Inline(InlineStyle::Strike) => "format-strike",
     FormatAction::Inline(InlineStyle::Code) => "format-code",
     FormatAction::Link => "format-link",
+    FormatAction::Table => "format-table",
     FormatAction::Block(BlockFormat::Numbered) => "format-numbered-list",
     FormatAction::Block(BlockFormat::Bulleted) => "format-bulleted-list",
     FormatAction::Block(BlockFormat::Quote) => "format-quote",

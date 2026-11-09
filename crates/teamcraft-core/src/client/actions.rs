@@ -9,6 +9,7 @@ use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::imported::{Authorship, ImportedAuthor};
 use crate::read_state;
+use crate::readable_text::readable_text;
 use crate::store::{
   AttachmentRef, Forwarded, LocalStore, MessageContent, MessageMeta, ReplyAttachment, ReplyRef, StoredMessage,
 };
@@ -210,7 +211,7 @@ pub fn reply_ref(
   ReplyRef {
     target: target.client_message_id,
     author: Authorship::of(target, maybe_importer).author,
-    excerpt: text.chars().take(REPLY_EXCERPT_CHARS).collect(),
+    excerpt: readable_text(text).chars().take(REPLY_EXCERPT_CHARS).collect(),
     maybe_attachment: maybe_quoted,
   }
 }

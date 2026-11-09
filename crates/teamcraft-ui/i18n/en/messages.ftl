@@ -119,6 +119,7 @@ composer-file-unstaged = { $name } could not be prepared for sending.
 permalink-label = Message in { $name }
 permalink-unavailable = Link to a conversation you are not in
 permalink-hidden = Message link
+message-table-label = Table
 
 # Composer: mentions, slash commands, formatting
 mention-channel = Notify everyone in this conversation
@@ -130,6 +131,7 @@ format-italic = Italic
 format-strike = Strikethrough
 format-code = Code
 format-code-block = Code block
+format-table = Table
 format-underline = Underline
 format-style = Text style
 format-paragraph = Normal text

@@ -2,7 +2,7 @@
 //! a body exactly as desktop and web do. Nested emphasis is flattened into runs with their styles,
 //! which maps directly onto Compose's `AnnotatedString` (and SwiftUI's `AttributedString`).
 
-use teamcraft_client_api::markdown::{self, Block, Inline, ListKind};
+use teamcraft_client_api::markdown::{self, Alignment, Block, Inline, ListKind};
 
 /// One block of a message body.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -23,6 +23,27 @@ pub enum MarkupBlock {
     maybe_language: Option<String>,
     code: String,
   },
+  /// A table: a header row over body rows, every row with one line per column.
+  Table {
+    alignments: Vec<MarkupAlignment>,
+    header: Vec<MarkupLine>,
+    rows: Vec<MarkupRow>,
+  },
+}
+
+/// One body row of a table.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MarkupRow {
+  pub cells: Vec<MarkupLine>,
+}
+
+/// A table column's alignment; `Natural` follows the reading direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum MarkupAlignment {
+  Natural,
+  Left,
+  Center,
+  Right,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -101,6 +122,26 @@ fn block(block: Block) -> MarkupBlock {
       items: items.iter().map(|inlines| line(inlines)).collect(),
     },
     Block::Code { maybe_language, code } => MarkupBlock::Code { maybe_language, code },
+    Block::Table(table) => MarkupBlock::Table {
+      alignments: table
+        .alignments
+        .iter()
+        .map(|alignment| match alignment {
+          Alignment::Default => MarkupAlignment::Natural,
+          Alignment::Left => MarkupAlignment::Left,
+          Alignment::Center => MarkupAlignment::Center,
+          Alignment::Right => MarkupAlignment::Right,
+        })
+        .collect(),
+      header: table.header.iter().map(|cell| line(cell)).collect(),
+      rows: table
+        .rows
+        .iter()
+        .map(|row| MarkupRow {
+          cells: row.iter().map(|cell| line(cell)).collect(),
+        })
+        .collect(),
+    },
   }
 }
 
@@ -262,6 +303,26 @@ mod tests {
       &blocks[2],
       MarkupBlock::Items { kind: MarkupListKind::Numbered { start: 2 }, items } if items.len() == 2
     ));
+  }
+
+  #[test]
+  fn tables_keep_alignment_and_styled_cells() {
+    let blocks = message_markup("| Name | Due |\n|---|---:|\n| **A** |\n".into());
+    let [
+      MarkupBlock::Table {
+        alignments,
+        header,
+        rows,
+      },
+    ] = blocks.as_slice()
+    else {
+      panic!("not one table: {blocks:?}");
+    };
+    assert_eq!(alignments, &[MarkupAlignment::Natural, MarkupAlignment::Right]);
+    assert_eq!(header[1].runs, [text("Due")]);
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].cells[0].runs[0].is_bold);
+    assert!(rows[0].cells[1].runs.is_empty());
   }
 
   #[test]
