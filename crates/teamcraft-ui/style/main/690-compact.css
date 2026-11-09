@@ -277,7 +277,7 @@
   display: inline-grid;
 }
 
-/* The bottom navigation: four tabs, each a full-height touch target. */
+/* The bottom navigation: up to five tabs (iOS tab bar), each a full-height touch target. */
 :root[data-layout="compact"] .bottom-nav {
   position: relative;
   isolation: isolate;

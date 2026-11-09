@@ -55,3 +55,210 @@
   fill: currentColor;
 }
 
+/* ---- The Files place's sidebar (#1510): filters, then the scopes ---- */
+
+.files-kinds {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: var(--space-1);
+}
+
+.files-scope-title {
+  margin: 0;
+}
+
+.files-scopes [role="group"] {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* A space's tile at the size of a row's icon, as under the list layout's list. */
+.files-scopes .space-tile {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  font-size: var(--text-2xs);
+}
+
+/* ---- Files on a phone (#1510): a tab of its own, laid out like the Photos and Files apps ---- */
+
+/* A large title on the page's 16px gutter; no back button in front of a tab. */
+:root[data-layout="compact"] .files-view-header {
+  min-height: 0;
+  padding: var(--space-3) var(--space-4) var(--space-2);
+  border-bottom: 0;
+}
+
+:root[data-layout="compact"] .files-view-header h1 {
+  font-size: var(--text-2xl);
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  font-weight: var(--weight-bold);
+}
+
+.files-phone-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The filters: one row of pills that scrolls sideways, edge to edge, the first on the gutter. */
+.files-chips {
+  display: flex;
+  gap: var(--space-2);
+  padding: 0 var(--space-4);
+  overflow-x: auto;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+}
+
+.files-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.files-chip {
+  flex: none;
+  min-height: 34px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  color: var(--text);
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+
+.files-chip[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+/* Where and the order: two menus side by side, each its value with a chevron, the native picker
+   behind it. 16px text, so focusing them doesn't zoom the page. */
+.files-menus {
+  display: flex;
+  gap: var(--space-2);
+  padding: 0 var(--space-4);
+}
+
+.files-menu {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.files-menu select {
+  width: 100%;
+  min-height: 36px;
+  padding: 0 32px 0 12px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-medium);
+  appearance: none;
+  -webkit-appearance: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.files-menu .icon {
+  position: absolute;
+  right: 10px;
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
+  pointer-events: none;
+}
+
+/* The list: on the gutter, no extra inset; the name gets the room, downloading stays in the menu. */
+:root[data-layout="compact"] .files-view-body {
+  padding: var(--space-2) 0 var(--space-6);
+}
+
+/* One inset group, rows divided by a hairline that starts after the icon, as in iOS lists. */
+:root[data-layout="compact"] .files-view .files-list {
+  gap: 0;
+  margin: 0 var(--space-4);
+  padding: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+:root[data-layout="compact"] .files-view .files-list:empty {
+  display: none;
+}
+
+:root[data-layout="compact"] .files-view .file-card {
+  position: relative;
+  min-height: 60px;
+  padding: 8px 2px 8px 12px;
+  gap: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+:root[data-layout="compact"] .files-view .file-card + .file-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 60px;
+  border-top: 1px solid var(--border);
+}
+
+/* The icon, then the name with the room, then the actions close together: 40 by 44 each, still a
+   finger's target, without the gap the card puts between its parts elsewhere. */
+:root[data-layout="compact"] .files-view .file-card > :first-child {
+  margin-right: var(--space-3);
+}
+
+:root[data-layout="compact"] .files-view .file-meta {
+  margin-right: var(--space-1);
+}
+
+:root[data-layout="compact"] .files-view .file-card .icon-btn {
+  min-width: 40px;
+  width: 40px;
+  height: 44px;
+  padding: 0;
+  color: var(--text-muted);
+}
+
+/* One size for every action, the menu's dots too (the viewer's 16px tools are too faint here). */
+:root[data-layout="compact"] .files-view .file-card .icon-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+:root[data-layout="compact"] .files-view .file-download {
+  display: none;
+}
+
+:root[data-layout="compact"] .files-sort-note {
+  padding: 0 var(--space-4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .files-chip {
+    transition: none;
+  }
+}
+
+/* The menu's dots are round stroke caps: a thicker stroke draws them large enough to find. */
+:root[data-layout="compact"] .files-view .file-menu-wrap .icon-btn svg {
+  stroke-width: 4;
+}
