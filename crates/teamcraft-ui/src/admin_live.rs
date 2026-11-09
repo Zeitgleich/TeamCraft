@@ -874,6 +874,19 @@ impl AdminLive {
     }
   }
 
+  /// Keeps a channel open for the policy's snooze period (issue #212); the console shows the new date
+  /// with the refresh.
+  pub fn snooze_channel(&self, channel: ConversationId) {
+    let request = teamcraft_proto::SnoozeInactivityRequest::default();
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.send(
+        ApiMethod::Post,
+        format!("/api/v1/conversations/{channel}/inactivity/snooze"),
+        Some(body),
+      );
+    }
+  }
+
   pub fn set_audit_filter(&self, filter: AuditFilter) {
     self.data.borrow_mut().audit_filter = filter;
     self.queue_refresh();
@@ -2540,6 +2553,7 @@ fn channel_from_wire(
     retention,
     history,
     is_archived: summary.is_archived,
+    maybe_inactivity: summary.maybe_inactivity.clone(),
   }
 }
 
@@ -2712,6 +2726,13 @@ pub fn action_from_wire(action: &str) -> AuditAction {
     },
     "conversation_updated" => AuditAction::ChannelUpdated,
     "channel_deleted" | "channel_deleted_last_member" => AuditAction::ChannelDeleted,
+    "channel_inactivity_notice" | "channel_inactivity_delete_notice" => AuditAction::InactivityNotice,
+    "channel_auto_archived" => AuditAction::ChannelAutoArchived,
+    "channel_inactivity_deleted" => AuditAction::ChannelAutoDeleted,
+    "channel_inactivity_snoozed" => AuditAction::InactivitySnoozed,
+    "inactivity_run_limited" => AuditAction::InactivityLimited,
+    "space_archived" => AuditAction::SpaceArchived,
+    "space_restored" => AuditAction::SpaceRestored,
     "space_created" => AuditAction::SpaceCreated,
     "space_updated" => AuditAction::SpaceUpdated,
     "space_deleted" => AuditAction::SpaceDeleted,
@@ -2917,6 +2938,7 @@ mod tests {
       },
       history: HistoryPolicy::Full,
       is_archived: false,
+      maybe_inactivity: None,
     }];
     let entry = AuditEntryResponse {
       id: id_from_raw(1),
@@ -2981,6 +3003,7 @@ mod tests {
       maybe_last_activity_at: None,
       maybe_owner_user_id: None,
       maybe_retention: None,
+      maybe_inactivity: None,
     };
     let status = RetentionSetting {
       maybe_max_age_days: Some(30),
@@ -3873,6 +3896,7 @@ mod tests {
           maybe_max_age_days: Some(30),
           maybe_max_messages: None,
         }),
+        maybe_inactivity: None,
       }
     }
 

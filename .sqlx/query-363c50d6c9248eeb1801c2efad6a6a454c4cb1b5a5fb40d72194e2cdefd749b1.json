@@ -1,0 +1,61 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT c.id, c.created_at, c.inactivity_notified_at, lm.last_id\n         FROM conversations c\n         JOIN spaces s ON s.id = c.space_id AND s.archived_at IS NULL AND s.deleted_at IS NULL\n         LEFT JOIN LATERAL (SELECT max(m.id) AS last_id FROM messages m WHERE m.conversation_id = c.id) lm ON true\n         WHERE c.kind = 'channel' AND c.archived_at IS NULL AND c.deleted_at IS NULL\n           AND c.importer_user_id IS NULL\n           AND (c.inactivity_snoozed_until IS NULL OR c.inactivity_snoozed_until <= $1)\n           AND (c.inactivity_notified_at IS NOT NULL\n                OR COALESCE(lm.last_id, tc_snowflake_floor(c.created_at)) < tc_snowflake_floor($2))\n         ORDER BY COALESCE(lm.last_id, tc_snowflake_floor(c.created_at)), c.id\n         LIMIT $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "inactivity_notified_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "inactivity_notified_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "last_id",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "363c50d6c9248eeb1801c2efad6a6a454c4cb1b5a5fb40d72194e2cdefd749b1"
+}

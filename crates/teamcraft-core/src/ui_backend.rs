@@ -2505,8 +2505,9 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     conversation: ConversationId,
     maybe_thread: Option<ThreadId>,
     files: Vec<teamcraft_client_api::actions::OutgoingFile>,
+    travel: teamcraft_client_api::drafts::DraftFileTravel,
   ) {
-    self.ui_attach_draft_files(conversation, maybe_thread, files);
+    self.ui_attach_draft_files(conversation, maybe_thread, files, travel);
   }
 
   fn draft_files(
@@ -3019,6 +3020,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn cancel_upload(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
     self.ui_cancel_upload(conversation, message, file_id);
+  }
+
+  fn cancel_message_upload(&self, conversation: ConversationId, message: MessageId) {
+    self.ui_cancel_message_upload(conversation, message);
   }
 
   fn acknowledge(&self, conversation: ConversationId, message: MessageId) {

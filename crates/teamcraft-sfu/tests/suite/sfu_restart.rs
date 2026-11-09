@@ -29,6 +29,8 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use wtransport::Identity;
 
+use crate::common::secured::wait_for_same_epoch;
+
 const CALL_ID: u64 = 43;
 const CONVERSATION_ID: u64 = 44;
 const ALICE: u64 = 1;
@@ -55,8 +57,7 @@ async fn graceful_restart_brings_everyone_back_into_the_call() {
     wait_for(call, |event| *event == CallEngineEvent::Reconnecting).await;
     wait_for(call, |event| *event == CallEngineEvent::Reconnected).await;
   }
-  wait_for_secured(&mut alice).await;
-  wait_for_secured(&mut bob).await;
+  wait_for_same_epoch(&mut alice, &mut bob).await;
   assert_back_together(alice, bob, &reports).await;
 }
 
@@ -83,8 +84,7 @@ async fn a_restart_with_a_new_certificate_is_rejoined_with_the_fresh_tokens_hash
   for call in [&mut alice, &mut bob] {
     wait_for(call, |event| *event == CallEngineEvent::Reconnected).await;
   }
-  wait_for_secured(&mut alice).await;
-  wait_for_secured(&mut bob).await;
+  wait_for_same_epoch(&mut alice, &mut bob).await;
   assert_back_together(alice, bob, &reports).await;
 }
 
@@ -111,8 +111,7 @@ async fn crash_is_noticed_and_everyone_rejoins_the_restarted_sfu() {
   for call in [&mut alice, &mut bob] {
     wait_for(call, |event| *event == CallEngineEvent::Reconnected).await;
   }
-  wait_for_secured(&mut alice).await;
-  wait_for_secured(&mut bob).await;
+  wait_for_same_epoch(&mut alice, &mut bob).await;
   assert_back_together(alice, bob, &reports).await;
   first.kill();
 }
@@ -164,8 +163,6 @@ async fn assert_back_together(mut alice: NativeCall, mut bob: NativeCall, report
   assert_eq!(devices, vec![ALICE, BOB], "{latest_roster:?}");
   let alice_stats = alice.leave().await.unwrap();
   let bob_stats = bob.leave().await.unwrap();
-  assert!(alice_stats.maybe_privacy_code.is_some());
-  assert_eq!(alice_stats.maybe_privacy_code, bob_stats.maybe_privacy_code);
   assert!(alice_stats.frames_received > 25, "{alice_stats:?}");
   assert!(bob_stats.frames_received > 25, "{bob_stats:?}");
 }

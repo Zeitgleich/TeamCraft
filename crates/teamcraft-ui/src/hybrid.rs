@@ -693,8 +693,11 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     conversation: ConversationId,
     maybe_thread: Option<ThreadId>,
     files: Vec<teamcraft_client_api::actions::OutgoingFile>,
+    travel: teamcraft_client_api::drafts::DraftFileTravel,
   ) {
-    self.chat.attach_draft_files(conversation, maybe_thread, files);
+    self
+      .chat
+      .attach_draft_files(conversation, maybe_thread, files, travel);
   }
 
   fn draft_files(
@@ -759,6 +762,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn cancel_upload(&self, conversation: ConversationId, message: MessageId, file_id: &str) {
     self.chat.cancel_upload(conversation, message, file_id);
+  }
+
+  fn cancel_message_upload(&self, conversation: ConversationId, message: MessageId) {
+    self.chat.cancel_message_upload(conversation, message);
   }
 
   fn acknowledge(&self, conversation: ConversationId, message: MessageId) {
@@ -1708,6 +1715,12 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
   fn admin_set_channel_archived(&self, channel: ConversationId, is_archived: bool) {
     if let Some(admin) = &self.maybe_admin {
       admin.set_channel_archived(channel, is_archived);
+    }
+  }
+
+  fn admin_snooze_channel(&self, channel: ConversationId) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.snooze_channel(channel);
     }
   }
 

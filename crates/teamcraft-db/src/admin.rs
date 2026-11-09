@@ -62,6 +62,13 @@ pub struct AdminConversationRow {
   /// The channel's own retention, then its space's (the inputs of the effective retention).
   pub own_retention: crate::retention::StoredRetention,
   pub space_retention: crate::retention::StoredRetention,
+  /// When the archive happened, if it did (issue #212).
+  pub maybe_archived_at: Option<OffsetDateTime>,
+  /// The inactivity policy archived it, not somebody by hand.
+  pub is_archived_by_policy: bool,
+  /// Inactivity policy: when the owners were told, and until when the channel is snoozed.
+  pub maybe_inactivity_notified_at: Option<OffsetDateTime>,
+  pub maybe_inactivity_snoozed_until: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,9 +202,11 @@ impl Database {
       r#"SELECT t.id AS "id!", t.space_id, t.name, t.visibility AS "visibility!", t.is_archived AS "is_archived!",
                 t.created_at AS "created_at!", t.member_count AS "member_count!", t.guest_count AS "guest_count!",
                 t.message_count AS "message_count!", t.last_message_id, t.storage_bytes AS "storage_bytes!",
-                t.owner_id, t.own_age_days, t.own_messages, t.space_age_days, t.space_messages
+                t.owner_id, t.own_age_days, t.own_messages, t.space_age_days, t.space_messages,
+                t.archived_at, t.archive_origin, t.inactivity_notified_at, t.inactivity_snoozed_until
          FROM (
            SELECT c.id, c.space_id, c.name, c.visibility, c.archived_at IS NOT NULL AS is_archived, c.created_at,
+                  c.archived_at, c.archive_origin, c.inactivity_notified_at, c.inactivity_snoozed_until,
                   (SELECT count(*) FROM memberships m WHERE m.conversation_id = c.id) AS member_count,
                   (SELECT count(*) FROM memberships m JOIN users u ON u.id = m.user_id
                     WHERE m.conversation_id = c.id AND u.kind = 'guest') AS guest_count,
@@ -276,6 +285,10 @@ impl Database {
             maybe_max_age_days: row.space_age_days,
             maybe_max_messages: row.space_messages,
           },
+          maybe_archived_at: row.archived_at,
+          is_archived_by_policy: row.archive_origin.as_deref() == Some("inactivity"),
+          maybe_inactivity_notified_at: row.inactivity_notified_at,
+          maybe_inactivity_snoozed_until: row.inactivity_snoozed_until,
         })
       })
       .collect()

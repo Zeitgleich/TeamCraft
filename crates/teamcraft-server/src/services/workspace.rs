@@ -382,6 +382,11 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
   }
   check_retention(&policy.retention)?;
   check_call_backgrounds(&policy.call_backgrounds)?;
+  if !policy.inactivity.is_valid() {
+    return Err(ApiError::InvalidRequest(
+      "inactivity periods or limit are out of range".into(),
+    ));
+  }
   if !policy.scheduled_messages.is_valid() {
     return Err(ApiError::InvalidRequest(
       "scheduled_messages limits are out of range".into(),
@@ -413,6 +418,14 @@ fn check_guest_and_password_policy(policy: &WorkspacePolicy) -> Result<(), ApiEr
   {
     return Err(ApiError::InvalidRequest(
       "guests.sponsor_extension_days is too large".into(),
+    ));
+  }
+  if guests
+    .maybe_deactivate_accounts_after_days
+    .is_some_and(|days| !(1..=MAX_GUEST_EXPIRY_DAYS).contains(&days))
+  {
+    return Err(ApiError::InvalidRequest(
+      "guests.deactivate_accounts_after_days is out of range".into(),
     ));
   }
   if let Some(chars) = policy.passwords.maybe_min_chars

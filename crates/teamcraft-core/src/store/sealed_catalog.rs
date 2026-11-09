@@ -344,6 +344,21 @@ impl<K, V> NodeCache<K, V> {
   pub(crate) fn has_dirty(&self) -> bool {
     !self.dirty_roots.is_empty() || !self.dirty_pages.is_empty()
   }
+
+  /// The scopes (indexes) the open group of writes changed.
+  pub(crate) fn dirty_scopes(&self) -> impl Iterator<Item = String> + '_ {
+    self
+      .dirty_roots
+      .keys()
+      .chain(self.dirty_pages.keys().map(|(scope, _)| scope))
+      .cloned()
+  }
+
+  /// Drops what is cached of one index: another connection changed it.
+  pub(crate) fn forget_scope(&mut self, scope: &str) {
+    self.roots.remove(&scope.to_string());
+    self.pages.retain(|(held, _)| held != scope);
+  }
 }
 
 impl<K: Serialize, V: Serialize> NodeCache<K, V> {

@@ -89,28 +89,50 @@
 @media (prefers-reduced-transparency: reduce) { .media-motion { background: rgba(20, 22, 30, .92); -webkit-backdrop-filter: none; backdrop-filter: none; } }
 .media-gif-badge { position: absolute; left: 8px; bottom: 8px; padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, .6); color: var(--on-fill); font-size: var(--text-xs); font-weight: var(--weight-bold); letter-spacing: .04em; pointer-events: none; }
 .media-more { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(0, 0, 0, .5); color: var(--on-fill); font-size: var(--text-2xl); letter-spacing: var(--tracking-2xl); line-height: var(--leading-2xl); font-weight: var(--weight-semibold); pointer-events: none; }
-/* A picture of the user's own message still going up: its local thumbnail, a turning ring over it,
-   or why it stopped and "Try again" */
+/* A picture of the user's own message still going up: its local thumbnail; only one that failed
+   for good says so on its tile. How far the message got is its one upload pill. */
 .media-tile.is-uploading .media-open { cursor: default; }
 .upload-state { position: absolute; left: 50%; top: 50%; z-index: 1; transform: translate(-50%, -50%); display: inline-flex; align-items: center; gap: 8px; padding: 8px; border-radius: 999px; background: rgba(0, 0, 0, .6); color: var(--on-fill); }
-.upload-state .spinner { width: 22px; height: 22px; border-color: rgba(255, 255, 255, .35); border-top-color: var(--on-fill); }
-.upload-label { font-size: var(--text-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.upload-state .upload-cancel { width: 28px; height: 28px; color: var(--on-fill); }
-.upload-state .upload-cancel svg { width: 16px; height: 16px; }
-.upload-actions { display: inline-flex; align-items: center; gap: 4px; }
+.upload-state.is-failed { flex-direction: column; max-width: calc(100% - 16px); padding: 10px 12px; border-radius: var(--radius-md); font-size: var(--text-sm); text-align: center; }
 /* How far a transfer got: a ring filled to --media-progress percent */
 .transfer-ring { flex: none; width: 22px; height: 22px; border-radius: 50%; background: conic-gradient(var(--on-fill) calc(var(--media-progress, 0) * 1%), rgba(255, 255, 255, .35) 0); mask: radial-gradient(farthest-side, transparent calc(100% - 3px), black calc(100% - 2px)); }
-/* A picture going up (or retrying by itself, #742): a thin ring in the corner around its cancel
-   button, so the picture stays readable; the words are for screen readers only. */
-.upload-progress { position: absolute; right: 8px; bottom: 8px; z-index: 1; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: rgba(0, 0, 0, .45); -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); color: var(--on-fill); }
-.upload-progress > * { grid-area: 1 / 1; }
-.upload-progress .transfer-ring, .upload-progress .spinner { width: 28px; height: 28px; }
-.upload-progress .transfer-ring { mask: radial-gradient(farthest-side, transparent calc(100% - 2px), black calc(100% - 1.5px)); }
-.upload-progress .spinner { border-width: 2px; border-color: rgba(255, 255, 255, .3); border-top-color: var(--on-fill); }
-.upload-progress .upload-cancel { width: 22px; height: 22px; padding: 0; color: var(--on-fill); }
-.upload-progress .upload-cancel svg { width: 12px; height: 12px; }
-@media (prefers-reduced-transparency: reduce) { .upload-progress { background: rgba(0, 0, 0, .7); -webkit-backdrop-filter: none; backdrop-filter: none; } }
-.upload-state.is-failed { flex-direction: column; max-width: calc(100% - 16px); padding: 10px 12px; border-radius: var(--radius-md); font-size: var(--text-sm); text-align: center; }
+/* A message's pictures with its one upload pill over their top-start corner. */
+.msg-media { position: relative; max-width: 100%; }
+/* One control per message while its files go up (Signal-style): a ring for all of them with a stop
+   square, and "Processing…" or "3.2 MB / 70 MB"; "Try again" once it stopped. Over pictures a
+   translucent pill in the corner; under documents a row in the bubble. */
+.upload-pill { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 2px 10px 2px 2px; border-radius: 999px; font-size: var(--text-xs); letter-spacing: var(--tracking-xs); font-variant-numeric: tabular-nums; white-space: nowrap; animation: upload-pill-in var(--dur-base) var(--ease-standard); }
+.upload-pill.is-corner { position: absolute; inset-inline-start: 6px; top: 6px; z-index: 2; max-width: calc(100% - 12px); background: rgba(0, 0, 0, .5); -webkit-backdrop-filter: blur(16px) saturate(1.6); backdrop-filter: blur(16px) saturate(1.6); color: var(--on-fill); }
+.upload-pill.is-row { align-self: flex-start; background: var(--surface-2); color: var(--text); }
+.upload-pill.is-failed { padding-inline-start: 4px; padding-inline-end: 2px; }
+.upload-pill-text { overflow: hidden; text-overflow: ellipsis; }
+.upload-stop { position: relative; display: grid; place-items: center; flex: none; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer; }
+.upload-stop > * { grid-area: 1 / 1; }
+.upload-stop:focus-visible, .upload-retry:focus-visible, .upload-dismiss:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 1px; }
+.upload-stop-square { width: 8px; height: 8px; border-radius: 2px; background: currentColor; transition: transform var(--dur-fast) var(--ease-standard); }
+.upload-stop:active .upload-stop-square { transform: scale(.8); }
+.upload-ring { width: 24px; height: 24px; transform: rotate(-90deg); fill: none; stroke-width: 2.5; stroke-linecap: round; }
+.upload-ring-track { stroke: currentColor; opacity: .3; }
+.upload-ring-fill { stroke: currentColor; stroke-dasharray: 100; transition: stroke-dashoffset var(--dur-slow) var(--ease-standard); }
+/* Before the first byte: a quarter arc that turns. */
+.upload-ring.is-turning .upload-ring-fill { stroke-dashoffset: 75; transition: none; }
+.upload-ring.is-turning { animation: upload-ring-turn 1s linear infinite; }
+.upload-retry, .upload-dismiss { display: inline-flex; align-items: center; gap: 4px; min-height: 28px; padding: 0 8px 0 4px; border: 0; border-radius: 999px; background: transparent; color: inherit; font: inherit; font-weight: var(--weight-semibold); cursor: pointer; }
+.upload-retry .icon { width: 16px; height: 16px; }
+.upload-dismiss { justify-content: center; width: 28px; padding: 0; opacity: .8; }
+.upload-dismiss .icon { width: 14px; height: 14px; }
+@media (hover: hover) and (pointer: fine) { :is(.upload-stop, .upload-retry, .upload-dismiss):hover { background: rgba(127, 127, 127, .2); } }
+@media not ((hover: hover) and (pointer: fine)) { .upload-pill { min-height: 36px; } .upload-stop, .upload-dismiss { width: 32px; height: 32px; } }
+@keyframes upload-ring-turn { from { transform: rotate(-90deg); } to { transform: rotate(270deg); } }
+@keyframes upload-pill-in { from { opacity: 0; transform: scale(.92); } }
+@media (prefers-reduced-motion: reduce) {
+  .upload-pill { animation-name: upload-pill-fade; }
+  .upload-ring-fill { transition: none; }
+  .upload-ring.is-turning { animation: none; }
+  .upload-ring.is-turning .upload-ring-fill { stroke-dashoffset: 0; opacity: .6; }
+}
+@keyframes upload-pill-fade { from { opacity: 0; } }
+@media (prefers-reduced-transparency: reduce) { .upload-pill.is-corner { background: rgba(0, 0, 0, .78); -webkit-backdrop-filter: none; backdrop-filter: none; } }
 .media-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; width: min(360px, 100%); }
 .media-grid .media-tile { aspect-ratio: 1; border-radius: var(--radius-sm); }
 .media-grid .media-open img { object-fit: cover; }

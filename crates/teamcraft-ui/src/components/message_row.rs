@@ -4,13 +4,14 @@ use leptos::prelude::*;
 use teamcraft_client_api::actions::{FileTransfer, MessagePriority, WorkspaceEvent};
 use teamcraft_client_api::log::{LogEntry, log_entries};
 use teamcraft_client_api::model::{ConversationId, MessageSource};
+use teamcraft_client_api::upload_pill::UploadPill;
 use teamcraft_proto::HistoryPolicy;
 
 use crate::channel_access::can_react_in;
 use crate::clock::{format_relative_short, format_time, format_time_seconds, local_day, now_ms};
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::date_jump::DatePill;
-use crate::components::file_views::{LinkPreviewCard, MessageFiles};
+use crate::components::file_views::{LinkPreviewCard, MessageFiles, without_upload_bytes};
 use crate::components::icons::{Icon, IconName};
 use crate::components::long_press::LongPress;
 use crate::components::message_actions::{MessageAction, QuotedImage, run_message_action};
@@ -603,10 +604,30 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       }
     })
   };
+  // Bytes going up move only the message's one upload pill (its own memo, so its ring animates):
+  // the files are built again when a transfer changes state, not on every chunk.
+  let files = Memo::new(move |_| {
+    extras.with(|maybe_extras| {
+      maybe_extras
+        .as_ref()
+        .map(|extras| without_upload_bytes(&extras.files))
+        .unwrap_or_default()
+    })
+  });
+  let upload = Memo::new(move |_| {
+    extras.with(|maybe_extras| {
+      maybe_extras
+        .as_ref()
+        .and_then(|extras| UploadPill::of(&extras.files))
+    })
+  });
+  let file_views = move || {
+    let files = files.get();
+    (!files.is_empty()).then(|| view! { <MessageFiles files=files upload=upload.into() /> })
+  };
   let attachments = move || {
     extras.get().map(|extras| {
       view! {
-        {(!extras.files.is_empty()).then(|| view! { <MessageFiles files=extras.files.clone() /> })}
         {extras
           .maybe_link_preview
           .clone()
@@ -1074,7 +1095,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
               </time>
               {delivery_view}
             </span>
-          </div> {attachments} {link_previews} {acknowledge}
+          </div> {file_views} {attachments} {link_previews} {acknowledge}
         </div>
         {reaction_chips} {replies}
       </div>

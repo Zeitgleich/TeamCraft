@@ -989,19 +989,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
-  /**
-   * "Cancel all" on a message's files going up (#1579). The core finds a file by its place among
-   * the message's pending files, and a cancel takes it out: the last goes first, one after another,
-   * so every place still names its file.
-   */
-  fun cancelUploads(files: List<FileInfo>) = viewModelScope.launch {
-    val last = files.sortedByDescending { it.fileId.removePrefix("pending-").toIntOrNull() ?: -1 }
-    for (file in last) {
-      tryAct(ChatActions.cancelUpload(file.conversation, file.message, file.fileId))?.let { failure ->
-        failures.value = failure
-        return@launch
-      }
-    }
+  /** The stop square of a message's upload pill: cancels all its files going up (#1579). */
+  fun cancelMessageUpload(conversation: String, message: String) = viewModelScope.launch {
+    tryAct(ChatActions.cancelMessageUpload(conversation, message))?.let { failures.value = it }
   }
 
   /**
@@ -1181,9 +1171,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun pickedKey(conversation: String, maybeThread: String?) = "$conversation/${maybeThread.orEmpty()}"
 
   /**
-   * Attaches the composer's picked files that aren't in its draft yet (#1220): they go up at once
-   * and travel with the draft. Runs in the view model's scope, so leaving the conversation doesn't
-   * stop it halfway; a file sent or removed meanwhile is not attached.
+   * Attaches the composer's picked files that aren't in its draft yet (#1220): the draft keeps them
+   * after the app is killed, and they go up when the message is sent (#1585). Runs in the view
+   * model's scope, so leaving the conversation doesn't stop it halfway; a file sent or removed
+   * meanwhile is not attached.
    */
   fun attachPickedToDraft(conversation: String, maybeThread: String?) = viewModelScope.launch {
     val key = pickedKey(conversation, maybeThread)

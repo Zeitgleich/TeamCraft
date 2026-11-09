@@ -8,7 +8,7 @@ use teamcraft_db::{
 use teamcraft_proto::{
   AddSpaceMemberRequest, CategoryId, CategoryResponse, CreateCategoryRequest, CreateSpaceRequest,
   GatewayEvent, JoinPolicy, ListCategoriesResponse, ListSpaceMembersResponse, ListSpacesResponse, Permission,
-  RemoveMemberQuery, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, UnixMillis,
+  RemoveMemberQuery, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, SystemEventKind, UnixMillis,
   UpdateCategoryRequest, UpdateSpaceMemberRequest, UpdateSpaceRequest, UserId, UserKind,
 };
 use time::OffsetDateTime;
@@ -18,6 +18,7 @@ use super::audit::{self, Target as AuditTarget};
 use super::conversations::{announce_deleted_direct, wake_sweep};
 use super::convert::{category_response, offset_date_time, space_response, unix_millis, user_summary};
 use super::permission_scheme::announce_conversation_rights;
+use super::system_events;
 use super::{validate_name, validate_text};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
@@ -199,6 +200,13 @@ pub async fn update_space(
   {
     return Err(ApiError::InvalidRequest("unknown brand".into()));
   }
+  // Archiving or restoring a space takes its channels along, as one operation (issue #212).
+  let archive_change = request
+    .maybe_is_archived
+    .filter(|wants_archived| *wants_archived != access.view.space.is_archived);
+  if let Some(wants_archived) = archive_change {
+    Box::pin(set_archived_with_channels(state, caller, id, wants_archived)).await?;
+  }
   state
     .database
     .update_space(
@@ -210,7 +218,7 @@ pub async fn update_space(
         maybe_color: request.maybe_color.as_deref(),
         maybe_description: request.maybe_description.as_deref(),
         maybe_join_policy: request.maybe_join_policy,
-        maybe_is_archived: request.maybe_is_archived,
+        maybe_is_archived: None,
       },
     )
     .await?;
@@ -224,6 +232,65 @@ pub async fn update_space(
   .await?;
   notify_space(state, id, &GatewayEvent::SpaceUpdate { space_id: id }).await?;
   get_space(state, caller, id).await
+}
+
+/// Archives a space with every open channel in it in one transaction, or restores it with exactly the
+/// channels that archiving took along: channels archived before, by hand or by the inactivity policy,
+/// stay as they are. A channel nobody can run (no channel admin among its members) stays archived
+/// until an admin assigns an owner (admin.md §3.1.1). Members hear of each channel as of any archive
+/// or restore.
+async fn set_archived_with_channels(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  id: SpaceId,
+  wants_archived: bool,
+) -> Result<(), ApiError> {
+  let now = time::OffsetDateTime::now_utc();
+  let (action, channels, details) = if wants_archived {
+    let Some(archive) = state.database.archive_space_with_channels(id, now).await? else {
+      return Ok(());
+    };
+    let count = archive.channels.len();
+    ("space_archived", archive.channels, json!({"channels": count}))
+  } else {
+    let policy = state.policy.get().inactivity.clone();
+    let maybe_snooze_until = policy
+      .is_enabled
+      .then(|| now + time::Duration::days(i64::from(policy.snooze_days)));
+    let Some(restore) = state
+      .database
+      .restore_space_with_channels(id, maybe_snooze_until)
+      .await?
+    else {
+      return Ok(());
+    };
+    let details = json!({"channels": restore.restored.len(), "left_archived": restore.left_archived.len()});
+    ("space_restored", restore.restored, details)
+  };
+  audit::record(
+    state,
+    Some(caller.user.id),
+    action,
+    Some(AuditTarget::new("space", id)),
+    &details,
+  )
+  .await?;
+  let kind = if wants_archived {
+    SystemEventKind::Archived
+  } else {
+    SystemEventKind::Unarchived
+  };
+  for channel in channels {
+    system_events::emit(state, channel, kind.clone(), Some(caller.user.id), None).await;
+    let members = state.database.conversation_member_ids(channel).await?;
+    state.hub.publish(
+      members,
+      &GatewayEvent::ConversationUpdate {
+        conversation_id: channel,
+      },
+    );
+  }
+  Ok(())
 }
 
 /// Deletes a space with all of its channels for everybody, archived or not, also with people in it

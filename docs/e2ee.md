@@ -1053,6 +1053,14 @@ in addition, through `is_draft`, that a file was attached to a draft and not (ye
 the keep when it was sent; not the draft's text, nor which message carried the file. Servers that publish no `draft_file_retention_days`
 in `GET /me` hold none: there a draft's files wait on the device and go up with the message.
 
+On phones (Android, iOS) a draft's files don't go up when they are attached (#1585): the app attaches them
+with `travel: on_send` (`DraftFileTravel::OnSend` of `AttachDraftFiles`), so they wait on the device like
+the files above, survive the app being killed, and go up with the message when the user taps Send; a
+picture edited before sending goes up only as edited. Mobile data isn't spent on files the user may still
+change or drop, and the server learns of them only as a message's files. The draft's text still travels
+in the account data; the files don't show on the user's other devices. Desktop and web attach with
+`with_draft`, the default, and keep the behaviour above.
+
 #### 4.5.0 Previews of files
 
 A received `.md`, `.html` or `.pdf` file, or a text file (`.txt`, `.log`, `.json`, `.csv`, `.yaml`, `.toml`,
@@ -5206,6 +5214,17 @@ key bag and its "upload me" flag, the account with its key bag and the end of a 
 If SQLite rolls a group's transaction back by itself (a full disk), the group's later writes are
 refused instead of being committed one by one. Where order alone is enough (content keys are written before
 the MLS state that consumed the epoch), reprocessing an entry after a crash is idempotent.
+
+**Read connections (issues #1476, #1583).** The mobile and desktop apps (sealed SQLite) read on
+connections of their own beside the engine's writing one: a read thread never waits for a group of
+writes, and a group never for a long read. Every commit numbers itself in the plaintext table
+`commit_stamp` (a counter and a random tag per connection: no content, no IDs). Before it commits,
+the writer stages in memory which records and catalog nodes the group changed; a reader that finds a
+newer number drops just those from its caches, and drops everything for a number it wasn't told of
+(another process, the notification extension). Reads see only committed writes: the notes of a group
+(what the UI reads again, the journal of written messages) are published after its commit, and a
+reader whose snapshot is older than a note takes a new one first. A read thread's own writes go
+through the writer, and its next read sees them. The notification extension opens no reader.
 
 **MLS state (issue #424).** The openmls provider storage (every group's tree, context, epoch and
 message secrets; key package private keys) is a map from storage key to value; each entry is one
