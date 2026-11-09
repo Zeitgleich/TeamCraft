@@ -123,6 +123,7 @@ message-table-label = Tabelle
 
 # Composer: mentions, slash commands, formatting
 mention-channel = Alle in dieser Unterhaltung benachrichtigen
+mention-admins = Admins und Eigentümer
 composer-suggestions = Vorschläge
 composer-format = Formatierung
 composer-format-toggle = Formatierung zeigen

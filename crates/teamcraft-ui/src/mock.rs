@@ -951,6 +951,7 @@ impl ChatBackend for MockBackend {
         let people: Vec<UserId> = people.iter().map(|id| id_from_raw::<UserId>(*id)).collect();
         let outside = people.iter().filter(|user| !members.contains(user)).count();
         teamcraft_client_api::model::MentionableGroup {
+          kind: teamcraft_client_api::model::MentionableGroupKind::Custom,
           handle: handle.to_owned(),
           name: name.to_owned(),
           notified: people
