@@ -253,6 +253,10 @@ struct ClientState {
   senders_by_stream: HashMap<StreamId, DeviceId>,
   /// Last `active_speakers` event.
   active_speakers: Vec<DeviceId>,
+  /// The transition the client prepared and the SFU hasn't executed yet: until it has, the client
+  /// still encrypts with the previous key, which somebody who joined by this very transition never
+  /// had (#1556).
+  maybe_awaited_transition: Option<DaveTransitionId>,
 }
 
 /// Starts an SFU on a dual-stack `[::]` socket with an ephemeral port.
@@ -315,6 +319,7 @@ async fn run_client(
     dave,
     senders_by_stream,
     active_speakers: Vec::new(),
+    maybe_awaited_transition: None,
   }));
 
   // Signaling: a writer task fed by a channel, and a reader task driving DAVE.
@@ -374,6 +379,9 @@ async fn run_client(
     }
   })
   .await;
+  // Nobody leaves before everyone has drained: a leave takes the leaver's keys out of the group, and
+  // its last frames, still on their way to a slower client, could no longer be decrypted (#1556).
+  ready.wait().await;
   receiver.abort();
   let ReceiveResults {
     decrypted_per_sender,
@@ -456,6 +464,7 @@ fn handle_event(
       assert_eq!(state.dave.maybe_epoch(), Some(DaveEpoch(epoch)));
       assert!(state.dave.process_commit(commit.as_slice()).unwrap());
       prepare(&mut state.dave, maybe_transition_id, outgoing);
+      state.maybe_awaited_transition = maybe_transition_id;
     },
     CallEvent::DaveWelcome {
       welcome,
@@ -468,9 +477,13 @@ fn handle_event(
         .collect();
       state.dave.process_welcome(welcome.as_slice(), &roster).unwrap();
       prepare(&mut state.dave, maybe_transition_id, outgoing);
+      state.maybe_awaited_transition = maybe_transition_id;
     },
     CallEvent::DaveExecuteTransition { transition_id } => {
       state.dave.execute_transition(transition_id).unwrap();
+      if state.maybe_awaited_transition == Some(transition_id) {
+        state.maybe_awaited_transition = None;
+      }
     },
     CallEvent::ParticipantJoined { participant } => {
       state
@@ -481,7 +494,10 @@ fn handle_event(
     CallEvent::ParticipantLeft { .. } => {},
     other => panic!("unexpected event {other:?}"),
   }
-  if state.dave.is_ready() && state.dave.participant_ids().len() == PARTICIPANTS.len() {
+  if state.dave.is_ready()
+    && state.dave.participant_ids().len() == PARTICIPANTS.len()
+    && state.maybe_awaited_transition.is_none()
+  {
     // The receiver only stops listening after the first signal; later sends are harmless.
     let _ = group_ready.send(());
   }
