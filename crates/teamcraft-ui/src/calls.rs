@@ -608,6 +608,8 @@ impl CallState {
     self.start_clock();
     self.phase.set(CallPhase::Active);
     if let Some(request) = self.maybe_request.get_untracked() {
+      // Until the media is secured (call_screen.rs).
+      crate::perf::begin_pending(crate::perf::PerfOperation::CallSetup, "");
       // The media layer starts as chosen, in one action (#453): a muted microphone stays muted
       // from the first frame (also when a call moves on into a meeting room), and the camera
       // starts with the call. The phone button joins with the camera off and never asks for it.

@@ -13,12 +13,16 @@ use crate::actions::LinkPreview;
 use crate::backend::ChatBackend;
 use crate::model::{MessageKind, TimestampMs};
 
+pub use teamcraft_proto::web_links::{extract_urls, is_openable_link};
+
 /// Links the "Files & links" tab loads at first and with each "Show more".
 pub const LINKS_PER_PAGE: usize = 30;
+/// The most links one read returns, whatever it asks for: "Show more" stops growing the page there.
+pub const MAX_LINKS_PER_READ: usize = 1_000;
 /// Messages read from the backend per step while looking for links, newest first.
 const SCAN_CHUNK: usize = 200;
 /// The most links one URL list of a message contributes (a message pasting a list of links).
-const MAX_LINKS_PER_MESSAGE: usize = 10;
+pub const MAX_LINKS_PER_MESSAGE: usize = 10;
 
 /// One link shared in a conversation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -42,47 +46,13 @@ pub struct LinkPage {
   pub has_more: bool,
 }
 
-/// The web links in a message body, in order, without duplicates: `http(s)://` up to whitespace,
-/// without the punctuation or closing bracket that ends a sentence around the link.
-pub fn extract_urls(body: &str) -> Vec<String> {
-  let mut urls: Vec<String> = Vec::new();
-  for word in body.split(|character: char| character.is_whitespace() || matches!(character, '<' | '>' | '"'))
-  {
-    let Some(start) = ["https://", "http://"]
-      .iter()
-      .filter_map(|scheme| find_scheme(word, scheme))
-      .min()
-    else {
-      continue;
-    };
-    let url = trim_url_end(&word[start..]);
-    if url.len() > "https://".len() && is_openable_link(url) && !urls.iter().any(|known| known == url) {
-      urls.push(url.to_owned());
-    }
-  }
-  urls
-}
-
-fn find_scheme(word: &str, scheme: &str) -> Option<usize> {
-  word.to_ascii_lowercase().find(scheme)
-}
-
-/// Drops sentence punctuation and an unbalanced closing bracket from the end of a URL.
-fn trim_url_end(url: &str) -> &str {
-  let mut end = url.len();
-  while let Some(last) = url[..end].chars().next_back() {
-    let is_trailing = match last {
-      '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*' | '_' => true,
-      ')' => url[..end].matches('(').count() < url[..end].matches(')').count(),
-      ']' => url[..end].matches('[').count() < url[..end].matches(']').count(),
-      _ => false,
-    };
-    if !is_trailing {
-      break;
-    }
-    end -= last.len_utf8();
-  }
-  &url[..end]
+/// The message a link was shared in.
+#[derive(Clone, Copy, Debug)]
+pub struct LinkSource {
+  pub conversation: ConversationId,
+  pub message: MessageId,
+  pub sender: UserId,
+  pub sent_at: TimestampMs,
 }
 
 /// The newest `limit` links of a conversation. Reads the messages newest first in chunks and stops
@@ -93,7 +63,8 @@ pub fn links_page(
   conversation: ConversationId,
   limit: usize,
 ) -> LinkPage {
-  let wanted = limit.saturating_add(1);
+  let limit = limit.min(MAX_LINKS_PER_READ);
+  let wanted = limit + 1;
   let mut found: Vec<LinkInfo> = Vec::new();
   let mut end = backend.message_count(conversation);
   while end > 0 && found.len() < wanted {
@@ -121,38 +92,52 @@ pub fn links_page(
       if extra.is_some_and(|extra| extra.is_deleted) {
         continue;
       }
-      for url in urls.into_iter().take(MAX_LINKS_PER_MESSAGE) {
-        let maybe_preview = extra
-          .and_then(|extra| extra.maybe_link_preview.clone())
-          .filter(|preview| preview.url == url);
-        found.push(LinkInfo {
-          url,
-          conversation,
-          message: message.id,
-          sender: message.author,
-          sent_at: message.sent_at,
-          maybe_preview,
-        });
-      }
+      let maybe_preview = extra.and_then(|extra| extra.maybe_link_preview.as_ref());
+      let source = LinkSource {
+        conversation,
+        message: message.id,
+        sender: message.author,
+        sent_at: message.sent_at,
+      };
+      found.extend(source.links(urls, maybe_preview));
     }
   }
-  let has_more = found.len() > limit;
-  found.truncate(limit);
-  LinkPage {
-    links: found,
-    has_more,
+  LinkPage::of_found(found, limit)
+}
+
+impl LinkSource {
+  /// The links of the message: its URLs ([`extract_urls`]), at most [`MAX_LINKS_PER_MESSAGE`],
+  /// each with the sender's preview when it is of that URL.
+  pub fn links<'a>(
+    self,
+    urls: Vec<String>,
+    maybe_preview: Option<&'a LinkPreview>,
+  ) -> impl Iterator<Item = LinkInfo> + 'a {
+    urls
+      .into_iter()
+      .take(MAX_LINKS_PER_MESSAGE)
+      .map(move |url| LinkInfo {
+        // Only the preview of this URL is copied (its image included).
+        maybe_preview: maybe_preview.filter(|preview| preview.url == url).cloned(),
+        url,
+        conversation: self.conversation,
+        message: self.message,
+        sender: self.sender,
+        sent_at: self.sent_at,
+      })
   }
 }
 
-const OPENABLE_SCHEMES: [&str; 2] = ["https://", "http://"];
-
-/// Whether `url` is a web link a client may open.
-pub fn is_openable_link(url: &str) -> bool {
-  OPENABLE_SCHEMES.iter().any(|scheme| {
-    url
-      .get(..scheme.len())
-      .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
-  })
+impl LinkPage {
+  /// The page of the first `limit` of `found` (newest first); one more found means more exist.
+  pub fn of_found(mut found: Vec<LinkInfo>, limit: usize) -> Self {
+    let has_more = found.len() > limit;
+    found.truncate(limit);
+    Self {
+      links: found,
+      has_more,
+    }
+  }
 }
 
 const EXTERNAL_SCHEMES: [&str; 3] = ["https://", "http://", "mailto:"];
@@ -169,65 +154,6 @@ pub fn is_external_link(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
-
-  mod extraction {
-    use super::*;
-
-    #[test]
-    fn links_are_found_without_sentence_punctuation() {
-      assert_eq!(
-        extract_urls("See https://example.com/a, and (http://example.org/b). Done!"),
-        ["https://example.com/a", "http://example.org/b"]
-      );
-    }
-
-    #[test]
-    fn a_bracket_that_belongs_to_the_url_stays() {
-      assert_eq!(
-        extract_urls("https://example.com/wiki/Rust_(language)"),
-        ["https://example.com/wiki/Rust_(language)"]
-      );
-    }
-
-    #[test]
-    fn duplicates_and_other_schemes_are_dropped() {
-      assert_eq!(
-        extract_urls("https://example.com/a https://example.com/a ftp://example.com/x javascript:alert(1)"),
-        ["https://example.com/a"]
-      );
-    }
-
-    #[test]
-    fn markdown_links_and_angle_brackets_give_the_url() {
-      assert_eq!(
-        extract_urls("[docs](https://example.com/docs) and <https://example.com/b>"),
-        ["https://example.com/docs", "https://example.com/b"]
-      );
-    }
-
-    #[test]
-    fn a_bare_scheme_is_no_link() {
-      assert!(extract_urls("https:// and http://").is_empty());
-    }
-  }
-
-  #[test]
-  fn only_web_links_open() {
-    assert!(is_openable_link("https://example.com/plan"));
-    assert!(is_openable_link("HTTP://example.com"));
-    for url in [
-      "file:///data/data/app/secret",
-      "content://provider/item",
-      "tel:+491234",
-      "intent://scan#Intent;end",
-      "javascript:alert(1)",
-      "httpx://example.com",
-      " https://example.com",
-      "",
-    ] {
-      assert!(!is_openable_link(url), "{url}");
-    }
-  }
 
   #[test]
   fn web_and_mail_links_leave_the_app() {

@@ -421,7 +421,8 @@ async fn the_service_worker_works_on_a_store_whose_catalog_is_not_complete() {
 #[wasm_bindgen_test]
 async fn a_catalog_build_reports_progress_and_goes_on_where_it_stopped() {
   const MESSAGES: u8 = 200;
-  const MORE_RECORDS: usize = 1600;
+  // Batches of 4,096 records (#1509): about four of them.
+  const MORE_RECORDS: usize = 14_000;
   let name = database_name();
   let key = browser_database_key(&name).await.unwrap();
   let store = IndexedDbStore::open(&name, &key).await.unwrap();

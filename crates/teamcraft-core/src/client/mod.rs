@@ -16,6 +16,7 @@ mod calls;
 mod catch_up;
 mod channel_roles;
 mod custom_status;
+mod delivered;
 pub mod devices;
 pub mod direct_uploads;
 pub mod disk_downloads;
@@ -64,9 +65,11 @@ mod sources;
 mod sync;
 mod sync_progress;
 mod sync_trace;
+mod thread_turns;
 #[cfg(feature = "ui")]
 mod ui_commands;
 pub mod upload_parts;
+mod user_groups;
 mod workspace;
 pub mod workspace_admin;
 pub(crate) use account::ACCOUNT_DATA_KEY;
@@ -136,7 +139,7 @@ pub use pending_add::{UserAddWait, pending_user_additions};
 pub use role_signing::{RoleSigningProblem, RoleSigningRecord, role_signing_record};
 #[cfg(not(target_arch = "wasm32"))]
 pub use segments::SegmentPrefetch;
-pub use self_add::is_waiting_for_admission;
+pub use self_add::{is_waiting_for_admission, self_add_attempts};
 pub use sources::HistoryScan;
 pub use sync_progress::{SyncProgressSignal, notify_sync_progress_during};
 pub use sync_trace::SyncPhase;
@@ -341,6 +344,11 @@ pub struct ClientSettings {
   /// #1448); meanwhile the feed shows a hole there (`history_gaps.rs`). The MLS queue is always read
   /// whole. `None` (default): every page in order, at once, for hosts whose feed shows no holes.
   pub catch_up_message_pages: Option<u32>,
+  /// For a host whose client shares its thread with the UI (the browser's only thread, issue
+  /// #1575): long work (a catch-up, a page of history, a backlog) hands the thread back at least
+  /// this often, so the UI's input and reads are answered meanwhile. `None` (default): a host with
+  /// a thread of its own for the client, where readers have their own thread too.
+  pub maybe_thread_turn: Option<std::time::Duration>,
   /// Make the user's notes to self (a DM with themself) once a sync finds there is none. Off by
   /// default; the apps turn it on with [`ClientSettings::with_notes_to_self`].
   pub creates_notes_to_self: bool,
@@ -378,7 +386,18 @@ impl ClientSettings {
     self.catch_up_message_pages = Some(CATCH_UP_MESSAGE_PAGES);
     self
   }
+
+  /// The settings of a host that runs the client on the UI's thread (web): long work hands the
+  /// thread back every [`THREAD_TURN`].
+  pub fn with_thread_turns(mut self) -> Self {
+    self.maybe_thread_turn = Some(THREAD_TURN);
+    self
+  }
 }
+
+/// [`ClientSettings::maybe_thread_turn`] of the web app: below the 50 ms of a "long task", so the
+/// UI's input waits for at most one turn plus its own work.
+pub const THREAD_TURN: std::time::Duration = std::time::Duration::from_millis(30);
 
 /// [`ClientSettings::catch_up_message_pages`] of the apps that show holes: 200 messages at the
 /// default page size, which is more than most conversations get in a day, and four round trips.
@@ -399,6 +418,8 @@ pub struct Client<A, S> {
   group_loads: u64,
   sync: SyncState,
   typing: crate::typing::TypingState,
+  /// Delivered reports waiting for the gateway (delivered ticks, issue #598).
+  delivered: delivered::DeliveredReports,
   /// Refusals of earlier user actions found by a background flush, for the host to show
   /// ([`Client::take_background_failures`]).
   background_failures: Vec<CoreError>,
@@ -445,6 +466,8 @@ pub struct Client<A, S> {
   /// What one pass over a conversation's MLS queue read for all its entries (issue #972); `None`
   /// outside of a pass, where each entry reads afresh.
   maybe_backlog_reads: Option<groups::BacklogReads>,
+  /// When the client last handed its thread back ([`Self::hand_back_thread`]).
+  thread_turn_began_ms: i64,
   /// Events of a resume replay still to come: the counters are read once it has drained, because
   /// `GET /unread` already counts the missed messages the replay delivers (issue #183).
   maybe_replay_left: Option<u64>,
@@ -457,6 +480,9 @@ pub struct Client<A, S> {
   /// Gateway events said the guest list changed, and it wasn't read since.
   are_expiring_guests_stale: bool,
   maybe_expiring_guests_read_ms: Option<i64>,
+  /// A gateway event said a user group changed, and the groups weren't read since.
+  are_user_groups_stale: bool,
+  maybe_user_groups_read_ms: Option<i64>,
   /// What the device last said about its activity; a new gateway session identifies with it.
   device_activity: DeviceActivity,
   /// The conversation the user looks at; a catch-up takes it first (issue #247).
@@ -556,6 +582,7 @@ impl Default for ClientSettings {
       upload_retry: files::UploadRetrySettings::default(),
       catch_up_concurrency: 6,
       catch_up_message_pages: None,
+      maybe_thread_turn: None,
       creates_notes_to_self: false,
       makes_thumbnails: true,
       // A day: a user who comes back to a failed setup soon picks up its registration.
@@ -577,6 +604,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     clock: Box<dyn Clock>,
     settings: ClientSettings,
   ) -> Result<Option<Self>, CoreError> {
+    let _step = crate::timing::step("client_open");
     let Some(account) = records::load_account(&store)? else {
       return Ok(None);
     };
@@ -614,6 +642,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       group_loads: 0,
       sync,
       typing: Default::default(),
+      delivered: Default::default(),
       background_failures: Vec::new(),
       transfers: crate::transfers::Transfers::new(),
       held_upload_progress: None,
@@ -628,11 +657,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
       maybe_backlog_reads: None,
+      thread_turn_began_ms: i64::MIN,
       maybe_replay_left: None,
       maybe_on_answered: None,
       maybe_live_catch_up: None,
       are_expiring_guests_stale: false,
       maybe_expiring_guests_read_ms: None,
+      are_user_groups_stale: false,
+      maybe_user_groups_read_ms: None,
       device_activity: DeviceActivity::Active,
       member_join_attempts: HashMap::new(),
       device_add_requests_handled: HashMap::new(),
@@ -780,6 +812,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   fn group(&mut self, conversation: ConversationId) -> Result<Option<&mut ConversationGroup>, CoreError> {
+    let _step = crate::timing::step("mls_group_load");
     if !self.groups.contains_key(&conversation) {
       let applied: Vec<[u8; 16]> =
         records::get_json(&self.store, Table::AppliedChanges, &conversation.to_string())?.unwrap_or_default();
@@ -935,6 +968,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Writes what changed in the MLS state (the provider storage) since the last save, as one
   /// group of writes; inside a caller's group it reaches the disk with that group.
   pub(crate) fn save_mls_storage(&self) -> Result<(), CoreError> {
+    let _step = crate::timing::step("mls_storage_save");
     mls_storage::save_mls_storage(&self.store, &self.provider, &self.saved_mls)
   }
 

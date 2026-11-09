@@ -6,8 +6,8 @@ struct LockView: View {
 
   var body: some View {
     VStack(spacing: Theme.spacing) {
-      Image(systemName: "lock.fill").font(.largeTitle).foregroundStyle(Theme.accent)
-      Text("app_lock_locked").font(.headline)
+      Image(systemName: "lock.fill").font(.app(.largeTitle)).foregroundStyle(Theme.accent)
+      Text("app_lock_locked").font(.app(.headline))
       Button("app_lock_unlock") { Task { await lock.unlock(reason: String(localized: "app_lock_prompt")) } }
         .buttonStyle(PrimaryButtonStyle())
     }
@@ -134,16 +134,16 @@ struct OfflineBanner: View {
       let tint = notice == .slow ? Color.secondary : Theme.danger
       HStack {
         text(of: notice)
-          .font(.footnote)
+          .font(.app(.footnote))
           .foregroundStyle(tint)
           .frame(maxWidth: .infinity, alignment: .leading)
         switch notice {
         case .unreachable:
           Button("connection_retry") { model.networkChanged() }
-            .font(.footnote.weight(.semibold))
+            .font(.app(.footnote).weight(.semibold))
         case .signInRequired, .noRoleLeft:
           Button("connection_sign_in_action") { Task { await model.signOut() } }
-            .font(.footnote.weight(.semibold))
+            .font(.app(.footnote).weight(.semibold))
         case .deviceOffline, .connecting, .slow:
           EmptyView()
         }
@@ -169,7 +169,7 @@ struct OfflineBanner: View {
       case nil: return Text("connection_unreachable \(seconds)")
       }
     case .signInRequired:
-      return Text("connection_sign_in")
+      return model.isDeviceKeyLost ? Text("connection_device_key_lost") : Text("connection_sign_in")
     case .noRoleLeft:
       return Text("connection_no_role_left")
     }

@@ -43,6 +43,7 @@ mod system_events;
 mod threads;
 mod user_groups;
 mod users;
+mod webhooks;
 mod workspace;
 
 pub use admin::*;
@@ -88,4 +89,5 @@ pub use system_events::*;
 pub use threads::*;
 pub use user_groups::*;
 pub use users::*;
+pub use webhooks::*;
 pub use workspace::*;

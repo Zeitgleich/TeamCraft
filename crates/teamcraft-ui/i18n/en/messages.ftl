@@ -67,6 +67,12 @@ typing-direct = typing…
 
 # ---- Meetings ----
 composer-confirm-channel = This message notifies everyone in this conversation ({ $count } people). Send it?
+composer-confirm-group = This message notifies { $count } people in the mentioned groups. Send it?
+composer-confirm-group-capped = This message notifies only the first { $cap } of the { $count } people in the mentioned groups. Send it?
+composer-group-outside = { $count ->
+    [one] 1 member of the mentioned groups isn't in this conversation and won't be notified.
+   *[other] { $count } members of the mentioned groups aren't in this conversation and won't be notified.
+}
 composer-confirm-send = Send anyway
 jump-to-date = Jump to date
 
@@ -113,6 +119,7 @@ composer-file-unstaged = { $name } could not be prepared for sending.
 permalink-label = Message in { $name }
 permalink-unavailable = Link to a conversation you are not in
 permalink-hidden = Message link
+message-table-label = Table
 
 # Composer: mentions, slash commands, formatting
 mention-channel = Notify everyone in this conversation
@@ -124,6 +131,7 @@ format-italic = Italic
 format-strike = Strikethrough
 format-code = Code
 format-code-block = Code block
+format-table = Table
 format-underline = Underline
 format-style = Text style
 format-paragraph = Normal text
@@ -215,6 +223,7 @@ message-show-more = Show more
 message-show-less = Show less
 message-sending = Sending…
 message-status-sent = Sent
+message-status-delivered = Delivered
 message-status-read = Read
 message-not-sent = Not sent yet, retrying automatically
 message-send-failed = Not sent
@@ -246,6 +255,7 @@ linked-message-unavailable = Message from a conversation you can’t see
 ## Settings: sections, search and rows (#327)
 # Files view and setup checklist (issue #301)
 composer-placeholder-notes = Note something for yourself
+messages-loading = Loading messages…
 older-history-loading = Loading older messages…
 older-history-failed = Older messages could not be loaded.
 older-history-retry = Try again

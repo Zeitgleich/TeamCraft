@@ -1,6 +1,7 @@
 //! The mail server of the server's own mail (admin.md §6.2): set in the console, else
 //! `[mail.smtp]` (or `[meetings.smtp]`) of the configuration file. The password is write-only: it
-//! is sealed with the settings key before it reaches the database and never sent back.
+//! is sealed with the settings key before it reaches the database and never sent back. A brand can
+//! have a server of its own ([`super::brand_mail`]); the checks of a server are shared.
 
 use std::sync::Arc;
 
@@ -237,11 +238,7 @@ async fn sealed_password(state: &AppState, update: &SecretUpdate) -> Result<Opti
     SecretUpdate::Clear => return Ok(None),
     SecretUpdate::Set(secret) => {
       let secret = secret.expose_secret();
-      if secret.is_empty() || secret.len() > MAX_PASSWORD_BYTES {
-        return Err(ApiError::InvalidRequest(format!(
-          "the password must be 1 to {MAX_PASSWORD_BYTES} bytes"
-        )));
-      }
+      check_new_password(secret)?;
       Some(SecretString::from(secret.to_owned()))
     },
     SecretUpdate::Keep => match state.database.server_setting(SETTING_NAME).await? {
@@ -258,14 +255,29 @@ async fn sealed_password(state: &AppState, update: &SecretUpdate) -> Result<Opti
   let Some(plain) = maybe_plain else {
     return Ok(None);
   };
+  seal_password(state, SETTING_NAME, plain.expose_secret()).map(Some)
+}
+
+/// A password an admin typed; the limits are the same for every mail server.
+pub(super) fn check_new_password(secret: &str) -> Result<(), ApiError> {
+  if secret.is_empty() || secret.len() > MAX_PASSWORD_BYTES {
+    return Err(ApiError::InvalidRequest(format!(
+      "the password must be 1 to {MAX_PASSWORD_BYTES} bytes"
+    )));
+  }
+  Ok(())
+}
+
+/// Encrypts a password for the database; `name` is the associated data and has to be given again
+/// to decrypt it, so a sealed password can't be moved to another setting.
+pub(super) fn seal_password(state: &AppState, name: &str, plain: &str) -> Result<Vec<u8>, ApiError> {
   let key = state.maybe_settings_key.as_ref().ok_or_else(|| {
     ApiError::Unavailable(
       "passwords can only be stored with a settings key ([secrets] in the configuration)".into(),
     )
   })?;
   key
-    .seal(SETTING_NAME, plain.expose_secret().as_bytes(), &mut OsRng)
-    .map(Some)
+    .seal(name, plain.as_bytes(), &mut OsRng)
     .map_err(|error| ApiError::Internal(error.to_string()))
 }
 
@@ -288,26 +300,34 @@ fn stored_config(state: &AppState, row: &StoredSetting) -> Option<SmtpConfig> {
       None
     },
   };
-  let timeout_secs = state
-    .settings
-    .get()
-    .maybe_mail_seed
-    .as_ref()
-    .map_or(DEFAULT_TIMEOUT_SECS, |config| config.timeout_secs);
   Some(SmtpConfig {
     host: stored.host,
     port: stored.port,
-    security: match stored.security {
-      SmtpSecurityMode::Tls => SmtpSecurity::Tls,
-      SmtpSecurityMode::Plain => SmtpSecurity::None,
-      SmtpSecurityMode::StartTls | SmtpSecurityMode::Unknown(_) => SmtpSecurity::StartTls,
-    },
+    security: transport_security(&stored.security),
     username: stored.maybe_username,
     password,
     from_address: stored.from_address,
     from_name: stored.maybe_from_name,
-    timeout_secs,
+    timeout_secs: timeout_secs(state),
   })
+}
+
+/// The network timeout of every mail server set in the console.
+pub(super) fn timeout_secs(state: &AppState) -> u64 {
+  state
+    .settings
+    .get()
+    .maybe_mail_seed
+    .as_ref()
+    .map_or(DEFAULT_TIMEOUT_SECS, |config| config.timeout_secs)
+}
+
+pub(super) fn transport_security(security: &SmtpSecurityMode) -> SmtpSecurity {
+  match security {
+    SmtpSecurityMode::Tls => SmtpSecurity::Tls,
+    SmtpSecurityMode::Plain => SmtpSecurity::None,
+    SmtpSecurityMode::StartTls | SmtpSecurityMode::Unknown(_) => SmtpSecurity::StartTls,
+  }
 }
 
 fn parse_stored(row: &StoredSetting) -> Option<StoredSmtp> {
@@ -317,34 +337,7 @@ fn parse_stored(row: &StoredSetting) -> Option<StoredSmtp> {
 }
 
 fn validate(request: &UpdateMailSettingsRequest) -> Result<StoredSmtp, ApiError> {
-  let host = request.host.trim().to_ascii_lowercase();
-  let is_host_ok = !host.is_empty()
-    && host.len() <= 253
-    && host
-      .bytes()
-      .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'));
-  if !is_host_ok {
-    return Err(ApiError::InvalidRequest(
-      "host must be a host name or address".into(),
-    ));
-  }
-  if request.port == 0 {
-    return Err(ApiError::InvalidRequest(
-      "port must be between 1 and 65535".into(),
-    ));
-  }
-  match &request.security {
-    SmtpSecurityMode::Unknown(_) => {
-      return Err(ApiError::InvalidRequest("unknown security mode".into()));
-    },
-    // Without encryption the password would cross the network in plain text.
-    SmtpSecurityMode::Plain if !is_loopback(&host) => {
-      return Err(ApiError::InvalidRequest(
-        "a mail server without encryption is only allowed on this machine (localhost)".into(),
-      ));
-    },
-    _ => {},
-  }
+  let host = checked_server(&request.host, request.port, &request.security)?;
   let maybe_username = optional_text(request.maybe_username.as_deref(), "username")?;
   let maybe_from_name = optional_text(request.maybe_from_name.as_deref(), "from_name")?;
   Ok(StoredSmtp {
@@ -357,7 +350,42 @@ fn validate(request: &UpdateMailSettingsRequest) -> Result<StoredSmtp, ApiError>
   })
 }
 
-fn optional_text(maybe_text: Option<&str>, name: &str) -> Result<Option<String>, ApiError> {
+/// The guard of an admin-entered mail server, for the instance's and a brand's alike: a host name
+/// or address, a port, a known security mode, and no plain text beyond this machine. Returns the
+/// normalized host.
+pub(super) fn checked_server(host: &str, port: u16, security: &SmtpSecurityMode) -> Result<String, ApiError> {
+  let host = host.trim().to_ascii_lowercase();
+  let is_host_ok = !host.is_empty()
+    && host.len() <= 253
+    && host
+      .bytes()
+      .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'));
+  if !is_host_ok {
+    return Err(ApiError::InvalidRequest(
+      "host must be a host name or address".into(),
+    ));
+  }
+  if port == 0 {
+    return Err(ApiError::InvalidRequest(
+      "port must be between 1 and 65535".into(),
+    ));
+  }
+  match security {
+    SmtpSecurityMode::Unknown(_) => {
+      return Err(ApiError::InvalidRequest("unknown security mode".into()));
+    },
+    // Without encryption the password would cross the network in plain text.
+    SmtpSecurityMode::Plain if !is_loopback(&host) => {
+      return Err(ApiError::InvalidRequest(
+        "a mail server without encryption is only allowed on this machine (localhost)".into(),
+      ));
+    },
+    _ => {},
+  }
+  Ok(host)
+}
+
+pub(super) fn optional_text(maybe_text: Option<&str>, name: &str) -> Result<Option<String>, ApiError> {
   let Some(text) = maybe_text.map(str::trim).filter(|text| !text.is_empty()) else {
     return Ok(None);
   };
@@ -370,7 +398,7 @@ fn optional_text(maybe_text: Option<&str>, name: &str) -> Result<Option<String>,
 }
 
 /// A plain address (no display name, no line breaks), as lettre parses it.
-fn checked_address(address: &str) -> Result<String, ApiError> {
+pub(super) fn checked_address(address: &str) -> Result<String, ApiError> {
   match address.parse::<lettre::Address>() {
     Ok(parsed) if parsed.to_string() == address => Ok(address.to_owned()),
     _ => Err(ApiError::InvalidRequest(format!(
@@ -395,7 +423,7 @@ fn security_mode(security: SmtpSecurity) -> SmtpSecurityMode {
 }
 
 /// What happened to the password, for the audit log (never the password itself).
-fn password_change(update: &SecretUpdate) -> &'static str {
+pub(super) fn password_change(update: &SecretUpdate) -> &'static str {
   match update {
     SecretUpdate::Keep => "kept",
     SecretUpdate::Clear => "cleared",

@@ -1201,7 +1201,12 @@ async fn send_invitations(
   recipients: &[StoredAttendee],
   maybe_occurrence: Option<OffsetDateTime>,
 ) -> Result<Vec<String>, ApiError> {
-  let Some(mailer) = service.mailer() else {
+  let brand = organizer_brand(state, meeting).await?;
+  let Some(mailer) = state
+    .brand_mail
+    .mailer_for(&brand.id)
+    .or_else(|| service.mailer())
+  else {
     return Ok(Vec::new());
   };
   let user_ids: Vec<UserId> = recipients
@@ -1219,7 +1224,6 @@ async fn send_invitations(
   )
   .await?;
   let organizer_name = names.get(&meeting.organizer).cloned().unwrap_or_default();
-  let brand = organizer_brand(state, meeting).await?;
   let join_url = meeting_link(state, service, &brand, meeting).await?;
   let mut undelivered = Vec::new();
   // The instance's mail identity is not for bulk mail: an organizer has an hourly budget. What

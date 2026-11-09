@@ -308,6 +308,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     conversation: ConversationId,
   ) -> Result<BacklogStep, CoreError> {
+    let _step = crate::timing::step("backlog_read_page");
     let Some(mut record) = read_record(&self.store, conversation)? else {
       return Ok(BacklogStep::Done);
     };
@@ -329,7 +330,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let page = self.api.list_messages(conversation, &query).await?;
     let read = Read::after(gap.after, bounds(&page.messages), page.has_more);
-    self.receive_page(page.messages)?;
+    self.receive_page(page.messages).await?;
     record.gaps = subtract(&record.gaps, read);
     if record.backlog_gap() == Some(gap) {
       // A page that doesn't get past the hole's start (only a server ignoring `after` sends one):
@@ -338,7 +339,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       record.maybe_backlog = None;
     }
     write_record(&self.store, conversation, &record)?;
-    self.note_sync_progress();
+    // A page fills a hole only the conversation on screen shows; elsewhere the UI hears of the
+    // backlog once it is read full. A wake per page had the UI read everything again for every page
+    // of a long absence, which kept the browser's only thread busy for minutes (issue #1572).
+    if self.catch_up_focus.get() == Some(conversation) {
+      self.note_sync_progress();
+    }
     Ok(BacklogStep::More)
   }
 
@@ -500,6 +506,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     edge: GapEdge,
     request: u64,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("history_gap_fill");
     let mut record = read_record(&self.store, conversation)?.unwrap_or_default();
     let maybe_gap = record.gaps.iter().copied().find(|gap| gap.after == after);
     let outcome = match maybe_gap {
@@ -555,7 +562,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Some(before) => Read::before(before, bounds(&page.messages), page.has_more),
       None => Read::after(gap.after, bounds(&page.messages), page.has_more),
     };
-    self.receive_earlier_page(conversation, page.messages)?;
+    self.receive_earlier_page(conversation, page.messages).await?;
     Ok((gap, read))
   }
 

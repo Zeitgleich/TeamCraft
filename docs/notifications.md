@@ -100,6 +100,7 @@ same list as a "Chats" tab (still labelled "Home" in the mobile shells until the
 | Auto-follow mentioned threads     | same                                                            |
 | Meeting reminders                 | same (`meeting_reminder_minutes`, `notifies_meeting_start`)     |
 | Send read receipts                | same (default: `[notifications] read_receipts_default`)         |
+| Send delivery receipts            | same (`send_delivery_receipts`; default as for read receipts)   |
 | Level of everything else          | same (`level`; default: `[notifications] default_level`, `all`) |
 
 ### Default level
@@ -140,7 +141,8 @@ database, so a daylight saving change needs no client.
 ### Per-conversation filters
 
 Issue #599. Next to level and mute time a member sets two filters per conversation, in the
-conversation's bell menu (desktop and web) or its notification dialog (Android):
+conversation's bell menu (desktop and web), its notification dialog (Android) or its "Notification
+filters" sheet (iOS):
 
 - **`@channel` and `@here`** (`channel_mentions`): `default` follows the general setting
   "@channel notifies me" (Settings → Notifications, synced in the account's encrypted data), `notify`
@@ -173,9 +175,9 @@ phones.
 **Where it is decided.** The push routing (`push::routing`) checks quiet hours right after the mute
 and evaluates them with its time zone database, so daylight saving time needs no client. The desktop
 and web notifier (`notifier::decide`) checks them again with the device's current offset, like the
-DND schedule, and applies `channel_mentions` to its own mention rules. Android shows what the push
+DND schedule, and applies `channel_mentions` to its own mention rules. Android and iOS show what the push
 routing let through. Changes reach the user's other devices like level and mute: the server holds
-them, desktop and web read them at start, Android with the dialog.
+them, desktop and web read them at start, Android and iOS with the dialog or sheet.
 
 ## E-mail digest of missed mentions
 
@@ -209,6 +211,23 @@ is only available while the signed push-content policy lets it show on the lock 
 and mark notifications (iOS: relevance score); they do not stop the server from pushing, and an extension
 without the filtering entitlement cannot suppress a notification.
 
+## Group mentions
+
+`@accounting` of a user group the sender may mention in a conversation (`use_group_mentions`, admin.md
+§3.2.4) notifies the group's members **who are in that conversation** (never anyone else; the sender's own
+device expands the handle, e2ee.md §4.4, and the handle itself travels in the ciphertext). For the people
+listed it counts as a mention everywhere a mention counts: push, badge, unread mention counts and the
+activity feed, and the same mute, do-not-disturb and urgent rules. A message's list is what the sender
+attached at sending: who is in the group later doesn't change who was mentioned.
+
+- **Composer:** groups are suggested after `@` next to people, only where the permission holds. A mention
+  of a group whose members aren't all in the conversation shows a hint that those members won't be notified.
+- **Large groups:** the `@channel` confirmation setting ("Ask before using @channel ... with more than",
+  `confirm_channel_over`) also asks before group mentions that notify more than that many people.
+- **Limit:** a message names at most `[limits] max_mentions_per_message` people (default 200). Beyond it a
+  device notifies the first ones and says so in the confirmation; the rest see the message without a
+  mention. Older clients and the phones render `@accounting` as text; the people listed are still mentioned.
+
 ## Push routing
 
 For each recipient without a live connection the server decides from metadata it has anyway
@@ -220,7 +239,9 @@ notification for what arrives over it. In order:
    The conversation's quiet hours count as a mute while they are on ("Per-conversation filters").
 2. **Do not disturb** (manual, timed, or the weekly schedule): suppresses the push unless an override
    applies: the sender is on the user's allow list, or the message is urgent and the user lets urgent
-   messages through. Overrides apply to manual and scheduled DND alike.
+   messages through. Overrides apply to manual and scheduled DND alike. It is the only status that
+   holds notifications back: *busy* (by hand or during a call or meeting), *be right back* and *away*
+   notify as usual (#1578).
 3. **Attention**: no push while a phone of the user is in the foreground (it gets the event live). While
    the user is *at a desktop or web session* (attentive, or recently active on it; see below), pushes to
    phones wait for the grace delay and go out only if the message is still unread then. Push mode
@@ -782,6 +803,21 @@ Moving the read position in a DM or group DM sends `read_receipt` to the other m
 `GET /conversations/{id}/read-receipts` lists the positions. Receipts are reciprocal: whoever turned
 them off neither sends nor sees them. Channels have none.
 
+### Delivered
+
+After a device stored new messages of a DM or group DM (a live `message_create`, the end of a
+conversation's catch-up), it sends the gateway frame `delivered` with the newest server message ID it
+has, once per conversation and only when that moved forward; offline it waits, and the catch-up after
+a reconnect reports again. The server keeps one position per membership, moved forward only, and for
+each other member works out "every other member has the messages up to here on a device". When that
+moves it sends that member `delivery_update` (`conversation_id`, `message_id`);
+`GET /conversations/{id}/read-receipts` answers it as `delivered_up_to`, for devices that were offline.
+It is an aggregate, never per member (e2ee.md §4.4), and reciprocal through `send_delivery_receipts`
+like read receipts: whoever turned it off neither sends nor sees it, and while any other member has
+it off the conversation shows no delivered state. No polling: the frame rides the open gateway
+connection, and the server ignores repeats per connection. Servers from before the feature ignore the
+frame, and clients from before it ignore the event and the field.
+
 ### Message status indicator
 
 Own messages show one indicator next to the time (issue #568), drawn with the app's SVG icons:
@@ -790,18 +826,21 @@ Own messages show one indicator next to the time (issue #568), drawn with the ap
 |---------------|----------------|-----------------------------------------------------------|
 | Sending       | clock          | message still in the local outbox                         |
 | On the server | one grey tick  | the server confirmed the send                             |
+| Delivered     | two grey ticks | a device of every other member has it (DMs, group DMs)    |
 | Read          | two blue ticks | the other member's read receipt reaches the message (DMs) |
 | Failed        | alert, retry   | the server refused the send                               |
 
 One read model per conversation kind (issue #635), never two saying the same thing: a DM shows the
 two blue ticks and no "Seen by"; a group DM shows "Seen by <names>" under my newest message (it says
-who) and its messages keep the single tick; channels show one tick only. Because both come from read
-receipts, they are reciprocal: someone with receipts off neither sends nor sees them.
-"Delivered" (two grey ticks, derived from device sync cursors on the server) is not built yet.
+who) and its messages show one tick, or two grey ones once delivered (never blue); channels show one
+tick only. Because both come from read receipts, they are reciprocal: someone with receipts off
+neither sends nor sees them. Delivered ticks (issue #598) follow "Delivered" above; read wins over
+delivered, and a message stays at one tick while the delivered state is unknown or off.
 
 The rules live in teamcraft-client-api (`receipts`), so every platform decides alike. The mobile apps
 read the result from the core: `MessageExtras::is_read` marks an own message the other member of a
-DM read (issue #769); inside an own bubble, which already has the accent, the two ticks take the
+DM read (issue #769), `is_delivered` one that reached every other member's device (two ticks in the
+muted colour); inside an own bubble, which already has the accent, the two ticks take the
 bubble's full text colour where the single tick is muted. Receipts sent while a device was offline
 never arrive as events: desktop and web read the open DM's receipts after each connection, the apps
 ask the core for them (`refresh_read_receipts`) when a conversation opens and when the connection

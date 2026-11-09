@@ -32,7 +32,7 @@ Dependencies are audited RustCrypto / dalek crates plus `openmls` with `openmls_
 Versions follow what `openmls_rust_crypto` already pulls in, so the stack isn't duplicated more
 than `openmls` itself does. Binary encodings use `tls_codec` (already an `openmls` dependency).
 
-Chat and calls share this `openmls` 0.9 stack (ARCHITECTURE.md §6.2): DAVE's `davey` 0.1.5 needs
+Chat and calls share this `openmls` 0.9 stack (ARCHITECTURE.md §6.2): DAVE's `davey` (0.2.0) needs
 `openmls` 0.8, whose `hpke-rs`/`libcrux` versions carry RUSTSEC-2026-0207/-0208/-0212, so the
 workspace uses a vendored `davey` ported to `openmls` 0.9 (`crates/vendor/davey/VENDORED.md`).
 Keep `openmls` versions here and there in lockstep.

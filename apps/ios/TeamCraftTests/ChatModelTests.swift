@@ -132,7 +132,59 @@ final class ChatModelTests: XCTestCase {
     XCTAssertEqual(sections[1].conversations.map(\.id), ["2", "1", "3"])
     XCTAssertEqual(listSections(list, chip: .channels).flatMap(\.conversations).count, 3)
     XCTAssertEqual(listSections(list, chip: .people).flatMap(\.conversations).map(\.id), ["1"])
-    XCTAssertEqual(listedSpaces(list).map(\.title), [.space("Project A"), .space("Project B")])
+  }
+
+  /// #1526: Home of the spaces layout shows the selected space's channels, also when it has none.
+  func testSpaceHomeShowsOnlyTheSelectedSpacesChannels() {
+    let list = [
+      item("1", "general", space: "Project A"),
+      item("2", "random", space: "Project B"),
+      item("3", "release", space: "Project B", favorite: true),
+      item("4", "Amy", kind: .direct, unread: 1),
+      item("5", "Bob", kind: .direct),
+    ]
+    let home = spaceHomeSections(list, spaceId: "Project A")
+    XCTAssertEqual(home.map(\.title), [.unreadDirect, .favorites, .spaceChannels(spaceId: "Project A")])
+    XCTAssertEqual(home[2].conversations.map(\.name), ["general"])
+    XCTAssertEqual(home[2].collapseKey, "space:Project A")
+    let empty = spaceHomeSections([item("1", "general", space: "Project A")], spaceId: "empty")
+    XCTAssertEqual(empty.map(\.title), [.spaceChannels(spaceId: "empty")])
+    XCTAssertTrue(empty[0].conversations.isEmpty)
+  }
+
+  /// #1526: the switcher's spaces count what is new in their channels and include empty spaces.
+  func testSpacesCountWhatIsNewAndKeepEmptySpaces() {
+    let spaces = [
+      HomeSpace(id: "b", name: "beta"), HomeSpace(id: "Project A", name: "Old name"), HomeSpace(id: "e", name: "Empty"),
+    ]
+    let list = [
+      item("1", "general", space: "Project A", unread: 2, mentions: 1),
+      item("2", "quiet", space: "Project A", unread: 4, mentions: 2, muted: true),
+      item("3", "Amy", kind: .direct, unread: 1),
+    ]
+    let result = homeSpaces(spaces, conversations: list)
+    // The name follows the channels (a rename before the next snapshot read).
+    XCTAssertEqual(result.map(\.name), ["beta", "Empty", "Project A"])
+    XCTAssertEqual(result[2].mentionCount, 3)
+    XCTAssertTrue(result[2].hasUnread)
+    XCTAssertEqual(result[1], HomeSpace(id: "e", name: "Empty"))
+    XCTAssertTrue(hasNewElsewhere(result, selectedId: "b"))
+    XCTAssertFalse(hasNewElsewhere(result, selectedId: "Project A"))
+    XCTAssertEqual(selectedSpace(result, remembered: "e")?.id, "e")
+    XCTAssertEqual(selectedSpace(result, remembered: "gone")?.id, "b")
+    XCTAssertNil(selectedSpace([], remembered: "e"))
+  }
+
+  /// #1526: grouped by space, the list names spaces without joined channels too, by name.
+  func testTheListBySpaceListsEmptySpaces() {
+    let sections = listSections([item("1", "general", space: "Project B"), item("2", "Amy", kind: .direct)], bySpace: true)
+    let spaces = [HomeSpace(id: "Project B", name: "Project B"), HomeSpace(id: "a", name: "Project A", maybeImageVersion: "v1")]
+    let result = withEmptySpaces(sections, spaces: spaces)
+    XCTAssertEqual(result.map(\.title), [.directMessages, .space("Project A"), .space("Project B")])
+    XCTAssertEqual(result[1].spaceId, "a")
+    XCTAssertEqual(result[1].spaceImageVersion, "v1")
+    XCTAssertEqual(result[1].collapseKey, "space:a")
+    XCTAssertEqual(withEmptySpaces(sections, spaces: Array(spaces.prefix(1))).map(\.title), sections.map(\.title))
   }
 
   /// #1345: grouped by space, the DMs come after the favorites, then each space by name.

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use teamcraft_proto::{
   ConversationKind as ConversationKindProto, ConversationResponse, ConversationVisibility, ErrorBody,
   GetMeResponse, ListConversationMembersResponse, ListConversationsResponse, ListPresenceResponse,
-  ListSpacesResponse, PresenceState, Role, SpaceResponse, UserKind, UserPresence, UserSummary,
+  ListSpacesResponse, Role, SpaceResponse, UserKind, UserPresence, UserSummary,
 };
 
 use crate::auth::{AuthError, Authenticator};
@@ -142,11 +142,8 @@ pub fn build_snapshot(
     presences
       .iter()
       .find(|entry| entry.user_id == id)
-      .map_or(PresenceStatus::Offline, |entry| match &entry.state {
-        PresenceState::Online => PresenceStatus::Online,
-        PresenceState::Away => PresenceStatus::Away,
-        PresenceState::DoNotDisturb => PresenceStatus::DoNotDisturb,
-        PresenceState::Offline | PresenceState::Unknown(_) => PresenceStatus::Offline,
+      .map_or(PresenceStatus::Offline, |entry| {
+        PresenceStatus::from(&entry.state)
       })
   };
   let to_user = |summary: &UserSummary| User {
@@ -425,6 +422,8 @@ impl ChatBackend for RestChat {
       maybe_imported: None,
       maybe_source: None,
       maybe_placeholder: None,
+      group_mentions: Vec::new(),
+      mentions_me: false,
     };
     self
       .local_messages

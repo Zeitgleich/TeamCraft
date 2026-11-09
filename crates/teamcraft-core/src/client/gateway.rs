@@ -221,6 +221,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     timing: GatewayTiming,
   ) -> Result<GatewayStart<A::Gateway>, CoreError> {
+    let _step = crate::timing::step("gateway_connect");
     let handshake_timeout = timing.handshake_timeout;
     if let Some(session) = &self.sync.maybe_gateway_session
       && self.is_resume_hopeless(session)
@@ -384,6 +385,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     session_id: String,
     maybe_resume_window_ms: Option<u64>,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("gateway_fresh_sync");
     // Boxed: this future is large, and it would sit in everything that connects, up to the app's tasks.
     Box::pin(self.full_sync()).await?;
     // Events the catch-up applied early were part of this session: a resume starts after them.
@@ -418,6 +420,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// the connection is counted, which tells the UI and the upkeep to do their once-per-connection
   /// reads. A failed presence read doesn't fail the connection; the next one retries.
   async fn finish_connection(&mut self) -> Result<(), CoreError> {
+    let _step = crate::timing::step("gateway_finish_connection");
     if let Err(error) = self.refresh_known_presence().await {
       tracing::warn!(%error, "could not read presence after connecting");
     }
@@ -545,6 +548,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       _ => {},
     }
     self.refresh_stale_expiring_guests().await;
+    self.refresh_stale_user_groups().await;
     Ok(())
   }
 
@@ -610,7 +614,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::MessageCreate { message } => {
         self.clear_typing(message.conversation_id, message.sender_user_id);
         read_state::note_new_message(&self.store, &message, self.account.user_id)?;
-        self.receive_message(message)
+        let conversation = message.conversation_id;
+        self.receive_message(message)?;
+        self.note_delivered(conversation)
       },
       GatewayEvent::MlsMessage { message } => {
         if message.kind == MlsMessageKind::Welcome {
@@ -757,6 +763,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         user_id,
         message_id,
       } => read_state::note_read_receipt(&self.store, conversation_id, user_id, message_id),
+      GatewayEvent::DeliveryUpdate {
+        conversation_id,
+        message_id,
+      } => read_state::note_delivered_to_others(&self.store, conversation_id, message_id),
       GatewayEvent::MessageAck {
         conversation_id,
         message_id,
@@ -792,9 +802,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.are_expiring_guests_stale = true;
         Ok(())
       },
+      // Read with the event's frame, or batched when a sync changes many groups at once.
+      GatewayEvent::UserGroupUpdate { .. } => {
+        self.are_user_groups_stale = true;
+        Ok(())
+      },
       GatewayEvent::OrgRecoveryUpdate { .. }
       | GatewayEvent::SystemEvent { .. }
-      | GatewayEvent::UserGroupUpdate { .. }
       | GatewayEvent::LobbyDecision { .. } => Ok(()),
       // A new name, username or avatar, or the account was deactivated: the cached summary goes.
       GatewayEvent::ProfileUpdate { user_id } => {

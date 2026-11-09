@@ -7,7 +7,14 @@ import uniffi.teamcraft_ffi.ConversationKind
 sealed interface SectionTitle {
   data object Favorites : SectionTitle
   data object Archived : SectionTitle
-  data class Space(val name: String) : SectionTitle
+  /**
+   * A space's channels under its name. [maybeId] and [maybeImageVersion] are set where the section
+   * comes from the space list rather than its channels: a space without joined channels (#1526).
+   */
+  data class Space(val name: String, val maybeId: String? = null, val maybeImageVersion: String? = null) : SectionTitle
+
+  /** The selected space's channels on Home of the spaces layout (#1526); the header names the space. */
+  data class SpaceChannels(val spaceId: String) : SectionTitle
   data object Channels : SectionTitle
   data object DirectMessages : SectionTitle
 
@@ -135,6 +142,93 @@ fun homeSections(
 }
 
 /**
+ * Home of the spaces layout with a space selected (#1526), as desktop's sidebar shows one space at
+ * a time: the DMs with something new, the favorites (of every space, as on desktop), then the
+ * selected space's channels under [SectionTitle.SpaceChannels], also when it has none yet (the
+ * header has the space's name, Home offers browsing). Channels outside any space stay listed.
+ */
+fun spaceHomeSections(
+  conversations: List<ConversationItem>,
+  spaceId: String,
+  lastActivity: Map<String, Long> = emptyMap(),
+  listsArchived: Boolean = false,
+): List<Section> {
+  val shown = conversations.filter { it.isDirect || it.isFavorite || it.maybeSpaceId == null || it.maybeSpaceId == spaceId }
+  val sections = homeSections(shown, lastActivity, listsArchived)
+  val channels = sections.filter { it.title is SectionTitle.Space }.flatMap { it.conversations }
+  val head = sections.filter { it.title == SectionTitle.UnreadDirect || it.title == SectionTitle.Favorites }
+  val tail = sections.filter { it.title == SectionTitle.Channels || it.title == SectionTitle.Archived }
+  return head + Section(SectionTitle.SpaceChannels(spaceId), channels) + tail
+}
+
+/** A space the user belongs to, as the space switcher and the lists name it (#1526). */
+data class HomeSpace(
+  val id: String,
+  val name: String,
+  val maybeImageVersion: String? = null,
+  /** Mentions in its channels. */
+  val mentionCount: Int = 0,
+  /** Something new in a channel that isn't muted. */
+  val hasUnread: Boolean = false,
+)
+
+/**
+ * Every space of the snapshot by name ([spaces]: id, name, picture version), with what is new in
+ * its channels counted from the live `conversations`, so the badges follow each change without a
+ * new snapshot read (#1466); so are its name and picture, where it has a channel. Spaces without
+ * joined channels are listed too.
+ */
+fun homeSpaces(spaces: List<HomeSpace>, conversations: List<ConversationItem>): List<HomeSpace> {
+  val bySpace = conversations
+    .filter { !it.isDirect && !it.isArchived && it.maybeSpaceId != null }
+    .distinctBy { it.id }
+    .groupBy { it.maybeSpaceId }
+  return spaces
+    .distinctBy { it.id }
+    .map { space ->
+      val channels = bySpace[space.id].orEmpty()
+      // A rename or a new picture reaches the channels before the next snapshot read.
+      val maybeLive = channels.firstOrNull()
+      space.copy(
+        name = maybeLive?.maybeSpaceName ?: space.name,
+        maybeImageVersion = maybeLive?.maybeSpaceImageVersion ?: space.maybeImageVersion,
+        mentionCount = channels.sumOf { it.mentionCount.toInt() },
+        hasUnread = channels.any { it.unreadCount > 0u && !it.isMuted },
+      )
+    }
+    .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+}
+
+/**
+ * The space Home of the spaces layout shows: the remembered one while the user still belongs to
+ * it, otherwise the first by name; `null` without spaces.
+ */
+fun selectedSpace(spaces: List<HomeSpace>, maybeRemembered: String?): HomeSpace? =
+  spaces.firstOrNull { it.id == maybeRemembered } ?: spaces.firstOrNull()
+
+/** Whether a space other than [selectedId] has something new: the switcher shows a dot then. */
+fun hasNewElsewhere(spaces: List<HomeSpace>, selectedId: String?): Boolean =
+  spaces.any { it.id != selectedId && (it.mentionCount > 0 || it.hasUnread) }
+
+/**
+ * The list layout grouped by space (#1526): [sections] as [listSections] made them, plus a section
+ * for each space in [spaces] that has none (no joined channels, or all of them favorites), so every
+ * space can be found, its menu opened and its channels browsed. Spaces stay ordered by name.
+ */
+fun withEmptySpaces(sections: List<Section>, spaces: List<HomeSpace>): List<Section> {
+  val listed = sections.mapNotNull { section ->
+    (section.title as? SectionTitle.Space)?.let { title -> title.maybeId ?: section.conversations.firstNotNullOfOrNull { it.maybeSpaceId } }
+  }.toSet()
+  val missing = spaces.filter { it.id !in listed }.map { Section(SectionTitle.Space(it.name, it.id, it.maybeImageVersion), emptyList()) }
+  if (missing.isEmpty()) return sections
+  val head = sections.filter { it.title !is SectionTitle.Space && it.title != SectionTitle.Channels }
+  val tail = sections.filter { it.title == SectionTitle.Channels }
+  val merged = (sections.filter { it.title is SectionTitle.Space } + missing)
+    .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { (it.title as SectionTitle.Space).name })
+  return head + merged + tail
+}
+
+/**
  * The key a section's collapsed state is remembered under (#1488): a space by its id, so renaming
  * it keeps the choice; `null` for the sections that can't be collapsed.
  */
@@ -144,7 +238,16 @@ fun Section.collapseKey(): String? = when (val title = title) {
   SectionTitle.Channels -> "channels"
   SectionTitle.Archived -> "archived"
   SectionTitle.DirectMessages -> "direct"
-  is SectionTitle.Space -> conversations.firstNotNullOfOrNull { it.maybeSpaceId }?.let { "space:$it" } ?: "space-name:${title.name}"
+  is SectionTitle.Space ->
+    (title.maybeId ?: conversations.firstNotNullOfOrNull { it.maybeSpaceId })?.let { "space:$it" } ?: "space-name:${title.name}"
+  is SectionTitle.SpaceChannels -> "space:${title.spaceId}"
+  else -> null
+}
+
+/** The space a section is of, from its title or its channels; `null` for other sections. */
+fun Section.spaceId(): String? = when (val title = title) {
+  is SectionTitle.Space -> title.maybeId ?: conversations.firstNotNullOfOrNull { it.maybeSpaceId }
+  is SectionTitle.SpaceChannels -> title.spaceId
   else -> null
 }
 
@@ -238,20 +341,6 @@ fun spaceDirectMessages(
     .filter { it.isDirect && it.id in wanted }
     .sortedWith(compareByDescending<ConversationItem> { lastActivity[it.id] ?: Long.MIN_VALUE }.then(byName))
 }
-
-/** A space the list layout names under its list, where its menu is. */
-data class ListedSpace(val id: String, val name: String, val maybeImageVersion: String? = null)
-
-/** The spaces the conversations are in, by name (#1151). */
-fun listedSpaces(conversations: List<ConversationItem>): List<ListedSpace> =
-  conversations
-    .mapNotNull { conversation ->
-      val id = conversation.maybeSpaceId
-      val name = conversation.maybeSpaceName
-      if (id != null && name != null) ListedSpace(id, name, conversation.maybeSpaceImageVersion) else null
-    }
-    .distinctBy { it.id }
-    .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.name })
 
 /** What a tab shows next to its name: mentions, unread messages, or nothing. */
 data class TabBadge(val mentions: Int, val unread: Int)

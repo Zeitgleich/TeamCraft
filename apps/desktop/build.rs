@@ -24,6 +24,7 @@ const COMMANDS: &[&str] = &[
   "public_get",
   "crash_report_post",
   "crash_reports_take_native",
+  "perf_core_steps",
   "public_asset",
   "avatar_download",
   "avatar_upload",

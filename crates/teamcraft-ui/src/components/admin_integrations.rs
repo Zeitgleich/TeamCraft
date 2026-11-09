@@ -5,16 +5,15 @@ use wasm_bindgen::JsCast;
 
 use crate::clock::format_date_time;
 use crate::components::admin_console::SectionHeader;
+use crate::components::copy_button::CopyButton;
 use crate::components::icons::{Icon, IconName};
 use crate::components::image_crop_dialog::{CropTarget, CropUpload, ImageCropDialog};
-use crate::components::message_actions::copy_text;
 use crate::feedback::report_failure;
 use crate::i18n::use_i18n;
 use crate::image_crop::check_pick;
 use crate::integrations::{BotsHub, MAX_BOT_NAME_CHARS, bridge_config, use_bots};
 use crate::reactive::SetIfAlive;
 use crate::rest::RestError;
-use crate::state::use_app_state;
 
 /// Bot accounts for the integration bridge (docs/bridge.md): create one, copy its token and the
 /// bridge configuration (shown once), rotate or revoke. Adding a bot to channels is a channel
@@ -238,32 +237,6 @@ fn TokenReveal(hub: BotsHub, reveal: BotTokenResponse) -> impl IntoView {
       </div>
       <p class="muted-text small">{move || i18n.t("admin-integrations-next-steps")}</p>
     </section>
-  }
-}
-
-/// Copies `text`; the label says "Copied" afterwards.
-#[component]
-pub fn CopyButton(#[prop(into)] text: Signal<String>) -> impl IntoView {
-  let state = use_app_state();
-  let i18n = use_i18n();
-  let is_copied = RwSignal::new(false);
-  let copy = move |_| {
-    let failed = i18n.t("action-copy-failed");
-    // Started inside the click: browsers only allow clipboard writes from a user action.
-    let copying = copy_text(&text.get_untracked());
-    spawn_local(async move {
-      if copying.await {
-        is_copied.set_if_alive(true);
-      } else {
-        state.show_error(failed, String::new());
-      }
-    });
-  };
-  view! {
-    <button type="button" class="btn" on:click=copy>
-      <Icon name=IconName::Copy />
-      <span aria-live="polite">{move || i18n.t(if is_copied.get() { "meetings-link-copied" } else { "admin-integrations-copy" })}</span>
-    </button>
   }
 }
 

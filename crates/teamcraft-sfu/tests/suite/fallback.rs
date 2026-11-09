@@ -41,8 +41,9 @@ use teamcraft_media::{
   video::EncodedVideoFrame,
 };
 use teamcraft_proto::{
-  AudioCodec, CALL_FALLBACK_PATH, CALL_FALLBACK_PROTOCOL, CallClientMessage, CallServerMessage, DeviceId,
-  ErrorCode, FallbackFrame, MediaCapabilities, VideoCodec, VideoLayerInfo, VideoTrackKind,
+  AudioCodec, CALL_FALLBACK_PATH, CALL_FALLBACK_PROTOCOL, CallClientMessage, CallServerMessage,
+  DaveTransitionMode, DeviceId, ErrorCode, FallbackFrame, MediaCapabilities, VideoCodec, VideoLayerInfo,
+  VideoTrackKind,
 };
 use teamcraft_sfu::{
   auth::DevTokenVerifier,
@@ -1166,6 +1167,7 @@ mod switch_back {
         .send(CallClientMessage::Join {
           token: token(device),
           capabilities: MediaCapabilities::default(),
+          dave_transition_mode: DaveTransitionMode::AtOnce,
         })
         .await;
       loop {
@@ -1724,6 +1726,7 @@ async fn send_join(socket: &mut Socket, token: &str) {
   let join = CallClientMessage::Join {
     token: token.to_owned(),
     capabilities: MediaCapabilities::default(),
+    dave_transition_mode: DaveTransitionMode::AtOnce,
   };
   let body = serde_json::to_vec(&join).unwrap();
   send_frame(socket, FallbackFrame::Signal(&body)).await;

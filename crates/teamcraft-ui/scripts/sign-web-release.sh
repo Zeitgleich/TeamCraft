@@ -9,14 +9,15 @@
 # and the signed-in app's, #334) and the signed-in app's pack (#1465): the worker fetches those when
 # needed or after a member's page loaded instead of on install, so a guest's meeting page doesn't
 # download the signed-in app. The
-# UI's texts (`i18n/*.ftl`, one file per language, #1437) are lazy too: a page asks for the language
-# it shows.
+# UI's texts (`i18n/*.ftl`, one file per language, #1437, and the administration console's per
+# language, #1462) are lazy too: a page asks for the language it shows, the console for its own.
 # `on_demand` (also in `lazy`) lists the background effects' segmentation (#439: the worker's
 # script and module, the model) and the photo backgrounds' full pictures: fetched only when someone
 # turns an effect on or picks the photo, never in the background; and the files in the signed-in
 # app's pack (#1465), which a member loads with the pack and only a guest's meeting or a page whose
 # pack didn't arrive asks for one by one. Both are outside the signature (older workers verify {version, files} only, and
-# fetch `on_demand` files like lazy ones); every file is checked against its hash.
+# fetch `on_demand` files like lazy ones); every file is checked against its hash. The interface
+# fonts (`fonts/`, #1494) are on demand too: a page asks for one only when someone picked it.
 # Run it on the machine that holds the release key, not on the server that serves the files.
 # Needs openssl 3, python3 and sha256sum (or shasum on macOS).
 set -eu
@@ -59,6 +60,8 @@ entry_points = "".join(open(os.path.join(dist, name), encoding="utf-8").read() f
 # module loads them, when the first background effect starts; a photo background's picture
 # (add-background-photos.sh) when the photo is picked. The picker's thumbnails stay as they are.
 on_demand_prefixes = ("teamcraft-segmentation-worker-", "teamcraft-web-segmentation-")
+def is_font(path):
+    return path.startswith("fonts/")
 def is_photo(path):
     return path.startswith("backgrounds/") and path.count("/") == 1 and path.endswith(".jpg")
 # The split loader names a file that is in the signed-in app's pack with `fetchPart` (teamcraft-web-bundle).
@@ -70,7 +73,7 @@ missing_packed = sorted(packed - set(files))
 if missing_packed:
     raise SystemExit("the split loader names files that aren't there: " + ", ".join(missing_packed))
 on_demand = sorted(packed | {path for path in files
-                   if path.endswith(".nnef") or path.startswith(on_demand_prefixes) or is_photo(path)})
+                   if path.endswith(".nnef") or path.startswith(on_demand_prefixes) or is_photo(path) or is_font(path)})
 # The UI's texts: each page asks for the language it shows (init.js, src/i18n.rs).
 texts = {path for path in files if path.startswith("i18n/") and path.endswith(".ftl")}
 lazy = sorted(set(on_demand) | texts | {path for path in files if path.endswith((".wasm", ".pack")) and path not in entry_points})

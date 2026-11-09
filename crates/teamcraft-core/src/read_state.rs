@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::live::{AnnouncedPresence, LiveMarks, LiveReceipt, RevisedPresence};
+use teamcraft_proto::live::{AnnouncedPresence, LiveDelivered, LiveMarks, LiveReceipt, RevisedPresence};
 use teamcraft_proto::{
   AdminJoinRequestResponse, ConversationId, ConversationUnread, ExpiringGuestResponse, MessageId,
   MessageResponse, ThreadId, ThreadSummary, UnreadResponse, UserId, UserPresence,
@@ -447,6 +447,53 @@ pub(crate) fn note_read_receipt(
     return Ok(());
   }
   records::put_json(store, Table::ReadReceipts, &key, &message)
+}
+
+/// Records how far every other member of a DM or group DM has the messages on a device (delivered
+/// ticks, issue #598); it only moves forward. Kept in [`Table::Unread`] under the conversation, so
+/// a deleted conversation leaves nothing behind.
+pub(crate) fn note_delivered_to_others(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+  message: MessageId,
+) -> Result<(), CoreError> {
+  let key = delivered_key(conversation);
+  let maybe_known: Option<MessageId> = records::get_json(store, Table::Unread, &key)?;
+  if maybe_known.is_some_and(|known| known >= message) {
+    return Ok(());
+  }
+  records::put_json(store, Table::Unread, &key, &message)
+}
+
+/// The newest message every other member of a DM or group DM has on a device, if known.
+pub fn delivered_to_others(
+  store: &impl LocalStore,
+  conversation: ConversationId,
+) -> Result<Option<MessageId>, CoreError> {
+  records::get_json(store, Table::Unread, &delivered_key(conversation))
+}
+
+/// How far every other member has the messages, across all DMs and group DMs this device heard of.
+pub fn all_delivered_to_others(store: &impl LocalStore) -> Result<Vec<LiveDelivered>, CoreError> {
+  let mut delivered = Vec::new();
+  for (key, value) in store.list(Table::Unread)? {
+    let Some(conversation) = key.strip_suffix(DELIVERED_SUFFIX) else {
+      continue;
+    };
+    delivered.push(LiveDelivered {
+      conversation: conversation
+        .parse()
+        .map_err(|_| CoreError::Corrupt(format!("delivered key {key}")))?,
+      message: serde_json::from_slice(&value).map_err(|error| CoreError::Corrupt(error.to_string()))?,
+    });
+  }
+  Ok(delivered)
+}
+
+const DELIVERED_SUFFIX: &str = "/delivered";
+
+fn delivered_key(conversation: ConversationId) -> String {
+  format!("{conversation}{DELIVERED_SUFFIX}")
 }
 
 pub(crate) fn note_acknowledgement(

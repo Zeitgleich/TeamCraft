@@ -4,7 +4,7 @@ use std::time::Duration;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use teamcraft_proto::{
   ConversationId, DeviceActivity, DeviceId, GATEWAY_PATH, GatewayClientMessage, GatewayEvent,
-  GatewayServerMessage, Permission, ThreadId, UserId,
+  GatewayServerMessage, MessageId, Permission, ThreadId, UserId,
 };
 use tokio::time::{Instant, sleep_until, timeout};
 use tracing::{debug, warn};
@@ -15,13 +15,16 @@ use crate::drain::CLOSE_SERVICE_RESTART;
 use crate::error::ApiError;
 use crate::outage_gate::OutageGate;
 use crate::services::access::{load_conversation, require};
-use crate::services::{accounts, presence};
+use crate::services::{accounts, delivery, presence};
 use crate::state::AppState;
 
 /// Minimum time between two typing events of one connection for the same conversation (or thread).
 const TYPING_THROTTLE: Duration = Duration::from_secs(3);
 /// Conversations a connection tracks typing for; more is ignored until entries age out.
 const MAX_TRACKED_TYPING: usize = 256;
+/// Conversations a connection remembers its last `delivered` report for; beyond that the memory is
+/// cleared (a repeated report then costs one lookup, nothing more).
+const MAX_TRACKED_DELIVERED: usize = 256;
 /// Changes of the activity state a connection may make: one per this long (each one costs queries
 /// and may broadcast to everybody who shares a conversation).
 const ACTIVITY_CHANGE_INTERVAL: Duration = Duration::from_secs(1);
@@ -354,6 +357,27 @@ async fn handle_client_message(
       last_typing.insert(place, now);
       true
     },
+    GatewayClientMessage::Delivered {
+      conversation_id,
+      message_id,
+    } => {
+      let last_delivered = &mut connection.last_delivered;
+      if last_delivered
+        .get(&conversation_id)
+        .is_some_and(|known| *known >= message_id)
+      {
+        return true;
+      }
+      if last_delivered.len() >= MAX_TRACKED_DELIVERED {
+        last_delivered.clear();
+      }
+      last_delivered.insert(conversation_id, message_id);
+      // Content-free bookkeeping: a failure only costs the ticks, the client isn't told.
+      if let Err(error) = delivery::note_delivered(state, caller, conversation_id, message_id).await {
+        debug!(conversation_id = %conversation_id, %error, "delivered report refused");
+      }
+      true
+    },
     // A second identify/resume or a frame this version doesn't know: ignore, stay compatible.
     GatewayClientMessage::Identify { .. }
     | GatewayClientMessage::Resume { .. }
@@ -447,6 +471,8 @@ struct ConnectionState {
   /// Per conversation, and per thread for replies.
   last_typing: HashMap<(ConversationId, Option<ThreadId>), Instant>,
   maybe_last_activity_change: Option<Instant>,
+  /// The last `delivered` report per conversation, so repeats cost nothing.
+  last_delivered: HashMap<ConversationId, MessageId>,
 }
 
 /// A token bucket over the frames of one connection.

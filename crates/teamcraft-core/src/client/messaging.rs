@@ -8,8 +8,9 @@ use teamcraft_crypto::message::{
   EncryptedMessage, MessageContext, MessageError, decrypt_message, decrypt_unsigned_message, encrypt_message,
 };
 use teamcraft_proto::{
-  Base64Bytes, ClientMessageId, ConversationId, Id, ListMessagesQuery, ListMessagesResponse, MessageId,
-  MessageResponse, SendMessageRequest, Snowflake, ThreadId, UserId, addresses_everyone,
+  Base64Bytes, ClientMessageId, ConversationId, Id, ListConversationMembersResponse, ListMessagesQuery,
+  ListMessagesResponse, MessageId, MessageResponse, SendMessageRequest, Snowflake, ThreadId, UserId,
+  addresses_everyone,
 };
 use zeroize::Zeroizing;
 
@@ -256,7 +257,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let page = self.api.list_messages(conversation, &query).await?;
     let count = page.messages.len();
-    self.receive_earlier_page(conversation, page.messages)?;
+    self.receive_earlier_page(conversation, page.messages).await?;
     Ok(count)
   }
 
@@ -280,7 +281,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let count = page.messages.len();
     let maybe_oldest = self.oldest_held(conversation)?;
     let (has_more, maybe_bounds) = (page.has_more, super::history_gaps::bounds(&page.messages));
-    self.receive_earlier_page(conversation, page.messages)?;
+    self.receive_earlier_page(conversation, page.messages).await?;
     self.note_jump_page(conversation, cursor, maybe_bounds, has_more, maybe_oldest)?;
     Ok(count)
   }
@@ -302,6 +303,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     mut maybe_first: Option<Result<ListMessagesResponse, ApiError>>,
     maybe_pages: Option<u32>,
   ) -> Result<usize, CoreError> {
+    let _step = crate::timing::step("catch_up_messages");
     let mut total = 0;
     if !self.is_history_loaded(conversation)? {
       let query = self.first_messages_query(conversation)?;
@@ -310,7 +312,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         None => self.api.list_messages(conversation, &query).await?,
       };
       total += page.messages.len();
-      self.receive_page(page.messages)?;
+      self.receive_page(page.messages).await?;
       records::put_json(&self.store, Table::SyncState, &history_key(conversation), &true)?;
       if query.maybe_before.is_none() {
         // That was the newest page: what came since arrives as gateway events.
@@ -336,7 +338,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       };
       total += page.messages.len();
       maybe_cursor = maybe_cursor.max(page.messages.iter().map(|message| message.id).max());
-      self.receive_page(page.messages)?;
+      self.receive_page(page.messages).await?;
       // The newest page's `has_more` speaks of older messages, not newer ones.
       if is_newest_page || !page.has_more {
         return Ok(total + self.load_imported_history(conversation).await?);
@@ -373,7 +375,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.note_backlog(conversation, cursor, oldest)?;
     }
     let count = page.messages.len();
-    self.receive_page(page.messages)?;
+    self.receive_page(page.messages).await?;
     Ok(count)
   }
 
@@ -501,57 +503,83 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// write on its own is a commit with its syncs; a catch-up after a long absence read pages of
   /// them one commit at a time (issue #972). Receiving is idempotent, so a crash that drops the
   /// group only means the page is read again.
-  pub(super) fn receive_page(&mut self, messages: Vec<MessageResponse>) -> Result<(), CoreError> {
-    self.receive_in_groups(messages, |_| Ok(()))
+  pub(super) async fn receive_page(&mut self, messages: Vec<MessageResponse>) -> Result<(), CoreError> {
+    self.receive_in_groups(messages, |_| Ok(())).await
   }
 
   /// Receives `messages` in groups of writes, then runs `finish` in the last one. A group ends
   /// early, after the message at hand, when another thread waits for the store (the UI's reads
-  /// while a catch-up decrypts a page, issue #1466); receiving is idempotent, so a crash between
-  /// two groups only means the page is read again, and `finish` (a cursor, the order of controls)
-  /// runs with the last of them.
-  pub(super) fn receive_in_groups(
+  /// while a catch-up decrypts a page, issue #1466) or the client's turn at a thread it shares with
+  /// the UI is over, which it then hands back (issue #1575). Receiving is idempotent, so a crash
+  /// between two groups only means the page is read again, and `finish` (a cursor, the order of
+  /// controls) runs with the last of them.
+  pub(super) async fn receive_in_groups(
     &mut self,
     messages: Vec<MessageResponse>,
     finish: impl FnOnce(&mut Self) -> Result<(), CoreError>,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("mls_decrypt_batch");
     let mut messages = messages.into_iter().peekable();
     let mut maybe_finish = Some(finish);
-    loop {
-      let is_done = self.atomically(|client| {
-        let began_ms = client.now_ms();
-        while let Some(message) = messages.next() {
-          client.receive_message(message)?;
-          // Long enough for the page to make progress, short enough for a read not to notice.
-          let has_had_its_turn = client.now_ms().saturating_sub(began_ms) >= GROUP_TURN_MS;
-          if messages.peek().is_some() && has_had_its_turn && client.store.is_awaited() {
-            return Ok(false);
-          }
-        }
-        if let Some(finish) = maybe_finish.take() {
-          finish(client)?;
-        }
-        Ok(true)
-      })?;
-      if is_done {
-        return Ok(());
-      }
+    while !self.receive_group(&mut messages, &mut maybe_finish)? {
+      self.hand_back_thread().await;
     }
+    Ok(())
+  }
+
+  /// [`Self::receive_page`] where no thread can be handed back: groups still end for a waiting read.
+  fn receive_page_now(&mut self, messages: Vec<MessageResponse>) -> Result<(), CoreError> {
+    let _step = crate::timing::step("mls_decrypt_batch");
+    let mut messages = messages.into_iter().peekable();
+    let mut maybe_finish = Some(|_: &mut Self| Ok(()));
+    while !self.receive_group(&mut messages, &mut maybe_finish)? {}
+    Ok(())
+  }
+
+  /// One group of [`Self::receive_in_groups`]; `true` once every message and `finish` are through.
+  fn receive_group<F: FnOnce(&mut Self) -> Result<(), CoreError>>(
+    &mut self,
+    messages: &mut std::iter::Peekable<std::vec::IntoIter<MessageResponse>>,
+    maybe_finish: &mut Option<F>,
+  ) -> Result<bool, CoreError> {
+    self.atomically(|client| {
+      let began_ms = client.now_ms();
+      while let Some(message) = messages.next() {
+        client.receive_message(message)?;
+        if messages.peek().is_some() && client.is_group_turn_over(began_ms) {
+          return Ok(false);
+        }
+      }
+      if let Some(finish) = maybe_finish.take() {
+        finish(client)?;
+      }
+      Ok(true)
+    })
+  }
+
+  /// Whether a group of received messages begun at `began_ms` ends after the message at hand: for a
+  /// read waiting at the store, once the group had a turn long enough for the page to make progress
+  /// and short enough for the read not to notice; or when the client's turn at the UI's thread is up.
+  fn is_group_turn_over(&self, began_ms: i64) -> bool {
+    let has_had_its_turn = self.now_ms().saturating_sub(began_ms) >= GROUP_TURN_MS;
+    (has_had_its_turn && self.store.is_awaited()) || self.is_thread_turn_over()
   }
 
   /// [`Self::receive_page`] for a page of `conversation` read out of order: before the messages
   /// this device holds or between them (older history, a jump to a date and its holes). Its pins
   /// and bookmarks were applied after newer ones, so those are taken again in their order
   /// ([`Self::settle_ordered_controls`], issue #1438).
-  pub(super) fn receive_earlier_page(
+  pub(super) async fn receive_earlier_page(
     &mut self,
     conversation: ConversationId,
     messages: Vec<MessageResponse>,
   ) -> Result<(), CoreError> {
     let received = received_ids(conversation, &messages);
-    self.receive_in_groups(messages, |client| {
-      client.settle_ordered_controls(conversation, &received)
-    })
+    self
+      .receive_in_groups(messages, |client| {
+        client.settle_ordered_controls(conversation, &received)
+      })
+      .await
   }
 
   /// After `received` (a page read out of order) was stored: when a pin or bookmarks message is
@@ -799,7 +827,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if parked.is_empty() {
       return Ok(());
     }
-    self.receive_page(
+    self.receive_page_now(
       parked
         .into_iter()
         .map(|(_, message)| message)
@@ -828,8 +856,25 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     records::enqueue_message(&self.store, self.account.user_id, self.now_ms(), draft)
   }
 
+  /// `mentions` without people who left since the message was written (a group mention names
+  /// many, and a queued message waits): the server refuses a message naming a non-member. Only the
+  /// list for the server changes, not what the message says. Unknown members leave it as it is.
+  fn mentions_still_here(&self, conversation: ConversationId, mentions: &[UserId]) -> Vec<UserId> {
+    let members: Option<ListConversationMembersResponse> =
+      records::get_json(&self.store, Table::Members, &conversation.to_string()).unwrap_or_default();
+    match members {
+      Some(list) => mentions
+        .iter()
+        .copied()
+        .filter(|user| list.members.iter().any(|member| member.user.id == *user))
+        .collect(),
+      None => mentions.to_vec(),
+    }
+  }
+
   /// `Ok(false)`: not sendable yet (no content key).
   async fn send_entry(&mut self, entry: &OutboxEntry) -> Result<bool, CoreError> {
+    let _step = crate::timing::step("send_entry");
     let key = records::outbox_key(entry.conversation_id, entry.client_message_id);
     let Some(mut stored) = self
       .store
@@ -854,7 +899,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       ciphertext: Base64Bytes::new(encrypted.to_bytes()?),
       maybe_thread_id: entry.maybe_thread_id,
       mentioned_user_ids: match &stored.content {
-        MessageContent::Text { mentions, .. } => mentions.clone(),
+        MessageContent::Text { mentions, .. } => self.mentions_still_here(entry.conversation_id, mentions),
         _ => Vec::new(),
       },
       // The one piece of metadata the server sees: it routes urgent pushes past do-not-disturb.
@@ -918,6 +963,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     client_message_id: ClientMessageId,
     content: &MessageContent,
   ) -> Result<EncryptedMessage, CoreError> {
+    let _step = crate::timing::step("seal_message");
     let ring = self
       .account
       .key_bag

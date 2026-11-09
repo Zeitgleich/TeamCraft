@@ -287,10 +287,11 @@ mod calls {
       .await;
     let call = token.body["call_id"].as_str().unwrap().to_owned();
     report(&app, "joined", &call, &alice_id, &alice_device).await;
-    assert_eq!(
-      presence_of(&app, &bob, &alice_id).await["status"]["activity"],
-      "in_call"
-    );
+    let in_call = presence_of(&app, &bob, &alice_id).await;
+    assert_eq!(in_call["status"]["activity"], "in_call");
+    // Busy during the call (#1578), as online for older clients.
+    assert_eq!(in_call["detailed_state"], "busy");
+    assert_eq!(in_call["state"], "online");
     let events = ws::events(&mut bob_socket, QUIET).await;
     assert!(events.iter().any(|event| matches!(
       event,
@@ -299,7 +300,9 @@ mod calls {
     )));
 
     report(&app, "left", &call, &alice_id, &alice_device).await;
-    assert!(presence_of(&app, &bob, &alice_id).await.get("status").is_none());
+    let after = presence_of(&app, &bob, &alice_id).await;
+    assert!(after.get("status").is_none());
+    assert!(after.get("detailed_state").is_none());
     app.stop().await;
   }
 }

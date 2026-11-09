@@ -622,6 +622,26 @@ impl Database {
     Ok(())
   }
 
+  /// Moves the member's delivered position forward to `message` (never back). `false` when it
+  /// already was there or further, or the user is no member.
+  pub async fn set_delivered_position(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    message: MessageId,
+  ) -> Result<bool, DbError> {
+    let result = sqlx::query!(
+      r#"UPDATE memberships SET last_delivered_message_id = $3
+         WHERE conversation_id = $1 AND user_id = $2 AND COALESCE(last_delivered_message_id, 0) < $3"#,
+      to_db(conversation),
+      to_db(user),
+      to_db(message),
+    )
+    .execute(self.pool())
+    .await?;
+    Ok(result.rows_affected() > 0)
+  }
+
   /// Adds reaction messages the member saw to their seen state ([`ReactionsSeen::add`], at most
   /// `max_ids` kept one by one). `None` if they aren't a member. Two devices at once don't lose
   /// each other's: the row is locked while it is merged.

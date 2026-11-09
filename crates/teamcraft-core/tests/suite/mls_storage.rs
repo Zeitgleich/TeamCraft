@@ -14,7 +14,7 @@ use crate::common::{self, PASSPHRASE, Peer, settle};
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
 use teamcraft_core::client::is_catching_up;
 use teamcraft_core::store::{
-  LocalStore, MediaRange, MemoryStore, MessageFilter, StoreError, StoredMessage, Table,
+  Attached, AttachedRange, LocalStore, MemoryStore, MessageFilter, StoreError, StoredMessage, Table,
 };
 use teamcraft_core::{Client, PendingEnrollment};
 use teamcraft_proto::{ClientMessageId, ConversationId, Id as _, MessageId};
@@ -686,13 +686,14 @@ impl LocalStore for CountingStore {
     self.inner.message_by_server_id(conversation, server_id)
   }
 
-  fn media_messages(
+  fn attached_messages(
     &self,
     conversation: ConversationId,
-    range: MediaRange,
+    kind: Attached,
+    range: AttachedRange,
     limit: usize,
   ) -> Result<Vec<StoredMessage>, StoreError> {
-    self.inner.media_messages(conversation, range, limit)
+    self.inner.attached_messages(conversation, kind, range, limit)
   }
 
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {

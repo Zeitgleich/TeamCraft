@@ -31,7 +31,7 @@ mod user_settings {
     assert_eq!(
       defaults.body,
       json!({"auto_follow_mentioned_threads": true, "push_mode": "away_only", "send_read_receipts": true,
-             "uses_desktop_attention": true, "default_level": "all"})
+             "uses_desktop_attention": true, "default_level": "all", "send_delivery_receipts": true})
     );
 
     let schedule = json!({
@@ -48,6 +48,7 @@ mod user_settings {
       "dnd_schedule": schedule,
       "uses_desktop_attention": false,
       "level": "mentions",
+      "send_delivery_receipts": false,
     });
     let mut answer = body.clone();
     answer["default_level"] = json!("all");
@@ -55,7 +56,7 @@ mod user_settings {
     assert_eq!((put.status, &put.body), (StatusCode::OK, &answer));
     assert_eq!(app.get(&carol, "/me/notification-settings").await.body, answer);
 
-    // Without a level (older clients) the stored choice stays.
+    // Without a level or delivery receipts (older clients) the stored choices stay.
     let cleared = json!({"auto_follow_mentioned_threads": true, "push_mode": "away_only", "send_read_receipts": true,
                          "uses_desktop_attention": true});
     app
@@ -64,6 +65,7 @@ mod user_settings {
     let mut kept = cleared;
     kept["level"] = json!("mentions");
     kept["default_level"] = json!("all");
+    kept["send_delivery_receipts"] = json!(false);
     assert_eq!(app.get(&carol, "/me/notification-settings").await.body, kept);
     app.stop().await;
   }
@@ -76,10 +78,9 @@ mod user_settings {
       return;
     };
     let carol = member("carol");
-    assert_eq!(
-      app.get(&carol, "/me/notification-settings").await.body["send_read_receipts"],
-      false
-    );
+    let settings = app.get(&carol, "/me/notification-settings").await.body;
+    assert_eq!(settings["send_read_receipts"], false);
+    assert_eq!(settings["send_delivery_receipts"], false);
     app.stop().await;
   }
 

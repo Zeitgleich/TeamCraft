@@ -5,7 +5,7 @@ members = ["crates/*", "apps/desktop", "tests/e2e"]
 exclude = ["crates/vendor", "fuzz"]
 
 [workspace.package]
-version = "1.0.25"
+version = "1.0.28"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/Zeitgleich/TeamCraft"
@@ -110,7 +110,7 @@ socket2 = "0.6"
 jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 figment = { version = "0.10", features = ["toml", "env"] }
 
-# davey 0.1.5 ported to openmls 0.9, so chat and calls share one MLS stack (ARCHITECTURE.md §6.2)
+# davey 0.2.0 ported to openmls 0.9, so chat and calls share one MLS stack (ARCHITECTURE.md §6.2)
 # without the libcrux advisories of the openmls 0.8 stack. See crates/vendor/davey/VENDORED.md.
 # wtransport 0.7.2 with a client Endpoint::rebind, so calls survive network changes (ARCHITECTURE.md
 # §6.5). See crates/vendor/wtransport/VENDORED.md.

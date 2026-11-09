@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use teamcraft_client_api::color_theme::ColorTheme;
 use teamcraft_client_api::files_query::{FileSort, StarredFile};
+use teamcraft_client_api::font::UiFont;
 use teamcraft_client_api::message_sound::{MessageSound, OwnSoundLimits};
 use teamcraft_proto::{ChannelMentions, DndWindow, Weekday};
 
@@ -411,21 +412,35 @@ pub const DEFAULT_AWAY_AFTER_MINUTES: u32 = 15;
 #[serde(default)]
 pub struct PrivacyPrefs {
   pub share_read_receipts: bool,
+  /// Tell others in DMs and group DMs that their messages reached this user's devices (#598).
+  pub share_delivery_receipts: bool,
   pub share_typing: bool,
   /// Minutes of inactivity before status turns to away; `None` never.
   pub away_after_minutes: Option<u32>,
   /// Send crash reports when the instance has them on (docs/crash-reports.md); counts only while
   /// the instance allows opting out.
   pub send_crash_reports: bool,
+  /// The manual status picked with an end ("Reset after", issue #1578), so every device can say
+  /// until when. The server ends the status itself; this is only for showing it.
+  pub maybe_status_end: Option<StatusEnd>,
+}
+
+/// A manual status and when it ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusEnd {
+  pub status: crate::model::PresenceStatus,
+  pub until: crate::model::TimestampMs,
 }
 
 impl Default for PrivacyPrefs {
   fn default() -> Self {
     Self {
       share_read_receipts: true,
+      share_delivery_receipts: true,
       share_typing: true,
       away_after_minutes: Some(DEFAULT_AWAY_AFTER_MINUTES),
       send_crash_reports: true,
+      maybe_status_end: None,
     }
   }
 }
@@ -597,6 +612,8 @@ pub struct DisplayPrefs {
   /// The colours of the rail, sidebar, top bar and accent (#202); follows the account. Light or
   /// dark stays the device's (`Settings::theme`).
   pub color_theme: ColorTheme,
+  /// The interface font (#1494, fonts.rs); follows the account.
+  pub font: UiFont,
 }
 
 impl Default for DisplayPrefs {
@@ -610,6 +627,7 @@ impl Default for DisplayPrefs {
       text_size: TextSize::DEFAULT,
       maybe_divider_dwell_secs: Some(DEFAULT_DIVIDER_DWELL_SECS),
       color_theme: ColorTheme::Brand,
+      font: UiFont::System,
     }
   }
 }

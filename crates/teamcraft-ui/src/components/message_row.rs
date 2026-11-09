@@ -18,7 +18,7 @@ use crate::components::message_link_card::MessageLinkPreviews;
 use crate::components::message_toolbar::{ActiveMessage, ToolbarHost};
 use crate::components::profile_views::UserHoverCard;
 use crate::components::rich_text::RichText;
-use crate::delivery::{Delivery, ReadIndicator, is_read_by_all};
+use crate::delivery::{Delivery, ReadIndicator, is_delivered, is_read_by_all};
 use crate::feed_motion::{Entrance, RowMotion};
 use crate::i18n::use_i18n;
 use crate::markdown;
@@ -744,6 +744,8 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   });
 
   let body_text = message.body.clone();
+  let group_mentions = message.group_mentions.clone();
+  let mentions_me = message.mentions_me;
   let edit_draft = RwSignal::new(String::new());
   let start_edit_text = body_text.clone();
   Effect::new(move |_| {
@@ -800,6 +802,10 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
         })
     })
   };
+  // Two grey ticks once a device of every other member has it (DMs and group DMs, #598); empty when
+  // either side turned delivery off.
+  let is_delivered =
+    move || state.read(|backend| is_delivered(backend.delivered_to_others(conversation), message_id));
   let delivery_view = move || {
     if is_send_failed() {
       return Some(
@@ -825,16 +831,20 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       );
     }
     match delivery.get() {
-      // Own messages on the server: one tick, two blue ones once the DM partner read it (#568, #635).
+      // Own messages on the server: one tick, two grey ones once every other member has it on a
+      // device (#598), two blue ones once the DM partner read it (#568, #635).
       Delivery::Sent if is_mine => {
         let is_read = is_read();
+        let is_delivered = !is_read && is_delivered();
         let sent_time = sent_time.clone();
         let key = if is_read {
           "message-status-read"
+        } else if is_delivered {
+          "message-status-delivered"
         } else {
           "message-status-sent"
         };
-        let icon = if is_read {
+        let icon = if is_read || is_delivered {
           IconName::CheckDouble
         } else {
           IconName::Check
@@ -925,11 +935,11 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
         .into_any();
       }
       if !is_long_body {
-        return view! { <RichText body=body_text.clone() me=me.username.clone() /> }.into_any();
+        return view! { <RichText body=body_text.clone() me=me.username.clone() group_mentions=group_mentions.clone() mentions_me=mentions_me /> }.into_any();
       }
       view! {
         <div class="msg-long" class:collapsed=move || !is_expanded.get()>
-          <RichText body=body_text.clone() me=me.username.clone() />
+          <RichText body=body_text.clone() me=me.username.clone() group_mentions=group_mentions.clone() mentions_me=mentions_me />
         </div>
         <button
           class="link-btn msg-expand"
@@ -1508,6 +1518,8 @@ mod tests {
       maybe_imported: None,
       maybe_source: None,
       maybe_placeholder: None,
+      group_mentions: Vec::new(),
+      mentions_me: false,
     }
   }
 }

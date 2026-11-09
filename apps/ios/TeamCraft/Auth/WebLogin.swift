@@ -28,7 +28,11 @@ final class WebLogin: NSObject, ASWebAuthenticationPresentationContextProviding 
 
   /// `maybeLoginPageAlwaysShown` is the sign-in screen's fresh answer from the server; without it
   /// the stored server's setting decides.
-  func login(server: StoredServer, maybeLoginPageAlwaysShown: Bool? = nil) async throws -> OidcSession {
+  /// `proofs` makes the session's device key and proof where both sides would use one
+  /// (docs/e2ee.md §3.1.2).
+  func login(
+    server: StoredServer, maybeLoginPageAlwaysShown: Bool? = nil, proofs: SessionProofs
+  ) async throws -> OidcSession {
     guard let oidc = OidcClient(server: server, environment: environment) else { throw OidcError.discoveryFailed }
     let endpoints = try await oidc.discover()
     let isLoginPageShown = maybeLoginPageAlwaysShown ?? server.isLoginPageAlwaysShown
@@ -43,11 +47,24 @@ final class WebLogin: NSObject, ASWebAuthenticationPresentationContextProviding 
       let callback = try await present(url, isEphemeral: isLoginPageShown)
       do {
         let code = try Self.authorizationCode(from: callback, expectedState: state)
-        return try await oidc.exchange(code: code, verifier: pkce.verifier, endpoints: endpoints)
+        let proof = try await proofs.forSignIn(endpoints: endpoints, server: server)
+        let session = try await proofs.exchange(
+          with: oidc, code: code, verifier: pkce.verifier, endpoints: endpoints, proof: proof)
+        Self.noteUnboundSignIn(session, proof: proof)
+        return session
       } catch OidcError.providerRefused(let code) where Self.isRetried(code: code, retries: retries) {
         Self.log.warning("the identity provider refused the sign-in (\(code, privacy: .public)), trying again")
         retries += 1
       }
+    }
+  }
+
+  /// A sign-in that went with a proof and got an unbound token: a provider that advertises DPoP may
+  /// not take proofs for this client, or whoever controls the server's answer withheld its nonce.
+  /// The user can't act on it and it works; only the log says so (docs/e2ee.md §3.1.2).
+  private static func noteUnboundSignIn(_ session: OidcSession, proof: TokenProof) {
+    if case .with = proof, session.boundKey == nil {
+      log.warning("this device has a device key and signed in without binding the sign-in to it")
     }
   }
 

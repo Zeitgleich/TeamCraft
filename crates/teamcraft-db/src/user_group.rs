@@ -154,6 +154,24 @@ impl Database {
     rows.into_iter().map(|row| from_db(row.user_id)).collect()
   }
 
+  /// The active members of every group, ordered by group and member: read in one go for a
+  /// device's copy of the groups, so a connect doesn't cost a query per group.
+  pub async fn list_active_user_group_members(&self) -> Result<Vec<(UserGroupId, UserId)>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT m.group_id, m.user_id
+         FROM user_group_members m
+         JOIN users u ON u.id = m.user_id
+         WHERE u.deactivated_at IS NULL
+         ORDER BY m.group_id, m.user_id"#,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| Ok((from_db(row.group_id)?, from_db(row.user_id)?)))
+      .collect()
+  }
+
   /// `true` if the user was added, `false` if they already were a member.
   pub async fn add_user_group_member(&self, id: UserGroupId, user: UserId) -> Result<bool, DbError> {
     let result = sqlx::query!(

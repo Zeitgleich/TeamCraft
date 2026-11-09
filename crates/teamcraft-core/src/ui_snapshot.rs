@@ -150,6 +150,7 @@ impl SnapshotCache {
     changes: StoreChanges,
     security: impl FnOnce() -> Option<SecuritySnapshot>,
   ) {
+    let _step = crate::timing::step("snapshot_refresh");
     let next = self.revision + 1;
     if changes.is_foreign {
       // Who another process announced is not noted either: the next update reads the whole log.
@@ -193,6 +194,7 @@ impl SnapshotCache {
 impl Parts {
   /// Everything but the security part (the host's), read at `revision`.
   fn read<S: LocalStore>(backend: &CoreChatBackend<S>, revision: u64) -> Self {
+    let _step = crate::timing::step("snapshot_read_full");
     let shared = Shared::read(backend, backend.summaries());
     let spaces = backend.spaces();
     let responses = backend.conversations_raw();
@@ -299,6 +301,7 @@ impl Parts {
     changes: &StoreChanges,
     revision: u64,
   ) -> bool {
+    let _step = crate::timing::step("snapshot_update");
     let mut is_changed = false;
     for user in &changes.users {
       let maybe_summary: Option<UserSummary> = backend.read(records::get_json(
@@ -537,6 +540,7 @@ fn live_since<S: LocalStore>(
     threads: backend.read(crate::read_state::threads(store)),
     presence: backend.read(index.since(store, presence)),
     receipts: backend.read(crate::read_state::all_read_receipts(store)),
+    delivered: backend.read(crate::read_state::all_delivered_to_others(store)),
     marks: backend.read(crate::read_state::marks(store)),
   }
 }

@@ -87,13 +87,13 @@ struct MessageRow: View {
     if let line = SystemLine(message: message, maybeExtras: maybeExtras, names: displayNames) {
       VStack(spacing: 2) {
         Text(line.text)
-          .font(.footnote.italic())
+          .font(.app(.footnote).italic())
           .foregroundStyle(Theme.textMuted)
           .multilineTextAlignment(.center)
         // The room a call moved into, where its summary lands.
         if case .callMoved(_, let room?, _) = line {
           Button("event_call_moved_open") { onOpenConversation(room) }
-            .font(.footnote)
+            .font(.app(.footnote))
         }
       }
       .frame(maxWidth: .infinity)
@@ -124,11 +124,11 @@ struct MessageRow: View {
           HStack(alignment: .firstTextBaseline, spacing: 8) {
             // A source's name always says it's a bot.
             Text(verbatim: message.shownAuthorName)
-              .font(.subheadline.weight(.bold))
+              .font(.app(.subheadline).weight(.bold))
               .foregroundStyle(PersonColor.name(message.authorId))
               .lineLimit(1)
             Text(message.sentDate, style: .time)
-              .font(.caption)
+              .font(.app(.caption))
               .foregroundStyle(Theme.textMuted)
           }
           .accessibilityElement(children: .combine)
@@ -196,7 +196,7 @@ struct MessageBubble: View {
       if showsName {
         // A source's name always says it's a bot.
         Text(verbatim: message.shownAuthorName)
-          .font(.subheadline.weight(.semibold))
+          .font(.app(.subheadline).weight(.semibold))
           .foregroundStyle(PersonColor.name(message.authorId))
           .lineLimit(1)
           .padding(.horizontal, textInset)
@@ -204,7 +204,7 @@ struct MessageBubble: View {
       }
       if let forwarded = maybeExtras?.maybeForwarded {
         Text("forwarded_from \(forwarded.authorName)")
-          .font(.caption.italic())
+          .font(.app(.caption).italic())
           .foregroundStyle(.secondary)
           .padding(.horizontal, textInset)
           .padding(.top, 4)
@@ -225,7 +225,7 @@ struct MessageBubble: View {
           .padding(.top, 3)
       } else if isDeleted {
         Text("message_deleted")
-          .font(.body.italic())
+          .font(.app(.body).italic())
           .foregroundStyle(.secondary)
           .padding(.horizontal, textInset)
           .padding(.top, 3)
@@ -330,9 +330,9 @@ struct PlaceholderLine: View {
 
   var body: some View {
     Label {
-      Text(text).font(.body.italic())
+      Text(text).font(.app(.body).italic())
     } icon: {
-      Image(systemName: symbol).font(.footnote)
+      Image(systemName: symbol).font(.app(.footnote))
     }
     .foregroundStyle(.secondary)
   }
@@ -381,13 +381,13 @@ struct MessageBodyView: View {
   private func blockView(_ block: MarkupBlock) -> some View {
     switch block {
     case .paragraph(let lines):
-      Text(styled(lines)).font(.body)
+      Text(styled(lines)).font(.app(.body))
     case .heading(let level, let line):
       Text(styled([line])).font(headingFont(level))
         .accessibilityAddTraits(.isHeader)
     case .quote(let lines):
       Text(styled(lines))
-        .font(.body)
+        .font(.app(.body))
         .opacity(0.85)
         .padding(.leading, 11)
         .overlay(alignment: .leading) {
@@ -400,16 +400,61 @@ struct MessageBodyView: View {
             Text(marker(kind, index)).monospacedDigit()
             Text(styled([item]))
           }
-          .font(.body)
+          .font(.app(.body))
         }
       }
     case .code(_, let code):
       // Monospace on its own surface, scrolled sideways rather than wrapped.
       ScrollView(.horizontal, showsIndicators: false) {
-        Text(code).font(.callout.monospaced()).fixedSize().padding(.horizontal, 10).padding(.vertical, 8)
+        Text(code).font(.app(.callout).monospaced()).fixedSize().padding(.horizontal, 10).padding(.vertical, 8)
       }
       .background(colors.codeBackground, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    case .table(let alignments, let header, let rows):
+      tableView(alignments: alignments, header: header, rows: rows)
     }
+  }
+
+  /// A table on hairlines, the header in a semibold weight on a light fill; wider than the bubble it
+  /// scrolls sideways. Cells wrap at a readable width instead of stretching a long text.
+  private func tableView(alignments: [MarkupAlignment], header: [MarkupLine], rows: [MarkupRow]) -> some View {
+    let alignment = { (column: Int) -> Alignment in
+      switch column < alignments.count ? alignments[column] : .natural {
+      case .natural, .left: return .leading
+      case .center: return .center
+      case .right: return .trailing
+      }
+    }
+    let cell = { (line: MarkupLine, column: Int, isHeader: Bool) -> AnyView in
+      AnyView(
+        Text(styled([line]))
+          .font(isHeader ? .app(.callout).weight(.semibold) : .app(.callout))
+          .monospacedDigit()
+          .fixedSize(horizontal: false, vertical: true)
+          .frame(maxWidth: 240, alignment: alignment(column))
+          .padding(.horizontal, 10)
+          .padding(.vertical, 5)
+          .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment(column))
+          .background(isHeader ? HierarchicalShapeStyle.primary.opacity(0.06) : HierarchicalShapeStyle.primary.opacity(0))
+      )
+    }
+    return ScrollView(.horizontal, showsIndicators: false) {
+      Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
+        GridRow {
+          ForEach(Array(header.enumerated()), id: \.offset) { column, line in cell(line, column, true) }
+        }
+        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+          Divider()
+          GridRow {
+            ForEach(Array(row.cells.enumerated()), id: \.offset) { column, line in cell(line, column, false) }
+          }
+        }
+      }
+      .fixedSize()
+    }
+    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(HierarchicalShapeStyle.primary.opacity(0.2), lineWidth: 1))
+    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel(Text("message_table_label"))
   }
 
   private func styled(_ lines: [MarkupLine]) -> AttributedString {
@@ -466,9 +511,12 @@ struct BubbleFooter: View {
   var showsTime = true
 
   /// Whether the list's footer has anything to say: pinned, edited, or an own message that is
-  /// still sending, failed or was read. The plain "sent" tick alone isn't worth a line.
+  /// still sending, failed, was delivered or read. The plain "sent" tick alone isn't worth a line.
   static func hasMarks(message: MessageItem, maybeExtras: MessageExtras?, isMine: Bool) -> Bool {
-    let ownState = isMine && (message.isPending || maybeExtras?.isSendFailed == true || maybeExtras?.isRead == true)
+    let ownState =
+      isMine
+      && (message.isPending || maybeExtras?.isSendFailed == true || maybeExtras?.isRead == true
+        || maybeExtras?.isDelivered == true)
     return ownState || message.isEdited || maybeExtras?.isPinned == true
   }
 
@@ -481,7 +529,7 @@ struct BubbleFooter: View {
       if showsTime { Text(message.sentDate, style: .time) }
       if isMine { stateIcon }
     }
-    .font(.caption2)
+    .font(.app(.caption2))
     .foregroundStyle(.secondary)
     .lineLimit(1)
     .accessibilityElement(children: .combine)
@@ -498,6 +546,9 @@ struct BubbleFooter: View {
       // The other member of the DM read it: two ticks at the bubble's full text colour, where the
       // single "sent" tick is muted (desktop and web: two accent ticks, #769).
       DoubleCheckmark().foregroundStyle(Theme.onOwnBubble).accessibilityLabel(Text("message_read"))
+    } else if maybeExtras?.isDelivered == true {
+      // A device of every other member has it: two muted ticks (#598).
+      DoubleCheckmark().accessibilityLabel(Text("message_delivered"))
     } else {
       Image(systemName: "checkmark").accessibilityLabel(Text("message_sent"))
     }
@@ -550,7 +601,7 @@ struct BelowBubble: View {
             }
           } label: {
             Image(systemName: "face.smiling")
-              .font(.caption)
+              .font(.app(.caption))
               .foregroundStyle(Theme.textMuted)
               .padding(.horizontal, 10).padding(.vertical, 4)
               .background(Theme.surface, in: Capsule())
@@ -562,7 +613,7 @@ struct BelowBubble: View {
     }
     if showsThreadLink && message.replyCount > 0 {
       Button(action: onOpenThread) {
-        Text("replies_count \(Int(message.replyCount))").font(.footnote.weight(.semibold))
+        Text("replies_count \(Int(message.replyCount))").font(.app(.footnote).weight(.semibold))
       }
       .padding(.horizontal, 4)
     }
@@ -571,15 +622,15 @@ struct BelowBubble: View {
   /// An own message the server rejected: say so, and offer to send it again or drop it.
   private var notSentLine: some View {
     HStack(spacing: 12) {
-      Label("not_sent", systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(Theme.danger)
+      Label("not_sent", systemImage: "exclamationmark.circle").font(.app(.caption)).foregroundStyle(Theme.danger)
       Button("not_sent_retry") {
         Task { await model.perform(.retrySend(conversationId: message.conversationId, messageId: message.id)) }
       }
-      .font(.caption.weight(.semibold))
+      .font(.app(.caption).weight(.semibold))
       Button("not_sent_delete", role: .destructive) {
         Task { await model.perform(.discardUnsent(conversationId: message.conversationId, messageId: message.id)) }
       }
-      .font(.caption.weight(.semibold))
+      .font(.app(.caption).weight(.semibold))
     }
   }
 }
@@ -592,7 +643,7 @@ struct ReactionPill: View {
   var body: some View {
     Button(action: action) {
       Text("\(reaction.emoji) \(reaction.count)")
-        .font(.caption)
+        .font(.app(.caption))
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(reaction.reactedByMe ? Theme.accentSoft : Theme.surface, in: Capsule())
         .overlay(Capsule().stroke(reaction.reactedByMe ? Theme.accent : Theme.border))
@@ -627,9 +678,9 @@ struct BubbleReplyQuote: View {
     HStack(spacing: 8) {
       VStack(alignment: .leading, spacing: 1) {
         if !author.isEmpty {
-          Text(author).font(.footnote.weight(.semibold)).foregroundStyle(accent).lineLimit(1)
+          Text(author).font(.app(.footnote).weight(.semibold)).foregroundStyle(accent).lineLimit(1)
         }
-        Text(excerpt).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
+        Text(excerpt).font(.app(.footnote)).foregroundStyle(.secondary).lineLimit(2)
       }
       Spacer(minLength: 0)
       if let image = maybeImage { QuotedPicture(image: image, side: 40) }
@@ -716,7 +767,7 @@ struct DayPill: View {
 
   var body: some View {
     Text(label)
-      .font(.footnote.weight(.medium))
+      .font(.app(.footnote).weight(.medium))
       .foregroundStyle(Theme.textMuted)
       .padding(.horizontal, 12).padding(.vertical, 4)
       .background(.regularMaterial, in: Capsule())

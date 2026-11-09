@@ -110,6 +110,8 @@ announced. *Change server* on the sign-in screen leads back to the entry; signin
   (`AfterFirstUnlockThisDeviceOnly`, shared access group), so the extension can open the store while
   the phone is locked. The **OIDC session** (access and refresh token) is in the Keychain too, one per
   server; `SessionVault` refreshes it and hands the core access tokens.
+- The **device key** binds a sign-in to this phone (DPoP, see "Device key" below). It is made when
+  a sign-in or the next refresh gets bound.
 - Database and lock file live in the **App Group container**. Without the entitlement (an unsigned
   simulator build) the app falls back to its own Application Support folder and the Keychain's default
   group; push then only works inside the app.
@@ -121,6 +123,32 @@ cookies), then the core enrolls the device: a new identity with a recovery passp
 with the passphrase, **device linking** (this phone shows a code and QR code; an existing device
 approves it in *Settings → Link a device*, both compare a short code), or **recovery by the
 organization's admins**. Same flows as the Android app.
+
+### Device key (DPoP, docs/e2ee.md §3.1.2)
+
+A session the identity provider binds to a key needs that key for every token it uses: the core signs
+API requests and the gateway and relay first frames, `OidcClient` the requests to the provider. The
+app stores the key and signs bytes (`Shared/DeviceProofKey.swift`); the proofs, nonces, clock and retries are
+the core's, through the FFI (`DeviceProofKey`, `ProviderProver`, `TeamCraft.withDeviceKey`).
+
+- **Where.** In the Secure Enclave, made with `.privateKeyUsage` and nothing else, so it signs without
+  asking the user, also on a locked phone after the first unlock. Where there is no enclave (the
+  Simulator) or it makes no key, a software key takes its place (`StoredDeviceKey.Kind`). Either way one
+  keychain item `dpop-key.<storage key>` in the shared group, `AfterFirstUnlockThisDeviceOnly`: a
+  restored phone gets neither key nor session.
+- **When.** A new sign-in is bound when the provider advertises ES256 and a fresh `server-info` has
+  `DPoP-Nonce`. A session from before gets bound by its next refresh in the app. A refused proof
+  leaves the session unbound and working. The policies `off` and an older server have no nonce, so
+  nothing changes there; under `required` an unbound session is refused and its next refresh or sign-in binds it.
+- **Extension.** It signs for sessions that are bound already, reads the key from the keychain and
+  refreshes under the same lock. It makes no key and binds nothing. It has no memory of the provider's
+  nonce, so each run meets one challenge: one more round trip, one more signature.
+- **When the key can't be used.** A keychain that can't be read or an enclave that doesn't answer keeps
+  the session: nothing goes to the provider and the core retries like a network problem. A key that is
+  gone (read and absent, or not the key the session names) doesn't retry and goes nowhere: the extension
+  shows the plain notification, and the app shows the reason and asks for a sign-in, which makes a new
+  key. Nothing is signed out by itself.
+- **Sign-out** deletes the key, as does a refused refresh token and a local-account sign-in.
 
 ### Push (docs/e2ee.md §7)
 
@@ -348,6 +376,13 @@ a **device** (push, CallKit and memory only work there), then the simulator.
 
 Report anything that fails with the Xcode console log (subsystem `de.zeitgleich.teamcraft` once added) and
 whether it was a device or the simulator.
+
+19. **Device key (DPoP).** Against a server and identity provider that do DPoP (operations.md, "Binding
+    tokens to devices"): sign in on a device and watch `teamcraft_dpop_requests_total` count `bound`.
+    Then with the phone locked: a push still shows the sender and text (the extension refreshed with
+    the key if the token had expired). Sign out, sign in: a new key (the old thumbprint is gone from the
+    provider's admin view). Under `required`, a phone on an unbound session signs in or refreshes to a
+    bound one and works.
 
 ## Known gaps
 

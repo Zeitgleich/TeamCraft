@@ -165,6 +165,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversations: &[ConversationId],
     members_order: &[ConversationId],
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("catch_up_conversations");
     // A catch-up dropped while it held the cursor (the app went away) must not keep it held.
     self.is_welcome_cursor_held = false;
     self.note_first_sync_due(conversations)?;
@@ -254,6 +255,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         };
         self.catch_up_one(conversation, first, phases).await?;
         self.apply_live_during_catch_up().await?;
+        // The UI reads what this conversation brought before the next one is decrypted.
+        self.hand_back_thread().await;
       }
     }
     Ok(())
@@ -287,6 +290,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     &mut self,
     focus: ConversationId,
   ) -> Result<(Result<ListConversationMembersResponse, ApiError>, FirstPages), CoreError> {
+    let _step = crate::timing::step("catch_up_read_focus");
     let queries = self.first_page_queries(&[focus])?;
     let (read, mut pages) =
       futures_util::join!(self.api.list_members(focus), read_pages(&self.api, &queries));
@@ -302,6 +306,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     first: FirstPages,
     phases: &PhaseTimer,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("catch_up_conversation");
     let started_ms = self.now_ms();
     let mls_written_before = self.saved_mls.written_bytes();
     // One conversation's failure (a 403 right after a removal) marks it for another try and the
@@ -397,6 +402,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       for welcome in &page.messages {
         self.catch_up_focus_ahead(ahead, phases).await?;
         self.join_from_welcome(welcome).await?;
+        self.hand_back_thread().await;
       }
       if !page.has_more || page.messages.is_empty() {
         self.are_welcomes_synced = true;
@@ -462,6 +468,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     ahead: &mut AheadOfTheRest,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("join_welcomes");
     let welcomes = match &ahead.maybe_welcomes {
       Some(kept) => kept
         .iter()
@@ -479,6 +486,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let joined = self.join_from_welcome(welcome).await;
       self.is_welcome_cursor_held = false;
       joined?;
+      self.hand_back_thread().await;
     }
     Ok(())
   }
@@ -533,6 +541,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// marks it for another try and the rest goes on. Each loses its mark once read. Not where the
   /// host reads them (`leave_backlogs_to_host`).
   async fn catch_up_backlogs(&mut self, conversations: &[ConversationId]) -> Result<(), CoreError> {
+    let _step = crate::timing::step("catch_up_backlogs");
     let mut due = Vec::new();
     for conversation in conversations {
       if self.has_backlog(*conversation)? {
@@ -559,6 +568,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.store.delete(Table::SyncState, &marker_key(conversation))?;
       self.note_sync_progress();
       self.apply_live_during_catch_up().await?;
+      self.hand_back_thread().await;
     }
     Ok(())
   }
@@ -594,12 +604,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Senders this device has no verified key for yet (it isn't in the group, or just joined).
     self.learn_sender_keys(conversation).await?;
     self.note_content_seen(conversation);
-    Ok(())
+    self.note_delivered(conversation)
   }
 
   /// Reads the first page of each conversation's MLS queue and messages at once. Failures are
   /// kept for the conversation's own catch-up to handle, like a failed read of its own.
   async fn read_first_pages(&mut self, batch: &[ConversationId]) -> Result<Vec<FirstPages>, CoreError> {
+    let _step = crate::timing::step("catch_up_read_first_pages");
     let queries = self.first_page_queries(batch)?;
     let mut pages = read_pages(&self.api, &queries).await;
     self.read_members_ahead(batch, &mut pages).await;
@@ -682,6 +693,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         if self.isolate(*conversation, ResyncPart::Members, result)? {
           self.unmark_resync(*conversation, ResyncPart::Members)?;
         }
+        self.hand_back_thread().await;
       }
     }
     Ok(())

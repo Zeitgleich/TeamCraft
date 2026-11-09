@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM brand_mail_servers WHERE brand_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "09d6e960e0cba0ea07cf70d970cdea454bfe0fee75bddc1ce514838a057e80a6"
+}

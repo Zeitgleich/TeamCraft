@@ -24,6 +24,7 @@ use crate::config::GuestsConfig;
 use crate::error::ApiError;
 use crate::meetings::ical::Method;
 use crate::meetings::mailer::OutgoingMail;
+use crate::runtime::brand_mail::run_per_route;
 use crate::state::AppState;
 
 /// Guests handled per run; a larger backlog continues at the next run.
@@ -517,15 +518,13 @@ async fn mail_notices(
   sponsored: &HashMap<UserId, u32>,
   guests: &HashMap<UserId, i32>,
 ) -> Result<(), ApiError> {
-  let Some(mailer) = state.mailer.get() else {
-    return Ok(());
-  };
   let people: Vec<UserId> = sponsored.keys().chain(guests.keys()).copied().collect();
   let emails = state.database.get_user_emails(&people).await?;
   let settings = state.settings.get();
   let config = &settings.guests;
   let brands = state.brands.current();
   let mut outgoing = Vec::new();
+  let mut queued = Vec::new();
   for (sponsor, count) in sponsored {
     outgoing.push((
       *sponsor,
@@ -549,6 +548,9 @@ async fn mail_notices(
       continue;
     };
     let brand = brands.for_email(address);
+    let Some(mailer) = state.mailer_for(brand) else {
+      continue;
+    };
     let url = brand.base_url(&settings.mail.public_base_url);
     let mail = OutgoingMail {
       to_address: address.clone(),
@@ -564,10 +566,16 @@ async fn mail_notices(
       maybe_from_address: None,
     }
     .as_brand(brand);
-    if let Err(error) = mailer.send(&mail).await {
-      warn!(%error, user_id = %user, "mailing a guest expiry notice failed");
-    }
+    queued.push((state.mail_route(brand), (user, mailer, mail)));
   }
+  run_per_route(queued, |queue| async move {
+    for (user, mailer, mail) in queue {
+      if let Err(error) = mailer.send(&mail).await {
+        warn!(%error, user_id = %user, "mailing a guest expiry notice failed");
+      }
+    }
+  })
+  .await;
   Ok(())
 }
 

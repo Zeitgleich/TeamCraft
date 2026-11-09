@@ -254,19 +254,65 @@ fn answer(status: u16, maybe_retry_after: Option<&reqwest::header::HeaderValue>)
   }
 }
 
-/// An envelope: within the size limit, and its first line a JSON object (the envelope header).
-/// The rest is the backend's to read; the server doesn't parse reports further.
+/// Item types the relay forwards: crash and error reports, and performance data (issue #1521).
+/// Anything else (attachments, sessions, replays) is not what the apps send and is refused.
+const RELAYED_ITEM_TYPES: [&str; 2] = ["event", "transaction"];
+
+/// An envelope: within the size limit, its first line a JSON object (the envelope header), then
+/// one or more items whose type the relay forwards. The payloads are the backend's to read; the
+/// server doesn't parse reports further.
 fn check_envelope(body: &[u8]) -> Result<(), ApiError> {
   if body.len() > MAX_CRASH_ENVELOPE_BYTES {
     return Err(ApiError::PayloadTooLarge(format!(
       "a crash report may have at most {MAX_CRASH_ENVELOPE_BYTES} bytes"
     )));
   }
-  let header = body.split(|byte| *byte == b'\n').next().unwrap_or_default();
-  match serde_json::from_slice::<serde_json::Value>(header) {
-    Ok(serde_json::Value::Object(_)) if body.contains(&b'\n') => Ok(()),
-    _ => Err(ApiError::InvalidRequest("not a crash report envelope".into())),
+  let not_envelope = || ApiError::InvalidRequest("not a crash report envelope".into());
+  let (header, mut rest) = split_line(body).ok_or_else(not_envelope)?;
+  if !matches!(serde_json::from_slice(header), Ok(serde_json::Value::Object(_))) {
+    return Err(not_envelope());
   }
+  let mut items = 0;
+  while !rest.iter().all(u8::is_ascii_whitespace) {
+    let (item_header, after) = split_line(rest).unwrap_or((rest, &[]));
+    let item: ItemHeader = serde_json::from_slice(item_header).map_err(|_| not_envelope())?;
+    if !RELAYED_ITEM_TYPES.contains(&item.item_type.as_str()) {
+      return Err(ApiError::InvalidRequest(
+        "the relay forwards only events and transactions".into(),
+      ));
+    }
+    rest = match item.maybe_length {
+      Some(length) => {
+        let payload_end = usize::try_from(length)
+          .ok()
+          .filter(|end| *end <= after.len())
+          .ok_or_else(not_envelope)?;
+        let tail = &after[payload_end..];
+        tail.strip_prefix(b"\n").unwrap_or(tail)
+      },
+      None => split_line(after).map_or(&[][..], |(_, tail)| tail),
+    };
+    items += 1;
+  }
+  if items == 0 {
+    return Err(not_envelope());
+  }
+  Ok(())
+}
+
+/// An item's header; the rest of it is the backend's.
+#[derive(serde::Deserialize)]
+struct ItemHeader {
+  #[serde(rename = "type")]
+  item_type: String,
+  #[serde(default, rename = "length")]
+  maybe_length: Option<u64>,
+}
+
+/// The line up to the first `\n` and what follows it; `None` without a line break.
+fn split_line(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+  let end = bytes.iter().position(|byte| *byte == b'\n')?;
+  Some((&bytes[..end], &bytes[end + 1..]))
 }
 
 #[cfg(test)]
@@ -280,6 +326,7 @@ mod tests {
   fn only_envelopes_within_the_limit_pass() {
     assert!(check_envelope(b"{\"event_id\":\"x\"}\n{\"type\":\"event\"}\n{}\n").is_ok());
     assert!(check_envelope(b"{}").is_err(), "no item");
+    assert!(check_envelope(b"{}\n").is_err(), "no item");
     assert!(check_envelope(b"[1]\n{}\n").is_err());
     assert!(check_envelope(b"<html>\n").is_err());
     let mut huge = b"{}\n".to_vec();
@@ -288,6 +335,35 @@ mod tests {
       check_envelope(&huge).unwrap_err().status(),
       StatusCode::PAYLOAD_TOO_LARGE
     );
+  }
+
+  #[test]
+  fn transactions_pass_and_other_item_types_do_not() {
+    let payload = r#"{"type":"transaction","transaction":"channel.switch"}"#;
+    let with_length = format!(
+      "{{\"event_id\":\"x\"}}\n{{\"type\":\"transaction\",\"length\":{}}}\n{payload}\n",
+      payload.len()
+    );
+    assert!(check_envelope(with_length.as_bytes()).is_ok());
+    assert!(
+      check_envelope(b"{}\n{\"type\":\"transaction\"}\n{}").is_ok(),
+      "no length, no final newline"
+    );
+    // A length can hold line breaks inside the payload.
+    assert!(check_envelope(b"{}\n{\"type\":\"event\",\"length\":3}\na\nb\n").is_ok());
+    for refused in [
+      &b"{}\n{\"type\":\"attachment\",\"length\":2}\nab\n"[..],
+      b"{}\n{\"type\":\"event\"}\n{}\n{\"type\":\"replay_event\"}\n{}\n",
+      b"{}\n{\"type\":\"event\",\"length\":99}\n{}\n",
+      b"{}\n{\"length\":2}\n{}\n",
+    ] {
+      assert_eq!(
+        check_envelope(refused).unwrap_err().status(),
+        StatusCode::BAD_REQUEST,
+        "{}",
+        String::from_utf8_lossy(refused)
+      );
+    }
   }
 
   #[test]

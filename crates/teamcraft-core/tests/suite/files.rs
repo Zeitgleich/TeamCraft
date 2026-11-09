@@ -19,6 +19,9 @@ use teamcraft_client_api::actions::{
   PixelSize, ShareLinkOptions,
 };
 use teamcraft_client_api::backend::ChatBackend;
+use teamcraft_client_api::files_query::{
+  self, FileKind, FileScope, FileSort, FilesPage, FilesQuery, StarredFile,
+};
 use teamcraft_client_api::model::Message;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::files::{UploadRetrySettings, UploadStep};
@@ -884,6 +887,94 @@ async fn each_file_of_a_message_has_its_own_share_link() {
       .share_links(channel, message.id, "no-such-file")
       .is_empty()
   );
+}
+
+/// Issue #1509: the Files view's page comes from the store's index, newest first across
+/// conversations, filtered and paged, and is read again once a file arrives.
+#[tokio::test]
+async fn the_files_page_reads_the_index_newest_first() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
+  for (name, media_type) in [
+    ("old.pdf", "application/pdf"),
+    ("photo.jpg", "image/jpeg"),
+    ("new.txt", "text/plain"),
+  ] {
+    alice_ui.send_message(with_files(channel, "", vec![file(name, media_type, jpeg())]));
+    run_commands(&mut alice, &alice_ui).await;
+    settle(&mut [&mut alice, &mut bob]).await;
+  }
+  alice_ui.send_message(with_files(channel, "no files here", Vec::new()));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let page = |kind, sort, max_files| {
+    bob_ui
+      .files_page(&FilesQuery {
+        scope: FileScope::Everything,
+        kind,
+        sort,
+        starred: &[],
+        max_files,
+      })
+      .expect("the core answers at once")
+  };
+  let names =
+    |page: &FilesPage| -> Vec<String> { page.files.iter().map(|file| file.file_name.clone()).collect() };
+  let newest = page(FileKind::All, FileSort::Newest, 2);
+  assert_eq!(names(&newest), ["new.txt", "photo.jpg"]);
+  assert!(newest.has_more);
+  let all = page(FileKind::All, FileSort::Newest, 10);
+  assert_eq!(names(&all), ["new.txt", "photo.jpg", "old.pdf"]);
+  assert!(!all.has_more);
+  assert_eq!(
+    names(&page(FileKind::All, FileSort::Oldest, 2)),
+    ["old.pdf", "photo.jpg"]
+  );
+  assert_eq!(names(&page(FileKind::Media, FileSort::Newest, 10)), ["photo.jpg"]);
+  assert_eq!(
+    names(&page(FileKind::Documents, FileSort::Newest, 10)),
+    ["new.txt", "old.pdf"]
+  );
+  assert_eq!(
+    names(&page(FileKind::All, FileSort::Name, 2)),
+    ["new.txt", "photo.jpg"],
+    "name orders the newest files of the page"
+  );
+  // The same as the rule every backend without an index follows.
+  assert_eq!(
+    all,
+    files_query::files_page(
+      &bob_ui,
+      &FilesQuery {
+        scope: FileScope::Everything,
+        kind: FileKind::All,
+        sort: FileSort::Newest,
+        starred: &[],
+        max_files: 10,
+      },
+    )
+  );
+  let star = StarredFile::of(&all.files[2]);
+  let starred = bob_ui
+    .files_page(&FilesQuery {
+      scope: FileScope::Everything,
+      kind: FileKind::Starred,
+      sort: FileSort::Newest,
+      starred: std::slice::from_ref(&star),
+      max_files: 10,
+    })
+    .unwrap();
+  assert_eq!(names(&starred), ["old.pdf"]);
+
+  // A file that arrives is listed at the next read.
+  alice_ui.send_message(with_files(
+    channel,
+    "",
+    vec![file("newer.txt", "text/plain", jpeg())],
+  ));
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(names(&page(FileKind::All, FileSort::Newest, 1)), ["newer.txt"]);
 }
 
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {

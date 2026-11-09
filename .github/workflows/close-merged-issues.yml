@@ -1,0 +1,42 @@
+name: Close merged issues
+
+# A pull request merged by github-actions (auto-merge turned on with `GITHUB_TOKEN`, see
+# auto-merge.yml) leaves the issues it names with "Closes #…" open: GitHub skips its closing
+# keywords for that actor. This closes them: every open issue that a pull request merged in the
+# last two days names as closing. Issues a pull request only mentions ("Part of #…") are not
+# closing references and stay open. Idempotent; the two-day window covers missed scheduled runs.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: close-merged-issues
+  cancel-in-progress: false
+
+jobs:
+  close:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Close issues of merged pull requests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          since="$(date -u -d '2 days ago' +%Y-%m-%d)"
+          gh pr list --state merged --base main --limit 200 --search "merged:>=$since" \
+            --json number,closingIssuesReferences \
+            --jq '.[] | .number as $pr | .closingIssuesReferences[] | "\(.number) \($pr)"' |
+            sort -u |
+            while read -r issue pr; do
+              state="$(gh issue view "$issue" --json state --jq .state)"
+              if [ "$state" = "OPEN" ]; then
+                echo "Closing #$issue (pull request #$pr)"
+                gh issue close "$issue" --reason completed --comment "Done in #$pr (merged)."
+              fi
+            done

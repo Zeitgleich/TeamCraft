@@ -64,6 +64,8 @@ mod web_feed_stability;
 #[cfg(feature = "browser")]
 mod web_mobile;
 #[cfg(feature = "browser")]
+mod web_new_device;
+#[cfg(feature = "browser")]
 mod web_single_image;
 #[cfg(feature = "browser")]
 mod web_split;

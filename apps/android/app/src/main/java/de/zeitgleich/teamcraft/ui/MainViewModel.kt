@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui
 
+import de.zeitgleich.teamcraft.crash.Perf
 import android.util.Log
 import android.app.Application
 import android.content.Intent
@@ -80,11 +81,14 @@ import de.zeitgleich.teamcraft.server.isServerAllowed
 import de.zeitgleich.teamcraft.server.serverEntryErrorText
 import de.zeitgleich.teamcraft.server.transportErrorText
 import uniffi.teamcraft_ffi.AccountState
+import uniffi.teamcraft_ffi.AddPeopleOutcome
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CheckedServer
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.ConversationKind
+import uniffi.teamcraft_ffi.CreateOutcome
+import de.zeitgleich.teamcraft.ui.forms.CreateResult
 import uniffi.teamcraft_ffi.LeaveChoice
 import uniffi.teamcraft_ffi.LinkPlatform
 import uniffi.teamcraft_ffi.LinkRequestItem
@@ -695,11 +699,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   suspend fun refreshChatList(myId: String) = chatListLock.withLock {
     val conversations = runCatching { graph.core.conversations() }.getOrNull()
     if (conversations == null) {
+      // A start whose chat list can't be read failed (#1375): its measure says so.
+      Perf.chatListFailed()
       // Cached rows stay; with none, the list says it could not be read instead of loading for ever.
       chatListState.update { if (it.maybeConversations == null) it.copy(maybeReadFailure = LoadFailure.OTHER) else it }
       return@withLock
     }
     chatListState.update { it.copy(maybeConversations = conversations, maybeReadFailure = null, runningCalls = runningCalls()) }
+    // The chat list shows the core's rows: a signed-in start is done (#1521).
+    Perf.chatListShown()
     val previews = chatPreviews(conversations, myId)
     chatListState.update { it.copy(previews = previews) }
     isStartCacheStale = false
@@ -869,8 +877,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     graph.notifier.dismiss(conversationId)
   }
 
-  fun setPresence(presence: Presence) = viewModelScope.launch {
-    runCatching { graph.core.core().setPresence(presence) }
+  /** Sets the status; with [maybeUntil] it is automatic again from then ("Reset after", #1578). */
+  fun setPresence(presence: Presence, maybeUntil: java.time.Instant? = null) = viewModelScope.launch {
+    runCatching {
+      val core = graph.core.core()
+      if (maybeUntil == null) core.setPresence(presence) else core.setPresenceUntil(presence, maybeUntil.toEpochMilli())
+    }
   }
 
   /** `{origin}/c/{id}` of a conversation on the active server, if it has a web address (#1105). */
@@ -963,6 +975,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
   /**
+   * Runs a create call of a form (#1534): the new conversation's or space's ID, a refusal of the
+   * name for its field, or why it failed otherwise. The form stays open unless it was created.
+   */
+  suspend fun tryCreate(create: suspend ChatClient.() -> CreateOutcome): CreateResult =
+    try {
+      when (val outcome = withContext(Dispatchers.Default) { chat.create() }) {
+        is CreateOutcome.Created -> CreateResult.Created(outcome.id)
+        is CreateOutcome.NameRefused -> CreateResult.NameRefused
+        is CreateOutcome.NotAllowed -> CreateResult.Failed(R.string.create_not_allowed)
+      }
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: TeamCraftException) {
+      CreateResult.Failed(errorText(failure))
+    } catch (failure: IllegalStateException) {
+      CreateResult.Failed(R.string.error_signed_out)
+    }
+
+  /** Adds people to a channel (#1534); answers why it failed, or null once everybody is in. */
+  @StringRes
+  suspend fun tryAddPeople(conversation: String, users: List<String>): Int? =
+    try {
+      when (withContext(Dispatchers.Default) { chat.addPeopleToChannel(conversation, users) }) {
+        AddPeopleOutcome.ADDED -> null
+        AddPeopleOutcome.NOT_IN_SPACE -> R.string.members_add_not_in_space
+        AddPeopleOutcome.NOT_ALLOWED -> R.string.create_not_allowed
+      }
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: TeamCraftException) {
+      errorText(failure)
+    } catch (failure: IllegalStateException) {
+      R.string.error_signed_out
+    }
+
+  /** Whether "New space" shows; false while the server can't tell (offline). */
+  suspend fun canCreateSpaces(): Boolean = readChat { canCreateSpaces() } ?: false
+
+  /**
    * Saves the member's own name (`null`: the sign-in name). Answers the string to show at the field
    * when it failed. A refusal of the server (too long, or the policy changed meanwhile) is worded
    * for the name; no connection and the like are worded as everywhere.
@@ -1032,6 +1083,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /** The failure to show, taken so that only one screen shows it; `null` when another took it. */
   fun takeFailure(): Int? = failures.getAndUpdate { null }
+
+  /**
+   * Asks the server for one page of a directory list (#1337): the page, or why it failed, so the
+   * list can say so and offer another try.
+   */
+  suspend fun <T> fetchPage(block: suspend ChatClient.() -> T): PageAnswer<T> =
+    try {
+      PageAnswer.Loaded(withContext(Dispatchers.Default) { chat.block() })
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: TeamCraftException) {
+      PageAnswer.Failed(if (failure is TeamCraftException.Network) LoadFailure.NETWORK else LoadFailure.OTHER)
+    } catch (failure: IllegalStateException) {
+      PageAnswer.Failed(LoadFailure.OTHER)
+    }
+
+  /**
+   * Runs a directory action (invite, resend, revoke): its outcome, or the text of why it failed
+   * when the server didn't answer it.
+   */
+  suspend fun <T> tryDirectoryAction(block: suspend ChatClient.() -> T): ActionAnswer<T> =
+    try {
+      ActionAnswer.Answered(withContext(Dispatchers.Default) { chat.block() })
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: TeamCraftException) {
+      ActionAnswer.Failed(errorText(failure))
+    } catch (failure: IllegalStateException) {
+      ActionAnswer.Failed(R.string.error_signed_out)
+    }
 
   /** Runs a read; `null` when the core can't answer (not enrolled, gone). */
   suspend fun <T> readChat(block: suspend ChatClient.() -> T): T? =
@@ -1784,3 +1865,17 @@ private const val MAX_FILE_NAME_CHARS = 255
 /** How many removed or sent draft files the composers keep hidden ([MainViewModel.goneDraftFiles]). */
 private const val MAX_GONE_DRAFT_FILES = 256
 private const val BIDI_CONTROLS = "\u061C\u200E\u200F\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069"
+
+/** A page of a server list, or why it could not be read. */
+sealed interface PageAnswer<out T> {
+  data class Loaded<T>(val value: T) : PageAnswer<T>
+
+  data class Failed(val failure: LoadFailure) : PageAnswer<Nothing>
+}
+
+/** The server's answer to an action, or the text of why there was none. */
+sealed interface ActionAnswer<out T> {
+  data class Answered<T>(val value: T) : ActionAnswer<T>
+
+  data class Failed(@StringRes val text: Int) : ActionAnswer<Nothing>
+}

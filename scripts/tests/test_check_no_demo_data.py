@@ -51,6 +51,20 @@ class ScanTest(unittest.TestCase):
                 tar.add(folder / "app.wasm", arcname="./app.wasm")
             self.assertEqual(run([archive]), 1)
 
+    def test_a_font_licence_is_no_demo_space(self):
+        # The OFL notices name "The Inter Project Authors": no "Project A" (v1.0.26 failed on it).
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = pathlib.Path(directory)
+            (bundle / "OFL-inter.txt").write_text("Copyright 2020 The Inter Project Authors")
+            (bundle / "Inter.woff2").write_bytes(b"wOF2\x00The Lexend Project Authors\x00Project Bold")
+            self.assertEqual(run([bundle]), 0)
+
+    def test_a_demo_space_next_to_punctuation_still_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = pathlib.Path(directory)
+            (bundle / "app.wasm").write_bytes(b'\x00asm{"name":"Project B"}')
+            self.assertEqual(run([bundle]), 1)
+
     def test_nothing_to_scan_is_an_error(self):
         with tempfile.TemporaryDirectory() as directory:
             self.assertEqual(run([pathlib.Path(directory)]), 2)

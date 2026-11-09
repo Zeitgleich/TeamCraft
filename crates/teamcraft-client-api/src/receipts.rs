@@ -33,6 +33,13 @@ pub fn is_read_by_all(seen_by: &[UserId], members: &[UserId], me: UserId) -> boo
   others.peek().is_some() && others.all(|member| seen_by.contains(member))
 }
 
+/// Whether the message reached a device of every other member (#598): the server's aggregate
+/// "everyone else has it up to here" reaches it. `None` (channels, delivery off on either side,
+/// not known yet) never reads as delivered.
+pub fn is_delivered(maybe_delivered_to_others: Option<MessageId>, message: MessageId) -> bool {
+  maybe_delivered_to_others.is_some_and(|delivered| delivered >= message)
+}
+
 /// The members whose read receipt (the newest message they read) reaches `message`.
 pub fn seen_by(receipts: &[(UserId, MessageId)], message: MessageId) -> Vec<UserId> {
   receipts
@@ -96,6 +103,14 @@ mod tests {
     assert_eq!(seen_by(&receipts, message(10)), vec![a, b]);
     assert_eq!(seen_by(&receipts, message(15)), vec![a]);
     assert_eq!(seen_by(&receipts, message(21)), Vec::<UserId>::new());
+  }
+
+  #[test]
+  fn delivered_covers_its_message_and_everything_before() {
+    assert!(is_delivered(Some(message(20)), message(20)));
+    assert!(is_delivered(Some(message(20)), message(10)));
+    assert!(!is_delivered(Some(message(20)), message(21)));
+    assert!(!is_delivered(None, message(1)));
   }
 
   fn user(raw: u64) -> UserId {

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH gone AS (\n           DELETE FROM webhook_deliveries\n           WHERE (webhook_id, event_id) IN (\n             SELECT webhook_id, event_id FROM webhook_deliveries\n             WHERE created_at < now() - $1::bigint * interval '1 millisecond'\n             FOR UPDATE SKIP LOCKED)\n           RETURNING webhook_id\n         ), counted AS (\n           UPDATE webhooks w SET dropped_count = w.dropped_count + g.count\n           FROM (SELECT webhook_id, COUNT(*) AS count FROM gone GROUP BY webhook_id) g\n           WHERE w.id = g.webhook_id\n           RETURNING w.id\n         )\n         SELECT (SELECT COUNT(*) FROM gone) AS \"count!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2ce36008fbd693e4254d498f624baa59afbe73a91516a45ade404d61cecf534b"
+}

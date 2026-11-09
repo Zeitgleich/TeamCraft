@@ -38,6 +38,7 @@ use crate::EventListener;
 use crate::engine::{Job, Store, direct_peer, feed_anchor, older_len, parse_id};
 use crate::error::TeamCraftError;
 use crate::logging;
+use crate::perf_jobs::{self, PerfJobKind};
 use crate::types::{
   AccountState, ChatPreviewItem, ConversationItem, FirstSyncItem, FirstSyncStageItem, KeyCatchUpItem,
   LeaveChoice, MentionSettings, MessageItem, MessagePage, NotificationContentSettings, NotifiedConversation,
@@ -129,6 +130,7 @@ impl ReadQueue {
     let (queue, jobs) = mpsc::channel::<ReadJob>();
     std::thread::Builder::new()
       .name("teamcraft-reads".into())
+      .stack_size(crate::engine::THREAD_STACK_BYTES)
       .spawn(move || {
         let mut reads = Reads {
           store,
@@ -252,13 +254,17 @@ impl ReadQueue {
   {
     let (reply, answer) = oneshot::channel();
     let queued = Instant::now();
+    let timing = perf_jobs::queued(PerfJobKind::ReadQueue, std::any::type_name::<F>());
     let boxed: ReadJob = Box::new(move |reads| {
       if when_gone == WhenCallerGone::Skip && reply.is_closed() {
+        timing.skip();
         return;
       }
+      let running = timing.start();
       let started = Instant::now();
       let result = reads.together(job);
       logging::slow_read(std::any::type_name::<F>(), started - queued, started.elapsed());
+      running.done();
       // The caller may have given up waiting meanwhile (cancelled coroutine); nothing to tell it.
       let _ = reply.send(result);
     });
@@ -283,15 +289,19 @@ impl ReadQueue {
       return Ok(answer);
     }
     let queued = Instant::now();
+    let timing = perf_jobs::queued(PerfJobKind::ReadQueue, std::any::type_name::<F>());
     let pass = shared.clone();
     let boxed: ReadJob = Box::new(move |reads| {
       let callers = pass.start();
       if callers.is_empty() {
+        timing.skip();
         return;
       }
+      let running = timing.start();
       let started = Instant::now();
       let result = reads.together(job);
       logging::slow_read(std::any::type_name::<F>(), started - queued, started.elapsed());
+      running.done();
       for caller in callers {
         // A caller may have given up waiting meanwhile; nothing to tell it then.
         let _ = caller.send(result.clone());
@@ -673,8 +683,14 @@ impl Reads {
     Ok(())
   }
 
-  pub(crate) fn set_presence(&self, presence: Presence) -> Result<(), TeamCraftError> {
-    self.backend()?.set_presence(presence.into());
+  pub(crate) fn set_presence(
+    &self,
+    presence: Presence,
+    maybe_until_ms: Option<i64>,
+  ) -> Result<(), TeamCraftError> {
+    self
+      .backend()?
+      .set_presence_until(presence.into(), maybe_until_ms);
     Ok(())
   }
 
@@ -783,6 +799,39 @@ mod tests {
   mod queue {
     use super::*;
 
+    /// Issue #1521 against #1466: a chat open that waited behind forty chat list reads shows,
+    /// in its measure's steps, that it waited in a queue forty deep behind `chat_list_pass`.
+    #[tokio::test]
+    async fn a_chat_open_behind_a_flood_names_what_it_waited_for() {
+      let (queue, release) = held_queue();
+      let since_ms = perf_jobs::now_ms();
+      let floods: Vec<_> = (0..40)
+        .map(|_| queue.queue(WhenCallerGone::Run, chat_list_pass()).unwrap())
+        .collect();
+      let open = queue.queue(WhenCallerGone::Run, open_chat()).unwrap();
+
+      release.send(()).unwrap();
+      open.await.unwrap().unwrap();
+      for flood in floods {
+        flood.await.unwrap().unwrap();
+      }
+      let spans = perf_jobs::perf_job_spans(since_ms, perf_jobs::now_ms());
+      let opened = spans
+        .iter()
+        .find(|span| span.name == "open_chat")
+        .expect("the chat open is a step of the measure");
+      assert_eq!(opened.kind, PerfJobKind::ReadQueue);
+      // Other tests share the counter, so at least: forty before it and itself.
+      assert!(opened.queue_depth >= 41, "{}", opened.queue_depth);
+      assert!(opened.started_at_ms >= opened.enqueued_at_ms);
+      assert!(
+        spans
+          .iter()
+          .any(|span| span.name == "chat_list_pass" && span.done_at_ms <= opened.started_at_ms),
+        "what it waited behind is named: {spans:?}"
+      );
+    }
+
     #[tokio::test]
     async fn a_read_whose_caller_is_gone_is_skipped() {
       let (queue, release) = held_queue();
@@ -890,6 +939,16 @@ mod tests {
     (queue, release)
   }
 
+  /// The chat list's read in #1466's flood (each a separate pass, as before sharing).
+  fn chat_list_pass() -> impl FnOnce(&mut Reads) -> Result<(), TeamCraftError> + Send + 'static {
+    |_| Ok(())
+  }
+
+  /// The read a chat open waits for.
+  fn open_chat() -> impl FnOnce(&mut Reads) -> Result<(), TeamCraftError> + Send + 'static {
+    |_| Ok(())
+  }
+
   /// A job that counts its runs and answers `value`.
   fn counting<R: Send + 'static>(
     runs: &Arc<AtomicUsize>,
@@ -923,6 +982,8 @@ mod tests {
       maybe_imported: None,
       maybe_source: None,
       maybe_placeholder: None,
+      group_mentions: Vec::new(),
+      mentions_me: false,
     }
   }
 }

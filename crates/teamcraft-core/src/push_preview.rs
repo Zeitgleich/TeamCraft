@@ -18,6 +18,7 @@ use crate::api::ServerApi;
 use crate::client::decrypt_plaintext;
 use crate::error::CoreError;
 use crate::people_names::shown_name;
+use crate::readable_text::readable_text;
 use crate::records;
 use crate::store::{LocalStore, Table};
 
@@ -128,6 +129,7 @@ pub async fn push_preview<A: ServerApi>(
   maybe_api: Option<&A>,
   sealed: &[u8],
 ) -> Result<PushPreview, CoreError> {
+  let _step = crate::timing::step("push_preview");
   let wake_up = open_push_wakeup(store, sealed)?;
   let maybe_conversation: Option<ConversationResponse> =
     records::get_json(store, Table::Conversations, &wake_up.conversation_id.to_string())?;
@@ -453,6 +455,7 @@ async fn fetch_and_decrypt<A: ServerApi>(
   wake_up: &PushWakeUp,
   message_id: MessageId,
 ) -> Result<(UserId, ShownContent), CoreError> {
+  let _step = crate::timing::step("push_fetch_decrypt");
   // `before` is exclusive: start right after the message, newest first.
   let next = Snowflake::new(message_id.snowflake().get().saturating_add(1))
     .map_err(|_| CoreError::Corrupt("message ID out of range".into()))?;
@@ -573,7 +576,9 @@ fn participant_name(
     .map(shown_name)
 }
 
-fn truncate(text: &str) -> String {
+/// The body as the notification shows it (tables as lines of cells), cut to its length.
+fn truncate(body: &str) -> String {
+  let text = readable_text(body);
   match text.char_indices().nth(MAX_PREVIEW_CHARS) {
     Some((cut, _)) => format!("{}…", &text[..cut]),
     None => text.to_string(),
@@ -695,6 +700,19 @@ mod tests {
     assert_eq!(
       content_preview(&shown(&text(" ", MessageMeta::default()))),
       PreviewContent::Unavailable
+    );
+  }
+
+  #[test]
+  fn tables_are_shown_as_rows_of_cells() {
+    let table = MessageContent::Text {
+      body: "Due:\n| Name | Due |\n|---|---|\n| Project A | Friday |".into(),
+      mentions: Vec::new(),
+      meta: MessageMeta::default(),
+    };
+    assert_eq!(
+      content_preview(&shown(&table)),
+      PreviewContent::Text("Due:\nName · Due\nProject A · Friday".into())
     );
   }
 

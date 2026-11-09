@@ -40,14 +40,10 @@ enum ChatAction {
   case deleteChannel(conversationId: String)
   /// Deletes a space with its channels for everybody, after the user confirmed it.
   case deleteSpace(spaceId: String)
-  case createChannel(spaceId: String, name: String)
-  /// The direct conversation with a person; created when there is none yet.
-  case openDm(userId: String)
-  /// The group DM with exactly these people (and the user); created when there is none yet.
-  case openGroupDm(userIds: [String])
+  /// Joins an open space (#1526); its default channels follow.
+  case joinSpace(spaceId: String)
   /// Reads again how far the others read: receipts sent while the app was offline never arrive.
   case refreshReadReceipts(conversationId: String)
-  case refreshSpaceRoster(spaceId: String)
   case refreshCallHistory
   /// The reactions to these own messages were on screen, or the user jumped to them: seen on
   /// every device (issue #1009).
@@ -120,14 +116,6 @@ enum ChatAction {
       object = ["action": "cancel_upload", "conversation": conversation, "message": message, "file_id": file]
     case .joinChannel(let conversation):
       object = ["action": "join_channel", "conversation": conversation]
-    case .createChannel(let space, let name):
-      object = ["action": "create_channel", "space": space, "name": name]
-    case .openDm(let user):
-      object = ["action": "open_dm", "user": user]
-    case .openGroupDm(let users):
-      object = ["action": "open_group_dm", "users": users]
-    case .refreshSpaceRoster(let space):
-      object = ["action": "refresh_space_roster", "space": space]
     case .refreshCallHistory:
       object = ["action": "refresh_call_history"]
     case .refreshReadReceipts(let conversation):
@@ -138,6 +126,8 @@ enum ChatAction {
       object = ["action": "delete_channel", "conversation": conversation]
     case .deleteSpace(let space):
       object = ["action": "delete_space", "space": space]
+    case .joinSpace(let space):
+      object = ["action": "join_space", "space": space]
     case .extendGuest(let space, let user, let expiresAtMs):
       object = ["action": "extend_guest", "space": space, "user": user, "expires_at_ms": expiresAtMs]
     case .markReactionsSeen(let conversation, let messages):
@@ -264,7 +254,6 @@ enum ChatQuery {
   case spaceFiles(spaceId: String)
   case spaceSavedItems(spaceId: String)
   case spaceCallHistory(spaceId: String)
-  case spaceMembers(spaceId: String)
   case maxUploadBytes
   case resolvePermalink(link: String)
   /// Everyone typing anywhere, thread replies apart: one answer for the list, the header and the lines (#882).
@@ -273,6 +262,8 @@ enum ChatQuery {
   /// The channels of a space the user is in or can join.
   case browseChannels(spaceId: String)
   case expiringGuests
+  /// Open spaces the user isn't in, from the stored space list (#1526).
+  case joinableSpaces
   /// Others' reactions to the user's messages here that the user hasn't seen.
   case unseenReactions(conversationId: String)
   case olderHistory(conversationId: String)
@@ -301,8 +292,6 @@ enum ChatQuery {
       return jsonText(["kind": "space_saved_items", "space": space])
     case .spaceCallHistory(let space):
       return jsonText(["kind": "space_call_history", "space": space])
-    case .spaceMembers(let space):
-      return jsonText(["kind": "space_members", "space": space])
     case .maxUploadBytes:
       return jsonText(["kind": "max_upload_bytes"])
     case .resolvePermalink(let link):
@@ -315,6 +304,8 @@ enum ChatQuery {
       return jsonText(["kind": "browse_channels", "space": space])
     case .expiringGuests:
       return jsonText(["kind": "expiring_guests"])
+    case .joinableSpaces:
+      return jsonText(["kind": "joinable_spaces"])
     case .unseenReactions(let conversation):
       return jsonText(["kind": "unseen_reactions", "conversation": conversation])
     case .olderHistory(let conversation):

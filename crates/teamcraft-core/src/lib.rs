@@ -23,6 +23,7 @@ pub mod signed_deletion;
 pub mod space_dms;
 // The keys come from the UI contract (client-api), which the hosts of a UI build in; the service
 // worker reads pictures for its notifications.
+pub mod group_mentions;
 #[cfg(any(feature = "ui", feature = "service-worker"))]
 pub mod media_cache;
 pub mod mls_storage;
@@ -42,6 +43,7 @@ pub mod push_probe;
 pub mod push_subscription;
 pub mod push_text;
 pub mod read_state;
+pub mod readable_text;
 pub mod records;
 pub mod retry;
 pub mod role_signing;
@@ -54,6 +56,7 @@ pub mod store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod svg_thumbnail;
 pub mod thumbnail;
+pub mod timing;
 pub mod transfers;
 pub mod typing;
 #[cfg(feature = "ui")]
@@ -69,7 +72,11 @@ mod ui_drafts;
 #[cfg(feature = "ui")]
 mod ui_files;
 #[cfg(feature = "ui")]
+mod ui_files_page;
+#[cfg(feature = "ui")]
 pub mod ui_join_requests;
+#[cfg(feature = "ui")]
+mod ui_links;
 #[cfg(feature = "ui")]
 mod ui_people;
 #[cfg(feature = "ui")]

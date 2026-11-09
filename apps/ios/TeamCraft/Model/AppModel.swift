@@ -5,12 +5,15 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-/// Why something failed, as the screens show it (translated per case).
-enum AppFailure: Equatable {
+/// Why something failed, as the screens show it (translated per case). An `Error`, so calls can
+/// answer `Result<_, AppFailure>` (the directory's invitations).
+enum AppFailure: Error, Equatable {
   case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, callMoveRefused, callDeviceLimit, callEncryptionPending, generic
   case tooLarge
   case backupOutOfMemory, backupTooNew, backupDamaged
   case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
+  /// The session is bound to a device key that is gone (docs/e2ee.md §3.1.2).
+  case deviceKeyLost
   /// The identity provider refused the sign-in (issue #1063); `code` is its cleaned `error`.
   case providerDenied, providerAlreadySignedIn
   case providerMisconfigured(code: String), providerRefused(code: String)
@@ -41,6 +44,7 @@ enum AppFailure: Equatable {
     switch self {
     case .network: return "error_network"
     case .signedOut: return "error_signed_out"
+    case .deviceKeyLost: return "error_device_key_lost"
     case .wrongPassphrase: return "error_wrong_passphrase"
     case .backupOutOfMemory: return "error_backup_out_of_memory"
     case .backupTooNew: return "error_backup_too_new"
@@ -183,6 +187,8 @@ final class AppModel {
   private(set) var pushStatus: PushStatus = .unknown
   /// Where the core's gateway connection stands (`nil`: no core open); the banner follows it.
   private(set) var connection: ConnectionState?
+  /// The connection needs a sign-in because the session's device key is gone: the banner says so.
+  private(set) var isDeviceKeyLost = false
   /// Since when the connection (or the device's network) is down: the banner waits out its grace
   /// period, the screens show the local store meanwhile (#713).
   private(set) var connectionGrace = ConnectionGrace()
@@ -210,7 +216,7 @@ final class AppModel {
   private(set) var maybeSignInPage: SignInPageInfo?
 
   @ObservationIgnored private let servers = ServerStore()
-  @ObservationIgnored private lazy var vault = SessionVault(servers: servers)
+  @ObservationIgnored private lazy var vault = SessionVault(servers: servers, bindsSessions: true)
   @ObservationIgnored private let container = SharedContainer()
   @ObservationIgnored private lazy var factory = CoreFactory(container: container, vault: vault, servers: servers)
   @ObservationIgnored private let login = WebLogin()
@@ -231,6 +237,8 @@ final class AppModel {
   @ObservationIgnored private var syncStops = 0
   @ObservationIgnored private let storeChanges = StoreChangeNotifier()
   @ObservationIgnored private var maybeCore: TeamCraft?
+  @ObservationIgnored private var maybeSettingsSync: SettingsSyncer?
+  @ObservationIgnored private var settingsDefaultsObserver: NSObjectProtocol?
   /// Pictures of spaces on disk, by version (AppModel+SpacePictures.swift).
   @ObservationIgnored let spacePictureStore = SpacePictureStore(
     directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
@@ -357,7 +365,7 @@ final class AppModel {
       let session: OidcSession
       do {
         session = try await login.login(
-          server: server, maybeLoginPageAlwaysShown: maybeSignInPage?.maybeLoginPageAlwaysShown)
+          server: server, maybeLoginPageAlwaysShown: maybeSignInPage?.maybeLoginPageAlwaysShown, proofs: vault.proofs)
       } catch {
         let maybeFailure = AppFailure.signIn(error)
         if maybeFailure != nil {
@@ -727,6 +735,9 @@ final class AppModel {
   func send(conversationId: String, threadId: String?, body: String) async -> Bool {
     do {
       try await core().sendMessage(conversationId: conversationId, maybeThreadId: threadId, body: body)
+      // Performance data: from the queued message until the server took it (ChatPane's feed has no
+      // pending message left).
+      if threadId == nil { Perf.begin(.messageSend, key: conversationId) }
       return true
     } catch {
       return false
@@ -743,8 +754,13 @@ final class AppModel {
     try? await core().setFavorite(conversationId: conversationId, isFavorite: isFavorite)
   }
 
-  func setPresence(_ presence: Presence) async {
-    try? await core().setPresence(presence: presence)
+  /// Sets the status; with `until` it is automatic again from then ("Reset after", #1578).
+  func setPresence(_ presence: Presence, until maybeUntil: Date? = nil) async {
+    if let until = maybeUntil {
+      try? await core().setPresenceUntil(presence: presence, untilMs: Int64(until.timeIntervalSince1970 * 1000))
+    } else {
+      try? await core().setPresence(presence: presence)
+    }
   }
 
   func perform(_ action: ChatAction) async {
@@ -910,10 +926,6 @@ final class AppModel {
     return snapshot.spaces.first { $0.id == spaceId }?.directConversations ?? []
   }
 
-  func roster(spaceId: String) async -> SpaceRoster? {
-    await answer(.spaceMembers(spaceId: spaceId))?.roster
-  }
-
   // MARK: Meetings
 
   /// The user's meetings that haven't ended, soonest first.
@@ -944,6 +956,25 @@ final class AppModel {
   /// The core keeps them in the store, so the notification extension applies them too.
   func setMentionSettings(_ settings: MentionSettings) async {
     try? await core().setMentionSettings(settings: settings)
+    settingsSyncer().localMayHaveChanged()
+  }
+
+  /// The sync of the settings that follow the account (#1483); made on first use, and it watches the
+  /// app's settings stores from then on.
+  func settingsSyncer() -> SettingsSyncer {
+    if let maybeSettingsSync { return maybeSettingsSync }
+    let stores = AppSettingsStores(
+      readMentions: { [weak self] in await self?.mentionSettings() ?? AppSettingsStores.defaultMentions },
+      writeMentions: { [weak self] settings in try? await self?.core().setMentionSettings(settings: settings) })
+    let syncer = SettingsSyncer(stores: stores, openCore: { [weak self] in self?.maybeCore })
+    maybeSettingsSync = syncer
+    // Any change of the app's UserDefaults; the syncer tells the user's own from its writes.
+    settingsDefaultsObserver = NotificationCenter.default.addObserver(
+      forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+    ) { _ in
+      MainActor.assumeIsolated { syncer.localMayHaveChanged() }
+    }
+    return syncer
   }
 
   func segmentPrefetch() async -> SegmentPrefetchMode {
@@ -1177,6 +1208,7 @@ final class AppModel {
   /// conversations that are read now go.
   private func storeDidChange() {
     changeCount += 1
+    if maybeCore != nil { settingsSyncer().storeDidChange() }
     followTyping()
     calls.storeDidChange()
     let wasConnected = connection?.isConnected == true
@@ -1375,6 +1407,11 @@ final class AppModel {
     }
   }
 
+  /// Open spaces the user isn't in (#1526); `nil` when the core couldn't answer.
+  func joinableSpaces() async -> [JoinableSpace]? {
+    await answer(.joinableSpaces)?.spaces
+  }
+
   func browseChannels(spaceId: String) async -> [BrowsableChannel] {
     await answer(.browseChannels(spaceId: spaceId))?.channels ?? []
   }
@@ -1452,6 +1489,7 @@ final class AppModel {
       })
     maybeCore = opened
     setConnection(opened.connectionState())
+    settingsSyncer().start()
     return opened
   }
 
@@ -1469,7 +1507,13 @@ final class AppModel {
   }
 
   private func setConnection(_ maybeConnection: ConnectionState?) {
+    if maybeConnection != connection { Perf.connectionChanged(from: connection, to: maybeConnection) }
     connection = maybeConnection
+    if case .signInRequired = maybeConnection {
+      isDeviceKeyLost = vault.isDeviceKeyLost
+    } else {
+      isDeviceKeyLost = false
+    }
     observeConnection()
   }
 
@@ -1581,7 +1625,11 @@ final class AppModel {
       }
     } catch {
       let failure = CoreFailure(error)
-      if failure == .signedOut {
+      if vault.isDeviceKeyLost {
+        // Nothing went out and nothing is lost but the key: the next sign-in replaces the session
+        // and makes a new one (docs/e2ee.md §3.1.2).
+        phase = .signedOut(.deviceKeyLost)
+      } else if failure == .signedOut {
         vault.clear()
         phase = .signedOut(.signedOut)
       } else {

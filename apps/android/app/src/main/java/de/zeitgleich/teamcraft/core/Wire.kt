@@ -61,6 +61,10 @@ data class Space(
   @SerialName("mention_count") val mentionCount: Int = 0,
   /** Whether the user may create channels here, as the core decided it (issue #758). */
   @SerialName("can_create_channels") val canCreateChannels: Boolean = true,
+  /** Whether the user may add or invite members here, as the server said (#1337). */
+  @SerialName("can_add_members") val canAddMembers: Boolean = false,
+  /** Whether the user may invite guests here, as the server said (#1337). */
+  @SerialName("can_invite_guests") val canInviteGuests: Boolean = false,
   /** Version of the space's picture; without one the space shows no picture. */
   @SerialName("maybe_image_version") val maybeImageVersion: String? = null,
   /**
@@ -90,8 +94,13 @@ data class Conversation(
   @SerialName("is_notes_to_self") val isNotesToSelf: Boolean = false,
   /** Still being caught up after the device was away (issue #247): newer messages may come. */
   @SerialName("is_catching_up") val isCatchingUp: Boolean = false,
+  /** The channel permissions the server says the user holds here; `null` when it didn't say. */
+  @SerialName("maybe_permissions") val maybePermissions: List<String>? = null,
 ) {
   val isDirect: Boolean get() = kind == "Direct" || kind == "Group"
+
+  /** "Add people" shows: the server says the user may manage the channel's members (#1534). */
+  val canAddMembers: Boolean get() = !isDirect && maybePermissions.orEmpty().contains("manage_members")
 }
 
 /** A link or file pinned to a conversation's header. */
@@ -436,6 +445,8 @@ data class MessageExtras(
   @SerialName("is_send_failed") val isSendFailed: Boolean = false,
   /** An own message the other member of a DM read: two ticks instead of one (issue #769). */
   @SerialName("is_read") val isRead: Boolean = false,
+  /** An own message that reached a device of every other member: two grey ticks (issue #598). */
+  @SerialName("is_delivered") val isDelivered: Boolean = false,
 )
 
 @Serializable
@@ -606,9 +617,22 @@ data class ChatAnswer(
   val unseen: UnseenReactions? = null,
   @SerialName("older_history") val olderHistory: String? = null,
   val calls: List<CallHistoryItem> = emptyList(),
-  val roster: SpaceRoster? = null,
   val overview: ScheduledOverview? = null,
   val load: ListLoadWire? = null,
+  /** [ChatQueries.joinableSpaces]: open spaces the user isn't in (#1526). */
+  val spaces: List<JoinableSpace> = emptyList(),
+  /** [ChatClient.searchPeople]: people by name, the server's directory included (#1534). */
+  val people: List<User> = emptyList(),
+)
+
+/** An open space the user may join, as "Browse spaces" lists it (#1526). */
+@Serializable
+data class JoinableSpace(
+  val id: String,
+  val name: String,
+  @SerialName("maybe_description") val maybeDescription: String? = null,
+  @SerialName("maybe_image_version") val maybeImageVersion: String? = null,
+  @SerialName("member_count") val memberCount: Int = 0,
 )
 
 /** Others typing in one place right now (#882): a conversation itself, or with a thread a reply in it. */
@@ -641,6 +665,8 @@ data class NotificationSettings(
   @SerialName("meeting_reminder_minutes") val maybeMeetingReminderMinutes: Int? = null,
   /** Whether a meeting's start notifies; absent: never chose (yes). */
   @SerialName("notifies_meeting_start") val maybeNotifiesMeetingStart: Boolean? = null,
+  /** Others see when their messages reached this user's devices (issue #598); absent: the server's default. */
+  @SerialName("send_delivery_receipts") val maybeSendDeliveryReceipts: Boolean? = null,
 )
 
 /**

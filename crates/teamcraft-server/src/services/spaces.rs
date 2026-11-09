@@ -260,6 +260,15 @@ pub async fn delete_space(state: &AppState, caller: &AuthenticatedUser, id: Spac
       super::calls::evict_from_call(state, *channel, *member).await;
     }
     announce_deleted_direct(state, *channel, members, None);
+    crate::webhooks::emit_for_conversation(
+      state,
+      teamcraft_proto::WebhookEventKind::ChannelDeleted,
+      *channel,
+      Some(caller.user.id),
+      None,
+      None,
+    )
+    .await;
   }
   // A device asks for the spaces again and finds this one gone; one that is away does at its next
   // sync.

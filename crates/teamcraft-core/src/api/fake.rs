@@ -20,14 +20,14 @@ use teamcraft_proto::{
   IdempotencyKey, IdentityKeyResponse, JoinPolicy, KeyBagResponse, KeyPackageStatusResponse,
   ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
   ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListScheduledMessagesResponse,
-  ListSpaceMembersResponse, ListSpacesResponse, MessageId, MessageResponse, MlsMessageId, MlsMessageKind,
-  MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel, PostMlsCommitRequest,
-  PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest, RegisterDeviceRequest, Role,
-  ScheduleMessageRequest, ScheduledHoldReason, ScheduledMessageId, ScheduledMessageResponse,
-  SendMessageRequest, SendScheduledMessageResponse, SetPresenceRequest, SetReadPositionRequest, Snowflake,
-  SpaceHead, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole, SyncHeadsResponse, UnixMillis,
-  UpdateConversationMemberRequest, UpdateScheduledMessageRequest, UploadIdentityKeyRequest,
-  UploadKeyPackagesRequest, UserId, UserKind, UserSummary,
+  ListSpaceMembersResponse, ListSpacesResponse, ListUserGroupRostersResponse, MessageId, MessageResponse,
+  MlsMessageId, MlsMessageKind, MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel,
+  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
+  RegisterDeviceRequest, Role, ScheduleMessageRequest, ScheduledHoldReason, ScheduledMessageId,
+  ScheduledMessageResponse, SendMessageRequest, SendScheduledMessageResponse, SetPresenceRequest,
+  SetReadPositionRequest, Snowflake, SpaceHead, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole,
+  SyncHeadsResponse, UnixMillis, UpdateConversationMemberRequest, UpdateScheduledMessageRequest,
+  UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserGroupRoster, UserId, UserKind, UserSummary,
 };
 use teamcraft_proto::{AdminJoinRequestChange, AdminJoinRequestResponse};
 use teamcraft_proto::{
@@ -127,6 +127,10 @@ pub struct FakeGateway {
 
 #[derive(Default)]
 struct State {
+  /// `GET /user-groups/rosters` as a real server answers it.
+  user_groups: Vec<UserGroupRoster>,
+  /// Users the groups are refused to (guests).
+  user_groups_refused: HashSet<UserId>,
   /// The identity provider's tokens each user's app holds (e2ee.md §3.1.3).
   provider_tokens: HashMap<UserId, String>,
   provider_access_tokens: HashMap<UserId, String>,
@@ -499,6 +503,8 @@ struct Conversation {
   messages: Vec<MessageResponse>,
   favorites: HashMap<UserId, bool>,
   read_positions: HashMap<UserId, MessageId>,
+  /// How far a device of each member stored the messages (delivered ticks, issue #598).
+  delivered_positions: HashMap<UserId, MessageId>,
   /// The reactions to their own messages each member saw.
   reactions_seen: HashMap<UserId, teamcraft_proto::ReactionsSeen>,
   /// How far each member read each thread.
@@ -795,6 +801,15 @@ impl FakeServer {
       .conversations
       .get(&conversation)
       .and_then(|entry| entry.read_positions.get(&user).copied())
+  }
+
+  /// How far a device of the user stored the conversation, as the server stores it.
+  pub fn delivered_position(&self, conversation: ConversationId, user: UserId) -> Option<MessageId> {
+    self
+      .lock()
+      .conversations
+      .get(&conversation)
+      .and_then(|entry| entry.delivered_positions.get(&user).copied())
   }
 
   /// How many gateway connections were opened so far.
@@ -1702,6 +1717,16 @@ impl FakeServer {
     self.lock().maybe_delete_answer = Some((status, code));
   }
 
+  /// The groups the server answers `GET /user-groups/rosters` with from now on.
+  pub fn set_user_groups(&self, groups: Vec<UserGroupRoster>) {
+    self.lock().user_groups = groups;
+  }
+
+  /// Like a guest's: the groups are refused from now on.
+  pub fn refuse_user_groups_to(&self, user: UserId) {
+    self.lock().user_groups_refused.insert(user);
+  }
+
   pub fn publish_event(&self, users: &[UserId], event: &GatewayEvent) {
     self.lock().publish(users.iter().copied(), event);
   }
@@ -2234,6 +2259,109 @@ impl ServerApi for FakeServerApi {
         return Err(ApiError::status(404, ErrorCode::UserNotFound, "unknown user"));
       }
       Ok(summary.clone())
+    })
+  }
+
+  /// People by name, a page of [`DIRECTORY_PAGE`] at a time; `after` is the last user's ID. Filters
+  /// on title and department match nothing: the fake keeps no profiles.
+  async fn directory_people(
+    &self,
+    query: &teamcraft_proto::DirectoryPeopleQuery,
+  ) -> Result<teamcraft_proto::DirectoryPeopleResponse, ApiError> {
+    let needle = query.query.trim().to_lowercase();
+    let maybe_after: Option<UserId> = query.maybe_after.as_deref().and_then(|after| after.parse().ok());
+    self.with(|state, _| {
+      let mut people: Vec<teamcraft_proto::DirectoryPerson> = state
+        .users
+        .values()
+        .filter(|user| user.kind != teamcraft_proto::UserKind::Bot)
+        .filter(|user| query.maybe_kind.as_ref().is_none_or(|kind| &user.kind == kind))
+        .filter(|_| query.maybe_title.is_none() && query.maybe_department.is_none())
+        .filter(|user| {
+          query
+            .maybe_organization
+            .as_ref()
+            .is_none_or(|organization| user.maybe_organization.as_ref() == Some(organization))
+        })
+        .filter(|user| user.display_name.to_lowercase().contains(&needle))
+        .filter(|user| maybe_after.is_none_or(|after| user.id > after))
+        .map(|user| teamcraft_proto::DirectoryPerson {
+          user: user.clone(),
+          maybe_title: None,
+          maybe_department: None,
+          presence: teamcraft_proto::PresenceState::Offline,
+        })
+        .collect();
+      let maybe_next_after =
+        (people.len() > DIRECTORY_PAGE).then(|| people[DIRECTORY_PAGE - 1].user.id.to_string());
+      people.truncate(DIRECTORY_PAGE);
+      Ok(teamcraft_proto::DirectoryPeopleResponse {
+        people,
+        maybe_next_after,
+      })
+    })
+  }
+
+  async fn directory_filters(
+    &self,
+    _query: &teamcraft_proto::DirectoryFiltersQuery,
+  ) -> Result<teamcraft_proto::DirectoryFiltersResponse, ApiError> {
+    self.with(|state, _| {
+      let organizations: BTreeSet<String> = state
+        .users
+        .values()
+        .filter_map(|user| user.maybe_organization.clone())
+        .collect();
+      Ok(teamcraft_proto::DirectoryFiltersResponse {
+        organizations: organizations.into_iter().collect(),
+        departments: Vec::new(),
+        titles: Vec::new(),
+      })
+    })
+  }
+
+  /// The fake keeps no channel directory: always one empty page.
+  async fn directory_channels(
+    &self,
+    _query: &teamcraft_proto::DirectoryChannelsQuery,
+  ) -> Result<teamcraft_proto::DirectoryChannelsResponse, ApiError> {
+    Ok(teamcraft_proto::DirectoryChannelsResponse {
+      channels: Vec::new(),
+      maybe_next_after: None,
+    })
+  }
+
+  /// Every open invitation, newest first, in one page.
+  async fn directory_invitations(
+    &self,
+    query: &teamcraft_proto::DirectoryInvitationsQuery,
+  ) -> Result<teamcraft_proto::DirectoryInvitationsResponse, ApiError> {
+    self.with(|state, _| {
+      let invitations = state
+        .invites
+        .iter()
+        .rev()
+        .filter(|invite| query.maybe_space_id.is_none_or(|space| invite.space_id == space))
+        .filter_map(|invite| {
+          let sponsor = state.users.get(&invite.sponsor_user_id)?.clone();
+          let space_name = state.spaces.get(&invite.space_id)?.name.clone();
+          Some(teamcraft_proto::DirectoryInvitation {
+            id: invite.id,
+            space_id: invite.space_id,
+            space_name,
+            email: invite.email.clone(),
+            role: invite.role.clone(),
+            sponsor,
+            maybe_expires_at: invite.maybe_expires_at,
+            is_expired: false,
+            can_resend: true,
+          })
+        })
+        .collect();
+      Ok(teamcraft_proto::DirectoryInvitationsResponse {
+        invitations,
+        maybe_next_after: None,
+      })
     })
   }
 
@@ -2811,6 +2939,16 @@ impl ServerApi for FakeServerApi {
   /// Every known user is in every fake space, except the outsiders.
   async fn list_space_members(&self, space: SpaceId) -> Result<ListSpaceMembersResponse, ApiError> {
     self.with(|state, _| state.space_members_answer(space))
+  }
+
+  async fn list_user_group_rosters(&self) -> Result<ListUserGroupRostersResponse, ApiError> {
+    let state = self.server.lock();
+    if state.user_groups_refused.contains(&self.user) {
+      return Err(ApiError::status(403, ErrorCode::Forbidden, "not for guests"));
+    }
+    Ok(ListUserGroupRostersResponse {
+      groups: state.user_groups.clone(),
+    })
   }
 
   async fn list_conversations(&self) -> Result<ListConversationsResponse, ApiError> {
@@ -4700,6 +4838,20 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn resend_invite(&self, space: SpaceId, invite: teamcraft_proto::InviteId) -> Result<(), ApiError> {
+    self.with(|state, _| {
+      if state
+        .invites
+        .iter()
+        .any(|candidate| candidate.id == invite && candidate.space_id == space)
+      {
+        Ok(())
+      } else {
+        Err(ApiError::status(404, ErrorCode::InviteNotFound, "no such invite"))
+      }
+    })
+  }
+
   async fn delete_invite(&self, space: SpaceId, invite: teamcraft_proto::InviteId) -> Result<(), ApiError> {
     self.with(|state, _| {
       let before = state.invites.len();
@@ -4926,9 +5078,15 @@ impl ServerApi for FakeServerApi {
       } else {
         Vec::new()
       };
+      let maybe_delivered_up_to = if has_receipts {
+        state.delivered_to_others(conversation, me)
+      } else {
+        None
+      };
       Ok(teamcraft_proto::ReadReceiptsResponse {
         conversation_id: conversation,
         receipts,
+        maybe_delivered_up_to,
       })
     })
   }
@@ -6363,6 +6521,10 @@ impl GatewayConnection for FakeGateway {
           .or_default()
           .push(activity.clone());
       },
+      GatewayClientMessage::Delivered {
+        conversation_id,
+        message_id,
+      } => state.note_delivered(*conversation_id, self.user, *message_id),
       GatewayClientMessage::Attention { .. } | GatewayClientMessage::Unknown => {},
     }
     Ok(())
@@ -6928,6 +7090,7 @@ impl State {
         messages: Vec::new(),
         favorites: HashMap::new(),
         read_positions: HashMap::new(),
+        delivered_positions: HashMap::new(),
         reactions_seen: HashMap::new(),
         thread_read_positions: HashMap::new(),
         pinned: HashSet::new(),
@@ -7056,6 +7219,79 @@ impl State {
       .get(&conversation)
       .map(|entry| entry.members.keys().copied().collect())
       .unwrap_or_default()
+  }
+
+  /// Like the server: a member's position moves forward, and the others whose aggregate moved hear
+  /// of it. Only DMs and group DMs, only for members who share delivery.
+  fn note_delivered(&mut self, conversation: ConversationId, user: UserId, message: MessageId) {
+    let Some(entry) = self.conversations.get(&conversation) else {
+      return;
+    };
+    if !entry.members.contains_key(&user)
+      || !matches!(
+        entry.response.kind,
+        ConversationKind::Dm | ConversationKind::Group
+      )
+      || !self.shares_delivery(user)
+      || entry
+        .delivered_positions
+        .get(&user)
+        .is_some_and(|known| *known >= message)
+    {
+      return;
+    }
+    let viewers: Vec<UserId> = entry
+      .members
+      .keys()
+      .copied()
+      .filter(|member| *member != user)
+      .collect();
+    let before: Vec<Option<MessageId>> = viewers
+      .iter()
+      .map(|viewer| self.delivered_to_others(conversation, *viewer))
+      .collect();
+    if let Some(entry) = self.conversations.get_mut(&conversation) {
+      entry.delivered_positions.insert(user, message);
+    }
+    for (viewer, maybe_before) in viewers.into_iter().zip(before) {
+      let maybe_now = self.delivered_to_others(conversation, viewer);
+      if let Some(message_id) = maybe_now
+        && maybe_now != maybe_before
+      {
+        self.publish(
+          [viewer],
+          &GatewayEvent::DeliveryUpdate {
+            conversation_id: conversation,
+            message_id,
+          },
+        );
+      }
+    }
+  }
+
+  /// The newest message all members but `viewer` stored, while all of them share delivery.
+  fn delivered_to_others(&self, conversation: ConversationId, viewer: UserId) -> Option<MessageId> {
+    let entry = self.conversations.get(&conversation)?;
+    if !self.shares_delivery(viewer) {
+      return None;
+    }
+    let mut lowest = None;
+    for member in entry.members.keys().filter(|member| **member != viewer) {
+      if !self.shares_delivery(*member) {
+        return None;
+      }
+      let delivered = *entry.delivered_positions.get(member)?;
+      lowest = Some(lowest.map_or(delivered, |lowest: MessageId| lowest.min(delivered)));
+    }
+    lowest
+  }
+
+  fn shares_delivery(&self, user: UserId) -> bool {
+    self
+      .notification_settings
+      .get(&user)
+      .and_then(|settings| settings.maybe_send_delivery_receipts)
+      .unwrap_or(true)
   }
 
   fn publish(&mut self, users: impl IntoIterator<Item = UserId>, event: &GatewayEvent) {
@@ -7472,6 +7708,7 @@ fn default_notification_settings() -> NotificationSettings {
     maybe_default_level: None,
     maybe_meeting_reminder_minutes: None,
     maybe_notifies_meeting_start: None,
+    maybe_send_delivery_receipts: None,
   }
 }
 

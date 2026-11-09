@@ -160,6 +160,7 @@ async fn the_dnd_schedule_from_the_server_is_checked_again_with_its_overrides() 
       maybe_default_level: None,
       maybe_meeting_reminder_minutes: None,
       maybe_notifies_meeting_start: None,
+      maybe_send_delivery_receipts: None,
     },
   );
   bob.client.refresh_notification_settings().await.unwrap();

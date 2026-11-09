@@ -22,24 +22,32 @@ class FinishLoaderTest(unittest.TestCase):
             staging = staged(tmp)
             self.assertEqual(run(staging).returncode, 0)
             files = translation_files(staging)
-            self.assertEqual(sorted(files), LANGUAGES)
-            for language, url in files.items():
-                match = re.fullmatch(rf"/i18n/{language}-([0-9a-f]{{16}})\.ftl", url)
+            self.assertEqual(sorted(files), sorted(LANGUAGES + [f"{language}-admin" for language in LANGUAGES]))
+            for name, url in files.items():
+                match = re.fullmatch(rf"/i18n/{name}-([0-9a-f]{{16}})\.ftl", url)
                 self.assertIsNotNone(match, url)
                 data = (staging / url.lstrip("/")).read_bytes()
                 self.assertEqual(hashlib.sha256(data).hexdigest()[:16], match.group(1))
 
-    def test_a_languages_file_has_every_message_and_no_comment(self):
+    def test_a_languages_files_have_every_message_and_no_comment(self):
+        """The console's texts are in the `-admin` file and only there (#1462)."""
         with tempfile.TemporaryDirectory() as tmp:
             staging = staged(tmp)
             run(staging)
-            for language, url in translation_files(staging).items():
-                text = (staging / url.lstrip("/")).read_text(encoding="utf-8")
-                self.assertFalse([line for line in text.splitlines() if line.startswith("#")])
+            files = translation_files(staging)
+            for language in LANGUAGES:
+                texts = {name: (staging / files[name].lstrip("/")).read_text(encoding="utf-8")
+                         for name in (language, f"{language}-admin")}
+                for text in texts.values():
+                    self.assertFalse([line for line in text.splitlines() if line.startswith("#")])
+                sources = sorted((UI / "i18n" / language).glob("*.ftl"))
                 expected = set()
-                for source in sorted((UI / "i18n" / language).glob("*.ftl")):
-                    expected |= message_ids(source.read_text(encoding="utf-8"))
-                self.assertEqual(message_ids(text), expected, language)
+                for source in sources:
+                    if source.name != "admin.ftl":
+                        expected |= message_ids(source.read_text(encoding="utf-8"))
+                self.assertEqual(message_ids(texts[language]), expected, language)
+                console = message_ids((UI / "i18n" / language / "admin.ftl").read_text(encoding="utf-8"))
+                self.assertEqual(message_ids(texts[f"{language}-admin"]), console, language)
 
     def test_the_loading_screens_texts_stay_and_a_second_run_fails(self):
         with tempfile.TemporaryDirectory() as tmp:

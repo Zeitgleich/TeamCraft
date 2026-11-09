@@ -60,6 +60,7 @@ mod urgent;
 mod user;
 mod user_deletion;
 mod user_group;
+mod webhook;
 mod workspace_log;
 
 pub use admin::{
@@ -111,7 +112,7 @@ pub use meeting::{
 pub use meeting_notice::{MeetingNoticeKind, MeetingNoticeRecipient};
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};
 pub use mls::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};
-pub use notification::{ReceiptRow, StoredSpaceNotifications, StoredUserSettings};
+pub use notification::{DeliveryRow, ReceiptRow, StoredSpaceNotifications, StoredUserSettings};
 pub use oidc_sync::{
   BrakeConfirmation, HeldDeactivation, NewHeldDeactivation, OidcSyncRun, OidcSyncStatusRow,
 };
@@ -129,7 +130,7 @@ pub use scheduled_message::{
   NewScheduledMessage, ReleaseOutcome, ScheduleOutcome, ScheduledUpdateOutcome, SealedParts, StaleWakes,
   StoredScheduledMessage,
 };
-pub use server_settings::{StoredBrand, StoredBrandAsset, StoredSetting};
+pub use server_settings::{StoredBrand, StoredBrandAsset, StoredBrandMailServer, StoredSetting};
 pub use share_link::{NewShareLink, ShareLink, ShareTarget};
 pub use snowflake::{Clock, SnowflakeError, SnowflakeGenerator, SystemClock};
 pub use space::{
@@ -145,4 +146,8 @@ pub use urgent::{Acknowledgement, DueReminder};
 pub use user::{OidcIdentity, OidcUserRow, PresencePreference, SyncedUser, User, UserSearch};
 pub use user_deletion::{ActiveAdminCounts, DELETED_USER_NAME, DirectConversationToDelete, UserDeletion};
 pub use user_group::{GroupCreateOutcome, NewUserGroup, UserGroup};
+pub use webhook::{
+  EnqueueOutcome, NewWebhook, NewWebhookLogEntry, StoredWebhook, StoredWebhookLogEntry, WebhookChange,
+  WebhookDeliveryClaim, WebhookDeliveryRow,
+};
 pub use workspace_log::{AppendOutcome, WorkspaceLogEntry};

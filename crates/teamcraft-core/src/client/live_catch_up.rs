@@ -90,6 +90,7 @@ pub(super) fn is_live_now(
       message.kind != MlsMessageKind::Welcome && caught_up.contains(&message.conversation_id)
     },
     GatewayEvent::ReadReceipt { conversation_id, .. }
+    | GatewayEvent::DeliveryUpdate { conversation_id, .. }
     | GatewayEvent::MessageAck { conversation_id, .. }
     | GatewayEvent::MembershipAdd { conversation_id, .. }
     | GatewayEvent::MembershipRemove { conversation_id, .. }
@@ -119,6 +120,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// to the first that has to wait. Nothing outside a fresh session's catch-up. A failure fails the
   /// catch-up like one of its own steps (the connection is then replaced and the sync runs again).
   pub(super) async fn apply_live_during_catch_up(&mut self) -> Result<(), CoreError> {
+    let _step = crate::timing::step("apply_live_frames");
     let mut applied = 0;
     loop {
       let Some(live) = &self.maybe_live_catch_up else {
@@ -144,6 +146,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         live.applied += 1;
       }
       applied += 1;
+      self.hand_back_thread().await;
     }
     if applied > 0 {
       tracing::debug!(applied, "catch-up: live events applied");

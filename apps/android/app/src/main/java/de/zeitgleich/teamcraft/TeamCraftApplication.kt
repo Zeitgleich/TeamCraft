@@ -28,6 +28,7 @@ import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.calls.CallController
 import de.zeitgleich.teamcraft.crash.CrashReports
 import de.zeitgleich.teamcraft.crash.CrashSdks
+import de.zeitgleich.teamcraft.crash.Perf
 import de.zeitgleich.teamcraft.core.ActivityReports
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.core.NetworkTrust
@@ -51,6 +52,7 @@ import de.zeitgleich.teamcraft.server.ServerStore
 import de.zeitgleich.teamcraft.ui.ConnectionGrace
 import de.zeitgleich.teamcraft.ui.NetworkWatcher
 import de.zeitgleich.teamcraft.ui.Pictures
+import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.setDeletedUserName
 
@@ -117,6 +119,15 @@ class TeamCraftApplication : Application(), Configuration.Provider {
     graph = AppGraph(this)
     // First, so a crash during the rest of the start is reported (the last known setting).
     graph.crashReports.install()
+    // Performance data of the app's own operations, through the same SDK (issue #1521).
+    Perf.install(CrashSdks.platform())
+    graph.scope.launch {
+      var maybePrevious: ConnectionState? = null
+      graph.core.connectionState.collect { current ->
+        Perf.connectionChanged(maybePrevious, current)
+        maybePrevious = current
+      }
+    }
     // The signed-in server's current setting, after every sign-in (and at start, signed in).
     graph.scope.launch {
       graph.auth.isSignedIn.collect { isSignedIn -> if (isSignedIn) refreshCrashReports(graph) }

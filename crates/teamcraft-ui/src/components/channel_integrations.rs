@@ -11,8 +11,8 @@ use teamcraft_proto::{
 use wasm_bindgen::JsCast;
 
 use crate::channel_access::ChannelAccess;
-use crate::components::admin_integrations::CopyButton;
 use crate::components::avatar::{Avatar, AvatarSize};
+use crate::components::copy_button::CopyButton;
 use crate::components::icons::{Icon, IconName};
 use crate::components::image_crop_dialog::{CropTarget, CropUpload, ImageCropDialog};
 use crate::components::pending_button::PendingButton;
@@ -303,6 +303,16 @@ fn Sources(conversation: ConversationId, has_bot: Signal<bool>) -> impl IntoView
     stand_in_bot(&bots)
   });
   let maybe_reveal: RwSignal<Option<Revealed>> = RwSignal::new(None);
+  // Where a bridge on its own host is reached, as the admins configured it. Only those who manage
+  // sources ask the server; read at once, so it is there when a source is created.
+  let maybe_bridge_url = Memo::new(move |_| {
+    if can_manage.get() {
+      state.read(|backend| backend.bridge_public_url(conversation))
+    } else {
+      None
+    }
+  });
+  Effect::new(move |_| maybe_bridge_url.track());
   view! {
     <h3 class="detail-heading">{move || i18n.t("channel-sources")}</h3>
     <ul class="settings-member-list">
@@ -326,7 +336,7 @@ fn Sources(conversation: ConversationId, has_bot: Signal<bool>) -> impl IntoView
         }
       }
     >
-      {move || maybe_reveal.get().map(|revealed| view! { <RevealSource revealed=revealed on_done=move || maybe_reveal.set(None) /> })}
+      {move || maybe_reveal.get().map(|revealed| view! { <RevealSource revealed=revealed maybe_bridge_url=maybe_bridge_url on_done=move || maybe_reveal.set(None) /> })}
     </Show>
   }
 }
@@ -797,17 +807,32 @@ fn AddSource(
 }
 
 /// The new source's URL, shown once with a copy button and an example, on the instance's host
-/// name (teamcraft-deploy) or on the bridge's loopback default.
+/// name (teamcraft-deploy), on the bridge's loopback default or, while the admins set one, at the
+/// bridge's public address, which is selected first.
 #[component]
-fn RevealSource(revealed: Revealed, #[prop(into)] on_done: Callback<()>) -> impl IntoView {
+fn RevealSource(
+  revealed: Revealed,
+  maybe_bridge_url: Memo<Option<String>>,
+  #[prop(into)] on_done: Callback<()>,
+) -> impl IntoView {
   let i18n = use_i18n();
   let server = web_origin().unwrap_or_default();
-  let location = RwSignal::new(BridgeLocation::Instance);
+  // What the person picked; until then the configured address leads. If it goes away meanwhile
+  // the choice falls back with it.
+  let picked: RwSignal<Option<BridgeLocation>> = RwSignal::new(None);
+  let location = Memo::new(move |_| {
+    let maybe_configured = maybe_bridge_url.get();
+    match picked.get() {
+      Some(BridgeLocation::Configured) if maybe_configured.is_none() => BridgeLocation::Instance,
+      Some(choice) => choice,
+      None => BridgeLocation::default_for(maybe_configured.as_deref()),
+    }
+  });
   let token = StoredValue::new(Arc::clone(&revealed.token));
   let kind = revealed.kind.clone();
   let is_webhook = kind == SourceKind::Webhook;
   let url = Memo::new(move |_| {
-    let base = bridge_base_url(location.get(), &server);
+    let base = bridge_base_url(location.get(), &server, maybe_bridge_url.get().as_deref());
     token.with_value(|token| {
       if is_webhook {
         webhook_url(&base, token.expose_secret())
@@ -833,7 +858,7 @@ fn RevealSource(revealed: Revealed, #[prop(into)] on_done: Callback<()>) -> impl
         role="radio"
         aria-checked=move || is_selected().to_string()
         aria-pressed=move || is_selected().to_string()
-        on:click=move |_| location.set(value)
+        on:click=move |_| picked.set(Some(value))
       >
         {move || i18n.t(key)}
       </button>
@@ -845,11 +870,20 @@ fn RevealSource(revealed: Revealed, #[prop(into)] on_done: Callback<()>) -> impl
     <div class="segmented" role="radiogroup" aria-label=move || i18n.t("channel-sources-bridge")>
       {location_button(BridgeLocation::Instance, "channel-sources-bridge-instance")}
       {location_button(BridgeLocation::Loopback, "channel-sources-bridge-loopback")}
+      {move || {
+        maybe_bridge_url
+          .with(Option::is_some)
+          .then(|| location_button(BridgeLocation::Configured, "channel-sources-bridge-configured"))
+      }}
     </div>
     <p class="hint">
       {move || match location.get() {
         BridgeLocation::Instance => i18n.t("channel-sources-bridge-instance-hint"),
         BridgeLocation::Loopback => i18n.t("channel-sources-bridge-loopback-hint"),
+        BridgeLocation::Configured => i18n.t_with(
+          "channel-sources-bridge-configured-hint",
+          &[("url", maybe_bridge_url.get().unwrap_or_default().as_str())],
+        ),
       }}
     </p>
     <label for="channel-source-url">{move || i18n.t("channel-sources-url")}</label>

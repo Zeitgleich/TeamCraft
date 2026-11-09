@@ -22,4 +22,9 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
       handlers::admin_delete_brand_asset_handler
     ))
     .routes(routes!(handlers::admin_take_over_brand_handler))
+    .routes(routes!(
+      handlers::admin_put_brand_mail_server_handler,
+      handlers::admin_delete_brand_mail_server_handler
+    ))
+    .routes(routes!(handlers::admin_send_brand_test_mail_handler))
 }

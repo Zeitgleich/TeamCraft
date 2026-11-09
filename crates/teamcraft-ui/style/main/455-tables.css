@@ -1,0 +1,104 @@
+/* Markdown tables in messages and in the composer (#1565). Quiet hairlines, a header told apart by
+   weight and a light fill, numbers in even columns. A table wider than the bubble scrolls sideways
+   inside it instead of widening the message. */
+.md-table-wrap {
+  max-width: 100%;
+  margin: 4px 0 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.md-table-wrap:first-child {
+  margin-top: 0;
+}
+
+.md-table-wrap:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.md-table,
+.composer-editor table {
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+  line-height: var(--leading-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.md-table {
+  min-width: 100%;
+}
+
+.md-table th,
+.md-table td,
+.composer-editor th,
+.composer-editor td {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: start;
+  vertical-align: top;
+  /* Cells keep their words together; the wrapper scrolls instead of breaking every letter. */
+  overflow-wrap: normal;
+  min-width: 4ch;
+  max-width: 32ch;
+}
+
+.md-table th + th,
+.md-table td + td,
+.composer-editor th + th,
+.composer-editor td + td {
+  border-inline-start: 1px solid var(--border);
+}
+
+.md-table th,
+.composer-editor th {
+  background: var(--surface-2);
+  font-weight: var(--weight-semibold);
+}
+
+.md-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.md-table .md-align-left,
+.composer-editor [data-align="left"] {
+  text-align: left;
+}
+
+.md-table .md-align-center,
+.composer-editor [data-align="center"] {
+  text-align: center;
+}
+
+.md-table .md-align-right,
+.composer-editor [data-align="right"] {
+  text-align: right;
+}
+
+.md-p + .md-table-wrap,
+.md-table-wrap + .md-p {
+  margin-top: 4px;
+}
+
+/* In the composer the table is written into: every cell shows its edge, so an empty one can be
+   found and clicked. */
+.composer-editor table {
+  margin: 4px 0;
+  border: 1px solid var(--border-strong);
+}
+
+.composer-editor th,
+.composer-editor td {
+  border: 1px solid var(--border-strong);
+  min-width: 8ch;
+}
+
+@media (prefers-contrast: more) {
+  .md-table-wrap,
+  .md-table th,
+  .md-table td {
+    border-color: var(--border-strong);
+  }
+}

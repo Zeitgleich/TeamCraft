@@ -99,7 +99,8 @@ pub async fn create_invite(
     })
     .await?
     .ok_or(ApiError::InviteAlreadyOpen)?;
-  let should_send_mail = match state.mailer.get() {
+  let invite_brand = invite_brand(state, caller, &invite.email).await;
+  let should_send_mail = match state.mailer_for(&invite_brand) {
     Some(_) => match spend_invite_mail(state, caller) {
       Ok(has_budget) => has_budget,
       Err(over_budget) => {
@@ -121,6 +122,7 @@ pub async fn create_invite(
     send_invite_mail(
       state,
       caller,
+      &invite_brand,
       &access.view.space.name,
       &invite,
       maybe_message.as_deref(),
@@ -194,30 +196,35 @@ pub(super) async fn inviter_brand(state: &AppState, user: &UserId) -> Arc<Brand>
 async fn send_invite_mail(
   state: &AppState,
   caller: &AuthenticatedUser,
+  brand: &Brand,
   space_name: &str,
   invite: &teamcraft_db::Invite,
   maybe_message: Option<&str>,
 ) {
-  let Some(mailer) = state.mailer.get() else {
+  let Some(mailer) = state.mailer_for(brand) else {
     return;
   };
-  let mail = invite_mail(state, caller, space_name, invite, maybe_message).await;
+  let mail = invite_mail(state, caller, brand, space_name, invite, maybe_message);
   if let Err(error) = mailer.send(&mail).await {
     warn!(%error, invite_id = %invite.id, "sending the invitation e-mail failed");
   }
 }
 
-async fn invite_mail(
+/// The brand an invitation goes out as: that of the recipient's domain, else the inviter's.
+async fn invite_brand(state: &AppState, caller: &AuthenticatedUser, email: &str) -> Arc<Brand> {
+  let inviter_brand = inviter_brand(state, &caller.user.id).await;
+  let brands = state.brands.current();
+  Arc::clone(brands.for_recipient(email, &inviter_brand))
+}
+
+fn invite_mail(
   state: &AppState,
   caller: &AuthenticatedUser,
+  brand: &Brand,
   space_name: &str,
   invite: &teamcraft_db::Invite,
   maybe_message: Option<&str>,
 ) -> OutgoingMail {
-  // Mail goes out as the brand of the recipient's domain, else as the brand the inviter used.
-  let inviter_brand = inviter_brand(state, &caller.user.id).await;
-  let brands = state.brands.current();
-  let brand = brands.for_recipient(&invite.email, &inviter_brand);
   // `/home` and not the bare address: the apps claim places, and the bare address is also where a
   // browser's sign-in comes back to (docs/app-links.md).
   let url = format!(
@@ -335,7 +342,8 @@ pub async fn resend_invite(
   if existing.role == SpaceRole::Guest {
     check_guest_domain(state, &existing.email)?;
   }
-  let Some(mailer) = state.mailer.get() else {
+  let brand = invite_brand(state, caller, &existing.email).await;
+  let Some(mailer) = state.mailer_for(&brand) else {
     return Err(ApiError::Conflict("this server sends no mail".into()));
   };
   let interval_secs = state.settings.get().limits.invite_resend_interval_secs;
@@ -355,7 +363,7 @@ pub async fn resend_invite(
     state.database.forget_invite_resend(invite).await?;
     return Err(refusal);
   }
-  let mail = invite_mail(state, caller, &access.view.space.name, &existing, None).await;
+  let mail = invite_mail(state, caller, &brand, &access.view.space.name, &existing, None);
   if let Err(error) = mailer.send(&mail).await {
     warn!(%error, invite_id = %invite, "resending the invitation e-mail failed");
     state.database.forget_invite_resend(invite).await?;
@@ -426,8 +434,9 @@ pub async fn list_directory_invitations(
   let maybe_next_after = has_more.then(|| found.last().map(|invite| invite.id)).flatten();
   let sponsor_ids: Vec<UserId> = found.iter().map(|invite| invite.sponsor_user_id).collect();
   let sponsors = state.database.get_users(&sponsor_ids).await?;
-  let can_send_mail =
-    state.mailer.get().is_some() && state.settings.get().limits.max_meeting_mails_per_user_per_hour > 0;
+  let has_mail_budget = state.settings.get().limits.max_meeting_mails_per_user_per_hour > 0;
+  let resender_brand = inviter_brand(state, &caller.user.id).await;
+  let brands = state.brands.current();
   let mut invitations = Vec::with_capacity(found.len());
   for invite in found {
     let sponsor = sponsors
@@ -435,6 +444,10 @@ pub async fn list_directory_invitations(
       .find(|user| user.id == invite.sponsor_user_id)
       .ok_or_else(|| ApiError::Internal("invite sponsor missing".into()))?;
     let is_expired = is_expired(invite.maybe_expires_at);
+    let can_send_mail = has_mail_budget
+      && state
+        .mailer_for(brands.for_recipient(&invite.email, &resender_brand))
+        .is_some();
     invitations.push(DirectoryInvitation {
       id: invite.id,
       space_id: invite.space_id,

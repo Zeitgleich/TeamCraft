@@ -18,11 +18,11 @@ use std::time::Duration;
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use teamcraft_client_api::custom_status::set_request;
-use teamcraft_client_api::live::{LiveMarks, LiveReceipt, LiveSnapshot};
+use teamcraft_client_api::live::{LiveDelivered, LiveMarks, LiveReceipt, LiveSnapshot};
 use teamcraft_client_api::receipts::seen_by;
 use teamcraft_proto::{
-  AnnouncementId, AnnouncementResponse, CustomStatus as CustomStatusWire, GetAnnouncementResponse,
-  ListPresenceResponse, ListThreadsResponse, PresenceState, ReadReceiptsResponse,
+  AnnouncementId, AnnouncementResponse, BridgeAddressResponse, CustomStatus as CustomStatusWire,
+  GetAnnouncementResponse, ListPresenceResponse, ListThreadsResponse, PresenceState, ReadReceiptsResponse,
   ThreadSummary as ThreadWire, UnreadResponse, UserPresence,
 };
 
@@ -63,6 +63,9 @@ pub struct LiveServer {
   refresh_queued: Rc<Cell<bool>>,
 }
 
+/// A conversation's read positions per member, and how far every other member has its messages.
+type ReceiptsAnswer = (Vec<(UserId, MessageId)>, Option<MessageId>);
+
 /// The last answers of the server. Empty until the first refresh finishes.
 #[derive(Debug, Default)]
 pub struct LiveState {
@@ -73,6 +76,8 @@ pub struct LiveState {
   threads: Vec<ThreadWire>,
   presence: HashMap<UserId, UserPresence>,
   receipts: HashMap<ConversationId, Vec<(UserId, MessageId)>>,
+  /// How far every other member has the messages on a device (DMs and group DMs, #598).
+  delivered: HashMap<ConversationId, MessageId>,
   announcement: Option<AnnouncementResponse>,
   /// The marks of the core's last snapshot; `None` before the first.
   maybe_last_marks: Option<LiveMarks>,
@@ -81,11 +86,17 @@ pub struct LiveState {
   presence_seen: u64,
   /// The receipts of the last snapshot: unchanged ones are not applied again.
   last_receipts: Vec<LiveReceipt>,
+  /// The delivered positions of the last snapshot: unchanged ones are not applied again.
+  last_delivered: Vec<LiveDelivered>,
   /// The conversation whose receipts the UI showed last (the open DM): the only one whose
   /// receipts are read over REST, once per connection.
   maybe_receipts_shown: Option<ConversationId>,
   /// Conversations whose receipts were read since the last connection, or are being read.
   receipts_read: HashSet<ConversationId>,
+  /// The bridge public URL the server answered per channel (only people who manage the channel
+  /// get an answer), and the channels asked since the last refresh, or being asked.
+  bridge_urls: HashMap<ConversationId, String>,
+  bridge_urls_asked: HashSet<ConversationId>,
 }
 
 /// What the UI still has to read from the server after a core snapshot.
@@ -108,6 +119,7 @@ struct Fetched {
   maybe_threads: Option<Vec<ThreadWire>>,
   presence: Vec<UserPresence>,
   receipts: HashMap<ConversationId, Vec<(UserId, MessageId)>>,
+  delivered: HashMap<ConversationId, MessageId>,
   maybe_announcement: Option<GetAnnouncementResponse>,
 }
 
@@ -172,6 +184,8 @@ impl LiveServer {
       let mut state = self.state.borrow_mut();
       // Receipts may have been missed since they were read: read again when shown.
       state.receipts_read.clear();
+      // A setting an admin changed meanwhile is read again the next time it is shown.
+      state.bridge_urls_asked.clear();
       (state.is_core_fed, state.maybe_receipts_shown)
     };
     let (unread, threads, presence) = if is_core_fed {
@@ -188,10 +202,12 @@ impl LiveServer {
     };
     let announcement = self.get::<GetAnnouncementResponse>("/api/v1/announcement").await;
     let mut receipts = HashMap::new();
+    let mut delivered = HashMap::new();
     if let Some(conversation) = maybe_shown {
       self.state.borrow_mut().receipts_read.insert(conversation);
-      if let Some(read) = self.receipts(conversation).await {
+      if let Some((read, maybe_delivered)) = self.receipts(conversation).await {
         receipts.insert(conversation, read);
+        delivered.extend(maybe_delivered.map(|message| (conversation, message)));
       }
     }
     let fetched = Fetched {
@@ -200,6 +216,7 @@ impl LiveServer {
       maybe_threads: threads.map(|threads| threads.threads),
       presence,
       receipts,
+      delivered,
       maybe_announcement: announcement,
     };
     // Issue #246: an unchanged answer must not make the whole UI read the workspace again.
@@ -209,11 +226,14 @@ impl LiveServer {
   }
 
   async fn refresh_receipts(&self, conversation: ConversationId) {
-    let Some(receipts) = self.receipts(conversation).await else {
+    let Some((receipts, maybe_delivered)) = self.receipts(conversation).await else {
       return;
     };
     let fetched = Fetched {
       receipts: HashMap::from([(conversation, receipts)]),
+      delivered: maybe_delivered
+        .map(|message| HashMap::from([(conversation, message)]))
+        .unwrap_or_default(),
       ..Fetched::default()
     };
     if self.state.borrow_mut().merge(fetched) {
@@ -221,16 +241,16 @@ impl LiveServer {
     }
   }
 
-  async fn receipts(&self, conversation: ConversationId) -> Option<Vec<(UserId, MessageId)>> {
+  /// The members' read positions and how far every other member has the messages on a device.
+  async fn receipts(&self, conversation: ConversationId) -> Option<ReceiptsAnswer> {
     let path = format!("/api/v1/conversations/{conversation}/read-receipts");
     let response = self.get::<ReadReceiptsResponse>(&path).await?;
-    Some(
-      response
-        .receipts
-        .into_iter()
-        .map(|receipt| (receipt.user_id, receipt.message_id))
-        .collect(),
-    )
+    let receipts = response
+      .receipts
+      .into_iter()
+      .map(|receipt| (receipt.user_id, receipt.message_id))
+      .collect();
+    Some((receipts, response.maybe_delivered_up_to))
   }
 
   async fn refresh_announcement(&self) {
@@ -242,6 +262,41 @@ impl LiveServer {
       if is_changed {
         self.changed();
       }
+    }
+  }
+
+  /// The bridge public URL for the channel's "Connect a source" section: what the server last
+  /// said (`None`: none is set, or the user may not read it, or it isn't read yet). The first ask
+  /// starts the read; a change shows through the change notifier.
+  pub fn bridge_public_url(&self, conversation: ConversationId) -> Option<String> {
+    let (maybe_url, is_new) = {
+      let mut state = self.state.borrow_mut();
+      let is_new = state.bridge_urls_asked.insert(conversation);
+      (state.bridge_urls.get(&conversation).cloned(), is_new)
+    };
+    if is_new {
+      let live = self.clone();
+      spawn_local(async move { live.refresh_bridge_url(conversation).await });
+    }
+    maybe_url
+  }
+
+  async fn refresh_bridge_url(&self, conversation: ConversationId) {
+    let path = format!("/api/v1/conversations/{conversation}/bridge-address");
+    let Some(address) = self.get::<BridgeAddressResponse>(&path).await else {
+      // Asked again with the next read.
+      self.state.borrow_mut().bridge_urls_asked.remove(&conversation);
+      return;
+    };
+    let is_changed = {
+      let mut state = self.state.borrow_mut();
+      match address.maybe_public_url {
+        Some(url) => state.bridge_urls.insert(conversation, url.clone()) != Some(url),
+        None => state.bridge_urls.remove(&conversation).is_some(),
+      }
+    };
+    if is_changed {
+      self.changed();
     }
   }
 
@@ -310,6 +365,24 @@ impl LiveServer {
   /// conversation is shown after a connection its receipts are read from the server once (events
   /// may have been missed); the UI reads again when they arrived.
   pub fn seen_by(&self, conversation: ConversationId, message: MessageId) -> Vec<UserId> {
+    self.note_receipts_shown(conversation);
+    let state = self.state.borrow();
+    state
+      .receipts
+      .get(&conversation)
+      .map_or_else(Vec::new, |receipts| seen_by(receipts, message))
+  }
+
+  /// The newest message every other member of a DM or group DM has on a device (#598); read from
+  /// the server with the receipts, like [`Self::seen_by`].
+  pub fn delivered_to_others(&self, conversation: ConversationId) -> Option<MessageId> {
+    self.note_receipts_shown(conversation);
+    self.state.borrow().delivered.get(&conversation).copied()
+  }
+
+  /// The UI shows the conversation's receipts: the first time after a connection they are read
+  /// from the server once.
+  fn note_receipts_shown(&self, conversation: ConversationId) {
     let is_unread = {
       let mut state = self.state.borrow_mut();
       state.maybe_receipts_shown = Some(conversation);
@@ -319,11 +392,6 @@ impl LiveServer {
       let live = self.clone();
       spawn_local(async move { live.refresh_receipts(conversation).await });
     }
-    let state = self.state.borrow();
-    state
-      .receipts
-      .get(&conversation)
-      .map_or_else(Vec::new, |receipts| seen_by(receipts, message))
   }
 
   /// Marks the conversation read in the local counts right away; the server confirms on refresh.
@@ -483,6 +551,9 @@ impl LiveState {
         is_changed = true;
       }
     }
+    for (conversation, message) in fetched.delivered {
+      is_changed |= self.note_delivered(conversation, message);
+    }
     if let Some(announcement) = fetched.maybe_announcement {
       is_changed |= replace_if_changed(&mut self.announcement, announcement.maybe_announcement);
     }
@@ -510,7 +581,26 @@ impl LiveState {
       self.apply_receipts(&live.receipts);
       self.last_receipts = live.receipts;
     }
+    if live.delivered != self.last_delivered {
+      for delivered in &live.delivered {
+        self.note_delivered(delivered.conversation, delivered.message);
+      }
+      self.last_delivered = live.delivered;
+    }
     follow_up(maybe_last_marks, live.marks)
+  }
+
+  /// Delivered positions only move forward; returns whether this one moved.
+  fn note_delivered(&mut self, conversation: ConversationId, message: MessageId) -> bool {
+    if self
+      .delivered
+      .get(&conversation)
+      .is_some_and(|known| *known >= message)
+    {
+      return false;
+    }
+    self.delivered.insert(conversation, message);
+    true
   }
 
   fn apply_receipts(&mut self, live: &[LiveReceipt]) {
@@ -589,12 +679,7 @@ pub fn thread_summary(entry: &ThreadWire, messages: &[Message]) -> Option<Thread
 }
 
 pub fn presence_status(state: &PresenceState) -> PresenceStatus {
-  match state {
-    PresenceState::Online => PresenceStatus::Online,
-    PresenceState::Away => PresenceStatus::Away,
-    PresenceState::DoNotDisturb => PresenceStatus::DoNotDisturb,
-    PresenceState::Offline | PresenceState::Unknown(_) => PresenceStatus::Offline,
-  }
+  PresenceStatus::from(state)
 }
 
 /// The status with its end resolved in the user's time zone ("today" ends at local midnight), on
@@ -781,6 +866,31 @@ mod tests {
     }
 
     #[test]
+    fn delivered_only_moves_forward_from_snapshots_and_answers() {
+      let conversation: ConversationId = id_from_raw(7);
+      let mut state = LiveState::default();
+      let mut snapshot = live(Some(&[]), LiveMarks::default());
+      snapshot.delivered = vec![LiveDelivered {
+        conversation,
+        message: id_from_raw(9),
+      }];
+      state.apply_snapshot(snapshot);
+      assert_eq!(state.delivered.get(&conversation), Some(&id_from_raw(9)));
+      // A late REST answer with an older position changes nothing.
+      let older = Fetched {
+        delivered: HashMap::from([(conversation, id_from_raw(5))]),
+        ..Fetched::default()
+      };
+      assert!(!state.merge(older));
+      let newer = Fetched {
+        delivered: HashMap::from([(conversation, id_from_raw(12))]),
+        ..Fetched::default()
+      };
+      assert!(state.merge(newer));
+      assert_eq!(state.delivered.get(&conversation), Some(&id_from_raw(12)));
+    }
+
+    #[test]
     fn only_presence_that_changed_overrides_the_rest_answer() {
       let user: UserId = id_from_raw(3);
       let mut state = LiveState::default();
@@ -928,14 +1038,19 @@ mod tests {
   }
 
   #[test]
-  fn unknown_presence_is_offline() {
+  fn unknown_presence_is_somebody_who_is_there() {
     assert_eq!(
       presence_status(&PresenceState::Unknown("x".into())),
-      PresenceStatus::Offline
+      PresenceStatus::Online
     );
     assert_eq!(
       presence_status(&PresenceState::DoNotDisturb),
       PresenceStatus::DoNotDisturb
+    );
+    assert_eq!(presence_status(&PresenceState::Busy), PresenceStatus::Busy);
+    assert_eq!(
+      presence_status(&PresenceState::BeRightBack),
+      PresenceStatus::BeRightBack
     );
   }
 
@@ -966,6 +1081,8 @@ mod tests {
       maybe_imported: None,
       maybe_source: None,
       maybe_placeholder: None,
+      group_mentions: Vec::new(),
+      mentions_me: false,
     }
   }
 

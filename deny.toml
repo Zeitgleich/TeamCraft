@@ -7,6 +7,12 @@ all-features = true
 [advisories]
 # Every ignored advisory needs a reason and a link.
 ignore = [
+  # SQLite before 3.54 can return stale page-cache memory for a database opened with a crafted -wal
+  # file of another page size. Local only: our SQLite files are the app's own, in its data
+  # directory; whoever can plant files there can read the data anyway. The fix (libsqlite3-sys 0.39,
+  # rusqlite 0.41) conflicts with sqlx-sqlite 0.9's `links = "sqlite3"` (< 0.38). Remove with #1570.
+  # https://rustsec.org/advisories/RUSTSEC-2026-0459
+  { id = "RUSTSEC-2026-0459", reason = "local-only SQLite WAL issue; fix blocked by sqlx-sqlite 0.9 (libsqlite3-sys < 0.38), tracked in #1570" },
   # crypto-bigint 0.5 (via elliptic-curve 0.13 / p256 0.13 / ecdsa 0.16, pulled in by davey and the
   # openmls_rust_crypto stack) has secret-dependent branches in a few arithmetic operations. Only
   # 0.7.6 is patched and those crates don't support it yet; the direct crypto-bigint 0.7 is updated

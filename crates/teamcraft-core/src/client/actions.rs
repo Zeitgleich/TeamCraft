@@ -9,6 +9,7 @@ use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::imported::{Authorship, ImportedAuthor};
 use crate::read_state;
+use crate::readable_text::readable_text;
 use crate::store::{
   AttachmentRef, Forwarded, LocalStore, MessageContent, MessageMeta, ReplyAttachment, ReplyRef, StoredMessage,
 };
@@ -135,12 +136,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .await
   }
 
-  /// Reads how far the other members of a DM or group DM read: receipts sent while this device was
-  /// offline never arrive as events. Receipts only move forward, so a stale answer changes nothing.
+  /// Reads how far the other members of a DM or group DM read, and how far the messages reached
+  /// their devices: receipts sent while this device was offline never arrive as events. Receipts only move forward, so a stale answer changes nothing.
   pub async fn refresh_read_receipts(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     let response = self.api.read_receipts(conversation).await?;
     for receipt in response.receipts {
       read_state::note_read_receipt(&self.store, conversation, receipt.user_id, receipt.message_id)?;
+    }
+    if let Some(delivered) = response.maybe_delivered_up_to {
+      read_state::note_delivered_to_others(&self.store, conversation, delivered)?;
     }
     Ok(())
   }
@@ -207,7 +211,7 @@ pub fn reply_ref(
   ReplyRef {
     target: target.client_message_id,
     author: Authorship::of(target, maybe_importer).author,
-    excerpt: text.chars().take(REPLY_EXCERPT_CHARS).collect(),
+    excerpt: readable_text(text).chars().take(REPLY_EXCERPT_CHARS).collect(),
     maybe_attachment: maybe_quoted,
   }
 }

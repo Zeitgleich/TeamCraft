@@ -87,7 +87,7 @@ fn is_blank_text(text: &str) -> bool {
 }
 
 /// Content of a paste, as the subset. `html` is parsed into an inert document (no scripts run, nothing
-/// loads) and read through the allow-list walk; plain text stays literal.
+/// loads) and read through the allow-list walk; plain text stays literal, except Markdown tables.
 pub fn pasted_blocks(maybe_html: Option<&str>, plain: &str) -> Vec<markdown::Block> {
   if let Some(html) = maybe_html.filter(|html| !html.trim().is_empty())
     && let Ok(parser) = web_sys::DomParser::new()
@@ -96,15 +96,7 @@ pub fn pasted_blocks(maybe_html: Option<&str>, plain: &str) -> Vec<markdown::Blo
   {
     return editor_doc::to_blocks(&read_children(&body), Whitespace::Collapse);
   }
-  let lines: Vec<Vec<markdown::Inline>> = plain
-    .lines()
-    .map(|line| vec![markdown::Inline::Text(line.to_owned())])
-    .collect();
-  if lines.is_empty() {
-    Vec::new()
-  } else {
-    vec![markdown::Block::Paragraph(lines)]
-  }
+  markdown::literal_with_tables(plain)
 }
 
 /// Inserts blocks at the caret. A single line goes into the current line instead of starting a block.
@@ -122,6 +114,87 @@ pub fn insert_blocks(blocks: &[markdown::Block]) {
   if !html.is_empty() {
     command("insertHTML", &html);
   }
+}
+
+/// Inserts an empty table and an empty line after it, and puts the caret into its first cell.
+pub fn insert_table(editor: &HtmlElement) {
+  let blocks = [
+    markdown::Block::Table(editor_doc::table_skeleton()),
+    markdown::Block::Paragraph(vec![Vec::new()]),
+  ];
+  command(
+    "insertHTML",
+    &editor_doc::to_html(&editor_doc::from_blocks(&blocks)),
+  );
+  // The caret is on the line after the table now.
+  let maybe_cell = caret_closest(editor, "p")
+    .and_then(|line| line.previous_element_sibling())
+    .filter(|table| table.tag_name().eq_ignore_ascii_case("table"))
+    .and_then(|table| table.query_selector("th").ok().flatten());
+  if let Some(cell) = maybe_cell {
+    place_caret(&cell, 0);
+  }
+}
+
+/// Tab and Shift+Tab in a table move to the next or previous cell; Tab in the last cell adds a row.
+/// Whether the caret was in a cell and moved.
+pub fn move_between_cells(editor: &HtmlElement, is_backwards: bool) -> bool {
+  let Some(cell) = caret_closest(editor, "td, th") else {
+    return false;
+  };
+  let Some(table) = cell.closest("table").ok().flatten() else {
+    return false;
+  };
+  let cells = elements(&table, "th, td");
+  let Some(at) = cells.iter().position(|candidate| *candidate == cell) else {
+    return false;
+  };
+  let maybe_target = match (is_backwards, at) {
+    (true, 0) => None,
+    (true, at) => cells.get(at - 1).cloned(),
+    (false, at) => cells.get(at + 1).cloned().or_else(|| add_row(&table)),
+  };
+  let Some(target) = maybe_target else {
+    return false;
+  };
+  place_caret(&target, target.child_nodes().length());
+  true
+}
+
+/// Appends an empty row with the last row's columns and alignments; its first cell.
+fn add_row(table: &Element) -> Option<Element> {
+  let document = table.owner_document()?;
+  let last = elements(table, "tr").pop()?;
+  let body = match table.query_selector("tbody").ok().flatten() {
+    Some(body) => body,
+    None => {
+      let body = document.create_element("tbody").ok()?;
+      table.append_child(&body).ok()?;
+      body
+    },
+  };
+  let row = document.create_element("tr").ok()?;
+  for template in elements(&last, ":scope > th, :scope > td") {
+    let cell = document.create_element("td").ok()?;
+    if let Some(align) = template.get_attribute("data-align") {
+      drop(cell.set_attribute("data-align", &align));
+    }
+    let line_break: Node = document.create_element("br").ok()?.into();
+    drop(cell.append_child(&line_break));
+    drop(row.append_child(&cell));
+  }
+  body.append_child(&row).ok()?;
+  row.first_element_child()
+}
+
+fn elements(parent: &Element, selector: &str) -> Vec<Element> {
+  let Ok(list) = parent.query_selector_all(selector) else {
+    return Vec::new();
+  };
+  (0..list.length())
+    .filter_map(|index| list.item(index))
+    .filter_map(|node| node.dyn_into::<Element>().ok())
+    .collect()
 }
 
 /// Inserts text at the caret, replacing the selection.
@@ -884,6 +957,9 @@ fn read(node: &Node, depth: usize) -> Option<DomNode> {
         maybe_style: element.get_attribute("style"),
         maybe_start: element.get_attribute("start"),
         maybe_language,
+        maybe_align: element
+          .get_attribute("data-align")
+          .or_else(|| element.get_attribute("align")),
         children: read_children_at(node, depth + 1),
       }))
     },
@@ -902,6 +978,7 @@ fn build(document: &Document, node: &DomNode) -> Option<Node> {
         ("href", &element.maybe_href),
         ("start", &element.maybe_start),
         ("data-language", &element.maybe_language),
+        ("data-align", &element.maybe_align),
       ] {
         if let Some(value) = maybe_value {
           drop(built.set_attribute(name, value));

@@ -32,9 +32,9 @@ use teamcraft_media::{
 };
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry, ConversationId,
-  DeviceId, ErrorBody, ErrorCode, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId,
-  SFU_GOING_AWAY_CLOSE_CODE, SfuCallRoster, SfuControlAction, TransportFeedback, UnixMillis, UserId,
-  VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
+  DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode, MAX_SIMULCAST_LAYERS,
+  MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, SfuCallRoster, SfuControlAction,
+  TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -174,6 +174,7 @@ struct Resumed {
 struct Joining {
   grant: JoinGrant,
   capabilities: MediaCapabilities,
+  dave_transition_mode: DaveTransitionMode,
   handle: ParticipantHandle,
   session: SessionId,
   maybe_switch_secret: Option<Base64Bytes>,
@@ -195,6 +196,8 @@ struct Participant {
   audio_stream_id: StreamId,
   session: SessionId,
   presence: Presence,
+  /// How the current connection applies DAVE transitions (its `join`).
+  dave_transition_mode: DaveTransitionMode,
 }
 
 enum Presence {
@@ -435,6 +438,7 @@ impl Rooms {
     &self,
     grant: JoinGrant,
     capabilities: MediaCapabilities,
+    dave_transition_mode: DaveTransitionMode,
     handle: ParticipantHandle,
     maybe_switch_secret: Option<Base64Bytes>,
   ) -> Result<(Arc<Room>, SessionId, JoinOutcome), RoomError> {
@@ -479,6 +483,7 @@ impl Rooms {
     let joining = Joining {
       grant,
       capabilities,
+      dave_transition_mode,
       handle,
       session,
       maybe_switch_secret,
@@ -539,7 +544,7 @@ impl Room {
       participants: HashMap::new(),
       latest_sessions: HashMap::new(),
       forwarder: Forwarder::new(config.forwarding),
-      dave: DaveCoordinator::new(call_id)?,
+      dave: DaveCoordinator::new(call_id, config.dave_transition_deadline)?,
       next_stream_id: 1,
       decodable_announced: HashMap::new(),
     };
@@ -592,7 +597,12 @@ impl Room {
           epoch,
           commit.into_vec(),
           maybe_welcome.map(Base64Bytes::into_vec),
+          now,
         );
+        Ok(())
+      },
+      CallClientMessage::DaveTransitionReady { transition_id } => {
+        self.on_transition_ready(participant_id, transition_id);
         Ok(())
       },
       CallClientMessage::Join { .. } => Err(ErrorBody::new(ErrorCode::ProtocolViolation, "already joined")),
@@ -779,11 +789,14 @@ impl Room {
     state.apply(effects);
   }
 
-  /// Periodic work for one participant (every ~100 ms): re-runs its layer allocation.
+  /// Periodic work for one participant (every ~100 ms): re-runs its layer allocation, and executes
+  /// a DAVE transition whose deadline passed (any participant's timer does; the check is cheap).
   pub fn on_timer(&self, device_id: DeviceId, now: Instant) {
     let mut state = lock(&self.state);
     let effects = state.forwarder.on_timer(device_id, now);
     state.apply(effects);
+    let outbound = state.dave.on_timer(now);
+    state.dispatch(outbound);
   }
 
   /// Feedback on the datagrams `sender` sent since the last call, for its uplink estimation.
@@ -798,11 +811,24 @@ impl Room {
     maybe_key_binding: Option<Vec<u8>>,
   ) -> Result<(), RoomError> {
     let mut state = lock(&self.state);
-    let outbound = state
-      .dave
-      .on_key_package(participant_id, key_package, maybe_key_binding)?;
+    let transition_mode = state
+      .participants
+      .get(&participant_id)
+      .map_or(DaveTransitionMode::AtOnce, |participant| {
+        participant.dave_transition_mode
+      });
+    let outbound =
+      state
+        .dave
+        .on_key_package(participant_id, key_package, maybe_key_binding, transition_mode)?;
     state.dispatch(outbound);
     Ok(())
+  }
+
+  pub fn on_transition_ready(&self, participant_id: DeviceId, transition_id: DaveTransitionId) {
+    let mut state = lock(&self.state);
+    let outbound = state.dave.on_transition_ready(participant_id, transition_id);
+    state.dispatch(outbound);
   }
 
   pub fn on_commit(
@@ -811,11 +837,12 @@ impl Room {
     epoch: u64,
     commit: Vec<u8>,
     maybe_welcome: Option<Vec<u8>>,
+    now: Instant,
   ) {
     let mut state = lock(&self.state);
     let outbound = state
       .dave
-      .on_commit(participant_id, DaveEpoch(epoch), commit, maybe_welcome);
+      .on_commit(participant_id, DaveEpoch(epoch), commit, maybe_welcome, now);
     state.dispatch(outbound);
   }
 
@@ -823,6 +850,7 @@ impl Room {
     let Joining {
       grant,
       capabilities,
+      dave_transition_mode,
       handle,
       session,
       maybe_switch_secret,
@@ -836,6 +864,9 @@ impl Room {
       },
       Some(_) => {
         let resumed = state.resume(participant_id, capabilities, handle, session, now);
+        if let Some(participant) = state.participants.get_mut(&participant_id) {
+          participant.dave_transition_mode = dave_transition_mode;
+        }
         let welcome = Welcome {
           package,
           reconnect_grace: self.reconnect_grace,
@@ -879,6 +910,7 @@ impl Room {
             audio_stream_id,
             session,
             presence: Presence::Connected(handle),
+            dave_transition_mode,
           },
         );
         let welcome = Welcome {
@@ -1802,6 +1834,7 @@ mod tests {
         .join(
           grant(CALL, Some(CONVERSATION), 1, 10),
           MediaCapabilities::default(),
+          DaveTransitionMode::Coordinated,
           handle,
           None,
         )
@@ -1826,6 +1859,7 @@ mod tests {
         .join(
           grant(CALL, Some(CONVERSATION), 1, 10),
           MediaCapabilities::default(),
+          DaveTransitionMode::Coordinated,
           handle,
           Some(Base64Bytes::new(vec![3; 32])),
         )
@@ -1918,6 +1952,7 @@ mod tests {
       .join(
         grant(CALL, Some(CONVERSATION), user, device),
         capabilities,
+        DaveTransitionMode::Coordinated,
         handle,
         None,
       )
@@ -1941,7 +1976,13 @@ mod tests {
       link: Arc::new(QuietLink),
       signal_tx,
     };
-    let (room, session, _) = rooms.join(grant, MediaCapabilities::default(), handle, None)?;
+    let (room, session, _) = rooms.join(
+      grant,
+      MediaCapabilities::default(),
+      DaveTransitionMode::Coordinated,
+      handle,
+      None,
+    )?;
     Ok((signal_rx, session, room.call_id()))
   }
 

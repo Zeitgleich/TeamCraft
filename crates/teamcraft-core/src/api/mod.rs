@@ -46,10 +46,10 @@ use teamcraft_proto::{
   KeyBagResponse, KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse,
   ListDevicesResponse, ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery,
   ListMlsMessagesResponse, ListScheduledMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse,
-  MessageResponse, MlsMessageResponse, MoveChannelRequest, PostMlsCommitRequest, PostMlsCommitResponse,
-  PostMlsMessageRequest, PutDeviceListRequest, PutKeyBagRequest, RegisterDeviceRequest,
-  ScheduleMessageRequest, ScheduledMessageId, ScheduledMessageResponse, SearchUsersResponse,
-  SendMessageRequest, SendScheduledMessageResponse, SpaceId, SpaceMemberResponse,
+  ListUserGroupRostersResponse, MessageResponse, MlsMessageResponse, MoveChannelRequest,
+  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutDeviceListRequest, PutKeyBagRequest,
+  RegisterDeviceRequest, ScheduleMessageRequest, ScheduledMessageId, ScheduledMessageResponse,
+  SearchUsersResponse, SendMessageRequest, SendScheduledMessageResponse, SpaceId, SpaceMemberResponse,
   UpdateScheduledMessageRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserId, UserSummary,
 };
 use teamcraft_proto::{
@@ -82,6 +82,10 @@ use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkRequest};
 use teamcraft_proto::{
   CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingId, MeetingResponse,
   PutMeetingAdmittersRequest,
+};
+use teamcraft_proto::{
+  DirectoryChannelsQuery, DirectoryChannelsResponse, DirectoryFiltersQuery, DirectoryFiltersResponse,
+  DirectoryInvitationsQuery, DirectoryInvitationsResponse, DirectoryPeopleQuery, DirectoryPeopleResponse,
 };
 use teamcraft_proto::{ExpiringGuestResponse, ExtendGuestRequest};
 use teamcraft_proto::{GatewayInfoResponse, PushGatewayResponse, WebPushKeyResponse};
@@ -152,6 +156,26 @@ pub trait ServerApi {
   /// The directory (`GET /users?query=`): people whose name or username contains `query`, at most
   /// one page of the server's size. Guests only find people they share a conversation with.
   fn search_users(&self, query: &str) -> impl Future<Output = Result<SearchUsersResponse, ApiError>>;
+  /// One page of the directory's people (`GET /directory/people`, issue #298), filtered.
+  fn directory_people(
+    &self,
+    query: &DirectoryPeopleQuery,
+  ) -> impl Future<Output = Result<DirectoryPeopleResponse, ApiError>>;
+  /// The organizations, departments and titles the people filters offer (`GET /directory/filters`).
+  fn directory_filters(
+    &self,
+    query: &DirectoryFiltersQuery,
+  ) -> impl Future<Output = Result<DirectoryFiltersResponse, ApiError>>;
+  /// One page of channels across the user's spaces (`GET /directory/channels`).
+  fn directory_channels(
+    &self,
+    query: &DirectoryChannelsQuery,
+  ) -> impl Future<Output = Result<DirectoryChannelsResponse, ApiError>>;
+  /// One page of the open invitations the user may manage (`GET /directory/invitations`).
+  fn directory_invitations(
+    &self,
+    query: &DirectoryInvitationsQuery,
+  ) -> impl Future<Output = Result<DirectoryInvitationsResponse, ApiError>>;
 
   fn register_device(
     &self,
@@ -246,6 +270,8 @@ pub trait ServerApi {
     space: SpaceId,
   ) -> impl Future<Output = Result<ListSpaceMembersResponse, ApiError>>;
   fn list_conversations(&self) -> impl Future<Output = Result<ListConversationsResponse, ApiError>>;
+  /// Every user group with its members (`GET /user-groups/rosters`); refused for guests.
+  fn list_user_group_rosters(&self) -> impl Future<Output = Result<ListUserGroupRostersResponse, ApiError>>;
   fn conversation(
     &self,
     conversation: ConversationId,
@@ -384,6 +410,8 @@ pub trait ServerApi {
   fn list_invites(&self, space: SpaceId) -> impl Future<Output = Result<ListInvitesResponse, ApiError>>;
   /// Withdraws a pending invitation (`DELETE /spaces/{id}/invites/{invite}`).
   fn delete_invite(&self, space: SpaceId, invite: InviteId) -> impl Future<Output = Result<(), ApiError>>;
+  /// Sends a pending invitation's e-mail again (`POST /spaces/{id}/invites/{invite}/resend`).
+  fn resend_invite(&self, space: SpaceId, invite: InviteId) -> impl Future<Output = Result<(), ApiError>>;
   /// Changes a space member's role (`PATCH /spaces/{id}/members/{user}`).
   fn update_space_member(
     &self,

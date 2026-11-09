@@ -186,6 +186,11 @@ select.input {
   color: var(--chrome-strong);
 }
 
+.sidebar .badge-count.is-quiet {
+  background: color-mix(in srgb, var(--sb-strong) 22%, transparent);
+  color: var(--sb-strong);
+}
+
 .main .badge-count.is-quiet,
 .side-panel .badge-count.is-quiet {
   background: var(--surface-3);

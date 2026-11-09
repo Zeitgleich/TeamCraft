@@ -30,7 +30,10 @@ use crate::state::{AppState, Overlay, ReplyImage, ReplyTarget, SidePanel, use_ap
 const EXCERPT_CHARS: usize = 120;
 
 pub fn excerpt(body: &str) -> String {
-  let single_line = body.split_whitespace().collect::<Vec<_>>().join(" ");
+  let single_line = crate::markdown::readable_tables(body)
+    .split_whitespace()
+    .collect::<Vec<_>>()
+    .join(" ");
   if single_line.chars().count() <= EXCERPT_CHARS {
     single_line
   } else {

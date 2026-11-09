@@ -32,6 +32,7 @@
   <string name="connection_sync_not_started">Synchronisierung konnte nicht starten. Neuer Versuch läuft…</string>
   <string name="message_link_label">Link zu einer Nachricht</string>
   <string name="message_sent">Gesendet</string>
+  <string name="message_delivered">Zugestellt</string>
   <string name="message_read">Gelesen</string>
   <plurals name="conversation_members">
     <item quantity="one">%d Mitglied</item>
@@ -150,7 +151,7 @@
   <string name="settings_devices_summary">Neues Gerät verknüpfen</string>
   <string name="chat_list_layout">Chats und Kanäle</string>
   <string name="chat_list_layout_list">Liste</string>
-  <string name="chat_list_layout_hint">Spaces zeigt Direktnachrichten und die Kanäle jedes Space getrennt. Liste zeigt alles in einer Liste.</string>
+  <string name="chat_list_layout_hint">Spaces zeigt deine Direktnachrichten und jeweils einen Space; gewechselt wird oben in der Kopfzeile. Liste zeigt alles in einer Liste.</string>
   <string name="chat_list_grouping">Kanäle</string>
   <string name="chat_list_grouping_mixed">Mit den Chats gemischt</string>
   <string name="chat_list_grouping_by_space">Nach Spaces gruppiert</string>
@@ -222,6 +223,14 @@
   <string name="list_failed_timeout">Keine Antwort rechtzeitig erhalten.</string>
   <string name="list_failed_other">Das konnte nicht geladen werden.</string>
   <string name="search_incomplete">Der Verlauf wird noch synchronisiert, die Ergebnisse können unvollständig sein.</string>
+  <!-- Interface font (#1494) -->
+  <string name="font">Schrift</string>
+  <string name="font_hint">Die Schriftart der ganzen App. Folgt deinem Konto.</string>
+  <string name="font_system">Systemschrift</string>
+  <string name="font_group_suggested">Empfohlen</string>
+  <string name="font_group_sans">Weitere serifenlose Schriften</string>
+  <string name="font_group_readability">Leichter lesen</string>
+  <string name="font_group_monospace">Festbreite</string>
   <!-- Colour themes (#202) -->
   <string name="color_theme">Farben</string>
   <string name="color_theme_hint">Akzent, Auswahl, Zähler und der Online-Punkt. Nachrichten bleiben immer auf Weiß oder Dunkelgrau. Folgt deinem Konto; hell oder dunkel bleibt bei diesem Gerät.</string>

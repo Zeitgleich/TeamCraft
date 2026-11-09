@@ -418,3 +418,5 @@ channel-sources-bridge-instance = On this server
 channel-sources-bridge-loopback = On its own machine
 channel-sources-bridge-instance-hint = The bridge runs beside the server (deployment option teamcraft_bridge); producers post to this server's address.
 channel-sources-bridge-loopback-hint = The bridge runs next to the producers and listens on its default local address. Use the bridge's own address if you opened its listener.
+channel-sources-bridge-configured = At the configured address
+channel-sources-bridge-configured-hint = The bridge runs on its own host and producers post to { $url }, the address the admins set.

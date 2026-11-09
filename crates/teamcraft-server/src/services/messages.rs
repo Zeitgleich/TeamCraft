@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use teamcraft_db::{Conversation, HistoryQuery, NewMessage, StoredMessage};
 use teamcraft_proto::{
   ConversationId, ConversationKind, GatewayEvent, Id, ListMessagesQuery, ListMessagesResponse, MessageId,
-  MessageResponse, Permission, SendMessageRequest, ThreadId, UserId,
+  MessageResponse, Permission, SendMessageRequest, Target, ThreadId, UserId,
 };
 use tracing::warn;
 
@@ -48,9 +48,7 @@ pub async fn send_message(
       "content_key_id has an invalid size".into(),
     ));
   }
-  if request.mentioned_user_ids.len() > limits.max_mentions_per_message {
-    return Err(ApiError::InvalidRequest("too many mentions".into()));
-  }
+  check_mention_count(state, caller, &access.target(), request.mentioned_user_ids.len())?;
   if !state
     .database
     .is_active_device_of(caller.user.id, request.device_id)
@@ -143,6 +141,30 @@ pub async fn send_message(
     message: response,
     is_new: outcome.is_new,
   })
+}
+
+/// The limits on who a message may name. Which of the named IDs came from a group is inside the
+/// ciphertext, so a server that can't read it enforces `use_group_mentions` the only way it can: a
+/// sender without the permission may name only a few people per message (docs/e2ee.md §4.4).
+pub(super) fn check_mention_count(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  target: &Target,
+  count: usize,
+) -> Result<(), ApiError> {
+  let limits = &state.settings.get().limits;
+  if count > limits.max_mentions_per_message {
+    return Err(ApiError::InvalidRequest("too many mentions".into()));
+  }
+  if count > limits.max_mentions_without_group_mentions
+    && !allows(state, caller, &Permission::UseGroupMentions, target)
+  {
+    return Err(ApiError::Forbidden(format!(
+      "missing permission {}",
+      Permission::UseGroupMentions
+    )));
+  }
+  Ok(())
 }
 
 /// A thread's root, which must be a top-level message of the conversation, with threads turned on.

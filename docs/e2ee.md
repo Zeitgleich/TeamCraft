@@ -374,8 +374,8 @@ leaves upkeep to the app, so it neither gets an ID token nor asks for one, and f
 
 DPoP (RFC 9449) makes a stolen or relayed access token useless without a key that stays on the
 device. This protects API access (posting, metadata, admin actions); message content is protected
-by E2EE either way. The server and the desktop and web clients are implemented; mobile sends no
-proofs yet (see "Not done yet").
+by E2EE either way. The server and the desktop, web and iOS clients are implemented; Android sends
+no proofs yet (see "Not done yet").
 
 **How it works.** The device has an ES256 key pair. At the token endpoint it proves that it holds
 the key, and the identity provider puts the key's thumbprint into the access token (`cnf.jkt`). With
@@ -467,14 +467,16 @@ platforms use hardware-backed keys where they have them. Tokens the server issue
 bearer tokens.
 
 **Clients** (`teamcraft_core::api::dpop`; web: `store/browser/dpop_key.rs`, `auth/browser.rs`;
-desktop: `apps/desktop/src/auth`).
+desktop: `apps/desktop/src/auth`; iOS: `apps/ios/Shared/DeviceProofKey.swift`, `SessionProofs.swift`).
 
 - **Key.** Behind `DpopSigner`: a public key and "sign these bytes", so that a hardware-backed key
   fits. One per device and server. In the browser a non-extractable Web Crypto ES256 key pair in
   its own IndexedDB database (the origin is the server), also for the service worker. On the desktop
   in the sealed secrets file (`SecretVault`), read with it at the start: no keychain access of its own
   at the start or later (#1150), and it is only made when it is needed. It stays after a sign-out,
-  because other tabs may be signing with it and it says nothing without a token.
+  because other tabs may be signing with it and it says nothing without a token. On iOS the key is in
+  the Secure Enclave (see "iOS" below): one per device and server, gone with the sign-out, as nothing else
+  signs with it.
 - **When a token goes with a proof.** A token that names a key (`cnf.jkt`) goes with `Authorization:
   DPoP` and a proof, on every API request and in the first frames of gateway and relay. Any other token
   stays a `Bearer` token: local accounts, bots, guests and unbound sessions. A proof with an unbound
@@ -539,13 +541,35 @@ desktop: `apps/desktop/src/auth`).
   an old `server-info` from a cache on the way, or more than two rotations of idle time), per concurrent
   request. Numbers:
   performance.md, "DPoP".
+- **iOS.** The key is in the Secure Enclave, made with `.privateKeyUsage` and nothing else: it signs
+  without asking the user, also while the phone is locked after its first unlock. Where there is no
+  enclave (the Simulator) or it makes no key, a software key takes its place, as far as a token thief on
+  the device goes the same as a desktop's. Both are one keychain item (`dpop-key.<server>`, in the
+  shared group, `AfterFirstUnlockThisDeviceOnly`), so neither reaches a restored phone. The app signs
+  bytes and the core makes the proofs (`DeviceProofKey`, `ProviderProver`), so RFC 9449 is
+  implemented once: `iat`, `ath`, nonce per party, one retry, also for the app's own requests to the
+  provider. The rules are the desktop's: a sign-in is bound when the provider advertises ES256 and a
+  fresh `server-info` has `DPoP-Nonce`, a session that isn't bound stays usable, and its next refresh **in
+  the app** tries to bind it. A session's binding is stored with its tokens (`boundKey`), so the two
+  can't disagree.
+  The **notification extension** signs for sessions that are bound already, with the same key, and
+  refreshes them under the same lock; it never makes a key and never binds a session, which is left to
+  the app (no key creation in a process that is killed at 30 s). It remembers no nonce, so each run
+  meets the provider's challenge once: one more round trip and signature.
+  **A key that can't be used keeps the session.** A keychain that can't be read or an enclave that
+  doesn't answer: nothing goes to the provider, the session stays, the core holds the token back
+  and retries like a network problem; the token is never `nil`, which would read as signed out. **A key
+  that is gone** (read and absent, or another key than the session names): the extension shows the
+  plain notification and changes nothing; the app says so in its banner, and on the sign-in screen
+  if it's there, and the session stays until the next sign-in replaces it. Nothing retries, and nothing
+  goes to the provider: signing in again is the only way out, which gets a new key.
 
 **Not done yet** (the next steps of issue #120):
 
-- Android and iOS: hardware-backed keys (Android Keystore, Secure Enclave) behind `DpopSigner`. Until
-  then they send no proofs and get unbound tokens: they work as bearer clients under `optional`, and
-  `required` refuses them. A software key through the FFI would be little work (`SoftwareDpopSigner`,
-  `AccessTokenSource::dpop_prover`), plus the proof in their own token requests (AppAuth, iOS).
+- Android: hardware-backed keys (Android Keystore) behind `DpopSigner`. Until then it sends no proofs
+  and gets unbound tokens: it works as a bearer client under `optional`, and `required` refuses it. The
+  iOS path is the template (`DeviceProofKey`, `TeamCraft::with_device_key`, `ProviderProver`); what is
+  left is a Keystore-backed key and the proof in AppAuth's token requests.
 - Secure Enclave for the macOS desktop: the key is software in the sealed file for now.
 - The identity provider: documented vendor-neutrally with the reference setup as example, and refresh
   tokens bound for public clients.
@@ -805,12 +829,53 @@ flag, and whether the text addresses the whole conversation (`is_channel_mention
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts, a
 channel's shared notes (§4.11).
 
+**Group mentions (`@accounting`, issue #206).** The sender's device expands them: from its sealed copy of
+the user groups (`GET /user-groups/rosters`, refused to guests like the rest of the groups) it puts the
+IDs of the group's members who are in the conversation into `mentioned_user_ids`, and records the handle
+in `meta.group_mentions` inside the ciphertext so receivers show `@accounting`. No new plaintext field:
+the server sees a list of IDs like for any mention, and doesn't learn that (or which) group was
+mentioned. The IDs are the ones at sending: a later change of the group changes nothing about who was
+notified, and receivers never look up who is in a group to decide this. Older clients ignore the unknown
+field (`MessageMeta` isn't strict) and show `@accounting` as text, with the mention still counted for the
+people listed.
+
+What this means for `use_group_mentions`: because the list of IDs is all the server sees, it can't tell a
+group mention from people typed one by one, and it can't check that the IDs on the list really came from
+the group. Devices honour the permission (no suggestion, no expansion without it); the server enforces
+the part it can: a sender without the permission in the conversation may name at most
+`[limits] max_mentions_without_group_mentions` (default 10) people per message (`403` above that, also for
+scheduled messages at sealing), on top of the limit for everybody and of IDs having to be members. A
+modified client without the permission can still name up to that many people, or claim a handle in the
+ciphertext for the text it shows, which only changes how that word looks. Anybody a mention names is
+visible to the conversation as `mentioned_user_ids` always was, so a group mention shows other members
+who of them it named, as any mention does; no more of the group than that, and guests read no groups.
+
 Typing indicators are plaintext metadata too: a `typing` gateway frame tells the server that a user
 types in a conversation, and for a reply in which thread (thread IDs are visible metadata anyway), never
 what, and it forwards that to the other members (gateway.md). Clients
 send at most one every 3 s while there is text in the composer, and none when the user turned "Show
 when I'm typing" off (a preference of each device, on by default). Nothing about typing is stored, on
 the server or the clients.
+
+Read and delivered positions are plaintext metadata (notifications.md, "Read receipts"). The server
+stores how far each member read (`read-position`, for unread counts and push) and, for DMs and group
+DMs, how far a device of each member stored the messages: after storing new messages a device sends a
+`delivered` gateway frame with the newest message ID it has (issue #598). That reveals nothing the
+server didn't already see, since it hands every device its messages (gateway events and history
+pages) and knows when. What other members learn is limited on purpose:
+
+- **Delivered is an aggregate.** A member is told one message ID per conversation, "every other
+  member has the messages up to here on at least one device" (`delivery_update`, `delivered_up_to`),
+  never who has what. In a DM that is the other person's state; in a group DM it doesn't say whose
+  device lagged.
+- **Reciprocal and per user.** `send_delivery_receipts` (and `send_read_receipts` for read
+  positions) is a per-user setting, default the instance's `[notifications] read_receipts_default`.
+  Whoever turns it off neither sends nor sees it; while any other member has it off, nobody in that
+  conversation sees the aggregate (their state is unknown, so the ticks never claim more than is
+  true).
+- **Bounded.** One position per membership (`memberships.last_delivered_message_id`), moved forward
+  only; nothing grows with the history.
+- Channels have no receipts of either kind.
 
 Directory data, not encrypted: the server has to show and route by it, so it holds it in plain text
 like the identity provider does. Space names, descriptions, colors and **pictures**; channel names,
@@ -1132,6 +1197,46 @@ its own. See [admin.md](admin.md) §2.
   refuses that commit, falls out and is added back into the group with the admin ("Falling out
   and coming back", below). This version never commits what an older one refuses, so the group
   doesn't split either way.
+- **An admin's self-join is committed by a member, not by an external commit** (issue #908,
+  evaluated, not adopted). Under `admin_self_join = visible` nobody decides, but a member's device
+  still has to commit the signed self-add, so with every member offline the admin waits. An MLS
+  external commit from the group's `GroupInfo` would let the admin's device join alone. It doesn't
+  hold up against the threat model, for four reasons:
+  - **No floor for the `GroupInfo`.** A further device refuses a `GroupInfo` older than the last key
+    switch its user's devices saw (above). An admin who was never in the group has no such floor, so
+    the server could hand out an old `GroupInfo` whose tree still holds a member removed since and
+    fork the admin into a group with them. Whatever the admin writes there, the removed member reads,
+    and the "joined as a workspace admin" line appears only in the fork. A signed "this is the
+    current epoch" from a member would close this, and needs a member online, which is what the
+    external commit was meant to avoid.
+  - **The refusal must hold.** Members enforce `owner_approval`, `disabled`, a fresh roster and the
+    `from_join` share (§4.7) by not committing. An external commit is sequenced by the server before
+    any member judged it, and openmls merges it on the joiner's side at once. Members that refuse it
+    can't undo it: they fall out of the group, and the only device that merged it is the admin's
+    ("Falling out and coming back", below), or in a strict channel they stop at that epoch until an
+    admin's rewind (§4.6.2). So a hostile or just outdated admin client could split or pause every
+    private channel it is not allowed into. Today a refused self-add changes nothing for the members.
+  - **It gains little.** A `from_join` addition switches the content key (§4.2). The joiner can't
+    have the current one and must not, so it could write only with a key it made, and read nothing
+    until a member's app handled the commit. Every member who writes is online and handles it first,
+    so the admin reads from the same moment as with a member's commit. The external commit would only
+    let the admin post into a channel nobody reads at that time.
+  - **The `GroupInfo` would go to non-members.** The server serves it to the group's members only. For
+    an external self-join it would serve it to every instance admin it lists in the channel, under
+    every setting (the policy check would be the server's word): the tree's devices and identity
+    certificates, which the server knows anyway, and the epoch's external public key, which lets
+    anybody with an accepted credential start the join. The server learns nothing new; the admin
+    learns the member devices before the members let them in.
+
+  The line every member writes stays unforgeable either way: it comes from the verified commit
+  (admin.md §2.4.2), and an external commit would carry the same signed change in its authenticated
+  data. Revisit once membership commits are signed per channel (§4.6.2, issue #878) and a member's
+  device can publish a signed, fresh epoch statement the joiner checks. Until then the admin's app
+  says what happens instead of waiting: "Adding you" while a member is online, "No member is online;
+  you are added when one is" when none is (from presence, gateway events), "You are a member" once
+  its device is in the group, and after `self_add_retry` without a commit that the request may have
+  been refused, with "Request access again" (admin.md §2.4). The request is kept in the device's store
+  and posted again on its own, also after a restart or while the admin's device was offline.
 - **Deactivation suspends, removal rotates keys** (admin.md §3.2.1). Deactivating an account changes
   no group: the user's devices stay members and new messages are still encrypted to them, so a
   reactivation needs no recovery and no re-adding. The server refuses the account every request
@@ -2899,8 +3004,9 @@ encryption, and what does and does not hold:
   private; then the usual default for roster members applies, which is what a private add would give them.
 - **Self-joins** sign `from_join` for themselves, and a member's client refuses to commit a signed self-add
   that asks for more (a modified client can't talk the group into showing it the past). The joiner
-  never hears of a refusal: until a member lets it in, its device shows "waiting to be let into this
-  channel" and posts the self-add again after `self_add_retry` (30 minutes, doubling up to a day),
+  never hears of a refusal: until a member lets it in, its device shows that it is being added (or
+  that no member is online, or, after a retry, that the request may have been refused, issue #908)
+  and posts the self-add again after `self_add_retry` (30 minutes, doubling up to a day),
   so a self-add refused by one version or policy goes through once the members accept it (issue
   #907).
 - **`history_policy` in the conversion request** is therefore a *hint* the server stores and shows (and
@@ -3276,7 +3382,7 @@ probe doing only the `serde_json` part (2026-11-04):
 | `automerge` 0.6.1                              | +930,498 B   | +284,962 B    | merges per character                |
 | Own op log, last writer wins per block         | a few kB     | a few kB      | one side's typing in the block lost |
 
-Neither CRDT breaks the budget of a signed-in first visit (5.65 MB gzip, docs/performance.md,
+Neither CRDT breaks the budget of a signed-in first visit (5.37 MB gzip, docs/performance.md,
 "Web bundle size"), and the editor doesn't count towards it anyway (below). `yrs` costs less than a
 third of `automerge` and speaks the Yjs format, which has editors and tooling around it. The op
 log would cost nothing, but it loses typing exactly where a meeting's notes are written: several
@@ -3733,12 +3839,13 @@ restored together with them on a new device.
   values); settings the server enforces (push, do not disturb, conversation and space mutes, read
   receipts) stay with the server and aren't copied here. Light, dark or as the system stays on
   each device, since it follows the room and the screen; the colour theme (#202,
-  `display.color_theme`: `brand`, `preset:<id>` or `custom:<four hex colours>`) syncs.
+  `display.color_theme`: `brand`, `preset:<id>` or `custom:<four hex colours>`) and the interface
+  font (#1494, `display.font`: `system` or a font's id) sync.
   An entry an older client wrote for a key no client reads any more (`theme`) stays as an unknown
   key.
   - *Mobile:* the apps sync the list layout and grouping, animated images, sharing typing, the
     mention rules (first name, `@channel`, keywords, the `@channel` confirmation), call status
-    sounds and the colour theme. The send key, language, wallpaper colours, notification content, media downloads and
+    sounds, the colour theme and the font. The send key, language, wallpaper colours, notification content, media downloads and
     devices stay on the phone. The app hands its values to the core (`sync_settings`) at start,
     when `settings_mark` moved after a store change, and 1.5 s after the user changed one, and
     stores an opaque state (owner and per-setting bases) next to its settings. A phone holds one
@@ -4268,6 +4375,56 @@ calls are verified with no extra prompts, and the DAVE privacy code and per-memb
 remain available for out-of-band comparison. Meeting guests without an account get an ephemeral
 key and are shown as "Guest (unverified)".
 
+**What a member checks in a welcome and a commit** (`davey` 0.2.0, #1541). A welcome is accepted
+only for this call's MLS group (the group ID is the call's), for the device's latest key package,
+with this call's external sender, and when every member it names is on the roster the device trusts
+plus the device itself (`recognized_user_ids`; without a trusted roster the SFU's participant list,
+reported as an untrusted roster, as for proposals). No group may hold two leaves of one device: a
+proposal, welcome or commit that would is refused. Proposals must be the external sender's Add or
+Remove proposals for the current epoch in plaintext; a commit must be a member's commit for the
+current epoch that references queued proposals only. A device accepts a commit from its own leaf
+only if it is byte for byte the commit it sent (openmls 0.9 would stage a mismatching one without an
+update path; `crates/vendor/davey/VENDORED.md`, change 2).
+
+**Transitions** (#1541). Processing a commit or welcome changes no frame key by itself. The member
+*prepares* the transition: it installs the new epoch's decryption keys at once (and keeps the
+previous epoch's for 10 s, so frames still under way decrypt) and only then switches its own
+encryption key, when the transition is *executed*. The SFU numbers every commit after the founding
+one with a transition id (DAVE's `transition_id`, never 0), sent with the commit and the welcome to
+each member that joined with `dave_transition_mode: coordinated`. Each of them answers
+`dave_transition_ready` once it has the keys; when all of them have (or left), the SFU sends
+`dave_execute_transition` and they switch together, so no receiver misses frames at the change.
+Without an id (the founding commit, an older SFU, a member from before #1541) the member prepares
+and executes at once, as before.
+
+The SFU's say in this is about timing only. It can't make a member encrypt with a key the member
+didn't derive from its own MLS state, and executing a transition it never prepared does nothing. It
+can delay an execution, but a member that hears none executes by itself 5 s after preparing
+(`DAVE_TRANSITION_TIMEOUT`). A transition prepared while another still waits keeps the earlier
+one's deadline, so chaining commits (forcing rejoins, say) doesn't push the switch back: at most
+5 s after the commit that removes a member (up to one SFU deadline, below, more after it left in
+the UI), nobody encrypts with a key it holds. Until then the
+departed member could still decrypt media it gets; an honest SFU no longer forwards any to it. The
+SFU executes once every member is ready or gone, or when its own deadline passed
+(`TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS`, default 2 s, checked on the room's 100 ms timer;
+#1544), so a member that never says it is ready (a hostile one, one whose welcome waits for a roster
+refresh) holds a joiner without keys for 2 s, not for the members' 5 s. It logs how many members
+weren't ready, never which. The next proposals wait until the transition in flight was executed,
+so the next commit no longer forces an execution before most members are ready (frames lost at the
+switch at a busy meeting start); joins and leaves meanwhile are batched into the next transition.
+A removal therefore reaches the group up to one deadline later; the SFU stops forwarding media to a
+departed member at once. There is no downgrade: TeamCraft has no
+counterpart of DAVE's `prepare_transition` to protocol version 0 (opcode 21), and the engine always
+prepares version 1, so the SFU can't switch a call to unencrypted media.
+
+**Nonces.** Every frame's AES-GCM nonce comes from the sender's per-epoch key ratchet and a counter.
+Installing the current epoch's key again (a repeated prepare for the same epoch) continues that
+counter; before `davey` 0.2.0 it restarted it and so reused nonces under one key. Tests in
+`teamcraft-media` (`dave.rs`) and in the vendored crate check that it doesn't. Receivers track
+missing nonces (at most 1000) and refuse a nonce that was used. Frames that fail for want of a key,
+for an invalid nonce or for authentication are counted by cause (`DaveFrameStats`); the counts go
+into the call's statistics and the log line at its end (numbers only).
+
 **Meeting links** (docs/meetings.md, "Links"; §4.6, "Meeting guests"). A meeting's link is
 `<base>/meeting/<token>#v=<organizer's key fingerprint>`: the token is random (192 bits) and only
 lets its holder knock at the lobby; the fragment is public data. Members already in the meeting
@@ -4665,7 +4822,9 @@ The browser has neither SQLCipher nor an OS keystore. The web client keeps the s
 4. **Catalog (issue #155):** so a record is decrypted when it is read instead of all of them when
    the store opens, the store keeps a catalog, sealed like every other record (entries of a reserved
    table name that versions before skip): per table the keys it holds, and per conversation its
-   messages in display order with server ID, thread and a few flags (hidden, media, unreadable), the
+   messages in display order with server ID, thread and a few flags (hidden, media, files, documents,
+   web links, unreadable; files and documents since catalog version 3, issue #1509; web links since
+   version 4, issue #609), the
    rows of its feed, and its reactions by target, replies by thread and events.
    Each is a paged index: a root listing pages of up to 256 entries. Table, conversation and message
    IDs stay inside the sealed plaintext. The catalog is derived from the records: a node that is
@@ -4886,7 +5045,8 @@ everything (§9.1). Signing the releases narrows this to what the operator contr
   loaded (so guests never download the signed-in app), checks it against the signed hash in the
   version's verified file list and only then stores and serves it. Files only some people use are
   also listed in `on_demand` (the background effects' segmentation worker and model and the photo
-  backgrounds' full pictures, #439; and the files in the signed-in app's pack, below): the
+  backgrounds' full pictures, #439; the interface fonts, #1494; and the files in the signed-in
+  app's pack, below): the
   worker skips them in the background fetch. A server that edits `lazy` or `on_demand` only
   changes when a file is downloaded, never what runs. A chunk that doesn't match its hash isn't
   served, and the pages warn as for a release that doesn't verify.

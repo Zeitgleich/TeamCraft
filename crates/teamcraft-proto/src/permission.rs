@@ -669,6 +669,33 @@ mod tests {
     }
   }
 
+  mod use_group_mentions {
+    use super::*;
+
+    /// A channel the user is a member of, with this instance and space role.
+    fn in_channel(role: Role, space: SpaceContext) -> bool {
+      is_allowed(
+        &PermissionScheme::default(),
+        &role,
+        &Permission::UseGroupMentions,
+        &channel_target(Some(space), member_channel_ctx()),
+      )
+    }
+
+    #[test]
+    fn every_role_of_the_default_scheme() {
+      assert!(!in_channel(Role::Guest, guest_space()), "guests");
+      assert!(in_channel(Role::Member, member_space()), "members");
+      assert!(in_channel(Role::Admin, member_space()), "admins");
+      assert!(in_channel(Role::Owner, member_space()), "owners");
+    }
+
+    #[test]
+    fn a_channel_can_take_it_away_from_members() {
+      assert!(Permission::UseGroupMentions.is_channel_moderatable());
+    }
+  }
+
   mod elevated_space_and_channel_roles {
     use super::*;
 

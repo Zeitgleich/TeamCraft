@@ -113,7 +113,8 @@ opt out (or the instance makes reports mandatory), and closes it when that ends.
   early in the next start is reported; changing the server forgets it.
 - **Options:** release `teamcraft@<version>`, the instance's environment, no personal data
   (`dataCollection`: no user info, cookies, headers, query parameters, bodies or file paths), no
-  screenshot, view hierarchy, threads, session replay, tracing, profiling or sessions, and no
+  screenshot, view hierarchy, threads, session replay, profiling or sessions, tracing only at the
+  trace rate ("Performance data"), and no
   automatic breadcrumbs (activity, app and system events, network, user interaction, app
   components); `beforeBreadcrumb` drops whatever else would add one. NDK and ANR capture are on.
 - **`beforeSend`** (`SentryEventScrub`): handled errors are sampled with the instance's rate
@@ -136,8 +137,9 @@ it with `SentrySDK.start` from the app delegate (the last known setting) and aft
 and return to the foreground (`server-info` through the same FFI check), and closes it when
 reports go off. Options: `sendDefaultPii`, `attachScreenshot`, `attachViewHierarchy`,
 `enableAutoBreadcrumbTracking`, `enableNetworkBreadcrumbs`, `enableCaptureFailedRequests`,
-`enableAutoPerformanceTracing` and `enableAutoSessionTracking` off; no tracing, profiling or
-replay (their defaults); `enableAppHangTracking` and `enableMetricKit` on. `beforeSend`
+and `enableAutoSessionTracking` off; tracing (app start, screen loads, frames) only at the trace
+rate, without network, file or Core Data spans ("Performance data"); no profiling or replay;
+`enableAppHangTracking` and `enableMetricKit` on. `beforeSend`
 (`CrashEventScrub`) and `CrashScrubber.swift` do what the Android side does, with the same test
 cases (`CrashScrubberTests`). The settings and the notice are the same as on Android.
 
@@ -214,6 +216,120 @@ account, the device or the instance, and it is rotated when the user turns repor
 - **Mobile core:** a Rust panic in the FFI reaches Kotlin or Swift as an exception, which the
   platform SDK reports (with its `beforeSend` scrubbing).
 
+## Performance data
+
+Issue #1521. How long the operations people wait for take on their devices, as Sentry
+`transaction` items to the same backend as crash reports (GlitchTip → Performance), so the
+budgets in robustness.md ("Performance and resources") are checked against real use, per platform
+and release. Where to read them: [performance.md](performance.md), "Numbers from real use".
+
+### What is measured, and what each measure answers
+
+A duration alone doesn't find a bug; each measure carries the steps and tags that say why it was
+slow. The yardstick is #1466 (a chat open waited seconds behind forty chat list reads on the read
+thread) and the Android fixes #1431, #1428 and #1375: each of them must be visible in the data.
+
+| Transaction             | From → to                                                                   | Apps                       | Answers                                                                                                                         |
+|-------------------------|-----------------------------------------------------------------------------|----------------------------|---------------------------------------------------------------------------------------------------------------------------------|
+| `start.channel_list`    | Process start (cold) or activity create (warm) / page navigation → chat list shows the core's rows | All                        | How long a start takes, by `start` (cold, warm) and `entry` (launcher, notification, share, link); `first_frame` step and `start_cache` (hit, miss) say whether the first frame showed the cached list (#1431, #1428); `activities` counts copies of the activity (#1375); status `internal_error` when the chat list couldn't be read |
+| `channel.switch`        | Opening a conversation → its first read is shown (rows or empty state)      | All                        | Where a slow open spent its time: `source` (seed, memory, store) and the core's jobs as steps (below)                           |
+| `conversation.catch_up` | Opening a conversation, or the app back in the foreground, while it is behind → the newest server message is stored and shown | All | "The push came, the chat lacks it", even when the switch was fast from the seed; `source` (push, open, foreground), `gap_fill`, `resync` |
+| `message.send`          | Sending a plain message → the server's message replaced the pending row     | All                        | Send latency, with the engine's jobs as steps                                                                                   |
+| `sync.reconnect`        | The core connecting again → connected                                       | All                        | How long reconnects take; `link` = `slow`                                                                                       |
+| `file.download`         | An attachment's download and decryption                                     | Web, desktop               | Download speed per `rendition`, `bytes`                                                                                         |
+| `call.setup`            | Joining a call → its media secured                                          | Web, desktop               | Call setup time                                                                                                                 |
+| SDK: app start, `ui.load` | Process start → first frame; a screen until displayed; slow/frozen frames | Android, iOS               | The platform's view of the same start                                                                                           |
+
+**The core's jobs as steps (mobile).** Everything the apps ask of the core runs on two serial
+queues: the read thread (local store) and the engine thread (network, sync, sending). The FFI
+records every job (`perf_jobs.rs`): its function's name in the code (`conversations`, `messages`,
+`send_message`), when it was queued, started and done, and how many jobs were queued with it.
+The local store adds its waits for another thread's group of writes (`store.lock_wait`) and how long
+a group of writes held it (`store.write_group`, `timing.rs`). When a measure ends, the jobs that
+overlapped it become its steps: `queue.wait` (queued → started, with `teamcraft.queue_depth`) and
+the run (`core.read`, `core.engine`, `store.lock_wait`, `store.write_group`), at most 24, the longest.
+So #1466 reads in GlitchTip as: `channel.switch` 6.4 s, of which `queue.wait messages` 6.2 s at
+queue depth 41, next to forty `core.read conversations` steps. A test reproduces it
+(`reads.rs`, `a_chat_open_behind_a_flood_names_what_it_waited_for`).
+
+**Slow jobs as warnings.** A job that waits or runs longer than the instance's threshold
+(Administration → Crash reports → `slow_job_ms`, 1000 ms by default, 0: never) is sent as a warning
+event `Slow core job: <name>`, grouped per job, tagged with `job`, `queue`, `wait_ms`, `run_ms` and
+`queue_depth`, sampled like handled errors; at most one per job a minute and 20 per process. It
+shows slow jobs that no measure was open for (a background sync holding the read thread).
+
+**Named steps inside the core (all platforms).** `teamcraft_core::timing::step("name")` times the
+rest of a function; about seventy places carry one, among them: store open and catalog build
+(`store_open`, `catalog_build`), client open and MLS state (`client_open`, `mls_storage_load`,
+`mls_group_load`, `mls_storage_save`), the chat list and snapshot (`chat_list_build`,
+`to_conversation`, `entry_counts`, `flush_entry_tallies`, `account_data_read`,
+`snapshot_read_full`, `conversation_view`), the gateway and sync (`gateway_connect`,
+`gateway_fresh_sync`, `full_sync`, `read_ahead_fresh`, `resync_marked`), catch-up
+(`catch_up_conversations`, `catch_up_conversation`, `catch_up_read_first_pages`, `mls_catch_up`,
+`mls_process`, `mls_decrypt_batch`, `catch_up_messages`, `history_gap_fill`, `join_welcomes`),
+sending and groups (`send_entry`, `seal_message`, `commit_change`, `post_commit`), files
+(`file_upload`, `file_download_decrypt`, `file_encrypt`, `thumbnail_make`, the Files view's page
+`files_page`), push
+(`push_notification`, `push_preview`, `push_catch_up`) and upkeep. Steps under 5 ms are not kept;
+until a measure asks, a step costs one atomic load. Mobile gets them through the FFI with the queue
+jobs; the web page reads its own core's ring; the desktop shell times each request of the page
+(named by its method, `messages`) and hands its ring to the page (`perf_core_steps`), which keeps a
+name only if it looks like code (`[a-z0-9_]`, at most 48 characters).
+
+Not yet measured: uploads and MLS commits as transactions of their own (they show as steps). A start that showed a sign-in page first is not a signed-in
+start and is not measured. A measure the user moved on from is dropped, not sent as slow.
+
+### What a transaction contains
+
+- Its name (above), the protocol's `op`, start and end time, status (`ok`, `internal_error`,
+  `cancelled`, `deadline_exceeded`, `unavailable`).
+- Steps (spans, at most 32; the core's jobs at most 24): an operation and a description from the
+  code (`app.start` / `store-read`, `db.query` / `core_messages`, `queue.wait` / `conversations`),
+  their times and status; on mobile the queue depth and queue name as span data, nothing else.
+- Tags (at most 8) and measurements (at most 8) from the code: `source`, `account`, `start`,
+  `entry`, `start_cache`, `gap_fill`, `resync`, `rendition`, `link`; `bytes`, `activities`.
+- Release, environment, the platform tag, the OS name and the installation ID, as in a report.
+
+**Privacy by construction:** in `crash_reporting::Transaction`, the name is an enum, and span
+operations and descriptions, tag names and values and measurement names are `&'static str`: there
+is no field a caller could fill with text at run time, so a transaction can't carry a message, a
+name, a file name, an ID or a URL. The page keeps measures that start and end in different places
+by a local key (a conversation's or a pending message's ID), which never leaves the page. No
+breadcrumbs. The tests check the shape and the bounds (`transaction.rs`) and that the relay
+forwards transactions and nothing else besides events.
+
+On Android and iOS the SDKs build transactions; their `beforeSendTransaction` (Android:
+`SentryTransactionScrub`) or `beforeSend` (iOS: `CrashEventScrub.prepareTransaction`) drops the
+request, server name, extras and breadcrumbs, keeps only the installation ID as user, scrubs tag
+values, and on Android scrubs span descriptions ([CrashScrubber]: a URL keeps scheme, host and
+path) and drops span tags and span data (full URLs, queries, file paths) except the core jobs'
+queue depth and queue name. iOS turns network, file and Core Data tracing
+off, so no span names a URL or a file; Android has no HTTP integration (the app's HTTP runs in the
+core). The Android measures of its own (`Perf.kt`) take their names from the core
+(`perf_measure_name`), so every platform reports the same transaction names.
+
+### Sampling and sending
+
+- **Trace rate (admin):** Administration → Crash reports → "Share of measured operations sent as
+  performance data", `trace_percent` in the setting and in `server-info`. **100 % by default for
+  now**: the instance has a handful of users and the team needs the data; meant to be lowered as
+  instances grow, without a rebuild. An older server's `server-info` has no `trace_percent`: no
+  performance data. Only where crash reports are on and the user didn't opt out (or reports are
+  mandatory).
+- **Decided at the start** of an operation (`CrashReporter::should_trace`): an unmeasured
+  operation costs a random number.
+- **A buffer of its own:** at most 50 transactions and 256 KiB, 3 tries, 2 days; the oldest drop
+  out. Crash reports have their own queue, so performance data never pushes one out, and a flush
+  sends crash reports first.
+- **No timers, no idle traffic:** transactions go with the crash reports' flushes (start, after a
+  capture, back online) and when 5 are queued; at most 5 per flush, one request each (the protocol
+  takes one transaction per envelope), so the relay's per-address rate limit
+  (`public_requests_per_minute`, 30 by default) keeps room for crash reports. A `429` pauses both
+  queues. The page keeps the buffer in memory and stores it in `localStorage` when hidden or
+  closed.
+- **Relay:** `POST /api/v1/crash-reports` checks each item's type and forwards `event` and
+  `transaction` items only (attachments, sessions, replays: `400`), same size limit.
+
 ## Symbols: readable stack traces
 
 | Platform         | What the report carries                          | Symbol upload (release workflow)                 |
@@ -266,3 +382,7 @@ account, the device or the instance, and it is rotated when the user turns repor
 | iOS (sentry-cocoa), settings and notice                      | Written; Mac build: #1515        |
 | iOS dSYM upload, device test                                 | Next (#1515)                     |
 | GlitchTip in teamcraft-deploy                                | teamcraft-deploy                 |
+| Performance data: web, desktop, Android, iOS SDK (#1521)     | Done; iOS untested (#1515)       |
+| Core job steps, slow-job warnings, catch-up (#1521 review)   | Done; iOS built in CI only       |
+| Named core steps on every platform                           | Done                             |
+| Uploads and MLS commits as transactions of their own         | Next                             |

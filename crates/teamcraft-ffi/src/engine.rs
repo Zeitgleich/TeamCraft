@@ -17,6 +17,7 @@ use teamcraft_client_api::model::{
   Conversation as ConversationView, ConversationKind as ConversationKindView, UserId,
 };
 use teamcraft_client_api::notify::{MentionRules, is_mentioned};
+use teamcraft_core::api::dpop::DpopProver;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServerApi, ServerApi};
 use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::client::files::sweep_staged_copies;
@@ -56,6 +57,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, LocalSet};
 
 use crate::calls::{CallHub, CallPreparation, RunningCalls};
+use crate::device_proofs::{DeviceKeyProofs, DeviceProofKey};
 use crate::error::TeamCraftError;
 use crate::logging::LIFECYCLE;
 use crate::reads::ReadQueue;
@@ -70,6 +72,10 @@ use crate::{EventListener, TokenProvider};
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
 const DOWNLOADS_DIR: &str = "downloads";
+/// Stack of the engine and read threads. They run the deepest calls (creating keys, MLS commits,
+/// the sync loop); Rust's 2 MiB default overflowed on a phone in a debug build (#1504). Only
+/// address space is reserved; pages are used as the stack grows.
+pub(crate) const THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 /// The longest a wake-up is worked on before its notification is shown with what is known by then.
 /// FCM gives a high-priority message about 10 s; the app hands over to expedited work at 8 s.
 const PUSH_PREVIEW_BUDGET: Duration = Duration::from_secs(7);
@@ -202,6 +208,8 @@ pub(crate) struct EngineStart {
   account: String,
   key: SymmetricKey,
   tokens: Arc<dyn TokenProvider>,
+  /// The app's key for DPoP proofs, where it keeps one (iOS).
+  maybe_device_key: Option<Arc<dyn DeviceProofKey>>,
   listener: Arc<dyn EventListener>,
   signals: SyncSignals,
   /// The process has little memory (the iOS notification extension): small store caches.
@@ -354,6 +362,8 @@ pub(crate) struct ForeignTokens {
   id_tokens: IdTokens,
   /// The thread that asks the app for a token where a request shouldn't wait on its own thread.
   asks: std::sync::mpsc::Sender<oneshot::Sender<Result<String, ApiError>>>,
+  /// What signs for bound tokens; `None` on a platform that keeps no key.
+  maybe_key_proofs: Option<DeviceKeyProofs>,
 }
 
 /// [`CoreClient::catch_up_for_push`] within `deadline`, cutting only the cancel-safe steps short.
@@ -365,6 +375,7 @@ async fn catch_up_for_push(
   conversation: ConversationId,
   deadline: tokio::time::Instant,
 ) -> Result<(), TeamCraftError> {
+  let _step = teamcraft_core::timing::step("push_catch_up");
   let timed_out = || TeamCraftError::Core("push catch-up timed out".into());
   tokio::time::timeout_at(deadline, client.push_refresh_conversation(conversation))
     .await
@@ -423,6 +434,7 @@ pub(crate) fn spawn(start: &EngineStart, late_problem: LateProblem) -> Result<En
   let own_jobs = jobs.downgrade();
   std::thread::Builder::new()
     .name("teamcraft-engine".into())
+    .stack_size(THREAD_STACK_BYTES)
     .spawn(move || {
       let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
@@ -544,6 +556,7 @@ impl EngineStart {
   pub(crate) fn new(
     config: AppConfig,
     tokens: Arc<dyn TokenProvider>,
+    maybe_device_key: Option<Arc<dyn DeviceProofKey>>,
     listener: Arc<dyn EventListener>,
     signals: SyncSignals,
   ) -> Result<Self, TeamCraftError> {
@@ -559,6 +572,7 @@ impl EngineStart {
       account: config.account,
       key,
       tokens,
+      maybe_device_key,
       listener,
       signals,
       is_memory_constrained: config.is_memory_constrained,
@@ -592,6 +606,7 @@ impl EngineStart {
       account: self.account.clone(),
       key: self.key.duplicate(),
       tokens: self.tokens.clone(),
+      maybe_device_key: self.maybe_device_key.clone(),
       listener: self.listener.clone(),
       is_memory_constrained: self.is_memory_constrained,
       signals: self.signals.clone(),
@@ -603,6 +618,7 @@ impl Engine {
   /// Opens the store and the read thread on it. Records that don't decode, or a key bag its own key
   /// doesn't open, make the store unreadable here already.
   fn open(start: EngineStart, own_jobs: mpsc::WeakUnboundedSender<Job>) -> Result<Self, OpenError> {
+    let _step = teamcraft_core::timing::step("engine_open_store");
     std::fs::create_dir_all(&start.data_dir)
       .map_err(|error| OpenError::Failed(TeamCraftError::Storage(error.to_string())))?;
     let [download_dir, upload_staging_dir] = start.plaintext_dirs();
@@ -613,6 +629,7 @@ impl Engine {
       maybe_push_gateway_url,
       key,
       tokens,
+      maybe_device_key,
       listener,
       signals,
       is_memory_constrained,
@@ -642,7 +659,8 @@ impl Engine {
       own_jobs,
     )
     .map_err(OpenError::Failed)?;
-    let tokens = ForeignTokens::new(tokens, signals.id_tokens.clone()).map_err(OpenError::Failed)?;
+    let tokens =
+      ForeignTokens::new(tokens, signals.id_tokens.clone(), maybe_device_key).map_err(OpenError::Failed)?;
     let mut engine = Self {
       is_memory_constrained,
       server_url,
@@ -711,6 +729,7 @@ impl Engine {
   }
 
   fn open_client(&mut self) -> Result<(), OpenError> {
+    let _step = teamcraft_core::timing::step("open_client");
     remove_shared_downloads(&self.shared_downloads);
     // Plaintext copies of files that were never sent (taken out of the composer, app stopped).
     if let Err(error) = sweep_staged_copies(&self.store, &self.upload_staging_dir) {
@@ -1273,6 +1292,7 @@ impl Engine {
     opening: PushOpening,
     reader: PushReader,
   ) -> Result<PushNotification, TeamCraftError> {
+    let _step = teamcraft_core::timing::step("push_notification");
     let opened_at = std::time::Instant::now();
     let preview = if opening == PushOpening::StoreOnly {
       push_preview::<Api>(&self.store, None, &payload).await?
@@ -1442,6 +1462,7 @@ impl Engine {
     deadline: tokio::time::Instant,
     preview: PushPreview,
   ) -> PushPreview {
+    let _step = teamcraft_core::timing::step("push_probe");
     // One copy of the MLS state in memory at a time: the extension's own client goes before the
     // probe's opens (it has nothing to do in the extension; the next use opens it again).
     if matches!(self.client, ClientSlot::Idle(_)) {
@@ -1723,9 +1744,9 @@ impl Engine {
   }
 
   /// Runs `operation` on the client with syncing paused, then resumes it and tells the app.
-  pub(crate) async fn with_client<F>(&mut self, operation: F) -> Result<(), TeamCraftError>
+  pub(crate) async fn with_client<R, F>(&mut self, operation: F) -> Result<R, TeamCraftError>
   where
-    F: for<'a> FnOnce(&'a mut CoreClient) -> LocalFuture<'a, Result<(), teamcraft_core::CoreError>>,
+    F: for<'a> FnOnce(&'a mut CoreClient) -> LocalFuture<'a, Result<R, teamcraft_core::CoreError>>,
   {
     let was_running = matches!(self.client, ClientSlot::Running { .. });
     let mut client = self.take_client().await?;
@@ -1871,15 +1892,28 @@ fn loop_restart_delay(deaths: u32) -> Duration {
 impl ForeignTokens {
   /// The asking thread lives as long as a clone of this: a token refresh in the app (AppAuth blocks
   /// for up to 10 s) holds it, never the engine thread with the sync loop (e2ee.md §7.2 is untouched:
-  /// no keys go through here, only the access token).
-  fn new(provider: Arc<dyn TokenProvider>, id_tokens: IdTokens) -> Result<Self, TeamCraftError> {
+  /// no keys go through here, only the access token). The device key is read here too, and only then:
+  /// a bound token needs it, and the store may take a moment.
+  fn new(
+    provider: Arc<dyn TokenProvider>,
+    id_tokens: IdTokens,
+    maybe_device_key: Option<Arc<dyn DeviceProofKey>>,
+  ) -> Result<Self, TeamCraftError> {
     let (asks, asked) = std::sync::mpsc::channel::<oneshot::Sender<Result<String, ApiError>>>();
     let asking = provider.clone();
+    let maybe_key_proofs = maybe_device_key.map(DeviceKeyProofs::new);
+    let proving = maybe_key_proofs.clone();
     std::thread::Builder::new()
       .name("teamcraft-tokens".into())
       .spawn(move || {
         for answer in asked {
-          let token = std::panic::catch_unwind(AssertUnwindSafe(|| signed_in_token(asking.as_ref())));
+          let token = std::panic::catch_unwind(AssertUnwindSafe(|| -> Result<String, ApiError> {
+            let token = signed_in_token(asking.as_ref())?;
+            if let Some(proofs) = &proving {
+              proofs.prepare_for(&token)?;
+            }
+            Ok(token)
+          }));
           // The request may have been dropped meanwhile; nobody needs the token then.
           let _ = answer.send(token.unwrap_or_else(|_| {
             Err(ApiError::Network(
@@ -1893,6 +1927,7 @@ impl ForeignTokens {
       provider,
       id_tokens,
       asks,
+      maybe_key_proofs,
     })
   }
 }
@@ -1911,6 +1946,10 @@ impl AccessTokenSource for ForeignTokens {
       Ok(token) => token,
       Err(_) => self.access_token(),
     }
+  }
+
+  fn dpop_prover(&self) -> Option<Arc<DpopProver>> {
+    self.maybe_key_proofs.as_ref()?.prover()
   }
 
   fn id_token(&self) -> Option<String> {
@@ -1975,7 +2014,7 @@ fn enrollment_options(device_name: String, secret: EnrollmentSecret) -> Enrollme
   }
 }
 
-fn parse_ids<T: Id + std::str::FromStr>(texts: &[String]) -> Result<Vec<T>, TeamCraftError> {
+pub(crate) fn parse_ids<T: Id + std::str::FromStr>(texts: &[String]) -> Result<Vec<T>, TeamCraftError> {
   texts.iter().map(|text| parse_id(text)).collect()
 }
 
@@ -2462,7 +2501,7 @@ mod tests {
         id_tokens: Default::default(),
         running_calls: Default::default(),
       };
-      let start = EngineStart::new(config, Arc::new(Token), Arc::new(listener), signals).unwrap();
+      let start = EngineStart::new(config, Arc::new(Token), None, Arc::new(listener), signals).unwrap();
       let key_source = StaticKeySource::new(SymmetricKey::from_slice(&KEY).unwrap());
       let store = SealedSqliteStore::open(&start.store_path(), &key_source).unwrap();
       let client = PendingEnrollment::new()
@@ -2524,6 +2563,75 @@ mod tests {
   impl Drop for TestDir {
     fn drop(&mut self) {
       let _ = std::fs::remove_dir_all(&self.0);
+    }
+  }
+
+  /// The app's device key behind the engine's token source (e2ee.md §3.1.2).
+  mod device_key {
+    use teamcraft_core::api::ApiError;
+
+    use super::*;
+    use crate::device_proofs::DeviceProofError;
+    use crate::device_proofs::test_support::{StandInKey, bound_token};
+
+    struct OneToken(String);
+
+    impl TokenProvider for OneToken {
+      fn access_token(&self) -> Option<String> {
+        Some(self.0.clone())
+      }
+    }
+
+    fn tokens_with(token: String, maybe_key: Option<Arc<StandInKey>>) -> ForeignTokens {
+      let maybe_key = maybe_key.map(|key| key as Arc<dyn crate::device_proofs::DeviceProofKey>);
+      ForeignTokens::new(Arc::new(OneToken(token)), IdTokens::default(), maybe_key).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_bound_token_finds_its_key_before_the_request() {
+      let key = StandInKey::new();
+      let token = bound_token(&key.thumbprint());
+      let tokens = tokens_with(token.clone(), Some(key.clone()));
+
+      assert_eq!(tokens.fresh_token().await.unwrap(), token);
+
+      assert_eq!(tokens.dpop_prover().unwrap().thumbprint(), key.thumbprint());
+    }
+
+    #[tokio::test]
+    async fn an_unbound_token_touches_no_key() {
+      let key = StandInKey::new();
+      let tokens = tokens_with("opaque".into(), Some(key.clone()));
+
+      tokens.fresh_token().await.unwrap();
+
+      assert!(tokens.dpop_prover().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_lost_key_asks_for_a_sign_in_and_a_locked_one_waits() {
+      let key = StandInKey::new();
+      let token = bound_token(&key.thumbprint());
+      let tokens = tokens_with(token, Some(key.clone()));
+
+      key.fail_with(DeviceProofError::KeyUnavailable);
+      let waiting = tokens.fresh_token().await.err().unwrap();
+      assert!(
+        waiting.is_transient() && !waiting.is_sign_in_required(),
+        "{waiting}"
+      );
+
+      key.fail_with(DeviceProofError::KeyLost);
+      let lost = tokens.fresh_token().await.err().unwrap();
+      assert!(matches!(lost, ApiError::BoundKeyLost));
+    }
+
+    /// Android: no key behind the core, tokens stay bearer as before.
+    #[tokio::test]
+    async fn a_platform_without_a_key_has_no_prover() {
+      let tokens = tokens_with("opaque".into(), None);
+      tokens.fresh_token().await.unwrap();
+      assert!(tokens.dpop_prover().is_none());
     }
   }
 }

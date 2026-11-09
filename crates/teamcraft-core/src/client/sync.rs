@@ -48,6 +48,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// messages (the conversation the user looks at first, several at once, issue #247), then the
   /// outbox, key packages and the key bag.
   pub async fn full_sync(&mut self) -> Result<(), CoreError> {
+    let _step = crate::timing::step("full_sync");
     // Welcomes may have come in while this device was away: no spent key package goes before they
     // are read again (issue #395).
     self.are_welcomes_synced = false;
@@ -90,6 +91,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     spaces: Result<ListSpacesResponse, ApiError>,
     conversations: Result<ListConversationsResponse, ApiError>,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("sync_listed");
     let started_ms = self.now_ms();
     self.sync_workspace().await?;
     self.trace_lap("workspace log");
@@ -188,8 +190,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The rest of [`Self::full_sync`]: settings, waiting additions and revocations, what was queued
   /// offline, key packages and account data.
   async fn finish_full_sync(&mut self) -> Result<(), CoreError> {
+    let _step = crate::timing::step("finish_full_sync");
     self.refresh_notification_settings().await?;
     self.trace_lap("notification settings");
+    Box::pin(self.refresh_user_groups()).await;
+    self.trace_lap("user groups");
     if let Err(error) = self.refresh_attachment_limit().await {
       if error.is_transient() {
         return Err(error);
@@ -264,6 +269,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Retries the conversations an earlier sync had to skip (see [`Self::isolate`]); the upkeep
   /// calls this with the account sync. Returns how many caught up.
   pub async fn resync_marked_conversations(&mut self) -> Result<usize, CoreError> {
+    let _step = crate::timing::step("resync_marked");
     let members = self.marked_for_resync(ResyncPart::Members)?;
     let content = self.marked_for_resync(ResyncPart::Content)?;
     let mut caught_up = 0;

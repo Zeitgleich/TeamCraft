@@ -16,15 +16,15 @@ struct SharePickerView: View {
       List {
         switch model.shareImportError {
         case .tooLarge(let limit):
-          Text("attachment_too_large \(FileSizeText.format(limit))").font(.footnote).foregroundStyle(.red)
+          Text("attachment_too_large \(FileSizeText.format(limit))").font(.app(.footnote)).foregroundStyle(.red)
         case .unreadable, .sendFailed, .draftFilesExpired:
-          Text("attachment_unreadable").font(.footnote).foregroundStyle(.red)
+          Text("attachment_unreadable").font(.app(.footnote)).foregroundStyle(.red)
         case nil:
           EmptyView()
         }
         if share.leftOut > 0 {
           Text("share_left_out \(share.leftOut)")
-            .font(.footnote)
+            .font(.app(.footnote))
             .foregroundStyle(.red)
         }
         let sections = ShareSections(targets: targets, filter: filter)
@@ -99,9 +99,9 @@ struct ShareWaitingNotice: View {
 
   var body: some View {
     HStack(spacing: 12) {
-      Text("share_waiting").font(.footnote)
+      Text("share_waiting").font(.app(.footnote))
       Button("share_discard") { model.discardShare(share) }
-        .font(.footnote.weight(.semibold))
+        .font(.app(.footnote).weight(.semibold))
     }
     .padding(12)
     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))

@@ -76,6 +76,7 @@ pub fn App() -> impl IntoView {
   apply_density(settings);
   apply_zoom(settings);
   apply_text_size(settings);
+  crate::fonts::apply_font(settings);
   apply_language_attribute();
   apply_deleted_user_name(i18n);
   crate::viewport::sync_theme_color(move || {
@@ -152,7 +153,13 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
     inbox.connect_app(state);
   }
   crate::components::typing_indicator::provide_typing_now(state);
+  // Performance data of a signed-in start: only when nothing (a sign-in page) came first.
+  let is_signed_in_start = !crate::startup::is_first_view_shown();
   crate::startup::first_view();
+  if is_signed_in_start {
+    // After the first view's effect: the channel list is on screen.
+    Effect::new(|_| crate::perf::finish_start());
+  }
   crate::viewport::watch_layout(state.layout);
   crate::viewport::track_visual_viewport();
   Effect::new(move |previous: Option<()>| {
@@ -278,6 +285,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   // sidebar stays, with its scroll position and filter (#1151).
   let sidebar_place = Memo::new(move |_| match (rail.get(), state.is_list_layout()) {
     (RailEntry::Activity, _) => SidebarPlace::Activity,
+    (RailEntry::Files, _) => SidebarPlace::Files,
     (_, true) => SidebarPlace::List,
     (RailEntry::Chats, false) => SidebarPlace::Chats,
     (RailEntry::Space, false) => SidebarPlace::Space,
@@ -300,6 +308,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         RailEntry::Chats => "home",
         RailEntry::Space => "space",
         RailEntry::Activity => "activity",
+        RailEntry::Files => "files",
       }
       class:has-bottom-nav=move || has_bottom_nav(state)
     >
@@ -338,6 +347,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             SidebarPlace::List => view! { <HomeSidebar is_list=true /> }.into_any(),
             SidebarPlace::Space => view! { <Sidebar /> }.into_any(),
             SidebarPlace::Activity => lazy_area(Place::Sidebar, || areas::activity_list(())),
+            SidebarPlace::Files => lazy_area(Place::Sidebar, || areas::files_sidebar(())),
           }}
           // Drag the sidebar's edge to resize it (#842); the phone layout has its own panes.
           <Show when=move || !state.is_compact() fallback=|| ()>
@@ -347,7 +357,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <main id="main-content" class="main" tabindex="-1">
           {move || match main_view.get() {
             MainView::Conversation(id) => view! { <ChannelView conversation=id /> }.into_any(),
-            MainView::Admin(section) => lazy_area(Place::Pane, move || areas::admin_console(section)),
+            MainView::Admin(section) => areas::admin_console_area(section),
             MainView::Search => lazy_area(Place::Pane, || areas::search(())),
             MainView::Meetings => lazy_area(Place::Pane, || areas::meetings(())),
             MainView::Saved => lazy_area(Place::Pane, || areas::saved(())),
@@ -466,6 +476,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       {move || match state.overlay.get() {
         Overlay::QuickSwitcher => lazy_area(Place::Overlay, || areas::quick_switcher(())),
         Overlay::CustomStatus => lazy_area(Place::Overlay, || areas::custom_status(())),
+        Overlay::StatusDuration => lazy_area(Place::Overlay, || areas::status_duration(())),
         Overlay::Settings => lazy_area(Place::Overlay, || areas::settings(())),
         Overlay::Shortcuts => lazy_area(Place::Overlay, || areas::shortcuts(())),
         Overlay::DeviceApproval => lazy_area(Place::Overlay, || areas::device_approval(())),
@@ -1530,6 +1541,8 @@ enum SidebarPlace {
   List,
   Space,
   Activity,
+  /// The Files view's filters and scopes (#1510).
+  Files,
 }
 
 /// Two reports from the same input: no input for "Away after" marks this device idle (the server

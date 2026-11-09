@@ -47,6 +47,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     request: u64,
   ) -> Result<(), CoreError> {
+    let _step = crate::timing::step("older_history_page");
     let key = record_key(conversation);
     let record = records::get_json::<OlderHistoryRecord>(&self.store, Table::SyncState, &key)?;
     let maybe_position = record.and_then(|record| record.maybe_position);
@@ -95,7 +96,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // key isn't stored yet, and the same page would be read again.
     let maybe_page_oldest = page.messages.iter().map(|message| message.id).min();
     let position = next_position(maybe_page_oldest, page.has_more);
-    self.receive_earlier_page(conversation, page.messages)?;
+    self.receive_earlier_page(conversation, page.messages).await?;
     Ok(position)
   }
 

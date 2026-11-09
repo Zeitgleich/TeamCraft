@@ -13,6 +13,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -36,6 +40,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -46,22 +51,15 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.ListLoad
-import de.zeitgleich.teamcraft.core.LoadFailure
 import de.zeitgleich.teamcraft.core.LoadingList
 import de.zeitgleich.teamcraft.core.Meeting
 import de.zeitgleich.teamcraft.core.Space
-import de.zeitgleich.teamcraft.core.SpaceRoster
-import de.zeitgleich.teamcraft.ui.ListPhase
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.Read
 import de.zeitgleich.teamcraft.ui.listPhase
 import de.zeitgleich.teamcraft.ui.spaceDirectMessages
 import de.zeitgleich.teamcraft.ui.SpacePicture
-import kotlinx.coroutines.delay
 import uniffi.teamcraft_ffi.rowBadge
-
-/** How long a space's member list may load before the user is offered another try. */
-private const val ROSTER_DEADLINE_MS = 15_000L
 
 /** The views of one space, in the order of the sidebar on the desktop. */
 enum class SpaceViewTab(@StringRes val label: Int) {
@@ -73,12 +71,22 @@ enum class SpaceViewTab(@StringRes val label: Int) {
   Files(R.string.space_tab_files),
 }
 
+/** A view's icon, as the space menu and Home's header show it (#1526). */
+@Composable
+fun SpaceViewIcon(tab: SpaceViewTab) {
+  when (tab) {
+    SpaceViewTab.People -> Icon(Icons.Filled.Person, contentDescription = null)
+    SpaceViewTab.DirectMessages -> Icon(Icons.Filled.Email, contentDescription = null)
+    SpaceViewTab.Calls -> Icon(Icons.Filled.Call, contentDescription = null)
+    SpaceViewTab.Meetings -> Icon(Icons.Filled.DateRange, contentDescription = null)
+    SpaceViewTab.Saved -> Icon(painterResource(R.drawable.ic_bookmark), contentDescription = null)
+    SpaceViewTab.Files -> Icon(painterResource(R.drawable.ic_description), contentDescription = null)
+  }
+}
+
 /** The upcoming meetings of a space, soonest first; a meeting belongs to the space it was scheduled in. */
 fun meetingsOfSpace(meetings: List<Meeting>, spaceId: String): List<Meeting> =
   upcomingMeetings(meetings).filter { it.maybeSpaceId == spaceId }
-
-/** The roster as a list: people first by name, integrations' bot accounts left out. */
-fun peopleOfRoster(roster: SpaceRoster) = roster.members.filterNot { it.isBot }.sortedBy { it.displayName.lowercase() }
 
 /**
  * People, calls, meetings, saved messages and files of one space (#954). Home's entries stay global;
@@ -86,10 +94,16 @@ fun peopleOfRoster(roster: SpaceRoster) = roster.members.filterNot { it.isBot }.
  * list and none is selected. Everything content is filtered by the core on this device.
  */
 @Composable
-fun SpaceViewsScreen(viewModel: MainViewModel, initialSpaceId: String, onOpen: (String) -> Unit, onBack: () -> Unit) {
+fun SpaceViewsScreen(
+  viewModel: MainViewModel,
+  initialSpaceId: String,
+  onOpen: (String) -> Unit,
+  onBack: () -> Unit,
+  initialTab: SpaceViewTab = SpaceViewTab.People,
+) {
   val changes by viewModel.changeCount.collectAsState()
   var spaceId by rememberSaveable { mutableStateOf(initialSpaceId) }
-  var tab by rememberSaveable { mutableStateOf(SpaceViewTab.People) }
+  var tab by rememberSaveable { mutableStateOf(initialTab) }
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
   LaunchedEffect(changes) { snapshot = viewModel.readChat { snapshot() } }
   val spaces = snapshot?.spaces.orEmpty()
@@ -111,7 +125,8 @@ fun SpaceViewsScreen(viewModel: MainViewModel, initialSpaceId: String, onOpen: (
         }
       }
       when (tab) {
-        SpaceViewTab.People -> SpacePeople(viewModel, spaceId)
+        // The directory of this space (#1337): people, channels, external people, invitations.
+        SpaceViewTab.People -> DirectoryContent(viewModel, maybeSpaceId = spaceId, onOpen = onOpen, modifier = Modifier.fillMaxSize())
         SpaceViewTab.DirectMessages ->
           SpaceDirectMessages(viewModel, spaces.firstOrNull { it.id == spaceId }?.directConversations.orEmpty(), onOpen)
         SpaceViewTab.Calls -> SpaceCalls(viewModel, spaceId, snapshot)
@@ -173,51 +188,6 @@ private fun SpaceSwitcher(spaces: List<Space>, onSelect: (String) -> Unit) {
             onSelect(space.id)
           },
         )
-      }
-    }
-  }
-}
-
-@Composable
-private fun SpacePeople(viewModel: MainViewModel, spaceId: String) {
-  val changes by viewModel.changeCount.collectAsState()
-  var maybeRoster by remember(spaceId) { mutableStateOf<SpaceRoster?>(null) }
-  var attempt by remember(spaceId) { mutableStateOf(0) }
-  var isOverdue by remember(spaceId) { mutableStateOf(false) }
-  LaunchedEffect(changes, spaceId) { maybeRoster = viewModel.readChat { query(ChatQueries.spaceMembers(spaceId)).roster } }
-  // What this device has shows at once; the fresh list follows as a store change.
-  LaunchedEffect(spaceId, attempt) {
-    isOverdue = false
-    viewModel.act(ChatActions.refreshSpaceRoster(spaceId))
-    delay(ROSTER_DEADLINE_MS)
-    isOverdue = true
-  }
-  val roster = maybeRoster
-  when {
-    roster == null || roster.state == "loading" ->
-      if (isOverdue) {
-        ListFailed(ListPhase.Failed(LoadFailure.TIMED_OUT), onRetry = { attempt += 1 })
-      } else {
-        ListSkeleton()
-      }
-    roster.state == "hidden" -> EmptyHint(stringResource(R.string.space_people_hidden))
-    else -> {
-      val people = peopleOfRoster(roster)
-      LazyColumn(Modifier.fillMaxSize()) {
-        if (people.isEmpty()) item { EmptyHint(stringResource(R.string.space_people_empty)) }
-        items(people, key = { it.user }) { member ->
-          Column(Modifier.fillMaxWidth().padding(16.dp)) {
-            Text(member.displayName)
-            if (member.isGuest) {
-              Text(
-                stringResource(R.string.space_person_guest),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-              )
-            }
-          }
-          HorizontalDivider()
-        }
       }
     }
   }

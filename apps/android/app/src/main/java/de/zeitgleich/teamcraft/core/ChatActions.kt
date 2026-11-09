@@ -197,8 +197,6 @@ object ChatActions {
 
   fun markRead(conversation: String) = action("mark_read") { put("conversation", conversation) }
 
-  fun refreshSpaceRoster(space: String) = action("refresh_space_roster") { put("space", space) }
-
   fun refreshCallHistory() = action("refresh_call_history") {}
 
   /** The user pressed "Try again" on a list that could not be read ([ChatQueries.listLoad]). */
@@ -358,6 +356,9 @@ object ChatActions {
 
   fun deleteSpace(space: String) = action("delete_space") { put("space", space) }
 
+  /** Joins an open space (#1526); its default channels follow. */
+  fun joinSpace(space: String) = action("join_space") { put("space", space) }
+
   /** `update_channel` with only `maybe_is_archived` set; the other changes stay absent. */
   fun archiveChannel(conversation: String, isArchived: Boolean = true) = action("update_channel") {
     put("conversation", conversation)
@@ -370,15 +371,6 @@ object ChatActions {
     put("user", user)
     put("expires_at_ms", expiresAtMs)
   }
-
-  fun createChannel(space: String, name: String) = action("create_channel") {
-    put("space", space)
-    put("name", name)
-  }
-
-  fun openDm(user: String) = action("open_dm") { put("user", user) }
-
-  fun openGroupDm(users: List<String>) = action("open_group_dm") { put("users", buildJsonArray { users.forEach { add(JsonPrimitive(it)) } }) }
 
   fun changePassphrase(passphrase: String) = action("change_passphrase") { put("passphrase", passphrase) }
 
@@ -431,8 +423,6 @@ object ChatQueries {
 
   fun spaceCallHistory(space: String) = query("space_call_history") { put("space", space) }
 
-  fun spaceMembers(space: String) = query("space_members") { put("space", space) }
-
   fun scheduledMessages() = query("scheduled_messages") {}
 
   fun permalink(conversation: String, message: String) = query("permalink") {
@@ -476,6 +466,9 @@ object ChatQueries {
   fun browseChannels(space: String) = query("browse_channels") { put("space", space) }
 
   fun expiringGuests() = query("expiring_guests") {}
+
+  /** Open spaces the user isn't in, from the stored space list (#1526). */
+  fun joinableSpaces() = query("joinable_spaces") {}
 
   fun search(text: String) = query("search") { put("query", text) }
 

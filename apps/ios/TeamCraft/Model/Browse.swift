@@ -15,9 +15,17 @@ struct BrowseSnapshot: Decodable, Sendable {
     let name: String
     /// Whether the user may create channels here, as the core decided it (issue #758).
     let canCreateChannels: Bool?
+    /// Version of the space's picture; without one the space shows its letter (#1526).
+    let maybeImageVersion: String?
+
+    /// Whether the user may add or invite members, or invite guests, here (#1337).
+    let canAddMembers: Bool?
+    let canInviteGuests: Bool?
 
     /// "Create channel" is offered: the core's word, or offered when an older core didn't say.
     var offersChannelCreation: Bool { canCreateChannels ?? true }
+    /// "Invite people" is offered: the user may invite anybody here.
+    var canInvite: Bool { canAddMembers == true || canInviteGuests == true }
   }
 
   struct Conversation: Decodable, Sendable {
@@ -25,21 +33,21 @@ struct BrowseSnapshot: Decodable, Sendable {
     /// `Public`, `Private`, `Direct`, `Group` or `Integration`.
     let kind: String
     let memberIds: [String]?
+    /// The channel permissions the server says the user holds here; nil when it didn't say.
+    let maybePermissions: [String]?
+
+    /// "Add people" shows: the server says the user may manage the channel's members (#1534).
+    var canAddMembers: Bool {
+      kind != "Direct" && kind != "Group" && (maybePermissions ?? []).contains("manage_members")
+    }
   }
 
   let me: Person
-  let users: [Person]?
   let spaces: [Space]?
   let conversations: [Conversation]?
 
   /// Guests browse no channels (the server refuses them, as on desktop): they only find people.
   var canBrowseChannels: Bool { me.isGuest != true }
-
-  /// Everyone the user can message, without the user and bots.
-  var people: [Person] {
-    (users ?? []).filter { $0.id != me.id && $0.isBot != true }
-      .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-  }
 
   /// The DM (one person) or group DM (several) with exactly these people and the user, if there is
   /// one.
@@ -51,16 +59,10 @@ struct BrowseSnapshot: Decodable, Sendable {
     }?.id
   }
 
-  /// The people "Add people" in a DM or group DM call offers: everyone the user can message who
-  /// isn't in that conversation, matching `query` (name or username) when one is typed.
-  func addablePeople(to conversationId: String, matching query: String) -> [Person] {
-    let members = Set(members(of: conversationId))
-    let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
-    return people.filter { person in
-      !members.contains(person.id)
-        && (needle.isEmpty || person.displayName.localizedCaseInsensitiveContains(needle)
-          || person.username.localizedCaseInsensitiveContains(needle))
-    }
+  /// Whom "Add people" in a DM or group DM call doesn't offer: the conversation's members and the
+  /// user (those not in the call join it from the DM).
+  func notAddableToCall(in conversationId: String) -> Set<String> {
+    Set(members(of: conversationId)).union([me.id])
   }
 
   /// Whom "Add people" in a DM or group DM call starts the meeting room with (docs/meetings.md,

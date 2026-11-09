@@ -14,6 +14,9 @@ mod calls;
 mod channel_roles;
 mod color_theme;
 mod crash_reports;
+mod creating;
+mod device_proofs;
+mod directory;
 mod engine;
 mod error;
 mod http_fetch;
@@ -22,6 +25,7 @@ mod logging;
 mod markup;
 mod media_viewer;
 mod notetaker;
+mod perf_jobs;
 mod reads;
 mod row_badge;
 mod server_entry;
@@ -45,6 +49,15 @@ pub use channel_roles::{
   channel_roles_review_has_new,
 };
 pub use crash_reports::{CrashReportsConfig, crash_reports_config};
+pub use device_proofs::{
+  DeviceProofError, DeviceProofKey, ProviderProver, TokenEndpointAnswer, TokenEndpointTransport,
+  TokenProofFallback, token_bound_key,
+};
+pub use directory::{
+  DirectoryChannelItem, DirectoryChannelsPage, DirectoryFilterChoices, DirectoryInvitationItem,
+  DirectoryInvitationsPage, DirectoryPeopleKind, DirectoryPeoplePage, DirectoryPeopleRequest,
+  DirectoryPersonItem, InvitationOutcome, InviteOutcome, InvitePeopleInput,
+};
 pub use error::TeamCraftError;
 pub use http_fetch::{
   HttpFetchError, HttpFetchHeader, HttpFetchMethod, HttpFetchRedirects, HttpFetchRequest, HttpFetchResponse,
@@ -61,6 +74,9 @@ pub use media_viewer::{
   OriginalDownload, album_layout, fetches_original_automatically, media_viewer_limits,
 };
 pub use notetaker::{MovedCallHint, NotetakerAddition};
+pub use perf_jobs::{
+  PerfJobKind, PerfJobSpan, PerfListener, perf_job_spans, set_perf_listener, set_slow_job_threshold_ms,
+};
 pub use server_entry::{
   CheckedServer, ServerAddress, ServerEntryError, SignInOption, SignInPageInfo, StoredServer,
   check_server_info, normalize_server_address, sign_in_page, sso_only_sign_in_page, stored_server,
@@ -154,7 +170,25 @@ impl TeamCraft {
     listener: Arc<dyn EventListener>,
   ) -> Result<Arc<Self>, TeamCraftError> {
     logging::install();
-    outcome(LifecycleStep::Open, Self::open(config, tokens, listener))
+    perf_jobs::install();
+    outcome(LifecycleStep::Open, Self::open(config, tokens, None, listener))
+  }
+
+  /// [`Self::new`] for an app with a device key for DPoP proofs (e2ee.md §3.1.2): a token bound to that
+  /// key goes with a proof, on every request and in the first frames.
+  #[uniffi::constructor]
+  pub fn with_device_key(
+    config: AppConfig,
+    tokens: Arc<dyn TokenProvider>,
+    device_key: Arc<dyn DeviceProofKey>,
+    listener: Arc<dyn EventListener>,
+  ) -> Result<Arc<Self>, TeamCraftError> {
+    logging::install();
+    perf_jobs::install();
+    outcome(
+      LifecycleStep::Open,
+      Self::open(config, tokens, Some(device_key), listener),
+    )
   }
 
   /// The session's newest ID token, for the role evidence of workspace owners and admins (e2ee.md
@@ -650,7 +684,17 @@ impl TeamCraft {
   }
 
   pub async fn set_presence(&self, presence: Presence) -> Result<(), TeamCraftError> {
-    self.act_locally(move |reads| reads.set_presence(presence)).await
+    self
+      .act_locally(move |reads| reads.set_presence(presence, None))
+      .await
+  }
+
+  /// Sets a status that ends by itself at `until_ms` (milliseconds since the epoch; "Reset after",
+  /// #1578). Available ignores the end: it is automatic.
+  pub async fn set_presence_until(&self, presence: Presence, until_ms: i64) -> Result<(), TeamCraftError> {
+    self
+      .act_locally(move |reads| reads.set_presence(presence, Some(until_ms)))
+      .await
   }
 
   /// Full-text search over decrypted messages (`from:`, `in:` and the other filters work).
@@ -1465,6 +1509,7 @@ impl TeamCraft {
   fn open(
     config: AppConfig,
     tokens: Arc<dyn TokenProvider>,
+    maybe_device_key: Option<Arc<dyn DeviceProofKey>>,
     listener: Arc<dyn EventListener>,
   ) -> Result<Arc<Self>, TeamCraftError> {
     let network = NetworkChanges::new();
@@ -1478,7 +1523,7 @@ impl TeamCraft {
       id_tokens: id_tokens.clone(),
       running_calls: running_calls.clone(),
     };
-    let start = engine::EngineStart::new(config, tokens, listener, signals)?;
+    let start = engine::EngineStart::new(config, tokens, maybe_device_key, listener, signals)?;
     let recovery = Arc::new(Mutex::new(None));
     let threads = match engine::spawn(&start, late_problem(recovery.clone())) {
       Ok(threads) => Some(threads),
@@ -1519,11 +1564,14 @@ impl TeamCraft {
   {
     let (reply, answer) = oneshot::channel();
     let queued = Instant::now();
+    let timing = perf_jobs::queued(PerfJobKind::EngineQueue, std::any::type_name::<F>());
     let boxed: Job = Box::new(move |engine| {
       Box::pin(async move {
+        let running = timing.start();
         let started = Instant::now();
         let result = job(engine).await;
         logging::slow_job(std::any::type_name::<F>(), started - queued, started.elapsed());
+        running.done();
         // The caller may have given up waiting (cancelled coroutine); nothing to tell it then.
         let _ = reply.send(result);
       })

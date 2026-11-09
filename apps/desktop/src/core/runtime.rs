@@ -813,7 +813,13 @@ impl CoreRuntime {
       .unwrap_or_else(|| Err(stopped()))
   }
 
-  async fn ask<T>(&self, build: impl FnOnce(oneshot::Sender<T>) -> Request) -> Option<T> {
+  async fn ask<T, B>(&self, build: B) -> Option<T>
+  where
+    B: FnOnce(oneshot::Sender<T>) -> Request,
+  {
+    // Performance data (#1521): the page's request from queued until answered, named by the method
+    // that asked (`messages`), as a step of the page's measure (`perf_core_steps`).
+    let _step = teamcraft_core::timing::step(teamcraft_core::timing::code_name(std::any::type_name::<B>()));
     let (reply, answer) = oneshot::channel();
     self.requests.send(build(reply)).ok()?;
     answer.await.ok()

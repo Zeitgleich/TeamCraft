@@ -5,6 +5,10 @@
 //!
 //! A panic kills the wasm instance, so its report is only queued; the next start sends it. No
 //! timers: the page sends on start, after a script error and when the browser comes back online.
+//!
+//! Performance data (`crate::perf`, issue #1521) waits in a queue of its own, kept in memory and
+//! stored when the page is hidden; it goes with those sends, and on its own once a small batch is
+//! queued, so an idle page sends nothing.
 
 use std::cell::{Cell, RefCell};
 use std::panic::PanicHookInfo;
@@ -13,7 +17,7 @@ use leptos::prelude::*;
 use serde::Deserialize;
 use teamcraft_client_api::crash_reporting::{
   AppInfo, AppPlatform, CrashEvent, CrashLevel, CrashReporter, CrashReportingConfig, CrashReportingConsent,
-  CrashSendOutcome, ErrorSource, EventId, InstallationId, PanicParts, PendingPanic, StackFrame,
+  CrashSendOutcome, ErrorSource, EventId, InstallationId, PanicParts, PendingPanic, StackFrame, Transaction,
 };
 use teamcraft_client_api::debug_log;
 use teamcraft_client_api::server_entry::SERVER_INFO_PATH;
@@ -24,6 +28,7 @@ use wasm_bindgen::closure::Closure;
 use crate::auth::{AppConfig, fetch, tauri};
 
 const KEY_QUEUE: &str = "teamcraft.crash_reports.queue";
+const KEY_TRANSACTIONS: &str = "teamcraft.crash_reports.transactions";
 const KEY_INSTALLATION: &str = "teamcraft.crash_reports.installation";
 const KEY_CONFIG: &str = "teamcraft.crash_reports.config";
 const KEY_NOTICE_SEEN: &str = "teamcraft.crash_reports.notice_seen";
@@ -55,6 +60,7 @@ pub fn install() {
     load_json(KEY_QUEUE).unwrap_or_default(),
   );
   reporter.set_config(load_json::<CrashReportingConfig>(KEY_CONFIG));
+  reporter = reporter.with_transactions(load_json(KEY_TRANSACTIONS).unwrap_or_default());
   reporter.set_consent(consent(
     crate::settings::stored_prefs().privacy.send_crash_reports,
   ));
@@ -92,7 +98,26 @@ pub fn set_consent(is_allowed: bool) {
     });
   }
   store_queue();
+  store_transactions();
   flush();
+}
+
+/// Whether an operation starting now is measured (`crate::perf`): reports on, the user didn't opt
+/// out, and the instance's trace rate keeps it.
+pub fn should_trace() -> bool {
+  !IS_DEAD.with(Cell::get) && with_reporter(|reporter| reporter.should_trace(random_roll())).unwrap_or(false)
+}
+
+/// Queues a finished measure; a full batch is sent at once.
+pub fn capture_transaction(transaction: &Transaction) {
+  let is_batch = with_reporter(|reporter| {
+    reporter.capture_transaction(transaction);
+    reporter.has_transaction_batch()
+  })
+  .unwrap_or(false);
+  if is_batch {
+    flush();
+  }
 }
 
 /// Whether the instance has crash reports on, and how (reactive).
@@ -115,6 +140,7 @@ pub fn flush() {
   if IS_DEAD.with(Cell::get) || IS_FLUSHING.with(|flushing| flushing.replace(true)) {
     return;
   }
+  with_reporter(CrashReporter::begin_flush);
   wasm_bindgen_futures::spawn_local(async {
     while let Some(pending) = with_reporter(|reporter| reporter.next_send(now_ms())).flatten() {
       let outcome = post(pending.request.body).await;
@@ -126,6 +152,7 @@ pub fn flush() {
         break;
       }
     }
+    store_transactions();
     // async-ok: a thread-local Cell, not a signal.
     IS_FLUSHING.with(|flushing| flushing.set(false));
   });
@@ -268,15 +295,31 @@ fn listen_to_window() {
       capture_script_error("UnhandledRejection", message, Vec::new());
     });
   let on_online = Closure::<dyn Fn()>::new(flush);
+  // Performance data lives in memory; it is stored when the page may go away (hidden, closed).
+  let on_hidden = Closure::<dyn Fn()>::new(|| {
+    let is_hidden = web_sys::window()
+      .and_then(|window| window.document())
+      .is_some_and(|document| document.visibility_state() == web_sys::VisibilityState::Hidden);
+    if is_hidden {
+      store_transactions();
+    }
+  });
+  let on_pagehide = Closure::<dyn Fn()>::new(store_transactions);
   // Listeners that fail to register only mean fewer reports; the app works without them.
   let _ = window.add_event_listener_with_callback("error", on_error.as_ref().unchecked_ref());
   let _ =
     window.add_event_listener_with_callback("unhandledrejection", on_rejection.as_ref().unchecked_ref());
   let _ = window.add_event_listener_with_callback("online", on_online.as_ref().unchecked_ref());
+  let _ = window.add_event_listener_with_callback("pagehide", on_pagehide.as_ref().unchecked_ref());
+  if let Some(document) = window.document() {
+    let _ = document.add_event_listener_with_callback("visibilitychange", on_hidden.as_ref().unchecked_ref());
+  }
   // Invariant: the listeners live as long as the page.
   on_error.forget();
   on_rejection.forget();
   on_online.forget();
+  on_hidden.forget();
+  on_pagehide.forget();
 }
 
 fn capture_script_error(error_type: &str, message: String, frames: Vec<StackFrame>) {
@@ -316,6 +359,12 @@ fn with_reporter<T>(work: impl FnOnce(&mut CrashReporter) -> T) -> Option<T> {
 fn store_queue() {
   if let Some(Ok(json)) = with_reporter(|reporter| serde_json::to_string(reporter.queue())) {
     store_text(KEY_QUEUE, &json);
+  }
+}
+
+fn store_transactions() {
+  if let Some(Ok(json)) = with_reporter(|reporter| serde_json::to_string(reporter.transactions())) {
+    store_text(KEY_TRANSACTIONS, &json);
   }
 }
 

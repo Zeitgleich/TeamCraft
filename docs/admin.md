@@ -207,9 +207,24 @@ signature (freshness above).
 
 An admin could add *themselves* to a private channel and read what is posted there from then on. A
 self-join asks only for the history from the join on: members' apps refuse a signed self-add that
-asks for more, whatever the workspace default (e2ee.md §4.7). Until a member's app lets the admin's
-device in, the channel says it waits and the device asks again on its own; the console's button then
-reads "Request access again" and is gone once the admin is in. That is allowed, but never silent:
+asks for more, whatever the workspace default (e2ee.md §4.7). Under `visible` nobody decides: the
+server can't add a device to the encryption group, so the app of a member who is online commits the
+signed self-add, which takes seconds (with a bridge in the channel, always). The channel details in
+Administration → Channels show what happens, live from gateway events (membership, presence), never
+polled (issue #908):
+
+- **Adding you to the channel**: a member is online; the button is gone meanwhile.
+- **No member is online**: the admin is added as soon as one is. The request is kept in the device's
+  store, also across restarts and while the admin's device is offline, and posted again on its own.
+- **Not added yet**: members were online, but none committed the self-add within `self_add_retry`
+  (30 minutes, doubling up to a day), perhaps refused (an outdated app, a policy it read
+  differently, issue #907). The app asks again on its own; "Request access again" asks at once.
+- **You are a member**: the device is in the group; the button is gone.
+
+The channel itself shows the same as a banner. Only `owner_approval` is a wait for people, and says
+so. Why the admin's app doesn't join by an MLS external commit instead, so that no member had to be
+online: e2ee.md §4.6, "An admin's self-join is committed by a member". That is allowed, but never
+silent:
 
 - Per instance setting `admin_self_join` for private channels:
   - `visible` (default) – allowed; members see "Paul joined this channel as a workspace admin"
@@ -754,6 +769,22 @@ once per `limits.invite_resend_interval_secs` (the invitation's own mail counts)
 invitation in an unarchived space on a server that sends mail. It uses the current directory policy
 and guest domains, and the personal note of the first mail isn't repeated, as it was never stored. Revoking and resending are in the audit log.
 
+#### 3.2.4 Group mentions (issue #206)
+
+`@handle` of a user group notifies its members who are in the conversation, expanded on the sender's
+device (e2ee.md §4.4). Admins limit who may do that with `use_group_mentions` (a channel permission, in the
+scheme and channel moderation). The server can't read which handle a message mentions, so what it enforces
+differs from what devices do:
+
+| Who enforces it | What                                                                                                                          |
+|-----------------|-------------------------------------------------------------------------------------------------------------------------------|
+| The apps        | No suggestion and no expansion without the permission                                                                         |
+| The server      | At most `[limits] max_mentions_without_group_mentions` (default 10) mentioned people per message without the permission       |
+| The server      | At most `[limits] max_mentions_per_message` (default 200) for everybody; mentioned people must be members of the conversation |
+| Nobody          | Whether a list of people really came from a group, or was typed: a modified client can name up to the limit                   |
+
+Group membership stays visible only to whom it already was: members of the workspace, never guests.
+
 ### 3.3 Moderation
 
 Admins can't read reported content unless a member shows it to them:
@@ -1062,6 +1093,7 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 | Call backgrounds                         | `POST /admin/backgrounds`, `POST /admin/backgrounds/{id}/complete`, `DELETE /admin/backgrounds/{id}`; everybody: `GET /org-backgrounds/{id}/download` |
 | Brands (§6)                              | `GET/POST /admin/brands`, `PUT/DELETE /admin/brands/{id}`, `POST /admin/brands/{id}/take-over`, `GET/PUT/DELETE /admin/brands/{id}/assets/{slot}` |
 | Mail server (§6.2)                       | `GET/PUT/DELETE /admin/settings/mail`, `POST /admin/settings/mail/test`            |
+| A brand's own mail server (§6.2)         | `PUT/DELETE /admin/brands/{id}/mail-server`, `POST /admin/brands/{id}/mail-server/test`; read in `GET /admin/brands` |
 | Calendar (§6.2)                          | `GET/PUT/DELETE /admin/settings/calendar`, `POST /admin/settings/calendar/test`    |
 | Instance settings (§6.3)                 | `GET/PUT /admin/settings`, `DELETE /admin/settings/{section}`                      |
 | Deactivate, reactivate, remove (§3.2.1)  | `POST /admin/users/{id}/deactivate`, `.../reactivate`, `.../remove-from-chats`      |
@@ -1125,11 +1157,33 @@ widen what the web client may load and talk to.
 
 ### 6.2 Mail server and calendar
 
-All mail the server sends (invitations, activations, digests, meeting invitations, test mail) goes
-through one SMTP server: host, port, security (STARTTLS, TLS, or none for a server on the same
-machine only), user, password, default sender address and name. Brands may have their own sender
-(§6.1). The page shows the delivery status since the start (last success, last failure and its
-error) and sends a test mail. The CalDAV calendar of meetings has URL, account, password and the
+Mail the server sends (invitations, activations, digests, guest notices, meeting invitations, test
+mail) goes through one SMTP server: host, port, security (STARTTLS, TLS, or none for a server on the
+same machine only), user, password, default sender address and name. Brands may have their own
+sender (§6.1). The page shows the delivery status since the start (last success, last failure and
+its error) and sends a test mail. "Mail per brand" lists each brand's sender, the server its mail
+goes through and how a brand's own server is doing.
+
+**A brand's own mail server.** Brands of different organizations often need their own relay, SPF and
+DKIM. The brand editor has an "Own mail server" section: host, port, security, user and password,
+with its own test mail and delivery status. The checks are those of the instance's server. The
+sender stays in the brand's settings, and a brand needs a sender address before it can have a
+server. An empty host (or `DELETE`) means the brand uses the instance's server, as without one. Only
+database brands have one: take a configuration brand over first (§6.1). Deleting a brand deletes its
+server. Instance admins (`manage_workspace`) read and change it, like the instance's server; changes
+and test mails are in the audit log (`brand_mail_server_updated`, `brand_mail_server_removed`,
+`brand_mail_test_sent`), never the password.
+
+The mail of a brand takes the brand's server: the recipient's home brand for digests and guest
+notices, the brand of the recipient's domain or else the inviter's for invitations and activations,
+the organizer's for meeting invitations. Each server is a transport of its own. A broken one fails
+only its own brand's mail and shows that at the brand, and its mail **never** moves to the instance's
+server, which would send with the wrong SPF and DKIM. Jobs that mail many people run one queue per
+server side by side; one mail is limited to three network timeouts, and a server that could not be
+reached is left alone for a minute (those mails fail at once and take their usual failure path, a
+test mail still asks the server). A changed server is in force at once, without a restart.
+
+The CalDAV calendar of meetings has URL, account, password and the
 optional free/busy URL template, and a connection test; it needs `[meetings]`.
 
 **Passwords are write-only.** They are never sent back (the console sees "has password"). Before they
@@ -1150,14 +1204,31 @@ Groups that are stored and reset as a whole:
 | `notifications`  | read receipt default, urgent repeat interval and count, phone push delay, desktop attention                                                   |
 | `email_digest`   | on/off, default and shortest interval, grace period, subjects and texts                                                                       |
 | `shares`         | on/off, default and longest expiry, download cap, links per user                                                                              |
-| `limits`         | attachment size and per-user total, avatar and background sizes, backgrounds per user, group DM size, user group size, meeting mails per hour |
-| `integration`    | default retention of integration channels                                                                                                     |
+| `limits`         | mentioned people per message (`max_mentions_per_message`, `max_mentions_without_group_mentions`), attachment size and per-user total, avatar and background sizes, backgrounds per user, group DM size, user group size, meeting mails per hour |
+| `integration`    | default retention of integration channels; the bridge public URL (below)                                                                      |
 | `local_accounts` | on/off (off: the form disappears, `/auth/local/*` answers 403 `local_accounts_disabled`, sessions end), second factor required, activation and session lifetime, failed attempts, lockout |
 | `sign_in_page`   | which methods the sign-in page offers (SSO, e-mail and password) and in which order; help text per language; help link; whether every sign-in shows the identity provider's login page |
 | `mail_texts`     | invitation and activation mail                                                                                                                |
 | `meeting_mail`   | most invitees; invitation, update and cancellation mail                                                                                       |
 | `token_binding`  | DPoP: off, optional (default) or required; proof age, clock leeway, nonce rotation, replay cache size in all and per account (e2ee.md §3.1.2) |
 | `holidays`       | the region (DE, AT, CH and their states or cantons) and an iCalendar feed whose public holidays repeating meetings can skip, how often the feed is fetched and when its copy counts as stale (none by default; organizers can pick a region of their own; docs/meetings.md, "Holidays") |
+
+**Bridge public URL** (`integration.bridge_public_url`, `[integration] bridge_public_url`, empty by
+default): where producers reach an integration bridge that runs on its own host, such as
+`https://bridge.example.com`. It is the base of `/hooks/<token>` and `/ingest/<token>`. `https`, or
+`http` for localhost, 127.0.0.0/8 and `::1`; no user name or password, no query and no fragment; a
+path is kept (a proxy may mount the bridge under one) and trailing slashes are dropped. A refused
+value shows its error at the field, and the server checks it again. Nothing in it is secret, but
+channel admins are not instance admins and can't read these settings, so the server answers
+`GET /api/v1/conversations/{id}/bridge-address` (`{"public_url": "..."}`, or `{}` when none is set)
+for whoever has `ManageChannelProperties` on that channel: owners and channel admins get 200,
+plain members 403, non-members 404. That call holds this one value and no other setting. While one
+is set the channel's "Connect a source" section offers it as a third choice, "At the configured
+address", and selects it first; without one only "On this server" and "On its own machine" show
+(docs/bridge.md, "Where producers reach the bridge"). The apps read it when the section opens and
+again after a refresh, so a changed address shows without a restart. It is stored like the other
+groups (a `settings.integration` row), without a migration; a group stored by an older server simply
+has none.
 
 **Signed or not.** Settings that member clients must be able to verify against a compromised server
 are part of the owner-signed workspace policy (§2.3) and are edited there: `admin_self_join`, org

@@ -81,6 +81,11 @@ impl OpsState {
     }
   }
 
+  /// The "bridge public URL" of the instance settings, for the channel's source section.
+  pub(super) fn bridge_public_url(&self) -> Option<String> {
+    self.settings.runtime.integration.maybe_bridge_public_url.clone()
+  }
+
   fn record(&mut self, now: TimestampMs, action: AuditAction, target: &str, detail: &str) {
     self.next_audit_id += 1;
     self.audit.push(AuditEntry {
@@ -457,6 +462,35 @@ impl AdminBackend for MockBackend {
     ops.record(self.now, AuditAction::BrandChanged, &id, "image removed");
   }
 
+  fn save_brand_mail_server(&self, id: String, request: teamcraft_proto::UpdateBrandMailServerRequest) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.save_brand_mail_server(&id, request);
+    ops.record(
+      self.now,
+      AuditAction::MailSettingsChanged,
+      &id,
+      "own mail server updated",
+    );
+  }
+
+  fn remove_brand_mail_server(&self, id: String) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.remove_brand_mail_server(&id);
+    ops.record(
+      self.now,
+      AuditAction::MailSettingsChanged,
+      &id,
+      "own mail server removed",
+    );
+  }
+
+  fn send_brand_test_mail(&self, id: String, _request: SendTestMailRequest) {
+    let mut ops = self.ops.borrow_mut();
+    let now = self.now;
+    ops.settings.record_brand_test_mail(&id, now);
+    ops.record(now, AuditAction::MailSettingsChanged, &id, "test sent");
+  }
+
   fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
     Some(self.ops.borrow().settings.mail.clone())
   }
@@ -805,11 +839,11 @@ impl AdminBackend for MockBackend {
   fn admin_join_channel(&self, channel: ConversationId) -> SelfJoinOutcome {
     let mut ops = self.ops.borrow_mut();
     let outcome = match ops.policy.admin_self_join {
-      AdminSelfJoinWire::Visible => SelfJoinOutcome::Joined,
+      AdminSelfJoinWire::Visible => SelfJoinOutcome::Adding,
       AdminSelfJoinWire::OwnerApproval => SelfJoinOutcome::ApprovalRequested,
       AdminSelfJoinWire::Disabled | AdminSelfJoinWire::Unknown(_) => SelfJoinOutcome::Disabled,
     };
-    if outcome == SelfJoinOutcome::Joined
+    if outcome == SelfJoinOutcome::Adding
       && let Some(name) = ops
         .channels
         .iter()
@@ -1387,7 +1421,7 @@ mod tests {
   fn self_join_follows_the_policy() {
     let backend = MockBackend::new(NOW);
     let channel = id_from_raw(41);
-    assert_eq!(backend.admin_join_channel(channel), SelfJoinOutcome::Joined);
+    assert_eq!(backend.admin_join_channel(channel), SelfJoinOutcome::Adding);
     let (_, mut policy) = backend.workspace_policy();
     policy.admin_self_join = AdminSelfJoinWire::Disabled;
     backend.set_workspace_policy(policy);

@@ -54,6 +54,19 @@ impl Default for CrashQueueLimits {
   }
 }
 
+impl CrashQueueLimits {
+  /// The performance data buffer's bounds: its own queue, so transactions never push a crash
+  /// report out; small and short-lived, as a lost transaction costs nothing.
+  pub fn transactions() -> Self {
+    Self {
+      max_reports: 50,
+      max_bytes: 256 * 1024,
+      max_attempts: 3,
+      max_age: Duration::from_secs(2 * 24 * 60 * 60),
+    }
+  }
+}
+
 impl CrashQueue {
   /// Adds a report, dropping the oldest until the queue fits its limits. A report larger than
   /// the whole byte limit is not queued.
@@ -67,6 +80,10 @@ impl CrashQueue {
       self.reports.pop_front();
     }
     true
+  }
+
+  pub fn contains(&self, event_id: EventId) -> bool {
+    self.reports.iter().any(|report| report.event_id == event_id)
   }
 
   pub fn len(&self) -> usize {

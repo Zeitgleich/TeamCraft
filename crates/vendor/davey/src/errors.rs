@@ -11,7 +11,7 @@ use openmls::{
 use openmls_rust_crypto::MemoryStorageError;
 use thiserror::Error;
 
-use crate::{cryptor::MediaType, displayable_code::MAX_GROUP_SIZE, session::DAVE_PROTOCOL_VERSION};
+use crate::{displayable_code::MAX_GROUP_SIZE, session::DAVE_PROTOCOL_VERSION};
 
 #[derive(Error, Debug)]
 pub enum DisplayableCodeError {
@@ -107,12 +107,24 @@ pub enum ProcessProposalsError {
   DeserializeMessageFailed(tls_codec::Error),
   #[error("message was not a private or public message: {0}")]
   MessageNotPrivateOrPublic(#[from] ProtocolMessageError),
+  #[error("proposal was not a public message")]
+  UnexpectedWireFormat,
+  #[error("proposal was not for the current epoch")]
+  EpochMismatch,
+  #[error("message was not a proposal")]
+  UnexpectedContentType,
+  #[error("proposal was not sent by an external sender")]
+  UnexpectedSenderType,
+  #[error("proposal was not an add or remove proposal")]
+  UnexpectedProposalType,
   #[error("failed to process message: {0}")]
   MessageProcessingFailed(#[from] ProcessMessageError<MemoryStorageError>),
   #[error("failed to convert credential content to user id: {0}")]
   CredentialContentConvertFailed(TryFromSliceError),
   #[error("unexpected user in add proposal: {0}")]
   UnexpectedUser(u64),
+  #[error("invalid proposed roster: {0}")]
+  InvalidRoster(#[from] RosterError),
   #[error("failed to store pending proposal: {0}")]
   StorePendingProposalFailed(MemoryStorageError),
   #[error("processed message was not a proposal")]
@@ -143,6 +155,14 @@ pub enum ProcessWelcomeError {
   ExpectedOneExternalSender,
   #[error("expected same external sender in welcome as currently set")]
   UnexpectedExternalSender,
+  #[error("welcome is for a different group than the session's channel")]
+  UnexpectedGroupId,
+  #[error("failed to convert credential content to user id: {0}")]
+  CredentialContentConvertFailed(TryFromSliceError),
+  #[error("unrecognized user in welcome roster: {0}")]
+  UnrecognizedUser(u64),
+  #[error("invalid welcome roster: {0}")]
+  InvalidRoster(#[from] RosterError),
   #[error("failed to delete pending group: {0}")]
   DeletingPendingGroupFailed(MemoryStorageError),
   #[error("failed to update ratchets: {0}")]
@@ -151,16 +171,24 @@ pub enum ProcessWelcomeError {
 
 #[derive(Error, Debug)]
 pub enum ProcessCommitError {
-  #[error("cannot process commit without a group")]
-  NoGroup,
-  #[error("cannot process commit for a pending group")]
-  PendingGroup,
+  #[error("cannot process commit without queued proposals")]
+  NoQueuedProposals,
   #[error("failed to deserialize message: {0}")]
   DeserializeMessage(tls_codec::Error),
   #[error("message was not a private or public message: {0}")]
   MessageNotPrivateOrPublic(#[from] ProtocolMessageError),
+  #[error("received commit before welcome")]
+  CommitBeforeWelcome,
   #[error("message was for a different group")]
   MessageForDifferentGroup,
+  #[error("commit was not a public message")]
+  UnexpectedWireFormat,
+  #[error("commit was not for the current epoch")]
+  EpochMismatch,
+  #[error("message was not a commit")]
+  UnexpectedContentType,
+  #[error("commit was not sent by a member")]
+  UnexpectedSenderType,
   #[error("failed to merge pending commit: {0}")]
   MergingPendingCommitFailed(#[from] MergePendingCommitError<MemoryStorageError>),
   #[error("failed to merge staged commit: {0}")]
@@ -169,8 +197,26 @@ pub enum ProcessCommitError {
   ProcessingMessageFailed(#[from] ProcessMessageError<MemoryStorageError>),
   #[error("processed message was not a staged commit")]
   ProcessedMessageNotStagedCommit,
+  #[error("received own commit but there is no pending commit")]
+  NoPendingCommit,
+  #[error("received own commit that does not match the pending commit")]
+  OwnCommitMismatch,
+  #[error("commit contains a non-ref proposal")]
+  UnexpectedNonRefProposal,
+  #[error("invalid commit roster: {0}")]
+  InvalidRoster(#[from] RosterError),
   #[error("failed to update ratchets: {0}")]
   UpdatingRatchetsFailed(#[from] UpdateRatchetsError),
+}
+
+#[derive(Error, Debug)]
+pub enum RosterError {
+  #[error("unexpected credential type")]
+  UnexpectedCredentialType,
+  #[error("failed to convert credential content to user id: {0}")]
+  CredentialContentConvertFailed(TryFromSliceError),
+  #[error("duplicate user: {0}")]
+  DuplicateUser(u64),
 }
 
 #[derive(Error, Debug)]
@@ -206,11 +252,31 @@ pub enum UpdateRatchetsError {
 }
 
 #[derive(Error, Debug)]
+pub enum TransitionError {
+  #[error("{0}")]
+  Reset(#[from] ResetError),
+  #[error("failed to update ratchets: {0}")]
+  UpdatingRatchetsFailed(#[from] UpdateRatchetsError),
+}
+
+#[derive(Error, Debug)]
 pub enum EncryptError {
   #[error("session is not ready to encrypt packets")]
   NotReady,
   #[error("failed to encrypt packet")]
-  EncryptionFailed,
+  EncryptionFailed(#[from] EncryptorEncryptError),
+}
+
+#[derive(Error, Debug)]
+pub enum EncryptorEncryptError {
+  #[error("no key ratchet to encrypt with")]
+  MissingKeyRatchet,
+  #[error("failed to get a cryptor for the current key generation")]
+  MissingCryptor,
+  #[error("failed to encrypt frame")]
+  EncryptionFailure,
+  #[error("encrypted frame failed codec validation too many times")]
+  TooManyAttempts,
 }
 
 #[derive(Error, Debug)]
@@ -229,15 +295,14 @@ pub struct NoDecryptorForUser;
 pub enum DecryptorDecryptError {
   #[error("provided frame was unencrypted when passthrough mode was disabled")]
   UnencryptedWhenPassthroughDisabled,
-  #[error(
-    "no valid cryptor manager could be found for {media_type:?}, encrypted size: {encrypted_size}, plaintext size: {plaintext_size}, num of managers: {manager_count})"
-  )]
-  NoValidCryptorFound {
-    media_type: MediaType,
-    encrypted_size: usize,
-    plaintext_size: usize,
-    manager_count: usize,
-  },
+  #[error("no key ratchet to decrypt with")]
+  MissingKeyRatchet,
+  #[error("nonce could not be processed")]
+  InvalidNonce,
+  #[error("failed to get a cryptor for the frame's key generation")]
+  MissingCryptor,
+  #[error("failed to decrypt frame")]
+  DecryptionFailure,
 }
 
 #[derive(Debug, Error)]

@@ -124,6 +124,8 @@ struct MessageExtras: Decodable, Equatable, Sendable {
   let maybeForwarded: ForwardedFrom?
   /// An own message the other member of a DM read: two ticks instead of one (#769).
   let isRead: Bool?
+  /// An own message that reached a device of every other member: two grey ticks (#598).
+  let isDelivered: Bool?
   /// A membership or channel change someone made, shown as a line instead of a bubble.
   let maybeWorkspaceEvent: WorkspaceEvent?
 }
@@ -250,11 +252,21 @@ struct ChatAnswer: Decodable, Sendable {
   let maybeReply: ReplyPreview?
   let olderHistory: OlderHistory?
   var calls: [CallHistoryItem]?
-  var roster: SpaceRoster?
   var items: [SavedItem]?
   var overview: ScheduledOverview?
   var drafts: [DraftItem]?
   var sent: [SentItem]?
+  /// `ChatQuery.joinableSpaces`: open spaces the user isn't in (#1526).
+  var spaces: [JoinableSpace]?
+}
+
+/// An open space the user may join, as "Browse spaces" lists it (#1526).
+struct JoinableSpace: Decodable, Identifiable, Equatable, Sendable {
+  let id: String
+  let name: String
+  var maybeDescription: String?
+  var maybeImageVersion: String?
+  var memberCount: Int?
 }
 
 /// How far a conversation's history reaches beyond what this device holds.

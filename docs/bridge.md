@@ -5,6 +5,9 @@ logs, monitoring alerts, CI results, the hotline bot. It is a small headless Tea
 runs **where the data comes from** (next to the service, on a NAS, on the hotline host), never on
 the VPS that runs the server.
 
+The other direction, telling external systems about events in TeamCraft, is outgoing webhooks:
+[webhooks.md](webhooks.md). They carry metadata only and are sent by the server itself.
+
 ```
  Grafana, CI, scripts,        HTTP (loopback)         encrypted          TeamCraft
  journalctl | curl      ─────────────────────▶ bridge ─────────────▶ server (ciphertext only)
@@ -97,8 +100,11 @@ for readable lines with levels use `-o short-iso` as plain text, or `-o cat` for
 - **Search index:** the bridge has the plaintext, so it publishes the index segments of its channels
   (closed months, e2ee.md §10) itself, once an hour by default.
 - **No channel yet:** messages for a channel the bot hasn't been added to wait (up to 1000) and go
-  out once it joins. A lost connection is retried with backoff; sends that fail stay in the
-  encrypted outbox of the local store.
+  out once it joins. The gateway connection is kept by the same supervisor as in the apps: a lost
+  or silent connection is replaced with jittered backoff (reset only after it stayed up 30 s), and
+  the catch-up after a reconnect brings in what was missed. Sends that fail stay in the encrypted
+  outbox of the local store. If the server refuses the bot's access token, the bridge logs a
+  warning and stops trying until it is restarted with a working token.
 - Tokens are part of the URL, so treat the URL as the credential: unknown tokens get `404`, the
   bridge knows only their SHA-256 and compares it in constant time, and the listener is loopback
   unless you open it.
@@ -418,13 +424,22 @@ false` turns app-managed sources off for such a bridge.
 
 The channel section's "Where the bridge runs" switch picks the base of the URLs it shows:
 
-| Choice             | URLs                                                       | When                                                                                                                          |
-|--------------------|------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|
-| On this server     | `https://<instance host>/hooks/<token>`, `/ingest/<token>` | The deployment runs the bridge (teamcraft-deploy role `teamcraft_bridge`); its proxy routes both paths to the loopback bridge |
-| On its own machine | `http://127.0.0.1:8088/hooks/<token>`, `/ingest/<token>`   | The bridge runs next to the producers on its default listener; use its own address instead if you opened the listener         |
+| Choice                    | URLs                                                       | When                                                                                                                          |
+|---------------------------|------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------|
+| On this server            | `https://<instance host>/hooks/<token>`, `/ingest/<token>` | The deployment runs the bridge (teamcraft-deploy role `teamcraft_bridge`); its proxy routes both paths to the loopback bridge |
+| On its own machine        | `http://127.0.0.1:8088/hooks/<token>`, `/ingest/<token>`   | The bridge runs next to the producers on its default listener; use its own address instead if you opened the listener         |
+| At the configured address | `<bridge public URL>/hooks/<token>`, `/ingest/<token>`     | The bridge runs on its own public host; an admin set its address (below). Only offered while one is set                       |
 
-The first is the default. The app does not check whether a bridge answers there: on an instance
-without the bridge role the instance's host name has no `/hooks/` route.
+"On this server" is the default; while a bridge public URL is set, "At the configured address" is.
+The app does not check whether a bridge answers there: on an instance without the bridge role the
+instance's host name has no `/hooks/` route.
+
+**Bridge public URL.** An admin sets it under Administration → Settings → Integrations, or in the
+configuration file (`[integration] bridge_public_url`, the seed): `https://bridge.example.com`, with
+`http` only for localhost and no user name, query or fragment (docs/admin.md §6.3). The bridge's own
+proxy has to route `/hooks/` and `/ingest/` there. Channel admins, who can't read the admin
+settings, get the value from `GET /api/v1/conversations/{id}/bridge-address`, which requires the
+right to manage the channel and returns only this setting.
 
 ## Bots
 

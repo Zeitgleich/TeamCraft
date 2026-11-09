@@ -1424,7 +1424,6 @@ fn DataGate(me: GetMeResponse, settings: Settings, control: SessionControl) -> i
         provide_context(StoredValue::new_local(NotificationSync::new(control.authenticator())));
         provide_context(MeetingsHub::new(MeetingsClient::new(control.authenticator())));
         provide_context(crate::integrations::BotsHub::new(crate::rest::RestClient::new(control.authenticator())));
-        provide_context(crate::groups::GroupsHub::new(crate::rest::RestClient::new(control.authenticator())));
         provide_context(crate::channel_policy::ChannelPolicyHub::new(crate::rest::RestClient::new(control.authenticator())));
         let picture_retries = crate::picture_retries::PictureRetries::new();
         provide_context(picture_retries);

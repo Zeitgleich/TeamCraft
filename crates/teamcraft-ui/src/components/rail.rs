@@ -18,9 +18,9 @@ use crate::state::{AppState, Overlay, RailEntry, use_app_state};
 const RAIL_BADGE_CAP: u32 = 99;
 
 /// Space switcher on the far left (Mattermost "team sidebar"). On top the global places with a
-/// label under each icon: Chats (the DMs, which live outside spaces) and Activity, whose list takes
-/// the sidebar's place like a space's (#752; followed threads are one of its filters). In the
-/// grouped sidebar one entry stands for all spaces.
+/// label under each icon: Chats (the DMs, which live outside spaces), Activity, whose list takes
+/// the sidebar's place like a space's (#752; followed threads are one of its filters), and Files,
+/// whose filters and scopes do (#1510). In the grouped sidebar one entry stands for all spaces.
 ///
 /// Only the spaces (with "add space" at their end) scroll; the destinations above stay in place
 /// (#652). Focus mode sits beside the account menu in the top bar (#299). Where spaces are scrolled out of sight, the scroller's edge fades.
@@ -57,6 +57,7 @@ pub fn SpaceRail() -> impl IntoView {
       <div class="rail-destinations">
         <ChatsButton />
         <ActivityButton />
+        <FilesButton />
         <RailCreateMenu />
       </div>
       // The list layout has the spaces under its list (#1151): no space to switch to here.
@@ -131,7 +132,7 @@ fn ChatsButton() -> impl IntoView {
   let is_current = Signal::derive(move || match state.rail.get() {
     RailEntry::Chats => true,
     RailEntry::Space => state.is_list_layout(),
-    RailEntry::Activity => false,
+    RailEntry::Activity | RailEntry::Files => false,
   });
   let label = Signal::derive(move || match count.get() {
     0 => i18n.t("chats-title"),
@@ -171,6 +172,24 @@ fn ActivityButton() -> impl IntoView {
       count=Signal::derive(move || count.get())
       tone=tone
       on_open=Callback::new(move |()| state.open_activity())
+    />
+  }
+}
+
+/// Every file the user can see (#1510); no count: files are nothing to catch up on.
+#[component]
+fn FilesButton() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  view! {
+    <RailDestination
+      icon=IconName::Folder
+      label_key="rail-files"
+      accessible_label=Signal::derive(move || i18n.t("files-title"))
+      maybe_tip_key="rail-files-tip"
+      is_current=Signal::derive(move || state.rail.get() == RailEntry::Files)
+      count=Signal::derive(|| 0)
+      on_open=Callback::new(move |()| state.open_files())
     />
   }
 }

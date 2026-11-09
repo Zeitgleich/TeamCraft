@@ -297,9 +297,11 @@ guest  = "external"
 - Each device reports `active` / `idle` over the gateway (desktop and web also report *attention*:
   focused, recent input, not idle, unlocked; on change and every 30 s, e2ee.md §7); the server
   aggregates per user
-  (online > away > offline) and merges manual states (DND, away, appear offline, in a call, in a
-  meeting). An automatic away (idle device, workspace away timeout) ends with the next activity; a
-  manually chosen away stays until the user picks another status (docs/gateway.md, "Presence").
+  (online > away > offline) and merges manual states (busy, DND, be right back, away, appear offline,
+  each optionally until a time) and what the server knows (in a call, in a meeting: busy while the
+  user is automatic). An automatic away (idle device, workspace away timeout) ends with the next
+  activity; a manual status stays until its end or until the user picks another one
+  (docs/gateway.md, "Presence").
 - "In a meeting" comes from CalCraft free/busy; "in a call" from the SFU roster.
 - Presence also drives push routing (no phone push while the desktop is active).
 - **Last seen**: the server stores when a user's devices last stopped being active (`users.last_seen_at`)
@@ -360,6 +362,15 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
 - Same code runs natively and compiled to WASM in the browser.
 - No unencrypted fallback. Verification codes per call and per participant.
 - The SFU sees RTP headers and an unencrypted audio-level header extension, never media payload.
+- **Transitions (#1541, `davey` 0.2.0):** a commit or welcome doesn't switch keys by itself. Each
+  member installs the new epoch's decryption keys, answers `dave_transition_ready` with the
+  commit's `transition_id`, and switches its encryption key on the SFU's `dave_execute_transition`,
+  which the SFU sends once every member is ready or gone, or before the next commit (Discord's
+  opcodes 29/30, 23, 22). So no
+  receiver misses frames at an epoch change. A client that hears no execution switches by itself
+  5 s after the oldest transition it still waits for; the founding commit and clients from before (`join` without
+  `dave_transition_mode: coordinated`) switch at once. There is no downgrade (opcode 21): the
+  protocol version stays 1. Details and what the SFU can and can't do: e2ee.md §8, "Transitions".
 
 ### 6.3 SFU
 

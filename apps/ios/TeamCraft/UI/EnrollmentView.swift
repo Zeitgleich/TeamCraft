@@ -22,7 +22,7 @@ struct EnrollmentView: View {
     ScrollViewReader { proxy in
       ScrollView {
         VStack(alignment: .leading, spacing: Theme.spacing) {
-          Text("enroll_title").font(.title.bold()).accessibilityAddTraits(.isHeader)
+          Text("enroll_title").font(.app(.title).bold()).accessibilityAddTraits(.isHeader)
           if hasExistingIdentity { restore(proxy) } else { newKeys(proxy) }
           Button("sign_out", role: .destructive) { Task { await model.signOut() } }
             .padding(.top, 16)
@@ -49,7 +49,7 @@ struct EnrollmentView: View {
       maybeError: errors[.repeated]?.message, focus: $maybeFocus,
       accessibilityFocus: $maybeAccessibilityFocus
     ) { submit(proxy) }
-    Text("passphrase_rule \(PassphraseRules.minimumLength)").font(.footnote).foregroundStyle(Theme.textMuted)
+    Text("passphrase_rule \(PassphraseRules.minimumLength)").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
     // The device's or the server's failure belongs to no field: it sits next to the button.
     if let failure, !model.isBusy { Text(failure.message).foregroundStyle(Theme.danger) }
     Button { submit(proxy) } label: { busyLabel("enroll_button") }
@@ -205,7 +205,7 @@ struct LinkThisDeviceView: View {
   var body: some View {
     ScrollView {
       VStack(spacing: Theme.spacing) {
-        Text("link_new_title").font(.title.bold()).accessibilityAddTraits(.isHeader)
+        Text("link_new_title").font(.app(.title).bold()).accessibilityAddTraits(.isHeader)
         if let shortCode = progress.maybeShortCode {
           // Connected: only the comparison matters now.
           Text("link_compare").foregroundStyle(Theme.textMuted)
@@ -216,7 +216,7 @@ struct LinkThisDeviceView: View {
           ProgressView()
         } else {
           if let notice = progress.maybeNotice {
-            Text(notice).font(.footnote).foregroundStyle(Theme.danger).frame(maxWidth: .infinity, alignment: .leading)
+            Text(notice).font(.app(.footnote)).foregroundStyle(Theme.danger).frame(maxWidth: .infinity, alignment: .leading)
           }
           Text("link_phone_intro").foregroundStyle(Theme.textMuted).frame(maxWidth: .infinity, alignment: .leading)
           // The prompt on the other devices needs the request's key at the server; scanning does not.
@@ -230,17 +230,17 @@ struct LinkThisDeviceView: View {
             }
             .buttonStyle(PrimaryButtonStyle())
             .disabled(askState == .asking)
-            Text("link_ask_hint").font(.footnote).foregroundStyle(Theme.textMuted)
+            Text("link_ask_hint").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
             if askState == .failed {
-              Text("link_ask_failed").font(.footnote).foregroundStyle(Theme.danger)
+              Text("link_ask_failed").font(.app(.footnote)).foregroundStyle(Theme.danger)
             }
           }
           Divider()
           Button("link_scan_code", systemImage: "qrcode.viewfinder") { isScanning = true }
             .buttonStyle(.bordered)
-          Text("link_scan_code_hint").font(.footnote).foregroundStyle(Theme.textMuted)
+          Text("link_scan_code_hint").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
           Divider()
-          Text("link_no_other_device").font(.footnote).foregroundStyle(Theme.textMuted)
+          Text("link_no_other_device").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
         }
         Button("cancel") { model.cancelLinking() }.padding(.top, 16)
       }
@@ -276,7 +276,7 @@ struct OrgRecoveryView: View {
     ScrollViewReader { proxy in
       ScrollView {
         VStack(alignment: .leading, spacing: Theme.spacing) {
-          Text("recovery_title").font(.title.bold()).accessibilityAddTraits(.isHeader)
+          Text("recovery_title").font(.app(.title).bold()).accessibilityAddTraits(.isHeader)
           Text("recovery_hint").foregroundStyle(Theme.textMuted)
           Text(progress.verificationCode)
             .font(.system(.title, design: .monospaced).bold())

@@ -24,10 +24,12 @@ use teamcraft_client_api::actions::{
 };
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
+use teamcraft_client_api::files_query::{FilesPage, FilesQuery};
+use teamcraft_client_api::links::{LinkPage, links_page};
 use teamcraft_client_api::model::{
   Conversation, ConversationId, CustomStatus, GapEdge, HistoryGap, InviteId, JoinableSpace, Message,
   MessageId, MessageKind, OlderHistory, PendingInvite, PresenceStatus, Space, SpaceId, SpaceRole,
-  SpaceRoster, ThreadId, ThreadSummary, UnseenReactions, User, UserId, pending_message_id,
+  SpaceRoster, ThreadId, ThreadSummary, UnseenReactions, User, UserId, is_pending, pending_message_id,
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
@@ -507,6 +509,17 @@ impl Feed {
     for (offset, message) in window.messages.into_iter().enumerate() {
       let index = window.start + offset;
       if self.rows.get(&index) != Some(&message) {
+        if let Some(previous) = self.rows.get(&index)
+          && is_pending(previous.id)
+          && !is_pending(message.id)
+        {
+          // The server took a message sent from here (perf.rs).
+          crate::perf::end_pending(
+            crate::perf::PerfOperation::MessageSend,
+            &previous.id.to_string(),
+            crate::perf::PerfStatus::Ok,
+          );
+        }
         self.rows.insert(index, message);
         is_changed = true;
       }
@@ -974,7 +987,22 @@ impl RemoteChat {
     let mut is_changed = false;
     loop {
       let args = json!({ "conversation": conversation, "start": page * PAGE, "len": PAGE });
+      let started_ms = crate::perf::now_ms();
       let outcome = call::<MessageWindow>("core_messages", &args).await;
+      // A switch whose rows weren't in the mirror: the read from the core's store is a step of it.
+      crate::perf::with_pending(
+        crate::perf::PerfOperation::ChannelSwitch,
+        &conversation.to_string(),
+        |measure| {
+          let status = if outcome.is_ok() {
+            crate::perf::PerfStatus::Ok
+          } else {
+            crate::perf::PerfStatus::Error
+          };
+          measure.span("db.query", "core_messages", started_ms, status);
+          measure.tag("source", "store");
+        },
+      );
       let mut mirror = self.mirror.borrow_mut();
       match outcome {
         Ok(window) => is_changed |= mirror.feeds.entry(conversation).or_default().apply(window),
@@ -1106,6 +1134,8 @@ impl RemoteChat {
         maybe_imported: None,
         maybe_source: None,
         maybe_placeholder: None,
+        group_mentions: Vec::new(),
+        mentions_me: false,
       };
       match message.maybe_thread {
         Some(thread) => mirror
@@ -1128,6 +1158,11 @@ impl RemoteChat {
   }
 
   fn withdraw_pending(&self, pending: PendingRow) {
+    crate::perf::end_pending(
+      crate::perf::PerfOperation::MessageSend,
+      &pending.id.to_string(),
+      crate::perf::PerfStatus::Error,
+    );
     let mut mirror = self.mirror.borrow_mut();
     match pending.maybe_thread {
       Some(thread) => {
@@ -1183,6 +1218,13 @@ impl ChatBackend for RemoteChat {
       .maybe_client_message_id
       .get_or_insert_with(ClientMessageId::random);
     let maybe_pending = self.show_pending(&message, id);
+    // Performance data: until the server's answer replaces the pending row (`Feed::store`).
+    if let Some(pending) = maybe_pending
+      .as_ref()
+      .filter(|pending| pending.maybe_thread.is_none())
+    {
+      crate::perf::begin_pending(crate::perf::PerfOperation::MessageSend, &pending.id.to_string());
+    }
     self.act_showing(ChatAction::SendMessage { message }, maybe_pending);
   }
 
@@ -1351,6 +1393,16 @@ impl ChatBackend for RemoteChat {
     match self.ask(ChatQuery::KeyCatchUp) {
       Some(ChatAnswer::KeyCatchUp { maybe_progress }) => maybe_progress,
       _ => None,
+    }
+  }
+
+  fn mentionable_groups(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::MentionableGroup> {
+    match self.ask(ChatQuery::MentionableGroups { conversation }) {
+      Some(ChatAnswer::MentionableGroups { groups }) => groups,
+      _ => Vec::new(),
     }
   }
 
@@ -1705,6 +1757,20 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn files_page(&self, query: &FilesQuery<'_>) -> Option<FilesPage> {
+    match self.ask(ChatQuery::FilesPage {
+      scope: query.scope,
+      filter: query.kind,
+      sort: query.sort,
+      starred: query.starred.to_vec(),
+      max_files: query.max_files,
+    })? {
+      ChatAnswer::FilesPage { files, has_more } => Some(FilesPage { files, has_more }),
+      // An answer of another kind (an older core): an empty list.
+      _ => Some(FilesPage::default()),
+    }
+  }
+
   fn conversation_media(
     &self,
     conversation: ConversationId,
@@ -1719,6 +1785,14 @@ impl ChatBackend for RemoteChat {
       ChatAnswer::MediaPage { page } => Some(page),
       // An answer of another kind (an older core): nothing to page through.
       _ => Some(MediaPage::default()),
+    }
+  }
+
+  fn conversation_links(&self, conversation: ConversationId, limit: usize) -> Option<LinkPage> {
+    match self.ask(ChatQuery::ConversationLinks { conversation, limit })? {
+      ChatAnswer::LinkPage { page } => Some(page),
+      // An answer of another kind (an older core): the scan through the messages it serves.
+      _ => Some(links_page(self, conversation, limit)),
     }
   }
 
@@ -3623,6 +3697,8 @@ mod tests {
           maybe_imported: None,
           maybe_source: None,
           maybe_placeholder: None,
+          group_mentions: Vec::new(),
+          mentions_me: false,
         })
         .collect(),
     }

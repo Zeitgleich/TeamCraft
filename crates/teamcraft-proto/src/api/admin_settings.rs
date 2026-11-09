@@ -113,6 +113,10 @@ pub struct AdminBrandsResponse {
   /// Whether images can be uploaded (they are kept in the object storage).
   pub is_image_upload_available: bool,
   pub max_asset_bytes: u64,
+  /// Whether the server has a key to store a brand's mail server password encrypted (`[secrets]` in
+  /// the configuration).
+  #[serde(default)]
+  pub can_store_secrets: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -129,6 +133,9 @@ pub struct AdminBrand {
   pub assets: Vec<BrandAssetSlot>,
   #[serde(rename = "updated_at", default, skip_serializing_if = "Option::is_none")]
   pub maybe_updated_at: Option<UnixMillis>,
+  /// The brand's own mail server. None: its mail goes through the instance's.
+  #[serde(rename = "mail_server", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_mail_server: Option<BrandMailServer>,
 }
 
 /// What an admin can change about a brand. Brand-specific content security policies and extra
@@ -231,6 +238,35 @@ pub struct SmtpSettings {
   pub maybe_from_name: Option<String>,
 }
 
+/// A brand's own SMTP server (admin.md §6.2). The sender stays in the brand's settings; the password
+/// is never sent back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct BrandMailServer {
+  pub host: String,
+  pub port: u16,
+  pub security: SmtpSecurityMode,
+  #[serde(rename = "username", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_username: Option<String>,
+  pub has_password: bool,
+  /// How mail through this server went, since the server started.
+  #[serde(default)]
+  pub status: MailDeliveryStatus,
+}
+
+/// `PUT /api/v1/admin/brands/{brand_id}/mail-server`. An empty host removes the brand's own server,
+/// like `DELETE`: its mail goes through the instance's mail server again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct UpdateBrandMailServerRequest {
+  pub host: String,
+  pub port: u16,
+  pub security: SmtpSecurityMode,
+  #[serde(rename = "username", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_username: Option<String>,
+  /// Left out: the stored password stays.
+  #[serde(default)]
+  pub password: SecretUpdate,
+}
+
 /// `PUT /api/v1/admin/settings/mail`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct UpdateMailSettingsRequest {
@@ -274,10 +310,11 @@ pub struct SettingsTestResponse {
 }
 
 /// A write-only secret in a settings request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "action", content = "value", rename_all = "snake_case")]
 pub enum SecretUpdate {
   /// Leave the stored secret as it is.
+  #[default]
   Keep,
   /// Remove it.
   Clear,
@@ -594,6 +631,17 @@ pub struct LimitSettings {
 pub struct IntegrationSettings {
   /// Retention of integration channels in days; 0 = none.
   pub default_retention_days: u32,
+  /// Where producers reach an integration bridge that runs on its own host (docs/bridge.md): the
+  /// base of its `/hooks/` and `/ingest/` URLs. `https`, or `http` for loopback; no credentials,
+  /// query or fragment ([`check_bridge_public_url`](crate::check_bridge_public_url)). Channel
+  /// admins read it through `GET /api/v1/conversations/{id}/bridge-address`. Absent: none, and the
+  /// apps offer the instance's own host name and the loopback default.
+  #[serde(
+    rename = "bridge_public_url",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_bridge_public_url: Option<String>,
 }
 
 /// Rules for local (password) accounts. They need `[local_accounts]` with a session secret in the
@@ -804,6 +852,7 @@ mod tests {
   fn sections_are_tagged_with_their_name() {
     let section = RuntimeSettingsSection::Integration(IntegrationSettings {
       default_retention_days: 30,
+      maybe_bridge_public_url: None,
     });
     assert_eq!(
       serde_json::to_string(&section).unwrap(),
@@ -828,6 +877,13 @@ mod tests {
       serde_json::from_str::<SecretUpdate>(r#"{"action":"clear"}"#).unwrap(),
       SecretUpdate::Clear
     );
+  }
+
+  #[test]
+  fn a_brand_mail_server_update_without_a_password_keeps_it() {
+    let request: UpdateBrandMailServerRequest =
+      serde_json::from_str(r#"{"host":"smtp.a.example.com","port":587,"security":"start_tls"}"#).unwrap();
+    assert_eq!(request.password, SecretUpdate::Keep);
   }
 
   #[test]

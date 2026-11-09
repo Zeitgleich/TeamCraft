@@ -213,7 +213,7 @@
 
 @media (hover: hover) and (pointer: fine) {
   .sb-more:hover {
-    color: var(--chrome-strong);
+    color: var(--sb-strong);
   }
 }
 

@@ -60,8 +60,24 @@
   background: var(--online);
 }
 
+/* Busy and do not disturb share red; only do not disturb carries the bar (issue #1578). */
+.presence-busy {
+  background: var(--dnd);
+}
+
 .presence-away {
   background: var(--away);
+}
+
+/* Be right back: the away colour with clock hands, so it reads apart from away without colour. */
+.presence-brb {
+  background-color: var(--away);
+  background-image:
+    linear-gradient(var(--on-fill), var(--on-fill)),
+    linear-gradient(var(--on-fill), var(--on-fill));
+  background-size: 1.5px 35%, 30% 1.5px;
+  background-position: 50% 20%, 75% 52%;
+  background-repeat: no-repeat;
 }
 
 .presence-dnd {

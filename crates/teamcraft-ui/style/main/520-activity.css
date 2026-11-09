@@ -43,12 +43,12 @@
 @media (hover: hover) and (pointer: fine) {
   .activity-item:hover {
     background: var(--sb-hover);
-    color: var(--chrome-strong);
+    color: var(--sb-strong);
   }
 }
 
 .activity-item.unread {
-  color: var(--chrome-strong);
+  color: var(--sb-strong);
 }
 
 .activity-item.current {
@@ -126,10 +126,10 @@
   flex: none;
   width: 1px;
   margin: 4px 2px;
-  background: rgba(255, 255, 255, 0.14);
+  background: var(--sb-edge);
 }
 
-/* The empty state sits in the dark sidebar: the shared card, in the sidebar's colours. */
+/* The empty state sits in the sidebar: the shared card, in the sidebar's colours. */
 .activity-empty {
   padding: var(--space-6) var(--space-3);
   color: var(--sb-muted);
@@ -142,7 +142,7 @@
 
 .activity-empty .empty-title,
 .activity-sidebar .list-failed .empty-title {
-  color: var(--chrome-strong);
+  color: var(--sb-strong);
 }
 
 .activity-empty .empty-body,

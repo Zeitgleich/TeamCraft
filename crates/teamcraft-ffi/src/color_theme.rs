@@ -60,8 +60,8 @@ pub fn color_theme_tokens(value: String, is_dark: bool) -> Option<AppThemeTokens
   let Ok(theme) = value.parse::<ColorTheme>();
   let tokens = theme.colors()?.tokens(is_dark);
   Some(AppThemeTokens {
-    chrome: rgb(tokens.sidebar),
-    on_chrome: rgb(tokens.sidebar_text),
+    chrome: rgb(tokens.navigation),
+    on_chrome: rgb(tokens.chrome_text),
     accent: rgb(tokens.accent),
     accent_strong: rgb(tokens.accent_strong),
     on_accent: rgb(tokens.on_accent),

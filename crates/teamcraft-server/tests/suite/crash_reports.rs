@@ -18,6 +18,8 @@ use teamcraft_server::testing::TestApp;
 
 const ENVELOPE: &str =
   "{\"event_id\":\"00000000000000000000000000000001\"}\n{\"type\":\"event\",\"length\":2}\n{}\n";
+/// Performance data (issue #1521).
+const TRANSACTION: &str = "{\"event_id\":\"00000000000000000000000000000002\"}\n{\"type\":\"transaction\",\"length\":32}\n{\"transaction\":\"channel.switch\"}\n";
 
 macro_rules! app {
   ($start:expr) => {
@@ -81,6 +83,26 @@ async fn envelopes_reach_the_backend_and_its_answer_comes_back() {
     post_envelope(&app, ENVELOPE).await.status(),
     StatusCode::BAD_REQUEST
   );
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn transactions_are_relayed_and_other_item_types_are_not() {
+  let app = app!(TestApp::start());
+  let backend = FakeBackend::start(AxumStatus::OK).await;
+  enable(&app, &backend.dsn()).await;
+  assert_eq!(
+    post_envelope(&app, TRANSACTION).await.status(),
+    StatusCode::ACCEPTED
+  );
+  let attachment = "{}\n{\"type\":\"attachment\",\"length\":2}\nab\n";
+  assert_eq!(
+    post_envelope(&app, attachment).await.status(),
+    StatusCode::BAD_REQUEST
+  );
+  let received = backend.received();
+  assert_eq!(received.len(), 1);
+  assert_eq!(received[0].3, TRANSACTION);
   app.stop().await;
 }
 

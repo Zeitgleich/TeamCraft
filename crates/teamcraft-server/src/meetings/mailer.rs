@@ -52,6 +52,14 @@ pub enum MailError {
   Build(String),
   #[error("the mail server refused or could not be reached: {0}")]
   Send(String),
+  /// No conversation with the mail server came about: it did not answer, or the connection or TLS
+  /// failed. Unlike a refusal of one address, the next mail would most likely fare the same.
+  #[error("the mail server could not be reached: {0}")]
+  Unreachable(String),
+  /// A mail server that was just unreachable gets a moment before it is tried again
+  /// ([`crate::runtime::brand_mail::BrandTransport`]).
+  #[error("the mail server could not be reached a moment ago and is not tried again yet")]
+  Paused,
 }
 
 /// SMTP through `lettre` with rustls.
@@ -91,12 +99,13 @@ impl Mailer for SmtpMailer {
   fn send<'a>(&'a self, mail: &'a OutgoingMail) -> BoxFuture<'a, Result<(), MailError>> {
     Box::pin(async move {
       let message = build_message(&self.from, mail)?;
-      self
-        .transport
-        .send(message)
-        .await
-        .map(|_| ())
-        .map_err(|error| MailError::Send(error.to_string()))
+      self.transport.send(message).await.map(|_| ()).map_err(|error| {
+        if error.is_permanent() || error.is_transient() {
+          MailError::Send(error.to_string())
+        } else {
+          MailError::Unreachable(error.to_string())
+        }
+      })
     })
   }
 }

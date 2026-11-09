@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- The directory on the phone (#1337): people, channels across spaces, external people, invitations -->
+  <string name="directory_title">Directory</string>
+  <string name="directory_hint">Find people and channels across your spaces</string>
+  <string name="directory_people">People</string>
+  <string name="directory_channels">Channels</string>
+  <string name="directory_external">External</string>
+  <string name="directory_invitations">Invitations</string>
+  <string name="directory_people_filter">Search people</string>
+  <string name="directory_channel_filter">Search channels</string>
+  <string name="directory_invitation_filter">Search by e-mail address</string>
+  <string name="directory_people_empty">Nobody matches. Try another name or clear a filter.</string>
+  <string name="directory_external_empty">No external people match.</string>
+  <string name="directory_channels_empty">No channels match.</string>
+  <string name="directory_invitations_empty">There are no open invitations you can manage.</string>
+  <string name="directory_more_failed">The next page could not be loaded.</string>
+  <string name="directory_filter_organization">Organization</string>
+  <string name="directory_filter_department">Department</string>
+  <string name="directory_filter_title">Title</string>
+  <string name="directory_filter_any">Any</string>
+  <!-- A filter chip with its chosen value, e.g. "Department: Sales" -->
+  <string name="directory_filter_chosen">%1$s: %2$s</string>
+  <string name="directory_guest">Guest</string>
+  <string name="directory_message">Message %1$s</string>
+  <plurals name="directory_channel_members">
+    <item quantity="one">%d member</item>
+    <item quantity="other">%d members</item>
+  </plurals>
+  <string name="directory_open">Open</string>
+  <string name="directory_joining">Joining</string>
+  <string name="directory_private">Private channel</string>
+  <string name="directory_invited_by">Invited by %1$s</string>
+  <string name="directory_invitation_expires">Expires %1$s</string>
+  <string name="directory_invitation_expired">Expired</string>
+  <string name="directory_resend">Resend</string>
+  <string name="directory_resent">Sent again</string>
+  <string name="directory_resend_later">Sent recently. Try again later.</string>
+  <string name="directory_revoke">Revoke</string>
+  <string name="directory_revoke_title">Revoke the invitation?</string>
+  <string name="directory_revoke_text">%1$s can no longer use this invitation to join %2$s.</string>
+  <!-- "Invite people" sheet -->
+  <string name="invite_title">Invite people</string>
+  <string name="invite_space_label">Space</string>
+  <string name="invite_email_label">E-mail address</string>
+  <string name="invite_email_missing">Enter an e-mail address.</string>
+  <string name="invite_email_invalid">Enter an e-mail address like name@example.com.</string>
+  <string name="invite_email_refused">The server doesn\'t accept this address. Check it, or invite them as a member.</string>
+  <string name="invite_already_invited">This address already has an open invitation to the space.</string>
+  <string name="invite_role_label">Invite as</string>
+  <string name="invite_role_member">Member</string>
+  <string name="invite_role_member_hint">Sees the space\'s public channels and the directory.</string>
+  <string name="invite_role_guest">Guest</string>
+  <string name="invite_role_guest_hint">Sees only the conversations they are added to.</string>
+  <string name="invite_message_label">Personal note (optional)</string>
+  <string name="invite_submit">Send invitation</string>
+  <string name="invite_sent">Invitation sent to %1$s</string>
+</resources>

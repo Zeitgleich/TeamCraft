@@ -4,7 +4,24 @@
   <string name="presence_online">Online</string>
   <string name="presence_away">Away</string>
   <string name="presence_dnd">Do not disturb</string>
-  <string name="presence_offline">Appear offline</string>
+  <string name="presence_busy">Busy</string>
+  <string name="presence_brb">Be right back</string>
+  <string name="status_pick_online">Available</string>
+  <string name="status_pick_busy">Busy</string>
+  <string name="status_pick_dnd">Do not disturb</string>
+  <string name="status_pick_brb">Be right back</string>
+  <string name="status_pick_away">Appear away</string>
+  <string name="status_pick_offline">Appear offline</string>
+  <string name="status_reset">Reset status</string>
+  <string name="status_duration_reset_after">Reset after</string>
+  <string name="status_duration_30m">30 minutes</string>
+  <string name="status_duration_1h">1 hour</string>
+  <string name="status_duration_2h">2 hours</string>
+  <string name="status_duration_today">Today</string>
+  <string name="status_duration_week">This week</string>
+  <string name="status_duration_until">Until a time…</string>
+  <string name="status_duration_never">Never</string>
+  <string name="status_duration_until_past">Pick a time in the future.</string>
   <string name="notifications_conversation">Notifications</string>
   <string name="notify_all">All messages</string>
   <string name="notify_mentions">Only mentions and direct messages</string>
@@ -24,6 +41,7 @@
   </plurals>
   <string name="meeting_notify_start">Notify me when a meeting starts</string>
   <string name="read_receipts">Send read receipts</string>
+  <string name="delivery_receipts">Send delivery receipts</string>
   <string name="auto_follow_threads">Follow threads I\'m mentioned in</string>
   <string name="custom_status_title">Custom status</string>
   <string name="custom_status_hint">What are you up to?</string>

@@ -102,14 +102,24 @@ to everyone online when an admin changes it; `GET /api/v1/me` returns the curren
 | `typing`       | `typing_start` to the other members (members only, throttled to one per 3 s per conversation and thread) |
 | `set_activity` | the device is `active` or `idle`; feeds presence                                              |
 | `heartbeat`    | keeps the connection alive                                                                    |
+| `delivered`    | a device stored a DM's or group DM's messages up to `message_id`; may send `delivery_update` (notifications.md, "Delivered") |
 
 ## Presence
 
 Each connected device reports `active` / `idle`. The server aggregates per user: online if any device is
-active, away if devices are connected but none is active, offline otherwise. The manual choice (`PUT
-/api/v1/me/presence`) overrides: *do not disturb* (optionally until a time) shows `dnd` while a device is
-connected; *away* shows `away` while a device is connected, whatever the devices report, until the user
-picks another status; *invisible* shows offline; *auto* (the "Online" choice) follows the devices again.
+active, away if devices are connected but none is active, offline otherwise; with *auto* a user in a
+call or a meeting (the `in_call` / `in_meeting` activity) is `busy` instead, and back to online or away
+afterwards. The manual choice (`PUT /api/v1/me/presence`, the Teams-style list of #1578) overrides while
+a device is connected, whatever the devices report: *busy* shows `busy`, *dnd* `dnd`, *brb* (be right
+back) `brb`, *away* `away`; *invisible* shows offline; *auto* (the "Available" choice) follows the
+devices and calls again. Every manual choice may carry `until`: from then on the server treats it as
+*auto* and resets it in the database at the next presence refresh. Only `dnd` holds notifications back
+(notifications.md, "Push routing").
+
+`busy` and `brb` are newer than the other states. On the wire (`presence_update`, `GET /presence`, the
+directory) they go as their legacy state (`online` for busy, `away` for be right back) under `state`
+plus the new one under `detailed_state` (`detailed_presence` in the directory), so older clients show
+the user online or away instead of breaking; newer clients read `detailed_state` when they know it.
 
 The workspace's away timeout (`presence.away_timeout_minutes`, 15 for a new workspace, at least 5;
 stored policies with less are applied as 5, absent lets the devices decide) marks a device that said

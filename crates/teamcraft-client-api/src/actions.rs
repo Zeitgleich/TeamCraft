@@ -152,6 +152,10 @@ pub struct MessageExtras {
   /// receipts (channels, group DMs, receipts off on either side).
   #[serde(default)]
   pub is_read: bool,
+  /// An own message that reached a device of every other member of a DM or group DM: two grey
+  /// ticks (#598), until it is read. Never set where delivery is off on either side.
+  #[serde(default)]
+  pub is_delivered: bool,
 }
 
 impl MessageExtras {
@@ -175,6 +179,7 @@ impl MessageExtras {
       maybe_workspace_event: None,
       is_send_failed: false,
       is_read: false,
+      is_delivered: false,
     }
   }
 }

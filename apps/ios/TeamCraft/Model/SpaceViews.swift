@@ -20,29 +20,6 @@ struct CallHistoryItem: Decodable, Equatable, Identifiable, Sendable {
   }
 }
 
-/// Somebody in a space, as far as the user may see it.
-struct SpaceMember: Decodable, Equatable, Identifiable, Sendable {
-  let user: String
-  let displayName: String
-  var isGuest: Bool?
-  var isBot: Bool?
-
-  var id: String { user }
-}
-
-/// The member list of a space: `loading`, `hidden` (guests may not see it) or `loaded`.
-struct SpaceRoster: Decodable, Equatable, Sendable {
-  let state: String
-  var members: [SpaceMember]?
-
-  /// The people to list: by name, integrations' bot accounts left out.
-  var people: [SpaceMember] {
-    (members ?? [])
-      .filter { $0.isBot != true }
-      .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-  }
-}
-
 /// A saved message, with what the list shows of it.
 struct SavedItem: Decodable, Equatable, Identifiable, Sendable {
   struct SavedMessage: Decodable, Equatable, Sendable {
@@ -94,6 +71,18 @@ enum SpaceViewTab: String, CaseIterable, Identifiable, Sendable {
     case .meetings: return "space_tab_meetings"
     case .saved: return "space_tab_saved"
     case .files: return "space_tab_files"
+    }
+  }
+
+  /// The SF Symbol the space menu shows the view with (#1526).
+  var symbol: String {
+    switch self {
+    case .people: return "person.2"
+    case .directMessages: return "bubble.left.and.bubble.right"
+    case .calls: return "phone"
+    case .meetings: return "calendar"
+    case .saved: return "bookmark"
+    case .files: return "doc"
     }
   }
 }

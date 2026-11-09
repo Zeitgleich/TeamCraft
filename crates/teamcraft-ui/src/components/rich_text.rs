@@ -2,14 +2,36 @@ use leptos::prelude::*;
 
 use crate::highlight::{TokenKind, highlight};
 use crate::i18n::use_i18n;
-use crate::markdown::{self, Block, Inline, ListKind, PERMALINK_PREFIX};
+use crate::markdown::{self, Alignment, Block, Inline, ListKind, PERMALINK_PREFIX, Table};
 use crate::state::use_app_state;
+
+/// How to show the `@words` of a body.
+#[derive(Clone)]
+struct MentionMarks {
+  me: String,
+  groups: Vec<String>,
+  mentions_me: bool,
+}
 
 /// Renders a message body through the safe Markdown subset.
 #[component]
-pub fn RichText(#[prop(into)] body: String, #[prop(optional, into)] me: String) -> impl IntoView {
+pub fn RichText(
+  #[prop(into)] body: String,
+  #[prop(optional, into)] me: String,
+  /// Handles the sender expanded in this message: these `@words` show as group mentions.
+  #[prop(optional, into)]
+  group_mentions: Vec<String>,
+  /// The sender named this user among the people to notify (through a group or by name).
+  #[prop(optional)]
+  mentions_me: bool,
+) -> impl IntoView {
+  let i18n = use_i18n();
   let blocks = markdown::parse(&body);
-  let me = StoredValue::new(me);
+  let me = StoredValue::new(MentionMarks {
+    me,
+    groups: group_mentions,
+    mentions_me,
+  });
   blocks
     .into_iter()
     .map(|block| match block {
@@ -57,12 +79,58 @@ pub fn RichText(#[prop(into)] body: String, #[prop(optional, into)] me: String) 
         }
         .into_any()
       },
+      Block::Table(table) => render_table(table, me.get_value(), i18n.t("message-table-label")),
     })
     .collect_view()
 }
 
+/// A table scrolls sideways inside the bubble when it is wider; the wrapper takes the focus so the
+/// keyboard can scroll it too.
+fn render_table(table: Table, me: MentionMarks, label: String) -> AnyView {
+  let Table {
+    alignments,
+    header,
+    rows,
+  } = table;
+  let align = move |column: usize| match alignments.get(column).copied().unwrap_or_default() {
+    Alignment::Default => "",
+    Alignment::Left => "md-align-left",
+    Alignment::Center => "md-align-center",
+    Alignment::Right => "md-align-right",
+  };
+  let head = header
+    .into_iter()
+    .enumerate()
+    .map(
+      |(column, cell)| view! { <th scope="col" class=align(column)>{render_inlines(cell, me.clone())}</th> },
+    )
+    .collect_view();
+  let body = rows
+    .into_iter()
+    .map(|row| {
+      let cells = row
+        .into_iter()
+        .enumerate()
+        .map(|(column, cell)| view! { <td class=align(column)>{render_inlines(cell, me.clone())}</td> })
+        .collect_view();
+      view! { <tr>{cells}</tr> }
+    })
+    .collect_view();
+  view! {
+    <div class="md-table-wrap" role="region" tabindex="0" aria-label=label>
+      <table class="md-table">
+        <thead>
+          <tr>{head}</tr>
+        </thead>
+        <tbody>{body}</tbody>
+      </table>
+    </div>
+  }
+  .into_any()
+}
+
 /// Lines of a paragraph or quote, with a line break between them.
-fn render_lines(lines: Vec<Vec<Inline>>, me: String) -> Vec<AnyView> {
+fn render_lines(lines: Vec<Vec<Inline>>, me: MentionMarks) -> Vec<AnyView> {
   let last = lines.len().saturating_sub(1);
   lines
     .into_iter()
@@ -87,7 +155,7 @@ fn token_class(kind: TokenKind) -> &'static str {
   }
 }
 
-fn render_inlines(inlines: Vec<Inline>, me: String) -> Vec<AnyView> {
+fn render_inlines(inlines: Vec<Inline>, me: MentionMarks) -> Vec<AnyView> {
   inlines
     .into_iter()
     .map(|inline| match inline {
@@ -117,10 +185,12 @@ fn render_inlines(inlines: Vec<Inline>, me: String) -> Vec<AnyView> {
       }
       .into_any(),
       Inline::Mention(name) => {
-        let class = if name == me {
-          "mention mention-me"
-        } else {
-          "mention"
+        let is_group = me.groups.contains(&name.to_lowercase());
+        let class = match (is_group, name == me.me || (is_group && me.mentions_me)) {
+          (true, true) => "mention mention-group mention-me",
+          (true, false) => "mention mention-group",
+          (false, true) => "mention mention-me",
+          (false, false) => "mention",
         };
         view! { <span class=class translate="no">{format!("@{name}")}</span> }.into_any()
       },

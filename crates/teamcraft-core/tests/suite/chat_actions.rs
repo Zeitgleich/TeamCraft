@@ -316,6 +316,44 @@ mod read_ticks {
   }
 
   #[tokio::test]
+  async fn own_dm_messages_turn_delivered_once_a_device_of_the_other_stored_them() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let alice_ui = backend_of(&alice);
+    alice_ui.post_message(dm, None, "lunch at noon?");
+    run_commands(&mut alice, &alice_ui).await;
+    settle(&mut [&mut alice, &mut bob]).await;
+    let sent = last(&alice_ui, dm);
+    let alice_sees = || alice_ui.message_extras(dm, &[sent.id])[0].clone();
+    assert!(
+      !alice_sees().is_delivered,
+      "on the server, not on Bob's device yet"
+    );
+
+    use teamcraft_core::api::GatewayConnection;
+
+    // Bob's device stored it and reports how far (the runner does this while connected).
+    let frames = bob.client.take_delivered_frames();
+    assert_eq!(frames.len(), 1, "one report for the DM");
+    for frame in &frames {
+      bob.gateway.send(frame).await.unwrap();
+      bob.client.mark_delivered_sent(frame);
+    }
+    settle(&mut [&mut alice, &mut bob]).await;
+    assert!(alice_sees().is_delivered);
+    assert!(!alice_sees().is_read);
+    assert!(
+      bob.client.take_delivered_frames().is_empty(),
+      "nothing new to report"
+    );
+    // Delivered counts for the sender only.
+    assert!(!backend_of(&bob).message_extras(dm, &[sent.id])[0].is_delivered);
+  }
+
+  #[tokio::test]
   async fn group_dms_name_their_readers_and_channels_have_no_receipts() {
     let (server, mut alice, mut bob, channel) = channel_with_two().await;
     let mut carol = Peer::enroll(&server, "Carol").await;

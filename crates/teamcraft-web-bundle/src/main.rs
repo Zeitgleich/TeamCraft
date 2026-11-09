@@ -526,6 +526,14 @@ try {
   // Storage blocked: no timing.
 }
 const mark = (name) => isTiming && performance.mark(`teamcraft:${name}`);
+// Whether the first bytes of a fetched file are an HTML page: optional whitespace, then `<`.
+function isPage(bytes) {
+  for (const byte of bytes) {
+    if (byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d) continue;
+    return byte === 0x3c;
+  }
+  return false;
+}
 
 // The signed-in app is a chunk of its own (areas.rs): its files, in one pack (#1465), are fetched at
 // once, next to the app, unless this is a guest's meeting link (`/meeting/<id>#invite=…`, meetings.rs
@@ -537,11 +545,13 @@ const isGuestLink = (/^\/meeting\/[^/]+\/?$/.test(location.pathname) && /(^#|&)i
 if (!isGuestLink) {
   mark('session-pack:start');
   globalThis.teamcraftSessionPack = fetch(sessionPack).then(async (response) => {
-    // A file the server doesn't have comes back as the app's page (its fallback), with 200.
-    if (!response.ok || (response.headers.get('content-type') || '').startsWith('text/html')) {
-      throw new Error(`${sessionPack}: HTTP ${response.status}`);
-    }
+    if (!response.ok) throw new Error(`${sessionPack}: HTTP ${response.status}`);
     const bytes = await response.arrayBuffer();
+    // A file the server doesn't have comes back as the app's page (its fallback), with 200. Judged
+    // by the content: the desktop app serves extensions it doesn't know as text/html.
+    if (isPage(new Uint8Array(bytes, 0, Math.min(bytes.byteLength, 64)))) {
+      throw new Error(`${sessionPack}: the app's page instead of the pack`);
+    }
     mark('session-pack:end');
     return bytes;
   });
@@ -577,11 +587,12 @@ async function startTranslations() {
   if (!file) throw new Error(`this build has no texts for ${tag}`);
   mark('texts-fetch:start');
   const response = await fetch(file);
-  // A file the server doesn't have comes back as the app's page (its fallback), with 200.
-  if (!response.ok || (response.headers.get('content-type') || '').startsWith('text/html')) {
-    throw new Error(`${file}: HTTP ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`${file}: HTTP ${response.status}`);
   const text = await response.text();
+  // A file the server doesn't have comes back as the app's page (its fallback), with 200. Judged by
+  // the content, not the content type: the desktop app's tauri:// protocol serves `.ftl` as
+  // text/html (an extension it doesn't know), which stopped 1.0.26 and 1.0.27 from starting.
+  if (/^\s*</.test(text)) throw new Error(`${file}: the app's page instead of texts`);
   mark('texts-fetch:end');
   return { tag, text };
 }
@@ -632,6 +643,13 @@ Promise.all([started, globalThis.teamcraftTranslations]).then(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// The desktop app's tauri:// protocol serves extensions it doesn't know (`.ftl`, the pack) as
+  /// text/html: a fetched file is judged by its content, never by its content type (1.0.26/1.0.27).
+  #[test]
+  fn init_never_judges_a_file_by_its_content_type() {
+    assert!(!INIT_TEMPLATE.contains("content-type"));
+  }
 
   #[test]
   fn every_file_of_a_build_carries_its_id() {

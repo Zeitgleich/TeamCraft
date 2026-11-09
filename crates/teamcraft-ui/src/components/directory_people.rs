@@ -388,6 +388,8 @@ fn facts_line(maybe_title: Option<&str>, maybe_department: Option<&str>) -> Stri
 fn presence_key(presence: PresenceStatus) -> &'static str {
   match presence {
     PresenceStatus::Online => "presence-online",
+    PresenceStatus::Busy => "presence-busy",
+    PresenceStatus::BeRightBack => "presence-brb",
     PresenceStatus::Away => "presence-away",
     PresenceStatus::DoNotDisturb => "presence-dnd",
     PresenceStatus::Offline => "presence-offline",

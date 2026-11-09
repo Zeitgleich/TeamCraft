@@ -4,9 +4,6 @@ import SwiftUI
 /// stay global; this sheet is what "inside a space" means here, where the channels of all spaces
 /// share one list and none is selected. Everything content is filtered by the core on this device.
 struct SpaceViewsView: View {
-  /// How long a space's member list may load before the user is offered another try.
-  private static let rosterDeadline = Duration.seconds(15)
-
   @Environment(\.dismiss) private var dismiss
   let account: Account
   let spaces: [SpaceChoice]
@@ -15,11 +12,15 @@ struct SpaceViewsView: View {
   @State private var spaceId: String
   @State private var tab = SpaceViewTab.people
 
-  init(account: Account, spaces: [SpaceChoice], initialSpaceId: String, onOpen: @escaping (String) -> Void) {
+  init(
+    account: Account, spaces: [SpaceChoice], initialSpaceId: String, initialTab: SpaceViewTab = .people,
+    onOpen: @escaping (String) -> Void
+  ) {
     self.account = account
     self.spaces = spaces
     self.onOpen = onOpen
     _spaceId = State(initialValue: initialSpaceId)
+    _tab = State(initialValue: initialTab)
   }
 
   var body: some View {
@@ -42,7 +43,7 @@ struct SpaceViewsView: View {
           ToolbarItem(placement: .principal) {
             HStack(spacing: 8) {
               SpacePictureView(spaceId: space.id, maybeVersion: space.maybeImageVersion, size: 28)
-              Text(space.name).font(.headline).lineLimit(1)
+              Text(space.name).font(.app(.headline)).lineLimit(1)
             }
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
@@ -69,7 +70,12 @@ struct SpaceViewsView: View {
   @ViewBuilder
   private var content: some View {
     switch tab {
-    case .people: SpacePeopleList(spaceId: spaceId, rosterDeadline: Self.rosterDeadline)
+    // The directory of this space (#1337): people, channels, external people, invitations.
+    case .people:
+      DirectoryContent(maybeSpaceId: spaceId) { conversationId in
+        dismiss()
+        onOpen(conversationId)
+      }
     case .directMessages:
       SpaceDirectMessagesList(account: account, spaceId: spaceId) { conversationId in
         dismiss()
@@ -90,60 +96,6 @@ struct SpaceViewsView: View {
 private struct SpaceLoadKey: Hashable {
   let changeCount: Int
   let spaceId: String
-}
-
-private struct SpacePeopleList: View {
-  @Environment(AppModel.self) private var model
-  let spaceId: String
-  let rosterDeadline: Duration
-
-  @State private var maybeRoster: SpaceRoster?
-  @State private var attempt = 0
-  @State private var isOverdue = false
-
-  var body: some View {
-    Group {
-      switch maybeRoster?.state {
-      case "hidden":
-        Text("space_people_hidden").foregroundStyle(Theme.textMuted)
-      case "loaded":
-        if let people = maybeRoster?.people, !people.isEmpty {
-          List(people) { member in
-            HStack {
-              AvatarView(name: member.displayName)
-              VStack(alignment: .leading) {
-                Text(member.displayName)
-                if member.isGuest == true {
-                  Text("space_person_guest").font(.caption).foregroundStyle(Theme.textMuted)
-                }
-              }
-            }
-          }
-        } else {
-          Text("space_people_empty").foregroundStyle(Theme.textMuted)
-        }
-      default:
-        if isOverdue {
-          VStack(spacing: 8) {
-            Text("space_people_failed").foregroundStyle(Theme.textMuted)
-            Button("retry") { attempt += 1 }
-          }
-        } else {
-          ProgressView("loading")
-        }
-      }
-    }
-    .task(id: SpaceLoadKey(changeCount: model.changeCount, spaceId: spaceId)) {
-      maybeRoster = await model.roster(spaceId: spaceId)
-    }
-    // What this device has shows at once; the fresh list follows as a store change.
-    .task(id: "\(spaceId)/\(attempt)") {
-      isOverdue = false
-      await model.perform(.refreshSpaceRoster(spaceId: spaceId))
-      guard (try? await Task.sleep(for: rosterDeadline)) != nil else { return }
-      isOverdue = true
-    }
-  }
 }
 
 private struct SpaceCallsList: View {
@@ -178,12 +130,12 @@ private struct SpaceCallsList: View {
     let name = names[call.conversation] ?? ""
     return HStack {
       VStack(alignment: .leading) {
-        Text(name).font(.headline)
+        Text(name).font(.app(.headline))
         HStack(spacing: 4) {
           Text(call.directionTitle)
           Text(call.startDate.formatted(date: .abbreviated, time: .shortened))
         }
-        .font(.subheadline)
+        .font(.app(.subheadline))
         .foregroundStyle(Theme.textMuted)
       }
       Spacer()
@@ -252,7 +204,7 @@ private struct SpaceSavedList: View {
               onOpen(item.message.conversation)
             } label: {
               VStack(alignment: .leading, spacing: 4) {
-                Text(item.listName).font(.caption).foregroundStyle(Theme.accent)
+                Text(item.listName).font(.app(.caption)).foregroundStyle(Theme.accent)
                 Text(item.message.body).lineLimit(3)
               }
             }

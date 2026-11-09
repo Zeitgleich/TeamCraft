@@ -10,12 +10,12 @@ use teamcraft_proto::{
   AppLinkSettings, CrashReportSettings, HealthAlertSettings, HolidaySettings, TokenBindingSettings,
 };
 
-use crate::brand::BrandStore;
+use crate::brand::{Brand, BrandStore};
 use crate::config::{
   BrandConfig, BrandingConfig, CalDavConfig, GatewayConfig, GuestsConfig, IntegrationConfig, LimitsConfig,
   LocalAccountsConfig, MailConfig, MailTexts, NotificationsConfig, PolicyConfig, PresenceConfig,
   RendezvousConfig, RetentionJobConfig, RoleNames, SecurityConfig, SharesConfig, SignInPageConfig,
-  SmtpConfig, WebConfig,
+  SmtpConfig, WebConfig, WebhooksConfig,
 };
 use crate::error::ApiError;
 use crate::gateway::Hub;
@@ -23,6 +23,7 @@ use crate::meetings::MeetingService;
 use crate::meetings::mailer::Mailer;
 use crate::push::{PushDispatcher, PushTracker};
 use crate::rendezvous::RendezvousHub;
+use crate::runtime::brand_mail::{BrandMailServers, MailRoute};
 use crate::runtime::mail_status::MailStatus;
 use crate::runtime::{SettingsCell, Slot};
 use crate::security::RateLimits;
@@ -59,11 +60,14 @@ pub struct AppState {
   pub maybe_calls: Option<Arc<CallService>>,
   /// Meetings, if configured.
   pub maybe_meetings: Option<Arc<MeetingService>>,
-  /// Outgoing e-mail of the server (invitations, activations, digests and, in production, meeting
-  /// invitations): from the admin console, else `[mail.smtp]`. Empty: no mail is sent.
+  /// The instance's mail server (invitations, activations, digests and, in production, meeting
+  /// invitations): from the admin console, else `[mail.smtp]`. Empty: no mail is sent. Mail of a
+  /// brand goes through [`Self::mailer_for`], so that a brand's own server takes it.
   pub mailer: Arc<Slot<dyn Mailer>>,
-  /// How that mail went since the start.
+  /// How the instance's mail went since the start.
   pub mail_status: Arc<MailStatus>,
+  /// The mail servers brands have of their own.
+  pub brand_mail: Arc<BrandMailServers>,
   /// Encrypts passwords entered in the admin console; `None` without `[secrets]`.
   pub maybe_settings_key: Option<Arc<SettingsSealingKey>>,
   /// Serializes changes of runtime settings (brands, mail, calendar, instance settings), so each
@@ -96,6 +100,8 @@ pub struct AppState {
   pub holiday_resync: Arc<crate::holidays::resync::HolidayResync>,
   /// Forwards the apps' crash reports to the backend in the instance settings.
   pub crash_relay: Arc<crate::services::crash_reports::CrashRelay>,
+  /// Outgoing webhooks: the HTTP clients and the workers' wake-up (docs/webhooks.md).
+  pub webhooks: Arc<crate::webhooks::WebhookDispatcher>,
 }
 
 /// Runtime settings handlers need, taken from the configuration.
@@ -120,6 +126,7 @@ pub struct Settings {
   pub sign_in_page: SignInPageConfig,
   pub presence: PresenceConfig,
   pub shares: SharesConfig,
+  pub webhooks: WebhooksConfig,
   pub push: PushSettings,
   /// Token claim the organization is read from, if any.
   pub maybe_organization_claim: Option<String>,
@@ -169,6 +176,26 @@ impl AppState {
   /// A fresh server-assigned ID.
   pub fn next_id<T: teamcraft_proto::Id>(&self) -> Result<T, ApiError> {
     self.ids.next_id().map_err(|e| ApiError::Internal(e.to_string()))
+  }
+
+  /// The way out for mail of `brand`: its own mail server if it has one, else the instance's. A
+  /// brand with its own server never falls back: the instance's would send with the wrong SPF and
+  /// DKIM, so a broken server makes its mail fail visibly.
+  pub fn mailer_for(&self, brand: &Brand) -> Option<Arc<dyn Mailer>> {
+    self
+      .brand_mail
+      .mailer_for(&brand.id)
+      .or_else(|| self.mailer.get())
+  }
+
+  /// Whether mail goes out at all: through the instance's server or a brand's own.
+  pub fn can_send_mail(&self) -> bool {
+    self.mailer.is_set() || self.brand_mail.has_any()
+  }
+
+  /// The mail server mail of `brand` goes through, as a key for one queue per server.
+  pub fn mail_route(&self, brand: &Brand) -> MailRoute {
+    self.brand_mail.route_of(&brand.id)
   }
 }
 

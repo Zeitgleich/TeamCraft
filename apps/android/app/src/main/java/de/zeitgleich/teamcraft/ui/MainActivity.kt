@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui
 
+import de.zeitgleich.teamcraft.crash.Perf
 import android.content.Intent
 import android.widget.Toast
 import android.content.pm.ActivityInfo
@@ -72,6 +73,16 @@ class MainActivity : FragmentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    // Performance data: the signed-in start until the chat list shows the core's rows (#1521).
+    // The first activity of a process starts cold, from the process start; later ones warm.
+    val isCold = !hasStartedBefore
+    hasStartedBefore = true
+    liveActivities++
+    val startedAtMs = if (isCold) processStartedAtMs() else System.currentTimeMillis()
+    // The entry path, the copies of the activity (each re-reads everything, #1375), and later the
+    // first frame and whether it showed the start cache (#1431, #1428).
+    Perf.beginStart(startedAtMs, isCold, entryOf(intent), liveActivities)
+    reportFirstFrame(startedAtMs)
     // A language change recreates the activity: the core names deleted accounts in the new one.
     // Off the main thread, like at start (TeamCraftApplication).
     val deletedName = getString(R.string.user_deleted_name)
@@ -215,6 +226,28 @@ class MainActivity : FragmentActivity() {
     outState.putString(KEY_APP_LINK, appLink.value)
   }
 
+  override fun onDestroy() {
+    liveActivities--
+    super.onDestroy()
+  }
+
+  /** The first frame drawn: a step of the start, and whether it showed the start cache's chat list. */
+  private fun reportFirstFrame(startedAtMs: Long) {
+    val decor = window.decorView
+    val listener = object : android.view.ViewTreeObserver.OnDrawListener {
+      private var isDone = false
+
+      override fun onDraw() {
+        if (isDone) return
+        isDone = true
+        Perf.firstFrame(startedAtMs, isCachedChatList = viewModel.chatList.value.maybeConversations != null)
+        // Not from inside the draw pass.
+        decor.post { decor.viewTreeObserver.removeOnDrawListener(this) }
+      }
+    }
+    decor.viewTreeObserver.addOnDrawListener(listener)
+  }
+
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     // For a configuration change. After a kill the system hands back the intent the activity started
@@ -257,6 +290,12 @@ class MainActivity : FragmentActivity() {
   }
 
   companion object {
+    /** Whether an activity of this process was created before: the next start is warm. */
+    private var hasStartedBefore = false
+
+    /** Copies of this activity alive in the process (one is right, #1375). */
+    private var liveActivities = 0
+
     const val EXTRA_CONVERSATION_ID = "conversation_id"
     const val EXTRA_LAUNCH_TOKEN = "launch_token"
 
@@ -264,4 +303,17 @@ class MainActivity : FragmentActivity() {
     private val lockState = AppLockState(SystemClock::elapsedRealtime)
     private var isUnlockedInProcess = false
   }
+}
+
+/** When this process started, Unix milliseconds (the system's uptime clock, moved to wall time). */
+private fun processStartedAtMs(): Long =
+  System.currentTimeMillis() - (android.os.SystemClock.uptimeMillis() - android.os.Process.getStartUptimeMillis())
+
+/** How the app was opened, for the start's performance data. */
+private fun entryOf(intent: Intent?): String = when {
+  intent == null -> "launcher"
+  intent.hasExtra(MainActivity.EXTRA_CONVERSATION_ID) -> "notification"
+  intent.action == Intent.ACTION_SEND || intent.action == Intent.ACTION_SEND_MULTIPLE -> "share"
+  intent.action == Intent.ACTION_VIEW && intent.data != null -> "link"
+  else -> "launcher"
 }

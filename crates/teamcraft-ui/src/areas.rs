@@ -43,6 +43,7 @@ use crate::components::downloads_menu::DownloadsButton;
 use crate::components::drafts_view::DraftsView;
 use crate::components::emoji_picker::EmojiPickerPanel;
 use crate::components::file_preview::FilePreview;
+use crate::components::files_sidebar::FilesSidebar;
 use crate::components::files_view::FilesView;
 use crate::components::guest_meeting::{GuestMeeting, GuestSession};
 use crate::components::home::NewMessageDialog;
@@ -69,7 +70,7 @@ use crate::components::settings_modal::{SettingsModal, ShortcutsModal};
 use crate::components::share_download::ShareDownloadPage;
 use crate::components::share_link_dialog::ShareLinkDialog;
 use crate::components::space_invites::{AddToChannelDialog, BrowseSpacesDialog, InvitePeopleDialog};
-use crate::components::status_menu::{CustomStatusDialog, StatusMenu};
+use crate::components::status_menu::{CustomStatusDialog, StatusDurationDialog, StatusMenu};
 use crate::components::tab_elsewhere::TabElsewhere;
 use crate::components::update_notice::UpdateNoticeBanner;
 use crate::components::video_player::VideoPlayer;
@@ -121,6 +122,8 @@ enum Phase {
 
 /// An area's view on its way: its chunk loading, then the view built.
 type AreaLoad = Pin<Box<dyn Future<Output = Result<AnyView, SplitLoaderError>>>>;
+/// What an area needs before its view is built, when that is more than its chunk.
+type AreaFirst = Rc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>>>>>;
 
 /// Declares split points: `name(args) => module: view` builds `view` in chunk `module`.
 macro_rules! areas {
@@ -243,12 +246,15 @@ areas! {
   /// The account menu behind the user's picture and the custom status it opens.
   status_menu(_unit: ()) => account: view! { <StatusMenu /> };
   custom_status(_unit: ()) => account: view! { <CustomStatusDialog /> };
+  status_duration(_unit: ()) => account: view! { <StatusDurationDialog /> };
   /// Home pages a first visit doesn't open (Meetings and People have their own chunks), and a
   /// conversation's side panels except the thread.
   saved(_unit: ()) => places: view! { <SavedView /> };
   scheduled(_unit: ()) => places: view! { <ScheduledView /> };
   drafts(_unit: ()) => places: view! { <DraftsView /> };
   files(_unit: ()) => places: view! { <FilesView /> };
+  /// The Files place's sidebar: its filters and scopes (#1510).
+  files_sidebar(_unit: ()) => places: view! { <FilesSidebar /> };
   call_history(_unit: ()) => places: view! { <CallsView /> };
   pins(conversation: ConversationId) => places: view! { <PinsPanel conversation=conversation /> };
   members(conversation: ConversationId) => places: view! { <MembersPanel conversation=conversation /> };
@@ -428,11 +434,23 @@ where
 {
   // Only this boxing is per caller: the views below are built once for every area. Generic, they
   // were copied for each caller's closure types, a few kB of the first visit each.
-  area_view(place, Rc::new(move || Box::pin(load())))
+  area_view(place, None, Rc::new(move || Box::pin(load())))
+}
+
+/// The administration console. Its texts are a file of their own on the web, fetched here before
+/// its view is built (`I18n::load_admin_texts`, #1462): a text read before they arrive would show
+/// its key, and nothing would render it again when they came.
+pub fn admin_console_area(section: AdminSection) -> AnyView {
+  let i18n = use_i18n();
+  area_view(
+    Place::Pane,
+    Some(Rc::new(move || Box::pin(i18n.load_admin_texts()))),
+    Rc::new(move || Box::pin(admin_console(section))),
+  )
 }
 
 /// [`lazy_area`] for any loader.
-fn area_view(place: Place, load: Rc<dyn Fn() -> AreaLoad>) -> AnyView {
+fn area_view(place: Place, maybe_first: Option<AreaFirst>, load: Rc<dyn Fn() -> AreaLoad>) -> AnyView {
   let i18n = use_i18n();
   let phase = RwSignal::new(Phase::Loading);
   let ready: StoredValue<Option<AnyView>, LocalStorage> = StoredValue::new_local(None);
@@ -444,8 +462,16 @@ fn area_view(place: Place, load: Rc<dyn Fn() -> AreaLoad>) -> AnyView {
   let start: Rc<dyn Fn()> = Rc::new(move || {
     let run = || {
       phase.set(Phase::Loading);
+      let maybe_first = maybe_first.as_ref().map(|first| first());
       let loading = load();
       spawn_local_scoped_with_cancellation(async move {
+        if let Some(first) = maybe_first
+          && let Err(error) = first.await
+        {
+          tracing::warn!(%error, "what a part of the app needs did not load");
+          phase.set_if_alive(Phase::Failed);
+          return;
+        }
         match loading.await {
           Ok(view) => {
             // Fails only when the area is gone; the view then goes with this task.

@@ -323,9 +323,14 @@ async fn the_runner_tells_the_ui_and_reads_older_history_until_it_is_done() {
   let changes = Rc::new(Cell::new(0_u32));
   let notified = changes.clone();
   let store = laptop.store().clone();
+  // The test's clock stands still: pages paced by it would never come due.
+  let unpaced = RunnerSettings {
+    background_page_gap: Duration::ZERO,
+    ..RunnerSettings::default()
+  };
   let (runner, handle) = SyncRunner::new(
     laptop,
-    RunnerSettings::default(),
+    unpaced,
     Box::new(move || notified.set(notified.get() + 1)),
   );
   let watcher = async {

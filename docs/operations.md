@@ -372,6 +372,11 @@ the server itself is down.
   about 5 s instead of at once. Rooms, locks and host removals live in the SFU's memory and start
   fresh; the server's meeting admission still applies to every rejoin. Desktop and mobile apps of
   version 1.0.2 and older end the call on "going away" (a browser tab rejoins).
+- In an encrypted call, every membership change waits until each member says it has the new keys,
+  for at most `TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS` (default 2000); then the SFU switches
+  everyone over and logs `executing a DAVE transition before every member is ready` with the
+  count. At most 4000: the apps switch by themselves after 5 s. Occasional lines are normal (a slow phone);
+  many point at a client that doesn't answer.
 - The SFU reports its whole call roster to the server at start and every
   `TEAMCRAFT_SFU_ROSTER_INTERVAL_SECS` (default 30); the server drops participants the SFU no
   longer has (after `[calls] roster_grace_secs`, default 60, while the SFU is fresh from a restart)
@@ -741,11 +746,11 @@ carried over. Work through it in this order:
 DPoP (RFC 9449) ties access tokens to a key on the device, so a stolen token, or one relayed by a
 look-alike server, doesn't work without that key (e2ee.md §3.1.2). The setting is in the admin console:
 Instance settings, "Binding sign-ins to devices". The default `optional` changes nothing for clients
-that don't support it. **The desktop and web apps send proofs, the mobile apps don't yet**, so stay on
-`optional` for now if people use those.
+that don't support it. **The desktop, web and iOS apps send proofs, the Android app doesn't yet**, so stay
+on `optional` for now if people use it.
 
 An identity provider that advertises DPoP (`dpop_signing_alg_values_supported`, on by default with
-current Keycloak) gets proofs from the desktop and web apps as soon as this server knows its origin,
+current Keycloak) gets proofs from the desktop, web and iOS apps as soon as this server knows its origin,
 and binds their tokens without further setup. To hold that back, leave the origin out of
 `public_origins` and the other settings below: `server-info` then offers no nonce and the apps stay
 unbound.
@@ -1118,7 +1123,7 @@ The `[push.apns]` block is only rendered when `apns_key` is a secret.
 | FCM service account key               | `[push.fcm] service_account`               | create a new key in Firebase, switch, then delete the old one; no gap             |
 | OIDC server client secret             | `[oidc.sync] client_secret`                | rotate in the identity provider, then restart the server                          |
 | Database password, S3 keys            | `[database]`, `[storage]`                  | change at the provider, then in the configuration, then restart                   |
-| SMTP and CalDAV passwords             | Administration → Mail / Calendar           | change at the provider, then enter the new one in the console; no restart         |
+| SMTP and CalDAV passwords             | Administration → Mail / Calendar / Brands  | change at the provider, then enter the new one in the console; no restart         |
 | Settings key                          | `[secrets] key` or `key_path`              | a new key makes the stored SMTP and CalDAV passwords unreadable: enter them again |
 
 Prefer environment variables or files for secrets (`TEAMCRAFT_...`), not the TOML file; never commit

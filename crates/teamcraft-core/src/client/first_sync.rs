@@ -193,6 +193,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// failure waits for its retry time, whatever it was. Returns whether the progress the UI shows
   /// changed: a page alone doesn't, so a long read doesn't make the UI read everything again.
   pub async fn load_older_history_page(&mut self) -> bool {
+    let _step = crate::timing::step("first_sync_older_page");
     let before = self.sync_progress.count();
     match self.read_older_page().await {
       Ok(()) => self.first_sync.maybe_retry_at_ms = None,
@@ -395,18 +396,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     });
     // Read newest first: an older pin or bookmarks message mustn't win (issue #1438).
     let received = super::messaging::received_ids(conversation, &page.messages);
-    self.receive_in_groups(page.messages, |client| {
-      client.settle_ordered_controls(conversation, &received)?;
-      if let Some(before) = maybe_next {
-        records::put_json(
-          &client.store,
-          Table::SyncState,
-          &key,
-          &OlderCursor { before, loaded },
-        )?;
-      }
-      Ok(())
-    })?;
+    self
+      .receive_in_groups(page.messages, |client| {
+        client.settle_ordered_controls(conversation, &received)?;
+        if let Some(before) = maybe_next {
+          records::put_json(
+            &client.store,
+            Table::SyncState,
+            &key,
+            &OlderCursor { before, loaded },
+          )?;
+        }
+        Ok(())
+      })
+      .await?;
     Ok(match maybe_next {
       Some(_) => PageOutcome::More,
       None => PageOutcome::Finished { loaded },

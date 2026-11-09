@@ -766,6 +766,44 @@ the next frame.
 How fast and how lean the apps are for the person using them; the budgets they must stay within are
 in [.claude/rules/robustness.md](../.claude/rules/robustness.md) ("Performance and resources").
 
+### Numbers from real use (issue #1521)
+
+The measurements below are taken on purpose, on test machines. What real users see comes from the
+apps' performance data, sent with the crash reports to the same backend
+([crash-reports.md](crash-reports.md), "Performance data"): **GlitchTip → Performance**, one row
+per transaction name, with its p50/p95, throughput and the slowest samples.
+
+| Transaction             | Budget it checks (robustness.md)                    | Apps                         |
+|-------------------------|-----------------------------------------------------|------------------------------|
+| `start.channel_list`    | Signed-in start until the channel list is usable    | All                          |
+| `channel.switch`        | Channel switch, p95                                 | All                          |
+| `conversation.catch_up` | (none yet) open or foreground until up to date      | All                          |
+| `message.send`          | (none yet) send until the server took the message   | All                          |
+| `sync.reconnect`        | (none yet) connecting again until connected         | All                          |
+| `file.download`         | (none yet) an attachment's download and decryption  | Web, desktop                 |
+| `call.setup`            | (none yet) joining until the media is secured       | Web, desktop                 |
+| App start, `ui.load`    | Signed-in start (mobile), slow and frozen frames    | Android, iOS (the SDKs' own) |
+
+How to find a cause, not only a number:
+
+- **Open the slowest samples** of a transaction: on mobile its steps are the core's jobs. A long
+  `queue.wait` with a high `teamcraft.queue_depth` means the operation waited behind other jobs
+  (the steps next to it name them); a long `core.read` or `core.engine` means the job itself was
+  slow; `store.lock_wait` means it waited for another thread's writes, `store.write_group` how long
+  those held the store.
+- **Issues → "Slow core job: …"** lists jobs over the threshold even when no measure was open,
+  with their wait, run and queue depth as tags.
+- **Compare tags**: `start` cold against warm, `entry` (a notification start slower than a launcher
+  start), `start_cache` miss (the first frame had nothing to show), `activities` above 1 (copies of
+  the activity), `catch_up` by `source` and `gap_fill`.
+- Filter by the tag `app.platform` (`web`, `desktop`, `android`, `ios`) and by release
+  (`teamcraft@<version>`): a regression shows as a step in p95 from one release to the next.
+- A transaction's steps (spans) say where the time went: the start's parts (the same names as
+  `start_timing`, "Web start on phones" below), a channel switch's read from the core's store
+  (`db.query core_messages`, tag `source` = `store`; without it the rows were in memory).
+- The share of operations measured is the instance's "trace rate" (Administration → Crash
+  reports), 100 % while the team gathers data; lower it as an instance grows. No rebuild needed.
+
 ### DPoP (issue #120)
 
 What proofs cost a client with a bound token (e2ee.md §3.1.2); a client with an unbound token pays
@@ -2015,7 +2053,8 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
   app and 25 kB in the service worker, which doesn't carry the build (27 kB less). It is needed
   from the first page on, so it can't move to a chunk; the guest budget went from 5.6 to 5.7 MB.
 - **Migration:** a store written before builds its catalog once, when the app opens it: every
-  record is decrypted once (what every start did before), in batches of 512 records, each a group of
+  record is decrypted once (what every start did before), in batches of 4,096 records (512 before
+  #1509), each a group of
   writes that saves its progress, so a build that is killed goes on after its last batch. Tested on
   the released 1.0.9 fixture and on a 4,500-message store stopped after two batches
   (`store::sealed::tests::catalog`). A damaged or inconsistent catalog is built again the same way,
@@ -2177,6 +2216,92 @@ read, so every message is unread. What a read costs since a tally was written:
 A tally is checked against a version the store writes in the group of the messages, so it is never
 updated by hand and can't drift; one written before a crash means counting the difference.
 
+### Files view on a large workspace (issue #1509)
+
+`crates/teamcraft-ffi/tests/files_budget.rs` measures the Files view through the API the apps call:
+a sealed store with 300 conversations and 100,000 messages (half in one), every 20th message with a
+file (5,191 files). Release build on a desktop machine.
+
+| Measured                                               | Result     |
+|--------------------------------------------------------|------------|
+| Before: every conversation's files, every 15 s         | 1564 ms    |
+| After: first page of all files, first read             | 443 ms     |
+| After: three pages, documents, media oldest, by name   | 28–34 ms   |
+| After: the same page again, nothing changed            | 2 ms (p50) |
+
+Before, the open view read and decrypted every message of every conversation on a 15-second timer.
+Now the sealed catalog (version 3) marks the messages with files and with documents, the core merges
+the conversations newest first and reads only the messages the page shows plus about one per
+conversation, and keeps the page until a message with files is written or removed
+(`LocalStore::attachments_cursor`): the view reads on every change, no timer. The first read includes
+building the conversation list for the first time in the process (the sidebar has done that by the
+time anyone opens Files). Sorting by name or size orders the newest files loaded so far; the view
+says so. The core times the page as the step `files_page`.
+
+The catalog's version 3 is built again once when a store of an earlier version opens
+(`measure_the_catalog_rebuild` in `store/sealed.rs`, 101,801 records, release, desktop). Each batch
+of the build rewrites the index nodes it touched, so the batch size decided the cost:
+
+| Build batch                    | 100,000 messages in 300 conversations |
+|--------------------------------|---------------------------------------|
+| 512 records (before)           | 10.3 s (101 µs per record)            |
+| 4,096 records (now)            | 2.6 s (25 µs per record)              |
+| 16,384 records (not taken)     | 1.3 s (13 µs per record)              |
+
+4,096 keeps a batch's records to a few MiB on a phone; the web build still yields between batches
+and shows its progress.
+
+### Links tab on a large workspace (issue #609)
+
+`crates/teamcraft-core/tests/suite/links_budget.rs` measures the Files & links tab's links: a sealed
+SQLite store with 300 conversations and 100,000 messages, half in one. There every 1,000th message
+has a link (few links in a long history); in the others every 10th. Release build on a desktop
+machine, median of 10 reads.
+
+| Measured                                    | Before (scan) | After (index) |
+|---------------------------------------------|---------------|---------------|
+| Large conversation, sparse links, 1 page    | 209 ms        | 8.5 ms        |
+| Large conversation, sparse links, 2 pages   | 336 ms        | 13 ms         |
+| Small conversation, dense links, 1 page     | 0.98 ms       | 0.03 ms       |
+| Peak memory (105 MiB after seeding)         | 111 MiB       | 109 MiB       |
+
+Before, the tab read the conversation's messages newest first, 200 at a time, until the page was
+full: in a long conversation with few links that is most of its history, decrypted. Now the sealed
+catalog (version 4) marks the messages the channel shows whose text has a web link, and the core
+walks the index's entries (no decryption) and opens only those messages. What is left of the 8.5 ms
+is walking 50,000 entries of the large conversation's index. The catalog is built again once when a
+store of version 3 opens, at the cost measured for version 3 above.
+
+### Catching up on the page's only thread (issue #1575)
+
+On web the core runs on the page's only thread. A catch-up after a long absence decrypts and writes
+conversation after conversation, and the server's answers often come faster than the work, so the
+UI's input, its reads of the core and its paints waited until the catch-up was done. The client now
+hands the thread back every 30 ms (`ClientSettings::with_thread_turns`, web only): between two
+conversations, welcomes, member lists, MLS queue entries and live events, and within a page of
+messages. Native hosts have a thread for the engine and one for reads; there the backlog's pages
+are paced instead (`RunnerSettings::background_page_gap`, at least the page's own time and 100 ms).
+
+Measured with `tests/e2e` `perf.rs`, phase `come_back_to_many_conversations` (small scale: 22
+channels with 150 new messages each, all read in the catch-up itself; the browser's CPU slowed
+down 4×, `PERF_CATCH_UP_CPU_SLOWDOWN`, because this machine is faster than the reporter's), on
+one machine, 2026-11-09:
+
+| Coming back to 22 conversations with 150 new messages each | Before   | After   |
+|------------------------------------------------------------|----------|---------|
+| Content phase of the catch-up                              | 11.7 s   | 6.9 s   |
+| Main-thread tasks over 100 ms in the content phase         | 52       | 8       |
+| Longest main-thread task in the content phase              | 310 ms   | 169 ms  |
+| Main-thread tasks over 50 ms, page load until caught up    | 120      | 61      |
+| Their total                                                | 18.4 s   | 7.1 s   |
+| Channel switch while it catches up, p95                    | 663 ms   | 311 ms  |
+
+What is left is not the catch-up's own work: the start of the page (the module, the store) and the
+UI's own reads after each wake. On a large store (the reporter's has about 97,000 records, and the
+lag shows on fast machines too), the UI's snapshot updates and entry counts cost far more than here;
+GlitchTip shows `snapshot_update` up to 5 s and `entry_counts` around 350 ms. Those are reads, not
+the catch-up, and are tracked on their own.
+
 ### Web bundle size
 
 Two budgets, both on the **compressed** wasm (issue #910's follow-up, 2026-10-31). The strict one
@@ -2198,13 +2323,14 @@ the chunks that load later. The limit:
 
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
-| A guest in a meeting: gzip -9 total  | 6,190,000 B  | fails; warns from 95 % (5.88 MB) |
-| Signed-in first visit: gzip -9 total | 5,390,000 B  | fails; warns from 95 % (5.12 MB) |
+| A guest in a meeting: gzip -9 total  | 6,180,000 B  | fails; warns from 95 % (5.87 MB) |
+| Signed-in first visit: gzip -9 total | 5,370,000 B  | fails; warns from 95 % (5.10 MB) |
 | The call module: gzip -9             | 1,000,000 B  | fails                            |
 
-Both budgets are the sizes measured below plus about 6 % (a guest's of #1452, a signed-in first
-visit's of #1465 and its pack; 5.65 MB before), so they warn only after real
-growth; before that they were 6.28 and 5.74 MB (#1437), 6.35 and 5.8 MB (#1413), 6.8 and 6.2 MB, the sizes of #1148 plus about 6 %. For a while they were 10 MB, because the guest's meeting had reached its budget of the time
+Both budgets are the sizes of #1462 below plus about 6 % for a signed-in first visit and about 5 %
+for a guest (6 % would have raised it, as the guest's meeting had grown since #1452), so they warn
+only after real growth; before that they were 6.19 and 5.39 MB (#1452, #1465; 5.65 MB before the
+pack), 6.28 and 5.74 MB (#1437), 6.35 and 5.8 MB (#1413), 6.8 and 6.2 MB, the sizes of #1148 plus about 6 %. For a while they were 10 MB, because the guest's meeting had reached its budget of the time
 (5.7 MB) and blocked unrelated pull requests; at 10 MB the check caught nothing. Before that the
 guest budget was the guest's meeting of 2026-10-31 plus about 4 %, the signed-in ceiling the
 signed-in first visit on `main` 8d653d3c plus about 10 %. The single budget before (4,700,000 B,
@@ -2215,6 +2341,33 @@ information. The uncompressed size is printed but not limited: what a user waits
 transfer. The earlier growth ratchet on it (11.85 MB) was dropped with the split (#334): main had
 outgrown it anyway, and the split moves code between files without changing what matters. Raising
 the budget is a decision, not a fix.
+
+#### The console's texts load with the console (#1462, 2026-11-08)
+
+`admin.ftl` was about a quarter of the language file every page fetches, for the few people who
+open the console. It is now a file of its own per language (`i18n/<language>-admin-<hash>.ftl`,
+17 kB gzip in English, 19 kB in German). `scripts/finish-loader.sh` writes it, and the console's
+area fetches it before it builds its view (`I18n::load_admin_texts`, `areas::admin_console_area`).
+A failed fetch shows the area's retry. Once the console was opened, a switch of the language waits
+for that language's file too. A signed release lists the files as `lazy`, like the languages.
+
+Before and after on the same tree (`trunk build --release`, then `scripts/check-web-size.py`):
+
+| gzip -9                                      | Before      | After       | Change     |
+|----------------------------------------------|-------------|-------------|------------|
+| Texts of one language (German, the larger)   | 76,161 B    | 58,190 B    | −17,971 B  |
+| App                                          | 2,644,388 B | 2,645,153 B | +765 B     |
+| Signed-in app (pack)                         | 1,969,826 B | 1,969,721 B | −105 B     |
+| Service worker                               | 401,556 B   | 401,556 B   | 0          |
+| **A signed-in first visit**                  | 5,091,931 B | 5,074,620 B | −17,311 B  |
+| **A guest in a meeting**                     | 5,878,190 B | 5,860,861 B | −17,329 B  |
+
+An admin pays one more round trip the first time the console opens: the texts first, then its
+chunk, because a view built before its texts arrive would keep showing keys. Everything a place
+outside the console shows moved to the files of those places (the announcement's dismiss label,
+the roster banners, "not available yet", the alerts badge, the three delete and owner errors, the
+copy button). The test `only_the_console_names_the_keys_of_admin_ftl` keeps it so: no literal key
+or built key's start from `admin.ftl` in code outside `components/admin_*` and `admin_live.rs`.
 
 #### The service worker reads only what a notification shows (#1452, 2026-11-08)
 

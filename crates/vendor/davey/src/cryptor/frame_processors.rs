@@ -72,10 +72,11 @@ pub fn deserialize_unencrypted_ranges(
       return None;
     }
 
-    unencrypted_ranges.push(Range {
-      offset: offset as usize,
-      size: size as usize,
-    });
+    let (Ok(offset), Ok(size)) = (usize::try_from(offset), usize::try_from(size)) else {
+      unencrypted_ranges.clear();
+      return None;
+    };
+    unencrypted_ranges.push(Range { offset, size });
   }
 
   Some(bytes_read as u8)
@@ -177,6 +178,7 @@ impl InboundFrameProcessor {
     self.authenticated.clear();
     self.ciphertext.clear();
     self.plaintext.clear();
+    self.tag.clear();
   }
 
   pub fn parse_frame(&mut self, frame: &[u8]) {
@@ -215,7 +217,9 @@ impl InboundFrameProcessor {
     let supplemental_bytes_buffer = &frame[frame.len() - bytes_size..];
 
     // Read the tag
-    self.tag = supplemental_bytes_buffer[..AES_GCM_127_TRUNCATED_TAG_BYTES].to_vec();
+    self
+      .tag
+      .extend_from_slice(&supplemental_bytes_buffer[..AES_GCM_127_TRUNCATED_TAG_BYTES]);
 
     // Read the nonce
     let nonce_buffer = &supplemental_bytes_buffer[AES_GCM_127_TRUNCATED_TAG_BYTES..];
@@ -229,16 +233,14 @@ impl InboundFrameProcessor {
     self.truncated_nonce = truncated_nonce as u32;
 
     // Read the unencrypted ranges
-    let mut unencrypted_ranges = Vec::new();
     if read_at.len() > nonce_size {
       let bytes_read =
-        deserialize_unencrypted_ranges(&read_at[nonce_size..], &mut unencrypted_ranges);
+        deserialize_unencrypted_ranges(&read_at[nonce_size..], &mut self.unencrypted_ranges);
       if bytes_read.is_none() {
         warn!("Failed to read unencrypted ranges");
         return;
       }
     }
-    self.unencrypted_ranges = unencrypted_ranges;
 
     if !validate_unencrypted_ranges(&self.unencrypted_ranges, frame.len()) {
       warn!("Invalid unencrypted ranges");
@@ -254,19 +256,24 @@ impl InboundFrameProcessor {
 
     // Split the frame into authenticated and ciphertext bytes
     let mut frame_index = 0;
-    let ranges = self.unencrypted_ranges.clone();
-    for range in &ranges {
+    for range in &self.unencrypted_ranges {
       let encrypted_bytes = range.offset - frame_index;
       if encrypted_bytes > 0 {
-        self.add_ciphertext_bytes(&frame[frame_index..frame_index + encrypted_bytes]);
+        self
+          .ciphertext
+          .extend_from_slice(&frame[frame_index..frame_index + encrypted_bytes]);
       }
 
-      self.add_authenticated_bytes(&frame[range.offset..range.offset + range.size]);
+      self
+        .authenticated
+        .extend_from_slice(&frame[range.offset..range.offset + range.size]);
       frame_index = range.offset + range.size;
     }
     let actual_frame_size = frame.len() - bytes_size;
     if frame_index < actual_frame_size {
-      self.add_ciphertext_bytes(&frame[frame_index..actual_frame_size]);
+      self
+        .ciphertext
+        .extend_from_slice(&frame[frame_index..actual_frame_size]);
     }
 
     // Make sure the plaintext buffer is the same size as the ciphertext buffer
@@ -294,14 +301,6 @@ impl InboundFrameProcessor {
       &self.plaintext,
       frame,
     )
-  }
-
-  fn add_authenticated_bytes(&mut self, data: &[u8]) {
-    self.authenticated.extend_from_slice(data);
-  }
-
-  fn add_ciphertext_bytes(&mut self, data: &[u8]) {
-    self.ciphertext.extend_from_slice(data);
   }
 }
 
@@ -350,10 +349,7 @@ impl OutboundFrameProcessor {
       Codec::VP8 => process_frame_vp8(self, frame),
       Codec::VP9 => process_frame_vp9(self, frame),
       Codec::AV1 => process_frame_av1(self, frame),
-      _ => {
-        // TODO we dont need to but maybe add more codecs later
-        unimplemented!("h264, h265, vp8, vp9, av1 and opus are the only supported codecs currently")
-      }
+      _ => false,
     };
 
     if !success {

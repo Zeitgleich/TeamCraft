@@ -35,6 +35,7 @@
   <string name="message_link_label">Message link</string>
   <!-- Accessibility: an own message the server has accepted -->
   <string name="message_sent">Sent</string>
+  <string name="message_delivered">Delivered</string>
   <!-- Accessibility: an own message the other member of a DM has read -->
   <string name="message_read">Read</string>
   <plurals name="conversation_members">
@@ -156,7 +157,7 @@
   <string name="settings_devices_summary">Link a new device</string>
   <string name="chat_list_layout">Chats and channels</string>
   <string name="chat_list_layout_list">List</string>
-  <string name="chat_list_layout_hint">Spaces shows direct messages and the channels of each space apart. List shows them all in one list.</string>
+  <string name="chat_list_layout_hint">Spaces shows your direct messages and one space at a time; switch spaces from the header. List shows everything in one list.</string>
   <string name="chat_list_grouping">Channels</string>
   <string name="chat_list_grouping_mixed">Mixed with chats</string>
   <string name="chat_list_grouping_by_space">Grouped by space</string>
@@ -228,6 +229,14 @@
   <string name="list_failed_timeout">No answer came in time.</string>
   <string name="list_failed_other">Couldn\'t load this.</string>
   <string name="search_incomplete">History is still syncing, so results may be incomplete.</string>
+  <!-- Interface font (#1494); font names themselves are not translated -->
+  <string name="font">Font</string>
+  <string name="font_hint">The typeface of the whole app. Follows your account.</string>
+  <string name="font_system">System font</string>
+  <string name="font_group_suggested">Suggested</string>
+  <string name="font_group_sans">More sans-serif fonts</string>
+  <string name="font_group_readability">Easier reading</string>
+  <string name="font_group_monospace">Monospaced</string>
   <!-- Colour themes (#202) -->
   <string name="color_theme">Colours</string>
   <string name="color_theme_hint">Accent, selections, badges and the online dot. Messages always stay on white or dark grey. Follows your account; light or dark stays with this device.</string>

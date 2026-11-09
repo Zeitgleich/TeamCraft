@@ -218,10 +218,10 @@ struct CallScreen: View {
   private func personTag(_ person: StagePerson) -> some View {
     if !person.name.isEmpty {
       HStack(spacing: 4) {
-        if person.isMuted { Image(systemName: "mic.slash.fill").font(.caption2) }
+        if person.isMuted { Image(systemName: "mic.slash.fill").font(.app(.caption2)) }
         Text(person.name).lineLimit(1)
       }
-      .font(.caption.weight(.medium))
+      .font(.app(.caption).weight(.medium))
       .foregroundStyle(.white)
       .padding(.horizontal, 8)
       .padding(.vertical, 2)
@@ -269,10 +269,10 @@ struct CallScreen: View {
   private func nameTag(for stream: RemoteVideoStream) -> some View {
     if let name = ownerName(of: stream) {
       HStack(spacing: 4) {
-        if isMuted(stream) { Image(systemName: "mic.slash.fill").font(.caption2) }
+        if isMuted(stream) { Image(systemName: "mic.slash.fill").font(.app(.caption2)) }
         Text(name).lineLimit(1)
       }
-      .font(.caption.weight(.medium))
+      .font(.app(.caption).weight(.medium))
       .foregroundStyle(.white)
       .accessibilityElement(children: .ignore)
       .accessibilityLabel(
@@ -320,11 +320,11 @@ struct CallScreen: View {
   private var topBar: some View {
     VStack(spacing: 6) {
       Text(call.displayName)
-        .font(.title2.weight(.semibold))
+        .font(.app(.title2).weight(.semibold))
         .lineLimit(1)
         .foregroundStyle(.white)
       subtitle
-        .font(.subheadline)
+        .font(.app(.subheadline))
         .foregroundStyle(.white.opacity(0.7))
         .accessibilityAddTraits(.updatesFrequently)
       if call.isSecured || call.maybePrivacyCode != nil {
@@ -335,7 +335,7 @@ struct CallScreen: View {
               maybeNotetaker?.isPresent == true
                 ? "call_notetaker_badge" : call.isSecured ? "call_secured" : "call_securing"),
             systemImage: maybeNotetaker?.isPresent == true ? "exclamationmark.triangle.fill" : "lock.fill")
-            .font(.footnote.weight(.semibold))
+            .font(.app(.footnote).weight(.semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, 12)
             .frame(minHeight: 44)
@@ -394,7 +394,7 @@ struct CallScreen: View {
 
   private func hint(_ key: LocalizedStringKey) -> some View {
     Text(key)
-      .font(.subheadline.weight(.medium))
+      .font(.app(.subheadline).weight(.medium))
       .foregroundStyle(.white)
       .padding(.horizontal, 16)
       .padding(.vertical, 8)
@@ -432,7 +432,7 @@ struct CallScreen: View {
           Button("call_notetaker_add", systemImage: "note.text.badge.plus") { interact { pressNotetaker() } }
         } label: {
           Image(systemName: "plus")
-            .font(.title2)
+            .font(.app(.title2))
             .foregroundStyle(.white)
             .frame(width: Self.controlSize, height: Self.controlSize)
             .background(Color.white.opacity(0.16), in: Circle())
@@ -560,12 +560,12 @@ struct CallScreen: View {
   /// The end-to-end encryption explained, with the code to compare out loud.
   private var encryptionSheet: some View {
     VStack(spacing: 14) {
-      Image(systemName: "lock.fill").font(.largeTitle).foregroundStyle(Theme.accent)
-      Text("call_encryption_title").font(.title2.bold())
+      Image(systemName: "lock.fill").font(.app(.largeTitle)).foregroundStyle(Theme.accent)
+      Text("call_encryption_title").font(.app(.title2).bold())
       Text("call_encryption_body").multilineTextAlignment(.center)
       if let code = call.maybePrivacyCode {
         Text("call_privacy_code_hint")
-          .font(.footnote)
+          .font(.app(.footnote))
           .foregroundStyle(Theme.textMuted)
           .multilineTextAlignment(.center)
         Text(code)
@@ -678,7 +678,7 @@ private struct RoundControl: View {
   var body: some View {
     Button(action: action) {
       Image(systemName: system)
-        .font(.title2)
+        .font(.app(.title2))
         .foregroundStyle(tint != nil ? .white : (isActive ? Color.black : .white))
         .frame(width: 60, height: 60)
         .background(tint ?? (isActive ? Color.white : Color.white.opacity(0.16)), in: Circle())

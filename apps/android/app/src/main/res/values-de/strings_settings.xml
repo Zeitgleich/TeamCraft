@@ -4,7 +4,24 @@
   <string name="presence_online">Online</string>
   <string name="presence_away">Abwesend</string>
   <string name="presence_dnd">Nicht stören</string>
-  <string name="presence_offline">Offline erscheinen</string>
+  <string name="presence_busy">Beschäftigt</string>
+  <string name="presence_brb">Bin gleich zurück</string>
+  <string name="status_pick_online">Verfügbar</string>
+  <string name="status_pick_busy">Beschäftigt</string>
+  <string name="status_pick_dnd">Nicht stören</string>
+  <string name="status_pick_brb">Bin gleich zurück</string>
+  <string name="status_pick_away">Als abwesend anzeigen</string>
+  <string name="status_pick_offline">Als offline anzeigen</string>
+  <string name="status_reset">Status zurücksetzen</string>
+  <string name="status_duration_reset_after">Zurücksetzen nach</string>
+  <string name="status_duration_30m">30 Minuten</string>
+  <string name="status_duration_1h">1 Stunde</string>
+  <string name="status_duration_2h">2 Stunden</string>
+  <string name="status_duration_today">Heute</string>
+  <string name="status_duration_week">Diese Woche</string>
+  <string name="status_duration_until">Bis zu einer Uhrzeit…</string>
+  <string name="status_duration_never">Nie</string>
+  <string name="status_duration_until_past">Wähle einen Zeitpunkt in der Zukunft.</string>
   <string name="notifications_conversation">Benachrichtigungen</string>
   <string name="notify_all">Alle Nachrichten</string>
   <string name="notify_mentions">Nur Erwähnungen und Direktnachrichten</string>
@@ -24,6 +41,7 @@
   </plurals>
   <string name="meeting_notify_start">Benachrichtigen, wenn eine Besprechung beginnt</string>
   <string name="read_receipts">Lesebestätigungen senden</string>
+  <string name="delivery_receipts">Zustellbestätigungen senden</string>
   <string name="auto_follow_threads">Threads folgen, in denen ich erwähnt werde</string>
   <string name="custom_status_title">Eigener Status</string>
   <string name="custom_status_hint">Was machst du gerade?</string>

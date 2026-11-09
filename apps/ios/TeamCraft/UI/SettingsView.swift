@@ -8,6 +8,8 @@ struct SettingsView: View {
   let account: Account
 
   @AppStorage("presence") private var presenceRaw = PresenceChoice.online.rawValue
+  @State private var resetAfter = ResetAfter.never
+  @State private var resetAt = Date().addingTimeInterval(60 * 60)
   @State private var statusEmoji = ""
   @State private var statusText = ""
   @State private var statusExpiry = StatusExpiryValue.never
@@ -29,23 +31,20 @@ struct SettingsView: View {
         Section {
           HStack(spacing: 12) {
             AvatarView(name: account.displayName, size: 44)
-            Text(account.displayName).font(.headline)
+            VStack(alignment: .leading, spacing: 2) {
+              Text(account.displayName).font(.app(.headline))
+              HStack(spacing: 6) {
+                PresenceDot(presence: currentPresence)
+                Text(currentPresence.pickTitle).font(.app(.subheadline)).foregroundStyle(Theme.textMuted)
+              }
+            }
           }
         }
         if let profile = maybeProfileJSON, OwnProfileDocument.canOverrideDisplayName(in: profile) {
           displayNameSection(profile: profile)
         }
         HolidayRegionSection()
-        Section("presence_title") {
-          Picker("presence_title", selection: $presenceRaw) {
-            ForEach(PresenceChoice.allCases) { choice in Text(choice.title).tag(choice.rawValue) }
-          }
-          .pickerStyle(.inline)
-          .labelsHidden()
-          .onChange(of: presenceRaw) { _, raw in
-            if let choice = PresenceChoice(rawValue: raw) { Task { await model.setPresence(choice.presence) } }
-          }
-        }
+        statusSection
         customStatusSection
         Section {
           NavigationLink { NotificationsSettingsPage(account: account) } label: {
@@ -78,6 +77,8 @@ struct SettingsView: View {
       }
       .navigationTitle("settings_title")
       .navigationBarTitleDisplayMode(.inline)
+      // A font chosen here applies to the app once Settings is gone (RootView).
+      .onDisappear { NotificationCenter.default.post(name: AppFont.mayHaveChanged, object: nil) }
       // The name changes through the profile update event; the profile is read again with it.
       .task(id: account.displayName) { maybeProfileJSON = await model.ownProfileJSON() }
       .toolbar {
@@ -148,6 +149,48 @@ struct SettingsView: View {
     isNameAccessibilityFocused = true
   }
 
+  private var currentPresence: Presence { PresenceChoice(rawValue: presenceRaw)?.presence ?? .online }
+
+  /// The Teams-style status list (#1578): the order of every platform, the current status checked,
+  /// a "Reset after" for the next pick, and "Reset status" back to automatic.
+  private var statusSection: some View {
+    Section("presence_title") {
+      ForEach(Presence.pickerOrder, id: \.self) { choice in
+        Button { pickStatus(choice) } label: {
+          HStack(spacing: 12) {
+            PresenceDot(presence: choice, size: 12)
+            Text(choice.pickTitle).foregroundStyle(Theme.text)
+            Spacer()
+            if choice == currentPresence {
+              Image(systemName: "checkmark").foregroundStyle(Theme.accentStrong).accessibilityHidden(true)
+            }
+          }
+        }
+        .accessibilityAddTraits(choice == currentPresence ? .isSelected : [])
+      }
+      Picker("status_duration_reset_after", selection: $resetAfter) {
+        ForEach(ResetAfter.allCases) { choice in Text(choice.title).tag(choice) }
+      }
+      if resetAfter == .untilTime {
+        DatePicker("status_duration_until_label", selection: $resetAt, in: Date()...)
+      }
+      if currentPresence != .online {
+        Button("status_reset") { pickStatus(.online) }
+      }
+    }
+  }
+
+  private func pickStatus(_ choice: Presence) {
+    // Available is automatic: nothing to end.
+    let maybeUntil: Date? = switch (choice, resetAfter) {
+    case (.online, _): nil
+    case (_, .untilTime): resetAt > Date() ? resetAt : nil
+    default: resetAfter.end(from: Date())
+    }
+    presenceRaw = PresenceChoice(choice).rawValue
+    Task { await model.setPresence(choice, until: maybeUntil) }
+  }
+
   private var customStatusSection: some View {
     Section("custom_status_title") {
       LabeledContent("custom_status_emoji_label") {
@@ -212,7 +255,7 @@ private struct SettingsEntry: View {
     Label {
       VStack(alignment: .leading, spacing: 2) {
         Text(title)
-        Text(summary).font(.caption).foregroundStyle(Theme.textMuted)
+        Text(summary).font(.app(.caption)).foregroundStyle(Theme.textMuted)
       }
     } icon: {
       Image(systemName: icon)
@@ -241,6 +284,7 @@ private struct NotificationsSettingsPage: View {
         NavigationLink("notification_content_title") { NotificationContentView() }
         NavigationLink("dnd_title") { DndSettingsView() }
         NavigationLink("meeting_reminder_title") { MeetingReminderSettingsView() }
+        NavigationLink("receipts_title") { ReceiptsSettingsView() }
         NavigationLink("rules_title") { NotificationRulesView() }
         NavigationLink("diagnostics_title") { NotificationDiagnosticsView(account: account) }
       }
@@ -260,13 +304,25 @@ private struct ChatsSettingsPage: View {
   @AppStorage(CallStatusSoundsSetting.key) private var statusSounds = CallStatusSoundsSetting.all.rawValue
   @AppStorage(OriginalDownloadSetting.key) private var originalDownload = OriginalDownloadSetting.fallback.rawValue
   @AppStorage(AnimatedImagesSetting.key) private var animatedImages = AnimatedImagesSetting.fallback.rawValue
+  @AppStorage(AppFont.key) private var appFontRaw = AppFont.system.rawValue
   @State private var prefetch = SegmentPrefetchMode.unmeteredOnly
   @State private var isPrefetchLoaded = false
+
+  private var appFont: AppFont { AppFont(rawValue: appFontRaw) ?? .system }
 
   var body: some View {
     Form {
       Section {
         Toggle("share_typing", isOn: $isSharingTyping)
+      }
+      Section {
+        NavigationLink { FontSettingsView() } label: {
+          LabeledContent("font") {
+            FontName(font: appFont)
+          }
+        }
+      } footer: {
+        Text("font_hint")
       }
       Section {
         Picker("chat_list_layout", selection: $chatListLayout) {
@@ -415,27 +471,31 @@ private struct KeyBackupSection: View {
   }
 }
 
-/// What the user can pick as presence (the core's four states).
+/// The status this device last picked, kept across launches (`@AppStorage`).
 enum PresenceChoice: String, CaseIterable, Identifiable {
-  case online, away, doNotDisturb, offline
+  case online, busy, doNotDisturb, beRightBack, away, offline
 
   var id: String { rawValue }
+
+  init(_ presence: Presence) {
+    switch presence {
+    case .online: self = .online
+    case .busy: self = .busy
+    case .doNotDisturb: self = .doNotDisturb
+    case .beRightBack: self = .beRightBack
+    case .away: self = .away
+    case .offline: self = .offline
+    }
+  }
 
   var presence: Presence {
     switch self {
     case .online: return .online
-    case .away: return .away
+    case .busy: return .busy
     case .doNotDisturb: return .doNotDisturb
+    case .beRightBack: return .beRightBack
+    case .away: return .away
     case .offline: return .offline
-    }
-  }
-
-  var title: LocalizedStringKey {
-    switch self {
-    case .online: return "presence_online"
-    case .away: return "presence_away"
-    case .doNotDisturb: return "presence_dnd"
-    case .offline: return "presence_offline"
     }
   }
 }
@@ -478,12 +538,12 @@ struct ApproveLinkView: View {
       case .enterCode:
         Section {
           if let notice = maybeNotice {
-            Text(notice).font(.footnote).foregroundStyle(Theme.danger)
+            Text(notice).font(.app(.footnote)).foregroundStyle(Theme.danger)
           }
           Text("approve_hint").foregroundStyle(Theme.textMuted)
           Button("approve_scan", systemImage: "qrcode.viewfinder") { isScanning = true }
             .disabled(isWorking)
-          Text("approve_new_phone_hint").font(.footnote).foregroundStyle(Theme.textMuted)
+          Text("approve_new_phone_hint").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
           VStack(alignment: .leading, spacing: 6) {
             TextField("approve_code", text: $code, axis: .vertical)
               .textInputAutocapitalization(.never)

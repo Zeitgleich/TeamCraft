@@ -112,6 +112,18 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("| texts (1 lang) ", out)
 
+    def test_the_consoles_texts_count_in_neither_visit(self):
+        """Only the console loads them (#1462), however large they are."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
+            wasm_only = gzip_total_of(dist)
+            (dist / "i18n").mkdir()
+            (dist / "i18n" / "de-0123456789abcdef.ftl").write_bytes(os.urandom(400))
+            (dist / "i18n" / "de-admin-0123456789abcdef.ftl").write_bytes(os.urandom(4000))
+            german = len(gzip.compress((dist / "i18n" / "de-0123456789abcdef.ftl").read_bytes(), 9))
+            self.assertEqual(check.guest_visit_bytes(dist), wasm_only + german)
+            self.assertEqual(check.measure(dist)["translations"]["gzip_bytes"], german)
+
     def test_a_guest_visit_counts_the_call_module_but_not_the_signed_in_app(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)

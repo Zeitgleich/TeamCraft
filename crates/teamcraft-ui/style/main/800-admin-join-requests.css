@@ -92,7 +92,7 @@
 
 .activity-sidebar .join-request {
   background: var(--sb-hover);
-  color: var(--chrome-strong);
+  color: var(--sb-strong);
 }
 
 .activity-sidebar .join-request + .join-request {
@@ -102,7 +102,7 @@
 .activity-sidebar .join-request .btn:not(.btn-primary) {
   border-color: transparent;
   background: var(--sb-hover);
-  color: var(--chrome-strong);
+  color: var(--sb-strong);
 }
 
 /* In the channel settings: cards above the member list. */

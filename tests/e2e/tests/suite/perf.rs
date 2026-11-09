@@ -21,6 +21,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use chromiumoxide::cdp::browser_protocol::emulation::SetCpuThrottlingRateParams;
 use chromiumoxide::cdp::browser_protocol::network::{
   EnableParams as NetworkEnableParams, EventRequestWillBeSent, EventWebSocketFrameReceived,
   EventWebSocketFrameSent,
@@ -83,6 +84,10 @@ const QUIET: Duration = Duration::from_secs(10);
 /// settled: what a catch-up left behind (IndexedDB writing, decoding) is done.
 const SETTLED_CPU_PERCENT: f64 = 3.0;
 const SETTLE_WINDOW: Duration = Duration::from_secs(10);
+/// How much slower than this machine the browser's CPU runs while it catches up many
+/// conversations (issue #1575): the reporter's laptop took 200 ms a conversation where this one
+/// takes 50. `PERF_CATCH_UP_CPU_SLOWDOWN` sets another factor (1: none).
+const CATCH_UP_CPU_SLOWDOWN: f64 = 4.0;
 /// Counts tasks that block the page's thread for more than 50 ms (`[count, total ms, longest ms]`).
 const LONG_TASK_RECORDER: &str = "window.__longTasks = [0, 0, 0];
   window.__longTaskList = [];
@@ -157,6 +162,9 @@ async fn the_web_client_stays_fast_and_lean_with_a_large_workspace() {
       eprintln!("seeded the {} workspace in {:?}", scale.name, started.elapsed());
       let mut report = measure(&page, &seeded, &profile, scale).await;
       scroll_through_held_history(&page, &mut alice, &seeded, scale, &mut report).await;
+      come_back_to_busy_channels(&page, &mut alice, &seeded, scale, &profile, &mut report).await;
+      come_back_to_many_conversations(&page, &mut alice, &mut bob, &seeded, scale, &profile, &mut report)
+        .await;
       measure_catalog_build(&page, &seeded, &mut report).await;
       report.seconds_sign_in_and_unlock = first_setup;
       report.pss_mib_empty_browser = baseline;
@@ -187,6 +195,12 @@ struct Scale {
   messages: usize,
   long_channel_messages: usize,
   images: usize,
+  /// Messages each busy channel gets while Carol is away the last time, beyond what a capped
+  /// catch-up reads (issue #1572).
+  backlog_messages: usize,
+  /// Messages every channel but two gets while Carol is away once more: fewer than a capped
+  /// catch-up reads, so all of them are decrypted in the catch-up itself (issue #1575).
+  catch_up_messages: usize,
   idle: Duration,
   is_regression_check: bool,
 }
@@ -314,6 +328,34 @@ struct Report {
   catalog_resume_percent_at_reload: f64,
   catalog_resume_first_percent_after: f64,
   seconds_catalog_resume_to_channel_list: f64,
+  /// Coming back to busy channels whose backlogs are read in the background (issue #1572):
+  /// switches between quiet channels meanwhile, from the page load until the browser went quiet,
+  /// and the page's main-thread tasks over 50 ms in that time.
+  backlog_switch_ms_p50: f64,
+  backlog_switch_ms_p95: f64,
+  backlog_switch_ms_max: f64,
+  seconds_backlog_until_settled: f64,
+  backlog_long_task_count: f64,
+  backlog_long_task_total_ms: f64,
+  backlog_longest_task_ms: f64,
+  backlog_gateway_connections_lost: f64,
+  /// Coming back to many conversations with new messages, all read in the catch-up itself (issue
+  /// #1575): switches between quiet channels while it runs, the time until it was done, and the
+  /// page's main-thread tasks over 50 ms (and over 100 ms) from the page load until then.
+  catch_up_switch_ms_p50: f64,
+  catch_up_switch_ms_p95: f64,
+  catch_up_switch_ms_max: f64,
+  seconds_catch_up_until_done: f64,
+  catch_up_long_task_count: f64,
+  catch_up_long_tasks_over_100ms: f64,
+  catch_up_long_task_total_ms: f64,
+  catch_up_longest_task_ms: f64,
+  /// The same, only those of the content phase (from the end of the phase before it until its own
+  /// end, by the client's log): the conversations' messages decrypted and written.
+  catch_up_content_seconds: f64,
+  catch_up_content_long_task_count: f64,
+  catch_up_content_long_tasks_over_100ms: f64,
+  catch_up_content_longest_task_ms: f64,
 }
 
 impl Scale {
@@ -326,6 +368,8 @@ impl Scale {
         messages: 100_000,
         long_channel_messages: 20_000,
         images: 200,
+        backlog_messages: 2_000,
+        catch_up_messages: 150,
         idle: Duration::from_secs(300),
         is_regression_check: false,
       },
@@ -336,6 +380,8 @@ impl Scale {
         messages: 60,
         long_channel_messages: 30,
         images: 2,
+        backlog_messages: 250,
+        catch_up_messages: 60,
         idle: Duration::from_secs(10),
         is_regression_check: false,
       },
@@ -346,6 +392,8 @@ impl Scale {
         messages: 3_000,
         long_channel_messages: 1_500,
         images: 12,
+        backlog_messages: 600,
+        catch_up_messages: 150,
         idle: Duration::from_secs(60),
         is_regression_check: true,
       },
@@ -607,6 +655,176 @@ async fn scroll_through_held_history(
   report.steady_scroll_long_tasks = steady[4];
   report.steady_scroll_longest_task_ms = steady[5];
   report.steady_scroll_frames_moving_backwards = steady[6];
+}
+
+/// Coming back after weeks away from busy channels (issue #1572). Every channel of the first space
+/// but the long one and two quiet ones grows by more than a capped catch-up reads (200 messages),
+/// so the rest of each is read in the background, a page at a time. Meanwhile Carol switches
+/// between the quiet channels, which got nothing new; measured until the browser went quiet.
+/// `PERF_BACKLOG_MESSAGES` sets the messages per busy channel.
+async fn come_back_to_busy_channels(
+  page: &Page,
+  alice: &mut Peer,
+  seeded: &Seeded,
+  scale: Scale,
+  profile: &str,
+  report: &mut Report,
+) {
+  page.goto("about:blank").await.unwrap();
+  let quiet = &seeded.first_space_channels[1..3];
+  let busy = &seeded.channels[3..seeded.first_space_channels.len()];
+  // PERF_BACKLOG_MESSAGES=n: a longer absence than the scale's.
+  let messages = std::env::var("PERF_BACKLOG_MESSAGES")
+    .ok()
+    .and_then(|value| value.parse().ok())
+    .unwrap_or(scale.backlog_messages);
+  for index in 0..messages {
+    for channel in busy {
+      send(alice, *channel, index).await;
+    }
+  }
+  let started = Instant::now();
+  let log = watch_catch_up_log(page, started).await;
+  page
+    .evaluate(format!("location.href = '{WEB_ORIGIN}/?backend=server'"))
+    .await
+    .unwrap();
+  come_back(page, &quiet[0].0).await;
+  let mut times = Vec::with_capacity(BUSY_SWITCHES);
+  for index in 0..BUSY_SWITCHES {
+    let (name, last) = &quiet[index % quiet.len()];
+    times.push(switch_within(page, name, last, Duration::from_secs(280)).await);
+  }
+  times.sort_by(f64::total_cmp);
+  report.backlog_switch_ms_p50 = percentile(&times, 50);
+  report.backlog_switch_ms_p95 = percentile(&times, 95);
+  report.backlog_switch_ms_max = times.last().copied().unwrap_or(0.0);
+  wait_until_done(page).await;
+  wait_until_browser_settled(profile).await;
+  report.seconds_backlog_until_settled = started.elapsed().as_secs_f64();
+  let long_tasks = evaluate_value(page, "window.__longTasks || [0, 0, 0]".into()).await;
+  report.backlog_long_task_count = long_tasks[0].as_f64().unwrap_or(0.0);
+  report.backlog_long_task_total_ms = long_tasks[1].as_f64().unwrap_or(0.0);
+  report.backlog_longest_task_ms = long_tasks[2].as_f64().unwrap_or(0.0);
+  report.backlog_gateway_connections_lost = log
+    .lock()
+    .unwrap()
+    .iter()
+    .filter(|(_, line)| line.contains("gateway connection lost"))
+    .count() as f64;
+}
+
+/// Coming back after an absence in which most conversations got new messages, fewer than a capped
+/// catch-up reads (issue #1575): the catch-up decrypts all of them itself, conversation after
+/// conversation, on the page's only thread. Meanwhile Carol switches between two quiet channels.
+/// `PERF_CATCH_UP_MESSAGES` sets the messages per channel.
+async fn come_back_to_many_conversations(
+  page: &Page,
+  alice: &mut Peer,
+  bob: &mut Peer,
+  seeded: &Seeded,
+  scale: Scale,
+  profile: &str,
+  report: &mut Report,
+) {
+  page.goto("about:blank").await.unwrap();
+  let quiet = &seeded.first_space_channels[1..3];
+  let busy: Vec<ConversationId> = seeded
+    .channels
+    .iter()
+    .enumerate()
+    .filter(|(index, _)| !(1..3).contains(index))
+    .map(|(_, channel)| *channel)
+    .collect();
+  let messages = std::env::var("PERF_CATCH_UP_MESSAGES")
+    .ok()
+    .and_then(|value| value.parse().ok())
+    .unwrap_or(scale.catch_up_messages);
+  let (alice_half, bob_half) = busy.split_at(busy.len() / 2);
+  let alice_writes = async {
+    for index in 0..messages {
+      for channel in alice_half {
+        send(alice, *channel, index).await;
+      }
+    }
+  };
+  let bob_writes = async {
+    for index in 0..messages {
+      for channel in bob_half {
+        send(bob, *channel, index).await;
+      }
+    }
+  };
+  tokio::join!(alice_writes, bob_writes);
+  let slowdown = std::env::var("PERF_CATCH_UP_CPU_SLOWDOWN")
+    .ok()
+    .and_then(|value| value.parse().ok())
+    .unwrap_or(CATCH_UP_CPU_SLOWDOWN);
+  page
+    .execute(SetCpuThrottlingRateParams::new(slowdown))
+    .await
+    .unwrap();
+  let started = Instant::now();
+  let log = watch_catch_up_log(page, started).await;
+  page
+    .evaluate(format!("location.href = '{WEB_ORIGIN}/?backend=server'"))
+    .await
+    .unwrap();
+  come_back(page, &quiet[0].0).await;
+  let mut times = Vec::with_capacity(BUSY_SWITCHES);
+  for index in 0..BUSY_SWITCHES {
+    let (name, last) = &quiet[index % quiet.len()];
+    times.push(switch_within(page, name, last, Duration::from_secs(280)).await);
+  }
+  times.sort_by(f64::total_cmp);
+  report.catch_up_switch_ms_p50 = percentile(&times, 50);
+  report.catch_up_switch_ms_p95 = percentile(&times, 95);
+  report.catch_up_switch_ms_max = times.last().copied().unwrap_or(0.0);
+  report.seconds_catch_up_until_done = wait_until_done(page).await.duration_since(started).as_secs_f64();
+  let long_tasks = evaluate_value(page, "window.__longTasks || [0, 0, 0]".into()).await;
+  report.catch_up_long_task_count = long_tasks[0].as_f64().unwrap_or(0.0);
+  report.catch_up_long_task_total_ms = long_tasks[1].as_f64().unwrap_or(0.0);
+  report.catch_up_longest_task_ms = long_tasks[2].as_f64().unwrap_or(0.0);
+  report.catch_up_long_tasks_over_100ms = evaluate_value(
+    page,
+    "(window.__longTaskList || []).filter(([, duration]) => duration > 100).length".into(),
+  )
+  .await
+  .as_f64()
+  .unwrap_or(0.0);
+  print_long_tasks(page, "catch-up of many conversations").await;
+  let lines = log.lock().unwrap().clone();
+  for (at, line) in &lines {
+    if line.contains("phase done") || line.contains("catch-up done") {
+      eprintln!("catch-up log {at:>7.1} s  {line}");
+    }
+  }
+  // The content phase, in the page's time (its origin is close to `started`).
+  let phase_end = |phase: &str| {
+    lines
+      .iter()
+      .rev()
+      .find(|(_, line)| line.contains(&format!("phase=\\\"{phase}\\\"")))
+      .map(|(at, _)| at * 1000.0)
+  };
+  if let (Some(from), Some(to)) = (phase_end("missing groups"), phase_end("content")) {
+    let tasks = evaluate_value(page, "window.__longTaskList || []".into()).await;
+    let durations: Vec<f64> = tasks
+      .as_array()
+      .into_iter()
+      .flatten()
+      .filter_map(|task| Some((task[0].as_f64()?, task[1].as_f64()?)))
+      .filter(|(start, duration)| start + duration > from && *start < to)
+      .map(|(_, duration)| duration)
+      .collect();
+    report.catch_up_content_seconds = (to - from) / 1000.0;
+    report.catch_up_content_long_task_count = durations.len() as f64;
+    report.catch_up_content_long_tasks_over_100ms =
+      durations.iter().filter(|duration| **duration > 100.0).count() as f64;
+    report.catch_up_content_longest_task_ms = durations.iter().copied().fold(0.0, f64::max);
+  }
+  page.execute(SetCpuThrottlingRateParams::new(1.0)).await.unwrap();
+  wait_until_browser_settled(profile).await;
 }
 
 async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> Report {
@@ -1593,6 +1811,44 @@ impl Report {
       (
         "seconds_catalog_resume_to_channel_list",
         self.seconds_catalog_resume_to_channel_list,
+      ),
+      ("backlog_switch_ms_p50", self.backlog_switch_ms_p50),
+      ("backlog_switch_ms_p95", self.backlog_switch_ms_p95),
+      ("backlog_switch_ms_max", self.backlog_switch_ms_max),
+      (
+        "seconds_backlog_until_settled",
+        self.seconds_backlog_until_settled,
+      ),
+      ("backlog_long_task_count", self.backlog_long_task_count),
+      ("backlog_long_task_total_ms", self.backlog_long_task_total_ms),
+      ("backlog_longest_task_ms", self.backlog_longest_task_ms),
+      (
+        "backlog_gateway_connections_lost",
+        self.backlog_gateway_connections_lost,
+      ),
+      ("catch_up_switch_ms_p50", self.catch_up_switch_ms_p50),
+      ("catch_up_switch_ms_p95", self.catch_up_switch_ms_p95),
+      ("catch_up_switch_ms_max", self.catch_up_switch_ms_max),
+      ("seconds_catch_up_until_done", self.seconds_catch_up_until_done),
+      ("catch_up_long_task_count", self.catch_up_long_task_count),
+      (
+        "catch_up_long_tasks_over_100ms",
+        self.catch_up_long_tasks_over_100ms,
+      ),
+      ("catch_up_long_task_total_ms", self.catch_up_long_task_total_ms),
+      ("catch_up_longest_task_ms", self.catch_up_longest_task_ms),
+      ("catch_up_content_seconds", self.catch_up_content_seconds),
+      (
+        "catch_up_content_long_task_count",
+        self.catch_up_content_long_task_count,
+      ),
+      (
+        "catch_up_content_long_tasks_over_100ms",
+        self.catch_up_content_long_tasks_over_100ms,
+      ),
+      (
+        "catch_up_content_longest_task_ms",
+        self.catch_up_content_longest_task_ms,
       ),
     ]
   }

@@ -19,6 +19,10 @@ struct OidcSession: Codable, Equatable {
   /// The account the ID token names (`preferred_username`, else `email`), for the next sign-in's
   /// login page (issue #448); not stored with the session's tokens elsewhere.
   var loginHint: String?
+  /// The device key the session is bound to (`cnf.jkt` of its access token, docs/e2ee.md §3.1.2);
+  /// `nil` for a session that isn't bound, as all were before the app knew DPoP. A bound refresh token
+  /// needs a proof with this key and no other.
+  var boundKey: String?
 
   /// Valid for at least `leeway` more seconds.
   func isFresh(leeway: TimeInterval = 30, now: Date = Date()) -> Bool {
@@ -34,6 +38,7 @@ struct OidcSession: Codable, Equatable {
     renewed.refreshToken = response.refreshToken ?? refreshToken
     renewed.expiresAt = now.addingTimeInterval(response.expiresIn ?? 300)
     renewed.idToken = response.idToken.flatMap { isOwnIdToken($0) ? $0 : nil }
+    renewed.boundKey = tokenBoundKey(accessToken: response.accessToken)
     return renewed
   }
 
@@ -65,6 +70,16 @@ enum OidcError: Error, Equatable {
   case network(String)
   /// The identity provider's `error` in the sign-in redirect, cleaned by the core (issue #1063).
   case providerRefused(code: String)
+  /// The session is bound to a device key that is gone: nothing went to the provider.
+  case deviceKeyLost
+  /// The session's device key can't be used right now: nothing went to the provider, nothing is
+  /// decided about the session.
+  case deviceKeyUnavailable
+
+  /// Whether this is about the device key and not the provider's answer.
+  var isDeviceKeyFailure: Bool {
+    self == .deviceKeyLost || self == .deviceKeyUnavailable
+  }
 }
 
 /// What an OIDC provider answers a token request with.
@@ -129,12 +144,18 @@ struct OidcClient {
     var issuer: String?
     let authorizationEndpoint: URL
     let tokenEndpoint: URL
+    /// What the provider takes as DPoP proofs (RFC 9449 §5.1).
+    var dpopSigningAlgValuesSupported: [String]?
 
     enum CodingKeys: String, CodingKey {
       case issuer
       case authorizationEndpoint = "authorization_endpoint"
       case tokenEndpoint = "token_endpoint"
+      case dpopSigningAlgValuesSupported = "dpop_signing_alg_values_supported"
     }
+
+    /// The provider advertises DPoP with the one algorithm this app signs: ES256.
+    var takesProofs: Bool { dpopSigningAlgValuesSupported?.contains("ES256") == true }
 
     /// https only (plain http to this device in debug builds), and the issuer's own document.
     func isTrusted(for issuer: URL) -> Bool {
@@ -172,7 +193,9 @@ struct OidcClient {
     }
   }
 
-  func exchange(code: String, verifier: String, endpoints: Endpoints) async throws -> OidcSession {
+  func exchange(
+    code: String, verifier: String, endpoints: Endpoints, proof: TokenProof = .none
+  ) async throws -> OidcSession {
     let response = try await Self.tokenRequest(
       endpoints.tokenEndpoint,
       [
@@ -182,7 +205,7 @@ struct OidcClient {
         "client_id": clientId,
         "code_verifier": verifier,
       ],
-      urlSession: urlSession)
+      urlSession: urlSession, proof: proof)
     guard let idToken = response.idToken, let claims = IdTokenClaims(jwt: idToken),
       claims.isIssued(by: issuer.absoluteString, to: clientId)
     else {
@@ -192,11 +215,13 @@ struct OidcClient {
       accessToken: response.accessToken, refreshToken: response.refreshToken, idToken: idToken,
       expiresAt: Date().addingTimeInterval(response.expiresIn ?? 300), subject: claims.subject,
       displayName: claims.name, tokenEndpoint: endpoints.tokenEndpoint, clientId: clientId,
-      loginHint: loginHintFromIdToken(idToken: idToken))
+      loginHint: loginHintFromIdToken(idToken: idToken), boundKey: tokenBoundKey(accessToken: response.accessToken))
   }
 
   /// Renews the access token with the session's own endpoint and client.
-  static func refresh(_ session: OidcSession, urlSession: URLSession = .shared) async throws -> OidcSession {
+  static func refresh(
+    _ session: OidcSession, urlSession: URLSession = .shared, proof: TokenProof = .none
+  ) async throws -> OidcSession {
     guard let refreshToken = session.refreshToken else { throw OidcError.sessionExpired }
     let response = try await tokenRequest(
       session.tokenEndpoint,
@@ -205,12 +230,12 @@ struct OidcClient {
         "refresh_token": refreshToken,
         "client_id": session.clientId,
       ],
-      urlSession: urlSession)
+      urlSession: urlSession, proof: proof)
     return session.renewed(by: response)
   }
 
   private static func tokenRequest(
-    _ endpoint: URL, _ form: [String: String], urlSession: URLSession
+    _ endpoint: URL, _ form: [String: String], urlSession: URLSession, proof: TokenProof
   ) async throws -> TokenResponse {
     var request = URLRequest(url: endpoint)
     request.httpMethod = "POST"
@@ -218,17 +243,30 @@ struct OidcClient {
     request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
     request.httpBody = Self.formEncoded(form).data(using: .utf8)
     do {
-      let (data, response) = try await urlSession.data(for: request)
-      let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-      switch status {
-      case 200: return try JSONDecoder().decode(TokenResponse.self, from: data)
+      let transport = TokenRequestTransport(request: request, urlSession: urlSession)
+      let answer: TokenEndpointAnswer
+      switch proof {
+      case .none:
+        answer = try await transport.send(proof: nil)
+      case .with(let prover, let fallback):
+        answer = try await prover.tokenRequest(
+          endpoint: endpoint.absoluteString, fallback: fallback, transport: transport)
+      }
+      switch answer.status {
+      case 200: return try JSONDecoder().decode(TokenResponse.self, from: answer.body)
       // Only a refused grant (an expired, revoked or reused refresh token) ends the session; any
       // other answer keeps it for the next try (issue #667).
-      case 400 where Self.isInvalidGrant(data): throw OidcError.sessionExpired
-      default: throw OidcError.tokenRequestFailed(status: status)
+      case 400 where Self.isInvalidGrant(answer.body): throw OidcError.sessionExpired
+      default: throw OidcError.tokenRequestFailed(status: Int(answer.status))
       }
     } catch let error as OidcError {
       throw error
+    } catch DeviceProofError.KeyLost {
+      throw OidcError.deviceKeyLost
+    } catch DeviceProofError.KeyUnavailable {
+      throw OidcError.deviceKeyUnavailable
+    } catch DeviceProofError.NoAnswer(let message) {
+      throw OidcError.network(message)
     } catch {
       throw OidcError.network(error.localizedDescription)
     }
@@ -284,18 +322,30 @@ final class SessionVault {
   private let refreshTimeout: TimeInterval
   private let refresh: @Sendable (OidcSession) async throws -> OidcSession
   private let queue = DispatchQueue(label: "de.zeitgleich.teamcraft.session")
+  /// What token requests do about DPoP; what the sign-in and the core sign with.
+  let proofs: SessionProofs
 
+  /// `bindsSessions`: this process may make a device key and bind a session that isn't bound yet.
+  /// The app does, the notification extension only signs for sessions that are bound already.
   init(
     keychain: any SecretItems = KeychainStore(), servers: ServerStore = ServerStore(),
     refreshLockURL: URL? = SharedContainer().refreshLockFileURL,
     refreshTimeout: TimeInterval = 20,
-    refresh: @escaping @Sendable (OidcSession) async throws -> OidcSession = { try await OidcClient.refresh($0) }
+    bindsSessions: Bool = false,
+    proofs: SessionProofs? = nil,
+    urlSession: URLSession = .shared,
+    refresh: (@Sendable (OidcSession) async throws -> OidcSession)? = nil
   ) {
     self.keychain = keychain
     self.servers = servers
     self.refreshLockURL = refreshLockURL
     self.refreshTimeout = refreshTimeout
-    self.refresh = refresh
+    let proofs =
+      proofs
+      ?? SessionProofs(
+        keys: DeviceKeyStore(keychain: keychain, servers: servers), servers: servers, bindsSessions: bindsSessions)
+    self.proofs = proofs
+    self.refresh = refresh ?? { try await proofs.refresh($0, urlSession: urlSession) }
   }
 
   func load() -> OidcSession? {
@@ -318,8 +368,9 @@ final class SessionVault {
   func saveLocal(_ session: LocalSession) throws {
     guard let account = activeItem, let localAccount = activeLocalItem else { throw SessionVaultError.noServer }
     try keychain.write(JSONEncoder().encode(session), for: localAccount)
-    // One session per server: an OIDC one from before goes.
+    // One session per server: an OIDC one from before goes, and the key it was bound to with it.
     try? keychain.delete(account)
+    forgetDeviceKey()
   }
 
   /// Whether the active server has a session of either kind (it may have expired).
@@ -331,6 +382,33 @@ final class SessionVault {
     for account in [activeItem, activeLocalItem].compactMap({ $0 }) {
       // Nothing to do about a failed delete; the next sign-in overwrites the item.
       try? keychain.delete(account)
+    }
+    forgetDeviceKey()
+  }
+
+  /// The active server's device key goes with its session (sign-out, or the provider refused the
+  /// refresh token), so that the next sign-in starts with a new one (docs/e2ee.md §3.1.2).
+  private func forgetDeviceKey() {
+    proofs.keys.delete()
+    proofs.forgetKey()
+  }
+
+  /// What the Rust core signs with: the active server's device key, read anew for each use.
+  var deviceKey: DeviceProofKey {
+    VaultDeviceKey(store: proofs.keys)
+  }
+
+  /// Whether the session is bound to a device key that is gone (never written, or removed): it can't
+  /// be used any more and the user has to sign in again. A key that just can't be read is no loss.
+  /// Reads the keychain; safe on the main thread.
+  var isDeviceKeyLost: Bool {
+    guard let bound = load()?.boundKey else { return false }
+    do {
+      return try ProviderProver(key: deviceKey).thumbprint() != bound
+    } catch DeviceProofError.KeyLost {
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -372,12 +450,20 @@ final class SessionVault {
         try? save(renewed)
         return renewed.accessToken
       case .failure(let error):
-        // A rejected refresh token ends the session; anything else keeps it for the next try.
-        if case OidcError.sessionExpired = error {
+        switch error {
+        // A rejected refresh token ends the session.
+        case OidcError.sessionExpired:
           clear()
           return nil
+        // A device key that is gone or can't be used: nothing went to the provider. The token comes
+        // back as it is, also an expired one: the core sees that it is bound, holds it back and
+        // says why. `nil` would read as signed out.
+        case OidcError.deviceKeyLost, OidcError.deviceKeyUnavailable:
+          return session.accessToken
+        // Anything else keeps the session for the next try.
+        default:
+          return session.accessTokenIfFresh
         }
-        return session.accessTokenIfFresh
       }
     }
   }

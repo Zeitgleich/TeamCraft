@@ -224,6 +224,13 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.with_live_presences(self.chat.users())
   }
 
+  fn mentionable_groups(
+    &self,
+    conversation: ConversationId,
+  ) -> Vec<teamcraft_client_api::model::MentionableGroup> {
+    self.chat.mentionable_groups(conversation)
+  }
+
   fn search_people(&self, query: &str) -> Vec<User> {
     self.with_live_presences(self.chat.search_people(query))
   }
@@ -762,6 +769,13 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.conversation_files(conversation)
   }
 
+  fn files_page(
+    &self,
+    query: &teamcraft_client_api::files_query::FilesQuery<'_>,
+  ) -> Option<teamcraft_client_api::files_query::FilesPage> {
+    self.chat.files_page(query)
+  }
+
   fn conversation_media(
     &self,
     conversation: ConversationId,
@@ -769,6 +783,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     max_messages: usize,
   ) -> Option<MediaPage> {
     self.chat.conversation_media(conversation, anchor, max_messages)
+  }
+
+  fn conversation_links(
+    &self,
+    conversation: ConversationId,
+    limit: usize,
+  ) -> Option<teamcraft_client_api::links::LinkPage> {
+    self.chat.conversation_links(conversation, limit)
   }
 
   fn download_file(&self, conversation: ConversationId, message: MessageId) {
@@ -914,6 +936,13 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
 
   fn can_manage_integration_sources(&self) -> bool {
     self.chat.can_manage_integration_sources()
+  }
+
+  fn bridge_public_url(&self, conversation: ConversationId) -> Option<String> {
+    self
+      .maybe_live
+      .as_ref()
+      .and_then(|live| live.bridge_public_url(conversation))
   }
 
   fn add_integration_source(
@@ -1199,6 +1228,13 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
       .maybe_live
       .as_ref()
       .map_or_else(Vec::new, |live| live.seen_by(conversation, message))
+  }
+
+  fn delivered_to_others(&self, conversation: ConversationId) -> Option<MessageId> {
+    self
+      .maybe_live
+      .as_ref()
+      .and_then(|live| live.delivered_to_others(conversation))
   }
 
   fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
@@ -1740,7 +1776,7 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     match admin.policy().admin_self_join {
       teamcraft_proto::AdminSelfJoin::Visible => {
         self.chat.admin_add_self(channel);
-        SelfJoinOutcome::Joined
+        SelfJoinOutcome::Adding
       },
       // The channel's owners decide (admin.md §2.4).
       teamcraft_proto::AdminSelfJoin::OwnerApproval => {
@@ -1936,6 +1972,24 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
+  fn save_brand_mail_server(&self, id: String, request: teamcraft_proto::UpdateBrandMailServerRequest) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.save_brand_mail_server(&id, &request);
+    }
+  }
+
+  fn remove_brand_mail_server(&self, id: String) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.remove_brand_mail_server(&id);
+    }
+  }
+
+  fn send_brand_test_mail(&self, id: String, request: SendTestMailRequest) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.send_brand_test_mail(&id, request);
+    }
+  }
+
   fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
     self.maybe_admin.as_ref().and_then(|admin| admin.mail_settings())
   }
@@ -1993,6 +2047,65 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
   fn test_calendar(&self) {
     if let Some(admin) = &self.maybe_admin {
       admin.test_calendar();
+    }
+  }
+
+  fn admin_webhooks(&self) -> Option<teamcraft_proto::AdminWebhooksResponse> {
+    self.maybe_admin.as_ref().and_then(|admin| admin.admin_webhooks())
+  }
+
+  fn create_webhook(&self, request: teamcraft_proto::CreateWebhookRequest) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.create_webhook(request);
+    }
+  }
+
+  fn update_webhook(&self, id: teamcraft_proto::WebhookId, request: teamcraft_proto::UpdateWebhookRequest) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.update_webhook(id, request);
+    }
+  }
+
+  fn delete_webhook(&self, id: teamcraft_proto::WebhookId) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.delete_webhook(id);
+    }
+  }
+
+  fn rotate_webhook_secret(&self, id: teamcraft_proto::WebhookId) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.rotate_webhook_secret(id);
+    }
+  }
+
+  fn test_webhook(&self, id: teamcraft_proto::WebhookId) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.test_webhook(id);
+    }
+  }
+
+  fn webhook_deliveries(
+    &self,
+    id: teamcraft_proto::WebhookId,
+  ) -> Option<teamcraft_proto::WebhookDeliveriesResponse> {
+    self
+      .maybe_admin
+      .as_ref()
+      .and_then(|admin| admin.webhook_deliveries(id))
+  }
+
+  fn revealed_webhook_secret(
+    &self,
+  ) -> Option<(teamcraft_proto::WebhookId, teamcraft_proto::WebhookSecretText)> {
+    self
+      .maybe_admin
+      .as_ref()
+      .and_then(|admin| admin.revealed_webhook_secret())
+  }
+
+  fn dismiss_webhook_secret(&self) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.dismiss_webhook_secret();
     }
   }
 

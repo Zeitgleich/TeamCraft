@@ -95,6 +95,9 @@ const MESSAGE_CACHE_BYTES: usize = DEFAULT_MESSAGE_CACHE_BYTES;
 const TICK: Duration = Duration::from_secs(3);
 /// How often the UI is told to read again while a long sync fills the store (issue #247).
 const SYNC_PROGRESS: Duration = Duration::from_secs(1);
+/// Least pause between two pages read in the background (backlogs, older history): the page's own
+/// time, but at least this, so the reading takes at most half of the page's thread (issue #1572).
+const BACKGROUND_PAGE_GAP: Duration = Duration::from_millis(100);
 /// How often the UI is told to read again while a file goes up or down, for its progress.
 const TRANSFER_PROGRESS: Duration = Duration::from_millis(500);
 /// How long a failed account data sync waits before it is retried; also how often the roster's age
@@ -1348,6 +1351,18 @@ struct Core {
   maybe_reported_bytes: Option<u64>,
   /// Attachment downloads, running beside the loop (issue #491).
   downloads: Downloads,
+  /// Pacing of the pages read in the background ([`Self::load_background_history`]).
+  background: BackgroundPacing,
+}
+
+/// When the next page read in the background is due, and what the UI was told of them: after a
+/// long absence there are thousands, and the page's thread is the UI's too (issue #1572).
+#[derive(Debug, Default)]
+struct BackgroundPacing {
+  next_page_ms: i64,
+  /// A page changed what the UI shows, and the UI has not been told yet.
+  is_change_untold: bool,
+  last_told_ms: i64,
 }
 
 /// A link this signed-in device approves, waiting for the code the new device shows.
@@ -1417,6 +1432,7 @@ impl Core {
       is_upload_due: true,
       maybe_reported_bytes: None,
       downloads: Downloads::default(),
+      background: BackgroundPacing::default(),
     }
   }
 
@@ -1463,6 +1479,7 @@ impl Core {
         },
       }
       self.report_progress();
+      self.report_delivered().await;
       self.check_store();
       self.check_push().await;
       self.report_background_failures();
@@ -1572,11 +1589,12 @@ impl Core {
       None => deadline,
     };
     // A catch-up's backlog: at once, but only after everything the select below looks at first.
-    let until_tick_ms = if self.is_background_history_due() {
-      0
+    let deadline = if self.is_background_history_due() {
+      deadline.min(self.background.next_page_ms)
     } else {
-      deadline.saturating_sub(now_ms()).max(0)
+      deadline
     };
+    let until_tick_ms = deadline.saturating_sub(now_ms()).max(0);
     let is_reading = !self.is_sync_paused;
     let Self {
       connection,
@@ -1681,7 +1699,8 @@ impl Core {
         Box::new(SystemClock),
         ClientSettings::default()
           .with_notes_to_self()
-          .with_capped_catch_up(),
+          .with_capped_catch_up()
+          .with_thread_turns(),
       )
     });
     let maybe_client = match opened {
@@ -1716,7 +1735,8 @@ impl Core {
       Box::new(SystemClock),
       ClientSettings::default()
         .with_notes_to_self()
-        .with_capped_catch_up(),
+        .with_capped_catch_up()
+        .with_thread_turns(),
       Argon2Settings::default(),
     )
     .await;
@@ -2111,7 +2131,9 @@ impl Core {
       self.api(),
       store,
       Box::new(SystemClock),
-      ClientSettings::default().with_capped_catch_up(),
+      ClientSettings::default()
+        .with_capped_catch_up()
+        .with_thread_turns(),
       device_name,
       // The key bag is wrapped with a random secret nobody keeps: the cheapest setting is plenty.
       Argon2Settings {
@@ -2159,7 +2181,8 @@ impl Core {
         Box::new(SystemClock),
         ClientSettings::default()
           .with_notes_to_self()
-          .with_capped_catch_up(),
+          .with_capped_catch_up()
+          .with_thread_turns(),
         options,
       )
       .await
@@ -2819,16 +2842,33 @@ impl Core {
   }
 
   /// One page of a backlog; the UI's reads are answered meanwhile.
+  /// Paced ([`BACKGROUND_PAGE_GAP`]), and the UI reads again at most once per [`SYNC_PROGRESS`]
+  /// for what the pages changed, and once more when they are done.
   async fn load_background_history(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) {
-    if !self.is_background_history_due() {
+    let started = now_ms();
+    if self.is_background_history_due() && started >= self.background.next_page_ms {
+      let read = self
+        .serve_during(requests, async |client: &mut Client<Api, Store>| {
+          client.load_background_history_page().await
+        })
+        .await;
+      let ended = now_ms();
+      let took = ended.saturating_sub(started);
+      self.background.next_page_ms = ended.saturating_add(took.max(millis(BACKGROUND_PAGE_GAP)));
+      self.background.is_change_untold |= read == Some(true);
+    }
+    self.tell_background_change();
+  }
+
+  fn tell_background_change(&mut self) {
+    if !self.background.is_change_untold {
       return;
     }
-    let read = self
-      .serve_during(requests, async |client: &mut Client<Api, Store>| {
-        client.load_background_history_page().await
-      })
-      .await;
-    if read == Some(true) {
+    let now = now_ms();
+    let is_done = !self.is_background_history_due();
+    if is_done || now.saturating_sub(self.background.last_told_ms) >= millis(SYNC_PROGRESS) {
+      self.background.is_change_untold = false;
+      self.background.last_told_ms = now;
       notify_changed();
     }
   }
@@ -2974,6 +3014,13 @@ impl Core {
     // The upkeep may resync many conversations; heartbeats go on meanwhile.
     if self.connection.keep_alive(now, self.upkeep.tick(client)).await {
       notify_changed();
+    }
+  }
+
+  /// Tells the server how far the DMs this device stored reach (delivered ticks, issue #598).
+  async fn report_delivered(&mut self) {
+    if let Some(client) = self.client.as_mut() {
+      client.report_delivered(&mut self.connection, now_ms()).await;
     }
   }
 

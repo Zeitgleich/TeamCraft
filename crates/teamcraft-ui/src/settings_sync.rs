@@ -23,6 +23,7 @@ use serde_json::{Value, json};
 use teamcraft_client_api::color_theme::ColorTheme;
 use teamcraft_client_api::emoji_catalog::SkinTone;
 use teamcraft_client_api::failure::{ActionFailure, FailureKind};
+use teamcraft_client_api::font::UiFont;
 use teamcraft_client_api::settings_sync::{
   SettingBases, SyncedValues, hold_inherited, keep_on_device, reconcile,
 };
@@ -57,6 +58,7 @@ const KEY_SKIN_TONE: &str = "emoji_skin_tone";
 const KEY_FAVORITE_ORDER: &str = "favorite_order";
 const KEY_BACKGROUND: &str = "calls.background";
 const KEY_COLOR_THEME: &str = "display.color_theme";
+const KEY_FONT: &str = "display.font";
 /// Settings that say something about a person: what they watch for, and their conversations. They
 /// are lists, so an upload of an edited one carries everything in it.
 const PRIVATE_KEYS: [&str; 3] = [
@@ -120,6 +122,7 @@ synced_prefs! {
   "display.show_status_in_messages" => display.show_status_in_messages,
   "display.maybe_divider_dwell_secs" => display.maybe_divider_dwell_secs,
   "display.color_theme" => display.color_theme,
+  "display.font" => display.font,
   "sidebar.layout" => sidebar.layout,
   "sidebar.list_grouping" => sidebar.list_grouping,
   "sidebar.sort" => sidebar.sort,
@@ -134,6 +137,7 @@ synced_prefs! {
   "privacy.share_typing" => privacy.share_typing,
   "privacy.away_after_minutes" => privacy.away_after_minutes,
   "privacy.send_crash_reports" => privacy.send_crash_reports,
+  "privacy.maybe_status_end" => privacy.maybe_status_end,
   "notifications.desktop" => notifications.desktop,
   "notifications.push_delay_minutes" => notifications.push_delay_minutes,
   "notifications.first_name_is_mention" => notifications.first_name_is_mention,
@@ -172,6 +176,7 @@ pub const SERVER_PREFS: &[&str] = &[
   "notifications.filters",
   "notifications.spaces",
   "privacy.share_read_receipts",
+  "privacy.share_delivery_receipts",
 ];
 
 /// Preferences that belong to one machine: its hardware, screen, disk, or a file picked on it.
@@ -449,6 +454,10 @@ fn is_known_value(key: &str, value: &Value) -> bool {
     KEY_COLOR_THEME => value
       .as_str()
       .is_some_and(|text| !matches!(text.parse(), Ok(ColorTheme::Unknown(_)))),
+    // A newer client's font: keep the one this device shows.
+    KEY_FONT => value
+      .as_str()
+      .is_some_and(|text| !matches!(text.parse(), Ok(UiFont::Unknown(_)))),
     _ => true,
   }
 }
@@ -727,6 +736,18 @@ mod tests {
       let custom = "custom:#1b2233,#2f66e0,#2eb67d,#d1453b";
       assert!(local.adopt(KEY_COLOR_THEME, &json!(custom)));
       assert_eq!(local.prefs.display.color_theme.to_string(), custom);
+    }
+
+    /// The font follows the account (#1494); a newer client's font keeps the local one.
+    #[test]
+    fn a_font_follows_unless_it_is_unknown_here() {
+      let mut local = values();
+      assert!(local.adopt(KEY_FONT, &json!("inter")));
+      assert!(!local.adopt(KEY_FONT, &json!("font-from-the-future")));
+      assert!(!local.adopt(KEY_FONT, &json!(1)));
+      assert_eq!(local.prefs.display.font, UiFont::Inter);
+      assert!(local.adopt(KEY_FONT, &json!("system")));
+      assert_eq!(local.prefs.display.font, UiFont::System);
     }
 
     /// Enums with a catch-all take any name; a sound setting of a newer client isn't "all".

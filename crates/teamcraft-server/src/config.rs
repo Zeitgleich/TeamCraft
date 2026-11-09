@@ -48,6 +48,8 @@ pub struct Config {
   #[serde(default)]
   pub integration: IntegrationConfig,
   #[serde(default)]
+  pub webhooks: WebhooksConfig,
+  #[serde(default)]
   pub web: WebConfig,
   #[serde(default)]
   pub security: SecurityConfig,
@@ -289,6 +291,9 @@ pub struct PolicyConfig {
 pub struct LimitsConfig {
   pub max_ciphertext_bytes: usize,
   pub max_mentions_per_message: usize,
+  /// IDs a message may name for a sender without `use_group_mentions` in the conversation: all the
+  /// server can enforce of that permission without reading the message (docs/e2ee.md §4.4).
+  pub max_mentions_without_group_mentions: usize,
   pub max_group_dm_participants: usize,
   pub max_name_length: usize,
   pub max_text_length: usize,
@@ -1065,12 +1070,30 @@ pub struct IntegrationConfig {
   /// Retention of a channel that becomes an integration channel, in days; `0` sets none. A
   /// channel's own setting wins.
   pub default_retention_days: u32,
+  /// Where producers reach a bridge that runs on its own host: the base of its `/hooks/` and
+  /// `/ingest/` URLs, shown in a channel's "Connect a source" section. `https`, or `http` for a
+  /// loopback host; no credentials, query or fragment. Unset: the apps offer the instance's host
+  /// name and the loopback default. The admin console changes it at runtime.
+  #[serde(rename = "bridge_public_url")]
+  pub maybe_bridge_public_url: Option<String>,
+}
+
+impl IntegrationConfig {
+  /// Rejects a bridge public URL the apps could not build working URLs from.
+  pub fn validate(&self) -> Result<(), String> {
+    if let Some(url) = &self.maybe_bridge_public_url {
+      teamcraft_proto::check_bridge_public_url(url)
+        .map_err(|error| format!("integration.bridge_public_url: {error}"))?;
+    }
+    Ok(())
+  }
 }
 
 impl Default for IntegrationConfig {
   fn default() -> Self {
     Self {
       default_retention_days: 30,
+      maybe_bridge_public_url: None,
     }
   }
 }
@@ -1246,6 +1269,58 @@ pub struct EmailDigestConfig {
   pub subject_many: String,
   pub body_one: String,
   pub body_many: String,
+}
+
+/// Limits of outgoing webhooks (docs/webhooks.md). The webhooks themselves (URL, events, secret)
+/// are set in the admin console; these bound what one target can cost the server.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct WebhooksConfig {
+  /// Lets webhook URLs point into private networks (loopback, RFC 1918, link-local, unique local)
+  /// and use plain `http`. Off by default: a console admin must not reach the server's own network
+  /// through a webhook (SSRF). Only the operator of the machine can turn it on.
+  pub allow_private_targets: bool,
+  /// Delivery workers; each holds a database connection (in an open transaction) while it sends,
+  /// so at most half of `[database].max_connections` are started. A database
+  /// `idle_in_transaction_session_timeout` must be longer than `request_timeout_secs`.
+  pub workers: usize,
+  /// Time to connect to a target.
+  pub connect_timeout_secs: u64,
+  /// Time for a whole request, answer included.
+  pub request_timeout_secs: u64,
+  /// Events one webhook may have waiting; further ones are dropped (and counted) until it drains.
+  pub max_queued_per_webhook: u32,
+  /// Attempts per event, the first included; then it is dropped.
+  pub max_attempts: u32,
+  /// Wait after the first failure; it doubles for each further one in a row (with jitter).
+  pub initial_retry_delay_secs: u64,
+  /// The longest wait between two attempts, unless the target asks for longer (`Retry-After`, up to
+  /// twice this).
+  pub max_retry_delay_secs: u64,
+  /// Events older than this are dropped from the queue.
+  pub max_age_hours: u64,
+  /// Attempts kept per webhook in the console's delivery log.
+  pub log_entries_per_webhook: u32,
+  /// How often idle workers look for due deliveries (new events wake them at once).
+  pub poll_interval_secs: u64,
+}
+
+impl Default for WebhooksConfig {
+  fn default() -> Self {
+    Self {
+      allow_private_targets: false,
+      workers: 2,
+      connect_timeout_secs: 5,
+      request_timeout_secs: 10,
+      max_queued_per_webhook: 1000,
+      max_attempts: 12,
+      initial_retry_delay_secs: 10,
+      max_retry_delay_secs: 3600,
+      max_age_hours: 24,
+      log_entries_per_webhook: 50,
+      poll_interval_secs: 15,
+    }
+  }
 }
 
 /// Share links for external download (e2ee.md §4.5.1).
@@ -1545,7 +1620,8 @@ impl Default for LimitsConfig {
   fn default() -> Self {
     Self {
       max_ciphertext_bytes: 1024 * 1024,
-      max_mentions_per_message: 200,
+      max_mentions_per_message: teamcraft_proto::DEFAULT_MAX_MENTIONS_PER_MESSAGE,
+      max_mentions_without_group_mentions: teamcraft_proto::DEFAULT_MAX_MENTIONS_WITHOUT_GROUP_MENTIONS,
       max_group_dm_participants: 8,
       max_name_length: 100,
       max_text_length: 1000,

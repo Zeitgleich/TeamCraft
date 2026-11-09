@@ -5,9 +5,10 @@ use wasm_bindgen::JsCast;
 use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, OutgoingMessage};
 use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::drafts::{DraftFileItem, DraftFileState};
+use teamcraft_client_api::model::MentionableGroup;
 use teamcraft_client_api::scheduled::ScheduleCheck;
 use teamcraft_client_api::voice::RecordingStop;
-use teamcraft_proto::ClientMessageId;
+use teamcraft_proto::{ClientMessageId, DEFAULT_MAX_MENTIONS_PER_MESSAGE};
 use wasm_bindgen_futures::JsFuture;
 
 use crate::audio::AudioFormat;
@@ -33,7 +34,6 @@ use crate::editor_doc::{BlockFormat, InlineStyle};
 use crate::emoji_catalog::{self, SkinTone};
 use crate::emoji_support;
 use crate::feedback::PendingAction;
-use crate::groups::use_groups;
 use crate::i18n::use_i18n;
 use crate::keys::t_with_shortcuts;
 use crate::large_files::{self, LargeFile};
@@ -43,7 +43,9 @@ use crate::media_layout::{APP_THUMBNAIL_SIDE, thumbnail_type};
 use crate::mention::{self, TriggerKind};
 use crate::model::{ConversationId, ThreadId};
 use crate::model::{MessageKind, User};
-use crate::notifier::needs_channel_confirmation;
+use crate::notifier::{
+  GroupMentionReach, group_mention_reach, needs_channel_confirmation, needs_group_confirmation,
+};
 use crate::paste::{PasteKind, paste_from_shell};
 use crate::raster;
 use crate::reactive::SetIfAlive;
@@ -51,7 +53,7 @@ use crate::settings::SendMode;
 use crate::share_into::ShareInbox;
 use crate::shell_drop::ShellFile;
 use crate::slash::{self, Parsed};
-use crate::state::{Overlay, SidePanel, use_app_state};
+use crate::state::{AppState, Overlay, SidePanel, use_app_state};
 use crate::tab_handover::PERSIST_DRAFTS_EVENT;
 use crate::unread_divider::DividerEvent;
 use crate::viewport::is_touch_primary;
@@ -157,7 +159,7 @@ fn emoji_suggestions(query: &str, tone: SkinTone) -> Vec<Suggestion> {
 fn mention_suggestions(
   query: &str,
   people: &[User],
-  groups: &[teamcraft_proto::UserGroupResponse],
+  groups: &[MentionableGroup],
   channel_label: &str,
 ) -> Vec<Suggestion> {
   let needle = query.to_lowercase();
@@ -228,6 +230,60 @@ fn mention_suggestions(
     .collect()
 }
 
+/// A send that would notify many people and waits for a confirmation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LargeMention {
+  /// `@channel` and friends: how many people are in the conversation.
+  Channel(usize),
+  /// Group mentions: how many people they notify.
+  Groups(usize),
+}
+
+impl LargeMention {
+  fn text(self, i18n: crate::i18n::I18n) -> String {
+    match self {
+      Self::Channel(members) => i18n.t_with("composer-confirm-channel", &[("count", &members.to_string())]),
+      Self::Groups(notified) if notified > DEFAULT_MAX_MENTIONS_PER_MESSAGE => i18n.t_with(
+        "composer-confirm-group-capped",
+        &[
+          ("count", &notified.to_string()),
+          ("cap", &DEFAULT_MAX_MENTIONS_PER_MESSAGE.to_string()),
+        ],
+      ),
+      Self::Groups(notified) => i18n.t_with("composer-confirm-group", &[("count", &notified.to_string())]),
+    }
+  }
+}
+
+/// Who a text's group mentions reach in the conversation.
+fn mention_reach(state: AppState, conversation: ConversationId, text: &str) -> GroupMentionReach {
+  if !text.contains('@') {
+    return GroupMentionReach::default();
+  }
+  group_mention_reach(
+    text,
+    &state.read(|backend| backend.mentionable_groups(conversation)),
+  )
+}
+
+/// Whether sending `text` notifies more people than the user wants to without being asked.
+fn large_mention(state: AppState, conversation: ConversationId, text: &str) -> Option<LargeMention> {
+  let threshold = state
+    .settings
+    .prefs
+    .get_untracked()
+    .notifications
+    .confirm_channel_over;
+  let members = state
+    .read(|backend| backend.conversation(conversation))
+    .map_or(0, |conv| conv.member_ids.len());
+  if needs_channel_confirmation(text, members, threshold) {
+    return Some(LargeMention::Channel(members));
+  }
+  let reach = mention_reach(state, conversation, text);
+  needs_group_confirmation(&reach, threshold).then_some(LargeMention::Groups(reach.notified.len()))
+}
+
 /// Message composer for a channel or, with `maybe_thread`, for a thread reply.
 ///
 /// The input is a rich-text editor ([`composer_editor`]): formatting shows as it will in the message
@@ -271,6 +327,8 @@ pub fn Composer(
       notice.set(None);
     }
   };
+  // People in the mentioned groups the message won't reach because they aren't in the conversation.
+  let outside_members = RwSignal::new(0_u32);
   let suggestions = RwSignal::new(Vec::<Suggestion>::new());
   let selected_suggestion = RwSignal::new(0_usize);
   let indexed_suggestions = Memo::new(move |_| {
@@ -469,6 +527,13 @@ pub fn Composer(
       .map(|element| composer_editor::markdown(&element))
       .unwrap_or_default();
     state.try_write(|backend| backend.set_draft(conversation, maybe_thread, &text));
+    if text.contains('@') {
+      if let Some(groups) = state.try_read(|backend| backend.mentionable_groups(conversation)) {
+        outside_members.try_set(group_mention_reach(&text, &groups).outside_count);
+      }
+    } else {
+      outside_members.try_set(0);
+    }
   };
   let save_draft = move || {
     draft_restore.set_value(DraftRestore::Settled);
@@ -520,6 +585,7 @@ pub fn Composer(
       composer_editor::clear(&element);
     }
     suggestions.set(Vec::new());
+    outside_members.set(0);
     is_empty.set(true);
     active_formats.set(ActiveFormats::default());
     draft_restore.set_value(DraftRestore::Settled);
@@ -527,8 +593,9 @@ pub fn Composer(
     state.write(|backend| backend.set_draft(conversation, maybe_thread, ""));
   };
 
-  // A message with @channel in a large conversation waits here until the user confirms.
-  let pending_confirm = RwSignal::new(None::<usize>);
+  // A message with @channel or a group mention notifying many people waits here until the user
+  // confirms.
+  let pending_confirm = RwSignal::new(None::<LargeMention>);
   let send_checked = move |is_confirmed: bool| {
     let Some(element) = editor.get_untracked() else {
       return;
@@ -577,20 +644,9 @@ pub fn Composer(
     if state.settings.prefs.get_untracked().composer.convert_emoticons {
       text = crate::emoji::convert(&text);
     }
-    if !is_confirmed {
-      let members = state
-        .read(|backend| backend.conversation(conversation))
-        .map_or(0, |conv| conv.member_ids.len());
-      let threshold = state
-        .settings
-        .prefs
-        .get_untracked()
-        .notifications
-        .confirm_channel_over;
-      if needs_channel_confirmation(&text, members, threshold) {
-        pending_confirm.set(Some(members));
-        return;
-      }
+    if !is_confirmed && let Some(large) = large_mention(state, conversation, &text) {
+      pending_confirm.set(Some(large));
+      return;
     }
     pending_confirm.set(None);
     let mut files = Vec::new();
@@ -730,21 +786,10 @@ pub fn Composer(
       notice.set(Some(Notice::Text(refusal_text(i18n, *refusal, &overview.policy))));
       return;
     }
-    if !is_confirmed {
-      let members = state
-        .read(|backend| backend.conversation(conversation))
-        .map_or(0, |conv| conv.member_ids.len());
-      let threshold = state
-        .settings
-        .prefs
-        .get_untracked()
-        .notifications
-        .confirm_channel_over;
-      if needs_channel_confirmation(&text, members, threshold) {
-        pending_schedule.set(Some(due_at));
-        pending_confirm.set(Some(members));
-        return;
-      }
+    if !is_confirmed && let Some(large) = large_mention(state, conversation, &text) {
+      pending_schedule.set(Some(due_at));
+      pending_confirm.set(Some(large));
+      return;
     }
     pending_confirm.set(None);
     pending_schedule.set(None);
@@ -857,7 +902,6 @@ pub fn Composer(
 
   // The picker under the input: people and user groups after `@`, commands after a leading `/`. It
   // looks at the text node at the caret only.
-  let groups = use_groups();
   let refresh_suggestions = move || {
     let Some(element) = editor.get_untracked() else {
       return;
@@ -890,7 +934,7 @@ pub fn Composer(
       },
       TriggerKind::Mention => {
         let people = state.read(|backend| backend.users());
-        let groups = groups.map(|hub| hub.groups()).unwrap_or_default();
+        let groups = state.read(|backend| backend.mentionable_groups(conversation));
         mention_suggestions(&found.query, &people, &groups, &i18n.t("mention-channel"))
       },
       TriggerKind::Emoji => emoji_suggestions(&found.query, state.settings.emoji_skin_tone.get_untracked()),
@@ -1006,6 +1050,7 @@ pub fn Composer(
         open_link_dialog();
         return;
       },
+      FormatAction::Table => composer_editor::insert_table(&element),
     }
     after_edit();
   };
@@ -1163,6 +1208,15 @@ pub fn Composer(
       && !has_modifier
       && let Some(element) = editor.get_untracked()
       && composer_editor::leave_block_at_start(&element)
+    {
+      ev.prevent_default();
+      after_edit();
+      return;
+    }
+    if ev.key() == "Tab"
+      && !(ev.alt_key() || ev.ctrl_key() || ev.meta_key())
+      && let Some(element) = editor.get_untracked()
+      && composer_editor::move_between_cells(&element, ev.shift_key())
     {
       ev.prevent_default();
       after_edit();
@@ -1613,10 +1667,15 @@ pub fn Composer(
           upload_error.get().map(|message| view! { <p class="composer-error" role="alert">{message}</p> })
         }}
         {move || {
-          pending_confirm.get().map(|members| {
+          (outside_members.get() > 0).then(|| view! {
+            <p class="composer-group-outside" role="status">{i18n.t_count("composer-group-outside", outside_members.get() as usize)}</p>
+          })
+        }}
+        {move || {
+          pending_confirm.get().map(|large| {
             view! {
               <div class="composer-confirm" role="alertdialog" aria-live="assertive">
-                <span>{i18n.t_with("composer-confirm-channel", &[("count", &members.to_string())])}</span>
+                <span>{large.text(i18n)}</span>
                 <button class="btn btn-small btn-primary" on:click=move |_| match pending_schedule.get_untracked() {
                   Some(due_at) => schedule_checked(due_at, true),
                   None => send_checked(true),

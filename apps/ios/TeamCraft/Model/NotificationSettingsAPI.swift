@@ -27,6 +27,14 @@ extension AppModel {
     _ = await request("PUT", "/me/notification-settings", body: body)
   }
 
+  /// Replaces the receipt settings (read and delivered), keeping the others.
+  func saveReceipts(read: Bool, delivered: Bool) async {
+    guard let current = await notificationSettingsJSON(),
+      let body = NotificationSettingsDocument.replacingReceipts(in: current, read: read, delivered: delivered)
+    else { return }
+    _ = await request("PUT", "/me/notification-settings", body: body)
+  }
+
   /// Quick DND until `date`; answers the end the server stored.
   func startDnd(until date: Date) async -> Date? {
     guard let answer = await request("PUT", "/me/presence", body: QuickDnd.requestBody(until: date)),
@@ -52,13 +60,6 @@ extension AppModel {
     return list.presences.first { $0.userId == userId }?.state
   }
 
-  /// People for the DND allow list (`GET /users?query=`).
-  func searchPeople(_ query: String) async -> [PersonSummary] {
-    let path = "/users?query=\(Self.queryEscaped(query))"
-    guard let json = await request("GET", path, body: nil) else { return [] }
-    return Wire.decode(PeopleList.self, from: json)?.users ?? []
-  }
-
   func person(_ userId: String) async -> PersonSummary? {
     guard let json = await request("GET", "/users/\(Self.queryEscaped(userId))", body: nil) else { return nil }
     return Wire.decode(PersonSummary.self, from: json)
@@ -76,6 +77,20 @@ extension AppModel {
     let path = "/conversations/\(conversationId)/notification-settings"
     guard let current = await request("GET", path, body: nil),
       let body = ConversationMute.body(current: current, mutedUntil: maybeDate)
+    else { return false }
+    return await request("PUT", path, body: body) != nil
+  }
+
+  /// The conversation's settings document (`GET`), or `nil` offline.
+  func conversationNotificationSettingsJSON(_ conversationId: String) async -> String? {
+    await request("GET", "/conversations/\(conversationId)/notification-settings", body: nil)
+  }
+
+  /// Saves the filters on top of what the server has now, so level and mute time stay as they are.
+  func saveConversationFilters(_ conversationId: String, filters: ConversationFilters) async -> Bool {
+    let path = "/conversations/\(conversationId)/notification-settings"
+    guard let current = await request("GET", path, body: nil),
+      let body = filters.body(applyingTo: current, timeZone: .current, at: Date())
     else { return false }
     return await request("PUT", path, body: body) != nil
   }
@@ -147,6 +162,3 @@ struct PersonSummary: Decodable, Identifiable, Equatable {
   let username: String?
 }
 
-struct PeopleList: Decodable {
-  let users: [PersonSummary]
-}

@@ -87,6 +87,17 @@ final class DndScheduleCodingTests: XCTestCase {
     XCTAssertNil(NotificationSettingsDocument.schedule(in: cleared))
   }
 
+  func testReceiptsDefaultToOnAndReplaceOnlyThemselves() throws {
+    let older = #"{"push_mode":"always","send_read_receipts":false}"#
+    XCTAssertTrue(NotificationSettingsDocument.receipts(in: older).delivered)
+    XCTAssertFalse(NotificationSettingsDocument.receipts(in: older).read)
+    let json = try XCTUnwrap(NotificationSettingsDocument.replacingReceipts(in: older, read: true, delivered: false))
+    let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+    XCTAssertEqual(object["push_mode"] as? String, "always")
+    XCTAssertEqual(object["send_read_receipts"] as? Bool, true)
+    XCTAssertEqual(object["send_delivery_receipts"] as? Bool, false)
+  }
+
   func testMalformedDocumentsAreRefused() {
     XCTAssertNil(NotificationSettingsDocument.replacingSchedule(in: "[]", with: .empty))
     XCTAssertNil(NotificationSettingsDocument.replacingSchedule(in: "", with: .empty))

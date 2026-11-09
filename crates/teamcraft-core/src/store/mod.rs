@@ -471,6 +471,11 @@ pub struct MessageMeta {
   /// identity"). Believed only from a bot account ([`crate::integration_sources::shown_source`]).
   #[serde(rename = "source", default, skip_serializing_if = "Option::is_none")]
   pub maybe_source: Option<Box<teamcraft_proto::SourceIdentity>>,
+  /// The user groups the sender's device expanded into `mentions`, by handle (`accounting`), so
+  /// receivers show `@accounting` as a group mention. Inside the ciphertext only: the server only
+  /// sees the expanded IDs (e2ee.md §4.4). An older client ignores it and shows the text.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub group_mentions: Vec<String>,
 }
 
 /// The quoted message: the reference, plus enough to show it where it isn't loaded.
@@ -696,14 +701,28 @@ impl FeedChange {
   }
 }
 
-/// Which messages with a picture or video [`LocalStore::media_messages`] lists, from a message
-/// outwards (the image viewer pages through them).
+/// Which messages with attachments [`LocalStore::attached_messages`] lists, from a message
+/// outwards (the image viewer and the Files view page through them).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MediaRange {
+pub enum AttachedRange {
   /// Older than the message (the newest ones without one), nearest first.
   Older(Option<MessageId>),
-  /// Newer than the message, nearest first.
-  Newer(MessageId),
+  /// Newer than the message (the oldest ones without one), nearest first.
+  Newer(Option<MessageId>),
+}
+
+/// Which attachments make a message count for [`LocalStore::attached_messages`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attached {
+  /// A picture or video: what the image viewer pages through.
+  Media,
+  /// A file that is no picture or video.
+  Document,
+  /// Any file: what the Files view lists (issue #1509).
+  Any,
+  /// No file: a web link in the text ([`teamcraft_proto::web_links`]) of a message the channel
+  /// shows (not a reply only in its thread), what the Files & links tab lists (issue #609).
+  Link,
 }
 
 /// Media types the image viewer shows: pictures and videos.
@@ -907,20 +926,29 @@ pub trait LocalStore {
       MessageEdge::Newest => server_ids.max(),
     })
   }
-  /// Up to `limit` listed server messages with a picture or video attachment, in the `range`,
-  /// nearest to its start first. The image viewer pages through a conversation's media with it,
-  /// so a store with an index reads only what it returns. The default scans.
-  fn media_messages(
+  /// Up to `limit` listed server messages with an attachment of `kind`, in the `range`, nearest to
+  /// its start first. The image viewer pages through a conversation's media with it, the Files
+  /// view through its files, so a store with an index reads only what it returns. The default
+  /// scans.
+  fn attached_messages(
     &self,
     conversation: ConversationId,
-    range: MediaRange,
+    kind: Attached,
+    range: AttachedRange,
     limit: usize,
   ) -> Result<Vec<StoredMessage>, StoreError> {
-    Ok(pick_media(
+    Ok(pick_attached(
       self.messages(conversation, MessageFilter::All)?,
+      kind,
       range,
       limit,
     ))
+  }
+  /// A number that changes whenever a message with attachments may have been written or removed
+  /// (also by another process): a reader that keeps a list of files reads it again only then.
+  /// `None` when the store can't tell; the reader then reads every time.
+  fn attachments_cursor(&self) -> Option<u64> {
+    None
   }
   /// Whether the feed reads below ([`Self::feed_len`] to [`Self::reply_counts`]) read only what
   /// they return (issue #155): a reader then pages a conversation's feed with them instead of
@@ -1239,13 +1267,18 @@ macro_rules! forward_local_store {
         (**self).messages(conversation, filter)
       }
 
-      fn media_messages(
+      fn attached_messages(
         &self,
         conversation: ConversationId,
-        range: MediaRange,
+        kind: Attached,
+        range: AttachedRange,
         limit: usize,
       ) -> Result<Vec<StoredMessage>, StoreError> {
-        (**self).media_messages(conversation, range, limit)
+        (**self).attached_messages(conversation, kind, range, limit)
+      }
+
+      fn attachments_cursor(&self) -> Option<u64> {
+        (**self).attachments_cursor()
       }
 
       fn indexes_feed(&self) -> bool {
@@ -1528,6 +1561,17 @@ impl StoredMessage {
   /// A listed server message with a picture or video attachment: what the image viewer pages
   /// through.
   pub fn has_media(&self) -> bool {
+    self.has_attached(Attached::Media)
+  }
+
+  /// A listed server message with an attachment of `kind`.
+  pub fn has_attached(&self, kind: Attached) -> bool {
+    if kind == Attached::Link {
+      // Only what the tab lists: a reply only in its thread isn't, as the channel doesn't show it.
+      return self.maybe_server_id.is_some()
+        && self.is_feed_row()
+        && matches!(&self.content, MessageContent::Text { body, .. } if teamcraft_proto::web_links::has_web_link(body));
+    }
     let attachments: &[AttachmentRef] = match &self.content {
       MessageContent::File { attachment } => std::slice::from_ref(attachment),
       MessageContent::Text { meta, .. } => &meta.attachments,
@@ -1535,10 +1579,11 @@ impl StoredMessage {
     };
     self.maybe_server_id.is_some()
       && !self.is_hidden()
-      && attachments.iter().any(|attachment| {
-        MEDIA_TYPE_PREFIXES
-          .iter()
-          .any(|prefix| attachment.media_type.starts_with(prefix))
+      && attachments.iter().any(|attachment| match kind {
+        Attached::Media => is_media_type(&attachment.media_type),
+        Attached::Document => !is_media_type(&attachment.media_type),
+        Attached::Any => true,
+        Attached::Link => false,
       })
   }
 
@@ -1553,9 +1598,21 @@ impl StoredMessage {
   }
 }
 
-/// The `limit` messages with media in `range` among `messages` (in display order), nearest to the
-/// range's start first.
-pub fn pick_media(messages: Vec<StoredMessage>, range: MediaRange, limit: usize) -> Vec<StoredMessage> {
+/// Whether a media type is a picture or video, as the image viewer counts it.
+fn is_media_type(media_type: &str) -> bool {
+  MEDIA_TYPE_PREFIXES
+    .iter()
+    .any(|prefix| media_type.starts_with(prefix))
+}
+
+/// The `limit` messages with attachments of `kind` in `range` among `messages` (in display order),
+/// nearest to the range's start first.
+pub fn pick_attached(
+  messages: Vec<StoredMessage>,
+  kind: Attached,
+  range: AttachedRange,
+  limit: usize,
+) -> Vec<StoredMessage> {
   let server_id = |message: &StoredMessage| {
     message
       .maybe_server_id
@@ -1563,14 +1620,18 @@ pub fn pick_media(messages: Vec<StoredMessage>, range: MediaRange, limit: usize)
   };
   let mut media: Vec<StoredMessage> = messages
     .into_iter()
-    .filter(StoredMessage::has_media)
+    .filter(|message| message.has_attached(kind))
     .filter(|message| match range {
-      MediaRange::Older(Some(from)) => server_id(message) < Some(teamcraft_proto::Id::snowflake(from).get()),
-      MediaRange::Older(None) => true,
-      MediaRange::Newer(from) => server_id(message) > Some(teamcraft_proto::Id::snowflake(from).get()),
+      AttachedRange::Older(Some(from)) => {
+        server_id(message) < Some(teamcraft_proto::Id::snowflake(from).get())
+      },
+      AttachedRange::Newer(Some(from)) => {
+        server_id(message) > Some(teamcraft_proto::Id::snowflake(from).get())
+      },
+      AttachedRange::Older(None) | AttachedRange::Newer(None) => true,
     })
     .collect();
-  if matches!(range, MediaRange::Older(_)) {
+  if matches!(range, AttachedRange::Older(_)) {
     media.reverse();
   }
   media.truncate(limit);
@@ -1686,7 +1747,8 @@ pub(crate) mod tests {
     messages_are_ordered_and_filtered(store);
     replies_also_sent_to_the_conversation_are_listed_in_both(store);
     groups_of_writes_nest_and_are_read_at_once(store);
-    media_messages_are_paged_from_a_message_outwards(store);
+    attached_messages_are_paged_from_a_message_outwards(store);
+    messages_with_web_links_are_listed_newest_first(store);
     admin_joins_show_only_as_lines_from_commits(store);
     server_changes_show_only_as_lines(store);
     edge_server_ids_skip_lines_pending_messages_and_placeholders(store);
@@ -1991,7 +2053,7 @@ pub(crate) mod tests {
     store.delete_messages(conversation).unwrap();
   }
 
-  fn media_messages_are_paged_from_a_message_outwards(store: &impl LocalStore) {
+  fn attached_messages_are_paged_from_a_message_outwards(store: &impl LocalStore) {
     let conversation = id(20);
     // Server IDs 10..=100: every other one has media; a text mentioning a media type has none.
     for (client, server) in (1..=10u8).zip((10..=100).step_by(10)) {
@@ -2018,27 +2080,55 @@ pub(crate) mod tests {
     for stored in [&video, &document, &pending] {
       store.upsert_message(stored).unwrap();
     }
-    let servers = |range, limit| -> Vec<i64> {
+    let servers_of = |kind, range, limit| -> Vec<i64> {
       store
-        .media_messages(conversation, range, limit)
+        .attached_messages(conversation, kind, range, limit)
         .unwrap()
         .iter()
         .map(|stored| Id::snowflake(stored.maybe_server_id.unwrap()).get())
         .collect()
     };
+    let servers = |range, limit| servers_of(Attached::Media, range, limit);
     assert_eq!(
-      servers(MediaRange::Older(None), 3),
+      servers(AttachedRange::Older(None), 3),
       [110, 100, 80],
       "newest first, no documents or texts"
     );
-    assert_eq!(servers(MediaRange::Older(Some(id(80))), 10), [60, 40, 20]);
-    assert_eq!(servers(MediaRange::Newer(id(60)), 2), [80, 100], "nearest first");
-    assert_eq!(servers(MediaRange::Newer(id(100)), 10), [110]);
-    assert!(servers(MediaRange::Newer(id(110)), 10).is_empty());
-    assert!(servers(MediaRange::Older(None), 0).is_empty());
+    assert_eq!(servers(AttachedRange::Older(Some(id(80))), 10), [60, 40, 20]);
+    assert_eq!(
+      servers(AttachedRange::Newer(Some(id(60))), 2),
+      [80, 100],
+      "nearest first"
+    );
+    assert_eq!(servers(AttachedRange::Newer(Some(id(100))), 10), [110]);
+    assert!(servers(AttachedRange::Newer(Some(id(110))), 10).is_empty());
+    assert!(servers(AttachedRange::Older(None), 0).is_empty());
+    assert_eq!(
+      servers(AttachedRange::Newer(None), 2),
+      [20, 40],
+      "the oldest first"
+    );
+    // The Files view (issue #1509): every file, or only documents.
+    assert_eq!(
+      servers_of(Attached::Any, AttachedRange::Older(None), 4),
+      [120, 110, 100, 80],
+      "documents too, still no texts or unsent messages"
+    );
+    assert_eq!(
+      servers_of(Attached::Any, AttachedRange::Older(Some(id(110))), 2),
+      [100, 80]
+    );
+    assert_eq!(
+      servers_of(Attached::Document, AttachedRange::Older(None), 10),
+      [120]
+    );
+    assert_eq!(
+      servers_of(Attached::Document, AttachedRange::Newer(None), 10),
+      [120]
+    );
     assert!(
       store
-        .media_messages(id(21), MediaRange::Older(None), 10)
+        .attached_messages(id(21), Attached::Media, AttachedRange::Older(None), 10)
         .unwrap()
         .is_empty(),
       "other conversations have their own"
@@ -2046,7 +2136,80 @@ pub(crate) mod tests {
     store.delete_messages(conversation).unwrap();
   }
 
-  fn media_content(media_type: &str) -> MessageContent {
+  /// Issue #609: the Files & links tab pages through the messages whose text has a web link.
+  fn messages_with_web_links_are_listed_newest_first(store: &impl LocalStore) {
+    let conversation = id(22);
+    let text = |body: &str| MessageContent::Text {
+      body: body.into(),
+      mentions: Vec::new(),
+      meta: Default::default(),
+    };
+    let bodies = [
+      "See https://example.com/a.",
+      "no link",
+      "HTTP://EXAMPLE.ORG/upper",
+      // Has the marker a store may look for, but no web link.
+      "ftp://example.com/file and app://open",
+      "[docs](https://example.com/docs)",
+      "edited away below: https://example.com/old",
+    ];
+    for (client, body) in (1..=6u8).zip(bodies) {
+      let mut stored = message(
+        conversation,
+        client,
+        Some(i64::from(client) * 10),
+        None,
+        i64::from(client),
+      );
+      stored.content = text(body);
+      store.upsert_message(&stored).unwrap();
+    }
+    let mut edited = message(conversation, 6, Some(60), None, 6);
+    edited.content = text("no link any more");
+    store.upsert_message(&edited).unwrap();
+    let mut deleted = message(conversation, 7, Some(70), None, 7);
+    deleted.content = text("https://example.com/deleted");
+    store.upsert_message(&deleted).unwrap();
+    deleted.content = MessageContent::Deleted;
+    store.upsert_message(&deleted).unwrap();
+    let mut pending = message(conversation, 8, None, None, 8);
+    pending.content = text("https://example.com/unsent");
+    store.upsert_message(&pending).unwrap();
+    let mut thread_only = message(conversation, 10, Some(100), Some(10), 10);
+    thread_only.content = text("in the thread: https://example.com/thread");
+    store.upsert_message(&thread_only).unwrap();
+    let mut file = message(conversation, 9, Some(90), None, 9);
+    file.content = media_content("application/pdf");
+    store.upsert_message(&file).unwrap();
+
+    let servers = |range, limit| -> Vec<i64> {
+      store
+        .attached_messages(conversation, Attached::Link, range, limit)
+        .unwrap()
+        .iter()
+        .map(|stored| Id::snowflake(stored.maybe_server_id.unwrap()).get())
+        .collect()
+    };
+    assert_eq!(
+      servers(AttachedRange::Older(None), 10),
+      [50, 30, 10],
+      "no text without a web link, no edited-away, deleted, unsent, thread-only or file message"
+    );
+    assert_eq!(servers(AttachedRange::Older(None), 2), [50, 30]);
+    assert_eq!(servers(AttachedRange::Older(Some(id(30))), 10), [10]);
+    assert_eq!(servers(AttachedRange::Newer(None), 1), [10]);
+    assert!(
+      store
+        .attached_messages(conversation, Attached::Any, AttachedRange::Older(None), 10)
+        .unwrap()
+        .iter()
+        .all(|stored| stored.maybe_server_id == Some(id(90))),
+      "a link is no file"
+    );
+    store.delete_messages(conversation).unwrap();
+  }
+
+  pub(crate) fn media_content(media_type: &str) -> MessageContent {
     // From JSON: the fields every version of the record has.
     let attachment = serde_json::json!({
       "attachment_id": id::<teamcraft_proto::AttachmentId>(1),

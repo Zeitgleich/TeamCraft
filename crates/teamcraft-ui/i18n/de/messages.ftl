@@ -67,6 +67,12 @@ typing-direct = schreibt …
 
 # ---- Meetings ----
 composer-confirm-channel = Diese Nachricht benachrichtigt alle in dieser Unterhaltung ({ $count } Personen). Trotzdem senden?
+composer-confirm-group = Diese Nachricht benachrichtigt { $count } Personen in den erwähnten Gruppen. Trotzdem senden?
+composer-confirm-group-capped = Diese Nachricht benachrichtigt nur die ersten { $cap } von { $count } Personen in den erwähnten Gruppen. Trotzdem senden?
+composer-group-outside = { $count ->
+    [one] 1 Mitglied der erwähnten Gruppen ist nicht in dieser Unterhaltung und wird nicht benachrichtigt.
+   *[other] { $count } Mitglieder der erwähnten Gruppen sind nicht in dieser Unterhaltung und werden nicht benachrichtigt.
+}
 composer-confirm-send = Trotzdem senden
 jump-to-date = Zu einem Datum springen
 
@@ -113,6 +119,7 @@ composer-file-unstaged = { $name } konnte nicht zum Senden vorbereitet werden.
 permalink-label = Nachricht in { $name }
 permalink-unavailable = Link zu einer Unterhaltung, in der du nicht Mitglied bist
 permalink-hidden = Nachrichtenlink
+message-table-label = Tabelle
 
 # Composer: mentions, slash commands, formatting
 mention-channel = Alle in dieser Unterhaltung benachrichtigen
@@ -124,6 +131,7 @@ format-italic = Kursiv
 format-strike = Durchgestrichen
 format-code = Code
 format-code-block = Codeblock
+format-table = Tabelle
 format-underline = Unterstrichen
 format-style = Textstil
 format-paragraph = Normaler Text
@@ -215,6 +223,7 @@ message-show-more = Mehr anzeigen
 message-show-less = Weniger anzeigen
 message-sending = Wird gesendet …
 message-status-sent = Gesendet
+message-status-delivered = Zugestellt
 message-status-read = Gelesen
 message-not-sent = Noch nicht gesendet, wird automatisch wiederholt
 message-send-failed = Nicht gesendet
@@ -246,6 +255,7 @@ linked-message-unavailable = Nachricht aus einem Gespräch, das du nicht sehen k
 ## Settings: sections, search and rows (#327)
 # Dateien-Ansicht und Einrichtungs-Checkliste (Issue #301)
 composer-placeholder-notes = Notiere etwas für dich
+messages-loading = Nachrichten werden geladen …
 older-history-loading = Ältere Nachrichten werden geladen …
 older-history-failed = Ältere Nachrichten konnten nicht geladen werden.
 older-history-retry = Erneut versuchen

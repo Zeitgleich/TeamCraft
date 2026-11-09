@@ -20,13 +20,14 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::calls::{
   BackgroundImageInfo, OrgBackgroundInfo, OrgBackgroundRule, OrgBackgrounds,
 };
+use teamcraft_client_api::files_query::{FilesPage, FilesQuery};
 use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup, GapEdge,
-  HistoryGap, ImportedAuthorView, ImportedFrom, ImportedMark, JoinableSpace, MembershipIssue, Message,
-  MessageKind, OlderHistory, PENDING_ID_BIT, PendingInvite, Placeholder, PresenceStatus, Reaction,
-  SidebarCategory, Space, SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId, ThreadSummary,
-  TimestampMs, TypingNow, UnseenReactions, User, UserId, hue_from_hex, pending_message_id,
+  HistoryGap, ImportedAuthorView, ImportedFrom, ImportedMark, JoinableSpace, MembershipIssue,
+  MentionableGroup, Message, MessageKind, OlderHistory, PENDING_ID_BIT, PendingInvite, Placeholder,
+  PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId,
+  ThreadSummary, TimestampMs, TypingNow, UnseenReactions, User, UserId, hue_from_hex, pending_message_id,
 };
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
@@ -40,7 +41,9 @@ use teamcraft_proto::{
   MoveChannelRequest, UpdateConversationRequest, UpdateSpaceRequest, effective_notifications,
 };
 
-use teamcraft_client_api::notify::{MentionRules, is_mentioned};
+use teamcraft_proto::{DEFAULT_MAX_MENTIONS_PER_MESSAGE, DEFAULT_MAX_MENTIONS_WITHOUT_GROUP_MENTIONS};
+
+use teamcraft_client_api::notify::{MentionRules, expanded_mentions, group_mention_reach, is_mentioned};
 use teamcraft_client_api::receipts::{ReadIndicator, seen_by};
 use teamcraft_client_api::scheduled::ScheduledOverview;
 
@@ -53,13 +56,15 @@ use crate::clock::Clock;
 pub use crate::entry_tally::EntryNeed;
 use crate::entry_tally::{self, Counted, EntryPass, EntryTally, TallyInputs, UnreadRows};
 use crate::error::CoreError;
+use crate::group_mentions::{may_mention_groups, mentionable_groups, stored_rosters};
 use crate::imported::{Authorship, ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
 use crate::notify_rules::{MentionPreferences, load_mention_preferences};
 use crate::people_names::shown_name;
 use crate::records::{self, Draft};
 use crate::store::{
   BookmarkItem, ConversationEvent, FeedVersion, LocalStore, MessageContent, MessageEdge, MessageFilter,
-  MessageOrder, MessageSlot, StoreError, StoredMessage, Table, Unreadable, read_together, write_group,
+  MessageMeta, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, Unreadable, read_together,
+  write_group,
 };
 
 /// Rows read at a time when a list's anchor is looked for by its time ([`FeedAnchor`]).
@@ -732,6 +737,8 @@ pub struct CoreChatBackend<S> {
   pub(crate) sent: RefCell<HashMap<ConversationId, crate::ui_drafts::KeptSent>>,
   /// Each space's members as a set, kept while its stored member list doesn't change (#701).
   pub(crate) space_members_kept: RefCell<HashMap<SpaceId, crate::space_dms::KeptMembers>>,
+  /// The Files view's page last read, kept while no message with files changes (#1509).
+  pub(crate) files_page_kept: RefCell<Option<crate::ui_files_page::KeptFilesPage>>,
   /// Tallies counted and not kept yet ([`Self::flush_entry_tallies`]).
   entry_tallies: RefCell<BTreeMap<ConversationId, EntryTally>>,
   /// What the snapshot's entries count ([`Self::with_entry_need`]).
@@ -804,6 +811,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       activity: RefCell::default(),
       sent: RefCell::default(),
       space_members_kept: RefCell::default(),
+      files_page_kept: RefCell::default(),
       entry_tallies: RefCell::default(),
       entry_need: EntryNeed::Everything,
       live_unread: RefCell::default(),
@@ -912,6 +920,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// store's order. For the mobile apps' lists: asking per space read and decrypted every
   /// conversation and user record once per space.
   pub fn listed_conversations(&self, spaces: &BTreeSet<SpaceId>) -> Vec<Conversation> {
+    let _step = crate::timing::step("chat_list_build");
     self.conversations_where(|conversation| {
       conversation
         .maybe_space_id
@@ -975,6 +984,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
     (ReadIndicator::of(view_kind(&response)) == ReadIndicator::Ticks).then(|| self.members(conversation))
   }
 
+  /// How far every other member has the conversation on a device (delivered ticks, issue #598).
+  pub(crate) fn delivered_up_to(&self, conversation: ConversationId) -> Option<MessageId> {
+    self.read(crate::read_state::delivered_to_others(&self.store, conversation))
+  }
+
   /// How far each other member read, as far as this device heard (gateway events and
   /// [`CoreCommand::RefreshReadReceipts`]).
   pub(crate) fn read_receipts(&self, conversation: ConversationId) -> Vec<(UserId, MessageId)> {
@@ -1033,6 +1047,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     users: &BTreeMap<UserId, UserSummary>,
     preferences: &MentionPreferences,
   ) -> Conversation {
+    let _step = crate::timing::step("to_conversation");
     let conversation = self.listed_conversation(response, users, preferences, &self.account_data());
     self.flush_entry_tallies();
     conversation
@@ -1078,6 +1093,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     preferences: &MentionPreferences,
     need: EntryNeed,
   ) -> EntryCounts {
+    let _step = crate::timing::step("entry_counts");
     let is_unread = self.unread_check(response, maybe_mark);
     let maybe_importer = self.importer();
     let rules = MentionRules {
@@ -1243,6 +1259,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// Keeps the tallies counted since the last call, in one group: a start counts many at once, and
   /// each on its own would wait for the disk. They are a cache: one not kept is counted again.
   pub(crate) fn flush_entry_tallies(&self) {
+    let _step = crate::timing::step("flush_entry_tallies");
     let tallies = std::mem::take(&mut *self.entry_tallies.borrow_mut());
     if tallies.is_empty() {
       return;
@@ -1267,6 +1284,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     users: &BTreeMap<UserId, UserSummary>,
     unread: UnreadCounts,
   ) -> Conversation {
+    let _step = crate::timing::step("conversation_view");
     let mut member_ids = self.members(response.id);
     let is_notes_to_self = response.is_notes_to_self(self.me);
     // The import account is no person of a DM or the notes: the banner tells about it instead
@@ -1640,6 +1658,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       maybe_imported,
       maybe_source,
       maybe_placeholder: stored.maybe_unreadable.map(placeholder_view),
+      group_mentions: crate::group_mentions::shown_group_mentions(&stored.content),
+      mentions_me: matches!(&stored.content, MessageContent::Text { mentions, .. } if mentions.contains(&self.me)),
     }
   }
 
@@ -1972,6 +1992,56 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 
   /// `@username` mentions of conversation members in a message body.
+  /// A text message as a send seals it: `@username` and the groups it may mention here expanded
+  /// to the people they notify, the group handles recorded inside the ciphertext for receivers.
+  pub(crate) fn text_mentioning(
+    &self,
+    conversation: ConversationId,
+    body: &str,
+    mut meta: MessageMeta,
+  ) -> MessageContent {
+    if !body.contains('@') {
+      meta.group_mentions = Vec::new();
+      return MessageContent::Text {
+        body: body.to_owned(),
+        mentions: Vec::new(),
+        meta,
+      };
+    }
+    let direct = self.mentions_in(conversation, body);
+    let may_mention = self.may_mention_groups_in(conversation);
+    let reach = group_mention_reach(body, &self.mentionable_groups_in(conversation, may_mention));
+    let cap = if may_mention {
+      DEFAULT_MAX_MENTIONS_PER_MESSAGE
+    } else {
+      DEFAULT_MAX_MENTIONS_WITHOUT_GROUP_MENTIONS
+    };
+    meta.group_mentions = reach.handles.clone();
+    MessageContent::Text {
+      body: body.to_owned(),
+      mentions: expanded_mentions(direct, &reach, cap),
+      meta,
+    }
+  }
+
+  fn may_mention_groups_in(&self, conversation: ConversationId) -> bool {
+    let maybe_response: Option<ConversationResponse> = self.read(records::get_json(
+      &self.store,
+      Table::Conversations,
+      &conversation.to_string(),
+    ));
+    maybe_response.as_ref().is_some_and(may_mention_groups)
+  }
+
+  fn mentionable_groups_in(&self, conversation: ConversationId, may_mention: bool) -> Vec<MentionableGroup> {
+    if !may_mention {
+      return Vec::new();
+    }
+    let rosters = self.read(stored_rosters(&self.store));
+    let members: BTreeSet<UserId> = self.members(conversation).into_iter().collect();
+    mentionable_groups(&rosters, &members, self.me, true)
+  }
+
   pub(crate) fn mentions_in(&self, conversation: ConversationId, body: &str) -> Vec<UserId> {
     // Most messages mention nobody: sending them reads neither the user directory nor the members.
     if !body.contains('@') {
@@ -2198,6 +2268,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   /// The conversation is lent, not copied: the feed asks again on every change of the open
   /// conversation, and a log channel changes all the time (issue #1000).
   fn message_page(&self, conversation: ConversationId, start: usize, len: usize) -> (usize, Vec<Message>) {
+    let _step = crate::timing::step("message_page_read");
     if self.store.indexes_feed() {
       return self.indexed_page(conversation, start, len);
     }
@@ -2240,17 +2311,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     Vec::new()
   }
 
+  fn mentionable_groups(&self, conversation: ConversationId) -> Vec<MentionableGroup> {
+    let may_mention = self.may_mention_groups_in(conversation);
+    self.mentionable_groups_in(conversation, may_mention)
+  }
+
   fn post_message(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>, body: &str) {
-    let mentions = self.mentions_in(conversation, body);
-    self.enqueue(
-      conversation,
-      maybe_thread,
-      MessageContent::Text {
-        body: body.to_string(),
-        mentions,
-        meta: Default::default(),
-      },
-    );
+    let content = self.text_mentioning(conversation, body, MessageMeta::default());
+    self.enqueue(conversation, maybe_thread, content);
   }
 
   fn toggle_reaction(&self, conversation: ConversationId, message: MessageId, emoji: &str) {
@@ -2696,8 +2764,8 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       Some(crate::client::DmSetupStatus::Failed) => issues.push(MembershipIssue::EncryptionSetupFailed),
       None => {},
     }
-    if self.read(crate::client::is_waiting_for_admission(&self.store, conversation)) {
-      issues.push(MembershipIssue::WaitingForAdmission);
+    if let Some(attempts) = self.read(crate::client::self_add_attempts(&self.store, conversation)) {
+      issues.push(MembershipIssue::WaitingForAdmission { attempts });
     }
     issues.extend(self.outsider_issues(conversation));
     issues.extend(
@@ -2877,6 +2945,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     seen_by(&self.read_receipts(conversation), message)
   }
 
+  fn delivered_to_others(&self, conversation: ConversationId) -> Option<MessageId> {
+    self.read(crate::read_state::delivered_to_others(&self.store, conversation))
+  }
+
   fn refresh_read_receipts(&self, conversation: ConversationId) {
     // Receipts exist only in DMs and group DMs: a channel's answer would always be empty.
     let has_receipts = self.conversations_raw().iter().any(|response| {
@@ -2898,6 +2970,7 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
       threads: self.read(crate::read_state::threads(&self.store)),
       presence: self.read(crate::read_state::announced_presence(&self.store)),
       receipts: self.read(crate::read_state::all_read_receipts(&self.store)),
+      delivered: self.read(crate::read_state::all_delivered_to_others(&self.store)),
       marks: self.read(crate::read_state::marks(&self.store)),
     })
   }
@@ -2956,6 +3029,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
   }
   fn conversation_files(&self, conversation: ConversationId) -> Vec<FileInfo> {
     self.ui_conversation_files(conversation)
+  }
+
+  fn files_page(&self, query: &FilesQuery<'_>) -> Option<FilesPage> {
+    Some(self.ui_files_page(query))
+  }
+
+  fn conversation_links(
+    &self,
+    conversation: ConversationId,
+    limit: usize,
+  ) -> Option<teamcraft_client_api::links::LinkPage> {
+    Some(self.ui_conversation_links(conversation, limit))
   }
 
   fn conversation_media(
@@ -4045,12 +4130,7 @@ fn role_appointer(
 }
 
 fn presence_status(state: PresenceState) -> PresenceStatus {
-  match state {
-    PresenceState::Online => PresenceStatus::Online,
-    PresenceState::Away => PresenceStatus::Away,
-    PresenceState::DoNotDisturb => PresenceStatus::DoNotDisturb,
-    PresenceState::Offline | PresenceState::Unknown(_) => PresenceStatus::Offline,
-  }
+  PresenceStatus::from(&state)
 }
 
 /// Avatar colour derived from the ID, stable across devices.

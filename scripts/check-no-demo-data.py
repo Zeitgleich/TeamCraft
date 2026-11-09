@@ -11,6 +11,7 @@ Directories are searched recursively; `.tar.gz`/`.tgz` archives are searched mem
 """
 import argparse
 import pathlib
+import re
 import sys
 import tarfile
 
@@ -52,9 +53,16 @@ def main(argv=None):
     return 0
 
 
+# Whole words only: "Project A" must not match the "Project Authors" of a font's licence (v1.0.26).
+FIXTURE_PATTERNS = [
+    (fixture, re.compile(rb"(?<![A-Za-z0-9])" + re.escape(fixture.encode()) + rb"(?![A-Za-z0-9])"))
+    for fixture in DEMO_FIXTURES
+]
+
+
 def fixtures_in(data):
-    """The demo fixtures that occur in `data` (bytes)."""
-    return [fixture for fixture in DEMO_FIXTURES if fixture.encode() in data]
+    """The demo fixtures that occur in `data` (bytes) as whole words."""
+    return [fixture for fixture, pattern in FIXTURE_PATTERNS if pattern.search(data)]
 
 
 def read_all(path):

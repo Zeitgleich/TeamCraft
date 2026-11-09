@@ -75,6 +75,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Reads ahead what a fresh session's full sync and the connection after it ask for; returns
   /// the listings the sync starts with.
   pub(super) async fn read_ahead_fresh(&mut self) -> Result<FirstListing, CoreError> {
+    let _step = crate::timing::step("read_ahead_fresh");
     let roster_after = self.workspace()?.roster.version;
     let policy_after = self.workspace()?.policy_version;
     let welcomes_after = self.sync.maybe_welcome_cursor;

@@ -55,25 +55,58 @@ pub fn root_message_of(thread: ThreadId) -> MessageId {
 /// Milliseconds since the Unix epoch.
 pub type TimestampMs = i64;
 
-/// Presence state a user chose or the system derived.
+/// Presence state a user chose or the system derived (issue #1578: the Teams-style list).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PresenceStatus {
+  /// "Available": the automatic state while a device is in use.
   Online,
-  Away,
+  /// Set by hand, and automatically during a call or a meeting. Notifications still come.
+  Busy,
+  /// Holds notifications back (urgent ones excepted, notifications.md).
   DoNotDisturb,
+  /// A short absence, set by hand.
+  BeRightBack,
+  Away,
+  /// Offline, or "appear offline" for the user themself.
   Offline,
 }
 
 impl PresenceStatus {
-  pub const ALL: [PresenceStatus; 4] = [Self::Online, Self::Away, Self::DoNotDisturb, Self::Offline];
+  /// Every status, in the order the status pickers list them on every platform.
+  pub const ALL: [PresenceStatus; 6] = [
+    Self::Online,
+    Self::Busy,
+    Self::DoNotDisturb,
+    Self::BeRightBack,
+    Self::Away,
+    Self::Offline,
+  ];
 
   /// CSS modifier and stable identifier.
   pub fn slug(self) -> &'static str {
     match self {
       Self::Online => "online",
-      Self::Away => "away",
+      Self::Busy => "busy",
       Self::DoNotDisturb => "dnd",
+      Self::BeRightBack => "brb",
+      Self::Away => "away",
       Self::Offline => "offline",
+    }
+  }
+}
+
+impl From<&teamcraft_proto::PresenceState> for PresenceStatus {
+  /// What the server reported, as shown. A state from a newer server is still somebody who is
+  /// there (its wire form names a legacy state alongside, so this is rare).
+  fn from(state: &teamcraft_proto::PresenceState) -> Self {
+    use teamcraft_proto::PresenceState;
+    match state {
+      PresenceState::Online | PresenceState::Unknown(_) => Self::Online,
+      PresenceState::Busy => Self::Busy,
+      PresenceState::DoNotDisturb => Self::DoNotDisturb,
+      PresenceState::BeRightBack => Self::BeRightBack,
+      PresenceState::Away => Self::Away,
+      PresenceState::Offline => Self::Offline,
     }
   }
 }
@@ -476,8 +509,12 @@ pub enum MembershipIssue {
   EncryptionSetupFailed,
   /// This device asked to be let into a channel's encryption group (a join, an admin's self-join)
   /// and no member has let it in yet; it asks again on its own (issue #907). Only messages from
-  /// the join on become readable.
-  WaitingForAdmission,
+  /// the join on become readable. `attempts` counts the requests posted; more than one means no
+  /// member let it in within the retry interval (issue #908).
+  WaitingForAdmission {
+    #[serde(default = "one_attempt")]
+    attempts: u32,
+  },
   /// The import account is in this DM or notes while it imports their history (e2ee.md §4.10):
   /// it can read what is written here until the import is finished.
   ImportInProgress { importer: UserId },
@@ -485,6 +522,11 @@ pub enum MembershipIssue {
   ReadByOutsider { user: UserId },
   #[serde(other)]
   Unknown,
+}
+
+/// What a `WaitingForAdmission` from a version before issue #908 meant: one request so far.
+fn one_attempt() -> u32 {
+  1
 }
 
 /// What kind of conversation a sidebar entry is.
@@ -793,6 +835,27 @@ pub struct Message {
   /// envelope's sender, time and thread, and an empty `body`. It fills in place once readable.
   #[serde(rename = "placeholder", default, skip_serializing_if = "Option::is_none")]
   pub maybe_placeholder: Option<Placeholder>,
+  /// Handles of the user groups the sender's device expanded in this message (`@accounting`), from
+  /// inside the ciphertext. The UI shows those words as group mentions.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub group_mentions: Vec<String>,
+  /// The sender named this user among the people to notify: by `@username` or through a group
+  /// they were in when it was sent.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub mentions_me: bool,
+}
+
+/// A user group this user may mention in a conversation (`use_group_mentions`) and who a mention
+/// of it would reach, as the composer offers it. People who aren't in the conversation are never
+/// mentioned, only counted for the hint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MentionableGroup {
+  pub handle: String,
+  pub name: String,
+  /// The group's members who are in the conversation, without the user.
+  pub notified: Vec<UserId>,
+  /// The group's members who aren't in the conversation.
+  pub outside_count: u32,
 }
 
 /// The integration source a message shows, see [`Message::maybe_source`].
@@ -1120,6 +1183,8 @@ mod tests {
         maybe_imported: None,
         maybe_source: None,
         maybe_placeholder: None,
+        group_mentions: Vec::new(),
+        mentions_me: false,
       })
     };
     assert_eq!(line("[ERROR] disk full").kind, MessageKind::Log(LogLevel::Error));
@@ -1147,6 +1212,8 @@ mod tests {
       maybe_imported: None,
       maybe_source: None,
       maybe_placeholder: None,
+      group_mentions: Vec::new(),
+      mentions_me: false,
     };
     as_chat_message(&mut message);
     assert_eq!(

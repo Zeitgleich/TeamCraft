@@ -1,6 +1,6 @@
 [package]
 name = "davey"
-version = "0.1.5"
+version = "0.2.0"
 description = "A Rust implementation of Discord Audio & Video End-to-End Encryption (DAVE) Protocol"
 license = "MIT"
 homepage = "https://github.com/Snazzah/davey"
@@ -13,6 +13,7 @@ edition = "2024"
 openmls = { features = ["js"], version = "0.9.1" }
 openmls_basic_credential = "0.6.0"
 openmls_rust_crypto = "0.6.0"
+openmls_traits = "0.6.0"
 tracing = "0.1.41"
 thiserror = "2.0.12"
 # TeamCraft: Instant that works in browsers (wasm32-unknown-unknown); re-exports std elsewhere.
@@ -46,3 +47,14 @@ pyo3 = ["dep:pyo3"]
 
 # TeamCraft vendoring: own workspace root, so the copy can be built and tested on its own.
 [workspace]
+
+# From the upstream workspace root (not part of the crate): scrypt is very slow unoptimised, and
+# tls_codec's debug assertions panic on truncated input instead of returning an error.
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3
+
+[profile.dev.package.tls_codec]
+debug-assertions = false

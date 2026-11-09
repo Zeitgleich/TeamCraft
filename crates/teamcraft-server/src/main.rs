@@ -19,7 +19,7 @@ use teamcraft_server::auth::{
   HttpJwkSource, JwksCache, JwksCacheOptions, Revocations, RoleMapping, TokenValidator, ValidatorOptions,
 };
 use teamcraft_server::brand::{BrandInputs, BrandStore};
-use teamcraft_server::config::{CONFIG_PATH_ENV, Config, DatabaseConfig};
+use teamcraft_server::config::{CONFIG_PATH_ENV, Config, DatabaseConfig, WebhooksConfig};
 use teamcraft_server::dependencies::{Dependencies, DependencyOptions, TokioClock};
 use teamcraft_server::drain::Drain;
 use teamcraft_server::error::ApiError;
@@ -48,7 +48,7 @@ use teamcraft_server::services::presence::{self, refresh_presence};
 use teamcraft_server::services::scheduled_messages;
 use teamcraft_server::services::session::{self, PolicyHolder};
 use teamcraft_server::services::{
-  admin, admin_join_requests, attachments, backgrounds, brands, calendar_settings, conversations,
+  admin, admin_join_requests, attachments, backgrounds, brand_mail, brands, calendar_settings, conversations,
   email_digest, guests, key_packages, mail_settings, meeting_guests, meeting_notices, oidc, retention,
   runtime_settings, storage_cleanup, urgent,
 };
@@ -126,6 +126,11 @@ async fn run() -> anyhow::Result<()> {
     .validate()
     .map_err(anyhow::Error::msg)
     .context("checking [limits]")?;
+  config
+    .integration
+    .validate()
+    .map_err(anyhow::Error::msg)
+    .context("checking [integration]")?;
   let brands = BrandStore::new(BrandInputs {
     branding: config.branding.clone(),
     config_brands: config.brands.clone(),
@@ -219,6 +224,7 @@ async fn run() -> anyhow::Result<()> {
     maybe_local: build_local_auth(&config)?.map(Arc::new),
     mailer,
     mail_status: Arc::new(MailStatus::default()),
+    brand_mail: Arc::default(),
     maybe_settings_key: maybe_settings_key.map(Arc::new),
     settings_lock: Arc::default(),
     dpop: Arc::default(),
@@ -243,6 +249,16 @@ async fn run() -> anyhow::Result<()> {
       sign_in_page: config.sign_in_page.clone(),
       presence: config.presence.clone(),
       shares: config.shares.clone(),
+      // Each worker holds a pooled connection while it sends: at most half the pool.
+      webhooks: WebhooksConfig {
+        workers: config.webhooks.workers.clamp(
+          1,
+          usize::try_from(config.database.max_connections / 2)
+            .unwrap_or(1)
+            .max(1),
+        ),
+        ..config.webhooks.clone()
+      },
       maybe_organization_claim: config.oidc.maybe_organization_claim.clone(),
       sign_in: SignInSettings::new(
         config.oidc.issuer.clone(),
@@ -301,6 +317,10 @@ async fn run() -> anyhow::Result<()> {
       teamcraft_server::services::crash_reports::CrashRelay::new(false)
         .context("building the crash reports relay client")?,
     ),
+    webhooks: Arc::new(
+      teamcraft_server::webhooks::WebhookDispatcher::new(&config.webhooks)
+        .context("building the webhook client")?,
+    ),
   };
   with_startup_retries("loading the settings", startup_deadline, || {
     load_runtime_settings(&state)
@@ -347,6 +367,7 @@ async fn run() -> anyhow::Result<()> {
   calls::adopt_running_calls(&state).await;
   // Wake-ups that failed for a temporary reason, also those queued before a restart.
   spawn_retry_workers(&state);
+  teamcraft_server::webhooks::spawn_workers(&state);
   let app = serve_metrics(&state, &config.metrics).context("[metrics]")?;
 
   let listener = bind_listener(config.server.listen_addr)
@@ -701,6 +722,10 @@ async fn load_runtime_settings(state: &AppState) -> anyhow::Result<()> {
     .await
     .context("loading the calendar settings")?;
   brands::load(state).await.context("loading the brands")?;
+  // After the brands: a brand's transport sends as that brand.
+  brand_mail::load(state)
+    .await
+    .context("loading the brands' mail servers")?;
   Ok(())
 }
 

@@ -21,6 +21,7 @@ mod rendezvous;
 mod role;
 pub mod role_rules;
 pub mod synced_settings;
+pub mod web_links;
 mod wire_enum;
 
 pub use api::*;
@@ -37,8 +38,8 @@ pub use call_media::{
 };
 pub use calls::{
   CALL_JOIN_TOKEN_AUDIENCE, CallClientMessage, CallEvent, CallJoinClaims, CallParticipant, CallServerMessage,
-  DaveKeyBinding, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, SWITCH_SECRET_BYTES,
-  ScreenAudioTrack, ScreenContentMode,
+  DaveKeyBinding, DaveTransitionId, DaveTransitionMode, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE,
+  SFU_SWITCHED_CLOSE_CODE, SWITCH_SECRET_BYTES, ScreenAudioTrack, ScreenContentMode,
 };
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode, SignInReason};
@@ -49,7 +50,8 @@ pub use id::{
   AnnouncementId, AttachmentId, AuditEntryId, BackgroundId, CallId, CategoryId, ConversationId, DeviceId, Id,
   IdError, InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId, MessageId, MlsMessageId, OrgBackgroundId,
   PushRetryId, RecoveryRequestId, SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS,
-  ScheduledMessageId, Snowflake, SpaceId, SystemEventId, ThreadId, UserGroupId, UserId,
+  ScheduledMessageId, Snowflake, SpaceId, SystemEventId, ThreadId, UserGroupId, UserId, WebhookEventId,
+  WebhookId,
 };
 pub use import::{
   IMPORT_WORKER, ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,

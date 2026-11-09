@@ -100,6 +100,14 @@ pub enum DpopProofError {
   Proof(#[from] DpopError),
   #[error("the key could not sign: {0}")]
   Signer(String),
+  /// The key this device was bound with is gone for good (read and absent). Only a key in a platform's
+  /// store says this: signing in again is the way out.
+  #[error("the key this sign-in is bound to is gone")]
+  KeyLost,
+  /// The key can't sign right now (its store is locked or doesn't answer). Nothing is decided about
+  /// the session, and the request waits like one that had no network.
+  #[error("the key this sign-in is bound to can't sign right now")]
+  KeyUnavailable,
 }
 
 /// How a token goes out: the value of `Authorization`, and the proof next to it for a bound token.
@@ -316,8 +324,10 @@ impl Learned {
 impl From<DpopSendError> for ApiError {
   fn from(error: DpopSendError) -> Self {
     match error {
-      DpopSendError::KeyLost => Self::BoundKeyLost,
-      DpopSendError::KeyUnavailable => Self::Network(error.to_string()),
+      DpopSendError::KeyLost | DpopSendError::Proof(DpopProofError::KeyLost) => Self::BoundKeyLost,
+      DpopSendError::KeyUnavailable | DpopSendError::Proof(DpopProofError::KeyUnavailable) => {
+        Self::Network(error.to_string())
+      },
       DpopSendError::Proof(error) => Self::Token(error.to_string()),
     }
   }
@@ -932,6 +942,22 @@ mod tests {
       assert_eq!(refused.err(), Some(DpopSendError::KeyUnavailable));
       let error = ApiError::from(DpopSendError::KeyUnavailable);
       assert!(error.is_transient() && !error.is_sign_in_required(), "{error}");
+    }
+
+    /// A key in a platform's store says itself when it can't sign: a store that doesn't answer is a
+    /// wait, not a sign-out, and a key that is gone is what a sign-in fixes.
+    #[test]
+    fn a_platform_key_that_cant_sign_is_a_wait_and_one_that_is_gone_a_sign_in() {
+      let waiting = ApiError::from(DpopSendError::Proof(DpopProofError::KeyUnavailable));
+      assert!(
+        waiting.is_transient() && !waiting.is_sign_in_required(),
+        "{waiting}"
+      );
+      let lost = ApiError::from(DpopSendError::Proof(DpopProofError::KeyLost));
+      assert!(
+        matches!(lost, ApiError::BoundKeyLost) && lost.is_sign_in_required(),
+        "{lost}"
+      );
     }
 
     fn bound_token(jkt: &JwkThumbprint) -> String {

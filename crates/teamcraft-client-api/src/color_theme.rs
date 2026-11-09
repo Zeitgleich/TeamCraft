@@ -1,6 +1,10 @@
 //! Colour themes (issue #202): the user's choice of colours for the app's chrome – the rail, the
 //! sidebar, the top bar, the selected row, the accent, the presence dot and the unread badge.
 //!
+//! In light mode the sidebar is a light tint of the navigation colour with dark text, and only the
+//! rail and the top bar carry the colour itself; in dark mode the sidebar is the (darkened)
+//! navigation colour.
+//!
 //! A theme never touches the content surfaces (messages, composer, threads, panels, dialogs): those
 //! stay neutral, white in light mode and dark grey in dark mode, so text is always readable.
 //!
@@ -36,6 +40,12 @@ const INK: Rgb = Rgb([0x14, 0x14, 0x14]);
 const DARK_NAV_BASE: Rgb = Rgb([0x12, 0x12, 0x12]);
 /// The most luminous a navigation colour may be in dark mode, so the chrome stays dark there.
 const MAX_DARK_NAV_LUMINANCE: f64 = 0.03;
+/// How much of a dark navigation colour tints the light-mode sidebar: `--sb-tint` in
+/// 000-tokens.css, which brands get.
+const SIDEBAR_TINT: f64 = 0.08;
+/// How far a light navigation colour (the bright presets) is lightened for the light-mode sidebar,
+/// so the sidebar stays a lighter step of the chrome.
+const LIGHT_NAV_SIDEBAR_LIFT: f64 = 0.5;
 /// Steps of a contrast adjustment: each mixes a little more toward black or white.
 const ADJUST_STEP: f64 = 0.04;
 /// The length of a share code: four `#rrggbb` colours and three commas.
@@ -75,17 +85,25 @@ pub struct Rgb(pub [u8; 3]);
 /// The colours a theme sets, for one of light or dark mode, each checked for contrast.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThemeTokens {
-  /// The rail and the top bar.
+  /// The navigation colour, moved away from its text until that reads: the dark-mode sidebar, and
+  /// the mobile apps' header.
+  pub navigation: Rgb,
+  /// The rail and the top bar: the navigation colour a little darker.
   pub chrome: Rgb,
+  /// Icons and text on the chrome and on [`Self::navigation`]: 4.5:1 on both.
+  pub chrome_text: Rgb,
+  /// The strongest text on the chrome (the brand name, active icons).
+  pub chrome_strong: Rgb,
+  /// Light in light mode (a tint of the navigation colour), dark in dark mode.
   pub sidebar: Rgb,
-  /// Names and icons in the sidebar and on the chrome: 4.5:1 on both.
+  /// Names and icons in the sidebar: 4.5:1.
   pub sidebar_text: Rgb,
-  /// The strongest text on the chrome (unread names, titles).
+  /// The strongest text in the sidebar (unread names, titles).
   pub sidebar_strong: Rgb,
-  /// Secondary text in the sidebar (section titles): 4.5:1 on both.
+  /// Secondary text in the sidebar (section titles, read channels): 4.5:1.
   pub sidebar_muted: Rgb,
-  /// Hover on the sidebar: a translucent white (dark sidebar) or black (light sidebar).
-  pub sidebar_hover_is_dark: bool,
+  /// Whether the sidebar is light: hover and fills on it are a translucent black, else white.
+  pub is_light_sidebar: bool,
   /// The selected row; white text on it is 4.5:1.
   pub selected: Rgb,
   /// Links, buttons and the focus ring: 4.5:1 on the content surfaces.
@@ -380,8 +398,8 @@ impl ThemeColors {
     } else {
       self.navigation
     };
-    // Dark or light text, whichever reads better; a mid-tone sidebar is moved away from it until
-    // the text reads on the sidebar and on the darker chrome.
+    // The navigation colour as before #202's light sidebar: light or dark, moved away from its
+    // text until that reads on it and on the darker chrome. In dark mode it is the sidebar.
     let is_light_nav = INK.contrast(navigation) > WHITE.contrast(navigation);
     let (ink, away) = if is_light_nav {
       (INK, WHITE)
@@ -395,15 +413,22 @@ impl ThemeColors {
         sidebar.mix(BLACK, 0.25)
       }
     };
-    let sidebar = navigation.toward(away, |sidebar| {
-      ink.contrast(sidebar) >= TEXT_CONTRAST && ink.contrast(chrome_of(sidebar)) >= TEXT_CONTRAST
+    let nav = navigation.toward(away, |nav| {
+      ink.contrast(nav) >= TEXT_CONTRAST && ink.contrast(chrome_of(nav)) >= TEXT_CONTRAST
     });
-    let chrome = chrome_of(sidebar);
-    let readable_on_chrome =
-      |color: Rgb| color.contrast(sidebar) >= TEXT_CONTRAST && color.contrast(chrome) >= TEXT_CONTRAST;
-    let sidebar_strong = ink;
-    let sidebar_text = ink.mix(sidebar, 0.18).toward(ink, readable_on_chrome);
-    let sidebar_muted = ink.mix(sidebar, 0.36).toward(ink, readable_on_chrome);
+    let chrome = chrome_of(nav);
+    let (chrome_text, chrome_strong) = text_on(ink, &[nav, chrome]);
+    let sidebar = match (is_dark, is_light_nav) {
+      (true, _) => nav,
+      (false, true) => nav.mix(WHITE, LIGHT_NAV_SIDEBAR_LIFT),
+      (false, false) => WHITE.mix(nav, SIDEBAR_TINT),
+    };
+    let is_light_sidebar = INK.contrast(sidebar) > WHITE.contrast(sidebar);
+    let sidebar_ink = if is_light_sidebar { INK } else { WHITE };
+    let (sidebar_text, sidebar_strong) = text_on(sidebar_ink, &[sidebar]);
+    let sidebar_muted = sidebar_ink
+      .mix(sidebar, 0.36)
+      .toward(sidebar_ink, |color| color.contrast(sidebar) >= TEXT_CONTRAST);
     let selected = self
       .selection
       .toward(BLACK, |color| WHITE.contrast(color) >= TEXT_CONTRAST);
@@ -437,12 +462,15 @@ impl ThemeColors {
       .notification
       .toward(BLACK, |color| WHITE.contrast(color) >= TEXT_CONTRAST);
     ThemeTokens {
+      navigation: nav,
       chrome,
+      chrome_text,
+      chrome_strong,
       sidebar,
       sidebar_text,
       sidebar_strong,
       sidebar_muted,
-      sidebar_hover_is_dark: is_light_nav,
+      is_light_sidebar,
       selected,
       accent,
       accent_strong,
@@ -457,17 +485,36 @@ impl ThemeColors {
 impl ThemeTokens {
   /// The UI's CSS custom properties (000-tokens.css) these colours set.
   pub fn css_properties(&self) -> Vec<(&'static str, String)> {
-    let hover = if self.sidebar_hover_is_dark {
-      "rgba(0, 0, 0, 0.06)"
+    // The same translucent layers as 000-tokens.css for a light or a dark sidebar.
+    let [hover, fill, fill_strong, edge, border] = if self.is_light_sidebar {
+      [
+        "rgba(0, 0, 0, 0.06)",
+        "rgba(0, 0, 0, 0.05)",
+        "rgba(0, 0, 0, 0.09)",
+        "rgba(0, 0, 0, 0.12)",
+        "rgba(0, 0, 0, 0.08)",
+      ]
     } else {
-      "rgba(255, 255, 255, 0.07)"
+      [
+        "rgba(255, 255, 255, 0.07)",
+        "rgba(255, 255, 255, 0.08)",
+        "rgba(255, 255, 255, 0.14)",
+        "rgba(255, 255, 255, 0.14)",
+        "rgba(0, 0, 0, 0)",
+      ]
     };
     vec![
       ("--chrome", self.chrome.to_string()),
-      ("--chrome-text", self.sidebar_text.to_string()),
-      ("--chrome-strong", self.sidebar_strong.to_string()),
+      ("--chrome-text", self.chrome_text.to_string()),
+      ("--chrome-strong", self.chrome_strong.to_string()),
       ("--sb-bg", self.sidebar.to_string()),
+      ("--sb-border", border.to_owned()),
+      ("--sb-text", self.sidebar_text.to_string()),
+      ("--sb-strong", self.sidebar_strong.to_string()),
       ("--sb-hover", hover.to_owned()),
+      ("--sb-fill", fill.to_owned()),
+      ("--sb-fill-strong", fill_strong.to_owned()),
+      ("--sb-edge", edge.to_owned()),
       ("--sb-current", self.selected.to_string()),
       ("--sb-muted", self.sidebar_muted.to_string()),
       ("--sb-dim", self.sidebar_muted.to_string()),
@@ -575,6 +622,18 @@ impl Rgb {
     }
     target
   }
+}
+
+/// Text and strong text in `ink`'s direction that read at 4.5:1 on every background: the text a
+/// little softer than the ink, the strong text the ink itself.
+fn text_on(ink: Rgb, backgrounds: &[Rgb]) -> (Rgb, Rgb) {
+  let readable = |color: Rgb| {
+    backgrounds
+      .iter()
+      .all(|background| color.contrast(*background) >= TEXT_CONTRAST)
+  };
+  let background = backgrounds.first().copied().unwrap_or(ink);
+  (ink.mix(background, 0.18).toward(ink, readable), ink)
 }
 
 /// A navigation colour for dark mode: dark ones stay, light ones are darkened toward a neutral
@@ -761,17 +820,41 @@ mod tests {
       let paper = Preset::find("paper").unwrap().colors;
       let tokens = paper.tokens(true);
       assert!(tokens.sidebar.luminance() <= MAX_DARK_NAV_LUMINANCE);
-      assert!(!tokens.sidebar_hover_is_dark);
+      assert_eq!(tokens.sidebar, tokens.navigation);
+      assert!(!tokens.is_light_sidebar);
       let light = paper.tokens(false);
-      assert_eq!(light.sidebar, paper.navigation);
-      assert!(light.sidebar_hover_is_dark);
+      assert_eq!(light.navigation, paper.navigation);
+      assert!(light.is_light_sidebar);
+    }
+
+    #[test]
+    fn light_mode_has_a_light_sidebar_and_the_colour_on_the_chrome() {
+      for preset in PRESETS {
+        let tokens = preset.colors.tokens(false);
+        assert!(tokens.is_light_sidebar, "{}", preset.id.as_str());
+        assert!(
+          tokens.sidebar.luminance() > tokens.chrome.luminance(),
+          "{}",
+          preset.id.as_str()
+        );
+        // The selected row stands out from the sidebar (WCAG 1.4.11).
+        assert!(
+          tokens.selected.contrast(tokens.sidebar) >= MARK_CONTRAST,
+          "{}",
+          preset.id.as_str()
+        );
+      }
+      let harbor = Preset::find("harbor").unwrap().colors;
+      let tokens = harbor.tokens(false);
+      assert_eq!(tokens.navigation, harbor.navigation);
+      assert_eq!(tokens.sidebar, WHITE.mix(harbor.navigation, SIDEBAR_TINT));
     }
 
     #[test]
     fn readable_colours_stay_as_chosen() {
       let colors = ThemeColors::from_share_code(CODE).unwrap();
       let tokens = colors.tokens(false);
-      assert_eq!(tokens.sidebar, colors.navigation);
+      assert_eq!(tokens.navigation, colors.navigation);
       assert_eq!(tokens.selected, colors.selection);
       assert_eq!(tokens.badge, colors.notification);
     }
@@ -779,10 +862,11 @@ mod tests {
     fn assert_readable(tokens: &ThemeTokens, is_dark: bool, colors: &ThemeColors) {
       let context = format!("{} dark={is_dark}", colors.share_code());
       for (text, background) in [
+        (tokens.chrome_text, tokens.chrome),
+        (tokens.chrome_text, tokens.navigation),
+        (tokens.chrome_strong, tokens.chrome),
         (tokens.sidebar_text, tokens.sidebar),
-        (tokens.sidebar_text, tokens.chrome),
         (tokens.sidebar_muted, tokens.sidebar),
-        (tokens.sidebar_muted, tokens.chrome),
         (tokens.sidebar_strong, tokens.sidebar),
         (WHITE, tokens.selected),
         (WHITE, tokens.badge),
@@ -818,7 +902,7 @@ mod tests {
   #[test]
   fn css_properties_are_known_tokens_with_safe_values() {
     let properties = ColorTheme::Preset(PRESETS[0].id).css_properties(false);
-    assert_eq!(properties.len(), 15);
+    assert_eq!(properties.len(), 21);
     for (name, value) in properties {
       assert!(name.starts_with("--"));
       assert!(
@@ -836,7 +920,7 @@ mod tests {
     assert_eq!(Rgb::from_hsl(0.0, 0.0, 1.0), WHITE);
     let theme = ThemeColors::from_hue(400.0);
     assert_eq!(theme, ThemeColors::from_hue(40.0));
-    assert_eq!(theme.tokens(false).sidebar, theme.navigation);
+    assert_eq!(theme.tokens(false).navigation, theme.navigation);
   }
 
   #[test]

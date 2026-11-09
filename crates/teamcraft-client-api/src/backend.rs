@@ -15,8 +15,8 @@ use teamcraft_proto::{
   AttachmentId, BackgroundId, BrandAssetSlot, CategoryId, ChannelModeration, CreateBrandRequest,
   HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role, RuntimeSettingsKey,
   RuntimeSettingsResponse, RuntimeSettingsSection, ScheduledMessageId, SchemeChange, SendTestMailRequest,
-  SetAnnouncementRequest, SettingsTestResponse, UpdateBrandRequest, UpdateCalendarSettingsRequest,
-  UpdateMailSettingsRequest, WorkspacePolicy,
+  SetAnnouncementRequest, SettingsTestResponse, UpdateBrandMailServerRequest, UpdateBrandRequest,
+  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use crate::actions::{
@@ -38,10 +38,12 @@ use crate::calls::{
   CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
 };
 use crate::drafts::{DraftFileItem, DraftItem, DraftReply, SentItem};
+use crate::files_query::{FilesPage, FilesQuery};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::model::{
-  Conversation, ConversationId, CustomStatus, DeviceId, FirstSync, KeyCatchUp, MembershipIssue, Message,
-  MessageId, PresenceStatus, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs, User, UserId,
+  Conversation, ConversationId, CustomStatus, DeviceId, FirstSync, KeyCatchUp, MembershipIssue,
+  MentionableGroup, Message, MessageId, PresenceStatus, Space, SpaceId, ThreadId, ThreadSummary, TimestampMs,
+  User, UserId,
 };
 use crate::privacy::{LastSeenVisibility, PrivacySettings};
 use crate::scheduled::ScheduledOverview;
@@ -67,6 +69,11 @@ pub trait ChatBackend {
   /// The people to offer in lists, pickers and mentions: deactivated accounts are left out
   /// (issue #654).
   fn users(&self) -> Vec<User>;
+  /// The user groups this user may mention in the conversation, with who a mention would reach:
+  /// empty without `use_group_mentions` there (and in a backend without a copy of the groups).
+  fn mentionable_groups(&self, _conversation: ConversationId) -> Vec<MentionableGroup> {
+    Vec::new()
+  }
   /// People whose name or username contains `query` (any case): the people the backend knows and,
   /// for a backend that reads the server, the server's directory, so colleagues who share nothing
   /// with the user yet are found too. Such a backend asks the server at most once per query in a
@@ -214,6 +221,11 @@ pub trait ChatBackend {
   /// when receipts are off.
   fn seen_by(&self, _conversation: ConversationId, _message: MessageId) -> Vec<UserId> {
     Vec::new()
+  }
+  /// The newest message every other member of a DM or group DM has on a device (delivered ticks,
+  /// #598). `None` elsewhere, when delivery is off on either side and while unknown.
+  fn delivered_to_others(&self, _conversation: ConversationId) -> Option<MessageId> {
+    None
   }
   /// The conversation is shown: read its members' receipts again, since those sent while this
   /// device was offline never arrive as events. Backends whose UI reads receipts itself ignore it.
@@ -648,11 +660,20 @@ pub trait ChatBackend {
   fn conversation_files(&self, _conversation: ConversationId) -> Vec<FileInfo> {
     Vec::new()
   }
-  /// The newest `limit` links shared in a conversation, newest first. The default reads the
-  /// messages newest first and stops once `limit` links are found, so a long conversation is not
-  /// read whole.
-  fn conversation_links(&self, conversation: ConversationId, limit: usize) -> crate::links::LinkPage {
-    crate::links::links_page(self, conversation, limit)
+  /// A page of the Files view ([`crate::files_query`]). A core reads only what the page shows,
+  /// through its index of the messages with files (issue #1509); the default reads each
+  /// conversation's files. `None` while a backend that asks the core waits for its answer (a change
+  /// notification follows), so the view never mistakes a page not read yet for an empty one.
+  fn files_page(&self, query: &FilesQuery<'_>) -> Option<FilesPage> {
+    Some(crate::files_query::files_page(self, query))
+  }
+  /// The newest `limit` links shared in a conversation, newest first. A core reads them through
+  /// its index of the messages with links (issue #609); the default reads the messages newest
+  /// first and stops once `limit` links are found. `None` while a backend that asks the core waits
+  /// for its answer (a change notification follows), so the tab never mistakes a page not read
+  /// yet for an empty one.
+  fn conversation_links(&self, conversation: ConversationId, limit: usize) -> Option<crate::links::LinkPage> {
+    Some(crate::links::links_page(self, conversation, limit))
   }
   /// A page of at most `max_messages` messages with pictures or videos at `anchor`, newest first
   /// (the image viewer pages through a conversation with it, #274). Bounded work: a core reads
@@ -811,6 +832,13 @@ pub trait ChatBackend {
   /// workspace roster (signed channel roles don't count for sources yet, e2ee.md §13.1).
   fn can_manage_integration_sources(&self) -> bool {
     false
+  }
+  /// The "bridge public URL" the instance's admins set: where producers reach a bridge on its own
+  /// host, offered in the channel's "Connect a source" section. Only people who manage the channel
+  /// get it from the server; `None` for anybody else, while it is being read, and when none is
+  /// set. Without one the section offers the instance's host name and the loopback default.
+  fn bridge_public_url(&self, _conversation: ConversationId) -> Option<String> {
+    None
   }
   /// Announces a new source in the channel: an encrypted, hidden control message the bridge reads.
   fn add_integration_source(
@@ -1342,6 +1370,11 @@ pub trait AdminBackend {
   }
   fn upload_brand_asset(&self, _id: String, _slot: BrandAssetSlot, _bytes: Vec<u8>, _content_type: String) {}
   fn delete_brand_asset(&self, _id: String, _slot: BrandAssetSlot) {}
+  /// Sets a brand's own mail server; an empty host removes it.
+  fn save_brand_mail_server(&self, _id: String, _request: UpdateBrandMailServerRequest) {}
+  /// Back to the instance's mail server.
+  fn remove_brand_mail_server(&self, _id: String) {}
+  fn send_brand_test_mail(&self, _id: String, _request: SendTestMailRequest) {}
   fn mail_settings(&self) -> Option<AdminMailSettingsResponse> {
     None
   }
@@ -1355,6 +1388,31 @@ pub trait AdminBackend {
   fn save_calendar_settings(&self, _request: UpdateCalendarSettingsRequest) {}
   fn reset_calendar_settings(&self) {}
   fn test_calendar(&self) {}
+  /// The outgoing webhooks; loaded once the console shows their page, `None` until then.
+  fn admin_webhooks(&self) -> Option<teamcraft_proto::AdminWebhooksResponse> {
+    None
+  }
+  fn create_webhook(&self, _request: teamcraft_proto::CreateWebhookRequest) {}
+  fn update_webhook(&self, _id: teamcraft_proto::WebhookId, _request: teamcraft_proto::UpdateWebhookRequest) {
+  }
+  fn delete_webhook(&self, _id: teamcraft_proto::WebhookId) {}
+  fn rotate_webhook_secret(&self, _id: teamcraft_proto::WebhookId) {}
+  /// Sends the test event; the answer shows as [`Self::last_settings_test`].
+  fn test_webhook(&self, _id: teamcraft_proto::WebhookId) {}
+  /// The latest delivery attempts of a webhook; loaded on the first ask.
+  fn webhook_deliveries(
+    &self,
+    _id: teamcraft_proto::WebhookId,
+  ) -> Option<teamcraft_proto::WebhookDeliveriesResponse> {
+    None
+  }
+  /// The secret of the webhook just created or rotated: shown once, until dismissed.
+  fn revealed_webhook_secret(
+    &self,
+  ) -> Option<(teamcraft_proto::WebhookId, teamcraft_proto::WebhookSecretText)> {
+    None
+  }
+  fn dismiss_webhook_secret(&self) {}
   /// The answer of the last mail or calendar test of this console session.
   fn last_settings_test(&self) -> Option<(SettingsTestKind, SettingsTestResponse)> {
     None

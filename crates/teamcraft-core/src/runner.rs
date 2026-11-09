@@ -41,6 +41,8 @@ pub struct SyncRunner<A: ServerApi, S> {
   /// When the next tick is due. A deadline rather than a fresh sleep per wake-up, so a busy
   /// connection (a frame every few seconds) can't postpone heartbeats until the server drops it.
   next_tick_ms: i64,
+  /// When the next page of a backlog may be read ([`RunnerSettings::background_page_gap`]).
+  next_background_page_ms: i64,
   upkeep: Upkeep,
   /// The user's own typing, sent at most once per [`crate::typing::TYPING_INTERVAL_MS`].
   #[cfg(feature = "ui")]
@@ -73,6 +75,10 @@ pub struct RunnerSettings {
   /// age is checked locally ([`Upkeep`]). Account data is read after each gateway connection and on
   /// `key_bag_update`, local changes are pushed on the next tick.
   pub upkeep_interval: Duration,
+  /// The least pause between two pages of a backlog read in the background (issue #1575); the
+  /// pause is at least as long as the page took, too, so the backlog takes at most about half of
+  /// the engine's time and of the store's, and the app's reads have their turns in between.
+  pub background_page_gap: Duration,
 }
 
 /// Sends commands to a running [`SyncRunner`].
@@ -122,6 +128,7 @@ impl Default for RunnerSettings {
       tick: Duration::from_secs(5),
       connection: ConnectionSettings::default(),
       upkeep_interval: Duration::from_secs(60),
+      background_page_gap: Duration::from_millis(100),
     }
   }
 }
@@ -151,6 +158,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       connection,
       maybe_network: None,
       next_tick_ms: i64::MIN,
+      next_background_page_ms: i64::MIN,
       upkeep,
       #[cfg(feature = "ui")]
       typing: TypingAnnouncer::default(),
@@ -229,6 +237,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         },
       }
       self.report_progress();
+      self.report_delivered().await;
       self.answer_drained();
       self.answer_caught_up();
     }
@@ -251,7 +260,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     // A catch-up's backlogs and a first sync's older history: at once, but only after everything
     // the select below looks at first (commands, frames, network changes, transfers).
     let until_ms = if self.is_background_history_due() {
-      0
+      until_ms.min(self.next_background_page_ms.saturating_sub(now).max(0))
     } else {
       until_ms
     };
@@ -399,16 +408,24 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
   }
 
   /// One page of a backlog or of a first sync's older history, so whatever arrives next is answered
-  /// after it.
+  /// after it. Paced ([`RunnerSettings::background_page_gap`]): back to back, the pages held the
+  /// engine and the store for the whole backlog, and the app's reads queued up behind them.
   async fn load_background_history(&mut self) {
-    if !self.is_background_history_due() {
+    let now = self.client.now_ms();
+    // The wall clock went back: the pause counts from now, not from the time before the jump.
+    if self.next_background_page_ms.saturating_sub(now) > millis(self.settings.tick) {
+      self.next_background_page_ms = now;
+    }
+    if !self.is_background_history_due() || now < self.next_background_page_ms {
       return;
     }
-    let now = self.client.now_ms();
     let is_changed = self
       .connection
       .keep_alive(now, self.client.load_background_history_page())
       .await;
+    let ended = self.client.now_ms();
+    let took = ended.saturating_sub(now);
+    self.next_background_page_ms = ended.saturating_add(took.max(millis(self.settings.background_page_gap)));
     if is_changed {
       self.changed();
     }
@@ -453,6 +470,12 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     if !self.connection.send(now, &message).await {
       tracing::debug!("device activity not reported");
     }
+  }
+
+  /// Tells the server how far the DMs this device stored reach (delivered ticks, issue #598).
+  async fn report_delivered(&mut self) {
+    let now = self.client.now_ms();
+    self.client.report_delivered(&mut self.connection, now).await;
   }
 
   /// Starts the next due upload, if none runs; drops a running one whose file was cancelled (or its

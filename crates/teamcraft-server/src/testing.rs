@@ -566,6 +566,7 @@ impl TestApp {
       maybe_meetings: maybe_meetings.map(Arc::new),
       mailer: Arc::new(Slot::new(maybe_mailer)),
       mail_status: Arc::new(MailStatus::default()),
+      brand_mail: Arc::default(),
       maybe_settings_key: Some(Arc::new(test_settings_key())),
       settings_lock: Arc::default(),
       maybe_local: settings
@@ -600,6 +601,7 @@ impl TestApp {
       holiday_resync: Arc::default(),
       // Tests forward to a fake backend on this machine.
       crash_relay: Arc::new(crate::services::crash_reports::CrashRelay::new(true).unwrap()),
+      webhooks: Arc::new(crate::webhooks::WebhookDispatcher::new(&settings.webhooks).unwrap()),
       settings: Arc::new(SettingsCell::new(settings)),
     };
 

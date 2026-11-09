@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-perf-core-steps"
+description = "Enables the perf_core_steps command without any pre-configured scope."
+commands.allow = ["perf_core_steps"]
+
+[[permission]]
+identifier = "deny-perf-core-steps"
+description = "Denies the perf_core_steps command without any pre-configured scope."
+commands.deny = ["perf_core_steps"]
