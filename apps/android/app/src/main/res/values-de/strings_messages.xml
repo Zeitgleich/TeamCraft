@@ -82,4 +82,17 @@
   <string name="message_edit_empty">Eine Nachricht kann nicht leer sein. Lösche sie, um sie zu entfernen.</string>
   <string name="search_start_title">Alle Unterhaltungen durchsuchen</string>
   <string name="search_start_text">Gib ein Wort ein oder grenze mit den Filtern ein: Person, Unterhaltung, Datum, Dateien oder Links.</string>
+  <string name="composer_format_show">Formatierung einblenden</string>
+  <string name="composer_format_hide">Formatierung ausblenden</string>
+  <string name="composer_format_bold">Fett</string>
+  <string name="composer_format_italic">Kursiv</string>
+  <string name="composer_format_strike">Durchgestrichen</string>
+  <string name="composer_format_code">Code</string>
+  <string name="composer_format_code_block">Codeblock</string>
+  <string name="composer_format_quote">Zitat</string>
+  <string name="composer_format_bulleted">Aufzählung</string>
+  <string name="composer_format_numbered">Nummerierte Liste</string>
+  <string name="composer_format_link">Link</string>
+  <string name="composer_format_state_on">Ein</string>
+  <string name="composer_format_state_off">Aus</string>
 </resources>

@@ -82,4 +82,17 @@
   <string name="message_edit_empty">A message can\'t be empty. To remove it, delete it.</string>
   <string name="search_start_title">Search every conversation</string>
   <string name="search_start_text">Type a word, or narrow it down with the filters: a person, a conversation, a date, files or links.</string>
+  <string name="composer_format_show">Show formatting</string>
+  <string name="composer_format_hide">Hide formatting</string>
+  <string name="composer_format_bold">Bold</string>
+  <string name="composer_format_italic">Italic</string>
+  <string name="composer_format_strike">Strikethrough</string>
+  <string name="composer_format_code">Code</string>
+  <string name="composer_format_code_block">Code block</string>
+  <string name="composer_format_quote">Quote</string>
+  <string name="composer_format_bulleted">Bulleted list</string>
+  <string name="composer_format_numbered">Numbered list</string>
+  <string name="composer_format_link">Link</string>
+  <string name="composer_format_state_on">On</string>
+  <string name="composer_format_state_off">Off</string>
 </resources>

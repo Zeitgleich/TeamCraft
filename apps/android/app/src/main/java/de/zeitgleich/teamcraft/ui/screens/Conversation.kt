@@ -1,5 +1,24 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.material3.IconToggleButton
+import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.semantics.isTraversalGroup
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextDecoration
+import de.zeitgleich.teamcraft.ui.ComposerStyleColors
+import de.zeitgleich.teamcraft.ui.ComposerStyleTransformation
+import de.zeitgleich.teamcraft.ui.activeFormats
+import de.zeitgleich.teamcraft.ui.formatted
+import de.zeitgleich.teamcraft.ui.interceptKey
+import de.zeitgleich.teamcraft.ui.styledComposerText
+import uniffi.teamcraft_ffi.ComposerFormat
+import uniffi.teamcraft_ffi.composerStyleSpans
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import de.zeitgleich.teamcraft.crash.CatchUpMeasure
 import de.zeitgleich.teamcraft.crash.Perf
 import uniffi.teamcraft_ffi.PerfMeasure
@@ -1243,6 +1262,8 @@ internal fun Composer(
   var maybeMediaFlow by rememberSaveable(conversationId, maybeThread, stateSaver = MediaFlowLaunch.saver) { mutableStateOf<MediaFlowLaunch?>(null) }
   val pickers = rememberAttachmentPickers(viewModel, onMediaFlow = { maybeMediaFlow = it }) { picked -> files = files + picked }
   val focus = remember { FocusRequester() }
+  val composerPrefs = remember { ComposerPrefs.prefs(context) }
+  var isFormatBarOpen by remember { mutableStateOf(composerPrefs.isFormatBarOpen) }
   val isSendWithEnter = remember { ComposerPrefs.prefs(context).isSendWithEnter }
   val isSharingTyping = remember { ComposerPrefs.prefs(context).isSharingTyping }
   var maybeLastTypingAt by remember { mutableStateOf<Long?>(null) }
@@ -1555,6 +1576,11 @@ internal fun Composer(
       onCamera = pickers.openCamera,
       onSend = ::trySend,
       onSendOptions = { isSendOptionsOpen = true },
+      isFormatBarOpen = isFormatBarOpen,
+      onFormatBarToggle = {
+        isFormatBarOpen = !isFormatBarOpen
+        composerPrefs.setFormatBarOpen(isFormatBarOpen)
+      },
       maybeVoiceBar = if (voice.isActive) {
         { VoiceBar(viewModel, voice) }
       } else {
@@ -1659,9 +1685,36 @@ private fun ComposerField(
   onCamera: () -> Unit,
   onSend: () -> Unit,
   onSendOptions: () -> Unit,
+  isFormatBarOpen: Boolean,
+  onFormatBarToggle: () -> Unit,
   maybeVoiceBar: (@Composable () -> Unit)? = null,
   maybeTrailing: (@Composable (Modifier) -> Unit)? = null,
 ) {
+  // The field's own text and selection: formatting acts on the selection. A text set from outside
+  // (a mention picked, a draft restored, the field cleared) puts the caret at its end.
+  var field by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
+  val value = if (field.text == text) field else TextFieldValue(text, TextRange(text.length))
+  val scheme = MaterialTheme.colorScheme
+  val styleColors = ComposerStyleColors(
+    marker = scheme.onSurfaceVariant,
+    quote = scheme.onSurfaceVariant,
+    link = scheme.primary,
+    mention = scheme.primary,
+    codeBackground = scheme.onSurface.copy(alpha = 0.08f),
+  )
+  // Presentation only: the text, the caret and the input method's composition stay as they are.
+  val styleTransformation = remember(text, styleColors) {
+    ComposerStyleTransformation(styledComposerText(text, composerStyleSpans(text), styleColors))
+  }
+  fun update(next: TextFieldValue) {
+    field = next
+    if (next.text != text) onTextChange(next.text)
+  }
+  val active = if (isFormatBarOpen) remember(value.text, value.selection) { value.activeFormats() } else emptySet()
+  Column {
+  if (isFormatBarOpen && maybeVoiceBar == null) {
+    ComposerFormatBar(active = active, onFormat = { format -> update(value.formatted(format)) })
+  }
   Row(
     Modifier.fillMaxWidth().padding(start = 8.dp, end = 8.dp, top = 4.dp, bottom = 6.dp),
     verticalAlignment = Alignment.Bottom,
@@ -1680,8 +1733,10 @@ private fun ComposerField(
           Icon(painterResource(R.drawable.ic_attach_file), contentDescription = stringResource(R.string.attach))
         }
         TextField(
-          value = text,
-          onValueChange = onTextChange,
+          value = value,
+          // Enter and Backspace at a block carry on or leave it, unless the keyboard is composing.
+          onValueChange = { next -> update(interceptKey(value, next) ?: next) },
+          visualTransformation = styleTransformation,
           placeholder = { Text(stringResource(R.string.composer_hint), style = MaterialTheme.typography.bodyLarge) },
           textStyle = MaterialTheme.typography.bodyLarge,
           modifier = Modifier
@@ -1708,6 +1763,14 @@ private fun ComposerField(
           ),
           keyboardActions = KeyboardActions(onSend = { if (canSend) onSend() }),
         )
+        val formatLabel = stringResource(if (isFormatBarOpen) R.string.composer_format_hide else R.string.composer_format_show)
+        IconToggleButton(
+          checked = isFormatBarOpen,
+          onCheckedChange = { onFormatBarToggle() },
+          modifier = Modifier.padding(vertical = 4.dp).semantics { contentDescription = formatLabel },
+        ) {
+          Text("Aa", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+        }
         // While typing the field needs the room; the camera comes back when it is empty.
         if (text.isEmpty()) {
           IconButton(onClick = onCamera, modifier = Modifier.padding(vertical = 4.dp)) {
@@ -1721,6 +1784,65 @@ private fun ComposerField(
       return@Row
     }
     SendButton(canSend, isSending, onSend, onSendOptions)
+  }
+  }
+}
+
+/** The formats of the toolbar, with the glyph each button shows and its name. */
+private val FORMAT_BUTTONS = listOf(
+  Triple(ComposerFormat.BOLD, "B", R.string.composer_format_bold),
+  Triple(ComposerFormat.ITALIC, "I", R.string.composer_format_italic),
+  Triple(ComposerFormat.STRIKE, "S", R.string.composer_format_strike),
+  Triple(ComposerFormat.CODE, "<>", R.string.composer_format_code),
+  Triple(ComposerFormat.CODE_BLOCK, "{ }", R.string.composer_format_code_block),
+  Triple(ComposerFormat.QUOTE, ">", R.string.composer_format_quote),
+  Triple(ComposerFormat.BULLETED, "\u2022", R.string.composer_format_bulleted),
+  Triple(ComposerFormat.NUMBERED, "1.", R.string.composer_format_numbered),
+  Triple(ComposerFormat.LINK, "[ ]", R.string.composer_format_link),
+)
+
+/**
+ * The formatting toolbar above the field (#1051): bold, italic, strikethrough, code, code block,
+ * quote, lists and link, as on desktop and web. A pressed button is on at the selection; pressing it
+ * again takes the format off. The buttons announce their state to screen readers.
+ */
+@Composable
+private fun ComposerFormatBar(active: Set<ComposerFormat>, onFormat: (ComposerFormat) -> Unit) {
+  val on = stringResource(R.string.composer_format_state_on)
+  val off = stringResource(R.string.composer_format_state_off)
+  Row(
+    Modifier
+      .fillMaxWidth()
+      .horizontalScroll(rememberScrollState())
+      .padding(horizontal = 8.dp)
+      .semantics { isTraversalGroup = true },
+    horizontalArrangement = Arrangement.spacedBy(2.dp),
+  ) {
+    for ((format, glyph, label) in FORMAT_BUTTONS) {
+      val name = stringResource(label)
+      val isOn = format in active
+      IconToggleButton(
+        checked = isOn,
+        onCheckedChange = { onFormat(format) },
+        modifier = Modifier.semantics {
+          contentDescription = name
+          stateDescription = if (isOn) on else off
+        },
+        colors = IconButtonDefaults.iconToggleButtonColors(
+          checkedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+          checkedContentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+        ),
+      ) {
+        Text(
+          glyph,
+          style = MaterialTheme.typography.titleMedium,
+          fontFamily = if (format == ComposerFormat.CODE || format == ComposerFormat.CODE_BLOCK) FontFamily.Monospace else null,
+          fontWeight = if (format == ComposerFormat.BOLD) FontWeight.Bold else null,
+          fontStyle = if (format == ComposerFormat.ITALIC) FontStyle.Italic else null,
+          textDecoration = if (format == ComposerFormat.STRIKE) TextDecoration.LineThrough else null,
+        )
+      }
+    }
   }
 }
 

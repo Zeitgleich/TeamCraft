@@ -92,7 +92,10 @@ struct ChatPane: View {
   @AppStorage("share_typing") private var isSharingTyping = true
   /// Bubbles or the desktop's list (#1488), a setting of this device.
   @AppStorage(MessageLayout.key) private var messageLayoutRaw = MessageLayout.bubbles.rawValue
-  @FocusState private var isComposerFocused: Bool
+  @State private var isComposerFocused = false
+  /// The formatting toolbar above the field (#1051), a setting of this device.
+  @AppStorage("composer_format_bar") private var isFormatBarShown = false
+  @StateObject private var formatController = ComposerFormatController()
 
   private static let quickReactions = ["👍", "❤️", "😂", "🎉", "😮", "🙏"]
   /// How long typing pauses before the draft is saved.
@@ -583,6 +586,9 @@ struct ChatPane: View {
         if let reply = maybeReply { replyBar(reply) }
         EmojiSuggestionBar(text: draft) { emoji in draft = completeEmoji(in: draft, with: emoji) }
         if !attachments.isEmpty || !otherFiles.isEmpty { attachmentChips }
+        if isFormatBarShown && !VoiceRecorder.shared.showsBar(for: draftKey) {
+          ComposerFormatBar(controller: formatController)
+        }
         if VoiceRecorder.shared.showsBar(for: draftKey) {
           VoiceRecorderBar(owner: draftKey) { Task { await sendVoice() } }
         } else {
@@ -654,15 +660,29 @@ struct ChatPane: View {
         }
         .accessibilityLabel(Text("attach"))
       }
-      TextField("composer_hint", text: $draft, axis: .vertical)
-        .focused($isComposerFocused)
-        .onChange(of: draft) { _, text in
-          announceTyping(text)
-          // Another text is another message, also if the same words come back later.
-          if let attempt = maybeScheduleAttempt, attempt.body != text { maybeScheduleAttempt = nil }
+      // A `UITextView` that styles the Markdown as it will render (#1051); the placeholder is ours.
+      ZStack(alignment: .topLeading) {
+        if draft.isEmpty {
+          Text("composer_hint")
+            .font(.app(.body))
+            .foregroundStyle(Theme.textMuted)
+            .padding(.vertical, 10)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
         }
-        .lineLimit(1...6)
-        .padding(.vertical, 10)
+        ComposerTextView(
+          text: $draft, isFocused: $isComposerFocused, controller: formatController,
+          accessibilityLabel: String(localized: "composer_hint"))
+      }
+      .frame(maxWidth: .infinity)
+      .onChange(of: draft) { _, text in
+        announceTyping(text)
+        // Another text is another message, also if the same words come back later.
+        if let attempt = maybeScheduleAttempt, attempt.body != text { maybeScheduleAttempt = nil }
+      }
+      Button { isFormatBarShown.toggle() } label: { composerIcon("textformat") }
+        .accessibilityLabel(Text(isFormatBarShown ? "composer_format_hide" : "composer_format_show"))
+        .accessibilityAddTraits(isFormatBarShown ? .isSelected : [])
       // While typing the field needs the room; the camera comes back when it is empty.
       if draft.isEmpty && maybeEditing == nil && CameraPicker.isAvailable {
         Button { isTakingPhoto = true } label: { composerIcon("camera") }

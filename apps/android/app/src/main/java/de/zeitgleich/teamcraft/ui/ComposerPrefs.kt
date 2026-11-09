@@ -21,6 +21,13 @@ class ComposerPrefs private constructor(context: Context) {
     LocalSettingChanges.changed()
   }
 
+  /** Whether the formatting toolbar shows above the field (#1051); off until the user turns it on. */
+  val isFormatBarOpen: Boolean get() = prefs.getBoolean(KEY_FORMAT_BAR, false)
+
+  fun setFormatBarOpen(isOpen: Boolean) {
+    prefs.edit().putBoolean(KEY_FORMAT_BAR, isOpen).apply()
+  }
+
   fun setSendWithEnter(isOn: Boolean) {
     prefs.edit().putBoolean(KEY_SEND_WITH_ENTER, isOn).apply()
   }
@@ -29,6 +36,7 @@ class ComposerPrefs private constructor(context: Context) {
     private const val FILE = "composer_prefs"
     private const val KEY_SEND_WITH_ENTER = "send_with_enter"
     private const val KEY_SHARE_TYPING = "share_typing"
+    private const val KEY_FORMAT_BAR = "format_bar"
 
     fun prefs(context: Context) = ComposerPrefs(context.applicationContext)
   }
