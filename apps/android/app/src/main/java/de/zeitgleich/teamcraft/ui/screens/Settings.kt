@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import de.zeitgleich.teamcraft.ui.PresenceDot
 import de.zeitgleich.teamcraft.ui.presenceLabel
 import de.zeitgleich.teamcraft.ui.presenceOf
@@ -496,6 +497,7 @@ private fun DisplayNameSection(viewModel: MainViewModel) {
     },
     label = { Text(stringResource(R.string.profile_name_label)) },
     singleLine = true,
+    keyboardOptions = textKeyboard(KeyboardCapitalization.Words),
     isError = maybeError != null,
     supportingText = supportingText(maybeError),
     modifier = Modifier.fillMaxWidth().focusRequester(nameFocus).fieldError(maybeError),
@@ -644,6 +646,7 @@ private fun CustomStatusSection(viewModel: MainViewModel) {
       label = { Text(stringResource(R.string.custom_status_text)) },
       singleLine = true,
       placeholder = { Text(stringResource(R.string.custom_status_hint)) },
+      keyboardOptions = textKeyboard(),
       isError = maybeTextError != null,
       supportingText = supportingText(maybeTextError),
       modifier = Modifier.weight(1f).focusRequester(textFocus).fieldError(maybeTextError),

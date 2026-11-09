@@ -68,6 +68,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import de.zeitgleich.teamcraft.ui.screens.textKeyboard
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 
@@ -407,6 +408,7 @@ private fun TextEntry(initial: String, color: Color, onDone: (String) -> Unit) {
       onValueChange = { text = it },
       textStyle = TextStyle(color = color, fontSize = 32.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center),
       cursorBrush = SolidColor(color),
+      keyboardOptions = textKeyboard(),
       modifier = Modifier.align(Alignment.Center).fillMaxWidth().padding(24.dp).focusRequester(focus),
     )
   }
