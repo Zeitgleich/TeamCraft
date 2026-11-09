@@ -1280,7 +1280,11 @@ private fun Bubble(
           }
           maybeExtras?.maybeLinkPreview?.let { LinkPreviewCard(it, colors) }
         }
-        files.filter { it.transfer.isCancellable || it.transfer.state == "upload_failed" }.forEach { file ->
+        // Files still going up: one line for all of them (#1579), not a bare "Cancel" row per
+        // file; one that stopped keeps its own line with the reason and "Try again".
+        val uploading = files.filter { it.transfer.state == "uploading" }
+        if (uploading.size >= 2) UploadsLine(viewModel, uploading, colors) else uploading.forEach { UploadLine(viewModel, it, colors) }
+        files.filter { it.transfer.state == "upload_stalled" || it.transfer.state == "upload_failed" }.forEach { file ->
           UploadLine(viewModel, file, colors)
         }
         when {
@@ -1650,14 +1654,15 @@ private fun UploadLine(viewModel: MainViewModel, file: FileInfo, colors: BubbleC
         }
         // A failed attempt says so at once, not only after the core gives up (#1355): a ring that
         // keeps turning without a word reads as stuck.
-        if (transfer.isRetrying) {
-          Text(
-            label,
-            color = colors.content,
-            style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier.padding(start = 6.dp).weight(1f, fill = false),
-          )
-        }
+        // Which file it is, so the row doesn't read as a bare "Cancel".
+        Text(
+          if (transfer.isRetrying) label else file.fileName,
+          color = colors.content,
+          style = MaterialTheme.typography.labelSmall,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+          modifier = Modifier.padding(start = 6.dp).weight(1f, fill = false),
+        )
         TextButton(onClick = cancel) { Text(stringResource(R.string.file_cancel_upload), color = colors.content) }
       }
       "upload_stalled" -> {
@@ -1675,6 +1680,34 @@ private fun UploadLine(viewModel: MainViewModel, file: FileInfo, colors: BubbleC
       }
       else -> Text(stringResource(R.string.file_failed), color = colors.content, style = MaterialTheme.typography.labelSmall)
     }
+  }
+}
+
+/**
+ * Several files of one message going up (#1579): how many, one ring for all of them, and "Cancel
+ * all". How far they got is the bytes of all of them together.
+ */
+@Composable
+private fun UploadsLine(viewModel: MainViewModel, files: List<FileInfo>, colors: BubbleColors) {
+  val doneBytes = files.sumOf { it.transfer.doneBytes }
+  val totalBytes = files.sumOf { it.transfer.totalBytes }
+  val text = pluralStringResource(R.plurals.file_uploads_running, files.size, files.size)
+  Row(verticalAlignment = Alignment.CenterVertically) {
+    val ring = Modifier.padding(start = 4.dp).size(16.dp)
+    if (totalBytes > 0) {
+      CircularProgressIndicator(progress = { doneBytes.toFloat() / totalBytes }, modifier = ring, color = colors.content, strokeWidth = 2.dp)
+    } else {
+      CircularProgressIndicator(ring, color = colors.content, strokeWidth = 2.dp)
+    }
+    Text(
+      text,
+      color = colors.content,
+      style = MaterialTheme.typography.labelSmall,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+      modifier = Modifier.padding(start = 6.dp).weight(1f, fill = false),
+    )
+    TextButton(onClick = { viewModel.cancelUploads(files) }) { Text(stringResource(R.string.file_cancel_uploads), color = colors.content) }
   }
 }
 
