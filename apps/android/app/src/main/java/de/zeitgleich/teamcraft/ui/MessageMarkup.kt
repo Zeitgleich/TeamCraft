@@ -15,7 +15,7 @@ import androidx.compose.ui.text.withStyle
 import uniffi.teamcraft_ffi.MarkupLine
 import uniffi.teamcraft_ffi.MarkupRun
 import uniffi.teamcraft_ffi.MarkupRunKind
-import uniffi.teamcraft_ffi.MessageItem
+import de.zeitgleich.teamcraft.core.Message
 
 /** How message permalinks start (the core's format, teamcraft-client-api `markdown`). */
 const val PERMALINK_PREFIX = "teamcraft:/c/"
@@ -46,7 +46,7 @@ data class MentionNames(
   val isMentionedThroughGroup: Boolean = false,
 ) {
   /** These names with the group mentions of [message]; the same object for most messages. */
-  fun forMessage(message: MessageItem): MentionNames =
+  fun forMessage(message: Message): MentionNames =
     if (message.groupMentions.isEmpty()) {
       this
     } else {
