@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE user_deactivation_followups SET attempts = attempts + 1, last_attempt_at = now() WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "62ab30ff69c100a0e464c7b9ef5d3e1479a68226b99c7159a1150699f0f06c5f"
+}

@@ -5,14 +5,16 @@ use std::collections::HashMap;
 
 use teamcraft_proto::{
   ALL_PERMISSIONS, AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse,
-  AdminInstanceResponse, AdminMailSettingsResponse, AdminSelfJoin as AdminSelfJoinWire, AnnouncementResponse,
-  BrandAssetSlot, ChannelModeration, CreateBrandRequest, GuestPolicy, HealthAlertResponse, HealthCheckId,
-  HealthCheckResponse, HealthCheckStatus, HistoryPolicy, OverrideEffect, Permission, PermissionScheme,
-  PermissionSchemeResponse, PushProvider, PushProviderState, PushProviderStatus, Role, RuntimeSettingsKey,
-  RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SchemeOverride, SchemeRole,
-  SchemeRoleResponse, SendTestMailRequest, SessionPolicy, SetAnnouncementRequest, SettingsTestResponse,
-  SfuStatus, StorageStatus, TestPushOutcome, UnixMillis, UpdateBrandRequest, UpdateCalendarSettingsRequest,
-  UpdateMailSettingsRequest, WorkspacePolicy,
+  AdminInstanceResponse, AdminMailSettingsResponse, AdminOidcSyncPreviewResponse, AdminOidcSyncResponse,
+  AdminSelfJoin as AdminSelfJoinWire, AnnouncementResponse, BrandAssetSlot, ChannelModeration,
+  CreateBrandRequest, DeactivationCause, GuestPolicy, HealthAlertResponse, HealthCheckId,
+  HealthCheckResponse, HealthCheckStatus, HeldDeactivationResponse, HistoryPolicy, OidcSyncBrakeSettings,
+  OidcSyncMode, OidcSyncOutcome, OidcSyncRunResponse, OidcSyncState, OverrideEffect, Permission,
+  PermissionScheme, PermissionSchemeResponse, PlannedDeactivationResponse, PushProvider, PushProviderState,
+  PushProviderStatus, Role, RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection,
+  SchemeChange, SchemeOverride, SchemeRole, SchemeRoleResponse, SendTestMailRequest, SessionPolicy,
+  SetAnnouncementRequest, SettingsTestResponse, SfuStatus, StorageStatus, TestPushOutcome, UnixMillis,
+  UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use super::{MockBackend, dm_first, id_from_raw};
@@ -619,6 +621,7 @@ impl AdminBackend for MockBackend {
         check(HealthCheckId::PushService, HealthCheckStatus::Ok, None),
         check(HealthCheckId::MediaServer, HealthCheckStatus::Ok, Some(4)),
         check(HealthCheckId::OidcSync, HealthCheckStatus::Ok, Some(1_200)),
+        check(HealthCheckId::OidcSyncBrake, HealthCheckStatus::Failing, Some(2)),
         check(HealthCheckId::Retention, HealthCheckStatus::NoData, None),
         check(
           HealthCheckId::PartitionMaintenance,
@@ -647,6 +650,65 @@ impl AdminBackend for MockBackend {
       hold_secs: 600,
       started_at: UnixMillis(self.now - 26 * hours * 1000),
       maybe_checked_at: Some(UnixMillis(self.now - 12_000)),
+    })
+  }
+
+  fn oidc_sync_status(&self) -> Option<AdminOidcSyncResponse> {
+    let held = |id: u64, name: &str, cause| HeldDeactivationResponse {
+      user_id: id_from_raw::<UserId>(id),
+      display_name: name.to_owned(),
+      maybe_username: Some(name.to_lowercase().replace(' ', ".")),
+      cause,
+      held_at: UnixMillis(self.now - 40 * 60_000),
+      is_confirmed: false,
+    };
+    Some(AdminOidcSyncResponse {
+      state: OidcSyncState::Active,
+      mode: OidcSyncMode::Apply,
+      interval_secs: 300,
+      stale_after_intervals: 3,
+      brake: OidcSyncBrakeSettings {
+        max_percent: 10,
+        min_allowed: 2,
+      },
+      maybe_last_success_at: Some(UnixMillis(self.now - 4 * 60_000)),
+      maybe_last_run: Some(OidcSyncRunResponse {
+        started_at: UnixMillis(self.now - 4 * 60_000 - 2_400),
+        finished_at: UnixMillis(self.now - 4 * 60_000),
+        duration_ms: 2_400,
+        outcome: OidcSyncOutcome::Held,
+        maybe_error: None,
+        consecutive_failures: 0,
+        deactivated: 1,
+        reactivated: 0,
+        role_changes: 2,
+        groups_changed: 0,
+        failed: 0,
+      }),
+      is_stale: false,
+      held: vec![
+        held(9001, "Jordan Lee", DeactivationCause::NoRole),
+        held(9002, "Sam Taylor", DeactivationCause::NoRole),
+      ],
+      held_revision: 4,
+      pending_removals: 3,
+      unfinished_deactivations: 0,
+    })
+  }
+
+  fn oidc_sync_preview(&self) -> Option<AdminOidcSyncPreviewResponse> {
+    Some(AdminOidcSyncPreviewResponse {
+      would_deactivate: vec![PlannedDeactivationResponse {
+        user_id: id_from_raw::<UserId>(9003),
+        display_name: "Morgan Reed".to_owned(),
+        maybe_username: Some("morgan.reed".to_owned()),
+        cause: DeactivationCause::Disabled,
+      }],
+      would_hold: Vec::new(),
+      would_reactivate: 0,
+      would_change_roles: 1,
+      active_users: 48,
+      allowed: 5,
     })
   }
 

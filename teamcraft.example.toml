@@ -96,7 +96,9 @@ guest = "guest"
 # Back-channel logout (POST /api/v1/auth/backchannel-logout) ends sessions immediately; register that
 # URL at the `client_id` client in the provider.
 [oidc.sync]
-is_enabled = false
+# On once client_secret is set; required for production (docs/admin.md 3.2.3). is_enabled = false
+# switches it off, is_enabled = true without client_secret is an error.
+# is_enabled = false
 interval_secs = 300
 initial_delay_secs = 30
 # Secret of `server_client`. Prefer TEAMCRAFT_OIDC__SYNC__CLIENT_SECRET. The dev realm uses:
@@ -106,6 +108,14 @@ initial_delay_secs = 30
 page_size = 100
 # Mirror the provider's top-level groups as user groups (@handle) with their members.
 sync_groups = false
+# "apply", or "dry_run" to only report what it would change.
+mode = "apply"
+# Safety brake: one run deactivates at most this share of the active users, and always at most
+# brake_min_allowed if that is more. Never everybody. A held run shows in the admin console.
+brake_max_percent = 10
+brake_min_allowed = 2
+# The console warns, and an alert follows, after this many intervals without a run.
+stale_after_intervals = 3
 
 [logging]
 # `tracing` filter, e.g. "info" or "teamcraft_server=debug,info". The RUST_LOG variable wins.

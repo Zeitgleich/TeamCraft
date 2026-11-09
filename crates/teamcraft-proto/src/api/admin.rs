@@ -125,6 +125,8 @@ wire_enum! {
     Oidc => "oidc",
     /// A meeting guest left the meeting.
     Left => "left",
+    /// A bot, paused because the person who created it was deactivated.
+    CreatorDeactivated => "creator_deactivated",
   }
 }
 

@@ -17,7 +17,7 @@ const SFU_SILENT_AFTER: Duration = Duration::seconds(120);
 const SECONDS_PER_DAY: i64 = 86_400;
 
 /// Every check, in the order the console shows them.
-pub const ALL_CHECKS: [HealthCheckId; 14] = [
+pub const ALL_CHECKS: [HealthCheckId; 15] = [
   HealthCheckId::Database,
   HealthCheckId::ObjectStorage,
   HealthCheckId::IdentityProvider,
@@ -25,6 +25,7 @@ pub const ALL_CHECKS: [HealthCheckId; 14] = [
   HealthCheckId::PushService,
   HealthCheckId::MediaServer,
   HealthCheckId::OidcSync,
+  HealthCheckId::OidcSyncBrake,
   HealthCheckId::Retention,
   HealthCheckId::PartitionMaintenance,
   HealthCheckId::Backup,
@@ -40,6 +41,12 @@ pub struct JobSchedule {
   pub interval: Duration,
   /// Time from the start of the server to the first run.
   pub initial_delay: Duration,
+  /// After this many missed runs the job is overdue.
+  pub missed_runs: i32,
+}
+
+impl JobSchedule {
+  pub const DEFAULT_MISSED_RUNS: i32 = JOB_MISSED_RUNS;
 }
 
 /// Which jobs run on this server and how often (they depend on the configuration).
@@ -82,6 +89,8 @@ pub struct Facts {
   pub media: MediaServerFacts,
   pub schedules: JobSchedules,
   pub oidc_sync_last_success: Option<OffsetDateTime>,
+  /// How many deactivations the sync's safety brake holds back.
+  pub oidc_sync_held: u32,
   pub retention_last_success: Option<OffsetDateTime>,
   pub partition_last_success: Option<OffsetDateTime>,
   pub holiday_resync_last_success: Option<OffsetDateTime>,
@@ -122,6 +131,7 @@ pub fn observe(facts: &Facts) -> Vec<(HealthCheckId, Observation)> {
         facts.oidc_sync_last_success,
       ),
     ),
+    (HealthCheckId::OidcSyncBrake, oidc_sync_brake(facts)),
     (
       HealthCheckId::Retention,
       job(
@@ -228,7 +238,7 @@ fn job(
   let Some(schedule) = maybe_schedule else {
     return Observation::new(Verdict::NotConfigured);
   };
-  let allowed = schedule.interval * JOB_MISSED_RUNS;
+  let allowed = schedule.interval * schedule.missed_runs;
   let Some(last) = maybe_last else {
     let waited = facts.now - facts.started_at;
     return Observation::new(
@@ -247,6 +257,17 @@ fn job(
       Verdict::Healthy
     },
     age.whole_seconds().max(0),
+  )
+}
+
+/// A safety brake that holds deactivations back has somebody waiting to be looked at.
+fn oidc_sync_brake(facts: &Facts) -> Observation {
+  if facts.schedules.maybe_oidc_sync.is_none() {
+    return Observation::new(Verdict::NotConfigured);
+  }
+  Observation::with_value(
+    verdict(facts.oidc_sync_held == 0),
+    i64::from(facts.oidc_sync_held),
   )
 }
 
@@ -637,6 +658,7 @@ mod tests {
       media: MediaServerFacts::NotMonitored,
       schedules: JobSchedules::default(),
       oidc_sync_last_success: None,
+      oidc_sync_held: 0,
       retention_last_success: None,
       partition_last_success: None,
       holiday_resync_last_success: None,
@@ -653,6 +675,7 @@ mod tests {
     JobSchedule {
       interval,
       initial_delay,
+      missed_runs: JOB_MISSED_RUNS,
     }
   }
 

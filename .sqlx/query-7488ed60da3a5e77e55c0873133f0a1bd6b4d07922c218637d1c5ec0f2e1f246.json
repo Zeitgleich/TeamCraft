@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO audit_log (id, actor_user_id, action, target_kind, target_id, detail)\n       VALUES ($1, $2, 'user_deactivated', 'user', $3,\n               ($4::text::jsonb || jsonb_build_object('conversations', $5::bigint)))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7488ed60da3a5e77e55c0873133f0a1bd6b4d07922c218637d1c5ec0f2e1f246"
+}

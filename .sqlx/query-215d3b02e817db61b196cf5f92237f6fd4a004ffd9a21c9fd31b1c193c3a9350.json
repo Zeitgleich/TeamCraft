@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET deactivated_at = NULL, deactivation_reason = NULL\n       WHERE id = $1 AND deactivation_reason = 'creator_deactivated'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "215d3b02e817db61b196cf5f92237f6fd4a004ffd9a21c9fd31b1c193c3a9350"
+}

@@ -35,6 +35,7 @@ mod meeting_notice;
 mod message;
 mod mls;
 mod notification;
+mod oidc_sync;
 mod org_background;
 mod org_recovery;
 mod permission_override;
@@ -63,8 +64,9 @@ mod webhook;
 mod workspace_log;
 
 pub use admin::{
-  AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow, AdminUserRow, ChatRemoval,
-  ChatRemovalEffects, Deactivation, PushDeviceCount, StorageTotals, UserStatusFilter,
+  AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow, AdminUserRow,
+  CREATOR_DEACTIVATED_REASON, ChatRemoval, ChatRemovalEffects, Deactivation, DeactivationAudit,
+  PushDeviceCount, StorageTotals, UserStatusFilter,
 };
 pub use admin_join_request::{
   AdminJoinApproval, AdminJoinRequest, AdminJoinRequestClosing, AdminJoinRequestOutcome,
@@ -111,6 +113,9 @@ pub use meeting_notice::{MeetingNoticeKind, MeetingNoticeRecipient};
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};
 pub use mls::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};
 pub use notification::{DeliveryRow, ReceiptRow, StoredSpaceNotifications, StoredUserSettings};
+pub use oidc_sync::{
+  BrakeConfirmation, HeldDeactivation, NewHeldDeactivation, OidcSyncRun, OidcSyncStatusRow,
+};
 pub use org_background::OrgBackgroundObject;
 pub use org_recovery::{
   ApprovalOutcome, NewRecoveryRequest, ShareOutcome, StoredApproval, StoredRecoveryRequest, StoredShare,

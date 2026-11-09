@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO oidc_sync_status (id, held_revision) VALUES (true, 1)\n       ON CONFLICT (id) DO UPDATE SET held_revision = oidc_sync_status.held_revision + 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "9e91ec304312a8b08b1ca4424582b795207c8ab3e7d4e420eb87fff6ba1fa571"
+}

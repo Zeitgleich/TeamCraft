@@ -61,6 +61,24 @@
 .health-alert-list li { padding: 8px 0; border-top: 1px solid var(--border); }
 .health-alert-list li:first-child { border-top: 0; }
 
+.oidc-sync-held {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0;
+  padding: 0;
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+.oidc-sync-run {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 16px;
+  margin: 0 0 12px;
+}
+.oidc-sync-run dt { color: var(--text-muted); }
+.oidc-sync-run dd { margin: 0; overflow-wrap: anywhere; }
+.oidc-sync-preview { margin-top: 12px; }
+
 .admin-nav-item .badge-count { margin-inline-start: auto; }
 .menu-item .badge-count { margin-inline-start: auto; }
 

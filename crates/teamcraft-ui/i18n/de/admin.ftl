@@ -764,6 +764,8 @@ admin-integrations-col-status = Status
 admin-integrations-empty = Noch keine Bots.
 admin-integrations-active = Aktiv
 admin-integrations-revoked = Widerrufen
+admin-integrations-paused = Pausiert
+admin-integrations-paused-hint = Die Person, die diesen Bot angelegt hat, wurde deaktiviert und kennt sein Token. Ein neues Token holt den Bot zurück.
 admin-integrations-rotate = Neues Token
 admin-integrations-picture = Bild
 admin-integrations-picture-remove = Bild entfernen
@@ -952,7 +954,66 @@ health-check-push_service-hint = Die Dienste, an die der Server direkt sendet. S
 health-check-media_server = Medienserver
 health-check-media_server-hint = Meldet sich im Betrieb alle paar Sekunden beim Server.
 health-check-oidc_sync = Abgleich mit dem Identitätsanbieter
-health-check-oidc_sync-hint = Gleicht die Personen regelmäßig mit dem Identitätsanbieter ab. Überfällig nach drei verpassten Läufen.
+health-check-oidc_sync-hint = Gleicht die Personen regelmäßig mit dem Identitätsanbieter ab. Überfällig nach der eingestellten Zahl verpasster Läufe, standardmäßig drei.
+oidc-sync-title = Abgleich mit dem Identitätsanbieter
+oidc-sync-not-configured = Nicht eingerichtet. Ohne ihn behält eine beim Identitätsanbieter gesperrte Person ihren Zugang, bis ihre Anmeldung endet. Setze oidc.sync.client_secret: für den Betrieb ist er erforderlich.
+oidc-sync-switched-off = Durch oidc.sync.is_enabled = false ausgeschaltet. Eine beim Identitätsanbieter gesperrte Person behält ihren Zugang, bis ihre Anmeldung endet. Für den Betrieb ist er erforderlich.
+oidc-sync-dry-run = Probelauf: Der Abgleich meldet nur, was er ändern würde, und ändert nichts.
+oidc-sync-stale = { $count ->
+    [one] Der Abgleich ist seit mehr als einem Intervall nicht gelaufen. Prüfe den Identitätsanbieter und das Dienstkonto.
+   *[other] Der Abgleich ist seit mehr als { $count } Intervallen nicht gelaufen. Prüfe den Identitätsanbieter und das Dienstkonto.
+}
+oidc-sync-held = { $count ->
+    [one] Die Sicherheitsbremse hält 1 Deaktivierung zurück.
+   *[other] Die Sicherheitsbremse hält { $count } Deaktivierungen zurück.
+}
+oidc-sync-held-hint = Das sieht eher nach einem Fehler beim Identitätsanbieter aus als nach Personen, die gehen. Prüfe zuerst den Anbieter: War es ein Fehler, behebe ihn dort, dann leert sich diese Liste von selbst. Andere Abgänge werden weiterhin wie gewohnt deaktiviert.
+oidc-sync-confirm = Diese Deaktivierungen bestätigen
+oidc-sync-confirm-question = { $count ->
+    [one] Diese Person jetzt deaktivieren? Ihre Sitzungen enden sofort. Das wird rückgängig gemacht, sobald der Identitätsanbieter sie wieder freigibt.
+   *[other] Diese { $count } Personen jetzt deaktivieren? Ihre Sitzungen enden sofort. Das wird rückgängig gemacht, sobald der Identitätsanbieter sie wieder freigibt.
+}
+oidc-sync-confirm-yes = Ja, deaktivieren
+oidc-sync-confirmed = Bestätigt
+oidc-sync-cause-removed = beim Identitätsanbieter entfernt
+oidc-sync-cause-disabled = beim Identitätsanbieter gesperrt
+oidc-sync-cause-no-role = keine TeamCraft-Rolle mehr beim Identitätsanbieter
+oidc-sync-cause-other = anderer Grund
+oidc-sync-never-ran = Noch nicht gelaufen.
+oidc-sync-last-run = Letzter Lauf
+oidc-sync-outcome = Ergebnis
+oidc-sync-changes-title = Änderungen
+oidc-sync-duration = { $when }, Dauer { $seconds } s
+oidc-sync-outcome-ok = Abgeschlossen
+oidc-sync-outcome-partial = Mit Fehlern abgeschlossen: Einige Änderungen sind fehlgeschlagen und werden beim nächsten Lauf wiederholt
+oidc-sync-outcome-held = Abgeschlossen, Sicherheitsbremse aktiv
+oidc-sync-outcome-dry-run = Als Probelauf abgeschlossen
+oidc-sync-outcome-failed = Fehlgeschlagen, es wurde nichts geändert
+oidc-sync-error-unreachable = Der Identitätsanbieter hat nicht geantwortet.
+oidc-sync-error-refused = Der Identitätsanbieter hat das Dienstkonto abgelehnt.
+oidc-sync-error-invalid = Der Identitätsanbieter hat eine unerwartete Antwort geschickt.
+oidc-sync-error-no-users = Der Identitätsanbieter hat keine Personen aufgelistet.
+oidc-sync-error-database = Die Datenbank hat abgelehnt.
+oidc-sync-failures = { $count } Fehlschläge in Folge.
+oidc-sync-changes = { $deactivated } deaktiviert, { $reactivated } reaktiviert, { $roles } Rollenänderungen, { $groups } Gruppenänderungen, { $failed } fehlgeschlagen
+oidc-sync-unfinished = { $count ->
+    [one] 1 Deaktivierung wird noch abgeschlossen; der Zugang ist bereits gesperrt.
+   *[other] { $count } Deaktivierungen werden noch abgeschlossen; der Zugang ist bereits gesperrt.
+}
+oidc-sync-pending-removals = { $count ->
+    [one] 1 deaktiviertes Konto hat noch Geräte in Verschlüsselungsgruppen. Nur „Aus allen Chats entfernen“ durch einen Admin nimmt sie heraus.
+   *[other] { $count } deaktivierte Konten haben noch Geräte in Verschlüsselungsgruppen. Nur „Aus allen Chats entfernen“ durch einen Admin nimmt sie heraus.
+}
+oidc-sync-open-users = Personen öffnen
+oidc-sync-preview = Prüfen, was ein Lauf ändern würde
+oidc-sync-preview-title = Was ein Lauf jetzt ändern würde
+oidc-sync-preview-summary = { $deactivate } deaktiviert, { $held } zurückgehalten, { $reactivate } reaktiviert, { $roles } Rollenänderungen. Ein Lauf darf { $allowed } von { $active } aktiven Personen deaktivieren.
+health-detail-held = { $count ->
+    [one] 1 Deaktivierung wartet auf eine Entscheidung.
+   *[other] { $count } Deaktivierungen warten auf eine Entscheidung.
+}
+health-check-oidc_sync_brake = Abgleich mit dem Identitätsanbieter: Sicherheitsbremse
+health-check-oidc_sync_brake-hint = Hält Deaktivierungen zurück, wenn ein Lauf zu viele Personen auf einmal deaktivieren würde. Schlägt an, solange welche auf eine Entscheidung warten.
 health-check-retention = Aufbewahrungsjob
 health-check-retention-hint = Löscht, was seine Aufbewahrungsfrist überschritten hat. Überfällig nach drei verpassten Läufen.
 health-check-partition_maintenance = Nachrichten-Partitionen

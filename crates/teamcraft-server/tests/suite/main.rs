@@ -29,6 +29,7 @@ mod conversations;
 mod crash_reports;
 mod delivery_receipts;
 mod dependency_outages;
+mod deprovisioning;
 mod device_gaps;
 mod directory;
 mod dpop;

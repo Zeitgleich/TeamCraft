@@ -96,6 +96,7 @@ fn BotRow(hub: BotsHub, bot: BotResponse) -> impl IntoView {
   let i18n = use_i18n();
   let id = bot.id;
   let is_revoked = bot.is_revoked;
+  let is_paused = bot.is_paused;
   let is_confirming = RwSignal::new(false);
   let is_busy = RwSignal::new(false);
   let run = move |work: std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), RestError>>>>| {
@@ -149,8 +150,15 @@ fn BotRow(hub: BotsHub, bot: BotResponse) -> impl IntoView {
       <td>{format_date_time(bot.created_at.0, i18n.locale().tag())}</td>
       <td>
         <span class="badge" class:badge-guest=is_revoked>
-          {move || i18n.t(if is_revoked { "admin-integrations-revoked" } else { "admin-integrations-active" })}
+          {move || i18n.t(if is_revoked {
+            "admin-integrations-revoked"
+          } else if is_paused {
+            "admin-integrations-paused"
+          } else {
+            "admin-integrations-active"
+          })}
         </span>
+        {is_paused.then(|| view! { <p class="muted-text small">{move || i18n.t("admin-integrations-paused-hint")}</p> })}
       </td>
       <td class="row-actions">
         {(!is_revoked)

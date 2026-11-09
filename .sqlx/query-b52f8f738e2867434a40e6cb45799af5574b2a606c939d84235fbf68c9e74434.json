@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO oidc_sync_held_deactivations (user_id, cause)\n         SELECT * FROM UNNEST($1::bigint[], $2::text[])\n         ON CONFLICT (user_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b52f8f738e2867434a40e6cb45799af5574b2a606c939d84235fbf68c9e74434"
+}

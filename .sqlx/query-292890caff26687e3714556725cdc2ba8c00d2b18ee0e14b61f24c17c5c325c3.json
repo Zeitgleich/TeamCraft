@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO oidc_sync_status (id, last_started_at, last_finished_at, last_success_at, last_duration_ms,\n                                       last_outcome, last_error, consecutive_failures, deactivated, reactivated,\n                                       role_changes, groups_changed, failed)\n         VALUES (true, $1, $2::timestamptz, CASE WHEN $3::boolean THEN $2::timestamptz END, $4, $5, $6, CASE WHEN $3::boolean THEN 0 ELSE 1 END, $7, $8, $9, $10, $11)\n         ON CONFLICT (id) DO UPDATE SET\n           last_started_at = EXCLUDED.last_started_at,\n           last_finished_at = EXCLUDED.last_finished_at,\n           last_success_at = COALESCE(EXCLUDED.last_success_at, oidc_sync_status.last_success_at),\n           last_duration_ms = EXCLUDED.last_duration_ms,\n           last_outcome = EXCLUDED.last_outcome,\n           last_error = EXCLUDED.last_error,\n           consecutive_failures = CASE WHEN $3::boolean THEN 0 ELSE oidc_sync_status.consecutive_failures + 1 END,\n           deactivated = EXCLUDED.deactivated,\n           reactivated = EXCLUDED.reactivated,\n           role_changes = EXCLUDED.role_changes,\n           groups_changed = EXCLUDED.groups_changed,\n           failed = EXCLUDED.failed",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz",
+        "Bool",
+        "Int8",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "292890caff26687e3714556725cdc2ba8c00d2b18ee0e14b61f24c17c5c325c3"
+}

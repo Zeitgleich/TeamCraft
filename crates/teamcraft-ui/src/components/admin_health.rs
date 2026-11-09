@@ -1,6 +1,8 @@
 use leptos::prelude::*;
 use teamcraft_proto::{
-  AdminHealthResponse, HealthAlertResponse, HealthCheckId, HealthCheckResponse, HealthCheckStatus,
+  AdminHealthResponse, AdminOidcSyncResponse, DeactivationCause, HealthAlertResponse, HealthCheckId,
+  HealthCheckResponse, HealthCheckStatus, OidcSyncError, OidcSyncMode, OidcSyncOutcome, OidcSyncState,
+  PlannedDeactivationResponse,
 };
 
 use crate::admin::AdminSection;
@@ -29,6 +31,269 @@ pub fn HealthSection() -> impl IntoView {
       None => view! { <p class="empty-state" role="status">{move || i18n.t("health-loading")}</p> }.into_any(),
       Some(health) => view! { <HealthContent health=health /> }.into_any(),
     }}
+    <OidcSyncCard />
+  }
+}
+
+/// The sync with the identity provider: how the last run went, overdue or not, and what its safety
+/// brake holds back (docs/admin.md §3.2.3).
+#[component]
+fn OidcSyncCard() -> impl IntoView {
+  let state = use_app_state();
+  let sync = Memo::new(move |_| state.read(|backend| backend.oidc_sync_status()));
+  let preview = Memo::new(move |_| state.read(|backend| backend.oidc_sync_preview()));
+  view! {
+    {move || sync.get().map(|sync| view! { <OidcSyncContent sync=sync preview=preview /> })}
+  }
+}
+
+#[component]
+fn OidcSyncContent(
+  sync: AdminOidcSyncResponse,
+  preview: Memo<Option<teamcraft_proto::AdminOidcSyncPreviewResponse>>,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let state = use_app_state();
+  let is_confirming = RwSignal::new(false);
+  let now = now_ms();
+  let revision = sync.held_revision;
+  let held = sync.held.clone();
+  let held_count = held.len();
+  let run = sync.maybe_last_run.clone();
+  let is_stale = sync.is_stale;
+  let stale_after = usize::try_from(sync.stale_after_intervals).unwrap_or(usize::MAX);
+  let is_active = sync.state == OidcSyncState::Active;
+  let is_dry_run = sync.mode == OidcSyncMode::DryRun;
+  let not_running_key = match sync.state {
+    OidcSyncState::SwitchedOff => Some("oidc-sync-switched-off"),
+    OidcSyncState::Active => None,
+    OidcSyncState::NotConfigured | OidcSyncState::Unknown(_) => Some("oidc-sync-not-configured"),
+  };
+  let pending_removals = usize::try_from(sync.pending_removals).unwrap_or(usize::MAX);
+  let unfinished = usize::try_from(sync.unfinished_deactivations).unwrap_or(usize::MAX);
+  let locale = move || i18n.locale().tag();
+  view! {
+    <section class="instance-card" aria-labelledby="health-oidc-sync">
+      <h3 id="health-oidc-sync"><Icon name=IconName::Activity /> {move || i18n.t("oidc-sync-title")}</h3>
+      {not_running_key
+        .map(|key| {
+          view! {
+            <div class="health-summary health-summary-failing" role="status">
+              <Icon name=IconName::Alert />
+              <p>{move || i18n.t(key)}</p>
+            </div>
+          }
+        })}
+      {is_dry_run
+        .then(|| {
+          view! { <p class="muted-text">{move || i18n.t("oidc-sync-dry-run")}</p> }
+        })}
+      {is_stale
+        .then(|| {
+          view! {
+            <div class="health-summary health-summary-alert" role="alert">
+              <Icon name=IconName::Alert />
+              <p>{move || i18n.t_count("oidc-sync-stale", stale_after)}</p>
+            </div>
+          }
+        })}
+      {(held_count > 0)
+        .then(|| {
+          view! {
+            <div class="health-summary health-summary-alert" role="alert">
+              <Icon name=IconName::Alert />
+              <div>
+                <strong>{move || i18n.t_count("oidc-sync-held", held_count)}</strong>
+                <p class="muted-text small">{move || i18n.t("oidc-sync-held-hint")}</p>
+                <ul class="oidc-sync-held">
+                  {held
+                    .into_iter()
+                    .map(|entry| {
+                      let key = cause_key(&entry.cause);
+                      let name = entry.display_name.clone();
+                      let username = entry.maybe_username.clone();
+                      let is_confirmed = entry.is_confirmed;
+                      view! {
+                        <li>
+                          <span translate="no">{name}</span>
+                          {username.map(|username| view! { <span class="muted-text small" translate="no">" @" {username}</span> })}
+                          " — "
+                          <span class="muted-text small">{move || i18n.t(key)}</span>
+                          {is_confirmed.then(|| view! { <span class="badge">{move || i18n.t("oidc-sync-confirmed")}</span> })}
+                        </li>
+                      }
+                    })
+                    .collect_view()}
+                </ul>
+                <Show
+                  when=move || is_confirming.get()
+                  fallback=move || {
+                    view! {
+                      <button type="button" class="btn btn-small" on:click=move |_| is_confirming.set(true)>
+                        {move || i18n.t("oidc-sync-confirm")}
+                      </button>
+                    }
+                  }
+                >
+                  <p>{move || i18n.t_count("oidc-sync-confirm-question", held_count)}</p>
+                  <button
+                    type="button"
+                    class="btn btn-small btn-danger"
+                    on:click=move |_| {
+                      state.write(|backend| backend.confirm_oidc_sync_brake(revision));
+                      is_confirming.set(false);
+                    }
+                  >
+                    {move || i18n.t("oidc-sync-confirm-yes")}
+                  </button>
+                  <button type="button" class="btn btn-small" on:click=move |_| is_confirming.set(false)>
+                    {move || i18n.t("cancel")}
+                  </button>
+                </Show>
+              </div>
+            </div>
+          }
+        })}
+      {move || match run.clone() {
+        None => view! { <p class="muted-text">{move || i18n.t("oidc-sync-never-ran")}</p> }.into_any(),
+        Some(run) => {
+          let outcome = outcome_key(&run.outcome);
+          let maybe_error = run.maybe_error.as_ref().map(error_key);
+          let failures = run.consecutive_failures;
+          let finished = run.finished_at.0;
+          let summary = i18n.t_with(
+            "oidc-sync-changes",
+            &[
+              ("deactivated", &run.deactivated.to_string()),
+              ("reactivated", &run.reactivated.to_string()),
+              ("roles", &run.role_changes.to_string()),
+              ("groups", &run.groups_changed.to_string()),
+              ("failed", &run.failed.to_string()),
+            ],
+          );
+          let duration = i18n.t_with(
+            "oidc-sync-duration",
+            &[
+              ("when", &format_relative(finished, now, locale())),
+              ("seconds", &(run.duration_ms.max(0) + 999).div_euclid(1000).to_string()),
+            ],
+          );
+          view! {
+            <dl class="oidc-sync-run">
+              <dt>{move || i18n.t("oidc-sync-last-run")}</dt>
+              <dd>{duration}</dd>
+              <dt>{move || i18n.t("oidc-sync-outcome")}</dt>
+              <dd>
+                {move || i18n.t(outcome)}
+                {maybe_error.map(|key| view! { " " <span>{move || i18n.t(key)}</span> })}
+                {(failures > 1).then(|| view! { " " <span class="muted-text small">{move || i18n.t_count("oidc-sync-failures", usize::try_from(failures).unwrap_or(usize::MAX))}</span> })}
+              </dd>
+              <dt>{move || i18n.t("oidc-sync-changes-title")}</dt>
+              <dd>{summary}</dd>
+            </dl>
+          }
+            .into_any()
+        },
+      }}
+      {(unfinished > 0).then(|| view! { <p class="muted-text small">{move || i18n.t_count("oidc-sync-unfinished", unfinished)}</p> })}
+      {(pending_removals > 0)
+        .then(|| {
+          view! {
+            <p class="muted-text">
+              {move || i18n.t_count("oidc-sync-pending-removals", pending_removals)}
+              " "
+              <button type="button" class="btn btn-small" on:click=move |_| state.open_admin(AdminSection::Users)>
+                {move || i18n.t("oidc-sync-open-users")}
+              </button>
+            </p>
+          }
+        })}
+      {is_active
+        .then(|| {
+          view! {
+            <p class="row-actions">
+              <button type="button" class="btn btn-small" on:click=move |_| state.write(|backend| backend.run_oidc_sync_preview())>
+                {move || i18n.t("oidc-sync-preview")}
+              </button>
+            </p>
+          }
+        })}
+      {move || preview.get().map(|preview| {
+        let count = preview.would_deactivate.len();
+        let held = preview.would_hold.len();
+        let reactivate = preview.would_reactivate;
+        let roles = preview.would_change_roles;
+        let allowed = preview.allowed;
+        let active = preview.active_users;
+        let would = preview.would_deactivate.clone();
+        let would_hold = preview.would_hold.clone();
+        view! {
+          <div class="oidc-sync-preview" role="status">
+            <strong>{move || i18n.t("oidc-sync-preview-title")}</strong>
+            <p class="muted-text small">
+              {move || i18n.t_with("oidc-sync-preview-summary", &[
+                ("deactivate", &count.to_string()),
+                ("held", &held.to_string()),
+                ("reactivate", &reactivate.to_string()),
+                ("roles", &roles.to_string()),
+                ("allowed", &allowed.to_string()),
+                ("active", &active.to_string()),
+              ])}
+            </p>
+            <ul class="oidc-sync-held">
+              {planned_rows(would)}
+              {planned_rows(would_hold)}
+            </ul>
+          </div>
+        }
+      })}
+    </section>
+  }
+}
+
+fn planned_rows(planned: Vec<PlannedDeactivationResponse>) -> impl IntoView {
+  let i18n = use_i18n();
+  planned
+    .into_iter()
+    .map(|entry| {
+      let key = cause_key(&entry.cause);
+      view! {
+        <li>
+          <span translate="no">{entry.display_name.clone()}</span>
+          " — "
+          <span class="muted-text small">{move || i18n.t(key)}</span>
+        </li>
+      }
+    })
+    .collect_view()
+}
+
+fn cause_key(cause: &DeactivationCause) -> &'static str {
+  match cause {
+    DeactivationCause::Removed => "oidc-sync-cause-removed",
+    DeactivationCause::Disabled => "oidc-sync-cause-disabled",
+    DeactivationCause::NoRole => "oidc-sync-cause-no-role",
+    DeactivationCause::Unknown(_) => "oidc-sync-cause-other",
+  }
+}
+
+fn outcome_key(outcome: &OidcSyncOutcome) -> &'static str {
+  match outcome {
+    OidcSyncOutcome::Ok => "oidc-sync-outcome-ok",
+    OidcSyncOutcome::Partial => "oidc-sync-outcome-partial",
+    OidcSyncOutcome::Held => "oidc-sync-outcome-held",
+    OidcSyncOutcome::DryRun => "oidc-sync-outcome-dry-run",
+    OidcSyncOutcome::Failed | OidcSyncOutcome::Unknown(_) => "oidc-sync-outcome-failed",
+  }
+}
+
+fn error_key(error: &OidcSyncError) -> &'static str {
+  match error {
+    OidcSyncError::ProviderRefused => "oidc-sync-error-refused",
+    OidcSyncError::ProviderInvalidAnswer => "oidc-sync-error-invalid",
+    OidcSyncError::ProviderListedNoUsers => "oidc-sync-error-no-users",
+    OidcSyncError::Database => "oidc-sync-error-database",
+    OidcSyncError::ProviderUnreachable | OidcSyncError::Unknown(_) => "oidc-sync-error-unreachable",
   }
 }
 
@@ -216,6 +481,8 @@ enum Detail {
   },
   Days(i64),
   Percent(i64),
+  /// Deactivations waiting for a decision.
+  Held(usize),
   /// A job that has not run since the server started.
   NeverRan,
 }
@@ -230,6 +497,7 @@ impl Detail {
       Self::Days(days) if *days < 0 => i18n.t("health-detail-certificate-expired"),
       Self::Days(days) => i18n.t_count("health-detail-certificate", usize::try_from(*days).unwrap_or(0)),
       Self::Percent(percent) => i18n.t_with("health-detail-disk", &[("percent", &percent.to_string())]),
+      Self::Held(count) => i18n.t_count("health-detail-held", *count),
       Self::NeverRan => i18n.t("health-detail-job-not-yet"),
     }
   }
@@ -270,6 +538,9 @@ fn measured(check: &HealthCheckId, value: i64) -> Option<Detail> {
     }),
     HealthCheckId::Certificate => Some(Detail::Days(value)),
     HealthCheckId::DiskSpace => Some(Detail::Percent(value)),
+    HealthCheckId::OidcSyncBrake if value > 0 => {
+      Some(Detail::Held(usize::try_from(value).unwrap_or(usize::MAX)))
+    },
     HealthCheckId::HolidayFeed => Some(Detail::Age {
       key: "health-detail-holiday-feed",
       secs: value,
@@ -363,6 +634,7 @@ mod tests {
       HealthCheckId::PushService,
       HealthCheckId::MediaServer,
       HealthCheckId::OidcSync,
+      HealthCheckId::OidcSyncBrake,
       HealthCheckId::Retention,
       HealthCheckId::PartitionMaintenance,
       HealthCheckId::Backup,

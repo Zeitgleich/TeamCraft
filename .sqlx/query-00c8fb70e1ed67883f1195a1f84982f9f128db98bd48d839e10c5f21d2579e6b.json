@@ -1,0 +1,93 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT h.user_id, h.cause, h.held_at, h.confirmed_at IS NOT NULL AS \"is_confirmed!\",\n                u.display_name, u.username, u.oidc_role\n         FROM oidc_sync_held_deactivations h JOIN users u ON u.id = h.user_id\n         ORDER BY h.held_at, h.user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_held_deactivations",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "cause",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_held_deactivations",
+            "name": "cause"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "held_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_held_deactivations",
+            "name": "held_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "is_confirmed!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "display_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "display_name"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "username",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "username"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "oidc_role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "oidc_role"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "00c8fb70e1ed67883f1195a1f84982f9f128db98bd48d839e10c5f21d2579e6b"
+}

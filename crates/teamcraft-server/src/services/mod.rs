@@ -47,6 +47,8 @@ pub mod mls;
 pub mod notetaker;
 pub mod notifications;
 pub mod oidc;
+pub mod oidc_brake;
+pub mod oidc_status;
 pub mod org_backgrounds;
 pub mod org_recovery;
 pub mod permission_scheme;

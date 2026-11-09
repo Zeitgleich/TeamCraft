@@ -596,6 +596,7 @@ impl TestApp {
         crate::health::JobSchedules::default(),
         time::OffsetDateTime::now_utc(),
       )),
+      oidc_sync: Arc::default(),
       holiday_feed: Arc::default(),
       holiday_resync: Arc::default(),
       // Tests forward to a fake backend on this machine.
