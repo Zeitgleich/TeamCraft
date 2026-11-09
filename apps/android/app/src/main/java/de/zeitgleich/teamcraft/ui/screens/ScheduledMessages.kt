@@ -244,7 +244,6 @@ private fun ScheduledEditor(
           label = { Text(stringResource(R.string.scheduled_edit_text)) },
           isError = errors[ScheduleField.BODY] != null,
           supportingText = supportingText(errors[ScheduleField.BODY]),
-          keyboardOptions = textKeyboard(),
           modifier = Modifier.fillMaxWidth().focusRequester(bodyFocus).fieldError(errors[ScheduleField.BODY]),
         )
         DueAtField(

@@ -38,6 +38,7 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
@@ -113,6 +114,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -1122,7 +1124,6 @@ fun TextDialog(
         label = { Text(stringResource(label)) },
         isError = maybeError != null,
         supportingText = supportingText(maybeError),
-        keyboardOptions = textKeyboard(),
         modifier = Modifier.fillMaxWidth().focusRequester(focus).fieldError(maybeError),
       )
     },
@@ -1701,7 +1702,10 @@ private fun ComposerField(
             unfocusedIndicatorColor = Color.Transparent,
             disabledIndicatorColor = Color.Transparent,
           ),
-          keyboardOptions = textKeyboard(imeAction = if (isSendWithEnter) ImeAction.Send else ImeAction.Default),
+          keyboardOptions = KeyboardOptions(
+            capitalization = KeyboardCapitalization.Sentences,
+            imeAction = if (isSendWithEnter) ImeAction.Send else ImeAction.Default,
+          ),
           keyboardActions = KeyboardActions(onSend = { if (canSend) onSend() }),
         )
         // While typing the field needs the room; the camera comes back when it is empty.

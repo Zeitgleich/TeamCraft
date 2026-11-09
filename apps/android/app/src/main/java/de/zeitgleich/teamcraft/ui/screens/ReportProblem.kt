@@ -162,7 +162,6 @@ fun ReportProblemScreen(viewModel: MainViewModel, account: AppState.Ready, onBac
         },
         label = { Text(stringResource(R.string.report_description)) },
         minLines = 4,
-        keyboardOptions = textKeyboard(),
         isError = errors[ReportField.DESCRIPTION] != null,
         supportingText = supportingText(errors[ReportField.DESCRIPTION], R.string.report_description_hint),
         modifier = Modifier

@@ -42,6 +42,7 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
@@ -159,7 +160,7 @@ internal fun InvitePeopleSheet(viewModel: MainViewModel, spaces: List<Space>, on
         minLines = 2,
         isError = shown[InviteField.NOTE] != null,
         supportingText = supportingText(shown[InviteField.NOTE]),
-        keyboardOptions = textKeyboard(),
+        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
         modifier = Modifier.fillMaxWidth().focusRequester(requesters.getValue(InviteField.NOTE)).fieldError(shown[InviteField.NOTE]),
       )
       maybeFailure?.let { failure ->
