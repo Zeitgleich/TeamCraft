@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="directory_title">Verzeichnis</string>
+  <string name="directory_hint">Personen und Kanäle in deinen Spaces finden</string>
+  <string name="directory_people">Personen</string>
+  <string name="directory_channels">Kanäle</string>
+  <string name="directory_external">Extern</string>
+  <string name="directory_invitations">Einladungen</string>
+  <string name="directory_people_filter">Personen suchen</string>
+  <string name="directory_channel_filter">Kanäle suchen</string>
+  <string name="directory_invitation_filter">Nach E-Mail-Adresse suchen</string>
+  <string name="directory_people_empty">Niemand passt. Versuch einen anderen Namen oder entferne einen Filter.</string>
+  <string name="directory_external_empty">Keine externen Personen passen.</string>
+  <string name="directory_channels_empty">Keine Kanäle passen.</string>
+  <string name="directory_invitations_empty">Es gibt keine offenen Einladungen, die du verwalten kannst.</string>
+  <string name="directory_more_failed">Die nächste Seite konnte nicht geladen werden.</string>
+  <string name="directory_filter_organization">Organisation</string>
+  <string name="directory_filter_department">Abteilung</string>
+  <string name="directory_filter_title">Position</string>
+  <string name="directory_filter_any">Alle</string>
+  <string name="directory_filter_chosen">%1$s: %2$s</string>
+  <string name="directory_guest">Gast</string>
+  <string name="directory_message">%1$s schreiben</string>
+  <plurals name="directory_channel_members">
+    <item quantity="one">%d Mitglied</item>
+    <item quantity="other">%d Mitglieder</item>
+  </plurals>
+  <string name="directory_open">Öffnen</string>
+  <string name="directory_joining">Trete bei</string>
+  <string name="directory_private">Privater Kanal</string>
+  <string name="directory_invited_by">Eingeladen von %1$s</string>
+  <string name="directory_invitation_expires">Läuft ab am %1$s</string>
+  <string name="directory_invitation_expired">Abgelaufen</string>
+  <string name="directory_resend">Erneut senden</string>
+  <string name="directory_resent">Erneut gesendet</string>
+  <string name="directory_resend_later">Gerade erst gesendet. Versuch es später noch einmal.</string>
+  <string name="directory_revoke">Zurückziehen</string>
+  <string name="directory_revoke_title">Einladung zurückziehen?</string>
+  <string name="directory_revoke_text">%1$s kann mit dieser Einladung %2$s nicht mehr beitreten.</string>
+  <string name="invite_title">Personen einladen</string>
+  <string name="invite_space_label">Space</string>
+  <string name="invite_email_label">E-Mail-Adresse</string>
+  <string name="invite_email_missing">Gib eine E-Mail-Adresse ein.</string>
+  <string name="invite_email_invalid">Gib eine E-Mail-Adresse wie name@example.com ein.</string>
+  <string name="invite_email_refused">Der Server nimmt diese Adresse nicht an. Prüf sie oder lade die Person als Mitglied ein.</string>
+  <string name="invite_already_invited">Für diese Adresse gibt es schon eine offene Einladung in den Space.</string>
+  <string name="invite_role_label">Einladen als</string>
+  <string name="invite_role_member">Mitglied</string>
+  <string name="invite_role_member_hint">Sieht die öffentlichen Kanäle des Spaces und das Verzeichnis.</string>
+  <string name="invite_role_guest">Gast</string>
+  <string name="invite_role_guest_hint">Sieht nur die Unterhaltungen, zu denen die Person hinzugefügt wird.</string>
+  <string name="invite_message_label">Persönliche Notiz (optional)</string>
+  <string name="invite_submit">Einladung senden</string>
+  <string name="invite_sent">Einladung an %1$s gesendet</string>
+</resources>

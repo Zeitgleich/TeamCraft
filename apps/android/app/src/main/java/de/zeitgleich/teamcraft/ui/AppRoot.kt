@@ -35,6 +35,7 @@ import androidx.navigation.navArgument
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.screens.BrowseScreen
+import de.zeitgleich.teamcraft.ui.screens.DirectoryScreen
 import de.zeitgleich.teamcraft.ui.screens.ChatListScreen
 import de.zeitgleich.teamcraft.ui.screens.ConfirmServerScreen
 import de.zeitgleich.teamcraft.ui.screens.ServerEntryScreen
@@ -427,6 +428,9 @@ private fun ReadyNavigation(
         isPeopleFirst = entry.arguments?.getBoolean("people") == true,
         maybeInitialSpaceId = entry.arguments?.getString("space"),
       )
+    }
+    composable("directory") {
+      DirectoryScreen(viewModel = viewModel, onOpen = { navigation.navigate("conversation/$it") }, onBack = { navigation.popBackStack() })
     }
     composable("meetings") {
       MeetingsScreen(viewModel = viewModel, onBack = { navigation.popBackStack() })

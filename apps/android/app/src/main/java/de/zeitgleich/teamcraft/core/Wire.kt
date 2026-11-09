@@ -61,6 +61,10 @@ data class Space(
   @SerialName("mention_count") val mentionCount: Int = 0,
   /** Whether the user may create channels here, as the core decided it (issue #758). */
   @SerialName("can_create_channels") val canCreateChannels: Boolean = true,
+  /** Whether the user may add or invite members here, as the server said (#1337). */
+  @SerialName("can_add_members") val canAddMembers: Boolean = false,
+  /** Whether the user may invite guests here, as the server said (#1337). */
+  @SerialName("can_invite_guests") val canInviteGuests: Boolean = false,
   /** Version of the space's picture; without one the space shows no picture. */
   @SerialName("maybe_image_version") val maybeImageVersion: String? = null,
   /**
@@ -613,7 +617,6 @@ data class ChatAnswer(
   val unseen: UnseenReactions? = null,
   @SerialName("older_history") val olderHistory: String? = null,
   val calls: List<CallHistoryItem> = emptyList(),
-  val roster: SpaceRoster? = null,
   val overview: ScheduledOverview? = null,
   val load: ListLoadWire? = null,
   /** [ChatQueries.joinableSpaces]: open spaces the user isn't in (#1526). */

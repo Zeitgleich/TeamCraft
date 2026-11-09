@@ -20,29 +20,6 @@ struct CallHistoryItem: Decodable, Equatable, Identifiable, Sendable {
   }
 }
 
-/// Somebody in a space, as far as the user may see it.
-struct SpaceMember: Decodable, Equatable, Identifiable, Sendable {
-  let user: String
-  let displayName: String
-  var isGuest: Bool?
-  var isBot: Bool?
-
-  var id: String { user }
-}
-
-/// The member list of a space: `loading`, `hidden` (guests may not see it) or `loaded`.
-struct SpaceRoster: Decodable, Equatable, Sendable {
-  let state: String
-  var members: [SpaceMember]?
-
-  /// The people to list: by name, integrations' bot accounts left out.
-  var people: [SpaceMember] {
-    (members ?? [])
-      .filter { $0.isBot != true }
-      .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-  }
-}
-
 /// A saved message, with what the list shows of it.
 struct SavedItem: Decodable, Equatable, Identifiable, Sendable {
   struct SavedMessage: Decodable, Equatable, Sendable {

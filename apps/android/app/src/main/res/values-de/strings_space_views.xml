@@ -9,10 +9,7 @@
   <string name="space_tab_meetings">Meetings</string>
   <string name="space_tab_saved">Gespeichert</string>
   <string name="space_tab_files">Dateien</string>
-  <string name="space_person_guest">Gast</string>
-  <string name="space_people_empty">Noch niemand ist in diesem Space.</string>
   <string name="space_people_hidden">Nur Mitglieder eines Space sehen, wer darin ist.</string>
-  <string name="space_people_failed">Die Mitglieder dieses Space konnten nicht geladen werden.</string>
   <string name="space_calls_empty">Anrufe in den Kanälen dieses Space erscheinen hier.</string>
   <string name="space_call_missed">Verpasst</string>
   <string name="space_call_incoming">Eingehend</string>

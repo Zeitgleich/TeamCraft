@@ -36,6 +36,19 @@ pub async fn http_fetch(request: HttpFetchRequest) -> Result<HttpFetchResponse, 
 }
 
 /// One request of the app. No `Debug`: the body may hold a password, a header a token.
+/// Runs a request of the server API on this module's runtime, off the engine thread, so a slow
+/// answer never holds up syncing. Dropping the returned future aborts the request.
+pub(crate) async fn run_request<F>(request: F) -> Result<F::Output, String>
+where
+  F: Future + Send + 'static,
+  F::Output: Send + 'static,
+{
+  let runtime = runtime().ok_or_else(|| "no runtime for HTTP requests".to_owned())?;
+  AbortOnDrop(runtime.spawn(request))
+    .await
+    .map_err(|ended| format!("the request ended: {ended}"))
+}
+
 #[derive(Clone, PartialEq, Eq, uniffi::Record)]
 pub struct HttpFetchRequest {
   pub method: HttpFetchMethod,

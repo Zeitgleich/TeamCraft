@@ -19,6 +19,7 @@ struct ConversationListView: View {
   @State private var hits: [SearchHitItem] = []
   @State private var isShowingSettings = false
   @State private var isShowingMeetings = false
+  @State private var isShowingDirectory = false
   @State private var isShowingFilters = false
   @State private var filters = SearchFilters()
   @State private var maybeBrowseTab: BrowseView.Tab?
@@ -204,6 +205,9 @@ struct ConversationListView: View {
     .sheet(isPresented: $isShowingSettings) { SettingsView(account: account) }
     .crashReportsNotice { isShowingSettings = true }
     .sheet(isPresented: $isShowingMeetings) { MeetingsView(account: account) }
+    .sheet(isPresented: $isShowingDirectory) {
+      DirectoryView { conversationId in selection = conversationId }
+    }
     .sheet(isPresented: $isShowingDrafts) {
       DraftsAndSentView { place in
         model.openedPlace = place
@@ -544,6 +548,8 @@ struct ConversationListView: View {
         if canBrowseChannels {
           Button("browse_channels", systemImage: "magnifyingglass") { browseChannels(in: maybeChannelSpace?.id) }
         }
+        // Everybody has a directory; a guest's lists the people they share a conversation with.
+        Button("directory_title", systemImage: "person.2") { isShowingDirectory = true }
       } label: {
         composeMark(symbol: "plus")
       }

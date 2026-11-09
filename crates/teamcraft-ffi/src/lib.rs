@@ -16,6 +16,7 @@ mod color_theme;
 mod crash_reports;
 mod creating;
 mod device_proofs;
+mod directory;
 mod engine;
 mod error;
 mod http_fetch;
@@ -51,6 +52,11 @@ pub use crash_reports::{CrashReportsConfig, crash_reports_config};
 pub use device_proofs::{
   DeviceProofError, DeviceProofKey, ProviderProver, TokenEndpointAnswer, TokenEndpointTransport,
   TokenProofFallback, token_bound_key,
+};
+pub use directory::{
+  DirectoryChannelItem, DirectoryChannelsPage, DirectoryFilterChoices, DirectoryInvitationItem,
+  DirectoryInvitationsPage, DirectoryPeopleKind, DirectoryPeoplePage, DirectoryPeopleRequest,
+  DirectoryPersonItem, InvitationOutcome, InviteOutcome, InvitePeopleInput,
 };
 pub use error::TeamCraftError;
 pub use http_fetch::{

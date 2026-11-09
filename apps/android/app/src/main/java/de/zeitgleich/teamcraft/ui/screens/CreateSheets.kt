@@ -19,6 +19,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -96,6 +97,7 @@ internal fun CreateMenuSheet(
   onNewChannel: () -> Unit,
   onNewSpace: () -> Unit,
   onBrowse: () -> Unit,
+  onDirectory: () -> Unit,
   onDismiss: () -> Unit,
 ) {
   ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
@@ -111,6 +113,8 @@ internal fun CreateMenuSheet(
       if (choices.canBrowse) {
         CreateEntry(Icons.Filled.Search, R.string.browse_channels, stringResource(R.string.create_browse_hint), onBrowse)
       }
+      // Everybody has a directory; a guest's lists the people they share a conversation with.
+      CreateEntry(Icons.Filled.Person, R.string.directory_title, stringResource(R.string.directory_hint), onDirectory)
     }
   }
 }

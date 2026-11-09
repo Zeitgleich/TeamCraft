@@ -44,7 +44,6 @@ enum ChatAction {
   case joinSpace(spaceId: String)
   /// Reads again how far the others read: receipts sent while the app was offline never arrive.
   case refreshReadReceipts(conversationId: String)
-  case refreshSpaceRoster(spaceId: String)
   case refreshCallHistory
   /// The reactions to these own messages were on screen, or the user jumped to them: seen on
   /// every device (issue #1009).
@@ -117,8 +116,6 @@ enum ChatAction {
       object = ["action": "cancel_upload", "conversation": conversation, "message": message, "file_id": file]
     case .joinChannel(let conversation):
       object = ["action": "join_channel", "conversation": conversation]
-    case .refreshSpaceRoster(let space):
-      object = ["action": "refresh_space_roster", "space": space]
     case .refreshCallHistory:
       object = ["action": "refresh_call_history"]
     case .refreshReadReceipts(let conversation):
@@ -257,7 +254,6 @@ enum ChatQuery {
   case spaceFiles(spaceId: String)
   case spaceSavedItems(spaceId: String)
   case spaceCallHistory(spaceId: String)
-  case spaceMembers(spaceId: String)
   case maxUploadBytes
   case resolvePermalink(link: String)
   /// Everyone typing anywhere, thread replies apart: one answer for the list, the header and the lines (#882).
@@ -296,8 +292,6 @@ enum ChatQuery {
       return jsonText(["kind": "space_saved_items", "space": space])
     case .spaceCallHistory(let space):
       return jsonText(["kind": "space_call_history", "space": space])
-    case .spaceMembers(let space):
-      return jsonText(["kind": "space_members", "space": space])
     case .maxUploadBytes:
       return jsonText(["kind": "max_upload_bytes"])
     case .resolvePermalink(let link):

@@ -18,8 +18,14 @@ struct BrowseSnapshot: Decodable, Sendable {
     /// Version of the space's picture; without one the space shows its letter (#1526).
     let maybeImageVersion: String?
 
+    /// Whether the user may add or invite members, or invite guests, here (#1337).
+    let canAddMembers: Bool?
+    let canInviteGuests: Bool?
+
     /// "Create channel" is offered: the core's word, or offered when an older core didn't say.
     var offersChannelCreation: Bool { canCreateChannels ?? true }
+    /// "Invite people" is offered: the user may invite anybody here.
+    var canInvite: Bool { canAddMembers == true || canInviteGuests == true }
   }
 
   struct Conversation: Decodable, Sendable {

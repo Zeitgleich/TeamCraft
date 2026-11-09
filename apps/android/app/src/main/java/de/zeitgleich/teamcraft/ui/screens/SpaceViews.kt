@@ -51,22 +51,15 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.ChatSnapshot
 import de.zeitgleich.teamcraft.core.ListLoad
-import de.zeitgleich.teamcraft.core.LoadFailure
 import de.zeitgleich.teamcraft.core.LoadingList
 import de.zeitgleich.teamcraft.core.Meeting
 import de.zeitgleich.teamcraft.core.Space
-import de.zeitgleich.teamcraft.core.SpaceRoster
-import de.zeitgleich.teamcraft.ui.ListPhase
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.Read
 import de.zeitgleich.teamcraft.ui.listPhase
 import de.zeitgleich.teamcraft.ui.spaceDirectMessages
 import de.zeitgleich.teamcraft.ui.SpacePicture
-import kotlinx.coroutines.delay
 import uniffi.teamcraft_ffi.rowBadge
-
-/** How long a space's member list may load before the user is offered another try. */
-private const val ROSTER_DEADLINE_MS = 15_000L
 
 /** The views of one space, in the order of the sidebar on the desktop. */
 enum class SpaceViewTab(@StringRes val label: Int) {
@@ -94,9 +87,6 @@ fun SpaceViewIcon(tab: SpaceViewTab) {
 /** The upcoming meetings of a space, soonest first; a meeting belongs to the space it was scheduled in. */
 fun meetingsOfSpace(meetings: List<Meeting>, spaceId: String): List<Meeting> =
   upcomingMeetings(meetings).filter { it.maybeSpaceId == spaceId }
-
-/** The roster as a list: people first by name, integrations' bot accounts left out. */
-fun peopleOfRoster(roster: SpaceRoster) = roster.members.filterNot { it.isBot }.sortedBy { it.displayName.lowercase() }
 
 /**
  * People, calls, meetings, saved messages and files of one space (#954). Home's entries stay global;
@@ -135,7 +125,8 @@ fun SpaceViewsScreen(
         }
       }
       when (tab) {
-        SpaceViewTab.People -> SpacePeople(viewModel, spaceId)
+        // The directory of this space (#1337): people, channels, external people, invitations.
+        SpaceViewTab.People -> DirectoryContent(viewModel, maybeSpaceId = spaceId, onOpen = onOpen, modifier = Modifier.fillMaxSize())
         SpaceViewTab.DirectMessages ->
           SpaceDirectMessages(viewModel, spaces.firstOrNull { it.id == spaceId }?.directConversations.orEmpty(), onOpen)
         SpaceViewTab.Calls -> SpaceCalls(viewModel, spaceId, snapshot)
@@ -197,51 +188,6 @@ private fun SpaceSwitcher(spaces: List<Space>, onSelect: (String) -> Unit) {
             onSelect(space.id)
           },
         )
-      }
-    }
-  }
-}
-
-@Composable
-private fun SpacePeople(viewModel: MainViewModel, spaceId: String) {
-  val changes by viewModel.changeCount.collectAsState()
-  var maybeRoster by remember(spaceId) { mutableStateOf<SpaceRoster?>(null) }
-  var attempt by remember(spaceId) { mutableStateOf(0) }
-  var isOverdue by remember(spaceId) { mutableStateOf(false) }
-  LaunchedEffect(changes, spaceId) { maybeRoster = viewModel.readChat { query(ChatQueries.spaceMembers(spaceId)).roster } }
-  // What this device has shows at once; the fresh list follows as a store change.
-  LaunchedEffect(spaceId, attempt) {
-    isOverdue = false
-    viewModel.act(ChatActions.refreshSpaceRoster(spaceId))
-    delay(ROSTER_DEADLINE_MS)
-    isOverdue = true
-  }
-  val roster = maybeRoster
-  when {
-    roster == null || roster.state == "loading" ->
-      if (isOverdue) {
-        ListFailed(ListPhase.Failed(LoadFailure.TIMED_OUT), onRetry = { attempt += 1 })
-      } else {
-        ListSkeleton()
-      }
-    roster.state == "hidden" -> EmptyHint(stringResource(R.string.space_people_hidden))
-    else -> {
-      val people = peopleOfRoster(roster)
-      LazyColumn(Modifier.fillMaxSize()) {
-        if (people.isEmpty()) item { EmptyHint(stringResource(R.string.space_people_empty)) }
-        items(people, key = { it.user }) { member ->
-          Column(Modifier.fillMaxWidth().padding(16.dp)) {
-            Text(member.displayName)
-            if (member.isGuest) {
-              Text(
-                stringResource(R.string.space_person_guest),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-              )
-            }
-          }
-          HorizontalDivider()
-        }
       }
     }
   }

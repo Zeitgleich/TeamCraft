@@ -57,20 +57,6 @@ final class SpaceViewsTests: XCTestCase {
     XCTAssertNil(list.meetings[1].spaceId)
   }
 
-  func testRosterAnswersDecodeAndThePeopleAreByNameWithoutBots() throws {
-    let json = """
-      {"answer":"space_members","roster":{"state":"loaded","members":[
-        {"user":"1","display_name":"bea","is_guest":true,"role":"member"},
-        {"user":"2","display_name":"Ada","role":"member"},
-        {"user":"3","display_name":"Bot","is_bot":true,"role":"member"}
-      ]}}
-      """
-    let roster = try XCTUnwrap(Wire.decode(ChatAnswer.self, from: json)?.roster)
-    XCTAssertEqual(roster.people.map(\.displayName), ["Ada", "bea"])
-    let hidden = try XCTUnwrap(Wire.decode(ChatAnswer.self, from: #"{"answer":"space_members","roster":{"state":"hidden"}}"#))
-    XCTAssertEqual(hidden.roster?.state, "hidden")
-  }
-
   func testCallAndSavedAnswersDecode() throws {
     let calls = #"{"answer":"call_history","calls":[{"id":"7","conversation":"3","direction":"missed","started_at":5,"participants":[]}]}"#
     XCTAssertEqual(try XCTUnwrap(Wire.decode(ChatAnswer.self, from: calls)?.calls).first?.direction, "missed")
