@@ -2216,6 +2216,29 @@ read, so every message is unread. What a read costs since a tally was written:
 A tally is checked against a version the store writes in the group of the messages, so it is never
 updated by hand and can't drift; one written before a crash means counting the difference.
 
+### Read connections and a lane for the open chat (issues #1476, #1583)
+
+Each read thread reads through a SQLite connection of its own; the open chat's reads (`query`,
+`message_tail`, `message_window`, `message_tail_ahead`) have a thread of their own, so they don't
+wait behind the chat list, a snapshot or the share sheet's targets, and nothing waits for the engine's
+groups of writes. The writer stages what each commit changed, so a reader drops only that from its
+caches (docs/e2ee.md §9.5). `crates/teamcraft-ffi/tests/list_reads_budget.rs`, release, 80
+conversations with about 100,000 messages (`TEAMCRAFT_STORM_BIG_CHATS=1`,
+`TEAMCRAFT_STORM_BIG_MESSAGES=70000`), before (main) and after:
+
+| Measured                                                   | OnePlus 5T before | after   | Desktop before | after  |
+|------------------------------------------------------------|-------------------|---------|----------------|--------|
+| Opening a chat during a change storm, p50                  | 10.2 ms           | 4.5 ms  | 2.6 ms         | 1.6 ms |
+| Opening a chat during a change storm, p95                  | 25.1 ms           | 7.1 ms  | 3.8 ms         | 2.3 ms |
+| One chat list pass, idle, p50                              | 29.4 ms           | 14.1 ms | 4.8 ms         | 3.5 ms |
+| List pass after another connection's commit, p50 (cold)    | 18.2 ms           | –       | 9.1 ms         | 7.2 ms |
+| List pass on the read connection after the writer's commit | –                 | 5.4 ms  | –              | 1.2 ms |
+| Same, warm caches                                          | 5.2 ms            | 5.2 ms  | 1.3 ms         | 1.2 ms |
+
+The storm's sync writes through a connection of its own (another process to the store), so its
+commits still drop every cache on both sides; the engine's own commits now cost the reader what they
+changed (the last two rows), where a plain second connection would pay the cold pass every time.
+
 ### Files view on a large workspace (issue #1509)
 
 `crates/teamcraft-ffi/tests/files_budget.rs` measures the Files view through the API the apps call:

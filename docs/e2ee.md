@@ -5215,6 +5215,17 @@ If SQLite rolls a group's transaction back by itself (a full disk), the group's 
 refused instead of being committed one by one. Where order alone is enough (content keys are written before
 the MLS state that consumed the epoch), reprocessing an entry after a crash is idempotent.
 
+**Read connections (issues #1476, #1583).** The mobile and desktop apps (sealed SQLite) read on
+connections of their own beside the engine's writing one: a read thread never waits for a group of
+writes, and a group never for a long read. Every commit numbers itself in the plaintext table
+`commit_stamp` (a counter and a random tag per connection: no content, no IDs). Before it commits,
+the writer stages in memory which records and catalog nodes the group changed; a reader that finds a
+newer number drops just those from its caches, and drops everything for a number it wasn't told of
+(another process, the notification extension). Reads see only committed writes: the notes of a group
+(what the UI reads again, the journal of written messages) are published after its commit, and a
+reader whose snapshot is older than a note takes a new one first. A read thread's own writes go
+through the writer, and its next read sees them. The notification extension opens no reader.
+
 **MLS state (issue #424).** The openmls provider storage (every group's tree, context, epoch and
 message secrets; key package private keys) is a map from storage key to value; each entry is one
 record of the `mls_storage` table (`entry/` and the storage key in base64url). A save writes the

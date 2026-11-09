@@ -85,6 +85,13 @@ impl WriteGroup {
     Ok(())
   }
 
+  /// Whether the open group is the outermost and will commit when it ends (none of its writes
+  /// failed, and SQLite didn't end its transaction early).
+  #[cfg_attr(not(feature = "sealed-sqlite"), allow(dead_code))]
+  pub(crate) fn will_commit(&self, connection: &Connection) -> bool {
+    self.depth == 1 && !self.has_failed && !connection.is_autocommit()
+  }
+
   /// Whether a group of writes is open on the connection.
   #[cfg_attr(not(feature = "sealed-sqlite"), allow(dead_code))]
   pub(crate) fn is_open(&self) -> bool {
