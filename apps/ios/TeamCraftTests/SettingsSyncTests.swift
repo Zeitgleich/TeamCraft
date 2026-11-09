@@ -14,7 +14,7 @@ private final class FakeStores: SettingsSyncStores {
   static let defaults = SyncedAppSettings(
     listLayout: .spaces, listGrouping: .mixed, animatedImages: .autoplay, sharesTyping: true,
     firstNameIsMention: true, channelMentionsNotify: true, keywords: [], confirmChannelOver: 10,
-    callStatusSounds: .all, colorTheme: "brand")
+    callStatusSounds: .all, colorTheme: "brand", font: "system")
 
   func current() async -> SyncedAppSettings { settings }
 
@@ -229,10 +229,12 @@ final class AppSettingsStoresTests: XCTestCase {
     var new = before
     new.confirmChannelOver = 25
     new.colorTheme = "preset:pine"
+    new.font = "inter"
     await stores.apply(new, over: before)
     let after = await stores.current()
     XCTAssertEqual(after.confirmChannelOver, 25)
     XCTAssertEqual(after.colorTheme, "preset:pine")
+    XCTAssertEqual(after.font, "inter")
   }
 
   func testTheStateIsKeptAcrossInstances() {
