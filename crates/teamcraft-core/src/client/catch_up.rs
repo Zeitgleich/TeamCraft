@@ -255,6 +255,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         };
         self.catch_up_one(conversation, first, phases).await?;
         self.apply_live_during_catch_up().await?;
+        // The UI reads what this conversation brought before the next one is decrypted.
+        self.hand_back_thread().await;
       }
     }
     Ok(())
@@ -400,6 +402,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       for welcome in &page.messages {
         self.catch_up_focus_ahead(ahead, phases).await?;
         self.join_from_welcome(welcome).await?;
+        self.hand_back_thread().await;
       }
       if !page.has_more || page.messages.is_empty() {
         self.are_welcomes_synced = true;
@@ -483,6 +486,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       let joined = self.join_from_welcome(welcome).await;
       self.is_welcome_cursor_held = false;
       joined?;
+      self.hand_back_thread().await;
     }
     Ok(())
   }
@@ -564,6 +568,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.store.delete(Table::SyncState, &marker_key(conversation))?;
       self.note_sync_progress();
       self.apply_live_during_catch_up().await?;
+      self.hand_back_thread().await;
     }
     Ok(())
   }
@@ -688,6 +693,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         if self.isolate(*conversation, ResyncPart::Members, result)? {
           self.unmark_resync(*conversation, ResyncPart::Members)?;
         }
+        self.hand_back_thread().await;
       }
     }
     Ok(())

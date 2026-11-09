@@ -330,7 +330,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let page = self.api.list_messages(conversation, &query).await?;
     let read = Read::after(gap.after, bounds(&page.messages), page.has_more);
-    self.receive_page(page.messages)?;
+    self.receive_page(page.messages).await?;
     record.gaps = subtract(&record.gaps, read);
     if record.backlog_gap() == Some(gap) {
       // A page that doesn't get past the hole's start (only a server ignoring `after` sends one):
@@ -562,7 +562,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Some(before) => Read::before(before, bounds(&page.messages), page.has_more),
       None => Read::after(gap.after, bounds(&page.messages), page.has_more),
     };
-    self.receive_earlier_page(conversation, page.messages)?;
+    self.receive_earlier_page(conversation, page.messages).await?;
     Ok((gap, read))
   }
 
