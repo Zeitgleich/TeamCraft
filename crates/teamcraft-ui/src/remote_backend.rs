@@ -24,6 +24,7 @@ use teamcraft_client_api::actions::{
 };
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
+use teamcraft_client_api::files_query::{FilesPage, FilesQuery};
 use teamcraft_client_api::model::{
   Conversation, ConversationId, CustomStatus, GapEdge, HistoryGap, InviteId, JoinableSpace, Message,
   MessageId, MessageKind, OlderHistory, PendingInvite, PresenceStatus, Space, SpaceId, SpaceRole,
@@ -1752,6 +1753,20 @@ impl ChatBackend for RemoteChat {
     match self.ask(ChatQuery::ConversationFiles { conversation }) {
       Some(ChatAnswer::Files { files }) => files,
       _ => Vec::new(),
+    }
+  }
+
+  fn files_page(&self, query: &FilesQuery<'_>) -> Option<FilesPage> {
+    match self.ask(ChatQuery::FilesPage {
+      scope: query.scope,
+      filter: query.kind,
+      sort: query.sort,
+      starred: query.starred.to_vec(),
+      max_files: query.max_files,
+    })? {
+      ChatAnswer::FilesPage { files, has_more } => Some(FilesPage { files, has_more }),
+      // An answer of another kind (an older core): an empty list.
+      _ => Some(FilesPage::default()),
     }
   }
 

@@ -4,7 +4,10 @@
 //! It runs on the device over what the device already holds; the server is asked nothing and learns
 //! nothing about what is looked at. File names are secret: nothing here logs them.
 //!
-//! The candidates are each conversation's newest files
+//! A backend reads the page through [`ChatBackend::files_page`]. The client core pages through an
+//! index of the messages with files, merging the conversations newest first, so a page reads what it
+//! shows (issue #1509); sorting by name or size orders the newest files loaded so far. The default
+//! here, for backends without such an index, takes each conversation's newest files
 //! ([`crate::space_scope::MAX_FILES_PER_CONVERSATION`] of them), so the work stays bounded by the
 //! number of conversations, not by their history. Starred files are looked up in their own
 //! conversations, so a starred file older than that window is still listed.
@@ -45,14 +48,16 @@ pub struct FilesQuery<'a> {
 }
 
 /// Whose files: those of all conversations the user is in, or of one space's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FileScope {
   Everything,
   Space(SpaceId),
 }
 
 /// Which files the list shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FileKind {
   All,
   /// Pictures and videos.
@@ -87,10 +92,17 @@ impl FileKind {
 
   fn matches(self, file: &FileInfo, starred: &HashSet<StarredFile>) -> bool {
     match self {
-      Self::All => true,
+      Self::Starred => starred.contains(&StarredFile::of(file)),
+      _ => self.includes(file),
+    }
+  }
+
+  /// Whether `file` is of this kind; every file counts as starred here (the stars decide that).
+  pub fn includes(self, file: &FileInfo) -> bool {
+    match self {
+      Self::All | Self::Starred => true,
       Self::Media => is_media(file),
       Self::Documents => !is_media(file),
-      Self::Starred => starred.contains(&StarredFile::of(file)),
     }
   }
 }
@@ -98,7 +110,12 @@ impl FileKind {
 impl FileSort {
   pub const ALL: [Self; 4] = [Self::Newest, Self::Oldest, Self::Name, Self::Largest];
 
-  fn compare(self, left: &FileInfo, right: &FileInfo) -> Ordering {
+  /// Whether the order goes by time. The others order the newest files loaded so far (#1509).
+  pub fn is_by_time(self) -> bool {
+    matches!(self, Self::Newest | Self::Oldest | Self::Unknown)
+  }
+
+  pub fn compare(self, left: &FileInfo, right: &FileInfo) -> Ordering {
     let newest_first = || Reverse(left.maybe_sent_at).cmp(&Reverse(right.maybe_sent_at));
     match self {
       Self::Newest | Self::Unknown => newest_first(),
@@ -115,7 +132,33 @@ impl StarredFile {
   }
 }
 
-/// A page of the files `query` asks for, from what `backend` holds.
+/// The conversations whose files `scope` lists: every one the user is in, or one space's.
+pub fn conversations_in(backend: &(impl ChatBackend + ?Sized), scope: FileScope) -> Vec<ConversationId> {
+  let spaces: Vec<SpaceId> = match scope {
+    FileScope::Space(space) => vec![space],
+    FileScope::Everything => backend.spaces().into_iter().map(|space| space.id).collect(),
+  };
+  let mut conversations: Vec<ConversationId> = match scope {
+    FileScope::Space(_) => Vec::new(),
+    FileScope::Everything => backend
+      .direct_conversations()
+      .into_iter()
+      .map(|conversation| conversation.id)
+      .collect(),
+  };
+  for space in spaces {
+    conversations.extend(
+      backend
+        .space_conversations(space)
+        .into_iter()
+        .map(|conversation| conversation.id),
+    );
+  }
+  conversations
+}
+
+/// A page of the files `query` asks for, from what `backend` holds, by reading each conversation's
+/// newest files (the default of [`ChatBackend::files_page`]).
 pub fn files_page(backend: &(impl ChatBackend + ?Sized), query: &FilesQuery<'_>) -> FilesPage {
   let candidates = match query.kind {
     FileKind::Starred => starred_candidates(backend, query.scope, query.starred),

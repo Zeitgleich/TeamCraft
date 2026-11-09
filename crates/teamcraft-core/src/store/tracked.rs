@@ -26,8 +26,8 @@ use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, MessageId, 
 
 use super::message_cache::MessageCache;
 use super::{
-  AttachmentRef, FeedVersion, LocalStore, MediaRange, MessageContent, MessageEdge, MessageFilter,
-  MessageOrder, MessageSlot, StoreError, StoredMessage, Table, WriteTally, Written,
+  Attached, AttachedRange, AttachmentRef, FeedVersion, LocalStore, MessageContent, MessageEdge,
+  MessageFilter, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, WriteTally, Written,
 };
 use crate::records::draft_reply_key;
 
@@ -85,6 +85,8 @@ struct Journal {
   complete_from: u64,
   /// [`WriteTally::foreign`] when last looked at.
   seen_foreign: u64,
+  /// Counts writes that may have added or taken away a file ([`LocalStore::attachments_cursor`]).
+  attachments: u64,
 }
 
 /// The host's work on [`MEDIA_PURGE_PREFIX`] records.
@@ -176,6 +178,7 @@ impl Journal {
       self.seen_foreign = tally.foreign;
       // What the other connection wrote isn't here: nobody's number before now holds.
       self.complete_from = self.next;
+      self.attachments += 1;
     }
   }
 
@@ -499,17 +502,22 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
 
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
     // Only a deletion takes files away (an edit changes the text); only then is the old one read.
+    let mut touches_files = !attachments(&message.content).is_empty();
     if matches!(message.content, MessageContent::Deleted)
       && let Some(old) = self
         .inner
         .message(message.conversation_id, message.client_message_id)?
     {
+      touches_files |= !attachments(&old.content).is_empty();
       self.note_removed([old]);
     }
-    self.journal().note(
+    let mut journal = self.journal();
+    journal.note(
       message.conversation_id,
       Written::Message(message.client_message_id),
     );
+    journal.attachments += u64::from(touches_files);
+    drop(journal);
     self.inner.upsert_message(message)?;
     // After the write: a commit of another process before it is counted by now.
     self.follow_disk();
@@ -617,13 +625,14 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     Ok(())
   }
 
-  fn media_messages(
+  fn attached_messages(
     &self,
     conversation: ConversationId,
-    range: MediaRange,
+    kind: Attached,
+    range: AttachedRange,
     limit: usize,
   ) -> Result<Vec<StoredMessage>, StoreError> {
-    self.inner.media_messages(conversation, range, limit)
+    self.inner.attached_messages(conversation, kind, range, limit)
   }
 
   fn indexes_feed(&self) -> bool {
@@ -679,6 +688,12 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     Some(self.journal().next)
   }
 
+  fn attachments_cursor(&self) -> Option<u64> {
+    // Another connection's commit counts as a change of files: it doesn't say what it wrote.
+    self.follow_disk();
+    Some(self.journal().attachments)
+  }
+
   fn is_awaited(&self) -> bool {
     self.inner.is_awaited()
   }
@@ -700,7 +715,10 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
     // Not read message by message: a big channel would be held in memory whole.
     self.note_removed_conversation(conversation)?;
-    self.journal().note(conversation, Written::Conversation);
+    let mut journal = self.journal();
+    journal.note(conversation, Written::Conversation);
+    journal.attachments += 1;
+    drop(journal);
     self.inner.delete_messages(conversation)?;
     self
       .inner
@@ -717,12 +735,15 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     conversation: ConversationId,
     client_message_id: ClientMessageId,
   ) -> Result<(), StoreError> {
+    let mut touches_files = false;
     if let Some(old) = self.inner.message(conversation, client_message_id)? {
+      touches_files = !attachments(&old.content).is_empty();
       self.note_removed([old]);
     }
-    self
-      .journal()
-      .note(conversation, Written::Message(client_message_id));
+    let mut journal = self.journal();
+    journal.note(conversation, Written::Message(client_message_id));
+    journal.attachments += u64::from(touches_files);
+    drop(journal);
     self.inner.delete_message(conversation, client_message_id)?;
     // After the write: a commit of another process before it is counted by now.
     self.follow_disk();
@@ -1072,6 +1093,51 @@ mod tests {
           .is_empty(),
         "no record that nobody would delete"
       );
+    }
+
+    #[test]
+    fn the_attachments_cursor_moves_only_with_files() {
+      let store = TrackedStore::new(MemoryStore::new());
+      let cursor = || store.attachments_cursor().unwrap();
+      let start = cursor();
+      let mut text = file_message(1, Some(10), "image/png");
+      text.content = MessageContent::Text {
+        body: "hello".into(),
+        mentions: Vec::new(),
+        meta: Default::default(),
+      };
+      store.upsert_message(&text).unwrap();
+      assert_eq!(cursor(), start, "a text without files");
+      store
+        .upsert_message(&StoredMessage {
+          content: MessageContent::Deleted,
+          ..text
+        })
+        .unwrap();
+      assert_eq!(cursor(), start, "deleting a text without files");
+      let document = file_message(2, Some(20), "application/pdf");
+      store.upsert_message(&document).unwrap();
+      let added = cursor();
+      assert!(added > start, "a file came");
+      store
+        .upsert_message(&StoredMessage {
+          content: MessageContent::Deleted,
+          ..document.clone()
+        })
+        .unwrap();
+      let deleted = cursor();
+      assert!(deleted > added, "deleted for everyone");
+      store
+        .upsert_message(&file_message(3, Some(30), "image/png"))
+        .unwrap();
+      let again = cursor();
+      store
+        .delete_message(id(7), ClientMessageId::from_bytes([3; 16]))
+        .unwrap();
+      assert!(cursor() > again, "removed from the store");
+      let before_purge = cursor();
+      store.delete_messages(id(7)).unwrap();
+      assert!(cursor() > before_purge, "a conversation that went");
     }
 
     /// How many looks pass until the failed purge of conversation 7 is handed out again.

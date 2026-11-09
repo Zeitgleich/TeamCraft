@@ -277,6 +277,7 @@ files-sort-newest = Newest first
 files-sort-oldest = Oldest first
 files-sort-name = Name
 files-sort-largest = Largest first
+files-sort-loaded = Sorted among the newest files. Scroll down to load more.
 files-star = Star
 files-unstar = Remove star
 files-star-limit = You can star up to { $max } files. Remove a star to add another one.

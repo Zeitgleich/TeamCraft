@@ -37,6 +37,7 @@ use crate::calls::{
   CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
 };
 use crate::drafts::{DraftFileItem, DraftItem, DraftReply, SentItem};
+use crate::files_query::{FilesPage, FilesQuery};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::model::{
   Conversation, ConversationId, CustomStatus, DeviceId, FirstSync, KeyCatchUp, MembershipIssue,
@@ -652,6 +653,13 @@ pub trait ChatBackend {
   /// Files of a conversation, newest first.
   fn conversation_files(&self, _conversation: ConversationId) -> Vec<FileInfo> {
     Vec::new()
+  }
+  /// A page of the Files view ([`crate::files_query`]). A core reads only what the page shows,
+  /// through its index of the messages with files (issue #1509); the default reads each
+  /// conversation's files. `None` while a backend that asks the core waits for its answer (a change
+  /// notification follows), so the view never mistakes a page not read yet for an empty one.
+  fn files_page(&self, query: &FilesQuery<'_>) -> Option<FilesPage> {
+    Some(crate::files_query::files_page(self, query))
   }
   /// The newest `limit` links shared in a conversation, newest first. The default reads the
   /// messages newest first and stops once `limit` links are found, so a long conversation is not

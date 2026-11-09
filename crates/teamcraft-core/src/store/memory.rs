@@ -8,7 +8,8 @@ use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId};
 use zeroize::Zeroize as _;
 
 use super::{
-  LocalStore, MediaRange, MessageFilter, MessageOrder, StoreError, StoredMessage, Table, pick_media,
+  Attached, AttachedRange, LocalStore, MessageFilter, MessageOrder, StoreError, StoredMessage, Table,
+  pick_attached,
 };
 
 #[derive(Debug, Default)]
@@ -155,23 +156,23 @@ impl LocalStore for MemoryStore {
     Ok(messages)
   }
 
-  fn media_messages(
+  fn attached_messages(
     &self,
     conversation: ConversationId,
-    range: MediaRange,
+    kind: Attached,
+    range: AttachedRange,
     limit: usize,
   ) -> Result<Vec<StoredMessage>, StoreError> {
-    // Only the messages with media are copied out of the map.
-    let media: Vec<StoredMessage> = self
+    // Only the messages with such attachments are copied out of the map.
+    let mut attached: Vec<StoredMessage> = self
       .lock()
       .messages
       .values()
-      .filter(|message| message.conversation_id == conversation && message.has_media())
+      .filter(|message| message.conversation_id == conversation && message.has_attached(kind))
       .cloned()
       .collect();
-    let mut media = media;
-    media.sort_by_key(StoredMessage::sort_key);
-    Ok(pick_media(media, range, limit))
+    attached.sort_by_key(StoredMessage::sort_key);
+    Ok(pick_attached(attached, kind, range, limit))
   }
 
   // The feed reads copy only what they return. `indexes_feed` stays false: every read still walks

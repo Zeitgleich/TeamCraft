@@ -2,11 +2,12 @@
 //! its conversations (#954), elsewhere those of all spaces, channels and direct messages. Filtered by
 //! kind, sorted, with starred files, a page at a time (`teamcraft_client_api::files_query`). It reads
 //! what the device already holds; nothing is fetched, so the server learns nothing about what is
-//! looked at.
+//! looked at. The core reads a page through its index of messages with files and keeps it until a
+//! file comes or goes (#1509), so the view reads on every change instead of on a timer.
 
 use leptos::prelude::*;
 use teamcraft_client_api::files_query::{
-  FILES_PAGE_SIZE, FileKind, FileScope, FileSort, FilesQuery, MAX_STARRED_FILES, StarredFile, files_page,
+  FILES_PAGE_SIZE, FileKind, FileScope, FileSort, FilesPage, FilesQuery, MAX_STARRED_FILES, StarredFile,
   toggle_star,
 };
 use wasm_bindgen::JsCast;
@@ -18,12 +19,8 @@ use crate::components::icons::IconName;
 use crate::components::page::ScopedSpaceName;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::use_i18n;
-use crate::reactive::use_interval_while_visible;
 use crate::state::use_app_state;
 
-/// New files arrive without an event this view hears, so it looks again this often while it is
-/// open and visible.
-const REFRESH_MS: u64 = 15_000;
 /// How far above the end of the list the next page comes in, in pixels.
 const PAGE_AHEAD_PX: i32 = 800;
 
@@ -34,8 +31,6 @@ pub fn FilesView() -> impl IntoView {
   let prefs = state.settings.prefs;
   let kind = RwSignal::new(FileKind::All);
   let pages = RwSignal::new(1_usize);
-  let reload = RwSignal::new(0_u32);
-  use_interval_while_visible(REFRESH_MS, move || reload.update(|count| *count += 1));
   let scope = Memo::new(move |_| match state.maybe_scoped_space() {
     Some(space) => FileScope::Space(space),
     None => FileScope::Everything,
@@ -51,8 +46,8 @@ pub fn FilesView() -> impl IntoView {
       pages.set(1);
     }
   });
-  let page = Memo::new(move |_| {
-    reload.track();
+  // `None` only while a desktop core reads the first page; then the list stays as it was.
+  let page = Memo::new(move |previous: Option<&FilesPage>| {
     let (scope, kind, sort, max_files) = (scope.get(), kind.get(), sort.get(), pages.get() * FILES_PAGE_SIZE);
     // A star only reads again while the starred files are listed.
     let starred_now = if kind == FileKind::Starred {
@@ -60,23 +55,22 @@ pub fn FilesView() -> impl IntoView {
     } else {
       Vec::new()
     };
-    // Read again on a timer, when the view opens and when the query changes, not on every change of
-    // the workspace.
-    untrack(|| {
-      state.read(|backend| {
-        files_page(
-          backend,
-          &FilesQuery {
-            scope,
-            kind,
-            sort,
-            starred: &starred_now,
-            max_files,
-          },
-        )
+    // Read on every change: the core answers from the page it keeps until a file comes or goes.
+    state
+      .read(|backend| {
+        backend.files_page(&FilesQuery {
+          scope,
+          kind,
+          sort,
+          starred: &starred_now,
+          max_files,
+        })
       })
-    })
+      .or_else(|| previous.cloned())
+      .unwrap_or_default()
   });
+  let is_sorted_among_loaded =
+    Memo::new(move |_| kind.get() != FileKind::Starred && !sort.get().is_by_time());
   let on_scroll = move |ev: leptos::ev::Event| {
     if page.with_untracked(|page| page.has_more) && is_near_end(&ev) {
       pages.update(|pages| *pages += 1);
@@ -148,6 +142,9 @@ pub fn FilesView() -> impl IntoView {
         </div>
       </header>
       <div class="files-view-body panel-scroll" on:scroll=on_scroll>
+        <Show when=move || is_sorted_among_loaded.get() fallback=|| ()>
+          <p class="files-sort-note">{move || i18n.t("files-sort-loaded")}</p>
+        </Show>
         <div class="files-list">
           <For
             each=move || page.with(|page| page.files.clone())
@@ -236,7 +233,13 @@ mod tests {
     let en = include_str!("../../i18n/en/files.ftl");
     let mut keys: Vec<&str> = FileKind::ALL.into_iter().map(kind_label_key).collect();
     keys.extend(FileSort::ALL.into_iter().map(sort_label_key));
-    keys.extend(["files-star", "files-unstar", "files-star-limit", "files-sort"]);
+    keys.extend([
+      "files-star",
+      "files-unstar",
+      "files-star-limit",
+      "files-sort",
+      "files-sort-loaded",
+    ]);
     keys.extend(["files-starred-empty-title", "files-starred-empty"]);
     for key in keys {
       assert!(en.contains(&format!("\n{key} = ")), "{key}");
