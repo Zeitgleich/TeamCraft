@@ -53,13 +53,14 @@ struct Accounts {
   maybe_active: Option<ServerOrigin>,
 }
 
-/// The file an administrator writes: `{ "server_url": "team.example.com", "lock_server": true }`.
+/// What an administrator configures, from `desktop.json` or the operating system's policy store:
+/// `{ "server_url": "team.example.com", "lock_server": true }`.
 #[derive(Debug, Default, Deserialize)]
-struct ManagedFile {
+pub(super) struct ManagedFile {
   #[serde(rename = "server_url", default)]
-  maybe_server_url: Option<String>,
+  pub(super) maybe_server_url: Option<String>,
   #[serde(default)]
-  lock_server: bool,
+  pub(super) lock_server: bool,
 }
 
 impl ServerState {
@@ -185,8 +186,17 @@ impl ServerDirectory {
 }
 
 impl ManagedServer {
-  /// The computer's configuration, most specific first: the administrator's file, then the
-  /// environment, then a default compiled into a self-built app.
+  /// The computer's configuration. This is the one place that says which source wins, first match
+  /// first (a source counts when it names a server; the lock comes from that same source):
+  ///
+  /// 1. the operating system's policy store: Windows registry policy, macOS configuration profile
+  ///    ([`super::policy`], #220);
+  /// 2. the administrator's `desktop.json` (macOS and Linux);
+  /// 3. the `TEAMCRAFT_SERVER_URL` environment variable (never locks);
+  /// 4. a default compiled into a self-built app (never locks).
+  ///
+  /// Only machine-wide locations an ordinary user cannot write are read for 1 and 2, because the
+  /// lock is a security control.
   pub fn load() -> Self {
     let from_file = system_config_path()
       .filter(|path| is_admin_owned(path))
@@ -201,6 +211,7 @@ impl ManagedServer {
         },
       );
     Self::resolve(
+      super::policy::load(),
       from_file,
       std::env::var(SERVER_ENV).ok(),
       BUILD_DEFAULT.map(str::to_owned),
@@ -219,19 +230,21 @@ impl ManagedServer {
       .is_some_and(|managed| &managed == origin)
   }
 
+  /// The order of [`Self::load`].
   fn resolve(
+    maybe_policy: Option<ManagedFile>,
     maybe_file: Option<ManagedFile>,
     maybe_env: Option<String>,
     maybe_build_default: Option<String>,
   ) -> Self {
     let non_empty = |value: Option<String>| value.filter(|text| !text.trim().is_empty());
-    if let Some(file) = maybe_file
-      && let Some(address) = non_empty(file.maybe_server_url)
-    {
-      return Self {
-        maybe_address: Some(address),
-        is_locked: file.lock_server,
-      };
+    for source in [maybe_policy, maybe_file].into_iter().flatten() {
+      if let Some(address) = non_empty(source.maybe_server_url) {
+        return Self {
+          maybe_address: Some(address),
+          is_locked: source.lock_server,
+        };
+      }
     }
     Self {
       maybe_address: non_empty(maybe_env).or_else(|| non_empty(maybe_build_default)),
@@ -266,7 +279,7 @@ fn system_config_path() -> Option<PathBuf> {
 /// Only a file root owns and only root can change counts: otherwise any local user could send
 /// every user of the computer to their server. An untrusted file is ignored with a warning.
 #[cfg(unix)]
-fn is_admin_owned(path: &Path) -> bool {
+pub(super) fn is_admin_owned(path: &Path) -> bool {
   use std::os::unix::fs::MetadataExt;
 
   let trusted = |metadata: &std::fs::Metadata| metadata.uid() == 0 && metadata.mode() & 0o022 == 0;
@@ -345,6 +358,7 @@ mod tests {
       lock_server: true,
     };
     let managed = ManagedServer::resolve(
+      None,
       Some(file),
       Some("env.example.com".into()),
       Some("build.example.com".into()),
@@ -352,7 +366,7 @@ mod tests {
     assert_eq!(managed.maybe_address.as_deref(), Some("team.example.com"));
     assert!(managed.is_locked);
 
-    let managed = ManagedServer::resolve(None, Some(" ".into()), Some("build.example.com".into()));
+    let managed = ManagedServer::resolve(None, None, Some(" ".into()), Some("build.example.com".into()));
     assert_eq!(managed.maybe_address.as_deref(), Some("build.example.com"));
     assert!(!managed.is_locked);
 
@@ -360,8 +374,38 @@ mod tests {
       maybe_server_url: None,
       lock_server: true,
     };
-    let managed = ManagedServer::resolve(Some(empty_file), None, None);
+    let managed = ManagedServer::resolve(None, Some(empty_file), None, None);
     assert_eq!(managed, ManagedServer::default());
+  }
+
+  #[test]
+  fn the_policy_store_wins_over_the_file_and_locks_only_with_its_own_flag() {
+    let policy = || ManagedFile {
+      maybe_server_url: Some("policy.example.com".into()),
+      lock_server: false,
+    };
+    let file = || ManagedFile {
+      maybe_server_url: Some("file.example.com".into()),
+      lock_server: true,
+    };
+    let managed = ManagedServer::resolve(Some(policy()), Some(file()), Some("env.example.com".into()), None);
+    assert_eq!(managed.maybe_address.as_deref(), Some("policy.example.com"));
+    assert!(
+      !managed.is_locked,
+      "the lock of a lower source does not carry over"
+    );
+
+    // A policy without a server (only a lock) falls through to the file.
+    let lock_only = ManagedFile {
+      maybe_server_url: Some("  ".into()),
+      lock_server: true,
+    };
+    let managed = ManagedServer::resolve(Some(lock_only), Some(file()), None, None);
+    assert_eq!(managed.maybe_address.as_deref(), Some("file.example.com"));
+    assert!(managed.is_locked);
+
+    let managed = ManagedServer::resolve(None, None, Some("env.example.com".into()), None);
+    assert_eq!(managed.maybe_address.as_deref(), Some("env.example.com"));
   }
 
   #[test]
