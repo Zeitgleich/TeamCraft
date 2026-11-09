@@ -1182,8 +1182,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /**
    * Attaches the composer's picked files that aren't in its draft yet (#1220): the draft keeps them
-   * after the app is killed, and they go up when the message is sent (#1585). Runs in the view model's scope, so leaving the conversation doesn't
-   * stop it halfway; a file sent or removed meanwhile is not attached.
+   * after the app is killed, and they go up when the message is sent (#1585). Runs in the view
+   * model's scope, so leaving the conversation doesn't stop it halfway; a file sent or removed
+   * meanwhile is not attached.
    */
   fun attachPickedToDraft(conversation: String, maybeThread: String?) = viewModelScope.launch {
     val key = pickedKey(conversation, maybeThread)

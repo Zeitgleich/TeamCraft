@@ -58,13 +58,13 @@ data class SendOptions(
   val maybeClientMessageId: String? = null,
 )
 
+/** When a draft's files go up on phones (#1585): with their message, not as they are picked. */
+const val DRAFT_FILE_TRAVEL = "on_send"
+
 /**
  * Builds the core's `ChatAction` messages (teamcraft-client-api `remote`, tagged by `action`).
  * Only shapes data: the core decides what an action does.
  */
-/** When a draft's files go up on phones (#1585): with their message, not as they are picked. */
-const val DRAFT_FILE_TRAVEL = "on_send"
-
 object ChatActions {
   fun send(conversation: String, body: String, options: SendOptions = SendOptions()): String = action("send_message") {
     put("message", outgoing(conversation, body, options))
