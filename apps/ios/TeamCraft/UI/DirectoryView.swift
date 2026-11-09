@@ -194,9 +194,9 @@ private struct PersonRow: View {
       HStack(spacing: 12) {
         AvatarView(name: person.displayName)
           .overlay(alignment: .bottomTrailing) {
-            Circle().fill(directoryPresenceColor(person.presence)).frame(width: 10, height: 10)
-              .overlay(Circle().stroke(Theme.surface, lineWidth: 2))
-              .accessibilityHidden(true)
+            PresenceDot(presence: Presence(directoryWire: person.presence))
+              .padding(2)
+              .background(Theme.surface, in: Circle())
           }
         VStack(alignment: .leading, spacing: 2) {
           Text(person.displayName).foregroundStyle(Theme.text).lineLimit(1)

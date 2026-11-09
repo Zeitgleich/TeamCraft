@@ -2,12 +2,18 @@
 
 ## Status
 
-Open the status menu (your avatar):
+Open the status menu (your avatar; on a phone, Settings). Your current status is checked and named
+under your name:
 
-- **Online**, **Away**, **Do not disturb**, **Offline**. Without input you turn away automatically
-  after a while (15 minutes unless you or your admin chose otherwise, at least 5) and back to online
-  as soon as you use the app again. **Away** chosen in the menu stays until you pick another status;
-  **Online** goes back to the automatic status.
+- **Available**, **Busy**, **Do not disturb**, **Be right back**, **Appear away**, **Appear offline**.
+  Available is automatic: without input you turn away after a while (15 minutes unless you or your
+  admin chose otherwise, at least 5), back to available as soon as you use the app again, and **busy
+  during a call or meeting**, back afterwards. Any other status stays until you pick another one, or
+  until the end you chose under **Duration…** (**Reset after**: 30 minutes, 1 hour, 2 hours, today,
+  this week, until a time, never). **Reset status** goes back to automatic. `/busy`, `/brb`, `/away`,
+  `/dnd`, `/offline` and `/online` do the same from the composer.
+- Only **Do not disturb** holds notifications back (urgent messages and people you allowed still come
+  through). The bell next to your avatar and the tray menu pause notifications for a while the same way.
 - **Custom status** with an emoji, a text and an expiry (30 minutes, 1 hour, today, this week, never),
   or one of the **presets** your admin offers. Presets: In a meeting, Commuting, Out sick, On vacation
   unless your admin chose others. `/status` does the same from the composer.

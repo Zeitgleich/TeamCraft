@@ -476,6 +476,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       {move || match state.overlay.get() {
         Overlay::QuickSwitcher => lazy_area(Place::Overlay, || areas::quick_switcher(())),
         Overlay::CustomStatus => lazy_area(Place::Overlay, || areas::custom_status(())),
+        Overlay::StatusDuration => lazy_area(Place::Overlay, || areas::status_duration(())),
         Overlay::Settings => lazy_area(Place::Overlay, || areas::settings(())),
         Overlay::Shortcuts => lazy_area(Place::Overlay, || areas::shortcuts(())),
         Overlay::DeviceApproval => lazy_area(Place::Overlay, || areas::device_approval(())),

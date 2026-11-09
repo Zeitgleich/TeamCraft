@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.presenceOf
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import androidx.annotation.StringRes
 import androidx.compose.foundation.background
@@ -339,14 +340,8 @@ fun directWith(snapshot: ChatSnapshot, users: List<String>): String? {
   return snapshot.conversations.firstOrNull { it.kind == kind && it.memberIds.toSet() - snapshot.me.id == wanted }?.id
 }
 
-/** A small coloured dot for a presence state as the core reports it. */
+/** The presence dot for a presence as the core names it (`Online`, `Busy`, …). */
 @Composable
 fun PresenceDot(presence: String) {
-  val color = when (presence) {
-    "Online" -> LocalTeamCraftColors.current.presence
-    "Away" -> Color(0xFFFF9F0A)
-    "DoNotDisturb" -> Color(0xFFFF3B30)
-    else -> MaterialTheme.colorScheme.outline
-  }
-  Box(Modifier.size(10.dp).background(color, CircleShape))
+  de.zeitgleich.teamcraft.ui.PresenceDot(presenceOf(presence))
 }

@@ -4,9 +4,11 @@
 use crate::model::PresenceStatus;
 
 /// Every command with its arguments, for `/help` and the autocomplete list.
-pub const COMMANDS: [(&str, &str); 23] = [
+pub const COMMANDS: [(&str, &str); 25] = [
   ("away", ""),
   ("online", ""),
+  ("busy", ""),
+  ("brb", ""),
   ("dnd", ""),
   ("offline", ""),
   ("status", "[emoji] text | clear"),
@@ -108,6 +110,8 @@ impl SlashCommand {
       Self::Presence(PresenceStatus::DoNotDisturb) => "dnd",
       Self::Presence(PresenceStatus::Offline) => "offline",
       Self::Presence(PresenceStatus::Online) => "online",
+      Self::Presence(PresenceStatus::Busy) => "busy",
+      Self::Presence(PresenceStatus::BeRightBack) => "brb",
       Self::Status(_) => "status",
       Self::Topic(_) => "topic",
       Self::Purpose(_) => "purpose",
@@ -206,6 +210,8 @@ pub fn parse(input: &str) -> Parsed {
   let command = match name.as_str() {
     "away" => SlashCommand::Presence(PresenceStatus::Away),
     "online" => SlashCommand::Presence(PresenceStatus::Online),
+    "busy" => SlashCommand::Presence(PresenceStatus::Busy),
+    "brb" => SlashCommand::Presence(PresenceStatus::BeRightBack),
     "dnd" => SlashCommand::Presence(PresenceStatus::DoNotDisturb),
     "offline" => SlashCommand::Presence(PresenceStatus::Offline),
     "status" => match status_change(args) {

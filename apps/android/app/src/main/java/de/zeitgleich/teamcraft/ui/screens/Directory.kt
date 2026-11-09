@@ -335,6 +335,8 @@ private fun PersonRow(person: DirectoryPersonItem, onMessage: (() -> Unit)?) {
 /** The directory's presence (`online`, `dnd`, …) as [PresenceDot] takes it. */
 internal fun corePresence(wire: String): String = when (wire) {
   "online" -> "Online"
+  "busy" -> "Busy"
+  "brb" -> "BeRightBack"
   "away" -> "Away"
   "dnd" -> "DoNotDisturb"
   else -> "Offline"

@@ -20,39 +20,53 @@ use crate::state::AppState;
 
 const MAX_PRESENCE_QUERY_USERS: usize = 200;
 
-/// What other users see, from the user's manual choice and their devices.
+/// What other users see, from the user's manual choice, their devices and what they are doing.
 ///
-/// Appearing offline hides everything. Do-not-disturb wins over activity while it lasts, a manual
-/// away while any device is connected. Otherwise the user is online if any device is active, away
-/// if devices are connected but idle, else offline.
+/// Appearing offline hides everything, and without a connected device the user is offline. Any
+/// other manual status that hasn't ended is shown while a device is connected, whatever the devices
+/// report. Otherwise the user is busy during a call or a meeting (`maybe_activity`), online if any
+/// device is active and away if all are idle (issue #1578: Teams-style statuses).
 pub fn derive_state(
   preference: &PresencePreference,
   devices: DeviceAggregate,
+  maybe_activity: Option<&PresenceActivity>,
   now: OffsetDateTime,
 ) -> PresenceState {
-  let is_dnd_active = preference.manual == ManualPresence::DoNotDisturb
-    && preference.maybe_dnd_until.is_none_or(|until| until > now);
-  if preference.manual == ManualPresence::Invisible {
+  let manual = effective_manual(preference, now);
+  if manual == ManualPresence::Invisible || devices == DeviceAggregate::NoDevice {
     return PresenceState::Offline;
   }
-  if is_dnd_active && devices != DeviceAggregate::NoDevice {
-    return PresenceState::DoNotDisturb;
-  }
-  match devices {
-    DeviceAggregate::NoDevice => PresenceState::Offline,
-    // A manual away stays until the user picks another status, whatever the devices report.
-    _ if preference.manual == ManualPresence::Away => PresenceState::Away,
-    DeviceAggregate::Active => PresenceState::Online,
-    DeviceAggregate::Idle => PresenceState::Away,
+  match manual {
+    ManualPresence::Busy => PresenceState::Busy,
+    ManualPresence::BeRightBack => PresenceState::BeRightBack,
+    ManualPresence::Away => PresenceState::Away,
+    ManualPresence::DoNotDisturb => PresenceState::DoNotDisturb,
+    ManualPresence::Auto | ManualPresence::Invisible | ManualPresence::Unknown(_) => {
+      match (maybe_activity, devices) {
+        (Some(_), _) => PresenceState::Busy,
+        (None, DeviceAggregate::Active) => PresenceState::Online,
+        (None, _) => PresenceState::Away,
+      }
+    },
   }
 }
 
-/// The status others see: the one the user set, else what the server derived (a call, a meeting).
-/// Nothing if the workspace switched statuses off, and nothing derived for users who appear offline.
+/// The manual choice while it lasts: once its end has passed, presence is automatic again.
+fn effective_manual(preference: &PresencePreference, now: OffsetDateTime) -> ManualPresence {
+  match preference.maybe_until {
+    Some(until) if until <= now => ManualPresence::Auto,
+    _ => preference.manual.clone(),
+  }
+}
+
+/// The status others see: the one the user set, else what the server derived (`maybe_derived`: a
+/// call, a meeting). Nothing if the workspace switched statuses off, and nothing derived for users
+/// who appear offline.
 async fn status_of(
   state: &AppState,
   user: UserId,
   presence: &PresenceState,
+  maybe_derived: Option<CustomStatus>,
   now: OffsetDateTime,
 ) -> Result<Option<CustomStatus>, ApiError> {
   if !state.policy.get().presence.statuses_enabled {
@@ -69,7 +83,7 @@ async fn status_of(
   if *presence == PresenceState::Offline {
     return Ok(None);
   }
-  derived_status(state, user, now).await
+  Ok(maybe_derived)
 }
 
 /// "In a call" beats "in a meeting"; a meeting known to TeamCraft beats a busy period of the calendar.
@@ -171,8 +185,8 @@ pub async fn note_user_action(state: &AppState, user: UserId, device: DeviceId) 
 /// devices, the periodic refresh, a disconnect) can't announce a state older than the newest.
 pub async fn refresh_presence(state: &AppState, user: UserId) -> Result<(), ApiError> {
   let _refreshing = state.hub.presence_refresh_lock(user).lock().await;
-  let preference = state.database.get_presence_preference(user).await?;
   let now = OffsetDateTime::now_utc();
+  let preference = current_preference(state, user, now).await?;
   let aggregate = state.hub.device_aggregate(user);
   // Last seen is the moment the user stopped being active (idle or gone). Not recorded while they
   // appear offline or hide it: a time from that period could show once they stop hiding.
@@ -183,8 +197,17 @@ pub async fn refresh_presence(state: &AppState, user: UserId) -> Result<(), ApiE
   {
     state.database.set_last_seen(user, now).await?;
   }
-  let presence = derive_state(&preference, aggregate, now);
-  let maybe_status = status_of(state, user, &presence, now).await?;
+  let maybe_derived =
+    if aggregate == DeviceAggregate::NoDevice || preference.manual == ManualPresence::Invisible {
+      None
+    } else {
+      derived_status(state, user, now).await?
+    };
+  let maybe_activity = maybe_derived
+    .as_ref()
+    .and_then(|status| status.maybe_activity.as_ref());
+  let presence = derive_state(&preference, aggregate, maybe_activity, now);
+  let maybe_status = status_of(state, user, &presence, maybe_derived, now).await?;
   let snapshot = PresenceSnapshot {
     state: presence.clone(),
     maybe_status: maybe_status.clone(),
@@ -204,6 +227,25 @@ pub async fn refresh_presence(state: &AppState, user: UserId) -> Result<(), ApiE
   Ok(())
 }
 
+/// The user's manual choice; one whose end has passed is reset to automatic in the database, so
+/// push routing and last seen stop honouring it too.
+async fn current_preference(
+  state: &AppState,
+  user: UserId,
+  now: OffsetDateTime,
+) -> Result<PresencePreference, ApiError> {
+  let stored = state.database.get_presence_preference(user).await?;
+  if effective_manual(&stored, now) == stored.manual {
+    return Ok(stored);
+  }
+  let automatic = PresencePreference {
+    manual: ManualPresence::Auto,
+    maybe_until: None,
+  };
+  state.database.set_presence_preference(user, &automatic).await?;
+  Ok(automatic)
+}
+
 pub async fn set_presence(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -212,25 +254,25 @@ pub async fn set_presence(
   if matches!(request.manual, ManualPresence::Unknown(_)) {
     return Err(ApiError::InvalidRequest("unknown presence choice".into()));
   }
+  // Every manual status may end by itself ("Reset after", issue #1578); automatic has nothing to end.
   let maybe_until = match (&request.manual, request.maybe_until) {
-    (ManualPresence::DoNotDisturb, Some(millis)) => {
+    (ManualPresence::Auto, Some(_)) => {
+      return Err(ApiError::InvalidRequest(
+        "until only applies to a manual status".into(),
+      ));
+    },
+    (_, Some(millis)) => {
       let until = offset_date_time(millis).ok_or_else(|| ApiError::InvalidRequest("invalid until".into()))?;
       if until <= OffsetDateTime::now_utc() {
         return Err(ApiError::InvalidRequest("until must be in the future".into()));
       }
       Some(until)
     },
-    (ManualPresence::DoNotDisturb, None) => None,
-    (_, Some(_)) => {
-      return Err(ApiError::InvalidRequest(
-        "until only applies to do-not-disturb".into(),
-      ));
-    },
     (_, None) => None,
   };
   let preference = PresencePreference {
     manual: request.manual.clone(),
-    maybe_dnd_until: maybe_until,
+    maybe_until,
   };
   state
     .database
@@ -477,7 +519,7 @@ mod tests {
   fn preference(manual: ManualPresence, until: Option<i64>) -> PresencePreference {
     PresencePreference {
       manual,
-      maybe_dnd_until: until.map(|seconds| now() + time::Duration::seconds(seconds)),
+      maybe_until: until.map(|seconds| now() + time::Duration::seconds(seconds)),
     }
   }
 
@@ -485,15 +527,15 @@ mod tests {
   fn follows_device_activity_without_manual_choice() {
     let auto = preference(ManualPresence::Auto, None);
     assert_eq!(
-      derive_state(&auto, DeviceAggregate::Active, now()),
+      derive_state(&auto, DeviceAggregate::Active, None, now()),
       PresenceState::Online
     );
     assert_eq!(
-      derive_state(&auto, DeviceAggregate::Idle, now()),
+      derive_state(&auto, DeviceAggregate::Idle, None, now()),
       PresenceState::Away
     );
     assert_eq!(
-      derive_state(&auto, DeviceAggregate::NoDevice, now()),
+      derive_state(&auto, DeviceAggregate::NoDevice, None, now()),
       PresenceState::Offline
     );
   }
@@ -502,21 +544,21 @@ mod tests {
   fn a_manual_away_sticks_whatever_the_devices_report() {
     let away = preference(ManualPresence::Away, None);
     assert_eq!(
-      derive_state(&away, DeviceAggregate::Active, now()),
+      derive_state(&away, DeviceAggregate::Active, None, now()),
       PresenceState::Away
     );
     assert_eq!(
-      derive_state(&away, DeviceAggregate::Idle, now()),
+      derive_state(&away, DeviceAggregate::Idle, None, now()),
       PresenceState::Away
     );
     assert_eq!(
-      derive_state(&away, DeviceAggregate::NoDevice, now()),
+      derive_state(&away, DeviceAggregate::NoDevice, None, now()),
       PresenceState::Offline
     );
     // Back to automatic: activity decides again.
     let auto = preference(ManualPresence::Auto, None);
     assert_eq!(
-      derive_state(&auto, DeviceAggregate::Active, now()),
+      derive_state(&auto, DeviceAggregate::Active, None, now()),
       PresenceState::Online
     );
   }
@@ -529,7 +571,10 @@ mod tests {
       DeviceAggregate::Idle,
       DeviceAggregate::NoDevice,
     ] {
-      assert_eq!(derive_state(&invisible, devices, now()), PresenceState::Offline);
+      assert_eq!(
+        derive_state(&invisible, devices, None, now()),
+        PresenceState::Offline
+      );
     }
   }
 
@@ -537,28 +582,115 @@ mod tests {
   fn do_not_disturb_wins_while_connected_and_until_it_expires() {
     let open_ended = preference(ManualPresence::DoNotDisturb, None);
     assert_eq!(
-      derive_state(&open_ended, DeviceAggregate::Active, now()),
+      derive_state(&open_ended, DeviceAggregate::Active, None, now()),
       PresenceState::DoNotDisturb
     );
     assert_eq!(
-      derive_state(&open_ended, DeviceAggregate::Idle, now()),
+      derive_state(&open_ended, DeviceAggregate::Idle, None, now()),
       PresenceState::DoNotDisturb
     );
     assert_eq!(
-      derive_state(&open_ended, DeviceAggregate::NoDevice, now()),
+      derive_state(&open_ended, DeviceAggregate::NoDevice, None, now()),
       PresenceState::Offline
     );
 
     let timed = preference(ManualPresence::DoNotDisturb, Some(600));
     assert_eq!(
-      derive_state(&timed, DeviceAggregate::Active, now()),
+      derive_state(&timed, DeviceAggregate::Active, None, now()),
       PresenceState::DoNotDisturb
     );
     let expired = preference(ManualPresence::DoNotDisturb, Some(-1));
     assert_eq!(
-      derive_state(&expired, DeviceAggregate::Active, now()),
+      derive_state(&expired, DeviceAggregate::Active, None, now()),
       PresenceState::Online
     );
+  }
+
+  mod teams_statuses {
+    use super::*;
+
+    #[test]
+    fn manual_busy_and_be_right_back_stick_while_connected() {
+      for (manual, shown) in [
+        (ManualPresence::Busy, PresenceState::Busy),
+        (ManualPresence::BeRightBack, PresenceState::BeRightBack),
+      ] {
+        let chosen = preference(manual, None);
+        for devices in [DeviceAggregate::Active, DeviceAggregate::Idle] {
+          assert_eq!(derive_state(&chosen, devices, None, now()), shown);
+        }
+        assert_eq!(
+          derive_state(&chosen, DeviceAggregate::NoDevice, None, now()),
+          PresenceState::Offline
+        );
+      }
+    }
+
+    #[test]
+    fn a_call_or_meeting_makes_an_automatic_user_busy_and_only_while_it_lasts() {
+      let auto = preference(ManualPresence::Auto, None);
+      for activity in [PresenceActivity::InCall, PresenceActivity::InMeeting] {
+        assert_eq!(
+          derive_state(&auto, DeviceAggregate::Idle, Some(&activity), now()),
+          PresenceState::Busy
+        );
+      }
+      assert_eq!(
+        derive_state(&auto, DeviceAggregate::Active, None, now()),
+        PresenceState::Online
+      );
+    }
+
+    #[test]
+    fn a_manual_status_wins_over_a_call() {
+      for (manual, shown) in [
+        (ManualPresence::DoNotDisturb, PresenceState::DoNotDisturb),
+        (ManualPresence::Away, PresenceState::Away),
+        (ManualPresence::BeRightBack, PresenceState::BeRightBack),
+      ] {
+        assert_eq!(
+          derive_state(
+            &preference(manual, None),
+            DeviceAggregate::Active,
+            Some(&PresenceActivity::InCall),
+            now()
+          ),
+          shown
+        );
+      }
+      assert_eq!(
+        derive_state(
+          &preference(ManualPresence::Invisible, None),
+          DeviceAggregate::Active,
+          Some(&PresenceActivity::InCall),
+          now()
+        ),
+        PresenceState::Offline
+      );
+    }
+
+    #[test]
+    fn every_manual_status_ends_at_its_until() {
+      for manual in [
+        ManualPresence::Busy,
+        ManualPresence::BeRightBack,
+        ManualPresence::Away,
+        ManualPresence::DoNotDisturb,
+        ManualPresence::Invisible,
+      ] {
+        let running = preference(manual.clone(), Some(600));
+        assert_ne!(
+          derive_state(&running, DeviceAggregate::Active, None, now()),
+          PresenceState::Online
+        );
+        let ended = preference(manual, Some(0));
+        assert_eq!(
+          derive_state(&ended, DeviceAggregate::Active, None, now()),
+          PresenceState::Online
+        );
+        assert_eq!(effective_manual(&ended, now()), ManualPresence::Auto);
+      }
+    }
   }
 
   mod last_seen {

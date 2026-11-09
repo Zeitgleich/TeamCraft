@@ -282,8 +282,8 @@ private fun pickTime(context: Context, minute: Int, onPicked: (Int) -> Unit) {
   ).show()
 }
 
-/** A date, then a time; only moments in the future are taken. */
-private fun pickDateTime(context: Context, onPicked: (Instant) -> Unit) {
+/** A date, then a time; only moments in the future are taken, a past one goes to [onPast]. */
+internal fun pickDateTime(context: Context, onPast: () -> Unit = {}, onPicked: (Instant) -> Unit) {
   val today = LocalDate.now()
   DatePickerDialog(
     context,
@@ -294,7 +294,7 @@ private fun pickDateTime(context: Context, onPicked: (Instant) -> Unit) {
         context,
         { _, hour, minute ->
           val chosen = date.atTime(hour, minute).atZone(ZoneId.systemDefault()).toInstant()
-          if (chosen.isAfter(Instant.now())) onPicked(chosen)
+          if (chosen.isAfter(Instant.now())) onPicked(chosen) else onPast()
         },
         now.hour,
         now.minute,

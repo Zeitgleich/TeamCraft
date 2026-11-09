@@ -19,6 +19,8 @@ pub enum TrayAction {
   CheckForUpdates,
   Quit,
   StatusOnline,
+  StatusBusy,
+  StatusBeRightBack,
   StatusAway,
   StatusDoNotDisturb,
   DoNotDisturbForHour,
@@ -48,11 +50,13 @@ pub enum TrayAction {
 }
 
 impl TrayAction {
-  pub const ALL: [Self; 24] = [
+  pub const ALL: [Self; 26] = [
     Self::OpenApp,
     Self::CheckForUpdates,
     Self::Quit,
     Self::StatusOnline,
+    Self::StatusBusy,
+    Self::StatusBeRightBack,
     Self::StatusAway,
     Self::StatusDoNotDisturb,
     Self::DoNotDisturbForHour,
@@ -82,6 +86,8 @@ impl TrayAction {
       Self::CheckForUpdates => "check_for_updates",
       Self::Quit => "quit",
       Self::StatusOnline => "status_online",
+      Self::StatusBusy => "status_busy",
+      Self::StatusBeRightBack => "status_be_right_back",
       Self::StatusAway => "status_away",
       Self::StatusDoNotDisturb => "status_do_not_disturb",
       Self::DoNotDisturbForHour => "do_not_disturb_for_hour",

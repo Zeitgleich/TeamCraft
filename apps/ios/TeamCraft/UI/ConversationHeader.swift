@@ -58,10 +58,9 @@ struct ConversationHeader: View {
     }
     .overlay(alignment: .bottomTrailing) {
       if let presence = conversation.maybePeerPresence {
-        Circle()
-          .fill(presence.color)
-          .frame(width: 10, height: 10)
-          .overlay(Circle().stroke(Theme.background, lineWidth: 2))
+        PresenceDot(presence: presence)
+          .padding(2)
+          .background(Theme.background, in: Circle())
       }
     }
     .accessibilityHidden(true)
@@ -88,23 +87,3 @@ struct ConversationHeader: View {
   private static let size: CGFloat = 32
 }
 
-extension Presence {
-  /// The presence dot's colour, the same in the chat list and the header.
-  var color: Color {
-    switch self {
-    case .online: return .green
-    case .away: return .orange
-    case .doNotDisturb: return .red
-    case .offline: return .gray
-    }
-  }
-
-  var label: LocalizedStringKey {
-    switch self {
-    case .online: return "presence_online"
-    case .away: return "presence_away"
-    case .doNotDisturb: return "presence_dnd"
-    case .offline: return "presence_peer_offline"
-    }
-  }
-}

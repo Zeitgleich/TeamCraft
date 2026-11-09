@@ -6,8 +6,8 @@ use teamcraft_proto::Role;
 
 use crate::admin::AdminSection;
 use crate::clock::{
-  format_date_time, format_local_datetime_input, format_time, local_day, now_ms, parse_local_datetime,
-  tomorrow_at,
+  end_of_local_day, end_of_local_week, format_date_time, format_local_datetime_input, format_time, local_day,
+  now_ms, parse_local_datetime,
 };
 use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
 use crate::components::emoji_picker::EmojiPicker;
@@ -15,15 +15,17 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::profile_views::status_until_label;
 use crate::components::sheet::MenuSurface;
+use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::{I18n, use_i18n};
 use crate::model::{CustomStatus, PresenceStatus, StatusExpiry, TimestampMs};
 use crate::session::use_session;
 use crate::state::{AppState, Overlay, SettingsTab, use_app_state};
 
-/// "Until tomorrow morning" means 08:00 local time.
+/// "Until tomorrow morning" (the bell and the tray) means 08:00 local time.
 pub(crate) const MORNING_MINUTE: u16 = 8 * 60;
 pub(crate) const MS_PER_HOUR: TimestampMs = 3_600_000;
-/// The shortest pause of notifications: focus button, account menu and tray offer it.
+/// The shortest pause of notifications and the shortest "Reset after": focus button, tray and the
+/// status's duration offer it.
 pub(crate) const FOCUS_SHORT_MS: TimestampMs = 30 * 60_000;
 
 /// Suggestions while the workspace configured no presets of its own; the label is an i18n key.
@@ -34,7 +36,7 @@ const STATUS_PRESETS: [(&str, &str); 4] = [
   ("🌴", "status-preset-vacation"),
 ];
 
-/// Popover under the avatar: presence, custom status and account shortcuts.
+/// Popover under the avatar: the status list (#1578), custom status and account shortcuts.
 #[component]
 pub fn StatusMenu() -> impl IntoView {
   let state = use_app_state();
@@ -75,42 +77,32 @@ pub fn StatusMenu() -> impl IntoView {
     }
   };
 
-  let set_presence_until = move |presence: PresenceStatus, maybe_until: Option<TimestampMs>| {
-    state.set_presence_until(presence, maybe_until);
+  let set_presence = move |presence: PresenceStatus| {
+    state.set_presence_until(presence, None);
     state.close_overlay();
     focus_account_button();
   };
-  let set_presence = move |presence: PresenceStatus| set_presence_until(presence, None);
-  let is_dnd = Memo::new(move |_| me.get().presence == PresenceStatus::DoNotDisturb);
-  // "Set yourself as away" and "Appear offline" are switches: off again means available.
-  let toggle_presence = move |presence: PresenceStatus| {
-    if me.get_untracked().presence == presence {
-      set_presence(PresenceStatus::Online);
-    } else {
-      set_presence(presence);
-    }
-  };
-  let presence_switch = move |presence: PresenceStatus, key: &'static str| {
+  // A status the user set themselves can be reset; available is automatic, and busy during a call
+  // on this device is the server's doing.
+  let is_manual = Memo::new(move |_| match me.get().presence {
+    PresenceStatus::Online => false,
+    PresenceStatus::Busy => state.call.phase.get() == teamcraft_client_api::calls::CallPhase::Idle,
+    _ => true,
+  });
+  let status_item = move |presence: PresenceStatus| {
+    let is_current = move || me.get().presence == presence;
     view! {
       <button
         class="menu-item"
-        role="menuitemcheckbox"
+        role="menuitemradio"
         tabindex="-1"
-        aria-checked=move || (me.get().presence == presence).to_string()
-        on:click=move |_| toggle_presence(presence)
+        aria-checked=move || is_current().to_string()
+        on:click=move |_| set_presence(presence)
       >
         <PresenceDot presence=presence />
-        <span class="menu-label">{move || i18n.t(key)}</span>
-        {move || (me.get().presence == presence).then(|| view! { <Icon name=IconName::Check /> })}
+        <span class="menu-label">{move || i18n.t(pick_key(presence))}</span>
+        {move || is_current().then(|| view! { <Icon name=IconName::Check /> })}
       </button>
-    }
-  };
-  let is_custom_open = RwSignal::new(false);
-  let custom_until = RwSignal::new(format_local_datetime_input(now_ms() + MS_PER_HOUR));
-  let set_custom = move || {
-    if let Some(until) = parse_local_datetime(&custom_until.get_untracked()).filter(|until| *until > now_ms())
-    {
-      set_presence_until(PresenceStatus::DoNotDisturb, Some(until));
     }
   };
 
@@ -128,6 +120,13 @@ pub fn StatusMenu() -> impl IntoView {
         <div>
           <div class="menu-user-name" translate="no">
             {move || me.get().display_name}
+          </div>
+          <div class="menu-user-sub menu-user-status">
+            {move || view! { <PresenceDot presence=me.get().presence /> }}
+            <span>
+              {move || i18n.t(&format!("presence-{}", me.get().presence.slug()))}
+              {move || status_end_label(state, i18n).map(|until| format!(" · {until}"))}
+            </span>
           </div>
           <div class="menu-user-sub" translate="no">
             {move || format!("@{}", me.get().username)}
@@ -165,80 +164,22 @@ pub fn StatusMenu() -> impl IntoView {
         </button>
         <div class="menu-sep" role="separator"></div>
       </Show>
-      // Status, away, pause, profile, preferences, sign out (#299); the rest sits between the last two.
-      {presence_switch(PresenceStatus::Away, "presence-set-away")}
-      {presence_switch(PresenceStatus::Offline, "presence-appear-offline")}
-      <div class="menu-sub" role="group" aria-label=move || i18n.t("tray-pause-notifications")>
-        <div class="menu-group-title">
-          <Icon name=IconName::BellOff />
-          <span class="menu-label">
-            {move || i18n.t("tray-pause-notifications")}
-            {move || paused_until_label(state, i18n).map(|label| view! { <small>{label}</small> })}
-          </span>
-        </div>
-        <Show
-          when=move || is_dnd.get()
-          fallback=move || {
-            view! {
-              <button
-                class="menu-item"
-                role="menuitem"
-                tabindex="-1"
-                on:click=move |_| set_presence_until(PresenceStatus::DoNotDisturb, Some(now_ms() + FOCUS_SHORT_MS))
-              >
-                <span class="menu-label">{move || i18n.t("focus-30-minutes")}</span>
-              </button>
-              <button
-                class="menu-item"
-                role="menuitem"
-                tabindex="-1"
-                on:click=move |_| set_presence_until(PresenceStatus::DoNotDisturb, Some(now_ms() + MS_PER_HOUR))
-              >
-                <span class="menu-label">{move || i18n.t("presence-dnd-for-hour")}</span>
-              </button>
-              <button
-                class="menu-item"
-                role="menuitem"
-                tabindex="-1"
-                on:click=move |_| set_presence_until(PresenceStatus::DoNotDisturb, Some(tomorrow_at(now_ms(), MORNING_MINUTE)))
-              >
-                <span class="menu-label">{move || i18n.t("presence-dnd-until-morning")}</span>
-              </button>
-              <button
-                class="menu-item"
-                role="menuitem"
-                tabindex="-1"
-                aria-expanded=move || is_custom_open.get().to_string()
-                on:click=move |_| is_custom_open.update(|is_open| *is_open = !*is_open)
-              >
-                <span class="menu-label">{move || i18n.t("presence-dnd-custom")}</span>
-              </button>
-              <Show when=move || is_custom_open.get() fallback=|| ()>
-                <div class="field-row menu-custom-until">
-                  <label class="visually-hidden" for="dnd-custom-until">{move || i18n.t("presence-dnd-custom-label")}</label>
-                  <input
-                    id="dnd-custom-until"
-                    class="input grow"
-                    type="datetime-local"
-                    prop:value=move || custom_until.get()
-                    on:input=move |ev| custom_until.set(event_target_value(&ev))
-                    on:keydown=move |ev: web_sys::KeyboardEvent| {
-                      if ev.key() == "Enter" {
-                        ev.prevent_default();
-                        set_custom();
-                      }
-                    }
-                  />
-                  <button type="button" class="btn" on:click=move |_| set_custom()>
-                    {move || i18n.t("presence-dnd-custom-set")}
-                  </button>
-                </div>
-              </Show>
-            }
-          }
+      // The Teams-style status list (#1578), then profile, preferences, sign out (#299).
+      <div class="menu-sub" role="group" aria-label=move || i18n.t("status-pick-label")>
+        {PresenceStatus::ALL.map(status_item).collect_view()}
+        <button
+          class="menu-item"
+          role="menuitem"
+          tabindex="-1"
+          on:click=move |_| state.overlay.set(Overlay::StatusDuration)
         >
+          <Icon name=IconName::Clock />
+          <span class="menu-label">{move || i18n.t("status-duration")}</span>
+        </button>
+        <Show when=move || is_manual.get() fallback=|| ()>
           <button class="menu-item" role="menuitem" tabindex="-1" on:click=move |_| set_presence(PresenceStatus::Online)>
-            <span class="menu-label">{move || i18n.t("tray-resume-notifications")}</span>
+            <Icon name=IconName::Undo />
+            <span class="menu-label">{move || i18n.t("status-reset")}</span>
           </button>
         </Show>
       </div>
@@ -320,6 +261,24 @@ pub(crate) fn paused_until_label(state: AppState, i18n: I18n) -> Option<String> 
     .settings
     .prefs
     .with(|prefs| prefs.notifications.maybe_dnd_until)?;
+  until_label(until, i18n)
+}
+
+/// "Until 14:30" while the user's manual status has an end ("Reset after"); nothing for a status
+/// without one, or once the shown status is another.
+pub(crate) fn status_end_label(state: AppState, i18n: I18n) -> Option<String> {
+  let presence = state.me().presence;
+  let end = state
+    .settings
+    .prefs
+    .with(|prefs| prefs.privacy.maybe_status_end)?;
+  if end.status != presence {
+    return paused_until_label(state, i18n);
+  }
+  until_label(end.until, i18n)
+}
+
+fn until_label(until: TimestampMs, i18n: I18n) -> Option<String> {
   let now = now_ms();
   if until <= now {
     return None;
@@ -331,6 +290,225 @@ pub(crate) fn paused_until_label(state: AppState, i18n: I18n) -> Option<String> 
     format_date_time(until, locale)
   };
   Some(i18n.t_with("presence-dnd-until", &[("time", &time)]))
+}
+
+/// The status list's wording: "Available", "Appear away", "Appear offline" say what the user does,
+/// where others see "Online", "Away", "Offline".
+pub(crate) fn pick_key(presence: PresenceStatus) -> &'static str {
+  match presence {
+    PresenceStatus::Online => "status-pick-online",
+    PresenceStatus::Busy => "status-pick-busy",
+    PresenceStatus::DoNotDisturb => "status-pick-dnd",
+    PresenceStatus::BeRightBack => "status-pick-brb",
+    PresenceStatus::Away => "status-pick-away",
+    PresenceStatus::Offline => "status-pick-offline",
+  }
+}
+
+/// "Reset after" of a manual status (#1578), as Teams' "Duration".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ResetAfter {
+  ThirtyMinutes,
+  OneHour,
+  TwoHours,
+  Today,
+  ThisWeek,
+  /// A time the user enters.
+  UntilTime,
+  Never,
+}
+
+impl ResetAfter {
+  pub(crate) const ALL: [Self; 7] = [
+    Self::ThirtyMinutes,
+    Self::OneHour,
+    Self::TwoHours,
+    Self::Today,
+    Self::ThisWeek,
+    Self::UntilTime,
+    Self::Never,
+  ];
+
+  pub(crate) fn slug(self) -> &'static str {
+    match self {
+      Self::ThirtyMinutes => "30m",
+      Self::OneHour => "1h",
+      Self::TwoHours => "2h",
+      Self::Today => "today",
+      Self::ThisWeek => "week",
+      Self::UntilTime => "until",
+      Self::Never => "never",
+    }
+  }
+
+  pub(crate) fn from_slug(slug: &str) -> Self {
+    Self::ALL
+      .into_iter()
+      .find(|choice| choice.slug() == slug)
+      .unwrap_or(Self::Today)
+  }
+
+  /// When a status set at `now` ends; `None` for never, and for a time the user enters.
+  pub(crate) fn end(self, now: TimestampMs) -> Option<TimestampMs> {
+    match self {
+      Self::ThirtyMinutes => Some(now + FOCUS_SHORT_MS),
+      Self::OneHour => Some(now + MS_PER_HOUR),
+      Self::TwoHours => Some(now + 2 * MS_PER_HOUR),
+      Self::Today => Some(end_of_local_day(now)),
+      Self::ThisWeek => Some(end_of_local_week(now)),
+      Self::UntilTime | Self::Never => None,
+    }
+  }
+}
+
+/// The statuses a duration applies to: every manual one (available is automatic).
+const MANUAL_STATUSES: [PresenceStatus; 5] = [
+  PresenceStatus::Busy,
+  PresenceStatus::DoNotDisturb,
+  PresenceStatus::BeRightBack,
+  PresenceStatus::Away,
+  PresenceStatus::Offline,
+];
+const DURATION_FORM_ID: &str = "status-duration-form";
+const UNTIL_FIELD: &str = "status-duration-until";
+
+/// "Duration…": a manual status with a "Reset after" (#1578). Afterwards the server makes presence
+/// automatic again.
+#[component]
+pub fn StatusDurationDialog() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let current = state.me().presence;
+  let status = RwSignal::new(if MANUAL_STATUSES.contains(&current) {
+    current
+  } else {
+    PresenceStatus::Busy
+  });
+  let reset_after = RwSignal::new(ResetAfter::OneHour);
+  let custom_until = RwSignal::new(format_local_datetime_input(now_ms() + MS_PER_HOUR));
+  let errors = FormErrors::new();
+  let check = move || -> Result<Option<TimestampMs>, FieldErrors> {
+    let now = now_ms();
+    match reset_after.get_untracked() {
+      ResetAfter::UntilTime => {
+        match parse_local_datetime(&custom_until.get_untracked()).filter(|until| *until > now) {
+          Some(until) => Ok(Some(until)),
+          None => {
+            let mut found = FieldErrors::new();
+            found.push(UNTIL_FIELD, i18n.t("status-duration-until-past"));
+            Err(found)
+          },
+        }
+      },
+      other => Ok(other.end(now)),
+    }
+  };
+  let save = move || match check() {
+    Ok(maybe_until) => {
+      state.set_presence_until(status.get_untracked(), maybe_until);
+      state.close_overlay();
+    },
+    Err(found) => errors.refuse(DURATION_FORM_ID, found),
+  };
+
+  view! {
+    <Modal labelled_by="status-duration-title" class="modal-small">
+      <form
+        id=DURATION_FORM_ID
+        novalidate
+        on:submit=move |ev| {
+          ev.prevent_default();
+          save();
+        }
+      >
+        <header class="modal-head">
+          <h2 id="status-duration-title">{move || i18n.t("status-duration-title")}</h2>
+          <button type="button" class="icon-btn" aria-label=move || i18n.t("close") on:click=move |_| state.close_overlay()>
+            <Icon name=IconName::Close />
+          </button>
+        </header>
+        <div class="modal-body">
+          <div class="field">
+            <label for="status-duration-status">{move || i18n.t("status-pick-label")}</label>
+            <select
+              id="status-duration-status"
+              class="input"
+              data-autofocus
+              on:change=move |ev| {
+                let slug = event_target_value(&ev);
+                if let Some(picked) = MANUAL_STATUSES.into_iter().find(|presence| presence.slug() == slug) {
+                  status.set(picked);
+                }
+              }
+            >
+              {MANUAL_STATUSES
+                .map(|presence| {
+                  view! {
+                    <option value=presence.slug() selected=move || status.get() == presence>
+                      {move || i18n.t(pick_key(presence))}
+                    </option>
+                  }
+                })
+                .collect_view()}
+            </select>
+            <Show when=move || status.get() == PresenceStatus::DoNotDisturb fallback=|| ()>
+              <p class="hint">{move || i18n.t("status-duration-dnd-hint")}</p>
+            </Show>
+          </div>
+          <div class="field">
+            <label for="status-duration-reset">{move || i18n.t("status-duration-reset-after")}</label>
+            <select
+              id="status-duration-reset"
+              class="input"
+              on:change=move |ev| {
+                reset_after.set(ResetAfter::from_slug(&event_target_value(&ev)));
+                errors.follow(check().err().unwrap_or_default());
+              }
+            >
+              {ResetAfter::ALL
+                .map(|choice| {
+                  view! {
+                    <option value=choice.slug() selected=move || reset_after.get() == choice>
+                      {move || i18n.t(&format!("status-duration-{}", choice.slug()))}
+                    </option>
+                  }
+                })
+                .collect_view()}
+            </select>
+          </div>
+          // Disabled rather than hidden would leave an empty field for most choices; it only
+          // appears below the select, so nothing above it moves.
+          <Show when=move || reset_after.get() == ResetAfter::UntilTime fallback=|| ()>
+            <div class="field">
+              <label for=UNTIL_FIELD>{move || i18n.t("status-duration-until-label")}</label>
+              <input
+                id=UNTIL_FIELD
+                class="input"
+                type="datetime-local"
+                aria-invalid=errors.invalid(UNTIL_FIELD)
+                aria-describedby=errors.described(UNTIL_FIELD)
+                prop:value=move || custom_until.get()
+                on:input=move |ev| {
+                  custom_until.set(event_target_value(&ev));
+                  errors.follow(check().err().unwrap_or_default());
+                }
+              />
+              <FieldError errors=errors field=UNTIL_FIELD />
+            </div>
+          </Show>
+        </div>
+        <footer class="modal-foot">
+          <span class="grow"></span>
+          <button type="button" class="btn" on:click=move |_| state.close_overlay()>
+            {move || i18n.t("cancel")}
+          </button>
+          <button type="submit" class="btn btn-primary">
+            {move || i18n.t("status-duration-set")}
+          </button>
+        </footer>
+      </form>
+    </Modal>
+  }
 }
 
 /// Dialog to set emoji, text and expiry of the custom status. Offers the workspace's presets (or

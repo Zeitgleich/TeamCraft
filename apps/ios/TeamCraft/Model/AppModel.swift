@@ -754,8 +754,13 @@ final class AppModel {
     try? await core().setFavorite(conversationId: conversationId, isFavorite: isFavorite)
   }
 
-  func setPresence(_ presence: Presence) async {
-    try? await core().setPresence(presence: presence)
+  /// Sets the status; with `until` it is automatic again from then ("Reset after", #1578).
+  func setPresence(_ presence: Presence, until maybeUntil: Date? = nil) async {
+    if let until = maybeUntil {
+      try? await core().setPresenceUntil(presence: presence, untilMs: Int64(until.timeIntervalSince1970 * 1000))
+    } else {
+      try? await core().setPresence(presence: presence)
+    }
   }
 
   func perform(_ action: ChatAction) async {
