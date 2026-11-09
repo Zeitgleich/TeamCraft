@@ -56,6 +56,8 @@ const MEDIA_IMAGE_MARKER: &[u8] = br#""media_type":"image/"#;
 const MEDIA_VIDEO_MARKER: &[u8] = br#""media_type":"video/"#;
 /// How a message record spells any attachment (`AttachmentRef`, compact JSON).
 const ATTACHMENT_MARKER: &[u8] = br#""attachment_id":"#;
+/// What every web link has ([`teamcraft_proto::web_links`]), in any case of its scheme.
+const LINK_MARKER: &[u8] = b"://";
 /// Rows an attachments query reads at a time at least.
 const MEDIA_SCAN_BATCH: usize = 64;
 /// IDs a query of the feed's reactions or replies names at most at once.
@@ -552,6 +554,7 @@ impl LocalStore for SqlCipherStore {
     let [first_marker, second_marker] = match kind {
       Attached::Media => [MEDIA_IMAGE_MARKER, MEDIA_VIDEO_MARKER],
       Attached::Document | Attached::Any => [ATTACHMENT_MARKER, ATTACHMENT_MARKER],
+      Attached::Link => [LINK_MARKER, LINK_MARKER],
     };
     let batch = i64::try_from(limit.saturating_mul(2).max(MEDIA_SCAN_BATCH)).unwrap_or(i64::MAX);
     let mut found = Vec::new();

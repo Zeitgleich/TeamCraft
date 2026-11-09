@@ -1719,14 +1719,15 @@ fn ChannelLinks(conversation: ConversationId, on_show_message: Callback<MessageI
   let page = Memo::new(move |_| state.read(|backend| backend.conversation_links(conversation, limit.get())));
   view! {
     <ul class="links-list" aria-label=move || i18n.t("shared-kind-links")>
-      <For each=move || page.get().links key=|link| (link.message, link.url.clone()) let:link>
+      <For each=move || page.get().map(|page| page.links).unwrap_or_default() key=|link| (link.message, link.url.clone()) let:link>
         <LinkRow link=link on_show_message=on_show_message />
       </For>
     </ul>
-    <Show when=move || page.with(|page| page.links.is_empty()) fallback=|| ()>
+    // Not read yet is no empty list: the answer and a change notification follow.
+    <Show when=move || page.with(|page| page.as_ref().is_some_and(|page| page.links.is_empty())) fallback=|| ()>
       <EmptyState icon=IconName::Link title_key="links-empty-title" body_key="links-empty" />
     </Show>
-    <Show when=move || page.with(|page| page.has_more) fallback=|| ()>
+    <Show when=move || page.with(|page| page.as_ref().is_some_and(|page| page.has_more)) fallback=|| ()>
       <div class="links-more">
         <button type="button" class="btn" on:click=move |_| limit.update(|limit| *limit += LINKS_PER_PAGE)>
           {move || i18n.t("links-more")}

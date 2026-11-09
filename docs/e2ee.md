@@ -4741,7 +4741,8 @@ The browser has neither SQLCipher nor an OS keystore. The web client keeps the s
    the store opens, the store keeps a catalog, sealed like every other record (entries of a reserved
    table name that versions before skip): per table the keys it holds, and per conversation its
    messages in display order with server ID, thread and a few flags (hidden, media, files, documents,
-   unreadable; files and documents since catalog version 3, issue #1509), the
+   web links, unreadable; files and documents since catalog version 3, issue #1509; web links since
+   version 4, issue #609), the
    rows of its feed, and its reactions by target, replies by thread and events.
    Each is a paged index: a root listing pages of up to 256 entries. Table, conversation and message
    IDs stay inside the sealed plaintext. The catalog is derived from the records: a node that is

@@ -3025,6 +3025,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     Some(self.ui_files_page(query))
   }
 
+  fn conversation_links(
+    &self,
+    conversation: ConversationId,
+    limit: usize,
+  ) -> Option<teamcraft_client_api::links::LinkPage> {
+    Some(self.ui_conversation_links(conversation, limit))
+  }
+
   fn conversation_media(
     &self,
     conversation: ConversationId,

@@ -91,6 +91,34 @@ async fn allowed_links_get_previews_and_receivers_follow_the_policy() {
   assert_eq!(preview.maybe_site_name.as_deref(), Some("Docs"));
   assert!(preview.maybe_image.is_some(), "the og:image became a thumbnail");
 
+  // The Files & links tab (issue #609) reads them from the store's index, newest first, with the
+  // sender's preview where the policy allows it.
+  let page = bob_ui.conversation_links(channel, 2).unwrap();
+  let urls: Vec<_> = page.links.iter().map(|link| link.url.as_str()).collect();
+  assert_eq!(
+    urls,
+    [
+      "https://docs.example.com/guide",
+      "https://elsewhere.example.org/x"
+    ]
+  );
+  assert!(page.has_more);
+  assert_eq!(page.links[0].message, last.id);
+  assert_eq!(page.links[0].sender, alice.client.user_id());
+  assert!(page.links[0].maybe_preview.is_some());
+  assert!(page.links[1].maybe_preview.is_none());
+  // A reply only in its thread isn't listed, as the channel doesn't show it.
+  alice_ui.post_message(
+    channel,
+    Some(teamcraft_client_api::model::thread_id_of(last.id)),
+    "in the thread: https://docs.example.com/thread",
+  );
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  let all = bob_ui.conversation_links(channel, 10).unwrap();
+  assert_eq!(all.links.len(), 3);
+  assert!(!all.has_more);
+
   // The owner switches to a block list naming the domain: Bob's client drops the preview.
   alice
     .client
@@ -102,6 +130,12 @@ async fn allowed_links_get_previews_and_receivers_follow_the_policy() {
     bob_ui.message_extras(channel, &[last.id])[0]
       .maybe_link_preview
       .is_none()
+  );
+  assert!(
+    bob_ui.conversation_links(channel, 1).unwrap().links[0]
+      .maybe_preview
+      .is_none(),
+    "the links tab follows the policy too"
   );
 }
 

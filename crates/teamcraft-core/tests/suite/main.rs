@@ -42,6 +42,7 @@ mod key_packages;
 mod key_placeholders;
 mod link_previews;
 mod linking;
+mod links_budget;
 mod list_load;
 mod live_permissions;
 mod meeting_chats;

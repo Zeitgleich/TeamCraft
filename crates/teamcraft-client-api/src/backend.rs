@@ -661,11 +661,13 @@ pub trait ChatBackend {
   fn files_page(&self, query: &FilesQuery<'_>) -> Option<FilesPage> {
     Some(crate::files_query::files_page(self, query))
   }
-  /// The newest `limit` links shared in a conversation, newest first. The default reads the
-  /// messages newest first and stops once `limit` links are found, so a long conversation is not
-  /// read whole.
-  fn conversation_links(&self, conversation: ConversationId, limit: usize) -> crate::links::LinkPage {
-    crate::links::links_page(self, conversation, limit)
+  /// The newest `limit` links shared in a conversation, newest first. A core reads them through
+  /// its index of the messages with links (issue #609); the default reads the messages newest
+  /// first and stops once `limit` links are found. `None` while a backend that asks the core waits
+  /// for its answer (a change notification follows), so the tab never mistakes a page not read
+  /// yet for an empty one.
+  fn conversation_links(&self, conversation: ConversationId, limit: usize) -> Option<crate::links::LinkPage> {
+    Some(crate::links::links_page(self, conversation, limit))
   }
   /// A page of at most `max_messages` messages with pictures or videos at `anchor`, newest first
   /// (the image viewer pages through a conversation with it, #274). Bounded work: a core reads

@@ -784,6 +784,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.conversation_media(conversation, anchor, max_messages)
   }
 
+  fn conversation_links(
+    &self,
+    conversation: ConversationId,
+    limit: usize,
+  ) -> Option<teamcraft_client_api::links::LinkPage> {
+    self.chat.conversation_links(conversation, limit)
+  }
+
   fn download_file(&self, conversation: ConversationId, message: MessageId) {
     self.chat.download_file(conversation, message);
   }

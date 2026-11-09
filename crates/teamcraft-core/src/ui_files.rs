@@ -348,7 +348,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     }
   }
 
-  fn attached_messages(
+  pub(crate) fn attached_messages(
     &self,
     conversation: ConversationId,
     kind: Attached,

@@ -2251,6 +2251,27 @@ of the build rewrites the index nodes it touched, so the batch size decided the 
 4,096 keeps a batch's records to a few MiB on a phone; the web build still yields between batches
 and shows its progress.
 
+### Links tab on a large workspace (issue #609)
+
+`crates/teamcraft-core/tests/suite/links_budget.rs` measures the Files & links tab's links: a sealed
+SQLite store with 300 conversations and 100,000 messages, half in one. There every 1,000th message
+has a link (few links in a long history); in the others every 10th. Release build on a desktop
+machine, median of 10 reads.
+
+| Measured                                    | Before (scan) | After (index) |
+|---------------------------------------------|---------------|---------------|
+| Large conversation, sparse links, 1 page    | 209 ms        | 8.5 ms        |
+| Large conversation, sparse links, 2 pages   | 336 ms        | 13 ms         |
+| Small conversation, dense links, 1 page     | 0.98 ms       | 0.03 ms       |
+| Peak memory (105 MiB after seeding)         | 111 MiB       | 109 MiB       |
+
+Before, the tab read the conversation's messages newest first, 200 at a time, until the page was
+full: in a long conversation with few links that is most of its history, decrypted. Now the sealed
+catalog (version 4) marks the messages the channel shows whose text has a web link, and the core
+walks the index's entries (no decryption) and opens only those messages. What is left of the 8.5 ms
+is walking 50,000 entries of the large conversation's index. The catalog is built again once when a
+store of version 3 opens, at the cost measured for version 3 above.
+
 ### Web bundle size
 
 Two budgets, both on the **compressed** wasm (issue #910's follow-up, 2026-10-31). The strict one

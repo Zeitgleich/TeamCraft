@@ -42,8 +42,9 @@ pub(crate) const RELATIONS_KIND: &str = "x";
 pub(crate) const FEED_VERSION_KIND: &str = "v";
 /// What a complete catalog holds. A store with an older one builds it again when it opens.
 /// 1: tables and messages; 2: feeds and relations; 3: which messages have files and documents
-/// ([`MessageFlags::FILES`], issue #1509).
-pub(crate) const CATALOG_VERSION: u32 = 3;
+/// ([`MessageFlags::FILES`], issue #1509); 4: which messages have web links
+/// ([`MessageFlags::LINKS`], issue #609).
+pub(crate) const CATALOG_VERSION: u32 = 4;
 
 /// How far the catalog of a store is built, and its generation (random, so a catalog built again
 /// never meets nodes of an earlier one). A store written before the catalog existed builds it when
@@ -97,6 +98,8 @@ impl MessageFlags {
   const FILES: u8 = 16;
   /// Has a file that is no picture or video (catalog version 3).
   const DOCUMENTS: u8 = 32;
+  /// Has a web link in its text: the Files & links tab lists it (catalog version 4).
+  const LINKS: u8 = 64;
 }
 
 /// An entry of a conversation's relations index: what a message relates to, then the message.
@@ -252,6 +255,7 @@ impl MessageEntry {
       (message.has_media(), MessageFlags::MEDIA),
       (message.has_attached(Attached::Any), MessageFlags::FILES),
       (message.has_attached(Attached::Document), MessageFlags::DOCUMENTS),
+      (message.has_attached(Attached::Link), MessageFlags::LINKS),
       (message.maybe_unreadable.is_some(), MessageFlags::UNREADABLE),
     ] {
       if is_set {
@@ -298,6 +302,7 @@ impl MessageEntry {
       Attached::Media => MessageFlags::MEDIA,
       Attached::Document => MessageFlags::DOCUMENTS,
       Attached::Any => MessageFlags::FILES,
+      Attached::Link => MessageFlags::LINKS,
     })
   }
 
