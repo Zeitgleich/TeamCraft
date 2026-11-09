@@ -17,6 +17,9 @@ pub struct StoredBot {
   pub maybe_description: Option<String>,
   pub created_at: OffsetDateTime,
   pub is_revoked: bool,
+  /// Paused because the person who created it (and saw its token) is deactivated. A new token, or
+  /// that person coming back, ends it.
+  pub is_paused: bool,
 }
 
 impl Database {
@@ -58,6 +61,7 @@ impl Database {
       maybe_description: maybe_description.map(str::to_owned),
       created_at: row.created_at,
       is_revoked: false,
+      is_paused: false,
     })
   }
 
@@ -78,6 +82,7 @@ impl Database {
           maybe_description: row.description,
           created_at: row.created_at,
           is_revoked: false,
+          is_paused: false,
         })
       })
       .transpose()
@@ -85,8 +90,9 @@ impl Database {
 
   pub async fn get_bot(&self, user: UserId) -> Result<Option<StoredBot>, DbError> {
     let row = sqlx::query!(
-      r#"SELECT user_id, name, description, created_at, revoked_at IS NOT NULL AS "is_revoked!"
-         FROM bots WHERE user_id = $1"#,
+      r#"SELECT b.user_id, b.name, b.description, b.created_at, b.revoked_at IS NOT NULL AS "is_revoked!",
+                COALESCE(u.deactivation_reason = 'creator_deactivated', false) AS "is_paused!"
+         FROM bots b JOIN users u ON u.id = b.user_id WHERE b.user_id = $1"#,
       to_db(user),
     )
     .fetch_optional(self.pool())
@@ -99,6 +105,7 @@ impl Database {
           maybe_description: row.description,
           created_at: row.created_at,
           is_revoked: row.is_revoked,
+          is_paused: row.is_paused,
         })
       })
       .transpose()
@@ -106,8 +113,9 @@ impl Database {
 
   pub async fn list_bots(&self) -> Result<Vec<StoredBot>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT user_id, name, description, created_at, revoked_at IS NOT NULL AS "is_revoked!"
-         FROM bots ORDER BY created_at, user_id"#,
+      r#"SELECT b.user_id, b.name, b.description, b.created_at, b.revoked_at IS NOT NULL AS "is_revoked!",
+                COALESCE(u.deactivation_reason = 'creator_deactivated', false) AS "is_paused!"
+         FROM bots b JOIN users u ON u.id = b.user_id ORDER BY b.created_at, b.user_id"#,
     )
     .fetch_all(self.pool())
     .await?;
@@ -120,21 +128,64 @@ impl Database {
           maybe_description: row.description,
           created_at: row.created_at,
           is_revoked: row.is_revoked,
+          is_paused: row.is_paused,
         })
       })
       .collect()
   }
 
-  /// Replaces the token of an active bot; the old token stops working. `false` if there is none.
-  pub async fn replace_bot_token(&self, user: UserId, token_hash: &[u8]) -> Result<bool, DbError> {
+  /// Replaces the token of an active bot; the old token stops working, and `rotated_by` is now the
+  /// one who knows it. A bot paused because of its creator comes back: whoever created it no longer
+  /// holds a working token. `false` if there is none.
+  pub async fn replace_bot_token(
+    &self,
+    user: UserId,
+    token_hash: &[u8],
+    rotated_by: UserId,
+  ) -> Result<bool, DbError> {
+    let mut tx = self.pool().begin().await?;
     let result = sqlx::query!(
-      "UPDATE bots SET token_hash = $2 WHERE user_id = $1 AND revoked_at IS NULL",
+      "UPDATE bots SET token_hash = $2, created_by = $3 WHERE user_id = $1 AND revoked_at IS NULL",
       to_db(user),
       token_hash,
+      to_db(rotated_by),
     )
-    .execute(self.pool())
+    .execute(&mut *tx)
     .await?;
-    Ok(result.rows_affected() > 0)
+    if result.rows_affected() == 0 {
+      return Ok(false);
+    }
+    sqlx::query!(
+      "UPDATE users SET deactivated_at = NULL, deactivation_reason = NULL
+       WHERE id = $1 AND deactivation_reason = 'creator_deactivated'",
+      to_db(user),
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+      "DELETE FROM user_deactivation_followups WHERE user_id = $1",
+      to_db(user),
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+  }
+
+  /// The bot is paused because of its creator and the creator is still deactivated: lifting the
+  /// pause by hand would leave the token working that the creator knows.
+  pub async fn is_bot_paused_with_inactive_creator(&self, user: UserId) -> Result<bool, DbError> {
+    Ok(
+      sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM users b JOIN bots ON bots.user_id = b.id LEFT JOIN users c ON c.id = bots.created_by
+             WHERE b.id = $1 AND b.deactivation_reason = 'creator_deactivated' AND bots.revoked_at IS NULL
+               AND (c.id IS NULL OR c.deactivated_at IS NOT NULL)) AS "exists!""#,
+        to_db(user),
+      )
+      .fetch_one(self.pool())
+      .await?,
+    )
   }
 
   /// Marks the bot revoked; `false` if it was not active.

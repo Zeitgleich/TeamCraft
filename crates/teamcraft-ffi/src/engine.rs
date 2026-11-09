@@ -39,8 +39,8 @@ use teamcraft_core::push_probe::{PROBE_OVERLAY_BYTES, probe_push};
 use teamcraft_core::records;
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{
-  DEFAULT_MESSAGE_CACHE_BYTES, LocalStore as _, OverlayStore, SealedSqliteStore, SealedStoreLimits,
-  StaticKeySource, TrackedStore,
+  CommitJournal, DEFAULT_MESSAGE_CACHE_BYTES, LaneStore, LocalStore as _, OverlayStore, SealedSqliteStore,
+  SealedStoreLimits, StaticKeySource, TrackedStore,
 };
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand, EntryNeed, FeedAnchor};
 use teamcraft_core::{
@@ -60,7 +60,7 @@ use crate::calls::{CallHub, CallPreparation, RunningCalls};
 use crate::device_proofs::{DeviceKeyProofs, DeviceProofKey};
 use crate::error::TeamCraftError;
 use crate::logging::LIFECYCLE;
-use crate::reads::ReadQueue;
+use crate::reads::{ReadLanes, ReadQueue};
 use crate::types::{
   AccountState, AppConfig, DirectPeer, LinkPlatform, LinkRequestItem, MentionSettings, NotificationContent,
   Presence, PushNotification, PushService, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
@@ -72,6 +72,14 @@ use crate::{EventListener, TokenProvider};
 /// Wrong short codes allowed before a link approval is dropped.
 const MAX_APPROVAL_MISSES: u8 = 3;
 const DOWNLOADS_DIR: &str = "downloads";
+/// The caches of the open chat's read connection: it reads a few conversations' pages, not the
+/// whole chat list, so half the default (docs/performance.md, "Local store").
+const READ_LANE_LIMITS: SealedStoreLimits = SealedStoreLimits {
+  max_entry_bytes: 4 * 1024 * 1024,
+  max_message_bytes: 2 * 1024 * 1024,
+  max_index_node_bytes: 1024 * 1024,
+};
+
 /// Stack of the engine and read threads. They run the deepest calls (creating keys, MLS commits,
 /// the sync loop); Rust's 2 MiB default overflowed on a phone in a debug build (#1504). Only
 /// address space is reserved; pages are used as the stack grows.
@@ -114,7 +122,7 @@ pub(crate) type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 pub(crate) type Job = Box<dyn for<'a> FnOnce(&'a mut Engine) -> LocalFuture<'a, ()> + Send>;
 
 pub(crate) type Api = HttpServerApi<ForeignTokens>;
-pub(crate) type Store = TrackedStore<Arc<SealedSqliteStore>>;
+pub(crate) type Store = TrackedStore<LaneStore>;
 pub(crate) type CoreClient = Client<Api, Store>;
 
 pub(crate) struct Engine {
@@ -646,19 +654,28 @@ impl Engine {
     } else {
       (SealedSqliteStore::open(&path, &key_source), MESSAGE_CACHE_BYTES)
     };
-    let store = store.map_err(|error| open_error(error.into()))?;
+    let store = Arc::new(store.map_err(|error| open_error(error.into()))?);
+    let journal = CommitJournal::new();
+    if !is_memory_constrained {
+      store.publish_commits(Arc::clone(&journal));
+    }
     // The apps keep drafts of conversations, which go with them (#1161).
-    let store = TrackedStore::with_message_cache(Arc::new(store), cached_bytes).with_conversation_purges();
+    let engine_store = TrackedStore::with_message_cache(LaneStore::writer(Arc::clone(&store)), cached_bytes)
+      .with_conversation_purges();
+    let lanes = read_lanes(
+      &engine_store,
+      &store,
+      &path,
+      &key_source,
+      &journal,
+      is_memory_constrained,
+    );
+    let store = engine_store;
     // A broken record only costs the preferences, not the store.
     let mentions: MentionSettings = load_mention_preferences(&store).unwrap_or_default().into();
     let maybe_account = records::load_account(&store).map_err(open_error)?;
-    let reads = ReadQueue::start(
-      store.clone(),
-      listener.clone(),
-      signals.catch_up_focus.clone(),
-      own_jobs,
-    )
-    .map_err(OpenError::Failed)?;
+    let reads = ReadQueue::start(lanes, listener.clone(), signals.catch_up_focus.clone(), own_jobs)
+      .map_err(OpenError::Failed)?;
     let tokens =
       ForeignTokens::new(tokens, signals.id_tokens.clone(), maybe_device_key).map_err(OpenError::Failed)?;
     let mut engine = Self {
@@ -1995,6 +2012,35 @@ async fn run_offline_tolerant(client: &mut CoreClient, command: CoreCommand) -> 
 
 /// An error of opening the store or the client on it: data this version can't read, now or after a
 /// restart, gets its own answer (issue #414); anything else stays a plain failure.
+/// The read threads' views of the store: each reads through a connection of its own, beside the
+/// engine's groups of writes (issue #1476). A process that must stay small (the notification
+/// extension) opens none, and a reader that doesn't open leaves its thread on the writer as before.
+fn read_lanes(
+  engine: &Store,
+  writer: &Arc<SealedSqliteStore>,
+  path: &std::path::Path,
+  key_source: &StaticKeySource,
+  journal: &Arc<CommitJournal>,
+  is_memory_constrained: bool,
+) -> ReadLanes {
+  let lane = |limits: SealedStoreLimits| {
+    if is_memory_constrained {
+      return engine.clone();
+    }
+    match SealedSqliteStore::open_reader(path, key_source, limits, Arc::clone(journal)) {
+      Ok(reader) => engine.sharing(LaneStore::reader(Arc::clone(writer), Arc::new(reader))),
+      Err(error) => {
+        tracing::warn!(%error, "could not open a read connection; reading through the writer's");
+        engine.clone()
+      },
+    }
+  };
+  ReadLanes {
+    main: lane(SealedStoreLimits::default()),
+    query: lane(READ_LANE_LIMITS),
+  }
+}
+
 fn open_error(error: CoreError) -> OpenError {
   match error.unreadable_store() {
     Some(problem) => {

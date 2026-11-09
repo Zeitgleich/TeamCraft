@@ -775,6 +775,8 @@ admin-integrations-col-status = Status
 admin-integrations-empty = No bots yet.
 admin-integrations-active = Active
 admin-integrations-revoked = Revoked
+admin-integrations-paused = Paused
+admin-integrations-paused-hint = The person who created this bot was deactivated, and they know its token. A new token brings the bot back.
 admin-integrations-rotate = New token
 admin-integrations-picture = Picture
 admin-integrations-picture-remove = Remove picture
@@ -963,7 +965,66 @@ health-check-push_service-hint = The services the server sends to directly. Fail
 health-check-media_server = Media server
 health-check-media_server-hint = Reports to the server every few seconds while it runs.
 health-check-oidc_sync = Identity provider sync
-health-check-oidc_sync-hint = Compares users with the identity provider on a schedule. Late after three missed runs.
+health-check-oidc_sync-hint = Compares users with the identity provider on a schedule. Late after the set number of missed runs, three by default.
+oidc-sync-title = Identity provider sync
+oidc-sync-not-configured = Not set up. Without it, someone disabled at the identity provider keeps access until their sign-in ends. Set oidc.sync.client_secret: it is required for production.
+oidc-sync-switched-off = Switched off by oidc.sync.is_enabled = false. Someone disabled at the identity provider keeps access until their sign-in ends. It is required for production.
+oidc-sync-dry-run = Dry run: the sync only reports what it would change and changes nothing.
+oidc-sync-stale = { $count ->
+    [one] The sync has not run for more than one interval. Check the identity provider and the service account.
+   *[other] The sync has not run for more than { $count } intervals. Check the identity provider and the service account.
+}
+oidc-sync-held = { $count ->
+    [one] The safety brake is holding back 1 deactivation.
+   *[other] The safety brake is holding back { $count } deactivations.
+}
+oidc-sync-held-hint = This looks more like a mistake at the identity provider than like people leaving. Check the provider first: if it was a mistake, fix it there and this list clears by itself. Other leavers are still deactivated as usual.
+oidc-sync-confirm = Confirm these deactivations
+oidc-sync-confirm-question = { $count ->
+    [one] Deactivate this person now? Their sessions end at once. This is undone when the identity provider enables them again.
+   *[other] Deactivate these { $count } people now? Their sessions end at once. This is undone when the identity provider enables them again.
+}
+oidc-sync-confirm-yes = Yes, deactivate
+oidc-sync-confirmed = Confirmed
+oidc-sync-cause-removed = removed from the identity provider
+oidc-sync-cause-disabled = disabled at the identity provider
+oidc-sync-cause-no-role = no TeamCraft role left at the identity provider
+oidc-sync-cause-other = other reason
+oidc-sync-never-ran = Has not run yet.
+oidc-sync-last-run = Last run
+oidc-sync-outcome = Result
+oidc-sync-changes-title = Changes
+oidc-sync-duration = { $when }, took { $seconds } s
+oidc-sync-outcome-ok = Finished
+oidc-sync-outcome-partial = Finished with errors: some changes failed and are tried again next run
+oidc-sync-outcome-held = Finished, safety brake engaged
+oidc-sync-outcome-dry-run = Finished as a dry run
+oidc-sync-outcome-failed = Failed, nothing was changed
+oidc-sync-error-unreachable = The identity provider did not answer.
+oidc-sync-error-refused = The identity provider refused the service account.
+oidc-sync-error-invalid = The identity provider sent an unexpected answer.
+oidc-sync-error-no-users = The identity provider listed no users.
+oidc-sync-error-database = The database refused.
+oidc-sync-failures = { $count } failures in a row.
+oidc-sync-changes = { $deactivated } deactivated, { $reactivated } reactivated, { $roles } role changes, { $groups } group changes, { $failed } failed
+oidc-sync-unfinished = { $count ->
+    [one] 1 deactivation is still being finished; access is already refused.
+   *[other] { $count } deactivations are still being finished; access is already refused.
+}
+oidc-sync-pending-removals = { $count ->
+    [one] 1 deactivated account still has devices in encryption groups. Only an admin's "Remove from all chats" takes them out.
+   *[other] { $count } deactivated accounts still have devices in encryption groups. Only an admin's "Remove from all chats" takes them out.
+}
+oidc-sync-open-users = Open Users
+oidc-sync-preview = Check what a run would change
+oidc-sync-preview-title = What a run would change now
+oidc-sync-preview-summary = { $deactivate } deactivated, { $held } held back, { $reactivate } reactivated, { $roles } role changes. A run may deactivate { $allowed } of { $active } active users.
+health-detail-held = { $count ->
+    [one] 1 deactivation is waiting for a decision.
+   *[other] { $count } deactivations are waiting for a decision.
+}
+health-check-oidc_sync_brake = Identity provider sync: safety brake
+health-check-oidc_sync_brake-hint = Holds deactivations back when a run would deactivate too many people at once. Fails while any are waiting for a decision.
 health-check-retention = Retention job
 health-check-retention-hint = Deletes what is past its retention. Late after three missed runs.
 health-check-partition_maintenance = Message partitions
@@ -1058,3 +1119,40 @@ policy-bug-reports-admins-hint = Everyone with a role in the workspace's signed 
 policy-bug-reports-named = These people
 policy-bug-reports-named-hint = For example the people who look after TeamCraft. Until you pick someone, reports go to the owners and admins.
 policy-bug-reports-chosen = Recipients of problem reports
+
+## Inactive channels and idle guest accounts (issue #212)
+policy-guest-deactivate = Deactivate a local guest account after its last space ended
+policy-guest-deactivate-never = Never
+policy-guest-deactivate-hint = Applies to guests with a password of their own that belong to no space any more. The account is only deactivated, not deleted, and an admin can reactivate it.
+policy-inactivity = Inactive channels
+policy-inactivity-hint = The server only sees when the last message was stored, never what it says. Off by default: nothing is noticed, archived or deleted until you turn it on.
+policy-inactivity-enable = Look after channels nobody writes in
+policy-inactivity-enable-hint = The owners of a quiet channel get a mail first. The channel is archived later only if nobody writes in it or keeps it open. Channels nobody can be told about are left alone.
+policy-inactivity-notice = Tell the owners after this long without a message
+policy-inactivity-archive = Archive after the notice
+policy-inactivity-archive-hint = Archived channels stay readable and an admin can restore them. With "notices only" nothing is archived.
+policy-inactivity-notice-only = Notices only, never archive
+policy-inactivity-snooze = Keeping a channel open lasts
+policy-inactivity-limit = Most channels per run
+policy-inactivity-limit-hint = A safety limit for noticing, archiving and deleting each, per hourly run. The audit log says when it held something back.
+policy-inactivity-channels = { $count ->
+    [one] { $count } channel
+   *[other] { $count } channels
+  }
+policy-inactivity-delete = Delete channels the policy archived
+policy-inactivity-delete-never = Never
+policy-inactivity-delete-hint = The only way this policy deletes messages. It deletes only channels it archived itself and nobody restored, and the owners are warned 7 days before. Cannot be undone.
+admin-inactivity-notified = The owners were told that this channel is quiet.
+admin-inactivity-archive-on = Archived on { $date } unless somebody writes in it or keeps it open.
+admin-inactivity-archived = Archived automatically because it was quiet.
+admin-inactivity-delete-on = Deleted on { $date } unless somebody restores it or postpones the deletion.
+admin-inactivity-kept-open = Kept open until { $date }.
+admin-inactivity-keep-open = Keep open
+admin-inactivity-postpone-delete = Postpone deletion
+audit-inactivity-notice = Owners told about a quiet channel
+audit-channel-auto-archived = Quiet channel archived
+audit-channel-auto-deleted = Archived channel deleted
+audit-inactivity-snoozed = Channel kept open
+audit-inactivity-limited = Inactivity run stopped at its limit
+audit-space-archived = Space archived with its channels
+audit-space-restored = Space restored

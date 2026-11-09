@@ -57,6 +57,9 @@ pub struct Config {
   pub security: SecurityConfig,
   #[serde(default)]
   pub guests: GuestsConfig,
+  /// Mails of the inactive-channel policy; the policy itself is signed and off by default.
+  #[serde(default)]
+  pub inactivity: InactivityConfig,
   #[serde(default)]
   pub mail: MailConfig,
   #[serde(default)]
@@ -188,7 +191,10 @@ pub struct OidcConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OidcSyncConfig {
-  pub is_enabled: bool,
+  /// Unset (the default): on once `client_secret` is set. `false` switches it off, which is not
+  /// meant for production (admin.md §3.2.3): leavers would only lose access when their tokens end.
+  #[serde(rename = "is_enabled")]
+  pub maybe_is_enabled: Option<bool>,
   pub interval_secs: u64,
   pub initial_delay_secs: u64,
   /// Secret of `server_client`.
@@ -203,6 +209,32 @@ pub struct OidcSyncConfig {
   /// Mirror the provider's top-level groups as user groups (`@handle`), members included. The
   /// handle is made from the group name; groups whose name cannot become a handle are skipped.
   pub sync_groups: bool,
+  /// `apply`, or `dry_run` to only report what it would change.
+  pub mode: OidcSyncRunMode,
+  /// The safety brake: a run may deactivate at most this share of the active users.
+  pub brake_max_percent: u32,
+  /// A run may always deactivate this many users, whatever the share (at least 1).
+  pub brake_min_allowed: u32,
+  /// Overdue (a warning in the console, then an alert) after this many intervals without a run.
+  pub stale_after_intervals: u32,
+}
+
+/// `[oidc.sync] mode`.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OidcSyncRunMode {
+  #[default]
+  Apply,
+  DryRun,
+}
+
+impl OidcSyncConfig {
+  /// Whether the sync should run: as `is_enabled` says, else once the service account is configured.
+  pub fn is_requested(&self) -> bool {
+    self
+      .maybe_is_enabled
+      .unwrap_or(self.maybe_client_secret.is_some())
+  }
 }
 
 /// Names of the identity provider's client roles per TeamCraft role (ARCHITECTURE.md §5.1.1).
@@ -596,6 +628,8 @@ pub struct GuestsConfig {
   /// About one guest.
   pub notice_body_sponsor_one: String,
   pub notice_body_sponsor: String,
+  /// Most idle local guest accounts one run deactivates, when the signed policy has a period for it.
+  pub max_deactivations_per_run: u32,
 }
 
 impl Default for GuestsConfig {
@@ -613,6 +647,42 @@ impl Default for GuestsConfig {
         .to_owned(),
       notice_subject_sponsor: "Guest access you are responsible for ends soon".to_owned(),
       notice_body_sponsor: "The access of {count} guests you are responsible for ends soon. Open the app to extend it or let it end.\n\n{url}\n"
+        .to_owned(),
+      max_deactivations_per_run: 50,
+    }
+  }
+}
+
+/// Inactive channels (PLAN.md §12, issue #212). What is noticed, archived and deleted, and when, is
+/// the signed workspace policy (`inactivity`), off by default; this holds how often the job runs and
+/// what the mails to the channels' owners say.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct InactivityConfig {
+  /// How often the job looks for quiet channels. Nothing happens while the policy is off.
+  pub check_interval_secs: u64,
+  /// Mail to the owners of a channel that has been quiet; `{days}` (until it is archived) and `{url}`
+  /// are filled in. It names no channel.
+  pub notice_subject: String,
+  pub notice_body: String,
+  /// The same for a policy that only notices and never archives.
+  pub notice_body_no_archive: String,
+  /// Mail to the owners of an archived channel that will be deleted; `{days}` and `{url}`.
+  pub delete_notice_subject: String,
+  pub delete_notice_body: String,
+}
+
+impl Default for InactivityConfig {
+  fn default() -> Self {
+    Self {
+      check_interval_secs: 3600,
+      notice_subject: "A channel you manage has gone quiet".to_owned(),
+      notice_body: "A channel you manage has had no new messages for a long time. It will be archived in {days} days unless somebody writes in it or an admin keeps it open. Archived channels stay readable and an admin can restore them.\n\n{url}\n"
+        .to_owned(),
+      notice_body_no_archive: "A channel you manage has had no new messages for a long time. Nothing happens to it automatically; you may want to archive it.\n\n{url}\n"
+        .to_owned(),
+      delete_notice_subject: "An archived channel you manage will be deleted".to_owned(),
+      delete_notice_body: "An archived channel you manage will be deleted with all its messages in {days} days. An admin can still keep it by restoring it or snoozing the deletion.\n\n{url}\n"
         .to_owned(),
     }
   }
@@ -1559,13 +1629,17 @@ impl Default for ServerConfig {
 impl Default for OidcSyncConfig {
   fn default() -> Self {
     Self {
-      is_enabled: false,
+      maybe_is_enabled: None,
       interval_secs: 300,
       initial_delay_secs: 30,
       maybe_client_secret: None,
       maybe_admin_url: None,
       page_size: 100,
       sync_groups: false,
+      mode: OidcSyncRunMode::Apply,
+      brake_max_percent: DEFAULT_BRAKE_MAX_PERCENT,
+      brake_min_allowed: DEFAULT_BRAKE_MIN_ALLOWED,
+      stale_after_intervals: DEFAULT_STALE_AFTER_INTERVALS,
     }
   }
 }
@@ -1609,6 +1683,9 @@ impl Default for PolicyConfig {
 
 /// Longest `limits.draft_file_retention_days` taken: ten years, far beyond any useful draft.
 const MAX_DRAFT_FILE_RETENTION_DAYS: u32 = 3650;
+const DEFAULT_BRAKE_MAX_PERCENT: u32 = 10;
+const DEFAULT_BRAKE_MIN_ALLOWED: u32 = 2;
+const DEFAULT_STALE_AFTER_INTERVALS: u32 = 3;
 
 impl LimitsConfig {
   /// Rejects limits that would delete drafts' files while they go up, or overflow a date.

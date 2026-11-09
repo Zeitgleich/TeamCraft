@@ -12,10 +12,10 @@ use teamcraft_proto::{
 
 use crate::brand::{Brand, BrandStore};
 use crate::config::{
-  BrandConfig, BrandingConfig, CalDavConfig, GatewayConfig, GuestsConfig, IntegrationConfig, LimitsConfig,
-  LocalAccountsConfig, MailConfig, MailTexts, NotificationsConfig, PolicyConfig, PresenceConfig,
-  RendezvousConfig, RetentionJobConfig, RoleNames, SecurityConfig, SharesConfig, SignInPageConfig,
-  SmtpConfig, WebConfig, WebhooksConfig,
+  BrandConfig, BrandingConfig, CalDavConfig, GatewayConfig, GuestsConfig, InactivityConfig,
+  IntegrationConfig, LimitsConfig, LocalAccountsConfig, MailConfig, MailTexts, NotificationsConfig,
+  PolicyConfig, PresenceConfig, RendezvousConfig, RetentionJobConfig, RoleNames, SecurityConfig,
+  SharesConfig, SignInPageConfig, SmtpConfig, WebConfig, WebhooksConfig,
 };
 use crate::error::ApiError;
 use crate::gateway::Hub;
@@ -92,6 +92,8 @@ pub struct AppState {
   pub metrics: Arc<crate::metrics::ServerMetrics>,
   /// The health checks and the alerts raised from them (issue #213).
   pub health: Arc<crate::health::HealthMonitor>,
+  /// One run of the identity provider sync at a time, and what the safety brake holds back.
+  pub oidc_sync: Arc<crate::services::oidc::OidcSyncRuntime>,
   /// The holiday feed's last good copy and how fetching it goes (#1426).
   pub holiday_feed: Arc<crate::holidays::HolidayFeed>,
   /// The runs asked for of the job that keeps calendar events current with the holidays (#1441).
@@ -107,6 +109,8 @@ pub struct AppState {
 pub struct Settings {
   /// The OIDC sync, if enabled.
   pub maybe_oidc_sync: Option<OidcSyncSettings>,
+  /// The service account is configured, but the configuration switches the sync off.
+  pub is_oidc_sync_switched_off: bool,
   pub policy: PolicyConfig,
   pub limits: LimitsConfig,
   pub gateway: GatewayConfig,
@@ -117,6 +121,7 @@ pub struct Settings {
   pub web: WebConfig,
   pub security: SecurityConfig,
   pub guests: GuestsConfig,
+  pub inactivity: InactivityConfig,
   pub mail: MailConfig,
   pub local_accounts: LocalAccountsConfig,
   pub sign_in_page: SignInPageConfig,
@@ -207,6 +212,10 @@ pub struct OidcSyncSettings {
   pub roles: RoleNames,
   pub page_size: u32,
   pub sync_groups: bool,
+  pub mode: crate::config::OidcSyncRunMode,
+  pub brake: crate::services::oidc_brake::Brake,
+  pub interval: std::time::Duration,
+  pub stale_after_intervals: u32,
 }
 
 /// The public part of `[oidc]` the apps need to sign in (docs/operations.md "Server address in

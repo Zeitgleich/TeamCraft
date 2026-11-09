@@ -65,14 +65,29 @@ pub enum DraftFileState {
   Uploading,
   /// Up and in the draft on every device of the user.
   Ready,
-  /// Kept on this device until it is sent: the server holds no drafts' files (an older one), or
-  /// the drafts already carry as many files as travel.
+  /// Kept on this device until it is sent: attached to go up on send (phones, #1585), the server
+  /// holds no drafts' files (an older one), or the drafts already carry as many files as travel.
   OnThisDevice,
   /// Can't go up (unreadable, too large) or gave up retrying: the user removes it.
   Failed,
   /// Held by the server longer than it keeps drafts' files (`draft_file_retention_days`): it is
   /// gone or about to be, and is not sent. The user attaches it again.
   Expired,
+  #[serde(other)]
+  Unknown,
+}
+
+/// When the files attached to a draft go up (#1585).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DraftFileTravel {
+  /// At once: they travel with the draft to the user's other devices (#1220). Desktop and web.
+  #[default]
+  WithDraft,
+  /// When the message is sent: they wait on this device until then, and the draft's text alone
+  /// travels. Phones, which shouldn't spend mobile data on files the user may still edit or drop.
+  OnSend,
+  /// A choice this version doesn't know: treated as [`Self::WithDraft`].
   #[serde(other)]
   Unknown,
 }

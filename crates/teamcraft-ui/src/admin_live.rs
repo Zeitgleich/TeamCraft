@@ -17,17 +17,18 @@ use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminConversationSummary, AdminDeviceResponse,
-  AdminHealthResponse, AdminInstanceResponse, AdminMailSettingsResponse, AdminSpaceSummary, AdminUserSummary,
-  AnnouncementResponse, AssignChannelOwnerRequest, AuditEntryResponse, BrandAssetSlot, ChannelModeration,
-  ConversationVisibility, CreateBrandRequest, ErrorBody, ErrorCode, ExtendGuestRequest,
-  GetAnnouncementResponse, HistoryPolicy, ListAdminConversationsResponse, ListAdminDevicesResponse,
-  ListAdminGuestsQuery, ListAdminGuestsResponse, ListAdminSpacesResponse, ListAdminUsersResponse,
-  ListAuditResponse, ListConversationMembersResponse, MAX_ADMIN_IDS, PermissionSchemeResponse,
-  RetentionSetting, RetentionStatusResponse, Role, RuntimeSettingsKey, RuntimeSettingsResponse,
-  RuntimeSettingsSection, SchemeChange, SendTestMailRequest, SetAnnouncementRequest,
-  SetChannelModerationRequest, SetRetentionRequest, SettingsTestResponse, SpaceId, UnixMillis,
-  UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateConversationRequest, UpdateMailSettingsRequest,
-  UpdatePermissionSchemeRequest, UpdateSpaceRequest, UserKind, WorkspacePolicy, WorkspacePolicyResponse,
+  AdminHealthResponse, AdminInstanceResponse, AdminMailSettingsResponse, AdminOidcSyncPreviewResponse,
+  AdminOidcSyncResponse, AdminSpaceSummary, AdminUserSummary, AnnouncementResponse,
+  AssignChannelOwnerRequest, AuditEntryResponse, BrandAssetSlot, ChannelModeration, ConversationVisibility,
+  CreateBrandRequest, ErrorBody, ErrorCode, ExtendGuestRequest, GetAnnouncementResponse, HistoryPolicy,
+  ListAdminConversationsResponse, ListAdminDevicesResponse, ListAdminGuestsQuery, ListAdminGuestsResponse,
+  ListAdminSpacesResponse, ListAdminUsersResponse, ListAuditResponse, ListConversationMembersResponse,
+  MAX_ADMIN_IDS, PermissionSchemeResponse, RetentionSetting, RetentionStatusResponse, Role,
+  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, SchemeChange, SendTestMailRequest,
+  SetAnnouncementRequest, SetChannelModerationRequest, SetRetentionRequest, SettingsTestResponse, SpaceId,
+  UnixMillis, UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateConversationRequest,
+  UpdateMailSettingsRequest, UpdatePermissionSchemeRequest, UpdateSpaceRequest, UserKind, WorkspacePolicy,
+  WorkspacePolicyResponse,
 };
 
 use crate::admin::{
@@ -45,6 +46,7 @@ use crate::server_backend::hue_from_seed;
 
 const REFRESH_DELAY: Duration = Duration::from_millis(500);
 const HEALTH_PATH: &str = "/api/v1/admin/health";
+const OIDC_SYNC_PATH: &str = "/api/v1/admin/oidc-sync";
 const LIST_LIMIT: u32 = 200;
 /// Guest memberships the overview shows at once; the filters narrow a longer list, and the console
 /// says that it is cut.
@@ -140,6 +142,8 @@ pub struct AdminData {
   announcement: Option<AnnouncementResponse>,
   instance: Option<AdminInstanceResponse>,
   health: Option<AdminHealthResponse>,
+  oidc_sync: Option<AdminOidcSyncResponse>,
+  oidc_sync_preview: Option<AdminOidcSyncPreviewResponse>,
   brands: Option<AdminBrandsResponse>,
   mail: Option<AdminMailSettingsResponse>,
   /// Loaded when the console shows the notetaker page.
@@ -418,6 +422,35 @@ impl AdminLive {
 
   pub fn health(&self) -> Option<AdminHealthResponse> {
     self.data.borrow().health.clone()
+  }
+
+  pub fn oidc_sync(&self) -> Option<AdminOidcSyncResponse> {
+    self.data.borrow().oidc_sync.clone()
+  }
+
+  pub fn oidc_sync_preview(&self) -> Option<AdminOidcSyncPreviewResponse> {
+    self.data.borrow().oidc_sync_preview.clone()
+  }
+
+  /// Asks what the sync would change now; the answer is kept for the console.
+  pub fn run_oidc_sync_preview(&self) {
+    self.send_stored(
+      ApiMethod::Post,
+      format!("{OIDC_SYNC_PATH}/preview"),
+      Some("{}".to_owned()),
+      Stored::OidcSyncPreview,
+    );
+  }
+
+  /// Confirms the deactivations the safety brake holds back.
+  pub fn confirm_oidc_sync_brake(&self, revision: i64) {
+    let body = serde_json::json!({ "revision": revision }).to_string();
+    self.send_stored(
+      ApiMethod::Post,
+      format!("{OIDC_SYNC_PATH}/brake/confirm"),
+      Some(body),
+      Stored::OidcSync,
+    );
   }
 
   /// How many health checks are alerting, as of the last read.
@@ -841,6 +874,19 @@ impl AdminLive {
     }
   }
 
+  /// Keeps a channel open for the policy's snooze period (issue #212); the console shows the new date
+  /// with the refresh.
+  pub fn snooze_channel(&self, channel: ConversationId) {
+    let request = teamcraft_proto::SnoozeInactivityRequest::default();
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.send(
+        ApiMethod::Post,
+        format!("/api/v1/conversations/{channel}/inactivity/snooze"),
+        Some(body),
+      );
+    }
+  }
+
   pub fn set_audit_filter(&self, filter: AuditFilter) {
     self.data.borrow_mut().audit_filter = filter;
     self.queue_refresh();
@@ -1015,7 +1061,7 @@ impl AdminLive {
     let mut errors: Vec<String> = Vec::new();
     let (
       ((spaces, conversations, users, policy, announcement), (instance, brands, mail, calendar, runtime)),
-      health,
+      (health, oidc_sync),
     ) = join(
       join(
         join5(
@@ -1036,7 +1082,10 @@ impl AdminLive {
           self.fetch_if::<RuntimeSettingsResponse>(reads.has(Reads::RUNTIME), "/api/v1/admin/settings"),
         ),
       ),
-      self.fetch_if::<AdminHealthResponse>(reads.has(Reads::HEALTH), HEALTH_PATH),
+      join(
+        self.fetch_if::<AdminHealthResponse>(reads.has(Reads::HEALTH), HEALTH_PATH),
+        self.fetch_if::<AdminOidcSyncResponse>(reads.has(Reads::HEALTH), OIDC_SYNC_PATH),
+      ),
     )
     .await;
     let spaces = settle(spaces, &mut errors).flatten();
@@ -1046,6 +1095,7 @@ impl AdminLive {
     let announcement = settle(announcement, &mut errors).flatten();
     let instance = settle(instance, &mut errors).flatten();
     let health = settle(health, &mut errors).flatten();
+    let oidc_sync = settle(oidc_sync, &mut errors).flatten();
     let brands = settle(brands, &mut errors).flatten();
     let mail = settle(mail, &mut errors).flatten();
     let calendar = settle(calendar, &mut errors).flatten();
@@ -1201,6 +1251,9 @@ impl AdminLive {
       if let Some(health) = health {
         self.open_alert_count.set(health.open_alert_count()); // async-ok: a Cell, not a signal.
         data.health = Some(health);
+      }
+      if oidc_sync.is_some() {
+        data.oidc_sync = oidc_sync;
       }
       if brands.is_some() {
         data.brands = brands;
@@ -2086,6 +2139,8 @@ pub enum Stored {
   Calendar,
   Runtime,
   Notetaker,
+  OidcSync,
+  OidcSyncPreview,
   /// A webhook was changed: the list is read again; `has_secret` answers carry a new secret.
   Webhooks {
     has_secret: bool,
@@ -2120,6 +2175,8 @@ impl Stored {
       Self::Calendar => data.calendar = Some(serde_json::from_str(body)?),
       Self::Runtime => data.runtime = Some(serde_json::from_str(body)?),
       Self::Notetaker => data.notetaker = Some(serde_json::from_str(body)?),
+      Self::OidcSync => data.oidc_sync = Some(serde_json::from_str(body)?),
+      Self::OidcSyncPreview => data.oidc_sync_preview = Some(serde_json::from_str(body)?),
       Self::Webhooks { has_secret } => {
         data.webhooks = None;
         data.has_asked_webhooks = false;
@@ -2496,6 +2553,7 @@ fn channel_from_wire(
     retention,
     history,
     is_archived: summary.is_archived,
+    maybe_inactivity: summary.maybe_inactivity.clone(),
   }
 }
 
@@ -2668,6 +2726,13 @@ pub fn action_from_wire(action: &str) -> AuditAction {
     },
     "conversation_updated" => AuditAction::ChannelUpdated,
     "channel_deleted" | "channel_deleted_last_member" => AuditAction::ChannelDeleted,
+    "channel_inactivity_notice" | "channel_inactivity_delete_notice" => AuditAction::InactivityNotice,
+    "channel_auto_archived" => AuditAction::ChannelAutoArchived,
+    "channel_inactivity_deleted" => AuditAction::ChannelAutoDeleted,
+    "channel_inactivity_snoozed" => AuditAction::InactivitySnoozed,
+    "inactivity_run_limited" => AuditAction::InactivityLimited,
+    "space_archived" => AuditAction::SpaceArchived,
+    "space_restored" => AuditAction::SpaceRestored,
     "space_created" => AuditAction::SpaceCreated,
     "space_updated" => AuditAction::SpaceUpdated,
     "space_deleted" => AuditAction::SpaceDeleted,
@@ -2873,6 +2938,7 @@ mod tests {
       },
       history: HistoryPolicy::Full,
       is_archived: false,
+      maybe_inactivity: None,
     }];
     let entry = AuditEntryResponse {
       id: id_from_raw(1),
@@ -2937,6 +3003,7 @@ mod tests {
       maybe_last_activity_at: None,
       maybe_owner_user_id: None,
       maybe_retention: None,
+      maybe_inactivity: None,
     };
     let status = RetentionSetting {
       maybe_max_age_days: Some(30),
@@ -2992,11 +3059,11 @@ mod tests {
       block_on(live.refresh_once());
 
       let paths = server.paths();
-      // Eleven lists and settings, the audit log, the guests and the owners and admins by role:
-      // the same 16 requests however many channels, users and spaces there are (it used to be
+      // Twelve lists and settings, the audit log, the guests and the owners and admins by role:
+      // the same 17 requests however many channels, users and spaces there are (it used to be
       // about 650, then 28, with a page of 200 repeated up to 5 times for each list).
       assert!(
-        paths.len() <= 11 + 1 + 1 + 2,
+        paths.len() <= 12 + 1 + 1 + 2,
         "{} requests: {paths:?}",
         paths.len()
       );
@@ -3048,7 +3115,7 @@ mod tests {
           "{section:?}: {paths:?}"
         );
         if section == AdminSection::Health {
-          assert_eq!(paths, [HEALTH_PATH], "one small request");
+          assert_eq!(paths, [HEALTH_PATH, OIDC_SYNC_PATH], "two small requests");
         }
       }
     }
@@ -3183,8 +3250,8 @@ mod tests {
       let live = AdminLive::new(server.clone());
       block_on(live.refresh_once());
 
-      // Only the first round of reads went out (the eleven lists); nothing followed once the server said to wait.
-      assert!(server.paths().len() <= 11, "{:?}", server.paths());
+      // Only the first round of reads went out (the twelve lists); nothing followed once the server said to wait.
+      assert!(server.paths().len() <= 12, "{:?}", server.paths());
       assert!(live.is_quiet());
       let detail = live.maybe_error().unwrap_or_default();
       assert_eq!(detail, "rate_limited:42");
@@ -3660,6 +3727,13 @@ mod tests {
             maybe_entry: None,
           });
         }
+        if path == OIDC_SYNC_PATH {
+          return (
+            200,
+            r#"{"state":"not_configured","mode":"apply","interval_secs":0,"stale_after_intervals":0,"brake":{"max_percent":10,"min_allowed":2},"is_stale":false,"held":[],"held_revision":0,"pending_removals":0,"unfinished_deactivations":0}"#
+              .to_owned(),
+          );
+        }
         if path == HEALTH_PATH {
           return (
             200,
@@ -3822,6 +3896,7 @@ mod tests {
           maybe_max_age_days: Some(30),
           maybe_max_messages: None,
         }),
+        maybe_inactivity: None,
       }
     }
 

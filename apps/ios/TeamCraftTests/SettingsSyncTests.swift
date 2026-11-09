@@ -86,6 +86,15 @@ final class SettingsSyncerTests: XCTestCase {
     XCTAssertEqual(core.syncCalls.first?.local.keywords, ["krebs"])
   }
 
+  func testAColourThemeChoiceIsUploaded() async throws {
+    let syncer = makeSyncer()
+    stores.settings.colorTheme = "preset:pine"
+    syncer.localMayHaveChanged()
+    try await settle(400)
+    XCTAssertEqual(core.syncCalls.count, 1)
+    XCTAssertEqual(core.syncCalls.first?.local.colorTheme, "preset:pine")
+  }
+
   func testNothingUploadsBeforeTheRest() async throws {
     let syncer = makeSyncer(write: .milliseconds(300))
     stores.settings.sharesTyping = false
@@ -228,12 +237,10 @@ final class AppSettingsStoresTests: XCTestCase {
     let before = await stores.current()
     var new = before
     new.confirmChannelOver = 25
-    new.colorTheme = "preset:pine"
     new.font = "inter"
     await stores.apply(new, over: before)
     let after = await stores.current()
     XCTAssertEqual(after.confirmChannelOver, 25)
-    XCTAssertEqual(after.colorTheme, "preset:pine")
     XCTAssertEqual(after.font, "inter")
   }
 

@@ -99,6 +99,10 @@ pub struct AdminConversationSummary {
   /// older servers.
   #[serde(rename = "retention", default, skip_serializing_if = "Option::is_none")]
   pub maybe_retention: Option<RetentionSetting>,
+  /// Where the channel stands in the inactivity policy (issue #212); absent while there is nothing
+  /// to say, and from older servers.
+  #[serde(rename = "inactivity", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_inactivity: Option<crate::ChannelInactivityStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -125,6 +129,8 @@ wire_enum! {
     Oidc => "oidc",
     /// A meeting guest left the meeting.
     Left => "left",
+    /// A bot, paused because the person who created it was deactivated.
+    CreatorDeactivated => "creator_deactivated",
   }
 }
 

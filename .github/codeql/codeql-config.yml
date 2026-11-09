@@ -1,0 +1,11 @@
+# Code scanning configuration shared by codeql.yml and codeql-mobile.yml.
+#
+# Excluded paths are not shipped and their findings are by design:
+# - .claude: agent skills and settings, partly third-party code copied as published.
+# - tests: integration and end-to-end test crates, vendored crates' tests included. They hold
+#   fixed keys and nonces for known-answer tests, print secrets in assertion messages and talk
+#   to local fakes over plain HTTP. Unit tests inside `src/` (`#[cfg(test)]`) are still scanned;
+#   their findings are dismissed one by one as "used in tests".
+paths-ignore:
+  - .claude
+  - "**/tests/**"

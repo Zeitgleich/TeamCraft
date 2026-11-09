@@ -489,6 +489,19 @@ with a warning in the bridge's log. Admins archive and restore from the
 channel's settings or the console (`PATCH /conversations/{id}`, audit `channel_archived`,
 `channel_restored`), with no group state involved.
 
+**Archiving a space archives its channels** (issue #212). `PATCH /spaces/{id}` with
+`is_archived: true` archives the space and, in the same transaction, every channel in it that is still
+open, so a half-archived space can't be left behind. Each channel gets the usual system line and
+webhook (`channel.archived`) and its members are told; the audit log has one entry, `space_archived`,
+with the number of channels (the channels that were archived before are not counted). Restoring the
+space (`is_archived: false`, audit `space_restored`) reverts exactly that: the channels the archive took
+along open again, while channels archived before, by hand or by the inactivity policy (§3.1.3), stay
+archived. A channel nobody can run (no channel admin among its members) can't be restored by a space
+(409 `channel_needs_admin` for the channel itself); it stays archived, and `space_restored` counts it in
+`left_archived` until a workspace admin assigns an owner. Archiving and restoring a space take
+`manage_space_properties`. Spaces archived before this existed have no marked channels: restoring them
+changes the space only.
+
 An archived channel left without an admin stays for its members: they read it and may leave. Restoring
 it takes an admin (409 `channel_needs_admin`): a workspace admin assigns an owner (below) or deletes it.
 Roles are signed, so the server can't make the restorer one. Archiving and restoring take
@@ -527,6 +540,74 @@ independent of the size of the instance:
   `GET /admin/users?ids=`, IDs separated by commas, at most 100 per request).
 - A 429 is honoured: the console reads nothing until `Retry-After` has passed (`retry_after_secs`
   in the body, for browsers behind proxies that strip headers), then reads once more.
+
+#### 3.1.3 Inactive channels (issue #212)
+
+Channels nobody writes in pile up. The signed workspace policy (`inactivity`, console: security,
+"Inactive channels") can have the server tell the owners, archive the channel later and, only if you
+ask for it, delete it much later. **It is off by default**: an instance whose policy does not name
+`inactivity` behaves exactly as before, and nothing is written, mailed or audited by the job while it
+is off. A policy signed by an older app that doesn't know the field also reads as off.
+
+The server is content-blind, so "quiet" is read from what it stores anyway: the time in the ID of the
+channel's newest message (replies in threads count), else the channel's creation. Nothing about the
+content, and no read state, is used. Only open channels of open spaces count; direct messages and group
+messages never do, nor channels with an import running.
+
+| Setting (`inactivity.`)         | Default            | Meaning                                                                                                    |
+|---------------------------------|--------------------|------------------------------------------------------------------------------------------------------------|
+| `is_enabled`                    | `false`            | Master switch                                                                                              |
+| `notice_after_days`             | 180                | Days without a message before the owners are told (1 to 3650)                                              |
+| `archive_after_more_days`       | 30                 | Days between the notice and the archiving; `0`: notices only, nothing is archived                          |
+| `snooze_days`                   | 90                 | What "keep open" defers by (1 to 365)                                                                      |
+| `max_per_run`                   | 10                 | Safety limit, below                                                                                        |
+| `delete_after_archived_days`    | absent: never      | Days after the policy archived a channel that it is deleted (14 to 3650); the only way it deletes content  |
+
+The job runs every `[inactivity] check_interval_secs` (default one hour):
+
+1. **Notice.** A channel quiet for `notice_after_days` gets one notice: a mail to its channel admins (its
+   space's admins if it has none), saying that the channel is archived in M days unless somebody writes in
+   it or an admin keeps it open. The mail names no channel and no person (`[inactivity]` texts in the
+   server file). Audit `channel_inactivity_notice`. **A notice nobody receives doesn't count**: with no
+   mail server, no address or no owner, nothing is recorded and the channel is never archived by the
+   policy; the console's "Inactive" filter still lists it.
+2. **Archive.** M days (`archive_after_more_days`) after the notice, if no message arrived since, the
+   channel is archived exactly like an archive by hand (system line "This channel was archived" without a
+   name, webhook, `ConversationUpdate`), audit `channel_auto_archived` (no actor; quiet days and notice
+   time in the detail). The check "no message since the notice" is part of the archiving statement, so a
+   message that races the job wins. Any message after a notice ends the quiet spell.
+3. **Snooze.** `POST /conversations/{id}/inactivity/snooze` (body `{"days": n}`, default `snooze_days`;
+   needs `manage_channel_properties`: channel admins, space admins, workspace admins and owners; audit
+   `channel_inactivity_snoozed`) defers everything until the snooze ends and forgets a notice already
+   sent. After it a channel that is still quiet is noticed afresh and gets the full M days, so a snooze
+   of 60 days with M = 30 defers the archiving by about 90. The console's channel page shows when a
+   channel is archived or deleted and has "Keep open". Restoring a channel by hand, or a space with its
+   channels, snoozes the restored channels for `snooze_days`, so they aren't archived again at the next
+   run.
+4. **Delete (retention step).** Only with `delete_after_archived_days`, and only channels **the policy
+   archived itself** that nobody restored: channels archived by hand or with a space are never deleted
+   by it. At `delete_after − 7` days after the archiving the owners are warned (mail, audit
+   `channel_inactivity_delete_notice`; no warning received by anybody, no deletion), and after the
+   warning has stood 7 days and `delete_after` has passed, the channel is deleted as with
+   `delete_channel` (§3.1.1; unsigned, so devices keep the history for a while) with audit
+   `channel_inactivity_deleted` (no actor). A snooze defers it; a restore ends it.
+5. **Old notices are repeated, not acted on.** A notice more than a period (at least 7 days) past the
+   date it led to is stale (the policy was off, the server down): it is sent again instead of archiving
+   or deleting on it, so turning the policy on again never acts on something old.
+
+**Safety limit.** One run notices at most `max_per_run` channels, archives at most that many, warns
+at most that many and deletes at most that many, quietest first. The rest wait for the next run;
+a run that held something back writes `inactivity_run_limited` with the counts, so switching the policy
+on for a large instance spreads over days instead of archiving it at once. The same switch off stops
+everything at once; what was archived stays archived until somebody restores it.
+
+**Local guest accounts.** `guests.deactivate_accounts_after_days` (absent: never, the default) deactivates
+a local guest account (one with a password of its own, that has signed in: a guest whose invite is
+still waiting for the first sign-in has no space yet and is left alone) that has belonged to no space for
+that long (1 to 3650 days): the account is deactivated as by an admin (§3.2.1, audit `user_deactivated` without
+an actor, the reason in its note), so it is reversible, nothing is deleted. The clock starts at the first
+run that sees the guest without a space and stops if they get one; at most `[guests]
+max_deactivations_per_run` (default 50) per run. §3.2.2 has the expiry that ends the memberships.
 
 ### 3.2 Users and guests
 
@@ -620,6 +701,18 @@ Deactivation and removal are two steps (issue #631); deletion is the final one (
   and its history stays readable (issue #698).
 - **Share links** of a deactivated user are paused (they answer like an unknown link) and work again
   after a reactivation if they haven't expired.
+- **Guest links and invitations.** A meeting guest link issued by a deactivated user is paused the same
+  way, and answers like an unknown one. A pending invitation of a guest whose sponsor is deactivated
+  waits: the invitee gets no access from it until the sponsor is back. Invitations of members are not
+  affected, since those people sign in through the organization's identity provider anyway.
+- **Bots** a deactivated user created are paused, reason `creator_deactivated`, because that person has
+  seen the token. They come back with the person. An admin can bring one back before that only by
+  issuing a new token, which also makes them its new creator (a plain "Reactivate" is refused).
+- **Channels they own** are not reassigned automatically: the server can't sign a channel role
+  (e2ee.md §4.6.1). The channel list's "No owner" filter finds them (a deactivated owner counts as
+  none), and an admin assigns a new owner (§2.5).
+- **Signed roster.** Roles in the roster are the owners' to sign; the server reports a deactivated admin
+  in `GET /role-evidence` and an owner's app takes them off (e2ee.md §3.1.3).
 - **Per reason** (`deactivation_reason`): `admin` and `oidc` only suspend; the OIDC sync reactivates a
   user it deactivated once the provider enables them again, with everything intact. Bots that are
   revoked and meeting guests (`left`, turned away, removed from the meeting, access ended) are
@@ -629,6 +722,74 @@ Deactivation and removal are two steps (issue #631); deletion is the final one (
   server could keep handing them that ciphertext. Removal is what takes them out
   cryptographically: the admin's signed change, committed by members, rotates the keys. The
   server's own removal is only a hint to the clients (security review A8).
+
+#### 3.2.3 The sync with the identity provider, its safety brake and the deactivation sequence (issue #210)
+
+The sync is on as soon as `[oidc.sync] client_secret` (the service account) is set, and **it is required
+for production**: without it someone disabled at the provider stays active here. `is_enabled = false`
+switches it off (console and log warn).
+
+**What an existing instance sees at the upgrade.** With a secret set and no `is_enabled`, the sync starts
+with the first start after the upgrade. Users disabled or deleted at the provider or without a role are
+deactivated `initial_delay_secs` later (a backlog over the brake's limit waits for an admin instead),
+role changes are picked up, and groups with `sync_groups`. `mode = "dry_run"` shows it first. With
+`is_enabled = false` set, nothing changes. Without a usable admin URL, the sync stays off with a warning;
+it never stops the server from starting.
+
+**System health** (console) shows the last run, its duration, the changes and a fixed error code (never
+the provider's answer, tokens or addresses), how many runs failed in a row, and warns when the sync has
+not run for `stale_after_intervals` intervals (default 3), raising the `oidc_sync` alert like other jobs.
+
+**One run.** It reads the whole provider first: all users, then the role of each. If any of that fails,
+or the provider lists nobody while the instance has users, nothing changes. Then it applies; one change
+that fails doesn't stop the others and is tried again by the next run.
+
+**The safety brake.** One run may deactivate at most `max(brake_min_allowed, brake_max_percent % of the
+active users)` (defaults 2 and 10 %, the share rounded up), and never everybody on an instance of two or
+more. Ten percent because deactivations by the sync are suspensions that the provider can undo, so a few
+false positives are cheap, while a mistake at the provider usually hits a group or all of the realm; the
+floor because a share of a handful of users means nothing. One leaver always goes through, whatever is
+configured. While it is engaged:
+
+- A run over the limit holds **all** of its deactivations back (no arbitrary subset goes through), changes
+  no roles or groups, is written to the audit log (`oidc_sync_brake_engaged`), and raises the
+  `oidc_sync_brake` alert after the hold time.
+- Users already held do not block later ones: the next run judges only those who newly appear, so a real
+  leaver is deactivated while the others wait. New ones that are themselves too many engage it again.
+- Fixing the provider ends it: whoever is no longer planned leaves the list; a list within the limit
+  goes through.
+- Confirming the list (`POST /admin/oidc-sync/brake/confirm` with the `held_revision` the admin saw, audit
+  `oidc_sync_brake_confirmed`) applies it. An owner has to confirm if an owner or admin is on the list. The
+  confirmation is stored first and stays on each entry until that deactivation has happened, so a provider
+  that is down or a failure doesn't need a second one. A list that changed since is refused (409).
+
+The brake limits what one run may do; several small runs in a row each pass it.
+
+**Dry run.** `[oidc.sync] mode = "dry_run"` runs the sync and reports what it would do; nothing changes, and
+groups are not looked at. `POST /admin/oidc-sync/preview` answers the same for one run, whatever the mode.
+
+**The deactivation sequence.** Every path (admin, sync, bots, meeting guests) goes through one function:
+
+| Step | What happens                                                                                                   | If it fails                                                                       |
+|------|----------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------|
+| 1    | One transaction: account marked deactivated, audit entry with `source` (`oidc_sync`, `manual`, later `scim`, `system`), the bots the user created paused and audited, a follow-up record | Nothing happened. The sync re-plans the user next run; the admin sees the error   |
+| 2    | Gateway connections close and can't resume                                                                     | Cannot fail; a crash ends the connections with the process                        |
+| 3    | Local sessions end, the user leaves running calls                                                              | Retried from the follow-up record                                                 |
+| 4    | Clients that share a conversation are told; the follow-up record goes                                         | Retried from the follow-up record                                                 |
+
+From step 1 on every REST request, gateway identify and sign-in is refused, whatever happens to steps 2 to
+4, so the user can't look deactivated and keep working, or the other way round. Follow-up records are
+retried by the account housekeeping and at the start of every sync; a reactivation removes them.
+
+**After the sequence.** Not part of it, by design:
+
+- *Tokens* of the identity provider: not revoked by the server (only the provider can), but refused on every
+  request; refresh tokens are the provider's.
+- *Push registrations and devices* are kept but unused (reactivation restores them); removal revokes them.
+- *MLS removal* needs an admin's device: see §3.2.1 and e2ee.md §4.6.4. Nothing queues it on the server, since
+  a server-made removal is no removal to the clients (A8). "Remove from all chats" posts the signed change into the
+  group, where the next online member commits it. The console shows how many deactivated
+  accounts still have devices or memberships (`pending_removals`), the list is the Users page.
 
 #### 3.2.2 Guest expiry (issue #212)
 
@@ -667,7 +828,9 @@ set in the console's security section; the server enforces them.
 - **At the expiry**, rechecked when the guest is removed, the guest leaves the space and its channels exactly as with a removal (§3.1.1,
   e2ee.md §4.6), audit `guest_expired`, and the guest, the sponsor if still in the space, and the space's admins are told. Their
   messages and files stay, under the retention rules like everybody's; nothing is deleted. The account
-  itself remains and signs in to whatever it still belongs to. It takes an admin to deactivate or delete it.
+  itself remains and signs in to whatever it still belongs to. An admin deactivates or deletes it, or, if
+  the policy says `guests.deactivate_accounts_after_days`, the server deactivates a local guest account
+  after that many days without a space (§3.1.3); the default is never.
 
 #### 3.2.3 Open invitations (issue #298)
 

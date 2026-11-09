@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users u SET memberless_since = $1\n         WHERE u.kind = 'guest' AND u.memberless_since IS NULL\n           AND u.deactivated_at IS NULL AND u.deleted_at IS NULL\n           AND EXISTS (SELECT 1 FROM local_accounts a WHERE a.user_id = u.id AND a.password_hash IS NOT NULL)\n           AND EXISTS (SELECT 1 FROM devices d WHERE d.user_id = u.id)\n           AND NOT EXISTS (SELECT 1 FROM space_members m WHERE m.user_id = u.id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4072f0f67dd15e7dab1fa7bf4e1737d2326d256e9db6e599b8dc746e9ad067fa"
+}

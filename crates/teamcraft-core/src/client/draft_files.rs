@@ -4,17 +4,23 @@
 //! (e2ee.md §6.4) with its per-file key, so the user's other devices show it in the draft and send
 //! it without uploading it again. Sending keeps it at the server; removing it deletes it there.
 //!
-//! A file waits on this device instead when the server holds no drafts' files (an older version)
-//! or the drafts already carry [`MAX_DRAFT_FILES`]; it goes up with its message then.
+//! A file waits on this device instead when the app attaches it to go up on send (phones, #1585),
+//! the server holds no drafts' files (an older version) or the drafts already carry
+//! [`MAX_DRAFT_FILES`](crate::account_data::MAX_DRAFT_FILES); it goes up with its message then.
 
+#[cfg(feature = "ui")]
+use teamcraft_client_api::drafts::DraftFileTravel;
 use teamcraft_proto::{AttachmentId, ClientMessageId, ConversationId, ThreadId};
 
 use super::Client;
+#[cfg(feature = "ui")]
+use super::files::save_pending_upload;
 use super::files::{
   PendingFile, PendingUpload, UploadPurpose, announced_attachment, pending_upload, queue_abandon,
-  save_pending_upload,
 };
-use crate::account_data::{AccountData, DraftFile, MAX_DRAFT_FILES, draft_files_budget};
+#[cfg(feature = "ui")]
+use crate::account_data::MAX_DRAFT_FILES;
+use crate::account_data::{AccountData, DraftFile, draft_files_budget};
 use crate::api::ServerApi;
 use crate::error::CoreError;
 use crate::records;
@@ -180,17 +186,20 @@ pub(crate) fn draft_file_retention_days(store: &impl LocalStore) -> Option<u32> 
 }
 
 /// Attaches `files` to the draft, each as its own pending upload under the ID the app chose (a
-/// fresh one without). Files beyond what the drafts carry ([`MAX_DRAFT_FILES`], counting those
-/// still going up) stay on this device. A file its message took already (the send reached the core
-/// first) is not attached again.
+/// fresh one without). Files the app wants sent on send ([`DraftFileTravel::OnSend`]), and files
+/// beyond what the drafts carry ([`MAX_DRAFT_FILES`], counting those still going up), stay on this
+/// device. A file its message took already (the send reached the core first) is not attached again.
+#[cfg(feature = "ui")]
 pub fn attach_draft_files(
   store: &impl LocalStore,
   data: &AccountData,
   conversation: ConversationId,
   maybe_thread: Option<ThreadId>,
   files: Vec<(Option<ClientMessageId>, PendingFile)>,
+  travel: DraftFileTravel,
   now_ms: i64,
 ) -> Result<Vec<ClientMessageId>, CoreError> {
+  let is_on_send = matches!(travel, DraftFileTravel::OnSend);
   let sent = sent_draft_files(store)?;
   let mut traveling = data.live_draft_files().count()
     + draft_uploads(store)?
@@ -203,7 +212,7 @@ pub fn attach_draft_files(
     if sent.contains(&id.to_hex()) || pending_upload(store, conversation, id)?.is_some() {
       continue;
     }
-    let is_local = traveling >= MAX_DRAFT_FILES;
+    let is_local = is_on_send || traveling >= MAX_DRAFT_FILES;
     traveling += usize::from(!is_local);
     let upload = PendingUpload {
       conversation_id: conversation,

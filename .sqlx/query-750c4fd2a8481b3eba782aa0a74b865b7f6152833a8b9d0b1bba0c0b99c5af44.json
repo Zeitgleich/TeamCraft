@@ -1,0 +1,170 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT last_started_at, last_finished_at, last_success_at, last_duration_ms, last_outcome, last_error,\n                consecutive_failures, deactivated, reactivated, role_changes, groups_changed, failed, held_revision\n         FROM oidc_sync_status",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_started_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "last_started_at"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "last_finished_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "last_finished_at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "last_success_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "last_success_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "last_duration_ms",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "last_duration_ms"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "last_outcome",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "last_outcome"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "last_error",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "last_error"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "consecutive_failures",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "consecutive_failures"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "deactivated",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "deactivated"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "reactivated",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "reactivated"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "role_changes",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "role_changes"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "groups_changed",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "groups_changed"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "failed",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "failed"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "held_revision",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "held_revision"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "750c4fd2a8481b3eba782aa0a74b865b7f6152833a8b9d0b1bba0c0b99c5af44"
+}

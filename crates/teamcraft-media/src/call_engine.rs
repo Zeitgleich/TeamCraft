@@ -588,6 +588,7 @@ impl CallEngine {
   pub fn moved_to_another_path(&mut self) {
     self.maybe_switch_secret = None;
     if self.is_in_call() {
+      self.uplink.forget_sent();
       self.measure_uplink_afresh();
     }
   }

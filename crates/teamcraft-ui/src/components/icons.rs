@@ -41,6 +41,8 @@ pub enum IconName {
   Help,
   More,
   ArrowDown,
+  /// An arrow up: try an upload again.
+  ArrowUp,
   Bell,
   BellOff,
   Phone,
@@ -192,6 +194,7 @@ impl IconName {
       Self::Help => "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3 M12 17h.01",
       Self::More => "M5 12h.01M12 12h.01M19 12h.01",
       Self::ArrowDown => "M12 5v14 M5 12l7 7 7-7",
+      Self::ArrowUp => "M12 19V5 M5 12l7-7 7 7",
       Self::Bell => "M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9 M13.7 21a2 2 0 0 1-3.4 0",
       Self::BellOff => {
         "M8.7 3A6 6 0 0 1 18 8a21.3 21.3 0 0 0 .6 5 M17 17H3s3-2 3-9a4.7 4.7 0 0 1 .3-1.7 M13.7 21a2 2 0 0 1-3.4 0 M2 2l20 20"

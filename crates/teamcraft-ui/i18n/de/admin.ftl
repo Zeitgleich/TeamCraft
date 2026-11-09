@@ -775,6 +775,8 @@ admin-integrations-col-status = Status
 admin-integrations-empty = Noch keine Bots.
 admin-integrations-active = Aktiv
 admin-integrations-revoked = Widerrufen
+admin-integrations-paused = Pausiert
+admin-integrations-paused-hint = Die Person, die diesen Bot angelegt hat, wurde deaktiviert und kennt sein Token. Ein neues Token holt den Bot zurück.
 admin-integrations-rotate = Neues Token
 admin-integrations-picture = Bild
 admin-integrations-picture-remove = Bild entfernen
@@ -963,7 +965,66 @@ health-check-push_service-hint = Die Dienste, an die der Server direkt sendet. S
 health-check-media_server = Medienserver
 health-check-media_server-hint = Meldet sich im Betrieb alle paar Sekunden beim Server.
 health-check-oidc_sync = Abgleich mit dem Identitätsanbieter
-health-check-oidc_sync-hint = Gleicht die Personen regelmäßig mit dem Identitätsanbieter ab. Überfällig nach drei verpassten Läufen.
+health-check-oidc_sync-hint = Gleicht die Personen regelmäßig mit dem Identitätsanbieter ab. Überfällig nach der eingestellten Zahl verpasster Läufe, standardmäßig drei.
+oidc-sync-title = Abgleich mit dem Identitätsanbieter
+oidc-sync-not-configured = Nicht eingerichtet. Ohne ihn behält eine beim Identitätsanbieter gesperrte Person ihren Zugang, bis ihre Anmeldung endet. Setze oidc.sync.client_secret: für den Betrieb ist er erforderlich.
+oidc-sync-switched-off = Durch oidc.sync.is_enabled = false ausgeschaltet. Eine beim Identitätsanbieter gesperrte Person behält ihren Zugang, bis ihre Anmeldung endet. Für den Betrieb ist er erforderlich.
+oidc-sync-dry-run = Probelauf: Der Abgleich meldet nur, was er ändern würde, und ändert nichts.
+oidc-sync-stale = { $count ->
+    [one] Der Abgleich ist seit mehr als einem Intervall nicht gelaufen. Prüfe den Identitätsanbieter und das Dienstkonto.
+   *[other] Der Abgleich ist seit mehr als { $count } Intervallen nicht gelaufen. Prüfe den Identitätsanbieter und das Dienstkonto.
+}
+oidc-sync-held = { $count ->
+    [one] Die Sicherheitsbremse hält 1 Deaktivierung zurück.
+   *[other] Die Sicherheitsbremse hält { $count } Deaktivierungen zurück.
+}
+oidc-sync-held-hint = Das sieht eher nach einem Fehler beim Identitätsanbieter aus als nach Personen, die gehen. Prüfe zuerst den Anbieter: War es ein Fehler, behebe ihn dort, dann leert sich diese Liste von selbst. Andere Abgänge werden weiterhin wie gewohnt deaktiviert.
+oidc-sync-confirm = Diese Deaktivierungen bestätigen
+oidc-sync-confirm-question = { $count ->
+    [one] Diese Person jetzt deaktivieren? Ihre Sitzungen enden sofort. Das wird rückgängig gemacht, sobald der Identitätsanbieter sie wieder freigibt.
+   *[other] Diese { $count } Personen jetzt deaktivieren? Ihre Sitzungen enden sofort. Das wird rückgängig gemacht, sobald der Identitätsanbieter sie wieder freigibt.
+}
+oidc-sync-confirm-yes = Ja, deaktivieren
+oidc-sync-confirmed = Bestätigt
+oidc-sync-cause-removed = beim Identitätsanbieter entfernt
+oidc-sync-cause-disabled = beim Identitätsanbieter gesperrt
+oidc-sync-cause-no-role = keine TeamCraft-Rolle mehr beim Identitätsanbieter
+oidc-sync-cause-other = anderer Grund
+oidc-sync-never-ran = Noch nicht gelaufen.
+oidc-sync-last-run = Letzter Lauf
+oidc-sync-outcome = Ergebnis
+oidc-sync-changes-title = Änderungen
+oidc-sync-duration = { $when }, Dauer { $seconds } s
+oidc-sync-outcome-ok = Abgeschlossen
+oidc-sync-outcome-partial = Mit Fehlern abgeschlossen: Einige Änderungen sind fehlgeschlagen und werden beim nächsten Lauf wiederholt
+oidc-sync-outcome-held = Abgeschlossen, Sicherheitsbremse aktiv
+oidc-sync-outcome-dry-run = Als Probelauf abgeschlossen
+oidc-sync-outcome-failed = Fehlgeschlagen, es wurde nichts geändert
+oidc-sync-error-unreachable = Der Identitätsanbieter hat nicht geantwortet.
+oidc-sync-error-refused = Der Identitätsanbieter hat das Dienstkonto abgelehnt.
+oidc-sync-error-invalid = Der Identitätsanbieter hat eine unerwartete Antwort geschickt.
+oidc-sync-error-no-users = Der Identitätsanbieter hat keine Personen aufgelistet.
+oidc-sync-error-database = Die Datenbank hat abgelehnt.
+oidc-sync-failures = { $count } Fehlschläge in Folge.
+oidc-sync-changes = { $deactivated } deaktiviert, { $reactivated } reaktiviert, { $roles } Rollenänderungen, { $groups } Gruppenänderungen, { $failed } fehlgeschlagen
+oidc-sync-unfinished = { $count ->
+    [one] 1 Deaktivierung wird noch abgeschlossen; der Zugang ist bereits gesperrt.
+   *[other] { $count } Deaktivierungen werden noch abgeschlossen; der Zugang ist bereits gesperrt.
+}
+oidc-sync-pending-removals = { $count ->
+    [one] 1 deaktiviertes Konto hat noch Geräte in Verschlüsselungsgruppen. Nur „Aus allen Chats entfernen“ durch einen Admin nimmt sie heraus.
+   *[other] { $count } deaktivierte Konten haben noch Geräte in Verschlüsselungsgruppen. Nur „Aus allen Chats entfernen“ durch einen Admin nimmt sie heraus.
+}
+oidc-sync-open-users = Personen öffnen
+oidc-sync-preview = Prüfen, was ein Lauf ändern würde
+oidc-sync-preview-title = Was ein Lauf jetzt ändern würde
+oidc-sync-preview-summary = { $deactivate } deaktiviert, { $held } zurückgehalten, { $reactivate } reaktiviert, { $roles } Rollenänderungen. Ein Lauf darf { $allowed } von { $active } aktiven Personen deaktivieren.
+health-detail-held = { $count ->
+    [one] 1 Deaktivierung wartet auf eine Entscheidung.
+   *[other] { $count } Deaktivierungen warten auf eine Entscheidung.
+}
+health-check-oidc_sync_brake = Abgleich mit dem Identitätsanbieter: Sicherheitsbremse
+health-check-oidc_sync_brake-hint = Hält Deaktivierungen zurück, wenn ein Lauf zu viele Personen auf einmal deaktivieren würde. Schlägt an, solange welche auf eine Entscheidung warten.
 health-check-retention = Aufbewahrungsjob
 health-check-retention-hint = Löscht, was seine Aufbewahrungsfrist überschritten hat. Überfällig nach drei verpassten Läufen.
 health-check-partition_maintenance = Nachrichten-Partitionen
@@ -1058,3 +1119,40 @@ policy-bug-reports-admins-hint = Alle mit einer Rolle in der signierten Admin-Li
 policy-bug-reports-named = Diese Personen
 policy-bug-reports-named-hint = Zum Beispiel die Personen, die TeamCraft betreuen. Solange du niemanden wählst, gehen Meldungen an Eigentümer und Admins.
 policy-bug-reports-chosen = Empfänger von Problemmeldungen
+
+## Inaktive Kanäle und ungenutzte Gastkonten (Issue #212)
+policy-guest-deactivate = Lokales Gastkonto deaktivieren, nachdem sein letzter Space endete
+policy-guest-deactivate-never = Nie
+policy-guest-deactivate-hint = Gilt für Gäste mit eigenem Passwort, die keinem Space mehr angehören. Das Konto wird nur deaktiviert, nicht gelöscht, und ein Admin kann es wieder aktivieren.
+policy-inactivity = Inaktive Kanäle
+policy-inactivity-hint = Der Server sieht nur, wann die letzte Nachricht gespeichert wurde, nie ihren Inhalt. Standardmäßig aus: Nichts wird angekündigt, archiviert oder gelöscht, bis du es einschaltest.
+policy-inactivity-enable = Kanäle im Blick behalten, in denen niemand schreibt
+policy-inactivity-enable-hint = Die Verantwortlichen eines ruhigen Kanals bekommen zuerst eine E-Mail. Der Kanal wird später nur archiviert, wenn niemand darin schreibt oder ihn offen hält. Kanäle, bei denen niemand benachrichtigt werden kann, bleiben unberührt.
+policy-inactivity-notice = Verantwortliche informieren nach so langer Zeit ohne Nachricht
+policy-inactivity-archive = Nach dem Hinweis archivieren
+policy-inactivity-archive-hint = Archivierte Kanäle bleiben lesbar, und ein Admin kann sie wiederherstellen. Bei „Nur Hinweise“ wird nichts archiviert.
+policy-inactivity-notice-only = Nur Hinweise, nie archivieren
+policy-inactivity-snooze = „Offen halten“ gilt für
+policy-inactivity-limit = Höchstens so viele Kanäle pro Durchlauf
+policy-inactivity-limit-hint = Eine Sicherung für Hinweise, Archivieren und Löschen, je stündlichem Durchlauf. Das Audit-Log zeigt, wenn sie etwas zurückgehalten hat.
+policy-inactivity-channels = { $count ->
+    [one] { $count } Kanal
+   *[other] { $count } Kanäle
+  }
+policy-inactivity-delete = Kanäle löschen, die die Regel archiviert hat
+policy-inactivity-delete-never = Nie
+policy-inactivity-delete-hint = Der einzige Weg, auf dem diese Regel Nachrichten löscht. Gelöscht werden nur Kanäle, die sie selbst archiviert hat und die niemand wiederhergestellt hat; die Verantwortlichen werden 7 Tage vorher gewarnt. Nicht rückgängig zu machen.
+admin-inactivity-notified = Die Verantwortlichen wurden informiert, dass dieser Kanal ruhig ist.
+admin-inactivity-archive-on = Wird am { $date } archiviert, sofern niemand darin schreibt oder ihn offen hält.
+admin-inactivity-archived = Automatisch archiviert, weil er ruhig war.
+admin-inactivity-delete-on = Wird am { $date } gelöscht, sofern ihn niemand wiederherstellt oder die Löschung verschiebt.
+admin-inactivity-kept-open = Bleibt offen bis { $date }.
+admin-inactivity-keep-open = Offen halten
+admin-inactivity-postpone-delete = Löschung verschieben
+audit-inactivity-notice = Verantwortliche über ruhigen Kanal informiert
+audit-channel-auto-archived = Ruhiger Kanal archiviert
+audit-channel-auto-deleted = Archivierter Kanal gelöscht
+audit-inactivity-snoozed = Kanal offen gehalten
+audit-inactivity-limited = Durchlauf der Inaktivitätsregel an der Grenze gestoppt
+audit-space-archived = Space mit seinen Kanälen archiviert
+audit-space-restored = Space wiederhergestellt

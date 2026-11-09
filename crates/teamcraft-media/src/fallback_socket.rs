@@ -266,8 +266,16 @@ where
   within(write_timeout, sink.send(message)).await
 }
 
+/// Whether `write` finished in time. [`tokio::time::timeout`] polls the write before its deadline,
+/// so one that a late wake-up finds done would count as in time (a busy machine, or a peer's TCP
+/// that lets a few bytes through with each window probe): it was a stall all the same (#1556).
 async fn within(write_timeout: Duration, write: impl Future<Output = Result<(), WebSocketError>>) -> bool {
+  let started_at = tokio::time::Instant::now();
   match tokio::time::timeout(write_timeout, write).await {
+    Ok(Ok(())) if started_at.elapsed() >= write_timeout => {
+      debug!("the peer took as long as the write timeout to take a write");
+      false
+    },
     Ok(Ok(())) => true,
     Ok(Err(error)) => {
       debug!(%error, "call socket write failed");
@@ -394,6 +402,23 @@ mod tests {
       let end = run_writer(StalledSink, control, sender.clone(), CONFIG).await;
       assert_eq!(end, WriterEnd::Broken);
       sender.wait_finished().await;
+    }
+
+    /// #1556: found finished only when the deadline passed, a write was still too slow.
+    #[tokio::test(start_paused = true)]
+    async fn a_write_that_took_the_whole_timeout_ends_the_writer() {
+      let (_control_tx, control) = control();
+      let sender = FallbackSender::new(MediaQueueConfig::default());
+      sender.send_datagram(b"media");
+      let sink = SlowSink {
+        delay: CONFIG.write_timeout,
+        maybe_sleep: None,
+        written: Arc::new(StdMutex::new(VecDeque::new())),
+      };
+      assert_eq!(
+        run_writer(sink, control, sender.clone(), CONFIG).await,
+        WriterEnd::Broken
+      );
     }
 
     #[tokio::test(start_paused = true)]

@@ -346,6 +346,10 @@ pub async fn update_conversation(
   if request.maybe_is_integration == Some(true) && !access.view.conversation.is_integration {
     apply_integration_defaults(state, id).await?;
   }
+  if request.maybe_is_archived == Some(false) && access.view.conversation.is_archived {
+    // Restored by hand: a quiet channel isn't archived again at the next run (issue #212).
+    super::inactivity::snooze_restored(state, id).await?;
+  }
   audit::record(
     state,
     Some(caller.user.id),

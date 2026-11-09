@@ -25,7 +25,7 @@ use crate::calls::{
   OrgBackgroundRule, OrgBackgrounds, PreviewCamera, PushToTalk, RemoteVideoTrack, RunningCall,
   ScreenContentMode, ScreenShareResolution, VideoQuality,
 };
-use crate::drafts::{DraftFileItem, DraftItem, DraftReply, SentItem};
+use crate::drafts::{DraftFileItem, DraftFileTravel, DraftItem, DraftReply, SentItem};
 use crate::files_query::{FileKind, FileScope, FileSort, FilesQuery, StarredFile};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::live::LiveSnapshot;
@@ -861,6 +861,8 @@ pub enum ChatAction {
     #[serde(default)]
     maybe_thread: Option<ThreadId>,
     files: Vec<OutgoingFile>,
+    #[serde(default)]
+    travel: DraftFileTravel,
   },
   RemoveDraftFile {
     conversation: ConversationId,
@@ -922,6 +924,10 @@ pub enum ChatAction {
     conversation: ConversationId,
     message: MessageId,
     file_id: String,
+  },
+  CancelMessageUpload {
+    conversation: ConversationId,
+    message: MessageId,
   },
   DownloadFile {
     conversation: ConversationId,
@@ -1343,7 +1349,8 @@ impl ChatAction {
         conversation,
         maybe_thread,
         files,
-      } => backend.attach_draft_files(conversation, maybe_thread, files),
+        travel,
+      } => backend.attach_draft_files(conversation, maybe_thread, files, travel),
       Self::RemoveDraftFile {
         conversation,
         maybe_thread,
@@ -1383,6 +1390,10 @@ impl ChatAction {
         message,
         file_id,
       } => backend.cancel_upload(conversation, message, &file_id),
+      Self::CancelMessageUpload {
+        conversation,
+        message,
+      } => backend.cancel_message_upload(conversation, message),
       Self::DownloadFile {
         conversation,
         message,
@@ -2493,6 +2504,33 @@ mod tests {
   }
 
   #[test]
+  fn attaching_draft_files_defaults_to_traveling_with_the_draft() {
+    let action: ChatAction =
+      serde_json::from_str(r#"{"action":"attach_draft_files","conversation":"7","files":[]}"#)
+        .expect("parse");
+    assert!(matches!(
+      action,
+      ChatAction::AttachDraftFiles {
+        travel: DraftFileTravel::WithDraft,
+        ..
+      }
+    ));
+    let action: ChatAction = serde_json::from_str(
+      r#"{"action":"attach_draft_files","conversation":"7","files":[],"travel":"on_send"}"#,
+    )
+    .expect("parse");
+    assert!(matches!(
+      action,
+      ChatAction::AttachDraftFiles {
+        travel: DraftFileTravel::OnSend,
+        ..
+      }
+    ));
+    let unknown: DraftFileTravel = serde_json::from_str(r#""with_the_team""#).expect("parse");
+    assert_eq!(unknown, DraftFileTravel::Unknown);
+  }
+
+  #[test]
   fn actions_round_trip_as_tagged_json() {
     let action = ChatAction::PostMessage {
       conversation: id_from_raw(7),
@@ -2621,6 +2659,16 @@ mod tests {
         conversation: id_from_raw(7),
         message: id_from_raw(9),
         file_id: "pending-1".into(),
+      }
+    );
+    let cancel_all: ChatAction =
+      serde_json::from_str(r#"{"action":"cancel_message_upload","conversation":"7","message":"9"}"#)
+        .expect("parse");
+    assert_eq!(
+      cancel_all,
+      ChatAction::CancelMessageUpload {
+        conversation: id_from_raw(7),
+        message: id_from_raw(9),
       }
     );
     // Extras from an older core have no send or read state: not failed, not read.

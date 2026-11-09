@@ -63,11 +63,41 @@ swap it.
 ## Deprovisioning
 
 - **Back-channel logout** ends sessions immediately when Keycloak ends them.
-- **User sync** (`[oidc.sync] is_enabled = true` plus the service account secret) polls the realm
-  admin API every 5 minutes and deactivates users that were disabled, deleted or lost all TeamCraft
-  roles, and picks up role changes.
+- **User sync** polls the realm admin API (every 5 minutes by default) and deactivates users that
+  were disabled, deleted or lost all TeamCraft roles, and picks up role changes. It is **on as soon
+  as `[oidc.sync] client_secret` (the service account) is set**, and **required for production**:
+  without it, someone disabled in Keycloak stays active in TeamCraft and keeps working until their
+  sign-in ends. `is_enabled = false` switches it off; the console then warns.
 
 Both should be on in production; see [Users, devices and guests](users-devices-guests.md).
+
+### What the sync does when Keycloak looks wrong
+
+A misconfigured Keycloak (wrong realm, a client role mapping removed) must not lock a company out:
+
+- The sync reads everything from Keycloak first and only then changes anything. If Keycloak fails
+  halfway, or lists no users at all, nothing changes and the run shows as failed in the console.
+- **Safety brake:** one run may deactivate at most 10 % of the active users, at least 2, and never
+  everybody on an instance of two or more. A run over that holds them all back, changes no roles
+  or groups, and shows who is held under **System health** with a warning and, after the hold time,
+  an alert. Users already held do not block anyone else: a leaver who shows up later is deactivated
+  as usual, and if you fix Keycloak the list empties by itself. To go ahead with the list as it
+  stands, confirm it in the console; an owner has to if an admin or owner is on it. Set
+  `brake_max_percent` and `brake_min_allowed` under `[oidc.sync]`.
+- **Dry run:** `mode = "dry_run"` under `[oidc.sync]` reports what the sync would change and changes
+  nothing. The console's "Check what a run would change" asks the same at any time.
+- System health shows the last run, how long it took, the changes and any error, and warns when
+  the sync has not run for `stale_after_intervals` intervals (3 by default).
+
+### Upgrading an instance
+
+If `client_secret` is set and `is_enabled` is **not** set, the sync starts on the first start after
+the upgrade: `initial_delay_secs` later, users disabled or deleted in Keycloak or without a role are
+deactivated (a large backlog is held back by the brake instead), roles are picked up, and with
+`sync_groups` so are the groups. Set `mode = "dry_run"` for the first start to see what it would do.
+If `is_enabled = false` is set explicitly, nothing changes, and the console and the log warn. If the
+issuer is not `<base>/realms/<realm>` and `admin_url` is not set, the sync stays off with a warning
+rather than stopping the server.
 
 ## Status
 

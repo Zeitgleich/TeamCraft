@@ -508,6 +508,44 @@ mod lobby {
   }
 }
 
+mod deactivated_creator {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_guest_link_of_a_deactivated_user_answers_like_an_unknown_one_until_they_are_back() {
+    let rig = rig!();
+    let (organizer, carol) = (owner(), member("carol"));
+    let carol_id = user_id(&rig.app, &carol).await;
+    let (meeting, _, _) = rig.meeting_with_guest(&carol, true).await;
+    let token = credential(&rig.one_time_link(&carol, &meeting).await);
+
+    let deactivated = rig
+      .app
+      .post(
+        &organizer,
+        &format!("/admin/users/{carol_id}/deactivate"),
+        json!({}),
+      )
+      .await;
+    assert_eq!(deactivated.status, StatusCode::NO_CONTENT, "{}", deactivated.body);
+    let (status, body) = rig.join(&token, "Gus").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    let reactivated = rig
+      .app
+      .post(
+        &organizer,
+        &format!("/admin/users/{carol_id}/reactivate"),
+        json!({}),
+      )
+      .await;
+    assert_eq!(reactivated.status, StatusCode::NO_CONTENT);
+    let (status, body) = rig.join(&token, "Gus").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    rig.app.stop().await;
+  }
+}
+
 mod sessions {
   use super::*;
 

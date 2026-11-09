@@ -1053,6 +1053,14 @@ in addition, through `is_draft`, that a file was attached to a draft and not (ye
 the keep when it was sent; not the draft's text, nor which message carried the file. Servers that publish no `draft_file_retention_days`
 in `GET /me` hold none: there a draft's files wait on the device and go up with the message.
 
+On phones (Android, iOS) a draft's files don't go up when they are attached (#1585): the app attaches them
+with `travel: on_send` (`DraftFileTravel::OnSend` of `AttachDraftFiles`), so they wait on the device like
+the files above, survive the app being killed, and go up with the message when the user taps Send; a
+picture edited before sending goes up only as edited. Mobile data isn't spent on files the user may still
+change or drop, and the server learns of them only as a message's files. The draft's text still travels
+in the account data; the files don't show on the user's other devices. Desktop and web attach with
+`with_draft`, the default, and keep the behaviour above.
+
 #### 4.5.0 Previews of files
 
 A received `.md`, `.html` or `.pdf` file, or a text file (`.txt`, `.log`, `.json`, `.csv`, `.yaml`, `.toml`,
@@ -1247,7 +1255,7 @@ its own. See [admin.md](admin.md) §2.
   devices. It is not undone by a reactivation. The automatic removal after
   `remove_deactivated_after_days` is the server's alone and changes no group (A8); those users are
   listed for admins until one removes them. Admins should remove people who left the organization
-  rather than only suspend them.
+  rather than only suspend them. §4.6.4 says what a leaver can read at each stage.
 - **Exception: further devices of existing members.** A commit may add devices of users who already
   have a device in the group without a signed change, because each device is cross-signed by its
   user's identity key (§3). Removing anything always needs a signed change.
@@ -2087,6 +2095,27 @@ first sync's backfill): one with a pin or bookmarks message takes them again fro
 #1438). A pin or bookmarks message also loses against a newer one already taken, by the server's
 message IDs, like edits (issue #1448): one parked for its key and decrypted later can't undo a newer
 one either. An own one shows at once and, once sent, counts by the ID the server gave it.
+
+### 4.6.4 What a leaver can still read (issue #210)
+
+A removal from a group can only be made by a member's or admin's device; the server has nothing to commit
+with, and a removal only it asserts is no removal to the clients (security review A8). So deactivating an
+account, which the identity provider sync does on its own (admin.md §3.2.3), doesn't change any group.
+
+| When                                                         | The leaver's devices can read                                                                                                                                                                     |
+|--------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Anything already delivered to a device                       | Forever: it is on the device, decrypted or decryptable with keys the device holds. Nothing the server or anyone does takes it back; retention and message deletion only apply on devices that still sync |
+| After the deactivation, honest server                        | Nothing new: every request and the gateway are refused from the commit of the deactivation on, and a push is no longer sent                                                                       |
+| After the deactivation, server compromised, or keeping a copy of the ciphertext | New messages of groups the device is still in, as long as the devices stay in the group: ciphertext is still encrypted to them                                                                     |
+| After "Remove from all chats" is committed                   | Nothing sent from the new epoch on, also with a compromised server; only what was delivered before, as above                                                                                       |
+
+**How long.** Identity provider to deactivation: at most one sync interval plus the run itself (default 5
+minutes; immediately for sessions the provider ends by back-channel logout). A run the safety brake holds
+back extends that until an admin decides or the provider is fixed; a held user's provider tokens stop being
+renewed anyway. Deactivation to removal has no bound: it takes an admin's device to sign "Remove from all
+chats", and then the next member online to commit each channel (§4.6). Until the first it is listed for
+admins as pending (admin.md §3.2.3, `pending_removals`); the removal also waits while a channel has no member
+online. Admins should remove people who left the organization rather than only suspend them.
 
 ### 4.6.1 Signed channel roles
 
@@ -5185,6 +5214,17 @@ key bag and its "upload me" flag, the account with its key bag and the end of a 
 If SQLite rolls a group's transaction back by itself (a full disk), the group's later writes are
 refused instead of being committed one by one. Where order alone is enough (content keys are written before
 the MLS state that consumed the epoch), reprocessing an entry after a crash is idempotent.
+
+**Read connections (issues #1476, #1583).** The mobile and desktop apps (sealed SQLite) read on
+connections of their own beside the engine's writing one: a read thread never waits for a group of
+writes, and a group never for a long read. Every commit numbers itself in the plaintext table
+`commit_stamp` (a counter and a random tag per connection: no content, no IDs). Before it commits,
+the writer stages in memory which records and catalog nodes the group changed; a reader that finds a
+newer number drops just those from its caches, and drops everything for a number it wasn't told of
+(another process, the notification extension). Reads see only committed writes: the notes of a group
+(what the UI reads again, the journal of written messages) are published after its commit, and a
+reader whose snapshot is older than a note takes a new one first. A read thread's own writes go
+through the writer, and its next read sees them. The notification extension opens no reader.
 
 **MLS state (issue #424).** The openmls provider storage (every group's tree, context, epoch and
 message secrets; key package private keys) is a map from storage key to value; each entry is one

@@ -2,3 +2,4 @@
 
 pub mod busy_camera;
 pub mod relay;
+pub mod secured;

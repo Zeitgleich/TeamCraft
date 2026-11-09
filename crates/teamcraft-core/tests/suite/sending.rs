@@ -138,6 +138,59 @@ mod cancel {
       "nothing was sent"
     );
   }
+
+  #[tokio::test]
+  async fn cancelling_a_messages_upload_sends_only_its_text() {
+    let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+    let alice_ui = backend_of(&alice);
+    alice_ui.send_message(with_files(
+      channel,
+      "the text stays",
+      vec![file("a.jpg", b"a"), file("b.jpg", b"b"), file("c.jpg", b"c")],
+    ));
+    let pending = last(&alice_ui, channel);
+    alice_ui.cancel_message_upload(channel, pending.id);
+    assert!(
+      alice_ui.message_extras(channel, &[pending.id])[0]
+        .files
+        .is_empty()
+    );
+
+    run_commands(&mut alice, &alice_ui).await;
+    alice.client.upload_pending().await.unwrap();
+    alice.client.flush_outbox().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let bob_ui = backend_of(&bob);
+    let received = last(&bob_ui, channel);
+    assert_eq!(received.body, "the text stays");
+    assert!(bob_ui.message_extras(channel, &[received.id])[0].files.is_empty());
+  }
+
+  #[tokio::test]
+  async fn cancelling_the_upload_of_a_message_without_text_drops_it() {
+    let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+    let before = backend_of(&bob).message_count(channel);
+    let alice_ui = backend_of(&alice);
+    alice_ui.send_message(with_files(
+      channel,
+      "",
+      vec![file("a.jpg", b"a"), file("b.jpg", b"b")],
+    ));
+    let pending = last(&alice_ui, channel);
+    let count = alice_ui.message_count(channel);
+    alice_ui.cancel_message_upload(channel, pending.id);
+    assert_eq!(alice_ui.message_count(channel), count - 1, "gone, no placeholder");
+
+    run_commands(&mut alice, &alice_ui).await;
+    alice.client.upload_pending().await.unwrap();
+    assert_eq!(alice.client.flush_outbox().await.unwrap().sent, 0);
+    settle(&mut [&mut alice, &mut bob]).await;
+    assert_eq!(
+      backend_of(&bob).message_count(channel),
+      before,
+      "nothing was sent"
+    );
+  }
 }
 
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {

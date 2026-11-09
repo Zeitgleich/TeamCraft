@@ -4,10 +4,10 @@ import UIKit
 /// The desktop UI's design tokens (crates/teamcraft-ui/style/main/000-tokens.css), the same values as the
 /// Android theme, so the apps look alike. Each color has a light and a dark value.
 enum Theme {
-  static let accent = dynamic(light: 0x005DFC, dark: 0x5C9DFF)
-  static let onAccent = dynamic(light: 0xFFFFFF, dark: 0x04122E)
-  static let accentSoft = dynamic(light: 0xE3EDFF, dark: 0x182A47)
-  static let accentStrong = dynamic(light: 0x004BD3, dark: 0x8AB8FF)
+  static var accent: Color { themed(\.accent, light: 0x005DFC, dark: 0x5C9DFF) }
+  static var onAccent: Color { themed(\.onAccent, light: 0xFFFFFF, dark: 0x04122E) }
+  static var accentSoft: Color { themed(\.accentSoft, light: 0xE3EDFF, dark: 0x182A47) }
+  static var accentStrong: Color { themed(\.accentStrong, light: 0x004BD3, dark: 0x8AB8FF) }
   static let background = dynamic(light: 0xF5F5F5, dark: 0x161616)
   static let surface = dynamic(light: 0xFFFFFF, dark: 0x1E1E1E)
   static let text = dynamic(light: 0x1D1D1D, dark: 0xF5F5F5)
@@ -18,24 +18,32 @@ enum Theme {
   static let controlBorder = dynamic(light: 0x858585, dark: 0x7A7A7A)
   static let danger = dynamic(light: 0xC0392B, dark: 0xFF7A6B)
   /// Unread and mention badges; white numbers on it need 4.5:1.
-  static let badge = dynamic(light: 0xC8441F, dark: 0xC8441F)
+  static var badge: Color { themed(\.badge, light: 0xC8441F, dark: 0xC8441F) }
   static let mentionBackground = dynamic(light: 0xFFF2CC, dark: 0x4A3B10)
   static let mentionText = dynamic(light: 0x6A4B00, dark: 0xFFD978)
   /// Own message bubbles: the accent, a deeper shade of it in dark mode so white text stays
   /// readable (4.5:1 and more in both).
-  static let ownBubble = dynamic(light: 0x005DFC, dark: 0x1F57C2)
+  static var ownBubble: Color { themed(\.selected, light: 0x005DFC, dark: 0x1F57C2) }
   static let onOwnBubble = Color.white
   /// Other people's bubbles: a neutral tone that stands off the conversation's background.
   static let otherBubble = dynamic(light: 0xEBEBEB, dark: 0x2C2C2C)
 
+  /// The online dot (`Presence.online`); the theme's colour (3:1 on the surfaces) or the system green.
+  static var presence: Color {
+    ColorThemeModel.shared.isThemed ? themed(\.presence, light: 0, dark: 0) : .green
+  }
+
   static let radius: CGFloat = 12
   static let spacing: CGFloat = 12
 
+  /// A colour the colour theme (#1493) sets, or the given light and dark values without a theme.
+  /// Read while a view builds its body, so the view is built again when the theme changes.
+  private static func themed(_ token: KeyPath<AppThemeTokens, UInt32>, light: UInt32, dark: UInt32) -> Color {
+    ColorThemeModel.shared.color(token, fallback: (light, dark))
+  }
+
   private static func dynamic(light: UInt32, dark: UInt32) -> Color {
-    Color(
-      uiColor: UIColor { traits in
-        UIColor(hex: traits.userInterfaceStyle == .dark ? dark : light)
-      })
+    ColorThemeModel.dynamic(light: light, dark: dark)
   }
 }
 

@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT held_revision FROM oidc_sync_status FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "held_revision",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "held_revision"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0ddc9bb7f7575a2d2b1935e192e5846159a2d15e20c21aa0c6df9d3ead05005e"
+}

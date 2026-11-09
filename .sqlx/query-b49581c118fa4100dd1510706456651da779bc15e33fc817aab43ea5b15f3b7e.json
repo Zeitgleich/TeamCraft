@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET deactivated_at = now(), deactivation_reason = 'creator_deactivated'\n           WHERE deactivated_at IS NULL AND id IN (SELECT user_id FROM bots WHERE created_by = $1 AND revoked_at IS NULL)\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b49581c118fa4100dd1510706456651da779bc15e33fc817aab43ea5b15f3b7e"
+}

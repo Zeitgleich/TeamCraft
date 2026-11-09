@@ -11,11 +11,12 @@ use std::collections::HashSet;
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
   AdminBrandsResponse, AdminCalendarSettingsResponse, AdminHealthResponse, AdminInstanceResponse,
-  AdminMailSettingsResponse, AnnouncementResponse, AttachmentId, BackgroundId, BrandAssetSlot, CategoryId,
-  ChannelModeration, CreateBrandRequest, HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role,
-  RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection, ScheduledMessageId, SchemeChange,
-  SendTestMailRequest, SetAnnouncementRequest, SettingsTestResponse, UpdateBrandMailServerRequest,
-  UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
+  AdminMailSettingsResponse, AdminOidcSyncPreviewResponse, AdminOidcSyncResponse, AnnouncementResponse,
+  AttachmentId, BackgroundId, BrandAssetSlot, CategoryId, ChannelModeration, CreateBrandRequest,
+  HistoryPolicy, OrgBackgroundId, PermissionSchemeResponse, Role, RuntimeSettingsKey,
+  RuntimeSettingsResponse, RuntimeSettingsSection, ScheduledMessageId, SchemeChange, SendTestMailRequest,
+  SetAnnouncementRequest, SettingsTestResponse, UpdateBrandMailServerRequest, UpdateBrandRequest,
+  UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use crate::actions::{
@@ -36,7 +37,7 @@ use crate::calls::{
 use crate::calls::{
   CallPreview, CameraFallback, JoinMedia, OrgBackgroundRule, OrgBackgrounds, PreviewCamera,
 };
-use crate::drafts::{DraftFileItem, DraftItem, DraftReply, SentItem};
+use crate::drafts::{DraftFileItem, DraftFileTravel, DraftItem, DraftReply, SentItem};
 use crate::files_query::{FilesPage, FilesQuery};
 use crate::list_load::{ListLoad, LoadingList};
 use crate::model::{
@@ -584,13 +585,16 @@ pub trait ChatBackend {
   /// Keeps what the conversation's composer replies to, so it survives the app being killed
   /// (#1115); `None` forgets it. Stays on this device, unlike the draft's text.
   fn set_draft_reply(&self, _conversation: ConversationId, _maybe_reply: Option<DraftReply>) {}
-  /// Attaches files to the draft (#1220): they go up at once, so they travel with the draft to the
-  /// user's other devices. Sending them names them with [`crate::actions::FileSource::Draft`].
+  /// Attaches files to the draft (#1220). With [`DraftFileTravel::WithDraft`] they go up at once,
+  /// so they travel with the draft to the user's other devices; with [`DraftFileTravel::OnSend`]
+  /// they wait on this device and go up with their message (#1585). Sending them names them with
+  /// [`crate::actions::FileSource::Draft`].
   fn attach_draft_files(
     &self,
     _conversation: ConversationId,
     _maybe_thread: Option<ThreadId>,
     _files: Vec<OutgoingFile>,
+    _travel: DraftFileTravel,
   ) {
   }
   /// The files attached to the draft, in the order they were attached.
@@ -652,6 +656,9 @@ pub trait ChatBackend {
   /// [`crate::actions::FileInfo`]): the message goes out without it, or not at all when nothing is
   /// left of it.
   fn cancel_upload(&self, _conversation: ConversationId, _message: MessageId, _file_id: &str) {}
+  /// Stops all files of an own message that is still going up (its one upload control): the
+  /// message goes out with its text only, or not at all when it has none.
+  fn cancel_message_upload(&self, _conversation: ConversationId, _message: MessageId) {}
 
   // Files.
 
@@ -1299,6 +1306,18 @@ pub trait AdminBackend {
   fn health_status(&self) -> Option<AdminHealthResponse> {
     None
   }
+  /// How the sync with the identity provider stands, as of the last read; `None` while unknown.
+  fn oidc_sync_status(&self) -> Option<AdminOidcSyncResponse> {
+    None
+  }
+  /// What the last preview of the sync found.
+  fn oidc_sync_preview(&self) -> Option<AdminOidcSyncPreviewResponse> {
+    None
+  }
+  /// Asks what the sync would change now, without changing anything.
+  fn run_oidc_sync_preview(&self) {}
+  /// Confirms the deactivations the safety brake holds back; `revision` names the list looked at.
+  fn confirm_oidc_sync_brake(&self, _revision: i64) {}
   /// How many health checks are alerting (the badges of the admin console); 0 for non-admins.
   fn health_alert_count(&self) -> usize {
     0
@@ -1320,6 +1339,9 @@ pub trait AdminBackend {
   /// Archives or restores a channel the admin may not be in; a server record (e2ee.md §4.10), so
   /// no group state is involved.
   fn admin_set_channel_archived(&self, _channel: ConversationId, _is_archived: bool) {}
+  /// Keeps a channel open for the policy's snooze period: the inactivity policy leaves it alone
+  /// (issue #212). A server record, like archiving.
+  fn admin_snooze_channel(&self, _channel: ConversationId) {}
   /// Why the signed policy cannot be changed here (not an owner, no encryption keys on this device).
   fn policy_edit_blocker(&self) -> Option<crate::admin::PolicyBlocker> {
     None

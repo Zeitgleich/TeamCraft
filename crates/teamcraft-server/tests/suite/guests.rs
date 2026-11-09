@@ -852,6 +852,52 @@ mod expiry {
   }
 }
 
+mod sponsor_deactivated {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_guest_invitation_waits_while_its_sponsor_is_deactivated() {
+    let app = app!();
+    let alice = owner();
+    let carol = admin();
+    let carol_id = user_id(&app, &carol).await;
+    let space = create_space(&app, &alice, "Client", "invite_only").await;
+    let invite = app
+      .post(
+        &carol,
+        &format!("/spaces/{space}/invites"),
+        json!({"email": "ext@example.com", "role": "guest"}),
+      )
+      .await;
+    assert_eq!(invite.status, StatusCode::CREATED, "{}", invite.body);
+    let deactivated = app
+      .post(&alice, &format!("/admin/users/{carol_id}/deactivate"), json!({}))
+      .await;
+    assert_eq!(deactivated.status, StatusCode::NO_CONTENT, "{}", deactivated.body);
+
+    let ext = guest("ext").with_email("ext@example.com", true);
+    assert_eq!(app.get(&ext, "/spaces").await.status, StatusCode::OK);
+    let is_in = |members: &serde_json::Value| {
+      members["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|member| member["role"] == "guest")
+    };
+    let members = app.get(&alice, &format!("/spaces/{space}/members")).await;
+    assert!(!is_in(&members.body), "{}", members.body);
+
+    let reactivated = app
+      .post(&alice, &format!("/admin/users/{carol_id}/reactivate"), json!({}))
+      .await;
+    assert_eq!(reactivated.status, StatusCode::NO_CONTENT);
+    assert_eq!(app.get(&ext, "/spaces").await.status, StatusCode::OK);
+    let members = app.get(&alice, &format!("/spaces/{space}/members")).await;
+    assert!(is_in(&members.body), "{}", members.body);
+    app.stop().await;
+  }
+}
+
 mod domains {
   use super::*;
 

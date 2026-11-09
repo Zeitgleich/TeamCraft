@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET memberless_since = NULL\n         WHERE memberless_since IS NOT NULL\n           AND EXISTS (SELECT 1 FROM space_members m WHERE m.user_id = users.id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "715f430c9dc2fe79bd08786e88174df61303804a6827f2a7caa892a708588390"
+}

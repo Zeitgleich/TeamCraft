@@ -953,7 +953,8 @@ impl TeamCraft {
     len: u32,
   ) -> Result<String, TeamCraftError> {
     self
-      .read(move |reads| reads.window_json(&conversation_id, start, len))
+      .read_queue()?
+      .query(move |reads| reads.window_json(&conversation_id, start, len))
       .await
   }
 
@@ -966,7 +967,8 @@ impl TeamCraft {
     older: u32,
   ) -> Result<String, TeamCraftError> {
     self
-      .read(move |reads| {
+      .read_queue()?
+      .query(move |reads| {
         reads.tail_json(
           &conversation_id,
           maybe_oldest_id.as_deref(),
@@ -985,7 +987,8 @@ impl TeamCraft {
     len: u32,
   ) -> Result<String, TeamCraftError> {
     self
-      .read(move |reads| reads.tail_ahead_json(&conversation_id, len))
+      .read_queue()?
+      .query(move |reads| reads.tail_ahead_json(&conversation_id, len))
       .await
   }
 
@@ -1027,7 +1030,10 @@ impl TeamCraft {
   /// Answers a `ChatQuery` (JSON, tagged by `kind`) with a `ChatAnswer` (JSON, tagged by `answer`):
   /// message extras, threads, pins, saved items, drafts, files, channel browser, search, mentions.
   pub async fn query(&self, query_json: String) -> Result<String, TeamCraftError> {
-    self.read(move |reads| reads.query_json(&query_json)).await
+    self
+      .read_queue()?
+      .query(move |reads| reads.query_json(&query_json))
+      .await
   }
 
   /// An authenticated call to a plain server endpoint under `/api/v1` (notification settings,

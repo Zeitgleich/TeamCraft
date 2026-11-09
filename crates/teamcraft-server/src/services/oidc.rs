@@ -5,23 +5,56 @@
 //! the authority; a user who loses every TeamCraft role is deactivated like a disabled one.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use secrecy::ExposeSecret;
 use serde::Deserialize;
 use serde_json::json;
-use teamcraft_db::{GroupCreateOutcome, NewUserGroup, OidcIdentity, OidcUserRow};
-use teamcraft_proto::{DeactivationReason, ProvisionStatus, ProvisionedUser, UserGroupId, UserId, UserKind};
+use teamcraft_db::{
+  GroupCreateOutcome, HeldDeactivation, NewHeldDeactivation, NewUserGroup, OidcIdentity, OidcSyncRun,
+  OidcUserRow,
+};
+use teamcraft_proto::{
+  DeactivationCause, DeactivationReason, OidcSyncError, OidcSyncOutcome, ProvisionStatus, ProvisionedUser,
+  Role, UserGroupId, UserId, UserKind,
+};
+use time::OffsetDateTime;
 use tracing::{debug, info, warn};
 
-use super::admin::{AfterDeactivation, announce_reactivation, deactivate_user};
+use super::admin::{AfterDeactivation, deactivate_user, reactivate_and_announce};
 use super::audit::{self, Target as AuditTarget};
+use super::oidc_brake::{Decision, HeldEntry, PlannedDeactivation};
 use super::user_groups;
 use crate::auth::RoleMapping;
+use crate::config::OidcSyncRunMode;
 use crate::error::ApiError;
 use crate::state::{AppState, OidcSyncSettings};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Why a deactivated user is deactivated, in words for the audit log.
+const NOTE_REMOVED: &str = "removed from the identity provider";
+const NOTE_DISABLED: &str = "disabled at the identity provider";
+const NOTE_NO_ROLE: &str = "no TeamCraft role at the identity provider";
+
+/// One run of the sync at a time (the scheduled ones and an admin's confirmation can meet), and how
+/// many deactivations the brake holds back, for the health check that may not query the database.
+#[derive(Debug, Default)]
+pub struct OidcSyncRuntime {
+  run: tokio::sync::Mutex<()>,
+  held: AtomicU32,
+}
+
+impl OidcSyncRuntime {
+  pub fn held(&self) -> u32 {
+    self.held.load(Ordering::Relaxed)
+  }
+
+  fn set_held(&self, count: u32) {
+    self.held.store(count, Ordering::Relaxed);
+  }
+}
 
 /// Ends the sessions a back-channel logout token names (the provider ended them).
 ///
@@ -76,91 +109,434 @@ pub struct SyncReport {
   pub groups_created: u32,
   pub groups_changed: u32,
   pub groups_deleted: u32,
+  /// Deactivations the safety brake holds back after this run.
+  pub held: u32,
+  /// Changes that failed; the next run tries them again.
+  pub failed: u32,
+}
+
+/// One planned change of a role.
+struct RoleChange {
+  user: UserId,
+  maybe_from: Option<String>,
+  role: Role,
+}
+
+/// What the provider says should change, read in full before anything is applied.
+pub(super) struct Plan {
+  provider_session: ProviderSession,
+  deactivations: Vec<PlannedDeactivation>,
+  reactivations: Vec<UserId>,
+  role_changes: Vec<RoleChange>,
+  active_users: usize,
+}
+
+impl Plan {
+  pub(super) fn reactivation_count(&self) -> usize {
+    self.reactivations.len()
+  }
+
+  pub(super) fn role_change_count(&self) -> usize {
+    self.role_changes.len()
+  }
+
+  pub(super) fn active_user_count(&self) -> usize {
+    self.active_users
+  }
 }
 
 /// Compares our users with the provider and applies the differences. Does nothing if the sync
-/// is not configured. Fails without changing anything if the provider can't be read completely.
+/// is not configured. Fails without changing anything if the provider can't be read completely;
+/// a change that fails doesn't stop the others and is tried again by the next run. In dry-run
+/// mode, reports what it would do and changes nothing.
 pub async fn sync_once(state: &AppState) -> Result<SyncReport, ApiError> {
   let Some(settings) = &state.settings.get().maybe_oidc_sync else {
     return Ok(SyncReport::default());
   };
-  let provider = Provider::new(settings).await.map_err(unavailable)?;
-  let remote_users = provider.list_users().await.map_err(unavailable)?;
-  let client_uuid = provider.client_uuid().await.map_err(unavailable)?;
+  let _running = state.oidc_sync.run.lock().await;
+  let started_at = OffsetDateTime::now_utc();
+  let started = Instant::now();
+  let result = Box::pin(run(state, settings)).await;
+  record_run(state, started_at, started, settings, &result).await;
+  result.map_err(|failure| failure.into_api_error())
+}
+
+/// Why a run failed before it applied anything.
+#[derive(Debug)]
+enum SyncFailure {
+  Provider(ProviderError),
+  ProviderListedNoUsers,
+  Database(ApiError),
+}
+
+impl SyncFailure {
+  fn code(&self) -> OidcSyncError {
+    match self {
+      Self::Provider(ProviderError::Unexpected(_)) => OidcSyncError::ProviderInvalidAnswer,
+      Self::Provider(ProviderError::Request(error)) => match error.status() {
+        Some(status) if status.as_u16() == 401 || status.as_u16() == 403 => OidcSyncError::ProviderRefused,
+        Some(_) => OidcSyncError::ProviderInvalidAnswer,
+        None if error.is_decode() => OidcSyncError::ProviderInvalidAnswer,
+        None => OidcSyncError::ProviderUnreachable,
+      },
+      Self::ProviderListedNoUsers => OidcSyncError::ProviderListedNoUsers,
+      Self::Database(_) => OidcSyncError::Database,
+    }
+  }
+
+  fn into_api_error(self) -> ApiError {
+    match self {
+      Self::Provider(error) => unavailable(error),
+      Self::ProviderListedNoUsers => {
+        warn!("the identity provider listed no users although the instance has some: nothing changed");
+        ApiError::Unavailable("identity provider".into())
+      },
+      Self::Database(error) => error,
+    }
+  }
+}
+
+impl From<ProviderError> for SyncFailure {
+  fn from(error: ProviderError) -> Self {
+    Self::Provider(error)
+  }
+}
+
+impl From<teamcraft_db::DbError> for SyncFailure {
+  fn from(error: teamcraft_db::DbError) -> Self {
+    Self::Database(error.into())
+  }
+}
+
+/// Reads everything the sync needs from the provider. Nothing is changed before all of it is
+/// known, so a provider that fails halfway leaves the instance as it was.
+async fn read_plan(state: &AppState, settings: &OidcSyncSettings) -> Result<Plan, SyncFailure> {
+  let provider = Provider::new(settings).await?;
+  let remote_users = provider.list_users().await?;
+  let client_uuid = provider.client_uuid().await?;
   let mapping = RoleMapping::new(settings.roles.clone());
   let remote: HashMap<&str, &RemoteUser> = remote_users.iter().map(|user| (user.id.as_str(), user)).collect();
 
-  let mut report = SyncReport::default();
-  for user in state.database.list_oidc_users(&settings.issuer).await? {
+  let users = state.database.list_oidc_users(&settings.issuer).await?;
+  let active_users = users.iter().filter(|user| !user.is_deactivated).count();
+  if remote_users.is_empty() && active_users > 0 {
+    return Err(SyncFailure::ProviderListedNoUsers);
+  }
+
+  let plan_deactivation = |user: &OidcUserRow, cause, note| {
+    (!user.is_deactivated).then_some(PlannedDeactivation {
+      user: user.id,
+      cause,
+      note,
+    })
+  };
+  let (mut deactivations, mut reactivations, mut role_changes) = (Vec::new(), Vec::new(), Vec::new());
+  for user in users {
     let Some(remote_user) = remote.get(user.subject.as_str()) else {
-      // Deleted at the provider.
-      if deactivate(state, &user, "removed from the identity provider").await? {
-        report.deactivated += 1;
-      }
+      deactivations.extend(plan_deactivation(&user, DeactivationCause::Removed, NOTE_REMOVED));
       continue;
     };
     if !remote_user.enabled {
-      if deactivate(state, &user, "disabled at the identity provider").await? {
-        report.deactivated += 1;
-      }
+      deactivations.extend(plan_deactivation(
+        &user,
+        DeactivationCause::Disabled,
+        NOTE_DISABLED,
+      ));
       continue;
     }
-
-    let roles = provider
-      .client_roles(&remote_user.id, &client_uuid)
-      .await
-      .map_err(unavailable)?;
+    let roles = provider.client_roles(&remote_user.id, &client_uuid).await?;
     match mapping.resolve(roles.iter().map(String::as_str)) {
-      None => {
-        if deactivate(state, &user, "no TeamCraft role at the identity provider").await? {
-          report.deactivated += 1;
-        }
-      },
+      None => deactivations.extend(plan_deactivation(&user, DeactivationCause::NoRole, NOTE_NO_ROLE)),
       Some(role) => {
         let was_deactivated_by_sync =
           user.is_deactivated && user.maybe_deactivation_reason.as_deref() == Some("oidc");
-        if was_deactivated_by_sync && state.database.reactivate_user(user.id).await? {
-          announce_reactivation(state, user.id).await?;
-          audit::record(
-            state,
-            None,
-            "user_reactivated",
-            Some(AuditTarget::new("user", user.id)),
-            &json!({"reason": "oidc"}),
-          )
-          .await?;
-          report.reactivated += 1;
+        if was_deactivated_by_sync {
+          reactivations.push(user.id);
         }
         if !user.is_deactivated && user.maybe_oidc_role.as_deref() != Some(role.as_str()) {
-          let kind = if role == teamcraft_proto::Role::Guest {
-            UserKind::Guest
-          } else {
-            UserKind::Member
-          };
-          state
-            .database
-            .set_user_oidc_role(user.id, role.as_str(), &kind)
-            .await?;
-          audit::record(
-            state,
-            None,
-            "oidc_role_changed",
-            Some(AuditTarget::new("user", user.id)),
-            &json!({"from": user.maybe_oidc_role, "to": role.as_str()}),
-          )
-          .await?;
-          report.role_changes += 1;
+          role_changes.push(RoleChange {
+            user: user.id,
+            maybe_from: user.maybe_oidc_role.clone(),
+            role,
+          });
         }
       },
     }
   }
+  Ok(Plan {
+    provider_session: provider.into_session(),
+    deactivations,
+    reactivations,
+    role_changes,
+    active_users,
+  })
+}
+
+fn decide(settings: &OidcSyncSettings, plan: &Plan, held: &[HeldDeactivation]) -> Decision {
+  let entries: Vec<HeldEntry> = held
+    .iter()
+    .map(|entry| HeldEntry {
+      user: entry.user,
+      is_confirmed: entry.is_confirmed,
+    })
+    .collect();
+  settings
+    .brake
+    .decide(plan.deactivations.clone(), &entries, plan.active_users)
+}
+
+async fn run(state: &AppState, settings: &OidcSyncSettings) -> Result<SyncReport, SyncFailure> {
+  // Deactivations earlier work left unfinished come first: nothing here depends on the provider.
+  if let Err(error) = Box::pin(super::admin::retry_deactivation_followups(state)).await {
+    warn!(%error, "finishing earlier deactivations failed");
+  }
+  let plan = read_plan(state, settings).await?;
+  let held = state.database.list_held_deactivations().await?;
+  let decision = decide(settings, &plan, &held);
+
+  if settings.mode == OidcSyncRunMode::DryRun {
+    info!(
+      would_deactivate = decision.apply.len(),
+      would_hold = decision.hold.len(),
+      would_reactivate = plan.reactivations.len(),
+      would_change_roles = plan.role_changes.len(),
+      "oidc sync dry run"
+    );
+    return Ok(SyncReport {
+      deactivated: count(decision.apply.len()),
+      reactivated: count(plan.reactivations.len()),
+      role_changes: count(plan.role_changes.len()),
+      held: count(decision.hold.len()),
+      ..SyncReport::default()
+    });
+  }
+
+  Box::pin(apply(state, settings, plan, decision, &held)).await
+}
+
+/// Applies a run: the brake's verdict is stored first, so that a crash cannot forget it. One change
+/// that fails doesn't stop the others.
+async fn apply(
+  state: &AppState,
+  settings: &OidcSyncSettings,
+  plan: Plan,
+  decision: Decision,
+  previously_held: &[HeldDeactivation],
+) -> Result<SyncReport, SyncFailure> {
+  // A confirmed deactivation stays on the list until it has happened: if it fails, the next run
+  // still has the confirmation.
+  let confirmed: HashSet<UserId> = previously_held
+    .iter()
+    .filter(|entry| entry.is_confirmed)
+    .map(|entry| entry.user)
+    .collect();
+  let retained = |deactivation: &&PlannedDeactivation| confirmed.contains(&deactivation.user);
+  let held = store_held(
+    state,
+    decision.hold.iter().chain(decision.apply.iter().filter(retained)),
+  )
+  .await?;
+
+  let mut report = SyncReport {
+    held: count(decision.hold.len()),
+    ..SyncReport::default()
+  };
+  if decision.is_tripped {
+    warn!(
+      held,
+      active = plan.active_users,
+      "the identity provider sync holds deactivations back (safety brake): admins have to look at them"
+    );
+    // Best effort in the log: the held rows are what counts.
+    if let Err(error) = audit::record(
+      state,
+      None,
+      "oidc_sync_brake_engaged",
+      None,
+      &json!({"held": held, "active_users": plan.active_users, "was_held": previously_held.len()}),
+    )
+    .await
+    {
+      warn!(%error, "recording that the safety brake engaged failed");
+    }
+  }
+  let mut still_confirmed: Vec<&PlannedDeactivation> = Vec::new();
+  for deactivation in &decision.apply {
+    match Box::pin(deactivate_user(
+      state,
+      None,
+      deactivation.user,
+      DeactivationReason::Oidc,
+      deactivation.note,
+      // Suspended like by an admin: the provider may enable the user again, and the sync then
+      // reactivates them with everything intact. The automatic removal setting covers people who left.
+      AfterDeactivation::KeepChats,
+    ))
+    .await
+    {
+      Ok(true) => report.deactivated += 1,
+      Ok(false) => {},
+      Err(error) => {
+        warn!(user_id = %deactivation.user, %error, "deactivating a user failed");
+        report.failed += 1;
+        if confirmed.contains(&deactivation.user) {
+          still_confirmed.push(deactivation);
+        }
+      },
+    }
+  }
+  store_held(state, decision.hold.iter().chain(still_confirmed)).await?;
+  if decision.is_tripped {
+    // The provider's answer as a whole looks wrong: roles and groups wait for a better one.
+    return Ok(report);
+  }
+
+  for user in &plan.reactivations {
+    match reactivate_from_sync(state, *user).await {
+      Ok(true) => report.reactivated += 1,
+      Ok(false) => {},
+      Err(error) => {
+        warn!(user_id = %user, %error, "reactivating a user failed");
+        report.failed += 1;
+      },
+    }
+  }
+  for change in &plan.role_changes {
+    match apply_role_change(state, change).await {
+      Ok(()) => report.role_changes += 1,
+      Err(error) => {
+        warn!(user_id = %change.user, %error, "changing a user's role failed");
+        report.failed += 1;
+      },
+    }
+  }
   if settings.sync_groups {
-    sync_groups(state, settings, &provider, &mut report).await?;
+    let provider = Provider::resume(settings, &plan.provider_session);
+    if let Err(error) = sync_groups(state, settings, &provider, &mut report).await {
+      warn!(%error, "syncing the groups failed");
+      report.failed += 1;
+    }
   }
   if report != SyncReport::default() {
     info!(?report, "oidc sync finished");
   }
   Ok(report)
+}
+
+/// Stores who is held back from now on and tells the health check. Returns how many.
+async fn store_held(
+  state: &AppState,
+  held: impl Iterator<Item = &PlannedDeactivation>,
+) -> Result<u32, SyncFailure> {
+  let entries: Vec<NewHeldDeactivation<'_>> = held
+    .map(|entry| NewHeldDeactivation {
+      user: entry.user,
+      cause: entry.cause.as_str(),
+    })
+    .collect();
+  let held = state.database.set_held_deactivations(&entries).await?;
+  state.oidc_sync.set_held(held);
+  Ok(held)
+}
+
+async fn reactivate_from_sync(state: &AppState, user: UserId) -> Result<bool, ApiError> {
+  if !reactivate_and_announce(state, user).await? {
+    return Ok(false);
+  }
+  audit::record(
+    state,
+    None,
+    "user_reactivated",
+    Some(AuditTarget::new("user", user)),
+    &json!({"reason": "oidc", "source": "oidc_sync"}),
+  )
+  .await?;
+  Ok(true)
+}
+
+async fn apply_role_change(state: &AppState, change: &RoleChange) -> Result<(), ApiError> {
+  let kind = if change.role == Role::Guest {
+    UserKind::Guest
+  } else {
+    UserKind::Member
+  };
+  state
+    .database
+    .set_user_oidc_role(change.user, change.role.as_str(), &kind)
+    .await?;
+  audit::record(
+    state,
+    None,
+    "oidc_role_changed",
+    Some(AuditTarget::new("user", change.user)),
+    &json!({"from": change.maybe_from, "to": change.role.as_str()}),
+  )
+  .await?;
+  Ok(())
+}
+
+fn count(items: usize) -> u32 {
+  u32::try_from(items).unwrap_or(u32::MAX)
+}
+
+/// Stores how the run went for the admin console. Never fails the run: it is only a report.
+async fn record_run(
+  state: &AppState,
+  started_at: OffsetDateTime,
+  started: Instant,
+  settings: &OidcSyncSettings,
+  result: &Result<SyncReport, SyncFailure>,
+) {
+  let (outcome, maybe_error, report) = match result {
+    Ok(report) if settings.mode == OidcSyncRunMode::DryRun => (OidcSyncOutcome::DryRun, None, report.clone()),
+    Ok(report) if report.failed > 0 => (OidcSyncOutcome::Partial, None, report.clone()),
+    Ok(report) if report.held > 0 => (OidcSyncOutcome::Held, None, report.clone()),
+    Ok(report) => (OidcSyncOutcome::Ok, None, report.clone()),
+    Err(failure) => (
+      OidcSyncOutcome::Failed,
+      Some(failure.code()),
+      SyncReport::default(),
+    ),
+  };
+  let run = OidcSyncRun {
+    started_at,
+    finished_at: OffsetDateTime::now_utc(),
+    duration_ms: i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX),
+    outcome: outcome.as_str(),
+    maybe_error: maybe_error.as_ref().map(OidcSyncError::as_str),
+    is_success: result.is_ok() && report.failed == 0,
+    deactivated: report.deactivated,
+    reactivated: report.reactivated,
+    role_changes: report.role_changes,
+    groups_changed: report.groups_created + report.groups_changed + report.groups_deleted,
+    failed: report.failed,
+  };
+  if let Err(error) = state.database.record_oidc_sync_run(&run).await {
+    warn!(%error, "storing how the oidc sync went failed");
+  }
+}
+
+/// What the sync would do right now, nothing applied (the console's preview, and to check the
+/// configuration before relying on it).
+pub(super) async fn preview_plan(state: &AppState) -> Result<(Decision, Plan), ApiError> {
+  let Some(settings) = &state.settings.get().maybe_oidc_sync else {
+    return Err(ApiError::Unavailable("identity provider sync (oidc.sync)".into()));
+  };
+  let _running = state.oidc_sync.run.lock().await;
+  let plan = Box::pin(read_plan(state, settings))
+    .await
+    .map_err(SyncFailure::into_api_error)?;
+  let held = state.database.list_held_deactivations().await?;
+  let decision = decide(settings, &plan, &held);
+  Ok((decision, plan))
+}
+
+/// Reads what the brake holds after a start, for the health check.
+pub async fn load_brake_state(state: &AppState) {
+  match state.database.list_held_deactivations().await {
+    Ok(held) => state.oidc_sync.set_held(count(held.len())),
+    Err(error) => warn!(%error, "reading what the identity provider sync holds back failed"),
+  }
 }
 
 /// Creates the accounts of `usernames` from the provider before their first sign-in (admin.md §3.8),
@@ -325,30 +701,13 @@ async fn sync_groups(
   Ok(())
 }
 
-async fn deactivate(state: &AppState, user: &OidcUserRow, note: &str) -> Result<bool, ApiError> {
-  if user.is_deactivated {
-    return Ok(false);
-  }
-  // Suspended like by an admin: the provider may enable the user again, and the sync then
-  // reactivates them with everything intact. The automatic removal setting covers people who left.
-  deactivate_user(
-    state,
-    None,
-    user.id,
-    DeactivationReason::Oidc,
-    note,
-    AfterDeactivation::KeepChats,
-  )
-  .await
-}
-
 fn unavailable(error: ProviderError) -> ApiError {
   warn!(%error, "identity provider request failed");
   ApiError::Unavailable("identity provider".into())
 }
 
 #[derive(Debug, thiserror::Error)]
-enum ProviderError {
+pub(crate) enum ProviderError {
   #[error("request failed: {0}")]
   Request(#[from] reqwest::Error),
   #[error("unexpected answer: {0}")]
@@ -416,6 +775,13 @@ struct Provider<'a> {
   access_token: String,
 }
 
+/// The parts of a [`Provider`] that outlive its borrow of the settings. The access token stays in
+/// here; it is never logged or stored.
+struct ProviderSession {
+  http: reqwest::Client,
+  access_token: String,
+}
+
 impl<'a> Provider<'a> {
   async fn new(settings: &'a OidcSyncSettings) -> Result<Self, ProviderError> {
     let http = reqwest::Client::builder().timeout(HTTP_TIMEOUT).build()?;
@@ -436,6 +802,21 @@ impl<'a> Provider<'a> {
       settings,
       access_token: answer.access_token,
     })
+  }
+
+  fn into_session(self) -> ProviderSession {
+    ProviderSession {
+      http: self.http,
+      access_token: self.access_token,
+    }
+  }
+
+  fn resume(settings: &'a OidcSyncSettings, session: &ProviderSession) -> Self {
+    Self {
+      http: session.http.clone(),
+      settings,
+      access_token: session.access_token.clone(),
+    }
   }
 
   async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ProviderError> {

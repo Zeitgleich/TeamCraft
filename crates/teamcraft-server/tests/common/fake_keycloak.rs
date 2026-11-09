@@ -37,6 +37,15 @@ pub struct FakeKeycloak {
   pub base_url: String,
   state: Arc<Mutex<Vec<FakeUser>>>,
   groups: Arc<Mutex<Vec<FakeGroup>>>,
+  faults: Faults,
+}
+
+/// What the fake is told to refuse.
+#[derive(Clone, Default)]
+struct Faults {
+  /// A user whose role lookup answers garbage.
+  maybe_broken_roles: Arc<Mutex<Option<String>>>,
+  refuses_token: Arc<std::sync::atomic::AtomicBool>,
 }
 
 type SharedGroups = Arc<Mutex<Vec<FakeGroup>>>;
@@ -47,13 +56,17 @@ impl FakeKeycloak {
   pub async fn start(users: Vec<FakeUser>) -> Self {
     let state: Shared = Arc::new(Mutex::new(users));
     let groups: SharedGroups = Arc::new(Mutex::new(Vec::new()));
+    let faults = Faults::default();
     let app = Router::new()
-      .route("/realms/test/protocol/openid-connect/token", post(token))
+      .route(
+        "/realms/test/protocol/openid-connect/token",
+        post(token).with_state(faults.clone()),
+      )
       .route("/admin/realms/test/clients", get(clients))
       .route("/admin/realms/test/users", get(list_users))
       .route(
         "/admin/realms/test/users/{id}/role-mappings/clients/{client}/composite",
-        get(roles),
+        get(roles).with_state((state.clone(), faults.clone())),
       )
       .route(
         "/admin/realms/test/groups",
@@ -73,7 +86,29 @@ impl FakeKeycloak {
       base_url,
       state,
       groups,
+      faults,
     }
+  }
+
+  /// The role lookup of `id` answers something that is no role list.
+  pub fn break_roles_of(&self, id: &str) {
+    *self.faults.maybe_broken_roles.lock().unwrap() = Some(id.to_owned());
+  }
+
+  pub fn mend_roles(&self) {
+    *self.faults.maybe_broken_roles.lock().unwrap() = None;
+  }
+
+  /// The token endpoint refuses the service account from now on.
+  pub fn refuse_token(&self) {
+    self
+      .faults
+      .refuses_token
+      .store(true, std::sync::atomic::Ordering::Relaxed);
+  }
+
+  pub fn remove_all(&self) {
+    self.state.lock().unwrap().clear();
   }
 
   /// Settings that point the sync at this fake.
@@ -88,6 +123,10 @@ impl FakeKeycloak {
       roles: RoleNames::default(),
       page_size,
       sync_groups: false,
+      mode: teamcraft_server::config::OidcSyncRunMode::Apply,
+      brake: teamcraft_server::services::oidc_brake::Brake::default(),
+      interval: std::time::Duration::from_secs(300),
+      stale_after_intervals: 3,
     }
   }
 
@@ -114,7 +153,13 @@ pub fn fake_user(subject: &str, roles: &[&str]) -> FakeUser {
   }
 }
 
-async fn token(Form(form): Form<HashMap<String, String>>) -> Result<Json<Value>, StatusCode> {
+async fn token(
+  State(faults): State<Faults>,
+  Form(form): Form<HashMap<String, String>>,
+) -> Result<Json<Value>, StatusCode> {
+  if faults.refuses_token.load(std::sync::atomic::Ordering::Relaxed) {
+    return Err(StatusCode::UNAUTHORIZED);
+  }
   let valid = form.get("grant_type").map(String::as_str) == Some("client_credentials")
     && form.get("client_id").map(String::as_str) == Some("teamcraft-server")
     && form.get("client_secret").map(String::as_str) == Some(CLIENT_SECRET);
@@ -168,11 +213,14 @@ async fn list_users(
 }
 
 async fn roles(
-  State(state): State<Shared>,
+  State((state, faults)): State<(Shared, Faults)>,
   headers: HeaderMap,
   Path((id, client)): Path<(String, String)>,
 ) -> Result<Json<Value>, StatusCode> {
   authorized(&headers)?;
+  if faults.maybe_broken_roles.lock().unwrap().as_deref() == Some(id.as_str()) {
+    return Ok(Json(json!({"not": "a list"})));
+  }
   if client != CLIENT_UUID {
     return Err(StatusCode::NOT_FOUND);
   }

@@ -3,20 +3,21 @@
 use serde_json::json;
 use teamcraft_db::{
   ActiveAdminCounts, AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow,
-  AdminUserRow, AuditEntry, AuditQuery, ChatRemoval, ChatRemovalEffects, LOCAL_ISSUER, UserDeletion,
-  UserStatusFilter,
+  AdminUserRow, AuditEntry, AuditQuery, ChatRemoval, ChatRemovalEffects, DeactivationAudit, LOCAL_ISSUER,
+  UserDeletion, UserStatusFilter,
 };
 use teamcraft_proto::{
   AdminConversationSummary, AdminDeviceResponse, AdminHealthResponse, AdminInstanceResponse,
   AdminSpaceSummary, AdminUserStatus, AdminUserSummary, AuditEntryId, AuditEntryResponse, ConversationId,
-  ConversationKind, DeactivateUserRequest, DeactivationReason, DeviceId, GatewayEvent, Id,
-  ListAdminConversationsQuery, ListAdminConversationsResponse, ListAdminDevicesResponse,
+  ConversationKind, DeactivateUserRequest, DeactivationReason, DeactivationSource, DeviceId, GatewayEvent,
+  Id, ListAdminConversationsQuery, ListAdminConversationsResponse, ListAdminDevicesResponse,
   ListAdminSpacesResponse, ListAdminUsersQuery, ListAdminUsersResponse, ListAuditQuery, ListAuditResponse,
   ListConversationMembersResponse, ListSpaceMembersResponse, MAX_ADMIN_IDS, Permission, PushProvider,
   PushProviderState, PushProviderStatus, RetentionPolicy, SfuStatus, SpaceId, StorageStatus, Target,
   UnixMillis, UserId,
 };
 use time::OffsetDateTime;
+use tracing::warn;
 
 use super::access::require;
 use super::audit::{self, Target as AuditTarget};
@@ -30,6 +31,8 @@ const REMOVAL_SWEEP_BATCH: i64 = 50;
 /// The identity provider sync deactivating this many users within an hour looks like an outage or
 /// a misconfiguration, not people leaving: the automatic removal leaves them to an admin.
 const MASS_OIDC_DEACTIVATION: i64 = 10;
+/// Unfinished deactivations finished per run; the rest follow in the next.
+const FOLLOWUP_BATCH: i64 = 200;
 /// Deleted accounts whose leftover DMs one housekeeping run deletes; the rest follow in the next.
 const LEFTOVER_SWEEP_BATCH: i64 = 20;
 
@@ -98,7 +101,7 @@ pub async fn list_conversations(
   Ok(ListAdminConversationsResponse {
     conversations: rows
       .iter()
-      .map(|row| conversation_summary(row, &policy.retention))
+      .map(|row| conversation_summary(row, &policy.retention, &policy.inactivity))
       .collect(),
     has_more,
   })
@@ -243,6 +246,13 @@ async fn ensure_may_act_on(
 /// every session ends at once and signing in is refused, but the user stays in their chats with
 /// their devices, so a reactivation restores everything. With [`AfterDeactivation::RemoveFromChats`]
 /// the user is also removed from all chats at once. Returns `false` if already deactivated.
+///
+/// The commit is what decides access: the account is marked, the audit entry with its source is
+/// written and the bots the user created are paused in one transaction, so a failure leaves all of
+/// them or none. What follows can only make the deactivated state bite sooner (sessions, calls,
+/// announcements); it is recorded in that same commit and retried if it fails (see
+/// [`retry_deactivation_followups`]), so it never leaves a working session behind an account that
+/// looks deactivated.
 pub async fn deactivate_user(
   state: &AppState,
   maybe_actor: Option<UserId>,
@@ -251,33 +261,95 @@ pub async fn deactivate_user(
   note: &str,
   after: AfterDeactivation,
 ) -> Result<bool, ApiError> {
-  let deactivation = state.database.deactivate_user(user, reason.as_str()).await?;
+  let detail = json!({
+    "reason": reason.as_str(),
+    "source": deactivation_source(&reason).as_str(),
+    "note": note,
+  })
+  .to_string();
+  let audit = DeactivationAudit {
+    id: state
+      .ids
+      .next_snowflake()
+      .map_err(|error| ApiError::Internal(error.to_string()))?,
+    maybe_actor,
+    detail: &detail,
+  };
+  let deactivation = state
+    .database
+    .deactivate_user(user, reason.as_str(), &audit, &state.ids)
+    .await?;
   let is_new = !deactivation.was_already_deactivated;
   // Idempotent, so run also when it already was: a crash after the commit must not leave a
-  // session or a call running on a retry.
-  end_sessions(state, user).await?;
-  for conversation in &deactivation.conversations {
-    super::calls::evict_from_call(state, *conversation, user).await;
+  // session or a call running on a retry. Failures don't undo the commit: they are retried.
+  Box::pin(finish_deactivation(state, user)).await;
+  for bot in &deactivation.paused_bots {
+    Box::pin(finish_deactivation(state, *bot)).await;
   }
   if after == AfterDeactivation::RemoveFromChats {
     remove_from_all_chats(state, maybe_actor, user).await?;
   }
-  if is_new {
-    // Clients fetch the profile again and show the user as deactivated.
-    state.hub.publish(
-      deactivation.co_members.iter().copied(),
-      &GatewayEvent::ProfileUpdate { user_id: user },
-    );
-    audit::record(
-      state,
-      maybe_actor,
-      "user_deactivated",
-      Some(AuditTarget::new("user", user)),
-      &json!({"reason": reason.as_str(), "note": note, "conversations": deactivation.conversations.len()}),
-    )
-    .await?;
-  }
   Ok(is_new)
+}
+
+/// Who a deactivation came from, by its reason.
+fn deactivation_source(reason: &DeactivationReason) -> DeactivationSource {
+  match reason {
+    DeactivationReason::Oidc => DeactivationSource::OidcSync,
+    DeactivationReason::Left | DeactivationReason::CreatorDeactivated => DeactivationSource::System,
+    DeactivationReason::Admin | DeactivationReason::Unknown(_) => DeactivationSource::Manual,
+  }
+}
+
+/// Finishes a committed deactivation; a failure is logged and retried by
+/// [`retry_deactivation_followups`]. Gateway connections close first, whatever happens next.
+async fn finish_deactivation(state: &AppState, user: UserId) {
+  state.hub.revoke_user(user);
+  if let Err(error) = try_finish_deactivation(state, user).await {
+    warn!(%user, %error, "finishing a deactivation failed; it will be retried");
+    if let Err(error) = state.database.note_deactivation_followup_attempt(user).await {
+      warn!(%user, %error, "noting a failed deactivation follow-up failed");
+    }
+  }
+}
+
+/// Ends the sessions and calls of a deactivated user and tells who shares a conversation with them.
+/// Access tokens of the identity provider stay valid until they expire, but every request checks
+/// the account and refuses a deactivated one.
+async fn try_finish_deactivation(state: &AppState, user: UserId) -> Result<(), ApiError> {
+  let Some(followup) = state.database.deactivation_followup(user).await? else {
+    // Reactivated meanwhile: nothing to end.
+    state.database.finish_deactivation_followup(user).await?;
+    return Ok(());
+  };
+  state
+    .database
+    .end_sessions_of(LOCAL_ISSUER, &user.to_string())
+    .await?;
+  for conversation in &followup.conversations {
+    super::calls::evict_from_call(state, *conversation, user).await;
+  }
+  // Clients fetch the profile again and show the user as deactivated.
+  state.hub.publish(
+    followup.co_members.iter().copied(),
+    &GatewayEvent::ProfileUpdate { user_id: user },
+  );
+  state.database.finish_deactivation_followup(user).await?;
+  Ok(())
+}
+
+/// Finishes deactivations that a crash or a failure left unfinished, a batch per run. Run with the
+/// account housekeeping and at the start of every identity provider sync.
+pub async fn retry_deactivation_followups(state: &AppState) -> Result<usize, ApiError> {
+  let due = state
+    .database
+    .pending_deactivation_followups(FOLLOWUP_BATCH)
+    .await?;
+  let count = due.len();
+  for user in due {
+    Box::pin(finish_deactivation(state, user)).await;
+  }
+  Ok(count)
 }
 
 /// What follows a deactivation.
@@ -287,18 +359,6 @@ pub enum AfterDeactivation {
   KeepChats,
   /// The user is removed from all chats at once (bots, meeting guests: they don't come back).
   RemoveFromChats,
-}
-
-/// Ends every session of the user: gateway connections close and can't resume, local sessions end.
-/// Access tokens of the identity provider stay valid until they expire, but every request checks
-/// the account and refuses a deactivated one.
-async fn end_sessions(state: &AppState, user: UserId) -> Result<(), ApiError> {
-  state.hub.revoke_user(user);
-  state
-    .database
-    .end_sessions_of(LOCAL_ISSUER, &user.to_string())
-    .await?;
-  Ok(())
 }
 
 /// The admin action "Remove from all chats" for a deactivated user (admin.md §3.4): their devices
@@ -542,28 +602,38 @@ pub async fn reactivate_user(
 ) -> Result<(), ApiError> {
   require(state, caller, Permission::ManageUsers, &Target::Instance)?;
   ensure_may_act_on(state, caller, user).await?;
-  if !state.database.reactivate_user(user).await? {
+  if state.database.is_bot_paused_with_inactive_creator(user).await? {
+    return Err(ApiError::Conflict(
+      "this bot is paused because its creator was deactivated: rotate its token instead".into(),
+    ));
+  }
+  if !reactivate_and_announce(state, user).await? {
     return Err(ApiError::user_not_found());
   }
-  announce_reactivation(state, user).await?;
   audit::record(
     state,
     Some(caller.user.id),
     "user_reactivated",
     Some(AuditTarget::new("user", user)),
-    &json!({}),
+    &json!({"source": DeactivationSource::Manual.as_str()}),
   )
   .await?;
   Ok(())
 }
 
-/// Tells everyone who shares a conversation with the user that they are back.
-pub async fn announce_reactivation(state: &AppState, user: UserId) -> Result<(), ApiError> {
-  let audience = state.database.users_sharing_conversation(user).await?;
-  state
-    .hub
-    .publish(audience, &GatewayEvent::ProfileUpdate { user_id: user });
-  Ok(())
+/// Lifts a deactivation and tells everyone who shares a conversation with the user, and with the
+/// bots that come back with them. `false` if there was none to lift.
+pub async fn reactivate_and_announce(state: &AppState, user: UserId) -> Result<bool, ApiError> {
+  let Some(bots) = state.database.reactivate_user(user).await? else {
+    return Ok(false);
+  };
+  for one in std::iter::once(user).chain(bots) {
+    let audience = state.database.users_sharing_conversation(one).await?;
+    state
+      .hub
+      .publish(audience, &GatewayEvent::ProfileUpdate { user_id: one });
+  }
+  Ok(true)
 }
 
 /// Removes one device of a user (a lost phone), announced like any device removal.
@@ -685,7 +755,11 @@ fn space_summary(row: &AdminSpaceRow) -> AdminSpaceSummary {
   }
 }
 
-fn conversation_summary(row: &AdminConversationRow, policy: &RetentionPolicy) -> AdminConversationSummary {
+fn conversation_summary(
+  row: &AdminConversationRow,
+  policy: &RetentionPolicy,
+  inactivity: &teamcraft_proto::InactivityPolicy,
+) -> AdminConversationSummary {
   AdminConversationSummary {
     id: row.id,
     maybe_space_id: row.maybe_space,
@@ -704,6 +778,7 @@ fn conversation_summary(row: &AdminConversationRow, policy: &RetentionPolicy) ->
       row.space_retention,
       policy,
     )),
+    maybe_inactivity: super::inactivity::status_of(inactivity, row),
   }
 }
 

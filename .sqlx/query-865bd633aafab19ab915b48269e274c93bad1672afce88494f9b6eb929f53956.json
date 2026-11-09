@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE oidc_sync_held_deactivations SET confirmed_at = now(), confirmed_by = $1\n         WHERE confirmed_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "865bd633aafab19ab915b48269e274c93bad1672afce88494f9b6eb929f53956"
+}

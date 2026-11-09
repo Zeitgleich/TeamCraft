@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT user_id, name, description, created_at, revoked_at IS NOT NULL AS \"is_revoked!\"\n         FROM bots WHERE user_id = $1",
+  "query": "SELECT b.user_id, b.name, b.description, b.created_at, b.revoked_at IS NOT NULL AS \"is_revoked!\",\n                COALESCE(u.deactivation_reason = 'creator_deactivated', false) AS \"is_paused!\"\n         FROM bots b JOIN users u ON u.id = b.user_id ORDER BY b.created_at, b.user_id",
   "describe": {
     "columns": [
       {
@@ -52,20 +52,25 @@
         "name": "is_revoked!",
         "type_info": "Bool",
         "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "is_paused!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
-      "Left": [
-        "Int8"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
       false,
       true,
       false,
+      null,
       null
     ]
   },
-  "hash": "28d6f14817be0ebe739a6ef041351de759e339e3f20dd2224deba4c1c848208c"
+  "hash": "b654b62d4e10ec59dd2a6c5f5fb55900251e610b3a54fe5e090e7d768cb4e229"
 }
