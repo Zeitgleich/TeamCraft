@@ -39,6 +39,7 @@ class CoreRepository(
   private val lock = Mutex()
 
   @Volatile private var maybeCore: TeamCraft? = null
+  @Volatile private var maybeStaging: Pair<TeamCraft, String>? = null
   private var maybeAccount: String? = null
   private val changes = MutableStateFlow(0L)
   private val generation = MutableStateFlow(0L)
@@ -113,6 +114,18 @@ class CoreRepository(
     newGeneration()
     connection.value = core.connectionState()
     core
+  }
+
+  /**
+   * Where the app puts copies of files to upload, asked of the core once per open core: the core
+   * answers on its engine thread, which waits behind a catch-up or an upload, and a share asked once
+   * per file (#1579). Made again if something deleted it since.
+   */
+  suspend fun uploadStagingDir(): File {
+    val core = core()
+    val path = maybeStaging?.takeIf { it.first === core }?.second
+      ?: core.uploadStagingDir().also { maybeStaging = core to it }
+    return File(path).also { withContext(Dispatchers.IO) { it.mkdirs() } }
   }
 
   /**

@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.contentDescription
 import android.content.ClipboardManager
 import android.content.Context
@@ -83,6 +85,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -140,7 +143,9 @@ import de.zeitgleich.teamcraft.core.HistoryGap
 import de.zeitgleich.teamcraft.core.Message
 import de.zeitgleich.teamcraft.core.MessageExtras
 import de.zeitgleich.teamcraft.core.DraftFileItem
+import de.zeitgleich.teamcraft.core.ComposerSendState
 import de.zeitgleich.teamcraft.core.DraftFileState
+import de.zeitgleich.teamcraft.core.SendContent
 import de.zeitgleich.teamcraft.core.DraftFiles
 import de.zeitgleich.teamcraft.core.PickedFile
 import de.zeitgleich.teamcraft.core.SendOptions
@@ -1206,6 +1211,13 @@ internal fun Composer(
   val draftRead = rememberRead(viewModel, key = conversationId to maybeThread) { draftFiles(conversationId, maybeThread) }
   val otherFiles = DraftFiles.others(draftRead.maybeValue.orEmpty(), files, viewModel.goneDraftFiles)
   val sendableDraftFiles = otherFiles.filter { it.isSendable }
+  // Where this composer's send stands (#1579): it keeps its content until the core has the message.
+  val sendKey = viewModel.pickedKey(conversationId, maybeThread)
+  val sendStates by viewModel.composerSend.all.collectAsState()
+  val sendState = sendStates[sendKey] ?: ComposerSendState.Idle
+  val isSending = sendState is ComposerSendState.Sending
+  // The draft's upload state of each picked file: a picture shows it's going up, or that it didn't.
+  val draftStates = draftRead.maybeValue.orEmpty().associate { it.id to it.state }
   var priority by rememberSaveable(conversationId) { mutableStateOf("normal") }
   var wantsAcknowledgement by rememberSaveable(conversationId) { mutableStateOf(false) }
   var isSilent by rememberSaveable(conversationId) { mutableStateOf(false) }
@@ -1330,21 +1342,31 @@ internal fun Composer(
       return
     }
     // `:)` and `:tada:` become emoji, as on desktop.
-    val isPlain = maybeThread == null && files.isEmpty() && sendableDraftFiles.isEmpty()
-    viewModel.act(ChatActions.send(conversationId, emojiConvert(text.trim()), sendOptions(files, sendableDraftFiles)))
+    val body = emojiConvert(text.trim())
+    val sentText = text
+    val sending = files
+    val fromDraft = sendableDraftFiles
+    // Null while this composer's send runs: a second tap doesn't send twice.
+    val attempt = viewModel.composerSend.start(sendKey, SendContent(body, sending.map { it.path }, fromDraft.map { it.id })) ?: return
+    val isPlain = maybeThread == null && sending.isEmpty() && fromDraft.isEmpty()
+    val options = sendOptions(sending, fromDraft).copy(maybeClientMessageId = attempt.clientMessageId)
+    // The composer clears once the core has the message; until then it shows it's sending, and a
+    // failure comes back here with "Try again" (#1579).
+    viewModel.sendFromComposer(sendKey, attempt, ChatActions.send(conversationId, body, options)) {
       // Performance data: from the queued message until the server took it (the feed has no
       // pending message left, read below). Plain messages in the conversation only.
-      .invokeOnCompletion { failure -> if (failure == null && isPlain) Perf.begin(PerfMeasure.MESSAGE_SEND, conversationId) }
-    viewModel.pickedSent(files, sendableDraftFiles.map { it.id })
-    viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
-    draftSave.stored("")
-    text = ""
-    files = emptyList()
-    priority = "normal"
-    wantsAcknowledgement = false
-    isSilent = false
-    ReplyTarget.current.value = null
-    onSent()
+      if (isPlain) Perf.begin(PerfMeasure.MESSAGE_SEND, conversationId)
+      viewModel.pickedSent(sending, fromDraft.map { it.id })
+      val sentPaths = sending.map { it.path }.toSet()
+      files = files.filterNot { it.path in sentPaths }
+      // Typed on while it was sent: that is the next message, it stays.
+      if (text == sentText) {
+        viewModel.act(ChatActions.setDraft(conversationId, maybeThread, ""))
+        draftSave.stored("")
+        text = ""
+      }
+      resetOptions()
+    }
   }
   var isSendLaterOpen by remember { mutableStateOf(false) }
   // The time while @channel waits for its confirmation; none for a plain send.
@@ -1408,7 +1430,7 @@ internal fun Composer(
   val voicePolicy = snapshot?.security?.voiceMessagePolicy ?: VoiceMessagePolicy()
   // The record button stands in for the send button while there is nothing to send; a recording
   // or take of this composer keeps it whatever the policy says now.
-  val showsVoice = voice.isActive || (voicePolicy.enabled && !canSend)
+  val showsVoice = voice.isActive || (voicePolicy.enabled && !canSend && !isSending)
   fun trySend() {
     val confirmOver = viewModel.confirmChannelOver().toUInt()
     if (needsChannelConfirmation(text, members.size.toUInt(), confirmOver)) isConfirmingChannel = true else send()
@@ -1453,6 +1475,7 @@ internal fun Composer(
             // Pictures show as themselves: a tap opens the editor, the corner removes them.
             PictureAttachment(
               file = file,
+              maybeUpload = file.maybeDraft?.id?.let(draftStates::get),
               onEdit = { maybeEditing = file },
               onRemove = {
                 files = files - file
@@ -1495,6 +1518,13 @@ internal fun Composer(
         modifier = Modifier.padding(horizontal = 12.dp),
       )
     }
+    (sendState as? ComposerSendState.Failed)?.let { failed ->
+      SendFailure(
+        reason = failed.reason,
+        onRetry = ::trySend,
+        onDismiss = { viewModel.composerSend.dismiss(sendKey) },
+      )
+    }
     ComposerField(
       text = text,
       onTextChange = {
@@ -1507,6 +1537,7 @@ internal fun Composer(
         }
       },
       canSend = canSend,
+      isSending = isSending,
       isSendWithEnter = isSendWithEnter,
       focus = focus,
       onAttach = { isAttachOpen = true },
@@ -1610,6 +1641,7 @@ private fun ComposerField(
   text: String,
   onTextChange: (String) -> Unit,
   canSend: Boolean,
+  isSending: Boolean,
   isSendWithEnter: Boolean,
   focus: FocusRequester,
   onAttach: () -> Unit,
@@ -1677,7 +1709,33 @@ private fun ComposerField(
       maybeTrailing(Modifier.padding(start = 6.dp, bottom = 4.dp))
       return@Row
     }
-    SendButton(canSend, onSend, onSendOptions)
+    SendButton(canSend, isSending, onSend, onSendOptions)
+  }
+}
+
+/**
+ * A send the core didn't take (#1579): why, at the composer, with "Try again". The text and files
+ * are still in the composer; the retry sends them as the same message.
+ */
+@Composable
+private fun SendFailure(@StringRes reason: Int, onRetry: () -> Unit, onDismiss: () -> Unit) {
+  Row(
+    Modifier
+      .fillMaxWidth()
+      .padding(horizontal = 16.dp)
+      .semantics { liveRegion = LiveRegionMode.Polite },
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Text(
+      stringResource(R.string.composer_send_failed, stringResource(reason)),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.error,
+      modifier = Modifier.weight(1f),
+    )
+    TextButton(onClick = onRetry) { Text(stringResource(R.string.retry)) }
+    IconButton(onClick = onDismiss) {
+      Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.composer_send_failed_dismiss))
+    }
   }
 }
 
@@ -1710,7 +1768,7 @@ private fun EmojiSuggestions(text: String, onPick: (String) -> Unit) {
 
 /** A picked picture in the composer: its thumbnail opens the editor, the corner button removes it. */
 @Composable
-private fun PictureAttachment(file: PickedFile, onEdit: () -> Unit, onRemove: () -> Unit) {
+private fun PictureAttachment(file: PickedFile, maybeUpload: DraftFileState?, onEdit: () -> Unit, onRemove: () -> Unit) {
   val maybePicture by produceState<ImageBitmap?>(null, file.path) { value = Pictures.file(file.path, ATTACHMENT_THUMB_PX) }
   val editLabel = stringResource(R.string.composer_edit_picture, file.fileName)
   Box(Modifier.size(ATTACHMENT_THUMB)) {
@@ -1722,6 +1780,7 @@ private fun PictureAttachment(file: PickedFile, onEdit: () -> Unit, onRemove: ()
         .clickable(onClickLabel = editLabel, onClick = onEdit),
     ) {
       maybePicture?.let { Image(it, contentDescription = file.fileName, contentScale = ContentScale.Crop, modifier = Modifier.matchParentSize()) }
+      UploadMark(maybeUpload, Modifier.align(Alignment.Center))
       Icon(
         Icons.Filled.Edit,
         contentDescription = null,
@@ -1751,6 +1810,38 @@ private fun PictureAttachment(file: PickedFile, onEdit: () -> Unit, onRemove: ()
         modifier = Modifier.size(16.dp),
       )
     }
+  }
+}
+
+/**
+ * How a picked picture's draft upload stands (#1579): a ring while it goes up, a mark when it
+ * didn't (the message then sends it again). Nothing once it is up, or while it isn't in the draft.
+ */
+@Composable
+private fun UploadMark(maybeUpload: DraftFileState?, modifier: Modifier) {
+  when (maybeUpload) {
+    DraftFileState.UPLOADING -> {
+      val label = stringResource(R.string.composer_file_uploading)
+      CircularProgressIndicator(
+        modifier = modifier
+          .size(24.dp)
+          .background(Color.Black.copy(alpha = 0.4f), CircleShape)
+          .padding(3.dp)
+          .semantics { contentDescription = label },
+        color = Color.White,
+        strokeWidth = 2.dp,
+      )
+    }
+    DraftFileState.FAILED, DraftFileState.UNKNOWN -> Icon(
+      painterResource(R.drawable.ic_warning),
+      contentDescription = stringResource(R.string.composer_draft_file_failed),
+      tint = MaterialTheme.colorScheme.onError,
+      modifier = modifier
+        .size(24.dp)
+        .background(MaterialTheme.colorScheme.error, CircleShape)
+        .padding(3.dp),
+    )
+    else -> {}
   }
 }
 
@@ -1802,7 +1893,7 @@ private const val ATTACHMENT_THUMB_PX = 256
 /** The round send button: tap sends, long-press (also with nothing typed yet) sets how. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun SendButton(canSend: Boolean, onSend: () -> Unit, onSendOptions: () -> Unit) {
+private fun SendButton(canSend: Boolean, isSending: Boolean, onSend: () -> Unit, onSendOptions: () -> Unit) {
   val haptics = LocalHapticFeedback.current
   val scheme = MaterialTheme.colorScheme
   Box(
@@ -1815,20 +1906,30 @@ private fun SendButton(canSend: Boolean, onSend: () -> Unit, onSendOptions: () -
         role = Role.Button,
         onClickLabel = stringResource(R.string.send),
         onLongClickLabel = stringResource(R.string.send_options),
-        onClick = { if (canSend) onSend() },
+        onClick = { if (canSend && !isSending) onSend() },
         onLongClick = {
           haptics.performHapticFeedback(HapticFeedbackType.LongPress)
           onSendOptions()
         },
       )
-      .semantics { if (!canSend) disabled() },
+      .semantics { if (!canSend || isSending) disabled() },
     contentAlignment = Alignment.Center,
   ) {
-    Icon(
-      Icons.AutoMirrored.Filled.Send,
-      contentDescription = stringResource(R.string.send),
-      tint = if (canSend) scheme.onPrimary else scheme.onSurfaceVariant.copy(alpha = 0.6f),
-    )
+    if (isSending) {
+      // The core hasn't taken the message yet (#1579): the button says so instead of going blank.
+      val label = stringResource(R.string.composer_sending)
+      CircularProgressIndicator(
+        modifier = Modifier.size(22.dp).semantics { contentDescription = label },
+        color = scheme.onPrimary,
+        strokeWidth = 2.dp,
+      )
+    } else {
+      Icon(
+        Icons.AutoMirrored.Filled.Send,
+        contentDescription = stringResource(R.string.send),
+        tint = if (canSend) scheme.onPrimary else scheme.onSurfaceVariant.copy(alpha = 0.6f),
+      )
+    }
   }
 }
 
