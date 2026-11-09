@@ -420,6 +420,16 @@ pub struct PrivacyPrefs {
   /// Send crash reports when the instance has them on (docs/crash-reports.md); counts only while
   /// the instance allows opting out.
   pub send_crash_reports: bool,
+  /// The manual status picked with an end ("Reset after", issue #1578), so every device can say
+  /// until when. The server ends the status itself; this is only for showing it.
+  pub maybe_status_end: Option<StatusEnd>,
+}
+
+/// A manual status and when it ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusEnd {
+  pub status: crate::model::PresenceStatus,
+  pub until: crate::model::TimestampMs,
 }
 
 impl Default for PrivacyPrefs {
@@ -430,6 +440,7 @@ impl Default for PrivacyPrefs {
       share_typing: true,
       away_after_minutes: Some(DEFAULT_AWAY_AFTER_MINUTES),
       send_crash_reports: true,
+      maybe_status_end: None,
     }
   }
 }

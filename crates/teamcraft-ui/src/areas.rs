@@ -70,7 +70,7 @@ use crate::components::settings_modal::{SettingsModal, ShortcutsModal};
 use crate::components::share_download::ShareDownloadPage;
 use crate::components::share_link_dialog::ShareLinkDialog;
 use crate::components::space_invites::{AddToChannelDialog, BrowseSpacesDialog, InvitePeopleDialog};
-use crate::components::status_menu::{CustomStatusDialog, StatusMenu};
+use crate::components::status_menu::{CustomStatusDialog, StatusDurationDialog, StatusMenu};
 use crate::components::tab_elsewhere::TabElsewhere;
 use crate::components::update_notice::UpdateNoticeBanner;
 use crate::components::video_player::VideoPlayer;
@@ -246,6 +246,7 @@ areas! {
   /// The account menu behind the user's picture and the custom status it opens.
   status_menu(_unit: ()) => account: view! { <StatusMenu /> };
   custom_status(_unit: ()) => account: view! { <CustomStatusDialog /> };
+  status_duration(_unit: ()) => account: view! { <StatusDurationDialog /> };
   /// Home pages a first visit doesn't open (Meetings and People have their own chunks), and a
   /// conversation's side panels except the thread.
   saved(_unit: ()) => places: view! { <SavedView /> };

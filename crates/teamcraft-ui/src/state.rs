@@ -237,6 +237,8 @@ pub enum Overlay {
   /// The desktop app's recent downloads under their button in the top bar.
   Downloads,
   CustomStatus,
+  /// A manual status with a "Reset after" (#1578).
+  StatusDuration,
   Settings,
   Shortcuts,
   /// Another device of the user asks for approval.
@@ -1138,10 +1140,17 @@ impl AppState {
   pub fn set_presence_until(&self, presence: PresenceStatus, maybe_until: Option<TimestampMs>) {
     self.write(|backend| backend.set_presence_until(presence, maybe_until));
     let maybe_dnd_until = maybe_until.filter(|_| presence == PresenceStatus::DoNotDisturb);
-    self
-      .settings
-      .prefs
-      .update(|prefs| prefs.notifications.maybe_dnd_until = maybe_dnd_until);
+    // Available is automatic: nothing to end.
+    let maybe_status_end = maybe_until
+      .filter(|_| presence != PresenceStatus::Online)
+      .map(|until| crate::prefs::StatusEnd {
+        status: presence,
+        until,
+      });
+    self.settings.prefs.update(|prefs| {
+      prefs.notifications.maybe_dnd_until = maybe_dnd_until;
+      prefs.privacy.maybe_status_end = maybe_status_end;
+    });
   }
 
   /// Answers a ringing call on this device: opens its conversation and joins. The in-app card and

@@ -1,5 +1,8 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.PresenceDot
+import de.zeitgleich.teamcraft.ui.presenceLabel
+import de.zeitgleich.teamcraft.ui.presenceOf
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.heading
 import android.app.Activity
@@ -149,10 +152,15 @@ private fun SettingsHub(
   // The user's own presence and custom status as the workspace shows them, not a guess.
   val maybeMe by produceState(viewModel.chat.maybeKeptSnapshot()?.me, changes) { value = viewModel.readChat { snapshot() }?.me ?: value }
   var presence by remember(maybeMe?.presence) { mutableStateOf(presenceOf(maybeMe?.presence)) }
+  val isInCall by viewModel.isInCall.collectAsState()
   Row(verticalAlignment = Alignment.CenterVertically) {
     AccountAvatar(account.userId, account.displayName, size = 56.dp)
     Column(Modifier.padding(start = 16.dp).weight(1f)) {
       Text(account.displayName, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        PresenceDot(presence)
+        Text(stringResource(presenceLabel(presence)), style = MaterialTheme.typography.bodyMedium)
+      }
       maybeMe?.maybeCustomStatus?.let { status ->
         Text(
           listOf(status.emoji, status.text).filter { it.isNotBlank() }.joinToString(" "),
@@ -167,9 +175,10 @@ private fun SettingsHub(
   DisplayNameSection(viewModel)
   // Guests have no meetings of their own to skip holidays in; the server refuses them anyway.
   if (maybeMe?.isGuest != true) HolidayRegionSection(viewModel)
-  PresenceRow(presence) { choice ->
+  // Busy during a call on this phone is the server's doing, not a status to reset.
+  StatusRow(presence, isManual = presence != Presence.ONLINE && !(presence == Presence.BUSY && isInCall)) { choice, maybeUntil ->
     presence = choice
-    viewModel.setPresence(choice)
+    viewModel.setPresence(choice, maybeUntil)
   }
   var isEditingStatus by rememberSaveable { mutableStateOf(false) }
   ListItem(
@@ -597,33 +606,6 @@ private fun holidayHint(region: HolidayRegion): String {
   return if (region.hasInstanceFeed) "$source ${stringResource(R.string.holiday_feed_hint)}" else source
 }
 
-/** The user's presence as one row; a tap opens the choices. */
-@Composable
-private fun PresenceRow(presence: Presence, onChoose: (Presence) -> Unit) {
-  var isOpen by remember { mutableStateOf(false) }
-  Box {
-    ListItem(
-      headlineContent = { Text(stringResource(R.string.presence_title)) },
-      supportingContent = { Text(stringResource(PRESENCE_CHOICES.first { it.first == presence }.second)) },
-      leadingContent = { Box(Modifier.size(12.dp).background(presenceDot(presence), CircleShape)) },
-      trailingContent = { Chevron() },
-      modifier = Modifier.clickable { isOpen = true },
-    )
-    DropdownMenu(expanded = isOpen, onDismissRequest = { isOpen = false }) {
-      for ((choice, label) in PRESENCE_CHOICES) {
-        DropdownMenuItem(
-          text = { Text(stringResource(label)) },
-          leadingIcon = { Box(Modifier.size(10.dp).background(presenceDot(choice), CircleShape)) },
-          onClick = {
-            isOpen = false
-            onChoose(choice)
-          },
-        )
-      }
-    }
-  }
-}
-
 /** A row's "more behind this" mark; pointing down while what it opens is shown below. */
 @Composable
 private fun Chevron(isOpen: Boolean = false) {
@@ -632,20 +614,6 @@ private fun Chevron(isOpen: Boolean = false) {
     contentDescription = null,
     tint = MaterialTheme.colorScheme.onSurfaceVariant,
   )
-}
-
-private fun presenceOf(maybeWire: String?): Presence = when (maybeWire) {
-  "Away" -> Presence.AWAY
-  "DoNotDisturb" -> Presence.DO_NOT_DISTURB
-  "Offline" -> Presence.OFFLINE
-  else -> Presence.ONLINE
-}
-
-private fun presenceDot(presence: Presence): Color = when (presence) {
-  Presence.ONLINE -> Color(0xFF2E9E5B)
-  Presence.AWAY -> Color(0xFFE0A030)
-  Presence.DO_NOT_DISTURB -> Color(0xFFD0453A)
-  Presence.OFFLINE -> Color(0xFF8A8F98)
 }
 
 /** An emoji and text shown next to the user's name, cleared after the chosen time. */
@@ -784,13 +752,6 @@ private fun ChangePassphrase(viewModel: MainViewModel) {
 private fun Heading(text: Int) {
   Text(stringResource(text), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
 }
-
-private val PRESENCE_CHOICES = listOf(
-  Presence.ONLINE to R.string.presence_online,
-  Presence.AWAY to R.string.presence_away,
-  Presence.DO_NOT_DISTURB to R.string.presence_dnd,
-  Presence.OFFLINE to R.string.presence_offline,
-)
 
 /** No screenshots or app-switcher thumbnails; applies the next time a screen opens. */
 @Composable

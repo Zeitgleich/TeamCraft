@@ -762,7 +762,11 @@ pub enum PushService {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum Presence {
+  /// "Available": automatic.
   Online,
+  /// Set by hand, and by the server during a call or meeting (#1578).
+  Busy,
+  BeRightBack,
   Away,
   DoNotDisturb,
   Offline,
@@ -1110,6 +1114,8 @@ impl From<PresenceStatus> for Presence {
   fn from(presence: PresenceStatus) -> Self {
     match presence {
       PresenceStatus::Online => Self::Online,
+      PresenceStatus::Busy => Self::Busy,
+      PresenceStatus::BeRightBack => Self::BeRightBack,
       PresenceStatus::Away => Self::Away,
       PresenceStatus::DoNotDisturb => Self::DoNotDisturb,
       PresenceStatus::Offline => Self::Offline,
@@ -1121,6 +1127,8 @@ impl From<Presence> for PresenceStatus {
   fn from(presence: Presence) -> Self {
     match presence {
       Presence::Online => Self::Online,
+      Presence::Busy => Self::Busy,
+      Presence::BeRightBack => Self::BeRightBack,
       Presence::Away => Self::Away,
       Presence::DoNotDisturb => Self::DoNotDisturb,
       Presence::Offline => Self::Offline,

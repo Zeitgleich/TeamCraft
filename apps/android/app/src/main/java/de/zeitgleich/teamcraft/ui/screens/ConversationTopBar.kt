@@ -1,5 +1,8 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.PresenceDot
+import de.zeitgleich.teamcraft.ui.presenceLabel
+import de.zeitgleich.teamcraft.ui.presenceOf
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -137,14 +140,7 @@ private fun peerStatus(peer: User): String {
     val text = listOf(status.emoji, status.text).filter { it.isNotBlank() }.joinToString(" ")
     if (text.isNotBlank()) return text
   }
-  return stringResource(
-    when (peer.presence) {
-      "Online" -> R.string.presence_online
-      "Away" -> R.string.presence_away
-      "DoNotDisturb" -> R.string.presence_dnd
-      else -> R.string.presence_peer_offline
-    },
-  )
+  return stringResource(presenceLabel(presenceOf(peer.presence)))
 }
 
 /**
@@ -178,22 +174,11 @@ private fun HeaderAvatar(name: String, maybeKind: String?, maybePeer: User?) {
     }
     maybePeer?.let { peer ->
       Box(
-        Modifier
-          .align(Alignment.BottomEnd)
-          .size(12.dp)
-          .background(scheme.surface, CircleShape)
-          .padding(2.dp)
-          .background(presenceDotColor(peer.presence, LocalTeamCraftColors.current.presence), CircleShape),
-      )
+        Modifier.align(Alignment.BottomEnd).size(12.dp).background(scheme.surface, CircleShape),
+        contentAlignment = Alignment.Center,
+      ) { PresenceDot(presenceOf(peer.presence), size = 8.dp) }
     }
   }
-}
-
-private fun presenceDotColor(presence: String, online: Color): Color = when (presence) {
-  "Online" -> online
-  "Away" -> Color(0xFFE0A030)
-  "DoNotDisturb" -> Color(0xFFD0453A)
-  else -> Color(0xFF8A8F98)
 }
 
 /** The snapshot's name of a [ConversationKind], as [Conversation.kind] holds it. */

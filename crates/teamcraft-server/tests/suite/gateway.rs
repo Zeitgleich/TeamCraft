@@ -817,7 +817,7 @@ mod presence {
   }
 
   #[tokio::test]
-  async fn do_not_disturb_validates_its_end_time() {
+  async fn a_manual_status_validates_its_end_time() {
     let app = app!();
     let s = scene(&app).await;
     let past = app
@@ -828,10 +828,23 @@ mod presence {
       .put(
         &s.carol,
         "/me/presence",
-        json!({"manual": "invisible", "until": 4_102_444_800_000_i64}),
+        json!({"manual": "auto", "until": 4_102_444_800_000_i64}),
       )
       .await;
     assert_eq!(misplaced.status, StatusCode::BAD_REQUEST);
+    let unknown = app
+      .put(&s.carol, "/me/presence", json!({"manual": "lunch"}))
+      .await;
+    assert_eq!(unknown.status, StatusCode::BAD_REQUEST);
+    let busy = app
+      .put(
+        &s.carol,
+        "/me/presence",
+        json!({"manual": "busy", "until": 4_102_444_800_000_i64}),
+      )
+      .await;
+    assert_eq!(busy.status, StatusCode::OK);
+    assert_eq!(busy.body["manual"], "busy");
     let timed = app
       .put(
         &s.carol,
@@ -841,6 +854,28 @@ mod presence {
       .await;
     assert_eq!(timed.status, StatusCode::OK);
     assert_eq!(timed.body["until"], 4_102_444_800_000_i64);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn busy_and_be_right_back_reach_others_with_their_legacy_state() {
+    let app = app!();
+    let s = scene(&app).await;
+    let mut alice = Gateway::connect(&app, &s.alice, &s.alice_device).await;
+    let _carol = Gateway::connect(&app, &s.carol, &s.carol_device).await;
+    assert_eq!(alice.presence_of(&s.carol_id).await, PresenceState::Online);
+    for (manual, shown) in [("busy", PresenceState::Busy), ("brb", PresenceState::BeRightBack)] {
+      let set = app
+        .put(&s.carol, "/me/presence", json!({ "manual": manual }))
+        .await;
+      assert_eq!(set.status, StatusCode::OK);
+      assert_eq!(alice.presence_of(&s.carol_id).await, shown);
+    }
+    let listed = app
+      .get(&s.alice, &format!("/presence?user_ids={}", s.carol_id))
+      .await;
+    assert_eq!(listed.body["presences"][0]["state"], "away");
+    assert_eq!(listed.body["presences"][0]["detailed_state"], "brb");
     app.stop().await;
   }
 

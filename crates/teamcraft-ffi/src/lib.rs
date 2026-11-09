@@ -684,7 +684,17 @@ impl TeamCraft {
   }
 
   pub async fn set_presence(&self, presence: Presence) -> Result<(), TeamCraftError> {
-    self.act_locally(move |reads| reads.set_presence(presence)).await
+    self
+      .act_locally(move |reads| reads.set_presence(presence, None))
+      .await
+  }
+
+  /// Sets a status that ends by itself at `until_ms` (milliseconds since the epoch; "Reset after",
+  /// #1578). Available ignores the end: it is automatic.
+  pub async fn set_presence_until(&self, presence: Presence, until_ms: i64) -> Result<(), TeamCraftError> {
+    self
+      .act_locally(move |reads| reads.set_presence(presence, Some(until_ms)))
+      .await
   }
 
   /// Full-text search over decrypted messages (`from:`, `in:` and the other filters work).

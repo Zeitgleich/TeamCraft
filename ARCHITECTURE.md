@@ -291,9 +291,11 @@ guest  = "external"
 - Each device reports `active` / `idle` over the gateway (desktop and web also report *attention*:
   focused, recent input, not idle, unlocked; on change and every 30 s, e2ee.md §7); the server
   aggregates per user
-  (online > away > offline) and merges manual states (DND, away, appear offline, in a call, in a
-  meeting). An automatic away (idle device, workspace away timeout) ends with the next activity; a
-  manually chosen away stays until the user picks another status (docs/gateway.md, "Presence").
+  (online > away > offline) and merges manual states (busy, DND, be right back, away, appear offline,
+  each optionally until a time) and what the server knows (in a call, in a meeting: busy while the
+  user is automatic). An automatic away (idle device, workspace away timeout) ends with the next
+  activity; a manual status stays until its end or until the user picks another one
+  (docs/gateway.md, "Presence").
 - "In a meeting" comes from CalCraft free/busy; "in a call" from the SFU roster.
 - Presence also drives push routing (no phone push while the desktop is active).
 - **Last seen**: the server stores when a user's devices last stopped being active (`users.last_seen_at`)

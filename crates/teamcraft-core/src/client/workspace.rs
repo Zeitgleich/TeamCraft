@@ -805,10 +805,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let maybe_state: Option<PresenceState> =
       records::get_json(&self.store, Table::Presence, &user.to_string())?;
-    Ok(matches!(
-      maybe_state,
-      Some(PresenceState::Online | PresenceState::Away | PresenceState::DoNotDisturb)
-    ))
+    Ok(maybe_state.is_some_and(|state| state != PresenceState::Offline))
   }
 
   async fn apply_pending(&mut self, change: &PendingChange) -> Result<PendingOutcome, CoreError> {

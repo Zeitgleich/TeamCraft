@@ -958,9 +958,8 @@ struct ConversationRow: View {
       leading
         .overlay(alignment: .bottomTrailing) {
           if let presence = conversation.maybePeerPresence {
-            Circle()
-              .fill(presence.color)
-              .frame(width: 8, height: 8)
+            PresenceDot(presence: presence, size: 8)
+              .accessibilityHidden(false)
               .accessibilityLabel(Text(presence.label))
           }
         }

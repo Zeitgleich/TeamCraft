@@ -8,6 +8,8 @@ struct SettingsView: View {
   let account: Account
 
   @AppStorage("presence") private var presenceRaw = PresenceChoice.online.rawValue
+  @State private var resetAfter = ResetAfter.never
+  @State private var resetAt = Date().addingTimeInterval(60 * 60)
   @State private var statusEmoji = ""
   @State private var statusText = ""
   @State private var statusExpiry = StatusExpiryValue.never
@@ -29,23 +31,20 @@ struct SettingsView: View {
         Section {
           HStack(spacing: 12) {
             AvatarView(name: account.displayName, size: 44)
-            Text(account.displayName).font(.app(.headline))
+            VStack(alignment: .leading, spacing: 2) {
+              Text(account.displayName).font(.app(.headline))
+              HStack(spacing: 6) {
+                PresenceDot(presence: currentPresence)
+                Text(currentPresence.pickTitle).font(.app(.subheadline)).foregroundStyle(Theme.textMuted)
+              }
+            }
           }
         }
         if let profile = maybeProfileJSON, OwnProfileDocument.canOverrideDisplayName(in: profile) {
           displayNameSection(profile: profile)
         }
         HolidayRegionSection()
-        Section("presence_title") {
-          Picker("presence_title", selection: $presenceRaw) {
-            ForEach(PresenceChoice.allCases) { choice in Text(choice.title).tag(choice.rawValue) }
-          }
-          .pickerStyle(.inline)
-          .labelsHidden()
-          .onChange(of: presenceRaw) { _, raw in
-            if let choice = PresenceChoice(rawValue: raw) { Task { await model.setPresence(choice.presence) } }
-          }
-        }
+        statusSection
         customStatusSection
         Section {
           NavigationLink { NotificationsSettingsPage(account: account) } label: {
@@ -148,6 +147,48 @@ struct SettingsView: View {
     maybeNameProblem = problem
     isNameFocused = true
     isNameAccessibilityFocused = true
+  }
+
+  private var currentPresence: Presence { PresenceChoice(rawValue: presenceRaw)?.presence ?? .online }
+
+  /// The Teams-style status list (#1578): the order of every platform, the current status checked,
+  /// a "Reset after" for the next pick, and "Reset status" back to automatic.
+  private var statusSection: some View {
+    Section("presence_title") {
+      ForEach(Presence.pickerOrder, id: \.self) { choice in
+        Button { pickStatus(choice) } label: {
+          HStack(spacing: 12) {
+            PresenceDot(presence: choice, size: 12)
+            Text(choice.pickTitle).foregroundStyle(Theme.text)
+            Spacer()
+            if choice == currentPresence {
+              Image(systemName: "checkmark").foregroundStyle(Theme.accentStrong).accessibilityHidden(true)
+            }
+          }
+        }
+        .accessibilityAddTraits(choice == currentPresence ? .isSelected : [])
+      }
+      Picker("status_duration_reset_after", selection: $resetAfter) {
+        ForEach(ResetAfter.allCases) { choice in Text(choice.title).tag(choice) }
+      }
+      if resetAfter == .untilTime {
+        DatePicker("status_duration_until_label", selection: $resetAt, in: Date()...)
+      }
+      if currentPresence != .online {
+        Button("status_reset") { pickStatus(.online) }
+      }
+    }
+  }
+
+  private func pickStatus(_ choice: Presence) {
+    // Available is automatic: nothing to end.
+    let maybeUntil: Date? = switch (choice, resetAfter) {
+    case (.online, _): nil
+    case (_, .untilTime): resetAt > Date() ? resetAt : nil
+    default: resetAfter.end(from: Date())
+    }
+    presenceRaw = PresenceChoice(choice).rawValue
+    Task { await model.setPresence(choice, until: maybeUntil) }
   }
 
   private var customStatusSection: some View {
@@ -430,27 +471,31 @@ private struct KeyBackupSection: View {
   }
 }
 
-/// What the user can pick as presence (the core's four states).
+/// The status this device last picked, kept across launches (`@AppStorage`).
 enum PresenceChoice: String, CaseIterable, Identifiable {
-  case online, away, doNotDisturb, offline
+  case online, busy, doNotDisturb, beRightBack, away, offline
 
   var id: String { rawValue }
+
+  init(_ presence: Presence) {
+    switch presence {
+    case .online: self = .online
+    case .busy: self = .busy
+    case .doNotDisturb: self = .doNotDisturb
+    case .beRightBack: self = .beRightBack
+    case .away: self = .away
+    case .offline: self = .offline
+    }
+  }
 
   var presence: Presence {
     switch self {
     case .online: return .online
-    case .away: return .away
+    case .busy: return .busy
     case .doNotDisturb: return .doNotDisturb
+    case .beRightBack: return .beRightBack
+    case .away: return .away
     case .offline: return .offline
-    }
-  }
-
-  var title: LocalizedStringKey {
-    switch self {
-    case .online: return "presence_online"
-    case .away: return "presence_away"
-    case .doNotDisturb: return "presence_dnd"
-    case .offline: return "presence_offline"
     }
   }
 }
