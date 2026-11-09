@@ -92,7 +92,7 @@
 }
 
 :root[data-layout="compact"] .files-view-header h1 {
-  font-size: 1.75rem;
+  font-size: var(--text-2xl);
   line-height: 1.1;
   letter-spacing: -0.02em;
   font-weight: var(--weight-bold);
@@ -128,7 +128,7 @@
   border-radius: var(--radius-pill);
   background: var(--surface-3);
   color: var(--text);
-  font-size: 0.9375rem;
+  font-size: var(--text-md);
   font-weight: var(--weight-medium);
   -webkit-tap-highlight-color: transparent;
   transition: background-color 120ms ease-out, color 120ms ease-out;
@@ -164,7 +164,7 @@
   background: var(--surface-2);
   color: var(--accent);
   font: inherit;
-  font-size: 1rem;
+  font-size: var(--text-lg);
   font-weight: var(--weight-medium);
   appearance: none;
   -webkit-appearance: none;
