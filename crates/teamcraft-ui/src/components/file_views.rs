@@ -1132,7 +1132,7 @@ pub fn FileCard(file: FileInfo, #[prop(optional)] maybe_star: Option<FileStar>) 
       })}
       {show_download.then(|| view! {
         <button
-          class="icon-btn file-action"
+          class="icon-btn file-action file-download"
           aria-label=move || i18n.t("file-download")
           data-tip=move || i18n.t("file-download")
           on:click=move |_| actions.download()

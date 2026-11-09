@@ -15,9 +15,9 @@ use wasm_bindgen::JsCast;
 use crate::components::empty_state::EmptyState;
 use crate::components::file_views::{FileCard, FileStar};
 use crate::components::files_sidebar::kind_label_key;
-use crate::components::icons::IconName;
-use crate::components::sliding_indicator::SlidingIndicator;
+use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
+use crate::model::Space;
 use crate::state::use_app_state;
 
 /// How far above the end of the list the next page comes in, in pixels.
@@ -115,76 +115,49 @@ pub fn FilesView() -> impl IntoView {
           <h1>{move || i18n.t("files-title")}</h1>
           {move || scope_name.get().map(|name| view! { <span class="panel-subtitle" translate="no">{name}</span> })}
         </div>
-        <div class="files-view-controls">
-          <Show when=move || is_compact.get() fallback=|| ()>
-          <div class="segmented" role="group" aria-label=move || i18n.t("files-filter")>
-            <SlidingIndicator />
+        // Wide layouts choose the filter and the scope in the sidebar; the order stays here.
+        <Show when=move || !is_compact.get() fallback=|| ()>
+          <div class="files-sort">
+            <label for="files-sort">{move || i18n.t("files-sort")}</label>
+            <SortSelect id="files-sort" class="input" />
+          </div>
+        </Show>
+      </header>
+      // Phones have no sidebar beside the list: the filters scroll in one row of pills, the scope
+      // and the order are two menus under them, as in the Photos and Files apps.
+      <Show when=move || is_compact.get() fallback=|| ()>
+        <div class="files-phone-bar">
+          <div class="files-chips" role="group" aria-label=move || i18n.t("files-filter")>
             {FileKind::ALL
               .into_iter()
               .map(|value| {
                 view! {
-                  <button aria-pressed=move || (kind.get() == value).to_string() on:click=move |_| kind.set(value)>
+                  <button
+                    type="button"
+                    class="files-chip"
+                    aria-pressed=move || (kind.get() == value).to_string()
+                    on:click=move |_| kind.set(value)
+                  >
                     {move || i18n.t(kind_label_key(value))}
                   </button>
                 }
               })
               .collect_view()}
           </div>
-          <div class="files-sort">
-            <label for="files-scope">{move || i18n.t("files-scope")}</label>
-            <select
-              id="files-scope"
-              class="input"
-              on:change=move |ev| {
-                let value = event_target_value(&ev);
-                let next = spaces
-                  .get_untracked()
-                  .into_iter()
-                  .find(|space| space.id.to_string() == value)
-                  .map_or(FileScope::Everything, |space| FileScope::Space(space.id));
-                state.files_scope.set(next);
-              }
-            >
-              <option value="" selected=move || scope.get() == FileScope::Everything>
-                {move || i18n.t("files-scope-everywhere")}
-              </option>
-              <For each=move || spaces.get() key=|space| (space.id, space.name.clone()) let:space>
-                <option
-                  value=space.id.to_string()
-                  selected=move || scope.get() == FileScope::Space(space.id)
-                  translate="no"
-                >
-                  {space.name.clone()}
-                </option>
-              </For>
-            </select>
-          </div>
-          </Show>
-          <div class="files-sort">
-            <label for="files-sort">{move || i18n.t("files-sort")}</label>
-            <select
-              id="files-sort"
-              class="input"
-              on:change=move |ev| {
-                if let Some(value) = sort_from_slug(&event_target_value(&ev)) {
-                  prefs.update(|all| all.files.sort = value);
-                }
-              }
-            >
-              {FileSort::ALL
-                .into_iter()
-                .map(|value| {
-                  view! {
-                    <option value=sort_slug(value) selected=move || sort.get() == value>
-                      {move || i18n.t(sort_label_key(value))}
-                    </option>
-                  }
-                })
-                .collect_view()}
-            </select>
+          <div class="files-menus">
+            <label class="files-menu">
+              <span class="visually-hidden">{move || i18n.t("files-scope")}</span>
+              <ScopeSelect scope=scope spaces=spaces />
+              <Icon name=IconName::ChevronDown />
+            </label>
+            <label class="files-menu">
+              <span class="visually-hidden">{move || i18n.t("files-sort")}</span>
+              <SortSelect id="files-sort-phone" class="" />
+              <Icon name=IconName::ChevronDown />
+            </label>
           </div>
         </div>
-      </header>
+      </Show>
       <div class="files-view-body panel-scroll" on:scroll=on_scroll>
         <Show when=move || is_sorted_among_loaded.get() fallback=|| ()>
           <p class="files-sort-note">{move || i18n.t("files-sort-loaded")}</p>
@@ -209,6 +182,64 @@ pub fn FilesView() -> impl IntoView {
         </Show>
       </div>
     </section>
+  }
+}
+
+/// The order of the list, remembered per account.
+#[component]
+fn SortSelect(id: &'static str, class: &'static str) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let prefs = state.settings.prefs;
+  let sort = Memo::new(move |_| prefs.with(|all| all.files.sort));
+  view! {
+    <select
+      id=id
+      class=class
+      on:change=move |ev| {
+        if let Some(value) = sort_from_slug(&event_target_value(&ev)) {
+          prefs.update(|all| all.files.sort = value);
+        }
+      }
+    >
+      {FileSort::ALL
+        .into_iter()
+        .map(|value| {
+          view! {
+            <option value=sort_slug(value) selected=move || sort.get() == value>
+              {move || i18n.t(sort_label_key(value))}
+            </option>
+          }
+        })
+        .collect_view()}
+    </select>
+  }
+}
+
+/// Whose files, on phones: everywhere or one space's.
+#[component]
+fn ScopeSelect(scope: Memo<FileScope>, spaces: Memo<Vec<Space>>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  view! {
+    <select on:change=move |ev| {
+      let value = event_target_value(&ev);
+      let next = spaces
+        .get_untracked()
+        .into_iter()
+        .find(|space| space.id.to_string() == value)
+        .map_or(FileScope::Everything, |space| FileScope::Space(space.id));
+      state.files_scope.set(next);
+    }>
+      <option value="" selected=move || scope.get() == FileScope::Everything>
+        {move || i18n.t("files-scope-everywhere")}
+      </option>
+      <For each=move || spaces.get() key=|space| (space.id, space.name.clone()) let:space>
+        <option value=space.id.to_string() selected=move || scope.get() == FileScope::Space(space.id) translate="no">
+          {space.name.clone()}
+        </option>
+      </For>
+    </select>
   }
 }
 
