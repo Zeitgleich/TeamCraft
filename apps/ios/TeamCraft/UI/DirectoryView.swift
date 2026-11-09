@@ -387,11 +387,11 @@ private struct InvitationRow: View {
   }
 
   private func resendNow() async {
-    await run(model.resendInvitation(invitation)) { resend = .sent }
+    await run(await model.resendInvitation(invitation)) { resend = .sent }
   }
 
   private func revokeNow() async {
-    await run(model.revokeInvitation(invitation), onDone: onGone)
+    await run(await model.revokeInvitation(invitation), onDone: onGone)
   }
 
   private func run(_ call: @autoclosure () async -> Result<InvitationOutcome, AppFailure>, onDone: () -> Void) async {

@@ -43,6 +43,11 @@
   <string name="history_gap_failed">Nachrichten konnten nicht geladen werden.</string>
   <string name="file_failed">Die Datei konnte nicht gesendet oder geladen werden.</string>
   <string name="file_cancel_upload">Abbrechen</string>
+  <string name="file_cancel_uploads">Alle abbrechen</string>
+  <plurals name="file_uploads_running">
+    <item quantity="one">%d Datei wird hochgeladen</item>
+    <item quantity="other">%d Dateien werden hochgeladen</item>
+  </plurals>
   <string name="file_upload_retrying">Wird erneut versucht …</string>
   <string name="file_upload_stalled">Hochladen fehlgeschlagen. Die Nachricht wartet auf die Datei.</string>
   <string name="file_upload_storage_unavailable">Der Dateispeicher ist gerade nicht erreichbar. Versuche es gleich noch einmal.</string>
