@@ -1039,6 +1039,7 @@ fn demo_channels(now: TimestampMs) -> Vec<AdminChannel> {
     retention,
     history,
     is_archived: false,
+    maybe_inactivity: None,
   };
   use ConversationKind::{Integration, Private, Public};
   let from_join = HistoryPolicy::FromJoin;

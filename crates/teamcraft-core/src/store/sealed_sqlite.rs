@@ -6,9 +6,10 @@
 //! refused (issue #160).
 
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use rand_core::{OsRng, RngCore};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use teamcraft_crypto::local_store::{LOOKUP_ID_LEN, LookupId};
 
@@ -19,7 +20,7 @@ use super::sql_group::{
 };
 use super::sqlite_log::{LOG_PRAGMAS, PurgeState};
 use super::sqlite_wipe::wipe_free_pages;
-use super::{DatabaseKeySource, StoreError, WriteTally};
+use super::{CommitJournal, CommitStamp, DatabaseKeySource, StoreError, WriteTally};
 
 /// The layout steps of this store, in order ([`run_migrations`]); released 1.0 databases carry
 /// version 0 and the table of version 1.
@@ -54,6 +55,17 @@ pub(crate) const MIGRATIONS: &[Migration] = &[
 const MMAP_BYTES: u64 = 256 * 1024 * 1024;
 /// How long a write waits for another connection's lock (a checkpoint of the log runs into one).
 const BUSY_TIMEOUT: Duration = Duration::from_secs(1);
+/// The number of the last commit and the connection that made it ([`CommitStamp`], issue #1476).
+/// Outside the numbered layout: versions before ignore it, and a store without it (the iOS
+/// notification extension opened it first) numbers no commits until the app opens it.
+const COMMIT_STAMP_TABLE: &str = "
+  CREATE TABLE IF NOT EXISTS commit_stamp (
+    id INTEGER PRIMARY KEY CHECK (id = 0),
+    sequence INTEGER NOT NULL,
+    writer INTEGER NOT NULL
+  );
+  INSERT OR IGNORE INTO commit_stamp (id, sequence, writer) VALUES (0, 0, 0);
+";
 const SCHEMA_V1: &str = "
   CREATE TABLE IF NOT EXISTS sealed_records (
     id BLOB PRIMARY KEY,
@@ -76,6 +88,8 @@ struct Inner {
   purge: PurgeState,
   /// A read transaction is open ([`RecordBackend::begin_read`]).
   is_reading: bool,
+  /// This connection's mark on the commits it numbers ([`CommitStamp::writer`]).
+  writer: u64,
 }
 
 impl SealedStore<SqliteRecords> {
@@ -132,6 +146,32 @@ impl SealedStore<SqliteRecords> {
     check_layout_left_to_app(&connection, MIGRATIONS)
   }
 
+  /// A second connection to the store at `path`, which only reads: the app's read threads read
+  /// beside the engine's groups of writes instead of waiting for them (issue #1476). It follows the
+  /// commits the writing connection stages in `journal`
+  /// ([`SealedStore::publish_commits`]), so its caches stay warm across them. Opened after the
+  /// writing connection: it builds no catalog and runs no step of the layout.
+  pub fn open_reader(
+    path: &Path,
+    key_source: &impl DatabaseKeySource,
+    limits: SealedStoreLimits,
+    journal: Arc<CommitJournal>,
+  ) -> Result<Self, StoreError> {
+    let connection = Connection::open_with_flags(
+      path,
+      OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(database_error)?;
+    Self::set_up_connection(&connection)?;
+    connection
+      .execute_batch("PRAGMA query_only = ON;")
+      .map_err(database_error)?;
+    let backend = Self::records_on(connection)?;
+    let store = SealedStore::open_backend_without_building(backend, &key_source.database_key()?, limits)?;
+    store.follow_commits(journal);
+    Ok(store)
+  }
+
   /// A database that lives only in memory, for tests.
   pub fn open_in_memory(key_source: &impl DatabaseKeySource) -> Result<Self, StoreError> {
     Self::from_connection(
@@ -153,6 +193,9 @@ impl SealedStore<SqliteRecords> {
   fn backend_of(connection: Connection) -> Result<SqliteRecords, StoreError> {
     Self::set_up_connection(&connection)?;
     run_migrations(&connection, MIGRATIONS)?;
+    connection
+      .execute_batch(COMMIT_STAMP_TABLE)
+      .map_err(database_error)?;
     Self::records_on(connection)
   }
 
@@ -180,6 +223,7 @@ impl SealedStore<SqliteRecords> {
         group,
         purge: PurgeState::new(),
         is_reading: false,
+        writer: OsRng.next_u64(),
       }),
     })
   }
@@ -332,6 +376,44 @@ impl RecordBackend for SqliteRecords {
       connection, group, ..
     } = &mut *inner;
     Some(group.tally(connection))
+  }
+
+  fn stage_commit(&self) -> Option<CommitStamp> {
+    let inner = self.lock();
+    if !inner.group.will_commit(&inner.connection) {
+      return None;
+    }
+    let writer = i64::from_ne_bytes(inner.writer.to_ne_bytes());
+    // A store without the table (opened by the extension before the app made it) numbers nothing:
+    // its reader then drops everything on a commit.
+    let sequence: i64 = inner
+      .connection
+      .query_row(
+        "UPDATE commit_stamp SET sequence = sequence + 1, writer = ?1 WHERE id = 0 RETURNING sequence",
+        params![writer],
+        |row| row.get(0),
+      )
+      .ok()?;
+    Some(CommitStamp {
+      sequence: u64::try_from(sequence).ok()?,
+      writer: inner.writer,
+    })
+  }
+
+  fn commit_stamp(&self) -> Option<CommitStamp> {
+    let inner = self.lock();
+    let (sequence, writer): (i64, i64) = inner
+      .connection
+      .query_row(
+        "SELECT sequence, writer FROM commit_stamp WHERE id = 0",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+      )
+      .ok()?;
+    Some(CommitStamp {
+      sequence: u64::try_from(sequence).ok()?,
+      writer: u64::from_ne_bytes(writer.to_ne_bytes()),
+    })
   }
 }
 

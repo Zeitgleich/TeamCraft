@@ -43,6 +43,7 @@ mod health;
 mod health_alerts;
 mod identity;
 mod import;
+mod inactivity;
 mod integration_channels;
 mod key_bag;
 mod key_packages;

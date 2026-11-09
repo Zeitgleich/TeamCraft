@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE conversations SET inactivity_notified_at = $2\n         WHERE id = $1 AND deleted_at IS NULL\n           AND inactivity_notified_at IS NOT DISTINCT FROM $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "245272733cdb4c7dc581f6b60c1fb3594814ace9b10e5cc9110b8e14a519d311"
+}

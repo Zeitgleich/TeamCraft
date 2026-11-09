@@ -1,13 +1,13 @@
 use leptos::prelude::*;
 
-use teamcraft_proto::{ChannelModeration, HistoryPolicy, Permission};
+use teamcraft_proto::{ChannelInactivityStatus, ChannelModeration, HistoryPolicy, Permission, UnixMillis};
 
 use crate::admin::{
   AdminChannel, AdminChannelFilter, AdminChannelQuery, AdminLoad, SelfJoinOutcome, format_bytes,
 };
 use crate::admission::{Admission, admission};
 use crate::channel_access::ChannelAccess;
-use crate::clock::{format_relative, now_ms};
+use crate::clock::{format_date, format_relative, now_ms};
 use crate::components::admin_console::{ListMore, SectionHeader};
 use crate::components::admin_spaces::{LoadNotice, SpacesPanel};
 use crate::components::channel_view::UnconfirmedRemovalActions;
@@ -520,6 +520,7 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
       <dt>{move || i18n.t("admin-retention")}</dt>
       <dd>{retention}</dd>
     </dl>
+    <InactivityNote current=current />
     <p class="no-content-note">
       <Icon name=IconName::EyeOff />
       <span>{move || i18n.t("admin-no-content")}</span>
@@ -558,6 +559,30 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
       </button>
       </Show>
     </div>
+    <Show
+      when=move || {
+        delete_access.can(&Permission::ManageChannelProperties)
+          && current.with(|channel| {
+            channel
+              .maybe_inactivity
+              .as_ref()
+              .is_some_and(|status| status.maybe_notified_at.is_some() || status.is_archived_by_policy)
+          })
+      }
+      fallback=|| ()
+    >
+      <div class="detail-actions">
+        <button type="button" class="btn" on:click=move |_| state.write(|backend| backend.admin_snooze_channel(id))>
+          {move || {
+            i18n.t(if current.with(|channel| channel.is_archived) {
+              "admin-inactivity-postpone-delete"
+            } else {
+              "admin-inactivity-keep-open"
+            })
+          }}
+        </button>
+      </div>
+    </Show>
     <Show when=move || is_confirming_archive.get() fallback=|| ()>
       <div class="detail-actions" role="alert">
         <p>{move || i18n.t("admin-channel-archive-confirm")}</p>
@@ -582,6 +607,68 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
     <p class="status-line" role="status">
       {move || is_private.then(|| join_status_text(i18n, admin_join_state(state, id), outcome.get())).flatten()}
     </p>
+  }
+}
+
+/// One thing to say about a channel's place in the inactivity policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InactivityLine {
+  /// The owners were told; nothing is archived by the policy.
+  Notified,
+  ArchiveOn(UnixMillis),
+  ArchivedByPolicy,
+  DeleteOn(UnixMillis),
+  KeptOpenUntil(UnixMillis),
+}
+
+/// What to tell the admin about a channel's inactivity state at `now`.
+fn inactivity_lines(status: &ChannelInactivityStatus, now: i64) -> Vec<InactivityLine> {
+  let mut lines = Vec::new();
+  if status.is_archived_by_policy {
+    lines.push(InactivityLine::ArchivedByPolicy);
+    lines.extend(status.maybe_delete_at.map(InactivityLine::DeleteOn));
+  } else if let Some(at) = status.maybe_archive_at {
+    lines.push(InactivityLine::ArchiveOn(at));
+  } else if status.maybe_notified_at.is_some() {
+    lines.push(InactivityLine::Notified);
+  }
+  lines.extend(
+    status
+      .maybe_snoozed_until
+      .filter(|until| until.0 > now)
+      .map(InactivityLine::KeptOpenUntil),
+  );
+  lines
+}
+
+/// What the inactivity policy has done or will do to the channel (issue #212): the owners were told,
+/// when it is archived and deleted, and that somebody kept it open.
+#[component]
+fn InactivityNote(current: Memo<AdminChannel>) -> impl IntoView {
+  let i18n = use_i18n();
+  let lines = move || {
+    let Some(status) = current.with(|channel| channel.maybe_inactivity.clone()) else {
+      return Vec::new();
+    };
+    let tag = i18n.locale().tag();
+    let date = |at: UnixMillis| format_date(at.0, tag);
+    inactivity_lines(&status, now_ms())
+      .into_iter()
+      .map(|line| match line {
+        InactivityLine::Notified => i18n.t("admin-inactivity-notified"),
+        InactivityLine::ArchiveOn(at) => i18n.t_with("admin-inactivity-archive-on", &[("date", &date(at))]),
+        InactivityLine::ArchivedByPolicy => i18n.t("admin-inactivity-archived"),
+        InactivityLine::DeleteOn(at) => i18n.t_with("admin-inactivity-delete-on", &[("date", &date(at))]),
+        InactivityLine::KeptOpenUntil(at) => {
+          i18n.t_with("admin-inactivity-kept-open", &[("date", &date(at))])
+        },
+      })
+      .collect::<Vec<_>>()
+  };
+  view! {
+    <For each=lines key=|line| line.clone() let:line>
+      <p class="muted-text small" role="status">{line}</p>
+    </For>
   }
 }
 
@@ -806,6 +893,50 @@ mod tests {
     assert!(denied.member_denied.is_empty());
     let allowed = with_allowed(denied, Who::Guests, Permission::CreatePost, true);
     assert!(allowed.guest_denied.is_empty());
+  }
+
+  #[test]
+  fn the_inactivity_note_says_what_is_coming_and_forgets_a_snooze_that_ended() {
+    let at = UnixMillis;
+    let quiet = ChannelInactivityStatus {
+      maybe_notified_at: Some(at(10)),
+      maybe_archive_at: Some(at(500)),
+      ..ChannelInactivityStatus::default()
+    };
+    assert_eq!(
+      inactivity_lines(&quiet, 100),
+      [InactivityLine::ArchiveOn(at(500))]
+    );
+    // Told, but the policy only notices: no date to name.
+    let notices_only = ChannelInactivityStatus {
+      maybe_archive_at: None,
+      ..quiet.clone()
+    };
+    assert_eq!(inactivity_lines(&notices_only, 100), [InactivityLine::Notified]);
+    // Kept open: shown while it lasts, not after.
+    let kept = ChannelInactivityStatus {
+      maybe_snoozed_until: Some(at(300)),
+      ..ChannelInactivityStatus::default()
+    };
+    assert_eq!(
+      inactivity_lines(&kept, 100),
+      [InactivityLine::KeptOpenUntil(at(300))]
+    );
+    assert!(inactivity_lines(&kept, 300).is_empty());
+    // Archived by the policy, with a deletion planned.
+    let archived = ChannelInactivityStatus {
+      is_archived_by_policy: true,
+      maybe_delete_at: Some(at(900)),
+      ..ChannelInactivityStatus::default()
+    };
+    assert_eq!(
+      inactivity_lines(&archived, 100),
+      [
+        InactivityLine::ArchivedByPolicy,
+        InactivityLine::DeleteOn(at(900))
+      ]
+    );
+    assert!(inactivity_lines(&ChannelInactivityStatus::default(), 100).is_empty());
   }
 
   #[test]

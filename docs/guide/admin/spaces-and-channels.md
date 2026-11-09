@@ -29,6 +29,8 @@ authenticate with a bearer token).
 | Permission scheme per instance and space       | Console (Permissions)               | `PUT /admin/permission-scheme`, `/admin/spaces/{id}/permission-scheme` |
 | Create space, channel, category; rename; topic | Client (channel and space settings) | `POST /spaces`, `/spaces/{id}/channels`, `PATCH /conversations/{id}`   |
 | Archive, unarchive                             | Client (channel settings)           | `PATCH /conversations/{id}` (`is_archived`)                            |
+| Archive, restore a space with its channels     | Console (Spaces)                    | `PATCH /spaces/{id}` (`is_archived`)                                   |
+| Keep a quiet channel open (snooze)             | Console (Channels)                  | `POST /conversations/{id}/inactivity/snooze`                           |
 | Make public / private                          | Client (channel settings)           | `PUT /conversations/{id}/visibility`                                   |
 | Flag as integration channel                    | API                                 | `PATCH /conversations/{id}` (`is_integration`)                         |
 | Add or remove members, change roles            | Client (members panel)              | `/spaces/{id}/members`, `/conversations/{id}/members`                  |
@@ -69,6 +71,13 @@ always *from join*. Set per channel with `PATCH /conversations/{id}` (`history_p
 ## Retention
 
 See [Security policy](security-policy.md#retention).
+
+## Quiet channels
+
+With the *Inactive channels* policy switched on (off by default), the owners of a channel without
+messages for a long time get a mail, and the channel is archived some days later unless somebody writes
+in it or an admin chooses *Keep open*. Archiving a space archives its open channels with it, and
+restoring the space restores exactly those. Details and limits: [docs/admin.md](../../admin.md) §3.1.3.
 
 ## Orphaned channels
 

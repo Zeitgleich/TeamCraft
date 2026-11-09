@@ -801,6 +801,35 @@ mod tests {
     for action in teamcraft_client_api::admin::AuditAction::ALL {
       keys.push(format!("audit-{}", action.slug()));
     }
+    // Inactive channels and idle guest accounts (issue #212).
+    for key in [
+      "policy-inactivity",
+      "policy-inactivity-hint",
+      "policy-inactivity-enable",
+      "policy-inactivity-enable-hint",
+      "policy-inactivity-notice",
+      "policy-inactivity-archive",
+      "policy-inactivity-archive-hint",
+      "policy-inactivity-notice-only",
+      "policy-inactivity-snooze",
+      "policy-inactivity-limit",
+      "policy-inactivity-limit-hint",
+      "policy-inactivity-delete",
+      "policy-inactivity-delete-never",
+      "policy-inactivity-delete-hint",
+      "policy-guest-deactivate",
+      "policy-guest-deactivate-never",
+      "policy-guest-deactivate-hint",
+      "admin-inactivity-notified",
+      "admin-inactivity-archive-on",
+      "admin-inactivity-archived",
+      "admin-inactivity-delete-on",
+      "admin-inactivity-kept-open",
+      "admin-inactivity-keep-open",
+      "admin-inactivity-postpone-delete",
+    ] {
+      keys.push(key.to_owned());
+    }
     for section in teamcraft_client_api::admin::AdminSection::ALL {
       keys.push(format!("admin-nav-{}", section.slug()));
     }

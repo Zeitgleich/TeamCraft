@@ -5,6 +5,10 @@
 //! and a write here stays out of the sync loop's group. There is no client and no MLS state on this
 //! thread: one core owns the store as before (e2ee.md §9.4), and the notification extension's path
 //! (§7.2) stays on the engine thread.
+//!
+//! There are two read threads, each on a read connection of its own (issue #1476): the open chat's
+//! queries ([`ReadQueue::query`]) don't wait behind the chat list, a snapshot or the share sheet's
+//! targets on the main one (issue #1583), and neither waits for the engine's groups of writes.
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
@@ -27,7 +31,7 @@ use teamcraft_core::pending_work::PendingWork;
 use teamcraft_core::prefetch::load_segment_prefetch;
 use teamcraft_core::push_guard;
 use teamcraft_core::push_preview::{device_push_content, push_content_mode};
-use teamcraft_core::store::read_together;
+use teamcraft_core::store::{read_together, write_group};
 use teamcraft_core::transfers::Transfers;
 use teamcraft_core::ui_backend::{CoreChatBackend, EntryNeed};
 use teamcraft_core::ui_snapshot::SnapshotCache;
@@ -59,12 +63,29 @@ pub(crate) type Dispatched = oneshot::Receiver<Result<(), TeamCraftError>>;
 /// Where a read's result goes.
 type Reply<R> = oneshot::Sender<Result<R, TeamCraftError>>;
 
-/// The read thread's queue. The thread ends once every handle on the queue is gone.
+/// The read threads' queues. The threads end once every handle on the queues is gone.
 #[derive(Clone)]
 pub(crate) struct ReadQueue {
   jobs: mpsc::Sender<ReadJob>,
+  /// The open chat's queries: a thread of their own (issue #1583).
+  query_jobs: mpsc::Sender<ReadJob>,
   /// The chat list's read, shared by everyone who asks while one waits to start (issue #1466).
   conversations: Arc<SharedRead<Vec<ConversationItem>>>,
+}
+
+/// The store as each read thread sees it ([`teamcraft_core::store::LaneStore`]).
+pub(crate) struct ReadLanes {
+  /// Everything but the open chat's queries.
+  pub(crate) main: Store,
+  /// The open chat's queries.
+  pub(crate) query: Store,
+}
+
+/// Which read thread runs a job.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lane {
+  Main,
+  Query,
 }
 
 /// What a read does when its caller is gone before it starts.
@@ -122,42 +143,22 @@ impl ReadAccount {
 
 impl ReadQueue {
   pub(crate) fn start(
-    store: Store,
+    lanes: ReadLanes,
     listener: Arc<dyn EventListener>,
     catch_up_focus: CatchUpFocus,
     engine: tokio_mpsc::WeakUnboundedSender<Job>,
   ) -> Result<Self, TeamCraftError> {
-    let (queue, jobs) = mpsc::channel::<ReadJob>();
-    std::thread::Builder::new()
-      .name("teamcraft-reads".into())
-      .stack_size(crate::engine::THREAD_STACK_BYTES)
-      .spawn(move || {
-        let mut reads = Reads {
-          store,
-          listener,
-          catch_up_focus,
-          engine,
-          maybe_account: None,
-          maybe_closing: None,
-        };
-        for job in jobs {
-          // The panic log names it (logging.rs), and the caller's answer is gone: the next read
-          // still works instead of every read of a dead thread failing.
-          let _ = std::panic::catch_unwind(AssertUnwindSafe(|| job(&mut reads)));
-          if reads.maybe_closing.is_some() {
-            break;
-          }
-        }
-        let maybe_closing = reads.maybe_closing.take();
-        drop(reads);
-        if let Some(closed) = maybe_closing {
-          // Whoever waits may be gone; the store is closed either way.
-          let _ = closed.send(());
-        }
-      })
-      .map_err(|error| TeamCraftError::Core(error.to_string()))?;
+    let jobs = spawn_lane(
+      "teamcraft-reads",
+      lanes.main,
+      listener.clone(),
+      catch_up_focus.clone(),
+      engine.clone(),
+    )?;
+    let query_jobs = spawn_lane("teamcraft-queries", lanes.query, listener, catch_up_focus, engine)?;
     Ok(Self {
-      jobs: queue,
+      jobs,
+      query_jobs,
       conversations: Arc::new(SharedRead::new()),
     })
   }
@@ -169,7 +170,18 @@ impl ReadQueue {
     R: Send + 'static,
     F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
   {
-    let answer = self.queue(WhenCallerGone::Skip, job)?;
+    let answer = self.queue(Lane::Main, WhenCallerGone::Skip, job)?;
+    answer.await.map_err(|_| TeamCraftError::EngineStopped)?
+  }
+
+  /// [`Self::read`] on the open chat's thread: what opening a chat or scrolling it reads, which
+  /// doesn't wait behind the other reads (issue #1583).
+  pub(crate) async fn query<R, F>(&self, job: F) -> Result<R, TeamCraftError>
+  where
+    R: Send + 'static,
+    F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
+  {
+    let answer = self.queue(Lane::Query, WhenCallerGone::Skip, job)?;
     answer.await.map_err(|_| TeamCraftError::EngineStopped)?
   }
 
@@ -188,8 +200,11 @@ impl ReadQueue {
     R: Send + 'static,
     F: FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
   {
-    let answer = self.queue(WhenCallerGone::Run, move |reads| {
-      let value = job(reads)?;
+    let answer = self.queue(Lane::Main, WhenCallerGone::Run, move |reads| {
+      // One group of writes: what the action reads comes from the writing connection and nothing
+      // else commits in between, so a change it makes to a record can't undo the engine's.
+      let store = reads.store.clone();
+      let value = write_group(&store, || job(reads))?;
       Ok((value, reads.dispatch()?))
     })?;
     let (value, dispatched) = answer.await.map_err(|_| TeamCraftError::EngineStopped)??;
@@ -201,20 +216,23 @@ impl ReadQueue {
   /// [`TeamCraftError::EngineStopped`].
   pub(crate) fn close(&self) {
     let (closed, is_closed) = mpsc::channel();
+    let query_closed = closed.clone();
     self.post(move |reads| reads.maybe_closing = Some(closed));
-    // An error here means the thread had ended already, which is what this waits for.
-    let _ = is_closed.recv();
+    self.post_to(Lane::Query, move |reads| reads.maybe_closing = Some(query_closed));
+    // Ends once both threads answered or ended: an error means every sender is gone, which is
+    // what this waits for.
+    while is_closed.recv().is_ok() {}
   }
 
   /// The account the store holds: from now on the app can read. A new account starts over.
   pub(crate) fn know_account(&self, user: UserId, identity_fingerprint: String) {
-    self.post(move |reads| {
+    self.post_all(move |reads| {
       let is_known = reads
         .maybe_account
         .as_ref()
         .is_some_and(|account| account.backend.me().id == user);
       if let (true, Some(account)) = (is_known, reads.maybe_account.as_mut()) {
-        account.identity_fingerprint = identity_fingerprint;
+        account.identity_fingerprint = identity_fingerprint.clone();
         return;
       }
       // The apps show no message count or last activity of the snapshot: their counts never read
@@ -224,7 +242,7 @@ impl ReadQueue {
       reads.maybe_account = Some(ReadAccount {
         backend,
         snapshots: SnapshotCache::new(u64::try_from(SystemClock.now_ms()).unwrap_or_default()),
-        identity_fingerprint,
+        identity_fingerprint: identity_fingerprint.clone(),
       });
     });
   }
@@ -232,10 +250,13 @@ impl ReadQueue {
   /// Typing and transfers come from the client once it is open, and from its successor when it is
   /// reopened; what the backend keeps stays.
   pub(crate) fn follow_client(&self, typing: TypingState, transfers: Transfers) {
-    self.post(move |reads| {
+    self.post_all(move |reads| {
       if let Some(account) = reads.maybe_account.take() {
         reads.maybe_account = Some(ReadAccount {
-          backend: account.backend.with_typing(typing).with_transfers(transfers),
+          backend: account
+            .backend
+            .with_typing(typing.clone())
+            .with_transfers(transfers.clone()),
           ..account
         });
       }
@@ -245,6 +266,7 @@ impl ReadQueue {
   /// Queues `job` and answers where its result will arrive; queued at once, before anyone awaits.
   fn queue<R, F>(
     &self,
+    lane: Lane,
     when_gone: WhenCallerGone,
     job: F,
   ) -> Result<oneshot::Receiver<Result<R, TeamCraftError>>, TeamCraftError>
@@ -268,7 +290,7 @@ impl ReadQueue {
       // The caller may have given up waiting meanwhile (cancelled coroutine); nothing to tell it.
       let _ = reply.send(result);
     });
-    self.send(boxed)?;
+    self.send_to(lane, boxed)?;
     Ok(answer)
   }
 
@@ -307,7 +329,7 @@ impl ReadQueue {
         let _ = caller.send(result.clone());
       }
     });
-    if let Err(error) = self.send(boxed) {
+    if let Err(error) = self.send_to(Lane::Main, boxed) {
       // The pass will never run: its callers (this one, and any that joined meanwhile) hear so.
       for caller in shared.start() {
         let _ = caller.send(Err(TeamCraftError::EngineStopped));
@@ -317,15 +339,74 @@ impl ReadQueue {
     Ok(answer)
   }
 
-  /// The store turned out unreadable: nothing reads it any more.
   fn post(&self, job: impl FnOnce(&mut Reads) + Send + 'static) {
-    // Refused only by a thread that ended, which has nobody left to tell.
-    let _ = self.jobs.send(Box::new(job));
+    self.post_to(Lane::Main, job);
   }
 
-  fn send(&self, job: ReadJob) -> Result<(), TeamCraftError> {
-    self.jobs.send(job).map_err(|_| TeamCraftError::EngineStopped)
+  fn post_to(&self, lane: Lane, job: impl FnOnce(&mut Reads) + Send + 'static) {
+    // Refused only by a thread that ended, which has nobody left to tell.
+    let _ = self.lane(lane).send(Box::new(job));
   }
+
+  /// Runs `job` on every read thread: what each keeps of the account.
+  fn post_all(&self, job: impl Fn(&mut Reads) + Clone + Send + 'static) {
+    self.post_to(Lane::Query, job.clone());
+    self.post_to(Lane::Main, job);
+  }
+
+  fn send_to(&self, lane: Lane, job: ReadJob) -> Result<(), TeamCraftError> {
+    self
+      .lane(lane)
+      .send(job)
+      .map_err(|_| TeamCraftError::EngineStopped)
+  }
+
+  fn lane(&self, lane: Lane) -> &mpsc::Sender<ReadJob> {
+    match lane {
+      Lane::Main => &self.jobs,
+      Lane::Query => &self.query_jobs,
+    }
+  }
+}
+
+/// Starts a read thread on `store` and answers its queue.
+fn spawn_lane(
+  name: &str,
+  store: Store,
+  listener: Arc<dyn EventListener>,
+  catch_up_focus: CatchUpFocus,
+  engine: tokio_mpsc::WeakUnboundedSender<Job>,
+) -> Result<mpsc::Sender<ReadJob>, TeamCraftError> {
+  let (queue, jobs) = mpsc::channel::<ReadJob>();
+  std::thread::Builder::new()
+    .name(name.into())
+    .stack_size(crate::engine::THREAD_STACK_BYTES)
+    .spawn(move || {
+      let mut reads = Reads {
+        store,
+        listener,
+        catch_up_focus,
+        engine,
+        maybe_account: None,
+        maybe_closing: None,
+      };
+      for job in jobs {
+        // The panic log names it (logging.rs), and the caller's answer is gone: the next read
+        // still works instead of every read of a dead thread failing.
+        let _ = std::panic::catch_unwind(AssertUnwindSafe(|| job(&mut reads)));
+        if reads.maybe_closing.is_some() {
+          break;
+        }
+      }
+      let maybe_closing = reads.maybe_closing.take();
+      drop(reads);
+      if let Some(closed) = maybe_closing {
+        // Whoever waits may be gone; the store is closed either way.
+        let _ = closed.send(());
+      }
+    })
+    .map_err(|error| TeamCraftError::Core(error.to_string()))?;
+  Ok(queue)
 }
 
 impl<R> SharedRead<R> {
@@ -790,7 +871,7 @@ mod tests {
   use std::sync::atomic::{AtomicUsize, Ordering};
 
   use teamcraft_client_api::model::{SystemEvent, id_from_raw};
-  use teamcraft_core::store::{SealedSqliteStore, StaticKeySource, TrackedStore};
+  use teamcraft_core::store::{LaneStore, SealedSqliteStore, StaticKeySource, TrackedStore};
   use teamcraft_crypto::secret::SymmetricKey;
 
   use super::*;
@@ -806,9 +887,13 @@ mod tests {
       let (queue, release) = held_queue();
       let since_ms = perf_jobs::now_ms();
       let floods: Vec<_> = (0..40)
-        .map(|_| queue.queue(WhenCallerGone::Run, chat_list_pass()).unwrap())
+        .map(|_| {
+          queue
+            .queue(Lane::Main, WhenCallerGone::Run, chat_list_pass())
+            .unwrap()
+        })
         .collect();
-      let open = queue.queue(WhenCallerGone::Run, open_chat()).unwrap();
+      let open = queue.queue(Lane::Main, WhenCallerGone::Run, open_chat()).unwrap();
 
       release.send(()).unwrap();
       open.await.unwrap().unwrap();
@@ -836,7 +921,11 @@ mod tests {
     async fn a_read_whose_caller_is_gone_is_skipped() {
       let (queue, release) = held_queue();
       let runs = Arc::new(AtomicUsize::new(0));
-      drop(queue.queue(WhenCallerGone::Skip, counting(&runs, ())).unwrap());
+      drop(
+        queue
+          .queue(Lane::Main, WhenCallerGone::Skip, counting(&runs, ()))
+          .unwrap(),
+      );
 
       release.send(()).unwrap();
       queue.read(|_| Ok(())).await.unwrap();
@@ -847,7 +936,11 @@ mod tests {
     async fn an_action_runs_when_its_caller_is_gone() {
       let (queue, release) = held_queue();
       let runs = Arc::new(AtomicUsize::new(0));
-      drop(queue.queue(WhenCallerGone::Run, counting(&runs, ())).unwrap());
+      drop(
+        queue
+          .queue(Lane::Main, WhenCallerGone::Run, counting(&runs, ()))
+          .unwrap(),
+      );
 
       release.send(()).unwrap();
       queue.read(|_| Ok(())).await.unwrap();
@@ -887,6 +980,105 @@ mod tests {
     }
   }
 
+  /// Issue #1583: each read thread on a read connection of its own.
+  mod lanes {
+    use teamcraft_core::store::{CommitJournal, LocalStore as _, SealedStoreLimits, Table};
+
+    use super::*;
+
+    /// A slow read on the main thread, which holds its snapshot, holds up neither the open chat's
+    /// query nor the engine's writes; the query sees the engine's commit.
+    #[tokio::test]
+    async fn a_slow_read_holds_up_neither_a_query_nor_a_write() {
+      let files = FileLanes::open();
+      let (started, has_started) = mpsc::channel();
+      let (release, released) = mpsc::channel::<()>();
+      let slow = files
+        .queue
+        .queue(Lane::Main, WhenCallerGone::Run, move |reads: &mut Reads| {
+          reads.store.get(Table::Users, "a")?;
+          started.send(()).map_err(|_| TeamCraftError::EngineStopped)?;
+          // Deliberately ignored: the test ends the wait either way.
+          let _ = released.recv();
+          Ok(())
+        })
+        .unwrap();
+      has_started.recv().unwrap();
+
+      // On one connection the engine would wait for the read's group to end.
+      files.engine.put(Table::Users, "a", b"new").unwrap();
+      let seen = files
+        .queue
+        .query(|reads| Ok(reads.store.get(Table::Users, "a")?))
+        .await
+        .unwrap();
+      assert_eq!(seen, Some(b"new".to_vec()));
+
+      release.send(()).unwrap();
+      slow.await.unwrap().unwrap();
+      files.finish();
+    }
+
+    /// The engine's store and read threads on a database file, as `Engine::open` makes them.
+    struct FileLanes {
+      engine: Store,
+      queue: ReadQueue,
+      directory: std::path::PathBuf,
+    }
+
+    impl FileLanes {
+      fn open() -> Self {
+        let directory = std::env::temp_dir().join(format!("teamcraft-read-lanes-{}", rand_suffix()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.db");
+        let key_source = StaticKeySource::new(SymmetricKey::from_bytes([7; 32]));
+        let journal = CommitJournal::new();
+        let writer = Arc::new(SealedSqliteStore::open(&path, &key_source).unwrap());
+        writer.publish_commits(Arc::clone(&journal));
+        let engine = TrackedStore::new(LaneStore::writer(Arc::clone(&writer)));
+        let lane = || {
+          let reader = SealedSqliteStore::open_reader(
+            &path,
+            &key_source,
+            SealedStoreLimits::default(),
+            Arc::clone(&journal),
+          )
+          .unwrap();
+          engine.sharing(LaneStore::reader(Arc::clone(&writer), Arc::new(reader)))
+        };
+        let (jobs, _) = tokio_mpsc::unbounded_channel::<Job>();
+        let queue = ReadQueue::start(
+          ReadLanes {
+            main: lane(),
+            query: lane(),
+          },
+          Arc::new(Quiet),
+          CatchUpFocus::default(),
+          jobs.downgrade(),
+        )
+        .unwrap();
+        Self {
+          engine,
+          queue,
+          directory,
+        }
+      }
+
+      fn finish(self) {
+        self.queue.close();
+        drop(self.engine);
+        std::fs::remove_dir_all(&self.directory).unwrap();
+      }
+    }
+
+    fn rand_suffix() -> u64 {
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_nanos()).unwrap_or_default())
+        .unwrap_or_default()
+    }
+  }
+
   #[test]
   fn a_preview_skips_the_system_lines_after_the_last_written_message() {
     let rows = [
@@ -923,10 +1115,15 @@ mod tests {
   /// A read queue whose thread waits until the sender is used: what is queued meanwhile waits.
   fn held_queue() -> (ReadQueue, mpsc::Sender<()>) {
     let key_source = StaticKeySource::new(SymmetricKey::from_bytes([7; 32]));
-    let store = TrackedStore::new(Arc::new(SealedSqliteStore::open_in_memory(&key_source).unwrap()));
+    let store = TrackedStore::new(LaneStore::writer(Arc::new(
+      SealedSqliteStore::open_in_memory(&key_source).unwrap(),
+    )));
     let (engine, _) = tokio_mpsc::unbounded_channel::<Job>();
     let queue = ReadQueue::start(
-      store,
+      ReadLanes {
+        main: store.clone(),
+        query: store,
+      },
       Arc::new(Quiet),
       CatchUpFocus::default(),
       engine.downgrade(),

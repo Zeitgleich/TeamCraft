@@ -1718,6 +1718,12 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
+  fn admin_snooze_channel(&self, channel: ConversationId) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.snooze_channel(channel);
+    }
+  }
+
   fn set_audit_filter(&self, filter: AuditFilter) {
     if let Some(admin) = &self.maybe_admin {
       admin.set_audit_filter(filter);

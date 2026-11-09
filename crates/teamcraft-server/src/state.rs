@@ -12,10 +12,10 @@ use teamcraft_proto::{
 
 use crate::brand::{Brand, BrandStore};
 use crate::config::{
-  BrandConfig, BrandingConfig, CalDavConfig, GatewayConfig, GuestsConfig, IntegrationConfig, LimitsConfig,
-  LocalAccountsConfig, MailConfig, MailTexts, NotificationsConfig, PolicyConfig, PresenceConfig,
-  RendezvousConfig, RetentionJobConfig, RoleNames, SecurityConfig, SharesConfig, SignInPageConfig,
-  SmtpConfig, WebConfig, WebhooksConfig,
+  BrandConfig, BrandingConfig, CalDavConfig, GatewayConfig, GuestsConfig, InactivityConfig,
+  IntegrationConfig, LimitsConfig, LocalAccountsConfig, MailConfig, MailTexts, NotificationsConfig,
+  PolicyConfig, PresenceConfig, RendezvousConfig, RetentionJobConfig, RoleNames, SecurityConfig,
+  SharesConfig, SignInPageConfig, SmtpConfig, WebConfig, WebhooksConfig,
 };
 use crate::error::ApiError;
 use crate::gateway::Hub;
@@ -121,6 +121,7 @@ pub struct Settings {
   pub web: WebConfig,
   pub security: SecurityConfig,
   pub guests: GuestsConfig,
+  pub inactivity: InactivityConfig,
   pub mail: MailConfig,
   pub local_accounts: LocalAccountsConfig,
   pub sign_in_page: SignInPageConfig,

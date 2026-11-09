@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE conversations c SET archived_at = $3, archive_origin = 'inactivity', inactivity_notified_at = NULL\n         WHERE c.id = $1 AND c.kind = 'channel' AND c.archived_at IS NULL AND c.deleted_at IS NULL\n           AND c.importer_user_id IS NULL\n           AND c.inactivity_notified_at = $2\n           AND (c.inactivity_snoozed_until IS NULL OR c.inactivity_snoozed_until <= $3)\n           AND NOT EXISTS (SELECT 1 FROM messages m\n                            WHERE m.conversation_id = c.id AND m.id >= tc_snowflake_floor($2))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "940f64e4b8e5dca3f140dc3fd52ee1848351d3f8e1df7bb37524c89dd0924039"
+}

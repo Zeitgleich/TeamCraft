@@ -47,6 +47,7 @@ use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{Base64Bytes, ClientMessageId, ConversationId, MessageId, ThreadId};
 use zeroize::Zeroizing;
 
+use super::commit_journal::{CommitJournal, CommitStamp, Replay, WriteSet};
 use super::lru::Lru;
 use super::sealed_catalog::{
   CATALOG_TABLE, CATALOG_VERSION, CatalogState, DIRECTORY_KIND, FEED_KIND, FEED_VERSION_KIND, MESSAGES_KIND,
@@ -138,6 +139,21 @@ struct State<B> {
   /// ([`SealedStore::open_backend_without_building`]). A pointer set only where the store is opened
   /// to build, so the service worker's bundle doesn't carry the build.
   maybe_rebuild: Option<Rebuild<B>>,
+  /// How this store takes part in a [`CommitJournal`], if it does.
+  maybe_journal: Option<(Arc<CommitJournal>, JournalRole)>,
+  /// What the open group of writes changed, while this store publishes its commits.
+  maybe_written: Option<WriteSet>,
+  /// The number of the last commit this store made, or found when its last group began.
+  last_commit: u64,
+}
+
+/// A sealed store's part in a [`CommitJournal`] (issue #1476).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JournalRole {
+  /// The app's writing connection: stages what each group of writes changed.
+  Publishes,
+  /// A reading connection: drops what the commits since `seen` changed.
+  Follows { seen: u64 },
 }
 
 /// See [`State::maybe_rebuild`].
@@ -211,6 +227,15 @@ pub trait RecordBackend {
   /// [`LocalStore::write_tally`] for the records. `None`: the backend keeps every write it took
   /// and has no other writer.
   fn write_tally(&self) -> Option<WriteTally> {
+    None
+  }
+  /// Numbers the commit of the outermost group of writes, which is about to end
+  /// ([`CommitJournal`]). `None`: the group won't commit, or the backend numbers no commits.
+  fn stage_commit(&self) -> Option<CommitStamp> {
+    None
+  }
+  /// The number of the last commit as this connection sees it (its snapshot, inside a read).
+  fn commit_stamp(&self) -> Option<CommitStamp> {
     None
   }
 }
@@ -397,6 +422,9 @@ impl<B: RecordBackend> SealedStore<B> {
         is_catalog_damaged: false,
         is_building: false,
         maybe_rebuild: None,
+        maybe_journal: None,
+        maybe_written: None,
+        last_commit: 0,
       }),
       group_ended: Condvar::new(),
       entries: Mutex::default(),
@@ -406,6 +434,59 @@ impl<B: RecordBackend> SealedStore<B> {
   #[cfg(any(target_arch = "wasm32", all(test, feature = "sealed-sqlite")))]
   pub(crate) fn backend(&self) -> &B {
     &self.backend
+  }
+
+  /// Stages what each group of writes changes in `journal`, for this database's reading
+  /// connections ([`Self::follow_commits`]). The app's writing connection; one per journal.
+  pub fn publish_commits(&self, journal: Arc<CommitJournal>) {
+    let mut state = self.lock();
+    if let Some(stamp) = self.backend.commit_stamp() {
+      state.last_commit = stamp.sequence;
+    }
+    state.maybe_journal = Some((journal, JournalRole::Publishes));
+  }
+
+  /// Follows the commits `journal` stages: another connection's commit drops only what it changed
+  /// from this store's caches, and a commit the journal doesn't know drops everything. For a
+  /// connection that only reads.
+  pub fn follow_commits(&self, journal: Arc<CommitJournal>) {
+    let mut state = self.lock();
+    let seen = self.backend.commit_stamp().map_or(0, |stamp| stamp.sequence);
+    state.maybe_journal = Some((journal, JournalRole::Follows { seen }));
+    state.last_commit = seen;
+  }
+
+  /// A reader catches up with the writer: inside a group of reads it takes a new snapshot, and
+  /// either way its caches follow the commits since the last look. What this thread wrote through
+  /// the writer is seen from here on.
+  pub fn renew_reads(&self) {
+    let mut state = self.lock();
+    if state.depth == 0 && state.read_depth > 0 {
+      self.backend.end_read();
+      if let Err(error) = self.backend.begin_read() {
+        // The next read begins one by itself and reports a broken connection.
+        tracing::warn!(%error, "could not take a new snapshot of the local store");
+      }
+    }
+    if state.depth == 0 {
+      self.follow_disk(&mut state);
+    }
+  }
+
+  /// Numbers the commit of the group that ends and stages what it changed, if this store publishes
+  /// its commits.
+  /// Every commit is numbered, also of a store that publishes nothing (the notification
+  /// extension): a reader must tell that something it wasn't told of was committed.
+  fn stage_commit(&self, state: &mut State<B>) -> Option<(Arc<CommitJournal>, CommitStamp)> {
+    let maybe_written = state.maybe_written.take();
+    let stamp = self.backend.stage_commit()?;
+    let (Some(written), Some((journal, JournalRole::Publishes))) = (maybe_written, &state.maybe_journal)
+    else {
+      return None;
+    };
+    let journal = Arc::clone(journal);
+    journal.stage(stamp, written);
+    Some((journal, stamp))
   }
 
   /// Builds the catalog of a store written before it, or before what this version's catalog holds,
@@ -532,6 +613,7 @@ impl<B: RecordBackend> SealedStore<B> {
     let (opened_before, skipped_before) = (build.opened, build.skipped);
     let (mut opened, mut skipped) = (opened_before, skipped_before);
     self.grouped(|state| {
+      state.note_everything();
       (opened, skipped) = (opened_before, skipped_before);
       for (id, sealed) in &batch {
         match self.open_record(id, sealed) {
@@ -567,7 +649,10 @@ impl<B: RecordBackend> SealedStore<B> {
       generation: build.generation,
       version: CATALOG_VERSION,
     };
-    self.grouped(|_| self.write_named(CATALOG_TABLE, META_KEY, &encode(&complete)?))?;
+    self.grouped(|state| {
+      state.note_everything();
+      self.write_named(CATALOG_TABLE, META_KEY, &encode(&complete)?)
+    })?;
     self.lock().set_catalog(Some(complete));
     if build.batches > 0 {
       tracing::info!(
@@ -709,6 +794,9 @@ impl<B: RecordBackend> SealedStore<B> {
     let counts = [version.generation, version.reshaped, version.edited];
     self.write_named(CATALOG_TABLE, &key, &encode_node(&counts)?)?;
     state.feed_versions.insert(conversation, version);
+    if let Some(written) = state.maybe_written.as_mut() {
+      written.conversations.insert(conversation);
+    }
     Ok(())
   }
 
@@ -810,10 +898,41 @@ impl<B: RecordBackend> SealedStore<B> {
   /// or a group of writes rolled back). Not inside a group: its own changes must stay, and nobody
   /// else commits while it holds the write lock.
   fn follow_disk(&self, state: &mut State<B>) {
+    if let Some((journal, JournalRole::Follows { seen })) = &state.maybe_journal
+      && let Some(now) = self.backend.commit_stamp()
+    {
+      let (journal, seen) = (Arc::clone(journal), *seen);
+      state.maybe_journal = Some((Arc::clone(&journal), JournalRole::Follows { seen: now.sequence }));
+      // A reader commits nothing: only the numbered commits tell what moved, the data version adds
+      // nothing to them (and may run ahead of the snapshot).
+      state.maybe_tally = self.backend.write_tally();
+      match journal.replay(seen, now) {
+        Replay::Unchanged => {},
+        Replay::Sets(sets) => {
+          if sets.iter().any(|written| state.forget(written)) {
+            self.follow_catalog(state);
+          }
+        },
+        Replay::Unknown => {
+          state.forget_all();
+          self.follow_catalog(state);
+        },
+      }
+      return;
+    }
     let maybe_tally = self.backend.write_tally();
     if maybe_tally != state.maybe_tally {
       state.forget_all();
       state.maybe_tally = maybe_tally;
+    }
+  }
+
+  /// A reading connection reads the catalog's state again: the writer built or started it over.
+  fn follow_catalog(&self, state: &mut State<B>) {
+    match self.read_catalog_state() {
+      Ok(maybe_catalog) => state.set_catalog(maybe_catalog),
+      // The next read that needs it reports it; the old state's nodes are gone from the cache.
+      Err(error) => tracing::warn!(%error, "could not read the local store's catalog state"),
     }
   }
 
@@ -1245,6 +1364,12 @@ impl<B: RecordBackend> SealedStore<B> {
 
   /// Writes the catalog nodes the ending group changed.
   fn flush_catalog(&self, state: &mut State<B>) -> Result<(), StoreError> {
+    if let Some(written) = state.maybe_written.as_mut() {
+      written.scopes[0].extend(state.message_nodes.dirty_scopes());
+      written.scopes[1].extend(state.directory_nodes.dirty_scopes());
+      written.scopes[2].extend(state.feed_nodes.dirty_scopes());
+      written.scopes[3].extend(state.relation_nodes.dirty_scopes());
+    }
     let changes = state
       .message_nodes
       .take_dirty()?
@@ -1316,6 +1441,7 @@ impl<B: RecordBackend> SealedStore<B> {
     state
       .messages
       .remove(&(conversation, *message.client_message_id.as_bytes()));
+    state.note_message(conversation, message.client_message_id);
     state.bump(conversation);
     Ok(())
   }
@@ -1377,6 +1503,65 @@ impl<B> State<B> {
   fn bump(&mut self, conversation: ConversationId) {
     let writes = self.revisions.entry(conversation).or_default();
     *writes = writes.wrapping_add(1);
+    if let Some(written) = self.maybe_written.as_mut() {
+      written.conversations.insert(conversation);
+    }
+  }
+
+  fn note_value(&mut self, table: Table, key: &str) {
+    if let Some(written) = self.maybe_written.as_mut() {
+      written.values.insert((table, key.to_string()));
+    }
+  }
+
+  fn note_message(&mut self, conversation: ConversationId, client_message_id: ClientMessageId) {
+    if let Some(written) = self.maybe_written.as_mut() {
+      written
+        .messages
+        .insert((conversation, *client_message_id.as_bytes()));
+    }
+  }
+
+  fn note_everything(&mut self) {
+    if let Some(written) = self.maybe_written.as_mut() {
+      written.is_everything = true;
+    }
+  }
+
+  /// Drops what another connection's commit changed ([`CommitJournal`]); whether the catalog itself
+  /// changed, so its state is read again.
+  fn forget(&mut self, written: &WriteSet) -> bool {
+    if written.is_everything {
+      self.forget_all();
+      return true;
+    }
+    for key in &written.values {
+      self.values.remove(key);
+    }
+    for key in &written.messages {
+      self.messages.remove(key);
+    }
+    if !written.wiped.is_empty() {
+      self.messages.retain(|(held, _)| !written.wiped.contains(held));
+    }
+    for conversation in written.conversations.iter().chain(&written.wiped) {
+      let writes = self.revisions.entry(*conversation).or_default();
+      *writes = writes.wrapping_add(1);
+      self.feed_versions.remove(conversation);
+    }
+    for scope in &written.scopes[0] {
+      self.message_nodes.forget_scope(scope);
+    }
+    for scope in &written.scopes[1] {
+      self.directory_nodes.forget_scope(scope);
+    }
+    for scope in &written.scopes[2] {
+      self.feed_nodes.forget_scope(scope);
+    }
+    for scope in &written.scopes[3] {
+      self.relation_nodes.forget_scope(scope);
+    }
+    false
   }
 }
 
@@ -1397,6 +1582,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
         Some(Zeroizing::new(value.to_vec())),
         weight,
       );
+      state.note_value(table, key);
       Ok(())
     })?;
     self.note_entry_write(table, key, false);
@@ -1408,6 +1594,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       state
         .values
         .insert((table, key.to_string()), None, entry_weight(key, 0));
+      state.note_value(table, key);
       self.backend.delete_record(&self.entry_id(table.name(), key))?;
       self.directory(state, table, |nodes| {
         sealed_index::remove(nodes, &key.to_string()).map(|_| ())
@@ -1468,6 +1655,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
         message.clone(),
         message.footprint_bytes(),
       );
+      state.note_message(conversation, message.client_message_id);
       state.bump(conversation);
       Ok(())
     })
@@ -1770,6 +1958,9 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       self.sweep_messages(state, conversation)?;
       self.note_feed_change(state, conversation, FeedChange::Reshaped)?;
       state.messages.retain(|(held, _)| *held != conversation);
+      if let Some(written) = state.maybe_written.as_mut() {
+        written.wiped.insert(conversation);
+      }
       state.bump(conversation);
       Ok(())
     })
@@ -1783,9 +1974,12 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     self.grouped(
       |state| match self.earlier_message(state, conversation, client_message_id)? {
         Some(message) => self.remove_message(state, &message),
-        None => self
-          .backend
-          .delete_record(&self.message_id(conversation, client_message_id)),
+        None => {
+          state.note_message(conversation, client_message_id);
+          self
+            .backend
+            .delete_record(&self.message_id(conversation, client_message_id))
+        },
       },
     )
   }
@@ -1802,6 +1996,22 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
 
   fn is_awaited(&self) -> bool {
     self.lock().awaiting > 0
+  }
+
+  fn snapshot_commit(&self) -> Option<u64> {
+    match self.lock().maybe_journal {
+      Some((_, JournalRole::Follows { seen })) => Some(seen),
+      _ => None,
+    }
+  }
+
+  fn last_commit(&self) -> Option<u64> {
+    let state = self.lock();
+    matches!(state.maybe_journal, Some((_, JournalRole::Publishes))).then_some(state.last_commit)
+  }
+
+  fn renew_snapshot(&self) {
+    self.renew_reads();
   }
 
   fn begin_reads(&self) -> Result<(), StoreError> {
@@ -1839,6 +2049,12 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       self.follow_disk(&mut state);
       state.maybe_group_owner = Some(thread::current().id());
       state.maybe_group_started = Mark::now();
+      if matches!(state.maybe_journal, Some((_, JournalRole::Publishes))) {
+        if let Some(stamp) = self.backend.commit_stamp() {
+          state.last_commit = stamp.sequence;
+        }
+        state.maybe_written = Some(WriteSet::default());
+      }
     }
     state.depth += 1;
     drop(state);
@@ -1872,7 +2088,19 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
         },
       }
     }
+    let maybe_staged = if state.depth == 0 {
+      self.stage_commit(&mut state)
+    } else {
+      None
+    };
     let ended = self.backend.end_writes();
+    if let Some((journal, stamp)) = maybe_staged {
+      if ended.is_err() || maybe_panic.is_some() {
+        journal.withdraw(stamp.sequence);
+      } else {
+        state.last_commit = stamp.sequence;
+      }
+    }
     if state.depth == 0
       && let Some(started) = state.maybe_group_started.take()
     {

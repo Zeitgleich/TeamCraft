@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT kind, visibility, archived_at IS NOT NULL AS \"is_archived!\", importer_user_id,\n              imported_through_message_id, deleted_at IS NOT NULL AS \"is_deleted!\"\n       FROM conversations WHERE id = $1",
+  "query": "SELECT kind, visibility, archived_at IS NOT NULL AS \"is_archived!\", importer_user_id,\n              COALESCE(archive_origin = 'inactivity', false) AS \"is_archived_by_policy!\",\n              imported_through_message_id, deleted_at IS NOT NULL AS \"is_deleted!\"\n       FROM conversations WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -44,6 +44,12 @@
       },
       {
         "ordinal": 4,
+        "name": "is_archived_by_policy!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
         "name": "imported_through_message_id",
         "type_info": "Int8",
         "origin": {
@@ -54,7 +60,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "is_deleted!",
         "type_info": "Bool",
         "origin": "Expression"
@@ -70,9 +76,10 @@
       false,
       null,
       true,
+      null,
       true,
       null
     ]
   },
-  "hash": "de584c61a8cfbd351494c376aa89486fa48d02c1506870c8158ab1b55f016659"
+  "hash": "b6dbb92f0e18e09fa9698888ebd1045fe455afdb7f75653ae1dfececf40c2e8f"
 }
