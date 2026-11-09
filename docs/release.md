@@ -167,7 +167,9 @@ GitHub starts scheduled runs several hours late, so the release usually lands be
 | Situation                                                       | Result                                                                                |
 |-----------------------------------------------------------------|---------------------------------------------------------------------------------------|
 | No commit since the last release tag, or only docs / Markdown   | nothing (notice in the run)                                                           |
-| CI of `main` is not green for the newest code change           | run fails, nothing tagged; fix `main`, then run the workflow again                    |
+| CI of `main` for the newest code change is queued or running   | run waits for it (at most 90 min), then goes on; red or not done in time: run fails   |
+| No CI run covers the newest code change (auto-merged PRs)      | run starts CI on `main` and waits for it                                              |
+| CI of `main` is red for the newest code change                 | run fails, nothing tagged; fix `main`, then run the workflow again                    |
 | The last tag has no published release                           | run fails: re-run it (`gh workflow run release.yml --ref vX.Y.Z -f publish=true`)    |
 | Tree version equals the last tag                                | patch bump commit on `main` (`scripts/bump-version.sh`), tag, release `X.Y.(Z+1)`      |
 | A pull request raised the tree's version above the last tag     | the tree is released as it is (minor / major releases: bump in a pull request)         |
@@ -177,9 +179,11 @@ The bump commit (`Release X.Y.Z`, signed off by `github-actions[bot]`) is pushed
 and carries no skip marker. `main` requires the `ci-gate` check (repository ruleset; see AGENTS.md,
 "Merging"), and GitHub Actions can't be exempted from a repository ruleset, so the run pushes the
 commit to a helper branch `nightly/bump-X.Y.Z`, marks its `ci-gate` as passed (the bump only changes
-version numbers of a tree whose CI was green), pushes it to `main` and deletes the helper branch. Waiting for CI takes minutes, so `main` may have moved
-by then and the push is rejected; the run then bumps again on the new `main` (up to five times) and lists
-the commits that came after the checked CI run. The annotated tag's message is the highlights
+version numbers of a tree whose CI was green), pushes it to `main` and deletes the helper branch. The release is what was on `main` when the run
+started: the bump commit on that tree is the tagged one. Waiting for CI takes minutes, so `main` may have
+moved by then and the push is rejected; the run then puts the same bump on top of the new `main` (up to
+five times) and lists the commits merged meanwhile. They stay out of this release (the tag remains on the
+checked tree, which then isn't on `main` itself) and go into the next one. The annotated tag's message is the highlights
 (`scripts/nightly-notes.py`): the title of every merged pull request (newest first, at most 15, then
 "and N more"; `security` and `breaking` ones first), and the `breaking` ones again under
 `### Breaking`. Write pull request titles for readers; `skip-release-notes` leaves one out. Labels
