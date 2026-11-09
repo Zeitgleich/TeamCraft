@@ -55,6 +55,9 @@ pub struct Config {
   pub security: SecurityConfig,
   #[serde(default)]
   pub guests: GuestsConfig,
+  /// Mails of the inactive-channel policy; the policy itself is signed and off by default.
+  #[serde(default)]
+  pub inactivity: InactivityConfig,
   #[serde(default)]
   pub mail: MailConfig,
   #[serde(default)]
@@ -623,6 +626,8 @@ pub struct GuestsConfig {
   /// About one guest.
   pub notice_body_sponsor_one: String,
   pub notice_body_sponsor: String,
+  /// Most idle local guest accounts one run deactivates, when the signed policy has a period for it.
+  pub max_deactivations_per_run: u32,
 }
 
 impl Default for GuestsConfig {
@@ -640,6 +645,42 @@ impl Default for GuestsConfig {
         .to_owned(),
       notice_subject_sponsor: "Guest access you are responsible for ends soon".to_owned(),
       notice_body_sponsor: "The access of {count} guests you are responsible for ends soon. Open the app to extend it or let it end.\n\n{url}\n"
+        .to_owned(),
+      max_deactivations_per_run: 50,
+    }
+  }
+}
+
+/// Inactive channels (PLAN.md §12, issue #212). What is noticed, archived and deleted, and when, is
+/// the signed workspace policy (`inactivity`), off by default; this holds how often the job runs and
+/// what the mails to the channels' owners say.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct InactivityConfig {
+  /// How often the job looks for quiet channels. Nothing happens while the policy is off.
+  pub check_interval_secs: u64,
+  /// Mail to the owners of a channel that has been quiet; `{days}` (until it is archived) and `{url}`
+  /// are filled in. It names no channel.
+  pub notice_subject: String,
+  pub notice_body: String,
+  /// The same for a policy that only notices and never archives.
+  pub notice_body_no_archive: String,
+  /// Mail to the owners of an archived channel that will be deleted; `{days}` and `{url}`.
+  pub delete_notice_subject: String,
+  pub delete_notice_body: String,
+}
+
+impl Default for InactivityConfig {
+  fn default() -> Self {
+    Self {
+      check_interval_secs: 3600,
+      notice_subject: "A channel you manage has gone quiet".to_owned(),
+      notice_body: "A channel you manage has had no new messages for a long time. It will be archived in {days} days unless somebody writes in it or an admin keeps it open. Archived channels stay readable and an admin can restore them.\n\n{url}\n"
+        .to_owned(),
+      notice_body_no_archive: "A channel you manage has had no new messages for a long time. Nothing happens to it automatically; you may want to archive it.\n\n{url}\n"
+        .to_owned(),
+      delete_notice_subject: "An archived channel you manage will be deleted".to_owned(),
+      delete_notice_body: "An archived channel you manage will be deleted with all its messages in {days} days. An admin can still keep it by restoring it or snoozing the deletion.\n\n{url}\n"
         .to_owned(),
     }
   }

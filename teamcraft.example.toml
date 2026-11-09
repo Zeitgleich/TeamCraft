@@ -395,6 +395,22 @@ notice_subject_sponsor = "Guest access you are responsible for ends soon"
 notice_body_sponsor_one = "The access of a guest you are responsible for ends soon. Open the app to extend it or let it end.\n\n{url}\n"
 notice_body_sponsor = "The access of {count} guests you are responsible for ends soon. Open the app to extend it or let it end.\n\n{url}\n"
 
+# Most idle local guest accounts one run deactivates, when the workspace policy
+# (guests.deactivate_accounts_after_days) has a period for it. Off by default.
+# max_deactivations_per_run = 50
+
+# Inactive channels. Whether anything happens, after how many days, and whether archived channels are
+# deleted later is the workspace policy (admin console, security: inactive channels); it is off by
+# default. Here: how often the job runs and the mails to the channels' owners. They name no channel.
+# {days} and {url} are filled in.
+[inactivity]
+check_interval_secs = 3600
+notice_subject = "A channel you manage has gone quiet"
+notice_body = "A channel you manage has had no new messages for a long time. It will be archived in {days} days unless somebody writes in it or an admin keeps it open. Archived channels stay readable and an admin can restore them.\n\n{url}\n"
+notice_body_no_archive = "A channel you manage has had no new messages for a long time. Nothing happens to it automatically; you may want to archive it.\n\n{url}\n"
+delete_notice_subject = "An archived channel you manage will be deleted"
+delete_notice_body = "An archived channel you manage will be deleted with all its messages in {days} days. An admin can still keep it by restoring it or snoozing the deletion.\n\n{url}\n"
+
 # Request limits and response hardening of the API.
 [security]
 # Largest request body; bigger ones get 413 (ciphertext and MLS payloads have smaller limits in [limits]).

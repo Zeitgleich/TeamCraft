@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE conversations SET inactivity_snoozed_until = $2, inactivity_notified_at = NULL\n         WHERE id = $1 AND deleted_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "95db6c1f7c1cd6e0a75874ea651d7bf16b99089187bf19129e8506a87a6524fb"
+}
