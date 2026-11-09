@@ -51,7 +51,7 @@ extension Presence {
   /// The presence dot's fill.
   var color: Color {
     switch self {
-    case .online: return .green
+    case .online: return Theme.presence
     case .busy, .doNotDisturb: return .red
     case .beRightBack, .away: return .orange
     case .offline: return Self.offlineColor
