@@ -503,6 +503,8 @@ struct Conversation {
   messages: Vec<MessageResponse>,
   favorites: HashMap<UserId, bool>,
   read_positions: HashMap<UserId, MessageId>,
+  /// How far a device of each member stored the messages (delivered ticks, issue #598).
+  delivered_positions: HashMap<UserId, MessageId>,
   /// The reactions to their own messages each member saw.
   reactions_seen: HashMap<UserId, teamcraft_proto::ReactionsSeen>,
   /// How far each member read each thread.
@@ -799,6 +801,15 @@ impl FakeServer {
       .conversations
       .get(&conversation)
       .and_then(|entry| entry.read_positions.get(&user).copied())
+  }
+
+  /// How far a device of the user stored the conversation, as the server stores it.
+  pub fn delivered_position(&self, conversation: ConversationId, user: UserId) -> Option<MessageId> {
+    self
+      .lock()
+      .conversations
+      .get(&conversation)
+      .and_then(|entry| entry.delivered_positions.get(&user).copied())
   }
 
   /// How many gateway connections were opened so far.
@@ -5067,9 +5078,15 @@ impl ServerApi for FakeServerApi {
       } else {
         Vec::new()
       };
+      let maybe_delivered_up_to = if has_receipts {
+        state.delivered_to_others(conversation, me)
+      } else {
+        None
+      };
       Ok(teamcraft_proto::ReadReceiptsResponse {
         conversation_id: conversation,
         receipts,
+        maybe_delivered_up_to,
       })
     })
   }
@@ -6504,6 +6521,10 @@ impl GatewayConnection for FakeGateway {
           .or_default()
           .push(activity.clone());
       },
+      GatewayClientMessage::Delivered {
+        conversation_id,
+        message_id,
+      } => state.note_delivered(*conversation_id, self.user, *message_id),
       GatewayClientMessage::Attention { .. } | GatewayClientMessage::Unknown => {},
     }
     Ok(())
@@ -7069,6 +7090,7 @@ impl State {
         messages: Vec::new(),
         favorites: HashMap::new(),
         read_positions: HashMap::new(),
+        delivered_positions: HashMap::new(),
         reactions_seen: HashMap::new(),
         thread_read_positions: HashMap::new(),
         pinned: HashSet::new(),
@@ -7197,6 +7219,79 @@ impl State {
       .get(&conversation)
       .map(|entry| entry.members.keys().copied().collect())
       .unwrap_or_default()
+  }
+
+  /// Like the server: a member's position moves forward, and the others whose aggregate moved hear
+  /// of it. Only DMs and group DMs, only for members who share delivery.
+  fn note_delivered(&mut self, conversation: ConversationId, user: UserId, message: MessageId) {
+    let Some(entry) = self.conversations.get(&conversation) else {
+      return;
+    };
+    if !entry.members.contains_key(&user)
+      || !matches!(
+        entry.response.kind,
+        ConversationKind::Dm | ConversationKind::Group
+      )
+      || !self.shares_delivery(user)
+      || entry
+        .delivered_positions
+        .get(&user)
+        .is_some_and(|known| *known >= message)
+    {
+      return;
+    }
+    let viewers: Vec<UserId> = entry
+      .members
+      .keys()
+      .copied()
+      .filter(|member| *member != user)
+      .collect();
+    let before: Vec<Option<MessageId>> = viewers
+      .iter()
+      .map(|viewer| self.delivered_to_others(conversation, *viewer))
+      .collect();
+    if let Some(entry) = self.conversations.get_mut(&conversation) {
+      entry.delivered_positions.insert(user, message);
+    }
+    for (viewer, maybe_before) in viewers.into_iter().zip(before) {
+      let maybe_now = self.delivered_to_others(conversation, viewer);
+      if let Some(message_id) = maybe_now
+        && maybe_now != maybe_before
+      {
+        self.publish(
+          [viewer],
+          &GatewayEvent::DeliveryUpdate {
+            conversation_id: conversation,
+            message_id,
+          },
+        );
+      }
+    }
+  }
+
+  /// The newest message all members but `viewer` stored, while all of them share delivery.
+  fn delivered_to_others(&self, conversation: ConversationId, viewer: UserId) -> Option<MessageId> {
+    let entry = self.conversations.get(&conversation)?;
+    if !self.shares_delivery(viewer) {
+      return None;
+    }
+    let mut lowest = None;
+    for member in entry.members.keys().filter(|member| **member != viewer) {
+      if !self.shares_delivery(*member) {
+        return None;
+      }
+      let delivered = *entry.delivered_positions.get(member)?;
+      lowest = Some(lowest.map_or(delivered, |lowest: MessageId| lowest.min(delivered)));
+    }
+    lowest
+  }
+
+  fn shares_delivery(&self, user: UserId) -> bool {
+    self
+      .notification_settings
+      .get(&user)
+      .and_then(|settings| settings.maybe_send_delivery_receipts)
+      .unwrap_or(true)
   }
 
   fn publish(&mut self, users: impl IntoIterator<Item = UserId>, event: &GatewayEvent) {
@@ -7613,6 +7708,7 @@ fn default_notification_settings() -> NotificationSettings {
     maybe_default_level: None,
     maybe_meeting_reminder_minutes: None,
     maybe_notifies_meeting_start: None,
+    maybe_send_delivery_receipts: None,
   }
 }
 

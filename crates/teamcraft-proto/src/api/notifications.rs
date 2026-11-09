@@ -242,6 +242,16 @@ pub struct NotificationSettings {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_notifies_meeting_start: Option<bool>,
+  /// Tell others in DMs and group DMs which messages reached one of the user's devices (delivered
+  /// ticks, issue #598). Reciprocal like `send_read_receipts`. Reads: whether it is in effect (the
+  /// user's choice or the instance default); servers from before the setting send nothing. Writes:
+  /// absent keeps the stored choice.
+  #[serde(
+    rename = "send_delivery_receipts",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_send_delivery_receipts: Option<bool>,
 }
 
 /// The reminder before a meeting for somebody who never chose (minutes before the start).
@@ -324,6 +334,11 @@ pub struct ReadReceipt {
 pub struct ReadReceiptsResponse {
   pub conversation_id: ConversationId,
   pub receipts: Vec<ReadReceipt>,
+  /// The newest message that reached a device of every other member (delivered ticks, issue #598):
+  /// one aggregate, not per member. Absent when the caller or another member doesn't share delivery,
+  /// when no device of some member reported one yet, and from servers before the feature.
+  #[serde(rename = "delivered_up_to", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_delivered_up_to: Option<MessageId>,
 }
 
 /// Somebody acknowledged an urgent message.
@@ -545,6 +560,7 @@ mod tests {
       maybe_default_level: None,
       maybe_meeting_reminder_minutes: None,
       maybe_notifies_meeting_start: None,
+      maybe_send_delivery_receipts: None,
     };
     assert_eq!(
       serde_json::to_string(&settings).unwrap(),
@@ -553,7 +569,7 @@ mod tests {
     let with_levels = NotificationSettings {
       maybe_level: Some(NotificationLevel::Mentions),
       maybe_default_level: Some(NotificationLevel::All),
-      ..settings
+      ..settings.clone()
     };
     assert_eq!(
       serde_json::to_string(&with_levels).unwrap(),
@@ -561,5 +577,37 @@ mod tests {
     );
     let unknown: PushMode = serde_json::from_str("\"sometimes\"").unwrap();
     assert_eq!(unknown, PushMode::Unknown("sometimes".into()));
+    let with_delivery = NotificationSettings {
+      maybe_send_delivery_receipts: Some(false),
+      ..settings
+    };
+    assert_eq!(
+      serde_json::to_string(&with_delivery).unwrap(),
+      r#"{"auto_follow_mentioned_threads":true,"push_mode":"away_only","send_read_receipts":false,"send_delivery_receipts":false}"#
+    );
+  }
+
+  #[test]
+  fn read_receipts_carry_the_delivered_aggregate_only_when_known() {
+    let response = ReadReceiptsResponse {
+      conversation_id: ConversationId::from_snowflake(Snowflake::new(7).unwrap()),
+      receipts: Vec::new(),
+      maybe_delivered_up_to: None,
+    };
+    let json = r#"{"conversation_id":"7","receipts":[]}"#;
+    assert_eq!(serde_json::to_string(&response).unwrap(), json);
+    // Servers before delivered ticks send no aggregate.
+    assert_eq!(
+      serde_json::from_str::<ReadReceiptsResponse>(json).unwrap(),
+      response
+    );
+    let delivered = ReadReceiptsResponse {
+      maybe_delivered_up_to: Some(MessageId::from_snowflake(Snowflake::new(9).unwrap())),
+      ..response
+    };
+    assert_eq!(
+      serde_json::to_string(&delivered).unwrap(),
+      r#"{"conversation_id":"7","receipts":[],"delivered_up_to":"9"}"#
+    );
   }
 }

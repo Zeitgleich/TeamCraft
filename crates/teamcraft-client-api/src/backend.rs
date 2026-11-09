@@ -221,6 +221,11 @@ pub trait ChatBackend {
   fn seen_by(&self, _conversation: ConversationId, _message: MessageId) -> Vec<UserId> {
     Vec::new()
   }
+  /// The newest message every other member of a DM or group DM has on a device (delivered ticks,
+  /// #598). `None` elsewhere, when delivery is off on either side and while unknown.
+  fn delivered_to_others(&self, _conversation: ConversationId) -> Option<MessageId> {
+    None
+  }
   /// The conversation is shown: read its members' receipts again, since those sent while this
   /// device was offline never arrive as events. Backends whose UI reads receipts itself ignore it.
   fn refresh_read_receipts(&self, _conversation: ConversationId) {}

@@ -100,6 +100,7 @@ same list as a "Chats" tab (still labelled "Home" in the mobile shells until the
 | Auto-follow mentioned threads     | same                                                            |
 | Meeting reminders                 | same (`meeting_reminder_minutes`, `notifies_meeting_start`)     |
 | Send read receipts                | same (default: `[notifications] read_receipts_default`)         |
+| Send delivery receipts            | same (`send_delivery_receipts`; default as for read receipts)   |
 | Level of everything else          | same (`level`; default: `[notifications] default_level`, `all`) |
 
 ### Default level
@@ -800,6 +801,21 @@ Moving the read position in a DM or group DM sends `read_receipt` to the other m
 `GET /conversations/{id}/read-receipts` lists the positions. Receipts are reciprocal: whoever turned
 them off neither sends nor sees them. Channels have none.
 
+### Delivered
+
+After a device stored new messages of a DM or group DM (a live `message_create`, the end of a
+conversation's catch-up), it sends the gateway frame `delivered` with the newest server message ID it
+has, once per conversation and only when that moved forward; offline it waits, and the catch-up after
+a reconnect reports again. The server keeps one position per membership, moved forward only, and for
+each other member works out "every other member has the messages up to here on a device". When that
+moves it sends that member `delivery_update` (`conversation_id`, `message_id`);
+`GET /conversations/{id}/read-receipts` answers it as `delivered_up_to`, for devices that were offline.
+It is an aggregate, never per member (e2ee.md §4.4), and reciprocal through `send_delivery_receipts`
+like read receipts: whoever turned it off neither sends nor sees it, and while any other member has
+it off the conversation shows no delivered state. No polling: the frame rides the open gateway
+connection, and the server ignores repeats per connection. Servers from before the feature ignore the
+frame, and clients from before it ignore the event and the field.
+
 ### Message status indicator
 
 Own messages show one indicator next to the time (issue #568), drawn with the app's SVG icons:
@@ -808,18 +824,21 @@ Own messages show one indicator next to the time (issue #568), drawn with the ap
 |---------------|----------------|-----------------------------------------------------------|
 | Sending       | clock          | message still in the local outbox                         |
 | On the server | one grey tick  | the server confirmed the send                             |
+| Delivered     | two grey ticks | a device of every other member has it (DMs, group DMs)    |
 | Read          | two blue ticks | the other member's read receipt reaches the message (DMs) |
 | Failed        | alert, retry   | the server refused the send                               |
 
 One read model per conversation kind (issue #635), never two saying the same thing: a DM shows the
 two blue ticks and no "Seen by"; a group DM shows "Seen by <names>" under my newest message (it says
-who) and its messages keep the single tick; channels show one tick only. Because both come from read
-receipts, they are reciprocal: someone with receipts off neither sends nor sees them.
-"Delivered" (two grey ticks, derived from device sync cursors on the server) is not built yet.
+who) and its messages show one tick, or two grey ones once delivered (never blue); channels show one
+tick only. Because both come from read receipts, they are reciprocal: someone with receipts off
+neither sends nor sees them. Delivered ticks (issue #598) follow "Delivered" above; read wins over
+delivered, and a message stays at one tick while the delivered state is unknown or off.
 
 The rules live in teamcraft-client-api (`receipts`), so every platform decides alike. The mobile apps
 read the result from the core: `MessageExtras::is_read` marks an own message the other member of a
-DM read (issue #769); inside an own bubble, which already has the accent, the two ticks take the
+DM read (issue #769), `is_delivered` one that reached every other member's device (two ticks in the
+muted colour); inside an own bubble, which already has the accent, the two ticks take the
 bubble's full text colour where the single tick is muted. Receipts sent while a device was offline
 never arrive as events: desktop and web read the open DM's receipts after each connection, the apps
 ask the core for them (`refresh_read_receipts`) when a conversation opens and when the connection

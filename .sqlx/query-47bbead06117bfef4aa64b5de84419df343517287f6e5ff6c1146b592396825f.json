@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE memberships SET last_delivered_message_id = $3\n         WHERE conversation_id = $1 AND user_id = $2 AND COALESCE(last_delivered_message_id, 0) < $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "47bbead06117bfef4aa64b5de84419df343517287f6e5ff6c1146b592396825f"
+}

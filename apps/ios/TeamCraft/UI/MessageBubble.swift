@@ -466,9 +466,12 @@ struct BubbleFooter: View {
   var showsTime = true
 
   /// Whether the list's footer has anything to say: pinned, edited, or an own message that is
-  /// still sending, failed or was read. The plain "sent" tick alone isn't worth a line.
+  /// still sending, failed, was delivered or read. The plain "sent" tick alone isn't worth a line.
   static func hasMarks(message: MessageItem, maybeExtras: MessageExtras?, isMine: Bool) -> Bool {
-    let ownState = isMine && (message.isPending || maybeExtras?.isSendFailed == true || maybeExtras?.isRead == true)
+    let ownState =
+      isMine
+      && (message.isPending || maybeExtras?.isSendFailed == true || maybeExtras?.isRead == true
+        || maybeExtras?.isDelivered == true)
     return ownState || message.isEdited || maybeExtras?.isPinned == true
   }
 
@@ -498,6 +501,9 @@ struct BubbleFooter: View {
       // The other member of the DM read it: two ticks at the bubble's full text colour, where the
       // single "sent" tick is muted (desktop and web: two accent ticks, #769).
       DoubleCheckmark().foregroundStyle(Theme.onOwnBubble).accessibilityLabel(Text("message_read"))
+    } else if maybeExtras?.isDelivered == true {
+      // A device of every other member has it: two muted ticks (#598).
+      DoubleCheckmark().accessibilityLabel(Text("message_delivered"))
     } else {
       Image(systemName: "checkmark").accessibilityLabel(Text("message_sent"))
     }

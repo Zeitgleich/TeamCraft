@@ -175,6 +175,7 @@ pub const SERVER_PREFS: &[&str] = &[
   "notifications.filters",
   "notifications.spaces",
   "privacy.share_read_receipts",
+  "privacy.share_delivery_receipts",
 ];
 
 /// Preferences that belong to one machine: its hardware, screen, disk, or a file picked on it.

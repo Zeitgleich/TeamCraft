@@ -16361,6 +16361,86 @@
         }
       }
     },
+    "message_delivered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delivered"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zugestellt"
+          }
+        }
+      }
+    },
+    "receipts_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Receipts"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bestätigungen"
+          }
+        }
+      }
+    },
+    "receipts_read": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send read receipts"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Lesebestätigungen senden"
+          }
+        }
+      }
+    },
+    "receipts_delivered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send delivery receipts"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zustellbestätigungen senden"
+          }
+        }
+      }
+    },
+    "receipts_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In direct and group messages, people see two grey ticks once their message reached one of your devices, and in direct messages two coloured ones once you read it. Turning one off also hides theirs from you."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In Direkt- und Gruppennachrichten sehen andere zwei graue Haken, sobald ihre Nachricht eines deiner Geräte erreicht hat, und in Direktnachrichten zwei farbige, sobald du sie gelesen hast. Ausgeschaltet siehst du ihre auch nicht."
+          }
+        }
+      }
+    },
     "directory_title": {
       "localizations": {
         "en": {

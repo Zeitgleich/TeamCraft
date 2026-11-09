@@ -221,6 +221,7 @@ message-show-more = Show more
 message-show-less = Show less
 message-sending = Sending…
 message-status-sent = Sent
+message-status-delivered = Delivered
 message-status-read = Read
 message-not-sent = Not sent yet, retrying automatically
 message-send-failed = Not sent

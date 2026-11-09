@@ -10,7 +10,7 @@ use teamcraft_client_api::model::{
   Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, PENDING_ID_BIT,
   ThreadId, UserId, is_pending,
 };
-use teamcraft_client_api::receipts::{is_read_by_all, seen_by};
+use teamcraft_client_api::receipts::{is_delivered, is_read_by_all, seen_by};
 use teamcraft_client_api::scheduled::{ScheduledMessage, ScheduledOverview, ScheduledStatus, status_of};
 use teamcraft_proto::{Base64Bytes, ClientMessageId, LinkPreviewPolicy, SourceChange, SourceId};
 
@@ -769,6 +769,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           .or_else(|| candidates.iter().find(|stored| ui_message_id(stored) == *id))?;
         let mut extras = MessageExtras::new(*id);
         extras.is_read = ticks.is_read(stored, self.me_id());
+        extras.is_delivered = ticks.is_delivered(stored, self.me_id());
         extras.is_pinned = stored.is_pinned;
         extras.is_saved = data.is_saved(conversation, stored.client_message_id);
         extras.is_deleted = matches!(stored.content, MessageContent::Deleted);
@@ -924,6 +925,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
 struct Ticks {
   maybe_members: Option<Vec<UserId>>,
   receipts: Vec<(UserId, MessageId)>,
+  /// How far every other member has the messages on a device (DMs and group DMs, #598).
+  maybe_delivered: Option<MessageId>,
 }
 
 impl Ticks {
@@ -936,7 +939,16 @@ impl Ticks {
     Self {
       maybe_members,
       receipts,
+      maybe_delivered: backend.delivered_up_to(conversation),
     }
+  }
+
+  /// Whether `stored`, an own message the server has, reached a device of every other member.
+  fn is_delivered(&self, stored: &StoredMessage, me: UserId) -> bool {
+    stored.sender_user_id == me
+      && stored
+        .maybe_server_id
+        .is_some_and(|server_id| is_delivered(self.maybe_delivered, server_id))
   }
 
   /// Whether every other member read `stored`, an own message the server has (#568, #769).

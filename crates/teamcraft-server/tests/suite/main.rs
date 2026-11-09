@@ -27,6 +27,7 @@ mod channel_images;
 mod channel_roles;
 mod conversations;
 mod crash_reports;
+mod delivery_receipts;
 mod dependency_outages;
 mod device_gaps;
 mod directory;

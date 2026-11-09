@@ -445,6 +445,8 @@ data class MessageExtras(
   @SerialName("is_send_failed") val isSendFailed: Boolean = false,
   /** An own message the other member of a DM read: two ticks instead of one (issue #769). */
   @SerialName("is_read") val isRead: Boolean = false,
+  /** An own message that reached a device of every other member: two grey ticks (issue #598). */
+  @SerialName("is_delivered") val isDelivered: Boolean = false,
 )
 
 @Serializable
@@ -663,6 +665,8 @@ data class NotificationSettings(
   @SerialName("meeting_reminder_minutes") val maybeMeetingReminderMinutes: Int? = null,
   /** Whether a meeting's start notifies; absent: never chose (yes). */
   @SerialName("notifies_meeting_start") val maybeNotifiesMeetingStart: Boolean? = null,
+  /** Others see when their messages reached this user's devices (issue #598); absent: the server's default. */
+  @SerialName("send_delivery_receipts") val maybeSendDeliveryReceipts: Boolean? = null,
 )
 
 /**

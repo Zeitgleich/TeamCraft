@@ -43,6 +43,14 @@ pub struct LiveReceipt {
   pub message: MessageId,
 }
 
+/// How far every other member of a DM or group DM has the messages on a device, from
+/// `delivery_update` events (delivered ticks, issue #598).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveDelivered {
+  pub conversation: ConversationId,
+  pub message: MessageId,
+}
+
 /// Presence and custom status as `presence_update` events announced them, newest last, one entry
 /// per user and at most a configured number of entries. Each announcement gets the next revision,
 /// so a reader applies only what is newer than what it saw instead of comparing everything.

@@ -32,6 +32,7 @@
   <string name="connection_sync_not_started">Synchronisierung konnte nicht starten. Neuer Versuch läuft…</string>
   <string name="message_link_label">Link zu einer Nachricht</string>
   <string name="message_sent">Gesendet</string>
+  <string name="message_delivered">Zugestellt</string>
   <string name="message_read">Gelesen</string>
   <plurals name="conversation_members">
     <item quantity="one">%d Mitglied</item>

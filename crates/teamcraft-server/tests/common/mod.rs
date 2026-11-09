@@ -222,6 +222,14 @@ pub mod ws {
     socket
   }
 
+  /// Sends one client frame.
+  pub async fn send_frame(socket: &mut Socket, frame: &GatewayClientMessage) {
+    socket
+      .send(Message::Text(serde_json::to_string(frame).unwrap().into()))
+      .await
+      .unwrap();
+  }
+
   /// Every event that arrives within `wait`, or until the connection closes.
   pub async fn events(socket: &mut Socket, wait: Duration) -> Vec<GatewayEvent> {
     let mut seen = Vec::new();

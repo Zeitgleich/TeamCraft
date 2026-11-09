@@ -614,7 +614,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::MessageCreate { message } => {
         self.clear_typing(message.conversation_id, message.sender_user_id);
         read_state::note_new_message(&self.store, &message, self.account.user_id)?;
-        self.receive_message(message)
+        let conversation = message.conversation_id;
+        self.receive_message(message)?;
+        self.note_delivered(conversation)
       },
       GatewayEvent::MlsMessage { message } => {
         if message.kind == MlsMessageKind::Welcome {
@@ -761,6 +763,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         user_id,
         message_id,
       } => read_state::note_read_receipt(&self.store, conversation_id, user_id, message_id),
+      GatewayEvent::DeliveryUpdate {
+        conversation_id,
+        message_id,
+      } => read_state::note_delivered_to_others(&self.store, conversation_id, message_id),
       GatewayEvent::MessageAck {
         conversation_id,
         message_id,

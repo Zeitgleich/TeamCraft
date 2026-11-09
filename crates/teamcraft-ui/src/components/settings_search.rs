@@ -96,6 +96,7 @@ const ENTRIES: &[(SettingsTab, &str)] = &[
   (SettingsTab::Security, "security-verify"),
   (SettingsTab::Security, "security-my-key"),
   (SettingsTab::Security, "privacy-read-receipts"),
+  (SettingsTab::Security, "privacy-delivery-receipts"),
   (SettingsTab::Security, "privacy-typing"),
   (SettingsTab::Security, "privacy-last-seen"),
   (SettingsTab::Security, "privacy-away"),

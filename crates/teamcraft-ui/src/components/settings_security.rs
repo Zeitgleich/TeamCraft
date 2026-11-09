@@ -805,6 +805,12 @@ fn PrivacyCard() -> impl IntoView {
         on_change=Callback::new(move |value: bool| prefs.update(|all| all.privacy.share_read_receipts = value))
       />
       <SwitchRow
+        label="privacy-delivery-receipts"
+        hint="privacy-delivery-receipts-hint"
+        value=Signal::derive(move || privacy.get().share_delivery_receipts)
+        on_change=Callback::new(move |value: bool| prefs.update(|all| all.privacy.share_delivery_receipts = value))
+      />
+      <SwitchRow
         label="privacy-typing"
         hint="privacy-typing-hint"
         value=Signal::derive(move || privacy.get().share_typing)

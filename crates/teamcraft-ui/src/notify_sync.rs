@@ -433,6 +433,10 @@ pub fn apply_global(prefs: &mut Preferences, server: &NotificationSettings) {
     |schedule| dnd_from_server(schedule, &notes.dnd),
   );
   prefs.privacy.share_read_receipts = server.send_read_receipts;
+  // Servers from before delivered ticks say nothing: the value on this device stays.
+  if let Some(shares) = server.maybe_send_delivery_receipts {
+    prefs.privacy.share_delivery_receipts = shares;
+  }
   // Servers from before the setting say nothing: attention is used there.
   prefs.notifications.uses_desktop_attention = server.maybe_uses_desktop_attention.unwrap_or(true);
   // The user's own level, else the instance default; servers from before the setting say nothing.
@@ -471,6 +475,10 @@ pub fn global_from_prefs(
     maybe_notifies_meeting_start: (previous.maybe_notifies_meeting_start.is_some()
       || !notes.notifies_meeting_start)
       .then_some(notes.notifies_meeting_start),
+    // Only a choice goes out to a server that says nothing (older ones): no write otherwise.
+    maybe_send_delivery_receipts: (previous.maybe_send_delivery_receipts.is_some()
+      || !prefs.privacy.share_delivery_receipts)
+      .then_some(prefs.privacy.share_delivery_receipts),
   }
 }
 
@@ -816,6 +824,7 @@ mod tests {
         maybe_default_level: Some(NotificationLevel::All),
         maybe_meeting_reminder_minutes: None,
         maybe_notifies_meeting_start: None,
+        maybe_send_delivery_receipts: None,
       };
       apply_global(&mut prefs, &server);
       assert_eq!(prefs.notifications.push, NotifyLevel::Mentions);
@@ -952,6 +961,7 @@ mod tests {
         maybe_default_level: None,
         maybe_meeting_reminder_minutes: None,
         maybe_notifies_meeting_start: None,
+        maybe_send_delivery_receipts: None,
       };
       apply_global(&mut prefs, &server);
       let dnd = &prefs.notifications.dnd;
@@ -1159,6 +1169,7 @@ mod tests {
         maybe_default_level,
         maybe_meeting_reminder_minutes: None,
         maybe_notifies_meeting_start: None,
+        maybe_send_delivery_receipts: None,
       }
     }
 
