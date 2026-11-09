@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE webhooks\n         SET url = $2, description = $3, events = $4, is_enabled = $5, updated_at = now(),\n             consecutive_failures = CASE WHEN url = $2 THEN consecutive_failures ELSE 0 END,\n             paused_until = CASE WHEN url = $2 THEN paused_until ELSE NULL END\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "TextArray",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f762e94a340cae55f54e7b502fe60d895352bc185f0577336e23657da5437525"
+}

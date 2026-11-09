@@ -217,6 +217,13 @@ impl ApiError {
     }
   }
 
+  pub fn webhook_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::WebhookNotFound,
+      what: "webhook",
+    }
+  }
+
   /// The admin's request to join is no longer open (decided, withdrawn or expired).
   pub fn admin_join_request_not_found() -> Self {
     Self::NotFound {
@@ -793,6 +800,11 @@ mod tests {
         ApiError::admin_join_request_not_found(),
         StatusCode::NOT_FOUND,
         ErrorCode::AdminJoinRequestNotFound,
+      ),
+      (
+        ApiError::webhook_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::WebhookNotFound,
       ),
       (
         ApiError::PayloadTooLarge("x".into()),

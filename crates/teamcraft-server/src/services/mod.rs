@@ -67,6 +67,7 @@ pub mod system_events;
 pub mod threads;
 pub mod urgent;
 pub mod user_groups;
+pub mod webhooks;
 pub mod workspace;
 
 use crate::error::ApiError;

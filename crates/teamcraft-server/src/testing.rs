@@ -600,6 +600,7 @@ impl TestApp {
       holiday_resync: Arc::default(),
       // Tests forward to a fake backend on this machine.
       crash_relay: Arc::new(crate::services::crash_reports::CrashRelay::new(true).unwrap()),
+      webhooks: Arc::new(crate::webhooks::WebhookDispatcher::new(&settings.webhooks).unwrap()),
       settings: Arc::new(SettingsCell::new(settings)),
     };
 

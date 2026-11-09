@@ -15,7 +15,7 @@ use crate::config::{
   BrandConfig, BrandingConfig, CalDavConfig, GatewayConfig, GuestsConfig, IntegrationConfig, LimitsConfig,
   LocalAccountsConfig, MailConfig, MailTexts, NotificationsConfig, PolicyConfig, PresenceConfig,
   RendezvousConfig, RetentionJobConfig, RoleNames, SecurityConfig, SharesConfig, SignInPageConfig,
-  SmtpConfig, WebConfig,
+  SmtpConfig, WebConfig, WebhooksConfig,
 };
 use crate::error::ApiError;
 use crate::gateway::Hub;
@@ -98,6 +98,8 @@ pub struct AppState {
   pub holiday_resync: Arc<crate::holidays::resync::HolidayResync>,
   /// Forwards the apps' crash reports to the backend in the instance settings.
   pub crash_relay: Arc<crate::services::crash_reports::CrashRelay>,
+  /// Outgoing webhooks: the HTTP clients and the workers' wake-up (docs/webhooks.md).
+  pub webhooks: Arc<crate::webhooks::WebhookDispatcher>,
 }
 
 /// Runtime settings handlers need, taken from the configuration.
@@ -120,6 +122,7 @@ pub struct Settings {
   pub sign_in_page: SignInPageConfig,
   pub presence: PresenceConfig,
   pub shares: SharesConfig,
+  pub webhooks: WebhooksConfig,
   pub push: PushSettings,
   /// Token claim the organization is read from, if any.
   pub maybe_organization_claim: Option<String>,

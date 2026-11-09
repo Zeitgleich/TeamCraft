@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH targets AS (\n           SELECT w.id,\n                  (SELECT COUNT(*) FROM webhook_deliveries d WHERE d.webhook_id = w.id) < $4 AS has_room\n           FROM webhooks w\n           WHERE w.is_enabled AND $2 = ANY (w.events)\n         ), inserted AS (\n           INSERT INTO webhook_deliveries (webhook_id, event_id, event_kind, payload)\n           SELECT id, $1, $2, $3 FROM targets WHERE has_room\n           ON CONFLICT DO NOTHING\n           RETURNING webhook_id\n         ), dropped AS (\n           UPDATE webhooks SET dropped_count = dropped_count + 1\n           WHERE id IN (SELECT id FROM targets WHERE NOT has_room)\n           RETURNING id\n         )\n         SELECT (SELECT COUNT(*) FROM inserted) AS \"queued!\", (SELECT COUNT(*) FROM dropped) AS \"dropped!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "queued!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "dropped!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "6c842271ce77c136d133391bef7219a4186b1839ef0dfb2e2d2d48d9686a1885"
+}

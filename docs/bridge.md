@@ -5,6 +5,9 @@ logs, monitoring alerts, CI results, the hotline bot. It is a small headless Tea
 runs **where the data comes from** (next to the service, on a NAS, on the hotline host), never on
 the VPS that runs the server.
 
+The other direction, telling external systems about events in TeamCraft, is outgoing webhooks:
+[webhooks.md](webhooks.md). They carry metadata only and are sent by the server itself.
+
 ```
  Grafana, CI, scripts,        HTTP (loopback)         encrypted          TeamCraft
  journalctl | curl      ─────────────────────▶ bridge ─────────────▶ server (ciphertext only)

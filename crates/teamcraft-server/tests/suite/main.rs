@@ -90,4 +90,5 @@ mod unread_events;
 mod user_deletion;
 mod user_groups;
 mod web;
+mod webhooks;
 mod workspace;
