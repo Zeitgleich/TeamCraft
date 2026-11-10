@@ -19,7 +19,7 @@ use crate::store::{LocalStore, Table};
 
 /// Tables keyed by the conversation (`{conversation}` or `{conversation}/…`) that a deleted
 /// conversation leaves nothing in.
-const PER_CONVERSATION_TABLES: [Table; 11] = [
+const PER_CONVERSATION_TABLES: [Table; 12] = [
   Table::PendingUploads,
   Table::PendingPreviews,
   Table::RemovedSenders,
@@ -31,6 +31,7 @@ const PER_CONVERSATION_TABLES: [Table; 11] = [
   Table::ReadReceipts,
   Table::MessageAcks,
   Table::SearchSegments,
+  Table::SegmentAnnouncements,
 ];
 /// Fresh member lists that must agree before a user still in the group counts as a leftover.
 const LEFTOVER_CONFIRMATIONS: u32 = 2;

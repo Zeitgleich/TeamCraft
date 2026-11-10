@@ -1042,6 +1042,7 @@ fn classify(table: Table, key: &str) -> Change {
     | Table::Undecrypted
     | Table::PendingChanges
     | Table::SearchSegments
+    | Table::SegmentAnnouncements
     | Table::SavedSearches
     | Table::FileTransfers
     | Table::Downloads

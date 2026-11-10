@@ -693,6 +693,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
               self.settings.change_announcement_window,
             )
           })?;
+        } else if super::segments::announces_segment(&stored) {
+          // The segment's record goes with its announcement, so a prefetch never has to look
+          // through the messages for it (issue #1636).
+          crate::store::write_group(&self.store, || -> Result<(), CoreError> {
+            self.store.upsert_message(&stored)?;
+            super::segments::note_segment_announcement(&self.store, &stored)
+          })?;
         } else {
           self.store.upsert_message(&stored)?;
         }

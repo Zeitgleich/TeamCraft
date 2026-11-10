@@ -115,6 +115,10 @@ pub enum Table {
   PendingChanges,
   /// Decrypted shared search index segments, keyed `conversation/month`.
   SearchSegments,
+  /// The announced search segment per month, keyed `conversation/month` like
+  /// [`Self::SearchSegments`]: written when an announcement is stored, so a prefetch reads these
+  /// instead of every message (issue #1636).
+  SegmentAnnouncements,
   /// The user's saved searches.
   SavedSearches,
   /// Followed threads (`GET /threads`), keyed `conversation/thread`.
@@ -1674,7 +1678,7 @@ pub fn pick_attached(
 
 impl Table {
   /// Every table; a new variant goes here too (stores that load by name skip unknown tables).
-  pub const ALL: [Self; 36] = [
+  pub const ALL: [Self; 37] = [
     Self::Account,
     Self::Spaces,
     Self::Conversations,
@@ -1691,6 +1695,7 @@ impl Table {
     Self::Workspace,
     Self::PendingChanges,
     Self::SearchSegments,
+    Self::SegmentAnnouncements,
     Self::SavedSearches,
     Self::Threads,
     Self::Unread,
@@ -1737,6 +1742,7 @@ impl Table {
       Self::Workspace => "workspace",
       Self::PendingChanges => "pending_changes",
       Self::SearchSegments => "search_segments",
+      Self::SegmentAnnouncements => "segment_announcements",
       Self::SavedSearches => "saved_searches",
       Self::Threads => "threads",
       Self::Unread => "unread",
