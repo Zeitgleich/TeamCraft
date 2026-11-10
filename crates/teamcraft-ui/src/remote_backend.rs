@@ -2172,6 +2172,10 @@ impl ChatBackend for RemoteChat {
     self.act(ChatAction::RevokeSpaceInvite { space, invite });
   }
 
+  fn resend_space_invite(&self, space: SpaceId, invite: InviteId) {
+    self.act(ChatAction::ResendSpaceInvite { space, invite });
+  }
+
   fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {
     self.act(ChatAction::AddSpaceMembers {
       space,

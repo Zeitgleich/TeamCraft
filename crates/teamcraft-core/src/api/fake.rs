@@ -50,7 +50,7 @@ use teamcraft_proto::{
   MoveCallRequest,
 };
 use teamcraft_proto::{
-  CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest,
+  CategoryId, CategoryResponse, CreateCategoryRequest, CreateInviteRequest, CreateSpaceRequest, InviteMail,
   InviteResponse, ListCategoriesResponse, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceRequest,
 };
@@ -333,6 +333,8 @@ struct State {
   spaces: BTreeMap<SpaceId, SpaceResponse>,
   categories: BTreeMap<CategoryId, CategoryResponse>,
   invites: Vec<InviteResponse>,
+  /// Created invitations report that their e-mail was refused.
+  does_invite_mail_fail: bool,
   /// People added to spaces through `add_space_member`, in order.
   space_member_adds: Vec<(SpaceId, AddSpaceMemberRequest)>,
   /// Known users who are in no space until `add_space_member` adds them.
@@ -1861,6 +1863,11 @@ impl FakeServer {
   /// The personal messages of the invitations sent so far, in order.
   pub fn invite_messages(&self) -> Vec<Option<String>> {
     self.lock().invite_messages.clone()
+  }
+
+  /// The invitation e-mails of the next created invitations fail (the mail server refuses them).
+  pub fn fail_invite_mail(&self) {
+    self.lock().does_invite_mail_fail = true;
   }
 
   /// Space invitations sent so far.
@@ -4940,10 +4947,19 @@ impl ServerApi for FakeServerApi {
         channel_ids: request.channel_ids.clone(),
         sponsor_user_id: me,
         maybe_expires_at: request.maybe_expires_at,
+        maybe_mail: None,
       };
       state.invites.push(invite.clone());
       state.invite_messages.push(request.maybe_message.clone());
-      Ok(invite)
+      // Only the answer to creating tells what became of the e-mail, as on the server.
+      Ok(InviteResponse {
+        maybe_mail: Some(if state.does_invite_mail_fail {
+          InviteMail::NotSent
+        } else {
+          InviteMail::Sent
+        }),
+        ..invite
+      })
     })
   }
 

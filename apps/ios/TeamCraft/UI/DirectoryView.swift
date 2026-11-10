@@ -528,6 +528,8 @@ struct InvitePeopleView: View {
   @State private var isSending = false
   @State private var maybeEmailRefusal: InviteProblem?
   @State private var maybeFailure: LocalizedStringKey?
+  /// The invitation exists, but its e-mail did not go out: the sheet says so, with a resend where one can help.
+  @State private var maybeUnsent: UnsentInvitation?
   @FocusState private var focused: InviteField?
   @AccessibilityFocusState private var accessibilityFocused: InviteField?
 
@@ -536,47 +538,60 @@ struct InvitePeopleView: View {
     let space = chosenSpace
     NavigationStack {
       Form {
-        if spaces.count > 1 {
+        if let unsent = maybeUnsent {
           Section {
-            Picker("invite_space_label", selection: $spaceId) {
-              ForEach(spaces) { candidate in Text(candidate.name).tag(candidate.id) }
-            }
-          }
-        }
-        Section {
-          TextField("invite_email_label", text: $email)
-            .keyboardType(.emailAddress)
-            .textContentType(.emailAddress)
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .focused($focused, equals: .email)
-            .accessibilityFocused($accessibilityFocused, equals: .email)
-            .fieldError(errors[.email]?.message)
-            .onChange(of: email) { maybeEmailRefusal = nil }
-          FieldMessage(maybeError: errors[.email]?.message)
-        } header: {
-          Text("invite_email_label")
-        }
-        if let space, space.canAddMembers == true, space.canInviteGuests == true {
-          Section {
-            Picker("invite_role_label", selection: $wantsGuest) {
-              RoleOption(title: "invite_role_member", hint: "invite_role_member_hint").tag(false)
-              RoleOption(title: "invite_role_guest", hint: "invite_role_guest_hint").tag(true)
-            }
-            .pickerStyle(.inline)
-          }
-        }
-        Section {
-          TextField("invite_message_label", text: $note, axis: .vertical)
-            .lineLimit(2...5)
-            .focused($focused, equals: .note)
-            .accessibilityFocused($accessibilityFocused, equals: .note)
-            .fieldError(errors[.note]?.message)
-          FieldMessage(maybeError: errors[.note]?.message)
-        } footer: {
-          if let maybeFailure {
-            Label { Text(maybeFailure) } icon: { Image(systemName: "exclamationmark.triangle.fill") }
+            Label { Text("invite_mail_not_sent \(email.trimmingCharacters(in: .whitespacesAndNewlines))") }
+              icon: { Image(systemName: "exclamationmark.triangle.fill") }
               .foregroundStyle(Theme.danger)
+            if unsent.canResend {
+              Button("directory_resend") { Task { await resend(unsent) } }.disabled(isSending)
+            }
+          } footer: {
+            if let maybeFailure { Text(maybeFailure).foregroundStyle(Theme.danger) }
+          }
+        } else {
+          if spaces.count > 1 {
+            Section {
+              Picker("invite_space_label", selection: $spaceId) {
+                ForEach(spaces) { candidate in Text(candidate.name).tag(candidate.id) }
+              }
+            }
+          }
+          Section {
+            TextField("invite_email_label", text: $email)
+              .keyboardType(.emailAddress)
+              .textContentType(.emailAddress)
+              .textInputAutocapitalization(.never)
+              .autocorrectionDisabled()
+              .focused($focused, equals: .email)
+              .accessibilityFocused($accessibilityFocused, equals: .email)
+              .fieldError(errors[.email]?.message)
+              .onChange(of: email) { maybeEmailRefusal = nil }
+            FieldMessage(maybeError: errors[.email]?.message)
+          } header: {
+            Text("invite_email_label")
+          }
+          if let space, space.canAddMembers == true, space.canInviteGuests == true {
+            Section {
+              Picker("invite_role_label", selection: $wantsGuest) {
+                RoleOption(title: "invite_role_member", hint: "invite_role_member_hint").tag(false)
+                RoleOption(title: "invite_role_guest", hint: "invite_role_guest_hint").tag(true)
+              }
+              .pickerStyle(.inline)
+            }
+          }
+          Section {
+            TextField("invite_message_label", text: $note, axis: .vertical)
+              .lineLimit(2...5)
+              .focused($focused, equals: .note)
+              .accessibilityFocused($accessibilityFocused, equals: .note)
+              .fieldError(errors[.note]?.message)
+            FieldMessage(maybeError: errors[.note]?.message)
+          } footer: {
+            if let maybeFailure {
+              Label { Text(maybeFailure) } icon: { Image(systemName: "exclamationmark.triangle.fill") }
+                .foregroundStyle(Theme.danger)
+            }
           }
         }
       }
@@ -587,6 +602,11 @@ struct InvitePeopleView: View {
         ToolbarItem(placement: .confirmationAction) {
           if isSending {
             ProgressView()
+          } else if maybeUnsent != nil {
+            Button("invite_mail_done") {
+              dismiss()
+              onSent()
+            }.fontWeight(.semibold)
           } else {
             Button("invite_submit") { Task { await send() } }.fontWeight(.semibold)
           }
@@ -637,6 +657,8 @@ struct InvitePeopleView: View {
     case .success(.sent):
       dismiss()
       onSent()
+    case .success(.mailNotSent(let spaceId, let invitationId, let canResend)):
+      maybeUnsent = UnsentInvitation(spaceId: spaceId, invitationId: invitationId, canResend: canResend)
     case .success(.alreadyInvited):
       maybeEmailRefusal = .alreadyInvited
       focus(.email)
@@ -651,10 +673,32 @@ struct InvitePeopleView: View {
     isSending = false
   }
 
+  private func resend(_ unsent: UnsentInvitation) async {
+    guard !isSending else { return }
+    isSending = true
+    maybeFailure = nil
+    switch await model.resendInvitation(spaceId: unsent.spaceId, invitationId: unsent.invitationId) {
+    case .success(.done):
+      dismiss()
+      onSent()
+    case .success(.tooSoon): maybeFailure = "directory_resend_later"
+    case .success(.gone), .success(.notAllowed): maybeFailure = "create_not_allowed"
+    case .failure(let failure): maybeFailure = failure.message
+    }
+    isSending = false
+  }
+
   private func focus(_ field: InviteField) {
     focused = field
     accessibilityFocused = field
   }
+}
+
+/// An invitation the server created without being able to send its e-mail.
+private struct UnsentInvitation {
+  let spaceId: String
+  let invitationId: String
+  let canResend: Bool
 }
 
 private struct RoleOption: View {

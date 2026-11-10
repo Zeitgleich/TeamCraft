@@ -24,10 +24,11 @@ use teamcraft_client_api::files_query::{FilesPage, FilesQuery};
 use teamcraft_client_api::live::LiveSnapshot;
 use teamcraft_client_api::model::{
   Bookmark, BookmarkKind, Conversation, ConversationId, ConversationKind, CustomStatus, DeviceSetup, GapEdge,
-  HistoryGap, ImportedAuthorView, ImportedFrom, ImportedMark, JoinableSpace, MembershipIssue,
-  MentionableGroup, Message, MessageKind, OlderHistory, PENDING_ID_BIT, PendingInvite, Placeholder,
-  PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SpaceMember, SpaceRoster, SystemEvent, ThreadId,
-  ThreadSummary, TimestampMs, TypingNow, UnseenReactions, User, UserId, hue_from_hex, pending_message_id,
+  HistoryGap, ImportedAuthorView, ImportedFrom, ImportedMark, InviteMailState, JoinableSpace,
+  MembershipIssue, MentionableGroup, Message, MessageKind, OlderHistory, PENDING_ID_BIT, PendingInvite,
+  Placeholder, PresenceStatus, Reaction, SidebarCategory, Space, SpaceId, SpaceMember, SpaceRoster,
+  SystemEvent, ThreadId, ThreadSummary, TimestampMs, TypingNow, UnseenReactions, User, UserId, hue_from_hex,
+  pending_message_id,
 };
 use teamcraft_proto::synced_settings::{SettingWrite, SyncedSettings};
 use teamcraft_proto::{
@@ -35,7 +36,7 @@ use teamcraft_proto::{
   ConversationVisibility, Id, InviteId, JoinPolicy, ListConversationMembersResponse, ListInvitesResponse,
   MessageId, NotificationLevel, PresenceState, SpaceResponse, SpaceRole, UserKind, UserSummary,
 };
-use teamcraft_proto::{BackgroundId, OrgBackgroundId, ScheduledMessageId};
+use teamcraft_proto::{BackgroundId, InviteMail, OrgBackgroundId, ScheduledMessageId};
 use teamcraft_proto::{
   CategoryId, ConversationNotificationSettings, CreateSpaceRequest, EffectiveNotifications, HistoryPolicy,
   MoveChannelRequest, UpdateConversationRequest, UpdateSpaceRequest, effective_notifications,
@@ -481,6 +482,10 @@ pub enum CoreCommand {
     space: SpaceId,
     invite: InviteId,
   },
+  ResendSpaceInvite {
+    space: SpaceId,
+    invite: InviteId,
+  },
   /// People picked from the directory join a space (those already in it are skipped).
   AddSpaceMembers {
     space: SpaceId,
@@ -563,6 +568,7 @@ impl CoreCommand {
       | Self::RefreshChannelRoles { .. }
       | Self::RemoveSpaceMember { .. }
       | Self::RevokeSpaceInvite { .. }
+      | Self::ResendSpaceInvite { .. }
       | Self::AddSpaceMembers { .. } => CommandPart::Workspace,
       Self::AddOrgBackground { .. }
       | Self::DeleteOrgBackground { .. }
@@ -3404,6 +3410,11 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
         id: invite.id,
         email: invite.email,
         role: invite.role,
+        mail: match invite.maybe_mail {
+          Some(InviteMail::NotSent) => InviteMailState::NotSent,
+          Some(InviteMail::NoMailServer) => InviteMailState::NoMailServer,
+          _ => InviteMailState::Sent,
+        },
       })
       .collect()
   }
@@ -3558,6 +3569,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn revoke_space_invite(&self, space: SpaceId, invite: InviteId) {
     self.command(CoreCommand::RevokeSpaceInvite { space, invite });
+  }
+
+  fn resend_space_invite(&self, space: SpaceId, invite: InviteId) {
+    self.command(CoreCommand::ResendSpaceInvite { space, invite });
   }
 
   fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {

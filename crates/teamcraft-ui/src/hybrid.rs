@@ -1075,6 +1075,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.revoke_space_invite(space, invite);
   }
 
+  fn resend_space_invite(&self, space: SpaceId, invite: teamcraft_client_api::model::InviteId) {
+    self.chat.resend_space_invite(space, invite);
+  }
+
   fn add_space_members(&self, space: SpaceId, users: Vec<UserId>, is_guest: bool) {
     self.chat.add_space_members(space, users, is_guest);
   }

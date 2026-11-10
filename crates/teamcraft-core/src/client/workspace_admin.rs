@@ -4,7 +4,7 @@
 use teamcraft_proto::{
   AddSpaceMemberRequest, CategoryId, ConversationId, ConversationKind, ConversationResponse,
   ConversationVisibility, CreateCategoryRequest, CreateChannelRequest, CreateInviteRequest,
-  CreateSpaceRequest, HistoryPolicy, IdempotencyKey, InviteId, ListCategoriesResponse,
+  CreateSpaceRequest, HistoryPolicy, IdempotencyKey, InviteId, InviteMail, ListCategoriesResponse,
   ListConversationsResponse, ListInvitesResponse, ListSpaceMembersResponse, MoveChannelRequest, SpaceId,
   SpaceResponse, SpaceRole, UnixMillis, UpdateCategoryRequest, UpdateConversationRequest,
   UpdateSpaceMemberRequest, UpdateSpaceRequest, UserId,
@@ -355,8 +355,36 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_expires_at: maybe_expires_at.map(UnixMillis),
       maybe_message,
     };
-    self.api.create_invite(space, &request).await?;
-    self.refresh_space_invites(space).await
+    let created = self.api.create_invite(space, &request).await?;
+    self.refresh_space_invites(space).await?;
+    // The listing doesn't carry what became of the e-mail; only this answer does.
+    self.remember_invite_mail(space, created.id, created.maybe_mail)
+  }
+
+  /// Sends a pending invitation's e-mail again. A refusal (the mail server still failing, the
+  /// interval since the last mail) is the failure; success clears the note at the invitation.
+  pub async fn resend_space_invite(&mut self, space: SpaceId, invite: InviteId) -> Result<(), CoreError> {
+    self.api.resend_invite(space, invite).await?;
+    self.remember_invite_mail(space, invite, Some(InviteMail::Sent))
+  }
+
+  /// Keeps what became of an invitation's e-mail with the stored invitations of the space.
+  fn remember_invite_mail(
+    &mut self,
+    space: SpaceId,
+    invite: InviteId,
+    maybe_mail: Option<InviteMail>,
+  ) -> Result<(), CoreError> {
+    let key = space.to_string();
+    let Some(mut stored) = records::get_json::<ListInvitesResponse>(&self.store, Table::SpaceInvites, &key)?
+    else {
+      return Ok(());
+    };
+    if let Some(entry) = stored.invites.iter_mut().find(|entry| entry.id == invite) {
+      entry.maybe_mail = maybe_mail;
+    }
+    records::put_json(&self.store, Table::SpaceInvites, &key, &stored)?;
+    Ok(())
   }
 
   /// The space's members with their roles, kept for the space settings. Guests and people outside
@@ -376,14 +404,24 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// The space's pending invitations. Only member managers may list them; for everybody else the
   /// list is empty rather than an error.
   pub async fn refresh_space_invites(&mut self, space: SpaceId) -> Result<(), CoreError> {
-    let invites = match self.api.list_invites(space).await {
+    let mut invites = match self.api.list_invites(space).await {
       Ok(invites) => invites,
       Err(ApiError::Status {
         status: 403 | 404, ..
       }) => ListInvitesResponse { invites: Vec::new() },
       Err(error) => return Err(error.into()),
     };
-    records::put_json(&self.store, Table::SpaceInvites, &space.to_string(), &invites)?;
+    // The listing never says whether the e-mail went out: keep what creating the invitation said.
+    let key = space.to_string();
+    if let Some(previous) = records::get_json::<ListInvitesResponse>(&self.store, Table::SpaceInvites, &key)?
+    {
+      for invite in &mut invites.invites {
+        if let Some(known) = previous.invites.iter().find(|known| known.id == invite.id) {
+          invite.maybe_mail = known.maybe_mail.clone();
+        }
+      }
+    }
+    records::put_json(&self.store, Table::SpaceInvites, &key, &invites)?;
     Ok(())
   }
 

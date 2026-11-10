@@ -306,6 +306,7 @@ impl MockBackend {
           id: id_from_raw(900),
           email: "new.colleague@example.com".into(),
           role: SpaceRole::Member,
+          mail: Default::default(),
         },
       )],
       workspace_events: HashMap::new(),

@@ -396,6 +396,33 @@ pub struct PendingInvite {
   pub id: InviteId,
   pub email: String,
   pub role: SpaceRole,
+  /// Whether the invitation e-mail went out, as far as this device knows (from creating it).
+  #[serde(default)]
+  pub mail: InviteMailState,
+}
+
+/// What this device knows of an invitation's e-mail.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InviteMailState {
+  /// Taken by the mail server, or not known (the invitation was created elsewhere).
+  #[default]
+  Sent,
+  /// The mail server refused the e-mail or could not be reached: it can be sent again.
+  NotSent,
+  /// The server sends no invitation e-mail; the person applies it at sign-in.
+  NoMailServer,
+}
+
+impl InviteMailState {
+  /// The inviter should be told the e-mail did not go out.
+  pub fn is_missing(self) -> bool {
+    self != Self::Sent
+  }
+
+  /// Sending it again can help.
+  pub fn can_resend(self) -> bool {
+    self == Self::NotSent
+  }
 }
 
 /// What a space from an older peer is taken for: nothing to share as a link.

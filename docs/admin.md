@@ -855,6 +855,11 @@ once per `limits.invite_resend_interval_secs` (the invitation's own mail counts)
 invitation in an unarchived space on a server that sends mail. It uses the current directory policy
 and guest domains, and the personal note of the first mail isn't repeated, as it was never stored. Revoking and resending are in the audit log.
 
+Creating an invitation answers `201` whatever became of its mail, and says so in `mail`: `sent`, `not_sent`
+(the mail server refused it or could not be reached) or `no_mail_server` (no mail server, or a mail budget
+of 0). Listings and older servers leave the field out; clients ignore values they don't know. The apps show a
+`not_sent` or `no_mail_server` invitation as created without its mail, and offer a resend for `not_sent`.
+
 #### 3.2.4 Group mentions (issue #206)
 
 `@handle` of a user group notifies its members who are in the conversation, expanded on the sender's

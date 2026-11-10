@@ -13,7 +13,7 @@ use teamcraft_core::api::{ApiError, ServerApi as _};
 use teamcraft_proto::{
   ConversationVisibility, CreateInviteRequest, DirectoryChannel, DirectoryChannelsQuery,
   DirectoryFiltersQuery, DirectoryInvitation, DirectoryInvitationsQuery, DirectoryPeopleQuery,
-  DirectoryPerson, ErrorCode, Id, InviteId, SpaceId, SpaceRole, UserKind,
+  DirectoryPerson, ErrorCode, Id, InviteId, InviteMail, InviteResponse, SpaceId, SpaceRole, UserKind,
 };
 
 use crate::TeamCraft;
@@ -133,6 +133,14 @@ pub struct InvitePeopleInput {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum InviteOutcome {
   Sent,
+  /// The invitation exists, but its e-mail did not go out (the mail server refused it or could not
+  /// be reached, or the server sends no invitation e-mail). The sheet says so and, where
+  /// `can_resend`, offers to send it again.
+  MailNotSent {
+    space_id: String,
+    invitation_id: String,
+    can_resend: bool,
+  },
   /// The server refused the address (malformed, or a domain guests may not come from): shown at
   /// the e-mail field.
   EmailRefused {
@@ -257,7 +265,7 @@ impl TeamCraft {
       .directory_request(move |api| async move { Ok(api.create_invite(space, &request).await) })
       .await?;
     match answer {
-      Ok(_) => Ok(InviteOutcome::Sent),
+      Ok(created) => Ok(invite_outcome(&created)),
       Err(error) => invite_refusal(&error).ok_or_else(|| CoreError::from(error).into()),
     }
   }
@@ -373,6 +381,19 @@ fn invitation_item(invitation: DirectoryInvitation) -> DirectoryInvitationItem {
 }
 
 /// A refusal of an invitation the sheet shows, if it is one.
+/// What the answer to creating an invitation says: its e-mail did not go out, or all is well (also
+/// for an answer without the field, or with a value this version doesn't know).
+fn invite_outcome(created: &InviteResponse) -> InviteOutcome {
+  match created.maybe_mail {
+    Some(InviteMail::NotSent | InviteMail::NoMailServer) => InviteOutcome::MailNotSent {
+      space_id: created.space_id.to_string(),
+      invitation_id: created.id.to_string(),
+      can_resend: created.maybe_mail == Some(InviteMail::NotSent),
+    },
+    _ => InviteOutcome::Sent,
+  }
+}
+
 fn invite_refusal(error: &ApiError) -> Option<InviteOutcome> {
   let ApiError::Status { status, .. } = error else {
     return None;
@@ -457,6 +478,42 @@ mod tests {
       Err(TeamCraftError::InvalidInput(_))
     ));
     assert_eq!(maybe_id::<SpaceId>("").unwrap(), None);
+  }
+
+  #[test]
+  fn an_invitation_whose_mail_did_not_go_out_says_so() {
+    let created = |maybe_mail| InviteResponse {
+      id: teamcraft_client_api::model::id_from_raw(5),
+      space_id: teamcraft_client_api::model::id_from_raw(6),
+      email: "ext@example.com".into(),
+      role: SpaceRole::Member,
+      channel_ids: Vec::new(),
+      sponsor_user_id: teamcraft_client_api::model::id_from_raw(7),
+      maybe_expires_at: None,
+      maybe_mail,
+    };
+    assert_eq!(invite_outcome(&created(None)), InviteOutcome::Sent);
+    assert_eq!(
+      invite_outcome(&created(Some(InviteMail::Sent))),
+      InviteOutcome::Sent
+    );
+    assert_eq!(
+      invite_outcome(&created(Some(InviteMail::Unknown("queued".into())))),
+      InviteOutcome::Sent
+    );
+    let not_sent = |can_resend| InviteOutcome::MailNotSent {
+      space_id: "6".into(),
+      invitation_id: "5".into(),
+      can_resend,
+    };
+    assert_eq!(
+      invite_outcome(&created(Some(InviteMail::NotSent))),
+      not_sent(true)
+    );
+    assert_eq!(
+      invite_outcome(&created(Some(InviteMail::NoMailServer))),
+      not_sent(false)
+    );
   }
 
   mod refusals {

@@ -941,6 +941,8 @@ pub trait ChatBackend {
   /// Removes someone from the space and, on the server, from its channels.
   fn remove_space_member(&self, _space: SpaceId, _user: UserId) {}
   fn revoke_space_invite(&self, _space: SpaceId, _invite: crate::model::InviteId) {}
+  /// Sends a pending invitation's e-mail again. A refusal (the mail server, a limit) is the failure.
+  fn resend_space_invite(&self, _space: SpaceId, _invite: crate::model::InviteId) {}
   /// "Jump to date": asks for the history around `at` (Unix milliseconds) to be loaded. It arrives
   /// like any store update; [`Self::is_history_loaded`] tells when the request is answered.
   fn request_history_at(&self, _conversation: ConversationId, _at: i64) {}

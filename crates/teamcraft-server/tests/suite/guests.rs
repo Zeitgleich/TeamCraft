@@ -957,6 +957,7 @@ mod mail {
       )
       .await;
     assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert_eq!(reply.body["mail"], "sent", "{}", reply.body);
 
     let sent = mailer.sent();
     assert_eq!(sent.len(), 1);
@@ -965,7 +966,8 @@ mod mail {
     assert!(sent[0].text.contains("https://chat.example.com"));
     assert!(sent[0].text.contains("guest"));
 
-    // A refusing mail server does not undo the invite.
+    // A refusing mail server does not undo the invite, and the answer says the mail did not go out;
+    // the listing leaves the outcome out.
     mailer.refuse("other@example.com");
     let reply = app
       .post(
@@ -975,6 +977,31 @@ mod mail {
       )
       .await;
     assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert_eq!(reply.body["mail"], "not_sent", "{}", reply.body);
+    assert_eq!(mailer.sent().len(), 1);
+    let listed = app.get(&alice, &format!("/spaces/{space}/invites")).await;
+    assert_eq!(listed.status, StatusCode::OK, "{}", listed.body);
+    assert_eq!(listed.body["invites"].as_array().unwrap().len(), 2);
+    assert!(listed.body["invites"][0].get("mail").is_none(), "{}", listed.body);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn an_invitation_without_a_mail_server_says_so() {
+    let Some(app) = TestApp::start().await else {
+      return;
+    };
+    let alice = owner();
+    let space = create_space(&app, &alice, "Client", "invite_only").await;
+    let reply = app
+      .post(
+        &alice,
+        &format!("/spaces/{space}/invites"),
+        json!({"email": "ext@example.com", "role": "member"}),
+      )
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    assert_eq!(reply.body["mail"], "no_mail_server", "{}", reply.body);
     app.stop().await;
   }
 }

@@ -148,8 +148,12 @@ extension AppModel {
   }
 
   func resendInvitation(_ invitation: DirectoryInvitationItem) async -> Result<InvitationOutcome, AppFailure> {
+    await resendInvitation(spaceId: invitation.spaceId, invitationId: invitation.invitationId)
+  }
+
+  func resendInvitation(spaceId: String, invitationId: String) async -> Result<InvitationOutcome, AppFailure> {
     do {
-      return .success(try await core().resendInvitation(spaceId: invitation.spaceId, invitationId: invitation.invitationId))
+      return .success(try await core().resendInvitation(spaceId: spaceId, invitationId: invitationId))
     } catch {
       return .failure(AppFailure(CoreFailure(error)))
     }

@@ -478,6 +478,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       CoreCommand::RemoveSpaceMember { space, user } => self.remove_space_member(space, user).await,
       CoreCommand::RevokeSpaceInvite { space, invite } => self.revoke_space_invite(space, invite).await,
+      CoreCommand::ResendSpaceInvite { space, invite } => self.resend_space_invite(space, invite).await,
       CoreCommand::AddSpaceMembers {
         space,
         users,

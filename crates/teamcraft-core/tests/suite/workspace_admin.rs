@@ -720,3 +720,43 @@ mod archived_channels {
     assert!(alice.client.is_refused(channel, queued).unwrap());
   }
 }
+
+#[tokio::test]
+async fn an_invitation_whose_mail_failed_says_so_until_it_is_resent() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let space = alice.space().await;
+  let alice_ui = backend_of(&alice);
+  let invite = |email: &str| SpaceInvite {
+    space,
+    email: email.into(),
+    is_guest: false,
+    channels: Vec::new(),
+    maybe_expires_at: None,
+    maybe_message: None,
+  };
+
+  alice_ui.invite_to_space(invite("sent@example.com"));
+  run_commands(&mut alice, &alice_ui).await;
+  server.fail_invite_mail();
+  alice_ui.invite_to_space(invite("lost@example.com"));
+  run_commands(&mut alice, &alice_ui).await;
+  let state_of = |email: &str| {
+    alice_ui
+      .space_invites(space)
+      .into_iter()
+      .find(|pending| pending.email == email)
+      .unwrap()
+  };
+  assert!(!state_of("sent@example.com").mail.is_missing());
+  let lost = state_of("lost@example.com");
+  assert!(lost.mail.is_missing() && lost.mail.can_resend());
+
+  // A reload of the list keeps the note; a resend that the server takes clears it.
+  alice_ui.refresh_space_roster(space);
+  run_commands(&mut alice, &alice_ui).await;
+  assert!(state_of("lost@example.com").mail.is_missing());
+  alice_ui.resend_space_invite(space, lost.id);
+  run_commands(&mut alice, &alice_ui).await;
+  assert!(!state_of("lost@example.com").mail.is_missing());
+}

@@ -206,6 +206,19 @@ pub struct CreateInviteRequest {
   pub maybe_message: Option<String>,
 }
 
+wire_enum! {
+  /// What became of the invitation e-mail when the invitation was created.
+  pub enum InviteMail {
+    /// The mail server took the e-mail.
+    Sent => "sent",
+    /// The server has a mail server, but it refused the e-mail or could not be reached: the
+    /// invitation exists and applies at sign-in, and the inviter can resend it.
+    NotSent => "not_sent",
+    /// The server sends no invitation e-mail (no mail server, or a mail budget of 0).
+    NoMailServer => "no_mail_server",
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct InviteResponse {
   pub id: InviteId,
@@ -217,6 +230,10 @@ pub struct InviteResponse {
   pub sponsor_user_id: UserId,
   #[serde(rename = "expires_at", default, skip_serializing_if = "Option::is_none")]
   pub maybe_expires_at: Option<UnixMillis>,
+  /// What became of the invitation e-mail. Only the answer to creating an invitation carries it;
+  /// listings and older servers leave it out. Clients ignoring it keep working.
+  #[serde(rename = "mail", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_mail: Option<InviteMail>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -234,6 +251,51 @@ mod tests {
 
   use super::*;
   use crate::{Id, Snowflake};
+
+  #[test]
+  fn the_mail_outcome_of_an_invitation_has_a_stable_shape() {
+    let mut invite: InviteResponse = serde_json::from_value(json!({
+      "id": "7",
+      "space_id": "8",
+      "email": "ext@example.com",
+      "role": "guest",
+      "channel_ids": [],
+      "sponsor_user_id": "9",
+    }))
+    .unwrap();
+    // Older servers and listings send no `mail`; nothing is written for none.
+    assert_eq!(invite.maybe_mail, None);
+    assert!(serde_json::to_value(&invite).unwrap().get("mail").is_none());
+    for (mail, wire) in [
+      (InviteMail::Sent, "sent"),
+      (InviteMail::NotSent, "not_sent"),
+      (InviteMail::NoMailServer, "no_mail_server"),
+    ] {
+      invite.maybe_mail = Some(mail);
+      let value = serde_json::to_value(&invite).unwrap();
+      assert_eq!(value["mail"], wire);
+      assert_eq!(serde_json::from_value::<InviteResponse>(value).unwrap(), invite);
+    }
+    // A value from a newer server is kept, not an error.
+    let newer: InviteResponse = serde_json::from_value(json!({
+      "id": "7",
+      "space_id": "8",
+      "email": "ext@example.com",
+      "role": "guest",
+      "channel_ids": [],
+      "sponsor_user_id": "9",
+      "mail": "queued",
+    }))
+    .unwrap();
+    assert_eq!(newer.maybe_mail, Some(InviteMail::Unknown("queued".into())));
+    // Older clients ignore the field.
+    #[derive(Deserialize)]
+    struct Old {
+      email: String,
+    }
+    let old: Old = serde_json::from_value(serde_json::to_value(&newer).unwrap()).unwrap();
+    assert_eq!(old.email, "ext@example.com");
+  }
 
   #[test]
   fn a_space_without_an_image_has_no_image_field() {

@@ -22,6 +22,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -56,6 +57,7 @@ import de.zeitgleich.teamcraft.ui.forms.inviteErrors
 import de.zeitgleich.teamcraft.ui.forms.supportingText
 import de.zeitgleich.teamcraft.ui.theme.Spacing
 import kotlinx.coroutines.launch
+import uniffi.teamcraft_ffi.InvitationOutcome
 import uniffi.teamcraft_ffi.InviteOutcome
 import uniffi.teamcraft_ffi.InvitePeopleInput
 
@@ -82,6 +84,9 @@ internal fun InvitePeopleSheet(viewModel: MainViewModel, spaces: List<Space>, on
   var hasTried by rememberSaveable { mutableStateOf(false) }
   var isSending by remember { mutableStateOf(false) }
   var maybeEmailRefusal by remember { mutableStateOf<Int?>(null) }
+  // The invitation exists, but its e-mail did not go out: the sheet says so, with a resend where one can help.
+  var maybeUnsent by remember { mutableStateOf<InviteOutcome.MailNotSent?>(null) }
+  var maybeResendNote by remember { mutableStateOf<Int?>(null) }
   var maybeFailure by remember { mutableStateOf<Int?>(null) }
   val requesters = remember { InviteField.entries.associateWith { FocusRequester() } }
   val checked = inviteErrors(email, note)
@@ -99,6 +104,7 @@ internal fun InvitePeopleSheet(viewModel: MainViewModel, spaces: List<Space>, on
       when (val answer = viewModel.tryDirectoryAction { invitePeople(InvitePeopleInput(space.id, email.trim(), isGuest, note.trim())) }) {
         is ActionAnswer.Answered -> when (answer.value) {
           is InviteOutcome.Sent -> onSent()
+          is InviteOutcome.MailNotSent -> maybeUnsent = answer.value as InviteOutcome.MailNotSent
           is InviteOutcome.AlreadyInvited, is InviteOutcome.EmailRefused -> {
             maybeEmailRefusal = if (answer.value is InviteOutcome.AlreadyInvited) R.string.invite_already_invited else R.string.invite_email_refused
             requesters.getValue(InviteField.EMAIL).requestFocus()
@@ -106,6 +112,22 @@ internal fun InvitePeopleSheet(viewModel: MainViewModel, spaces: List<Space>, on
           is InviteOutcome.NotAllowed -> maybeFailure = R.string.create_not_allowed
         }
         is ActionAnswer.Failed -> maybeFailure = answer.text
+      }
+      isSending = false
+    }
+  }
+  val resend: (InviteOutcome.MailNotSent) -> Unit = resend@{ unsent ->
+    if (isSending) return@resend
+    isSending = true
+    maybeResendNote = null
+    scope.launch {
+      when (val answer = viewModel.tryDirectoryAction { resendInvitation(unsent.spaceId, unsent.invitationId) }) {
+        is ActionAnswer.Answered -> when (answer.value) {
+          InvitationOutcome.DONE -> onSent()
+          InvitationOutcome.TOO_SOON -> maybeResendNote = R.string.directory_resend_later
+          InvitationOutcome.GONE, InvitationOutcome.NOT_ALLOWED -> maybeResendNote = R.string.create_not_allowed
+        }
+        is ActionAnswer.Failed -> maybeResendNote = answer.text
       }
       isSending = false
     }
@@ -126,55 +148,73 @@ internal fun InvitePeopleSheet(viewModel: MainViewModel, spaces: List<Space>, on
       verticalArrangement = Arrangement.spacedBy(Spacing.m),
     ) {
       Text(stringResource(R.string.invite_title), style = MaterialTheme.typography.titleLarge, modifier = Modifier.semantics { heading() })
-      if (spaces.size > 1) {
-        ChoiceGroup(R.string.invite_space_label) {
-          for (candidate in spaces) {
-            Choice(candidate.name, maybeHint = null, isSelected = candidate.id == space.id) { spaceId = candidate.id }
-          }
-        }
-      }
-      OutlinedTextField(
-        value = email,
-        onValueChange = {
-          email = it
-          maybeEmailRefusal = null
-        },
-        label = { Text(stringResource(R.string.invite_email_label)) },
-        singleLine = true,
-        isError = shown[InviteField.EMAIL] != null,
-        supportingText = supportingText(shown[InviteField.EMAIL]),
-        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
-        modifier = Modifier.fillMaxWidth().focusRequester(requesters.getValue(InviteField.EMAIL)).fieldError(shown[InviteField.EMAIL]),
-      )
-      if (space.canAddMembers && space.canInviteGuests) {
-        ChoiceGroup(R.string.invite_role_label) {
-          Choice(stringResource(R.string.invite_role_member), stringResource(R.string.invite_role_member_hint), isSelected = !isGuest) { wantsGuest = false }
-          Choice(stringResource(R.string.invite_role_guest), stringResource(R.string.invite_role_guest_hint), isSelected = isGuest) { wantsGuest = true }
-        }
-      }
-      OutlinedTextField(
-        value = note,
-        onValueChange = { note = it },
-        label = { Text(stringResource(R.string.invite_message_label)) },
-        minLines = 2,
-        isError = shown[InviteField.NOTE] != null,
-        supportingText = supportingText(shown[InviteField.NOTE]),
-        keyboardOptions = textKeyboard(),
-        modifier = Modifier.fillMaxWidth().focusRequester(requesters.getValue(InviteField.NOTE)).fieldError(shown[InviteField.NOTE]),
-      )
-      maybeFailure?.let { failure ->
+      val unsent = maybeUnsent
+      if (unsent != null) {
         Text(
-          stringResource(failure),
-          color = MaterialTheme.colorScheme.error,
-          style = MaterialTheme.typography.bodyMedium,
+          stringResource(R.string.invite_mail_not_sent, email.trim()),
+          style = MaterialTheme.typography.bodyLarge,
           modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
         )
-      }
-      Button(onClick = send, enabled = !isSending, modifier = Modifier.fillMaxWidth()) {
-        if (isSending) {
-          CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
-        } else {
-          Text(stringResource(R.string.invite_submit))
+        maybeResendNote?.let { Text(stringResource(it), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
+        if (unsent.canResend) {
+          Button(onClick = { resend(unsent) }, enabled = !isSending, modifier = Modifier.fillMaxWidth()) {
+            Text(stringResource(R.string.directory_resend))
+          }
+        }
+        TextButton(onClick = onSent, enabled = !isSending, modifier = Modifier.fillMaxWidth()) {
+          Text(stringResource(R.string.invite_mail_done))
+        }
+      } else {
+        if (spaces.size > 1) {
+          ChoiceGroup(R.string.invite_space_label) {
+            for (candidate in spaces) {
+              Choice(candidate.name, maybeHint = null, isSelected = candidate.id == space.id) { spaceId = candidate.id }
+            }
+          }
+        }
+        OutlinedTextField(
+          value = email,
+          onValueChange = {
+            email = it
+            maybeEmailRefusal = null
+          },
+          label = { Text(stringResource(R.string.invite_email_label)) },
+          singleLine = true,
+          isError = shown[InviteField.EMAIL] != null,
+          supportingText = supportingText(shown[InviteField.EMAIL]),
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Next),
+          modifier = Modifier.fillMaxWidth().focusRequester(requesters.getValue(InviteField.EMAIL)).fieldError(shown[InviteField.EMAIL]),
+        )
+        if (space.canAddMembers && space.canInviteGuests) {
+          ChoiceGroup(R.string.invite_role_label) {
+            Choice(stringResource(R.string.invite_role_member), stringResource(R.string.invite_role_member_hint), isSelected = !isGuest) { wantsGuest = false }
+            Choice(stringResource(R.string.invite_role_guest), stringResource(R.string.invite_role_guest_hint), isSelected = isGuest) { wantsGuest = true }
+          }
+        }
+        OutlinedTextField(
+          value = note,
+          onValueChange = { note = it },
+          label = { Text(stringResource(R.string.invite_message_label)) },
+          minLines = 2,
+          isError = shown[InviteField.NOTE] != null,
+          supportingText = supportingText(shown[InviteField.NOTE]),
+          keyboardOptions = textKeyboard(),
+          modifier = Modifier.fillMaxWidth().focusRequester(requesters.getValue(InviteField.NOTE)).fieldError(shown[InviteField.NOTE]),
+        )
+        maybeFailure?.let { failure ->
+          Text(
+            stringResource(failure),
+            color = MaterialTheme.colorScheme.error,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+          )
+        }
+        Button(onClick = send, enabled = !isSending, modifier = Modifier.fillMaxWidth()) {
+          if (isSending) {
+            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
+          } else {
+            Text(stringResource(R.string.invite_submit))
+          }
         }
       }
     }

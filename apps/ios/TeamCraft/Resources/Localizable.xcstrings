@@ -17353,6 +17353,38 @@
         }
       }
     },
+    "invite_mail_done": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Done"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fertig"
+          }
+        }
+      }
+    },
+    "invite_mail_not_sent %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The invitation for %@ was created, but the e-mail could not be sent. Resend later."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Einladung für %@ wurde angelegt, aber die E-Mail konnte nicht gesendet werden. Sende sie später erneut."
+          }
+        }
+      }
+    },
     "invite_submit": {
       "localizations": {
         "en": {
