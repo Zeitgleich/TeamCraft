@@ -1,7 +1,10 @@
 package de.zeitgleich.teamcraft.crash
 
 import android.content.Context
+import android.os.Build
 import android.util.Log
+import io.sentry.android.core.InternalSentrySdk
+import java.util.concurrent.Executors
 import io.sentry.KeyValueCollectionBehavior
 import io.sentry.Sentry
 import io.sentry.ITransaction
@@ -25,6 +28,9 @@ import uniffi.teamcraft_ffi.perfJobSpans
 import uniffi.teamcraft_ffi.recentLogLines
 import uniffi.teamcraft_ffi.setPerfListener
 import uniffi.teamcraft_ffi.setSlowJobThresholdMs
+import uniffi.teamcraft_ffi.takeTraceEnvelopes
+import uniffi.teamcraft_ffi.traceStart
+import uniffi.teamcraft_ffi.traceStop
 
 /** Google Play builds: sentry-android (JVM, NDK and ANR crashes). */
 object CrashSdks {
@@ -53,6 +59,15 @@ private object SentryCrashSdk : CrashSdk {
       // The core's slow jobs as sampled warnings (issue #1521), with the instance's threshold.
       setSlowJobThresholdMs(settings.config.slowJobMs.toULong())
       setPerfListener(SlowJobReports)
+      // The core's spans (docs/tracing.md): slow, failed and sampled traces as transactions.
+      traceStart(
+        traceRate = settings.config.traceRate,
+        slowJobMs = settings.config.slowJobMs.toULong(),
+        environment = settings.config.environment,
+        appVersion = settings.release.removePrefix("teamcraft@"),
+        installationId = settings.installationId,
+        osVersion = Build.VERSION.RELEASE ?: "",
+      )
       // The scope's user too: NDK crashes are written by the native SDK from the synced scope.
       Sentry.setUser(User().apply { id = settings.installationId })
       maybeRunning = settings
@@ -67,6 +82,7 @@ private object SentryCrashSdk : CrashSdk {
   override fun stop() {
     if (maybeRunning == null) return
     setSlowJobThresholdMs(0uL)
+    traceStop()
     Sentry.close()
     maybeRunning = null
   }
@@ -176,7 +192,8 @@ private class SentryPerfHandle(private val transaction: ITransaction) : PerfHand
    * function or the step's name in the code.
    */
   private fun addJob(job: PerfJobSpan) {
-    val op = jobOp(job.kind)
+    // A span of the core's trace layer names its own operation (`http.client`); a queue job doesn't.
+    val op = job.op.ifEmpty { jobOp(job.kind) }
     if (job.startedAtMs - job.enqueuedAtMs >= MIN_STEP_MS) {
       val wait = transaction.startChild("queue.wait", job.name, sentryDate(job.enqueuedAtMs), Instrumenter.SENTRY)
       wait.setData(QUEUE_DEPTH_DATA, job.queueDepth.toLong())
@@ -219,6 +236,22 @@ private object SlowJobReports : PerfListener {
       job.maybeCpuMs?.let { setTag("cpu_ms", it.toLong().toString()) }
     }
     runCatching { Sentry.captureEvent(event) }
+  }
+
+  /** One thread takes the kept traces off the core's thread and hands them to the SDK's queue. */
+  private val traces = Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "teamcraft-traces") }
+
+  /**
+   * Kept traces (docs/tracing.md) are envelopes the core built and scrubbed; the SDK sends them as
+   * they are, with its own queue, retries and rate limits.
+   */
+  override fun onTracesKept() {
+    traces.execute {
+      runCatching { takeTraceEnvelopes() }.getOrDefault(emptyList()).forEach { envelope ->
+        // A refused envelope (SDK closed meanwhile) is only a trace not sent.
+        runCatching { InternalSentrySdk.captureEnvelope(envelope, false) }
+      }
+    }
   }
 }
 

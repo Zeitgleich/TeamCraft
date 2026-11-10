@@ -11,6 +11,8 @@ use tracing::Level;
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 use tracing_subscriber::filter::Targets;
 
+use teamcraft_client_api::crash_reporting::trace;
+
 use crate::TeamCraftError;
 
 /// The target of lifecycle events, logged at `info` while everything else needs `warn`.
@@ -188,7 +190,10 @@ pub(crate) fn outcome<T>(
 /// problem" (docs/bug-reports.md): the core's redacted ring (`teamcraft_client_api::debug_log`), which
 /// holds TeamCraft's own events from `info` and everything else from `warn`.
 pub(crate) fn recent_lines() -> Vec<String> {
-  teamcraft_client_api::debug_log::recent_lines()
+  let mut lines = teamcraft_client_api::debug_log::recent_lines();
+  // What the core's spans did last and which are still open: where it hung (docs/tracing.md).
+  lines.extend(trace::breadcrumb_lines(crate::perf_jobs::now_ms()));
+  lines
 }
 
 /// The text file the diagnostics export shares: a header with the app and OS version, then the
@@ -225,7 +230,13 @@ fn install_system_log() {
     .with_filter(system_log_filter());
   let ring = teamcraft_client_api::debug_log::layer();
   // Ignored: another subscriber (a test harness) already owns the process.
-  let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer).with(ring));
+  let _ = tracing::subscriber::set_global_default(
+    tracing_subscriber::registry()
+      .with(layer)
+      .with(ring)
+      .with(trace::layer()),
+  );
+  trace::set_cpu_clock(thread_cpu_time);
 }
 
 #[cfg(target_os = "ios")]
@@ -236,7 +247,13 @@ fn install_system_log() {
   let layer = OsLogger::new(SUBSYSTEM, TAG).with_filter(system_log_filter());
   let ring = teamcraft_client_api::debug_log::layer();
   // Ignored: another subscriber (a test harness) already owns the process.
-  let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer).with(ring));
+  let _ = tracing::subscriber::set_global_default(
+    tracing_subscriber::registry()
+      .with(layer)
+      .with(ring)
+      .with(trace::layer()),
+  );
+  trace::set_cpu_clock(thread_cpu_time);
 }
 
 /// Desktop builds of this crate are tests and tools: they bring their own subscriber.

@@ -96,6 +96,7 @@ use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_core::device_activity::ActivityReports;
 use teamcraft_media::openh264_library::{self, OpenH264Binary};
 use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument as _;
 pub use types::{
   AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ChatPreviewItem, ConnectionState,
   ConversationItem, ConversationKind, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem,
@@ -176,7 +177,6 @@ impl TeamCraft {
     listener: Arc<dyn EventListener>,
   ) -> Result<Arc<Self>, TeamCraftError> {
     logging::install();
-    perf_jobs::install();
     outcome(LifecycleStep::Open, Self::open(config, tokens, None, listener))
   }
 
@@ -190,7 +190,6 @@ impl TeamCraft {
     listener: Arc<dyn EventListener>,
   ) -> Result<Arc<Self>, TeamCraftError> {
     logging::install();
-    perf_jobs::install();
     outcome(
       LifecycleStep::Open,
       Self::open(config, tokens, Some(device_key), listener),
@@ -1632,9 +1631,10 @@ impl TeamCraft {
     let timing = perf_jobs::queued(PerfJobKind::EngineQueue, std::any::type_name::<F>());
     let boxed: Job = Box::new(move |engine| {
       Box::pin(async move {
+        let span = timing.span();
         let running = timing.start();
         let clock = JobClock::start();
-        let result = job(engine).await;
+        let result = job(engine).instrument(span).await;
         logging::slow_job(std::any::type_name::<F>(), clock.started() - queued, clock.ran());
         running.done();
         // The caller may have given up waiting (cancelled coroutine); nothing to tell it then.

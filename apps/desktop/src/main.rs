@@ -88,11 +88,12 @@ fn main() -> anyhow::Result<()> {
     .with(tracing_subscriber::fmt::layer().with_filter(env_filter))
     // The recent log for "Report a problem" (docs/bug-reports.md), redacted, in memory only.
     .with(teamcraft_client_api::debug_log::layer())
+    // The shell's spans for the page's performance data and crash breadcrumbs (docs/tracing.md);
+    // off until the page passes the crash report settings on (`perf_configure`).
+    .with(teamcraft_client_api::crash_reporting::trace::layer())
     .init();
   // Panics of the shell are kept for the page to report (docs/crash-reports.md).
   crash_reports::install_hook();
-  // The core's steps for the page's performance data (#1521); cheap: only steps over 5 ms are kept.
-  teamcraft_core::timing::enable_ring();
 
   // No server yet: the account's server is set in `setup`, once the data directory is known.
   // The one read of the OS keychain per start happens when something first asks it for a secret
@@ -289,7 +290,9 @@ fn main() -> anyhow::Result<()> {
       auth::commands::public_get,
       auth::commands::crash_report_post,
       crash_reports::crash_reports_take_native,
-      crash_reports::perf_core_steps,
+      crash_reports::perf_spans,
+      crash_reports::perf_traces,
+      crash_reports::perf_configure,
       auth::commands::public_asset,
       auth::commands::avatar_download,
       auth::commands::avatar_upload,

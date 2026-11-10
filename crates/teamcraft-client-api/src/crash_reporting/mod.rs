@@ -14,6 +14,8 @@ mod panic;
 mod queue;
 mod reporter;
 mod scrub;
+pub mod trace;
+mod trace_fields;
 mod transaction;
 
 use std::future::Future;
@@ -35,8 +37,8 @@ pub use reporter::{
 };
 pub use scrub::scrub;
 pub use transaction::{
-  CoreStep, MAX_MEASUREMENTS, MAX_SPANS, MAX_TAGS, PerfOperation, PerfSpan, PerfStatus, PerfUnit, SpanId,
-  TraceId, Transaction,
+  MAX_MEASUREMENTS, MAX_SPANS, MAX_TAGS, PerfOperation, PerfSpan, PerfStatus, PerfUnit, SpanId, TraceId,
+  Transaction,
 };
 
 /// How long one send may take, connect to answer. A dead backend must never hold the app up;

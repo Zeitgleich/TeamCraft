@@ -11,10 +11,11 @@
 use super::event::{AppInfo, CrashEvent, CrashLevel, EventId, InstallationId};
 use super::queue::{CrashQueue, CrashQueueLimits, QueuedCrashReport};
 use super::scrub::scrub;
+use super::trace::{TraceSettings, TraceTree};
 use super::transaction::Transaction;
 use super::{
   CrashReportingConfig, CrashReportingConsent, CrashRequest, CrashSendOutcome, CrashTransport,
-  ENVELOPE_CONTENT_TYPE,
+  ENVELOPE_CONTENT_TYPE, SampleRate,
 };
 
 /// Transactions sent per flush at most: one request each (the protocol takes one per envelope),
@@ -144,6 +145,32 @@ impl CrashReporter {
       .as_ref()
       .filter(|_| self.is_active())
       .is_some_and(|config| config.trace_rate.keeps(roll))
+  }
+
+  /// What the trace layer collects now (docs/tracing.md): on while reports are on and the instance
+  /// keeps performance data at all (a trace rate above 0).
+  pub fn trace_settings(&self) -> TraceSettings {
+    match self.maybe_config.as_ref().filter(|_| self.is_active()) {
+      Some(config) => TraceSettings {
+        is_on: config.trace_rate.get() > 0.0,
+        trace_rate: config.trace_rate,
+        slow_ms: config.slow_job_ms,
+      },
+      None => TraceSettings {
+        is_on: false,
+        trace_rate: SampleRate::NONE,
+        slow_ms: 0,
+      },
+    }
+  }
+
+  /// Queues the trees the trace layer kept as transactions; `random` gives 16 bytes from the
+  /// platform's secure random source per tree.
+  pub fn capture_traces(&mut self, trees: &[TraceTree], mut random: impl FnMut() -> [u8; 16]) {
+    for tree in trees {
+      // A full queue or reports turned off only mean this tree isn't sent.
+      let _ = self.capture_transaction(&Transaction::from_trace(tree, random()));
+    }
   }
 
   /// Queues a finished transaction (sampled with [`Self::should_trace`] when it started). It needs

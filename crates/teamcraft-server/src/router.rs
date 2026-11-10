@@ -37,6 +37,7 @@ use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::middleware;
 use tower_http::trace::TraceLayer;
+use tracing::Instrument as _;
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::brand as brand_resolver;
@@ -61,6 +62,7 @@ pub fn router(state: AppState) -> Router {
       outage_gate,
     ))
     .layer(middleware::from_fn_with_state(state.clone(), security::guard))
+    .layer(middleware::from_fn(trace_request))
     .layer(
       TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
         tracing::debug_span!(
@@ -71,6 +73,36 @@ pub fn router(state: AppState) -> Router {
       }),
     )
     .with_state(state)
+}
+
+/// Tracing (docs/tracing.md): every request as an `http.server` span named by its matched route
+/// (`GET /api/v1/users/{id}`, never the IDs in it), with the status, continuing the client's trace
+/// (`sentry-trace`). The SQL statements it runs become its children.
+async fn trace_request(request: axum::extract::Request, next: middleware::Next) -> axum::response::Response {
+  let span = tracing::trace_span!(
+    "http.server",
+    method = request.method().as_str(),
+    route = tracing::field::Empty,
+    sentry_trace = tracing::field::Empty,
+    status = tracing::field::Empty,
+  );
+  if !span.is_disabled() {
+    let route = match request.extensions().get::<axum::extract::MatchedPath>() {
+      Some(matched) => matched.as_str().to_owned(),
+      None => teamcraft_proto::route_template(request.uri().path()),
+    };
+    span.record("route", route.as_str());
+    if let Some(header) = request
+      .headers()
+      .get(teamcraft_proto::SENTRY_TRACE_HEADER)
+      .and_then(|value| value.to_str().ok())
+    {
+      span.record("sentry_trace", header);
+    }
+  }
+  let response = next.run(request).instrument(span.clone()).await;
+  span.record("status", response.status().as_u16());
+  response
 }
 
 /// The request path as logs show it: meeting link tokens (`/meeting/<token>`, the knock route)

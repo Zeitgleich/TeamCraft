@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use super::Environment;
 use super::event::{AppInfo, EventId, InstallationId, RELEASE_PREFIX, hex, seconds_f64};
+use super::trace::{ClosedSpan, KeepReason, TraceTree};
 
 /// Spans per transaction at most; later ones are left out.
 pub const MAX_SPANS: usize = 32;
@@ -27,6 +28,8 @@ pub struct Transaction {
   trace_id: TraceId,
   span_id: SpanId,
   operation: PerfOperation,
+  /// The caller's span when the trace was continued from another process (`sentry-trace`).
+  maybe_parent_span: Option<SpanId>,
   start_ms: f64,
   end_ms: f64,
   status: PerfStatus,
@@ -62,11 +65,18 @@ pub enum PerfOperation {
   /// smooth it was, and how often the list had to move the scroll position under the reader
   /// (#1595).
   ScrollBack,
+  /// A root span of the trace layer kept for being slow, failed or sampled (docs/tracing.md):
+  /// its operation and description, both from the code.
+  Traced {
+    op: &'static str,
+    name: &'static str,
+  },
 }
 
 /// How an operation ended (the protocol's span status).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PerfStatus {
+  #[default]
   Ok,
   /// The operation failed.
   Error,
@@ -79,7 +89,7 @@ pub enum PerfStatus {
 }
 
 /// A step inside a transaction (`http.client` / `GET /api/v1/channels/{id}/messages`).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PerfSpan {
   /// The protocol's operation (`http.client`, `db`, `crypto`, `ui.render`).
   pub op: &'static str,
@@ -89,6 +99,11 @@ pub struct PerfSpan {
   pub start_ms: f64,
   pub end_ms: f64,
   pub status: PerfStatus,
+  /// Its own ID and its parent's, for a span from the trace layer (docs/tracing.md); `None`: a
+  /// direct child of the transaction with a derived ID.
+  pub maybe_ids: Option<(SpanId, SpanId)>,
+  /// Numbers from the code (`queued_ms`, `busy_ms`, `status`), as the span's data.
+  pub data: Vec<(&'static str, f64)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,18 +112,6 @@ pub enum PerfUnit {
   Byte,
   /// A count (messages, members).
   None,
-}
-
-/// A timed step of the core (`teamcraft_core::timing`) as the desktop shell hands it to the page
-/// (`perf_core_steps`): a code name, never data; the page turns it into a [`PerfSpan`].
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CoreStep {
-  /// `core.step`, `store.lock_wait` or `store.write_group`.
-  pub op: String,
-  /// The step's or the request's name in the code (`messages`, `catch_up_conversation`).
-  pub name: String,
-  pub started_at_ms: f64,
-  pub took_ms: f64,
 }
 
 /// A trace: 16 random bytes, 32 hex digits.
@@ -135,6 +138,7 @@ impl Transaction {
       trace_id: TraceId(trace),
       span_id: SpanId(span),
       operation,
+      maybe_parent_span: None,
       start_ms,
       end_ms: start_ms,
       status: PerfStatus::Ok,
@@ -142,6 +146,54 @@ impl Transaction {
       tags: BTreeMap::new(),
       measurements: BTreeMap::new(),
     }
+  }
+
+  /// A root span of the trace layer as a transaction of its own (docs/tracing.md): its
+  /// descendants and the spans that blocked it become its spans, its phases its measurements.
+  /// `event_random`: 16 bytes from the platform's secure random source.
+  pub fn from_trace(tree: &TraceTree, event_random: [u8; 16]) -> Self {
+    let root = &tree.root;
+    let mut transaction = Self {
+      event_id: EventId::from_random_bytes(event_random),
+      trace_id: root.trace_id,
+      span_id: root.span_id,
+      operation: PerfOperation::Traced {
+        op: root.op,
+        name: root.description,
+      },
+      maybe_parent_span: root.maybe_parent,
+      start_ms: root.start_ms,
+      end_ms: root.end_ms.max(root.start_ms),
+      status: root.status,
+      spans: Vec::new(),
+      tags: BTreeMap::new(),
+      measurements: BTreeMap::new(),
+    };
+    transaction.set_tag("trace.keep", tree.reason.as_str());
+    if let Some(class) = root.maybe_error {
+      transaction.set_tag("error", class);
+    }
+    for (name, value) in span_numbers(root) {
+      transaction.set_measurement(name, value, PerfUnit::of_field(name));
+    }
+    for span in &tree.spans {
+      transaction.add_span(PerfSpan::from_closed(
+        span,
+        span.maybe_parent.unwrap_or(root.span_id),
+      ));
+    }
+    for span in &tree.blocked_by {
+      let mut blocking = PerfSpan::from_closed(span, root.span_id);
+      blocking.data.push(("blocked_by", 1.0));
+      transaction.add_span(blocking);
+    }
+    transaction
+  }
+
+  /// Adds a closed span of the trace layer as a step: its own ID, under this transaction.
+  pub fn add_trace_span(&mut self, span: &ClosedSpan) {
+    let step = PerfSpan::from_closed(span, self.span_id);
+    self.add_span(step);
   }
 
   /// Adds a step; beyond [`MAX_SPANS`] steps it is left out.
@@ -196,8 +248,8 @@ impl Transaction {
     self.end_ms - self.start_ms
   }
 
-  /// The envelope (header, item header, payload).
-  pub(super) fn to_envelope(
+  /// The envelope (header, item header, payload) as the backend takes it.
+  pub fn to_envelope(
     &self,
     app: &AppInfo,
     environment: &Environment,
@@ -222,16 +274,24 @@ impl Transaction {
       .iter()
       .enumerate()
       .map(|(index, span)| {
-        json!({
+        let (span_id, parent) = span
+          .maybe_ids
+          .unwrap_or((self.span_id.child(index), self.span_id));
+        let mut value = json!({
           "trace_id": trace_id,
-          "span_id": self.span_id.child(index).to_string(),
-          "parent_span_id": self.span_id.to_string(),
+          "span_id": span_id.to_string(),
+          "parent_span_id": parent.to_string(),
           "op": span.op,
           "description": span.description.as_ref(),
           "start_timestamp": seconds_f64(span.start_ms.max(self.start_ms)),
           "timestamp": seconds_f64(span.end_ms.clamp(self.start_ms, self.end_ms)),
           "status": span.status.as_str(),
-        })
+        });
+        if !span.data.is_empty() {
+          let data: BTreeMap<&str, f64> = span.data.iter().copied().collect();
+          value["data"] = json!(data);
+        }
+        value
       })
       .collect();
     let measurements: BTreeMap<&str, Value> = self
@@ -239,7 +299,7 @@ impl Transaction {
       .iter()
       .map(|(name, (value, unit))| (*name, json!({ "value": value, "unit": unit.as_str() })))
       .collect();
-    json!({
+    let mut payload = json!({
       "type": "transaction",
       "event_id": self.event_id.to_string(),
       "transaction": self.operation.name(),
@@ -263,24 +323,32 @@ impl Transaction {
       },
       "spans": spans,
       "measurements": measurements,
-    })
+    });
+    if let Some(parent) = self.maybe_parent_span {
+      payload["contexts"]["trace"]["parent_span_id"] = json!(parent.to_string());
+    }
+    payload
   }
 }
 
 impl PerfSpan {
-  /// A name that came over a boundary (the desktop shell): kept only while it looks like a name
-  /// in the code (lowercase letters, digits, `_`, 1 to 48 characters), otherwise `step`.
-  pub fn code_name(name: &str) -> Cow<'static, str> {
-    let is_code = !name.is_empty()
-      && name.len() <= 48
-      && name
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
-    if is_code {
-      Cow::Owned(name.to_owned())
-    } else {
-      Cow::Borrowed("step")
+  /// A closed span of the trace layer under `parent`, with its phases and numbers as data.
+  pub fn from_closed(span: &ClosedSpan, parent: SpanId) -> Self {
+    Self {
+      op: span.op,
+      description: Cow::Borrowed(span.description),
+      start_ms: span.start_ms,
+      end_ms: span.end_ms,
+      status: span.status,
+      maybe_ids: Some((span.span_id, parent)),
+      data: span_numbers(span),
     }
+  }
+
+  /// A name that came over a boundary (the desktop shell): kept only while it looks like a name
+  /// in the code or a route template (`trace_fields::checked_description`), otherwise `other`.
+  pub fn code_name(name: &str) -> Cow<'static, str> {
+    Cow::Borrowed(super::trace_fields::checked_description(name))
   }
 }
 
@@ -299,6 +367,7 @@ impl PerfOperation {
       Self::CatchUp => "conversation.catch_up",
       Self::OlderHistoryPage => "history.older_page",
       Self::ScrollBack => "feed.scroll_back",
+      Self::Traced { name, .. } => name,
     }
   }
 
@@ -314,12 +383,24 @@ impl PerfOperation {
       Self::CatchUp => "sync",
       Self::OlderHistoryPage => "ui.load",
       Self::ScrollBack => "ui.scroll",
+      Self::Traced { op, .. } => op,
     }
   }
 }
 
 impl PerfStatus {
-  fn as_str(self) -> &'static str {
+  /// The protocol's name back to the status; anything else is an error.
+  pub(super) fn from_protocol(name: &str) -> Self {
+    match name {
+      "ok" => Self::Ok,
+      "cancelled" => Self::Cancelled,
+      "deadline_exceeded" => Self::TimedOut,
+      "unavailable" => Self::Unavailable,
+      _ => Self::Error,
+    }
+  }
+
+  pub(super) fn as_str(self) -> &'static str {
     match self {
       Self::Ok => "ok",
       Self::Error => "internal_error",
@@ -330,7 +411,43 @@ impl PerfStatus {
   }
 }
 
+/// A span's phases, CPU time and numbers, by name.
+fn span_numbers(span: &ClosedSpan) -> Vec<(&'static str, f64)> {
+  let mut numbers = Vec::with_capacity(4 + span.data.len());
+  if let Some(phases) = span.maybe_phases {
+    numbers.push(("queued_ms", phases.queued_ms));
+    numbers.push(("busy_ms", phases.busy_ms));
+    numbers.push(("idle_ms", phases.idle_ms));
+  }
+  if let Some(cpu_ms) = span.maybe_cpu_ms {
+    numbers.push(("cpu_ms", cpu_ms));
+  }
+  numbers.extend(span.data.iter().copied());
+  numbers
+}
+
+impl KeepReason {
+  pub(super) fn as_str(self) -> &'static str {
+    match self {
+      Self::Failed => "failed",
+      Self::Slow => "slow",
+      Self::Sampled => "sampled",
+    }
+  }
+}
+
 impl PerfUnit {
+  /// The unit a field's name says (`*_ms`, `*_bytes`), else a count.
+  fn of_field(name: &str) -> Self {
+    if name.ends_with("_ms") {
+      Self::Millisecond
+    } else if name.ends_with("_bytes") {
+      Self::Byte
+    } else {
+      Self::None
+    }
+  }
+
   fn as_str(self) -> &'static str {
     match self {
       Self::Millisecond => "millisecond",
@@ -340,7 +457,29 @@ impl PerfUnit {
   }
 }
 
+impl TraceId {
+  pub(super) fn from_u128(value: u128) -> Self {
+    Self(value.to_be_bytes())
+  }
+
+  /// 32 hex digits, as in a `sentry-trace` header; `None` for anything else or all zeros.
+  pub fn parse(text: &str) -> Option<Self> {
+    let value = parse_hex(text, 32)?;
+    (value != 0).then(|| Self::from_u128(value))
+  }
+}
+
 impl SpanId {
+  pub(super) fn from_u64(value: u64) -> Self {
+    Self(value.to_be_bytes())
+  }
+
+  /// 16 hex digits, as in a `sentry-trace` header; `None` for anything else or all zeros.
+  pub fn parse(text: &str) -> Option<Self> {
+    let value = u64::try_from(parse_hex(text, 16)?).ok()?;
+    (value != 0).then(|| Self::from_u64(value))
+  }
+
   /// A child span's ID: unique inside the trace, derived from the parent so no more random bytes
   /// are needed (span IDs only have to be unique within their trace).
   fn child(self, index: usize) -> Self {
@@ -350,6 +489,13 @@ impl SpanId {
     bytes[7] ^= low;
     Self(bytes)
   }
+}
+
+fn parse_hex(text: &str, digits: usize) -> Option<u128> {
+  if text.len() != digits || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    return None;
+  }
+  u128::from_str_radix(text, 16).ok()
 }
 
 impl std::fmt::Display for TraceId {
@@ -422,6 +568,7 @@ mod tests {
       start_ms: 500.0,
       end_ms: 9_000.0,
       status: PerfStatus::Ok,
+      ..Default::default()
     });
     let transaction = transaction.finish(2_000.0, PerfStatus::Ok);
     let payload = transaction.payload(
@@ -447,6 +594,7 @@ mod tests {
         start_ms: 0.0,
         end_ms: 1.0,
         status: PerfStatus::Ok,
+        ..Default::default()
       });
     }
     const KEYS: [&str; 12] = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"];
@@ -485,7 +633,7 @@ mod tests {
     );
     assert_eq!(PerfSpan::code_name("migrate_to_v5"), "migrate_to_v5");
     for leaky in ["Alice Example", "a@example.com", "/home/x", "", &"x".repeat(49)] {
-      assert_eq!(PerfSpan::code_name(leaky), "step", "{leaky}");
+      assert_eq!(PerfSpan::code_name(leaky), "other", "{leaky}");
     }
   }
 
@@ -519,6 +667,7 @@ mod tests {
       start_ms: 1_700_000_000_010.0,
       end_ms: 1_700_000_000_070.0,
       status: PerfStatus::Error,
+      ..Default::default()
     });
     transaction.set_tag("source", "network");
     transaction.set_measurement("messages", 50.0, PerfUnit::None);

@@ -248,6 +248,7 @@ impl Measure {
         start_ms,
         end_ms: now_ms(),
         status,
+        ..Default::default()
       });
     }
   }
@@ -261,6 +262,7 @@ impl Measure {
         start_ms,
         end_ms,
         status: PerfStatus::Ok,
+        ..Default::default()
       });
     }
   }
@@ -292,33 +294,22 @@ impl Measure {
 
 #[cfg(target_arch = "wasm32")]
 mod platform {
-  use teamcraft_client_api::crash_reporting::{CoreStep, PerfSpan, PerfStatus, Transaction};
-  use teamcraft_core::timing::{self, TimedKind};
+  use teamcraft_client_api::crash_reporting::Transaction;
+  use teamcraft_client_api::crash_reporting::trace::{self, WireSpan};
 
   use crate::auth::tauri;
 
   pub fn should_trace() -> bool {
-    let is_traced = crate::crash_reports::should_trace();
-    if is_traced {
-      // The page's own core (web) keeps its steps from now on; on desktop the shell does.
-      timing::enable_ring();
-    }
-    is_traced
+    crate::crash_reports::should_trace()
   }
 
-  /// Queues the measure with the core's steps that overlapped it: on the web from the page's own
-  /// core, on desktop from the shell's (`perf_core_steps`).
+  /// Queues the measure with the spans that overlapped it (docs/tracing.md): on the web from the
+  /// page's own trace layer, on desktop from the shell's (`perf_spans`), checked again on arrival.
   pub fn capture(mut transaction: Transaction) {
     let (start_ms, end_ms) = (transaction.start_ms(), transaction.end_ms());
     if !tauri::is_available() {
-      for timed in timing::recent(start_ms, end_ms) {
-        transaction.add_span(PerfSpan {
-          op: kind_op(timed.kind),
-          description: timed.name.into(),
-          start_ms: timed.started_at_ms,
-          end_ms: timed.started_at_ms + timed.took.as_secs_f64() * 1_000.0,
-          status: PerfStatus::Ok,
-        });
+      for span in trace::recent(start_ms, end_ms) {
+        transaction.add_trace_span(&span);
       }
       crate::crash_reports::capture_transaction(&transaction);
       return;
@@ -326,36 +317,13 @@ mod platform {
     wasm_bindgen_futures::spawn_local(async move {
       let args = serde_json::json!({ "start_ms": start_ms, "end_ms": end_ms });
       // A shell without the command (older) only means no steps.
-      if let Ok(steps) = tauri::call::<Vec<CoreStep>>("perf_core_steps", &args).await {
-        for step in steps {
-          transaction.add_span(PerfSpan {
-            op: op_of(&step.op),
-            description: PerfSpan::code_name(&step.name),
-            start_ms: step.started_at_ms,
-            end_ms: step.started_at_ms + step.took_ms,
-            status: PerfStatus::Ok,
-          });
+      if let Ok(spans) = tauri::call::<Vec<WireSpan>>("perf_spans", &args).await {
+        for span in spans.into_iter().filter_map(WireSpan::into_span) {
+          transaction.add_trace_span(&span);
         }
       }
       crate::crash_reports::capture_transaction(&transaction);
     });
-  }
-
-  fn kind_op(kind: TimedKind) -> &'static str {
-    match kind {
-      TimedKind::Step => "core.step",
-      TimedKind::GroupLock => "store.lock_wait",
-      TimedKind::WriteGroup => "store.write_group",
-    }
-  }
-
-  /// The shell's operation, as one of the page's own names.
-  fn op_of(op: &str) -> &'static str {
-    match op {
-      "store.lock_wait" => "store.lock_wait",
-      "store.write_group" => "store.write_group",
-      _ => "core.step",
-    }
   }
 
   pub fn random40() -> [u8; 40] {
@@ -379,6 +347,7 @@ mod platform {
       performance.time_origin() + performance.now()
     })
   }
+
   /// Runs `callback` once the next frame was painted: its animation frame, then a task after it.
   pub fn after_next_paint(callback: impl FnOnce() + 'static) {
     leptos::prelude::request_animation_frame(move || {

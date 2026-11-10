@@ -366,6 +366,61 @@ pub enum GatewayEvent {
   Unknown,
 }
 
+impl GatewayEvent {
+  /// The event's type as the wire names it (`message_create`): a name from the code, for tracing
+  /// (docs/tracing.md), never anything the event carries.
+  pub fn kind(&self) -> &'static str {
+    match self {
+      Self::MessageCreate { .. } => "message_create",
+      Self::MlsMessage { .. } => "mls_message",
+      Self::ConversationUpdate { .. } => "conversation_update",
+      Self::MembershipAdd { .. } => "membership_add",
+      Self::MembershipRemove { .. } => "membership_remove",
+      Self::ConversationDelete { .. } => "conversation_delete",
+      Self::WorkspaceUpdate { .. } => "workspace_update",
+      Self::RoleEvidenceUpdate => "role_evidence_update",
+      Self::LeaverUpdate => "leaver_update",
+      Self::ChannelRolesUpdate { .. } => "channel_roles_update",
+      Self::MeetingUpdate { .. } => "meeting_update",
+      Self::LobbyJoin { .. } => "lobby_join",
+      Self::LobbyDecision { .. } => "lobby_decision",
+      Self::ProfileUpdate { .. } => "profile_update",
+      Self::AdminJoinRequestUpdate { .. } => "admin_join_request_update",
+      Self::OrgRecoveryUpdate { .. } => "org_recovery_update",
+      Self::KeyBagUpdate { .. } => "key_bag_update",
+      Self::ScheduledMessagesUpdate => "scheduled_messages_update",
+      Self::AnnouncementUpdate => "announcement_update",
+      Self::AttachmentLimitUpdate { .. } => "attachment_limit_update",
+      Self::HealthAlertUpdate => "health_alert_update",
+      Self::SystemEvent { .. } => "system_event",
+      Self::UserGroupUpdate { .. } => "user_group_update",
+      Self::GuestExpired { .. } => "guest_expired",
+      Self::GuestTermsUpdate => "guest_terms_update",
+      Self::MessageAck { .. } => "message_ack",
+      Self::ReadReceipt { .. } => "read_receipt",
+      Self::DeliveryUpdate { .. } => "delivery_update",
+      Self::UnreadUpdate { .. } => "unread_update",
+      Self::NotificationSettingsUpdate => "notification_settings_update",
+      Self::ThreadUpdate { .. } => "thread_update",
+      Self::CallStart { .. } => "call_start",
+      Self::CallUpdate { .. } => "call_update",
+      Self::CallEnd { .. } => "call_end",
+      Self::CallMove { .. } => "call_move",
+      Self::CallRing { .. } => "call_ring",
+      Self::DeviceAdd { .. } => "device_add",
+      Self::DeviceLinkRequested { .. } => "device_link_requested",
+      Self::DeviceLinkClosed { .. } => "device_link_closed",
+      Self::DeviceRemove { .. } => "device_remove",
+      Self::SpaceUpdate { .. } => "space_update",
+      Self::SpaceMemberAdd { .. } => "space_member_add",
+      Self::SpaceMemberRemove { .. } => "space_member_remove",
+      Self::TypingStart { .. } => "typing_start",
+      Self::PresenceUpdate { .. } => "presence_update",
+      Self::Unknown => "unknown",
+    }
+  }
+}
+
 // The token must not end up in logs.
 impl fmt::Debug for GatewayClientMessage {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

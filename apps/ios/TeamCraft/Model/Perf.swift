@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
-import Sentry
+// The hybrid-SDK envelope API (`SentrySDK.internal.envelope`): the core builds trace envelopes.
+@_spi(Private) import Sentry
 
 /// Performance data of the app's own operations (issue #1521, docs/crash-reports.md "Performance
 /// data"): the signed-in start, a channel switch, a send until the server took it, a reconnect and a
@@ -101,7 +102,8 @@ enum Perf {
 
   /// A core job as two steps: its wait in the queue (`queue.wait`) and its run.
   private static func addJob(_ job: PerfJobSpan, to transaction: any Span) {
-    let op = jobOperation(job.kind)
+    // A span of the core's trace layer names its own operation (`http.client`); a queue job doesn't.
+    let op = job.op.isEmpty ? jobOperation(job.kind) : job.op
     if job.startedAtMs - job.enqueuedAtMs >= 1 {
       let wait = transaction.startChild(operation: "queue.wait", description: job.name)
       wait.startTimestamp = date(job.enqueuedAtMs)
@@ -200,5 +202,18 @@ final class SlowJobReports: PerfListener, Sendable {
       event.tags?["cpu_ms"] = String(Int(cpuMs))
     }
     SentrySDK.capture(event: event)
+  }
+
+  /// Kept traces (docs/tracing.md) are envelopes the core built and scrubbed; the SDK sends them as
+  /// they are, with its own queue, retries and rate limits. Off the core's thread.
+  func onTracesKept() {
+    DispatchQueue.global(qos: .utility).async {
+      for data in takeTraceEnvelopes() {
+        // An envelope the SDK can't read is only a trace not sent.
+        if let envelope = SentrySDK.internal.envelope.deserialize(from: data) {
+          SentrySDK.internal.envelope.capture(envelope)
+        }
+      }
+    }
   }
 }

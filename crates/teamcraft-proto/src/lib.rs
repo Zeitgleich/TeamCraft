@@ -21,6 +21,7 @@ mod rendezvous;
 mod role;
 pub mod role_rules;
 pub mod synced_settings;
+mod trace_context;
 pub mod web_links;
 mod wire_enum;
 
@@ -77,3 +78,4 @@ pub use permission::{
 };
 pub use rendezvous::{RENDEZVOUS_PATH, RendezvousClientMessage, RendezvousServerMessage};
 pub use role::Role;
+pub use trace_context::{SENTRY_TRACE_HEADER, current_trace_header, route_template, set_trace_header_source};

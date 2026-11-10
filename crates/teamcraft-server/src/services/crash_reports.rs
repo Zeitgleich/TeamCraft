@@ -14,10 +14,13 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use reqwest::header::{CONTENT_TYPE, RETRY_AFTER};
+use teamcraft_client_api::crash_reporting::trace;
 use teamcraft_client_api::crash_reporting::{
-  AppInfo, AppPlatform, CrashQueue, CrashReporter, CrashReportingConfig, EventId, InstallationId, PanicParts,
+  AppInfo, AppPlatform, CrashQueue, CrashReporter, CrashReportingConfig, CrashSendOutcome, EventId,
+  InstallationId, PanicParts,
 };
 use teamcraft_proto::{Dsn, ErrorCode, MAX_CRASH_ENVELOPE_BYTES};
+use tokio::sync::Notify;
 use tracing::{debug, warn};
 use url::Url;
 
@@ -177,6 +180,95 @@ pub fn install_panic_hook(state: AppState) {
       warn!(%error, "could not start sending a crash report");
     }
   }));
+}
+
+/// How often the trace sender looks at the instance's setting without a kept trace waking it: an
+/// admin who turns crash reports on or off is followed within this time.
+const TRACE_SETTINGS_RECHECK: Duration = Duration::from_secs(60);
+
+/// Sends the server's kept traces (docs/tracing.md): slow or failed requests with their SQL
+/// statements, and a sample, to the backend in the instance settings. The trace layer follows the
+/// setting (off: nothing is collected); a kept trace wakes the sender, which also looks at the
+/// setting once a [`TRACE_SETTINGS_RECHECK`]. Bounded like the apps' queue; a slow or dead backend
+/// only delays traces, never a request.
+pub fn spawn_trace_sender(state: AppState) {
+  static WAKE: std::sync::OnceLock<Arc<Notify>> = std::sync::OnceLock::new();
+  let wake = WAKE.get_or_init(|| Arc::new(Notify::new())).clone();
+  trace::set_kept_hook(|| {
+    if let Some(wake) = WAKE.get() {
+      wake.notify_one();
+    }
+  });
+  let installation = InstallationId::from_random_bytes(random_bytes());
+  tokio::spawn(async move {
+    let mut reporter = CrashReporter::new(server_app(), installation, CrashQueue::default());
+    loop {
+      let maybe_config = current_config(&state);
+      reporter.set_config(maybe_config.clone());
+      trace::configure(reporter.trace_settings());
+      if let Some(config) = maybe_config {
+        reporter.capture_traces(&trace::take_kept(), random_bytes);
+        send_traces(&state, &mut reporter, &config).await;
+      } else {
+        let _ = trace::take_kept();
+      }
+      // Either wakes it: a kept trace, or the time to look at the setting again.
+      let _ = tokio::time::timeout(TRACE_SETTINGS_RECHECK, wake.notified()).await;
+    }
+  });
+}
+
+fn current_config(state: &AppState) -> Option<CrashReportingConfig> {
+  state
+    .settings
+    .get()
+    .crash_reports
+    .info(state.crash_relay.publisher())
+    .and_then(|info| CrashReportingConfig::from_info(&info).ok())
+}
+
+/// One flush of the queued traces, one envelope per request, until the queue or the flush's share
+/// is through or the backend asks to wait.
+async fn send_traces(state: &AppState, reporter: &mut CrashReporter, config: &CrashReportingConfig) {
+  let Ok(url) = Url::parse(&config.dsn.envelope_url(env!("CARGO_PKG_VERSION"))) else {
+    return;
+  };
+  let relay = &state.crash_relay;
+  if !relay.allows_private && check_public_url(&url).is_err() {
+    return;
+  }
+  reporter.begin_flush();
+  while let Some(pending) = reporter.next_send(now_ms()) {
+    let sent = tokio::time::timeout(
+      FORWARD_TIMEOUT,
+      relay
+        .http
+        .post(url.clone())
+        .header(CONTENT_TYPE, ENVELOPE_CONTENT_TYPE)
+        .body(pending.request.body)
+        .send(),
+    )
+    .await;
+    let outcome = match sent {
+      Ok(Ok(response)) => outcome_of(response.status().as_u16(), response.headers().get(RETRY_AFTER)),
+      _ => CrashSendOutcome::Unreachable,
+    };
+    if !reporter.record_outcome(pending.event_id, outcome, now_ms()) {
+      break;
+    }
+  }
+}
+
+/// The backend's answer to a send of the server's own.
+fn outcome_of(status: u16, maybe_retry_after: Option<&reqwest::header::HeaderValue>) -> CrashSendOutcome {
+  match answer(status, maybe_retry_after) {
+    Ok(()) => CrashSendOutcome::Accepted,
+    Err(ApiError::RateLimited { retry_after_secs }) => CrashSendOutcome::RateLimited {
+      retry_after: Duration::from_secs(retry_after_secs),
+    },
+    Err(ApiError::Unavailable(_)) => CrashSendOutcome::Unreachable,
+    Err(_) => CrashSendOutcome::Rejected,
+  }
 }
 
 fn send_blocking(url: &str, body: Vec<u8>, allows_private: bool) {
@@ -364,6 +456,19 @@ mod tests {
         String::from_utf8_lossy(refused)
       );
     }
+  }
+
+  #[test]
+  fn backend_answers_to_the_servers_traces_map_to_queue_outcomes() {
+    assert_eq!(outcome_of(202, None), CrashSendOutcome::Accepted);
+    assert_eq!(
+      outcome_of(429, Some(&HeaderValue::from_static("5"))),
+      CrashSendOutcome::RateLimited {
+        retry_after: Duration::from_secs(5)
+      }
+    );
+    assert_eq!(outcome_of(400, None), CrashSendOutcome::Rejected);
+    assert_eq!(outcome_of(502, None), CrashSendOutcome::Unreachable);
   }
 
   #[test]
