@@ -116,6 +116,9 @@ brake_max_percent = 10
 brake_min_allowed = 2
 # The console warns, and an alert follows, after this many intervals without a run.
 stale_after_intervals = 3
+# Events from the provider (POST /api/v1/identity-provider/events, secret set in the admin console)
+# start a run soon; runs started by events are at least this far apart (docs/provisioning.md 4).
+event_min_gap_secs = 10
 
 [logging]
 # `tracing` filter, e.g. "info" or "teamcraft_server=debug,info". The RUST_LOG variable wins.

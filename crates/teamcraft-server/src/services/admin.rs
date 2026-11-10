@@ -216,7 +216,7 @@ pub async fn deactivate_user_as_admin(
 /// Admins manage members, guests and bots; owners also manage admins and other owners. Without
 /// this an admin could lock every owner (the only signers of roster and policy) out of the
 /// workspace.
-async fn ensure_may_act_on(
+pub(crate) async fn ensure_may_act_on(
   state: &AppState,
   caller: &AuthenticatedUser,
   target: UserId,
@@ -288,6 +288,9 @@ pub async fn deactivate_user(
   }
   if after == AfterDeactivation::RemoveFromChats {
     remove_from_all_chats(state, maybe_actor, user).await?;
+  } else if is_new && reason == DeactivationReason::Oidc {
+    // A leaver: owners' and admins' apps take them out of the groups (docs/provisioning.md §3).
+    super::leavers::announce(state).await;
   }
   Ok(is_new)
 }
@@ -363,14 +366,19 @@ pub enum AfterDeactivation {
 
 /// The admin action "Remove from all chats" for a deactivated user (admin.md §3.4): their devices
 /// are removed and they leave every conversation and space; the members' clients commit the
-/// removals with a key rotation (e2ee.md §4.6). Not reversible by a reactivation.
+/// removals with a key rotation (e2ee.md §4.6). Not reversible by a reactivation. `as_leaver`: an
+/// app's automatic removal (docs/provisioning.md §3), refused unless the user is still a leaver.
 pub async fn remove_from_chats_as_admin(
   state: &AppState,
   caller: &AuthenticatedUser,
   user: UserId,
+  as_leaver: bool,
 ) -> Result<(), ApiError> {
   require(state, caller, Permission::ManageUsers, &Target::Instance)?;
   ensure_may_act_on(state, caller, user).await?;
+  if as_leaver && !state.database.is_leaver(user).await? {
+    return Err(ApiError::Conflict("the user is no longer a leaver".into()));
+  }
   remove_from_all_chats(state, Some(caller.user.id), user).await
 }
 
@@ -391,6 +399,7 @@ pub async fn remove_from_all_chats(
     },
     ChatRemoval::UnknownUser => return Err(ApiError::user_not_found()),
   };
+  super::leavers::release(state, user).await;
   if !announce_chat_removal(state, user, &effects).await {
     return Ok(());
   }

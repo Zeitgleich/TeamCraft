@@ -35,6 +35,7 @@ mod imported_history;
 mod join_requests;
 mod key_history;
 mod key_packages;
+mod leavers;
 mod linking;
 #[cfg(feature = "ui")]
 pub(crate) mod list_outcomes;
@@ -120,6 +121,7 @@ pub use guest::{
   is_open_by_own_record,
 };
 pub use join_requests::is_open_private_channel;
+pub use leavers::{LeaverRound, leavers_held_by_limit};
 pub use linking::{
   LinkAnnouncement, LinkApproval, LinkCodeKind, LinkOffer, LinkReceipt, LinkRequestInfo, LinkRequestList,
   LinkWait, LinkWaitCancel, LinkedSecrets, NewDeviceLink, ReceiptCancel,
@@ -447,6 +449,8 @@ pub struct Client<A, S> {
   maybe_jwks_source: Option<Box<dyn JwksSource>>,
   /// Boxed: a client is moved around by value, and this is seldom touched.
   role_signing: Box<role_signing::RoleSigningRun>,
+  /// Leavers this device takes out of the groups (docs/provisioning.md §3).
+  leavers: leavers::LeaverRun,
   /// When the key packages were last checked ([`Client::renew_key_packages_if_due`]).
   last_key_package_check_ms: i64,
   /// When this device last tried to join each conversation's group as a further device (backs
@@ -658,6 +662,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_preview_fetcher,
       maybe_jwks_source: None,
       role_signing: Default::default(),
+      leavers: Default::default(),
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
       maybe_backlog_reads: None,

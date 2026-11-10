@@ -145,6 +145,21 @@ policy-voice-messages = Sprachnachrichten
 policy-voice-messages-enabled = Sprachnachrichten erlauben
 policy-voice-messages-enabled-hint = Personen können im Eingabefeld eine Sprachnachricht aufnehmen. Sie wird wie jede Audiodatei Ende-zu-Ende-verschlüsselt gesendet. Aus: Die Aufnahmetaste fehlt; Audiodateien lassen sich weiterhin anhängen.
 policy-voice-messages-max = Längste Sprachnachricht
+policy-leavers = Personen, die gehen
+policy-leavers-hint = Deaktiviert oder löscht der Identity Provider jemanden, sperrt TeamCraft die Person sofort. Aus den verschlüsselten Chats entfernen kann sie nur die App eines Eigentümers oder Admins, die die Entfernung signiert; die Apps der Mitglieder wechseln danach die Schlüssel.
+policy-leavers-automatic = Ausgeschiedene automatisch aus allen Chats entfernen
+policy-leavers-automatic-hint = Die App eines Eigentümers oder Admins erledigt das selbst, sobald die Wartezeit vorbei ist. Eigentümer und Admins werden so nie entfernt. Aus: Die Seite „Benutzer“ listet sie, und ein Admin entfernt sie von Hand.
+policy-leavers-grace = Wartezeit nach der Deaktivierung
+policy-leavers-at-once = Sofort
+policy-leavers-limit = Höchstens pro Gerät und Tag
+policy-leavers-people = { $count ->
+    [one] { $count } Person
+   *[other] { $count } Personen
+  }
+policy-hours = { $count ->
+    [one] { $count } Stunde
+   *[other] { $count } Stunden
+  }
 policy-recovery = Organisations-Wiederherstellung
 policy-recovery-hint = Erlaubt Admins, den Zugang wiederherzustellen, wenn jemand alle Geräte und den Passkey verliert.
 policy-recovery-members = Für Mitglieder erlauben
@@ -967,6 +982,18 @@ health-check-media_server-hint = Meldet sich im Betrieb alle paar Sekunden beim 
 health-check-oidc_sync = Abgleich mit dem Identitätsanbieter
 health-check-oidc_sync-hint = Gleicht die Personen regelmäßig mit dem Identitätsanbieter ab. Überfällig nach der eingestellten Zahl verpasster Läufe, standardmäßig drei.
 oidc-sync-title = Abgleich mit dem Identitätsanbieter
+provider-events-title = Ereignisse des Identitätsanbieters
+provider-events-hint = Mit einem Secret kann der Identitätsanbieter Änderungen (Benutzer deaktiviert, Rolle oder Gruppe geändert) an POST /api/v1/identity-provider/events melden, mit dem Header „Authorization: Bearer“ und dem Secret. Der Abgleich läuft dann binnen Sekunden statt erst beim nächsten Intervall. Die Meldung startet nur einen Lauf: Der Abgleich liest den Provider selbst.
+provider-events-needs-sync = Ereignisse starten nur den Abgleich, und der läuft auf dieser Instanz nicht.
+provider-events-off = Aus: Änderungen kommen mit dem nächsten Intervall des Abgleichs an.
+provider-events-none-yet = An. Noch kein Ereignis eingegangen.
+provider-events-last = An. Letztes Ereignis { $when }.
+provider-events-secret-once = Jetzt kopieren: Es wird nur einmal angezeigt. Im Event-Listener des Identitätsanbieters eintragen. Ein neues Secret ersetzt dieses sofort.
+provider-events-create = Secret erstellen
+provider-events-rotate = Neues Secret
+provider-events-delete = Ausschalten
+provider-events-delete-question = Ereignisse ausschalten? Meldungen des Providers werden abgelehnt; der Abgleich läuft weiter im Intervall.
+provider-events-delete-yes = Ausschalten
 oidc-sync-not-configured = Nicht eingerichtet. Ohne ihn behält eine beim Identitätsanbieter gesperrte Person ihren Zugang, bis ihre Anmeldung endet. Setze oidc.sync.client_secret: für den Betrieb ist er erforderlich.
 oidc-sync-switched-off = Durch oidc.sync.is_enabled = false ausgeschaltet. Eine beim Identitätsanbieter gesperrte Person behält ihren Zugang, bis ihre Anmeldung endet. Für den Betrieb ist er erforderlich.
 oidc-sync-dry-run = Probelauf: Der Abgleich meldet nur, was er ändern würde, und ändert nichts.
@@ -979,6 +1006,10 @@ oidc-sync-held = { $count ->
    *[other] Die Sicherheitsbremse hält { $count } Deaktivierungen zurück.
 }
 oidc-sync-held-hint = Das sieht eher nach einem Fehler beim Identitätsanbieter aus als nach Personen, die gehen. Prüfe zuerst den Anbieter: War es ein Fehler, behebe ihn dort, dann leert sich diese Liste von selbst. Andere Abgänge werden weiterhin wie gewohnt deaktiviert.
+oidc-sync-leavers-held = { $count ->
+    [one] Diese App hat ihr Tageslimit automatischer Entfernungen erreicht: { $count } weitere ausgeschiedene Person wartet, bis ein Admin sie aus allen Chats entfernt.
+   *[other] Diese App hat ihr Tageslimit automatischer Entfernungen erreicht: { $count } weitere ausgeschiedene Personen warten, bis ein Admin sie aus allen Chats entfernt.
+  }
 oidc-sync-confirm = Diese Deaktivierungen bestätigen
 oidc-sync-confirm-question = { $count ->
     [one] Diese Person jetzt deaktivieren? Ihre Sitzungen enden sofort. Das wird rückgängig gemacht, sobald der Identitätsanbieter sie wieder freigibt.

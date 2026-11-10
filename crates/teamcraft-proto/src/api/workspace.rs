@@ -559,6 +559,61 @@ pub struct BugReportPolicy {
   pub recipients: Vec<crate::UserId>,
 }
 
+wire_enum! {
+  /// Whether owners' and admins' apps take leavers out of the encryption groups on their own.
+  pub enum LeaverRemovalMode {
+    /// After the grace, with nobody asked (docs/provisioning.md §3).
+    Automatic => "automatic",
+    /// The console lists leavers; an admin removes them by hand.
+    Manual => "manual",
+  }
+}
+
+/// The grace of a new workspace before a leaver is removed, in minutes.
+pub const DEFAULT_LEAVER_GRACE_MINUTES: u32 = 60;
+/// The longest grace a workspace may set: 30 days.
+pub const MAX_LEAVER_GRACE_MINUTES: u32 = 43_200;
+/// How many leavers one device removes on its own per 24 hours in a new workspace.
+pub const DEFAULT_LEAVER_MAX_PER_DAY: u32 = 10;
+/// The most a workspace may let one device remove on its own per 24 hours.
+pub const MAX_LEAVER_MAX_PER_DAY: u32 = 1_000;
+
+/// How leavers, people the identity provider deactivated, leave the encryption groups
+/// (docs/provisioning.md §3). Signed, so the server can't switch the automation on, shorten the
+/// grace or raise the limit; it only says who is a leaver, and the apps limit what that word can do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LeaverPolicy {
+  pub mode: LeaverRemovalMode,
+  /// How long after the deactivation, by the server's clock: a disable undone within it costs
+  /// nothing. 0 to [`MAX_LEAVER_GRACE_MINUTES`]; clients clamp a value outside.
+  pub grace_minutes: u32,
+  /// Automatic removals per device in 24 hours of its own clock; more wait for an admin. 1 to
+  /// [`MAX_LEAVER_MAX_PER_DAY`]; clients clamp a value outside.
+  pub max_per_day: u32,
+}
+
+impl Default for LeaverPolicy {
+  fn default() -> Self {
+    Self {
+      mode: LeaverRemovalMode::Automatic,
+      grace_minutes: DEFAULT_LEAVER_GRACE_MINUTES,
+      max_per_day: DEFAULT_LEAVER_MAX_PER_DAY,
+    }
+  }
+}
+
+impl LeaverPolicy {
+  /// The grace in force: a stored value above the maximum counts as the maximum.
+  pub fn grace_minutes(&self) -> u32 {
+    self.grace_minutes.min(MAX_LEAVER_GRACE_MINUTES)
+  }
+
+  /// The daily limit in force, between 1 and the maximum.
+  pub fn max_per_day(&self) -> u32 {
+    self.max_per_day.clamp(1, MAX_LEAVER_MAX_PER_DAY)
+  }
+}
+
 /// The most recipients a workspace may name for problem reports: a group DM stays small.
 pub const MAX_BUG_REPORT_RECIPIENTS: usize = 20;
 
@@ -716,6 +771,9 @@ pub struct WorkspacePolicy {
   /// Who receives problem reports (docs/bug-reports.md); owners and admins when absent.
   #[serde(default)]
   pub bug_reports: BugReportPolicy,
+  /// How leavers leave the encryption groups (docs/provisioning.md §3); automatic when absent.
+  #[serde(default)]
+  pub leavers: LeaverPolicy,
   /// How the admin roster follows the identity provider (e2ee.md §3.1.3). Absent means automatic.
   /// A policy that doesn't name it doesn't change it: an older owner's app re-signs without it, so
   /// clients keep the last one they verified. Boxed: every client future that holds a policy holds this.
@@ -929,6 +987,7 @@ impl Default for WorkspacePolicy {
       import: crate::ImportPolicy::default(),
       scheduled_messages: ScheduledMessagePolicy::default(),
       bug_reports: BugReportPolicy::default(),
+      leavers: LeaverPolicy::default(),
     }
   }
 }
@@ -1173,6 +1232,23 @@ mod tests {
     let named: BugReportPolicy = serde_json::from_str(r#"{"recipients":["7","9"]}"#).unwrap();
     let ids: Vec<String> = named.recipients.iter().map(ToString::to_string).collect();
     assert_eq!(ids, ["7", "9"]);
+  }
+
+  #[test]
+  fn leavers_default_to_automatic_and_older_policies_still_parse() {
+    let mut value = serde_json::to_value(WorkspacePolicy::default()).unwrap();
+    assert_eq!(
+      value["leavers"],
+      serde_json::json!({"mode": "automatic", "grace_minutes": 60, "max_per_day": 10})
+    );
+    value.as_object_mut().unwrap().remove("leavers");
+    let older: WorkspacePolicy = serde_json::from_value(value).unwrap();
+    assert_eq!(older.leavers, LeaverPolicy::default());
+    let odd: LeaverPolicy =
+      serde_json::from_str(r#"{"mode":"later","grace_minutes":99999999,"max_per_day":0}"#).unwrap();
+    assert_eq!(odd.mode, LeaverRemovalMode::Unknown("later".into()));
+    assert_eq!(odd.grace_minutes(), MAX_LEAVER_GRACE_MINUTES);
+    assert_eq!(odd.max_per_day(), 1);
   }
 
   #[test]

@@ -339,6 +339,22 @@ pub trait ServerApi {
   /// Removes a deactivated user from what is left after the signed removals: devices, direct
   /// messages, spaces (`POST /admin/users/{id}/remove-from-chats`; idempotent).
   fn admin_remove_from_chats(&self, user: UserId) -> impl Future<Output = Result<(), ApiError>>;
+  /// [`Self::admin_remove_from_chats`] for an automatic removal of a leaver
+  /// (`?as_leaver=true`): 409 if they are no leaver any more.
+  fn admin_remove_leaver_from_chats(&self, user: UserId) -> impl Future<Output = Result<(), ApiError>>;
+  /// Leavers the identity provider deactivated, one page (`GET /admin/leavers`, instance admins;
+  /// docs/provisioning.md §3).
+  fn admin_list_leavers(
+    &self,
+    query: &teamcraft_proto::ListLeaversQuery,
+  ) -> impl Future<Output = Result<teamcraft_proto::ListLeaversResponse, ApiError>>;
+  /// Claims a leaver for this device before it signs their removals (`POST
+  /// /admin/leavers/{id}/claim`); 409 `leaver_claimed` while another device holds it.
+  fn admin_claim_leaver(
+    &self,
+    user: UserId,
+    request: &teamcraft_proto::ClaimLeaverRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
   /// Deletes the account after the signed removals (`DELETE /admin/users/{id}`, admin.md §3.2.1):
   /// devices, key material, memberships and direct messages go, a tombstone stays; idempotent.
   fn admin_delete_user(&self, user: UserId) -> impl Future<Output = Result<(), ApiError>>;

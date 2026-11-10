@@ -2114,10 +2114,14 @@ account, which the identity provider sync does on its own (admin.md §3.2.3), do
 **How long.** Identity provider to deactivation: at most one sync interval plus the run itself (default 5
 minutes; immediately for sessions the provider ends by back-channel logout). A run the safety brake holds
 back extends that until an admin decides or the provider is fixed; a held user's provider tokens stop being
-renewed anyway. Deactivation to removal has no bound: it takes an admin's device to sign "Remove from all
-chats", and then the next member online to commit each channel (§4.6). Until the first it is listed for
-admins as pending (admin.md §3.2.3, `pending_removals`); the removal also waits while a channel has no member
-online. Admins should remove people who left the organization rather than only suspend them.
+renewed anyway. Deactivation to removal: an owner's or admin's app signs "Remove from all chats" on its
+own once `leavers.grace_minutes` of the signed policy (default 60) have passed, for people the identity
+provider deactivated, and the next member online commits each channel (§4.6); docs/provisioning.md §3. That
+needs one such app online, and it removes at most `leavers.max_per_day` people per device and day, never
+anybody on the roster: who is a leaver is the server's word, so a hostile server can get members removed
+(availability, announced in each channel) but no access. Without such an app online, with the policy set to
+`manual`, over the limit and for deactivations by hand, it is listed for admins as pending (admin.md §3.2.3,
+`pending_removals`) until an admin removes them; the removal also waits while a channel has no member online.
 
 ### 4.6.1 Signed channel roles
 

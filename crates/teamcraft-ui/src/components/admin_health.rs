@@ -8,6 +8,7 @@ use teamcraft_proto::{
 use crate::admin::AdminSection;
 use crate::clock::{format_relative, now_ms};
 use crate::components::admin_console::SectionHeader;
+use crate::components::copy_button::CopyButton;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
@@ -32,6 +33,7 @@ pub fn HealthSection() -> impl IntoView {
       Some(health) => view! { <HealthContent health=health /> }.into_any(),
     }}
     <OidcSyncCard />
+    <ProviderEventsCard />
   }
 }
 
@@ -44,6 +46,85 @@ fn OidcSyncCard() -> impl IntoView {
   let preview = Memo::new(move |_| state.read(|backend| backend.oidc_sync_preview()));
   view! {
     {move || sync.get().map(|sync| view! { <OidcSyncContent sync=sync preview=preview /> })}
+  }
+}
+
+/// The identity provider's events (docs/provisioning.md §4): whether a secret is set, when the last
+/// event came, a new secret shown once, and turning it off.
+#[component]
+fn ProviderEventsCard() -> impl IntoView {
+  let i18n = use_i18n();
+  let state = use_app_state();
+  let hook = Memo::new(move |_| state.read(|backend| backend.provider_event_hook()));
+  let revealed = Memo::new(move |_| state.read(|backend| backend.revealed_provider_event_secret()));
+  let is_confirming = RwSignal::new(false);
+  let locale = move || i18n.locale().tag();
+  view! {
+    {move || hook.get().map(|hook| {
+      let now = now_ms();
+      let is_configured = hook.is_configured;
+      let status = match (hook.is_configured, hook.maybe_last_event_at) {
+        (false, _) => i18n.t("provider-events-off"),
+        (true, None) => i18n.t("provider-events-none-yet"),
+        (true, Some(at)) => i18n.t_with("provider-events-last", &[("when", &format_relative(at.0, now, locale()))]),
+      };
+      view! {
+        <section class="instance-card" aria-labelledby="health-provider-events">
+          <h3 id="health-provider-events"><Icon name=IconName::Activity /> {move || i18n.t("provider-events-title")}</h3>
+          <p class="muted-text small">{move || i18n.t("provider-events-hint")}</p>
+          {(!hook.is_sync_active).then(|| view! { <p class="muted-text">{move || i18n.t("provider-events-needs-sync")}</p> })}
+          <p role="status">{status}</p>
+          {move || revealed.get().map(|secret| {
+            let text = secret.expose().to_owned();
+            view! {
+              <section class="integration-reveal" role="status" aria-live="polite">
+                <p class="muted-text">{move || i18n.t("provider-events-secret-once")}</p>
+                <label for="provider-event-secret">{move || i18n.t("admin-webhooks-secret")}</label>
+                <div class="integration-copy-row">
+                  <input id="provider-event-secret" class="input mono" readonly translate="no" prop:value=text.clone() />
+                  <CopyButton text=text.clone() />
+                  <span class="grow"></span>
+                  <button type="button" class="btn" on:click=move |_| state.write(|backend| backend.dismiss_provider_event_secret())>
+                    {move || i18n.t("admin-integrations-reveal-done")}
+                  </button>
+                </div>
+              </section>
+            }
+          })}
+          <p class="row-actions">
+            <button type="button" class="btn btn-small" on:click=move |_| state.write(|backend| backend.create_provider_event_secret())>
+              {move || if is_configured { i18n.t("provider-events-rotate") } else { i18n.t("provider-events-create") }}
+            </button>
+            {is_configured.then(|| view! {
+              <Show
+                when=move || is_confirming.get()
+                fallback=move || view! {
+                  <button type="button" class="btn btn-small" on:click=move |_| is_confirming.set(true)>
+                    {move || i18n.t("provider-events-delete")}
+                  </button>
+                }
+              >
+                <span>{move || i18n.t("provider-events-delete-question")}</span>
+                " "
+                <button
+                  type="button"
+                  class="btn btn-small btn-danger"
+                  on:click=move |_| {
+                    state.write(|backend| backend.delete_provider_event_hook());
+                    is_confirming.set(false);
+                  }
+                >
+                  {move || i18n.t("provider-events-delete-yes")}
+                </button>
+                <button type="button" class="btn btn-small" on:click=move |_| is_confirming.set(false)>
+                  {move || i18n.t("cancel")}
+                </button>
+              </Show>
+            })}
+          </p>
+        </section>
+      }
+    })}
   }
 }
 
@@ -196,6 +277,21 @@ fn OidcSyncContent(
         },
       }}
       {(unfinished > 0).then(|| view! { <p class="muted-text small">{move || i18n.t_count("oidc-sync-unfinished", unfinished)}</p> })}
+      {move || {
+        let held = state.read(|backend| backend.leavers_held_by_limit());
+        (held > 0).then(|| view! {
+          <div class="health-summary health-summary-alert" role="status">
+            <Icon name=IconName::Alert />
+            <p>
+              {move || i18n.t_count("oidc-sync-leavers-held", held)}
+              " "
+              <button type="button" class="btn btn-small" on:click=move |_| state.open_admin(AdminSection::Users)>
+                {move || i18n.t("oidc-sync-open-users")}
+              </button>
+            </p>
+          </div>
+        })
+      }}
       {(pending_removals > 0)
         .then(|| {
           view! {

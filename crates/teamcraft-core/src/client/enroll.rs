@@ -222,6 +222,7 @@ impl PendingEnrollment {
       maybe_preview_fetcher,
       maybe_jwks_source: None,
       role_signing: Default::default(),
+      leavers: Default::default(),
       last_key_package_check_ms: i64::MIN,
       mls_current: Default::default(),
       maybe_backlog_reads: None,

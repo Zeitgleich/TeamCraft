@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO leaver_removal_claims (user_id, device_id, claimed_until)\n         SELECT l.user_id, $2, now() + make_interval(secs => $3)\n         FROM identity_provider_leavers l WHERE l.user_id = $1\n         ON CONFLICT (user_id) DO UPDATE\n           SET device_id = EXCLUDED.device_id, claimed_until = EXCLUDED.claimed_until\n           WHERE leaver_removal_claims.claimed_until <= now()\n              OR leaver_removal_claims.device_id = EXCLUDED.device_id\n         RETURNING user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "leaver_removal_claims",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2ed03db18c542e14d4cf951221f4ad965bd651a886135cef2ea5a32145b4b5ca"
+}

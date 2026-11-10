@@ -270,7 +270,8 @@ guest  = "external"
   at once (default: more than 10 % of the active users, at least 2, never everybody), until an admin
   confirms or the provider is fixed. A deactivation suspends the account; it does **not** take the
   user out of the MLS groups, which only an admin's device can sign (docs/admin.md §3.2.1, docs/e2ee.md
-  §4.6.4). The console shows how many such removals are pending.
+  §4.6.4). An owner's or admin's app signs that removal on its own after a grace set in the signed
+  policy (docs/provisioning.md §3); the console shows how many removals are pending.
 - **Roles and the admin roster:** Keycloak roles decide who is admin; the cryptographic admin roster
   (docs/admin.md §2.3) follows by itself – an owner's app verifies each person's ID token against Keycloak
   and signs (e2ee.md §3.1.3). A compromised VPS can't promote anyone without a matching Keycloak-signed

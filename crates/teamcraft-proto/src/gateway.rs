@@ -156,6 +156,9 @@ pub enum GatewayEvent {
   /// Somebody published newer role evidence (e2ee.md §3.1.3); sent to owners, whose apps read and
   /// verify it.
   RoleEvidenceUpdate,
+  /// The identity provider deactivated somebody who is still in encryption groups
+  /// (docs/provisioning.md §3); sent to owners and admins, whose apps read `GET /admin/leavers`.
+  LeaverUpdate,
   /// A channel's signed role log has a new entry (issue #380); fetch entries after the known
   /// version. Sent to the channel's members.
   ChannelRolesUpdate {

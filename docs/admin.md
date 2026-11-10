@@ -787,9 +787,12 @@ retried by the account housekeeping and at the start of every sync; a reactivati
   request; refresh tokens are the provider's.
 - *Push registrations and devices* are kept but unused (reactivation restores them); removal revokes them.
 - *MLS removal* needs an admin's device: see §3.2.1 and e2ee.md §4.6.4. Nothing queues it on the server, since
-  a server-made removal is no removal to the clients (A8). "Remove from all chats" posts the signed change into the
-  group, where the next online member commits it. The console shows how many deactivated
-  accounts still have devices or memberships (`pending_removals`), the list is the Users page.
+  a server-made removal is no removal to the clients (A8). For people the provider deactivated, an owner's or
+  admin's app signs "Remove from all chats" on its own after the grace of the signed policy (`leavers`, Security
+  section; default one hour, at most 10 per device and day, never anybody on the roster), see
+  [provisioning.md](provisioning.md) §3. The signed change goes into the group, where the next online member
+  commits it. The console shows how many deactivated accounts still have devices or memberships
+  (`pending_removals`), the list is the Users page.
 
 #### 3.2.2 Guest expiry (issue #212)
 
