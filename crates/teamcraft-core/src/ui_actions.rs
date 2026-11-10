@@ -12,7 +12,9 @@ use teamcraft_client_api::model::{
 };
 use teamcraft_client_api::receipts::{is_delivered, is_read_by_all, seen_by};
 use teamcraft_client_api::scheduled::{ScheduledMessage, ScheduledOverview, ScheduledStatus, status_of};
-use teamcraft_proto::{Base64Bytes, ClientMessageId, LinkPreviewPolicy, SourceChange, SourceId};
+use teamcraft_proto::{
+  Base64Bytes, ClientMessageId, ConversationResponse, LinkPreviewPolicy, SourceChange, SourceId,
+};
 
 use crate::client::previews::queue_preview;
 use crate::client::scheduled::{message_priority, read_list};
@@ -657,12 +659,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 
   pub(crate) fn ui_pinned_messages(&self, conversation: ConversationId) -> Vec<Message> {
-    let all = self.all_messages(conversation);
-    all
-      .iter()
-      .filter(|stored| stored.is_pinned && !stored.is_hidden())
-      .map(|stored| self.to_message(stored, &all))
-      .collect()
+    self.pinned_messages_of(conversation)
   }
 
   pub(crate) fn ui_permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {
@@ -731,12 +728,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 
   pub(crate) fn ui_first_unread(&self, conversation: ConversationId) -> Option<MessageId> {
-    let response = self
-      .conversations_raw()
-      .into_iter()
-      .find(|candidate| candidate.id == conversation)?;
+    // One record, not the whole list of conversations.
+    let response: ConversationResponse = self.read(records::get_json(
+      self.store_ref(),
+      Table::Conversations,
+      &conversation.to_string(),
+    ))?;
     // A line derived from a commit can be the first unread one: its row goes by the commit's ID.
-    self.unread_messages(&response).first().map(ui_message_id)
+    self.first_unread_message(&response).as_ref().map(ui_message_id)
   }
 
   pub(crate) fn ui_message_extras(

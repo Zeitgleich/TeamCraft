@@ -436,6 +436,69 @@ async fn the_runner_reads_the_backlog_before_it_says_caught_up() {
   tokio::join!(runner.run(), stop);
 }
 
+/// Issue #1656: the app goes to the background while the runner's connection catches up. The stop
+/// ends the catch-up at the next conversation instead of after all of them, and nothing is lost:
+/// the session isn't kept, so the next run syncs again and brings the rest.
+#[tokio::test]
+async fn a_stop_ends_the_runners_catch_up_between_conversations() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  // Turns: the catch-up hands the thread back between conversations, where the app's stop comes in.
+  let turns = ClientSettings {
+    maybe_thread_turn: Some(Duration::ZERO),
+    ..settings()
+  };
+  let mut carol = Peer::enroll_with(server.add_user("Carol"), "Carol", turns).await;
+  let channels = channels_with(&mut alice, carol.client.user_id(), 4).await;
+  settle(&mut [&mut alice, &mut carol]).await;
+  carol.client.full_sync().await.unwrap();
+  for channel in &channels {
+    send_many(&mut alice, *channel, "away", 3).await;
+  }
+  server.expire_sessions();
+  let Peer { client, store, .. } = carol;
+  let through = || {
+    channels
+      .iter()
+      .filter(|channel| texts(store.as_ref(), **channel).len() == 4)
+      .count()
+  };
+
+  let (runner, handle) = SyncRunner::new(client, unpaced(), Box::new(|| {}));
+  // The injected step: the app goes to the background once one conversation is through.
+  let background = async {
+    while through() == 0 {
+      tokio::task::yield_now().await;
+    }
+    assert!(handle.send(RunnerCommand::Stop));
+  };
+  let (client, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+    tokio::join!(runner.run(), background)
+  })
+  .await
+  .expect("the runner never stopped");
+  assert!(
+    through() < channels.len(),
+    "the stop didn't wait for every conversation"
+  );
+
+  let (runner, handle) = SyncRunner::new(client, unpaced(), Box::new(|| {}));
+  let (caught_up, is_caught_up) = futures_channel::oneshot::channel();
+  assert!(handle.send(RunnerCommand::CatchUp(caught_up)));
+  let foreground = async {
+    tokio::time::timeout(Duration::from_secs(60), is_caught_up)
+      .await
+      .expect("never caught up")
+      .unwrap();
+    assert!(handle.send(RunnerCommand::Stop));
+  };
+  tokio::join!(runner.run(), foreground);
+  assert_eq!(through(), channels.len(), "the next run brings the rest");
+  for channel in &channels {
+    assert!(!is_catching_up(store.as_ref(), *channel).unwrap());
+  }
+}
+
 /// Alice's channel with Carol, "before" in it, read by Carol; Carol reads pages of five and two of
 /// them in order before the newest.
 /// Issue #1575: a host that runs the client on the UI's thread (web) asks for turns. A catch-up of

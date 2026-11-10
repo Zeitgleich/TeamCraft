@@ -911,7 +911,8 @@ private fun SwipeToReply(message: Message, maybeOnReply: ((Message) -> Unit)?, c
         if (next != offset.value) change.consume()
         scope.launch { offset.snapTo(next) }
         val isPast = next >= thresholdPx
-        if (isPast && !hasPassedThreshold) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        // Material haptics: crossing a gesture's commit point, not a long press.
+        if (isPast && !hasPassedThreshold) haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
         hasPassedThreshold = isPast
       }
     },

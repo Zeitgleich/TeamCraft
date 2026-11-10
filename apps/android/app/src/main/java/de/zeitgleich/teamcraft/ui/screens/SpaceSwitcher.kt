@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -241,11 +242,11 @@ fun BrowseSpacesScreen(viewModel: MainViewModel, onBack: () -> Unit) {
     snackbarHost = { SnackbarHost(snackbars) },
   ) { padding ->
     val spaces = maybeSpaces
-    Column(Modifier.fillMaxSize().padding(padding)) {
+    Column(Modifier.fillMaxSize().padding(padding.withoutBottom()).consumeWindowInsets(padding)) {
       when {
         spaces == null -> LoadingScreen()
         spaces.isEmpty() -> EmptyHint(stringResource(R.string.spaces_browse_empty))
-        else -> LazyColumn(Modifier.fillMaxSize()) {
+        else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.bottomOnly()) {
           items(spaces, key = { it.id }) { space ->
             JoinableSpaceRow(space, isJoining = maybeJoining == space.id) {
               maybeJoining = space.id

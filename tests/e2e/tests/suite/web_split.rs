@@ -206,7 +206,7 @@ fn signed_copy(unsigned: &Path) -> PathBuf {
 }
 
 /// Waits until the service worker verified the release and controls the page.
-async fn wait_for_verified_worker(page: &Page) {
+pub(crate) async fn wait_for_verified_worker(page: &Page) {
   let script = r#"(async () => {
     const registration = await navigator.serviceWorker.ready;
     const state = await new Promise((resolve) => {

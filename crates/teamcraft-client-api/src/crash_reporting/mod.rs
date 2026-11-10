@@ -13,6 +13,7 @@ mod event;
 mod panic;
 mod queue;
 mod reporter;
+mod script_stack;
 mod scrub;
 pub mod trace;
 mod trace_fields;
@@ -35,6 +36,7 @@ pub use reporter::{
   CaptureOutcome, CrashReporter, FlushSummary, MAX_TRANSACTIONS_PER_FLUSH, PendingSend, SendKind,
   TRANSACTION_BATCH,
 };
+pub use script_stack::frames_from_script_stack;
 pub use scrub::scrub;
 pub use transaction::{
   MAX_MEASUREMENTS, MAX_SPANS, MAX_TAGS, PerfOperation, PerfSpan, PerfStatus, PerfUnit, SpanId, TraceId,

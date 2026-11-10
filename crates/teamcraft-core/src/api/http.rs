@@ -219,6 +219,32 @@ impl<T: AccessTokenSource> HttpServerApi<T> {
     self
   }
 
+  /// Another handle on the same server that uses this one's connection pools as they are now: its
+  /// requests reuse open connections instead of each handle opening (and handshaking) its own. A
+  /// host that hands out a handle per call keeps one and shares it; [`Self::drop_connections`] on
+  /// the kept one reaches handles made after it.
+  pub fn sharing_connections(&self) -> Self
+  where
+    T: Clone,
+  {
+    Self {
+      client: RwLock::new(self.http()),
+      // Made here if it wasn't yet, so the handles share it too.
+      maybe_proof_client: RwLock::new(Some(self.proof_http())),
+      maybe_insecure: self.maybe_insecure.clone(),
+      base_url: self.base_url.clone(),
+      tokens: self.tokens.clone(),
+      lacks_enrollment_endpoint: AtomicBool::new(self.lacks_enrollment_endpoint.load(Ordering::Relaxed)),
+      #[cfg(target_arch = "wasm32")]
+      maybe_write_barrier: self.maybe_write_barrier.clone(),
+    }
+  }
+
+  /// The server's address, without trailing slash.
+  pub fn base_url(&self) -> &str {
+    &self.base_url
+  }
+
   /// Forgets the pooled connections: after a suspend or a network change they are usually dead,
   /// and a request on one would only fail once the HTTP/2 keep-alive gives up (issue #883).
   /// Requests already running keep theirs.

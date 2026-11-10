@@ -18,7 +18,7 @@ use teamcraft_proto::{
   ErrorCode, RecoveryRequestId, RecoveryRequestResponse, RecoveryResultPayload,
 };
 
-use crate::engine::{Engine, feed_anchor, older_len, parse_id};
+use crate::engine::{Api, Engine, feed_anchor, older_len, parse_id};
 use crate::error::TeamCraftError;
 use crate::reads::Reads;
 use crate::types::{AccountState, OrgRecoveryStart};
@@ -342,53 +342,6 @@ impl Engine {
     )?)
   }
 
-  /// The profile picture of `user` as image bytes (JPEG, PNG or WebP); `None` if the person has
-  /// none. The API names a presigned URL (profile pictures are not secret from members) and the
-  /// download is capped at `max_bytes`, so a hostile answer can't make the phone buffer a huge body.
-  pub(crate) async fn avatar_picture(
-    &self,
-    user: &str,
-    max_bytes: u64,
-  ) -> Result<Option<Vec<u8>>, TeamCraftError> {
-    let user: teamcraft_proto::UserId = parse_id(user)?;
-    let api = self.api();
-    let answer = match api
-      .raw_request("GET", &format!("/users/{user}/avatar"), None)
-      .await
-    {
-      Ok(answer) => answer,
-      Err(error) if error.error_code() == Some(&ErrorCode::AvatarNotFound) => return Ok(None),
-      Err(error) => return Err(teamcraft_core::CoreError::from(error).into()),
-    };
-    // Plain http only for a development server on this computer, which is plain http itself.
-    let (url, size_bytes) = avatar_location(&answer, self.server_url.starts_with("http://"))?;
-    let picture = api
-      .get_blob_capped(&url, size_bytes.min(max_bytes))
-      .await
-      .map_err(teamcraft_core::CoreError::from)?;
-    Ok(Some(picture))
-  }
-
-  /// The picture of a space as PNG bytes (`GET /spaces/{id}/image`, at most `max_bytes`); `None`
-  /// when the space has none (any more). The app caches by the version the space list names, so
-  /// it asks only for a version it doesn't hold.
-  pub(crate) async fn space_picture(
-    &self,
-    space: &str,
-    max_bytes: u64,
-  ) -> Result<Option<Vec<u8>>, TeamCraftError> {
-    let space: teamcraft_proto::SpaceId = parse_id(space)?;
-    match self
-      .api()
-      .get_bytes_capped(&format!("/spaces/{space}/image"), max_bytes)
-      .await
-    {
-      Ok(picture) => Ok(Some(picture)),
-      Err(error) if error.error_code() == Some(&ErrorCode::SpaceImageNotFound) => Ok(None),
-      Err(error) => Err(teamcraft_core::CoreError::from(error).into()),
-    }
-  }
-
   /// New device without the passphrase: asks the organization's admins to recover the account.
   /// Returns the code the user reads to an admin.
   pub(crate) async fn start_org_recovery(&mut self) -> Result<OrgRecoveryStart, TeamCraftError> {
@@ -468,8 +421,6 @@ pub(crate) fn from_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T,
   serde_json::from_str(text).map_err(|error| TeamCraftError::InvalidInput(error.to_string()))
 }
 
-/// The download URL and size of `GET /users/{id}/avatar`'s answer; refuses a type that is not a
-/// picture and a URL that is not `https` (`http` only if `is_plain_http_allowed`).
 /// Which kind of query `json` is, for a log line (never its content: a search's text, a name).
 fn query_kind(json: &str) -> String {
   #[derive(serde::Deserialize)]
@@ -479,6 +430,55 @@ fn query_kind(json: &str) -> String {
   serde_json::from_str::<Kind>(json).map_or_else(|_| "unknown".to_owned(), |kind| kind.kind)
 }
 
+/// The profile picture of `user` as image bytes (JPEG, PNG or WebP); `None` if the person has
+/// none. The API names a presigned URL (profile pictures are not secret from members) and the
+/// download is capped at `max_bytes`, so a hostile answer can't make the phone buffer a huge body.
+/// Runs on the HTTP runtime, beside the engine: two round trips that held up every job behind them
+/// at the app's start, when the screens ask for many pictures at once.
+pub(crate) async fn avatar_picture(
+  api: &Api,
+  user: &str,
+  max_bytes: u64,
+) -> Result<Option<Vec<u8>>, TeamCraftError> {
+  let user: teamcraft_proto::UserId = parse_id(user)?;
+  let answer = match api
+    .raw_request("GET", &format!("/users/{user}/avatar"), None)
+    .await
+  {
+    Ok(answer) => answer,
+    Err(error) if error.error_code() == Some(&ErrorCode::AvatarNotFound) => return Ok(None),
+    Err(error) => return Err(teamcraft_core::CoreError::from(error).into()),
+  };
+  // Plain http only for a development server on this computer, which is plain http itself.
+  let (url, size_bytes) = avatar_location(&answer, api.base_url().starts_with("http://"))?;
+  let picture = api
+    .get_blob_capped(&url, size_bytes.min(max_bytes))
+    .await
+    .map_err(teamcraft_core::CoreError::from)?;
+  Ok(Some(picture))
+}
+
+/// The picture of a space as PNG bytes (`GET /spaces/{id}/image`, at most `max_bytes`); `None`
+/// when the space has none (any more). The app caches by the version the space list names, so
+/// it asks only for a version it doesn't hold. Runs on the HTTP runtime, like [`avatar_picture`].
+pub(crate) async fn space_picture(
+  api: &Api,
+  space: &str,
+  max_bytes: u64,
+) -> Result<Option<Vec<u8>>, TeamCraftError> {
+  let space: teamcraft_proto::SpaceId = parse_id(space)?;
+  match api
+    .get_bytes_capped(&format!("/spaces/{space}/image"), max_bytes)
+    .await
+  {
+    Ok(picture) => Ok(Some(picture)),
+    Err(error) if error.error_code() == Some(&ErrorCode::SpaceImageNotFound) => Ok(None),
+    Err(error) => Err(teamcraft_core::CoreError::from(error).into()),
+  }
+}
+
+/// The download URL and size of `GET /users/{id}/avatar`'s answer; refuses a type that is not a
+/// picture and a URL that is not `https` (`http` only if `is_plain_http_allowed`).
 fn avatar_location(answer: &str, is_plain_http_allowed: bool) -> Result<(String, u64), TeamCraftError> {
   let location: AvatarResponse =
     serde_json::from_str(answer).map_err(|error| TeamCraftError::Core(error.to_string()))?;

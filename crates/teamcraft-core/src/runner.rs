@@ -15,9 +15,9 @@ use futures_util::future::{Either, select};
 use teamcraft_proto::{DeviceActivity, GatewayClientMessage, GatewayServerMessage};
 
 use crate::api::{ApiError, ServerApi};
-use crate::client::Client;
 use crate::client::files::BlobUpload;
 use crate::client::notify_sync_progress_during;
+use crate::client::{Client, SyncStopRequest};
 use crate::clock::{rewound, sleep_ms_until};
 use crate::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor, NetworkChanges};
 use crate::downloads::{Downloads, Finished};
@@ -86,6 +86,9 @@ pub struct RunnerSettings {
 #[derive(Clone, Debug)]
 pub struct RunnerHandle {
   sender: mpsc::UnboundedSender<RunnerCommand>,
+  /// Raised with [`RunnerCommand::Stop`], so a catch-up running now ends at its next conversation
+  /// instead of after all of them (issue #1656).
+  stop: SyncStopRequest,
 }
 
 /// What an app asks the runner to do.
@@ -145,6 +148,8 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     if let Err(error) = client.read_backlogs_in_background() {
       tracing::warn!(%error, "backlogs left by an earlier run not found; the next catch-up reads them");
     }
+    let stop = SyncStopRequest::default();
+    client.share_stop_request(stop.clone());
     let (sender, commands) = mpsc::unbounded();
     let on_change: std::rc::Rc<dyn Fn()> = on_change.into();
     let mut connection = ConnectionSupervisor::new(settings.connection.clone(), ConnectionStatus::new());
@@ -170,7 +175,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       drained: Vec::new(),
       caught_up: Vec::new(),
     };
-    (runner, RunnerHandle { sender })
+    (runner, RunnerHandle { sender, stop })
   }
 
   /// Reconnects at once whenever `changes` reports a network change or a wake-up.
@@ -220,6 +225,8 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
           if self.connection.is_connected() {
             self.client.note_gateway_closing();
           }
+          // Work on the returned client outside a loop is never cut short by this loop's stop.
+          self.client.share_stop_request(SyncStopRequest::default());
           return self.client;
         },
         Wake::Command(Some(command)) => self.on_command(command).await,
@@ -249,6 +256,11 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
 
   async fn next_wake(&mut self) -> Wake {
     let now = self.client.now_ms();
+    // A clock set back leaves the tick an hour away, and a busy connection wakes the loop more
+    // often than the clamp below lets a tick through: rewind on every wake, not in the tick only,
+    // so the tick comes now (issue #1673).
+    self.next_tick_ms = rewound(self.next_tick_ms, now, self.settings.tick);
+    self.next_background_page_ms = rewound(self.next_background_page_ms, now, self.settings.tick);
     let deadline = self
       .connection
       .next_deadline_ms()
@@ -258,8 +270,8 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       Some(_) => deadline.min(now.saturating_add(millis(TRANSFER_PROGRESS))),
       None => deadline,
     };
-    // Never longer than a tick: after the wall clock went back, deadlines lie in the "future" by
-    // the jump, and the tick notices the jump and moves them (robustness.md, "Time").
+    // Never longer than a tick: after the wall clock went back, the connection's deadlines lie in
+    // the "future" by the jump until it notices the jump and moves them (robustness.md, "Time").
     let until_ms = sleep_ms_until(deadline, now, self.settings.tick);
     // A catch-up's backlogs and a first sync's older history: at once, but only after everything
     // the select below looks at first (commands, frames, network changes, transfers).
@@ -582,6 +594,9 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
 impl RunnerHandle {
   /// Queues a command; returns `false` if the runner has stopped.
   pub fn send(&self, command: RunnerCommand) -> bool {
+    if matches!(command, RunnerCommand::Stop) {
+      self.stop.request();
+    }
     self.sender.unbounded_send(command).is_ok()
   }
 }

@@ -166,9 +166,12 @@ fun SpaceMuteDialog(viewModel: MainViewModel, spaceId: String, name: String, onD
   )
 }
 
-/** Global notification preferences: when pushes come, read receipts, thread auto-follow. */
+/**
+ * Global notification preferences as settings groups: when pushes come, receipts and thread
+ * auto-follow, meeting reminders. Nothing shows until the settings are read.
+ */
 @Composable
-fun NotificationSettingsSection(viewModel: MainViewModel) {
+fun NotificationSettingsGroups(viewModel: MainViewModel, pushRows: SettingsGroupScope.() -> Unit) {
   val scope = rememberCoroutineScope()
   var settings by remember { mutableStateOf<NotificationSettings?>(null) }
   LaunchedEffect(Unit) { settings = viewModel.readChat { notificationSettings() } }
@@ -177,87 +180,82 @@ fun NotificationSettingsSection(viewModel: MainViewModel) {
     settings = changed
     scope.launch { viewModel.readChat { setNotificationSettings(changed) } }
   }
-  Column(Modifier.fillMaxWidth()) {
-    for ((mode, label) in PUSH_MODES) {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        RadioButton(selected = current.pushMode == mode, onClick = { save(current.copy(pushMode = mode)) })
-        Text(stringResource(label))
+  SettingsGroup(R.string.settings_group_push) {
+    row { shapes ->
+      SettingsChoiceRow(shapes, stringResource(R.string.push_mode_title), PUSH_MODES, current.pushMode) {
+        save(current.copy(pushMode = it))
       }
     }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Switch(checked = current.sendReadReceipts, onCheckedChange = { save(current.copy(sendReadReceipts = it)) })
-      Text(stringResource(R.string.read_receipts), style = MaterialTheme.typography.bodyMedium)
+    pushRows()
+  }
+  SettingsGroup(R.string.settings_group_messages) {
+    row { shapes ->
+      SettingsSwitchRow(shapes, stringResource(R.string.read_receipts), current.sendReadReceipts) {
+        save(current.copy(sendReadReceipts = it))
+      }
     }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Switch(
-        checked = current.maybeSendDeliveryReceipts ?: true,
-        onCheckedChange = { save(current.copy(maybeSendDeliveryReceipts = it)) },
-      )
-      Text(stringResource(R.string.delivery_receipts), style = MaterialTheme.typography.bodyMedium)
+    row { shapes ->
+      SettingsSwitchRow(shapes, stringResource(R.string.delivery_receipts), current.maybeSendDeliveryReceipts ?: true) {
+        save(current.copy(maybeSendDeliveryReceipts = it))
+      }
     }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Switch(
-        checked = current.autoFollowMentionedThreads,
-        onCheckedChange = { save(current.copy(autoFollowMentionedThreads = it)) },
-      )
-      Text(stringResource(R.string.auto_follow_threads), style = MaterialTheme.typography.bodyMedium)
+    row { shapes ->
+      SettingsSwitchRow(shapes, stringResource(R.string.auto_follow_threads), current.autoFollowMentionedThreads) {
+        save(current.copy(autoFollowMentionedThreads = it))
+      }
     }
-    Text(stringResource(R.string.meeting_reminder_title), style = MaterialTheme.typography.bodyMedium)
-    val reminderMinutes = current.maybeMeetingReminderMinutes ?: DEFAULT_MEETING_REMINDER_MINUTES
-    for (minutes in MEETING_REMINDER_CHOICES) {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        RadioButton(
-          selected = reminderMinutes == minutes,
-          onClick = { save(current.copy(maybeMeetingReminderMinutes = minutes)) },
-        )
-        Text(
+  }
+  SettingsGroup(R.string.settings_group_meetings) {
+    row { shapes ->
+      SettingsChoiceRow(
+        shapes,
+        stringResource(R.string.meeting_reminder_title),
+        MEETING_REMINDER_CHOICES,
+        current.maybeMeetingReminderMinutes ?: DEFAULT_MEETING_REMINDER_MINUTES,
+        label = { minutes ->
           if (minutes == 0) {
             stringResource(R.string.meeting_reminder_off)
           } else {
             pluralStringResource(R.plurals.meeting_reminder_minutes, minutes, minutes)
-          },
-        )
-      }
+          }
+        },
+      ) { save(current.copy(maybeMeetingReminderMinutes = it)) }
     }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Switch(
-        checked = current.maybeNotifiesMeetingStart ?: true,
-        onCheckedChange = { save(current.copy(maybeNotifiesMeetingStart = it)) },
-      )
-      Text(stringResource(R.string.meeting_notify_start), style = MaterialTheme.typography.bodyMedium)
+    row { shapes ->
+      SettingsSwitchRow(shapes, stringResource(R.string.meeting_notify_start), current.maybeNotifiesMeetingStart ?: true) {
+        save(current.copy(maybeNotifiesMeetingStart = it))
+      }
     }
   }
 }
 
 /**
  * How much message notifications show on this device (issue #314). The workspace policy can only
- * lower it, and the app lock caps it at the sender; both are said below the choices.
+ * lower it, and the app lock caps it at the sender; both are said below the group.
  */
 @Composable
-fun NotificationContentSection(viewModel: MainViewModel) {
+fun NotificationContentGroup(viewModel: MainViewModel) {
   val context = LocalContext.current
   val content by viewModel.notificationContent.content.collectAsState()
   var maybeLimit by remember { mutableStateOf<NotificationContent?>(null) }
   LaunchedEffect(Unit) { maybeLimit = viewModel.notificationContentLimit() }
   val isAppLockOn = remember { AppLockPrefs.prefs(context).isEnabled }
-  Column(Modifier.fillMaxWidth()) {
-    for ((choice, label) in CONTENT_CHOICES) {
-      Row(verticalAlignment = Alignment.CenterVertically) {
-        RadioButton(selected = content == choice, onClick = { viewModel.setNotificationContent(choice) })
-        Text(stringResource(label))
+  val limit = maybeLimit
+  val hints = listOfNotNull(
+    if (limit != null && limit.ordinal > content.ordinal) {
+      stringResource(R.string.notification_content_limited, stringResource(CONTENT_CHOICES.first { it.first == limit }.second))
+    } else {
+      null
+    },
+    if (isAppLockOn && content == NotificationContent.CONTENT) stringResource(R.string.notification_content_app_lock) else null,
+  )
+  SettingsGroup(maybeFooter = hints.joinToString("\n").ifEmpty { null }) {
+    row { shapes ->
+      SettingsChoiceRow(shapes, stringResource(R.string.notification_content_title), CONTENT_CHOICES, content) {
+        viewModel.setNotificationContent(it)
       }
     }
-    val limit = maybeLimit
-    if (limit != null && limit.ordinal > content.ordinal) {
-      ContentHint(stringResource(R.string.notification_content_limited, stringResource(CONTENT_CHOICES.first { it.first == limit }.second)))
-    }
-    if (isAppLockOn && content == NotificationContent.CONTENT) ContentHint(stringResource(R.string.notification_content_app_lock))
   }
-}
-
-@Composable
-private fun ContentHint(text: String) {
-  Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 /** Mute until a preset time from now, or not at all; shows until when it is muted. */

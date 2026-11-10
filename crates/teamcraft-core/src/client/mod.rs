@@ -100,7 +100,7 @@ pub use attachments::{BlobDownload, MAX_VIEWER_BYTES, OutgoingFile};
 pub use attested::{AttestationSettings, JwksSource};
 pub use calls::{CallEventSink, CallKeySigner, CallMoveRecord, CallPreparation, call_move_announcement};
 pub(crate) use catch_up::CATCHING_UP_PREFIX;
-pub use catch_up::{CatchUpFocus, is_catching_up};
+pub use catch_up::{CatchUpFocus, SyncStopRequest, is_catching_up};
 pub use channel_roles::RoleSigning;
 #[cfg(feature = "ui")]
 pub(crate) use channel_roles::{channel_roles_alarmed_key, channel_roles_key, role_key_standings_key};
@@ -499,6 +499,8 @@ pub struct Client<A, S> {
   device_activity: DeviceActivity,
   /// The conversation the user looks at; a catch-up takes it first (issue #247).
   catch_up_focus: CatchUpFocus,
+  /// Set when the host's loop is told to stop; a catch-up then ends between conversations.
+  stop_request: SyncStopRequest,
   /// The first sync of a newly set up device, beside its record in the store.
   first_sync: first_sync::FirstSyncState,
   /// The backlogs a catch-up left for the host's loop to read (issue #1448).
@@ -687,6 +689,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       are_welcomes_synced: false,
       maybe_waiting_checked_at_ms: None,
       catch_up_focus: CatchUpFocus::default(),
+      stop_request: SyncStopRequest::default(),
       first_sync: Default::default(),
       background_backlogs: Default::default(),
       sync_progress: Default::default(),

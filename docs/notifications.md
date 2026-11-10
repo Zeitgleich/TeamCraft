@@ -449,10 +449,18 @@ wake-up with the core (`notification_for_push`) without starting the UI and show
 DMs, and the text (cut at 240 characters, `@mentions` in bold) or a label for files (photo, video,
 audio, file name). How the core gets there, within `PUSH_PREVIEW_BUDGET` (7 s; FCM gives about 10 s):
 
-1. From the store if the app already has the message.
-2. Otherwise it fetches and decrypts the one message (at most 4 s), reading nothing else.
-3. If that fails or names no sender (a first DM from somebody new, keys that changed while the app was
-   closed) and the sync loop isn't running, the app's own client catches that one conversation up
+1. From the store if the app already has the message: no access token, no connection (issue #1662).
+2. Otherwise, while the sync loop runs (the app in the foreground), nothing more: the sync brings the
+   message, and the app fills the placeholder in from the store (`notification_from_store`). A push
+   then holds the engine for milliseconds instead of a fetch on a connection that may be cold.
+3. Otherwise it fetches and decrypts the one message, reading nothing else. The wait for the app's
+   access token and the fetch share 4 s: a slow token refresh leaves less time for the fetch rather
+   than adding to it. Without a token the store's preview stays and the app tries again later. The
+   app's token provider says why there is none (issue #1671): a refresh that failed for now (offline,
+   the identity provider down) is a network problem everywhere in the core and is retried; only an
+   ended session (signed out, refresh token refused) is a sign-out, which the app handles itself.
+4. If that fails or names no sender (a first DM from somebody new, keys that changed while the app was
+   closed), the sync loop isn't running and the token wasn't missing, the app's own client catches that one conversation up
    (`Client::catch_up_for_push`: record and members, welcomes, MLS backlog, new messages) and reads the
    message from the store. Only the cancel-safe parts are cut at the deadline: following the groups
    (welcomes, MLS) starts only with 2 s left and then runs to completion, since a welcome spends the
@@ -460,7 +468,7 @@ audio, file name). How the core gets there, within `PUSH_PREVIEW_BUDGET` (7 s; F
    must not advance its state: it catches the conversation up on a probe instead, an overlay of the
    store in memory and a read-only API that are thrown away afterwards, within 14 s and 4 MB of
    writes (`notification_probe_for_push`, issue #839; e2ee.md §7.2). With less than 12 MB of memory
-   to spare it stops after step 2 (`notification_preview_for_push`).
+   to spare it stops after step 3 (`notification_preview_for_push`).
 
 Whatever is known by then is shown: "New message" under the sender's name when the text could not be
 read, never nothing. `PushNotification.maybe_gap` says why less was shown (no session, not decrypted,

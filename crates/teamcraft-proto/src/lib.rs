@@ -50,8 +50,8 @@ pub use gateway::{
 };
 pub use id::{
   AnnouncementId, AttachmentId, AuditEntryId, BackgroundId, CallId, CategoryId, ConversationId,
-  CustomEmojiId, DeviceId, GroupMappingId, Id, IdError, InviteId, MeetingAttendeeId, MeetingId,
-  MeetingInviteId, MessageId, MlsMessageId, OrgBackgroundId, PushRetryId, RecoveryRequestId,
+  CustomEmojiId, DeviceId, GroupMappingId, HealthNoticeId, Id, IdError, InviteId, MeetingAttendeeId,
+  MeetingId, MeetingInviteId, MessageId, MlsMessageId, OrgBackgroundId, PushRetryId, RecoveryRequestId,
   SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, ScheduledMessageId, Snowflake, SpaceId,
   SystemEventId, ThreadId, UserGroupId, UserId, WebhookEventId, WebhookId,
 };

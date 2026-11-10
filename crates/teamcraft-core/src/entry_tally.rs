@@ -667,6 +667,54 @@ fn unread_between(
   Ok((pass.counts.unread, maybe_last_placed))
 }
 
+/// The oldest unread row of the feed, where the "new messages" line goes. Only rows from the read
+/// position on are read, up to the first unread one, and of a conversation never read (an import)
+/// only the newest [`UNREAD_WINDOW_ROWS`], like the chat list's counts: opening a conversation no
+/// longer reads (and decrypts) its whole history to place the line (TEAMCRAFT-1D).
+pub(crate) fn first_unread_row(
+  store: &dyn LocalStore,
+  conversation: ConversationId,
+  maybe_boundary: Option<MessageOrder>,
+  maybe_importer: Option<UserId>,
+  is_unread: &dyn Fn(&StoredMessage) -> bool,
+) -> Result<Option<StoredMessage>, StoreError> {
+  let end = store.feed_len(conversation)?;
+  let mut at = match maybe_boundary {
+    Some(boundary) => store
+      .feed_ranks(conversation, &[boundary])?
+      .first()
+      .copied()
+      .unwrap_or(0),
+    None => end.saturating_sub(UNREAD_WINDOW_ROWS),
+  };
+  let mut additions = ImportAdditions::new(maybe_importer);
+  // Without an import account there are no additions to know of.
+  let mut has_earlier_events = maybe_importer.is_none();
+  while at < end {
+    let rows = store.feed_rows(conversation, at, ROWS_PER_READ.min(end - at))?;
+    if rows.is_empty() {
+      break;
+    }
+    at += rows.len();
+    #[cfg(test)]
+    UNREAD_ROWS.with(|read| read.set(read.get() + rows.len()));
+    for row in rows {
+      if row.is_event() && !has_earlier_events {
+        has_earlier_events = true;
+        for event in store.event_messages(conversation)? {
+          if event.is_feed_row() && event.order() < row.order() {
+            additions.note(&event);
+          }
+        }
+      }
+      if !additions.note(&row) && is_unread(&row) {
+        return Ok(Some(row));
+      }
+    }
+  }
+  Ok(None)
+}
+
 /// The first place an unread row can be: at the "mark unread" mark, or after the read position.
 pub(crate) fn read_boundary(
   maybe_mark: Option<MessageId>,
@@ -1045,6 +1093,111 @@ mod tests {
     fixture.check();
     fixture.restore_tally(&edited_tally);
     assert_eq!(fixture.check(), 0, "only the unread counts are decided again");
+  }
+
+  /// TEAMCRAFT-1D: the "new messages" line read and decrypted the whole conversation.
+  mod first_unread {
+    use super::*;
+
+    #[test]
+    fn reads_from_the_read_position_up_to_the_first_unread_row() {
+      let (store, _dir) = sealed_store();
+      let mut fixture = Fixture::new(store);
+      for n in 7..=20 {
+        let sender = if n == 16 { ME } else { PEER };
+        fixture.write(&text(n, sender, "plain"));
+      }
+      fixture.set_last_read(Some(15));
+      let before = UNREAD_ROWS.with(std::cell::Cell::get);
+      let first = fixture.backend.first_unread_message(&fixture.response);
+      assert_eq!(
+        UNREAD_ROWS.with(std::cell::Cell::get) - before,
+        5,
+        "only the rows after the read position, in one page"
+      );
+      let expected = fixture.mirror.first_unread_message(&fixture.response);
+      assert_eq!(first.map(|row| row.client_message_id), Some(client_id(17)));
+      assert_eq!(expected.map(|row| row.client_message_id), Some(client_id(17)));
+    }
+
+    #[test]
+    fn everything_read_has_none() {
+      let (store, _dir) = sealed_store();
+      let mut fixture = Fixture::new(store);
+      fixture.set_last_read(Some(FIRST_ROWS));
+      assert!(fixture.backend.first_unread_message(&fixture.response).is_none());
+      assert!(fixture.mirror.first_unread_message(&fixture.response).is_none());
+    }
+
+    #[test]
+    fn a_conversation_never_read_reads_only_its_newest_rows() {
+      let (store, _dir) = sealed_store();
+      let mut fixture = Fixture::new(store);
+      for n in 7..=20 {
+        fixture.write(&text(n, PEER, "plain"));
+      }
+      let first = fixture.backend.first_unread_message(&fixture.response);
+      assert_eq!(
+        first.map(|row| row.client_message_id),
+        Some(client_id(21 - UNREAD_WINDOW_ROWS as i64)),
+        "the line goes at the oldest of the newest rows, like the badge's count"
+      );
+    }
+  }
+
+  /// TEAMCRAFT-F: the pinned bar read and decrypted the whole conversation on every change.
+  mod pinned {
+    use super::*;
+    use crate::ui_backend::PIN_SCANS;
+
+    #[test]
+    fn pins_are_scanned_once_and_then_followed() {
+      let (store, _dir) = tracked_sealed_store();
+      let mut fixture = Fixture::new(store);
+      fixture.write(&pinned(2, true));
+      let scans = || PIN_SCANS.with(std::cell::Cell::get);
+      let before = scans();
+      assert_eq!(fixture.pinned_ids(), vec![server_id(2)]);
+      assert_eq!(scans() - before, 1);
+
+      fixture.write(&pinned(4, true));
+      assert_eq!(fixture.pinned_ids(), vec![server_id(2), server_id(4)]);
+      fixture.write(&pinned(2, false));
+      assert_eq!(fixture.pinned_ids(), vec![server_id(4)]);
+      fixture.write(&text(30, PEER, "new"));
+      assert_eq!(fixture.pinned_ids(), vec![server_id(4)]);
+      assert_eq!(scans() - before, 1, "later changes are followed, not scanned");
+
+      fixture.remove(4);
+      assert!(fixture.pinned_ids().is_empty(), "a removed message is no pin");
+      fixture.remove_all();
+      assert!(fixture.pinned_ids().is_empty());
+    }
+
+    fn pinned(n: i64, is_pinned: bool) -> StoredMessage {
+      let mut message = text(n, PEER, "plain");
+      message.is_pinned = is_pinned;
+      message
+    }
+
+    impl<S: LocalStore> Fixture<S> {
+      fn pinned_ids(&self) -> Vec<MessageId> {
+        let ids: Vec<MessageId> = self
+          .backend
+          .pinned_messages_of(conversation())
+          .into_iter()
+          .map(|message| message.id)
+          .collect();
+        let expected: Vec<MessageId> = self
+          .mirror
+          .pinned_messages_of(conversation())
+          .into_iter()
+          .map(|message| message.id)
+          .collect();
+        assert_eq!(ids, expected, "as a whole read finds them");
+        ids
+      }
+    }
   }
 
   /// Issue #1466: a chat list shows the unread counts alone, which never read older history than

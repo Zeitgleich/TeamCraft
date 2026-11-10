@@ -64,8 +64,8 @@ use crate::people_names::shown_name;
 use crate::records::{self, Draft};
 use crate::store::{
   BookmarkItem, ConversationEvent, FeedVersion, LocalStore, MessageContent, MessageEdge, MessageFilter,
-  MessageMeta, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, Unreadable, read_together,
-  write_group,
+  MessageMeta, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, Unreadable, Written,
+  read_together, write_group,
 };
 
 /// Rows read at a time when a list's anchor is looked for by its time ([`FeedAnchor`]).
@@ -767,6 +767,9 @@ pub struct CoreChatBackend<S> {
   /// The unread rows of conversations whose counts follow the store's journal of writes
   /// ([`EntryNeed::Unread`]): a change costs a read of what it changed (issue #1466).
   live_unread: RefCell<HashMap<ConversationId, LiveUnread>>,
+  /// The pinned messages of conversations whose pins were read, followed through the store's
+  /// journal of writes: the pinned bar asks on every change, and a scan decrypts all history.
+  live_pins: RefCell<HashMap<ConversationId, LivePins>>,
   /// When the tallies of followed counts were last handed to the store.
   followed_kept_at: std::cell::Cell<Option<TimestampMs>>,
   /// The feed rows of the conversations read last, kept while their messages don't change.
@@ -836,6 +839,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       entry_tallies: RefCell::default(),
       entry_need: EntryNeed::Everything,
       live_unread: RefCell::default(),
+      live_pins: RefCell::default(),
       followed_kept_at: std::cell::Cell::new(None),
       feeds: RefCell::default(),
       layouts: RefCell::default(),
@@ -1518,13 +1522,35 @@ impl<S: LocalStore> CoreChatBackend<S> {
     })
   }
 
-  /// Top-level messages the user hasn't read: others' messages after the server's read position,
-  /// or everything from the user's own "mark unread" on.
-  pub(crate) fn unread_messages(&self, response: &ConversationResponse) -> Vec<StoredMessage> {
+  /// The oldest top-level message the user hasn't read: others' messages after the server's read
+  /// position, or everything from the user's own "mark unread" on. A store with a feed index reads
+  /// only the rows after the read position ([`entry_tally::first_unread_row`]), not the whole
+  /// conversation (TEAMCRAFT-1D).
+  pub(crate) fn first_unread_message(&self, response: &ConversationResponse) -> Option<StoredMessage> {
     let maybe_mark = self
       .read(crate::client::stored_account_data(&self.store))
       .unread_mark(response.id);
-    self.unread_among(response, maybe_mark, self.top_level(response.id))
+    if !self.store.indexes_feed() {
+      return self
+        .unread_among(response, maybe_mark, self.top_level(response.id))
+        .into_iter()
+        .next();
+    }
+    let maybe_last_read = response
+      .maybe_my_membership
+      .as_ref()
+      .and_then(|membership| membership.maybe_last_read_message_id);
+    let is_unread = self.unread_check(response, maybe_mark);
+    self.read(
+      entry_tally::first_unread_row(
+        &self.store,
+        response.id,
+        entry_tally::read_boundary(maybe_mark, maybe_last_read),
+        self.importer(),
+        &is_unread,
+      )
+      .map_err(CoreError::from),
+    )
   }
 
   /// A conversation's top-level messages, deleted ones included.
@@ -1759,6 +1785,17 @@ impl<S: LocalStore> CoreChatBackend<S> {
     end: usize,
   ) -> Vec<Message> {
     let rows = self.layout_rows(conversation, layout, start, end);
+    self.with_indexed_relations(conversation, &rows, layout.maybe_importer)
+  }
+
+  /// `rows` of a conversation as the lists show them, their reactions and replies read from the
+  /// store's indexes.
+  fn with_indexed_relations(
+    &self,
+    conversation: ConversationId,
+    rows: &[StoredMessage],
+    maybe_importer: Option<UserId>,
+  ) -> Vec<Message> {
     let targets: Vec<ClientMessageId> = rows.iter().map(|row| row.client_message_id).collect();
     let threads: Vec<ThreadId> = rows
       .iter()
@@ -1777,11 +1814,101 @@ impl<S: LocalStore> CoreChatBackend<S> {
         .reply_counts(conversation, &threads)
         .map_err(CoreError::from),
     );
-    let relations = Relations::indexed(&reactions, &threads, &counts, layout.maybe_importer);
+    let relations = Relations::indexed(&reactions, &threads, &counts, maybe_importer);
     rows
       .iter()
       .map(|row| self.to_message_among(row, &relations))
       .collect()
+  }
+
+  /// The pinned messages of a conversation, in display order. A store with a journal of writes
+  /// scans the conversation once and then reads only what was written since (TEAMCRAFT-F: the
+  /// pinned bar asked again on every change and decrypted the whole history each time).
+  pub(crate) fn pinned_messages_of(&self, conversation: ConversationId) -> Vec<Message> {
+    let is_shown_pin = |stored: &StoredMessage| stored.is_pinned && !stored.is_hidden();
+    if !self.store.indexes_feed() {
+      let all = self.all_messages(conversation);
+      let relations = Relations::of(&all, self.importer());
+      return all
+        .iter()
+        .filter(|stored| is_shown_pin(stored))
+        .map(|stored| self.to_message_among(stored, &relations))
+        .collect();
+    }
+    let mut rows = match self.followed_pins(conversation, &is_shown_pin) {
+      Some(rows) => rows,
+      None => self.scanned_pins(conversation, &is_shown_pin),
+    };
+    rows.sort_by_key(StoredMessage::order);
+    self.with_indexed_relations(conversation, &rows, self.importer())
+  }
+
+  /// The pinned messages kept for `conversation`, after what the store's journal says was written
+  /// to it since; `None` when none are kept or the journal can't tell: scan again.
+  fn followed_pins(
+    &self,
+    conversation: ConversationId,
+    is_shown_pin: &dyn Fn(&StoredMessage) -> bool,
+  ) -> Option<Vec<StoredMessage>> {
+    let mut lives = self.live_pins.borrow_mut();
+    let live = lives.get_mut(&conversation)?;
+    let maybe_followed = self.store.written_cursor().and_then(|cursor| {
+      let written = self.store.written_since(conversation, live.cursor)?;
+      for change in written {
+        match change {
+          Written::Message(id) => {
+            live.pinned.remove(&id);
+            let maybe_stored = self.store.message(conversation, id).ok()?;
+            if maybe_stored.as_ref().is_some_and(is_shown_pin) {
+              live.pinned.insert(id);
+            }
+          },
+          Written::Conversation => live.pinned.clear(),
+        }
+      }
+      live.cursor = cursor;
+      let mut rows = Vec::with_capacity(live.pinned.len());
+      for id in &live.pinned {
+        rows.extend(self.store.message(conversation, *id).ok()?.filter(is_shown_pin));
+      }
+      Some(rows)
+    });
+    if maybe_followed.is_none() {
+      lives.remove(&conversation);
+    }
+    maybe_followed
+  }
+
+  /// All of `conversation`'s messages read for its pins, which are kept to follow from here on.
+  fn scanned_pins(
+    &self,
+    conversation: ConversationId,
+    is_shown_pin: &dyn Fn(&StoredMessage) -> bool,
+  ) -> Vec<StoredMessage> {
+    #[cfg(test)]
+    PIN_SCANS.with(|scans| scans.set(scans.get() + 1));
+    // Taken before the scan: what is written meanwhile is read again on the next ask.
+    let maybe_cursor = self.store.written_cursor();
+    let mut rows = Vec::new();
+    let visited = self
+      .store
+      .visit_messages(conversation, MessageFilter::All, &mut |stored| {
+        if is_shown_pin(stored) {
+          rows.push(stored.clone());
+        }
+      });
+    if let Err(error) = visited {
+      tracing::error!(%error, "local store read failed");
+      return Vec::new();
+    }
+    if let Some(cursor) = maybe_cursor {
+      let pinned = rows.iter().map(|row| row.client_message_id).collect();
+      self
+        .live_pins
+        .borrow_mut()
+        .insert(conversation, LivePins { cursor, pinned });
+    }
+    rows
   }
 
   /// The stored messages of the rows `start..end` of the feed.
@@ -3720,6 +3847,20 @@ struct LiveUnread {
   rows: UnreadRows,
   /// A tally of them not handed to the store yet ([`CoreChatBackend::keep_followed_tallies_if_due`]).
   maybe_unkept: Option<EntryTally>,
+}
+
+#[cfg(test)]
+thread_local! {
+  /// Whole conversations read for their pins ([`CoreChatBackend::scanned_pins`]).
+  pub(crate) static PIN_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The pinned messages of one conversation, found by a scan and followed since through the store's
+/// journal of writes ([`CoreChatBackend::pinned_messages_of`]).
+struct LivePins {
+  /// Where the journal stood when they were last brought up to date.
+  cursor: u64,
+  pinned: HashSet<ClientMessageId>,
 }
 
 /// What a sidebar entry counts of a conversation ([`CoreChatBackend::entry_counts`]).

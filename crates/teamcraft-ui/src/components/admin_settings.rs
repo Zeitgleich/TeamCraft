@@ -311,6 +311,13 @@ const HEALTH_ALERTS: &[FieldDef] = &[
     "settings-error-health-percent",
   ),
   flag("is_email_enabled"),
+  ranged(
+    "history_days",
+    1,
+    (1, 3650),
+    DAYS,
+    "settings-error-health-history-days",
+  ),
 ];
 const HOLIDAYS: &[FieldDef] = &[
   FieldDef {

@@ -7,7 +7,8 @@
 //! no call to a backend. A check that fails for the hold time becomes an alert (see [`tracker`]),
 //! and the admins are told through the gateway; the console reads `GET /api/v1/admin/health` when
 //! it is told, or when the health page is open. Raised and resolved alerts also go out by e-mail and
-//! to the webhooks subscribed to them ([`notices`]).
+//! to the webhooks subscribed to them ([`notices`]). The alert history and the notices waiting are
+//! written to the database behind memory, and read back at a start ([`persistence`]).
 //!
 //! Nothing here carries content, names or addresses: a check is one of a fixed list, with a state,
 //! times and one number.
@@ -15,6 +16,7 @@
 mod checks;
 mod heartbeat;
 mod notices;
+mod persistence;
 mod tracker;
 
 use std::path::PathBuf;
@@ -23,7 +25,8 @@ use std::time::Duration as StdDuration;
 
 use serde::Deserialize;
 use teamcraft_proto::{
-  AdminHealthResponse, GatewayEvent, HealthAlertSettings, HealthCheckResponse, PushProvider, UserId,
+  AdminHealthResponse, GatewayEvent, HealthAlertSettings, HealthCheckResponse, HealthNoticeId, PushProvider,
+  UserId,
 };
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Notify;
@@ -36,6 +39,7 @@ pub use checks::{ALL_CHECKS, JobSchedule, JobSchedules};
 use checks::{Facts, MediaServerFacts, PushFacts, observe};
 use heartbeat::Heartbeats;
 use notices::{Channel, Notice, Outbox, Outcome};
+use persistence::Persistence;
 use tracker::{AlertChange, AlertChangeKind, AlertPolicy, AlertTracker};
 
 /// Shortest interval between two evaluations: they are cheap, but never a busy loop.
@@ -72,7 +76,7 @@ pub struct HealthConfig {
   pub startup_grace_secs: u64,
 }
 
-/// The checks, their state and the alerts raised since the start.
+/// The checks, their state and the alerts raised, kept across restarts.
 pub struct HealthMonitor {
   config: HealthConfig,
   schedules: JobSchedules,
@@ -80,6 +84,8 @@ pub struct HealthMonitor {
   inner: Mutex<Inner>,
   /// Wakes the delivery task when notices were queued.
   wake: Notify,
+  /// Wakes the task that writes the alerts and the outbox to the database.
+  persist_wake: Notify,
 }
 
 #[derive(Default)]
@@ -91,6 +97,8 @@ struct Inner {
   addresses: Vec<String>,
   /// Mail and webhook events waiting to go out.
   outbox: Outbox,
+  /// What is not in the database yet.
+  persistence: Persistence,
   evaluations: u64,
 }
 
@@ -118,6 +126,7 @@ impl HealthMonitor {
       started_at,
       inner: Mutex::new(Inner::default()),
       wake: Notify::new(),
+      persist_wake: Notify::new(),
     }
   }
 
@@ -149,6 +158,8 @@ impl HealthMonitor {
       let changes = inner
         .tracker
         .evaluate(now, &self.policy(&settings), &observations);
+      inner.tracker.prune(persistence::history_start(&settings, now));
+      inner.persistence.note(&changes);
       let is_due = inner.evaluations.is_multiple_of(ADMIN_REFRESH_EVERY);
       inner.evaluations += 1;
       (changes, is_due)
@@ -162,6 +173,7 @@ impl HealthMonitor {
     if !changes.is_empty() {
       self.tell_admins(state).await;
       self.queue_notices(state, &settings, &changes, now);
+      self.persist_wake.notify_one();
     } else if is_admin_refresh_due {
       self.read_admins(state).await;
     }
@@ -171,11 +183,19 @@ impl HealthMonitor {
   /// delivery task, never by the evaluation, so a hanging mail server can't hold up the checks.
   pub async fn deliver_notices(&self, state: &AppState, now: OffsetDateTime) {
     let due = self.lock().outbox.take_due(now);
+    if due.is_empty() {
+      return;
+    }
     for pending in due {
-      if notices::deliver(state, &pending).await == Outcome::Retry {
-        self.lock().outbox.retry_later(pending, now);
+      let outcome = notices::deliver(state, &pending).await;
+      let mut inner = self.lock();
+      match outcome {
+        Outcome::Retry => inner.outbox.retry_later(pending.id, now),
+        Outcome::Delivered | Outcome::Dropped => inner.outbox.finish(pending.id),
       }
     }
+    // A delivery made is written at once, so a restart right after does not send it again.
+    self.persist_wake.notify_one();
   }
 
   /// One webhook event per change, and one mail per change and address when mail is on.
@@ -187,6 +207,13 @@ impl HealthMonitor {
     now: OffsetDateTime,
   ) {
     let is_mailing = settings.is_email_enabled && state.can_send_mail();
+    let next_id = || match state.next_id::<HealthNoticeId>() {
+      Ok(id) => Some(id),
+      Err(error) => {
+        warn!(%error, "no ID for a health alert notice; it is not sent");
+        None
+      },
+    };
     {
       let mut inner = self.lock();
       let addresses = if is_mailing {
@@ -200,15 +227,17 @@ impl HealthMonitor {
           kind: change.kind,
           at: now,
         };
-        inner.outbox.push(notice.clone(), Channel::Webhook, now);
+        if let Some(id) = next_id() {
+          inner.outbox.push(id, notice.clone(), Channel::Webhook, now);
+        }
         for address in &addresses {
-          inner.outbox.push(
-            notice.clone(),
-            Channel::Mail {
-              address: address.clone(),
-            },
-            now,
-          );
+          let Some(id) = next_id() else {
+            continue;
+          };
+          let channel = Channel::Mail {
+            address: address.clone(),
+          };
+          inner.outbox.push(id, notice.clone(), channel, now);
         }
       }
     }
@@ -309,6 +338,7 @@ impl HealthMonitor {
 /// Evaluates the checks until the process ends, and delivers the notices beside it.
 pub fn spawn(state: AppState) {
   spawn_delivery(state.clone());
+  persistence::spawn(state.clone());
   tokio::spawn(async move {
     let mut interval = tokio::time::interval(state.health.config.check_interval());
     // A late tick is not made up for: the checks look at the state now.

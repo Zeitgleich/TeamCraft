@@ -2245,13 +2245,10 @@ internal fun PreJoinDialog(
             modifier = Modifier.padding(bottom = 8.dp),
           )
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Switch(checked = isCameraOn, onCheckedChange = { isCameraOn = it })
-          Text(stringResource(R.string.call_prejoin_camera), modifier = Modifier.padding(start = 8.dp))
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Switch(checked = isMuted, onCheckedChange = { isMuted = it })
-          Text(stringResource(R.string.call_prejoin_muted), modifier = Modifier.padding(start = 8.dp))
+        // The settings' switch rows: the whole row toggles, with Material's toggle haptics.
+        SettingsGroup {
+          row { shapes -> SettingsSwitchRow(shapes, stringResource(R.string.call_prejoin_camera), isCameraOn) { isCameraOn = it } }
+          row { shapes -> SettingsSwitchRow(shapes, stringResource(R.string.call_prejoin_muted), isMuted) { isMuted = it } }
         }
       }
     },

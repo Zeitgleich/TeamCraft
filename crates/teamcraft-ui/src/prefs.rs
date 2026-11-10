@@ -247,8 +247,11 @@ pub struct NotificationPrefs {
   /// Per space, keyed by the space ID as text. Its channels follow it unless they have an entry of
   /// their own; "mute space" is an entry with the level `Nothing` or a mute time.
   pub spaces: BTreeMap<String, ConversationNotify>,
-  /// A ringtone plays on the default output while a call rings (notifications.md, "Calls").
+  /// A ringtone plays on the chosen call speakers (the default output unless chosen) while a call rings (notifications.md, "Calls").
   pub plays_ringtone: bool,
+  /// How loud the ringtone is, in percent of full volume (desktop; the speakers are the call
+  /// speakers chosen in the call settings).
+  pub ringtone_volume_percent: u8,
   /// Desktop: a ringing call shows a small window above all other apps while TeamCraft is in the
   /// background, instead of the notification (#650).
   pub shows_call_window: bool,
@@ -294,6 +297,7 @@ impl Default for NotificationPrefs {
       filters: BTreeMap::new(),
       spaces: BTreeMap::new(),
       plays_ringtone: true,
+      ringtone_volume_percent: 100,
       shows_call_window: true,
       maybe_meeting_reminder_minutes: Some(DEFAULT_MEETING_REMINDER_MINUTES),
       notifies_meeting_start: true,

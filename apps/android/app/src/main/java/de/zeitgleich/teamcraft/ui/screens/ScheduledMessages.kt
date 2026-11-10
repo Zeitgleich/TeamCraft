@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.consumeWindowInsets
 import android.text.format.DateUtils
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -83,7 +84,7 @@ fun ScheduledScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: 
     topBar = { ChromeTopBar(title = stringResource(R.string.scheduled_title), maybeOnBack = onBack) },
     contentWindowInsets = ScreenInsets,
   ) { padding ->
-    LazyColumn(Modifier.fillMaxSize().padding(padding)) {
+    LazyColumn(Modifier.fillMaxSize().consumeWindowInsets(padding), contentPadding = padding) {
       item {
         Text(
           stringResource(R.string.scheduled_note),
