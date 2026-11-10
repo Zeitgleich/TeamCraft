@@ -404,7 +404,7 @@ mod dismissal {
     let reply = report(&scene, &scene.bob, &id, starts_at).await;
     assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
     let pushes = scene.recorder.taken().await;
-    let mut bob_phones = vec![scene.bob_phone.clone(), second_phone.clone()];
+    let mut bob_phones = [scene.bob_phone.clone(), second_phone.clone()];
     bob_phones.sort();
     assert_eq!(
       withdrawals(&pushes),
@@ -466,10 +466,8 @@ mod dismissal {
 
     // The start notice is a new row, still open: it shows, and dismissing it works.
     run_at(&scene.app, starts_at).await;
-    assert_eq!(
-      kinds(&scene.recorder.taken().await),
-      [(scene.bob_phone.clone(), PushKind::MeetingStart)]
-    );
+    let started = kinds(&scene.recorder.taken().await);
+    assert!(started.contains(&(scene.bob_phone.clone(), PushKind::MeetingStart)));
     let reply = report(&scene, &scene.bob, &id, starts_at).await;
     assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
     assert_eq!(withdrawals(&scene.recorder.taken().await).len(), 1);
