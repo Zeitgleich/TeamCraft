@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import de.zeitgleich.teamcraft.ui.theme.SeekablePages
 import de.zeitgleich.teamcraft.ui.PresenceDot
 import de.zeitgleich.teamcraft.ui.presenceLabel
 import de.zeitgleich.teamcraft.ui.presenceOf
@@ -8,7 +9,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.heading
 import android.app.Activity
 import android.view.WindowManager
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.material3.ListItem
 import androidx.compose.material.icons.Icons
@@ -116,7 +116,6 @@ fun SettingsScreen(
   opensSecurity: Boolean = false,
 ) {
   var maybePage by rememberSaveable { mutableStateOf(if (opensSecurity) SettingsPage.Security else null) }
-  BackHandler(enabled = maybePage != null) { maybePage = null }
   val page = maybePage
   Scaffold(
     contentWindowInsets = ScreenInsets,
@@ -127,16 +126,19 @@ fun SettingsScreen(
       )
     },
   ) { padding ->
-    Column(
-      Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
-      verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-      when (page) {
-        null -> SettingsHub(viewModel, account, onOpen = { maybePage = it }, onReportProblem = onReportProblem)
-        SettingsPage.Notifications -> NotificationsPage(viewModel, onDnd, onDiagnostics)
-        SettingsPage.Chats -> ChatsPage(viewModel)
-        SettingsPage.Security -> SecurityPage(viewModel, account)
-        SettingsPage.Devices -> ApproveDevice(viewModel)
+    // Back from a page to the hub: the predictive back gesture previews it (issue #454).
+    SeekablePages(page = page, rootPage = null, onBack = { maybePage = null }, modifier = Modifier.padding(padding)) { shown ->
+      Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+      ) {
+        when (shown) {
+          null -> SettingsHub(viewModel, account, onOpen = { maybePage = it }, onReportProblem = onReportProblem)
+          SettingsPage.Notifications -> NotificationsPage(viewModel, onDnd, onDiagnostics)
+          SettingsPage.Chats -> ChatsPage(viewModel)
+          SettingsPage.Security -> SecurityPage(viewModel, account)
+          SettingsPage.Devices -> ApproveDevice(viewModel)
+        }
       }
     }
   }

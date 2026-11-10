@@ -295,10 +295,10 @@ private fun ReadyNavigation(
   NavHost(
     navController = navigation,
     startDestination = "chats",
-    enterTransition = transitions.enter,
-    exitTransition = transitions.exit,
-    popEnterTransition = transitions.popEnter,
-    popExitTransition = transitions.popExit,
+    enterTransition = { transitions.enter },
+    exitTransition = { transitions.exit },
+    popEnterTransition = { transitions.popEnter },
+    popExitTransition = { transitions.popExit },
   ) {
     composable("chats") {
       // Wide windows (tablets, unfolded foldables, landscape) show the conversation next to the list.
