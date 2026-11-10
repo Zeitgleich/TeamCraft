@@ -15,6 +15,7 @@ use std::panic::PanicHookInfo;
 
 use leptos::prelude::*;
 use serde::Deserialize;
+use teamcraft_client_api::crash_reporting::trace::{self, TraceSettings, WireTraceTree};
 use teamcraft_client_api::crash_reporting::{
   AppInfo, AppPlatform, CrashEvent, CrashLevel, CrashReporter, CrashReportingConfig, CrashReportingConsent,
   CrashSendOutcome, ErrorSource, EventId, InstallationId, PanicParts, PendingPanic, StackFrame, Transaction,
@@ -104,6 +105,7 @@ pub fn set_consent(is_allowed: bool) {
       reporter.set_consent(consent(is_allowed));
     });
   }
+  with_reporter(|reporter| apply_trace_settings(reporter.trace_settings()));
   store_queue();
   store_transactions();
   flush();
@@ -117,6 +119,7 @@ pub fn should_trace() -> bool {
 
 /// Queues a finished measure; a full batch is sent at once.
 pub fn capture_transaction(transaction: &Transaction) {
+  take_traces();
   let is_batch = with_reporter(|reporter| {
     reporter.capture_transaction(transaction);
     reporter.has_transaction_batch()
@@ -147,10 +150,16 @@ pub fn flush() {
   if IS_DEAD.with(Cell::get) || IS_FLUSHING.with(|flushing| flushing.replace(true)) {
     return;
   }
+  take_traces();
   with_reporter(CrashReporter::begin_flush);
   wasm_bindgen_futures::spawn_local(async {
+    take_shell_traces().await;
+    let mut accepted = 0_u32;
     while let Some(pending) = with_reporter(|reporter| reporter.next_send(now_ms())).flatten() {
       let outcome = post(pending.request.body).await;
+      if outcome == CrashSendOutcome::Accepted {
+        accepted += 1;
+      }
       let should_go_on =
         with_reporter(|reporter| reporter.record_outcome(pending.event_id, outcome, now_ms()))
           .unwrap_or(false);
@@ -162,6 +171,12 @@ pub fn flush() {
     store_transactions();
     // async-ok: a thread-local Cell, not a signal.
     IS_FLUSHING.with(|flushing| flushing.set(false));
+    // At a full trace rate a flush's share (5) may not empty the queue: go on while the backend
+    // takes what is sent; a refusal or a wait ends it until the next trigger.
+    let is_more = accepted > 0 && with_reporter(|reporter| reporter.has_transaction_batch()).unwrap_or(false);
+    if is_more {
+      flush();
+    }
   });
 }
 
@@ -390,6 +405,7 @@ fn capture_handled(error_type: &str, message: String) {
 }
 
 fn publish_status(reporter: &CrashReporter) {
+  apply_trace_settings(reporter.trace_settings());
   let status = reporter.config().map(|config| CrashReportsStatus {
     allows_opt_out: config.allows_opt_out,
     shows_notice: config.shows_notice,
@@ -408,6 +424,7 @@ fn store_queue() {
 }
 
 fn store_transactions() {
+  take_traces();
   if let Some(Ok(json)) = with_reporter(|reporter| serde_json::to_string(reporter.transactions())) {
     store_text(KEY_TRANSACTIONS, &json);
   }
@@ -486,8 +503,50 @@ fn random_roll() -> f64 {
   js_sys::Math::random()
 }
 
+/// The redacted debug log, then what the page's own spans did and which are still open.
 fn breadcrumbs() -> Vec<String> {
-  debug_log::recent_lines()
+  let mut lines = debug_log::recent_lines();
+  lines.extend(trace::breadcrumb_lines(js_sys::Date::now()));
+  lines
+}
+
+/// Collection follows the reporter (docs/tracing.md): in the page's own process, and on desktop in
+/// the shell's, whose spans only the page can send.
+fn apply_trace_settings(settings: TraceSettings) {
+  trace::configure(settings);
+  if tauri::is_available() {
+    wasm_bindgen_futures::spawn_local(async move {
+      let args = serde_json::json!({
+        "is_on": settings.is_on,
+        "trace_rate": settings.trace_rate.get(),
+        "slow_ms": settings.slow_ms,
+      });
+      // An older shell without the command only means its spans aren't collected.
+      let _ = tauri::call::<()>("perf_configure", &args).await;
+    });
+  }
+}
+
+/// The trees the page's trace layer kept, queued as transactions.
+fn take_traces() {
+  let trees = trace::take_kept();
+  if !trees.is_empty() {
+    with_reporter(|reporter| reporter.capture_traces(&trees, random_bytes));
+  }
+}
+
+/// The desktop shell's kept trees, checked again on arrival ([`WireTraceTree::into_tree`]).
+async fn take_shell_traces() {
+  if !tauri::is_available() {
+    return;
+  }
+  let Ok(wire) = tauri::call::<Vec<WireTraceTree>>("perf_traces", &serde_json::json!({})).await else {
+    return;
+  };
+  let trees: Vec<_> = wire.into_iter().filter_map(WireTraceTree::into_tree).collect();
+  if !trees.is_empty() {
+    with_reporter(|reporter| reporter.capture_traces(&trees, random_bytes));
+  }
 }
 
 fn now_ms() -> i64 {

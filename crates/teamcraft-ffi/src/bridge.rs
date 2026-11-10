@@ -114,9 +114,15 @@ impl Reads {
   pub(crate) fn query_json(&self, query: &str) -> Result<String, TeamCraftError> {
     let started = std::time::Instant::now();
     let started_at_ms = crate::perf_jobs::now_ms();
+    let kind = query_kind(query);
+    // Tracing (docs/tracing.md): the layer keeps the name only when the kind is a code name.
+    let span = tracing::trace_span!("db.query", name = tracing::field::Empty);
+    if !span.is_disabled() {
+      span.record("name", format!("query_{kind}").as_str());
+    }
+    let _entered = span.enter();
     let parsed: ChatQuery = from_json(query)?;
     let answer = to_json(&parsed.answer(self.backend()?));
-    let kind = query_kind(query);
     crate::perf_jobs::query_ran(&kind, started_at_ms, started.elapsed());
     crate::logging::slow_query(kind, started.elapsed());
     answer

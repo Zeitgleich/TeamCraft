@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use teamcraft_core::timing::{self, Timed, TimedKind};
+use teamcraft_client_api::crash_reporting::trace::{self, ClosedSpan};
+use teamcraft_core::timing;
 
 use crate::logging;
 
@@ -44,6 +45,10 @@ const MAX_KIND_LEN: usize = 48;
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct PerfJobSpan {
   pub kind: PerfJobKind,
+  /// The span's operation from the trace layer (`http.client`, `core.step`); empty for a queue job
+  /// recorded here (docs/tracing.md). The apps use it as the step's operation when set.
+  #[uniffi(default = "")]
+  pub op: String,
   /// The job's function in the code (`conversations`, `messages`), or the store's wait.
   pub name: String,
   /// Unix time in milliseconds: queued, started, done. A store wait starts when queued.
@@ -78,10 +83,17 @@ pub enum PerfJobKind {
 #[uniffi::export(with_foreign)]
 pub trait PerfListener: Send + Sync {
   fn on_slow_job(&self, job: PerfJobSpan);
+
+  /// The trace layer kept a slow, failed or sampled trace (docs/tracing.md): take it with
+  /// `take_trace_envelopes` and hand it to the crash SDK, off this thread.
+  fn on_traces_kept(&self);
 }
 
 /// A job on its way through a queue.
 pub(crate) struct Queued {
+  /// The job's span (`queue.read`, `queue.query`, `queue.engine`): made when queued, entered (or
+  /// its future instrumented) while it runs, so the trace layer tells waited from ran.
+  span: tracing::Span,
   kind: PerfJobKind,
   name: &'static str,
   enqueued_at_ms: f64,
@@ -97,18 +109,33 @@ pub(crate) struct Running {
   maybe_cpu_at_start: Option<Duration>,
 }
 
-/// Steps of the measure from `start_ms` to `end_ms` (Unix milliseconds): the jobs that overlap it,
-/// the longest first, at most [`MAX_SPANS_PER_MEASURE`], then in time order.
+/// Steps of the measure from `start_ms` to `end_ms` (Unix milliseconds): the queue jobs recorded
+/// here and the trace layer's other spans (steps, store waits, requests) that overlap it, the
+/// longest first, at most [`MAX_SPANS_PER_MEASURE`], then in time order.
 #[uniffi::export]
 pub fn perf_job_spans(start_ms: f64, end_ms: f64) -> Vec<PerfJobSpan> {
-  let records = RECORDS.lock().unwrap_or_else(PoisonError::into_inner);
+  let mut records: VecDeque<PerfJobSpan> = RECORDS.lock().unwrap_or_else(PoisonError::into_inner).clone();
+  records.extend(
+    trace::recent(start_ms, end_ms)
+      .iter()
+      .filter(|span| !is_recorded_here(span.op))
+      .map(job_span_of),
+  );
   spans_between(&records, start_ms, end_ms)
 }
 
-/// Where slow jobs are reported; replaces the one before.
+/// Where slow jobs and kept traces are reported; replaces the one before.
 #[uniffi::export]
 pub fn set_perf_listener(listener: Arc<dyn PerfListener>) {
   *LISTENER.lock().unwrap_or_else(PoisonError::into_inner) = Some(listener);
+  trace::set_kept_hook(on_traces_kept);
+}
+
+fn on_traces_kept() {
+  let maybe_listener = LISTENER.lock().unwrap_or_else(PoisonError::into_inner).clone();
+  if let Some(listener) = maybe_listener {
+    listener.on_traces_kept();
+  }
 }
 
 /// What counts as a slow job, from the instance's setting (`slow_job_ms`); 0 turns reports off.
@@ -117,17 +144,37 @@ pub fn set_slow_job_threshold_ms(threshold_ms: u64) {
   SLOW_MS.store(threshold_ms, Ordering::Relaxed);
 }
 
-/// Times the local store's waits from now on (once per process).
-pub(crate) fn install() {
-  timing::set_observer(on_timed);
-}
-
 /// A job of `kind` named by its closure's type (`std::any::type_name`) joins its queue.
 pub(crate) fn queued(kind: PerfJobKind, type_name: &'static str) -> Queued {
+  queued_on(kind, Lane::Main, type_name)
+}
+
+/// [`queued`] on the open chat's read thread (issue #1583): its own span operation, so a wait
+/// there is never blamed on the main read thread's jobs.
+pub(crate) fn queued_for_query(type_name: &'static str) -> Queued {
+  queued_on(PerfJobKind::ReadQueue, Lane::Query, type_name)
+}
+
+/// Which thread of its kind a job runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Lane {
+  Main,
+  Query,
+}
+
+fn queued_on(kind: PerfJobKind, lane: Lane, type_name: &'static str) -> Queued {
   let depth = depth_of(kind).map_or(1, |depth| depth.fetch_add(1, Ordering::Relaxed) + 1);
+  let name = job_name(type_name);
+  let span = match (kind, lane) {
+    (PerfJobKind::ReadQueue, Lane::Main) => tracing::trace_span!("queue.read", name, depth),
+    (PerfJobKind::ReadQueue, Lane::Query) => tracing::trace_span!("queue.query", name, depth),
+    (PerfJobKind::EngineQueue, _) => tracing::trace_span!("queue.engine", name, depth),
+    _ => tracing::Span::none(),
+  };
   Queued {
+    span,
     kind,
-    name: job_name(type_name),
+    name,
     enqueued_at_ms: now_ms(),
     enqueued: Instant::now(),
     depth,
@@ -135,6 +182,11 @@ pub(crate) fn queued(kind: PerfJobKind, type_name: &'static str) -> Queued {
 }
 
 impl Queued {
+  /// The job's span: enter it around a job that runs on its thread, or instrument the job's future.
+  pub(crate) fn span(&self) -> tracing::Span {
+    self.span.clone()
+  }
+
   pub(crate) fn start(self) -> Running {
     if let Some(depth) = depth_of(self.kind) {
       // Saturating: a job queued before this module counted can't make it wrap.
@@ -165,6 +217,7 @@ impl Running {
     }
     let span = PerfJobSpan {
       kind: self.queued.kind,
+      op: String::new(),
       name: self.queued.name.to_owned(),
       enqueued_at_ms: self.queued.enqueued_at_ms,
       started_at_ms: self.started_at_ms,
@@ -182,22 +235,29 @@ impl Running {
   }
 }
 
-fn on_timed(timed: Timed) {
-  let started = timed.started_at_ms;
-  let span = PerfJobSpan {
-    kind: match timed.kind {
-      TimedKind::Step => PerfJobKind::CoreStep,
-      TimedKind::GroupLock => PerfJobKind::StoreLock,
-      TimedKind::WriteGroup => PerfJobKind::WriteGroup,
-    },
-    name: timed.name.to_owned(),
-    enqueued_at_ms: started,
-    started_at_ms: started,
-    done_at_ms: started + duration_ms(timed.took),
-    queue_depth: 0,
-    maybe_cpu_ms: None,
+/// Ops this module records itself (queue jobs, queries), not taken again from the trace layer.
+fn is_recorded_here(op: &str) -> bool {
+  op.starts_with("queue.") || op == "db.query"
+}
+
+/// A span of the trace layer as a step the apps know.
+fn job_span_of(span: &ClosedSpan) -> PerfJobSpan {
+  let kind = match span.op {
+    "store.lock_wait" => PerfJobKind::StoreLock,
+    "store.write_group" => PerfJobKind::WriteGroup,
+    _ => PerfJobKind::CoreStep,
   };
-  keep(span);
+  let queued_ms = span.maybe_phases.map_or(0.0, |phases| phases.queued_ms);
+  PerfJobSpan {
+    kind,
+    op: span.op.to_owned(),
+    name: span.description.to_owned(),
+    enqueued_at_ms: span.start_ms,
+    started_at_ms: span.start_ms + queued_ms,
+    done_at_ms: span.end_ms,
+    queue_depth: 0,
+    maybe_cpu_ms: span.maybe_cpu_ms,
+  }
 }
 
 /// A query of the app's answered on the read thread (issue #1634): kept as a step named after its
@@ -215,6 +275,7 @@ pub(crate) fn query_ran(kind: &str, started_at_ms: f64, ran: Duration) {
   let name = format!("query_{}", if is_code_name { kind } else { "unknown" });
   let span = PerfJobSpan {
     kind: PerfJobKind::CoreStep,
+    op: "db.query".to_owned(),
     name: name.clone(),
     enqueued_at_ms: started_at_ms,
     started_at_ms,
@@ -361,6 +422,7 @@ mod tests {
   fn span(enqueued: f64, took: f64) -> PerfJobSpan {
     PerfJobSpan {
       kind: PerfJobKind::ReadQueue,
+      op: String::new(),
       name: "conversations".to_owned(),
       enqueued_at_ms: enqueued,
       started_at_ms: enqueued,

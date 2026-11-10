@@ -13,6 +13,7 @@ use teamcraft_proto::{
   DeviceActivity, ErrorBody, ErrorCode, GATEWAY_PATH, GatewayClientMessage, GatewayEvent,
   GatewayServerMessage, MlsMessageKind, UserPresence,
 };
+use tracing::Instrument as _;
 
 use super::Client;
 use super::groups::MlsProgress;
@@ -530,15 +531,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.maybe_last_heard_ms = Some(self.now_ms());
     match frame {
       GatewayServerMessage::Event { seq, event } => {
-        self.handle_event(event).await?;
-        self.apply_pending_changes().await?;
-        let now = self.now_ms();
-        if let Some(session) = &mut self.sync.maybe_gateway_session {
-          session.last_seq = session.last_seq.max(seq);
-          session.maybe_heard_at_ms = Some(now);
+        // Tracing (docs/tracing.md): each event received and applied, named by its kind.
+        let span = tracing::trace_span!(
+          "gateway.event",
+          kind = event.kind(),
+          error = tracing::field::Empty
+        );
+        let applied = self.apply_event(seq, event).instrument(span.clone()).await;
+        if applied.is_err() {
+          span.record("error", "apply");
         }
-        self.persist_sync()?;
-        self.note_replayed_event().await?;
+        applied?;
       },
       GatewayServerMessage::SessionInvalid => {
         self.sync.maybe_gateway_session = None;
@@ -550,6 +553,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.refresh_stale_expiring_guests().await;
     self.refresh_stale_user_groups().await;
     Ok(())
+  }
+
+  /// One event: applied, the session's sequence number moved on and kept.
+  async fn apply_event(&mut self, seq: u64, event: GatewayEvent) -> Result<(), CoreError> {
+    self.handle_event(event).await?;
+    self.apply_pending_changes().await?;
+    let now = self.now_ms();
+    if let Some(session) = &mut self.sync.maybe_gateway_session {
+      session.last_seq = session.last_seq.max(seq);
+      session.maybe_heard_at_ms = Some(now);
+    }
+    self.persist_sync()?;
+    self.note_replayed_event().await
   }
 
   /// Reads the guest list after a change, but not after each of a sweep's or a bulk action's many

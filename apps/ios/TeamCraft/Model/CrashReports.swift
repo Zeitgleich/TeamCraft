@@ -89,6 +89,12 @@ final class CrashReports {
     isAllowedByUser || !config.allowsOptOut
   }
 
+  /// The OS version as the reports carry it (`17.4.1`).
+  nonisolated static func osVersion() -> String {
+    let version = ProcessInfo.processInfo.operatingSystemVersion
+    return "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
+  }
+
   /// 128 random bits as 32 hex digits; never derived from the account, device or instance.
   nonisolated static func newInstallationID() -> String {
     var generator = SystemRandomNumberGenerator()
@@ -112,6 +118,15 @@ final class CrashReports {
     // The core's slow jobs as sampled warnings, and the app's own measures (issue #1521).
     setSlowJobThresholdMs(thresholdMs: settings.config.slowJobMs)
     setPerfListener(listener: SlowJobReports())
+    // The core's spans (docs/tracing.md): slow, failed and sampled traces as transactions.
+    traceStart(
+      traceRate: settings.config.traceRate,
+      slowJobMs: settings.config.slowJobMs,
+      environment: settings.config.environment,
+      appVersion: String(settings.release.dropFirst("teamcraft@".count)),
+      installationId: settings.installationID,
+      osVersion: Self.osVersion()
+    )
     Perf.setRunning(true)
     // The scope's user too, so every report path carries the installation ID and nothing else.
     SentrySDK.setUser(User(userId: settings.installationID))
@@ -122,6 +137,7 @@ final class CrashReports {
   private func stop() {
     guard maybeRunning != nil else { return }
     setSlowJobThresholdMs(thresholdMs: 0)
+    traceStop()
     Perf.setRunning(false)
     SentrySDK.close()
     maybeRunning = nil

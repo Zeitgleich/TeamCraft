@@ -53,6 +53,7 @@ use teamcraft_proto::{
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::LocalSet;
+use tracing::Instrument as _;
 
 use super::media::{KeptKey, MediaSlot};
 use crate::auth::{AuthError, AuthService, TokenPeek, TokenStore, token_fingerprint};
@@ -817,12 +818,15 @@ impl CoreRuntime {
   where
     B: FnOnce(oneshot::Sender<T>) -> Request,
   {
-    // Performance data (#1521): the page's request from queued until answered, named by the method
-    // that asked (`messages`), as a step of the page's measure (`perf_core_steps`).
-    let _step = teamcraft_core::timing::step(teamcraft_core::timing::code_name(std::any::type_name::<B>()));
+    // Tracing (docs/tracing.md): the page's request from queued until answered, named by the method
+    // that asked (`messages`), as a span the page's measures take as a step (`perf_spans`).
+    let span = tracing::trace_span!(
+      "queue.shell",
+      name = teamcraft_core::timing::code_name(std::any::type_name::<B>())
+    );
     let (reply, answer) = oneshot::channel();
     self.requests.send(build(reply)).ok()?;
-    answer.await.ok()
+    answer.instrument(span).await.ok()
   }
 }
 

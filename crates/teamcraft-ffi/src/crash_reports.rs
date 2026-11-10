@@ -2,8 +2,23 @@
 //! instance's setting from `GET /api/v1/server-info`, checked the way the web and desktop apps
 //! check it, for the platform SDKs. Scrubbing and sending stay in the SDKs' `beforeSend`.
 
-use teamcraft_client_api::crash_reporting::{CrashReportingConfig, PerfOperation};
+use std::sync::{Mutex, PoisonError};
+
+use teamcraft_client_api::crash_reporting::trace::{self, TraceSettings};
+use teamcraft_client_api::crash_reporting::{
+  AppInfo, AppPlatform, CrashReportingConfig, Environment, InstallationId, PerfOperation, SampleRate,
+  Transaction,
+};
 use teamcraft_proto::ServerInfoResponse;
+
+/// Where kept traces go while the crash SDK runs: the app and the installation, as its reports say.
+static TRACE_TARGET: Mutex<Option<TraceTarget>> = Mutex::new(None);
+
+struct TraceTarget {
+  app: AppInfo,
+  environment: Environment,
+  installation: InstallationId,
+}
 
 /// What the platform crash SDK is started with while the instance has crash reports on.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
@@ -149,4 +164,92 @@ mod tests {
     })
     .to_string()
   }
+}
+
+/// Starts the core's tracing (docs/tracing.md) with the settings the crash SDK was started with
+/// ([`CrashReportsConfig`]): spans are collected, and slow, failed or sampled ones are kept for
+/// [`take_trace_envelopes`]. `app_version` without the `teamcraft@` prefix. An environment or
+/// installation ID that doesn't check leaves tracing off.
+#[uniffi::export]
+pub fn trace_start(
+  trace_rate: f64,
+  slow_job_ms: u64,
+  environment: String,
+  app_version: String,
+  installation_id: String,
+  os_version: String,
+) {
+  let (Ok(environment), Ok(installation)) = (
+    Environment::new(&environment),
+    InstallationId::try_from(installation_id),
+  ) else {
+    trace_stop();
+    return;
+  };
+  *TRACE_TARGET.lock().unwrap_or_else(PoisonError::into_inner) = Some(TraceTarget {
+    app: AppInfo {
+      version: app_version,
+      platform: platform(),
+      os_name: os_name().to_owned(),
+      maybe_os_version: Some(os_version),
+    },
+    environment,
+    installation,
+  });
+  let trace_rate = SampleRate::new(trace_rate).unwrap_or(SampleRate::NONE);
+  trace::configure(TraceSettings {
+    is_on: trace_rate.get() > 0.0,
+    trace_rate,
+    slow_ms: u32::try_from(slow_job_ms).unwrap_or(u32::MAX),
+  });
+}
+
+/// Stops tracing (reports turned off, the user opted out): nothing is collected or kept.
+#[uniffi::export]
+pub fn trace_stop() {
+  trace::configure(TraceSettings {
+    is_on: false,
+    trace_rate: SampleRate::NONE,
+    slow_ms: 0,
+  });
+  let _ = trace::take_kept();
+  *TRACE_TARGET.lock().unwrap_or_else(PoisonError::into_inner) = None;
+}
+
+/// The traces kept since the last call, each a finished Sentry envelope (one transaction) for the
+/// crash SDK to send as it is: built and scrubbed here like every platform's (docs/tracing.md).
+#[uniffi::export]
+pub fn take_trace_envelopes() -> Vec<Vec<u8>> {
+  let trees = trace::take_kept();
+  let target = TRACE_TARGET.lock().unwrap_or_else(PoisonError::into_inner);
+  let Some(target) = target.as_ref() else {
+    return Vec::new();
+  };
+  trees
+    .iter()
+    .map(|tree| {
+      Transaction::from_trace(tree, random_bytes())
+        .to_envelope(&target.app, &target.environment, target.installation)
+        .into_bytes()
+    })
+    .collect()
+}
+
+fn random_bytes() -> [u8; 16] {
+  use rand_core::{OsRng, RngCore as _};
+  let mut bytes = [0; 16];
+  OsRng.fill_bytes(&mut bytes);
+  bytes
+}
+
+fn platform() -> AppPlatform {
+  if cfg!(target_os = "ios") {
+    AppPlatform::Ios
+  } else {
+    AppPlatform::Android
+  }
+}
+
+fn os_name() -> &'static str {
+  if cfg!(target_os = "ios") { "iOS" } else { "Android" }
 }

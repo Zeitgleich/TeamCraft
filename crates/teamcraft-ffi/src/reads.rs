@@ -277,15 +277,19 @@ impl ReadQueue {
   {
     let (reply, answer) = oneshot::channel();
     let queued = Instant::now();
-    let timing = perf_jobs::queued(PerfJobKind::ReadQueue, std::any::type_name::<F>());
+    let timing = match lane {
+      Lane::Query => perf_jobs::queued_for_query(std::any::type_name::<F>()),
+      Lane::Main => perf_jobs::queued(PerfJobKind::ReadQueue, std::any::type_name::<F>()),
+    };
     let boxed: ReadJob = Box::new(move |reads| {
       if when_gone == WhenCallerGone::Skip && reply.is_closed() {
         timing.skip();
         return;
       }
+      let span = timing.span();
       let running = timing.start();
       let clock = JobClock::start();
-      let result = reads.together(job);
+      let result = span.in_scope(|| reads.together(job));
       logging::slow_read(std::any::type_name::<F>(), clock.started() - queued, clock.ran());
       running.done();
       // The caller may have given up waiting meanwhile (cancelled coroutine); nothing to tell it.
@@ -320,9 +324,10 @@ impl ReadQueue {
         timing.skip();
         return;
       }
+      let span = timing.span();
       let running = timing.start();
       let clock = JobClock::start();
-      let result = reads.together(job);
+      let result = span.in_scope(|| reads.together(job));
       logging::slow_read(std::any::type_name::<F>(), clock.started() - queued, clock.ran());
       running.done();
       for caller in callers {

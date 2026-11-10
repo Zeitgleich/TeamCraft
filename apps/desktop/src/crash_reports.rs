@@ -8,9 +8,9 @@ use std::backtrace::Backtrace;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use teamcraft_client_api::crash_reporting::{CoreStep, MAX_PENDING_PANICS, PanicParts, PendingPanic};
+use teamcraft_client_api::crash_reporting::trace::{self, TraceSettings, WireSpan, WireTraceTree};
+use teamcraft_client_api::crash_reporting::{MAX_PENDING_PANICS, PanicParts, PendingPanic, SampleRate};
 use teamcraft_client_api::debug_log;
-use teamcraft_core::timing::{self, TimedKind};
 
 const PENDING_FILE: &str = "crash-reports-pending.json";
 
@@ -24,12 +24,20 @@ pub fn install_hook() {
       let pending = PendingPanic {
         parts: PanicParts::from_hook(info, Backtrace::force_capture().to_string()),
         timestamp_ms: now_ms(),
-        breadcrumbs: debug_log::recent_lines(),
+        breadcrumbs: breadcrumbs(),
       };
       append(path, pending);
     }
     previous(info);
   }));
+}
+
+/// The redacted debug log, then the shell's last spans and the ones still open: where it hung.
+fn breadcrumbs() -> Vec<String> {
+  let mut lines = debug_log::recent_lines();
+  // Precision: Unix milliseconds fit an f64 exactly.
+  lines.extend(trace::breadcrumb_lines(now_ms() as f64));
+  lines
 }
 
 /// The data directory, from the app's setup.
@@ -38,27 +46,33 @@ pub fn set_data_dir(dir: &Path) {
   let _ = PENDING_PATH.set(dir.join(PENDING_FILE));
 }
 
-/// The page takes the shell's pending panics to report them; the file is gone afterwards.
-/// The core's timed steps between two Unix milliseconds (#1521): the page attaches them to the
-/// measure it finishes, so a slow switch on desktop shows what the shell's core did meanwhile.
+/// The shell's closed spans between two Unix milliseconds (docs/tracing.md): the page attaches
+/// them to the measure it finishes, so a slow switch on desktop shows what the shell's core did.
 #[tauri::command(rename_all = "snake_case")]
-pub fn perf_core_steps(start_ms: f64, end_ms: f64) -> Vec<CoreStep> {
-  timing::recent(start_ms, end_ms)
-    .into_iter()
-    .map(|timed| CoreStep {
-      op: match timed.kind {
-        TimedKind::Step => "core.step",
-        TimedKind::GroupLock => "store.lock_wait",
-        TimedKind::WriteGroup => "store.write_group",
-      }
-      .to_owned(),
-      name: timed.name.to_owned(),
-      started_at_ms: timed.started_at_ms,
-      took_ms: timed.took.as_secs_f64() * 1_000.0,
-    })
+pub fn perf_spans(start_ms: f64, end_ms: f64) -> Vec<WireSpan> {
+  trace::recent(start_ms, end_ms)
+    .iter()
+    .map(WireSpan::from)
     .collect()
 }
 
+/// The shell's kept trees (slow, failed or sampled roots) since the last call: only the page sends.
+#[tauri::command(rename_all = "snake_case")]
+pub fn perf_traces() -> Vec<WireTraceTree> {
+  trace::take_kept().iter().map(WireTraceTree::from).collect()
+}
+
+/// The page's crash report settings, which the shell doesn't know: its trace layer follows them.
+#[tauri::command(rename_all = "snake_case")]
+pub fn perf_configure(is_on: bool, trace_rate: f64, slow_ms: u32) {
+  trace::configure(TraceSettings {
+    is_on,
+    trace_rate: SampleRate::new(trace_rate).unwrap_or(SampleRate::NONE),
+    slow_ms,
+  });
+}
+
+/// The page takes the shell's pending panics to report them; the file is gone afterwards.
 #[tauri::command(rename_all = "snake_case")]
 pub fn crash_reports_take_native() -> Vec<PendingPanic> {
   let Some(path) = PENDING_PATH.get() else {

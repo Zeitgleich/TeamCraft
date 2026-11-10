@@ -60,7 +60,7 @@ use super::{
   MessageSlot, StoreError, StoredMessage, Table, WriteTally,
 };
 use crate::push_preview::ShownMessage;
-use crate::timing::{Mark, TimedKind};
+use crate::timing::Mark;
 
 const ENTRY_NAMESPACE: &str = "entry";
 const MESSAGE_NAMESPACE: &str = "message";
@@ -970,7 +970,7 @@ impl<B: RecordBackend> SealedStore<B> {
       return state;
     }
     state.awaiting += 1;
-    let maybe_waiting = Mark::now();
+    let maybe_waiting = Mark::lock_wait();
     let mut state = self
       .group_ended
       .wait_while(state, |state| {
@@ -978,7 +978,7 @@ impl<B: RecordBackend> SealedStore<B> {
       })
       .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(waiting) = maybe_waiting {
-      waiting.note(TimedKind::GroupLock);
+      waiting.note();
     }
     state.awaiting -= 1;
     // A group that waits for the awaiting to have their turn may begin.
@@ -2048,7 +2048,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       // counts, and nobody else commits from here on.
       self.follow_disk(&mut state);
       state.maybe_group_owner = Some(thread::current().id());
-      state.maybe_group_started = Mark::now();
+      state.maybe_group_started = Mark::write_group();
       if matches!(state.maybe_journal, Some((_, JournalRole::Publishes))) {
         if let Some(stamp) = self.backend.commit_stamp() {
           state.last_commit = stamp.sequence;
@@ -2104,7 +2104,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     if state.depth == 0
       && let Some(started) = state.maybe_group_started.take()
     {
-      started.note(TimedKind::WriteGroup);
+      started.note();
     }
     if state.depth == 0 {
       // What moved here is a rollback or another process: this one's commits don't count.

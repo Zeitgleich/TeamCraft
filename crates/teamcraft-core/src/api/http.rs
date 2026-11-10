@@ -76,6 +76,7 @@ use teamcraft_proto::{ListThreadsQuery, ListThreadsResponse, MessageId, SyncHead
 use teamcraft_proto::{NotificationSettings, TestPushResponse};
 use teamcraft_proto::{PushHealthResponse, UpdateDeviceRequest};
 use teamcraft_proto::{SetPresenceRequest, SetReadPositionRequest, UpdateConversationMemberRequest};
+use tracing::Instrument as _;
 
 use super::dpop::{
   DPOP_HEADER, DPOP_NONCE_HEADER, DpopAnswer, DpopProver, Learned, is_from_a_cache, signed_headers,
@@ -2629,8 +2630,92 @@ async fn send_noting(
   request: RequestBuilder,
   note: impl FnOnce(&reqwest::header::HeaderMap),
 ) -> Result<Response, ApiError> {
+  send_traced(request, note, None).await
+}
+
+/// How a request that got no answer in time is described (and told from other network failures).
+const NO_ANSWER: &str = "no answer within";
+
+/// Every HTTP request of the core goes through here (docs/tracing.md): one `http.client` span with
+/// the method, the route template (no IDs, no query), the status and the time until the answer's
+/// headers; an API request carries the span to the server as `sentry-trace`. `maybe_timeout` caps
+/// the wait for the headers (native only: the browser has its own).
+async fn send_traced(
+  request: RequestBuilder,
+  note: impl FnOnce(&reqwest::header::HeaderMap),
+  maybe_timeout: Option<std::time::Duration>,
+) -> Result<Response, ApiError> {
   let (client, request) = request.build_split();
-  let request = request.map_err(network_error)?;
+  let mut request = request.map_err(network_error)?;
+  let span = tracing::trace_span!(
+    "http.client",
+    method = request.method().as_str(),
+    route = tracing::field::Empty,
+    status = tracing::field::Empty,
+    error = tracing::field::Empty,
+  );
+  if !span.is_disabled() {
+    span.record(
+      "route",
+      teamcraft_proto::route_template(request.url().path()).as_str(),
+    );
+  }
+  let outcome = async {
+    if request.headers().contains_key(reqwest::header::AUTHORIZATION)
+      && let Some(header) = teamcraft_proto::current_trace_header()
+      && let Ok(value) = reqwest::header::HeaderValue::from_str(&header)
+    {
+      request
+        .headers_mut()
+        .insert(teamcraft_proto::SENTRY_TRACE_HEADER, value);
+    }
+    let sending = send_built(client, request, note);
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(limit) = maybe_timeout {
+      return match tokio::time::timeout(limit, sending).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(ApiError::Network(format!("{NO_ANSWER} {} s", limit.as_secs()))),
+      };
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = maybe_timeout;
+    sending.await
+  }
+  .instrument(span.clone())
+  .await;
+  note_outcome(&span, &outcome);
+  outcome
+}
+
+/// The status or the class of failure, on the request's span.
+fn note_outcome(span: &tracing::Span, outcome: &Result<Response, ApiError>) {
+  match outcome {
+    Ok(response) => {
+      span.record("status", response.status().as_u16());
+    },
+    Err(ApiError::Status { status, .. }) => {
+      span.record("status", *status);
+    },
+    Err(ApiError::Intercepted { .. }) => {
+      span.record("error", "intercepted");
+    },
+    Err(ApiError::Network(text)) if text.starts_with(NO_ANSWER) => {
+      span.record("error", "timeout");
+    },
+    Err(ApiError::Network(_)) => {
+      span.record("error", "network");
+    },
+    Err(_) => {
+      span.record("error", "request");
+    },
+  }
+}
+
+async fn send_built(
+  client: reqwest::Client,
+  request: reqwest::Request,
+  note: impl FnOnce(&reqwest::header::HeaderMap),
+) -> Result<Response, ApiError> {
   let origin = request.url().origin();
   let response = client.execute(request).await.map_err(network_error)?;
   let status = response.status();
@@ -2767,11 +2852,10 @@ async fn send_api_noting(
   note: impl FnOnce(&reqwest::header::HeaderMap),
 ) -> Result<Response, ApiError> {
   #[cfg(not(target_arch = "wasm32"))]
-  return tokio::time::timeout(API_ANSWER_TIMEOUT, send_noting(request, note))
-    .await
-    .map_err(|_| ApiError::Network(format!("no answer within {} s", API_ANSWER_TIMEOUT.as_secs())))?;
+  let maybe_timeout = Some(API_ANSWER_TIMEOUT);
   #[cfg(target_arch = "wasm32")]
-  send_noting(request, note).await
+  let maybe_timeout = None;
+  send_traced(request, note, maybe_timeout).await
 }
 
 /// The JSON of an API answer, read by [`read_api_body`].
@@ -2783,6 +2867,20 @@ async fn decode_api<R: DeserializeOwned>(response: Response) -> Result<R, ApiErr
 /// An API answer's body; natively it fails once it stops moving for [`API_READ_IDLE_TIMEOUT`],
 /// however long it takes in total.
 async fn read_api_body(response: Response) -> Result<Vec<u8>, ApiError> {
+  let span = tracing::trace_span!(
+    "http.body",
+    body_bytes = tracing::field::Empty,
+    error = tracing::field::Empty
+  );
+  let outcome = read_api_body_untraced(response).instrument(span.clone()).await;
+  match &outcome {
+    Ok(body) => span.record("body_bytes", body.len()),
+    Err(_) => span.record("error", "network"),
+  };
+  outcome
+}
+
+async fn read_api_body_untraced(response: Response) -> Result<Vec<u8>, ApiError> {
   #[cfg(not(target_arch = "wasm32"))]
   {
     let mut response = response;

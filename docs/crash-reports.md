@@ -237,7 +237,10 @@ not reported. At most five per page life; the service worker reports none.
 
 ## Performance data
 
-Issue #1521. How long the operations people wait for take on their devices, as Sentry
+Issue #1521. Since #1640 the steps of every measure, and transactions of their own for slow or
+failed work, come from one `tracing` layer: see [tracing.md](tracing.md).
+
+How long the operations people wait for take on their devices, as Sentry
 `transaction` items to the same backend as crash reports (GlitchTip → Performance), so the
 budgets in robustness.md ("Performance and resources") are checked against real use, per platform
 and release. Where to read them: [performance.md](performance.md), "Numbers from real use".
@@ -283,7 +286,8 @@ the job waited (a lock, or the process frozen in the background, which counts on
 about `run_ms`, it worked. The app's queries all run as the job `query`; each is also kept as a step
 named after its kind (`query_feed_extras`), and reported as `Slow core job: query_<kind>` when slow.
 
-**Named steps inside the core (all platforms).** `teamcraft_core::timing::step("name")` times the
+**Named steps inside the core (all platforms).** `teamcraft_core::timing::step("name")` (a span of
+the trace layer, [tracing.md](tracing.md)) times the
 rest of a function; about seventy places carry one, among them: store open and catalog build
 (`store_open`, `catalog_build`), client open and MLS state (`client_open`, `mls_storage_load`,
 `mls_group_load`, `mls_storage_save`), the chat list and snapshot (`chat_list_build`,

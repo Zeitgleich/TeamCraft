@@ -25,6 +25,9 @@ fn main() {
     .with(fmt_layer)
     // The recent log for "Report a problem" (docs/bug-reports.md), redacted, in memory only.
     .with(teamcraft_client_api::debug_log::layer())
+    // Spans of the core and the page for performance data and crash breadcrumbs (docs/tracing.md);
+    // off until the crash report settings turn it on.
+    .with(teamcraft_client_api::crash_reporting::trace::layer())
     .init();
   teamcraft_ui::mount();
 }

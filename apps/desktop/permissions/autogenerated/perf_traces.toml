@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-perf-traces"
+description = "Enables the perf_traces command without any pre-configured scope."
+commands.allow = ["perf_traces"]
+
+[[permission]]
+identifier = "deny-perf-traces"
+description = "Denies the perf_traces command without any pre-configured scope."
+commands.deny = ["perf_traces"]

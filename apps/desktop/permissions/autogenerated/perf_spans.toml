@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-perf-spans"
+description = "Enables the perf_spans command without any pre-configured scope."
+commands.allow = ["perf_spans"]
+
+[[permission]]
+identifier = "deny-perf-spans"
+description = "Denies the perf_spans command without any pre-configured scope."
+commands.deny = ["perf_spans"]
