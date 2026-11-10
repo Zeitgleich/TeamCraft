@@ -87,6 +87,8 @@ class CallController(
   /** The call somebody else was in with this device: only then does being alone end it. */
   @Volatile private var hadOthersIn: String? = null
   @Volatile private var maybeAloneEnd: Job? = null
+  /** "Try again" is rejoining; the old session's ended state is awaited here and not shown (#1624). */
+  @Volatile private var maybeRetryEnded: CompletableDeferred<Unit>? = null
 
   /** "Add people" and following a move of the call into a meeting room. */
   val moves = CallMoves(
@@ -333,6 +335,52 @@ class CallController(
       session != null -> session.leave()
       joining.value -> abandonJoin()
       else -> decline()
+    }
+  }
+
+  /**
+   * "Try again" after the call's encryption refused this device (#1555, #1624): leaves the engine's
+   * call and joins the same conversation again inside the same Telecom call, with the microphone
+   * and camera as they were, so the entry path (incoming, notification, app, car) doesn't matter.
+   * A failed join ends the call as failed, like a failed move into a meeting room.
+   */
+  fun retryEncryption() {
+    val current = state.value
+    val session = maybeSession
+    if (session == null || current?.maybeEncryptionRetryAfterSecs == null) return
+    // Claimed before the coroutine runs: a second tap is ignored.
+    if (!joining.compareAndSet(expect = false, update = true)) return
+    val conversationId = current.conversationId
+    scope.launch {
+      options = CallOptions(isCameraOn = wantsCamera.value, isMuted = current.isMuted)
+      val ended = CompletableDeferred<Unit>()
+      maybeRetryEnded = ended
+      maybeSession = null
+      session.leave()
+      // The old session's ended state would end the new call (same conversation) if it came late.
+      withTimeoutOrNull(RETRY_LEAVE_WAIT_MS) { ended.await() }
+      session.close()
+      tracks.value = emptyList()
+      frames.value = emptyMap()
+      state.value = current.copy(
+        phase = CallPhase.CONNECTING,
+        isSecured = false,
+        participantCount = 0u,
+        participantUserIds = emptyList(),
+        peers = emptyList(),
+        speakingUserIds = emptyList(),
+        mutedUserIds = emptyList(),
+        reconnectingCount = 0u,
+        reconnectingUserIds = emptyList(),
+        maybePrivacyCode = null,
+        maybeEncryptionRetryAfterSecs = null,
+      )
+      val isJoined = join(conversationId, isClaimed = true)
+      maybeRetryEnded = null
+      if (!isJoined) {
+        state.update { it?.copy(phase = CallPhase.ENDED, maybeEndReason = CallEndReason.FAILED) }
+        endCall(maybeTelecomCall)
+      }
     }
   }
 
@@ -673,6 +721,12 @@ class CallController(
     override fun onCallState(state: CallStateInfo) {
       // The DM's call this device left for a meeting room ends after the room's call began.
       if (state.conversationId == maybeLeftConversation) return
+      // "Try again": the old session's end is not the new call's.
+      val maybeRetry = maybeRetryEnded
+      if (state.phase == CallPhase.ENDED && maybeRetry != null && !maybeRetry.isCompleted) {
+        maybeRetry.complete(Unit)
+        return
+      }
       this@CallController.state.value = state
       followOthers(state)
       // The engine is the source of truth: once its call ended, the session, the service and its
@@ -731,6 +785,8 @@ class CallController(
     const val URI_SCHEME = "teamcraft"
     /** How long a join waits for the user to answer the microphone permission request. */
     private const val MICROPHONE_WAIT_MS = 60_000L
+    /** How long "Try again" waits for the engine to report the old session's end. */
+    private const val RETRY_LEAVE_WAIT_MS = 5_000L
   }
 }
 
