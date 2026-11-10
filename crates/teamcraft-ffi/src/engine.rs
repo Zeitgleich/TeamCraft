@@ -92,6 +92,9 @@ const READ_LANE_LIMITS: SealedStoreLimits = SealedStoreLimits {
 /// the sync loop); Rust's 2 MiB default overflowed on a phone in a debug build (#1504). Only
 /// address space is reserved; pages are used as the stack grows.
 pub(crate) const THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+/// How long stopping the engine waits for the purge of the local database's log (#1684): a few
+/// syncs of a phone's flash when no read holds the log.
+const PURGE_BEFORE_SUSPEND: Duration = Duration::from_secs(1);
 /// The longest a wake-up is worked on before its notification is shown with what is known by then.
 /// FCM gives a high-priority message about 10 s; the app hands over to expedited work at 8 s.
 const PUSH_PREVIEW_BUDGET: Duration = Duration::from_secs(7);
@@ -1261,6 +1264,11 @@ impl Engine {
     // The app goes to the background: clear what the debounce kept in the write-ahead log (#417).
     if let Err(error) = self.store.purge_freed() {
       tracing::warn!(%error, "could not clear the local database log");
+    }
+    // The purge runs on a thread of its own (#1684): give it the moment before the OS may suspend
+    // the app. One that a read holds up finishes after the resume, or when the store opens again.
+    if !self.store.wait_for_purge(PURGE_BEFORE_SUSPEND) {
+      tracing::debug!("the local database log is purged after the app resumes");
     }
     Ok(())
   }

@@ -13,12 +13,13 @@ use rand_core::{OsRng, RngCore};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use teamcraft_crypto::local_store::{LOOKUP_ID_LEN, LookupId};
 
+use super::log_purger::{LogPurge, LogPurgeLimits, LogPurger, Ticket};
 use super::sealed::{RecordBackend, SealedStore, SealedStoreLimits};
 use super::sql_group::{
   Migration, MigrationKind, WriteGroup, check_layout_left_to_app, run_migrations,
   sqlite_error as database_error,
 };
-use super::sqlite_log::{LOG_PRAGMAS, PurgeState};
+use super::sqlite_log::LOG_PRAGMAS;
 use super::sqlite_wipe::wipe_free_pages;
 use super::{CommitJournal, CommitStamp, DatabaseKeySource, StoreError, WriteTally};
 
@@ -76,16 +77,36 @@ const SCHEMA_V1: &str = "
 /// The encrypted store on SQLite.
 pub type SealedSqliteStore = SealedStore<SqliteRecords>;
 
+/// How a connection takes part in the purge of the write-ahead log.
+enum Purging<'a> {
+  /// A database in memory: no log.
+  None,
+  /// The writing connection: runs the purge for the database at the path.
+  Runs(&'a Path),
+  /// A connection that only reads: reports its transactions to the writer's purge.
+  Reports(&'a Path),
+}
+
 /// The SQLite table holding the sealed records.
 pub struct SqliteRecords {
   inner: Mutex<Inner>,
+  /// The purge of the write-ahead log this connection reports its transactions to; `None` for a
+  /// database in memory, which has no log.
+  maybe_purge: Option<Arc<LogPurge>>,
+  /// The writing connection's purge thread (issue #1684); `None` for a connection that only reads.
+  maybe_purger: Option<LogPurger>,
 }
 
 /// The connection and its open group of writes, under one lock.
 struct Inner {
   connection: Connection,
   group: WriteGroup,
-  purge: PurgeState,
+  /// The transaction open on the connection, as [`SqliteRecords::maybe_purge`] counts it.
+  maybe_ticket: Option<Ticket>,
+  /// The last commit this connection knows of: seen at the last look at the tally, or its own.
+  maybe_known_stamp: Option<CommitStamp>,
+  /// The number the open group's commit takes ([`RecordBackend::stage_commit`]).
+  maybe_staged_stamp: Option<CommitStamp>,
   /// A read transaction is open ([`RecordBackend::begin_read`]).
   is_reading: bool,
   /// This connection's mark on the commits it numbers ([`CommitStamp::writer`]).
@@ -110,6 +131,7 @@ impl SealedStore<SqliteRecords> {
       Connection::open(path).map_err(database_error)?,
       key_source,
       limits,
+      Purging::Runs(path),
     )
   }
 
@@ -132,7 +154,7 @@ impl SealedStore<SqliteRecords> {
     )
     .map_err(database_error)?;
     Self::set_up_connection(&connection)?;
-    let backend = Self::records_on(connection)?;
+    let backend = Self::records_on(connection, Purging::Runs(path))?;
     SealedStore::open_backend_without_building(backend, &key_source.database_key()?, limits)
   }
 
@@ -168,7 +190,7 @@ impl SealedStore<SqliteRecords> {
     connection
       .execute_batch("PRAGMA query_only = ON;")
       .map_err(database_error)?;
-    let backend = Self::records_on(connection)?;
+    let backend = Self::records_on(connection, Purging::Reports(path))?;
     let store = SealedStore::open_backend_without_building(backend, &key_source.database_key()?, limits)?;
     store.follow_commits(journal);
     Ok(store)
@@ -180,6 +202,7 @@ impl SealedStore<SqliteRecords> {
       Connection::open_in_memory().map_err(database_error)?,
       key_source,
       SealedStoreLimits::default(),
+      Purging::None,
     )
   }
 
@@ -187,18 +210,26 @@ impl SealedStore<SqliteRecords> {
     connection: Connection,
     key_source: &impl DatabaseKeySource,
     limits: SealedStoreLimits,
+    purging: Purging<'_>,
   ) -> Result<Self, StoreError> {
-    let backend = Self::backend_of(connection)?;
+    let backend = Self::backend_of(connection, purging)?;
     SealedStore::open_backend(backend, &key_source.database_key()?, limits)
   }
 
-  fn backend_of(connection: Connection) -> Result<SqliteRecords, StoreError> {
+  fn backend_of(connection: Connection, purging: Purging<'_>) -> Result<SqliteRecords, StoreError> {
     Self::set_up_connection(&connection)?;
     run_migrations(&connection, MIGRATIONS)?;
     connection
       .execute_batch(COMMIT_STAMP_TABLE)
       .map_err(database_error)?;
-    Self::records_on(connection)
+    Self::records_on(connection, purging)
+  }
+
+  /// Changes when the write-ahead log is purged (docs/e2ee.md §4.3.1); on the writing connection.
+  pub fn set_log_purge_limits(&self, limits: LogPurgeLimits) {
+    if let Some(purge) = &self.backend().maybe_purge {
+      purge.set_limits(limits);
+    }
   }
 
   fn set_up_connection(connection: &Connection) -> Result<(), StoreError> {
@@ -214,19 +245,41 @@ impl SealedStore<SqliteRecords> {
     connection.busy_timeout(BUSY_TIMEOUT).map_err(database_error)
   }
 
-  fn records_on(connection: Connection) -> Result<SqliteRecords, StoreError> {
+  fn records_on(connection: Connection, purging: Purging<'_>) -> Result<SqliteRecords, StoreError> {
     // Before anything is read: a commit of another connection after it counts (the caches drop
     // what they hold).
+    // Read before the data version: a commit in between then counts once more, never not at all.
+    let maybe_known_stamp = stamp_of(&connection);
     let mut group = WriteGroup::default();
     group.watch_other_connections(&connection)?;
+    let (maybe_purge, maybe_purger) = match purging {
+      Purging::None => (None, None),
+      Purging::Runs(path) => {
+        LogPurger::take_over_checkpoints(&connection)?;
+        let purger = LogPurger::start(path)?;
+        (Some(Arc::clone(purger.purge())), Some(purger))
+      },
+      Purging::Reports(path) => {
+        let maybe_purge = LogPurge::of_database(path);
+        if maybe_purge.is_none() {
+          // Its reads then keep the log without the purge knowing; the purge still retries.
+          tracing::warn!("a reading connection opened without the writer's log purge");
+        }
+        (maybe_purge, None)
+      },
+    };
     Ok(SqliteRecords {
       inner: Mutex::new(Inner {
         connection,
         group,
-        purge: PurgeState::new(BUSY_TIMEOUT),
+        maybe_ticket: None,
+        maybe_known_stamp,
+        maybe_staged_stamp: None,
         is_reading: false,
         writer: OsRng.next_u64(),
       }),
+      maybe_purge,
+      maybe_purger,
     })
   }
 }
@@ -304,6 +357,7 @@ impl RecordBackend for SqliteRecords {
     }
     inner.connection.execute_batch("BEGIN").map_err(database_error)?;
     inner.is_reading = true;
+    self.note_transaction(&mut inner);
     Ok(())
   }
 
@@ -313,6 +367,13 @@ impl RecordBackend for SqliteRecords {
       // Deliberately ignored: nothing was written, and the next statement reports a broken connection.
       let _ = inner.connection.execute_batch("COMMIT");
     }
+    self.note_transaction(&mut inner);
+  }
+
+  fn before_writes(&self) {
+    if let Some(purge) = &self.maybe_purge {
+      purge.wait_before_writes();
+    }
   }
 
   fn begin_writes(&self) -> Result<(), StoreError> {
@@ -320,68 +381,79 @@ impl RecordBackend for SqliteRecords {
     let Inner {
       connection, group, ..
     } = &mut *inner;
-    group.begin(connection)
+    let began = group.begin(connection);
+    self.note_transaction(&mut inner);
+    began
   }
 
   fn end_writes(&self) -> Result<(), StoreError> {
     let mut inner = self.lock();
     let Inner {
-      connection,
-      group,
-      purge,
-      ..
+      connection, group, ..
     } = &mut *inner;
-    group.end(connection)?;
-    // The group is committed whatever happens to the purge: a failed one stays due and must not
-    // make the committed writes look failed.
-    if !group.is_open() {
-      purge.run_if_due(connection);
+    let ended = group.end(connection);
+    if ended.is_ok()
+      && !inner.group.is_open()
+      && let Some(purger) = &self.maybe_purger
+    {
+      purger.after_commit();
     }
-    Ok(())
+    let maybe_staged = inner.maybe_staged_stamp.take();
+    if ended.is_ok() && maybe_staged.is_some() {
+      inner.maybe_known_stamp = maybe_staged;
+    }
+    self.note_transaction(&mut inner);
+    ended
   }
 
-  /// Writes the log back into the database (whose freed pages `secure_delete` zeroes) and
-  /// truncates it, so no old page version stays in the log file. Inside a group of writes it waits
-  /// for the group's commit: a checkpoint before would write half of the group to the database.
+  /// Has the log purged (docs/e2ee.md §4.3.1): its thread writes the log back into the database
+  /// (whose freed pages `secure_delete` zeroes) and truncates it, so no old page version stays in
+  /// the log file, as soon as no transaction of this process keeps the log, and within the
+  /// purge's maximum delay. Inside a group of writes it waits for the group's commit: a
+  /// checkpoint before would write half of the group to the database.
   fn purge_freed(&self) -> Result<(), StoreError> {
-    let mut inner = self.lock();
-    let Inner {
-      connection,
-      group,
-      purge,
-      ..
-    } = &mut *inner;
-    purge.force();
-    if !group.is_open() {
-      purge.run_if_due(connection);
+    if let Some(purge) = &self.maybe_purge {
+      purge.request_now();
     }
     Ok(())
   }
 
   fn purge_freed_soon(&self) {
+    if let Some(purge) = &self.maybe_purge {
+      purge.request_soon();
+    }
+  }
+
+  fn wait_for_purge(&self, max_wait: Duration) -> bool {
+    self
+      .maybe_purge
+      .as_ref()
+      .is_none_or(|purge| purge.wait_until_purged(max_wait))
+  }
+
+  /// A change of SQLite's data version with no new numbered commit is a checkpoint of the log by
+  /// another connection (the purge's, issue #1684), which changes no record: it doesn't count as
+  /// another connection's commit, which would drop the caches and save the whole MLS state.
+  fn write_tally(&self) -> Option<WriteTally> {
     let mut inner = self.lock();
     let Inner {
       connection,
       group,
-      purge,
+      maybe_known_stamp,
       ..
     } = &mut *inner;
-    purge.is_due = true;
-    if !group.is_open() {
-      purge.run_if_due(connection);
-    }
-  }
-
-  fn write_tally(&self) -> Option<WriteTally> {
-    let mut inner = self.lock();
-    let Inner {
-      connection, group, ..
-    } = &mut *inner;
-    Some(group.tally(connection))
+    // The known number moves only here, when the data version moved, and with this connection's
+    // own commits: a commit between the two reads then still counts at the next look.
+    Some(group.tally_checking(connection, || {
+      let maybe_now = stamp_of(connection);
+      let is_commit = maybe_now.is_none() || maybe_now != *maybe_known_stamp;
+      *maybe_known_stamp = maybe_now;
+      is_commit
+    }))
   }
 
   fn stage_commit(&self) -> Option<CommitStamp> {
-    let inner = self.lock();
+    let mut inner = self.lock();
     if !inner.group.will_commit(&inner.connection) {
       return None;
     }
@@ -396,40 +468,40 @@ impl RecordBackend for SqliteRecords {
         |row| row.get(0),
       )
       .ok()?;
-    Some(CommitStamp {
+    let stamp = CommitStamp {
       sequence: u64::try_from(sequence).ok()?,
       writer: inner.writer,
-    })
+    };
+    inner.maybe_staged_stamp = Some(stamp);
+    Some(stamp)
   }
 
   fn commit_stamp(&self) -> Option<CommitStamp> {
-    let inner = self.lock();
-    let (sequence, writer): (i64, i64) = inner
-      .connection
-      .query_row(
-        "SELECT sequence, writer FROM commit_stamp WHERE id = 0",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-      )
-      .ok()?;
-    Some(CommitStamp {
-      sequence: u64::try_from(sequence).ok()?,
-      writer: u64::from_ne_bytes(writer.to_ne_bytes()),
-    })
+    stamp_of(&self.lock().connection)
   }
+}
+
+/// The number of the last commit to the database `connection` sees; `None` without the table.
+fn stamp_of(connection: &Connection) -> Option<CommitStamp> {
+  let (sequence, writer): (i64, i64) = connection
+    .prepare_cached("SELECT sequence, writer FROM commit_stamp WHERE id = 0")
+    .and_then(|mut statement| statement.query_row([], |row| Ok((row.get(0)?, row.get(1)?))))
+    .ok()?;
+  Some(CommitStamp {
+    sequence: u64::try_from(sequence).ok()?,
+    writer: u64::from_ne_bytes(writer.to_ne_bytes()),
+  })
 }
 
 impl Drop for SqliteRecords {
   fn drop(&mut self) {
-    // Closing the app is the last chance to clear what the interval kept back.
-    let mut inner = self.lock();
-    let Inner {
-      connection, purge, ..
-    } = &mut *inner;
-    if purge.is_due {
-      purge.is_forced = true;
-      purge.run_if_due(connection);
+    // Closing the app is the last chance to clear what the interval kept back: the purge thread
+    // tries once more before it stops. A transaction left open counts as ended.
+    let maybe_ticket = self.lock().maybe_ticket.take();
+    if let (Some(purge), Some(ticket)) = (&self.maybe_purge, maybe_ticket) {
+      purge.transaction_ended(ticket);
     }
+    drop(self.maybe_purger.take());
   }
 }
 
@@ -437,6 +509,23 @@ impl SqliteRecords {
   fn lock(&self) -> MutexGuard<'_, Inner> {
     // A poisoned lock only means another thread panicked; SQLite keeps the connection consistent.
     self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+  }
+
+  /// Tells the purge whether the connection has a transaction open now (a read, or a group of
+  /// writes): one that ends may be the moment the log can be truncated.
+  fn note_transaction(&self, inner: &mut Inner) {
+    let Some(purge) = &self.maybe_purge else {
+      return;
+    };
+    let is_open = inner.is_reading || inner.group.is_open();
+    match (is_open, inner.maybe_ticket) {
+      (true, None) => inner.maybe_ticket = Some(purge.transaction_began()),
+      (false, Some(ticket)) => {
+        inner.maybe_ticket = None;
+        purge.transaction_ended(ticket);
+      },
+      _ => {},
+    }
   }
 
   /// Runs a write; a failure inside a group of writes undoes the whole group when it ends.
@@ -471,6 +560,10 @@ mod tests {
   /// Entries and messages of the store the build is killed on: with the catalog's own records
   /// more than two batches.
   const ENTRIES: usize = 8_400;
+  /// Longer than any purge that can run takes in a test.
+  const PURGE_WAIT: Duration = Duration::from_secs(10);
+  /// How long a test looks at a purge that can't run yet.
+  const SHORT_WAIT: Duration = Duration::from_millis(300);
   const MESSAGES: u8 = 60;
 
   /// Issue #1466: a reader waiting for a group of writes is seen by the group's thread, and has its
@@ -613,27 +706,15 @@ mod tests {
   fn a_deleted_record_leaves_no_ciphertext_in_the_files() {
     let directory = scratch_dir();
     let path = directory.join("store.db");
-    let store =
-      SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    let store = open_purged(&path);
     store.put(Table::MlsStorage, "state", &[7; 64 * 1024]).unwrap();
-    let sealed: Vec<u8> = Connection::open(&path)
-      .unwrap()
-      .query_row(
-        "SELECT value FROM sealed_records ORDER BY length(value) DESC LIMIT 1",
-        [],
-        |row| row.get(0),
-      )
-      .unwrap();
-    let needle = &sealed[sealed.len() / 2..sealed.len() / 2 + 32];
+    let needle = largest_record_part(&path);
 
     store.delete(Table::MlsStorage, "state").unwrap();
     store.purge_freed().unwrap();
 
-    let raw = std::fs::read(&path).unwrap();
-    let wal = std::fs::read(path.with_extension("db-wal")).unwrap_or_default();
-    for bytes in [&raw, &wal] {
-      assert!(!bytes.windows(needle.len()).any(|window| window == needle));
-    }
+    assert!(store.wait_for_purge(PURGE_WAIT));
+    assert_files_lack(&path, &needle);
     drop(store);
     std::fs::remove_dir_all(&directory).unwrap();
   }
@@ -644,35 +725,23 @@ mod tests {
   fn a_purge_inside_a_group_waits_for_the_commit() {
     let directory = scratch_dir();
     let path = directory.join("store.db");
-    let store =
-      SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    let store = open_purged(&path);
     store.put(Table::MlsStorage, "state", &[7; 64 * 1024]).unwrap();
-    let sealed: Vec<u8> = Connection::open(&path)
-      .unwrap()
-      .query_row(
-        "SELECT value FROM sealed_records ORDER BY length(value) DESC LIMIT 1",
-        [],
-        |row| row.get(0),
-      )
-      .unwrap();
-    let needle = &sealed[sealed.len() / 2..sealed.len() / 2 + 32];
+    let needle = largest_record_part(&path);
 
     store.begin_writes().unwrap();
     store.put(Table::MlsStorage, "state", &[9; 64 * 1024]).unwrap();
     store.purge_freed().unwrap();
+    assert!(
+      !store.wait_for_purge(SHORT_WAIT),
+      "the open group keeps the purge waiting"
+    );
     store.end_writes().unwrap();
 
-    let raw = std::fs::read(&path).unwrap();
-    let wal = std::fs::read(path.with_extension("db-wal")).unwrap_or_default();
-    for bytes in [&raw, &wal] {
-      assert!(!bytes.windows(needle.len()).any(|window| window == needle));
-    }
+    assert!(store.wait_for_purge(PURGE_WAIT));
+    assert_files_lack(&path, &needle);
     drop(store);
     std::fs::remove_dir_all(&directory).unwrap();
-  }
-
-  fn is_purge_due(store: &SealedSqliteStore) -> bool {
-    store.backend().lock().purge.is_due
   }
 
   /// Issue #417: the MLS storage is saved for every message, so those purges are merged; an
@@ -681,16 +750,16 @@ mod tests {
   fn debounced_purges_are_merged_and_an_explicit_one_clears_what_is_left() {
     let directory = scratch_dir();
     let path = directory.join("store.db");
-    let store =
-      SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
-    store.put(Table::MlsStorage, "state", &[1; 64]).unwrap();
-    store.purge_freed_soon();
-    assert!(!is_purge_due(&store), "the first one runs at once");
+    // Opening purged the log: the next debounced purge waits for the interval.
+    let store = open_purged(&path);
     store.put(Table::MlsStorage, "state", &[2; 64]).unwrap();
     store.purge_freed_soon();
-    assert!(is_purge_due(&store), "the next one within the interval waits");
+    assert!(
+      !store.wait_for_purge(SHORT_WAIT),
+      "a purge within the interval waits"
+    );
     store.purge_freed().unwrap();
-    assert!(!is_purge_due(&store));
+    assert!(store.wait_for_purge(PURGE_WAIT));
     drop(store);
     std::fs::remove_dir_all(&directory).unwrap();
   }
@@ -699,10 +768,161 @@ mod tests {
   fn closing_the_store_clears_the_log_of_a_waiting_purge() {
     let directory = scratch_dir();
     let path = directory.join("store.db");
-    let store =
-      SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    let store = open_purged(&path);
     store.put(Table::MlsStorage, "state", &[7; 64 * 1024]).unwrap();
-    let sealed: Vec<u8> = Connection::open(&path)
+    let needle = largest_record_part(&path);
+    store.put(Table::MlsStorage, "state", &[9; 64 * 1024]).unwrap();
+    store.purge_freed_soon();
+    assert!(!store.wait_for_purge(SHORT_WAIT));
+    drop(store);
+    assert_files_lack(&path, &needle);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// A reader of another process (the iOS notification extension) holds the log: the purge can't
+  /// finish, nothing waits for it, and it finishes once the reader is gone.
+  #[test]
+  fn a_purge_that_another_process_holds_up_finishes_after_it() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let store = open_purged(&path);
+    store.put(Table::MlsStorage, "state", &[1; 64]).unwrap();
+    let reader = pin_log(&path);
+    store.put(Table::MlsStorage, "state", &[2; 64]).unwrap();
+    let started = std::time::Instant::now();
+    store.purge_freed().unwrap();
+    store.put(Table::MlsStorage, "state", &[3; 64]).unwrap();
+    // TEAMCRAFT-F, #1678: the purge's tries held the writer.
+    assert!(
+      started.elapsed() < BUSY_TIMEOUT / 2,
+      "neither the purge nor the next write waits for the reader"
+    );
+    assert!(!store.wait_for_purge(SHORT_WAIT), "the reader keeps the log");
+
+    reader.execute_batch("COMMIT").unwrap();
+    assert!(store.wait_for_purge(PURGE_WAIT), "it is tried again");
+    drop(store);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Issue #1684: the app crashed before the purge finished. The log it left still holds the
+  /// deleted record's page; the next start clears it before it does anything else.
+  #[test]
+  fn a_purge_a_crash_cut_short_runs_when_the_store_opens_again() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = || StaticKeySource::new(SymmetricKey::from_bytes([9; 32]));
+    let store = SealedSqliteStore::open(&path, &key()).unwrap();
+    assert!(store.wait_for_purge(PURGE_WAIT));
+    store.put(Table::MlsStorage, "state", &[7; 64 * 1024]).unwrap();
+    let needle = largest_record_part(&path);
+    let reader = pin_log(&path);
+    store.delete(Table::MlsStorage, "state").unwrap();
+    store.purge_freed().unwrap();
+    // The files as a crash at this moment leaves them.
+    let crashed = scratch_dir();
+    let crashed_path = crashed.join("store.db");
+    std::fs::copy(&path, &crashed_path).unwrap();
+    std::fs::copy(
+      path.with_extension("db-wal"),
+      crashed_path.with_extension("db-wal"),
+    )
+    .unwrap();
+    assert!(
+      files_contain(&crashed_path, &needle),
+      "the reader kept the deleted record in the files"
+    );
+    drop(reader);
+    drop(store);
+
+    let reopened = SealedSqliteStore::open(&crashed_path, &key()).unwrap();
+    assert!(reopened.wait_for_purge(PURGE_WAIT));
+    assert_files_lack(&crashed_path, &needle);
+    drop(reopened);
+    std::fs::remove_dir_all(&directory).unwrap();
+    std::fs::remove_dir_all(&crashed).unwrap();
+  }
+
+  /// Issue #1684: the purge truncates on a connection of its own, which moves the writer's
+  /// data version; that is no other connection's commit, which would drop the caches and make
+  /// the next MLS save write everything.
+  #[test]
+  fn a_purge_does_not_count_as_another_connections_commit() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let store = open_purged(&path);
+    for round in 0..3_u8 {
+      store.put(Table::MlsStorage, "state", &[round; 64]).unwrap();
+      store.purge_freed().unwrap();
+      assert!(store.wait_for_purge(PURGE_WAIT));
+    }
+    assert_eq!(store.write_tally(), Some(WriteTally::default()));
+
+    let other = SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng)));
+    assert!(other.is_err(), "another key doesn't open it");
+    let theirs = Connection::open(&path).unwrap();
+    theirs
+      .execute("UPDATE commit_stamp SET sequence = sequence + 1 WHERE id = 0", [])
+      .unwrap();
+    assert_eq!(
+      store.write_tally().map(|tally| tally.foreign),
+      Some(1),
+      "another process's commit still counts"
+    );
+    drop(store);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Issue #1681: the writer's commit no longer runs SQLite's automatic checkpoint (two syncs under
+  /// its lock); a long log is written back on the purge's connection.
+  #[test]
+  fn a_long_log_is_written_back_off_the_writer() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let store = open_purged(&path);
+    let autocheckpoint: i64 = store
+      .backend()
+      .lock()
+      .connection
+      .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
+      .unwrap();
+    assert_eq!(autocheckpoint, 0);
+    crate::store::write_group(&store, || {
+      for index in 0..80_u8 {
+        store.put(Table::MlsStorage, &format!("entry {index}"), &[index; 64 * 1024])?;
+      }
+      Ok::<_, StoreError>(())
+    })
+    .unwrap();
+    let purge = Arc::clone(store.backend().maybe_purge.as_ref().unwrap());
+    assert!(purge.wait_for_backfill(PURGE_WAIT), "the commit asked for none");
+    drop(store);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// A store at `path` whose purge at opening is done.
+  fn open_purged(path: &Path) -> SealedSqliteStore {
+    let store =
+      SealedSqliteStore::open(path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
+    assert!(store.wait_for_purge(PURGE_WAIT));
+    store
+  }
+
+  /// A connection of "another process" in the middle of a read transaction: it pins the log.
+  fn pin_log(path: &Path) -> Connection {
+    let reader = Connection::open(path).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    reader
+      .query_row("SELECT count(*) FROM sealed_records", [], |row| {
+        row.get::<_, i64>(0)
+      })
+      .unwrap();
+    reader
+  }
+
+  /// 32 bytes from the middle of the largest sealed record.
+  fn largest_record_part(path: &Path) -> Vec<u8> {
+    let sealed: Vec<u8> = Connection::open(path)
       .unwrap()
       .query_row(
         "SELECT value FROM sealed_records ORDER BY length(value) DESC LIMIT 1",
@@ -710,62 +930,22 @@ mod tests {
         |row| row.get(0),
       )
       .unwrap();
-    let needle = sealed[sealed.len() / 2..sealed.len() / 2 + 32].to_vec();
-    store.purge_freed_soon();
-    store.put(Table::MlsStorage, "state", &[9; 64 * 1024]).unwrap();
-    store.purge_freed_soon();
-    assert!(is_purge_due(&store));
-    drop(store);
-    let raw = std::fs::read(&path).unwrap();
-    let wal = std::fs::read(path.with_extension("db-wal")).unwrap_or_default();
-    for bytes in [&raw, &wal] {
-      assert!(!bytes.windows(needle.len()).any(|window| window == needle));
-    }
-    std::fs::remove_dir_all(&directory).unwrap();
+    sealed[sealed.len() / 2..sealed.len() / 2 + 32].to_vec()
   }
 
-  /// A reader that holds the log keeps the checkpoint from finishing; the purge stays due and the
-  /// write that asked for it is not reported as failed.
-  #[test]
-  fn a_checkpoint_that_cannot_finish_stays_due_without_failing_the_write() {
-    let directory = scratch_dir();
-    let path = directory.join("store.db");
-    let store =
-      SealedSqliteStore::open(&path, &StaticKeySource::new(SymmetricKey::generate(&mut OsRng))).unwrap();
-    store.put(Table::MlsStorage, "state", &[1; 64]).unwrap();
-    // A second connection in the middle of a read transaction pins the log.
-    let reader = Connection::open(&path).unwrap();
-    reader.execute_batch("BEGIN").unwrap();
-    reader
-      .query_row("SELECT count(*) FROM sealed_records", [], |row| {
-        row.get::<_, i64>(0)
-      })
-      .unwrap();
-    store.put(Table::MlsStorage, "state", &[2; 64]).unwrap();
-    let started = std::time::Instant::now();
-    store.purge_freed().unwrap();
-    // TEAMCRAFT-F: it waited the busy timeout for the reader, under the writer's locks.
+  fn files_contain(path: &Path, needle: &[u8]) -> bool {
+    let raw = std::fs::read(path).unwrap();
+    let wal = std::fs::read(path.with_extension("db-wal")).unwrap_or_default();
+    [&raw, &wal]
+      .iter()
+      .any(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
+  }
+
+  fn assert_files_lack(path: &Path, needle: &[u8]) {
     assert!(
-      started.elapsed() < BUSY_TIMEOUT / 2,
-      "the checkpoint doesn't wait for the reader"
+      !files_contain(path, needle),
+      "the deleted record is still in the files"
     );
-    assert!(is_purge_due(&store), "an unfinished checkpoint is retried");
-    let busy_timeout_ms: i64 = store
-      .backend()
-      .lock()
-      .connection
-      .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
-      .unwrap();
-    assert_eq!(
-      u128::try_from(busy_timeout_ms).unwrap(),
-      BUSY_TIMEOUT.as_millis(),
-      "other statements still wait"
-    );
-    reader.execute_batch("COMMIT").unwrap();
-    store.purge_freed().unwrap();
-    assert!(!is_purge_due(&store));
-    drop(store);
-    std::fs::remove_dir_all(&directory).unwrap();
   }
 
   /// The sync loop's group of writes on one thread, the app's reads and writes on another: they
@@ -1175,7 +1355,7 @@ mod tests {
   fn a_panic_while_the_catalog_flushes_ends_the_group_and_rolls_it_back() {
     let connection = Connection::open_in_memory().unwrap();
     let backend = PanicsOnPut {
-      records: SealedSqliteStore::backend_of(connection).unwrap(),
+      records: SealedSqliteStore::backend_of(connection, Purging::None).unwrap(),
       is_armed: std::cell::Cell::new(false),
     };
     let key = SymmetricKey::generate(&mut OsRng);
@@ -1221,7 +1401,7 @@ mod tests {
 
     let connection = Connection::open_in_memory().unwrap();
     let backend = PanicsOnPut {
-      records: SealedSqliteStore::backend_of(connection).unwrap(),
+      records: SealedSqliteStore::backend_of(connection, Purging::None).unwrap(),
       is_armed: std::cell::Cell::new(false),
     };
     let key = SymmetricKey::generate(&mut OsRng);
@@ -1361,7 +1541,7 @@ mod tests {
     let source = StaticKeySource::new(key.duplicate());
     let conversation = id(7);
     let other = SealedSqliteStore::open(&path, &source).unwrap();
-    let records = SealedSqliteStore::backend_of(Connection::open(&path).unwrap()).unwrap();
+    let records = SealedSqliteStore::backend_of(Connection::open(&path).unwrap(), Purging::None).unwrap();
     let store = SealedStore::open_backend(
       Waiting {
         records,
@@ -1709,7 +1889,7 @@ mod tests {
     };
     let marker = std::env::var_os(HELPER_MARKER).unwrap();
     let batch: usize = std::env::var(HELPER_BATCH).unwrap().parse().unwrap();
-    let records = SealedSqliteStore::backend_of(Connection::open(path).unwrap()).unwrap();
+    let records = SealedSqliteStore::backend_of(Connection::open(path).unwrap(), Purging::None).unwrap();
     let store = SealedStore::open_backend_to_build(
       Dying {
         records,

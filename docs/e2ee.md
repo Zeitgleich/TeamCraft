@@ -788,15 +788,40 @@ for months must keep fresh ones on the server:
 - **Wiping.** A deleted package's stored bundle (private init and leaf keys) is overwritten in
   memory before it goes, and so is every old copy of the MLS storage in the store's cache. The
   local database zeroes freed pages (SQLite `secure_delete`), and the native stores (SQLCipher on
-  the desktop, sealed SQLite on mobile, §9.4) truncate their write-ahead log after a deletion, and after saves of the MLS storage at most every 30 seconds
-  (a checkpoint costs two or three syncs and the MLS storage is saved for every processed
-  message; measured when the storage was one record: about 20 ms per save at 64 KiB, 320 ms at
-  1 MiB; since #424 a save writes only the entries that changed, §9.5). What the
-  interval keeps back is cleared when the app stops (goes to the background) or closes the store;
-  a checkpoint that cannot finish (another reader holds the log) stays due and is retried, and never
-  fails the write. Inside a group of writes (§9.5) the purge waits for the commit. So old storage
-  records can stay in the log for up to 30 seconds while the app runs, and are not left in the files
-  for somebody who later gets the database key (#391, #417). The first start after #391 rebuilt each
+  the desktop and in the server-side bots, sealed SQLite on mobile, §9.4) truncate their write-ahead log after a
+  deletion, and after saves of the MLS storage at most every 30 seconds (a checkpoint costs two or
+  three syncs and the MLS storage is saved for every processed message; measured when the storage
+  was one record: about 20 ms per save at 64 KiB, 320 ms at 1 MiB; since #424 a save writes only
+  the entries that changed, §9.5). Until the truncation, a deleted record's old page is in the log
+  and, not yet overwritten by its zeroed version, in the database file. Inside a group of writes
+  (§9.5) the purge waits for the commit, and a truncation can only finish once no connection
+  holds a snapshot that reads from the log.
+  - **On mobile (sealed SQLite, issue #1684)** the purge runs on a connection and a thread of its own, never on
+    the engine's writing connection: nothing waits for a purge that can't finish. Every connection
+    of the store in the process (the writer and the read threads' connections, §9.5) reports when
+    its transactions begin and end, and the purge truncates as soon as they are all idle.
+    **The bound:** a deleted record leaves the files at most `max_delay` (default 10 s,
+    `LogPurgeLimits`) after its group of writes committed, plus the time the reads open at that
+    moment still take and a few checkpoints; a saved MLS storage's old version at most 30 s plus
+    that. Past the delay, new groups of writes are held back (reads never are): with no new
+    commit, a read that begins after the log was written back reads the database file alone, so
+    only the reads that were already open can keep the log, and the truncation follows when they
+    end. A write is held at most 5 s (a safety valve against a read that waits for that write; it
+    is logged), and a failing disk lets writes go and is retried. Another process's reader (the
+    iOS notification extension) can keep the log beyond the bound while it reads; the purge
+    retries every half second, and the extension's own store purges the same way.
+  - **On mobile: stop, close, crash.** Stopping the engine (the app goes to the background) asks for the purge
+    and waits up to a second for it; closing the store tries once more, and SQLite checkpoints
+    the log again when its last connection closes. A crash (or a kill) before the truncation
+    leaves the log on disk: every opening of the store asks for a purge at once, which finishes
+    before any read thread is open, so the bound after a crash runs from the next start.
+  - **On the desktop and the bots (SQLCipher)** the store has one connection and no read threads,
+    so nothing in the process keeps the log: the purge runs at the end of the group of writes (or
+    at once outside one) on that connection and finishes there, never waits for a lock, and one
+    that another process holds up is tried again every 2 seconds. Opening the store truncates a
+    log a crash left, and closing it purges what the 30-second interval kept back.
+  So old storage records are not left in the files for somebody who later gets the database key
+  (#391, #417), beyond the bound above. The first start after #391 rebuilt each
   database once (`VACUUM`), wiping free pages left from before; a rebuild that fails (full disk) is
   tried again on the next start. Copies the file system or the flash controller keep are
   out of reach; the browser's IndexedDB gives no such control. The listing and the wiping rely on
@@ -5344,7 +5369,14 @@ newer number drops just those from its caches, and drops everything for a number
 (another process, the notification extension). Reads see only committed writes: the notes of a group
 (what the UI reads again, the journal of written messages) are published after its commit, and a
 reader whose snapshot is older than a note takes a new one first. A read thread's own writes go
-through the writer, and its next read sees them. The notification extension opens no reader.
+through the writer, and its next read sees them. The notification extension opens no reader. The
+write-ahead log is purged on a connection of its own, which counts the connections' open transactions
+and truncates when they are idle (§4.3.1, issue #1684). A truncation moves SQLite's data version on
+the other connections; the writer counts it as another process's commit (which drops its caches and
+makes the next MLS save write everything) only if the commit number moved too. The same connection
+takes over SQLite's automatic checkpoint (issue #1681): the writer turns it off, and a commit that
+leaves more than 1000 pages in the log asks the purge's thread for a passive checkpoint, instead of
+syncing twice inside the commit under the writer's lock.
 
 **MLS state (issue #424).** The openmls provider storage (every group's tree, context, epoch and
 message secrets; key package private keys) is a map from storage key to value; each entry is one

@@ -985,6 +985,8 @@ mod tests {
       let values_before = sealed_values(&path);
 
       operation(&store);
+      // The purge runs on a thread of its own (issue #1684).
+      assert!(store.wait_for_purge(std::time::Duration::from_secs(10)));
 
       let values_after = sealed_values(&path);
       let gone: Vec<Vec<u8>> = values_before

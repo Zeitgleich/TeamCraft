@@ -716,6 +716,10 @@ impl LocalStore for CountingStore {
     self.inner.purge_freed_soon();
   }
 
+  fn wait_for_purge(&self, max_wait: std::time::Duration) -> bool {
+    self.inner.wait_for_purge(max_wait)
+  }
+
   fn begin_writes(&self) -> Result<(), StoreError> {
     self.inner.begin_writes()
   }
