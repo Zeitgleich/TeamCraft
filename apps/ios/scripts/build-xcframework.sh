@@ -4,18 +4,22 @@
 #   apps/ios/Generated/TeamCraftFFI.xcframework   static library + C header + module map
 #   apps/ios/Generated/Swift/teamcraft_ffi.swift  UniFFI Swift bindings (compiled into app and extension)
 #
-# Usage: scripts/build-xcframework.sh [--debug] [--device-only]
-#   --debug        dev profile instead of release (faster, big)
-#   --device-only  skip the simulator slices (TestFlight/archive builds)
+# Usage: scripts/build-xcframework.sh [--debug] [--device-only | --simulator-arm64-only]
+#   --debug                 dev profile instead of release (faster, big)
+#   --device-only           skip the simulator slices (TestFlight/archive builds)
+#   --simulator-arm64-only  simulator slice for Apple silicon only, no x86_64 (CI on arm64 runners:
+#                           one Rust build less, and Xcode offers the simulator once)
 set -euo pipefail
 
 PROFILE=release
 CARGO_PROFILE_ARGS=(--release)
 SIMULATOR=1
+SIM_ARM64_ONLY=0
 for argument in "$@"; do
   case "${argument}" in
     --debug) PROFILE=debug; CARGO_PROFILE_ARGS=() ;;
     --device-only) SIMULATOR=0 ;;
+    --simulator-arm64-only) SIM_ARM64_ONLY=1 ;;
     *) echo "unknown argument: ${argument}" >&2; exit 2 ;;
   esac
 done
@@ -34,6 +38,7 @@ export IPHONEOS_DEPLOYMENT_TARGET=17.0
 
 DEVICE_TARGET=aarch64-apple-ios
 SIM_TARGETS=(aarch64-apple-ios-sim x86_64-apple-ios)
+if [ "${SIM_ARM64_ONLY}" = 1 ]; then SIM_TARGETS=(aarch64-apple-ios-sim); fi
 TARGETS=("${DEVICE_TARGET}")
 if [ "${SIMULATOR}" = 1 ]; then TARGETS+=("${SIM_TARGETS[@]}"); fi
 
@@ -68,9 +73,10 @@ cp "${BINDINGS_DIR}/teamcraft_ffiFFI.modulemap" "${HEADERS_DIR}/module.modulemap
 
 ARGUMENTS=(-library "$(lib "${DEVICE_TARGET}")" -headers "${HEADERS_DIR}")
 if [ "${SIMULATOR}" = 1 ]; then
-  # One simulator slice for both Mac architectures.
-  lipo -create "$(lib aarch64-apple-ios-sim)" "$(lib x86_64-apple-ios)" \
-    -output "${OUT_DIR}/slices/libteamcraft_ffi-sim.a"
+  # One simulator slice for both Mac architectures (or Apple silicon only).
+  sim_libs=()
+  for target in "${SIM_TARGETS[@]}"; do sim_libs+=("$(lib "${target}")"); done
+  lipo -create "${sim_libs[@]}" -output "${OUT_DIR}/slices/libteamcraft_ffi-sim.a"
   ARGUMENTS+=(-library "${OUT_DIR}/slices/libteamcraft_ffi-sim.a" -headers "${HEADERS_DIR}")
 fi
 xcodebuild -create-xcframework "${ARGUMENTS[@]}" -output "${OUT_DIR}/TeamCraftFFI.xcframework"
