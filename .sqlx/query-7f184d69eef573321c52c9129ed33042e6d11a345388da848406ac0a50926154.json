@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO oidc_sync_held_deactivations (user_id, cause, source) VALUES ($1, $2, 'scim')\n       ON CONFLICT (user_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7f184d69eef573321c52c9129ed33042e6d11a345388da848406ac0a50926154"
+}

@@ -54,6 +54,8 @@ wire_enum! {
     AnnouncementNotFound => "announcement_not_found",
     RecoveryRequestNotFound => "recovery_request_not_found",
     WebhookNotFound => "webhook_not_found",
+    /// No such SCIM client (docs/provisioning.md §7).
+    ScimClientNotFound => "scim_client_not_found",
     /// The admin's request to join a private channel is no longer open: decided (on another
     /// device or by another owner), withdrawn or expired (admin.md §2.4).
     AdminJoinRequestNotFound => "admin_join_request_not_found",
@@ -342,6 +344,7 @@ mod tests {
       ErrorCode::AnnouncementNotFound,
       ErrorCode::RecoveryRequestNotFound,
       ErrorCode::WebhookNotFound,
+      ErrorCode::ScimClientNotFound,
       ErrorCode::AdminJoinRequestNotFound,
       ErrorCode::AdminJoinRequestTooSoon,
       ErrorCode::ShareUnavailable,

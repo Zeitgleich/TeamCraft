@@ -67,6 +67,13 @@ impl Brake {
     share.max(self.min_allowed as usize)
   }
 
+  /// Whether one more deactivation fits a time window that had `recent` already, with `active`
+  /// active users (SCIM, where a client sends one request per user instead of one run).
+  pub fn allows_one_more(&self, recent: u64, active: u64) -> bool {
+    let planned = usize::try_from(recent.saturating_add(1)).unwrap_or(usize::MAX);
+    !self.trips(planned, usize::try_from(active).unwrap_or(usize::MAX))
+  }
+
   /// Whether deactivating `planned` of `active` users is too many for one run. A single user
   /// always passes; a share of a tiny instance means nothing, so the allowance is a number there,
   /// but no run may take everybody on an instance of two or more.
@@ -123,6 +130,18 @@ impl Default for Brake {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_window_allows_the_share_and_never_everybody() {
+    let brake = Brake::new(10, 2);
+    // 100 active: 10 per window.
+    assert!(brake.allows_one_more(9, 100));
+    assert!(!brake.allows_one_more(10, 100));
+    // A tiny instance: the minimum counts, but not all of them.
+    assert!(brake.allows_one_more(0, 2));
+    assert!(!brake.allows_one_more(1, 2));
+    assert!(brake.allows_one_more(0, 1));
+  }
 
   fn user(id: u64) -> UserId {
     serde_json::from_value(serde_json::json!(id.to_string())).unwrap()

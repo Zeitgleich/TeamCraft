@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT m.user_id FROM scim_group_members m\n       JOIN scim_groups g ON g.id = m.group_id JOIN users u ON u.id = m.user_id\n       WHERE lower(g.display_name) = lower($1) AND u.deactivated_at IS NULL AND u.deleted_at IS NULL\n       ORDER BY m.user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scim_group_members",
+            "name": "user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6958d00d087674179d8e405bb46d1c40c94312d89a8b7f5c864d5f0d1e351f1a"
+}

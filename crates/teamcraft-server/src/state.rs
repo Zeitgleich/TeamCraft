@@ -128,6 +128,7 @@ pub struct Settings {
   pub presence: PresenceConfig,
   pub shares: SharesConfig,
   pub webhooks: WebhooksConfig,
+  pub scim: crate::config::ScimConfig,
   pub push: PushSettings,
   /// Token claim the organization is read from, if any.
   pub maybe_organization_claim: Option<String>,

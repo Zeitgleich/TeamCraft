@@ -12,7 +12,7 @@ default, its safety brake, sync health, the deactivation sequence and its audit)
 | IdP events start a sync at once (§4)                    | This document                 |
 | IdP group to space and channel mapping (§5)             | This document                 |
 | Accounts listed before their first sign-in (§6)         | This document (#1632)         |
-| SCIM 2.0 endpoint (§7)                                  | Follow-up (v1.1), #1631       |
+| SCIM 2.0 endpoint (§7)                                  | This document (#1631)         |
 
 ## 1. The shape
 
@@ -39,7 +39,7 @@ default, its safety brake, sync health, the deactivation sequence and its audit)
   is idempotent, so a missed, duplicated or forged event costs at most an extra run.
 - **Vendor-neutral.** The provider is behind one interface: the sync reads users, roles and groups
   from an admin API (Keycloak today), and an event is only "something changed". SCIM, where a
-  provider pushes instead, is a second implementation of the same plan (§7).
+  provider pushes instead, is a second source of the same plan (§7).
 
 ## 2. Joiners
 
@@ -49,6 +49,7 @@ default, its safety brake, sync health, the deactivation sequence and its audit)
 | First sign-in (just in time)     | The account is created from the token, or the one made before is taken; default spaces and channels apply once (admin.md §3.4); the group mapping applies at the next sync run, which the sign-in starts at once (§4) |
 | The provider adds a group member | The next sync run, by event within seconds or by polling within an interval, applies the mapping (§5)                                                                                                                 |
 | An import names a user           | Created from the provider before the first sign-in (admin.md §3.8), the same way as §6                                                                                                                                |
+| A SCIM client creates a user     | The account is made at once, the same way as §6, and its groups' mapping applies (§7)                                                                                                                                 |
 
 Group mapping only ever adds: spaces, and *public* channels of those spaces, on the server, which is
 what a self-join is (the member's own app joins the encryption group, e2ee.md §4.4). Private channels
@@ -81,7 +82,7 @@ The leaver round (`client/leavers.rs`) runs in every app of an owner or admin th
 - **When:** once per gateway connection, on `leaver_update`, and at the time the next listed leaver
   becomes due (a local timer that starts no request before then). Failures back off exponentially,
   like role signing. Nothing runs while nothing is listed.
-- **Whom:** users the server lists as deactivated **by the identity provider** (`oidc`, later `scim`)
+- **Whom:** users the server lists as deactivated **by the identity provider** (reason `oidc`, by the sync or by SCIM, §7)
   whose grace has passed. Not: users an admin deactivated by hand (the admin removes them as a second,
   explicit step, admin.md §3.2.1), bots and meeting guests (they have their own paths), and **nobody on the
   signed roster**: an owner or admin who leaves goes off the roster through role evidence first
@@ -182,7 +183,7 @@ the default spaces. Stored in the database (`GET`/`PUT /api/v1/admin/identity-pr
 
 A new colleague is listed in the directory as "not yet signed in" and can be added to channels before
 they ever open the app (#1632). Each sync run makes the accounts the provider has and TeamCraft doesn't,
-the way the import already does (admin.md §3.8, both use the same function, and SCIM will too):
+the way the import already does (admin.md §3.8, both use the same function; SCIM makes them the same way, §7):
 
 - **Who.** Enabled provider users whose TeamCraft role is owner, admin or member, without an account
   here. **Guests are not made in advance:** they come from outside, are only found by people they share
@@ -236,13 +237,151 @@ the server made up for a pre-made account fails the checks of a first device lik
 import made that never signed in, and are removed the same way when the provider disables them before
 a sign-in.
 
-## 7. Not yet (follow-up issues, v1.1)
+## 7. SCIM 2.0
 
-- **SCIM 2.0** (`/scim/v2/Users`, `/Groups`, its own bearer token): the provider pushes create, update,
-  disable, delete and group membership. It plugs in as a second source of the same plan: a SCIM
-  create makes the account as in §6 (`source: scim`), a SCIM disable runs the deactivation sequence
-  with `source: scim` (or removes a never-signed-in account outright, §6), group changes feed §5, and
-  the brakes apply per minute instead of per run.
+Identity providers that push instead of being polled (Entra ID, Okta, Keycloak with a SCIM extension,
+others) provision TeamCraft through SCIM 2.0 (RFC 7643, RFC 7644) at `<server>/scim/v2` (#1631). It is
+a second source of the same plan as the sync, not a second implementation of it: a create makes the
+account of §6, a disable or delete runs the deactivation sequence (admin.md §3.2.3) and the leaver
+round (§3), group members feed the mapping (§5). Sync and SCIM can run side by side; the periodic sync,
+where configured, stays the net that reconciles what a lost SCIM request missed.
+
+### 7.1 Clients and tokens
+
+Administration → System health, "SCIM provisioning", lists the SCIM clients: one per identity provider
+application that pushes, at most 10. Making one (`POST /api/v1/admin/scim/clients`, `ManageUsers`,
+audit `scim_client_created`) shows its token once: `tcscim_<client id>_<32 random bytes>`. The server
+keeps the SHA-256 of it (high entropy, no slow hash needed), finds the client by the ID in the token and
+compares the hash in constant time; it never logs the token. "New token" replaces it at once
+(`scim_client_token_rotated`), "Revoke" deletes the client (`scim_client_deleted`): its token stops
+working and its groups go, the accounts it made stay. The console shows when a client was last used (to
+the minute) and how many users and groups it provisioned.
+
+Each client names its **identity attribute**: the SCIM attribute that equals the subject (`sub`) of
+the person's sign-in at the identity provider, `externalId` (Okta, Keycloak extensions) or `userName`.
+An account SCIM makes carries the identity provider's issuer and that subject, so the first sign-in
+finds it like one the sync made. A user without it is refused (`scim_identity_immutable`), and it can't
+change later: a different subject is a different person at sign-in.
+
+### 7.2 Users
+
+| SCIM                            | TeamCraft                                                                                                                                                                                                                    |
+|---------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `POST /Users`                   | Makes the account before its first sign-in (§6), a **member** (`user_provisioned`, `source: scim`), or links the account of that subject that is there (`scim_user_linked`). A retried create answers with the same resource |
+| `GET /Users`, `GET /Users/{id}` | The client's own users only: `userName`, `externalId`, `name`, `displayName`, `emails`, `active`, `groups`, `meta`                                                                                                           |
+| `PUT`, `PATCH /Users/{id}`      | Changes the attributes; the account takes name, user name and address only until its first sign-in, then the sign-in's token is their source and SCIM keeps what it sent in the resource                                     |
+| `active: false`                 | The deactivation sequence with reason `oidc` and `source: scim`; a leaver like any the provider deactivated (§3). The resource stays: `active: true` lifts it with everything intact                                         |
+| `DELETE /Users/{id}`            | The resource goes. An account that never signed in is deleted outright (§6); any other is deactivated like a disable                                                                                                         |
+
+- **Roles.** SCIM carries no TeamCraft role: what it makes is a member, and the first sign-in's token
+  decides the role from then on (§2). A SCIM token can't make an admin, and can't change a role.
+- **Admin deactivations stick.** Enabling through SCIM lifts only a deactivation by the identity provider
+  (reason `oidc`), never one an admin made by hand.
+- **Deleted by an admin.** An identity whose account an admin deleted (released, admin.md §3.2.1) isn't
+  made again by SCIM (`scim_identity_released`, 409) until its own next sign-in, as with the sync.
+- **Guests** are not provisioned as guests: SCIM makes members, and guests come through invitations.
+  Assign only staff to the SCIM application.
+- Attributes TeamCraft doesn't keep (the enterprise extension, phone numbers, addresses, a password)
+  are accepted and dropped.
+
+### 7.3 Groups
+
+`/Groups` keeps the groups the client pushes, with their members (users of the same client), up to
+`[scim] max_group_members` (20 000). A group mapping rule (§5) whose group is the SCIM group's display
+name, without the slashes and case ignored (`/engineering` for `Engineering`), adds the members to its
+spaces and public channels: on create, on each added member, for all members when the group is renamed,
+and for all SCIM groups when the rules are saved. Once per member and revision of the rule, additions
+only, like the sync's: leaving or deleting a SCIM group removes nobody (`group_mapping_applied`,
+`source: scim`). Nested paths (`/a/b`) are the sync's; SCIM groups have no hierarchy.
+
+### 7.4 What the endpoint speaks
+
+- Create, read, replace (`PUT`), `PATCH` (`add`, `replace`, `remove`; paths with value filters such as
+  `emails[type eq "work"].value` and `members[value eq "…"]`; no-path values; `op` in any case and
+  `active` as text, as Entra ID sends it), delete, for users and groups. A group's `PATCH` answers 204
+  with the new `ETag`, so a large group isn't sent back for every member change.
+- Filters (RFC 7644 §3.4.2.2) with every operator, `and`, `or`, `not` and value paths. Equality on
+  `userName`, `externalId`, `id` and (groups) `displayName` is looked up by index; any other filter
+  reads the client's resources up to `[scim] max_filter_scan` (10 000) and is refused beyond
+  (`tooMany`); a group filter that names `members` reads their members, up to `[scim]
+  max_filter_members` (100 000) in all. Attribute names ignore case; `id` and `externalId` compare
+  exactly, all other values ignore case.
+- Paging with `startIndex` and `count` (at most 200), `attributes` and `excludedAttributes`. A group page
+  carries at most 10 000 members in all and stops early beyond them (`itemsPerPage` says how many).
+- ETags: `meta.version` and the `ETag` header are `W/"<version>"`; `If-Match` on `PUT`, `PATCH` and
+  `DELETE` (412 on a mismatch), `If-None-Match` on `GET` (304).
+- `/ServiceProviderConfig`, `/ResourceTypes`, `/Schemas`. No bulk, no sorting, no password change.
+- `application/scim+json` both ways (`application/json` is accepted). Errors are SCIM error bodies with
+  `scimType` and TeamCraft's stable `error_code` (`invalid_token`, `rate_limited`, `scim_not_found`,
+  `scim_invalid_syntax`, `scim_invalid_value`, `scim_invalid_filter`, `scim_invalid_path`,
+  `scim_too_many`, `scim_body_too_large`, `scim_uniqueness`, `scim_linked_elsewhere`,
+  `scim_identity_released`, `scim_identity_immutable`, `scim_unknown_member`, `scim_version_mismatch`,
+  `unavailable`, `internal`).
+
+### 7.5 The brake, per time window
+
+A SCIM client sends one request per user, not one run, so the brake counts deactivations and deletions
+by SCIM (all clients together) in a sliding window: `[scim] brake_window_secs` (an hour) may take
+`max(brake_min_allowed, brake_max_percent % of the active people who have signed in)` (defaults 2 and
+10 %), never everybody. Accounts made in advance that never signed in don't count, so a client can't
+raise the allowance by making dummy accounts first. Beyond it, the deactivation is **held**: the
+request succeeds, the resource still says `active: true`, the person keeps working, and the held entry
+shows in the console's brake list next to the sync's (`scim_deactivation_held`, the `oidc_sync_brake`
+check). Confirming the list applies it (an owner confirms when an owner or admin is on it). Only an
+explicit `active: true` from the provider (a PUT, a create, or a PATCH that names `active`) takes a
+hold off: the resource keeps the provider's requested `active`, so a PATCH of other attributes leaves
+the hold as it is. **Owners and admins are always held**: a SCIM token alone never deactivates them.
+The sync's runs replace only their own entries of the list and never apply SCIM's.
+
+### 7.6 What a SCIM token can do, and what a hostile one can
+
+A SCIM token is admin-level power over accounts, as strong as the identity provider itself, and is
+treated like one: rate-limited per client (`[scim] requests_per_minute`, 600), bodies bounded (`[scim]
+max_body_bytes`, 1 MiB; 100 PATCH operations; 1 000 members per request), every failed authentication
+counted against the address like a failed sign-in.
+
+| It can                                                                  | Bound                                                                                                                       |
+|-------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
+| Read the users and groups of its own client, with what it sent itself   | Nothing else: no other client's resources, no other accounts, no message content, keys, devices, sessions or audit log      |
+| Make member accounts and link existing ones by their subject            | No roles; an account another client holds is refused; a released identity is refused                                        |
+| Link any account of the instance's identity provider by its subject     | Intended: a provider set up on an instance in use takes over the people already there; the token then manages them as above |
+| Deactivate the members it linked, and delete those that never signed in | The brake's window; owners and admins only with an admin's confirmation; an admin's own deactivation is never lifted by it  |
+| Add its users to mapped spaces and public channels                      | Only what the admins' rules name; private channels need a member's signed add (§5)                                          |
+
+The server never trusted the identity provider's word for encryption groups and doesn't trust SCIM's
+either: membership, removal and roles stay signed by members' devices (e2ee.md §4.6), so a stolen SCIM
+token is an availability risk (accounts suspended up to the brake, directory entries made), not a
+confidentiality one. Revoking the client in the console ends it at once.
+
+### 7.7 Robustness
+
+| Condition                         | Behaviour                                                                                                                           |
+|-----------------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| Retried create, lost answer       | The same subject finds the same account and resource: same `id`, 201 again                                                          |
+| Retried disable, delete           | A disabled account stays as it is; a deleted resource answers 404, which providers take as done                                     |
+| Out-of-order PATCHes              | `If-Match` when the provider sends it (412 otherwise); without it, last writer wins per resource, like the provider's own model     |
+| Group change naming unknown users | Refused as a whole (`scim_unknown_member`), nothing half-applied; removing a user that is gone removes nothing                      |
+| Server restart                    | Everything is in the database: resources, groups, the brake's window and its holds                                                  |
+| Database briefly down             | 503 with `Retry-After`; providers retry                                                                                             |
+| Several requests at once          | Each write is one transaction; the brake's window is counted under an advisory lock, so two requests can't both take its last place |
+| A provider flooding requests      | 429 with `Retry-After` per client; the address limit of the API applies as well                                                     |
+| Sync and SCIM both on             | Both write the same accounts by subject; the sync's run reconciles against the provider, SCIM's holds stay SCIM's                   |
+
+| Setting                      | Default | Meaning                                                         |
+|------------------------------|---------|-----------------------------------------------------------------|
+| `[scim] requests_per_minute` | 600     | Requests of one client per minute (and its burst)               |
+| `[scim] brake_max_percent`   | 10      | Share of signed-in active people SCIM may deactivate per window |
+| `[scim] brake_min_allowed`   | 2       | Deactivations per window whatever the share                     |
+| `[scim] brake_window_secs`   | 3600    | The brake's window                                              |
+| `[scim] max_group_members`   | 20000   | Members of one SCIM group                                       |
+| `[scim] max_body_bytes`      | 1048576 | Largest request body                                            |
+| `[scim] max_filter_scan`     | 10000   | Resources a filter no index narrows may read                    |
+| `[scim] max_filter_members`  | 100000  | Group members a filter on `members` may read in all             |
+
+**Setting it up.** Make a client in the console, give the identity provider the base URL (`https://<server>/scim/v2`)
+and the token as a bearer token ("secret token" in Entra ID, "HTTP header" authentication in Okta), and
+choose as the client's identity attribute the one that carries the same value as the `sub` claim of the
+person's sign-in. The provider's test connection reads `/Users?filter=…` and the discovery endpoints.
 
 ## 8. Robustness
 
@@ -258,5 +397,6 @@ a sign-in.
 | Several server instances          | Claims are single SQL statements. The sync's lock is per process: several instances would run it twice, which is idempotent but not supported (the server is single-instance, robustness-audit.md) |
 | Large instance                    | `GET /admin/leavers` is paged (100); a round handles at most `max_per_day` users; group mapping adds in batches; a run makes at most `max_created_per_run` accounts (§6)                           |
 | First sign-in during a run        | Making the account is one insert that leaves an existing one alone; a removal of a never-signed-in account checks the mark under the row lock, so the sign-in wins                                 |
+| SCIM                              | See §7.7                                                                                                                                                                                           |
 | Server restart mid-creation       | Accounts are made one by one and idempotently; the round's position is in memory and starts over, which only repeats lookups                                                                       |
 | Clock skew                        | The grace is judged by the server's clock (`deactivated_for_secs`); the per-day limit by the device's own                                                                                          |

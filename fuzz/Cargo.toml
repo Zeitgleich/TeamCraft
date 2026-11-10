@@ -115,3 +115,10 @@ path = "fuzz_targets/voice_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "scim"
+path = "fuzz_targets/scim.rs"
+test = false
+doc = false
+bench = false

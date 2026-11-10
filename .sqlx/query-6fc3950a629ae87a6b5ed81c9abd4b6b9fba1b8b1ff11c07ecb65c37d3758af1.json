@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "LOCK TABLE scim_clients IN SHARE ROW EXCLUSIVE MODE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "6fc3950a629ae87a6b5ed81c9abd4b6b9fba1b8b1ff11c07ecb65c37d3758af1"
+}

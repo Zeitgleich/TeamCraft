@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO scim_groups (id, client_id, display_name, external_id) VALUES ($1, $2, $3, $4)\n       ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5952d84dcdabe0aed6de613f9f395fd05312527e37f34b1b3ba484000bf47baa"
+}

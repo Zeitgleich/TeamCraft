@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM oidc_sync_held_deactivations WHERE user_id = $1 AND source = 'scim'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eb67ecc40bafce929de0e822d4693b129096f1c6f279ea412fa51eec675f3bee"
+}

@@ -49,6 +49,7 @@ const HEALTH_PATH: &str = "/api/v1/admin/health";
 const OIDC_SYNC_PATH: &str = "/api/v1/admin/oidc-sync";
 const PROVIDER_EVENT_HOOK_PATH: &str = "/api/v1/admin/identity-provider/event-hook";
 const GROUP_MAPPINGS_PATH: &str = "/api/v1/admin/identity-provider/group-mappings";
+const SCIM_CLIENTS_PATH: &str = "/api/v1/admin/scim/clients";
 const LIST_LIMIT: u32 = 200;
 /// Guest memberships the overview shows at once; the filters narrow a longer list, and the console
 /// says that it is cut.
@@ -167,6 +168,11 @@ pub struct AdminData {
   asked_webhook_deliveries: HashSet<teamcraft_proto::WebhookId>,
   /// The secret of the webhook just created or rotated, until the admin dismisses it.
   revealed_webhook_secret: Option<(teamcraft_proto::WebhookId, teamcraft_proto::WebhookSecretText)>,
+  /// Loaded when the health page first asks; dropped after every change, so it is read again.
+  scim_clients: Option<teamcraft_proto::ScimClientsResponse>,
+  has_asked_scim_clients: bool,
+  /// The token of the SCIM client just added or rotated, until the admin dismisses it.
+  revealed_scim_token: Option<(teamcraft_proto::ScimClientId, teamcraft_proto::WebhookSecretText)>,
   runtime: Option<RuntimeSettingsResponse>,
   last_test: Option<(SettingsTestKind, SettingsTestResponse)>,
   /// `data:` URLs of brand images by `{brand}/{slot}`; loaded when the editor shows them.
@@ -860,6 +866,71 @@ impl AdminLive {
 
   pub fn dismiss_webhook_secret(&self) {
     self.data.borrow_mut().revealed_webhook_secret = None;
+    self.changed();
+  }
+
+  /// The SCIM clients; loaded once the health page shows them, and again after each change.
+  pub fn scim_clients(&self) -> Option<teamcraft_proto::ScimClientsResponse> {
+    let maybe_clients = self.data.borrow().scim_clients.clone();
+    // Once until the next change: a refusal must not ask again on every render.
+    let is_first_ask = !std::mem::replace(&mut self.data.borrow_mut().has_asked_scim_clients, true);
+    if maybe_clients.is_none() && is_first_ask {
+      self.load(
+        "scim-clients".to_owned(),
+        SCIM_CLIENTS_PATH.to_owned(),
+        Loaded::ScimClients,
+      );
+    }
+    maybe_clients
+  }
+
+  pub fn create_scim_client(&self, request: teamcraft_proto::CreateScimClientRequest) {
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.send_stored(
+        ApiMethod::Post,
+        SCIM_CLIENTS_PATH.to_owned(),
+        Some(body),
+        Stored::ScimClients { has_token: true },
+      );
+    }
+  }
+
+  pub fn rotate_scim_client_token(&self, id: teamcraft_proto::ScimClientId) {
+    self.send_stored(
+      ApiMethod::Post,
+      format!("{SCIM_CLIENTS_PATH}/{id}/token"),
+      Some("{}".to_owned()),
+      Stored::ScimClients { has_token: true },
+    );
+  }
+
+  pub fn delete_scim_client(&self, id: teamcraft_proto::ScimClientId) {
+    {
+      let mut data = self.data.borrow_mut();
+      if data
+        .revealed_scim_token
+        .as_ref()
+        .is_some_and(|(revealed, _)| *revealed == id)
+      {
+        data.revealed_scim_token = None;
+      }
+    }
+    self.send_stored(
+      ApiMethod::Delete,
+      format!("{SCIM_CLIENTS_PATH}/{id}"),
+      None,
+      Stored::ScimClients { has_token: false },
+    );
+  }
+
+  pub fn revealed_scim_token(
+    &self,
+  ) -> Option<(teamcraft_proto::ScimClientId, teamcraft_proto::WebhookSecretText)> {
+    self.data.borrow().revealed_scim_token.clone()
+  }
+
+  pub fn dismiss_scim_token(&self) {
+    self.data.borrow_mut().revealed_scim_token = None;
     self.changed();
   }
 
@@ -1698,6 +1769,10 @@ impl AdminLive {
         .fetch::<teamcraft_proto::AdminWebhooksResponse>(&path, &mut errors)
         .await
         .map(|webhooks| Box::new(move |data: &mut AdminData| data.webhooks = Some(webhooks)) as Store),
+      Loaded::ScimClients => self
+        .fetch::<teamcraft_proto::ScimClientsResponse>(&path, &mut errors)
+        .await
+        .map(|clients| Box::new(move |data: &mut AdminData| data.scim_clients = Some(clients)) as Store),
       Loaded::WebhookDeliveries(id) => self
         .fetch::<teamcraft_proto::WebhookDeliveriesResponse>(&path, &mut errors)
         .await
@@ -2233,6 +2308,10 @@ pub enum Stored {
   Webhooks {
     has_secret: bool,
   },
+  /// A SCIM client was changed: the list is read again; `has_token` answers carry a new token.
+  ScimClients {
+    has_token: bool,
+  },
 }
 
 /// What on-demand data a load is for.
@@ -2245,6 +2324,7 @@ pub enum Loaded {
   Webhooks,
   WebhookDeliveries(teamcraft_proto::WebhookId),
   GroupMappings,
+  ScimClients,
 }
 
 /// Stores a loaded value in the cache.
@@ -2287,6 +2367,14 @@ impl Stored {
         if has_secret {
           let answer: teamcraft_proto::WebhookSecretResponse = serde_json::from_str(body)?;
           data.revealed_webhook_secret = Some((answer.webhook.id, answer.secret));
+        }
+      },
+      Self::ScimClients { has_token } => {
+        data.scim_clients = None;
+        data.has_asked_scim_clients = false;
+        if has_token {
+          let answer: teamcraft_proto::ScimClientTokenResponse = serde_json::from_str(body)?;
+          data.revealed_scim_token = Some((answer.client.id, answer.token));
         }
       },
     }

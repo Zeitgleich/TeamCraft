@@ -261,9 +261,33 @@ pub async fn deactivate_user(
   note: &str,
   after: AfterDeactivation,
 ) -> Result<bool, ApiError> {
+  let source = deactivation_source(&reason);
+  Box::pin(deactivate_user_from(
+    state,
+    maybe_actor,
+    user,
+    reason,
+    source,
+    note,
+    after,
+  ))
+  .await
+}
+
+/// [`deactivate_user`] with the source the audit names given, for a cause the reason doesn't tell
+/// apart (a SCIM client deactivates with the identity provider's reason, `oidc`).
+pub async fn deactivate_user_from(
+  state: &AppState,
+  maybe_actor: Option<UserId>,
+  user: UserId,
+  reason: DeactivationReason,
+  source: DeactivationSource,
+  note: &str,
+  after: AfterDeactivation,
+) -> Result<bool, ApiError> {
   let detail = json!({
     "reason": reason.as_str(),
-    "source": deactivation_source(&reason).as_str(),
+    "source": source.as_str(),
     "note": note,
   })
   .to_string();

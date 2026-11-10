@@ -22,6 +22,7 @@ mod poll;
 mod rendezvous;
 mod role;
 pub mod role_rules;
+pub mod scim;
 pub mod synced_settings;
 mod trace_context;
 pub mod web_links;
@@ -53,8 +54,8 @@ pub use id::{
   AnnouncementId, AttachmentId, AuditEntryId, BackgroundId, CallId, CategoryId, ConversationId,
   CustomEmojiId, DeviceId, GroupMappingId, HealthNoticeId, Id, IdError, InviteId, MeetingAttendeeId,
   MeetingId, MeetingInviteId, MessageId, MlsMessageId, OrgBackgroundId, PushRetryId, RecoveryRequestId,
-  SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, ScheduledMessageId, Snowflake, SpaceId,
-  SystemEventId, ThreadId, UserGroupId, UserId, WebhookEventId, WebhookId,
+  SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, ScheduledMessageId, ScimClientId,
+  ScimGroupId, Snowflake, SpaceId, SystemEventId, ThreadId, UserGroupId, UserId, WebhookEventId, WebhookId,
 };
 pub use import::{
   IMPORT_WORKER, ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,

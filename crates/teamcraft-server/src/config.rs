@@ -52,6 +52,8 @@ pub struct Config {
   #[serde(default)]
   pub webhooks: WebhooksConfig,
   #[serde(default)]
+  pub scim: ScimConfig,
+  #[serde(default)]
   pub web: WebConfig,
   #[serde(default)]
   pub security: SecurityConfig,
@@ -1424,6 +1426,47 @@ impl Default for WebhooksConfig {
       max_age_hours: 24,
       log_entries_per_webhook: 50,
       poll_interval_secs: 15,
+    }
+  }
+}
+
+/// Limits of the SCIM 2.0 endpoint (docs/provisioning.md §7). The SCIM clients and their tokens are
+/// made in the admin console; these bound what one client can do.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ScimConfig {
+  /// Requests of one SCIM client per minute (and its burst); more get 429 with `Retry-After`.
+  pub requests_per_minute: u32,
+  /// Safety brake: deactivations and removals by SCIM within `brake_window_secs` may reach this
+  /// share of the active people who have signed in (accounts made in advance don't count, so a
+  /// client can't raise the allowance by making some), and always `brake_min_allowed`; beyond that they are held for an
+  /// admin to confirm, like the sync's (admin.md §3.2.3).
+  pub brake_max_percent: u32,
+  pub brake_min_allowed: u32,
+  pub brake_window_secs: u64,
+  /// The most members one SCIM group may have.
+  pub max_group_members: usize,
+  /// The largest request body, in bytes.
+  pub max_body_bytes: usize,
+  /// The most resources a filter that no index narrows may look at; beyond that it is refused
+  /// (`tooMany`) and the client has to filter by `userName`, `externalId` or `displayName`.
+  pub max_filter_scan: u32,
+  /// The most group members a filter that names `members` may read in all; beyond that it is
+  /// refused (`tooMany`).
+  pub max_filter_members: u32,
+}
+
+impl Default for ScimConfig {
+  fn default() -> Self {
+    Self {
+      requests_per_minute: 600,
+      brake_max_percent: 10,
+      brake_min_allowed: 2,
+      brake_window_secs: 3600,
+      max_group_members: 20_000,
+      max_body_bytes: 1024 * 1024,
+      max_filter_scan: 10_000,
+      max_filter_members: 100_000,
     }
   }
 }

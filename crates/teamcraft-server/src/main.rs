@@ -261,6 +261,7 @@ async fn run() -> anyhow::Result<()> {
         ),
         ..config.webhooks.clone()
       },
+      scim: config.scim.clone(),
       maybe_organization_claim: config.oidc.maybe_organization_claim.clone(),
       sign_in: SignInSettings::new(
         config.oidc.issuer.clone(),

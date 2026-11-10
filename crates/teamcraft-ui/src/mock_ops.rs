@@ -56,6 +56,9 @@ pub(super) struct OpsState {
   /// How the last test push to each of the demo user's devices went.
   push_tests: HashMap<DeviceId, TestPushOutcome>,
   settings: super::settings_data::SettingsMock,
+  scim_clients: Vec<teamcraft_proto::ScimClientResponse>,
+  next_scim_client_id: u64,
+  revealed_scim_token: Option<(teamcraft_proto::ScimClientId, teamcraft_proto::WebhookSecretText)>,
 }
 
 impl OpsState {
@@ -78,6 +81,9 @@ impl OpsState {
       verified_contacts: vec![id_from_raw(2)],
       push_tests: HashMap::new(),
       settings: super::settings_data::SettingsMock::new(now),
+      scim_clients: vec![demo_scim_client(now)],
+      next_scim_client_id: 9_101,
+      revealed_scim_token: None,
     }
   }
 
@@ -725,6 +731,61 @@ impl AdminBackend for MockBackend {
 
   fn health_alert_count(&self) -> usize {
     1
+  }
+
+  fn scim_clients(&self) -> Option<teamcraft_proto::ScimClientsResponse> {
+    Some(teamcraft_proto::ScimClientsResponse {
+      clients: self.ops.borrow().scim_clients.clone(),
+      maybe_base_url: Some("https://chat.example.com/scim/v2".to_owned()),
+    })
+  }
+
+  fn create_scim_client(&self, request: teamcraft_proto::CreateScimClientRequest) {
+    let mut ops = self.ops.borrow_mut();
+    ops.next_scim_client_id += 1;
+    let id = id_from_raw(ops.next_scim_client_id);
+    ops.scim_clients.push(teamcraft_proto::ScimClientResponse {
+      id,
+      name: request.name,
+      identity_attribute: request.identity_attribute,
+      created_at: UnixMillis(self.now),
+      token_rotated_at: UnixMillis(self.now),
+      maybe_last_used_at: None,
+      user_count: 0,
+      group_count: 0,
+    });
+    ops.revealed_scim_token = Some((id, demo_scim_token()));
+  }
+
+  fn rotate_scim_client_token(&self, id: teamcraft_proto::ScimClientId) {
+    let mut ops = self.ops.borrow_mut();
+    let now = self.now;
+    if let Some(client) = ops.scim_clients.iter_mut().find(|client| client.id == id) {
+      client.token_rotated_at = UnixMillis(now);
+      ops.revealed_scim_token = Some((id, demo_scim_token()));
+    }
+  }
+
+  fn delete_scim_client(&self, id: teamcraft_proto::ScimClientId) {
+    let mut ops = self.ops.borrow_mut();
+    ops.scim_clients.retain(|client| client.id != id);
+    if ops
+      .revealed_scim_token
+      .as_ref()
+      .is_some_and(|(revealed, _)| *revealed == id)
+    {
+      ops.revealed_scim_token = None;
+    }
+  }
+
+  fn revealed_scim_token(
+    &self,
+  ) -> Option<(teamcraft_proto::ScimClientId, teamcraft_proto::WebhookSecretText)> {
+    self.ops.borrow().revealed_scim_token.clone()
+  }
+
+  fn dismiss_scim_token(&self) {
+    self.ops.borrow_mut().revealed_scim_token = None;
   }
 
   fn instance_status(&self) -> Option<AdminInstanceResponse> {
@@ -1406,6 +1467,25 @@ fn demo_audit(now: TimestampMs) -> Vec<AuditEntry> {
       detail: detail.to_owned(),
     })
     .collect()
+}
+
+/// The demo's SCIM client: an identity provider that made a few accounts and groups.
+fn demo_scim_client(now: TimestampMs) -> teamcraft_proto::ScimClientResponse {
+  teamcraft_proto::ScimClientResponse {
+    id: id_from_raw(9_100),
+    name: "Identity provider".to_owned(),
+    identity_attribute: teamcraft_proto::ScimIdentityAttribute::ExternalId,
+    created_at: UnixMillis(now - 30 * DAY),
+    token_rotated_at: UnixMillis(now - 12 * DAY),
+    maybe_last_used_at: Some(UnixMillis(now - 6 * MINUTE)),
+    user_count: 42,
+    group_count: 7,
+  }
+}
+
+/// A token-shaped placeholder; the demo never accepts it anywhere.
+fn demo_scim_token() -> teamcraft_proto::WebhookSecretText {
+  teamcraft_proto::WebhookSecretText::new("tcscim_demo_0123456789abcdefghijklmnopqrstuv".to_owned())
 }
 
 #[cfg(test)]

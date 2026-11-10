@@ -17,7 +17,7 @@ use axum::http::header::{
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use teamcraft_proto::UserId;
+use teamcraft_proto::{ScimClientId, UserId};
 
 use crate::auth::{DPOP_HEADER, note_nonce_header};
 use crate::config::RateLimitConfig;
@@ -62,6 +62,9 @@ pub struct RateLimits {
   /// per-address limit: the address limit runs before authentication, so the importer's address is
   /// learned from its requests.
   import_addresses: Mutex<HashMap<String, Instant>>,
+  /// Requests each SCIM client may still make (docs/provisioning.md §7). Only authenticated clients
+  /// get a bucket, and an instance has a handful of them.
+  scim_buckets: Mutex<HashMap<ScimClientId, Bucket>>,
 }
 
 impl RateLimits {
@@ -72,6 +75,27 @@ impl RateLimits {
       mail_budgets: Mutex::new(HashMap::new()),
       large_mention_budgets: Mutex::new(HashMap::new()),
       import_addresses: Mutex::new(HashMap::new()),
+      scim_buckets: Mutex::new(HashMap::new()),
+    }
+  }
+
+  /// Takes one request of the SCIM client's `per_minute` (also its burst); 429 when used up.
+  pub fn check_scim(&self, client: ScimClientId, per_minute: u32, now: Instant) -> Result<(), ApiError> {
+    if !self.config.is_enabled {
+      return Ok(());
+    }
+    let rate = f64::from(per_minute.max(1));
+    let mut buckets = self.scim_buckets.lock().unwrap_or_else(PoisonError::into_inner);
+    let bucket = buckets.entry(client).or_insert(Bucket {
+      tokens: rate,
+      updated_at: now,
+    });
+    refill(bucket, rate, now);
+    if bucket.tokens >= 1.0 {
+      bucket.tokens -= 1.0;
+      Ok(())
+    } else {
+      Err(retry_after(bucket.tokens, rate))
     }
   }
 
@@ -288,7 +312,10 @@ pub struct ClientIp(pub String);
 /// The middleware around every route: rate limits, then the response headers.
 pub async fn guard(State(state): State<AppState>, request: Request, next: Next) -> Response {
   let path = request.uri().path().to_owned();
-  let is_api = path.starts_with("/api/") || path == "/healthz" || path == "/readyz";
+  let is_api = path.starts_with("/api/")
+    || path.starts_with(teamcraft_proto::scim::SCIM_BASE_PATH)
+    || path == "/healthz"
+    || path == "/readyz";
   if !is_api {
     // The web client sets its own headers (see `web`).
     return next.run(request).await;

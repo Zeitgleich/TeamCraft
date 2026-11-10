@@ -17,8 +17,8 @@ use teamcraft_db::{
   OidcSyncRun, OidcUserRow,
 };
 use teamcraft_proto::{
-  DeactivationCause, DeactivationReason, OidcSyncError, OidcSyncOutcome, ProvisionStatus, ProvisionedUser,
-  Role, UserGroupId, UserId, UserKind,
+  DeactivationCause, DeactivationReason, DeactivationSource, OidcSyncError, OidcSyncOutcome, ProvisionStatus,
+  ProvisionedUser, Role, UserGroupId, UserId, UserKind,
 };
 use time::OffsetDateTime;
 use tracing::{debug, info, warn};
@@ -431,7 +431,7 @@ async fn run(state: &AppState, settings: &OidcSyncSettings) -> Result<SyncReport
     warn!(%error, "finishing earlier deactivations failed");
   }
   let plan = read_plan(state, settings).await?;
-  let held = state.database.list_held_deactivations().await?;
+  let held = sync_held(state).await?;
   let decision = decide(settings, &plan, &held);
 
   if settings.mode == OidcSyncRunMode::DryRun {
@@ -593,7 +593,8 @@ async fn store_held(
     })
     .collect();
   let held = state.database.set_held_deactivations(&entries).await?;
-  state.oidc_sync.set_held(held);
+  // The health check counts SCIM's holds on the same list too.
+  load_brake_state(state).await;
   Ok(held)
 }
 
@@ -789,12 +790,25 @@ pub(super) async fn preview_plan(state: &AppState) -> Result<(Decision, Plan), A
   let plan = Box::pin(read_plan(state, settings))
     .await
     .map_err(SyncFailure::into_api_error)?;
-  let held = state.database.list_held_deactivations().await?;
+  let held = sync_held(state).await?;
   let decision = decide(settings, &plan, &held);
   Ok((decision, plan))
 }
 
-/// Reads what the brake holds after a start, for the health check.
+/// What the brake holds for the sync: SCIM's holds share the list but are applied by SCIM once
+/// confirmed, never by a run (docs/provisioning.md §7).
+async fn sync_held(state: &AppState) -> Result<Vec<HeldDeactivation>, teamcraft_db::DbError> {
+  let held = state.database.list_held_deactivations().await?;
+  Ok(
+    held
+      .into_iter()
+      .filter(|entry| entry.source == DeactivationSource::OidcSync.as_str())
+      .collect(),
+  )
+}
+
+/// Reads what the brake holds (the sync's and SCIM's) for the health check, after a start and after
+/// every change of the list.
 pub async fn load_brake_state(state: &AppState) {
   match state.database.list_held_deactivations().await {
     Ok(held) => state.oidc_sync.set_held(count(held.len())),
@@ -896,35 +910,10 @@ async fn apply_group_mappings(
       .database
       .find_users_by_subjects(&settings.issuer, &subjects)
       .await?;
-    for member in members {
-      let applied = state.database.apply_group_mapping(&mapping, member).await?;
-      if applied.is_empty() {
-        continue;
-      }
-      report.mapped_memberships += u32::try_from(
-        applied
-          .iter()
-          .map(|invite| 1 + invite.joined_channels.len())
-          .sum::<usize>(),
-      )
-      .unwrap_or(u32::MAX);
-      super::audit::record(
-        state,
-        None,
-        "group_mapping_applied",
-        Some(AuditTarget::new("user", member)),
-        &json!({
-          "source": "oidc_sync",
-          "group_path": mapping.group_path,
-          "spaces": applied.iter().map(|invite| invite.space_id.to_string()).collect::<Vec<_>>(),
-          "channels": applied.iter().flat_map(|invite| invite.joined_channels.iter().map(ToString::to_string)).collect::<Vec<_>>(),
-        }),
-      )
-      .await?;
-      if let Some(user) = state.database.get_user(member).await? {
-        super::accounts::announce_applied(state, &user, applied).await?;
-      }
-    }
+    report.mapped_memberships = report.mapped_memberships.saturating_add(
+      super::group_mappings::apply_to_members(state, &mapping, &members, DeactivationSource::OidcSync)
+        .await?,
+    );
   }
   Ok(())
 }

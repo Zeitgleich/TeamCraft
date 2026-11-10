@@ -51,6 +51,7 @@ mod push_retry;
 mod retention;
 mod role_evidence;
 mod scheduled_message;
+mod scim;
 mod server_settings;
 mod share_link;
 mod snowflake;
@@ -144,6 +145,11 @@ pub use role_evidence::{RoleStanding, StoredRoleEvidence, StoredRoleLoss};
 pub use scheduled_message::{
   NewScheduledMessage, ReleaseOutcome, ScheduleOutcome, ScheduledUpdateOutcome, SealedParts, StaleWakes,
   StoredScheduledMessage,
+};
+pub use scim::{
+  NewScimClient, ScimAccountState, ScimClientCreation, ScimClientCredentials, ScimClientRow,
+  ScimGroupCreation, ScimGroupLookup, ScimGroupRow, ScimGroupUpdate, ScimGroupWrite, ScimLink,
+  ScimUserLookup, ScimUserRow, ScimUserWrite, ScimWrite,
 };
 pub use server_settings::{StoredBrand, StoredBrandAsset, StoredBrandMailServer, StoredSetting};
 pub use share_link::{NewShareLink, ShareLink, ShareTarget};

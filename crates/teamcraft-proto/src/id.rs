@@ -276,6 +276,14 @@ define_id!(
   WebhookId
 );
 define_id!(
+  /// An identity provider application that provisions through SCIM 2.0 (docs/provisioning.md §7).
+  ScimClientId
+);
+define_id!(
+  /// A group a SCIM client provisioned (docs/provisioning.md §7).
+  ScimGroupId
+);
+define_id!(
   /// A health alert notice on its way to one mail address or the webhooks (docs/operations.md,
   /// "Health and alerts").
   HealthNoticeId

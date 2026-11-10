@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT h.user_id, h.cause, h.held_at, h.confirmed_at IS NOT NULL AS \"is_confirmed!\",\n                u.display_name, u.username, u.oidc_role\n         FROM oidc_sync_held_deactivations h JOIN users u ON u.id = h.user_id\n         ORDER BY h.held_at, h.user_id",
+  "query": "SELECT h.user_id, h.cause, h.source, h.held_at, h.confirmed_at IS NOT NULL AS \"is_confirmed!\",\n                u.display_name, u.username, u.oidc_role\n         FROM oidc_sync_held_deactivations h JOIN users u ON u.id = h.user_id\n         ORDER BY h.held_at, h.user_id",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,17 @@
       },
       {
         "ordinal": 2,
+        "name": "source",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_held_deactivations",
+            "name": "source"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
         "name": "held_at",
         "type_info": "Timestamptz",
         "origin": {
@@ -37,13 +48,13 @@
         }
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "is_confirmed!",
         "type_info": "Bool",
         "origin": "Expression"
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "display_name",
         "type_info": "Text",
         "origin": {
@@ -54,7 +65,7 @@
         }
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "username",
         "type_info": "Text",
         "origin": {
@@ -65,7 +76,7 @@
         }
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "oidc_role",
         "type_info": "Text",
         "origin": {
@@ -83,11 +94,12 @@
       false,
       false,
       false,
+      false,
       null,
       false,
       true,
       true
     ]
   },
-  "hash": "00c8fb70e1ed67883f1195a1f84982f9f128db98bd48d839e10c5f21d2579e6b"
+  "hash": "6d4e116ea41725829a4b6012f20b0daa2ac8a6c836590e1207192904a5b1b71e"
 }

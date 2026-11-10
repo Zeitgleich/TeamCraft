@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) AS \"count!\" FROM users\n         WHERE oidc_issuer = $1 AND deactivated_at IS NULL AND deleted_at IS NULL\n           AND awaiting_first_sign_in_since IS NULL AND kind IN ('member', 'guest')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "c165c9c7641abf19e6164ed6972876bf591bd66b5d95cfc9dd976c2e61f4570d"
+}

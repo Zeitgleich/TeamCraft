@@ -230,6 +230,13 @@ impl ApiError {
     }
   }
 
+  pub fn scim_client_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::ScimClientNotFound,
+      what: "SCIM client",
+    }
+  }
+
   /// The admin's request to join is no longer open (decided, withdrawn or expired).
   pub fn admin_join_request_not_found() -> Self {
     Self::NotFound {
@@ -830,6 +837,11 @@ mod tests {
         ApiError::webhook_not_found(),
         StatusCode::NOT_FOUND,
         ErrorCode::WebhookNotFound,
+      ),
+      (
+        ApiError::scim_client_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::ScimClientNotFound,
       ),
       (
         ApiError::PayloadTooLarge("x".into()),

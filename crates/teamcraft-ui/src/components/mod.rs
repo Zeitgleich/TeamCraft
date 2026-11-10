@@ -26,6 +26,7 @@ pub mod admin_people;
 pub mod admin_permissions;
 pub mod admin_policy;
 pub mod admin_retention;
+pub mod admin_scim;
 pub mod admin_security;
 pub mod admin_settings;
 pub mod admin_spaces;

@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT user_id, cause FROM oidc_sync_held_deactivations\n       WHERE source = 'scim' AND confirmed_at IS NOT NULL ORDER BY held_at, user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_held_deactivations",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "cause",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_held_deactivations",
+            "name": "cause"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "42f409a0d908025e460995b994b20175fd1554085abacbeda5220df2f14febe6"
+}
