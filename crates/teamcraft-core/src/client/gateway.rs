@@ -728,12 +728,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       GatewayEvent::WorkspaceUpdate { kind, .. } => {
         // After a handover the new owner has the policy to sign under the new roster, and the previous
         // owner could otherwise still sign one naming an older roster (A7).
-        if kind == teamcraft_proto::WorkspaceLogKind::Roster {
+        let is_roster = kind == teamcraft_proto::WorkspaceLogKind::Roster;
+        if is_roster {
           self.note_role_evidence_update();
-          // Who may sign custom emoji follows the roster: verify the set again.
-          self.is_custom_emoji_stale = true;
         }
-        self.sync_workspace_and_recovery().await
+        let synced = self.sync_workspace_and_recovery().await;
+        if is_roster {
+          // Who may sign custom emoji follows the roster: the list read last is verified again,
+          // here, without a request.
+          self.reverify_custom_emoji();
+        }
+        synced
       },
       GatewayEvent::RoleEvidenceUpdate => {
         self.note_role_evidence_update();

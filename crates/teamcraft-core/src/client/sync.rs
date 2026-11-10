@@ -195,8 +195,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.trace_lap("notification settings");
     Box::pin(self.refresh_user_groups()).await;
     self.trace_lap("user groups");
-    // Read with the next gateway frame: the set and its pictures never hold up the sync.
-    self.is_custom_emoji_stale = true;
     if let Err(error) = self.refresh_attachment_limit().await {
       if error.is_transient() {
         return Err(error);

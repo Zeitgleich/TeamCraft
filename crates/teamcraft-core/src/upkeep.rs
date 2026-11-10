@@ -63,6 +63,12 @@ pub struct Upkeep {
   /// The gateway connection the list of scheduled messages was read for.
   #[cfg(feature = "ui")]
   maybe_scheduled_connection: Option<u64>,
+  /// The gateway connection the workspace's custom emoji were read for (issue #207).
+  #[cfg(feature = "ui")]
+  maybe_custom_emoji_connection: Option<u64>,
+  /// When reading them last failed.
+  #[cfg(feature = "ui")]
+  maybe_custom_emoji_read_failed_ms: Option<i64>,
   uploads: UploadMode,
 }
 
@@ -98,6 +104,10 @@ impl Upkeep {
       last_scheduled_event_read_ms: i64::MIN,
       #[cfg(feature = "ui")]
       maybe_scheduled_connection: None,
+      #[cfg(feature = "ui")]
+      maybe_custom_emoji_connection: None,
+      #[cfg(feature = "ui")]
+      maybe_custom_emoji_read_failed_ms: None,
       uploads: UploadMode::Inline,
     }
   }
@@ -174,12 +184,43 @@ impl Upkeep {
     {
       // On the heap: sealing catches groups up, too big a future for the frame of every tick's caller.
       is_changed |= Box::pin(self.tend_scheduled(client, now)).await;
+      is_changed |= Box::pin(self.tend_custom_emoji(client, now)).await;
     }
     let is_flushed = match self.uploads {
       UploadMode::Inline => flush(client).await,
       UploadMode::Host => flush_sends(client).await,
     };
     is_changed | is_flushed
+  }
+
+  /// Reads the workspace's custom emoji once per gateway connection (gateway events bring changes
+  /// in between); after a failed read not before the interval.
+  #[cfg(feature = "ui")]
+  async fn tend_custom_emoji<A: ServerApi, S: LocalStore>(
+    &mut self,
+    client: &mut Client<A, S>,
+    now: i64,
+  ) -> bool {
+    let interval_ms = i64::try_from(self.interval.as_millis()).unwrap_or(i64::MAX);
+    let Some(connection) = client
+      .gateway_connections()
+      .filter(|connection| self.maybe_custom_emoji_connection != Some(*connection))
+      .filter(|_| {
+        self
+          .maybe_custom_emoji_read_failed_ms
+          .is_none_or(|failed| now.abs_diff(failed) >= interval_ms.unsigned_abs())
+      })
+    else {
+      return false;
+    };
+    if Box::pin(client.refresh_custom_emoji()).await {
+      self.maybe_custom_emoji_connection = Some(connection);
+      self.maybe_custom_emoji_read_failed_ms = None;
+      true
+    } else {
+      self.maybe_custom_emoji_read_failed_ms = Some(now);
+      false
+    }
   }
 
   /// Keeps this device's view of the scheduled messages (docs/scheduled-messages.md) and seals again

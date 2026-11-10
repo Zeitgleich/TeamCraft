@@ -50,8 +50,9 @@ async fn each_new_connection_reads_the_account_data_once() {
 
   assert_eq!(
     server.rest_call_count(user),
-    before + 1 + u64::from(cfg!(feature = "ui")),
-    "one key bag read for the new connection, and with a UI one read of the scheduled messages"
+    before + 1 + 2 * u64::from(cfg!(feature = "ui")),
+    "one key bag read for the new connection, and with a UI one read each of the scheduled \
+     messages and the custom emoji"
   );
 }
 
