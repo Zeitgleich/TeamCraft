@@ -209,3 +209,13 @@
   flex: 1;
   min-width: 0;
 }
+
+/* The question's label above its field, which takes the dialog's width. */
+.poll-dialog .modal-body > label[for] {
+  display: block;
+  margin-bottom: var(--space-1);
+}
+
+.poll-dialog .modal-body > .input {
+  width: 100%;
+}
