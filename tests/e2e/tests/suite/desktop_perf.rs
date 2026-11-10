@@ -44,8 +44,9 @@ const SWITCHES: usize = 40;
 /// check allows four times that for a debug build on a shared CI runner; the regression it is for
 /// (#1000) was 4 % and more.
 const HIDDEN_CPU_PERCENT_LIMIT: f64 = 2.0;
-/// Wakeups (context switches of all threads) per second of the whole app while hidden. Measured
-/// about TODO; a timer that ticks while the window can't be seen adds tens per second.
+/// Wakeups (voluntary context switches of all threads) per second of the whole app while hidden.
+/// Measured 50 to 55, most of them WebKit's own (its IPC and memory pressure threads); a timer
+/// that keeps the page or the core busy while nobody can see it adds tens to hundreds.
 const HIDDEN_WAKEUPS_PER_SECOND_LIMIT: f64 = 100.0;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
