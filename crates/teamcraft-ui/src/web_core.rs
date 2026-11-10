@@ -32,6 +32,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::calls::{BackgroundEffect, OrgBackgrounds};
+use teamcraft_client_api::data_export::{DataExportRequest, DataExportStatus};
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
   AttachmentPriority, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection,
@@ -49,6 +50,7 @@ use teamcraft_core::client::{
 use teamcraft_core::clock::{Clock, SystemClock, rewound, sleep_ms_until};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
 use teamcraft_core::downloads::{Downloads, Finished};
+use teamcraft_core::export::{ExportError, ExportJob, ExportStep};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
 use teamcraft_core::push_text::{MINUTES_PLACEHOLDER, NAME_PLACEHOLDER, NotificationLabels};
 use teamcraft_core::records;
@@ -81,6 +83,7 @@ use crate::tab_handover::{
   Blocker, OnTaken, PERSIST_DRAFTS_EVENT, TabEvent, TabState, TakeoverAnswer, answer_takeover, keeps_lock,
   on_taken,
 };
+use crate::web_export::{BlobSink, WebExportRun, WebExportSlot};
 use crate::web_tabs::{self, Follower, OwnerChannel, OwnerLock, Ownership};
 
 /// A catalog build shorter than this shows nothing: a small store would only flash a screen.
@@ -651,6 +654,10 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
       let id: String = field(&args, "id")?;
       ask(|reply| Request::LinkRequestReject { id, reply }).await??;
       Ok(Value::Null)
+    },
+    "core_data_export" => {
+      let request: DataExportRequest = field(&args, "request")?;
+      to_value(ask(|reply| Request::DataExport(request, reply)).await?)
     },
     other => Err(format!("{other} is not available in the browser")),
   }
@@ -1258,6 +1265,8 @@ enum Request {
     id: String,
     reply: oneshot::Sender<Result<(), String>>,
   },
+  /// "Export my data" (issue #211, `crate::web_export`).
+  DataExport(DataExportRequest, oneshot::Sender<DataExportStatus>),
   /// The browser went online, the tab became visible or was resumed: check the connection now.
   NetworkChanged,
   /// What joining a conversation's call needs (`web_calls`).
@@ -1351,6 +1360,8 @@ struct Core {
   maybe_reported_bytes: Option<u64>,
   /// Attachment downloads, running beside the loop (issue #491).
   downloads: Downloads,
+  /// "Export my data" (issue #211): the export running beside the loop, or how the last one ended.
+  export: WebExportSlot,
   /// Pacing of the pages read in the background ([`Self::load_background_history`]).
   background: BackgroundPacing,
 }
@@ -1432,6 +1443,7 @@ impl Core {
       is_upload_due: true,
       maybe_reported_bytes: None,
       downloads: Downloads::default(),
+      export: WebExportSlot::default(),
       background: BackgroundPacing::default(),
     }
   }
@@ -1452,6 +1464,7 @@ impl Core {
       }
       self.start_upload(&mut requests).await;
       self.start_downloads().await;
+      self.export_step(&mut requests).await;
       match self.next_wake(&mut requests).await {
         Wake::Request(None) => return,
         // A large file must not hold up the loop while it downloads.
@@ -1599,6 +1612,11 @@ impl Core {
       deadline.min(self.background.next_page_ms)
     } else {
       deadline
+    };
+    // A data export's next step, the same way: at once, or when its wait for the network ends.
+    let deadline = match self.export_due_at_ms() {
+      Some(due) => deadline.min(due),
+      None => deadline,
     };
     // Never longer than a tick: after the wall clock went back, deadlines lie in the "future" by
     // the jump, and the tick notices the jump and moves them (robustness.md, "Time").
@@ -1985,7 +2003,11 @@ impl Core {
       Request::LinkRequests(reply) => drop(reply.send(self.link_requests())),
       Request::LinkRequestReview { id, reply } => drop(reply.send(self.link_request_review(&id).await)),
       Request::LinkRequestReject { id, reply } => drop(reply.send(self.link_request_reject(&id).await)),
+      Request::DataExport(request, reply) => drop(reply.send(self.data_export(request))),
       Request::NetworkChanged => {
+        if let WebExportSlot::Running(run) = &mut self.export {
+          run.job.network_back();
+        }
         self.tokens.wake();
         // Without a token an attempt can only fail, and it would use up the one skipped backoff
         // the token's arrival needs.
@@ -2847,6 +2869,126 @@ impl Core {
         .client
         .as_ref()
         .is_some_and(Client::is_background_history_due)
+  }
+
+  /// When the data export's next step is due: now, or when its wait for the network ends.
+  fn export_due_at_ms(&self) -> Option<i64> {
+    match &self.export {
+      WebExportSlot::Running(run) if self.client.is_some() => Some(run.job.retry_at_ms().unwrap_or(i64::MIN)),
+      _ => None,
+    }
+  }
+
+  /// One step of the data export, when it is due; the UI's reads are answered meanwhile.
+  async fn export_step(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) {
+    if self.export_due_at_ms().is_none_or(|due| now_ms() < due) {
+      return;
+    }
+    let WebExportSlot::Running(mut run) = std::mem::take(&mut self.export) else {
+      return;
+    };
+    let maybe_outcome = self
+      .serve_during(requests, async |client: &mut Client<Api, Store>| {
+        let WebExportRun { job, sink, .. } = run.as_mut();
+        Box::pin(job.step(client, sink)).await
+      })
+      .await;
+    let outcome = match maybe_outcome {
+      Some(outcome) => outcome,
+      // No client any more (signed out meanwhile): the export ends with it.
+      None => Err(ExportError::Invalid("the client closed")),
+    };
+    self.export = match outcome {
+      Ok(ExportStep::Continue | ExportStep::RetryAt(_)) => WebExportSlot::Running(run),
+      Ok(ExportStep::Done) => {
+        let WebExportRun { job, sink, file_name } = *run;
+        let progress = job.progress();
+        match sink.finish(&file_name) {
+          Ok(()) => {
+            tracing::info!("the data export was handed to the browser");
+            WebExportSlot::Ended(DataExportStatus::Done { progress, file_name })
+          },
+          Err(error) => {
+            tracing::warn!(%error, "the data export could not be saved");
+            WebExportSlot::Ended(DataExportStatus::Failed {
+              reason: error.failure(),
+              progress,
+            })
+          },
+        }
+      },
+      Err(error) => {
+        let progress = run.job.progress();
+        drop(run);
+        self.forget_export();
+        WebExportSlot::Ended(DataExportStatus::Failed {
+          reason: error.failure(),
+          progress,
+        })
+      },
+    };
+  }
+
+  fn forget_export(&self) {
+    if let Some(store) = &self.store
+      && let Err(error) = ExportJob::forget(store)
+    {
+      tracing::warn!(%error, "could not delete the data export's checkpoint");
+    }
+  }
+
+  /// Answers a request of the export card. The browser can't continue an export a reload ended:
+  /// its pieces went with the page, so `Resume` does nothing and the checkpoint is deleted.
+  fn data_export(&mut self, request: DataExportRequest) -> DataExportStatus {
+    if !matches!(self.export, WebExportSlot::Running(_))
+      && let Some(store) = &self.store
+      && matches!(ExportJob::stored(store), Ok(Some(_)))
+    {
+      tracing::info!("a data export a reload ended was dropped");
+      self.forget_export();
+    }
+    match request {
+      DataExportRequest::Status | DataExportRequest::Resume | DataExportRequest::Discard => {},
+      DataExportRequest::Start { options, labels } => {
+        if let (false, Some(client)) = (
+          matches!(self.export, WebExportSlot::Running(_)),
+          self.client.as_ref(),
+        ) {
+          let file_name = teamcraft_core::export::suggested_file_name(now_ms());
+          self.export = match ExportJob::start(client, options, *labels, file_name.clone()) {
+            Ok(job) => WebExportSlot::Running(Box::new(WebExportRun {
+              job,
+              sink: BlobSink::new(),
+              file_name,
+            })),
+            Err(error) => {
+              tracing::warn!(%error, "the data export could not start");
+              WebExportSlot::Ended(DataExportStatus::Failed {
+                reason: error.failure(),
+                progress: Default::default(),
+              })
+            },
+          };
+        }
+      },
+      DataExportRequest::Cancel => {
+        if matches!(self.export, WebExportSlot::Running(_)) {
+          self.export = WebExportSlot::Ended(DataExportStatus::Cancelled);
+          self.forget_export();
+          tracing::info!("the data export was cancelled");
+        }
+      },
+      DataExportRequest::Dismiss => {
+        if matches!(self.export, WebExportSlot::Ended(_)) {
+          self.export = WebExportSlot::Idle;
+        }
+      },
+    }
+    match &self.export {
+      WebExportSlot::Running(run) => run.job.status(),
+      WebExportSlot::Ended(status) => status.clone(),
+      WebExportSlot::Idle => DataExportStatus::Idle,
+    }
   }
 
   /// One page of a backlog; the UI's reads are answered meanwhile.

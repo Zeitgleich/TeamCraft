@@ -823,6 +823,17 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.inner.key_bag()
   }
 
+  fn personal_data(&self) -> impl Future<Output = Result<PersonalDataResponse, ApiError>> {
+    self.inner.personal_data()
+  }
+
+  fn security_log(
+    &self,
+    query: &ListAuditQuery,
+  ) -> impl Future<Output = Result<ListAuditResponse, ApiError>> {
+    self.inner.security_log(query)
+  }
+
   fn schedule_message(
     &self,
     _conversation: ConversationId,

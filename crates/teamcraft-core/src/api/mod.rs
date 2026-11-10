@@ -93,6 +93,7 @@ use teamcraft_proto::{
   ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
   ProvisionUsersRequest, ProvisionUsersResponse,
 };
+use teamcraft_proto::{ListAuditQuery, ListAuditResponse, PersonalDataResponse};
 use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
 };
@@ -669,6 +670,13 @@ pub trait ServerApi {
   fn put_key_bag(&self, request: &PutKeyBagRequest)
   -> impl Future<Output = Result<KeyBagResponse, ApiError>>;
   fn key_bag(&self) -> impl Future<Output = Result<KeyBagResponse, ApiError>>;
+
+  /// Everything the server holds about the user that it can read (`GET /me/personal-data`), for
+  /// their data export (docs/data-export.md).
+  fn personal_data(&self) -> impl Future<Output = Result<PersonalDataResponse, ApiError>>;
+  /// One page of what happened to the user's account (`GET /me/security-log`), newest first.
+  fn security_log(&self, query: &ListAuditQuery)
+  -> impl Future<Output = Result<ListAuditResponse, ApiError>>;
 
   /// "Send later" (docs/scheduled-messages.md).
   fn schedule_message(

@@ -41,6 +41,10 @@ use teamcraft_proto::{
   PresignAttachmentPartRequest, RegisterPushRequest, ShareLinkResponse,
 };
 use teamcraft_proto::{
+  AuditEntryResponse, ListAuditQuery, ListAuditResponse, PERSONAL_DATA_VERSION, PersonalAccount,
+  PersonalDataResponse,
+};
+use teamcraft_proto::{
   BackgroundDownloadResponse, BackgroundId, CreateBackgroundUploadRequest, CreateBackgroundUploadResponse,
   CreateOrgBackgroundUploadRequest, CreateOrgBackgroundUploadResponse, OrgBackgroundDownloadResponse,
   OrgBackgroundId,
@@ -202,6 +206,8 @@ struct State {
   conversations: BTreeMap<ConversationId, Conversation>,
   welcomes: Vec<MlsMessageResponse>,
   key_bags: HashMap<UserId, KeyBagResponse>,
+  /// What happened to each user's account (`GET /me/security-log`), oldest first.
+  security_logs: HashMap<UserId, Vec<AuditEntryResponse>>,
   /// Held messages with their owners; the real rules are tested against the real server.
   scheduled: Vec<(UserId, ScheduledMessageResponse)>,
   next_scheduled: i64,
@@ -957,6 +963,26 @@ impl FakeServer {
 
   /// While set, this user's REST calls fail but the gateway still connects (REST timing out
   /// behind a flaky proxy, or the sync after `ready` being cut off).
+  /// Adds an entry to `user`'s security log, as the server records what happened to an account.
+  pub fn add_security_log_entry(&self, user: UserId, action: &str) {
+    let mut state = self.lock();
+    let id = state.next_id();
+    let created_at = state.now_ms();
+    state
+      .security_logs
+      .entry(user)
+      .or_default()
+      .push(AuditEntryResponse {
+        id,
+        maybe_actor_user_id: None,
+        action: action.to_owned(),
+        maybe_target_kind: Some("user".into()),
+        maybe_target_id: Some(user.to_string()),
+        detail: "{}".into(),
+        created_at: teamcraft_proto::UnixMillis(created_at),
+      });
+  }
+
   pub fn set_rest_failing(&self, user: UserId, is_failing: bool) {
     let mut state = self.lock();
     if is_failing {
@@ -5357,6 +5383,63 @@ impl ServerApi for FakeServerApi {
         .get(&me)
         .cloned()
         .ok_or_else(|| ApiError::status(404, ErrorCode::KeyBagNotFound, "no key bag"))
+    })
+  }
+
+  async fn personal_data(&self) -> Result<PersonalDataResponse, ApiError> {
+    let spaces = self.list_spaces().await?.spaces;
+    let conversations = self.list_conversations().await?.conversations;
+    self.with(|state, me| {
+      let user = state.user(me)?;
+      Ok(PersonalDataResponse {
+        version: PERSONAL_DATA_VERSION,
+        generated_at: teamcraft_proto::UnixMillis(state.now_ms()),
+        account: PersonalAccount {
+          id: me,
+          maybe_username: user.maybe_username.clone(),
+          display_name: user.display_name.clone(),
+          kind: user.kind.clone(),
+          role: Role::Member,
+          maybe_organization: user.maybe_organization.clone(),
+          created_at: teamcraft_proto::UnixMillis(0),
+          is_deactivated: user.is_deactivated,
+        },
+        maybe_profile: None,
+        maybe_privacy: None,
+        maybe_notification_settings: None,
+        maybe_email_digest: None,
+        maybe_holiday_region: None,
+        devices: Vec::new(),
+        spaces,
+        conversations,
+        scheduled_messages: Vec::new(),
+        maybe_key_bag: None,
+      })
+    })
+  }
+
+  async fn security_log(&self, query: &ListAuditQuery) -> Result<ListAuditResponse, ApiError> {
+    self.with(|state, me| {
+      let limit = query
+        .maybe_limit
+        .map_or(PAGE_SIZE, |limit| limit as usize)
+        .clamp(1, PAGE_SIZE);
+      let newest_first: Vec<&AuditEntryResponse> = state
+        .security_logs
+        .get(&me)
+        .map(|entries| entries.iter().rev().collect())
+        .unwrap_or_default();
+      let selected: Vec<AuditEntryResponse> = newest_first
+        .into_iter()
+        .filter(|entry| query.maybe_before.is_none_or(|before| entry.id < before))
+        .take(limit + 1)
+        .cloned()
+        .collect();
+      let has_more = selected.len() > limit;
+      Ok(ListAuditResponse {
+        entries: selected.into_iter().take(limit).collect(),
+        has_more,
+      })
     })
   }
 

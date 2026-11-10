@@ -23,6 +23,7 @@ Read before changing behaviour:
 | [docs/webhooks.md](docs/webhooks.md)                     | Outgoing webhooks: signed metadata events to external systems |
 | [docs/meetings.md](docs/meetings.md)                     | Meetings, invitations, guests and lobby                       |
 | [docs/scheduled-messages.md](docs/scheduled-messages.md) | Send later: client-held, what the server learns               |
+| [docs/data-export.md](docs/data-export.md)               | Export my data: archive format, GDPR mapping, compliance gap  |
 | [docs/bug-reports.md](docs/bug-reports.md)               | Report a problem: encrypted delivery, redacted debug log      |
 | [docs/crash-reports.md](docs/crash-reports.md)           | Crash reports: Sentry envelopes, scrubbing, queue, symbols    |
 | [docs/tracing.md](docs/tracing.md)                       | Tracing: spans from FFI, store, HTTP to the server            |

@@ -56,6 +56,7 @@ pub mod oidc_status;
 pub mod org_backgrounds;
 pub mod org_recovery;
 pub mod permission_scheme;
+pub mod personal_data;
 pub mod presence;
 pub mod profiles;
 pub mod provider_events;

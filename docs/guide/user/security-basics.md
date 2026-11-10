@@ -68,6 +68,15 @@ and *Settings > About* shows the version and the release key it was verified aga
 changed files, but a server that replaces the checker itself could still serve you a modified app.
 For the strongest protection use the desktop or mobile app, which carry their own code.
 
+## Export your data
+
+*Settings > Account > Your data* saves a copy of your account, your settings and your conversations
+as a ZIP file. Because messages are end-to-end encrypted, your own device does this: it decrypts what
+you can read and writes the file, with what the server knows about you. Choose only your own messages
+or every message you can read, and whether the files you sent go in. Long histories take a while; you
+can keep working, and on the desktop an export that was interrupted can continue. The file is **not
+encrypted**: keep it somewhere safe. What is in it: [data-export.md](../../data-export.md).
+
 ## Status
 
 The key-change banner and safety numbers are computed from the client core's data. Verification

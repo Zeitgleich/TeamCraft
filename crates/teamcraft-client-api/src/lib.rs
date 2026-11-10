@@ -22,6 +22,7 @@ pub mod composer_format;
 pub mod crash_reporting;
 pub mod custom_emoji;
 pub mod custom_status;
+pub mod data_export;
 pub mod debug_log;
 pub mod drafts;
 pub mod emoji;

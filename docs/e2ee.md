@@ -5907,6 +5907,10 @@ protocol change:
   deletion for selected users/conversations) and retention enforcement on its copy.
 - Credential type `system:archive` is reserved in the MLS credentials from the start.
 
+Not built yet (issue #211). What exists: each user's own export, written by their own device from
+what it can decrypt, and the server's record of them (`GET /me/personal-data`); see
+[data-export.md](data-export.md). Without the vault node an admin can't export anybody's messages.
+
 ## 12. Link previews
 
 - The **sender's client** generates the preview (title, description, image), so pages behind a login
