@@ -139,6 +139,7 @@ pub fn invite_response(invite: &Invite) -> InviteResponse {
     channel_ids: invite.channel_ids.clone(),
     sponsor_user_id: invite.sponsor_user_id,
     maybe_expires_at: invite.maybe_expires_at.map(unix_millis),
+    maybe_mail: None,
   }
 }
 

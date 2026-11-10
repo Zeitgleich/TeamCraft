@@ -52,4 +52,6 @@
   <string name="invite_message_label">Persönliche Notiz (optional)</string>
   <string name="invite_submit">Einladung senden</string>
   <string name="invite_sent">Einladung an %1$s gesendet</string>
+  <string name="invite_mail_not_sent">Die Einladung für %1$s wurde angelegt, aber die E-Mail konnte nicht gesendet werden. Sende sie später erneut.</string>
+  <string name="invite_mail_done">Fertig</string>
 </resources>

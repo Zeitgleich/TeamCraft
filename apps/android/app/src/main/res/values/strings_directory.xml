@@ -55,4 +55,6 @@
   <string name="invite_message_label">Personal note (optional)</string>
   <string name="invite_submit">Send invitation</string>
   <string name="invite_sent">Invitation sent to %1$s</string>
+  <string name="invite_mail_not_sent">The invitation for %1$s was created, but the e-mail could not be sent. Resend later.</string>
+  <string name="invite_mail_done">Done</string>
 </resources>

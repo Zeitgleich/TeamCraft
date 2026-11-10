@@ -1788,11 +1788,20 @@ fn SpaceMembersSection(space: Space) -> impl IntoView {
             <span class="grow"></span>
             {can_manage.then(|| {
               let invite_id = invite.id;
+              let can_resend = invite.mail.can_resend();
               view! {
+                {can_resend.then(|| view! {
+                  <button type="button" class="btn btn-small" on:click=move |_| state.write(|backend| backend.resend_space_invite(id, invite_id))>
+                    {move || i18n.t("space-invite-resend")}
+                  </button>
+                })}
                 <button type="button" class="btn btn-small" on:click=move |_| state.write(|backend| backend.revoke_space_invite(id, invite_id))>
                   {move || i18n.t("space-invite-revoke")}
                 </button>
               }
+            })}
+            {invite.mail.is_missing().then(|| view! {
+              <p class="field-error settings-member-note" role="status">{move || i18n.t("space-invite-mail-unsent")}</p>
             })}
           </li>
         </For>

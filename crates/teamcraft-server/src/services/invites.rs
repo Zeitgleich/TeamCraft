@@ -4,8 +4,8 @@ use serde_json::json;
 use teamcraft_db::{DirectoryInvitationFilter, NewInvite, SpaceListing};
 use teamcraft_proto::{
   ConversationKind, CreateInviteRequest, DirectoryInvitation, DirectoryInvitationsQuery,
-  DirectoryInvitationsResponse, InviteId, InviteResponse, ListInvitesResponse, Permission, SpaceId,
-  SpaceRole, Target, UserId,
+  DirectoryInvitationsResponse, InviteId, InviteMail, InviteResponse, ListInvitesResponse, Permission,
+  SpaceId, SpaceRole, Target, UserId,
 };
 use time::OffsetDateTime;
 use tracing::warn;
@@ -118,7 +118,7 @@ pub async fn create_invite(
     &json!({"role": invite.role.as_str()}),
   )
   .await?;
-  if should_send_mail {
+  let mail = if should_send_mail {
     send_invite_mail(
       state,
       caller,
@@ -127,9 +127,14 @@ pub async fn create_invite(
       &invite,
       maybe_message.as_deref(),
     )
-    .await;
-  }
-  Ok(invite_response(&invite))
+    .await
+  } else {
+    InviteMail::NoMailServer
+  };
+  Ok(InviteResponse {
+    maybe_mail: Some(mail),
+    ..invite_response(&invite)
+  })
 }
 
 /// The channels an invite lists must be channels of the space.
@@ -192,7 +197,8 @@ pub(super) async fn inviter_brand(state: &AppState, user: &UserId) -> Arc<Brand>
 }
 
 /// Mails the invitee, if the server has a mail server. A failure is logged and does not undo the
-/// invite: it is applied at sign-in anyway.
+/// invite (it is applied at sign-in anyway); the outcome goes into the answer, so that the inviter
+/// learns that the mail did not go out.
 async fn send_invite_mail(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -200,13 +206,17 @@ async fn send_invite_mail(
   space_name: &str,
   invite: &teamcraft_db::Invite,
   maybe_message: Option<&str>,
-) {
+) -> InviteMail {
   let Some(mailer) = state.mailer_for(brand) else {
-    return;
+    return InviteMail::NoMailServer;
   };
   let mail = invite_mail(state, caller, brand, space_name, invite, maybe_message);
-  if let Err(error) = mailer.send(&mail).await {
-    warn!(%error, invite_id = %invite.id, "sending the invitation e-mail failed");
+  match mailer.send(&mail).await {
+    Ok(()) => InviteMail::Sent,
+    Err(error) => {
+      warn!(%error, invite_id = %invite.id, "sending the invitation e-mail failed");
+      InviteMail::NotSent
+    },
   }
 }
 

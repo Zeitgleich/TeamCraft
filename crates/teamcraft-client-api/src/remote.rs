@@ -1159,6 +1159,10 @@ pub enum ChatAction {
     space: SpaceId,
     invite: crate::model::InviteId,
   },
+  ResendSpaceInvite {
+    space: SpaceId,
+    invite: crate::model::InviteId,
+  },
   SetThreadFollowed {
     conversation: ConversationId,
     thread: ThreadId,
@@ -1555,6 +1559,7 @@ impl ChatAction {
       Self::RefreshChannelRoles { conversation } => backend.refresh_channel_roles(conversation),
       Self::RemoveSpaceMember { space, user } => backend.remove_space_member(space, user),
       Self::RevokeSpaceInvite { space, invite } => backend.revoke_space_invite(space, invite),
+      Self::ResendSpaceInvite { space, invite } => backend.resend_space_invite(space, invite),
       Self::SaveSearch { name, query } => backend.save_search(&name, &query),
       Self::DeleteSavedSearch { id } => backend.delete_saved_search(id),
       Self::WriteSettings { writes } => backend.write_settings(writes),

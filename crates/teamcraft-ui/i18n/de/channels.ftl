@@ -134,6 +134,8 @@ space-members-loading = Mitglieder werden geladen…
 space-members-hidden = Nur Mitglieder des Space sehen, wer darin ist.
 space-invites-pending = Offene Einladungen
 space-invite-revoke = Zurückziehen
+space-invite-resend = Erneut senden
+space-invite-mail-unsent = Die Einladung wurde angelegt, aber die E-Mail konnte nicht gesendet werden. Sende sie später erneut.
 space-role = Rolle
 space-role-member = Mitglied
 space-role-admin = Space-Admin
@@ -257,6 +259,10 @@ invite-message-hint = Wird den Einladungs-E-Mails hinzugefügt.
 invite-done = { $count ->
     [one] { $count } Person eingeladen.
    *[other] { $count } Personen eingeladen.
+  }
+invite-mail-unsent = { $count ->
+    [one] Die Einladung wurde angelegt, aber ihre E-Mail konnte nicht gesendet werden. Sende sie in der Mitgliederliste des Space erneut.
+   *[other] { $count } Einladungen wurden angelegt, aber ihre E-Mails konnten nicht gesendet werden. Sende sie in der Mitgliederliste des Space erneut.
   }
 invite-link = Space-Link
 invite-link-copy = Link kopieren

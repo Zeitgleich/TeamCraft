@@ -349,6 +349,16 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
   let emails = RwSignal::new(String::new());
   let message = RwSignal::new(String::new());
   let status = RwSignal::new(InviteStatus::Editing);
+  // The addresses the core took in this round, to tell whether their e-mails went out.
+  let created_for = RwSignal::new(Vec::<String>::new());
+  let unsent_count = move || {
+    let created = created_for.get();
+    state
+      .read(|backend| backend.space_invites(space))
+      .iter()
+      .filter(|invite| invite.mail.is_missing() && created.contains(&invite.email))
+      .count()
+  };
   // How many of the sent invitations the core hasn't answered yet, and the last refusal (also
   // shown as a toast, issue #322).
   let in_flight = RwSignal::new(0_usize);
@@ -402,6 +412,7 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
     let maybe_message = Some(message.get_untracked().trim().to_owned()).filter(|text| !text.is_empty());
     let count = users.len() + addresses.len();
     status.set(InviteStatus::Editing);
+    created_for.set(Vec::new());
     last_failure.set(None);
     // Each part reports on its own: what went through leaves the form, so "send" again only sends
     // what failed (a second invitation mail must not go out). The dialog may be gone by then,
@@ -454,6 +465,7 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
         move |maybe_failure| {
           if maybe_failure.is_none() {
             let _ = emails.try_update(|text| *text = without_address(text, &sent));
+            let _ = created_for.try_update(|list| list.push(sent.clone()));
           }
           finish_one(maybe_failure);
         },
@@ -520,7 +532,13 @@ pub fn InvitePeopleDialog(space: SpaceId) -> impl IntoView {
             <footer class="modal-foot">
               // Reported once the core answered without a failure.
               {move || match status.get() {
-                InviteStatus::Sent { count } => view! { <span role="status">{i18n.t_count("invite-done", count)}</span> }.into_any(),
+                InviteStatus::Sent { count } => view! {
+                  <span role="status">{i18n.t_count("invite-done", count)}</span>
+                  // The invitation exists either way; say so when its e-mail did not go out.
+                  {move || (unsent_count() != 0).then(|| view! {
+                    <span class="field-error" role="alert">{i18n.t_count("invite-mail-unsent", unsent_count())}</span>
+                  })}
+                }.into_any(),
                 InviteStatus::Editing => view! {
                   // Refusals that belong to no field; an address refusal shows at the addresses.
                   {move || last_failure.get().filter(|failure| !is_address_refusal(failure)).map(|failure| view! { <span class="field-error" role="alert">{failure_message(i18n, &failure)}</span> })}
