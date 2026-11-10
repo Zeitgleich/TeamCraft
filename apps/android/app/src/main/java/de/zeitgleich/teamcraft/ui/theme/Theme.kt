@@ -2,7 +2,8 @@ package de.zeitgleich.teamcraft.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MaterialExpressiveTheme
+import androidx.compose.material3.MotionScheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -17,6 +18,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.material3.ColorScheme
 import androidx.compose.ui.graphics.Color
+import de.zeitgleich.teamcraft.ui.rememberMotionReduced
 import uniffi.teamcraft_ffi.AppThemePolicy
 import uniffi.teamcraft_ffi.AppThemeTokens
 import uniffi.teamcraft_ffi.BrandAccent
@@ -49,6 +51,34 @@ private val Light = lightColorScheme(
   outline = Color(0xFF858585),
   outlineVariant = Color(0xFFDDDDDD),
   error = Color(0xFFC0392B),
+  errorContainer = Color(0xFFFFDAD5),
+  onErrorContainer = Color(0xFF8C1D12),
+  // The roles below are Material's lavender by default; expressive components (toggle buttons,
+  // FAB menus, toolbars, loading indicators) use them, so they derive from the brand blue too.
+  inversePrimary = Color(0xFFB2C5FF),
+  secondary = Color(0xFF545F71),
+  onSecondary = Color(0xFFFFFFFF),
+  tertiary = Color(0xFF00677F),
+  onTertiary = Color(0xFFFFFFFF),
+  tertiaryContainer = Color(0xFFB7EAFF),
+  onTertiaryContainer = Color(0xFF004D61),
+  surfaceTint = Color(0xFF005DFC),
+  inverseSurface = Color(0xFF2F2F2F),
+  inverseOnSurface = Color(0xFFF2F2F2),
+  surfaceBright = Color(0xFFFFFFFF),
+  surfaceDim = Color(0xFFDCDCDC),
+  primaryFixed = FixedRoles.primaryFixed,
+  primaryFixedDim = FixedRoles.primaryFixedDim,
+  onPrimaryFixed = FixedRoles.onPrimaryFixed,
+  onPrimaryFixedVariant = FixedRoles.onPrimaryFixedVariant,
+  secondaryFixed = FixedRoles.secondaryFixed,
+  secondaryFixedDim = FixedRoles.secondaryFixedDim,
+  onSecondaryFixed = FixedRoles.onSecondaryFixed,
+  onSecondaryFixedVariant = FixedRoles.onSecondaryFixedVariant,
+  tertiaryFixed = FixedRoles.tertiaryFixed,
+  tertiaryFixedDim = FixedRoles.tertiaryFixedDim,
+  onTertiaryFixed = FixedRoles.onTertiaryFixed,
+  onTertiaryFixedVariant = FixedRoles.onTertiaryFixedVariant,
 )
 
 private val Dark = darkColorScheme(
@@ -72,7 +102,52 @@ private val Dark = darkColorScheme(
   outline = Color(0xFF7A7A7A),
   outlineVariant = Color(0xFF363636),
   error = Color(0xFFFF7A6B),
+  errorContainer = Color(0xFF5C1A13),
+  onErrorContainer = Color(0xFFFFDAD5),
+  inversePrimary = Color(0xFF005DFC),
+  secondary = Color(0xFFBCC7DC),
+  onSecondary = Color(0xFF263141),
+  tertiary = Color(0xFF5DD5FC),
+  onTertiary = Color(0xFF003544),
+  tertiaryContainer = Color(0xFF004D61),
+  onTertiaryContainer = Color(0xFFB7EAFF),
+  surfaceTint = Color(0xFF5C9DFF),
+  inverseSurface = Color(0xFFE6E6E6),
+  inverseOnSurface = Color(0xFF2A2A2A),
+  surfaceBright = Color(0xFF3A3A3A),
+  surfaceDim = Color(0xFF161616),
+  primaryFixed = FixedRoles.primaryFixed,
+  primaryFixedDim = FixedRoles.primaryFixedDim,
+  onPrimaryFixed = FixedRoles.onPrimaryFixed,
+  onPrimaryFixedVariant = FixedRoles.onPrimaryFixedVariant,
+  secondaryFixed = FixedRoles.secondaryFixed,
+  secondaryFixedDim = FixedRoles.secondaryFixedDim,
+  onSecondaryFixed = FixedRoles.onSecondaryFixed,
+  onSecondaryFixedVariant = FixedRoles.onSecondaryFixedVariant,
+  tertiaryFixed = FixedRoles.tertiaryFixed,
+  tertiaryFixedDim = FixedRoles.tertiaryFixedDim,
+  onTertiaryFixed = FixedRoles.onTertiaryFixed,
+  onTertiaryFixedVariant = FixedRoles.onTertiaryFixedVariant,
 )
+
+/**
+ * Material's "fixed" roles keep their tone in light and dark (FAB menus, vibrant toolbars); tones of
+ * the brand blue (primary), a blue gray (secondary) and a cyan (tertiary).
+ */
+private object FixedRoles {
+  val primaryFixed = Color(0xFFDAE2FF)
+  val primaryFixedDim = Color(0xFFB2C5FF)
+  val onPrimaryFixed = Color(0xFF001849)
+  val onPrimaryFixedVariant = Color(0xFF0040A8)
+  val secondaryFixed = Color(0xFFD8E3F8)
+  val secondaryFixedDim = Color(0xFFBCC7DC)
+  val onSecondaryFixed = Color(0xFF111C2B)
+  val onSecondaryFixedVariant = Color(0xFF3C4758)
+  val tertiaryFixed = Color(0xFFB7EAFF)
+  val tertiaryFixedDim = Color(0xFF5DD5FC)
+  val onTertiaryFixed = Color(0xFF001F28)
+  val onTertiaryFixedVariant = Color(0xFF004D61)
+}
 
 /** Colors outside Material's scheme: the dark sidebar chrome, badges, mentions. */
 @Immutable
@@ -116,7 +191,9 @@ val LocalTeamCraftColors = staticCompositionLocalOf { LightExtra }
 val LocalThemePolicy = staticCompositionLocalOf<AppThemePolicy?> { null }
 
 /**
- * The app's theme. [maybeBrand]: the server's brand, whose accent colors (branding.md §4) replace
+ * The app's theme: Material 3 Expressive (issue #454) with TeamCraft's colours. Motion is the
+ * expressive spring scheme, or the standard one without overshoot when the system's "remove
+ * animations" is on. [maybeBrand]: the server's brand, whose accent colors (branding.md §4) replace
  * TeamCraft's teal; status, danger and text colors stay the app's own.
  */
 @Composable
@@ -127,6 +204,7 @@ fun TeamCraftTheme(maybeBrand: LoginBrand? = null, content: @Composable () -> Un
   val isDynamic by prefs.isDynamicColor.collectAsState()
   val colorTheme by prefs.colorThemeValue.collectAsState()
   val font by prefs.fontValue.collectAsState()
+  val isMotionReduced = rememberMotionReduced()
   val typography = remember(font) { appFontFamily(font)?.let(TeamCraftTypography::withFontFamily) ?: TeamCraftTypography }
   val maybePolicy = maybeBrand?.themePolicy
   // A chosen colour theme (#202): the accent, selection, badge and presence; surfaces stay neutral.
@@ -152,13 +230,20 @@ fun TeamCraftTheme(maybeBrand: LoginBrand? = null, content: @Composable () -> Un
     LocalStatusBarBackdrop provides backdrop,
     LocalThemePolicy provides maybePolicy,
   ) {
-    MaterialTheme(colorScheme = scheme, typography = typography, shapes = TeamCraftShapes, content = content)
+    MaterialExpressiveTheme(
+      colorScheme = scheme,
+      motionScheme = if (isMotionReduced) MotionScheme.standard() else MotionScheme.expressive(),
+      shapes = TeamCraftShapes,
+      typography = typography,
+      content = content,
+    )
   }
 }
 
 /** A colour theme's accent tokens over the scheme (the core checked their contrast). */
 private fun ColorScheme.withTheme(theme: AppThemeTokens): ColorScheme = copy(
   primary = rgb(theme.accent),
+  surfaceTint = rgb(theme.accent),
   onPrimary = rgb(theme.onAccent),
   primaryContainer = rgb(theme.accentSoft),
   onPrimaryContainer = rgb(theme.accentStrong),
@@ -182,8 +267,10 @@ private fun ColorScheme.withAccent(maybeAccent: BrandAccent?): ColorScheme {
   fun pick(maybeHex: String?, fallback: Color) = maybeHex?.let(::brandArgb)?.let { Color(it) } ?: fallback
   val soft = pick(accent.maybeAccentSoft, primaryContainer)
   val strong = pick(accent.maybeAccentStrong, onPrimaryContainer)
+  val accentColor = pick(accent.maybeAccent, primary)
   return copy(
-    primary = pick(accent.maybeAccent, primary),
+    primary = accentColor,
+    surfaceTint = accentColor,
     onPrimary = pick(accent.maybeOnAccent, onPrimary),
     primaryContainer = soft,
     onPrimaryContainer = strong,

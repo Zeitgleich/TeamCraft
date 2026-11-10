@@ -4,7 +4,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -12,6 +11,10 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.LoadingIndicatorDefaults
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -66,8 +69,10 @@ val ScreenInsets: WindowInsets
 val TopBarInsets: WindowInsets
   @Composable get() = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
 
-/** The top bar of the screens behind the main one: back, title and actions on the theme's surface. */
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * The top bar of the screens behind the main one: back, title and actions on the theme's surface.
+ * A subtitle uses Material's expressive two-line bar (issue #454).
+ */
 @Composable
 fun ChromeTopBar(
   title: String,
@@ -76,40 +81,41 @@ fun ChromeTopBar(
   actions: @Composable RowScope.() -> Unit = {},
   maybeIcon: (@Composable () -> Unit)? = null,
 ) {
-  TopAppBar(
-    title = {
-      androidx.compose.foundation.layout.Row(
-        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
-      ) {
-        maybeIcon?.invoke()
-        androidx.compose.foundation.layout.Column {
-          Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.semantics { heading() })
-          maybeSubtitle?.takeIf { it.isNotBlank() }?.let {
-            Text(
-              it,
-              maxLines = 1,
-              overflow = TextOverflow.Ellipsis,
-              style = MaterialTheme.typography.bodySmall,
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-          }
-        }
+  val titleSlot = @Composable {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      maybeIcon?.invoke()
+      Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.semantics { heading() })
+    }
+  }
+  val navigationIcon = @Composable {
+    if (maybeOnBack != null) {
+      IconButton(onClick = maybeOnBack) {
+        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.back))
       }
-    },
-    navigationIcon = {
-      if (maybeOnBack != null) {
-        IconButton(onClick = maybeOnBack) {
-          Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.back))
-        }
-      }
-    },
-    actions = actions,
-    windowInsets = TopBarInsets,
-    // The theme's surface, as on the main screen: one header style in light and dark (the status
-    // bar icons follow the theme).
-    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
-  )
+    }
+  }
+  // The theme's surface, as on the main screen: one header style in light and dark (the status
+  // bar icons follow the theme).
+  val colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+  val maybeSubtitleText = maybeSubtitle?.takeIf { it.isNotBlank() }
+  if (maybeSubtitleText == null) {
+    TopAppBar(
+      title = titleSlot,
+      navigationIcon = navigationIcon,
+      actions = actions,
+      windowInsets = TopBarInsets,
+      colors = colors,
+    )
+  } else {
+    TopAppBar(
+      title = titleSlot,
+      subtitle = { Text(maybeSubtitleText, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+      navigationIcon = navigationIcon,
+      actions = actions,
+      windowInsets = TopBarInsets,
+      colors = colors,
+    )
+  }
 }
 
 /**
@@ -261,3 +267,17 @@ private const val COUNTDOWN_MILLIS = 1_000L
 /** How long syncing goes on before [SyncingLine] shows it. */
 private const val SYNCING_LINE_DELAY_MILLIS = 300L
 private val SYNCING_LINE_HEIGHT = 2.dp
+
+/**
+ * Material 3 Expressive's loading indicator (issue #454) for a screen or pane whose content is
+ * coming: the morphing shape instead of a spinner. Small waits inside buttons and rows keep the
+ * thin circular indicator.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun PageLoadingIndicator(
+  modifier: Modifier = Modifier,
+  color: Color = LoadingIndicatorDefaults.indicatorColor,
+) {
+  LoadingIndicator(modifier = modifier, color = color)
+}

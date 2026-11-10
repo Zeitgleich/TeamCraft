@@ -37,7 +37,6 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -69,6 +68,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import de.zeitgleich.teamcraft.ui.screens.PageLoadingIndicator
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.MediaAccess
 import de.zeitgleich.teamcraft.ui.RecentMediaItem
@@ -178,7 +178,7 @@ private fun Albums(isPartial: Boolean, onMore: () -> Unit, onAlbum: (MediaAlbumR
   val maybeAlbums by produceState<List<MediaAlbum>?>(null) { value = MediaLibrary.albums(context) }
   val albums = maybeAlbums
   if (albums == null) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { PageLoadingIndicator() }
     return
   }
   LazyVerticalGrid(
@@ -214,7 +214,7 @@ private fun AlbumGrid(album: MediaAlbumRef, draft: MediaDraft, isFull: Boolean, 
   val maybeItems by produceState<List<RecentMediaItem>?>(null, album) { value = MediaLibrary.items(context, album) }
   val items = maybeItems
   if (items == null) {
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { PageLoadingIndicator() }
     return
   }
   val selected = draft.items.map { it.uri }

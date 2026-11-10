@@ -34,6 +34,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.ui.theme.rememberScreenTransitions
 import de.zeitgleich.teamcraft.ui.screens.BrowseScreen
 import de.zeitgleich.teamcraft.ui.screens.DirectoryScreen
 import de.zeitgleich.teamcraft.ui.screens.ChatListScreen
@@ -290,7 +291,15 @@ private fun ReadyNavigation(
     if (maybeShare != null) navigation.navigate("share") { launchSingleTop = true }
   }
   CrashReportsNotice(viewModel.crashReports, onSettings = { navigation.navigate("settings/security") })
-  NavHost(navController = navigation, startDestination = "chats") {
+  val transitions = rememberScreenTransitions()
+  NavHost(
+    navController = navigation,
+    startDestination = "chats",
+    enterTransition = transitions.enter,
+    exitTransition = transitions.exit,
+    popEnterTransition = transitions.popEnter,
+    popExitTransition = transitions.popExit,
+  ) {
     composable("chats") {
       // Wide windows (tablets, unfolded foldables, landscape) show the conversation next to the list.
       val isWide = LocalConfiguration.current.screenWidthDp >= TWO_PANE_MIN_WIDTH_DP

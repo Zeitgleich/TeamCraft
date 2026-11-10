@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -105,7 +104,7 @@ fun ChannelMembersSheet(viewModel: MainViewModel, conversationId: String, onDism
         }
       }
       if (info == null) {
-        item { CircularProgressIndicator(Modifier.padding(Spacing.l).size(24.dp)) }
+        item { PageLoadingIndicator(Modifier.padding(Spacing.l)) }
         return@LazyColumn
       }
       if (info.hasRoleAlarm) {

@@ -21,7 +21,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -142,7 +141,7 @@ private fun BoxScope.VideoContent(viewModel: MainViewModel, target: PictureTarge
   val file = maybeFile
   val maybePath = file?.transfer?.path?.takeIf { file.transfer.state == "local" }
   when {
-    file == null -> if (isRead) Notice(stringResource(R.string.file_gone)) else CircularProgressIndicator(Modifier.align(Alignment.Center), color = Color.White)
+    file == null -> if (isRead) Notice(stringResource(R.string.file_gone)) else PageLoadingIndicator(Modifier.align(Alignment.Center), color = Color.White)
     isUnplayable -> Notice(stringResource(R.string.video_unplayable)) {
       val context = LocalContext.current
       maybePath?.let { path ->
@@ -172,7 +171,7 @@ private fun BoxScope.DownloadProgress(file: FileInfo) {
     Text(stringResource(R.string.video_loading, Formatter.formatShortFileSize(context, file.sizeBytes)), color = Color.White)
     file.transfer.maybeProgress?.let { progress ->
       LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
-    } ?: CircularProgressIndicator(color = Color.White)
+    } ?: PageLoadingIndicator(color = Color.White)
   }
 }
 

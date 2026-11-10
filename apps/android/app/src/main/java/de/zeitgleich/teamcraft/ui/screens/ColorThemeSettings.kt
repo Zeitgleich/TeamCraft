@@ -22,7 +22,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -68,6 +67,9 @@ import uniffi.teamcraft_ffi.colorThemeShareCode
 import uniffi.teamcraft_ffi.colorThemeSurprise
 import uniffi.teamcraft_ffi.colorThemeTokens
 import kotlin.random.Random
+
+/** Presets or the user's own colours. */
+private val THEME_MODE_CHOICES = listOf(false to R.string.color_theme_presets, true to R.string.color_theme_custom)
 
 /** The app's own colours (navigation, selection, presence, notifications), where custom starts. */
 private val PRODUCT_COLORS = listOf(0x1A2434u, 0x0064FCu, 0x2EB67Du, 0xC8441Du)
@@ -117,24 +119,13 @@ fun ColorThemeSetting() {
       )
     }
     if (canCustomize) {
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilterChip(
-          selected = !isCustom,
-          onClick = { wantsCustom = false },
-          label = { Text(stringResource(R.string.color_theme_presets)) },
-        )
-        FilterChip(
-          selected = isCustom,
-          onClick = {
-            wantsCustom = true
-            // Custom starts from what is on screen, so the switch itself changes nothing.
-            if (!value.startsWith(CUSTOM_PREFIX)) {
-              val onScreen = maybePolicy?.let { colorThemeEffective(value, it) } ?: value
-              colorThemeCustom(colorThemeColors(onScreen) ?: PRODUCT_COLORS)?.let(prefs::setColorTheme)
-            }
-          },
-          label = { Text(stringResource(R.string.color_theme_custom)) },
-        )
+      ChoiceButtonGroup(THEME_MODE_CHOICES, selected = isCustom) { custom ->
+        wantsCustom = custom
+        // Custom starts from what is on screen, so the switch itself changes nothing.
+        if (custom && !value.startsWith(CUSTOM_PREFIX)) {
+          val onScreen = maybePolicy?.let { colorThemeEffective(value, it) } ?: value
+          colorThemeCustom(colorThemeColors(onScreen) ?: PRODUCT_COLORS)?.let(prefs::setColorTheme)
+        }
       }
     }
     if (isCustom) {

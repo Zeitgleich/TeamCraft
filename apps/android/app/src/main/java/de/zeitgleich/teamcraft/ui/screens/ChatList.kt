@@ -1423,7 +1423,8 @@ private fun SwipeableConversationRow(
         SwipeToDismissBoxValue.EndToStart -> actions.toggleFavorite()
         SwipeToDismissBoxValue.Settled -> Unit
       }
-      haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+      // The swipe did its action (Material haptics: confirm, not a long press).
+      haptics.performHapticFeedback(HapticFeedbackType.Confirm)
       // Never removed: the row snaps back.
       scope.launch { state.reset() }
     },

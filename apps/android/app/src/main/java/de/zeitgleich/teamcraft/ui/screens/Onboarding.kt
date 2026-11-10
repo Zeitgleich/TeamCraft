@@ -70,7 +70,7 @@ internal val LOGO_MAX_HEIGHT = 96.dp
 
 @Composable
 fun LoadingScreen() {
-  Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+  Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { PageLoadingIndicator() }
 }
 
 @Composable
@@ -386,7 +386,7 @@ fun LinkThisDeviceScreen(
         },
       )
       Text(stringResource(R.string.link_confirm_on_other))
-      CircularProgressIndicator()
+      PageLoadingIndicator()
     }
     OutlinedButton(onClick = onCancel) { Text(stringResource(R.string.cancel)) }
   }
