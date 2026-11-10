@@ -325,7 +325,8 @@ fun LinkThisDeviceScreen(
   var ask by remember(state.attempt) { mutableStateOf(LinkAsk.IDLE) }
   var isScanning by rememberSaveable(state.attempt) { mutableStateOf(false) }
   if (isScanning) {
-    Dialog(onDismissRequest = { isScanning = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    // Full screen and edge to edge: the surface fills the system bars, the scanner keeps clear of them.
+    Dialog(onDismissRequest = { isScanning = false }, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
       Surface(Modifier.fillMaxSize()) {
         // Without a camera the prompt above is the way: it needs none.
         QrScanner(
@@ -334,6 +335,7 @@ fun LinkThisDeviceScreen(
             onScanned(scanned)
           },
           onCancel = { isScanning = false },
+          modifier = Modifier.safeDrawingPadding(),
         )
       }
     }

@@ -1,5 +1,9 @@
 package de.zeitgleich.teamcraft.calls
 
+import androidx.compose.foundation.layout.plus
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.WindowInsets
 import android.graphics.Bitmap
 import android.os.SystemClock
 import android.provider.Settings
@@ -293,8 +297,9 @@ private fun GridStage(ui: CallUiState) {
   if (tiles.size > GRID_FIXED_MAX) {
     LazyVerticalGrid(
       columns = GridCells.Fixed(columns),
-      modifier = Modifier.fillMaxSize().safeDrawingPadding(),
-      contentPadding = padding,
+      modifier = Modifier.fillMaxSize(),
+      // Edge to edge: the tiles scroll behind the system bars and the first and last keep clear of them.
+      contentPadding = WindowInsets.safeDrawing.asPaddingValues() + padding,
       horizontalArrangement = Arrangement.spacedBy(GRID_GAP),
       verticalArrangement = Arrangement.spacedBy(GRID_GAP),
     ) {

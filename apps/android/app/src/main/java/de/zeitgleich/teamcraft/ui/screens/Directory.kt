@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.annotation.StringRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -121,17 +123,29 @@ fun DirectoryScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: 
     topBar = { ChromeTopBar(title = stringResource(R.string.directory_title), maybeOnBack = onBack) },
     snackbarHost = { SnackbarHost(snackbars) },
   ) { padding ->
-    DirectoryContent(viewModel, maybeSpaceId = null, onOpen = onOpen, modifier = Modifier.fillMaxSize().padding(padding))
+    DirectoryContent(
+      viewModel,
+      maybeSpaceId = null,
+      onOpen = onOpen,
+      modifier = Modifier.fillMaxSize().padding(padding.withoutBottom()).consumeWindowInsets(padding),
+      contentPadding = padding.bottomOnly(),
+    )
   }
 }
 
 /**
  * People, channels, external people and invitations, each paged from the server (#1337). With
  * [maybeSpaceId] every list shows that space only (a space's People view); without, all the user's
- * spaces.
+ * spaces. The lists take [contentPadding] (the bottom inset): they scroll behind the navigation bar.
  */
 @Composable
-fun DirectoryContent(viewModel: MainViewModel, maybeSpaceId: String?, onOpen: (String) -> Unit, modifier: Modifier = Modifier) {
+fun DirectoryContent(
+  viewModel: MainViewModel,
+  maybeSpaceId: String?,
+  onOpen: (String) -> Unit,
+  modifier: Modifier = Modifier,
+  contentPadding: PaddingValues = PaddingValues(),
+) {
   val changes by viewModel.changeCount.collectAsState()
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
   LaunchedEffect(changes) { viewModel.readChat { snapshot() }?.let { snapshot = it } }
@@ -160,11 +174,11 @@ fun DirectoryContent(viewModel: MainViewModel, maybeSpaceId: String?, onOpen: (S
           // A guest sees no roster of a space, only the people they share a conversation with.
           DirectoryHint(R.string.space_people_hidden)
         } else {
-          PeopleList(viewModel, spaceId, if (isGuest) DirectoryPeopleKind.EVERYBODY else DirectoryPeopleKind.MEMBERS, snapshot, onOpen, onInvite)
+          PeopleList(viewModel, spaceId, if (isGuest) DirectoryPeopleKind.EVERYBODY else DirectoryPeopleKind.MEMBERS, snapshot, onOpen, onInvite, contentPadding)
         }
-      DirectoryTab.External -> PeopleList(viewModel, spaceId, DirectoryPeopleKind.GUESTS, snapshot, onOpen, onInvite)
-      DirectoryTab.Channels -> ChannelList(viewModel, spaceId, snapshot, onOpen)
-      DirectoryTab.Invitations -> InvitationList(viewModel, spaceId, invitationsGeneration, onInvite)
+      DirectoryTab.External -> PeopleList(viewModel, spaceId, DirectoryPeopleKind.GUESTS, snapshot, onOpen, onInvite, contentPadding)
+      DirectoryTab.Channels -> ChannelList(viewModel, spaceId, snapshot, onOpen, contentPadding)
+      DirectoryTab.Invitations -> InvitationList(viewModel, spaceId, invitationsGeneration, onInvite, contentPadding)
     }
   }
   if (isInviting && inviting.isNotEmpty()) {
@@ -190,6 +204,7 @@ private fun PeopleList(
   snapshot: ChatSnapshot?,
   onOpen: (String) -> Unit,
   maybeOnInvite: (() -> Unit)?,
+  contentPadding: PaddingValues,
 ) {
   val scope = rememberCoroutineScope()
   var text by rememberSaveable(kind) { mutableStateOf("") }
@@ -239,7 +254,7 @@ private fun PeopleList(
         FilterMenu(R.string.directory_filter_title, choices.titles, title) { title = it }
       }
     }
-    LazyColumn(Modifier.fillMaxSize()) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
       items(pager.rows, key = { it.userId }) { person ->
         PersonRow(person, onMessage = { message(person) }.takeIf { person.userId != me })
         HorizontalDivider()
@@ -357,7 +372,7 @@ private fun GuestBadge() {
 // Channels
 
 @Composable
-private fun ChannelList(viewModel: MainViewModel, spaceId: String, snapshot: ChatSnapshot?, onOpen: (String) -> Unit) {
+private fun ChannelList(viewModel: MainViewModel, spaceId: String, snapshot: ChatSnapshot?, onOpen: (String) -> Unit, contentPadding: PaddingValues) {
   var text by rememberSaveable { mutableStateOf("") }
   val query by debounced(text)
   val pager = rememberPager(spaceId, query, idOf = DirectoryChannelItem::conversationId) { after ->
@@ -371,7 +386,7 @@ private fun ChannelList(viewModel: MainViewModel, spaceId: String, snapshot: Cha
   var joining by remember { mutableStateOf(setOf<String>()) }
   Column(Modifier.fillMaxSize()) {
     ListTools(text, { text = it }, R.string.directory_channel_filter, maybeOnInvite = null)
-    LazyColumn(Modifier.fillMaxSize()) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
       items(pager.rows, key = { it.conversationId }) { channel ->
         val isMember = channel.isMember || channel.conversationId in joined
         ChannelRow(
@@ -438,7 +453,7 @@ private fun ChannelRow(channel: DirectoryChannelItem, isMember: Boolean, isJoini
 // Invitations
 
 @Composable
-private fun InvitationList(viewModel: MainViewModel, spaceId: String, generation: Int, maybeOnInvite: (() -> Unit)?) {
+private fun InvitationList(viewModel: MainViewModel, spaceId: String, generation: Int, maybeOnInvite: (() -> Unit)?, contentPadding: PaddingValues) {
   var text by rememberSaveable { mutableStateOf("") }
   val query by debounced(text)
   val pager = rememberPager(spaceId, query, generation, idOf = DirectoryInvitationItem::invitationId) { after ->
@@ -449,7 +464,7 @@ private fun InvitationList(viewModel: MainViewModel, spaceId: String, generation
   }
   Column(Modifier.fillMaxSize()) {
     ListTools(text, { text = it }, R.string.directory_invitation_filter, maybeOnInvite)
-    LazyColumn(Modifier.fillMaxSize()) {
+    LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
       items(pager.rows, key = { it.invitationId }) { invitation ->
         InvitationRow(viewModel, invitation, onGone = { pager.remove { it.invitationId == invitation.invitationId } })
         HorizontalDivider()

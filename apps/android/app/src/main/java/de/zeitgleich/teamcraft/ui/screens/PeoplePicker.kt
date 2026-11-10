@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -70,6 +71,7 @@ internal fun PeoplePicker(
   excluded: Set<String> = emptySet(),
   mode: PickMode = PickMode.Several,
   isEnabled: Boolean = true,
+  contentPadding: PaddingValues = PaddingValues(),
 ) {
   var query by rememberSaveable { mutableStateOf("") }
   var maybeFound by remember { mutableStateOf<List<User>?>(null) }
@@ -96,7 +98,7 @@ internal fun PeoplePicker(
         modifier = Modifier.fillMaxWidth().padding(Spacing.xxl),
       )
     }
-    LazyColumn(Modifier.fillMaxWidth()) {
+    LazyColumn(Modifier.fillMaxWidth(), contentPadding = contentPadding) {
       items(shown, key = { it.id }) { user ->
         val pick = {
           known = known + (user.id to user)

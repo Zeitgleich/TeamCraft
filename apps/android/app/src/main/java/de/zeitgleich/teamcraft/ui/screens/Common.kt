@@ -48,6 +48,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
@@ -68,6 +72,20 @@ val ScreenInsets: WindowInsets
 /** Top bars reach behind the status bar but keep their content clear of it and of a side cutout. */
 val TopBarInsets: WindowInsets
   @Composable get() = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+
+/**
+ * Edge to edge for a screen with a fixed header above its list: the header side of a Scaffold's
+ * padding (top and sides) pads the column, and [bottomOnly] goes to the list as content padding,
+ * so the list scrolls behind the navigation bar instead of being clipped above it.
+ */
+@Composable
+fun PaddingValues.withoutBottom(): PaddingValues {
+  val direction = LocalLayoutDirection.current
+  return PaddingValues(start = calculateStartPadding(direction), top = calculateTopPadding(), end = calculateEndPadding(direction))
+}
+
+/** The bottom of a Scaffold's padding (navigation bar or keyboard): a list's last item ends clear of it. */
+fun PaddingValues.bottomOnly(): PaddingValues = PaddingValues(bottom = calculateBottomPadding())
 
 /**
  * The top bar of the screens behind the main one: back, title and actions on the theme's surface.

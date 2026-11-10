@@ -92,6 +92,9 @@ class MainActivity : FragmentActivity() {
     val deletedName = getString(R.string.user_deleted_name)
     TeamCraftApplication.graph(this).scope.launch { setDeletedUserName(deletedName) }
     enableEdgeToEdge()
+    // The main screen's bottom navigation bar reaches down behind the system's: no translucent
+    // scrim over it with three-button navigation.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.isNavigationBarContrastEnforced = false
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) handOverFromSplash()
     // Upright from the first frame while setting up (a recreated activity may be past that).
     keepUprightWhileSettingUp(isSettingUp = viewModel.appState.value !is AppState.Ready)

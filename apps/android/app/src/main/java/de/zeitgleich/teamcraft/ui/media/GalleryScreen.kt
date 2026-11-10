@@ -1,5 +1,9 @@
 package de.zeitgleich.teamcraft.ui.media
 
+import androidx.compose.foundation.layout.plus
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.WindowInsetsSides
 import android.content.Context
 import android.net.Uri
 import android.text.format.DateUtils
@@ -108,7 +112,11 @@ fun GalleryScreen(
   LaunchedEffect(Unit) { if (!MediaAccess.isOffered) openPicker() }
   val maybeAlbum = draft.maybeAlbum
   Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-    Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+    // Edge to edge: the grids scroll behind the navigation bar and end clear of it; with a selection,
+    // the selection bar takes the bottom inset instead.
+    val hasSelection = draft.items.isNotEmpty()
+    val gridBottom = if (hasSelection) PaddingValues() else WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom).asPaddingValues()
+    Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))) {
       Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = { if (maybeAlbum != null) onAlbum(null) else onClose() }) {
           Icon(
@@ -132,16 +140,18 @@ fun GalleryScreen(
           access == MediaAccess.None -> NoAccess(
             maybeOnAllow = if (MediaAccess.isOffered) ({ ask.launch(MediaAccess.permissions()) }) else null,
             onPicker = ::openPicker,
+            modifier = Modifier.padding(gridBottom),
           )
           maybeAlbum == null -> Albums(
             isPartial = access == MediaAccess.Partial,
             onMore = { ask.launch(MediaAccess.permissions()) },
             onAlbum = onAlbum,
+            bottomInset = gridBottom,
           )
-          else -> AlbumGrid(maybeAlbum, draft, isFull = draft.items.size >= MAX_MEDIA_ITEMS, onToggle = onToggle)
+          else -> AlbumGrid(maybeAlbum, draft, isFull = draft.items.size >= MAX_MEDIA_ITEMS, onToggle = onToggle, bottomInset = gridBottom)
         }
       }
-      if (draft.items.isNotEmpty()) SelectionBar(draft, onNext)
+      if (hasSelection) SelectionBar(draft, onNext)
     }
   }
 }
@@ -154,9 +164,9 @@ private fun albumName(album: MediaAlbumRef): String = when (album.kind) {
 }
 
 @Composable
-private fun NoAccess(maybeOnAllow: (() -> Unit)?, onPicker: () -> Unit) {
+private fun NoAccess(maybeOnAllow: (() -> Unit)?, onPicker: () -> Unit, modifier: Modifier) {
   Column(
-    Modifier.fillMaxSize().padding(32.dp),
+    modifier.fillMaxSize().padding(32.dp),
     horizontalAlignment = Alignment.CenterHorizontally,
     verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
   ) {
@@ -173,7 +183,7 @@ private fun NoAccess(maybeOnAllow: (() -> Unit)?, onPicker: () -> Unit) {
 }
 
 @Composable
-private fun Albums(isPartial: Boolean, onMore: () -> Unit, onAlbum: (MediaAlbumRef) -> Unit) {
+private fun Albums(isPartial: Boolean, onMore: () -> Unit, onAlbum: (MediaAlbumRef) -> Unit, bottomInset: PaddingValues) {
   val context = LocalContext.current
   val maybeAlbums by produceState<List<MediaAlbum>?>(null) { value = MediaLibrary.albums(context) }
   val albums = maybeAlbums
@@ -183,7 +193,7 @@ private fun Albums(isPartial: Boolean, onMore: () -> Unit, onAlbum: (MediaAlbumR
   }
   LazyVerticalGrid(
     columns = GridCells.Adaptive(150.dp),
-    contentPadding = PaddingValues(16.dp),
+    contentPadding = PaddingValues(16.dp) + bottomInset,
     horizontalArrangement = Arrangement.spacedBy(12.dp),
     verticalArrangement = Arrangement.spacedBy(16.dp),
     modifier = Modifier.fillMaxSize(),
@@ -209,7 +219,7 @@ private fun Albums(isPartial: Boolean, onMore: () -> Unit, onAlbum: (MediaAlbumR
 }
 
 @Composable
-private fun AlbumGrid(album: MediaAlbumRef, draft: MediaDraft, isFull: Boolean, onToggle: (RecentMediaItem) -> Unit) {
+private fun AlbumGrid(album: MediaAlbumRef, draft: MediaDraft, isFull: Boolean, onToggle: (RecentMediaItem) -> Unit, bottomInset: PaddingValues) {
   val context = LocalContext.current
   val maybeItems by produceState<List<RecentMediaItem>?>(null, album) { value = MediaLibrary.items(context, album) }
   val items = maybeItems
@@ -220,6 +230,7 @@ private fun AlbumGrid(album: MediaAlbumRef, draft: MediaDraft, isFull: Boolean, 
   val selected = draft.items.map { it.uri }
   LazyVerticalGrid(
     columns = GridCells.Adaptive(88.dp),
+    contentPadding = bottomInset,
     horizontalArrangement = Arrangement.spacedBy(2.dp),
     verticalArrangement = Arrangement.spacedBy(2.dp),
     modifier = Modifier.fillMaxSize(),
@@ -279,7 +290,14 @@ private fun SelectionBadge(number: Int, modifier: Modifier) {
 @Composable
 private fun SelectionBar(draft: MediaDraft, onNext: () -> Unit) {
   Surface(tonalElevation = 3.dp) {
-    Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+    // The bar reaches down behind the navigation bar; its content stays clear of it.
+    Row(
+      Modifier
+        .fillMaxWidth()
+        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom))
+        .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
       LazyRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         items(draft.items, key = { it.id }) { item ->
           Thumbnail(item.asRecent(), side = 48.dp, modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)))

@@ -97,6 +97,7 @@ import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 import de.zeitgleich.teamcraft.ui.theme.Spacing
 import androidx.compose.material3.ListItemShapes
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.WindowInsetsSides
 
@@ -390,9 +391,14 @@ private fun ApproveDevice(viewModel: MainViewModel) {
     }
   }
   if (isScanning) {
-    Dialog(onDismissRequest = { isScanning = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    // Full screen and edge to edge: the scanner draws behind the system bars, its controls clear them.
+    Dialog(
+      onDismissRequest = { isScanning = false },
+      properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
+    ) {
       Surface(Modifier.fillMaxSize()) {
         QrScanner(
+          modifier = Modifier.safeDrawingPadding(),
           onScanned = { scanned ->
             isScanning = false
             code = scanned
