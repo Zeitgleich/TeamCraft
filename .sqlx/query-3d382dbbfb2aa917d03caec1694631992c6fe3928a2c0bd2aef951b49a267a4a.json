@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH closed AS (\n           UPDATE meeting_notices SET dismissed_at = now()\n           WHERE meeting_id = $1 AND starts_at = $2 AND user_id = $3 AND dismissed_at IS NULL\n           RETURNING 1)\n         SELECT (SELECT count(*) FROM closed) AS \"closed!\",\n                EXISTS (SELECT 1 FROM meeting_notices\n                        WHERE meeting_id = $1 AND starts_at = $2 AND user_id = $3) AS \"was_notified!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "closed!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "was_notified!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "3d382dbbfb2aa917d03caec1694631992c6fe3928a2c0bd2aef951b49a267a4a"
+}

@@ -787,9 +787,12 @@ retried by the account housekeeping and at the start of every sync; a reactivati
   request; refresh tokens are the provider's.
 - *Push registrations and devices* are kept but unused (reactivation restores them); removal revokes them.
 - *MLS removal* needs an admin's device: see §3.2.1 and e2ee.md §4.6.4. Nothing queues it on the server, since
-  a server-made removal is no removal to the clients (A8). "Remove from all chats" posts the signed change into the
-  group, where the next online member commits it. The console shows how many deactivated
-  accounts still have devices or memberships (`pending_removals`), the list is the Users page.
+  a server-made removal is no removal to the clients (A8). For people the provider deactivated, an owner's or
+  admin's app signs "Remove from all chats" on its own after the grace of the signed policy (`leavers`, Security
+  section; default one hour, at most 10 per device and day, never anybody on the roster), see
+  [provisioning.md](provisioning.md) §3. The signed change goes into the group, where the next online member
+  commits it. The console shows how many deactivated accounts still have devices or memberships
+  (`pending_removals`), the list is the Users page.
 
 #### 3.2.2 Guest expiry (issue #212)
 
@@ -1235,7 +1238,8 @@ never a password. All endpoints need `manage_workspace` (instance admins and own
 
 Admins list, create, edit and delete brands (docs/branding.md §2.1): display name, organization name,
 host names, e-mail domains, colors for the light and dark theme (with a live preview and a contrast
-check), login title and text per language, support/privacy/terms/imprint links, the mail sender
+check), the default colour theme and which themes people may pick (branding.md §5.1, with a live
+preview of the default), login title and text per language, support/privacy/terms/imprint links, the mail sender
 (name and From address) and the images (logo, icon, favicon, each with a dark variant), which are
 kept in the object storage. Brands of the configuration file are shown as "from configuration file"
 and are read-only; "Take over into the database" copies one (with its images) into the database,
@@ -1334,6 +1338,10 @@ Everything in this section is enforced
 by the server alone (the server sends the mail, checks the sizes, applies invites): a compromised
 server could ignore these settings whether they were signed or not, so a signature would protect
 nothing. Brands, mail and calendar are server-side presentation and transport for the same reason.
+A brand's colour theme policy (branding.md §5.1) is enforced by the clients, but it decides colours
+alone, on a host whose name, logo and colours the server already sets, so it is presentation too and
+not signed: a server that tampers with it can show its default instead of someone's chosen theme,
+and shorten the picker, nothing else, and the synced choice is never touched.
 
 "Scheduled messages" under People (signed policy, `scheduled_messages`): whether people may schedule, how
 far ahead, and how many messages one person can have waiting. The server holds these messages encrypted

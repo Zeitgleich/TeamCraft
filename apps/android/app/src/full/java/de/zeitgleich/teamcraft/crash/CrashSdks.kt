@@ -198,8 +198,9 @@ private class SentryPerfHandle(private val transaction: ITransaction) : PerfHand
 
 /**
  * A core job that waited or ran longer than the instance's threshold, as a warning (sampled with
- * the handled errors' rate in `beforeSend`), grouped per job: its name, queue, wait, run and the
- * queue's depth as tags. Names are functions in the code, never data.
+ * the handled errors' rate in `beforeSend`), grouped per job: its name, queue, wait, run, the
+ * thread's CPU time while it ran and the queue's depth as tags. Names are functions in the code
+ * (and query kinds), never data.
  */
 private object SlowJobReports : PerfListener {
   override fun onSlowJob(job: PerfJobSpan) {
@@ -214,6 +215,8 @@ private object SlowJobReports : PerfListener {
       setTag("wait_ms", waitMs.toString())
       setTag("run_ms", runMs.toString())
       setTag("queue_depth", job.queueDepth.toString())
+      // Far below run_ms: the job waited (a lock, or the process frozen in the background).
+      job.maybeCpuMs?.let { setTag("cpu_ms", it.toLong().toString()) }
     }
     runCatching { Sentry.captureEvent(event) }
   }

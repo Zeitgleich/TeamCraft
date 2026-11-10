@@ -1,5 +1,5 @@
 use leptos::prelude::*;
-use teamcraft_proto::{AdminSelfJoin, GuestDmStart, HistoryPolicy, ScreenShareResolution};
+use teamcraft_proto::{AdminSelfJoin, GuestDmStart, HistoryPolicy, LeaverRemovalMode, ScreenShareResolution};
 
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_owners::OwnersPanel;
@@ -37,6 +37,11 @@ const INACTIVITY_DELETE_DAYS: [u32; 5] = [u32::MAX, 30, 90, 180, 365];
 const APPROVALS: [u8; 2] = [2, 3];
 /// The longest voice message offered, in minutes.
 const VOICE_MINUTES: [u16; 6] = [1, 2, 5, 10, 30, 60];
+/// The grace before a leaver is removed (docs/provisioning.md §3): at once, a quarter of an hour, an
+/// hour (the default), four hours, a day, a week.
+const LEAVER_GRACE_MINUTES: [u32; 6] = [0, 15, 60, 240, 1440, 10_080];
+/// Automatic removals per admin device and day.
+const LEAVER_MAX_PER_DAY: [u32; 6] = [1, 5, 10, 25, 50, 100];
 
 /// Security policy: the signed settings that the server and every member client enforce.
 #[component]
@@ -45,6 +50,31 @@ pub fn SecuritySection() -> impl IntoView {
   let policy = use_policy_draft();
   let draft = policy.draft;
 
+  let leaver_grace_options = Signal::derive(move || {
+    LEAVER_GRACE_MINUTES
+      .into_iter()
+      .map(|minutes| {
+        let label = match minutes {
+          0 => i18n.t("policy-leavers-at-once"),
+          minutes if minutes % 1440 == 0 => i18n.t_count("policy-days", (minutes / 1440) as usize),
+          minutes if minutes % 60 == 0 => i18n.t_count("policy-hours", (minutes / 60) as usize),
+          minutes => i18n.t_count("policy-minutes", minutes as usize),
+        };
+        (minutes.to_string(), label)
+      })
+      .collect()
+  });
+  let leaver_limit_options = Signal::derive(move || {
+    LEAVER_MAX_PER_DAY
+      .into_iter()
+      .map(|count| {
+        (
+          count.to_string(),
+          i18n.t_count("policy-leavers-people", count as usize),
+        )
+      })
+      .collect()
+  });
   let voice_options = Signal::derive(move || {
     VOICE_MINUTES
       .into_iter()
@@ -289,6 +319,46 @@ pub fn SecuritySection() -> impl IntoView {
           on_select=move |value: String| {
             if let Ok(minutes) = value.parse::<u16>() {
               policy.edit(|p| p.voice_messages.max_minutes = minutes);
+            }
+          }
+        />
+      </fieldset>
+
+      <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
+        <legend>{move || i18n.t("policy-leavers")}</legend>
+        <p class="muted-text small">{move || i18n.t("policy-leavers-hint")}</p>
+        <CheckRow
+          name="leavers_automatic"
+          label=Signal::derive(move || i18n.t("policy-leavers-automatic"))
+          hint=Signal::derive(move || i18n.t("policy-leavers-automatic-hint"))
+          checked=Signal::derive(move || draft.get().leavers.mode == LeaverRemovalMode::Automatic)
+          on_change=move |value| {
+            policy.edit(|p| {
+              p.leavers.mode = if value { LeaverRemovalMode::Automatic } else { LeaverRemovalMode::Manual };
+            })
+          }
+        />
+        <SelectRow
+          id="policy-leavers-grace"
+          label=Signal::derive(move || i18n.t("policy-leavers-grace"))
+          options=leaver_grace_options
+          selected=Signal::derive(move || draft.get().leavers.grace_minutes().to_string())
+          disabled=Signal::derive(move || draft.get().leavers.mode != LeaverRemovalMode::Automatic)
+          on_select=move |value: String| {
+            if let Ok(minutes) = value.parse::<u32>() {
+              policy.edit(|p| p.leavers.grace_minutes = minutes);
+            }
+          }
+        />
+        <SelectRow
+          id="policy-leavers-limit"
+          label=Signal::derive(move || i18n.t("policy-leavers-limit"))
+          options=leaver_limit_options
+          selected=Signal::derive(move || draft.get().leavers.max_per_day().to_string())
+          disabled=Signal::derive(move || draft.get().leavers.mode != LeaverRemovalMode::Automatic)
+          on_select=move |value: String| {
+            if let Ok(count) = value.parse::<u32>() {
+              policy.edit(|p| p.leavers.max_per_day = count);
             }
           }
         />

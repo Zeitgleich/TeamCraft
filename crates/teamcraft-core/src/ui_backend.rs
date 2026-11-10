@@ -2931,6 +2931,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self.read(crate::client::all_group_leftovers(&self.store))
   }
 
+  fn leavers_held_by_limit(&self) -> usize {
+    self.read(crate::client::leavers_held_by_limit(&self.store))
+  }
+
   fn typing_users(&self, conversation: ConversationId) -> Vec<UserId> {
     self.typing.users(conversation, self.me, self.clock.now_ms())
   }

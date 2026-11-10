@@ -77,6 +77,9 @@ import de.zeitgleich.teamcraft.ui.screens.PEOPLE_SHOWN
 import de.zeitgleich.teamcraft.ui.screens.PeoplePicker
 import de.zeitgleich.teamcraft.ui.toggled
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import de.zeitgleich.teamcraft.core.ChatClient
+import de.zeitgleich.teamcraft.notifications.MeetingNoticeReport
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallStateInfo
 import uniffi.teamcraft_ffi.NotetakerCallInfo
@@ -171,7 +174,16 @@ class CallActivity : ComponentActivity() {
       return
     }
     Log.i(TAG, "call screen: answer from the notification")
+    reportMeetingNotice(intent)
     answerWithMicrophone(conversationId)
+  }
+
+  /** Joining from a meeting's notice tells the server, so the user's other phones take theirs down. */
+  private fun reportMeetingNotice(intent: Intent) {
+    val meetingId = intent.getStringExtra(EXTRA_MEETING_ID) ?: return
+    val startsAtMs = intent.getLongExtra(EXTRA_MEETING_STARTS_AT_MS, -1L).takeIf { it >= 0 } ?: return
+    val graph = TeamCraftApplication.graph(this)
+    graph.scope.launch { MeetingNoticeReport.send(ChatClient { graph.core.core() }, meetingId, startsAtMs) }
   }
 
   override fun onSaveInstanceState(outState: Bundle) {
@@ -202,6 +214,10 @@ class CallActivity : ComponentActivity() {
     const val ACTION_SHOW_INCOMING = "de.zeitgleich.teamcraft.calls.SHOW_INCOMING"
     const val ACTION_ANSWER = "de.zeitgleich.teamcraft.calls.ANSWER"
     const val EXTRA_CONVERSATION_ID = "conversation_id"
+
+    /** The meeting and occurrence start of the notice that Join was tapped on (docs/notifications.md). */
+    const val EXTRA_MEETING_ID = "meeting_id"
+    const val EXTRA_MEETING_STARTS_AT_MS = "meeting_starts_at_ms"
     private const val STATE_ANSWER_AFTER_PERMISSION = "answer_after_permission"
     private const val TAG = "TeamCraftCalls"
   }

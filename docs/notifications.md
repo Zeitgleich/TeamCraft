@@ -641,7 +641,7 @@ it the extension hands it to CallKit (`NSE_NOTIFICATION_FILTERING` in `Base.xcco
 `NSE_ENTITLEMENTS`). Without the entitlement iOS can't drop a notification, so muted, DND and duplicate
 pushes are shown passively (no sound, no banner). While the app is in the foreground it holds the store
 and opens pushes itself (`willPresent`). A `dismiss` without a thread removes only top-level
-notifications. The PushKit path is ready for when a VoIP token is registered.
+notifications; one naming a meeting removes that meeting's notices (thread `meeting-<id>`). The PushKit path is ready for when a VoIP token is registered.
 
 ### Desktop notifications
 
@@ -803,6 +803,26 @@ Shown reminders are remembered per device by meeting, start time and kind (local
 restart or a second tab never repeats one and a moved meeting reminds again for its new time; each of
 the user's devices reminds once. Later occurrences of a repeating meeting are not reminded yet (the
 list returns a series once).
+
+**Meeting notices on several devices (#1473).** A reminder or start notice that was dealt with on
+one phone goes away on the user's others. What counts as dealt with, per platform:
+
+| Platform | Reports                                                                              | Removes what it shows on a `dismiss` naming the meeting                                                                                     |
+|----------|--------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| Android  | Join, and swiping the notice away (`setDeleteIntent`, no permission)                 | the notification with tag `meeting:<id>`                                                                                                    |
+| iOS      | Join, and clearing the notice (`customDismissAction` on the category, no permission) | delivered notifications of thread `meeting-<id>`                                                                                            |
+| Web      | Join and closing a push notice (`notificationclose`), with the stored push session   | nothing: no silent push in browsers, so no `dismiss` goes to Web Push (the notice stays until closed or replaced by the start notice's tag) |
+| Desktop  | nothing: no push, its own reminders                                                  | nothing                                                                                                                                     |
+
+The report is `POST /meetings/{id}/notices/dismiss` with the occurrence's start. It names only an
+occurrence a notice went to the caller for (else 404), is scoped to the caller's account, is
+idempotent (the first report of the notice's rows sends the withdrawal, repeats and parallel reports
+answer 204 and send nothing) and falls under the general per-user write limit. The server then sends
+a `dismiss` wake-up with the meeting and the occurrence's start to the user's phones that can take a
+silent withdrawal (APNs, FCM, UnifiedPush), also the one that reported and phones with the app in
+front (they show notices with the app open). It names no conversation (`conversation_id` is `0`) and
+no text, so an app from before it removes nothing; a gateway sees an ordinary withdrawal. The same
+withdrawal drops the notices of that occurrence still waiting in the user's retry queue.
 
 **Several tabs.** In a browser only the tab that owns the account's store (e2ee.md §9.4) shows
 notifications. Each tab records in local storage which conversation it shows while in front, so the

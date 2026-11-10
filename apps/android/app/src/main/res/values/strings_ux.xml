@@ -240,6 +240,8 @@
   <!-- Colour themes (#202) -->
   <string name="color_theme">Colours</string>
   <string name="color_theme_hint">Accent, selections, badges and the online dot. Messages always stay on white or dark grey. Follows your account; light or dark stays with this device.</string>
+  <string name="color_theme_withheld">The colours you picked aren\'t available on this server, so its default is shown. Your choice is kept for servers that allow it.</string>
+  <string name="color_theme_fixed">This server uses one colour theme for everyone.</string>
   <string name="color_theme_presets">Presets</string>
   <string name="color_theme_custom">Custom</string>
   <string name="color_theme_brand">Server default</string>

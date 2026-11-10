@@ -192,6 +192,16 @@ pub struct SetRsvpRequest {
   pub status: RsvpStatus,
 }
 
+/// `POST /api/v1/meetings/{id}/notices/dismiss`: the caller dealt with the reminder or start notice
+/// of one occurrence on a device (joined from it, or swiped it away where the platform tells), so
+/// their other phones take it down (docs/notifications.md, "Meeting notices"). It can name only an
+/// occurrence the caller was notified of; reporting it twice does nothing more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct DismissMeetingNoticeRequest {
+  /// The start of the occurrence, as in the push (`PushMeeting::starts_at`).
+  pub starts_at: UnixMillis,
+}
+
 /// One invitee with the answer so far.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct MeetingAttendeeResponse {

@@ -151,6 +151,11 @@ impl Upkeep {
       // Paced by its own backoff, so this says it now and then at most: a person's rights may wait on it.
       Err(error) => tracing::warn!(%error, "roles not signed yet"),
     }
+    // Leavers leave the groups (docs/provisioning.md §3); nothing while none is listed or due.
+    match Box::pin(client.run_leaver_removal()).await {
+      Ok(round) => is_changed |= round.removed > 0,
+      Err(error) => tracing::warn!(%error, "leavers not removed from the groups yet"),
+    }
     // Key packages expire; a device that runs for weeks renews them in time (e2ee.md §4.3).
     if let Err(error) = client.renew_key_packages_if_due().await {
       tracing::debug!(%error, "key packages not renewed yet");

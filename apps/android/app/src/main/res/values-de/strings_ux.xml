@@ -234,6 +234,8 @@
   <!-- Colour themes (#202) -->
   <string name="color_theme">Farben</string>
   <string name="color_theme_hint">Akzent, Auswahl, Zähler und der Online-Punkt. Nachrichten bleiben immer auf Weiß oder Dunkelgrau. Folgt deinem Konto; hell oder dunkel bleibt bei diesem Gerät.</string>
+  <string name="color_theme_withheld">Deine gewählten Farben sind auf diesem Server nicht verfügbar, deshalb siehst du seinen Standard. Deine Auswahl bleibt für Server erhalten, die sie zulassen.</string>
+  <string name="color_theme_fixed">Dieser Server verwendet für alle dasselbe Farbschema.</string>
   <string name="color_theme_presets">Vorlagen</string>
   <string name="color_theme_custom">Eigene</string>
   <string name="color_theme_brand">Standard des Servers</string>

@@ -41,7 +41,7 @@ use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 use crate::EventListener;
 use crate::engine::{Job, Store, direct_peer, feed_anchor, older_len, parse_id};
 use crate::error::TeamCraftError;
-use crate::logging;
+use crate::logging::{self, JobClock};
 use crate::perf_jobs::{self, PerfJobKind};
 use crate::types::{
   AccountState, ChatPreviewItem, ConversationItem, FirstSyncItem, FirstSyncStageItem, GroupMentionReachItem,
@@ -284,9 +284,9 @@ impl ReadQueue {
         return;
       }
       let running = timing.start();
-      let started = Instant::now();
+      let clock = JobClock::start();
       let result = reads.together(job);
-      logging::slow_read(std::any::type_name::<F>(), started - queued, started.elapsed());
+      logging::slow_read(std::any::type_name::<F>(), clock.started() - queued, clock.ran());
       running.done();
       // The caller may have given up waiting meanwhile (cancelled coroutine); nothing to tell it.
       let _ = reply.send(result);
@@ -321,9 +321,9 @@ impl ReadQueue {
         return;
       }
       let running = timing.start();
-      let started = Instant::now();
+      let clock = JobClock::start();
       let result = reads.together(job);
-      logging::slow_read(std::any::type_name::<F>(), started - queued, started.elapsed());
+      logging::slow_read(std::any::type_name::<F>(), clock.started() - queued, clock.ran());
       running.done();
       for caller in callers {
         // A caller may have given up waiting meanwhile; nothing to tell it then.

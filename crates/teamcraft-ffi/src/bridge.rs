@@ -113,9 +113,12 @@ impl Reads {
 
   pub(crate) fn query_json(&self, query: &str) -> Result<String, TeamCraftError> {
     let started = std::time::Instant::now();
+    let started_at_ms = crate::perf_jobs::now_ms();
     let parsed: ChatQuery = from_json(query)?;
     let answer = to_json(&parsed.answer(self.backend()?));
-    crate::logging::slow_query(query_kind(query), started.elapsed());
+    let kind = query_kind(query);
+    crate::perf_jobs::query_ran(&kind, started_at_ms, started.elapsed());
+    crate::logging::slow_query(kind, started.elapsed());
     answer
   }
 

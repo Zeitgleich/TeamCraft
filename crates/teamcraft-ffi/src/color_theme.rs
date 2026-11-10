@@ -3,7 +3,8 @@
 //! same colours with the same contrast rules. The chosen theme itself is a synced setting
 //! (`SyncedAppSettings::color_theme`), a string the app keeps as it is.
 
-use teamcraft_client_api::color_theme::{ColorTheme, PRESETS, Rgb, ThemeColors};
+use teamcraft_client_api::color_theme::{ColorTheme, PRESETS, Rgb, ThemeColors, ThemePolicy};
+use teamcraft_proto::BrandThemePolicy;
 
 /// The colours a theme sets for light or dark mode, as `0xRRGGBB`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
@@ -37,6 +38,52 @@ pub struct AppThemePreset {
   pub group: String,
   /// The theme's own colours, for a swatch: navigation, selection, presence, notification.
   pub colors: Vec<u32>,
+}
+
+/// What a brand lets people choose (docs/branding.md §5.1), checked by the core: only presets this
+/// build knows. Without a policy from the server nothing is restricted.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AppThemePolicy {
+  /// The server's default, as a setting's value (`brand`, `preset:<id>` or `custom:…`).
+  pub default_value: String,
+  /// Preset ids people may pick; `None`: all.
+  pub maybe_allowed_presets: Option<Vec<String>>,
+  pub is_custom_allowed: bool,
+}
+
+impl AppThemePolicy {
+  pub(crate) fn from_policy(policy: &ThemePolicy) -> Self {
+    let wire = policy.to_wire();
+    Self {
+      default_value: wire.default_theme,
+      maybe_allowed_presets: wire.maybe_allowed_presets,
+      is_custom_allowed: wire.is_custom_allowed,
+    }
+  }
+
+  fn to_policy(&self) -> ThemePolicy {
+    ThemePolicy::from_wire(&BrandThemePolicy {
+      default_theme: self.default_value.clone(),
+      maybe_allowed_presets: self.maybe_allowed_presets.clone(),
+      is_custom_allowed: self.is_custom_allowed,
+    })
+  }
+}
+
+/// The value whose colours to show for the stored theme `value` under `policy`: `value` where it is
+/// allowed, else the policy's default. For display only: `value` stays the synced setting.
+#[uniffi::export]
+pub fn color_theme_effective(value: String, policy: AppThemePolicy) -> String {
+  let Ok(theme) = value.parse::<ColorTheme>();
+  policy.to_policy().effective(&theme).to_string()
+}
+
+/// What to mark as chosen in the picker for the stored theme `value`: `value` where it is allowed,
+/// else `brand` (the server's default).
+#[uniffi::export]
+pub fn color_theme_in_force(value: String, policy: AppThemePolicy) -> String {
+  let Ok(theme) = value.parse::<ColorTheme>();
+  policy.to_policy().in_force(&theme).to_string()
 }
 
 /// The built-in themes in the order of the picker.
@@ -144,6 +191,41 @@ fn from_rgb(value: u32) -> Rgb {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_policy_decides_what_shows_and_the_stored_value_is_left_alone() {
+    let fixed = AppThemePolicy {
+      default_value: "preset:harbor".into(),
+      maybe_allowed_presets: Some(vec!["pine".into(), "from-the-future".into()]),
+      is_custom_allowed: false,
+    };
+    assert_eq!(
+      color_theme_effective("preset:paper".into(), fixed.clone()),
+      "preset:harbor"
+    );
+    assert_eq!(
+      color_theme_in_force("preset:paper".into(), fixed.clone()),
+      "brand"
+    );
+    assert_eq!(
+      color_theme_effective("preset:pine".into(), fixed.clone()),
+      "preset:pine"
+    );
+    assert_eq!(
+      color_theme_effective("brand".into(), fixed.clone()),
+      "preset:harbor"
+    );
+    assert_eq!(
+      color_theme_effective("custom:#112233,#445566,#778899,#aabbcc".into(), fixed.clone()),
+      "preset:harbor"
+    );
+    let open = AppThemePolicy::from_policy(&ThemePolicy::default());
+    assert_eq!(
+      color_theme_effective("preset:paper".into(), open.clone()),
+      "preset:paper"
+    );
+    assert_eq!(color_theme_in_force("preset:nope".into(), open), "preset:nope");
+  }
 
   #[test]
   fn presets_resolve_to_tokens_and_the_default_to_none() {

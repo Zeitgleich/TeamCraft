@@ -30,6 +30,7 @@ mod invite;
 mod key_bag;
 mod key_package;
 mod last_seen;
+mod leavers;
 mod local_account;
 mod meeting;
 mod meeting_notice;
@@ -41,6 +42,7 @@ mod org_background;
 mod org_recovery;
 mod permission_override;
 mod profile;
+mod provider_events;
 mod push;
 mod push_retry;
 mod retention;
@@ -106,12 +108,13 @@ pub use invite::{AppliedInvite, Invite, NewInvite};
 pub use key_bag::{KeyBag, KeyBagOutcome};
 pub use key_package::{AddPackagesOutcome, ClaimedPackage, KeyPackageCounts, NewKeyPackage};
 pub use last_seen::StoredLastSeen;
+pub use leavers::{LeaverClaim, StoredLeaver};
 pub use local_account::{LOCAL_ISSUER, LocalAccount, SessionLimits, SessionState};
 pub use meeting::{
   AttendeeDiff, AttendeeKey, LobbyRow, MeetingChanges, NewAttendee, NewMeeting, SharedInviteClaim,
   StoredAttendee, StoredMeeting, StoredMeetingInvite,
 };
-pub use meeting_notice::{MeetingNoticeKind, MeetingNoticeRecipient};
+pub use meeting_notice::{MeetingNoticeDismissal, MeetingNoticeKind, MeetingNoticeRecipient};
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};
 pub use mls::{CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, StoredMlsMessage};
 pub use notification::{DeliveryRow, ReceiptRow, StoredSpaceNotifications, StoredUserSettings};
@@ -124,6 +127,7 @@ pub use org_recovery::{
 };
 pub use permission_override::{OverrideEdit, StoredOverride};
 pub use profile::{StoredAvatar, StoredProfile, StoredWorkingHours};
+pub use provider_events::ProviderEventHook;
 pub use push::{PushDeviceRow, PushRecipientRow};
 pub use push_retry::{NewPushRetry, PushRetryClaim, PushRetryRow};
 pub use retention::{RetentionTarget, StoredObject, StoredRetention};

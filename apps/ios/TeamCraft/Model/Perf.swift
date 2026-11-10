@@ -195,6 +195,10 @@ final class SlowJobReports: PerfListener, Sendable {
       "run_ms": String(Int(job.doneAtMs - job.startedAtMs)),
       "queue_depth": String(job.queueDepth),
     ]
+    // Far below run_ms: the job waited (a lock, or the app suspended in the background).
+    if let cpuMs = job.maybeCpuMs {
+      event.tags?["cpu_ms"] = String(Int(cpuMs))
+    }
     SentrySDK.capture(event: event)
   }
 }

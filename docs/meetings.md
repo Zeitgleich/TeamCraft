@@ -98,7 +98,16 @@ the change, and people taken off the list are removed from the group.
    account to notify. A desktop app that isn't running can't be told (it has no push), nor can a
    phone without a push registration.
 
-   Dismissing a notice on one device doesn't clear it on the others yet.
+   *Dismissing a notice* on one phone takes it down on the user's others (#1473): Join, or swiping
+   it away where the platform says so, makes the phone report the occurrence
+   (`POST /meetings/{id}/notices/dismiss`, `{"starts_at": <occurrence start>}`), and the server sends
+   a silent `dismiss` wake-up naming the meeting and the occurrence to the user's phones
+   (notifications.md, "Meeting notices"). The report can name only an occurrence a notice went to the
+   caller for (the `meeting_notices` row; anything else is 404, so nobody learns about a meeting
+   they weren't told of), clears only the caller's own rows (`dismissed_at`), and is idempotent: of
+   several reports, also from two devices at once, exactly one sends the withdrawal. A notice that
+   comes later (the start after the reminder) is a row of its own and shows. Queued retries of the
+   occurrence's notices on the user's devices are dropped with it.
 4. **Guests** open the meeting link `<base>/meeting/<token>#v=<fingerprint>` (see "Links"). The
    web client sends the token from the path to `POST /meetings/join` (no authentication) together
    with a display name and receives a guest session token valid until the meeting's end plus

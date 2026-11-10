@@ -112,7 +112,7 @@ pub enum Inline {
 }
 
 /// What one source line is, before consecutive lines are grouped into blocks.
-enum Line<'a> {
+pub(crate) enum Line<'a> {
   Text(&'a str),
   Heading(u8, &'a str),
   Quote(&'a str),
@@ -220,7 +220,7 @@ fn same_list(list: ListKind, item: ListKind) -> bool {
   )
 }
 
-fn classify(line: &str) -> Line<'_> {
+pub(crate) fn classify(line: &str) -> Line<'_> {
   let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
   if (1..=usize::from(MAX_HEADING_LEVEL)).contains(&hashes)
     && let Some(text) = line[hashes..].strip_prefix(' ')
@@ -540,7 +540,7 @@ pub fn parse_inline(text: &str) -> Vec<Inline> {
 
 /// Returns the content between `marker` at the start of `rest` and the next unescaped `marker`, plus
 /// the bytes used.
-fn delimited<'a>(rest: &'a str, marker: &str) -> Option<(&'a str, usize)> {
+pub(crate) fn delimited<'a>(rest: &'a str, marker: &str) -> Option<(&'a str, usize)> {
   let body = &rest[marker.len()..];
   // Code is verbatim; elsewhere `\*` inside the span doesn't close it.
   let end = if marker == "`" {
@@ -557,7 +557,7 @@ fn delimited<'a>(rest: &'a str, marker: &str) -> Option<(&'a str, usize)> {
 }
 
 /// Byte offset of the first `needle` in `haystack` that isn't escaped by a backslash.
-fn find_unescaped(haystack: &str, needle: &str) -> Option<usize> {
+pub(crate) fn find_unescaped(haystack: &str, needle: &str) -> Option<usize> {
   let mut is_escaped = false;
   for (at, ch) in haystack.char_indices() {
     if is_escaped {
@@ -571,7 +571,7 @@ fn find_unescaped(haystack: &str, needle: &str) -> Option<usize> {
   None
 }
 
-fn mention(rest: &str) -> Option<(Inline, usize)> {
+pub(crate) fn mention(rest: &str) -> Option<(Inline, usize)> {
   let name: String = rest[1..]
     .chars()
     .take_while(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '.' | '-'))
@@ -584,7 +584,7 @@ fn mention(rest: &str) -> Option<(Inline, usize)> {
   Some((Inline::Mention(name), used))
 }
 
-fn link(rest: &str) -> Option<(Inline, usize)> {
+pub(crate) fn link(rest: &str) -> Option<(Inline, usize)> {
   // `teamcraft:/c/...` is a permalink to a message (shown as a chip, never opened by the browser).
   let url = link_at(rest)?;
   Some((Inline::Link(url.to_owned()), url.len()))
@@ -609,7 +609,7 @@ fn link_at(rest: &str) -> Option<&str> {
 }
 
 /// `[label](https://…)`: the label is plain text, the URL must be a link the subset allows.
-fn labeled_link(rest: &str) -> Option<(Inline, usize)> {
+pub(crate) fn labeled_link(rest: &str) -> Option<(Inline, usize)> {
   let label_end = 1 + find_unescaped(&rest[1..], "]")?;
   let raw_label = &rest[1..label_end];
   let target = rest[label_end + 1..].strip_prefix('(')?;

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM identity_provider_event_hook WHERE id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "981cca796d122f40c329d69603e80add60dc9a53eb0dc2b372017a9e18caace6"
+}

@@ -10,6 +10,8 @@ use teamcraft_proto::{
   BrandAssetSlot, BrandLinks, BrandResponse, brand_color_properties, is_brand_hex_color,
 };
 
+use crate::color_theme::{ColorTheme, ThemePolicy};
+
 /// Path prefix of brand images on the server.
 const ASSET_PREFIX: &str = "/api/v1/brand/assets/";
 const MAX_NAME_CHARS: usize = 100;
@@ -37,6 +39,10 @@ pub struct BrandView {
   pub login_title: BTreeMap<String, String>,
   pub login_text: BTreeMap<String, String>,
   pub links: BrandLinks,
+  /// The default theme and what people may pick (docs/branding.md §5.1); restricts nothing without
+  /// a policy from the server.
+  #[serde(default)]
+  pub theme_policy: ThemePolicy,
 }
 
 impl BrandView {
@@ -52,6 +58,7 @@ impl BrandView {
       login_title: BTreeMap::new(),
       login_text: BTreeMap::new(),
       links: BrandLinks::default(),
+      theme_policy: ThemePolicy::default(),
     }
   }
 
@@ -108,7 +115,18 @@ impl BrandView {
         maybe_imprint: safe_link(response.links.maybe_imprint),
         maybe_download: safe_link(response.links.maybe_download),
       },
+      theme_policy: response
+        .maybe_theme_policy
+        .as_ref()
+        .map(ThemePolicy::from_wire)
+        .unwrap_or_default(),
     })
+  }
+
+  /// The theme to show for a person's choice under this brand's policy. The choice itself is the
+  /// synced setting and is not changed: another brand may allow it.
+  pub fn effective_theme(&self, chosen: &ColorTheme) -> ColorTheme {
+    self.theme_policy.effective(chosen)
   }
 
   /// The CSS custom properties for the effective theme.
@@ -285,6 +303,26 @@ mod tests {
   }
 
   #[test]
+  fn the_brand_carries_the_theme_policy_of_the_server() {
+    let plain = BrandView::from_response(response(), "").unwrap();
+    assert_eq!(plain.theme_policy, ThemePolicy::default());
+    let chosen: ColorTheme = "preset:paper".parse().unwrap();
+    assert_eq!(plain.effective_theme(&chosen), chosen);
+
+    let mut restricted = response();
+    restricted.maybe_theme_policy = Some(teamcraft_proto::BrandThemePolicy {
+      default_theme: "preset:harbor".into(),
+      maybe_allowed_presets: Some(vec![]),
+      is_custom_allowed: false,
+    });
+    let view = BrandView::from_response(restricted, "").unwrap();
+    assert_eq!(
+      view.effective_theme(&chosen),
+      "preset:harbor".parse::<ColorTheme>().unwrap()
+    );
+  }
+
+  #[test]
   fn the_builtin_brand_without_images_is_the_product() {
     let mut builtin = response();
     builtin.id = "teamcraft".into();
@@ -326,6 +364,7 @@ mod tests {
         maybe_support: Some("https://support.a.example.com".into()),
         ..BrandLinks::default()
       },
+      maybe_theme_policy: None,
     }
   }
 

@@ -3,6 +3,7 @@ package de.zeitgleich.teamcraft.notifications
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.util.Log
 import androidx.core.app.RemoteInput
 import kotlinx.coroutines.CoroutineScope
@@ -54,6 +55,11 @@ class NotificationActionReceiver : BroadcastReceiver() {
             graph.core.core().markRead(conversationId)
             graph.notifier.dismiss(conversationId)
           }
+          ACTION_MEETING_DISMISSED -> {
+            val meetingId = intent.getStringExtra(EXTRA_MEETING_ID) ?: return@launch
+            val startsAtMs = intent.getLongExtra(EXTRA_MEETING_STARTS_AT_MS, -1L).takeIf { it >= 0 } ?: return@launch
+            MeetingNoticeReport.send(ChatClient { graph.core.core() }, meetingId, startsAtMs)
+          }
           ACTION_APPROVE_JOIN, ACTION_DECLINE_JOIN -> {
             val user = intent.getStringExtra(EXTRA_USER_ID) ?: return@launch
             val tag = intent.getStringExtra(EXTRA_TAG) ?: return@launch
@@ -74,6 +80,8 @@ class NotificationActionReceiver : BroadcastReceiver() {
     const val ACTION_MARK_READ = "de.zeitgleich.teamcraft.MARK_READ"
     const val ACTION_MUTE = "de.zeitgleich.teamcraft.MUTE"
     const val ACTION_DISMISSED = "de.zeitgleich.teamcraft.DISMISSED"
+    /** A meeting's notice was swiped away: reported, so the user's other phones take theirs down. */
+    const val ACTION_MEETING_DISMISSED = "de.zeitgleich.teamcraft.MEETING_DISMISSED"
     const val ACTION_APPROVE_JOIN = "de.zeitgleich.teamcraft.APPROVE_JOIN"
     const val ACTION_DECLINE_JOIN = "de.zeitgleich.teamcraft.DECLINE_JOIN"
     const val KEY_REPLY = "reply"
@@ -81,6 +89,8 @@ class NotificationActionReceiver : BroadcastReceiver() {
     private const val EXTRA_THREAD_ID = "thread_id"
     private const val EXTRA_USER_ID = "user_id"
     private const val EXTRA_TAG = "tag"
+    private const val EXTRA_MEETING_ID = "meeting_id"
+    private const val EXTRA_MEETING_STARTS_AT_MS = "meeting_starts_at_ms"
     private const val MUTE_DURATION_MS = 8L * 60 * 60 * 1000
     private const val TAG = "TeamCraftNotify"
 
@@ -89,6 +99,13 @@ class NotificationActionReceiver : BroadcastReceiver() {
         .setAction(action)
         .putExtra(EXTRA_CONVERSATION_ID, conversationId)
         .apply { maybeThreadId?.let { putExtra(EXTRA_THREAD_ID, it) } }
+
+    /** The meeting notice of [meetingId] (the occurrence starting at [startsAtMs]) was swiped away. */
+    fun meetingDismissedIntent(context: Context, conversationId: String, meetingId: String, startsAtMs: Long): Intent =
+      intent(context, ACTION_MEETING_DISMISSED, conversationId)
+        .setData(Uri.parse("teamcraft-meeting-notice://$meetingId/$startsAtMs"))
+        .putExtra(EXTRA_MEETING_ID, meetingId)
+        .putExtra(EXTRA_MEETING_STARTS_AT_MS, startsAtMs)
 
     /** Approve or Decline of [request] ([ACTION_APPROVE_JOIN], [ACTION_DECLINE_JOIN]). */
     fun joinRequestIntent(context: Context, action: String, request: JoinRequestItem): Intent =

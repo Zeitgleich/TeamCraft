@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
 use serde_json::Value;
-use teamcraft_server::config::{BrandColorsConfig, BrandConfig, UnknownHostPolicy};
+use teamcraft_server::config::{BrandColorsConfig, BrandConfig, BrandThemePolicyConfig, UnknownHostPolicy};
 use teamcraft_server::testing::TestApp;
 
 const HOST_A: &str = "chat.a.example.com";
@@ -284,6 +284,39 @@ async fn the_theme_is_a_stylesheet_of_the_brands_colors() {
   );
   let (_, _, body) = get_as(&app, Some(HOST_A), "/api/v1/brand/theme.css").await;
   assert!(body.is_empty());
+  app.stop().await;
+}
+
+#[tokio::test]
+async fn a_configured_theme_policy_is_served_with_its_brand() {
+  let dir = Files::create();
+  let site = dir.dir.join("site");
+  let Some(app) = TestApp::start_with(move |settings| {
+    settings.web.maybe_static_dir = Some(site);
+    settings.branding.unknown_host = UnknownHostPolicy::Default;
+    let mut a = brand("a", HOST_A, true);
+    a.maybe_theme_policy = Some(BrandThemePolicyConfig {
+      default_theme: "preset:paper".into(),
+      maybe_allowed_presets: Some(vec!["paper".into()]),
+      is_custom_allowed: false,
+    });
+    settings.brands = vec![a, brand("b", HOST_B, false)];
+  })
+  .await
+  else {
+    return;
+  };
+  let (_, _, body) = get_as(&app, Some(HOST_A), "/api/v1/brand").await;
+  assert_eq!(
+    json(&body)["theme_policy"],
+    serde_json::json!({"default_theme": "preset:paper", "allowed_presets": ["paper"], "is_custom_allowed": false})
+  );
+  let (_, _, css) = get_as(&app, Some(HOST_A), "/api/v1/brand/theme.css").await;
+  assert!(String::from_utf8(css).unwrap().contains("--chrome:"));
+  let (_, _, body) = get_as(&app, Some(HOST_B), "/api/v1/brand").await;
+  assert!(json(&body).get("theme_policy").is_none());
+  let (_, _, css) = get_as(&app, Some(HOST_B), "/api/v1/brand/theme.css").await;
+  assert!(css.is_empty(), "no policy, no default theme in the stylesheet");
   app.stop().await;
 }
 

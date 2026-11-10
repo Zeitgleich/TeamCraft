@@ -22,6 +22,10 @@ self.addEventListener('push', (event) => {
   event.waitUntil(ready.then(() => wasm_bindgen.handlePush(DATABASE_NAME, payload, null)));
 });
 
+self.addEventListener('notificationclose', (event) => {
+  event.waitUntil(ready.then(() => wasm_bindgen.handleNotificationClose(event, DATABASE_NAME)));
+});
+
 self.addEventListener('notificationclick', (event) => {
   event.waitUntil(ready.then(() => wasm_bindgen.handleNotificationClick(event, DATABASE_NAME)));
 });

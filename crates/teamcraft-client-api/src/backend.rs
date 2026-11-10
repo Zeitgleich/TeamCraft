@@ -537,6 +537,11 @@ pub trait ChatBackend {
   fn group_leftovers(&self) -> Vec<(ConversationId, UserId)> {
     Vec::new()
   }
+  /// Leavers this device's app left for an admin because it reached its daily limit of automatic
+  /// removals (docs/provisioning.md §3.2): for the admin console.
+  fn leavers_held_by_limit(&self) -> usize {
+    0
+  }
 
   fn first_unread(&self, _conversation: ConversationId) -> Option<MessageId> {
     None
@@ -1320,6 +1325,19 @@ pub trait AdminBackend {
   fn run_oidc_sync_preview(&self) {}
   /// Confirms the deactivations the safety brake holds back; `revision` names the list looked at.
   fn confirm_oidc_sync_brake(&self, _revision: i64) {}
+  /// The identity provider's event hook (docs/provisioning.md §4), as of the last read.
+  fn provider_event_hook(&self) -> Option<teamcraft_proto::ProviderEventHookResponse> {
+    None
+  }
+  /// Makes a new secret for the provider's events; the old one stops working.
+  fn create_provider_event_secret(&self) {}
+  /// Turns the provider's events off.
+  fn delete_provider_event_hook(&self) {}
+  /// The secret just made, shown once until dismissed.
+  fn revealed_provider_event_secret(&self) -> Option<teamcraft_proto::WebhookSecretText> {
+    None
+  }
+  fn dismiss_provider_event_secret(&self) {}
   /// How many health checks are alerting (the badges of the admin console); 0 for non-admins.
   fn health_alert_count(&self) -> usize {
     0

@@ -260,6 +260,11 @@ struct State {
   next_connection: u64,
   /// Users with workspace admin rights (permission checks only; trust comes from the roster).
   admins: HashSet<UserId>,
+  /// Leavers the identity provider deactivated (docs/provisioning.md §3), with how long ago and
+  /// which device claimed them.
+  leavers: BTreeMap<UserId, FakeLeaver>,
+  /// How many times each leaver was claimed.
+  leaver_claims: HashMap<UserId, u32>,
   /// Direct messages deleted with a deleted account, per remaining participant.
   deleted_conversations: HashMap<UserId, Vec<ConversationId>>,
   /// The signatures deletions came with, or that the server claims they did.
@@ -427,6 +432,13 @@ pub enum NetworkCut {
 }
 
 /// A device-linking relay: at most two endpoints of one user, frames held for an absent peer.
+/// A leaver as the fake server lists them.
+#[derive(Clone, Copy, Debug)]
+struct FakeLeaver {
+  deactivated_for_secs: u64,
+  maybe_claim: Option<DeviceId>,
+}
+
 #[derive(Default)]
 struct Relay {
   endpoints: Vec<(u64, UserId, UnboundedSender<RendezvousFrame>)>,
@@ -578,6 +590,46 @@ impl FakeServer {
     }
     let everyone: Vec<UserId> = state.users.keys().copied().collect();
     state.publish(everyone, &GatewayEvent::ProfileUpdate { user_id: user });
+  }
+
+  /// The identity provider deactivated `user` `deactivated_for_secs` ago, like the sync does:
+  /// deactivated, listed as a leaver while they are in a conversation, and admins are told.
+  pub fn deactivate_leaver(&self, user: UserId, deactivated_for_secs: u64) {
+    self.deactivate_user(user);
+    let mut state = self.lock();
+    state.leavers.insert(
+      user,
+      FakeLeaver {
+        deactivated_for_secs,
+        maybe_claim: None,
+      },
+    );
+    let admins: Vec<UserId> = state.admins.iter().copied().collect();
+    state.publish(admins, &GatewayEvent::LeaverUpdate);
+  }
+
+  /// Time passes for a leaver's grace: the server's clock, which the apps judge it by.
+  pub fn age_leaver(&self, user: UserId, deactivated_for_secs: u64) {
+    if let Some(leaver) = self.lock().leavers.get_mut(&user) {
+      leaver.deactivated_for_secs = deactivated_for_secs;
+    }
+  }
+
+  /// Another device holds a claim on the leaver.
+  pub fn claim_leaver_elsewhere(&self, user: UserId, device: DeviceId) {
+    if let Some(leaver) = self.lock().leavers.get_mut(&user) {
+      leaver.maybe_claim = Some(device);
+    }
+  }
+
+  /// Whether `user` is still listed as a leaver (not yet removed from all chats).
+  pub fn is_listed_leaver(&self, user: UserId) -> bool {
+    self.lock().leavers.contains_key(&user)
+  }
+
+  /// How many times `user` was claimed.
+  pub fn leaver_claims(&self, user: UserId) -> u32 {
+    self.lock().leaver_claims.get(&user).copied().unwrap_or(0)
   }
 
   /// How many device link requests the server holds.
@@ -3187,11 +3239,73 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn admin_remove_leaver_from_chats(&self, user: UserId) -> Result<(), ApiError> {
+    if !self.server.lock().leavers.contains_key(&user) {
+      return Err(ApiError::status(409, ErrorCode::Conflict, "no longer a leaver"));
+    }
+    self.admin_remove_from_chats(user).await
+  }
+
+  async fn admin_list_leavers(
+    &self,
+    query: &teamcraft_proto::ListLeaversQuery,
+  ) -> Result<teamcraft_proto::ListLeaversResponse, ApiError> {
+    self.with(|state, me| {
+      if !state.admins.contains(&me) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "administrators only"));
+      }
+      let page = usize::try_from(teamcraft_proto::LEAVERS_PAGE_SIZE).unwrap_or(usize::MAX);
+      let leavers: Vec<teamcraft_proto::Leaver> = state
+        .leavers
+        .iter()
+        .filter(|(user, _)| query.maybe_after.is_none_or(|after| **user > after))
+        .take(page)
+        .map(|(user, leaver)| teamcraft_proto::Leaver {
+          user_id: *user,
+          deactivated_for_secs: leaver.deactivated_for_secs,
+          is_claimed: leaver
+            .maybe_claim
+            .is_some_and(|claim| Some(claim) != query.maybe_device_id),
+        })
+        .collect();
+      let maybe_next = (leavers.len() == page)
+        .then(|| leavers.last().map(|leaver| leaver.user_id))
+        .flatten();
+      Ok(teamcraft_proto::ListLeaversResponse { leavers, maybe_next })
+    })
+  }
+
+  async fn admin_claim_leaver(
+    &self,
+    user: UserId,
+    request: &teamcraft_proto::ClaimLeaverRequest,
+  ) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      if !state.admins.contains(&me) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "administrators only"));
+      }
+      let Some(leaver) = state.leavers.get_mut(&user) else {
+        return Err(ApiError::status(404, ErrorCode::UserNotFound, "not a leaver"));
+      };
+      if leaver.maybe_claim.is_some_and(|claim| claim != request.device_id) {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::LeaverClaimed,
+          "claimed by another device",
+        ));
+      }
+      leaver.maybe_claim = Some(request.device_id);
+      *state.leaver_claims.entry(user).or_default() += 1;
+      Ok(())
+    })
+  }
+
   async fn admin_remove_from_chats(&self, user: UserId) -> Result<(), ApiError> {
     let me = self.user;
     if !self.server.lock().admins.contains(&me) {
       return Err(ApiError::status(403, ErrorCode::Forbidden, "administrators only"));
     }
+    self.server.lock().leavers.remove(&user);
     let conversations: Vec<ConversationId> = self
       .server
       .lock()

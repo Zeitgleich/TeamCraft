@@ -28,6 +28,17 @@ impl MeetingNoticeKind {
   }
 }
 
+/// What reporting a meeting's notices as dealt with came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeetingNoticeDismissal {
+  /// No notice of this occurrence went to the user: nothing to report.
+  NotNotified,
+  /// Every notice that went to them was reported before.
+  AlreadyDone,
+  /// At least one notice was still open and is now reported.
+  Done,
+}
+
 /// Somebody a meeting's notices are for, with their settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MeetingNoticeRecipient {
@@ -116,6 +127,36 @@ impl Database {
     .fetch_all(self.pool())
     .await?;
     claimed.into_iter().map(from_db).collect()
+  }
+
+  /// Reports the notices of this occurrence that went to `user` as dealt with (joined, swiped away).
+  /// One statement, so of two devices reporting at once exactly one gets [`MeetingNoticeDismissal::Done`].
+  /// A notice that goes out later (the start after the reminder) is a row of its own and still open.
+  pub async fn dismiss_meeting_notices(
+    &self,
+    meeting: MeetingId,
+    starts_at: OffsetDateTime,
+    user: UserId,
+  ) -> Result<MeetingNoticeDismissal, DbError> {
+    let row = sqlx::query!(
+      r#"WITH closed AS (
+           UPDATE meeting_notices SET dismissed_at = now()
+           WHERE meeting_id = $1 AND starts_at = $2 AND user_id = $3 AND dismissed_at IS NULL
+           RETURNING 1)
+         SELECT (SELECT count(*) FROM closed) AS "closed!",
+                EXISTS (SELECT 1 FROM meeting_notices
+                        WHERE meeting_id = $1 AND starts_at = $2 AND user_id = $3) AS "was_notified!""#,
+      to_db(meeting),
+      starts_at,
+      to_db(user),
+    )
+    .fetch_one(self.pool())
+    .await?;
+    Ok(match (row.was_notified, row.closed) {
+      (false, _) => MeetingNoticeDismissal::NotNotified,
+      (true, 0) => MeetingNoticeDismissal::AlreadyDone,
+      (true, _) => MeetingNoticeDismissal::Done,
+    })
   }
 
   /// Forgets the notices of occurrences that started before `before`. Returns how many.

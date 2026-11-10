@@ -48,6 +48,11 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time",
 # Kotlin (and later Swift) bindings from proc-macros; Mozilla's generator, used by Firefox mobile.
 uniffi = "0.32.2"
 
+[target.'cfg(any(target_os = "android", target_os = "linux"))'.dependencies]
+# The thread's CPU time beside a slow job's wall time (issue #1634): a frozen process from real
+# work. Safe clock_gettime; already in the tree (tempfile).
+rustix = { version = "1.1.5", default-features = false, features = ["std", "time"] }
+
 [target.'cfg(target_os = "android")'.dependencies]
 # Core tracing to logcat (liblog through ndk-sys), the maintained tracing layer for it.
 paranoid-android = "0.2.2"
