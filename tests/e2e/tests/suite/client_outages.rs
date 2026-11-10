@@ -515,7 +515,6 @@ mod clock_jump {
   /// busy: the connection keeps its pace (heartbeats are not postponed by the hour, the server
   /// doesn't drop it), and messages keep arriving live and going out.
   #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-  #[ignore = "#1673: a busy conversation keeps the runner from noticing a clock set back; the server drops the app"]
   async fn the_app_keeps_its_connection_when_the_clock_goes_back() {
     LocalSet::new().run_until(clock_jump(Jump::Back)).await;
   }
