@@ -1311,7 +1311,7 @@ What changed and what the numbers say:
   side by side.
 - **A resume** read its counts, presence and link requests one after the other after the answer; now
   they are read while the server answers.
-- The budget test fails above 18 requests or 300 ms for an unchanged workspace, also at 30 ms RTT.
+- The budget test fails above 19 requests (18 plus the one user-groups read of #1527) or 300 ms (1.75 times that on a shared CI runner) for an unchanged workspace, also at 30 ms RTT.
 
 Left open (see the PR of #714/#717):
 

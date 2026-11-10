@@ -32,6 +32,8 @@ const PASSWORD: &str = "role-signing-dev-pass";
 /// evidence of a lost role goes out once that token has expired.
 const ROLE_CHANGE_WAIT: Duration = Duration::from_secs(780);
 const SIGN_WAIT: Duration = Duration::from_secs(180);
+/// How long the roles review gets to show a list that can be confirmed.
+const REVIEW_WAIT: Duration = Duration::from_secs(60);
 
 /// What the app used to say about signing, on every page. None of it may come back in normal operation.
 const PROMPTS: [&str; 9] = [
@@ -265,10 +267,8 @@ async fn a_workspace_admin_sees_a_channels_roles_with_their_marks_and_the_alarm(
     .evaluate("document.querySelector('.space-btn[aria-label^=\"Role look\"]').click()")
     .await
     .unwrap();
-  wait_for_text(&page, "role-look").await;
-  click_text(&page, "role-look").await;
-  wait_for_element(&page, ".channel-header").await;
-  tokio::time::sleep(Duration::from_secs(3)).await;
+  open_channel(&page, "role-look").await;
+  wait_for_element(&page, "[aria-label=\"Channel settings\"]").await;
   page
     .evaluate("document.querySelector('[aria-label=\"Channel settings\"]').click()")
     .await
@@ -278,13 +278,14 @@ async fn a_workspace_admin_sees_a_channels_roles_with_their_marks_and_the_alarm(
   shot(&page, "role-look-1-members").await;
   assert_no_prompt(&page, "the members section").await;
 
-  click_text(&page, "Check roles").await;
-  wait_for_text(&page, "Confirm exactly these roles").await;
+  // The list is as the page knows it when it is opened: look again until it has the marks of
+  // every member (the members and keys may still be arriving).
+  let text = open_role_review_showing(&page, &["New", "Can't check", "This device can't check"]).await;
   shot(&page, "role-look-2-marks").await;
-  let text = body_text(&page).await;
-  for expected in ["New", "Can't check", "This device can't check"] {
-    assert!(text.contains(expected), "the panel says {expected:?}:\n{text}");
-  }
+  assert!(
+    text.contains("Confirm exactly these roles"),
+    "the review is open:\n{text}"
+  );
   assert!(
     is_confirm_disabled(&page).await,
     "a key nobody can check can't be confirmed"
@@ -306,11 +307,7 @@ async fn a_workspace_admin_sees_a_channels_roles_with_their_marks_and_the_alarm(
   // They look again, and confirm through the real server.
   let log = format!("/conversations/{channel}/role-log");
   let entries_before = role_log_length(&stack, &alice, &log).await;
-  let reopen = "[...document.querySelectorAll('.role-review-actions button')]\
-    .find(button => button.innerText.trim() === 'Check roles').click()";
-  page.evaluate(reopen).await.unwrap();
-  tokio::time::sleep(Duration::from_secs(1)).await;
-  assert!(!is_confirm_disabled(&page).await, "this list can be confirmed");
+  wait_until_confirmable(&page).await;
   shot(&page, "role-look-4-can-confirm").await;
   click_text(&page, "Confirm exactly these roles").await;
   let deadline = Instant::now() + SIGN_WAIT;
@@ -380,6 +377,81 @@ async fn wait_for_owner_id(stack: &Stack, reader: &teamcraft_e2e::tokens::UserTo
     .unwrap();
   let document: Value = serde_json::from_slice(&payload).unwrap();
   document["members"][0]["user_id"].as_str().unwrap().to_owned()
+}
+
+/// Opens the channel in the sidebar and waits for its header; the click is repeated until the
+/// header shows, since the entry may not take clicks while the list is still being built.
+async fn open_channel(page: &Page, name: &str) {
+  let deadline = Instant::now() + REVIEW_WAIT;
+  loop {
+    if page.find_element(".channel-header").await.is_ok() {
+      return;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "the channel {name:?} did not open within {REVIEW_WAIT:?}:\n{}",
+      body_text(page).await
+    );
+    let _ = page
+      .evaluate(format!(
+        "[...document.querySelectorAll('button, a, li, [role=button], [role=link], [role=treeitem]')]\
+          .find(e => e.innerText.includes({name:?}))?.click()"
+      ))
+      .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+  }
+}
+
+/// Opens the roles review and returns the page text once it shows every one of `marks`. A review
+/// that opened before the members and keys were in (marks missing) is closed and opened again,
+/// like a person would: the panel shows the list as it stood when it was opened.
+async fn open_role_review_showing(page: &Page, marks: &[&str]) -> String {
+  let deadline = Instant::now() + REVIEW_WAIT;
+  loop {
+    click_button_if_present(page, "Check roles").await;
+    let text = body_text(page).await;
+    if text.contains("Confirm exactly these roles") {
+      if marks.iter().all(|mark| text.contains(mark)) {
+        return text;
+      }
+      click_button_if_present(page, "Cancel").await;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "the review never showed {marks:?} within {REVIEW_WAIT:?}:\n{text}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+  }
+}
+
+/// Waits until the open review can be confirmed. A review whose list moved meanwhile is opened
+/// again, as its own hint asks; one that stays refused fails with what the page says.
+async fn wait_until_confirmable(page: &Page) {
+  let deadline = Instant::now() + REVIEW_WAIT;
+  loop {
+    let has_review = body_text(page).await.contains("Confirm exactly these roles");
+    if has_review && !is_confirm_disabled(page).await {
+      return;
+    }
+    assert!(
+      Instant::now() < deadline,
+      "this list can be confirmed, but is not within {REVIEW_WAIT:?}:\n{}",
+      body_text(page).await
+    );
+    // Closed, or showing a list that moved: look again.
+    click_button_if_present(page, "Check roles").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+  }
+}
+
+/// Clicks the review's own button with this exact text, if there is one right now.
+async fn click_button_if_present(page: &Page, text: &str) {
+  let _ = page
+    .evaluate(format!(
+      "[...document.querySelectorAll('.role-review-actions button')]\
+        .find(button => button.innerText.trim() === {text:?})?.click()"
+    ))
+    .await;
 }
 
 async fn is_confirm_disabled(page: &Page) -> bool {
