@@ -19,7 +19,7 @@ use teamcraft_proto::{AttachmentId, ConversationId};
 use crate::api::ServerApi;
 use crate::client::Client;
 use crate::client::disk_downloads::{
-  DownloadStatus, DownloadTarget, download_record, due_downloads, forget_download,
+  DownloadStatus, DownloadTarget, download_record, due_downloads, forget_download, resume_failed_downloads,
 };
 use crate::client::files::failure_of;
 use crate::error::CoreError;
@@ -46,6 +46,9 @@ pub struct Downloads {
   maybe_next_scan_ms: Option<i64>,
   /// The first scan also continues the saves an app left running when it stopped.
   has_resumed: bool,
+  /// The connection came back or the network changed: the next [`Self::start_due`] continues the
+  /// saves that failed for a transient reason (issue #1618), once.
+  is_network_back: bool,
 }
 
 /// What a finished download leaves for the host.
@@ -135,6 +138,7 @@ impl Downloads {
       opens: Vec::new(),
       maybe_next_scan_ms: Some(i64::MIN),
       has_resumed: false,
+      is_network_back: false,
     }
   }
 
@@ -220,6 +224,13 @@ impl Downloads {
       self.waiting.retain(|job| !job.saves(attachment));
     }
     self.controls.push((attachment, control));
+  }
+
+  /// Tells that the connection came back or the network changed: saves that failed on an outage
+  /// (storage unavailable, network, intercepted) continue once, within an age limit; permanent
+  /// failures and cancelled saves wait for the user.
+  pub fn network_back(&mut self) {
+    self.is_network_back = true;
   }
 
   /// The saved files the user asked to open or show since the last call.
@@ -391,6 +402,17 @@ impl Downloads {
   /// Queues the saves whose retry came due (and, the first time, those an app left running).
   fn queue_due_saves<A: ServerApi, S: LocalStore>(&mut self, client: &Client<A, S>) {
     let now_ms = client.now_ms();
+    if std::mem::take(&mut self.is_network_back) {
+      match resume_failed_downloads(client.store(), now_ms) {
+        Ok(resumed) => {
+          for download in resumed {
+            tracing::info!(attachment_id = %download.attachment_id, "resuming a failed download after an outage");
+            self.queue_save(download.conversation_id, download.attachment_id, download.target);
+          }
+        },
+        Err(error) => tracing::warn!(%error, "could not read the failed downloads to resume"),
+      }
+    }
     if self.maybe_next_scan_ms.is_none_or(|next| now_ms < next) {
       return;
     }
