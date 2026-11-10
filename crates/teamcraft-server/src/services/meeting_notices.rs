@@ -10,16 +10,17 @@
 
 use std::collections::HashSet;
 
-use teamcraft_db::{MeetingNoticeKind, MeetingNoticeRecipient, StoredMeeting};
+use teamcraft_db::{MeetingNoticeDismissal, MeetingNoticeKind, MeetingNoticeRecipient, StoredMeeting};
 use teamcraft_proto::{
-  DEFAULT_MEETING_REMINDER_MINUTES, MAX_MEETING_REMINDER_MINUTES, MeetingStatus, PushKind, PushMeeting,
-  UnixMillis, UserId,
+  DEFAULT_MEETING_REMINDER_MINUTES, DismissMeetingNoticeRequest, MAX_MEETING_REMINDER_MINUTES, MeetingId,
+  MeetingStatus, PushKind, PushMeeting, UnixMillis, UserId,
 };
 use time::OffsetDateTime;
 use tracing::warn;
 
 use super::convert::{offset_date_time, unix_millis};
 use super::meetings::occurrence_starts;
+use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::push::routing::{self, MeetingNotice};
 use crate::state::AppState;
@@ -57,6 +58,38 @@ pub async fn run_due(state: &AppState, now: OffsetDateTime) -> Result<usize, Api
     .delete_old_meeting_notices(at(now_ms - KEEP_NOTICES_MS)?)
     .await?;
   Ok(sent)
+}
+
+/// The caller dealt with the notice of one occurrence on a device (joined, swiped away): their other
+/// phones take it down. Only an occurrence a notice went to the caller for can be named, so nobody
+/// learns anything about a meeting they were not told of, and nobody can clear another user's
+/// notices. Reporting again does nothing more: of several reports exactly one sends the withdrawal.
+pub async fn dismiss(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  meeting: MeetingId,
+  request: DismissMeetingNoticeRequest,
+) -> Result<(), ApiError> {
+  let starts_at = at(request.starts_at.0)?;
+  match state
+    .database
+    .dismiss_meeting_notices(meeting, starts_at, caller.user.id)
+    .await?
+  {
+    MeetingNoticeDismissal::NotNotified => Err(ApiError::meeting_not_found()),
+    MeetingNoticeDismissal::AlreadyDone => Ok(()),
+    MeetingNoticeDismissal::Done => {
+      tokio::spawn(routing::dismiss_meeting(
+        state.clone(),
+        caller.user.id,
+        PushMeeting {
+          meeting_id: meeting,
+          starts_at: request.starts_at,
+        },
+      ));
+      Ok(())
+    },
+  }
 }
 
 /// Whether the occurrence a queued notice tells about still is on: the meeting isn't cancelled and

@@ -117,11 +117,15 @@ fn subscription_json(subscription: &web_sys::PushSubscription) -> Result<String,
 }
 
 #[cfg(feature = "service-worker")]
-pub use service_worker::{handle_notification_click, handle_push, handle_subscription_change};
+pub use service_worker::{
+  handle_notification_click, handle_notification_close, handle_push, handle_subscription_change,
+};
 
 #[cfg(feature = "service-worker")]
 mod service_worker {
-  use teamcraft_proto::{ConversationId, MessageId, SetReadPositionRequest};
+  use teamcraft_proto::{
+    ConversationId, DismissMeetingNoticeRequest, MeetingId, MessageId, SetReadPositionRequest, UnixMillis,
+  };
   use wasm_bindgen::prelude::wasm_bindgen;
   use wasm_bindgen::{JsCast, JsValue};
   use wasm_bindgen_futures::JsFuture;
@@ -153,6 +157,10 @@ mod service_worker {
   /// (`NotificationTag::meeting` in `teamcraft-client-api`) and its Join button.
   const MEETING_TAG_PREFIX: &str = "meeting:";
   const JOIN_MEETING_ACTION: &str = "join-meeting";
+  /// Keys of a meeting notice's meeting and the start of its occurrence (Unix milliseconds, as text)
+  /// in the notification's `data`: Join and closing the notice report them to the server.
+  const MEETING_FIELD: &str = "meeting_id";
+  const MEETING_STARTS_AT_FIELD: &str = "meeting_starts_at";
 
   /// The service worker's `push` handler: decrypts the wake-up and shows the notification.
   /// Browsers require a notification for every push, so failures still show one that says a
@@ -225,6 +233,11 @@ mod service_worker {
       .ok()
       .and_then(|value| value.as_string())
       .unwrap_or_default();
+    if action == JOIN_MEETING_ACTION
+      && let Some(database_name) = &maybe_database_name
+    {
+      report_meeting_notice(database_name, &field).await;
+    }
     if action == MARK_READ_ACTION
       && let (Some(database_name), Some(conversation), Some(message)) =
         (&maybe_database_name, &maybe_conversation, &maybe_message)
@@ -273,6 +286,62 @@ mod service_worker {
       url.push_str(&format!("?{CONVERSATION_FIELD}={conversation}"));
     }
     JsFuture::from(clients.open_window(&url)).await?;
+    Ok(())
+  }
+
+  /// The service worker's `notificationclose` handler: the user closed a meeting's notice without
+  /// opening it (the browser tells only for that; closing it from the worker doesn't count), so the
+  /// server takes it down on the user's other phones. Other notifications are not reported.
+  #[wasm_bindgen(js_name = handleNotificationClose)]
+  pub async fn handle_notification_close(
+    event: web_sys::NotificationEvent,
+    maybe_database_name: Option<String>,
+  ) -> Result<(), JsValue> {
+    let Some(database_name) = maybe_database_name else {
+      return Ok(());
+    };
+    let data = event.notification().data();
+    let field = |key: &str| {
+      js_sys::Reflect::get(&data, &JsValue::from_str(key))
+        .ok()
+        .and_then(|value| value.as_string())
+    };
+    report_meeting_notice(&database_name, &field).await;
+    Ok(())
+  }
+
+  /// Tells the server that the meeting notice whose `data` `field` reads was dealt with here. Best
+  /// effort with the stored push session: no session, an offline browser or an occurrence the server
+  /// no longer knows only log.
+  async fn report_meeting_notice(database_name: &str, field: &impl Fn(&str) -> Option<String>) {
+    let (Some(meeting), Some(starts_at)) = (field(MEETING_FIELD), field(MEETING_STARTS_AT_FIELD)) else {
+      return;
+    };
+    if let Err(error) = send_meeting_report(database_name, &meeting, &starts_at).await {
+      tracing::debug!(%error, "could not report a meeting notice");
+    }
+  }
+
+  async fn send_meeting_report(database_name: &str, meeting: &str, starts_at: &str) -> Result<(), CoreError> {
+    let unreadable = || CoreError::Corrupt("unreadable notification data".into());
+    let meeting: MeetingId = meeting.parse().map_err(|_| unreadable())?;
+    let starts_at: i64 = starts_at.parse().map_err(|_| unreadable())?;
+    let body = serde_json::to_string(&DismissMeetingNoticeRequest {
+      starts_at: UnixMillis(starts_at),
+    })
+    .map_err(|_| unreadable())?;
+    let key = browser_database_key_without_upgrade(database_name).await?;
+    let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
+    let session = push_session(&store, SystemClock.now_ms())?
+      .ok_or_else(|| CoreError::Browser("no valid push session".into()))?;
+    session_api(session)
+      .await
+      .raw_request(
+        "POST",
+        &format!("/meetings/{meeting}/notices/dismiss"),
+        Some(body),
+      )
+      .await?;
     Ok(())
   }
 
@@ -472,6 +541,16 @@ mod service_worker {
       let tag = format!("{MEETING_TAG_PREFIX}{}", meeting.meeting_id);
       options.set_tag(&tag);
       let _ = js_sys::Reflect::set(&data, &TAG_FIELD.into(), &tag.into());
+      let _ = js_sys::Reflect::set(
+        &data,
+        &MEETING_FIELD.into(),
+        &meeting.meeting_id.to_string().into(),
+      );
+      let _ = js_sys::Reflect::set(
+        &data,
+        &MEETING_STARTS_AT_FIELD.into(),
+        &meeting.starts_at.0.to_string().into(),
+      );
       if let (Some(label), true) = (
         labels.maybe_join_meeting.as_deref(),
         preview.is_conversation_verified,

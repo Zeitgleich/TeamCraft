@@ -64,6 +64,7 @@ class PushHandler(
         notifier.showQuietCall(ring(decision.notification.conversationId, null, decision.notification).displayName)
       }
       is PushDecision.StopRinging -> calls.stopRinging(decision.callId)
+      is PushDecision.RemoveMeeting -> notifier.removeMeeting(decision.meetingId)
       is PushDecision.RemoveRead -> notifier.removeRead(
         conversationId = decision.conversationId,
         maybeThreadId = decision.maybeThreadId,

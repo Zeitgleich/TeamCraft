@@ -45,12 +45,13 @@ enum NotificationCategories {
     let call = UNNotificationCategory(
       identifier: callCategory, actions: [answer, decline], intentIdentifiers: [], options: [])
     // A meeting's reminder or start notice: Join opens the app like Answer (the microphone needs
-    // the app in the foreground).
+    // the app in the foreground). Clearing the notice reports it to the app (no permission needed),
+    // which tells the server so the user's other phones take theirs down.
     let join = UNNotificationAction(
       identifier: joinMeetingAction, title: String(localized: "notification_join_meeting"),
       options: [.foreground, .authenticationRequired])
     let meeting = UNNotificationCategory(
-      identifier: meetingCategory, actions: [join], intentIdentifiers: [], options: [])
+      identifier: meetingCategory, actions: [join], intentIdentifiers: [], options: [.customDismissAction])
     // Letting somebody into a channel needs the unlocked phone; the app decides in the background.
     let approveJoin = UNNotificationAction(
       identifier: approveJoinAction, title: String(localized: "join_request_approve"),

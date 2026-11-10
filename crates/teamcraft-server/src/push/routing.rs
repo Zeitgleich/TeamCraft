@@ -490,6 +490,39 @@ pub async fn end_ring(state: AppState, call: CallId) {
   }
 }
 
+/// The user dealt with a meeting's notice on one device: their phones take it down, the one that
+/// reported included (it is silent and a second removal does nothing). Phones in use get it too: they
+/// show the notice with the app open, as they keep no timers of their own. It names the meeting
+/// and the occurrence and nothing else, in no conversation, so an older app that doesn't know the
+/// field removes nothing. Browsers can't take a push notification down silently (`can_dismiss`);
+/// theirs stay until the user closes them or the start notice replaces them.
+pub async fn dismiss_meeting(state: AppState, user: UserId, meeting: PushMeeting) {
+  let rows = match state.database.list_push_devices(user).await {
+    Ok(rows) => rows,
+    Err(error) => {
+      warn!(%error, "listing push devices for a meeting withdrawal failed");
+      return;
+    },
+  };
+  let wake_up = PushWakeUp {
+    kind: PushKind::Dismiss,
+    conversation_id: no_conversation(),
+    maybe_message_id: None,
+    maybe_sender_id: None,
+    is_urgent: false,
+    maybe_thread_id: None,
+    maybe_call_id: None,
+    maybe_badge: None,
+    maybe_sent_at: Some(now_millis()),
+    maybe_meeting: Some(meeting),
+  };
+  for row in rows {
+    if can_dismiss(&row.provider) {
+      delivery::spawn(state.clone(), user, row, wake_up.clone());
+    }
+  }
+}
+
 /// The user read the conversation (or a thread of it) up to `up_to`: phones that show a
 /// notification for it remove it. Devices with a live connection learn it from the gateway.
 pub async fn dismiss_read(

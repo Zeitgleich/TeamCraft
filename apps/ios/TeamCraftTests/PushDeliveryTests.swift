@@ -175,6 +175,31 @@ final class NotificationMatcherTests: XCTestCase {
     XCTAssertEqual(NotificationMatcher.identifiers(delivered, dismissing: target), ["a"])
   }
 
+  func testAMeetingDismissRemovesOnlyThatMeetingsNotices() {
+    let delivered = [
+      meeting("a", meetingId: "5"),
+      meeting("b", meetingId: "5"),
+      meeting("c", meetingId: "6"),
+      message("d", conversation: "1", id: "100"),
+    ]
+    let target = DismissTarget(conversationId: "0", maybeMeetingId: "5")
+    XCTAssertEqual(NotificationMatcher.identifiers(delivered, dismissing: target), ["a", "b"])
+  }
+
+  func testAMessageDismissLeavesMeetingNotices() {
+    let delivered = [meeting("a", meetingId: "5")]
+    XCTAssertTrue(NotificationMatcher.identifiers(delivered, dismissing: DismissTarget(conversationId: "1")).isEmpty)
+    XCTAssertTrue(NotificationMatcher.identifiers(delivered, dismissing: DismissTarget(conversationId: "0")).isEmpty)
+  }
+
+  func testAMeetingNoticeKeepsWhatReportingItNeeds() {
+    let info = NotificationKeys.userInfo(
+      kind: NotificationKeys.meetingKind, conversationId: "1", maybeTag: nil, maybeMeetingId: "5",
+      maybeMeetingStartsAtMs: 1_800_000_000_000)
+    XCTAssertEqual(info[NotificationKeys.meetingId] as? String, "5")
+    XCTAssertEqual(info[NotificationKeys.meetingStartsAt] as? String, "1800000000000")
+  }
+
   func testAMessageDismissLeavesCallAlertsAndTestPushes() {
     let delivered = [
       call("a", conversation: "1", callId: "77"),
@@ -222,6 +247,14 @@ final class NotificationMatcherTests: XCTestCase {
       userInfo: NotificationKeys.userInfo(
         kind: NotificationKeys.messageKind, conversationId: conversation, maybeTag: nil, maybeMessageId: id,
         maybeThreadId: thread))
+  }
+
+  private func meeting(_ identifier: String, meetingId: String) -> DeliveredPush {
+    DeliveredPush(
+      identifier: identifier,
+      userInfo: NotificationKeys.userInfo(
+        kind: NotificationKeys.meetingKind, conversationId: "1", maybeTag: nil, maybeMeetingId: meetingId),
+      maybeThreadIdentifier: NotificationKeys.meetingThread(meetingId))
   }
 
   private func call(_ identifier: String, conversation: String, callId: String) -> DeliveredPush {

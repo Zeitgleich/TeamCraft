@@ -64,6 +64,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         notificationId: response.notification.request.identifier)
       return
     }
+    // A meeting's notice dealt with here (Join, or cleared): the server takes it down on the user's
+    // other phones. Clearing is nothing more than that; Join goes on to open the call.
+    if info[NotificationKeys.kind] as? String == NotificationKeys.meetingKind,
+      response.actionIdentifier == NotificationCategories.joinMeetingAction
+        || response.actionIdentifier == UNNotificationDismissActionIdentifier,
+      let meetingId = info[NotificationKeys.meetingId] as? String,
+      let startsAt = (info[NotificationKeys.meetingStartsAt] as? String).flatMap(Int64.init)
+    {
+      await AppModel.shared.reportMeetingNoticeDealtWith(meetingId: meetingId, startsAtMs: startsAt)
+    }
+    if response.actionIdentifier == UNNotificationDismissActionIdentifier { return }
     guard let conversationId = info[NotificationCategories.conversationKey] as? String else { return }
     let reply = (response as? UNTextInputNotificationResponse)?.userText
     let tag = info[NotificationAuthenticator.tagKey] as? String

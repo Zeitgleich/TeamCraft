@@ -19,7 +19,7 @@ use teamcraft_server::config::{MailTexts, MeetingsConfig};
 use teamcraft_server::push::crypto::open_wakeup;
 use teamcraft_server::push::{PushDispatcher, PushError, PushMessage, PushSender, PushTarget};
 use teamcraft_server::services::meeting_notices;
-use teamcraft_server::testing::{FakeCalendar, FakeMailer, TestApp, TestUser};
+use teamcraft_server::testing::{FakeCalendar, FakeMailer, Reply, TestApp, TestUser};
 use time::OffsetDateTime;
 
 const MINUTE: i64 = 60_000;
@@ -353,5 +353,169 @@ mod changes {
       .await;
     assert_eq!(cancelled.status, StatusCode::OK, "{}", cancelled.body);
     assert_eq!(run_at(&scene.app, second - 5 * MINUTE).await, 0);
+  }
+}
+
+mod dismissal {
+  use super::*;
+
+  async fn report(scene: &Scene, user: &TestUser, meeting: &str, starts_at: i64) -> Reply {
+    scene
+      .app
+      .post(
+        user,
+        &format!("/meetings/{meeting}/notices/dismiss"),
+        json!({"starts_at": starts_at}),
+      )
+      .await
+  }
+
+  /// The withdrawals among the pushes, as (device, meeting, occurrence start).
+  fn withdrawals(pushes: &[(String, PushWakeUp)]) -> Vec<(String, String, i64)> {
+    let mut found: Vec<_> = pushes
+      .iter()
+      .filter(|(_, wake_up)| wake_up.kind == PushKind::Dismiss)
+      .map(|(device, wake_up)| {
+        let meeting = wake_up.maybe_meeting.expect("names the meeting");
+        (
+          device.clone(),
+          meeting.meeting_id.to_string(),
+          meeting.starts_at.0,
+        )
+      })
+      .collect();
+    found.sort();
+    found
+  }
+
+  #[tokio::test]
+  async fn joining_on_one_phone_takes_the_notice_down_on_the_users_phones_and_nobody_elses() {
+    let Some(scene) = scene().await else { return };
+    let second_phone = phone(&scene.app, &scene.bob).await;
+    let starts_at = now_ms() + 6 * 24 * 60 * MINUTE;
+    let (id, chat) = scene.schedule(starts_at, None).await;
+    run_at(&scene.app, starts_at - 5 * MINUTE).await;
+    assert_eq!(
+      scene.recorder.taken().await.len(),
+      3,
+      "Bob's two phones and Carol's"
+    );
+
+    let reply = report(&scene, &scene.bob, &id, starts_at).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    let pushes = scene.recorder.taken().await;
+    let mut bob_phones = [scene.bob_phone.clone(), second_phone.clone()];
+    bob_phones.sort();
+    assert_eq!(
+      withdrawals(&pushes),
+      bob_phones
+        .iter()
+        .map(|device| (device.clone(), id.clone(), starts_at))
+        .collect::<Vec<_>>(),
+      "Bob's phones, not Carol's"
+    );
+    // It names the meeting and nothing else: no conversation, no text.
+    for (_, wake_up) in &pushes {
+      assert_ne!(wake_up.conversation_id.to_string(), chat);
+      assert_eq!(wake_up.maybe_message_id, None);
+      assert_eq!(wake_up.maybe_sender_id, None);
+    }
+
+    // Carol's report is hers: it doesn't touch Bob's notice and only goes to her phones.
+    let carols = report(&scene, &scene.carol, &id, starts_at).await;
+    assert_eq!(carols.status, StatusCode::NO_CONTENT, "{}", carols.body);
+    assert_eq!(
+      withdrawals(&scene.recorder.taken().await),
+      [(scene.carol_phone.clone(), id.clone(), starts_at)]
+    );
+  }
+
+  #[tokio::test]
+  async fn reporting_again_does_nothing_more() {
+    let Some(scene) = scene().await else { return };
+    let starts_at = now_ms() + 7 * 24 * 60 * MINUTE;
+    let (id, _) = scene.schedule(starts_at, None).await;
+    run_at(&scene.app, starts_at - 5 * MINUTE).await;
+    scene.recorder.taken().await;
+
+    let (first, second) = tokio::join!(
+      report(&scene, &scene.bob, &id, starts_at),
+      report(&scene, &scene.bob, &id, starts_at)
+    );
+    assert_eq!(first.status, StatusCode::NO_CONTENT, "{}", first.body);
+    assert_eq!(second.status, StatusCode::NO_CONTENT, "{}", second.body);
+    assert_eq!(
+      withdrawals(&scene.recorder.taken().await).len(),
+      1,
+      "one withdrawal"
+    );
+
+    let third = report(&scene, &scene.bob, &id, starts_at).await;
+    assert_eq!(third.status, StatusCode::NO_CONTENT, "{}", third.body);
+    assert!(scene.recorder.taken().await.is_empty());
+  }
+
+  #[tokio::test]
+  async fn a_notice_that_comes_later_can_be_dismissed_in_its_turn() {
+    let Some(scene) = scene().await else { return };
+    let starts_at = now_ms() + 8 * 24 * 60 * MINUTE;
+    let (id, _) = scene.schedule(starts_at, None).await;
+    run_at(&scene.app, starts_at - 5 * MINUTE).await;
+    report(&scene, &scene.bob, &id, starts_at).await;
+    scene.recorder.taken().await;
+
+    // The start notice is a new row, still open: it shows, and dismissing it works.
+    run_at(&scene.app, starts_at).await;
+    let started = kinds(&scene.recorder.taken().await);
+    assert!(started.contains(&(scene.bob_phone.clone(), PushKind::MeetingStart)));
+    let reply = report(&scene, &scene.bob, &id, starts_at).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+    assert_eq!(withdrawals(&scene.recorder.taken().await).len(), 1);
+  }
+
+  #[tokio::test]
+  async fn only_an_occurrence_the_user_was_notified_of_can_be_named() {
+    let Some(scene) = scene().await else { return };
+    let dave = member("dave");
+    phone(&scene.app, &dave).await;
+    let starts_at = now_ms() + 9 * 24 * 60 * MINUTE;
+    let (id, _) = scene.schedule(starts_at, None).await;
+
+    // Nothing was sent yet, not even to the invited.
+    let early = report(&scene, &scene.bob, &id, starts_at).await;
+    assert_eq!(early.status, StatusCode::NOT_FOUND, "{}", early.body);
+
+    run_at(&scene.app, starts_at - 5 * MINUTE).await;
+    scene.recorder.taken().await;
+    // Somebody who is not invited, and an occurrence that never was.
+    let stranger = report(&scene, &dave, &id, starts_at).await;
+    assert_eq!(stranger.status, StatusCode::NOT_FOUND, "{}", stranger.body);
+    let other_time = report(&scene, &scene.bob, &id, starts_at + MINUTE).await;
+    assert_eq!(other_time.status, StatusCode::NOT_FOUND, "{}", other_time.body);
+    let other_meeting = report(&scene, &scene.bob, "1", starts_at).await;
+    assert_eq!(
+      other_meeting.status,
+      StatusCode::NOT_FOUND,
+      "{}",
+      other_meeting.body
+    );
+    assert!(scene.recorder.taken().await.is_empty(), "nothing went out");
+  }
+
+  #[tokio::test]
+  async fn a_bad_body_is_refused() {
+    let Some(scene) = scene().await else { return };
+    let starts_at = now_ms() + 10 * 24 * 60 * MINUTE;
+    let (id, _) = scene.schedule(starts_at, None).await;
+    run_at(&scene.app, starts_at - 5 * MINUTE).await;
+    let reply = scene
+      .app
+      .post(
+        &scene.bob,
+        &format!("/meetings/{id}/notices/dismiss"),
+        json!({"starts_at": "soon"}),
+      )
+      .await;
+    assert!(reply.status.is_client_error(), "{}", reply.body);
   }
 }

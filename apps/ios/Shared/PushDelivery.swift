@@ -79,6 +79,10 @@ enum NotificationKeys {
   static let message = "message_id"
   static let thread = "thread_id"
   static let call = "call_id"
+  /// A meeting notice's meeting and the start of its occurrence (Unix milliseconds, as text), so a tap
+  /// on Join or a swipe away can be reported to the server (docs/notifications.md, "Meeting notices").
+  static let meetingId = "meeting_id"
+  static let meetingStartsAt = "meeting_starts_at"
 
   static let messageKind = "message"
   static let callKind = "call"
@@ -89,16 +93,23 @@ enum NotificationKeys {
   /// The admin of a join request's notification (with its conversation under `conversation`).
   static let joinRequestUser = "join_request_user"
 
+  /// The thread of a meeting's notices: the reminder and the start notice of a meeting share it, and
+  /// a `dismiss` naming the meeting removes the thread's notifications.
+  static func meetingThread(_ meetingId: String) -> String { "meeting-\(meetingId)" }
+
   /// `userInfo` of a notification the app built; `maybeTag` is `NotificationAuthenticator`'s tag.
   static func userInfo(
     kind: String, conversationId: String, maybeTag: String?, maybeMessageId: String? = nil,
-    maybeThreadId: String? = nil, maybeCallId: String? = nil
+    maybeThreadId: String? = nil, maybeCallId: String? = nil, maybeMeetingId: String? = nil,
+    maybeMeetingStartsAtMs: Int64? = nil
   ) -> [AnyHashable: Any] {
     var info: [AnyHashable: Any] = [Self.kind: kind, conversation: conversationId]
     if let maybeTag { info[NotificationAuthenticator.tagKey] = maybeTag }
     if let maybeMessageId { info[message] = maybeMessageId }
     if let maybeThreadId { info[thread] = maybeThreadId }
     if let maybeCallId { info[call] = maybeCallId }
+    if let maybeMeetingId { info[meetingId] = maybeMeetingId }
+    if let maybeMeetingStartsAtMs { info[meetingStartsAt] = String(maybeMeetingStartsAtMs) }
     return info
   }
 }
@@ -111,9 +122,12 @@ struct DeliveredPush: Equatable {
   let maybeThreadId: String?
   let maybeMessageId: String?
   let maybeCallId: String?
+  /// The notification's `threadIdentifier`, which a meeting's notices share (`NotificationKeys.meetingThread`).
+  let maybeThreadIdentifier: String?
 
-  init(identifier: String, userInfo: [AnyHashable: Any]) {
+  init(identifier: String, userInfo: [AnyHashable: Any], maybeThreadIdentifier: String? = nil) {
     self.identifier = identifier
+    self.maybeThreadIdentifier = maybeThreadIdentifier
     maybeKind = userInfo[NotificationKeys.kind] as? String
     maybeConversationId = userInfo[NotificationKeys.conversation] as? String
     maybeThreadId = userInfo[NotificationKeys.thread] as? String
@@ -127,23 +141,32 @@ struct DeliveredPush: Equatable {
   }
 
   var isCall: Bool { maybeKind == NotificationKeys.callKind }
+
+  /// A meeting's reminder or start notice.
+  var isMeeting: Bool { maybeKind == NotificationKeys.meetingKind }
 }
 
 /// A `dismiss` wake-up: the conversation (or one thread of it) was read up to a message on another
-/// device, or a ring ended.
+/// device, a ring ended, or a meeting's notice was dealt with on another device.
 struct DismissTarget: Equatable {
   let conversationId: String
   var maybeThreadId: String?
   var maybeMessageId: String?
   var maybeCallId: String?
+  var maybeMeetingId: String?
 }
 
 /// Which delivered notifications go when something was read or ended. Pure, unit-tested.
 enum NotificationMatcher {
-  /// For a dismiss with a call ID: that call's alert. Otherwise the message notifications of the
+  /// For a dismiss with a meeting ID: the notices of that meeting. With a call ID: that call's alert. Otherwise the message notifications of the
   /// conversation (only the named thread if one was read, else the top-level ones) whose message is
   /// not newer than the dismissed one.
   static func identifiers(_ delivered: [DeliveredPush], dismissing target: DismissTarget) -> [String] {
+    // A meeting's notices (its conversation is not named, so older apps remove nothing).
+    if let meetingId = target.maybeMeetingId {
+      let thread = NotificationKeys.meetingThread(meetingId)
+      return delivered.filter { $0.isMeeting && $0.maybeThreadIdentifier == thread }.map(\.identifier)
+    }
     if let callId = target.maybeCallId {
       return
         delivered

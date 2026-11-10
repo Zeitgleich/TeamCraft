@@ -4219,8 +4219,8 @@ Details:
   meantime unreadable, and a registration whose answer was lost left server and device with
   different keys, so nothing could be opened until the next start (issue #826). Sign-out deletes the
   key; the next registration chooses a new one.
-- Wake-up kinds: `message`, `mention`, `call`, `dismiss` (a notification was read on another device, or
-  a ring ended: remove it; silent, APNs background push / FCM normal priority, never to Web Push),
+- Wake-up kinds: `message`, `mention`, `call`, `dismiss` (a notification was read on another device,
+  a ring ended, or a meeting's notice was dealt with on another device: remove it; silent, APNs background push / FCM normal priority, never to Web Push),
   `scheduled_seal` (above), `sync` (catch up in the background, silent, names nothing; above) and `test`
   (diagnostics), and `meeting_reminder` and `meeting_start` (a planned meeting's time, docs/meetings.md
   "Starting"; alerts like a message, and a gateway is told `message`). Besides conversation, message,

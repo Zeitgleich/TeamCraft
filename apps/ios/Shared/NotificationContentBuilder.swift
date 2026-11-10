@@ -98,11 +98,12 @@ struct NotificationContentBuilder {
       }
     content.subtitle = ""
     content.body = ""
-    content.threadIdentifier = "meeting-\(notification.maybeMeetingId ?? notification.conversationId)"
+    content.threadIdentifier = NotificationKeys.meetingThread(notification.maybeMeetingId ?? notification.conversationId)
     content.targetContentIdentifier = notification.conversationId
     let tag = NotificationAuthenticator().tag(for: notification.conversationId)
     content.userInfo = NotificationKeys.userInfo(
-      kind: NotificationKeys.meetingKind, conversationId: notification.conversationId, maybeTag: tag)
+      kind: NotificationKeys.meetingKind, conversationId: notification.conversationId, maybeTag: tag,
+      maybeMeetingId: notification.maybeMeetingId, maybeMeetingStartsAtMs: notification.maybeMeetingStartsAtMs)
     content.categoryIdentifier =
       tag != nil && notification.isConversationVerified ? NotificationCategories.meetingCategory : ""
     Self.apply(.meeting, flags: PushFlags(notification), to: content)

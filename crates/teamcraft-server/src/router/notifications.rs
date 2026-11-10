@@ -9,6 +9,7 @@ use crate::state::AppState;
 pub(super) fn routes() -> OpenApiRouter<AppState> {
   OpenApiRouter::new()
     .routes(routes!(handlers::acknowledge_message_handler))
+    .routes(routes!(handlers::dismiss_meeting_notice_handler))
     .routes(routes!(handlers::list_acknowledgements_handler))
     .routes(routes!(
       handlers::get_conversation_notification_settings_handler,
