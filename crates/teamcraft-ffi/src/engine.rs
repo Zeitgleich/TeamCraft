@@ -2113,8 +2113,8 @@ impl Drop for AbortOnDrop {
   }
 }
 
-/// The prefetch itself: the look through the store on a blocking thread (it reads every
-/// conversation's announcements), then the downloads.
+/// The prefetch itself: the look through the store on a blocking thread (it reads the announced
+/// segments, and the first time backfills them from the messages), then the downloads.
 async fn prefetch_segments_beside(
   api: Api,
   store: Store,

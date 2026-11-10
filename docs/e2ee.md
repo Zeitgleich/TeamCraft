@@ -5682,14 +5682,21 @@ Implemented (`teamcraft-core::search`, first version):
   same month, readers use the earliest announcement.
 - The local index is built in memory from the encrypted store when searching and never written to
   disk. The browser has no tantivy (it doesn't target wasm32) and scans the store instead.
-- Server gap: segments use the attachment endpoints; a dedicated segment listing would let devices
-  find segments without reading the conversation's messages first.
+- Finding segments: when a device stores a segment announcement (received, or its own on
+  publishing), it also records the announced segment under `conversation/month` in the encrypted
+  store's `segment_announcements` table, in the same group of writes as the message; of two
+  announcements for one month the earlier one wins. A prefetch reads only that table, so its work
+  grows with the number of segments, not of messages (#1636). A store written before the table
+  existed is backfilled once by looking through the messages, one conversation at a time with a
+  marker each, so a stopped backfill resumes. The server learns nothing new: the record never
+  leaves the device. A server segment listing was not needed (the key is inside the announcement
+  anyway).
 - Prefetch: the mobile core has a setting (`teamcraft_core::prefetch::SegmentPrefetch`: off, unmetered
   networks only (default), any network) in the sealed store, and `Client::fetch_index_segments` does the
   download. The platform decides when it can run: iOS schedules a `BGProcessingTask` (external power and
   network), the app asks the core with the network's metered flag (`TeamCraft.prefetch_segments`); Android
   runs a daily WorkManager job (unmetered, charging) with a size cap. The prefetch runs beside the sync
-  (#1634, `SegmentPlan`): it never takes the client, looks through the announcements on a read
+  (#1634, `SegmentPlan`): it never takes the client, reads the announced segments on a read
   connection of its own, holds no lock while downloading, and writes each segment on its own.
 
 ### 10.2 Optional: vault node for compliance and file contents

@@ -15,6 +15,8 @@ use teamcraft_proto::{
 use zeroize::Zeroizing;
 
 use super::Client;
+#[cfg(not(target_arch = "wasm32"))]
+use super::segments::{announces_segment, note_segment_announcement};
 use crate::api::{ApiError, ServerApi};
 use crate::convert;
 use crate::error::CoreError;
@@ -692,6 +694,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
               &stored,
               self.settings.change_announcement_window,
             )
+          })?;
+        } else if announces_segment(&stored) {
+          // The segment's record goes with its announcement, so a prefetch never has to look
+          // through the messages for it (issue #1636).
+          crate::store::write_group(&self.store, || -> Result<(), CoreError> {
+            self.store.upsert_message(&stored)?;
+            note_segment_announcement(&self.store, &stored)
           })?;
         } else {
           self.store.upsert_message(&stored)?;
@@ -1480,6 +1489,17 @@ fn history_key(conversation: ConversationId) -> String {
 
 pub(crate) fn bookmarks_key(conversation: ConversationId) -> String {
   format!("bookmarks/{conversation}")
+}
+
+// The browser fetches no index segments (e2ee.md §10.1: it scans its store), so it records none.
+#[cfg(target_arch = "wasm32")]
+fn announces_segment(_message: &StoredMessage) -> bool {
+  false
+}
+
+#[cfg(target_arch = "wasm32")]
+fn note_segment_announcement(_store: &impl LocalStore, _message: &StoredMessage) -> Result<(), CoreError> {
+  Ok(())
 }
 
 #[cfg(test)]
