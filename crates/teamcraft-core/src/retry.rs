@@ -67,6 +67,13 @@ impl RetryRounds {
   pub fn succeeded(&mut self) {
     self.rounds_failed = 0;
   }
+
+  /// The network came back: whatever waits asks now, in a round the caller runs at once (and drops
+  /// the timer of the planned one). The backoff starts over, as the cause of the failures is gone.
+  pub fn restart(&mut self) {
+    self.is_waiting = false;
+    self.rounds_failed = 0;
+  }
 }
 
 /// What the server asked a failed request to wait (`retry_after_secs` in the error body, filled
@@ -160,6 +167,22 @@ mod tests {
         })
         .collect();
       assert_eq!(waits, [Some(5), Some(10), Some(20), Some(20)]);
+    }
+
+    #[test]
+    fn a_restart_drops_the_planned_round_and_the_backoff() {
+      let mut rounds = rounds();
+      for _ in 0..3 {
+        rounds.failed(None);
+        rounds.round_started();
+      }
+      assert_eq!(rounds.failed(None), Some(Duration::from_secs(20)));
+      rounds.restart();
+      assert_eq!(
+        rounds.failed(None),
+        Some(Duration::from_secs(5)),
+        "a new round can be planned, from the shortest wait"
+      );
     }
 
     #[test]

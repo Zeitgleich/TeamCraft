@@ -17,6 +17,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
+import de.zeitgleich.teamcraft.ui.PictureRetries
+import de.zeitgleich.teamcraft.ui.isTransient
 import uniffi.teamcraft_ffi.TeamCraft
 
 /**
@@ -30,6 +32,7 @@ import uniffi.teamcraft_ffi.TeamCraft
 class AvatarCache(
   private val context: Context,
   private val core: suspend () -> TeamCraft,
+  private val retries: PictureRetries,
 ) {
   private val inFlight = ConcurrentHashMap.newKeySet<String>()
   private val memory = LruCache<String, Bitmap>(MEMORY_ENTRIES)
@@ -74,6 +77,7 @@ class AvatarCache(
     val startedIn = synchronized(writeLock) { generation }
     return try {
       val bytes = core().avatarPicture(userId, MAX_PICTURE_BYTES)
+      retries.succeeded()
       // Under the lock, so a sign-out's clear() can't be followed by this write.
       synchronized(writeLock) {
         when {
@@ -100,8 +104,10 @@ class AvatarCache(
     } catch (cancelled: CancellationException) {
       throw cancelled
     } catch (failure: Exception) {
-      // Offline, signed out, or a storage error: the initials stay, the next message tries again.
+      // Offline, signed out, or a storage error: the initials stay. Trouble that passes is asked
+      // for again in the next shared round (issue #1616), the rest with the next message.
       Log.w(TAG, "avatar not fetched: ${failure.javaClass.simpleName}")
+      if (isTransient(failure)) retries.failed()
       false
     } finally {
       inFlight.remove(userId)

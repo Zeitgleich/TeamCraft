@@ -1,6 +1,8 @@
 package de.zeitgleich.teamcraft
 
 import de.zeitgleich.teamcraft.settings.SettingsSync
+import de.zeitgleich.teamcraft.ui.CoreRetryRounds
+import de.zeitgleich.teamcraft.ui.PictureRetries
 import de.zeitgleich.teamcraft.ui.ShareReceiver
 import de.zeitgleich.teamcraft.ui.StartCacheStore
 import de.zeitgleich.teamcraft.ui.media.MediaDraftStore
@@ -66,11 +68,14 @@ class AppGraph(context: Context) {
   /** What other apps shared, until it has a conversation (issue #208). */
   val shares = ShareReceiver(File(context.noBackupFilesDir, "share-inbox"), MAX_IMPORT_BYTES, scope)
   val servers = ServerStore(context)
+  val network = NetworkWatcher(context) { core.networkChanged() }
+  /** One pause for every picture that failed during an outage, in place of a timer per picture (#1616). */
+  val pictureRetries = PictureRetries(scope, network.isOnline, CoreRetryRounds())
   val managedConfig = ManagedConfig(context)
   /** Profile pictures for screens and notifications; they belong to the signed-in account. `core` is only used when called. */
-  val avatars = AvatarCache(context) { core.core() }
+  val avatars = AvatarCache(context, { core.core() }, pictureRetries)
   /** Pictures of spaces on screen, kept by version (issue #284). */
-  val spacePictures = SpacePictureCache(context) { core.core() }
+  val spacePictures = SpacePictureCache(context, { core.core() }, pictureRetries)
   /** The chat list shown last, for the next start's first frame (e2ee.md §9.2). */
   val startCache = StartCacheStore(context.filesDir)
   val auth: AuthRepository = AuthRepository(context, servers, onSignedOut = {
@@ -96,7 +101,6 @@ class AppGraph(context: Context) {
   val calls = CallController(context, core, scope)
   val pushStats = PushStats(context)
   val pushHandler = PushHandler(context, notifier, calls, pushStats)
-  val network = NetworkWatcher(context) { core.networkChanged() }
   val push = PushManager(context, core, pushHandler, mentionPrefs, notificationContent, carProjection, managedConfig, network.isOnline, scope)
   val placeholderWatcher = PlaceholderWatcher(core, notifier, pushHandler, scope, endDueHolds = { push.endHolds() })
   val segmentPrefetch = SegmentPrefetch(context)

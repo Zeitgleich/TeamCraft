@@ -19,6 +19,11 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import de.zeitgleich.teamcraft.calls.IncomingCallNotifier
 import de.zeitgleich.teamcraft.calls.IncomingRing
+import de.zeitgleich.teamcraft.ui.CoreRetryRounds
+import de.zeitgleich.teamcraft.ui.PictureRetries
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
 import de.zeitgleich.teamcraft.notifications.AvatarCache
 import de.zeitgleich.teamcraft.notifications.HoldEnd
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
@@ -363,7 +368,11 @@ class NotificationsOnDeviceTest {
   private fun notifier(isInCar: Boolean = false) = MessageNotifier(
     context,
     NotificationContentPrefs(context),
-    AvatarCache(context) { error("no core in this test") },
+    AvatarCache(
+      context,
+      { error("no core in this test") },
+      PictureRetries(CoroutineScope(Dispatchers.Default), MutableStateFlow(true), CoreRetryRounds()),
+    ),
     isInCar = { isInCar },
   )
 

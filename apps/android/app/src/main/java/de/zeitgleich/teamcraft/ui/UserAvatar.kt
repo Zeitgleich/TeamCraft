@@ -23,7 +23,7 @@ import de.zeitgleich.teamcraft.TeamCraftApplication
 /**
  * A person's round profile picture (issue #846), with [placeholder] (their initials) while it loads
  * and for people without one. The picture comes from the app's shared avatar cache; it is fetched when
- * missing or stale, and again when the device comes back online after a failed fetch. [modifier]
+ * missing or stale, and again in the next shared retry round after a failed fetch (issue #1616). [modifier]
  * sizes and shapes the avatar, as it would the placeholder alone.
  */
 @Composable
@@ -33,10 +33,11 @@ fun UserAvatar(maybeUserId: String?, modifier: Modifier = Modifier, placeholder:
   val userId = maybeUserId?.takeIf { it.isNotEmpty() }
   val changes by avatars.changes.collectAsState()
   val isOnline by graph.network.isOnline.collectAsState()
+  val retryRound by graph.pictureRetries.round.collectAsState()
   val maybePicture by produceState<ImageBitmap?>(userId?.let(avatars::maybeDecoded)?.asImageBitmap(), userId, changes) {
     value = userId?.let { avatars.loadBitmap(it) }?.asImageBitmap()
   }
-  LaunchedEffect(userId, isOnline) {
+  LaunchedEffect(userId, isOnline, retryRound) {
     if (userId != null && isOnline) avatars.refresh(userId)
   }
   val picture = maybePicture
