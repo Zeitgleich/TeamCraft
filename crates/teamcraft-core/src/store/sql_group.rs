@@ -64,10 +64,25 @@ impl WriteGroup {
   /// What was lost so far, and whether another connection committed since the last look. A
   /// `data_version` that can't be read counts as a foreign commit: the caller then writes all.
   pub(crate) fn tally(&mut self, connection: &Connection) -> WriteTally {
+    self.tally_checking(connection, || true)
+  }
+
+  /// [`Self::tally`], where a changed data version counts only if `is_commit` says another
+  /// connection committed since the last look; otherwise it was a checkpoint of the log (the
+  /// sealed store's purge, issue #1684), which changes no record. `is_commit` runs after the
+  /// data version was read, so a commit after that read shows at the next look.
+  #[cfg_attr(not(feature = "sealed-sqlite"), allow(dead_code))]
+  pub(crate) fn tally_checking(
+    &mut self,
+    connection: &Connection,
+    is_commit: impl FnOnce() -> bool,
+  ) -> WriteTally {
     if let Some(seen) = self.maybe_data_version {
       let maybe_now = data_version(connection).ok();
       if maybe_now != Some(seen) {
-        self.tally.foreign = self.tally.foreign.saturating_add(1);
+        if maybe_now.is_none() || is_commit() {
+          self.tally.foreign = self.tally.foreign.saturating_add(1);
+        }
         self.maybe_data_version = maybe_now.or(Some(seen));
       }
     }

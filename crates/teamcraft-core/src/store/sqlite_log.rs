@@ -1,6 +1,8 @@
 //! The write-ahead log of the SQLite stores and its purge (docs/e2ee.md §4.3.1, §9.5): commits go
 //! to the log, and old page versions are cleared from it by a truncating checkpoint, at once after
 //! a deletion and at most every [`PURGE_INTERVAL`] after the many small saves of the MLS state.
+//! The SQLCipher store purges on its one connection ([`PurgeState`]); the sealed store, whose read
+//! threads have connections of their own, on a connection and thread of its own (`log_purger`).
 
 use std::time::{Duration, Instant};
 
@@ -20,7 +22,7 @@ pub(crate) const LOG_PRAGMAS: &str = "PRAGMA journal_mode = WAL; PRAGMA synchron
 /// The most often a debounced purge ([`super::LocalStore::purge_freed_soon`]) truncates the log: a
 /// checkpoint costs two or three syncs, and the MLS storage is saved for every processed message.
 /// Old snapshots can stay in the log this long while the app runs (docs/e2ee.md §4.3.1).
-const PURGE_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const PURGE_INTERVAL: Duration = Duration::from_secs(30);
 /// How often a forced purge that could not finish (a read thread held its snapshot) is tried again.
 /// Not after every group of writes: each try writes the log back and syncs, under the writer's
 /// lock, so on a phone's flash every write and every read that waits for the writer paid for it
@@ -123,14 +125,22 @@ impl PurgeState {
 /// is tried again later ([`PurgeState::run_if_due`]).
 fn checkpoint_truncate(connection: &Connection, busy_timeout: Duration) -> Result<bool, StoreError> {
   connection.busy_timeout(Duration::ZERO).map_err(sqlite_error)?;
-  let checkpointed = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-  });
+  let checkpointed = checkpoint_truncate_now(connection);
   if let Err(error) = connection.busy_timeout(busy_timeout) {
     // The connection's statements then fail at once on a lock instead of waiting for it.
     tracing::warn!(%error, "could not restore the local store's busy timeout");
   }
-  let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = checkpointed.map_err(sqlite_error)?;
+  checkpointed
+}
+
+/// `PRAGMA wal_checkpoint(TRUNCATE)` with the connection's own busy timeout; `true` only if it ran
+/// to the end: not blocked by a reader or writer (`busy`) and every frame of the log written back.
+pub(crate) fn checkpoint_truncate_now(connection: &Connection) -> Result<bool, StoreError> {
+  let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = connection
+    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+      Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })
+    .map_err(sqlite_error)?;
   // Without a log (a database that is not in WAL mode) SQLite answers -1 for both counts.
   Ok(busy == 0 && log_frames == checkpointed_frames)
 }

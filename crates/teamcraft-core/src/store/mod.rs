@@ -20,6 +20,8 @@ mod key_source;
 mod lane;
 #[cfg(not(target_arch = "wasm32"))]
 mod lock;
+#[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+mod log_purger;
 mod lru;
 mod memory;
 mod message_cache;
@@ -66,6 +68,8 @@ pub use key_source::{KeystoreThreadError, run_outside_runtime};
 pub use lane::LaneStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use lock::StoreLock;
+#[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+pub use log_purger::{DEFAULT_MAX_PURGE_DELAY, LogPurgeLimits};
 pub use memory::MemoryStore;
 pub use overlay::OverlayStore;
 pub use sealed::SealedStoreLimits;
@@ -1075,11 +1079,19 @@ pub trait LocalStore {
 
   /// Overwrites what deleted or replaced records left behind in the store's files (free pages, a
   /// write-ahead log), so a secret that was deleted can't be read back from them, also not by
-  /// somebody who later gets the database key (issue #391). The store may still hold it until this
-  /// returns; data the file system or flash controller copied elsewhere is out of reach. Stores
-  /// without such files do nothing.
+  /// somebody who later gets the database key (issue #391). A store may do it in the background,
+  /// within the bound docs/e2ee.md §4.3.1 states (the sealed SQLite store: issue #1684);
+  /// [`Self::wait_for_purge`] waits for it. Data the file system or flash controller copied
+  /// elsewhere is out of reach. Stores without such files do nothing.
   fn purge_freed(&self) -> Result<(), StoreError> {
     Ok(())
+  }
+
+  /// Waits until the purges asked for so far ran, at most `max_wait`; whether they did. Stores
+  /// that purge before [`Self::purge_freed`] returns keep the default.
+  fn wait_for_purge(&self, max_wait: std::time::Duration) -> bool {
+    let _ = max_wait;
+    true
   }
 
   /// [`Self::purge_freed`], but for writes that come in bursts (the MLS storage is saved for
@@ -1406,6 +1418,10 @@ macro_rules! forward_local_store {
 
       fn purge_freed_soon(&self) {
         (**self).purge_freed_soon()
+      }
+
+      fn wait_for_purge(&self, max_wait: std::time::Duration) -> bool {
+        (**self).wait_for_purge(max_wait)
       }
 
       fn begin_writes(&self) -> Result<(), StoreError> {
