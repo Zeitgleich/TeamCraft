@@ -31,17 +31,22 @@ const FAR_RTT: Duration = Duration::from_millis(30);
 const SYNC_BUDGET: Duration = Duration::from_millis(300);
 /// Requests of a fresh session on an unchanged workspace, independent of its size: handshake,
 /// workspace log, own summary, spaces, the sync heads, welcomes, read state, notification
-/// settings, key packages, account data, presence, link requests and their like.
-const MAX_UNCHANGED_REQUESTS: u64 = 18;
+/// settings, user groups (one request, #1527), key packages, account data, presence, link requests
+/// and their like.
+const MAX_UNCHANGED_REQUESTS: u64 = 19;
 /// How often a fresh session on the unchanged workspace is measured at most. A debug build next to
 /// other tests on a small runner misses the budget now and then (339 ms in one run, #1281), a real
 /// regression misses it every time. The request count, which load doesn't move, needs no retry.
 const UNCHANGED_ATTEMPTS: usize = 3;
+/// On a shared runner the whole suite runs in parallel, so the wall-clock budget gets this much
+/// room there (346 ms in one nightly, #1608); on a quiet machine it is [`SYNC_BUDGET`]. The request
+/// count and the printed phases stay exact everywhere, and a real regression adds round trips.
+const SHARED_RUNNER_SLACK: f64 = 1.75;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn coming_back_costs_what_changed_not_the_workspace() {
   let Some(stack) = Stack::builder()
-    .with_env("TEAMCRAFT_LOGGING__FILTER", "info,tower_http=debug")
+    .with_env("TEAMCRAFT_LOGGING__FILTER", "info,tower_http=debug,teamcraft_server::router=debug")
     // Seeding a large workspace is many requests in a short time.
     .with_env("TEAMCRAFT_SECURITY__RATE_LIMITS__IS_ENABLED", "false")
     .start()
@@ -106,6 +111,11 @@ async fn coming_back_costs_what_changed_not_the_workspace() {
   .await;
   let far = scenarios(&stack, &far_url, &mut alice, &mut carol, &channels, "30 ms away").await;
 
+  let time_budget = if std::env::var_os("CI").is_some() {
+    SYNC_BUDGET.mul_f64(SHARED_RUNNER_SLACK)
+  } else {
+    SYNC_BUDGET
+  };
   for (where_, measured) in [("local", &local), ("30 ms away", &far)] {
     assert!(
       measured.unchanged.requests <= MAX_UNCHANGED_REQUESTS,
@@ -121,14 +131,14 @@ async fn coming_back_costs_what_changed_not_the_workspace() {
       measured.changed.paths
     );
     assert!(
-      measured.unchanged.elapsed <= SYNC_BUDGET,
-      "{where_}: a fresh session on an unchanged workspace took {:?} (budget {SYNC_BUDGET:?}): {:?}",
+      measured.unchanged.elapsed <= time_budget,
+      "{where_}: a fresh session on an unchanged workspace took {:?} (budget {time_budget:?}): {:?}",
       measured.unchanged.elapsed,
       measured.unchanged.phases
     );
     assert!(
-      measured.resumed.elapsed <= SYNC_BUDGET,
-      "{where_}: a resume took {:?} (budget {SYNC_BUDGET:?})",
+      measured.resumed.elapsed <= time_budget,
+      "{where_}: a resume took {:?} (budget {time_budget:?})",
       measured.resumed.elapsed
     );
   }
@@ -304,11 +314,11 @@ fn request_paths(log: &str) -> BTreeMap<String, usize> {
     .lines()
     .filter(|line| line.contains("started processing request"))
   {
-    let Some(start) = line.find("uri=") else {
+    // The server's request span carries `path=<path>` (the query is never logged, #987).
+    let Some(start) = line.find("path=") else {
       continue;
     };
-    let uri = line[start + 4..].split([' ', '}']).next().unwrap_or_default();
-    let path = uri.split('?').next().unwrap_or_default();
+    let path = line[start + 5..].split([' ', '}']).next().unwrap_or_default();
     let normalized: Vec<&str> = path
       .split('/')
       .map(|part| {
