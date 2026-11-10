@@ -1915,6 +1915,30 @@ For comparison, the installed 1.0 release on a real workspace (38 conversations,
 Wayland, GPU): 411 MiB, of it the shell and core 142 MiB (97 anonymous, the release binary's
 mapped files 44 MiB), the page 263 MiB (201 anonymous) and the network process 6 MiB.
 
+Where it goes. The same measurement on the small workspace (24 channels, 3,000 messages) puts the
+page at 312 MiB (255 anonymous) and the shell and core at 210 MiB (100 anonymous): the large
+workspace adds about 40 MiB to the page and 50 MiB to the core, and the rest is there whatever the
+workspace. Inside the page, with the large workspace held in the inspector after the channel
+switches (`PERF_DESKTOP_HOLD_SECS`):
+
+| Page (`WebKitWebProcess`), large workspace | Value    |
+|--------------------------------------------|----------|
+| The UI's wasm heap (`memory.buffer`)       | 19 MiB   |
+| JIT code (anonymous executable mappings)   | 11 MiB   |
+| DOM nodes                                  | 671      |
+| Pictures shown                             | 6, as 960×540 previews |
+| Freed by a full collection (`Heap.gc`)     | 17 MiB   |
+| Anonymous memory in all                    | 305 MiB  |
+
+So the UI's own data is small and bounded (the message list is virtualised, pictures arrive as
+previews), and about 250 MiB of the page is WebKit's own at any workspace size: the JavaScript
+heap, its allocator's arenas and the backing stores of what it paints, which with CPU painting
+under Xvfb sit in RAM where a GPU keeps some in VRAM. In the shell's process GTK and WebKit's UI
+process sit next to the core; the core's caches are bounded (the message cache at 64 MiB). Nothing
+of ours explains the gap to the budget, and WebKit's limits can only be set where Tauri creates its
+web context, without a hook: #1708 (WebKit's memory pressure settings, a heap profile of the core,
+a release build on a GPU).
+
 ### Coming back and bad networks, end to end (issue #972)
 
 `tests/e2e` runs the app as the apps do (the sync runner with its connection supervisor, the
