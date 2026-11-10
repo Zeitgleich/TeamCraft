@@ -84,8 +84,11 @@ struct Inner {
   /// Every record's sealed bytes as of its latest issued write (what is queued is in `writes`).
   records: RefCell<BTreeMap<LookupId, Vec<u8>>>,
   writes: Rc<RefCell<Writes>>,
-  on_complete: Closure<dyn FnMut(web_sys::Event)>,
-  on_abort: Closure<dyn FnMut(web_sys::Event)>,
+  /// The write transactions' handlers, owned by the page's garbage collector: a transaction still
+  /// running when the store is dropped (sign-out, reopening) keeps them alive until it ended,
+  /// instead of calling a dropped closure (GlitchTip TEAMCRAFT-1I). They hold `Inner` only weakly.
+  on_complete: js_sys::Function,
+  on_abort: js_sys::Function,
   _on_version_change: Closure<dyn FnMut(web_sys::Event)>,
   /// This `Inner` itself, for the timer that issues the writes a retry backoff held back.
   own: Weak<Inner>,
@@ -348,7 +351,7 @@ impl Inner {
   /// `own`: this `Inner` itself, for the handlers that issue the next batch when one ended.
   fn new(own: &Weak<Inner>, database: IdbDatabase, records: BTreeMap<LookupId, Vec<u8>>) -> Self {
     let writes = Rc::new(RefCell::new(Writes::default()));
-    let on_complete = Closure::<dyn FnMut(web_sys::Event)>::new({
+    let on_complete: js_sys::Function = Closure::<dyn FnMut(web_sys::Event)>::new({
       let writes = writes.clone();
       let own = own.clone();
       move |event: web_sys::Event| {
@@ -359,8 +362,10 @@ impl Inner {
           inner.issue_queued();
         }
       }
-    });
-    let on_abort = Closure::<dyn FnMut(web_sys::Event)>::new({
+    })
+    .into_js_value()
+    .unchecked_into();
+    let on_abort: js_sys::Function = Closure::<dyn FnMut(web_sys::Event)>::new({
       let writes = writes.clone();
       let own = own.clone();
       move |event: web_sys::Event| {
@@ -383,7 +388,9 @@ impl Inner {
           inner.issue_queued();
         }
       }
-    });
+    })
+    .into_js_value()
+    .unchecked_into();
     // e2ee.md §9.4: a newer version of the app (another tab, the service worker) upgrades the
     // database. Holding it open would block that page; this page stops writing and asks for a reload.
     let on_version_change = Closure::<dyn FnMut(web_sys::Event)>::new({
@@ -461,8 +468,8 @@ impl Inner {
         // The events fire after this returns, so the handlers are in time. Setting a property on a
         // fresh transaction object can't fail.
         let _ = js_sys::Reflect::set(&transaction, &BATCH_PROPERTY.into(), &batch.into());
-        transaction.set_oncomplete(Some(self.on_complete.as_ref().unchecked_ref()));
-        transaction.set_onabort(Some(self.on_abort.as_ref().unchecked_ref()));
+        transaction.set_oncomplete(Some(&self.on_complete));
+        transaction.set_onabort(Some(&self.on_abort));
       },
       // Aborted before it carried a batch number: the abort handler leaves it alone. Deliberately
       // ignored: a transaction that can't abort any more was already aborted by the browser.

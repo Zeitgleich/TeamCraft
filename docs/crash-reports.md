@@ -395,6 +395,10 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
   release's commit with `strip = false` (the build is reproducible) and map the frame with
   `wasm-tools addr2line` or `llvm-symbolizer`. Keeping the name section in the shipped module would
   cost download size against the budget; panics carry their message and location either way.
+  Uncaught script errors and rejected promises carry the thrown `Error`'s `stack`, read in the
+  Safari/Firefox (`name@url:line:column`) and Chrome (`at name (url:line:column)`) shapes
+  (`frames_from_script_stack`); frames from the page's origin and wasm frames are in-app, and
+  script URLs are scrubbed to their path like any other frame.
 - **Android:** the release workflow (`release.yml`, job `android`) gives the full release a fresh
   ProGuard UUID (`-Pteamcraft.proguardUuid`, written to the app's `sentry-debug-meta.properties`)
   and uploads `mapping.txt` under it (`sentry-cli upload-proguard`) and the unstripped libraries
