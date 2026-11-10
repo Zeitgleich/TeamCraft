@@ -176,7 +176,7 @@ pub fn KitSaveStep(
         {move || if has_downloaded.get() {
           view! { <span>{move || i18n.t("onboarding-continue")}</span> }.into_any()
         } else {
-          view! { <Icon name=IconName::Download /><span>{move || i18n.t("kit-download")}</span> }.into_any()
+          view! { <Icon name=IconName::Download /><span>{move || i18n.t("kit-download-short")}</span> }.into_any()
         }}
       </button>
       {maybe_secondary.map(|secondary| view! {
