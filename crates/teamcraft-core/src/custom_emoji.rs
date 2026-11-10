@@ -95,7 +95,7 @@ pub fn verify(response: &CustomEmojiResponse, workspace: &WorkspaceState) -> Opt
       )
       .is_ok()
     });
-  verified.then(|| CustomEmoji {
+  verified.then_some(CustomEmoji {
     id: response.id,
     shortcode: document.shortcode,
     sha256: document.sha256,

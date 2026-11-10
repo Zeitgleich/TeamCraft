@@ -990,6 +990,7 @@ impl ChatBackend for MockBackend {
       maybe_source: None,
       maybe_placeholder: None,
       group_mentions,
+      custom_emoji: Vec::new(),
       mentions_me: false,
     };
     match maybe_thread {

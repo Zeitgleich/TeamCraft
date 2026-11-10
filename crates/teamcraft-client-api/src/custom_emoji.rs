@@ -57,8 +57,14 @@ mod tests {
       limits: CustomEmojiLimits::default(),
     };
     assert_eq!(check_new_shortcode(&set, "deploy", None), Ok(()));
-    assert_eq!(check_new_shortcode(&set, "smile", None), Err(NewShortcodeError::BuiltIn));
-    assert_eq!(check_new_shortcode(&set, "ship_it", None), Err(NewShortcodeError::Taken));
+    assert_eq!(
+      check_new_shortcode(&set, "smile", None),
+      Err(NewShortcodeError::BuiltIn)
+    );
+    assert_eq!(
+      check_new_shortcode(&set, "ship_it", None),
+      Err(NewShortcodeError::Taken)
+    );
     assert_eq!(check_new_shortcode(&set, "ship_it", Some(id(1))), Ok(()));
   }
 }

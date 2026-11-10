@@ -3038,7 +3038,7 @@ impl ServerApi for FakeServerApi {
         limits.max_bytes,
         limits.max_side_px,
       )
-      .map_err(|error| ApiError::status(400, ErrorCode::InvalidRequest, &error.to_string()))?;
+      .map_err(|error| ApiError::status(400, ErrorCode::InvalidRequest, error.to_string()))?;
       let document: teamcraft_proto::CustomEmojiDocument =
         serde_json::from_slice(request.signed.payload.as_slice())
           .map_err(|_| ApiError::status(400, ErrorCode::InvalidRequest, "unreadable document"))?;

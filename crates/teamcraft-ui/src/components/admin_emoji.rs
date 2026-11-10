@@ -5,7 +5,9 @@
 
 use leptos::html;
 use leptos::prelude::*;
-use teamcraft_client_api::custom_emoji::{CustomEmoji, NewShortcodeError, check_new_shortcode, picture_error_key};
+use teamcraft_client_api::custom_emoji::{
+  CustomEmoji, NewShortcodeError, check_new_shortcode, picture_error_key,
+};
 use teamcraft_proto::inspect_custom_emoji_picture;
 use wasm_bindgen_futures::JsFuture;
 
@@ -74,8 +76,6 @@ fn EmojiRow(emoji: CustomEmoji) -> impl IntoView {
   let is_confirming = RwSignal::new(false);
   let draft = RwSignal::new(emoji.shortcode.clone());
   let maybe_error = RwSignal::new(None::<String>);
-  let field_id = format!("admin-emoji-rename-{id}");
-  let error_dom_id = format!("{field_id}-error");
   let rename = move || {
     let shortcode = draft.get_untracked().trim().to_owned();
     let checked = state.read(|backend| check_new_shortcode(&backend.custom_emoji(), &shortcode, Some(id)));
@@ -107,7 +107,7 @@ fn EmojiRow(emoji: CustomEmoji) -> impl IntoView {
           }
         >
           <input
-            id=field_id.clone()
+            id=format!("admin-emoji-rename-{id}")
             class="input"
             type="text"
             maxlength="32"
@@ -115,7 +115,9 @@ fn EmojiRow(emoji: CustomEmoji) -> impl IntoView {
             spellcheck="false"
             aria-label=move || i18n.t("admin-emoji-name")
             aria-invalid=move || maybe_error.with(Option::is_some).then_some("true")
-            aria-describedby=move || maybe_error.with(Option::is_some).then(|| error_dom_id.clone())
+            aria-describedby=move || {
+              maybe_error.with(Option::is_some).then(|| format!("admin-emoji-rename-{id}-error"))
+            }
             prop:value=move || draft.get()
             on:input=move |ev| draft.set(event_target_value(&ev))
           />
