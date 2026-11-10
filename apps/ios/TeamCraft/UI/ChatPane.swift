@@ -318,15 +318,7 @@ struct ChatPane: View {
     .sheet(isPresented: $isSchedulingSend) {
       SendLaterSheet { dueAtMs in Task { await confirmThenSend(dueAtMs: dueAtMs) } }
     }
-    .alert(
-      maybePendingMention?.titleKey ?? "channel_mention_confirm_title", isPresented: pendingMentionBinding,
-      presenting: maybePendingMention
-    ) { pending in
-      Button("send") { Task { await sendConfirmed(pending) } }
-      Button("cancel", role: .cancel) {}
-    } message: { pending in
-      Text(pending.message)
-    }
+    .modifier(MentionConfirmationAlert(pending: $maybePendingMention, onSend: sendConfirmed))
     .task(id: model.changeCount) {
       isSchedulingAllowed = await model.scheduledOverview()?.policy.isEnabled == true
     }
@@ -1147,10 +1139,6 @@ struct ChatPane: View {
     }
   }
 
-  private var pendingMentionBinding: Binding<Bool> {
-    Binding(get: { maybePendingMention != nil }, set: { if !$0 { maybePendingMention = nil } })
-  }
-
   /// Sends (or schedules for `dueAtMs`) after the confirmations the text needs: `@channel`, or
   /// group mentions that notify more people than the same setting (issue #1619). The reach is read
   /// for this text; an edit is not asked about.
@@ -1637,6 +1625,27 @@ struct PendingMention: Equatable {
       notified > Int(maxMentionsPerMessage())
         ? Text("group_mention_confirm_capped \(Int(maxMentionsPerMessage())) \(notified)")
         : Text("group_mention_confirm \(notified)")
+    }
+  }
+}
+
+/// Asks before a send that notifies many people (issue #1619); a modifier of its own keeps the
+/// conversation view's body light enough for the type checker.
+struct MentionConfirmationAlert: ViewModifier {
+  @Binding var pending: PendingMention?
+  let onSend: (PendingMention) async -> Void
+
+  private var isShown: Binding<Bool> {
+    Binding<Bool>(get: { pending != nil }, set: { if !$0 { pending = nil } })
+  }
+
+  func body(content: Content) -> some View {
+    let title: LocalizedStringKey = pending?.titleKey ?? "channel_mention_confirm_title"
+    content.alert(title, isPresented: isShown, presenting: pending) { (item: PendingMention) in
+      Button("send") { Task { await onSend(item) } }
+      Button("cancel", role: .cancel) {}
+    } message: { (item: PendingMention) in
+      item.message
     }
   }
 }
