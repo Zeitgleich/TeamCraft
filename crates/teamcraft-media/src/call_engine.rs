@@ -62,6 +62,12 @@ const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 /// slow link; DAVE keeps the previous epoch's decryption keys for 10 s, so receivers that fall
 /// behind still decrypt.
 const DAVE_TRANSITION_TIMEOUT: Duration = Duration::from_secs(5);
+/// With others in the call, a sent DAVE key package that brings no secured media within this time
+/// is reported as [`CallEngineEvent::EncryptionFailed`] (#1555): the safety net for an SFU that
+/// never says the device was refused (an older one, a lost message). Above the longest wait the
+/// SFU allows a joiner whose proposals stalled once: two commit deadlines (10 s each), the members
+/// coming back in between (up to 10 s) and the execution (2 s).
+const ENCRYPTION_SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// One call from this device's point of view.
 pub struct CallEngine {
@@ -113,6 +119,13 @@ pub struct CallEngine {
   /// The DAVE transition prepared here whose execution is awaited, with the time it is executed
   /// without the SFU (set on the first timer tick after preparing).
   maybe_pending_transition: Option<PendingTransition>,
+  /// The current DAVE session sent its key package and waits to be added to the group.
+  has_sent_key_package: bool,
+  /// Since when this device waits for secured media with others in the call
+  /// ([`ENCRYPTION_SETUP_TIMEOUT`]); set on the first timer tick of the wait.
+  maybe_securing_since: Option<Instant>,
+  /// [`CallEngineEvent::EncryptionFailed`] went out for the current DAVE session.
+  has_reported_encryption_failure: bool,
   /// Frame failures of the DAVE sessions before the current one (a rejoin starts a new one).
   earlier_dave_stats: DaveFrameStats,
   maybe_trusted_roster: Option<BTreeSet<DeviceId>>,
@@ -202,6 +215,12 @@ pub enum CallEngineEvent {
   Secured {
     epoch: u64,
     privacy_code: String,
+  },
+  /// This device couldn't be added to the call's end-to-end encryption (#1555): the SFU refused
+  /// it after its joins stalled the group, or nothing secured the media in time. No media flows;
+  /// the user can leave, or join again once `retry_after` passed (zero: at once).
+  EncryptionFailed {
+    retry_after: Duration,
   },
   /// A decrypted audio frame for the jitter buffer (one per sender and origin).
   AudioFrame {
@@ -464,6 +483,9 @@ impl CallEngine {
       remote_video: HashMap::new(),
       maybe_dave: None,
       maybe_pending_transition: None,
+      has_sent_key_package: false,
+      maybe_securing_since: None,
+      has_reported_encryption_failure: false,
       earlier_dave_stats: DaveFrameStats::default(),
       maybe_trusted_roster: None,
       maybe_authenticator: None,
@@ -1110,6 +1132,7 @@ impl CallEngine {
       self.signal(CallClientMessage::TransportFeedback { feedback });
     }
     self.execute_overdue_transition(now);
+    self.check_encryption_setup(now);
   }
 
   /// Frames DAVE couldn't encrypt or decrypt during this call, by cause (all its DAVE sessions).
@@ -1208,6 +1231,10 @@ impl CallEngine {
         Ok(())
       },
       CallEvent::DaveExternalSender { package } => self.on_external_sender(package.as_slice()),
+      CallEvent::DaveRefused { retry_after_secs } => {
+        self.report_encryption_failure(Duration::from_secs(u64::from(retry_after_secs)));
+        Ok(())
+      },
       change @ (CallEvent::DaveProposals { .. }
       | CallEvent::DaveAnnounceCommit { .. }
       | CallEvent::DaveWelcome { .. }
@@ -1691,7 +1718,21 @@ impl CallEngine {
     self.uplink.set_demand_bps(maybe_demand);
   }
 
+  /// Installs the call's external sender and answers with a key package. Heard again, the SFU
+  /// starts the group over (#1555): the session goes, with its keys and the changes held for it,
+  /// and a fresh one (with a fresh signature key) answers.
   fn on_external_sender(&mut self, package: &[u8]) -> Result<(), CallEngineError> {
+    let Some(call_id) = self.call_id() else {
+      return Err(CallEngineError::Protocol("DAVE message before joined"));
+    };
+    if self.dave()?.has_external_sender() {
+      debug!("the SFU starts the DAVE group over");
+      self.held_dave.clear();
+      self.replace_dave(Some(DaveParticipant::new(
+        DaveParticipantId::from_device(self.config.device_id),
+        DaveCallId::from_call(call_id),
+      )?));
+    }
     let dave = self.dave()?;
     dave.set_external_sender(package)?;
     let key_package = dave.create_key_package()?;
@@ -1706,7 +1747,40 @@ impl CallEngine {
       key_package: Base64Bytes::new(key_package),
       maybe_key_binding,
     });
+    self.has_sent_key_package = true;
     Ok(())
+  }
+
+  /// Tells the UI once per DAVE session that this device can't get media keys.
+  fn report_encryption_failure(&mut self, retry_after: Duration) {
+    if self.has_reported_encryption_failure {
+      return;
+    }
+    self.has_reported_encryption_failure = true;
+    warn!(
+      retry_after_secs = retry_after.as_secs(),
+      "this device couldn't be added to the call's encryption"
+    );
+    self.event(CallEngineEvent::EncryptionFailed { retry_after });
+  }
+
+  /// The safety net behind [`CallEvent::DaveRefused`]: with others in the call, a key package that
+  /// brings no secured media within [`ENCRYPTION_SETUP_TIMEOUT`] is a failure too. Alone in the
+  /// call nobody can add this device, so nothing counts then.
+  fn check_encryption_setup(&mut self, now: Instant) {
+    let is_waiting = self.has_sent_key_package
+      && !self.has_reported_encryption_failure
+      && !self.is_compromised
+      && !self.participants.is_empty()
+      && !self.maybe_dave.as_ref().is_some_and(DaveParticipant::is_ready);
+    if !is_waiting {
+      self.maybe_securing_since = None;
+      return;
+    }
+    let since = *self.maybe_securing_since.get_or_insert(now);
+    if now.saturating_duration_since(since) >= ENCRYPTION_SETUP_TIMEOUT {
+      self.report_encryption_failure(Duration::ZERO);
+    }
   }
 
   /// A DAVE membership change: applied now, or held while the trusted roster is brought up to
@@ -1841,6 +1915,9 @@ impl CallEngine {
       self.earlier_dave_stats += old.frame_stats();
     }
     self.maybe_pending_transition = None;
+    self.has_sent_key_package = false;
+    self.maybe_securing_since = None;
+    self.has_reported_encryption_failure = false;
   }
 
   /// Verifies relayed call key bindings and remembers the bound keys.
@@ -3023,6 +3100,106 @@ mod tests {
           .iter()
           .all(|output| !matches!(output, EngineOutput::Datagram(_)))
       );
+    }
+
+    /// The SFU starts the group over (#1555): the external sender again drops the established
+    /// session, keys included, and a fresh one with a new signature key answers.
+    #[test]
+    fn the_external_sender_again_starts_a_fresh_session() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      let old_key = alice.maybe_dave.as_ref().unwrap().signature_public_key().to_vec();
+      let gateway = DaveExternalSender::new().unwrap();
+      let package = Base64Bytes::new(gateway.package().unwrap());
+
+      alice
+        .handle_signal(event(6, CallEvent::DaveExternalSender { package }), now)
+        .unwrap();
+
+      assert!(!alice.is_secured());
+      let (key_package, maybe_binding) = key_package_of(&mut alice);
+      assert!(!key_package.is_empty() && maybe_binding.is_some());
+      let new_key = alice.maybe_dave.as_ref().unwrap().signature_public_key();
+      assert_ne!(new_key, old_key.as_slice());
+      alice.send_audio(&frame(), now);
+      assert!(
+        drain(&mut alice)
+          .iter()
+          .all(|output| !matches!(output, EngineOutput::Datagram(_))),
+        "nothing leaves with the old key"
+      );
+    }
+
+    /// The SFU refuses this device (#1555): the UI hears it once, with the time to wait.
+    #[test]
+    fn a_refusal_is_reported_once() {
+      let now = Instant::now();
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[2], &gateway, None, now);
+      drain(&mut alice);
+
+      for seq in 3..=4 {
+        alice
+          .handle_signal(
+            event(
+              seq,
+              CallEvent::DaveRefused {
+                retry_after_secs: 300,
+              },
+            ),
+            now,
+          )
+          .unwrap();
+      }
+
+      assert_eq!(encryption_failures(&mut alice), vec![Duration::from_secs(300)]);
+      alice.on_timer(now + Duration::from_secs(120));
+      assert!(encryption_failures(&mut alice).is_empty());
+    }
+
+    /// Without a word from the SFU, a key package that brings no secured media while others are
+    /// in the call is a failure after the safety net's time; alone in a call it is not.
+    #[test]
+    fn no_secured_media_in_time_is_a_failure() {
+      let now = Instant::now();
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[2], &gateway, None, now);
+      let mut lonely = joined_engine(3, &[], &gateway, None, now);
+      drain(&mut alice);
+      drain(&mut lonely);
+
+      for engine in [&mut alice, &mut lonely] {
+        engine.on_timer(now);
+        engine.on_timer(now + ENCRYPTION_SETUP_TIMEOUT - Duration::from_millis(1));
+      }
+      assert!(encryption_failures(&mut alice).is_empty());
+      for engine in [&mut alice, &mut lonely] {
+        engine.on_timer(now + ENCRYPTION_SETUP_TIMEOUT);
+        engine.on_timer(now + ENCRYPTION_SETUP_TIMEOUT * 2);
+      }
+
+      assert_eq!(encryption_failures(&mut alice), vec![Duration::ZERO]);
+      assert!(encryption_failures(&mut lonely).is_empty());
+    }
+
+    /// A secured call never reports a failure.
+    #[test]
+    fn a_secured_call_reports_no_failure() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.on_timer(now);
+      alice.on_timer(now + ENCRYPTION_SETUP_TIMEOUT * 2);
+      assert!(encryption_failures(&mut alice).is_empty());
+    }
+
+    fn encryption_failures(engine: &mut CallEngine) -> Vec<Duration> {
+      drain(engine)
+        .into_iter()
+        .filter_map(|output| match output {
+          EngineOutput::Event(CallEngineEvent::EncryptionFailed { retry_after }) => Some(retry_after),
+          _ => None,
+        })
+        .collect()
     }
 
     #[test]

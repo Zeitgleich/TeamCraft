@@ -4427,6 +4427,49 @@ departed member at once. There is no downgrade: TeamCraft has no
 counterpart of DAVE's `prepare_transition` to protocol version 0 (opcode 21), and the engine always
 prepares version 1, so the SFU can't switch a call to unencrypted media.
 
+**Proposals nobody commits** (#1555). Every member commits the SFU's proposals and the first commit
+wins, so they stall only when every committer stays silent: its session is broken, it is hostile,
+or it refuses a joiner whose call key binding it can't verify (above). Without a way out no
+later join or removal would ever be proposed: joiners would get no keys, and a member that left
+would stay in the group with the current epoch's key. Proposals can't be taken back (the members
+hold them for the epoch; computing their references at the SFU would need MLS internals), so the
+SFU starts the group over when no commit arrived within `TEAMCRAFT_SFU_DAVE_COMMIT_DEADLINE_SECS`
+(default 10 s, long enough for a member that first refreshes its roster):
+
+- Every member gets `dave_external_sender` again. The engine takes it as "start over": it drops its
+  DAVE session with every key and every change held for it, creates a new one (a new signature
+  key, so a new key binding) and answers with a fresh key package. A broken member is repaired by
+  that, and the new group holds only those still in the call, so a member that left is out.
+- The joiners of the stalled proposals keep their key packages, with a strike. A device with a
+  strike never founds the new group while one without can, and is proposed alone, after every
+  member that started over came back (or one deadline passed), so a further stall is its own. At
+  its second strike it is refused and told so: `dave_refused` with `retry_after_secs`. Strikes and
+  refusals belong to the device, not its connection: they last
+  `TEAMCRAFT_SFU_DAVE_REFUSAL_WINDOW_SECS` (default 300) after the last stall, reconnects
+  included, so a device nobody accepts costs the call two restarts per window, not per reconnect.
+  A key package of a refused device within the window is answered with `dave_refused` (the time
+  left), and restarts nothing. A joiner that gets in loses its strikes. A call remembers at most
+  256 such devices; beyond that the one whose strikes expire first goes.
+- The refused device stays in the call without media keys, and its user sees why: "Your device
+  couldn't be added to the call's encryption", with Leave, and Try again once the window passed
+  (web and desktop; the Android app says when calling back may work). An SFU that never says so
+  (an older one, a lost message) is covered by the engine's own safety net: with others in the
+  call, a key package that brings no secured media within 60 s (`ENCRYPTION_SETUP_TIMEOUT`, above
+  the longest wait the SFU allows a joiner with one strike) shows the same failure, with no wait.
+  Alone in a call nothing counts: nobody could add the device.
+- A commit sent before the restart can't be taken for one of the new group: a member's signaling
+  stream is ordered, so it reaches the SFU before that member's new key package, while the member
+  isn't a committer of anything.
+
+Each joiner thus costs the call at most two restarts per refusal window, each a gap of a round trip or two in the
+members' media; the SFU logs counts only. The SFU learns nothing new and gains no power: it could
+always drop media or force rejoins, and the new group is built with the same checks (expected
+participants, key bindings, trusted roster) as the first. One hostile member that is the only
+committer can keep newcomers out (it can't tell which side is at fault, and keeps the member); it
+can't read anything it couldn't before. Clients from before #1555 can't drop an established
+session: they stay out of the new group until they rejoin, and hold a waiting joiner up for one
+deadline only.
+
 **Nonces.** Every frame's AES-GCM nonce comes from the sender's per-epoch key ratchet and a counter.
 Installing the current epoch's key again (a repeated prepare for the same epoch) continues that
 counter; before `davey` 0.2.0 it restarted it and so reused nonces under one key. Tests in

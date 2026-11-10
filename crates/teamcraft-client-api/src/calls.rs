@@ -734,6 +734,17 @@ pub struct ActiveCall {
   /// came from. Absent from older shells.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub maybe_joined_at: Option<TimestampMs>,
+  /// This device couldn't be added to the call's end-to-end encryption (#1555): no media flows,
+  /// and the UI says so with a way out. Absent from older shells.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_encryption_failure: Option<EncryptionFailure>,
+}
+
+/// Why this device has no media keys in its call, and when joining again may help.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncryptionFailure {
+  /// How long after the failure a new join may be taken (the SFU's refusal window); 0: at once.
+  pub retry_after_secs: u32,
 }
 
 /// The sound of a screen share (the computer's playback without the call itself).

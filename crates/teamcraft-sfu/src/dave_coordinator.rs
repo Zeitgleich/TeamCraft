@@ -21,6 +21,15 @@
 //! would make the next commit flush the execution before most members are ready, and they'd lose
 //! frames at the switch. The execution's deadline bounds that wait.
 //!
+//! Proposals that nobody commits in time (#1555: every committer silent, broken or refusing a
+//! joiner) don't wedge the call: the group starts over. Members hear the external sender again,
+//! drop their session and come back with fresh key packages; the joiners of the stalled proposals
+//! keep theirs but get a strike, are proposed alone and only after everyone else, and are refused
+//! after a second stall, and told so. A broken member is repaired by its fresh session, a joiner
+//! its members won't accept is kept out, and a member that left is no longer in any group with a
+//! current key. Strikes and refusals outlast reconnects for a while, so each joiner costs at most
+//! two restarts per refusal window.
+//!
 //! Pure state machine: every input returns the messages to send, and time comes in as an argument
 //! ([`DaveCoordinator::on_timer`]), so it is tested without network or clock.
 
@@ -39,12 +48,18 @@ use tracing::{debug, info, warn};
 
 use crate::ids::{dave_call_id, dave_participant_id, device_id_from_dave};
 
+/// Stalls a joiner may be part of before it is refused (#1555).
+const STRIKE_LIMIT: u8 = 2;
+/// Most devices with strikes a call remembers; beyond it the one whose strikes expire first goes.
+const MAX_SUSPECTS: usize = 256;
+
 /// DAVE membership state of one call.
 pub struct DaveCoordinator {
   call_id: CallId,
-  /// How long an announced transition waits for its members' ready before it is executed anyway.
-  transition_deadline: Duration,
+  deadlines: DaveDeadlines,
   external_sender: DaveExternalSender,
+  /// [`DaveExternalSender::package`], sent again to members when the group starts over.
+  external_sender_package: Vec<u8>,
   /// `None` until the group is founded (and again after everyone left).
   maybe_epoch: Option<DaveEpoch>,
   /// Leaves of the MLS ratchet tree, mirrored to address Remove proposals. MLS places new members
@@ -62,6 +77,39 @@ pub struct DaveCoordinator {
   last_transition_id: u16,
   /// The announced transition waiting for its members to be ready.
   maybe_execution: Option<Execution>,
+  /// Joiners of stalled proposals (at most [`MAX_SUSPECTS`]), kept across their reconnects until
+  /// the refusal window after their last stall passed; cleared once they are in.
+  suspects: HashMap<DeviceId, Suspect>,
+  /// Members told to start over whose new key package hasn't arrived; joiners with a strike wait
+  /// for them, at most until `maybe_restart_deadline`.
+  restarting: BTreeSet<DeviceId>,
+  maybe_restart_deadline: Option<Instant>,
+}
+
+/// How long the coordinator waits for its members.
+#[derive(Debug, Clone, Copy)]
+pub struct DaveDeadlines {
+  /// How long an announced transition waits for its members' ready before it is executed anyway.
+  pub transition: Duration,
+  /// How long proposals wait for a commit before the group starts over (#1555).
+  pub commit: Duration,
+  /// How long a joiner's strikes count after its last stall, and so how long a refused joiner
+  /// stays refused, reconnects included.
+  pub refusal: Duration,
+}
+
+/// A joiner whose proposals stalled.
+#[derive(Debug, Clone, Copy)]
+struct Suspect {
+  strikes: u8,
+  /// When the strikes are forgotten (and a refusal lifts).
+  until: Instant,
+}
+
+impl Suspect {
+  fn is_refused(self) -> bool {
+    self.strikes >= STRIKE_LIMIT
+  }
 }
 
 /// One message to deliver over a participant's signaling stream.
@@ -91,6 +139,8 @@ struct Transition {
   removed: Vec<DaveLeafIndex>,
   committers: BTreeSet<DeviceId>,
   departed_joiners: BTreeSet<DeviceId>,
+  /// When the group starts over if nobody committed.
+  deadline: Instant,
 }
 
 #[derive(Debug, Error)]
@@ -106,12 +156,15 @@ pub enum DaveCoordinatorError {
 }
 
 impl DaveCoordinator {
-  /// A coordinator that executes each transition at most `transition_deadline` after announcing it.
-  pub fn new(call_id: CallId, transition_deadline: Duration) -> Result<Self, DaveCoordinatorError> {
+  /// A coordinator that waits for its members at most as long as `deadlines` say.
+  pub fn new(call_id: CallId, deadlines: DaveDeadlines) -> Result<Self, DaveCoordinatorError> {
+    let external_sender = DaveExternalSender::new()?;
+    let external_sender_package = external_sender.package()?;
     Ok(Self {
       call_id,
-      transition_deadline,
-      external_sender: DaveExternalSender::new()?,
+      deadlines,
+      external_sender,
+      external_sender_package,
       maybe_epoch: None,
       leaves: Vec::new(),
       waiting: Vec::new(),
@@ -121,21 +174,26 @@ impl DaveCoordinator {
       transition_modes: HashMap::new(),
       last_transition_id: 0,
       maybe_execution: None,
+      suspects: HashMap::new(),
+      restarting: BTreeSet::new(),
+      maybe_restart_deadline: None,
     })
   }
 
   /// The `ExternalSender` package every participant installs on join.
-  pub fn external_sender_package(&self) -> Result<Vec<u8>, DaveCoordinatorError> {
-    Ok(self.external_sender.package()?)
+  pub fn external_sender_package(&self) -> Vec<u8> {
+    self.external_sender_package.clone()
   }
 
   /// A participant's key package arrived; `transition_mode` is what its connection's `join` said.
+  /// A refused device hears so again instead.
   pub fn on_key_package(
     &mut self,
     participant_id: DeviceId,
     key_package: Vec<u8>,
     maybe_key_binding: Option<Vec<u8>>,
     transition_mode: DaveTransitionMode,
+    now: Instant,
   ) -> Result<Vec<Outbound>, DaveCoordinatorError> {
     let actual = device_id_from_dave(self.external_sender.key_package_participant(&key_package)?)?;
     if actual != participant_id {
@@ -143,6 +201,18 @@ impl DaveCoordinator {
         expected: participant_id,
         actual,
       });
+    }
+    self.forget_expired_suspects(now);
+    if let Some(suspect) = self
+      .suspects
+      .get(&participant_id)
+      .filter(|suspect| suspect.is_refused())
+    {
+      debug!(?participant_id, "key package of a refused device");
+      return Ok(vec![refusal(
+        participant_id,
+        suspect.until.saturating_duration_since(now),
+      )]);
     }
     if self.is_known(participant_id) {
       return Err(DaveCoordinatorError::AlreadyKnown(participant_id));
@@ -152,7 +222,8 @@ impl DaveCoordinator {
     }
     self.transition_modes.insert(participant_id, transition_mode);
     self.waiting.push((participant_id, key_package));
-    Ok(self.start_transition())
+    self.restarting.remove(&participant_id);
+    Ok(self.start_transition(now))
   }
 
   /// A participant committed the proposals of `epoch`. Late or foreign commits are ignored.
@@ -178,8 +249,13 @@ impl DaveCoordinator {
     let Some(transition) = self.maybe_transition.take() else {
       return Vec::new();
     };
+    // The joiners are in and the committer works: whatever stalled before is behind them.
+    self.suspects.remove(&participant_id);
+    for (joiner, _) in &transition.joiners {
+      self.suspects.remove(joiner);
+    }
     let mut outbound = self.apply(transition, commit, maybe_welcome, now);
-    outbound.extend(self.start_transition());
+    outbound.extend(self.start_transition(now));
     outbound
   }
 
@@ -188,6 +264,7 @@ impl DaveCoordinator {
     &mut self,
     participant_id: DeviceId,
     transition_id: DaveTransitionId,
+    now: Instant,
   ) -> Vec<Outbound> {
     let Some(execution) = &mut self.maybe_execution else {
       debug!(?participant_id, "transition ready without a transition in flight");
@@ -203,30 +280,49 @@ impl DaveCoordinator {
     }
     execution.awaiting.remove(&participant_id);
     let mut outbound = self.execute_when_ready();
-    outbound.extend(self.start_transition());
+    outbound.extend(self.start_transition(now));
     outbound
   }
 
   /// Periodic check (the room's timer): executes a transition whose deadline passed, logging how
-  /// many members weren't ready, and starts the proposals that waited for it.
+  /// many members weren't ready; starts the group over when proposals found no committer in time
+  /// (#1555); and starts the proposals that waited.
   pub fn on_timer(&mut self, now: Instant) -> Vec<Outbound> {
-    let is_overdue = self
+    self.forget_expired_suspects(now);
+    let mut outbound = Vec::new();
+    if self
       .maybe_execution
       .as_ref()
-      .is_some_and(|execution| now >= execution.deadline);
-    if !is_overdue {
-      return Vec::new();
+      .is_some_and(|execution| now >= execution.deadline)
+    {
+      outbound.extend(self.execute_now());
     }
-    let mut outbound = self.execute_now();
-    outbound.extend(self.start_transition());
+    if self
+      .maybe_transition
+      .as_ref()
+      .is_some_and(|transition| now >= transition.deadline)
+    {
+      outbound.extend(self.restart(now));
+    }
+    if self
+      .maybe_restart_deadline
+      .is_some_and(|deadline| now >= deadline)
+    {
+      // Members that didn't come back in time (clients from before restarts can't) hold nobody up.
+      self.restarting.clear();
+      self.maybe_restart_deadline = None;
+    }
+    outbound.extend(self.start_transition(now));
     outbound
   }
 
-  /// A participant left the call (or its connection dropped).
-  pub fn on_leave(&mut self, participant_id: DeviceId) -> Vec<Outbound> {
+  /// A participant left the call (or its connection dropped). Its strikes stay: a reconnect
+  /// doesn't buy a joiner nobody accepts two more restarts.
+  pub fn on_leave(&mut self, participant_id: DeviceId, now: Instant) -> Vec<Outbound> {
     self.waiting.retain(|(id, _)| *id != participant_id);
     self.key_bindings.remove(&participant_id);
     self.transition_modes.remove(&participant_id);
+    self.restarting.remove(&participant_id);
     let mut outbound = Vec::new();
     if let Some(execution) = &mut self.maybe_execution {
       execution.recipients.remove(&participant_id);
@@ -253,7 +349,7 @@ impl DaveCoordinator {
     if self.leaves.iter().all(Option::is_none) {
       self.reset_group();
     }
-    outbound.extend(self.start_transition());
+    outbound.extend(self.start_transition(now));
     outbound
   }
 
@@ -262,32 +358,63 @@ impl DaveCoordinator {
     self.maybe_epoch
   }
 
-  fn start_transition(&mut self) -> Vec<Outbound> {
+  fn start_transition(&mut self, now: Instant) -> Vec<Outbound> {
     // One change at a time: proposals wait while a commit or an execution is outstanding.
     if self.maybe_transition.is_some() || self.maybe_execution.is_some() {
       return Vec::new();
     }
     match self.maybe_epoch {
-      None => self.found_group(),
-      Some(epoch) if !self.waiting.is_empty() || !self.pending_removals.is_empty() => {
-        let joiners = std::mem::take(&mut self.waiting);
+      None => self.found_group(now),
+      Some(epoch) => {
+        let joiners = self.take_batch();
+        if joiners.is_empty() && self.pending_removals.is_empty() {
+          return Vec::new();
+        }
         let removed = std::mem::take(&mut self.pending_removals);
-        self.propose(epoch, joiners, removed)
+        self.propose(epoch, joiners, removed, now)
       },
-      Some(_) => Vec::new(),
     }
   }
 
-  fn found_group(&mut self) -> Vec<Outbound> {
+  /// The founder is the first waiting device without a strike (a joiner that stalled proposals
+  /// never founds while another can); it adds the next batch.
+  fn found_group(&mut self, now: Instant) -> Vec<Outbound> {
     if self.waiting.len() < 2 {
       return Vec::new();
     }
-    let mut joiners = std::mem::take(&mut self.waiting);
-    let (founder, _) = joiners.remove(0);
+    let founder_index = self
+      .waiting
+      .iter()
+      .position(|(id, _)| !self.suspects.contains_key(id))
+      .unwrap_or(0);
+    let founder = self.waiting.remove(founder_index);
+    let joiners = self.take_batch();
+    if joiners.is_empty() {
+      self.waiting.insert(founder_index, founder);
+      return Vec::new();
+    }
+    let (founder, _) = founder;
     self.leaves = vec![Some(founder)];
     self.maybe_epoch = Some(DaveEpoch(0));
     debug!(call_id = %self.call_id, ?founder, "founding DAVE group");
-    self.propose(DaveEpoch(0), joiners, Vec::new())
+    self.propose(DaveEpoch(0), joiners, Vec::new(), now)
+  }
+
+  /// The key packages the next proposals add: every waiting device without a strike; when there is
+  /// none, one with a strike, alone, so a stall is its own (#1555). Those wait while members that
+  /// start over are still expected.
+  fn take_batch(&mut self) -> Vec<(DeviceId, Vec<u8>)> {
+    let known = &self.suspects;
+    let (clean, mut suspects): (Vec<_>, Vec<_>) = std::mem::take(&mut self.waiting)
+      .into_iter()
+      .partition(|(id, _)| !known.contains_key(id));
+    if !clean.is_empty() || suspects.is_empty() || !self.restarting.is_empty() {
+      self.waiting = suspects;
+      return clean;
+    }
+    let first = suspects.remove(0);
+    self.waiting = suspects;
+    vec![first]
   }
 
   fn propose(
@@ -295,6 +422,7 @@ impl DaveCoordinator {
     epoch: DaveEpoch,
     joiners: Vec<(DeviceId, Vec<u8>)>,
     removed: Vec<DaveLeafIndex>,
+    now: Instant,
   ) -> Vec<Outbound> {
     let joiner_refs: Vec<(DaveParticipantId, &[u8])> = joiners
       .iter()
@@ -337,8 +465,84 @@ impl DaveCoordinator {
       removed,
       committers,
       departed_joiners: BTreeSet::new(),
+      deadline: now + self.deadlines.commit,
     });
     outbound
+  }
+
+  /// Nobody committed the proposals in time (#1555): every committer is silent, whether broken,
+  /// hostile or refusing a joiner it can't verify. Their proposals can't be taken back, so the
+  /// group starts over: members get the external sender again and answer with fresh sessions,
+  /// which repairs a broken one; the joiners keep their key packages with a strike, and are
+  /// refused (and told) at the second. A count only goes into the log.
+  fn restart(&mut self, now: Instant) -> Vec<Outbound> {
+    let Some(transition) = self.maybe_transition.take() else {
+      return Vec::new();
+    };
+    let mut requeued = Vec::new();
+    let mut outbound = Vec::new();
+    for (joiner, key_package) in transition.joiners {
+      // A joiner that left (and maybe came back on a new connection) still stalled them.
+      if self.strike(joiner, now).is_refused() {
+        self.waiting.retain(|(id, _)| *id != joiner);
+        self.key_bindings.remove(&joiner);
+        outbound.push(refusal(joiner, self.deadlines.refusal));
+      } else if !transition.departed_joiners.contains(&joiner) {
+        requeued.push((joiner, key_package));
+      }
+    }
+    let refused = outbound.len();
+    let members: Vec<DeviceId> = self.members().collect();
+    warn!(
+      call_id = %self.call_id,
+      epoch = transition.epoch.0,
+      committers = transition.committers.len(),
+      requeued = requeued.len(),
+      refused,
+      "no member committed the DAVE proposals in time; starting the group over"
+    );
+    self.maybe_epoch = None;
+    self.leaves.clear();
+    self.pending_removals.clear();
+    self.maybe_execution = None;
+    requeued.append(&mut self.waiting);
+    self.waiting = requeued;
+    self.restarting = members.iter().copied().collect();
+    self.maybe_restart_deadline = Some(now + self.deadlines.commit);
+    outbound.extend(members.into_iter().map(|recipient| Outbound {
+      recipient,
+      event: CallEvent::DaveExternalSender {
+        package: Base64Bytes::new(self.external_sender_package.clone()),
+      },
+    }));
+    outbound
+  }
+
+  /// Gives a joiner of stalled proposals a strike that counts for the refusal window. A full map
+  /// makes room by forgetting the suspect whose strikes would expire first.
+  fn strike(&mut self, joiner: DeviceId, now: Instant) -> Suspect {
+    if !self.suspects.contains_key(&joiner) && self.suspects.len() >= MAX_SUSPECTS {
+      let maybe_oldest = self
+        .suspects
+        .iter()
+        .min_by_key(|(_, suspect)| suspect.until)
+        .map(|(id, _)| *id);
+      if let Some(oldest) = maybe_oldest {
+        self.suspects.remove(&oldest);
+      }
+    }
+    let until = now + self.deadlines.refusal;
+    let suspect = self
+      .suspects
+      .entry(joiner)
+      .or_insert(Suspect { strikes: 0, until });
+    suspect.strikes = suspect.strikes.saturating_add(1);
+    suspect.until = until;
+    *suspect
+  }
+
+  fn forget_expired_suspects(&mut self, now: Instant) {
+    self.suspects.retain(|_, suspect| now < suspect.until);
   }
 
   fn apply(
@@ -415,7 +619,7 @@ impl DaveCoordinator {
         id,
         awaiting: recipients.clone(),
         recipients,
-        deadline: now + self.transition_deadline,
+        deadline: now + self.deadlines.transition,
       });
       outbound.extend(self.execute_when_ready());
     }
@@ -546,6 +750,18 @@ impl DaveCoordinator {
   }
 }
 
+/// Tells a refused device so, and when a key package may be taken again.
+fn refusal(recipient: DeviceId, retry_after: Duration) -> Outbound {
+  // Rounded up: a retry at the given second must not be refused again.
+  let secs = retry_after.as_secs() + u64::from(retry_after.subsec_nanos() > 0);
+  Outbound {
+    recipient,
+    event: CallEvent::DaveRefused {
+      retry_after_secs: u32::try_from(secs).unwrap_or(u32::MAX),
+    },
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -556,6 +772,8 @@ mod tests {
 
   const FRAME: &[u8] = &[0x78, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
   const DEADLINE: Duration = Duration::from_secs(2);
+  const COMMIT_DEADLINE: Duration = Duration::from_secs(10);
+  const REFUSAL_WINDOW: Duration = Duration::from_secs(300);
 
   mod membership {
     use super::*;
@@ -637,7 +855,7 @@ mod tests {
       // Proposals adding 3 are in flight when its connection drops; it is back at once.
       harness.join_without_delivery(3);
       harness.clients.remove(&device(3));
-      let outbound = harness.coordinator.on_leave(device(3));
+      let outbound = harness.coordinator.on_leave(device(3), harness.now);
       harness.queue.extend(outbound);
       harness.join_without_delivery(3);
       harness.deliver_all();
@@ -918,9 +1136,253 @@ mod tests {
       assert!(
         harness
           .coordinator
-          .on_transition_ready(device(1), stranger)
+          .on_transition_ready(device(1), stranger, harness.now)
           .is_empty()
       );
+    }
+  }
+
+  /// Proposals nobody commits (#1555).
+  mod stalls {
+    use super::*;
+
+    /// Every committer's session is broken: before the deadline nothing moves, after it the group
+    /// starts over with fresh sessions, the joiner comes in alone after the members, and the next
+    /// join goes through.
+    #[test]
+    fn broken_committers_are_repaired_by_a_restart() {
+      let mut harness = Harness::new();
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      harness.broken.extend([device(1), device(2), device(3)]);
+      harness.join(4);
+      harness.advance(COMMIT_DEADLINE - Duration::from_millis(1));
+      assert_eq!(harness.coordinator.maybe_epoch(), Some(DaveEpoch(2)), "stalled");
+      assert_eq!(harness.restarts_to(1), 0);
+
+      harness.advance(Duration::from_millis(1));
+
+      for id in 1..=3 {
+        assert_eq!(harness.restarts_to(id), 1, "member {id}");
+      }
+      assert_eq!(harness.restarts_to(4), 0, "the joiner keeps its key package");
+      harness.assert_all_exchange_frames(&[1, 2, 3, 4]);
+      harness.join(5);
+      harness.assert_all_exchange_frames(&[1, 2, 3, 4, 5]);
+    }
+
+    /// A member that left is removed even when nobody commits its removal: the new group is the
+    /// one of those still here.
+    #[test]
+    fn a_departed_member_is_dropped_when_its_removal_stalls() {
+      let mut harness = Harness::new();
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      harness.broken.extend([device(2), device(3)]);
+      harness.leave(1);
+      assert_eq!(harness.coordinator.maybe_epoch(), Some(DaveEpoch(2)), "stalled");
+
+      harness.advance(COMMIT_DEADLINE);
+
+      harness.assert_all_exchange_frames(&[2, 3]);
+      assert!(!harness.coordinator.leaves.contains(&Some(device(1))));
+    }
+
+    /// A joiner its members can't verify stalls its proposals twice: the members start over twice,
+    /// then it is refused, the members keep talking and later joins go through.
+    #[test]
+    fn a_joiner_nobody_accepts_is_refused_after_two_stalls() {
+      let mut harness = Harness::new();
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      harness.unverifiable.insert(device(4));
+      harness.join(4);
+      harness.advance(COMMIT_DEADLINE);
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
+      harness.advance(COMMIT_DEADLINE);
+
+      for id in 1..=3 {
+        assert_eq!(harness.restarts_to(id), 2, "member {id}");
+      }
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
+      assert_eq!(
+        harness.refusals_to(4),
+        vec![300],
+        "the refused joiner is told, with the window"
+      );
+
+      harness.advance(COMMIT_DEADLINE);
+      assert_eq!(harness.restarts_to(1), 2, "no further restarts");
+      harness.join(5);
+      harness.assert_all_exchange_frames(&[1, 2, 3, 5]);
+    }
+
+    /// The case of the issue: the only committer never commits. The joiner is refused after two
+    /// restarts, and the call stays quiet afterwards instead of restarting for good.
+    #[test]
+    fn a_hostile_only_committer_costs_a_joiner_two_restarts() {
+      let mut harness = Harness::new();
+      harness.join(1);
+      harness.join(2);
+      harness.leave(2);
+      harness.hostile.insert(device(1));
+      harness.join(3);
+
+      harness.advance(COMMIT_DEADLINE);
+      harness.advance(COMMIT_DEADLINE);
+      harness.advance(COMMIT_DEADLINE);
+      harness.advance(COMMIT_DEADLINE);
+
+      assert_eq!(harness.restarts_to(1), 2);
+      assert_eq!(harness.refusals_to(3).len(), 1);
+      assert!(harness.coordinator.maybe_transition.is_none());
+    }
+
+    /// A refused device that reconnects is refused again at once, with the time left, and costs
+    /// nobody a restart; once the window passed it is proposed again (and refused after two more
+    /// stalls).
+    #[test]
+    fn a_refused_device_that_reconnects_restarts_nothing_within_the_window() {
+      let mut harness = Harness::new();
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      harness.unverifiable.insert(device(4));
+      harness.join(4);
+      harness.advance(COMMIT_DEADLINE);
+      harness.advance(COMMIT_DEADLINE);
+      assert_eq!(harness.restarts_to(1), 2);
+
+      harness.advance(Duration::from_secs(60));
+      harness.leave(4);
+      harness.join(4);
+      harness.advance(COMMIT_DEADLINE);
+      harness.advance(COMMIT_DEADLINE);
+
+      assert_eq!(harness.restarts_to(1), 2, "no restart within the window");
+      // Refused at 20 s, back at 80 s.
+      assert_eq!(*harness.refusals_to(4).last().unwrap(), 300 - 60);
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
+
+      harness.advance(REFUSAL_WINDOW);
+      harness.leave(4);
+      harness.join(4);
+      harness.advance(COMMIT_DEADLINE);
+      assert_eq!(harness.restarts_to(1), 3, "proposed again after the window");
+    }
+
+    /// A strike survives a reconnect: the joiner's next stall refuses it.
+    #[test]
+    fn a_strike_outlasts_a_reconnect() {
+      let mut harness = Harness::new();
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      harness.unverifiable.insert(device(4));
+      harness.join(4);
+      harness.advance(COMMIT_DEADLINE);
+      harness.leave(4);
+      harness.join(4);
+      harness.advance(COMMIT_DEADLINE);
+
+      assert_eq!(harness.restarts_to(1), 2);
+      assert_eq!(harness.refusals_to(4), vec![300]);
+    }
+
+    /// The suspects a call remembers are bounded; the one whose strikes expire first goes.
+    #[test]
+    fn suspects_are_bounded() {
+      let mut harness = Harness::new();
+      let now = harness.now;
+      for raw in 0..MAX_SUSPECTS + 10 {
+        let at = now + Duration::from_millis(u64::try_from(raw).unwrap());
+        harness
+          .coordinator
+          .strike(device(1000 + u64::try_from(raw).unwrap()), at);
+      }
+      assert_eq!(harness.coordinator.suspects.len(), MAX_SUSPECTS);
+      assert!(!harness.coordinator.suspects.contains_key(&device(1000)));
+      assert!(harness.coordinator.suspects.contains_key(&device(1000 + 265)));
+    }
+
+    /// A commit that was on its way when the group started over arrives before the member's new
+    /// key package (one ordered stream) and is ignored.
+    #[test]
+    fn a_commit_from_before_the_restart_is_ignored() {
+      let mut harness = Harness::new();
+      harness.join(1);
+      harness.join(2);
+      harness.holds_commits.extend([device(1), device(2)]);
+      harness.join(3);
+      assert_eq!(harness.held_commits.len(), 2);
+      harness.holds_commits.clear();
+
+      harness.now += COMMIT_DEADLINE;
+      let restart = harness.coordinator.on_timer(harness.now);
+      for HeldCommit {
+        member,
+        epoch,
+        commit,
+        maybe_welcome,
+      } in std::mem::take(&mut harness.held_commits)
+      {
+        assert!(
+          harness
+            .coordinator
+            .on_commit(member, epoch, commit, maybe_welcome, harness.now)
+            .is_empty()
+        );
+      }
+      harness.queue.extend(restart);
+      harness.deliver_all();
+
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
+    }
+
+    /// A member that drops while the group starts over doesn't hold it up.
+    #[test]
+    fn a_member_leaving_during_the_restart() {
+      let mut harness = Harness::new();
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      harness.broken.extend([device(1), device(2), device(3)]);
+      harness.join(4);
+      harness.now += COMMIT_DEADLINE;
+      let restart = harness.coordinator.on_timer(harness.now);
+      harness.queue.extend(restart);
+      harness.deliver_one();
+      harness.leave(2);
+
+      harness.assert_all_exchange_frames(&[1, 3, 4]);
+    }
+
+    /// A member that never answers the restart (a client from before) holds the joiner with a
+    /// strike up for one deadline only.
+    #[test]
+    fn a_member_that_never_comes_back_holds_nobody_up() {
+      let mut harness = Harness::new();
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      harness.broken.extend([device(1), device(2), device(3)]);
+      harness.ignores_restart.insert(device(3));
+      harness.join(4);
+      harness.advance(COMMIT_DEADLINE);
+      assert!(
+        !harness
+          .events_to(4)
+          .iter()
+          .any(|event| matches!(event, CallEvent::DaveWelcome { .. })),
+        "4 waits for 3"
+      );
+
+      harness.advance(COMMIT_DEADLINE);
+
+      harness.assert_all_exchange_frames(&[1, 2, 4]);
     }
   }
 
@@ -977,10 +1439,13 @@ mod tests {
       let mut harness = Harness::new();
       let mut client = harness.new_client(5);
       let key_package = client.create_key_package().unwrap();
-      let result =
-        harness
-          .coordinator
-          .on_key_package(device(6), key_package, None, DaveTransitionMode::Coordinated);
+      let result = harness.coordinator.on_key_package(
+        device(6),
+        key_package,
+        None,
+        DaveTransitionMode::Coordinated,
+        harness.now,
+      );
       assert!(matches!(
         result,
         Err(DaveCoordinatorError::ParticipantMismatch { .. })
@@ -997,10 +1462,13 @@ mod tests {
         .unwrap()
         .create_key_package()
         .unwrap();
-      let result =
-        harness
-          .coordinator
-          .on_key_package(device(1), key_package, None, DaveTransitionMode::Coordinated);
+      let result = harness.coordinator.on_key_package(
+        device(1),
+        key_package,
+        None,
+        DaveTransitionMode::Coordinated,
+        harness.now,
+      );
       assert!(matches!(result, Err(DaveCoordinatorError::AlreadyKnown(_))));
     }
 
@@ -1039,6 +1507,17 @@ mod tests {
     mode: DaveTransitionMode,
     /// Ready messages are held here instead of sent while set (a slow member).
     holds_ready: BTreeSet<DeviceId>,
+    /// Members whose session is broken: they commit nothing until a restart gives them a new one.
+    broken: BTreeSet<DeviceId>,
+    /// Members that never commit, whatever their session.
+    hostile: BTreeSet<DeviceId>,
+    /// Members whose commits are held back here (slow signaling).
+    holds_commits: BTreeSet<DeviceId>,
+    held_commits: Vec<HeldCommit>,
+    /// Clients from before restarts: they don't answer the external sender a second time.
+    ignores_restart: BTreeSet<DeviceId>,
+    /// Devices whose key binding no member can verify: proposals adding one aren't committed.
+    unverifiable: BTreeSet<DeviceId>,
     held_ready: Vec<(DeviceId, DaveTransitionId)>,
     /// Every event delivered, in order, by recipient.
     delivered: Vec<Outbound>,
@@ -1053,11 +1532,25 @@ mod tests {
 
     fn with_mode(mode: DaveTransitionMode) -> Self {
       Self {
-        coordinator: DaveCoordinator::new(call(), DEADLINE).unwrap(),
+        coordinator: DaveCoordinator::new(
+          call(),
+          DaveDeadlines {
+            transition: DEADLINE,
+            commit: COMMIT_DEADLINE,
+            refusal: REFUSAL_WINDOW,
+          },
+        )
+        .unwrap(),
         clients: BTreeMap::new(),
         queue: VecDeque::new(),
         mode,
         holds_ready: BTreeSet::new(),
+        broken: BTreeSet::new(),
+        hostile: BTreeSet::new(),
+        holds_commits: BTreeSet::new(),
+        held_commits: Vec::new(),
+        ignores_restart: BTreeSet::new(),
+        unverifiable: BTreeSet::new(),
         held_ready: Vec::new(),
         delivered: Vec::new(),
         now: Instant::now(),
@@ -1091,7 +1584,7 @@ mod tests {
     fn new_client(&self, id: u64) -> DaveParticipant {
       let mut client = DaveParticipant::new(DaveParticipantId(id), dave_call_id(call())).unwrap();
       client
-        .set_external_sender(&self.coordinator.external_sender_package().unwrap())
+        .set_external_sender(&self.coordinator.external_sender_package())
         .unwrap();
       client
     }
@@ -1116,6 +1609,7 @@ mod tests {
           key_package,
           Some(vec![u8::try_from(id).unwrap()]),
           mode,
+          self.now,
         )
         .unwrap();
       self.queue.extend(outbound);
@@ -1125,7 +1619,9 @@ mod tests {
     fn release_ready(&mut self) {
       self.holds_ready.clear();
       for (recipient, transition_id) in std::mem::take(&mut self.held_ready) {
-        let outbound = self.coordinator.on_transition_ready(recipient, transition_id);
+        let outbound = self
+          .coordinator
+          .on_transition_ready(recipient, transition_id, self.now);
         self.queue.extend(outbound);
       }
       self.deliver_all();
@@ -1144,7 +1640,7 @@ mod tests {
 
     fn leave(&mut self, id: u64) {
       self.clients.remove(&device(id));
-      let outbound = self.coordinator.on_leave(device(id));
+      let outbound = self.coordinator.on_leave(device(id), self.now);
       self.queue.extend(outbound);
       self.deliver_all();
     }
@@ -1173,11 +1669,26 @@ mod tests {
             expected_participants,
             ..
           } => {
+            let adds_unverifiable = expected_participants
+              .iter()
+              .any(|id| *id != recipient && self.unverifiable.contains(id));
+            if self.broken.contains(&recipient) || self.hostile.contains(&recipient) || adds_unverifiable {
+              return;
+            }
             let expected: Vec<_> = expected_participants
               .iter()
               .map(|id| dave_participant_id(*id))
               .collect();
             if let Some(commit) = client.process_proposals(proposals.as_slice(), &expected).unwrap() {
+              if self.holds_commits.contains(&recipient) {
+                self.held_commits.push(HeldCommit {
+                  member: recipient,
+                  epoch: DaveEpoch(epoch),
+                  commit: commit.commit,
+                  maybe_welcome: commit.maybe_welcome,
+                });
+                return;
+              }
               let outbound = self.coordinator.on_commit(
                 recipient,
                 DaveEpoch(epoch),
@@ -1214,6 +1725,14 @@ mod tests {
             );
             None
           },
+          CallEvent::DaveRefused { .. } => None,
+          CallEvent::DaveExternalSender { .. } => {
+            // The group starts over: a fresh session answers, like the engine.
+            if !self.ignores_restart.contains(&recipient) {
+              self.rejoin(recipient);
+            }
+            None
+          },
           other => panic!("unexpected event {other:?}"),
         };
         if let Some(maybe_transition_id) = maybe_transition {
@@ -1223,12 +1742,57 @@ mod tests {
             if self.holds_ready.contains(&recipient) {
               self.held_ready.push((recipient, transition_id));
             } else {
-              let outbound = self.coordinator.on_transition_ready(recipient, transition_id);
+              let outbound = self
+                .coordinator
+                .on_transition_ready(recipient, transition_id, self.now);
               self.queue.extend(outbound);
             }
           }
         }
       }
+    }
+
+    /// A member answering a restart: a fresh session and key package on the same connection.
+    fn rejoin(&mut self, recipient: DeviceId) {
+      let raw = dave_participant_id(recipient).0;
+      let mut client = self.new_client(raw);
+      let key_package = client.create_key_package().unwrap();
+      self.clients.insert(recipient, client);
+      self.broken.remove(&recipient);
+      let outbound = self
+        .coordinator
+        .on_key_package(
+          recipient,
+          key_package,
+          Some(vec![u8::try_from(raw).unwrap()]),
+          self.mode,
+          self.now,
+        )
+        .unwrap();
+      self.queue.extend(outbound);
+    }
+
+    fn refusals_to(&self, id: u64) -> Vec<u32> {
+      self
+        .delivered
+        .iter()
+        .filter_map(|outbound| match outbound.event {
+          CallEvent::DaveRefused { retry_after_secs } if outbound.recipient == device(id) => {
+            Some(retry_after_secs)
+          },
+          _ => None,
+        })
+        .collect()
+    }
+
+    fn restarts_to(&self, id: u64) -> usize {
+      self
+        .delivered
+        .iter()
+        .filter(|outbound| {
+          outbound.recipient == device(id) && matches!(outbound.event, CallEvent::DaveExternalSender { .. })
+        })
+        .count()
     }
 
     fn assert_all_exchange_frames(&mut self, ids: &[u64]) {
@@ -1254,6 +1818,14 @@ mod tests {
         }
       }
     }
+  }
+
+  /// A commit the harness holds back instead of sending.
+  struct HeldCommit {
+    member: DeviceId,
+    epoch: DaveEpoch,
+    commit: Vec<u8>,
+    maybe_welcome: Option<Vec<u8>>,
   }
 
   fn call() -> CallId {

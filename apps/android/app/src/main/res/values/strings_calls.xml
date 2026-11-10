@@ -99,6 +99,11 @@
     <item quantity="one">member</item>
     <item quantity="other">members</item>
   </plurals>
+  <string name="call_encryption_failed">Your device couldn\'t be added to the call\'s encryption, so you can\'t hear or be heard. Others in the call may not be able to verify this device. Hang up and call back from the conversation.</string>
+  <plurals name="call_encryption_retry_in">
+    <item quantity="one">You can call back in %d minute.</item>
+    <item quantity="other">You can call back in %d minutes.</item>
+  </plurals>
   <string name="call_join_failed_title">Couldn\'t join the call</string>
   <string name="call_join_failed">Joining the call didn\'t work. Call back from the conversation.</string>
   <string name="call_join_failed_microphone">TeamCraft needs the microphone to join a call. Allow it, then call back from the conversation.</string>

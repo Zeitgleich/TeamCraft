@@ -270,7 +270,9 @@ pub enum CallEvent {
   ActiveSpeakers {
     device_ids: Vec<DeviceId>,
   },
-  /// Serialized MLS `ExternalSender` the client installs before creating its key package.
+  /// Serialized MLS `ExternalSender` the client installs before creating its key package. Sent
+  /// again when the call's DAVE group starts over because nobody committed its proposals (#1555):
+  /// the client drops its DAVE session, keys included, and answers with a fresh key package.
   DaveExternalSender {
     package: Base64Bytes,
   },
@@ -311,6 +313,13 @@ pub enum CallEvent {
   /// media.
   DaveExecuteTransition {
     transition_id: DaveTransitionId,
+  },
+  /// This device's key packages are refused: proposals adding it stalled the call's group twice,
+  /// nobody committed them (#1555). It stays in the call without media keys; a key package sent
+  /// within `retry_after_secs`, also on a new connection, is refused again. Older clients read
+  /// `Unknown` and notice by their own timeout.
+  DaveRefused {
+    retry_after_secs: u32,
   },
   /// A video track was published (also sent to its publisher, which learns the stream id).
   VideoPublished {
@@ -536,6 +545,16 @@ mod tests {
 
   /// DAVE transitions (#1541): the id is a number, absent without a transition, and older peers'
   /// messages still read.
+  #[test]
+  fn dave_refused_wire_format() {
+    let refused = CallEvent::DaveRefused {
+      retry_after_secs: 300,
+    };
+    let json = r#"{"type":"dave_refused","retry_after_secs":300}"#;
+    assert_eq!(serde_json::to_string(&refused).unwrap(), json);
+    assert_eq!(serde_json::from_str::<CallEvent>(json).unwrap(), refused);
+  }
+
   #[test]
   fn dave_transition_wire_format() {
     let transition_id = DaveTransitionId(NonZeroU16::new(7).unwrap());
