@@ -398,7 +398,12 @@ fn apply_call_alert(state: AppState, i18n: I18n, here: &Rc<RefCell<RingingHere>>
         let was_silent = here.borrow().ringtone_for.is_empty();
         here.borrow_mut().ringtone_for.push(call.conversation);
         if was_silent {
-          leptos::task::spawn_local(tauri::set_ringtone(true));
+          let speaker_id = state.settings.prefs.get_untracked().calls.speaker_id;
+          leptos::task::spawn_local(tauri::set_ringtone(
+            true,
+            speaker_id,
+            prefs.ringtone_volume_percent,
+          ));
         }
       }
     },
@@ -414,7 +419,7 @@ fn apply_call_alert(state: AppState, i18n: I18n, here: &Rc<RefCell<RingingHere>>
       // Withdrawn also when not surfaced by this page: one may be left from before a reload.
       hide_surfaced(conversation);
       if had_ringtone && !has_ringtone {
-        leptos::task::spawn_local(tauri::set_ringtone(false));
+        leptos::task::spawn_local(tauri::set_ringtone(false, String::new(), 0));
       }
       if state.read(|backend| backend.incoming_calls().is_empty()) {
         leptos::task::spawn_local(tauri::request_attention(false));

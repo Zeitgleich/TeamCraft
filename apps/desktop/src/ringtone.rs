@@ -1,4 +1,4 @@
-//! The ringtone of an incoming call, on the default output (notifications.md, "Calls"). The webview
+//! The ringtone of an incoming call, on the speakers chosen for calls (notifications.md, "Calls"). The webview
 //! decides when a call rings audibly (the user's setting, mutes, the app's do-not-disturb); the
 //! shell adds the desktop's own do-not-disturb where it can read it (Linux) and plays
 //! `teamcraft-media`'s synthesized ringtone until told to stop.
@@ -6,8 +6,7 @@
 use std::sync::Mutex;
 
 use tauri::State;
-use teamcraft_media::audio_io::AudioDeviceChoice;
-use teamcraft_media::ringtone::RingtonePlayer;
+use teamcraft_media::ringtone::{FULL_VOLUME_PERCENT, RingtonePlayer};
 
 /// The ringtone while it plays.
 #[derive(Default)]
@@ -20,12 +19,19 @@ pub async fn set_ringtone(
   ringtone: State<'_, RingtoneState>,
   probe: State<'_, crate::attention::OsProbe>,
   is_ringing: bool,
+  maybe_speakers: Option<String>,
+  volume_percent: Option<u8>,
 ) -> Result<(), ()> {
   let is_quiet = is_ringing && is_desktop_quiet(&probe).await;
   if is_quiet {
     tracing::debug!("the desktop's do-not-disturb is on: no ringtone");
   }
-  let maybe_player = (is_ringing && !is_quiet).then(|| RingtonePlayer::start(AudioDeviceChoice::Default));
+  let maybe_player = (is_ringing && !is_quiet).then(|| {
+    RingtonePlayer::start(
+      crate::calls::device_choice(maybe_speakers.filter(|id| !id.is_empty())),
+      volume_percent.unwrap_or(FULL_VOLUME_PERCENT),
+    )
+  });
   let previous = std::mem::replace(
     &mut *ringtone
       .maybe_player
@@ -38,8 +44,9 @@ pub async fn set_ringtone(
   Ok(())
 }
 
-/// Whether the desktop asked for quiet: GNOME's or KDE's do-not-disturb. macOS Focus and Windows'
-/// do-not-disturb are not readable by apps without extra entitlements; there the OS silences the
+/// Whether the desktop asked for quiet: GNOME's or KDE's do-not-disturb. Windows' quiet state
+/// is only reachable through an `unsafe` Win32 call, which the crate forbids, and macOS Focus is
+/// not readable without the Communication Notifications entitlement; there the OS silences the
 /// notification and the in-app setting silences the ringtone. The message sound asks the same.
 pub(crate) async fn is_desktop_quiet(probe: &crate::attention::OsProbe) -> bool {
   #[cfg(target_os = "linux")]
