@@ -484,6 +484,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         users,
         is_guest,
       } => self.add_space_members(space, &users, is_guest).await,
+      CoreCommand::RefreshCustomEmoji => Box::pin(self.refresh_custom_emoji()).await,
       other => Err(runs_elsewhere(&other)),
     }
   }
@@ -499,6 +500,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .set_org_background_rule(rule.mode, rule.maybe_default, rule.guests_exempt, rule.order)
           .await
       },
+      CoreCommand::AddCustomEmoji { shortcode, picture } => {
+        Box::pin(self.add_custom_emoji(shortcode, picture)).await
+      },
+      CoreCommand::RenameCustomEmoji { id, shortcode } => {
+        Box::pin(self.rename_custom_emoji(id, shortcode)).await
+      },
+      CoreCommand::DeleteCustomEmoji { id } => Box::pin(self.delete_custom_emoji(id)).await,
       other => Err(runs_elsewhere(&other)),
     }
   }

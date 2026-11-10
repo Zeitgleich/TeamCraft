@@ -704,6 +704,40 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get("/user-groups/rosters").await
   }
 
+  async fn list_custom_emoji(&self) -> Result<teamcraft_proto::ListCustomEmojiResponse, ApiError> {
+    self.get("/custom-emoji").await
+  }
+
+  async fn create_custom_emoji(
+    &self,
+    request: &teamcraft_proto::CreateCustomEmojiRequest,
+  ) -> Result<teamcraft_proto::CustomEmojiResponse, ApiError> {
+    self.send_json(Method::POST, "/custom-emoji", request).await
+  }
+
+  async fn rename_custom_emoji(
+    &self,
+    emoji: teamcraft_proto::CustomEmojiId,
+    request: &teamcraft_proto::RenameCustomEmojiRequest,
+  ) -> Result<teamcraft_proto::CustomEmojiResponse, ApiError> {
+    self
+      .send_json(Method::PUT, &format!("/custom-emoji/{emoji}"), request)
+      .await
+  }
+
+  async fn delete_custom_emoji(&self, emoji: teamcraft_proto::CustomEmojiId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/custom-emoji/{emoji}"), None)
+      .await
+  }
+
+  async fn download_custom_emoji(
+    &self,
+    emoji: teamcraft_proto::CustomEmojiId,
+  ) -> Result<teamcraft_proto::CustomEmojiDownloadResponse, ApiError> {
+    self.get(&format!("/custom-emoji/{emoji}/download")).await
+  }
+
   async fn conversation(&self, conversation: ConversationId) -> Result<ConversationResponse, ApiError> {
     self.get(&format!("/conversations/{conversation}")).await
   }

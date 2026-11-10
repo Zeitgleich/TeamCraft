@@ -215,6 +215,12 @@ image_decode_timeout_secs = 5
 # A user's own call background pictures: largest picture, and how many one user may keep.
 max_background_bytes = 8388608
 max_backgrounds_per_user = 24
+# Custom emoji of the workspace (issue #207, docs/admin.md §3.11): how many, the largest picture in
+# bytes and its longest side in pixels. Pictures are still PNG or WebP, stored as uploaded; admins
+# can change all three in the admin console (Settings > Limits).
+max_custom_emoji = 500
+max_custom_emoji_bytes = 65536
+max_custom_emoji_side_px = 128
 # How long a request for organization recovery waits for admin approvals.
 org_recovery_request_ttl_secs = 86400
 # Largest sealed share or sealed backup key the server stores for a recovery.

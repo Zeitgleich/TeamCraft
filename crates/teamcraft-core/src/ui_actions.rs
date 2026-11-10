@@ -262,6 +262,9 @@ impl<S: LocalStore> CoreChatBackend<S> {
       MessageContent::Edit {
         target: target.client_message_id,
         body: body.to_string(),
+        custom_emoji: self
+          .read(crate::custom_emoji::stored_set(self.store_ref()))
+          .refs_in(body),
       },
     );
   }

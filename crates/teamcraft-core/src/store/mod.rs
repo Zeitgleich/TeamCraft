@@ -316,7 +316,13 @@ pub enum MessageContent {
   /// An encrypted attachment in object storage (e2ee.md §4.5).
   File { attachment: AttachmentRef },
   /// Replaces the text of the sender's own earlier message.
-  Edit { target: ClientMessageId, body: String },
+  Edit {
+    target: ClientMessageId,
+    body: String,
+    /// The custom emoji the new text names (issue #207), added to the message's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    custom_emoji: Vec<teamcraft_proto::CustomEmojiRef>,
+  },
   /// Withdraws the sender's own earlier message.
   Delete { target: ClientMessageId },
   /// What a deleted message turns into locally.
@@ -350,6 +356,10 @@ pub enum MessageContent {
     target: ClientMessageId,
     emoji: String,
     is_added: bool,
+    /// A custom emoji (issue #207): `emoji` is its `:shortcode:`, which older clients show, and
+    /// this names its picture.
+    #[serde(rename = "custom", default, skip_serializing_if = "Option::is_none")]
+    maybe_custom: Option<teamcraft_proto::CustomEmojiRef>,
   },
   /// The sender's vote in a poll (issue #205, e2ee.md §4.12): the options it chooses, by position,
   /// replace the sender's earlier vote; none withdraws it. The newest valid vote of each sender in
@@ -506,6 +516,12 @@ pub struct MessageMeta {
   /// sees the expanded IDs (e2ee.md §4.4). An older client ignores it and shows the text.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub group_mentions: Vec<String>,
+  /// The workspace's custom emoji the text names by `:shortcode:` (issue #207), with their
+  /// pictures' hashes, inside the ciphertext only. Receivers show those words as the pictures
+  /// they hold; an older client ignores the field and shows the text. A boxed slice: the text
+  /// variant of [`MessageContent`] stays small enough.
+  #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+  pub custom_emoji: Box<[teamcraft_proto::CustomEmojiRef]>,
   /// A poll (issue #205, e2ee.md §4.12): the message's text is what an older version shows (the
   /// question and options as text), this is what a current one shows. Votes and the close are
   /// [`MessageContent::PollVote`] and [`MessageContent::PollClose`] messages naming the message.
@@ -2049,6 +2065,7 @@ pub(crate) mod tests {
       target: root.client_message_id,
       emoji: "+1".into(),
       is_added: true,
+      maybe_custom: None,
     };
     let mut joined = message(conversation, 65, Some(1_300), None, 1_300);
     joined.content = MessageContent::Event {
@@ -2636,6 +2653,7 @@ pub(crate) mod tests {
       target: first.client_message_id,
       emoji: "+1".into(),
       is_added: true,
+      maybe_custom: None,
     };
     for stored in [
       &pending,

@@ -2366,6 +2366,7 @@ impl Reads {
         Self::POLICY | Self::ROLE_HOLDERS
       },
       AdminSection::Backgrounds
+      | AdminSection::Emoji
       | AdminSection::Updates
       | AdminSection::Integrations
       | AdminSection::Webhooks

@@ -1,14 +1,17 @@
 //! Emoji picker for reactions and the composer: all of Unicode in its groups with a tab per group,
-//! search, frequently used first, skin tones and keyboard navigation. The grid is virtualised: only
-//! the rows in view (and a few around them) are in the page.
+//! the workspace's own emoji (issue #207), search, frequently used first, skin tones and keyboard
+//! navigation. The grid is virtualised: only the rows in view (and a few around them) are in the
+//! page. A workspace emoji is picked as its `:shortcode:`.
 
 use leptos::html;
 use leptos::prelude::*;
+use teamcraft_client_api::custom_emoji::token_shortcode;
 use wasm_bindgen::JsCast;
 
 use crate::areas::{self, Place, lazy_area};
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::{PopoverBackdrop, Sheet};
+use crate::custom_emoji::EmojiGlyph;
 use crate::emoji_catalog::{self, CatalogEmoji, EmojiGroup, EmojiVersion, SkinTone};
 use crate::emoji_support::{can_draw, can_draw_skin_tones, newest_drawable};
 use crate::i18n::use_i18n;
@@ -88,13 +91,27 @@ pub fn EmojiPickerPanel(
     });
   }
 
+  // The workspace's emoji as their `:shortcode:` tokens, by name; read again if they changed.
+  crate::custom_emoji::want_set();
+  let custom = Memo::new(move |_| {
+    state.read(|backend| {
+      backend
+        .custom_emoji()
+        .emoji
+        .iter()
+        .map(teamcraft_client_api::custom_emoji::CustomEmoji::text)
+        .collect::<Vec<String>>()
+    })
+  });
   let layout = Memo::new(move |_| {
     let tone = state.settings.emoji_skin_tone.get();
-    query.with(|query| {
-      state
-        .settings
-        .recent_emoji
-        .with(|recent| Layout::build(query, recent, tone, maybe_newest, metrics))
+    custom.with(|custom| {
+      query.with(|query| {
+        state
+          .settings
+          .recent_emoji
+          .with(|recent| Layout::build(query, recent, tone, maybe_newest, metrics, custom))
+      })
     })
   });
   let visible_rows = Memo::new(move |_| {
@@ -199,6 +216,7 @@ pub fn EmojiPickerPanel(
 
   let tabs = Section::TABS
     .into_iter()
+    .filter(|section| *section != Section::Workspace || custom.with_untracked(|custom| !custom.is_empty()))
     .map(|section| {
       let is_current = move || query.with(String::is_empty) && current_section.get() == Some(section);
       view! {
@@ -240,7 +258,7 @@ pub fn EmojiPickerPanel(
               .enumerate()
               .map(|(column, emoji)| {
                 let index = first + column;
-                let label = emoji_catalog::shortcode(&emoji).map_or_else(|| emoji.clone(), |code| format!(":{code}:"));
+                let label = label_of(&emoji);
                 let chosen = emoji.clone();
                 view! {
                   <span
@@ -254,7 +272,7 @@ pub fn EmojiPickerPanel(
                     on:mousedown=move |ev| ev.prevent_default()
                     on:click=move |_| pick(chosen.clone())
                   >
-                    {emoji}
+                    <EmojiGlyph emoji=emoji />
                   </span>
                 }
               })
@@ -324,10 +342,10 @@ pub fn EmojiPickerPanel(
         <Show
           when=move || is_choosing_tone.get()
           fallback=move || view! {
-            <span class="emoji-preview" aria-hidden="true">{move || active_emoji.get()}</span>
-            <span class="emoji-preview-code">
-              {move || active_emoji.get().and_then(|emoji| emoji_catalog::shortcode(&emoji)).map(|code| format!(":{code}:"))}
+            <span class="emoji-preview" aria-hidden="true">
+              {move || active_emoji.get().map(|emoji| view! { <EmojiGlyph emoji=emoji /> })}
             </span>
+            <span class="emoji-preview-code">{move || active_emoji.get().map(|emoji| label_of(&emoji))}</span>
           }
         >
           <div class="emoji-tones" role="radiogroup" aria-label=move || i18n.t("emoji-skin-tone")>{tone_chooser}</div>
@@ -371,6 +389,8 @@ pub fn EmojiPickerPanel(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Section {
   Frequent,
+  /// The workspace's own emoji (issue #207).
+  Workspace,
   Group(EmojiGroup),
 }
 
@@ -413,8 +433,9 @@ enum Direction {
 }
 
 impl Section {
-  const TABS: [Self; 10] = [
+  const TABS: [Self; 11] = [
     Self::Frequent,
+    Self::Workspace,
     Self::Group(EmojiGroup::SmileysAndEmotion),
     Self::Group(EmojiGroup::PeopleAndBody),
     Self::Group(EmojiGroup::AnimalsAndNature),
@@ -429,6 +450,7 @@ impl Section {
   fn label_key(self) -> &'static str {
     match self {
       Self::Frequent => "emoji-frequent",
+      Self::Workspace => "emoji-workspace",
       Self::Group(EmojiGroup::SmileysAndEmotion) => "emoji-group-smileys",
       Self::Group(EmojiGroup::PeopleAndBody) => "emoji-group-people",
       Self::Group(EmojiGroup::AnimalsAndNature) => "emoji-group-nature",
@@ -444,6 +466,7 @@ impl Section {
   fn icon(self) -> IconName {
     match self {
       Self::Frequent => IconName::Clock,
+      Self::Workspace => IconName::Star,
       Self::Group(EmojiGroup::SmileysAndEmotion) => IconName::Smile,
       Self::Group(EmojiGroup::PeopleAndBody) => IconName::User,
       Self::Group(EmojiGroup::AnimalsAndNature) => IconName::Leaf,
@@ -458,14 +481,16 @@ impl Section {
 }
 
 impl Layout {
-  /// The grid for `query`: search results without titles, or "frequently used" and every group.
-  /// Emoji the font can't draw are left out; `tone` goes on those that have skin tones.
+  /// The grid for `query`: search results without titles, or "frequently used", the workspace's
+  /// emoji (`custom`, as `:shortcode:` tokens) and every group. Emoji the font can't draw are left
+  /// out; `tone` goes on those that have skin tones.
   fn build(
     query: &str,
     recent: &[String],
     tone: SkinTone,
     maybe_newest: Option<EmojiVersion>,
     metrics: Metrics,
+    custom: &[String],
   ) -> Self {
     let mut layout = Self {
       metrics,
@@ -480,11 +505,24 @@ impl Layout {
       }
     };
     if !query.trim().is_empty() {
-      let found = emoji_catalog::search(query).into_iter().filter(shown).map(toned);
-      layout.push_section(None, found.collect());
+      let needle = query.trim().trim_matches(':').to_lowercase();
+      let mut found: Vec<String> = custom
+        .iter()
+        .filter(|token| token.contains(&needle))
+        .cloned()
+        .collect();
+      found.extend(emoji_catalog::search(query).into_iter().filter(shown).map(toned));
+      layout.push_section(None, found);
       return layout;
     }
-    layout.push_section(Some(Section::Frequent), frequent(recent, maybe_newest, toned));
+    // A workspace emoji used recently stays only while the workspace still has it.
+    let recent: Vec<String> = recent
+      .iter()
+      .filter(|emoji| token_shortcode(emoji).is_none() || custom.contains(emoji))
+      .cloned()
+      .collect();
+    layout.push_section(Some(Section::Frequent), frequent(&recent, maybe_newest, toned));
+    layout.push_section(Some(Section::Workspace), custom.to_vec());
     for group in EmojiGroup::ALL {
       let emoji = emoji_catalog::group(group).filter(shown).map(toned).collect();
       layout.push_section(Some(Section::Group(group)), emoji);
@@ -609,6 +647,14 @@ fn frequent(
   list
 }
 
+/// What a cell is called: a workspace emoji's or an emoji's `:shortcode:`, else the emoji itself.
+fn label_of(emoji: &str) -> String {
+  if token_shortcode(emoji).is_some() {
+    return emoji.to_owned();
+  }
+  emoji_catalog::shortcode(emoji).map_or_else(|| emoji.to_owned(), |code| format!(":{code}:"))
+}
+
 /// Fixed position (top, left) that keeps the picker inside the window: above the anchor when there is
 /// room, otherwise below it; right-aligned with it.
 fn placement(anchor: &web_sys::Element) -> (f64, f64, PopoverSide) {
@@ -646,10 +692,15 @@ mod tests {
 
   #[test]
   fn every_group_gets_a_titled_section() {
-    let layout = Layout::build("", &[], SkinTone::Default, None, METRICS);
-    for section in Section::TABS {
+    let layout = Layout::build("", &[], SkinTone::Default, None, METRICS, &[]);
+    for section in Section::TABS
+      .into_iter()
+      .filter(|section| *section != Section::Workspace)
+    {
       assert!(layout.section_start(section).is_some(), "{section:?}");
     }
+    // A workspace without emoji has no section for them.
+    assert!(layout.section_start(Section::Workspace).is_none());
     assert_eq!(
       layout.cells.len(),
       FREQUENT_ROWS * COLUMNS + emoji_catalog::all().len()
@@ -659,13 +710,13 @@ mod tests {
   #[test]
   fn frequent_starts_with_recent_and_fills_up_with_favorites() {
     let recent = vec!["🦄".to_owned(), "👍🏽".to_owned()];
-    let layout = Layout::build("", &recent, SkinTone::Default, None, METRICS);
+    let layout = Layout::build("", &recent, SkinTone::Default, None, METRICS, &[]);
     assert_eq!(&layout.cells[..3], ["🦄", "👍🏽", "👎"]);
   }
 
   #[test]
   fn search_has_no_titles_and_uses_the_skin_tone() {
-    let layout = Layout::build("wave", &[], SkinTone::Dark, None, METRICS);
+    let layout = Layout::build("wave", &[], SkinTone::Dark, None, METRICS, &[]);
     assert!(layout.rows.iter().all(|row| matches!(row, Row::Emoji { .. })));
     assert_eq!(layout.cells.first().map(String::as_str), Some("👋🏿"));
   }
@@ -673,13 +724,34 @@ mod tests {
   #[test]
   fn emoji_the_font_cant_draw_are_left_out() {
     let old_font = Some(EmojiVersion::new(13, 0));
-    let layout = Layout::build("melting", &[], SkinTone::Default, old_font, METRICS);
+    let layout = Layout::build("melting", &[], SkinTone::Default, old_font, METRICS, &[]);
     assert!(!layout.cells.iter().any(|emoji| emoji == "🫠"));
   }
 
   #[test]
+  fn workspace_emoji_get_a_section_and_lead_the_search() {
+    let custom = vec![":ship_it:".to_owned(), ":smile_team:".to_owned()];
+    let layout = Layout::build("", &[], SkinTone::Default, None, METRICS, &custom);
+    let (_, first) = layout
+      .section_start(Section::Workspace)
+      .expect("workspace section");
+    assert_eq!(layout.cells[first..first + 2], custom[..]);
+    let found = Layout::build("smile", &[], SkinTone::Default, None, METRICS, &custom);
+    assert_eq!(found.cells.first().map(String::as_str), Some(":smile_team:"));
+    assert!(found.cells.iter().any(|emoji| emoji == "😄"));
+  }
+
+  #[test]
+  fn recent_workspace_emoji_go_once_the_workspace_drops_them() {
+    let recent = vec![":gone:".to_owned(), ":ship_it:".to_owned(), "🦄".to_owned()];
+    let custom = vec![":ship_it:".to_owned()];
+    let layout = Layout::build("", &recent, SkinTone::Default, None, METRICS, &custom);
+    assert_eq!(&layout.cells[..2], [":ship_it:", "🦄"]);
+  }
+
+  #[test]
   fn only_rows_in_view_are_rendered() {
-    let layout = Layout::build("", &[], SkinTone::Default, None, METRICS);
+    let layout = Layout::build("", &[], SkinTone::Default, None, METRICS, &[]);
     let rows = layout.rows_between(1_000.0, 1_400.0);
     assert!(rows.len() < 15, "{}", rows.len());
     assert!(
@@ -699,7 +771,7 @@ mod tests {
 
   #[test]
   fn arrows_move_by_rows_across_sections() {
-    let layout = Layout::build("", &[], SkinTone::Default, None, METRICS);
+    let layout = Layout::build("", &[], SkinTone::Default, None, METRICS, &[]);
     assert_eq!(layout.vertical_neighbour(0, Direction::Down), Some(COLUMNS));
     assert_eq!(layout.vertical_neighbour(COLUMNS, Direction::Up), Some(0));
     assert_eq!(layout.vertical_neighbour(0, Direction::Up), None);

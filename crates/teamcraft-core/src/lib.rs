@@ -10,6 +10,7 @@ pub mod channel_roles;
 pub mod client;
 pub mod clock;
 pub mod connection;
+pub mod custom_emoji;
 pub mod device_activity;
 pub mod downloads;
 #[cfg(feature = "ui")]

@@ -1426,6 +1426,7 @@ mod tests {
         maybe_source: None,
         maybe_placeholder: None,
         group_mentions: Vec::new(),
+        custom_emoji: Vec::new(),
         mentions_me: false,
         maybe_poll: None,
       }
@@ -1650,6 +1651,7 @@ mod tests {
       maybe_source: None,
       maybe_placeholder: None,
       group_mentions: Vec::new(),
+      custom_emoji: Vec::new(),
       mentions_me: false,
       maybe_poll: None,
     }

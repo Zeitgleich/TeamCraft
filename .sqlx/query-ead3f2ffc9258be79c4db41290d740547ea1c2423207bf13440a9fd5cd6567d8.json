@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE custom_emoji SET shortcode = $2, payload = $3, signature = $4\n       WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Bytea",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ead3f2ffc9258be79c4db41290d740547ea1c2423207bf13440a9fd5cd6567d8"
+}

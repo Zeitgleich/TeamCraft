@@ -9,6 +9,7 @@ mod call_fallback;
 mod call_media;
 mod calls;
 mod conversation;
+pub mod custom_emoji_set;
 mod error;
 mod gateway;
 mod id;
@@ -49,11 +50,11 @@ pub use gateway::{
   ATTENTION_AWAY_DELAY_SECS, GATEWAY_PATH, GatewayClientMessage, GatewayEvent, GatewayServerMessage,
 };
 pub use id::{
-  AnnouncementId, AttachmentId, AuditEntryId, BackgroundId, CallId, CategoryId, ConversationId, DeviceId,
-  GroupMappingId, HealthNoticeId, Id, IdError, InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId,
-  MessageId, MlsMessageId, OrgBackgroundId, PushRetryId, RecoveryRequestId, SNOWFLAKE_EPOCH_MS,
-  SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, ScheduledMessageId, Snowflake, SpaceId, SystemEventId,
-  ThreadId, UserGroupId, UserId, WebhookEventId, WebhookId,
+  AnnouncementId, AttachmentId, AuditEntryId, BackgroundId, CallId, CategoryId, ConversationId,
+  CustomEmojiId, DeviceId, GroupMappingId, HealthNoticeId, Id, IdError, InviteId, MeetingAttendeeId,
+  MeetingId, MeetingInviteId, MessageId, MlsMessageId, OrgBackgroundId, PushRetryId, RecoveryRequestId,
+  SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, ScheduledMessageId, Snowflake, SpaceId,
+  SystemEventId, ThreadId, UserGroupId, UserId, WebhookEventId, WebhookId,
 };
 pub use import::{
   IMPORT_WORKER, ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,

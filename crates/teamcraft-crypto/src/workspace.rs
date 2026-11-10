@@ -1,6 +1,7 @@
 //! Signatures on the workspace's append-only logs: the admin roster and the policy (admin.md §2.3,
 //! e2ee.md §11), each channel's role log (e2ee.md §4.6.1, issue #380), and a channel's deletion
-//! (e2ee.md §4.6, issue #1135), which is one entry of no log but signed and verified the same way.
+//! (e2ee.md §4.6, issue #1135) and a custom emoji (e2ee.md §4.13, issue #207), which are entries of
+//! no log but signed and verified the same way.
 //!
 //! An entry is signed by a device key over its log, version and payload; the signature travels
 //! together with the device certificate, so a client can check it against the signer's identity
@@ -30,6 +31,9 @@ pub enum WorkspaceLog {
   /// A channel's signed deletion: the "version" is the group epoch it was signed for and the
   /// payload names the channel, so a role entry can't pass for a deletion or the other way round.
   ChannelDeletion = 4,
+  /// A custom emoji of the workspace (issue #207): the "version" is when it was signed, and the
+  /// payload names the emoji and its picture's hash.
+  CustomEmoji = 5,
 }
 
 /// The signature field of a log entry: the signer's device certificate and its signature.

@@ -326,6 +326,7 @@ mod tests {
       MessageContent::Edit {
         target,
         body: "edited".into(),
+        custom_emoji: Vec::new(),
       },
       MessageContent::Delete { target },
       MessageContent::Deleted,
@@ -369,6 +370,7 @@ mod tests {
         target,
         emoji: "x".into(),
         is_added: true,
+        maybe_custom: None,
       },
       MessageContent::IntegrationSource {
         change: SourceChange::Unknown,

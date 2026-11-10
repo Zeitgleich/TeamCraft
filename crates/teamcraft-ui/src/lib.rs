@@ -80,6 +80,7 @@ pub mod navigation;
 pub use teamcraft_client_api::notetaker;
 #[cfg(target_arch = "wasm32")]
 pub mod crash_reports;
+pub mod custom_emoji;
 pub mod notification_pictures;
 pub mod notifier;
 pub mod notify_sync;

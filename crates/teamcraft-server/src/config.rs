@@ -329,6 +329,12 @@ pub struct LimitsConfig {
   pub max_background_bytes: u64,
   /// How many call background pictures one user may keep.
   pub max_backgrounds_per_user: u32,
+  /// Custom emoji the workspace may have (issue #207).
+  pub max_custom_emoji: u32,
+  /// Largest custom emoji picture (a still PNG or WebP, stored as uploaded).
+  pub max_custom_emoji_bytes: u64,
+  /// Longest side of a custom emoji picture, in pixels.
+  pub max_custom_emoji_side_px: u32,
   /// How long a request for organization recovery waits for approvals.
   pub org_recovery_request_ttl_secs: u64,
   /// Largest sealed share or sealed backup key.
@@ -1731,6 +1737,9 @@ impl Default for LimitsConfig {
       image_decode_timeout_secs: 5,
       max_background_bytes: 8 * 1024 * 1024,
       max_backgrounds_per_user: 24,
+      max_custom_emoji: teamcraft_proto::DEFAULT_MAX_CUSTOM_EMOJI,
+      max_custom_emoji_bytes: teamcraft_proto::DEFAULT_MAX_CUSTOM_EMOJI_BYTES,
+      max_custom_emoji_side_px: teamcraft_proto::DEFAULT_MAX_CUSTOM_EMOJI_SIDE_PX,
       org_recovery_request_ttl_secs: 86_400,
       max_recovery_blob_bytes: 8192,
       max_profile_text_chars: 100,

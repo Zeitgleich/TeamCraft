@@ -456,6 +456,9 @@ fn default_runtime() -> RuntimeSettingsResponse {
       max_user_group_members: 200,
       max_meeting_mails_per_user_per_hour: 20,
       max_large_mentions_per_user_per_hour: 30,
+      max_custom_emoji: teamcraft_proto::DEFAULT_MAX_CUSTOM_EMOJI,
+      max_custom_emoji_bytes: teamcraft_proto::DEFAULT_MAX_CUSTOM_EMOJI_BYTES,
+      max_custom_emoji_side_px: teamcraft_proto::DEFAULT_MAX_CUSTOM_EMOJI_SIDE_PX,
     },
     integration: IntegrationSettings {
       default_retention_days: 30,

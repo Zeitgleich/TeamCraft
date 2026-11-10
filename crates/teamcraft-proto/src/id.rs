@@ -236,6 +236,10 @@ define_id!(
   OrgBackgroundId
 );
 define_id!(
+  /// A custom emoji of the workspace (issue #207).
+  CustomEmojiId
+);
+define_id!(
   /// A user's own call background picture (encrypted, synced across the user's devices).
   BackgroundId
 );

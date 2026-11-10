@@ -202,6 +202,7 @@ action-react-with = Mit { $emoji } reagieren
 emoji-picker-title = Emoji
 emoji-search = Emoji suchen
 emoji-frequent = Häufig verwendet
+emoji-workspace = Workspace
 emoji-categories = Emoji-Kategorien
 emoji-group-smileys = Smileys & Gefühle
 emoji-group-people = Menschen & Körper

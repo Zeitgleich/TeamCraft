@@ -504,7 +504,7 @@ pub fn route_class(path: &str) -> &'static str {
     "conversations" => conversation_class(maybe_tail),
     "dms" | "group-dms" | "threads" | "unread" => "conversations",
     "admin" | "admin-join-requests" | "announcement" | "brands" | "organizations" | "workspace" => "admin",
-    "attachments" | "org-backgrounds" | "shares" => "attachments",
+    "attachments" | "custom-emoji" | "org-backgrounds" | "shares" => "attachments",
     "auth" => "auth",
     "calls" | "notetaker" => "calls",
     "device-links" | "devices" | "push" => "devices",

@@ -339,6 +339,9 @@ fn apply(settings: &mut Settings, section: &RuntimeSettingsSection) {
       limits.max_user_group_members = to_usize(values.max_user_group_members);
       limits.max_meeting_mails_per_user_per_hour = values.max_meeting_mails_per_user_per_hour;
       limits.max_large_mentions_per_user_per_hour = values.max_large_mentions_per_user_per_hour;
+      limits.max_custom_emoji = values.max_custom_emoji;
+      limits.max_custom_emoji_bytes = values.max_custom_emoji_bytes;
+      limits.max_custom_emoji_side_px = values.max_custom_emoji_side_px;
     },
     RuntimeSettingsSection::Integration(values) => {
       settings.integration.default_retention_days = values.default_retention_days;
@@ -453,6 +456,9 @@ fn view(settings: &Settings, sources: Vec<RuntimeSettingsState>) -> RuntimeSetti
       max_user_group_members: to_u32(limits.max_user_group_members),
       max_meeting_mails_per_user_per_hour: limits.max_meeting_mails_per_user_per_hour,
       max_large_mentions_per_user_per_hour: limits.max_large_mentions_per_user_per_hour,
+      max_custom_emoji: limits.max_custom_emoji,
+      max_custom_emoji_bytes: limits.max_custom_emoji_bytes,
+      max_custom_emoji_side_px: limits.max_custom_emoji_side_px,
     },
     integration: IntegrationSettings {
       default_retention_days: settings.integration.default_retention_days,
@@ -681,6 +687,24 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
         u64::from(values.max_large_mentions_per_user_per_hour),
         0,
         100_000,
+      )?;
+      check_range(
+        "max_custom_emoji",
+        u64::from(values.max_custom_emoji),
+        0,
+        u64::from(teamcraft_proto::MAX_CUSTOM_EMOJI_LIMIT),
+      )?;
+      check_range(
+        "max_custom_emoji_bytes",
+        values.max_custom_emoji_bytes,
+        1024,
+        teamcraft_proto::MAX_CUSTOM_EMOJI_BYTES_LIMIT,
+      )?;
+      check_range(
+        "max_custom_emoji_side_px",
+        u64::from(values.max_custom_emoji_side_px),
+        16,
+        u64::from(teamcraft_proto::MAX_CUSTOM_EMOJI_SIDE_PX_LIMIT),
       )
     },
     RuntimeSettingsSection::Integration(values) => {

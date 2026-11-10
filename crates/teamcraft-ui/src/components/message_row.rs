@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use leptos::prelude::*;
 use teamcraft_client_api::actions::{FileTransfer, MessagePriority, WorkspaceEvent};
+use teamcraft_client_api::custom_emoji::jumbo_custom_count;
 use teamcraft_client_api::emoji::jumbo_emoji_count;
 use teamcraft_client_api::log::{LogEntry, log_entries};
 use teamcraft_client_api::model::{ConversationId, MessageSource};
@@ -21,6 +22,7 @@ use crate::components::message_toolbar::{ActiveMessage, ToolbarHost};
 use crate::components::poll_card::PollCard;
 use crate::components::profile_views::UserHoverCard;
 use crate::components::rich_text::RichText;
+use crate::custom_emoji::EmojiGlyph;
 use crate::delivery::{Delivery, ReadIndicator, is_delivered, is_read_by_all};
 use crate::feed_motion::{Entrance, RowMotion};
 use crate::i18n::use_i18n;
@@ -692,7 +694,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
             aria-label=move || i18n.t_with("reaction-label", &[("emoji", &label_emoji), ("count", &count.to_string())])
             on:click=move |_| state.write(|backend| backend.toggle_reaction(conversation, message_id, &emoji))
           >
-            <span aria-hidden="true">{reaction.emoji}</span>
+            <span aria-hidden="true"><EmojiGlyph emoji=reaction.emoji maybe_reference=reaction.maybe_custom /></span>
             <span class="reaction-count">{count}</span>
           </button>
         }
@@ -771,6 +773,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
 
   let body_text = message.body.clone();
   let group_mentions = message.group_mentions.clone();
+  let custom_emoji = message.custom_emoji.clone();
   let mentions_me = message.mentions_me;
   let edit_draft = RwSignal::new(String::new());
   let start_edit_text = body_text.clone();
@@ -964,22 +967,24 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
         }
         .into_any();
       }
-      if let Some(count) = jumbo_emoji_count(&body_text) {
+      if let Some(count) =
+        jumbo_emoji_count(&body_text).or_else(|| jumbo_custom_count(&body_text, &custom_emoji))
+      {
         // Only 1 to 3 emoji: drawn larger, still real text for screen readers (#1603). The same
         // check decides on Android and iOS.
         return view! {
           <div class=format!("msg-jumbo msg-jumbo-{count}")>
-            <RichText body=body_text.clone() me=me.username.clone() group_mentions=group_mentions.clone() mentions_me=mentions_me />
+            <RichText body=body_text.clone() me=me.username.clone() group_mentions=group_mentions.clone() mentions_me=mentions_me custom_emoji=custom_emoji.clone() />
           </div>
         }
         .into_any();
       }
       if !is_long_body {
-        return view! { <RichText body=body_text.clone() me=me.username.clone() group_mentions=group_mentions.clone() mentions_me=mentions_me /> }.into_any();
+        return view! { <RichText body=body_text.clone() me=me.username.clone() group_mentions=group_mentions.clone() mentions_me=mentions_me custom_emoji=custom_emoji.clone() /> }.into_any();
       }
       view! {
         <div class="msg-long" class:collapsed=move || !is_expanded.get()>
-          <RichText body=body_text.clone() me=me.username.clone() group_mentions=group_mentions.clone() mentions_me=mentions_me />
+          <RichText body=body_text.clone() me=me.username.clone() group_mentions=group_mentions.clone() mentions_me=mentions_me custom_emoji=custom_emoji.clone() />
         </div>
         <button
           class="link-btn msg-expand"
@@ -1559,6 +1564,7 @@ mod tests {
       maybe_source: None,
       maybe_placeholder: None,
       group_mentions: Vec::new(),
+      custom_emoji: Vec::new(),
       mentions_me: false,
       maybe_poll: None,
     }

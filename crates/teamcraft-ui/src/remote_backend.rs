@@ -1142,6 +1142,7 @@ impl RemoteChat {
         maybe_source: None,
         maybe_placeholder: None,
         group_mentions: Vec::new(),
+        custom_emoji: Vec::new(),
         mentions_me: false,
         maybe_poll: None,
       };
@@ -1368,6 +1369,44 @@ impl ChatBackend for RemoteChat {
 
   fn set_org_background_rule(&self, rule: OrgBackgroundRule) {
     self.act(ChatAction::SetOrgBackgroundRule { rule });
+  }
+
+  fn custom_emoji(&self) -> teamcraft_client_api::custom_emoji::CustomEmojiSet {
+    match self.ask(ChatQuery::CustomEmoji) {
+      Some(ChatAnswer::CustomEmoji { set }) => set,
+      _ => teamcraft_client_api::custom_emoji::CustomEmojiSet::default(),
+    }
+  }
+
+  fn custom_emoji_picture(&self, sha256: teamcraft_proto::CustomEmojiHash) -> Option<Vec<u8>> {
+    match self.ask(ChatQuery::CustomEmojiPicture { sha256 }) {
+      Some(ChatAnswer::CustomEmojiPicture { maybe_picture }) => {
+        maybe_picture.map(teamcraft_proto::Base64Bytes::into_vec)
+      },
+      _ => None,
+    }
+  }
+
+  fn want_custom_emoji(&self) {
+    self.act(ChatAction::WantCustomEmoji);
+  }
+
+  fn add_custom_emoji(&self, shortcode: &str, picture: Vec<u8>) {
+    self.act(ChatAction::AddCustomEmoji {
+      shortcode: shortcode.to_owned(),
+      picture: picture.into(),
+    });
+  }
+
+  fn rename_custom_emoji(&self, id: teamcraft_proto::CustomEmojiId, shortcode: &str) {
+    self.act(ChatAction::RenameCustomEmoji {
+      id,
+      shortcode: shortcode.to_owned(),
+    });
+  }
+
+  fn delete_custom_emoji(&self, id: teamcraft_proto::CustomEmojiId) {
+    self.act(ChatAction::DeleteCustomEmoji { id });
   }
 
   fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {
@@ -3784,6 +3823,7 @@ mod tests {
           maybe_source: None,
           maybe_placeholder: None,
           group_mentions: Vec::new(),
+          custom_emoji: Vec::new(),
           mentions_me: false,
           maybe_poll: None,
         })

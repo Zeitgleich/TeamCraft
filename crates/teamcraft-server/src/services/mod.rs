@@ -20,6 +20,7 @@ pub mod channel_roles;
 pub mod conversations;
 pub mod convert;
 pub mod crash_reports;
+pub mod custom_emoji;
 pub mod delivery;
 pub mod device_links;
 pub mod device_lists;

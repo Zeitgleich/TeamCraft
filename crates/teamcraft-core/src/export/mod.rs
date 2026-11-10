@@ -850,6 +850,7 @@ fn reactions_of(
       target,
       emoji,
       is_added,
+      ..
     } = &reaction.content
     {
       standing

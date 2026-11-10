@@ -175,6 +175,20 @@ pub enum CoreCommand {
   SetOrgBackgroundRule {
     rule: OrgBackgroundRule,
   },
+  /// Reads the workspace's custom emoji and fetches pictures this device lacks (issue #207).
+  RefreshCustomEmoji,
+  /// Custom emoji (admins; each is signed on this device, issue #207).
+  AddCustomEmoji {
+    shortcode: String,
+    picture: Vec<u8>,
+  },
+  RenameCustomEmoji {
+    id: teamcraft_proto::CustomEmojiId,
+    shortcode: String,
+  },
+  DeleteCustomEmoji {
+    id: teamcraft_proto::CustomEmojiId,
+  },
   /// The server's pin flag (the encrypted pin message is already in the outbox).
   SetServerPin {
     conversation: ConversationId,
@@ -569,10 +583,14 @@ impl CoreCommand {
       | Self::RemoveSpaceMember { .. }
       | Self::RevokeSpaceInvite { .. }
       | Self::ResendSpaceInvite { .. }
-      | Self::AddSpaceMembers { .. } => CommandPart::Workspace,
+      | Self::AddSpaceMembers { .. }
+      | Self::RefreshCustomEmoji => CommandPart::Workspace,
       Self::AddOrgBackground { .. }
       | Self::DeleteOrgBackground { .. }
-      | Self::SetOrgBackgroundRule { .. } => CommandPart::Admin,
+      | Self::SetOrgBackgroundRule { .. }
+      | Self::AddCustomEmoji { .. }
+      | Self::RenameCustomEmoji { .. }
+      | Self::DeleteCustomEmoji { .. } => CommandPart::Admin,
       Self::FlushOutbox
       | Self::Typing { .. }
       | Self::MarkRead { .. }
@@ -1766,6 +1784,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       maybe_source,
       maybe_placeholder: stored.maybe_unreadable.map(placeholder_view),
       group_mentions: crate::group_mentions::shown_group_mentions(&stored.content),
+      custom_emoji: shown_custom_emoji(&stored.content),
       mentions_me: matches!(&stored.content, MessageContent::Text { mentions, .. } if mentions.contains(&self.me)),
       maybe_poll: crate::polls::poll_of(stored).map(|spec| {
         Box::new(crate::polls::tally(
@@ -2216,6 +2235,10 @@ impl<S: LocalStore> CoreChatBackend<S> {
     body: &str,
     mut meta: MessageMeta,
   ) -> MessageContent {
+    meta.custom_emoji = self
+      .read(crate::custom_emoji::stored_set(&self.store))
+      .refs_in(body)
+      .into_boxed_slice();
     if !body.contains('@') {
       meta.group_mentions = Vec::new();
       return MessageContent::Text {
@@ -2545,10 +2568,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     let is_reacted = reactions_of(target.client_message_id, &all, self.me)
       .iter()
       .any(|reaction| reaction.emoji == emoji && reaction.reacted_by_me);
+    // A custom emoji's `:shortcode:` names its picture too (issue #207).
+    let maybe_custom = teamcraft_client_api::custom_emoji::token_shortcode(emoji).and_then(|shortcode| {
+      self
+        .read(crate::custom_emoji::stored_set(&self.store))
+        .by_shortcode(shortcode)
+        .map(teamcraft_client_api::custom_emoji::CustomEmoji::reference)
+    });
     let content = MessageContent::Reaction {
       target: target.client_message_id,
       emoji: emoji.to_string(),
       is_added: !is_reacted,
+      maybe_custom,
     };
     self.enqueue(conversation, None, content);
   }
@@ -2690,6 +2721,36 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn set_org_background_rule(&self, rule: OrgBackgroundRule) {
     self.command(CoreCommand::SetOrgBackgroundRule { rule });
+  }
+
+  fn custom_emoji(&self) -> teamcraft_client_api::custom_emoji::CustomEmojiSet {
+    self.read(crate::custom_emoji::stored_set(&self.store))
+  }
+
+  fn custom_emoji_picture(&self, sha256: teamcraft_proto::CustomEmojiHash) -> Option<Vec<u8>> {
+    self.read(crate::custom_emoji::picture(&self.store, sha256))
+  }
+
+  fn want_custom_emoji(&self) {
+    self.ui_want_custom_emoji();
+  }
+
+  fn add_custom_emoji(&self, shortcode: &str, picture: Vec<u8>) {
+    self.command(CoreCommand::AddCustomEmoji {
+      shortcode: shortcode.to_owned(),
+      picture,
+    });
+  }
+
+  fn rename_custom_emoji(&self, id: teamcraft_proto::CustomEmojiId, shortcode: &str) {
+    self.command(CoreCommand::RenameCustomEmoji {
+      id,
+      shortcode: shortcode.to_owned(),
+    });
+  }
+
+  fn delete_custom_emoji(&self, id: teamcraft_proto::CustomEmojiId) {
+    self.command(CoreCommand::DeleteCustomEmoji { id });
   }
 
   fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {
@@ -4203,15 +4264,23 @@ fn reactions_of<'a>(
   me: UserId,
 ) -> Vec<Reaction> {
   let mut latest: HashMap<(UserId, String), bool> = HashMap::new();
+  // A custom emoji's picture, from the first reaction that names one for its `:shortcode:`.
+  let mut pictures: HashMap<String, teamcraft_proto::CustomEmojiRef> = HashMap::new();
   for message in messages {
     if let MessageContent::Reaction {
       target: reacted,
       emoji,
       is_added,
+      maybe_custom,
     } = &message.content
       && *reacted == target
     {
       latest.insert((message.sender_user_id, emoji.clone()), *is_added);
+      if let Some(custom) = maybe_custom
+        && custom.text() == *emoji
+      {
+        pictures.entry(emoji.clone()).or_insert_with(|| custom.clone());
+      }
     }
   }
   let mut by_emoji: BTreeMap<String, Reaction> = BTreeMap::new();
@@ -4219,15 +4288,25 @@ fn reactions_of<'a>(
     if !is_added {
       continue;
     }
+    let maybe_custom = pictures.get(&emoji).cloned();
     let entry = by_emoji.entry(emoji.clone()).or_insert(Reaction {
       emoji,
       count: 0,
       reacted_by_me: false,
+      maybe_custom,
     });
     entry.count += 1;
     entry.reacted_by_me |= user == me;
   }
   by_emoji.into_values().collect()
+}
+
+/// The custom emoji a text message names (issue #207); those of its `:shortcode:` words only.
+fn shown_custom_emoji(content: &MessageContent) -> Vec<teamcraft_proto::CustomEmojiRef> {
+  match content {
+    MessageContent::Text { meta, .. } => meta.custom_emoji.to_vec(),
+    _ => Vec::new(),
+  }
 }
 
 /// How the list shows where an imported message came from; `importer` is its sender.
@@ -4279,6 +4358,7 @@ fn with_imported_reactions(
         emoji: imported.emoji.clone(),
         count,
         reacted_by_me: has_mine,
+        maybe_custom: None,
       }),
       None => {},
     }
@@ -4582,6 +4662,7 @@ mod tests {
       target: text,
       emoji: "+1".into(),
       is_added: true,
+      maybe_custom: None,
     };
     store
       .upsert_message(&stored(ClientMessageId::from_bytes([2; 16]), 102, reaction))
@@ -4613,6 +4694,7 @@ mod tests {
       target: ClientMessageId::from_bytes([1; 16]),
       emoji: "+1".into(),
       is_added: true,
+      maybe_custom: None,
     };
     store.upsert_message(&reaction).unwrap();
     store.upsert_message(&text(3, 103)).unwrap();
@@ -4727,6 +4809,7 @@ mod tests {
           target: stored(conversation, 3).client_message_id,
           emoji: "+1".to_string(),
           is_added: true,
+          maybe_custom: None,
         },
         ..stored(conversation, 6)
       };
@@ -4842,7 +4925,8 @@ mod tests {
       vec![Reaction {
         emoji: "+1".into(),
         count: 1,
-        reacted_by_me: true
+        reacted_by_me: true,
+        maybe_custom: None,
       }]
     );
     backend.toggle_reaction(conversation, posted.id, "+1");
@@ -5615,6 +5699,7 @@ mod tests {
           target,
           emoji: "+1".into(),
           is_added,
+          maybe_custom: None,
         };
         message
       };
@@ -5847,6 +5932,7 @@ mod tests {
           target: stored.client_message_id,
           emoji: "\u{1f44d}".into(),
           is_added: true,
+          maybe_custom: None,
         },
         ..stored.clone()
       };

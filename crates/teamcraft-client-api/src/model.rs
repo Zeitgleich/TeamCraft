@@ -821,9 +821,13 @@ pub enum MessageKind {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Reaction {
+  /// The emoji, or a custom emoji's `:shortcode:`.
   pub emoji: String,
   pub count: u32,
   pub reacted_by_me: bool,
+  /// A custom emoji (issue #207): its picture, shown when this device holds it.
+  #[serde(rename = "custom", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_custom: Option<teamcraft_proto::CustomEmojiRef>,
 }
 
 /// Reactions of others to the user's own messages in a conversation that the user hasn't seen yet:
@@ -866,6 +870,10 @@ pub struct Message {
   /// inside the ciphertext. The UI shows those words as group mentions.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub group_mentions: Vec<String>,
+  /// The custom emoji the text names by `:shortcode:` (issue #207), from inside the ciphertext.
+  /// The UI shows those words as the pictures this device holds.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub custom_emoji: Vec<teamcraft_proto::CustomEmojiRef>,
   /// The sender named this user among the people to notify: by `@username` or through a group
   /// they were in when it was sent.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -1228,6 +1236,7 @@ mod tests {
         maybe_source: None,
         maybe_placeholder: None,
         group_mentions: Vec::new(),
+        custom_emoji: Vec::new(),
         mentions_me: false,
         maybe_poll: None,
       })
@@ -1258,6 +1267,7 @@ mod tests {
       maybe_source: None,
       maybe_placeholder: None,
       group_mentions: Vec::new(),
+      custom_emoji: Vec::new(),
       mentions_me: false,
       maybe_poll: None,
     };

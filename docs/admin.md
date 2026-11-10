@@ -1159,6 +1159,26 @@ redaction: [bug-reports.md](bug-reports.md).
 - **Forwarding:** a recipient who wants the developers to look at a report writes the issue
   themselves, leaving out what the reporter wouldn't want there. Nothing goes out automatically.
 
+### 3.11 Custom emoji (issue #207)
+
+Admins and owners add the workspace's own emoji under Administration → Emoji: a name (`:ship_it:`,
+2 to 32 lower-case letters, digits, `_` or `-`, none a built-in emoji has) and a still PNG or WebP
+picture. They rename and delete them there too. Everybody uses them in messages and reactions,
+through the emoji picker's "Workspace" section and the `:` suggestions of the composer.
+
+- **Who:** `manage_workspace` on the server, and on every device an admin or owner of the verified
+  roster, whose device signs each emoji (e2ee.md §4.13). Members adding their own emoji, enabling
+  emoji per space, and reporting one are left for later in #207.
+- **Storage:** unencrypted in object storage, like the organization's call backgrounds; the server
+  operator can see the pictures, which the page says. Messages that use them stay encrypted.
+- **Limits** (`[limits]`, also Settings → Limits): `max_custom_emoji` (500 emoji),
+  `max_custom_emoji_bytes` (64 KB per picture) and `max_custom_emoji_side_px` (128 px). The server
+  and the apps check them; animated pictures are refused until #201's reduced-motion rules cover them.
+- **Deleting:** the picture is deleted from storage at once. Messages that use the emoji keep showing
+  it on devices that hold the picture, and show the `:shortcode:` elsewhere; nothing in a message
+  changes.
+- **Audit:** `custom_emoji_added`, `custom_emoji_renamed` and `custom_emoji_deleted`.
+
 ## 4. Audit log
 
 Every admin action, recovery, device change and role change is logged with actor, target and time.

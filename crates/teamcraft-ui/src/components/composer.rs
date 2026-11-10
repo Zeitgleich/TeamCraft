@@ -4,6 +4,7 @@ use wasm_bindgen::JsCast;
 
 use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, OutgoingMessage};
 use teamcraft_client_api::admin::format_bytes;
+use teamcraft_client_api::custom_emoji::CustomEmojiSet;
 use teamcraft_client_api::drafts::{DraftFileItem, DraftFileState, DraftFileTravel};
 use teamcraft_client_api::model::{MentionableGroup, MentionableGroupKind};
 use teamcraft_client_api::scheduled::ScheduleCheck;
@@ -30,6 +31,7 @@ use crate::components::sheet::MenuSurface;
 use crate::components::typing_indicator::should_notify_typing;
 use crate::components::voice_bar::{VoiceBar, VoiceButton};
 use crate::composer_focus::{self, FocusSituation};
+use crate::custom_emoji::CustomEmojiGlyph;
 use crate::editor_doc::{BlockFormat, InlineStyle};
 use crate::emoji_catalog::{self, SkinTone};
 use crate::emoji_support;
@@ -117,6 +119,8 @@ struct Suggestion {
   label: String,
   detail: String,
   person: Option<User>,
+  /// A workspace emoji (issue #207): its picture leads the line.
+  maybe_custom: Option<teamcraft_proto::CustomEmojiRef>,
   /// The typed word already is this suggestion (`/shrug`): Enter sends instead of completing.
   is_exact: bool,
 }
@@ -126,6 +130,24 @@ const MAX_SUGGESTIONS: usize = 8;
 /// Whether `list` shows the same entries as `shown`, so the selected one stays selected.
 fn is_same_list(shown: &[Suggestion], list: &[Suggestion]) -> bool {
   shown.len() == list.len() && shown.iter().zip(list).all(|(a, b)| a.label == b.label)
+}
+
+/// The workspace's emoji whose shortcode contains what was typed after `:` (issue #207), prefix
+/// matches first; they come before the built-in ones. Picking one types its `:shortcode:`.
+fn custom_emoji_suggestions(query: &str, set: &CustomEmojiSet) -> Vec<Suggestion> {
+  set
+    .search(query)
+    .into_iter()
+    .take(MAX_SUGGESTIONS)
+    .map(|emoji| Suggestion {
+      insert: emoji.text(),
+      label: emoji.text(),
+      detail: String::new(),
+      person: None,
+      maybe_custom: Some(emoji.reference()),
+      is_exact: false,
+    })
+    .collect()
 }
 
 /// Emoji whose shortcode or name starts with what was typed after `:`, best first, in the user's
@@ -149,6 +171,7 @@ fn emoji_suggestions(query: &str, tone: SkinTone) -> Vec<Suggestion> {
           .map_or_else(|| emoji.to_owned(), |code| format!("{emoji} :{code}:")),
         detail: String::new(),
         person: None,
+        maybe_custom: None,
         is_exact: false,
       }
     })
@@ -193,6 +216,7 @@ fn mention_suggestions(
         label: "@channel".to_owned(),
         detail: labels.channel.clone(),
         person: None,
+        maybe_custom: None,
         is_exact: false,
       },
     ));
@@ -209,6 +233,7 @@ fn mention_suggestions(
             None => format!("@{}", user.username),
           },
           person: Some(user.clone()),
+          maybe_custom: None,
           is_exact: false,
         },
       ));
@@ -227,6 +252,7 @@ fn mention_suggestions(
           label: name.clone(),
           detail: format!("@{}", group.handle),
           person: None,
+          maybe_custom: None,
           is_exact: false,
         },
       ));
@@ -952,6 +978,7 @@ pub fn Composer(
             label: format!("/{name} {usage}").trim_end().to_owned(),
             detail: String::new(),
             person: None,
+            maybe_custom: None,
             is_exact: name == found.query.to_lowercase(),
           })
           .collect()
@@ -965,7 +992,17 @@ pub fn Composer(
         };
         mention_suggestions(&found.query, &people, &groups, &labels)
       },
-      TriggerKind::Emoji => emoji_suggestions(&found.query, state.settings.emoji_skin_tone.get_untracked()),
+      TriggerKind::Emoji => {
+        crate::custom_emoji::want_set();
+        let set = state.read(|backend| backend.custom_emoji());
+        let mut list = custom_emoji_suggestions(&found.query, &set);
+        list.extend(emoji_suggestions(
+          &found.query,
+          state.settings.emoji_skin_tone.get_untracked(),
+        ));
+        list.truncate(MAX_SUGGESTIONS);
+        list
+      },
     };
     // The caret moving inside the same query (arrow keys, a click) keeps the selection (#690); a
     // new list starts at its first entry.
@@ -1781,6 +1818,7 @@ pub fn Composer(
                       on:mousedown=move |ev| { ev.prevent_default(); accept_suggestion(index); }
                     >
                       {item.person.clone().map(|user| view! { <Avatar user=user size=AvatarSize::Small /> })}
+                      {item.maybe_custom.clone().map(|reference| view! { <span class="suggestion-emoji" aria-hidden="true"><CustomEmojiGlyph reference=reference /></span> })}
                       <span translate="no">{item.label.clone()}</span>
                       <span class="suggestion-detail" translate="no">{item.detail.clone()}</span>
                     </button>
@@ -2451,6 +2489,7 @@ mod tests {
       label: label.into(),
       detail: String::new(),
       person: None,
+      maybe_custom: None,
       is_exact: false,
     }
   }

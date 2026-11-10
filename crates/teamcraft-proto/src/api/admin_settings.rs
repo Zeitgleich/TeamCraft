@@ -638,6 +638,16 @@ pub struct LimitSettings {
   /// (large group mentions); 0 = no limit. Absent from older clients' requests: the default.
   #[serde(default = "default_max_large_mentions_per_user_per_hour")]
   pub max_large_mentions_per_user_per_hour: u32,
+  /// Custom emoji the workspace may have (issue #207). Absent from older clients' requests: the
+  /// default.
+  #[serde(default = "default_max_custom_emoji")]
+  pub max_custom_emoji: u32,
+  /// Largest custom emoji picture.
+  #[serde(default = "default_max_custom_emoji_bytes")]
+  pub max_custom_emoji_bytes: u64,
+  /// Longest side of a custom emoji picture, in pixels.
+  #[serde(default = "default_max_custom_emoji_side_px")]
+  pub max_custom_emoji_side_px: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -700,6 +710,18 @@ fn default_max_space_image_bytes() -> u64 {
 
 fn default_max_large_mentions_per_user_per_hour() -> u32 {
   crate::DEFAULT_MAX_LARGE_MENTIONS_PER_USER_PER_HOUR
+}
+
+fn default_max_custom_emoji() -> u32 {
+  crate::DEFAULT_MAX_CUSTOM_EMOJI
+}
+
+fn default_max_custom_emoji_bytes() -> u64 {
+  crate::DEFAULT_MAX_CUSTOM_EMOJI_BYTES
+}
+
+fn default_max_custom_emoji_side_px() -> u32 {
+  crate::DEFAULT_MAX_CUSTOM_EMOJI_SIDE_PX
 }
 
 /// Texts of the server's own mail. Placeholders: invitation `{inviter}` `{space}` `{role}` `{url}`,

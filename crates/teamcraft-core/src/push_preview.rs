@@ -735,10 +735,12 @@ mod tests {
         target,
         emoji: "x".into(),
         is_added: true,
+        maybe_custom: None,
       },
       MessageContent::Edit {
         target,
         body: "edited".into(),
+        custom_emoji: Vec::new(),
       },
       MessageContent::Delete { target },
       MessageContent::Deleted,

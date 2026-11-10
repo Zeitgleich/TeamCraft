@@ -225,6 +225,9 @@ pub enum GatewayEvent {
   UserGroupUpdate {
     group_id: UserGroupId,
   },
+  /// A custom emoji was added, renamed or deleted (issue #207). Sent to everyone online; clients
+  /// read `GET /api/v1/custom-emoji` again. Older clients skip the event.
+  CustomEmojiUpdate,
   /// A guest's membership of a space ran out and they were removed. Sent to the guest, the sponsor
   /// if still in the space, and the space's admins.
   GuestExpired {
@@ -394,6 +397,7 @@ impl GatewayEvent {
       Self::HealthAlertUpdate => "health_alert_update",
       Self::SystemEvent { .. } => "system_event",
       Self::UserGroupUpdate { .. } => "user_group_update",
+      Self::CustomEmojiUpdate => "custom_emoji_update",
       Self::GuestExpired { .. } => "guest_expired",
       Self::GuestTermsUpdate => "guest_terms_update",
       Self::MessageAck { .. } => "message_ack",

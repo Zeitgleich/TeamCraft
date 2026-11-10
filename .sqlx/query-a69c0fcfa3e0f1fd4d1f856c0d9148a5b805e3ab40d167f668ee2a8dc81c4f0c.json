@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM custom_emoji WHERE id = $1 RETURNING s3_key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "s3_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "custom_emoji",
+            "name": "s3_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a69c0fcfa3e0f1fd4d1f856c0d9148a5b805e3ab40d167f668ee2a8dc81c4f0c"
+}

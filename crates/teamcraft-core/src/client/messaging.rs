@@ -97,6 +97,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       MessageContent::Edit {
         target,
         body: body.to_string(),
+        custom_emoji: Vec::new(),
       },
     )?;
     apply_control(
@@ -106,6 +107,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       &MessageContent::Edit {
         target,
         body: body.to_string(),
+        custom_emoji: Vec::new(),
       },
       self.now_ms(),
     )?;
@@ -143,6 +145,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       target,
       emoji: emoji.to_string(),
       is_added,
+      maybe_custom: None,
     };
     let id = self.enqueue(conversation, None, content)?;
     self.flush_outbox().await?;
@@ -1340,7 +1343,9 @@ fn apply_control_with(
   }
   let is_own = stored.sender_user_id == sender;
   match content {
-    MessageContent::Edit { body, .. } if is_own => {
+    MessageContent::Edit {
+      body, custom_emoji, ..
+    } if is_own => {
       if let Some(edit_id) = maybe_server_id {
         if stored.maybe_edit_id.is_some_and(|applied| applied >= edit_id) {
           // A later edit is already applied: this one lost.
@@ -1348,9 +1353,18 @@ fn apply_control_with(
         }
         stored.maybe_edit_id = Some(edit_id);
       }
-      let MessageContent::Text { body: old, .. } = &mut stored.content else {
+      let MessageContent::Text { body: old, meta, .. } = &mut stored.content else {
         return Ok(());
       };
+      if !custom_emoji.is_empty() {
+        let mut named = meta.custom_emoji.to_vec();
+        for reference in custom_emoji {
+          if named.len() < teamcraft_proto::MAX_CUSTOM_EMOJI_PER_MESSAGE && !named.contains(reference) {
+            named.push(reference.clone());
+          }
+        }
+        meta.custom_emoji = named.into_boxed_slice();
+      }
       if old != body {
         let previous = std::mem::replace(old, body.clone());
         stored.edits.push(EditRecord {
@@ -2238,6 +2252,7 @@ mod tests {
     MessageContent::Edit {
       target,
       body: body.into(),
+      custom_emoji: Vec::new(),
     }
   }
 

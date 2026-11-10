@@ -73,6 +73,9 @@ wire_enum! {
     /// No OpenRouter API key is stored for the notetaker (admin.md §3.7).
     NotetakerKeyNotFound => "notetaker_key_not_found",
     UserGroupNotFound => "user_group_not_found",
+    CustomEmojiNotFound => "custom_emoji_not_found",
+    /// Another custom emoji of the workspace has this shortcode.
+    CustomEmojiNameTaken => "custom_emoji_name_taken",
     MfaRequired => "mfa_required",
     /// The message isn't held any more, or isn't the caller's (docs/scheduled-messages.md).
     ScheduledMessageNotFound => "scheduled_message_not_found",
@@ -350,6 +353,8 @@ mod tests {
       ErrorCode::BrandAssetNotFound,
       ErrorCode::CrashReportsOff,
       ErrorCode::UserGroupNotFound,
+      ErrorCode::CustomEmojiNotFound,
+      ErrorCode::CustomEmojiNameTaken,
       ErrorCode::ScheduledMessageNotFound,
       ErrorCode::ScheduledMessagesDisabled,
       ErrorCode::ScheduledMessageLimit,

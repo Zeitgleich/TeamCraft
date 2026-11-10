@@ -852,7 +852,7 @@ flag, and whether the text addresses the whole conversation (`is_channel_mention
 "Per-conversation filters"). Reactions are encrypted messages, so not even reaction counts are visible.
 
 Encrypted: text, attachments, attachment names, reactions, edits, polls, link previews, drafts, a
-channel's shared notes (§4.11).
+channel's shared notes (§4.11), which custom emoji a message or reaction uses (§4.13).
 
 **Group mentions (`@accounting`, issue #206).** The sender's device expands them: from its sealed copy of
 the user groups (`GET /user-groups/rosters`, refused to guests like the rest of the groups) it puts the
@@ -3581,6 +3581,60 @@ by moderators, a `create_poll` permission and admin settings for the limits, a r
 closing, and exporting the results as text. A server can't enforce a poll permission (it doesn't
 see what a message is); receivers would ignore polls of members without it, as for group mentions
 (§4.4).
+
+### 4.13 Custom emoji (issue #207)
+
+A workspace has its own emoji, small pictures named `:shortcode:` that admins add (admin.md §3.11)
+and everybody uses in messages and reactions.
+
+**Decision: workspace assets, not encrypted.** The pictures lie unencrypted in object storage, like
+the organization's call backgrounds (§8.1) and space pictures (§4.4), and the server hands download
+URLs to signed-in people only. Encrypting them would protect them from the server operator alone:
+everybody in the workspace, guests in shared channels too, has to see them, so a key would go to
+every account and need a rotation for every leaver, for pictures that are about as sensitive as a
+space's picture. The admin console says the operator can see them. An instance setting for
+encrypted pictures (`custom_emoji_assets = encrypted`), with a set key shared like the workspace's
+other keys, is left for later in #207.
+
+**Integrity: signed by an admin.** What makes a picture count is a signature, not the server:
+
+- An admin's device signs the emoji's document (shortcode, SHA-256 and format of the picture, when it
+  was signed) as an entry of no log, `WorkspaceLog::CustomEmoji` (crypto crate), with its device key
+  and certificate, like a channel's signed deletion. A new name is a new document over the same
+  picture.
+- Every device verifies the server's list against its own verified roster: the signer must be an
+  owner or admin of the roster now, or have been one in a tenure of the admin history (§4.6.1) that
+  covers the signing time, so a former admin's emoji stay and nothing they sign later counts. A
+  document that doesn't verify is left out; the server's copies of the name and hash are ignored.
+- A picture is kept only when its SHA-256 is the one the verified document names.
+
+The server checks what it can without trusting anybody: the picture (a still PNG or WebP within the
+size and side limits, read from its header, the same check the apps run), the name, that the
+document names this picture and that its signature claims the caller as signer. Deleting needs no
+signature: a server can always withhold an emoji, and a deleted one just leaves the list.
+
+**What the server sees.** Names and pictures of the set, who added them, and when devices fetch
+them. Which emoji a message or reaction uses is inside the ciphertext only: the text keeps the
+`:shortcode:`, `meta.custom_emoji` names each emoji it uses with its picture's hash (an edit carries
+the ones it adds), and a reaction's `emoji` is the `:shortcode:` with the hash in `custom`. Devices
+read the whole set when the app first needs it (the picker, the `:` suggestions, a message with a
+picture the device lacks), at most once a minute and again after the gateway said the set or the
+roster changed, and download all its pictures, a round at a time, never one because a message on
+screen uses it. Fetches tell the server when a device needed the set, not which message used which
+emoji; the storage host learns that a device read the set.
+
+**Old messages and old apps.** A message shows the picture whose hash it names, as long as the
+device holds it: pictures stay on the device after their emoji is renamed or deleted (those of the
+set and up to 200 more), so earlier messages look the same. A device without the picture (new, or
+the emoji was deleted before it fetched it) shows the `:shortcode:` text, and so do apps that don't
+know custom emoji: older versions, and for now the Android and iOS apps, whose rendering is left for
+#207.
+
+**Accepted risks.** A compromised server can withhold emoji, serve a renamed emoji's older document
+(its old name) or a deleted emoji's last one (it shows again): everything it can show was signed by
+an admin of the roster at the time. A server that withholds an admin's demotion lets that admin add
+emoji until the roster moves on, as for every admin action (admin.md §2.3, freshness); emoji don't
+wait for a fresh roster, since they change no membership and no history.
 
 ## 5. Adding a device (Threema/WhatsApp style)
 
