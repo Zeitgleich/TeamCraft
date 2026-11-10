@@ -311,13 +311,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let mls_written_before = self.saved_mls.written_bytes();
     // One conversation's failure (a 403 right after a removal) marks it for another try and the
     // catch-up goes on with the others (issue #159).
+    let mut times = ContentTimes::default();
     let result = self
-      .catch_up_content_from(conversation, first, self.settings.catch_up_message_pages)
+      .catch_up_content_timed(
+        conversation,
+        first,
+        self.settings.catch_up_message_pages,
+        &mut times,
+      )
       .await;
-    // One line each, so a slow conversation shows (issue #972).
+    // One line each, so a slow conversation shows (issue #972), with where its time went.
     tracing::info!(
       conversation_id = %conversation,
       ms = self.now_ms().saturating_sub(started_ms),
+      mls_ms = times.mls_ms,
+      messages_ms = times.messages_ms,
+      messages = times.messages,
+      keys_ms = times.keys_ms,
       mls_written_bytes = self.saved_mls.written_bytes().saturating_sub(mls_written_before),
       is_ok = result.is_ok(),
       "catch-up: conversation done"
@@ -592,19 +602,45 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     first: FirstPages,
     maybe_pages: Option<u32>,
   ) -> Result<(), CoreError> {
+    let mut times = ContentTimes::default();
+    self
+      .catch_up_content_timed(conversation, first, maybe_pages, &mut times)
+      .await
+  }
+
+  /// [`Self::catch_up_content_from`], noting in `times` how long each part took.
+  async fn catch_up_content_timed(
+    &mut self,
+    conversation: ConversationId,
+    first: FirstPages,
+    maybe_pages: Option<u32>,
+    times: &mut ContentTimes,
+  ) -> Result<(), CoreError> {
+    let mut lap_ms = self.now_ms();
     if self.has_group(conversation)? {
       self
         .sync_mls_from(conversation, first.maybe_mls, first.maybe_members)
         .await?;
     }
-    self
+    times.mls_ms = self.ms_since_lap(&mut lap_ms);
+    times.messages = self
       .catch_up_messages_from(conversation, first.maybe_messages, maybe_pages)
       .await?;
+    times.messages_ms = self.ms_since_lap(&mut lap_ms);
     self.retry_undecrypted(conversation)?;
     // Senders this device has no verified key for yet (it isn't in the group, or just joined).
     self.learn_sender_keys(conversation).await?;
+    times.keys_ms = self.ms_since_lap(&mut lap_ms);
     self.note_content_seen(conversation);
     self.note_delivered(conversation)
+  }
+
+  /// Milliseconds since `lap_ms`, which moves to now.
+  fn ms_since_lap(&self, lap_ms: &mut i64) -> i64 {
+    let now_ms = self.now_ms();
+    let elapsed_ms = now_ms.saturating_sub(*lap_ms);
+    *lap_ms = now_ms;
+    elapsed_ms
   }
 
   /// Reads the first page of each conversation's MLS queue and messages at once. Failures are
@@ -660,10 +696,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
   ) -> Result<ListMessagesQuery, CoreError> {
     let (maybe_before, maybe_after) = if self.is_history_loaded(conversation)? {
-      (
-        None,
-        self.store.edge_server_id(conversation, MessageEdge::Newest)?,
-      )
+      (None, self.catch_up_cursor(conversation)?)
     } else {
       (
         self.store.edge_server_id(conversation, MessageEdge::Oldest)?,
@@ -741,6 +774,19 @@ fn next_batch(
   }
   let size = size.max(1).min(waiting.len());
   waiting.drain(..size).collect()
+}
+
+/// Where one conversation's catch-up spent its time, for its log line: IDs and durations only.
+#[derive(Clone, Copy, Debug, Default)]
+struct ContentTimes {
+  /// Its MLS queue (and the member list and device lists that verify it).
+  mls_ms: i64,
+  /// Its new messages: fetched, decrypted and stored.
+  messages_ms: i64,
+  /// How many messages the server sent.
+  messages: usize,
+  /// Messages waiting for keys tried again, and their senders' keys.
+  keys_ms: i64,
 }
 
 /// Logs how long each phase of a catch-up took (docs/performance.md: where the time to a readable

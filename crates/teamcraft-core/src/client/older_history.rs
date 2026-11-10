@@ -112,6 +112,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// history this user may see can differ then.
   pub(super) fn forget_older_history(&self, conversation: ConversationId) -> Result<(), CoreError> {
     self.store.delete(Table::SyncState, &record_key(conversation))?;
+    self.forget_read_through(conversation)?;
     self.forget_history_gaps(conversation)
   }
 }
