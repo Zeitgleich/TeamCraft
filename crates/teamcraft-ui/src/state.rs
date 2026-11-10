@@ -288,6 +288,8 @@ pub enum Overlay {
   EditHistory(ConversationId, MessageId),
   /// Edit the bookmarks bar of a conversation.
   Bookmarks(ConversationId),
+  /// Make a poll in a conversation (issue #205).
+  NewPoll(ConversationId),
   /// Another person's profile card.
   UserProfile(UserId),
   /// Calls aren't available in this client (the browser, for now): where the apps are.

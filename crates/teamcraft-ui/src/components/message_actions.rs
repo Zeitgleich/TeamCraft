@@ -75,6 +75,8 @@ pub struct ActionContext {
   pub is_pinned: bool,
   pub is_saved: bool,
   pub has_files: bool,
+  /// A poll (issue #205): its text is only what older versions show, so it isn't edited.
+  pub is_poll: bool,
   /// What the conversation lets the user do (issue #691): nothing else is offered.
   pub permissions: MessagePermissions,
 }
@@ -93,7 +95,13 @@ impl ActionContext {
       is_pinned: maybe_extras.is_some_and(|extras| extras.is_pinned),
       is_saved: maybe_extras.is_some_and(|extras| extras.is_saved),
       has_files: maybe_extras.is_some_and(|extras| !extras.files.is_empty()),
+      is_poll: false,
     }
+  }
+
+  /// The same for a poll, which offers no edit.
+  pub fn for_poll(self, is_poll: bool) -> Self {
+    Self { is_poll, ..self }
   }
 }
 
@@ -133,7 +141,10 @@ pub fn message_actions(context: ActionContext, surface: ActionSurface) -> Vec<Me
     }
   }
   if context.is_mine && permissions.can_post {
-    actions.extend([MessageAction::Edit, MessageAction::Delete]);
+    if !context.is_poll {
+      actions.push(MessageAction::Edit);
+    }
+    actions.push(MessageAction::Delete);
   }
   actions
 }
@@ -770,6 +781,18 @@ mod tests {
         MessageAction::Pin,
       ]
     );
+  }
+
+  #[test]
+  fn an_own_poll_is_deleted_but_never_edited() {
+    let context = ActionContext {
+      is_mine: true,
+      ..allowed()
+    }
+    .for_poll(true);
+    let actions = message_actions(context, ActionSurface::Sheet);
+    assert!(!actions.contains(&MessageAction::Edit));
+    assert_eq!(actions.last(), Some(&MessageAction::Delete));
   }
 
   #[test]

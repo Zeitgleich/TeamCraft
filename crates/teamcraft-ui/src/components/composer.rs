@@ -1947,6 +1947,21 @@ pub fn Composer(
                       <span class="menu-label">{move || i18n.t("composer-attach-camera")}</span>
                     </button>
                   })}
+                  // A poll goes to the conversation, not into a thread (issue #205).
+                  {maybe_thread.is_none().then(|| view! {
+                    <button
+                      type="button"
+                      class="menu-item"
+                      role="menuitem"
+                      on:click=move |_| {
+                        is_attach_menu_open.set(false);
+                        state.overlay.set(Overlay::NewPoll(conversation));
+                      }
+                    >
+                      <Icon name=IconName::Poll />
+                      <span class="menu-label">{move || i18n.t("composer-poll")}</span>
+                    </button>
+                  })}
                 </MenuSurface>
               </Show>
             </div>

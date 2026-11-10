@@ -245,6 +245,10 @@ pub fn run(state: AppState, i18n: I18n, conversation: ConversationId, command: S
     SlashCommand::Help => Outcome::Notice(Notice::Help),
     SlashCommand::Remind { when, text: body } => remind(i18n, when, body),
     SlashCommand::Meet => start_meeting(state, i18n),
+    SlashCommand::Poll => {
+      state.overlay.set(Overlay::NewPoll(conversation));
+      Outcome::Done
+    },
   }
 }
 

@@ -367,6 +367,13 @@ pub trait ChatBackend {
   ) {
   }
   fn set_pinned(&self, _conversation: ConversationId, _message: MessageId, _is_pinned: bool) {}
+  /// Sends a poll (issue #205): an encrypted message like any other.
+  fn post_poll(&self, _conversation: ConversationId, _poll: crate::polls::NewPoll) {}
+  /// Votes in the poll `message` for the options at `choices` (replacing the user's earlier vote;
+  /// none withdraws it).
+  fn vote_in_poll(&self, _conversation: ConversationId, _message: MessageId, _choices: Vec<u32>) {}
+  /// Closes one of the user's own polls: no more votes count.
+  fn close_poll(&self, _conversation: ConversationId, _message: MessageId) {}
   fn pinned_messages(&self, _conversation: ConversationId) -> Vec<Message> {
     Vec::new()
   }

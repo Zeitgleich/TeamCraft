@@ -991,6 +991,7 @@ impl ChatBackend for MockBackend {
       maybe_placeholder: None,
       group_mentions,
       mentions_me: false,
+      maybe_poll: None,
     };
     match maybe_thread {
       Some(thread) => {
@@ -1004,6 +1005,49 @@ impl ChatBackend for MockBackend {
         state.replies.entry(conversation).or_default().push(message);
       },
       None => state.messages.entry(conversation).or_default().push(message),
+    }
+  }
+
+  fn post_poll(&self, conversation: ConversationId, poll: teamcraft_client_api::polls::NewPoll) {
+    if poll
+      .spec
+      .check(&teamcraft_client_api::polls::PollLimits::default())
+      .is_err()
+    {
+      return;
+    }
+    self.post_message(conversation, None, &poll.fallback);
+    let mut state = self.state.borrow_mut();
+    if let Some(posted) = state
+      .messages
+      .get_mut(&conversation)
+      .and_then(|all| all.last_mut())
+    {
+      posted.maybe_poll = Some(Box::new(new_poll_view(poll.spec)));
+    }
+  }
+
+  fn vote_in_poll(&self, conversation: ConversationId, message: MessageId, choices: Vec<u32>) {
+    let mut state = self.state.borrow_mut();
+    let found = state
+      .messages
+      .get_mut(&conversation)
+      .and_then(|all| all.iter_mut().find(|candidate| candidate.id == message))
+      .and_then(|found| found.maybe_poll.as_deref_mut());
+    if let Some(poll) = found {
+      vote_as(poll, me(), &choices);
+    }
+  }
+
+  fn close_poll(&self, conversation: ConversationId, message: MessageId) {
+    let mut state = self.state.borrow_mut();
+    let found = state
+      .messages
+      .get_mut(&conversation)
+      .and_then(|all| all.iter_mut().find(|candidate| candidate.id == message))
+      .and_then(|found| found.maybe_poll.as_deref_mut());
+    if let Some(poll) = found.filter(|poll| poll.is_mine) {
+      poll.is_closed = true;
     }
   }
 
@@ -1506,6 +1550,7 @@ impl State {
         maybe_placeholder: None,
         group_mentions: Vec::new(),
         mentions_me: false,
+        maybe_poll: None,
       };
       if matches!(message.kind, MessageKind::User) {
         for _ in 0..rng.below(3) {
@@ -1553,6 +1598,7 @@ impl State {
               maybe_placeholder: None,
               group_mentions: Vec::new(),
               mentions_me: false,
+              maybe_poll: None,
             });
           }
         }
@@ -1625,6 +1671,57 @@ fn log_line(conversation: ConversationId, index: usize, total: usize, now: Times
     maybe_placeholder: None,
     group_mentions: Vec::new(),
     mentions_me: false,
+    maybe_poll: None,
+  }
+}
+
+/// A poll the user just made, with no votes yet.
+fn new_poll_view(spec: teamcraft_client_api::polls::PollSpec) -> teamcraft_client_api::polls::PollView {
+  teamcraft_client_api::polls::PollView {
+    question: spec.question,
+    options: spec
+      .options
+      .into_iter()
+      .map(|text| teamcraft_client_api::polls::PollOptionView {
+        text,
+        count: 0,
+        is_chosen: false,
+        voters: Vec::new(),
+      })
+      .collect(),
+    choice: spec.choice,
+    voters: spec.voters,
+    voter_count: 0,
+    is_closed: false,
+    is_mine: true,
+  }
+}
+
+/// Replaces `voter`'s vote in a demo poll with `choices` (none withdraws it).
+fn vote_as(poll: &mut teamcraft_client_api::polls::PollView, voter: UserId, choices: &[u32]) {
+  if poll.is_closed {
+    return;
+  }
+  let had_voted = poll.options.iter().any(|option| option.is_chosen);
+  for (at, option) in poll.options.iter_mut().enumerate() {
+    let is_chosen = u32::try_from(at).is_ok_and(|at| choices.contains(&at));
+    if option.is_chosen != is_chosen {
+      option.count = if is_chosen {
+        option.count + 1
+      } else {
+        option.count.saturating_sub(1)
+      };
+      option.voters.retain(|user| *user != voter);
+      if is_chosen && poll.voters.are_shown() {
+        option.voters.push(voter);
+      }
+    }
+    option.is_chosen = is_chosen;
+  }
+  match (had_voted, choices.is_empty()) {
+    (false, false) => poll.voter_count += 1,
+    (true, true) => poll.voter_count = poll.voter_count.saturating_sub(1),
+    _ => {},
   }
 }
 

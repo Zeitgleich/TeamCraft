@@ -514,6 +514,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
           lazy_area(Place::Overlay, move || areas::edit_history(conversation, message))
         },
         Overlay::Bookmarks(conversation) => lazy_area(Place::Overlay, move || areas::bookmarks(conversation)),
+        Overlay::NewPoll(conversation) => lazy_area(Place::Overlay, move || areas::new_poll(conversation)),
         Overlay::QuietHours(conversation) => lazy_area(Place::Overlay, move || areas::quiet_hours(conversation)),
         Overlay::UserProfile(user) => lazy_area(Place::Overlay, move || areas::user_profile(user)),
         Overlay::CallsUnavailable => lazy_area(Place::Overlay, || areas::calls_unavailable(())),

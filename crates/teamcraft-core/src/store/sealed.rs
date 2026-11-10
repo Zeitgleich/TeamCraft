@@ -1915,7 +1915,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       keys.dedup();
       self.load_listed(state, conversation, &keys, |message| {
         message
-          .reaction_target()
+          .relation_target()
           .is_some_and(|target| targets.contains(&target))
       })
     })

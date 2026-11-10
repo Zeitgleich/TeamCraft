@@ -1427,6 +1427,7 @@ mod tests {
         maybe_placeholder: None,
         group_mentions: Vec::new(),
         mentions_me: false,
+        maybe_poll: None,
       }
     }
   }
@@ -1650,6 +1651,7 @@ mod tests {
       maybe_placeholder: None,
       group_mentions: Vec::new(),
       mentions_me: false,
+      maybe_poll: None,
     }
   }
 

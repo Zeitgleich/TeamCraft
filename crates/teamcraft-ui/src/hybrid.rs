@@ -486,6 +486,18 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.set_pinned(conversation, message, is_pinned);
   }
 
+  fn post_poll(&self, conversation: ConversationId, poll: teamcraft_client_api::polls::NewPoll) {
+    self.chat.post_poll(conversation, poll);
+  }
+
+  fn vote_in_poll(&self, conversation: ConversationId, message: MessageId, choices: Vec<u32>) {
+    self.chat.vote_in_poll(conversation, message, choices);
+  }
+
+  fn close_poll(&self, conversation: ConversationId, message: MessageId) {
+    self.chat.close_poll(conversation, message);
+  }
+
   fn pinned_messages(&self, conversation: ConversationId) -> Vec<Message> {
     self.chat.pinned_messages(conversation)
   }

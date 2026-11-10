@@ -17,6 +17,7 @@ mod integration;
 pub mod live;
 mod notetaker;
 mod permission;
+mod poll;
 mod rendezvous;
 mod role;
 pub mod role_rules;
@@ -75,6 +76,11 @@ pub use permission::{
   ALL_KNOWN as ALL_PERMISSIONS, ChannelContext, ChannelModeration, ChannelRole, Permission, PermissionScheme,
   PermissionScope, SchemeChangeError, SchemeRole, SpaceContext, SpaceRole, Target, check_scheme_change,
   is_allowed,
+};
+pub use poll::{
+  DEFAULT_MAX_POLL_OPTION_CHARS, DEFAULT_MAX_POLL_OPTIONS, DEFAULT_MAX_POLL_QUESTION_CHARS,
+  MAX_RECEIVED_POLL_OPTIONS, MAX_RECEIVED_POLL_TEXT_CHARS, MIN_POLL_OPTIONS, PollChoice, PollError,
+  PollLimits, PollSpec, PollVoters,
 };
 pub use rendezvous::{RENDEZVOUS_PATH, RendezvousClientMessage, RendezvousServerMessage};
 pub use role::Role;

@@ -59,6 +59,7 @@ mod older_history;
 mod org_backgrounds;
 mod org_recovery;
 mod people_directory;
+mod polls;
 mod push;
 mod push_guard;
 mod queries;

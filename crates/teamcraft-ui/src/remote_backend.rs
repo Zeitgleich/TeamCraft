@@ -1143,6 +1143,7 @@ impl RemoteChat {
         maybe_placeholder: None,
         group_mentions: Vec::new(),
         mentions_me: false,
+        maybe_poll: None,
       };
       match message.maybe_thread {
         Some(thread) => mirror
@@ -1292,6 +1293,25 @@ impl ChatBackend for RemoteChat {
       conversation,
       message,
       is_pinned,
+    });
+  }
+
+  fn post_poll(&self, conversation: ConversationId, poll: teamcraft_client_api::polls::NewPoll) {
+    self.act(ChatAction::PostPoll { conversation, poll });
+  }
+
+  fn vote_in_poll(&self, conversation: ConversationId, message: MessageId, choices: Vec<u32>) {
+    self.act(ChatAction::VoteInPoll {
+      conversation,
+      message,
+      choices,
+    });
+  }
+
+  fn close_poll(&self, conversation: ConversationId, message: MessageId) {
+    self.act(ChatAction::ClosePoll {
+      conversation,
+      message,
     });
   }
 
@@ -3765,6 +3785,7 @@ mod tests {
           maybe_placeholder: None,
           group_mentions: Vec::new(),
           mentions_me: false,
+          maybe_poll: None,
         })
         .collect(),
     }

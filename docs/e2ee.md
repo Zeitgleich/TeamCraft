@@ -3486,6 +3486,77 @@ over pages, the mobile apps, a snapshot when a member joins, stopping the histor
 snapshot, and not waking phones for page edits: today a page edit is a message like a reaction, so
 a phone of a member whose level is "all" gets a push for it (docs/notifications.md, "Push routing").
 
+### 4.12 Polls (issue #205)
+
+A poll is a message like any other, and everything about it travels inside the ciphertext. The
+server learns what it learns from any message (sender, device, time, size), never the question,
+the options, who voted, or for what.
+
+**Wire format.** Three encrypted messages, all signed by their sender's device like every message
+(§4.4, "Sender signatures"):
+
+| Message                         | Content                                                                                                                    | Shown as                 |
+|---------------------------------|----------------------------------------------------------------------------------------------------------------------------|--------------------------|
+| The poll                        | a text message whose `meta.poll` holds question, options, `choice` (`single`, `multiple`) and `voters` (`shown`, `hidden`) | the poll                 |
+| `poll_vote { target, choices }` | the sender's choices by option position; none withdraws the vote                                                           | hidden (like a reaction) |
+| `poll_close { target }`         | ends the poll                                                                                                              | hidden                   |
+
+`choice` and `voters` are wire enums with a catch-all: a mode of a newer version shows the results
+of such a poll but takes no votes, and an unknown `voters` names nobody. The poll never changes:
+options are named by position, and an edit of the message replaces only the text versions before
+polls show (below).
+
+**Counting.** Every device counts for itself from the messages it holds
+(`teamcraft-core::polls`), by the server's order of the messages, so devices that hold the same
+messages show the same result whatever order they arrived in:
+
+- each person's newest vote counts; a vote the poll doesn't take (an option it lacks, several for a
+  single choice, a repeated option) is skipped and the earlier one stands; a replayed vote changes
+  nothing, since only the newest per person counts and a duplicate client message ID is dropped
+  (§4.4),
+- the first `poll_close` by the poll's sender closes it, and votes the server ordered after it don't
+  count, also on devices that read them before the close; a close by anybody else changes nothing,
+- a vote still in this device's outbox counts as the newest until the server orders it. Votes and
+  closes go through the outbox like reactions, so a vote made offline is sent later, once.
+
+Receivers also bound what they count: a poll with fewer than 2 or more than 32 options, or a
+question or option of more than 1000 characters, isn't taken as a poll (its text shows). Senders
+keep to tighter limits (`PollLimits`: 12 options, 300 and 100 characters).
+
+**What "hidden voters" means, and why it isn't anonymous.** With `voters: hidden` the poll shows
+only counts and the user's own choice; the core leaves the names out of what it hands the UI. That
+is a promise of the clients' display, not anonymity, and the app says so ("Hide who voted": "It
+isn't anonymous: every member's app still receives each vote with its sender"):
+
+| Who                                    | Learns about a hidden poll                                                                                                                                                                                         |
+|----------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Any member (its device)                | who voted for what: each vote is a message to the whole conversation, signed by the voter's device. A modified client, a debug export of the local store, or watching the counts change as a vote arrives shows it |
+| The poll's creator                     | the same as any member, nothing more                                                                                                                                                                               |
+| A member added later with full history | the same, from the history                                                                                                                                                                                         |
+| The server                             | that the voter sent some message to the conversation at that time (votes look like any message), not that it is a vote, for which poll, or what                                                                    |
+| Someone removed before the vote        | nothing (§4.2)                                                                                                                                                                                                     |
+
+Real anonymity towards other members would need votes that don't carry the voter's identity, while
+MLS and the sender signatures authenticate every message by its sender. The ways out (blind- or
+ring-signature tokens issued per voter, or votes sealed to the creator alone, who then learns them)
+are not built; the label "anonymous" is reserved for one of them, after a review.
+
+**Versions before polls.** The poll is a text message, so they show its text: the question, the
+options as a list, and "Update TeamCraft to vote in this poll", in the sender's language. They don't
+know `poll_vote` and `poll_close`: they keep each as a message of an unknown kind, which they list
+as an empty message of its sender, and a notification of such a message (a DM, or a conversation
+set to notify on every message) reads like that of a new message. A device that received votes
+while on such a version keeps them as unknown after updating and doesn't count them; a device that
+loads the history anew does.
+
+**Not in this step** (issue #205): the Android and iOS screens (the core, the client API's
+`PollView` and the `post_poll`, `vote_in_poll` and `close_poll` actions are shared, so the apps only
+add their views), closing at a set time, results shown only after voting or after closing, closing
+by moderators, a `create_poll` permission and admin settings for the limits, a reminder before
+closing, and exporting the results as text. A server can't enforce a poll permission (it doesn't
+see what a message is); receivers would ignore polls of members without it, as for group mentions
+(§4.4).
+
 ## 5. Adding a device (Threema/WhatsApp style)
 
 Two ways, the user picks whichever is convenient:

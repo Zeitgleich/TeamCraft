@@ -1,0 +1,211 @@
+/* Polls in messages and the dialog that makes them (issue #205). Every bar carries its count and
+   share as text next to it: the bar only repeats what the numbers say. */
+
+.poll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: 28rem;
+  margin-top: var(--space-1);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.poll-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.poll-icon {
+  display: inline-flex;
+  flex: none;
+  margin-top: 2px;
+  color: var(--accent-strong);
+}
+
+.poll-question {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.poll-mode {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
+.poll-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.poll-option {
+  --poll-share: 0;
+  display: grid;
+  grid-template-columns: 1.25rem minmax(0, 1fr) auto;
+  grid-template-rows: auto 4px;
+  align-items: center;
+  column-gap: var(--space-2);
+  row-gap: 6px;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+  text-align: start;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .poll-option:not(:disabled):hover {
+    border-color: var(--text-muted);
+  }
+}
+
+.poll-option:not(:disabled):active {
+  transform: scale(0.99);
+}
+
+/* Results stay readable where nobody may vote (closed, no right to): not pressable, not dimmed. */
+.poll-option:disabled {
+  cursor: default;
+  opacity: 1;
+  color: inherit;
+}
+
+.poll-option.is-chosen {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.poll-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 1.5px solid var(--text-muted);
+  border-radius: var(--radius-pill);
+  color: var(--surface);
+}
+
+.poll-option.is-chosen .poll-mark {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.poll-mark svg {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+.poll-option-text {
+  overflow-wrap: anywhere;
+}
+
+.poll-option.is-leader .poll-option-text {
+  font-weight: var(--weight-semibold);
+}
+
+.poll-option-count {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.poll-bar {
+  grid-column: 2 / 4;
+  height: 4px;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+}
+
+.poll-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transform: scaleX(var(--poll-share));
+  transform-origin: left center;
+}
+
+.poll-voters {
+  margin: 4px 0 0 calc(1.25rem + var(--space-2) + var(--space-3));
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  overflow-wrap: anywhere;
+}
+
+.poll-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
+.poll-total {
+  display: inline-flex;
+  gap: var(--space-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.poll-closed {
+  font-weight: var(--weight-semibold);
+}
+
+.poll-close-confirm {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.poll-edit-options {
+  margin: var(--space-3) 0;
+  padding: 0;
+  border: 0;
+}
+
+.poll-edit-options legend {
+  margin-bottom: var(--space-1);
+  padding: 0;
+}
+
+.poll-edit-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  list-style: none;
+}
+
+.poll-edit-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.poll-edit-row .input {
+  flex: 1;
+  min-width: 0;
+}

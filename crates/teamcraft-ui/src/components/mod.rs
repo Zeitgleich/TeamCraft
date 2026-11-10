@@ -119,6 +119,8 @@ pub mod pdf_pane;
 pub mod pending_button;
 pub mod people_picker;
 pub mod picture_editor;
+pub mod poll_card;
+pub mod poll_dialog;
 pub mod profile_views;
 pub mod quick_switcher;
 pub mod rail;
