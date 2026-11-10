@@ -102,12 +102,16 @@ impl Reads {
     let backend = self.backend()?;
     let tail = backend.feed_tail(conversation, maybe_anchor, older);
     let gaps = tail.gaps_among(backend.history_gaps(conversation));
+    let author_ids = tail.messages.iter().map(|message| message.author).collect();
+    let (me, authors) = backend.me_and_known_users(&author_ids);
     to_json(&MessageTail {
       conversation,
       messages: tail.messages,
       has_older: tail.has_older,
       undecrypted: backend.undecrypted_count(conversation),
       gaps,
+      maybe_me: Some(me),
+      authors,
     })
   }
 
