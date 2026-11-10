@@ -236,7 +236,7 @@ impl LocalStore for MemoryStore {
   ) -> Result<Vec<StoredMessage>, StoreError> {
     Ok(self.picked(conversation, |message| {
       message
-        .reaction_target()
+        .relation_target()
         .is_some_and(|target| targets.contains(&target))
     }))
   }

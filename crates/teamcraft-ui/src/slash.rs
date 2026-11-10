@@ -4,7 +4,7 @@
 use crate::model::PresenceStatus;
 
 /// Every command with its arguments, for `/help` and the autocomplete list.
-pub const COMMANDS: [(&str, &str); 25] = [
+pub const COMMANDS: [(&str, &str); 26] = [
   ("away", ""),
   ("online", ""),
   ("busy", ""),
@@ -30,6 +30,7 @@ pub const COMMANDS: [(&str, &str); 25] = [
   ("shortcuts", ""),
   ("remind", "in 10m|at 14:30 text"),
   ("meet", ""),
+  ("poll", ""),
 ];
 
 /// Where a command is typed and what the user may do there. Decides which commands are offered,
@@ -100,6 +101,8 @@ pub enum SlashCommand {
     text: String,
   },
   Meet,
+  /// Opens the dialog that makes a poll (issue #205).
+  Poll,
 }
 
 impl SlashCommand {
@@ -132,6 +135,7 @@ impl SlashCommand {
       Self::Help => "help",
       Self::Remind { .. } => "remind",
       Self::Meet => "meet",
+      Self::Poll => "poll",
     }
   }
 
@@ -266,6 +270,7 @@ pub fn parse(input: &str) -> Parsed {
       Err(error) => return Parsed::Invalid(error),
     },
     "meet" => SlashCommand::Meet,
+    "poll" => SlashCommand::Poll,
     _ => return Parsed::Message(input.to_owned()),
   };
   Parsed::Command(command)

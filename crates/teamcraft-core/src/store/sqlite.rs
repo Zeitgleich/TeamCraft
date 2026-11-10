@@ -1008,7 +1008,7 @@ impl FeedColumns {
     Self {
       is_feed_row: message.is_feed_row(),
       is_event: message.is_event(),
-      maybe_reaction_target: message.reaction_target().map(|target| *target.as_bytes()),
+      maybe_reaction_target: message.relation_target().map(|target| *target.as_bytes()),
       is_reply: message.counts_as_reply(),
     }
   }

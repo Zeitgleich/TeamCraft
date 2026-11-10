@@ -317,3 +317,44 @@ scheduled-cancel-question = Cancel this message? Nobody will see it.
 scheduled-cancel-confirm = Cancel it
 scheduled-keep = Keep it
 schedule-refused-limit = You have as many scheduled messages as your workspace allows. Send or cancel one first.
+
+## Polls (issue #205)
+composer-poll = Poll
+poll-title = Poll
+poll-fallback-note = Update TeamCraft to vote in this poll.
+poll-new-title = New poll
+poll-question = Question
+poll-options = Options
+poll-option = Option { $number }
+poll-add-option = Add option
+poll-remove-option = Remove option { $number }
+poll-multiple = Allow several answers
+poll-hide-voters = Hide who voted
+poll-hide-voters-hint = The poll shows only counts. It isn't anonymous: every member's app still receives each vote with its sender.
+poll-send = Send poll
+poll-error-question = Enter a question.
+poll-error-question-long = A question can have at most { $max } characters.
+poll-error-options = A poll needs at least { $min } options.
+poll-error-options-many = A poll can have at most { $max } options.
+poll-error-option-long = An option can have at most { $max } characters.
+poll-error-option-duplicate = This option is already in the poll.
+poll-single-choice = Choose one
+poll-multiple-choice = Choose any
+poll-hidden-voters = Names hidden
+poll-closed = Closed
+poll-votes = { $count ->
+    [one] { $count } vote
+   *[other] { $count } votes
+  }
+poll-option-count = { $count } · { $percent }%
+poll-option-label = { $option }: { $count ->
+    [one] { $count } vote
+   *[other] { $count } votes
+  }, { $percent } percent
+poll-voters-more = { $count ->
+    [one] and { $count } more
+   *[other] and { $count } more
+  }
+poll-close = Close poll
+poll-close-confirm = Close for everyone? Later votes won't count.
+poll-unknown-choice = This poll needs a newer version of TeamCraft to vote.

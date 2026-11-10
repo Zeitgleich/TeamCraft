@@ -1660,6 +1660,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       // The UI recognizes files by their name in the body (search filter `has:file`).
       MessageContent::File { attachment } => attachment.file_name.clone(),
       MessageContent::Reaction { .. }
+      | MessageContent::PollVote { .. }
+      | MessageContent::PollClose { .. }
       | MessageContent::Edit { .. }
       | MessageContent::Delete { .. }
       | MessageContent::Pin { .. }
@@ -1709,6 +1711,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
       maybe_placeholder: stored.maybe_unreadable.map(placeholder_view),
       group_mentions: crate::group_mentions::shown_group_mentions(&stored.content),
       mentions_me: matches!(&stored.content, MessageContent::Text { mentions, .. } if mentions.contains(&self.me)),
+      maybe_poll: crate::polls::poll_of(stored).map(|spec| {
+        Box::new(crate::polls::tally(
+          stored,
+          spec,
+          relations.reactions_to(stored.client_message_id),
+          self.me,
+        ))
+      }),
     }
   }
 
@@ -2752,6 +2762,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn pinned_messages(&self, conversation: ConversationId) -> Vec<Message> {
     self.ui_pinned_messages(conversation)
+  }
+
+  fn post_poll(&self, conversation: ConversationId, poll: teamcraft_client_api::polls::NewPoll) {
+    self.ui_post_poll(conversation, poll);
+  }
+
+  fn vote_in_poll(&self, conversation: ConversationId, message: MessageId, choices: Vec<u32>) {
+    self.ui_vote_in_poll(conversation, message, choices);
+  }
+
+  fn close_poll(&self, conversation: ConversationId, message: MessageId) {
+    self.ui_close_poll(conversation, message);
   }
 
   fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {
@@ -3904,7 +3926,8 @@ impl MentionMemo {
 /// What the messages of a conversation say about each other, gathered in one pass: a page of rows
 /// would otherwise scan the whole conversation once per row for its reactions and replies.
 struct Relations<'a> {
-  /// Reaction messages by the message they react to, in conversation order (the latest counts).
+  /// Reactions, poll votes and closes by the message they are about, in conversation order (the
+  /// latest counts).
   reactions: HashMap<ClientMessageId, Vec<&'a StoredMessage>>,
   /// Shown replies per thread.
   replies: HashMap<ThreadId, usize>,
@@ -3925,7 +3948,8 @@ struct FeedView {
   messages: usize,
   /// Positions of the rows among the conversation's messages, in display order.
   rows: Vec<usize>,
-  /// Positions of the reactions to each message, in conversation order (the latest counts).
+  /// Positions of the reactions to each message (and of the votes and closes of a poll), in
+  /// conversation order (the latest counts).
   reactions: HashMap<ClientMessageId, Vec<usize>>,
   /// Shown replies per thread.
   replies: HashMap<ThreadId, usize>,
@@ -3993,8 +4017,8 @@ impl FeedView {
       if message.is_feed_row() && !additions.hides(message) {
         rows.push(at);
       }
-      if let MessageContent::Reaction { target, .. } = &message.content {
-        reactions.entry(*target).or_default().push(at);
+      if let Some(target) = message.relation_target() {
+        reactions.entry(target).or_default().push(at);
       }
       if message.counts_as_reply()
         && let Some(thread) = message.maybe_thread_id
@@ -4061,8 +4085,8 @@ impl<'a> Relations<'a> {
     let mut reactions: HashMap<ClientMessageId, Vec<&'a StoredMessage>> = HashMap::new();
     let mut replies: HashMap<ThreadId, usize> = HashMap::new();
     for message in all {
-      if let MessageContent::Reaction { target, .. } = &message.content {
-        reactions.entry(*target).or_default().push(message);
+      if let Some(target) = message.relation_target() {
+        reactions.entry(target).or_default().push(message);
       }
       if message.counts_as_reply()
         && let Some(thread) = message.maybe_thread_id
@@ -4087,7 +4111,7 @@ impl<'a> Relations<'a> {
   ) -> Self {
     let mut by_target: HashMap<ClientMessageId, Vec<&'a StoredMessage>> = HashMap::new();
     for message in reactions {
-      if let Some(target) = message.reaction_target() {
+      if let Some(target) = message.relation_target() {
         by_target.entry(target).or_default().push(message);
       }
     }

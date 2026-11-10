@@ -268,6 +268,7 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   let (conversation, id) = (active.message.conversation, active.message.id);
   let thread_root = active.message.maybe_thread.unwrap_or_else(|| thread_id_of(id));
   let (in_thread, is_mine) = (active.in_thread, active.is_mine);
+  let is_poll = active.message.maybe_poll.is_some();
   let extras = Memo::new(move |_| {
     state
       .read(|backend| backend.message_extras(conversation, &[id]))
@@ -279,7 +280,9 @@ fn ToolbarBar(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   let access = ChannelAccess::new(state, conversation);
   let permissions = Memo::new(move |_| access.message_permissions());
   let can_react = move || permissions.get().can_react;
-  let context = move || ActionContext::new(is_mine, in_thread, extras.get().as_ref(), permissions.get());
+  let context = move || {
+    ActionContext::new(is_mine, in_thread, extras.get().as_ref(), permissions.get()).for_poll(is_poll)
+  };
   let is_saved = move || extras.get().is_some_and(|extras| extras.is_saved);
   let react_button = NodeRef::<html::Button>::new();
   let more_button = NodeRef::<html::Button>::new();
@@ -636,6 +639,7 @@ fn ActionSheet(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
   }
   quick.truncate(QUICK_REACTION_COUNT + 2);
   let (is_mine, in_thread) = (active.is_mine, active.in_thread);
+  let is_poll = active.message.maybe_poll.is_some();
   let access = ChannelAccess::new(state, conversation);
   let permissions = Memo::new(move |_| access.message_permissions());
   // Reactions only where the user may react (`add_reaction`, which channels can take away).
@@ -684,7 +688,7 @@ fn ActionSheet(host: ToolbarHost, active: ActiveMessage) -> impl IntoView {
       }}
       <div class="sheet-actions" role="menu" node_ref=actions on:keydown=move |ev| move_in_menu(&ev, actions)>
         {move || {
-          message_actions(ActionContext::new(is_mine, in_thread, extras.get().as_ref(), permissions.get()), ActionSurface::Sheet)
+          message_actions(ActionContext::new(is_mine, in_thread, extras.get().as_ref(), permissions.get()).for_poll(is_poll), ActionSurface::Sheet)
             .into_iter()
             .map(|action| view! { <ActionItem action=action on_run=Callback::new(run) /> })
             .collect_view()

@@ -34,6 +34,9 @@ pub mod pending_work;
 pub mod people_names;
 pub mod picked_files;
 pub mod platform;
+/// Counting polls into the UI's view (issue #205).
+#[cfg(feature = "ui")]
+pub mod polls;
 pub mod prefetch;
 pub mod push_guard;
 #[cfg(any(feature = "ui", feature = "service-worker"))]
