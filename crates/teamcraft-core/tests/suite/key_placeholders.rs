@@ -160,6 +160,35 @@ async fn a_key_arriving_while_older_rows_are_shown_changes_only_its_own_row() {
 /// Alice's phone and Bob share a channel with history; Alice recovers a laptop (key bag from the
 /// server, not in the group yet) while her phone is switched off, and Bob switches the channel's key and
 /// writes. The laptop can't read that message: no device of Alice's that is online has its key.
+/// The catch-up cursor leaves placeholders out (their IDs are the server's word), so it stood
+/// before every message waiting for a key and each catch-up fetched them all again; with more
+/// than its page limit of them it noted them as a backlog every time.
+#[tokio::test]
+async fn a_catch_up_does_not_fetch_messages_waiting_for_keys_again() {
+  let server = FakeServer::new();
+  let (_phone, mut bob, mut laptop, channel, _clock) = laptop_missing_a_key(&server).await;
+  assert_eq!(
+    laptop.client.catch_up_messages(channel).await.unwrap(),
+    0,
+    "the waiting message came with the first page"
+  );
+
+  let waiting_before = waiting(&laptop, channel);
+
+  bob.client.send_text(channel, None, "still no key").await.unwrap();
+  assert_eq!(laptop.client.catch_up_messages(channel).await.unwrap(), 1);
+  assert_eq!(
+    laptop.client.catch_up_messages(channel).await.unwrap(),
+    0,
+    "nothing new, nothing fetched"
+  );
+  assert_eq!(
+    waiting(&laptop, channel),
+    waiting_before + 1,
+    "the new one waits in its place too"
+  );
+}
+
 async fn laptop_missing_a_key(server: &FakeServer) -> (Peer, Peer, Peer, ConversationId, Arc<ManualClock>) {
   let mut phone = Peer::enroll(server, "Alice").await;
   let mut bob = Peer::enroll(server, "Bob").await;
@@ -212,6 +241,16 @@ async fn laptop_missing_a_key(server: &FakeServer) -> (Peer, Peer, Peer, Convers
       .any(|message| matches!(message.maybe_unreadable, Some(Unreadable::Waiting { .. })))
   );
   (phone, bob, laptop, channel, clock)
+}
+
+fn waiting(peer: &Peer, channel: ConversationId) -> usize {
+  peer
+    .store
+    .messages(channel, MessageFilter::TopLevel)
+    .unwrap()
+    .iter()
+    .filter(|message| matches!(message.maybe_unreadable, Some(Unreadable::Waiting { .. })))
+    .count()
 }
 
 fn placeholders(

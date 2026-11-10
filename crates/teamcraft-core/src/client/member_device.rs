@@ -375,11 +375,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// device's key, only from a list that names it, and only for current members or devices whose
   /// removal time the user's devices recorded (their later messages are refused).
   pub(crate) async fn learn_sender_keys(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
-    let parked: Vec<MessageResponse> = records::list_json(&self.store, Table::Undecrypted)?;
+    // This conversation's only (keyed "<conversation>/<client message ID>"), not every parked
+    // message of the account on every conversation's catch-up.
+    let parked: Vec<(String, MessageResponse)> =
+      records::list_json_with_prefix(&self.store, Table::Undecrypted, &format!("{conversation}/"))?;
     let mut senders = BTreeSet::new();
-    for message in parked
+    for (_, message) in parked
       .iter()
-      .filter(|message| message.conversation_id == conversation)
+      .filter(|(_, message)| message.conversation_id == conversation)
     {
       if records::device_signing_key(&self.store, message.sender_user_id, message.sender_device_id)?.is_none()
       {
@@ -400,6 +403,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let users: Vec<UserId> = senders.iter().map(|(user, _)| *user).collect();
     let directory = self.trusted_directory(users.iter().copied()).await?;
     let lists = self.stored_device_lists(&directory, &users);
+    let mut has_learned = false;
     for (user, device) in senders {
       let key = format!("{conversation}/{user}/{device}");
       let has_removal = self.store.get(Table::RemovedSenders, &key)?.is_some();
@@ -415,9 +419,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .find(|entry| entry.device_id == crypto_device);
       if let Some(entry) = maybe_entry {
         records::put_device_signing_key(&self.store, user, device, &entry.signing_key)?;
+        has_learned = true;
       }
     }
-    self.retry_undecrypted(conversation)
+    // Every caller tried the parked messages just before: again only with a key that is new.
+    if has_learned {
+      self.retry_undecrypted(conversation)?;
+    }
+    Ok(())
   }
 
   /// Shares the removal records this device keeps locally (also those of versions before they

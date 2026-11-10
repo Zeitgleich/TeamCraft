@@ -61,6 +61,7 @@ use crate::device_proofs::{DeviceKeyProofs, DeviceProofKey};
 use crate::error::TeamCraftError;
 use crate::logging::LIFECYCLE;
 use crate::reads::{ReadLanes, ReadQueue};
+use crate::server_pool::ServerPool;
 use crate::types::{
   AccountState, AppConfig, DirectPeer, LinkPlatform, LinkRequestItem, MentionSettings, NotificationContent,
   Presence, PushNotification, PushService, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
@@ -135,7 +136,6 @@ pub(crate) type CoreClient = Client<Api, Store>;
 pub(crate) struct Engine {
   /// A process short of memory (the iOS notification extension): the client leaves upkeep to the app.
   is_memory_constrained: bool,
-  pub(crate) server_url: String,
   /// Where downloaded files are decrypted to (inside the app's private storage).
   download_dir: PathBuf,
   maybe_push_gateway_url: Option<String>,
@@ -144,6 +144,10 @@ pub(crate) struct Engine {
   /// The folder of downloads older versions shared between accounts.
   shared_downloads: PathBuf,
   tokens: ForeignTokens,
+  /// The engine thread's connections to the server, shared by every request made here.
+  http: ServerPool,
+  /// The connections of the requests on the HTTP runtime (pictures, directory), off this thread.
+  side_http: Arc<ServerPool>,
   listener: Arc<dyn EventListener>,
   pub(crate) store: Store,
   pub(crate) client: ClientSlot,
@@ -203,6 +207,19 @@ pub(crate) struct SyncSignals {
   pub(crate) running_calls: RunningCalls,
 }
 
+/// Where a push's preview spent its time, for the `push opened` line: durations only.
+#[derive(Clone, Copy, Debug, Default)]
+struct PushTimes {
+  /// Waiting for the app's access token (a refresh may ask the identity provider).
+  auth_wait: Duration,
+  /// Fetching and decrypting the message (a connection to the server first, after a pause).
+  fetch: Duration,
+  /// The app's own client catching the conversation up.
+  catch_up: Duration,
+  /// The notification extension's probe.
+  probe: Duration,
+}
+
 /// The new device's wait in the relay ([`Engine::wait_for_link_peer`]): a task on the engine thread
 /// beside the jobs, and the link it leaves once the other device answered. Dropping it ends the wait.
 #[derive(Default)]
@@ -238,6 +255,8 @@ pub(crate) struct EngineStart {
 pub(crate) struct EngineThreads {
   pub(crate) jobs: mpsc::UnboundedSender<Job>,
   pub(crate) reads: ReadQueue,
+  /// The server for requests that run on the HTTP runtime and need nothing of the engine.
+  pub(crate) http: Arc<ServerPool>,
 }
 
 /// Told when the client finds the store unreadable after the engine started: why, and what opens the
@@ -478,9 +497,9 @@ pub(crate) fn spawn(start: &EngineStart, late_problem: LateProblem) -> Result<En
             return;
           }
           drop(recovery_start);
-          let _ = ready.send(Ok(engine.reads.clone()));
+          let _ = ready.send(Ok((engine.reads.clone(), engine.side_http.clone())));
         } else {
-          let _ = ready.send(Ok(engine.reads.clone()));
+          let _ = ready.send(Ok((engine.reads.clone(), engine.side_http.clone())));
           if let Err(problem) = engine.finish_opening() {
             // The store closes first: a reset sets its files aside, and a connection closing after
             // that would delete the log of the new database, which has the old one's name.
@@ -502,10 +521,10 @@ pub(crate) fn spawn(start: &EngineStart, late_problem: LateProblem) -> Result<En
       });
     })
     .map_err(|error| OpenError::Failed(TeamCraftError::Core(error.to_string())))?;
-  let reads = opened
+  let (reads, http) = opened
     .recv()
     .map_err(|_| OpenError::Failed(TeamCraftError::EngineStopped))??;
-  Ok(EngineThreads { jobs, reads })
+  Ok(EngineThreads { jobs, reads, http })
 }
 
 /// A step of opening the engine, with a panic turned into an error that says where it happened.
@@ -694,13 +713,22 @@ impl Engine {
     .map_err(OpenError::Failed)?;
     let tokens =
       ForeignTokens::new(tokens, signals.id_tokens.clone(), maybe_device_key).map_err(OpenError::Failed)?;
+    let http = ServerPool::new(
+      HttpServerApi::new(server_url.clone(), tokens.clone()),
+      &signals.network,
+    );
+    let side_http = Arc::new(ServerPool::new(
+      HttpServerApi::new(server_url, tokens.clone()),
+      &signals.network,
+    ));
     let mut engine = Self {
       is_memory_constrained,
-      server_url,
       maybe_push_gateway_url,
       download_dir,
       upload_staging_dir,
       tokens,
+      http,
+      side_http,
       listener,
       store,
       client: ClientSlot::Missing,
@@ -1328,10 +1356,13 @@ impl Engine {
   ) -> Result<PushNotification, TeamCraftError> {
     let _step = teamcraft_core::timing::step("push_notification");
     let opened_at = std::time::Instant::now();
+    let mut times = PushTimes::default();
     let preview = if opening == PushOpening::StoreOnly {
       push_preview::<Api>(&self.store, None, &payload).await?
     } else {
-      self.push_preview_within_budget(&payload, reader).await?
+      self
+        .push_preview_within_budget(&payload, reader, &mut times)
+        .await?
     };
     // Why a notification said less, and how long it took: IDs and reasons only (security.md), so
     // an exported diagnostics log shows how often each path is taken.
@@ -1341,6 +1372,10 @@ impl Engine {
         ?opening,
         gap = ?preview.maybe_gap,
         ran_ms = opened_at.elapsed().as_millis(),
+        auth_wait_ms = times.auth_wait.as_millis(),
+        fetch_ms = times.fetch.as_millis(),
+        catch_up_ms = times.catch_up.as_millis(),
+        probe_ms = times.probe.as_millis(),
         is_client_idle = matches!(self.client, ClientSlot::Idle(_)),
         "push opened"
       );
@@ -1424,6 +1459,7 @@ impl Engine {
     &mut self,
     payload: &[u8],
     reader: PushReader,
+    times: &mut PushTimes,
   ) -> Result<PushPreview, TeamCraftError> {
     let started = tokio::time::Instant::now();
     let deadline = started + PUSH_PREVIEW_BUDGET;
@@ -1431,14 +1467,17 @@ impl Engine {
     // Without a token the preview still names conversation and sender, also when a refresh would
     // use up the time for the fetch.
     let maybe_token = tokio::time::timeout(PUSH_FETCH_BUDGET, self.tokens.fresh_token()).await;
+    times.auth_wait = started.elapsed();
     if !matches!(maybe_token, Ok(Ok(_))) {
       let is_timed_out = maybe_token.is_err();
       tracing::info!(target: LIFECYCLE, is_timed_out, "no access token for the push");
     }
     let maybe_api = matches!(maybe_token, Ok(Ok(_))).then_some(&api);
     // Cancel-safe: the preview only reads the store.
+    let fetch_started = tokio::time::Instant::now();
     let fetched =
       tokio::time::timeout(PUSH_FETCH_BUDGET, push_preview(&self.store, maybe_api, payload)).await;
+    times.fetch = fetch_started.elapsed();
     let mut preview = match fetched {
       Ok(result) => result?,
       Err(_elapsed) => {
@@ -1462,7 +1501,10 @@ impl Engine {
       && let ClientSlot::Idle(client) = &mut self.client
     {
       let conversation = preview.wake_up.conversation_id;
-      if let Err(error) = catch_up_for_push(client, conversation, deadline).await {
+      let catch_up_started = tokio::time::Instant::now();
+      let caught = catch_up_for_push(client, conversation, deadline).await;
+      times.catch_up = catch_up_started.elapsed();
+      if let Err(error) = caught {
         // The class only: an error's text can carry what a server said.
         let cause = error_class(&error);
         tracing::info!(target: LIFECYCLE, cause, conversation_id = %conversation, "push catch-up stopped");
@@ -1477,9 +1519,11 @@ impl Engine {
       }
     }
     if reader.probes(preview.needs_catch_up()) {
+      let probe_started = tokio::time::Instant::now();
       preview = self
         .probe_for_push(payload, started + PUSH_PROBE_BUDGET, preview)
         .await;
+      times.probe = probe_started.elapsed();
     }
     Ok(preview)
   }
@@ -1855,8 +1899,9 @@ impl Engine {
     }
   }
 
+  /// A handle on the server whose requests share the engine thread's open connections.
   pub(crate) fn api(&self) -> Api {
-    HttpServerApi::new(self.server_url.clone(), self.tokens.clone())
+    self.http.api()
   }
 }
 
@@ -1930,6 +1975,20 @@ fn loop_restart_delay(deaths: u32) -> Duration {
     0 | 1 => Duration::ZERO,
     _ => Duration::from_secs(1u64 << doublings).min(MAX_LOOP_RESTART_DELAY),
   }
+}
+
+/// A server handle for tests, with a provider that has a fixed token.
+#[cfg(test)]
+pub(crate) fn test_api(server_url: &str) -> Api {
+  struct FixedToken;
+  impl TokenProvider for FixedToken {
+    fn access_token(&self) -> Option<String> {
+      Some("token".into())
+    }
+  }
+  let tokens = ForeignTokens::new(Arc::new(FixedToken), IdTokens::default(), None)
+    .unwrap_or_else(|error| panic!("token thread: {error}"));
+  HttpServerApi::new(server_url, tokens)
 }
 
 impl ForeignTokens {
