@@ -774,7 +774,10 @@ The brake limits what one run may do; several small runs in a row each pass it.
 **SCIM.** Identity providers that push accounts through SCIM 2.0 (`/scim/v2`) go through the same
 sequence and the same list of held deactivations, with the brake counted per time window instead of per
 run, and owners and admins always held for a confirmation ([provisioning.md §7](provisioning.md)). Their
-clients and tokens are made, rotated and revoked under System health, "SCIM provisioning".
+clients and tokens are made, rotated and revoked under System health, "SCIM provisioning". A SCIM client
+takes over any existing account of the identity provider whose subject it sends (so an instance in use
+can switch to SCIM), and can then disable it within these limits: treat its token like the provider's
+own admin credentials.
 
 **Dry run.** `[oidc.sync] mode = "dry_run"` runs the sync and reports what it would do; nothing changes, and
 groups are not looked at. `POST /admin/oidc-sync/preview` answers the same for one run, whatever the mode.

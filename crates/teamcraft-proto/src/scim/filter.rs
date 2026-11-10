@@ -1,5 +1,5 @@
 //! SCIM filters (RFC 7644 §3.4.2.2) and PATCH paths (§3.5.2): parsed from network input, so the
-//! parser is bounded in length and depth, never panics, and is fuzzed (`fuzz/fuzz_targets/scim_filter.rs`).
+//! parser is bounded in length and depth, never panics, and is fuzzed (`fuzz/fuzz_targets/scim.rs`).
 //!
 //! Attribute names are case-insensitive (RFC 7643 §2.1): the parser lower-cases them, and the
 //! evaluator expects resources whose keys were lower-cased by [`super::normalize_keys`].

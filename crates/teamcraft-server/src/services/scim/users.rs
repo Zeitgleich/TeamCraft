@@ -308,8 +308,9 @@ async fn write(
       ));
     },
   }
-  // Also when it says active and the account is: a held deactivation comes off the list.
-  if attributes.is_active || row.is_active {
+  // Only a change of the provider's own `active` acts: a held deactivation stays held until an
+  // admin confirms it or the provider says `active: true` again.
+  if attributes.is_active != row.is_active_requested {
     set_active(
       state,
       caller,
@@ -534,6 +535,7 @@ fn write_of<'a>(attributes: &'a UserAttributes, shown_name: &'a str) -> ScimUser
     maybe_display_name: attributes.maybe_display_name.as_deref(),
     shown_name,
     maybe_email: attributes.maybe_email.as_deref(),
+    is_active_requested: attributes.is_active,
   }
 }
 
@@ -545,7 +547,9 @@ fn attributes_of(row: &ScimUserRow) -> UserAttributes {
     maybe_family_name: row.maybe_family_name.clone(),
     maybe_display_name: row.maybe_display_name.clone(),
     maybe_email: row.maybe_email.clone(),
-    is_active: row.is_active,
+    // What the provider asked for, not the account's state: a PATCH that doesn't name `active`
+    // must not lift a held deactivation.
+    is_active: row.is_active_requested,
   }
 }
 

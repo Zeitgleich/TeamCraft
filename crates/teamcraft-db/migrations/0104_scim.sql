@@ -32,6 +32,9 @@ CREATE TABLE scim_users (
   -- until its first sign-in, from then on the sign-in's token is the source of them.
   display_name text,
   email        text,
+  -- The provider's own `active`. A held deactivation leaves the account active while this is
+  -- false, so a PATCH that doesn't name `active` keeps the hold; only an explicit `true` lifts it.
+  is_active_requested boolean NOT NULL DEFAULT true,
   -- The ETag (`W/"<version>"`): raised by every change through SCIM.
   version     bigint      NOT NULL DEFAULT 1,
   created_at  timestamptz NOT NULL DEFAULT now(),

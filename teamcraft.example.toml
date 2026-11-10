@@ -783,7 +783,7 @@ calendar_lookahead_secs = 900
 # Requests of one SCIM client per minute (and its burst); more get 429 with Retry-After.
 requests_per_minute = 600
 # Safety brake: deactivations and removals by SCIM within brake_window_secs may reach this share of
-# the active accounts, and always brake_min_allowed; beyond it they wait for an admin to confirm.
+# the active people who have signed in (accounts made in advance don't count), and always brake_min_allowed; beyond it they wait for an admin to confirm.
 # Owners and admins always wait.
 brake_max_percent = 10
 brake_min_allowed = 2
@@ -795,6 +795,8 @@ max_body_bytes = 1048576
 # The most resources a filter no index narrows may read; filter by userName, externalId or
 # displayName for more.
 max_filter_scan = 10000
+# The most group members a filter that names members may read in all.
+max_filter_members = 100000
 
 [webhooks]
 # Outgoing webhooks are set in the admin console (Integrations > Webhooks, docs/webhooks.md); these

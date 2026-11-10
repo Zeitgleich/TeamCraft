@@ -79,6 +79,7 @@ pub async fn list_groups(
       let candidates = candidates(state, caller.client, &filter).await?;
       let needs_members = text.to_ascii_lowercase().contains("members");
       let members = if needs_members {
+        within_filter_budget(state, &candidates).await?;
         members_of(state, &candidates).await?
       } else {
         HashMap::new()
@@ -505,6 +506,22 @@ type MembersByGroup = HashMap<ScimGroupId, Vec<(UserId, String)>>;
 async fn members_of(state: &AppState, rows: &[ScimGroupRow]) -> Result<MembersByGroup, ScimError> {
   let groups: Vec<ScimGroupId> = rows.iter().map(|row| row.id).collect();
   Ok(state.database.scim_group_members(&groups).await?)
+}
+
+/// Refuses (`tooMany`) a filter on members whose candidate groups have more members together than
+/// `[scim] max_filter_members`: they would all be read into memory to evaluate it.
+async fn within_filter_budget(state: &AppState, candidates: &[ScimGroupRow]) -> Result<(), ScimError> {
+  let groups: Vec<ScimGroupId> = candidates.iter().map(|row| row.id).collect();
+  let total: i64 = state
+    .database
+    .scim_group_member_counts(&groups)
+    .await?
+    .values()
+    .sum();
+  if total > i64::from(state.settings.get().scim.max_filter_members) {
+    return Err(ScimError::FilterTooBroad);
+  }
+  Ok(())
 }
 
 /// The first groups of `rows` whose members together stay within [`MAX_LISTED_MEMBERS`], at

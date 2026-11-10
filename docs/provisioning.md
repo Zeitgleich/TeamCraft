@@ -303,8 +303,9 @@ only, like the sync's: leaving or deleting a SCIM group removes nobody (`group_m
 - Filters (RFC 7644 §3.4.2.2) with every operator, `and`, `or`, `not` and value paths. Equality on
   `userName`, `externalId`, `id` and (groups) `displayName` is looked up by index; any other filter
   reads the client's resources up to `[scim] max_filter_scan` (10 000) and is refused beyond
-  (`tooMany`). Attribute names ignore case; `id` and `externalId` compare exactly, all other values
-  ignore case.
+  (`tooMany`); a group filter that names `members` reads their members, up to `[scim]
+  max_filter_members` (100 000) in all. Attribute names ignore case; `id` and `externalId` compare
+  exactly, all other values ignore case.
 - Paging with `startIndex` and `count` (at most 200), `attributes` and `excludedAttributes`. A group page
   carries at most 10 000 members in all and stops early beyond them (`itemsPerPage` says how many).
 - ETags: `meta.version` and the `ETag` header are `W/"<version>"`; `If-Match` on `PUT`, `PATCH` and
@@ -321,13 +322,16 @@ only, like the sync's: leaving or deleting a SCIM group removes nobody (`group_m
 
 A SCIM client sends one request per user, not one run, so the brake counts deactivations and deletions
 by SCIM (all clients together) in a sliding window: `[scim] brake_window_secs` (an hour) may take
-`max(brake_min_allowed, brake_max_percent % of the active accounts)` (defaults 2 and 10 %), never
-everybody. Beyond it, the deactivation is **held**: the request succeeds, the resource still says
-`active: true`, the person keeps working, and the held entry shows in the console's brake list next to
-the sync's (`scim_deactivation_held`, the `oidc_sync_brake` check). Confirming the list applies it
-(an owner confirms when an owner or admin is on it); enabling the person again through SCIM takes it
-off. **Owners and admins are always held**: a SCIM token alone never deactivates them. The sync's runs
-replace only their own entries of the list and never apply SCIM's.
+`max(brake_min_allowed, brake_max_percent % of the active people who have signed in)` (defaults 2 and
+10 %), never everybody. Accounts made in advance that never signed in don't count, so a client can't
+raise the allowance by making dummy accounts first. Beyond it, the deactivation is **held**: the
+request succeeds, the resource still says `active: true`, the person keeps working, and the held entry
+shows in the console's brake list next to the sync's (`scim_deactivation_held`, the `oidc_sync_brake`
+check). Confirming the list applies it (an owner confirms when an owner or admin is on it). Only an
+explicit `active: true` from the provider (a PUT, a create, or a PATCH that names `active`) takes a
+hold off: the resource keeps the provider's requested `active`, so a PATCH of other attributes leaves
+the hold as it is. **Owners and admins are always held**: a SCIM token alone never deactivates them.
+The sync's runs replace only their own entries of the list and never apply SCIM's.
 
 ### 7.6 What a SCIM token can do, and what a hostile one can
 
@@ -336,12 +340,13 @@ treated like one: rate-limited per client (`[scim] requests_per_minute`, 600), b
 max_body_bytes`, 1 MiB; 100 PATCH operations; 1 000 members per request), every failed authentication
 counted against the address like a failed sign-in.
 
-| It can                                                                  | Bound                                                                                                                      |
-|-------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------|
-| Read the users and groups of its own client, with what it sent itself   | Nothing else: no other client's resources, no other accounts, no message content, keys, devices, sessions or audit log     |
-| Make member accounts and link existing ones by their subject            | No roles; an account another client holds is refused; a released identity is refused                                       |
-| Deactivate the members it linked, and delete those that never signed in | The brake's window; owners and admins only with an admin's confirmation; an admin's own deactivation is never lifted by it |
-| Add its users to mapped spaces and public channels                      | Only what the admins' rules name; private channels need a member's signed add (§5)                                         |
+| It can                                                                  | Bound                                                                                                                       |
+|-------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
+| Read the users and groups of its own client, with what it sent itself   | Nothing else: no other client's resources, no other accounts, no message content, keys, devices, sessions or audit log      |
+| Make member accounts and link existing ones by their subject            | No roles; an account another client holds is refused; a released identity is refused                                        |
+| Link any account of the instance's identity provider by its subject     | Intended: a provider set up on an instance in use takes over the people already there; the token then manages them as above |
+| Deactivate the members it linked, and delete those that never signed in | The brake's window; owners and admins only with an admin's confirmation; an admin's own deactivation is never lifted by it  |
+| Add its users to mapped spaces and public channels                      | Only what the admins' rules name; private channels need a member's signed add (§5)                                          |
 
 The server never trusted the identity provider's word for encryption groups and doesn't trust SCIM's
 either: membership, removal and roles stay signed by members' devices (e2ee.md §4.6), so a stolen SCIM
@@ -362,15 +367,16 @@ confidentiality one. Revoking the client in the console ends it at once.
 | A provider flooding requests      | 429 with `Retry-After` per client; the address limit of the API applies as well                                                     |
 | Sync and SCIM both on             | Both write the same accounts by subject; the sync's run reconciles against the provider, SCIM's holds stay SCIM's                   |
 
-| Setting                      | Default | Meaning                                                 |
-|------------------------------|---------|---------------------------------------------------------|
-| `[scim] requests_per_minute` | 600     | Requests of one client per minute (and its burst)       |
-| `[scim] brake_max_percent`   | 10      | Share of active accounts SCIM may deactivate per window |
-| `[scim] brake_min_allowed`   | 2       | Deactivations per window whatever the share             |
-| `[scim] brake_window_secs`   | 3600    | The brake's window                                      |
-| `[scim] max_group_members`   | 20000   | Members of one SCIM group                               |
-| `[scim] max_body_bytes`      | 1048576 | Largest request body                                    |
-| `[scim] max_filter_scan`     | 10000   | Resources a filter no index narrows may read            |
+| Setting                      | Default | Meaning                                                         |
+|------------------------------|---------|-----------------------------------------------------------------|
+| `[scim] requests_per_minute` | 600     | Requests of one client per minute (and its burst)               |
+| `[scim] brake_max_percent`   | 10      | Share of signed-in active people SCIM may deactivate per window |
+| `[scim] brake_min_allowed`   | 2       | Deactivations per window whatever the share                     |
+| `[scim] brake_window_secs`   | 3600    | The brake's window                                              |
+| `[scim] max_group_members`   | 20000   | Members of one SCIM group                                       |
+| `[scim] max_body_bytes`      | 1048576 | Largest request body                                            |
+| `[scim] max_filter_scan`     | 10000   | Resources a filter no index narrows may read                    |
+| `[scim] max_filter_members`  | 100000  | Group members a filter on `members` may read in all             |
 
 **Setting it up.** Make a client in the console, give the identity provider the base URL (`https://<server>/scim/v2`)
 and the token as a bearer token ("secret token" in Entra ID, "HTTP header" authentication in Okta), and

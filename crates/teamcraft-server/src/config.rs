@@ -1438,7 +1438,8 @@ pub struct ScimConfig {
   /// Requests of one SCIM client per minute (and its burst); more get 429 with `Retry-After`.
   pub requests_per_minute: u32,
   /// Safety brake: deactivations and removals by SCIM within `brake_window_secs` may reach this
-  /// share of the active accounts, and always `brake_min_allowed`; beyond that they are held for an
+  /// share of the active people who have signed in (accounts made in advance don't count, so a
+  /// client can't raise the allowance by making some), and always `brake_min_allowed`; beyond that they are held for an
   /// admin to confirm, like the sync's (admin.md §3.2.3).
   pub brake_max_percent: u32,
   pub brake_min_allowed: u32,
@@ -1450,6 +1451,9 @@ pub struct ScimConfig {
   /// The most resources a filter that no index narrows may look at; beyond that it is refused
   /// (`tooMany`) and the client has to filter by `userName`, `externalId` or `displayName`.
   pub max_filter_scan: u32,
+  /// The most group members a filter that names `members` may read in all; beyond that it is
+  /// refused (`tooMany`).
+  pub max_filter_members: u32,
 }
 
 impl Default for ScimConfig {
@@ -1462,6 +1466,7 @@ impl Default for ScimConfig {
       max_group_members: 20_000,
       max_body_bytes: 1024 * 1024,
       max_filter_scan: 10_000,
+      max_filter_members: 100_000,
     }
   }
 }

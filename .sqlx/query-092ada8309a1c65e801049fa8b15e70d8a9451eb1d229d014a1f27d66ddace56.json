@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE scim_users\n       SET user_name = $2, external_id = $3, given_name = $4, family_name = $5, display_name = $6,\n           email = $7, version = version + 1, updated_at = now()\n       WHERE user_id = $1 RETURNING version",
+  "query": "UPDATE scim_users\n       SET user_name = $2, external_id = $3, given_name = $4, family_name = $5, display_name = $6,\n           email = $7, is_active_requested = $8, version = version + 1, updated_at = now()\n       WHERE user_id = $1 RETURNING version",
   "describe": {
     "columns": [
       {
@@ -23,12 +23,13 @@
         "Text",
         "Text",
         "Text",
-        "Text"
+        "Text",
+        "Bool"
       ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "793efceb7e83fc59d9ca87c3383e7ee309aaf2cf37f4b8e72eec5b6d53b8a044"
+  "hash": "092ada8309a1c65e801049fa8b15e70d8a9451eb1d229d014a1f27d66ddace56"
 }

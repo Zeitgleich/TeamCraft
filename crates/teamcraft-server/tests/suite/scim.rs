@@ -820,6 +820,30 @@ mod brake {
       .await;
     assert_eq!(held.body["active"], true);
     assert_eq!(app.get(&admin(), "/me").await.status, StatusCode::OK);
+    // A PATCH of other attributes (Entra ID sends them apart) keeps the hold.
+    let renamed = scim
+      .patch(
+        &format!("/Users/{bob}"),
+        &json!({"Operations": [{"op": "replace", "path": "displayName", "value": "Bob B"}]}),
+      )
+      .await;
+    assert_eq!(renamed.status, StatusCode::OK, "{}", renamed.body);
+    let status = app.get(&owner(), "/admin/oidc-sync").await;
+    assert_eq!(status.body["held"][0]["user_id"], bob.as_str(), "{}", status.body);
+    // So does a PUT that still says inactive.
+    scim
+      .put(
+        &format!("/Users/{bob}"),
+        r#"{"userName": "bob", "externalId": "sub-bob", "active": false}"#,
+      )
+      .await;
+    let status = app.get(&owner(), "/admin/oidc-sync").await;
+    assert_eq!(
+      status.body["held"].as_array().unwrap().len(),
+      1,
+      "{}",
+      status.body
+    );
     // Enabling again takes the hold off the list.
     scim
       .patch(
@@ -832,6 +856,47 @@ mod brake {
       status.body["held"].as_array().unwrap().is_empty(),
       "{}",
       status.body
+    );
+    app.stop().await;
+  }
+}
+
+mod brake_allowance {
+  use super::*;
+
+  #[tokio::test]
+  async fn accounts_made_in_advance_do_not_raise_the_allowance() {
+    let app = app!(|settings: &mut teamcraft_server::state::Settings| {
+      settings.scim.brake_max_percent = 40;
+      settings.scim.brake_min_allowed = 1;
+    });
+    let (scim, _) = client(&app, "external_id").await;
+    let mut people = Vec::new();
+    for name in ["carol", "dave", "erin"] {
+      let id = scim
+        .create_user(&json!({"userName": name, "externalId": format!("sub-{name}")}).to_string())
+        .await;
+      user_id(&app, &member(name)).await;
+      people.push(id);
+    }
+    // Five people signed in: two deactivations per window. Twenty dummies would make it ten.
+    for index in 0..20 {
+      scim
+        .create_user(
+          &json!({"userName": format!("dummy{index}"), "externalId": format!("sub-dummy{index}")})
+            .to_string(),
+        )
+        .await;
+    }
+    let disable = json!({"Operations": [{"op": "replace", "path": "active", "value": false}]});
+    let mut states = Vec::new();
+    for id in &people {
+      states.push(scim.patch(&format!("/Users/{id}"), &disable).await.body["active"].clone());
+    }
+    assert_eq!(
+      states,
+      vec![json!(false), json!(false), json!(true)],
+      "the third is held"
     );
     app.stop().await;
   }
@@ -999,6 +1064,40 @@ mod groups {
     assert_eq!(again.status, StatusCode::NO_CONTENT, "{}", again.body);
     let group = scim.get(&format!("/Groups/{group}")).await;
     assert_eq!(group.body["members"].as_array().unwrap().len(), 1);
+    app.stop().await;
+  }
+}
+
+mod group_filters {
+  use super::*;
+
+  #[tokio::test]
+  async fn a_filter_on_members_reads_a_bounded_number_of_them() {
+    let app = app!(|settings: &mut teamcraft_server::state::Settings| settings.scim.max_filter_members = 2);
+    let (scim, _) = client(&app, "external_id").await;
+    let mut members = Vec::new();
+    for name in ["carol", "dave", "erin"] {
+      let id = scim
+        .create_user(&json!({"userName": name, "externalId": format!("sub-{name}")}).to_string())
+        .await;
+      members.push(json!({"value": id}));
+    }
+    let group = scim
+      .post(
+        "/Groups",
+        &json!({"displayName": "G", "members": members}).to_string(),
+      )
+      .await;
+    assert_eq!(group.status, StatusCode::CREATED, "{}", group.body);
+    let dave = members[1]["value"].as_str().unwrap();
+    let answer = scim
+      .get(&format!("/Groups?filter=members%5Bvalue%20eq%20%22{dave}%22%5D"))
+      .await;
+    assert_eq!(answer.status, StatusCode::BAD_REQUEST, "{}", answer.body);
+    assert_eq!(answer.body["scimType"], "tooMany");
+    // Without members in the filter nothing is read.
+    let answer = scim.get("/Groups?filter=displayName%20eq%20%22G%22").await;
+    assert_eq!(answer.body["totalResults"], 1);
     app.stop().await;
   }
 }

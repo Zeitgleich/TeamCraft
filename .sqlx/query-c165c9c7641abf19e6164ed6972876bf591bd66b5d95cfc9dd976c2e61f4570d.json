@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT count(*) AS \"count!\" FROM users\n         WHERE oidc_issuer = $1 AND deactivated_at IS NULL AND deleted_at IS NULL",
+  "query": "SELECT count(*) AS \"count!\" FROM users\n         WHERE oidc_issuer = $1 AND deactivated_at IS NULL AND deleted_at IS NULL\n           AND awaiting_first_sign_in_since IS NULL AND kind IN ('member', 'guest')",
   "describe": {
     "columns": [
       {
@@ -19,5 +19,5 @@
       null
     ]
   },
-  "hash": "e62b1d6bb3b4f5f13bb680b29cad02be47daded7ff2fca81cc78de35d02bec5e"
+  "hash": "c165c9c7641abf19e6164ed6972876bf591bd66b5d95cfc9dd976c2e61f4570d"
 }

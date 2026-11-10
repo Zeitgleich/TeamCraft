@@ -63,7 +63,10 @@ pub struct ScimUserRow {
   pub maybe_family_name: Option<String>,
   pub maybe_display_name: Option<String>,
   pub maybe_email: Option<String>,
+  /// The account's state: not deactivated.
   pub is_active: bool,
+  /// What the provider last asked for; differs from `is_active` while a deactivation is held.
+  pub is_active_requested: bool,
   pub version: i64,
   pub created_at: OffsetDateTime,
   pub updated_at: OffsetDateTime,
@@ -80,6 +83,7 @@ pub struct ScimUserWrite<'a> {
   /// The name the account shows while it never signed in.
   pub shown_name: &'a str,
   pub maybe_email: Option<&'a str>,
+  pub is_active_requested: bool,
 }
 
 /// How a user lookup narrows the client's resources.
@@ -348,7 +352,7 @@ impl Database {
     let rows = sqlx::query!(
       r#"SELECT s.user_id, s.user_name, s.external_id, s.given_name, s.family_name,
                 s.display_name, s.email,
-                u.deactivated_at IS NULL AS "is_active!", s.version, s.created_at, s.updated_at
+                u.deactivated_at IS NULL AS "is_active!", s.is_active_requested, s.version, s.created_at, s.updated_at
          FROM scim_users s JOIN users u ON u.id = s.user_id
          WHERE s.client_id = $1 AND u.deleted_at IS NULL
            AND ($2::bigint IS NULL OR s.user_id = $2)
@@ -377,6 +381,7 @@ impl Database {
           maybe_display_name: row.display_name,
           maybe_email: row.email,
           is_active: row.is_active,
+          is_active_requested: row.is_active_requested,
           version: row.version,
           created_at: row.created_at,
           updated_at: row.updated_at,
@@ -413,8 +418,8 @@ impl Database {
       None => {},
     }
     let inserted = sqlx::query!(
-      "INSERT INTO scim_users (user_id, client_id, user_name, external_id, given_name, family_name, display_name, email)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      "INSERT INTO scim_users (user_id, client_id, user_name, external_id, given_name, family_name, display_name, email, is_active_requested)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT DO NOTHING",
       to_db(user),
       to_db(client),
@@ -424,6 +429,7 @@ impl Database {
       write.maybe_family_name,
       write.maybe_display_name,
       write.maybe_email,
+      write.is_active_requested,
     )
     .execute(&mut *tx)
     .await?
@@ -486,7 +492,7 @@ impl Database {
     let new_version = sqlx::query_scalar!(
       "UPDATE scim_users
        SET user_name = $2, external_id = $3, given_name = $4, family_name = $5, display_name = $6,
-           email = $7, version = version + 1, updated_at = now()
+           email = $7, is_active_requested = $8, version = version + 1, updated_at = now()
        WHERE user_id = $1 RETURNING version",
       to_db(user),
       write.user_name,
@@ -495,6 +501,7 @@ impl Database {
       write.maybe_family_name,
       write.maybe_display_name,
       write.maybe_email,
+      write.is_active_requested,
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -866,7 +873,9 @@ impl Database {
 
   /// Takes a place in the safety brake's window for deactivating or removing `user`, if
   /// `may_proceed(recent, active)` allows it: `recent` is how many SCIM deprovisions happened in
-  /// the last `window`, `active` how many active accounts of `issuer` there are. Serialized by an
+  /// the last `window`, `active` how many active people of `issuer` have signed in. Accounts that
+  /// never signed in don't count: a SCIM client could otherwise make many of them to raise the
+  /// allowance before deactivating real people. Serialized by an
   /// advisory lock, so concurrent requests can't both take the last place. `false`: hold it.
   pub async fn reserve_scim_deprovision(
     &self,
@@ -892,7 +901,8 @@ impl Database {
       .await?;
     let active = sqlx::query_scalar!(
       r#"SELECT count(*) AS "count!" FROM users
-         WHERE oidc_issuer = $1 AND deactivated_at IS NULL AND deleted_at IS NULL"#,
+         WHERE oidc_issuer = $1 AND deactivated_at IS NULL AND deleted_at IS NULL
+           AND awaiting_first_sign_in_since IS NULL AND kind IN ('member', 'guest')"#,
       issuer,
     )
     .fetch_one(&mut *tx)
