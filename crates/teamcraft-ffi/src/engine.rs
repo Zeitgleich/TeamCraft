@@ -67,7 +67,7 @@ use crate::types::{
   Presence, PushNotification, PushService, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
   TestPushResult,
 };
-use crate::{EventListener, TokenProvider};
+use crate::{AccessToken, EventListener, TokenProvider};
 
 /// Decrypted downloads, one folder per account below it.
 /// Wrong short codes allowed before a link approval is dropped.
@@ -385,7 +385,8 @@ enum PushAccess {
   /// Nothing to fetch: not asked.
   NotAsked,
   Supplied,
-  /// The app had none: signed out, or a refresh that failed (offline, Doze) – it can't tell which.
+  /// The app had none: signed out, or a refresh that failed for now (offline, Doze). Either way
+  /// more requests would fail; only the first is a sign-out, which the app handles itself.
   Missing,
   /// The app's refresh took longer than the fetch's time.
   TimedOut,
@@ -1589,8 +1590,8 @@ impl Engine {
     };
     times.auth_wait = auth_started.elapsed();
     if access.is_missing() {
-      // Not a sign-out: an app that can't refresh its token right now (offline, Doze, the identity
-      // provider slow) says no token too. The app signs out itself when its session ends.
+      // Either way the store's preview stays: a refresh that failed for now (offline, Doze, the
+      // identity provider slow) is retried later, and the app signs out itself when its session ends.
       tracing::info!(target: LIFECYCLE, ?access, "no access token for the push");
       let preview = if access == PushAccess::TimedOut {
         timed_out(stored)
@@ -2066,8 +2067,10 @@ fn loop_restart_delay(deaths: u32) -> Duration {
 pub(crate) fn test_api(server_url: &str) -> Api {
   struct FixedToken;
   impl TokenProvider for FixedToken {
-    fn access_token(&self) -> Option<String> {
-      Some("token".into())
+    fn access_token(&self) -> AccessToken {
+      AccessToken::Token {
+        value: "token".into(),
+      }
     }
   }
   let tokens = ForeignTokens::new(Arc::new(FixedToken), IdTokens::default(), None)
@@ -2147,10 +2150,16 @@ impl AccessTokenSource for ForeignTokens {
   }
 }
 
+/// The app's answer as the core's: only an ended session is a sign-out; a refresh that failed is a
+/// network problem, so callers retry with backoff and keep their state (issue #1671).
 fn signed_in_token(provider: &dyn TokenProvider) -> Result<String, ApiError> {
-  provider
-    .access_token()
-    .ok_or_else(|| ApiError::Token("signed out".into()))
+  match provider.access_token() {
+    AccessToken::Token { value } => Ok(value),
+    AccessToken::Unavailable => Err(ApiError::Network(
+      "the app could not refresh its access token".into(),
+    )),
+    AccessToken::SignedOut => Err(ApiError::Token("signed out".into())),
+  }
 }
 
 /// Runs a UI command on an idle client; offline is fine (the outbox keeps messages).
@@ -2461,6 +2470,45 @@ mod tests {
     assert_eq!(PushFetch::of(false, true), PushFetch::NotNeeded);
     assert_eq!(PushFetch::of(true, true), PushFetch::LeftToSync);
     assert_eq!(PushFetch::of(true, false), PushFetch::Fetch);
+  }
+
+  /// Issue #1671: only an ended session is a sign-out. A refresh that failed for now is a network
+  /// problem: the connection, the sync and queued work retry it with backoff and keep their state,
+  /// and the apps don't show the sign-in.
+  #[test]
+  fn only_an_ended_session_is_a_sign_out() {
+    struct Answers(fn() -> AccessToken);
+    impl TokenProvider for Answers {
+      fn access_token(&self) -> AccessToken {
+        (self.0)()
+      }
+    }
+    let answer = |token: fn() -> AccessToken| signed_in_token(&Answers(token));
+
+    let supplied = answer(|| AccessToken::Token {
+      value: "token".into(),
+    });
+    assert_eq!(supplied.ok().as_deref(), Some("token"));
+
+    let Err(failed_refresh) = answer(|| AccessToken::Unavailable) else {
+      panic!("a failed refresh supplies no token");
+    };
+    assert!(failed_refresh.is_transient());
+    assert!(!failed_refresh.is_sign_in_required());
+    assert!(matches!(
+      TeamCraftError::from(CoreError::Api(failed_refresh)),
+      TeamCraftError::Network(_)
+    ));
+
+    let Err(signed_out) = answer(|| AccessToken::SignedOut) else {
+      panic!("a signed-out app supplies no token");
+    };
+    assert!(!signed_out.is_transient());
+    assert!(signed_out.is_sign_in_required());
+    assert!(matches!(
+      TeamCraftError::from(CoreError::Api(signed_out)),
+      TeamCraftError::SignedOut
+    ));
   }
 
   #[test]
@@ -2865,13 +2913,13 @@ mod tests {
     }
 
     impl TokenProvider for CountedTokens {
-      fn access_token(&self) -> Option<String> {
+      fn access_token(&self) -> AccessToken {
         self.asked.fetch_add(1, Ordering::SeqCst);
         if let Some(released) = self.maybe_hang.lock().unwrap().take() {
           // Ends when the test drops its sender.
           let _ = released.recv();
         }
-        None
+        AccessToken::Unavailable
       }
     }
 
@@ -2939,8 +2987,10 @@ mod tests {
     struct Token;
 
     impl TokenProvider for Token {
-      fn access_token(&self) -> Option<String> {
-        Some("token".into())
+      fn access_token(&self) -> AccessToken {
+        AccessToken::Token {
+          value: "token".into(),
+        }
       }
     }
 
@@ -3050,8 +3100,10 @@ mod tests {
     struct OneToken(String);
 
     impl TokenProvider for OneToken {
-      fn access_token(&self) -> Option<String> {
-        Some(self.0.clone())
+      fn access_token(&self) -> AccessToken {
+        AccessToken::Token {
+          value: self.0.clone(),
+        }
       }
     }
 

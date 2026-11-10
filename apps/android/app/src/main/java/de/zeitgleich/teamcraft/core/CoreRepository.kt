@@ -16,6 +16,7 @@ import de.zeitgleich.teamcraft.auth.AuthRepository
 import de.zeitgleich.teamcraft.security.KeystoreBox
 import de.zeitgleich.teamcraft.security.SealedFile
 import de.zeitgleich.teamcraft.server.StoragePaths
+import uniffi.teamcraft_ffi.AccessToken
 import uniffi.teamcraft_ffi.AppActivity
 import uniffi.teamcraft_ffi.AppConfig
 import uniffi.teamcraft_ffi.ConnectionState
@@ -174,13 +175,19 @@ class CoreRepository(
     /**
      * Called on the core's own token thread, never on one that reads. Every authenticated request
      * of the core passes here, so reading what the store holds doesn't wait for the device's CAs.
-     * The ID token goes along for the owners' apps to verify (e2ee.md §3.1.3).
+     * The ID token goes along for the owners' apps to verify (e2ee.md §3.1.3). No token while the
+     * session is kept is a refresh that failed for now, not a sign-out (issue #1671).
      */
-    override fun accessToken(): String? = runBlocking {
+    override fun accessToken(): AccessToken = runBlocking {
       NetworkTrust.awaitTrustedCertificates()
       // A core closed in between throws: nothing to tell it then, and the token is still good.
       if (runCatching { maybeCore?.takeIdTokenRequest() }.getOrNull() == true) auth.refreshTokensSoon()
-      auth.accessToken().also { runCatching { maybeCore?.noteIdToken(auth.idToken()) } }
+      val maybeToken = auth.accessToken().also { runCatching { maybeCore?.noteIdToken(auth.idToken()) } }
+      when {
+        maybeToken != null -> AccessToken.Token(maybeToken)
+        auth.isSessionKept() -> AccessToken.Unavailable
+        else -> AccessToken.SignedOut
+      }
     }
   }
 
