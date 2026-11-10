@@ -78,6 +78,16 @@ pub(crate) fn accounts_seen_on_device() -> Vec<String> {
     .collect()
 }
 
+/// Forgets what this device kept for `user` beside the store: the conversations open last and
+/// the place the desktop app reopens. For an account removed from this computer (#214).
+pub fn forget_account_on_device(user: UserId) {
+  if let Some(storage) = local_storage() {
+    for key in [last_open_key(user), crate::last_place::key(user)] {
+      drop(storage.remove_item(&key));
+    }
+  }
+}
+
 fn last_open_key(user: UserId) -> String {
   format!("{KEY_LAST_OPEN_PREFIX}{user}")
 }
