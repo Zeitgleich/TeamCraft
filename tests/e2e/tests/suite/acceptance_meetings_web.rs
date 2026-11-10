@@ -12,10 +12,9 @@ use chromiumoxide::cdp::browser_protocol::browser::{
 use chromiumoxide::page::Page;
 use reqwest::StatusCode;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use teamcraft_core::client::admits_link_arrivals;
 use teamcraft_e2e::browser::{BrowserSession, web_dir};
-use teamcraft_e2e::call::join_call;
+use teamcraft_e2e::call::{SfuIdentity, join_call};
 use teamcraft_e2e::peer::settle;
 use teamcraft_e2e::{Mailpit, Peer, Stack};
 use teamcraft_media::call_engine::CallEngineEvent;
@@ -23,7 +22,7 @@ use teamcraft_media::call_native::NativeCall;
 use teamcraft_proto::{ConversationId, MeetingId, UserId};
 
 use crate::web::{TEST_CSP, click_text, type_until_kept, wait_for_element, wait_for_text};
-use crate::web_calls::{MEDIA_ARGS, click_selector, console_log, sfu_identity};
+use crate::web_calls::{MEDIA_ARGS, click_selector, console_log};
 
 /// Ends a few minutes from now, so the call may start (a meeting that is over can't be joined).
 const MEETING_LENGTH_MS: i64 = 60 * 60_000;
@@ -267,12 +266,11 @@ impl Env {
       eprintln!("skipping: no web build (tests/e2e/web/build.sh)");
       return None;
     };
-    let identity = sfu_identity();
-    let sha256: String = Sha256::digest(identity.cert.der())
-      .iter()
-      .map(|byte| format!("{byte:02x}"))
-      .collect();
-    let (certificate, key) = (identity.cert.pem(), identity.signing_key.serialize_pem());
+    let SfuIdentity {
+      certificate_pem: certificate,
+      key_pem: key,
+      sha256_hex: sha256,
+    } = SfuIdentity::generate();
     let stack = Stack::builder()
       .with_meetings()
       .with_calls()

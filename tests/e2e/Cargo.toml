@@ -29,9 +29,12 @@ e2e = [
   "dep:tokio-tungstenite",
   "dep:futures-util",
   "dep:tracing-subscriber",
+  "dep:rcgen",
+  "dep:sha2",
+  "dep:time",
 ]
 # Drives the web client in headless Chromium (needs a trunk build of teamcraft-ui, see README.md).
-browser = ["e2e", "dep:chromiumoxide", "dep:rcgen", "dep:sha2", "dep:time"]
+browser = ["e2e", "dep:chromiumoxide"]
 
 [dependencies]
 teamcraft-client-api = { path = "../../crates/teamcraft-client-api", optional = true }
@@ -49,8 +52,9 @@ sqlx = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "process", "io-util", "fs", "net", "time", "macros", "sync"] }
 # Headless Chromium over the DevTools protocol: no driver binary, no Node, Rust like the rest of the tests.
 chromiumoxide = { version = "0.9", optional = true, default-features = false }
-# The SFU's certificate for browser calls, so the browser can be told to accept it (Chromium pins its
-# public key by SHA-256); both already in the tree (wtransport, teamcraft-crypto).
+# The SFU's certificate (crate::call::SfuIdentity): browsers accept it by SHA-256, native calls by
+# the hashes their join tickets carry (an SFU restarted with a new one); already in the tree
+# (wtransport, teamcraft-crypto).
 rcgen = { version = "0.14.10", optional = true }
 sha2 = { version = "0.11.0", optional = true }
 time = { version = "0.3", optional = true }

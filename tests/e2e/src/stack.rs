@@ -66,6 +66,17 @@ pub struct SfuHandle {
   pub service: Service,
   /// SHA-256 of the SFU's self-signed certificate.
   pub certificate_hash: [u8; 32],
+  /// How it was started, to start it again ([`Stack::restart_sfu`]).
+  launch: SfuLaunch,
+}
+
+/// Where an SFU listens and whom it registers with.
+#[derive(Clone)]
+struct SfuLaunch {
+  server_url: String,
+  port: u16,
+  maybe_fallback_port: Option<u16>,
+  has_one_fallback_slot: bool,
 }
 
 /// What a test needs from the server beyond the defaults.
@@ -300,6 +311,40 @@ impl Stack {
       .await
       .unwrap_or_else(|error| panic!("starting the server again: {error:#}"));
     shutdown
+  }
+
+  /// Stops the SFU with SIGTERM (a deploy: it tells the calls it is going away) and starts it again
+  /// on the same port with `identity` (certificate and key PEM) as its certificate, or a fresh
+  /// self-signed one. Returns the new certificate's SHA-256.
+  pub async fn restart_sfu(&mut self, maybe_identity: Option<(String, String)>) -> [u8; 32] {
+    let sfu = self
+      .maybe_sfu
+      .as_mut()
+      .expect("the stack was built without with_calls()");
+    sfu
+      .service
+      .terminate(START_TIMEOUT)
+      .await
+      .unwrap_or_else(|error| panic!("stopping the SFU: {error:#}"));
+    let runs = std::fs::read_dir(&self.dir)
+      .map(|entries| {
+        entries
+          .filter_map(Result::ok)
+          .filter(|entry| entry.file_name().to_string_lossy().starts_with("sfu"))
+          .count()
+      })
+      .unwrap_or_default();
+    let restarted = start_sfu(
+      &self.dir,
+      &format!("sfu-{runs}"),
+      sfu.launch.clone(),
+      maybe_identity.as_ref(),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("starting the SFU again: {error:#}"));
+    let hash = restarted.certificate_hash;
+    *sfu = restarted;
+    hash
   }
 
   /// Starts the server process again (after it exited or was terminated) and waits for `/healthz`.
@@ -540,10 +585,13 @@ impl Stack {
       Some(
         start_sfu(
           &dir,
-          &base_url,
-          sfu_port,
-          maybe_fallback_port,
-          settings.has_one_call_fallback_slot,
+          "sfu",
+          SfuLaunch {
+            server_url: base_url.clone(),
+            port: sfu_port,
+            maybe_fallback_port,
+            has_one_fallback_slot: settings.has_one_call_fallback_slot,
+          },
           settings.maybe_sfu_identity.as_ref(),
         )
         .await?,
@@ -570,12 +618,16 @@ impl Stack {
 
 async fn start_sfu(
   dir: &std::path::Path,
-  server_url: &str,
-  port: u16,
-  maybe_fallback_port: Option<u16>,
-  has_one_fallback_slot: bool,
+  run_name: &str,
+  launch: SfuLaunch,
   maybe_identity: Option<&(String, String)>,
 ) -> anyhow::Result<SfuHandle> {
+  let SfuLaunch {
+    ref server_url,
+    port,
+    maybe_fallback_port,
+    has_one_fallback_slot,
+  } = launch;
   let public_key_path = dir.join("call-signing.pub.pem");
   std::fs::write(&public_key_path, CALL_PUBLIC_KEY_PEM)?;
   let mut envs = vec![
@@ -595,8 +647,8 @@ async fn start_sfu(
       "TEAMCRAFT_SFU_JOIN_TOKEN_PUBLIC_KEY".into(),
       public_key_path.display().to_string(),
     ),
-    ("TEAMCRAFT_SFU_JOIN_TOKEN_ISSUER".into(), server_url.into()),
-    ("TEAMCRAFT_SFU_SERVER_URL".into(), server_url.into()),
+    ("TEAMCRAFT_SFU_JOIN_TOKEN_ISSUER".into(), server_url.clone()),
+    ("TEAMCRAFT_SFU_SERVER_URL".into(), server_url.clone()),
     (
       "TEAMCRAFT_SFU_REGISTRATION_TOKEN".into(),
       SFU_REGISTRATION_TOKEN.into(),
@@ -605,7 +657,10 @@ async fn start_sfu(
     ("RUST_LOG".into(), "info".into()),
   ];
   if let Some((certificate, key)) = maybe_identity {
-    let (certificate_path, key_path) = (dir.join("sfu-cert.pem"), dir.join("sfu-key.pem"));
+    let (certificate_path, key_path) = (
+      dir.join(format!("{run_name}-cert.pem")),
+      dir.join(format!("{run_name}-key.pem")),
+    );
     std::fs::write(&certificate_path, certificate)?;
     std::fs::write(&key_path, key)?;
     envs.push((
@@ -617,12 +672,13 @@ async fn start_sfu(
   if has_one_fallback_slot {
     envs.push(("TEAMCRAFT_SFU_FALLBACK_MAX_CONNECTIONS".into(), "1".into()));
   }
-  let mut service = Service::spawn("sfu", &binary("teamcraft-sfu"), &[], &envs, dir)?;
+  let mut service = Service::spawn(run_name, &binary("teamcraft-sfu"), &[], &envs, dir)?;
   service.wait_for_log("SFU listening", START_TIMEOUT).await?;
   let certificate_hash = parse_certificate_hash(&service.plain_log())?;
   Ok(SfuHandle {
     service,
     certificate_hash,
+    launch,
   })
 }
 
