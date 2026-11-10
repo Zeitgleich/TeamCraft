@@ -57,6 +57,7 @@ use crate::{
   fallback,
   net::bind_dual_stack,
   prejoin::{PreJoinLimiter, PreJoinSlot},
+  quality::{CallQuality, Transport, sample_path},
   rejoin::{RejoinLimiter, RejoinTurn},
   reporting::{NoReporter, ParticipantReporter},
   room::{
@@ -123,6 +124,7 @@ pub(crate) struct ParticipantSession {
   signal_tx: mpsc::Sender<Outgoing>,
   max_bytes: usize,
   roster_now: Arc<Notify>,
+  quality: Arc<CallQuality>,
 }
 
 /// How a participant's session ended.
@@ -473,6 +475,7 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
   };
 
   drop(prejoin_slot);
+  shared.rooms.quality().session_joined(Transport::Quic, remote_ip);
   let handover = Arc::new(Handover::default());
   let registration = register_switch(shared, maybe_switch_secret, &room, grant, session_id, &handover);
   let session = ParticipantSession::new(Arc::clone(&room), grant, signal_tx, shared);
@@ -528,6 +531,7 @@ async fn take_over(
     // Reading tells how the connection went.
     debug!(%error, "could not confirm a switch");
   }
+  shared.rooms.quality().session_switched();
   let session = ParticipantSession::new(Arc::clone(&room), grant, signal_tx, shared);
   let writer = SessionWriter::spawn_taken_over(send, arrives);
   let (end, result) = session.run(connection, recv, writer).await;
@@ -709,6 +713,11 @@ impl SfuControl {
     self.shared.fallback_connections.load(Ordering::Relaxed)
   }
 
+  /// How the calls go, in aggregates, for the metrics.
+  pub fn quality(&self) -> &CallQuality {
+    self.shared.rooms.quality()
+  }
+
   pub fn apply(&self, request: &SfuControlRequest) -> Result<(), RoomError> {
     self
       .shared
@@ -730,6 +739,7 @@ impl ParticipantSession {
       signal_tx,
       max_bytes: shared.config.max_signaling_message_bytes,
       roster_now: Arc::clone(&shared.roster_now),
+      quality: Arc::clone(shared.rooms.quality()),
     }
   }
 
@@ -800,6 +810,7 @@ impl ParticipantSession {
       result = signaling => result,
       result = media => result,
       () = self.periodic() => Ok(Served::Ended),
+      () = sample_path(connection, &self.quality) => Ok(Served::Ended),
       served = written => Ok(served),
     }
   }

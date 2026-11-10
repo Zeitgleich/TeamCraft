@@ -161,6 +161,12 @@ the start; only an IPv6 address that fails after another one worked is skipped (
 | `teamcraft_sfu_rooms`                          | gauge     |                           | SFU            | Calls running                                                                     |
 | `teamcraft_sfu_participants`                   | gauge     |                           | SFU            | Devices in those calls, reconnecting ones included                                |
 | `teamcraft_sfu_fallback_connections`           | gauge     |                           | SFU            | Open connections on the WebSocket fallback, for networks that block UDP           |
+| `teamcraft_sfu_rtt_seconds`                    | histogram |                           | SFU            | Round-trip time of its QUIC paths, per session every 10 s (10 ms to 2 s)          |
+| `teamcraft_sfu_downlink_loss_ratio`            | histogram |                           | SFU            | Share of its packets to a client lost, per session that sent ≥ 100 in 10 s        |
+| `teamcraft_sfu_keyframe_requests_total`        | counter   |                           | SFU            | Keyframes asked of publishers: the SFU's PLI (media is never retransmitted)       |
+| `teamcraft_sfu_forwarded_bytes_total`          | counter   |                           | SFU            | Media bytes forwarded to receivers; its `rate()` is the bitrate forwarded         |
+| `teamcraft_sfu_sessions_total`                 | counter   | `transport`, `family`     | SFU            | Sessions that joined a call, by transport and the client's address family         |
+| `teamcraft_sfu_session_switches_total`         | counter   |                           | SFU            | Sessions that moved to QUIC, from the fallback once UDP got through               |
 | `teamcraft_bridge_queue_depth`                 | gauge     |                           | bridge         | Submissions waiting for the worker (it holds 4096)                                |
 
 Label values come from fixed lists, so the number of series is bounded, and each binary's tests check
@@ -172,6 +178,9 @@ no error texts.**
   `web` (everything outside `/api/`). Bridge: `health`, `hooks`, `ingest`, `other`.
 - `status`: `1xx` (WebSocket upgrades), `2xx`, `3xx`, `4xx` without 429, `429`, `5xx`.
 - `provider`: `apns`, `fcm`, `unifiedpush`, `webpush`.
+- `transport`, SFU: `quic`, `fallback` (the WebSocket fallback). `family`: `ipv4`, `ipv6`; an
+  IPv4 client of the dual-stack socket counts as `ipv4`, a fallback client behind a trusted proxy by
+  its forwarded address.
 - `dependency`: `database`, `object_storage`, `identity_provider`, `push_gateway`, `sfu`, once in use.
   `state`: `ok`, `down`, `recovering`.
 - `check`: the checks of "Health and alerts" below. `state` of a check: `ok`, `failing`, `alert`,
@@ -188,6 +197,23 @@ the last values stay, and the timestamp of `database_check` shows how old they a
 at 0 with the process, which Prometheus handles, and everything is per instance.
 
 The endpoint can't tell you that the server is down: probe `/readyz` from outside as well.
+
+**How calls go** (SFU, #1648). Calls run on QUIC datagrams, not RTP, so there are no RTCP reports:
+round-trip time and loss come from the QUIC connection, which acknowledges every packet, so the loss
+is that of the SFU's packets to the clients (the downlink, where receivers suffer). Each session
+reads them once every 10 seconds beside its other timers; a 10-second window in which the SFU sent
+fewer than 100 packets to the client counts for the round-trip time but not for loss. Sessions on the
+WebSocket fallback run on TCP, which hides loss as delay: they count in `teamcraft_sfu_sessions_total`
+only. Forwarding a datagram costs one more atomic add (its bytes, for all its receivers together), a
+keyframe request one more; memory is fixed (two histograms, a few counters), whatever the number of
+calls. Aggregates only, over every call on the SFU: no call, user, device or address in a label.
+
+Reading them: `histogram_quantile(0.95, rate(teamcraft_sfu_downlink_loss_ratio_bucket[5m]))` above
+about 0.02 means audio suffers somewhere, above 0.1 video does. A rising share of
+`transport="fallback"` in `rate(teamcraft_sfu_sessions_total[1h])`, or `quic` falling to zero, means
+UDP to the SFU's port (`3478/udp`) got blocked: check the firewall before people complain. The SFU
+can't tell why a client fell back (it only sees it arrive on the fallback), and
+`teamcraft_sfu_session_switches_total` counts those that reached QUIC after all.
 
 ## Health and alerts
 
