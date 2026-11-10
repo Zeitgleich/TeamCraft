@@ -1851,6 +1851,94 @@ that still can't be read is not written again on every retry, and both SQLite st
 (btrfs on NVMe, 1.5 KB record): 17.6 ms with the rollback journal, 6.0 ms with WAL and full syncs,
 0.04 ms with WAL and `NORMAL`.
 
+### Desktop on Linux: hidden in the tray, and memory with a large workspace (issue #1022)
+
+`tests/e2e` `desktop_perf.rs` measures the Linux app as it ships (tests/e2e/README.md, "The desktop
+app"): a debug build of the shell with the release web client embedded, on a virtual display
+(Xvfb, so WebKit paints on the CPU), signed in through Keycloak, with its own session bus, keyring
+and tray. Carol signs in and quits, the `perf.rs` workspace is seeded while she is away, she starts
+the app again, it catches up, she opens 40 channels, and the app is watched untouched, first with
+the window shown and then closed to the tray. CPU and memory (PSS from `smaps_rollup`) come from
+`/proc` for each process of the app; wakeups are the threads' voluntary context switches; requests
+are the server's own log. The inspector the test drives the page with is closed while anything is
+measured (an attached one instruments the page). The nightly E2E workflow runs it at the small
+scale (3 spaces, 24 channels, 3,000 messages, 60 s per window) and fails when the app hidden in the
+tray uses 2 % CPU or more, wakes up 100 times a second or more, or sends any request.
+
+Measured 2026-11-10 on main with the store rework (#1690, #1691, #1692), AMD Ryzen 9 5900X, Fedora
+44, WebKitGTK 2.54. Whole app, percent of one core:
+
+| Small workspace, 60 s untouched | Before                        | After  | Budget  |
+|---------------------------------|-------------------------------|--------|---------|
+| Window shown: CPU               | 19–22 % (spinner, see below)  | 0.35 % | ≤ 0.5 % |
+| Closed to the tray: CPU         | 0.15 %                        | 0.15 % | ≤ 0.5 % |
+| Closed to the tray: wakeups     | 26 per second (old count)     | 50–55  | -       |
+| Closed to the tray: requests    | 0                             | 0      | none    |
+
+What the measurement found and fixed:
+
+- **A spinner that never stopped.** A channel a little taller than the window, opened at its
+  bottom, showed "Loading older messages…" for good: the list asks for older history only once
+  the reader leaves the bottom (or the list doesn't fill the window), but showed every
+  conversation with more history on the server as loading. Its animation kept WebKit painting at
+  about 20 % of a core with the window shown and untouched (on the CPU here; on a GPU it costs
+  less CPU but the same frames). The top of the list now says "loading" only while a page is asked
+  for (`shown_older_status`, `message_list.rs`).
+- **A key grabber polling all day.** The global-shortcut plugin's X11 grabber (`global-hotkey`)
+  polls the X server every 50 ms from the moment the plugin exists, grabbed key or not: 20 wakeups
+  a second, minimized or not, also on Wayland (through XWayland), where the GlobalShortcuts portal
+  binds the keys and the plugin is never used. The app now adds the plugin the first time
+  push-to-talk or the mute shortcut is registered on X11 (`global_keys.rs`).
+
+Hidden in the tray the app was already within the budget once #1003 had fixed the core: the page
+stops painting and its timers when the window is hidden, and the core reads nothing on a timer. The
+wakeups left are mostly WebKit's own: the IPC threads between the web process and the shell, the
+web process's main loop, and its memory pressure monitor, which reads `/proc` files (about 170
+reads a second that don't wake it).
+
+Not fixed here: after a catch-up, the core reads the workspace roster and policy log once per
+channel whose role head moved (`sync_channel_roles`), so the first upkeep pass after coming back
+sends three requests per channel (74 on the small workspace, one burst): #1706.
+
+**Memory.** The budget is 400 MiB for the whole app with 300 channels and 100k messages. PSS by
+process, the large workspace (20 spaces, 300 channels, 100k messages, 200 pictures) after 40
+channel switches, window closed to the tray:
+
+| Process                                | PSS      | Of it anonymous | Notes                                   |
+|----------------------------------------|----------|-----------------|-----------------------------------------|
+| `teamcraft-desktop` (shell and core)   | 244 MiB  | 152 MiB         | the debug binary maps about 90 MiB      |
+| `WebKitWebProcess` (the page)          | 352 MiB  | 294 MiB         | painting on the CPU (Xvfb)              |
+| `WebKitNetworkProcess`                 | 21 MiB   | 13 MiB          |                                         |
+| Whole app                              | 617 MiB  | 459 MiB         | budget 400 MiB                          |
+
+For comparison, the installed 1.0 release on a real workspace (38 conversations, 13 hours in use,
+Wayland, GPU): 411 MiB, of it the shell and core 142 MiB (97 anonymous, the release binary's
+mapped files 44 MiB), the page 263 MiB (201 anonymous) and the network process 6 MiB.
+
+Where it goes. The same measurement on the small workspace (24 channels, 3,000 messages) puts the
+page at 312 MiB (255 anonymous) and the shell and core at 210 MiB (100 anonymous): the large
+workspace adds about 40 MiB to the page and 50 MiB to the core, and the rest is there whatever the
+workspace. Inside the page, with the large workspace held in the inspector after the channel
+switches (`PERF_DESKTOP_HOLD_SECS`):
+
+| Page (`WebKitWebProcess`), large workspace | Value    |
+|--------------------------------------------|----------|
+| The UI's wasm heap (`memory.buffer`)       | 19 MiB   |
+| JIT code (anonymous executable mappings)   | 11 MiB   |
+| DOM nodes                                  | 671      |
+| Pictures shown                             | 6, as 960×540 previews |
+| Freed by a full collection (`Heap.gc`)     | 17 MiB   |
+| Anonymous memory in all                    | 305 MiB  |
+
+So the UI's own data is small and bounded (the message list is virtualised, pictures arrive as
+previews), and about 250 MiB of the page is WebKit's own at any workspace size: the JavaScript
+heap, its allocator's arenas and the backing stores of what it paints, which with CPU painting
+under Xvfb sit in RAM where a GPU keeps some in VRAM. In the shell's process GTK and WebKit's UI
+process sit next to the core; the core's caches are bounded (the message cache at 64 MiB). Nothing
+of ours explains the gap to the budget, and WebKit's limits can only be set where Tauri creates its
+web context, without a hook: #1708 (WebKit's memory pressure settings, a heap profile of the core,
+a release build on a GPU).
+
 ### Coming back and bad networks, end to end (issue #972)
 
 `tests/e2e` runs the app as the apps do (the sync runner with its connection supervisor, the

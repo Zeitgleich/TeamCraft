@@ -28,6 +28,8 @@ mod client_outages;
 mod conversion;
 mod dependency_outages;
 mod deployed;
+#[cfg(feature = "desktop")]
+mod desktop_perf;
 mod devices;
 mod display_names;
 #[cfg(feature = "browser")]

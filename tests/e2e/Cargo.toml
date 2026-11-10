@@ -35,6 +35,8 @@ e2e = [
 ]
 # Drives the web client in headless Chromium (needs a trunk build of teamcraft-ui, see README.md).
 browser = ["e2e", "dep:chromiumoxide"]
+# Starts the Linux desktop app (a debug build named by `E2E_DESKTOP_BIN`) and measures it (#1022).
+desktop = ["browser", "dep:zbus"]
 
 [dependencies]
 teamcraft-client-api = { path = "../../crates/teamcraft-client-api", optional = true }
@@ -64,3 +66,6 @@ futures-util = { version = "0.3", optional = true, default-features = false, fea
 # Raw gateway connections (resume with a chosen sequence number, a consumer that stops reading); the
 # same version the core and the server use.
 tokio-tungstenite = { version = "0.30", optional = true }
+# A tray watcher on the desktop app's private session bus (crate::desktop), so closing the window
+# hides it to the tray; the version and features the desktop app and the keyring already use.
+zbus = { version = "5.13", optional = true, default-features = false, features = ["tokio"] }
