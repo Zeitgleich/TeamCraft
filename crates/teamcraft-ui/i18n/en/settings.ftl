@@ -742,10 +742,12 @@ settings-f-backup_max_age_secs = The last backup is too old after
 settings-f-certificate_min_days = The certificate is too close to expiry with fewer than
 settings-f-disk_max_percent = The disk is too full above
 settings-f-is_email_enabled = Also e-mail alerts to owners and admins
+settings-f-history_days = Keep resolved alerts in the history for
 settings-error-health-minutes = Enter 1 to 1,440 minutes.
 settings-error-health-backup-hours = Enter 1 to 720 hours.
 settings-error-health-days = Enter 1 to 365 days.
 settings-error-health-percent = Enter 50 to 99 percent.
+settings-error-health-history-days = Enter 1 to 3,650 days.
 
 settings-group-crash_reports = Crash reports
 settings-group-crash_reports-hint = Where the apps send crash and error reports: by default to the publisher's service (whoever built the apps and this server), or to a backend of your own that speaks the Sentry protocol, such as GlitchTip. Reports carry stack traces, versions and a random installation ID, never messages, names, file names or keys. People can turn them off in their privacy settings.

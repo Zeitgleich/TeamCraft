@@ -237,8 +237,8 @@ shows as an alert, and it ends with the next successful send.
 to the instance's owners and admins and nobody else. It has no payload: the console reads
 `GET /api/v1/admin/health` once when told (and once after the gateway reconnects, and once at the
 start), so nothing polls. The System health page itself reloads every 30 seconds while it is open and
-the page is visible; every other page reads nothing for it. Alerts are kept in memory (the last 50);
-a restart starts the list again, and a failure that lasts is raised again after the hold time.
+the page is visible; every other page reads nothing for it. The alert history keeps resolved alerts
+for `history_days` (90) and at most the last 500; open alerts stay until they end.
 
 Outside the app, each raised and resolved alert goes out two more ways:
 
@@ -250,11 +250,26 @@ Outside the app, each raised and resolved alert goes out two more ways:
   a chat-ops channel or a paging system.
 
 The evaluation only queues these; a task of its own delivers them, so a mail server that hangs does
-not hold up the checks. The queue is in memory on purpose, as are the admins' addresses (read with
-the admins, and the last ones kept when that fails): when the database is what failed, the mail
+not hold up the checks. The queue works from memory on purpose, as do the admins' addresses (read
+with the admins, and the last ones kept when that fails): when the database is what failed, the mail
 still goes out, and the webhook event is queued once the database is back. A delivery that fails is
 tried again after 30 seconds, doubling up to an hour, and given up after a day; at most 200 wait.
-A restart loses what was waiting, like the alert list; a failure that lasts is raised again. Keeping both across restarts is #1646.
+
+**Across restarts** (#1646). The alert history and the deliveries waiting are written to the
+database (`health_alerts`, `health_alert_notices`) behind memory, by a task of its own: a write
+never holds up the checks or a delivery, and one that fails (the database is down) is tried again
+every check interval, together with whatever changed meanwhile. At a start the server reads both
+back before it writes anything, retrying while the database is unavailable. So a restart or a
+rolling deploy:
+
+- keeps the history the System health page shows;
+- keeps an open alert open: its check stays in alert, a failure that lasts is not raised a second
+  time, and the alert ends (and is reported as ended) once the check has been fine for the clear time;
+- sends what was still waiting, and not what already went out. A delivery is written as done right
+  after it was made; only one made in the moment before the process died can go out a second time.
+
+Pruning runs with each write and at least every six hours: resolved alerts older than
+`history_days`, the oldest beyond 500 resolved ones, and deliveries older than a day.
 
 **Settings** (Administration → Settings → Health alerts; the configuration file only names paths):
 
@@ -267,6 +282,7 @@ A restart loses what was waiting, like the alert list; a failure that lasts is r
 | `certificate_min_days` | 14       | Too close to expiry with fewer days (1 to 365)               |
 | `disk_max_percent`     | 85       | Too full above this (50 to 99)                               |
 | `is_email_enabled`     | on       | Also mail raised and resolved alerts to owners and admins    |
+| `history_days`         | 90       | Resolved alerts stay in the history this long (1 to 3650)    |
 
 **What the deployment reports.** The server cannot see its backups, its certificate or the disk
 from inside its container. With `[health] heartbeat_dir = "/path"` it reads three files there at

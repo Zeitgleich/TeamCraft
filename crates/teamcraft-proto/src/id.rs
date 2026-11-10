@@ -272,6 +272,11 @@ define_id!(
   WebhookId
 );
 define_id!(
+  /// A health alert notice on its way to one mail address or the webhooks (docs/operations.md,
+  /// "Health and alerts").
+  HealthNoticeId
+);
+define_id!(
   /// An event told to webhooks; the receivers' idempotency key (`webhook-id`).
   WebhookEventId
 );

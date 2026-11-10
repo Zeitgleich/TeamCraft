@@ -16,8 +16,9 @@ use teamcraft_proto::{
 };
 use time::{Duration, OffsetDateTime};
 
-/// Alerts kept for the health view: enough for a bad week, bounded for good.
-const MAX_ALERT_RECORDS: usize = 50;
+/// Alerts kept for the health view, in memory and in the database: enough for a bad quarter,
+/// bounded for good. Resolved ones also go after `history_days` (#1646).
+pub const MAX_ALERT_RECORDS: usize = 500;
 
 /// What one evaluation says about one check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +54,8 @@ pub struct AlertPolicy {
 pub struct AlertChange {
   pub check: HealthCheckId,
   pub kind: AlertChangeKind,
+  /// When the alert this change is about was raised: with the check, it names the alert.
+  pub raised_at: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,11 +92,12 @@ enum Phase {
   },
 }
 
-#[derive(Debug, Clone)]
-struct AlertRecord {
-  check: HealthCheckId,
-  raised_at: OffsetDateTime,
-  maybe_resolved_at: Option<OffsetDateTime>,
+/// One alert as the history keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlertRecord {
+  pub check: HealthCheckId,
+  pub raised_at: OffsetDateTime,
+  pub maybe_resolved_at: Option<OffsetDateTime>,
 }
 
 impl AlertTracker {
@@ -116,10 +120,12 @@ impl AlertTracker {
       let (phase, maybe_change) = step(track.phase, observation.verdict, now, policy);
       track.phase = phase;
       if let Some(kind) = maybe_change {
-        self.record(check, kind, now);
+        // A resolve whose alert left the history still tells the admins it ended.
+        let raised_at = self.record(check, kind, now).unwrap_or(now);
         changes.push(AlertChange {
           check: check.clone(),
           kind,
+          raised_at,
         });
       }
     }
@@ -168,6 +174,74 @@ impl AlertTracker {
     self.maybe_last_evaluation
   }
 
+  /// The alert a check raised at a time, if the history still has it.
+  pub fn record_of(&self, check: &HealthCheckId, raised_at: OffsetDateTime) -> Option<&AlertRecord> {
+    self
+      .alerts
+      .iter()
+      .find(|record| record.check == *check && record.raised_at == raised_at)
+  }
+
+  /// Takes the history kept from before a restart, newest first. An alert that was open goes on
+  /// where it stopped: its check is in alert again, so a failure that lasts is not raised twice,
+  /// and the alert ends once the check has been fine for the clear time. Returns the alerts this
+  /// changed besides adding them: an old open alert of a check that raised a new one since the
+  /// start is closed when the new one began.
+  pub fn restore(&mut self, kept: Vec<AlertRecord>) -> Vec<AlertRecord> {
+    let mut closed = Vec::new();
+    for mut record in kept {
+      if self.record_of(&record.check, record.raised_at).is_some() {
+        continue;
+      }
+      if record.maybe_resolved_at.is_none() {
+        match self.open_record_of(&record.check) {
+          Some(newer) if newer.raised_at > record.raised_at => {
+            record.maybe_resolved_at = Some(newer.raised_at);
+            closed.push(record.clone());
+          },
+          // Two open alerts of one check: only possible with a broken history. The older wins.
+          Some(_) => continue,
+          None => self.reopen(&record),
+        }
+      }
+      self.alerts.push_back(record);
+    }
+    self
+      .alerts
+      .make_contiguous()
+      .sort_by_key(|record| std::cmp::Reverse(record.raised_at));
+    self.alerts.truncate(MAX_ALERT_RECORDS);
+    closed
+  }
+
+  /// Forgets resolved alerts that ended before `resolved_before`. Open ones stay.
+  pub fn prune(&mut self, resolved_before: OffsetDateTime) {
+    self.alerts.retain(|record| {
+      record
+        .maybe_resolved_at
+        .is_none_or(|resolved_at| resolved_at >= resolved_before)
+    });
+  }
+
+  fn open_record_of(&self, check: &HealthCheckId) -> Option<&AlertRecord> {
+    self
+      .alerts
+      .iter()
+      .find(|record| record.check == *check && record.maybe_resolved_at.is_none())
+  }
+
+  /// Puts a check whose alert was open before a restart back in alert.
+  fn reopen(&mut self, record: &AlertRecord) {
+    let track = self.tracks.entry(record.check.clone()).or_insert(Track {
+      phase: Phase::Ok,
+      last: Observation::new(Verdict::NoData),
+    });
+    track.phase = Phase::Alert {
+      since: record.raised_at,
+      maybe_fine_since: None,
+    };
+  }
+
   fn forget_counting_across_a_gap(&mut self, now: OffsetDateTime, policy: &AlertPolicy) {
     let Some(last) = self.maybe_last_evaluation else {
       return;
@@ -187,7 +261,14 @@ impl AlertTracker {
     }
   }
 
-  fn record(&mut self, check: &HealthCheckId, kind: AlertChangeKind, now: OffsetDateTime) {
+  /// Writes the change into the history and returns when its alert was raised. `None` for a
+  /// resolve the history has no open alert for (it left the history).
+  fn record(
+    &mut self,
+    check: &HealthCheckId,
+    kind: AlertChangeKind,
+    now: OffsetDateTime,
+  ) -> Option<OffsetDateTime> {
     match kind {
       AlertChangeKind::Raised => {
         self.alerts.push_front(AlertRecord {
@@ -196,15 +277,15 @@ impl AlertTracker {
           maybe_resolved_at: None,
         });
         self.alerts.truncate(MAX_ALERT_RECORDS);
+        Some(now)
       },
       AlertChangeKind::Resolved => {
-        if let Some(record) = self
+        let record = self
           .alerts
           .iter_mut()
-          .find(|record| record.check == *check && record.maybe_resolved_at.is_none())
-        {
-          record.maybe_resolved_at = Some(now);
-        }
+          .find(|record| record.check == *check && record.maybe_resolved_at.is_none())?;
+        record.maybe_resolved_at = Some(now);
+        Some(record.raised_at)
       },
     }
   }
@@ -481,7 +562,111 @@ mod tests {
     }
   }
 
+  mod restoring {
+    use super::*;
+
+    #[test]
+    fn an_alert_open_before_a_restart_is_not_raised_again_and_ends_after_the_clear_time() {
+      let mut run = Run::new();
+      let closed = run.tracker.restore(vec![open_record(0)]);
+      assert!(closed.is_empty());
+      assert_eq!(run.status(), HealthCheckStatus::Alert, "before any evaluation");
+      for seconds in (STEP..HOLD * 3).step_by(STEP as usize) {
+        assert_eq!(
+          run.at(seconds, Verdict::Unhealthy),
+          None,
+          "still failing: no second raise"
+        );
+      }
+      let fine = HOLD * 3;
+      assert_eq!(run.at(fine, Verdict::Healthy), None);
+      assert_eq!(
+        run.at(fine + CLEAR, Verdict::Healthy),
+        Some(AlertChangeKind::Resolved)
+      );
+      let alerts = run.tracker.alerts();
+      assert_eq!(alerts.len(), 1);
+      assert_eq!(alerts[0].raised_at, millis(at(0)));
+      assert_eq!(alerts[0].maybe_resolved_at, Some(millis(at(fine + CLEAR))));
+    }
+
+    #[test]
+    fn the_resolve_names_the_alert_raised_before_the_restart() {
+      let mut run = Run::new();
+      run.tracker.restore(vec![open_record(0)]);
+      run.at(STEP, Verdict::Healthy);
+      let changes = run.tracker.evaluate(
+        at(STEP + CLEAR),
+        &run.policy,
+        &[(CHECK, Observation::new(Verdict::Healthy))],
+      );
+      assert_eq!(changes[0].raised_at, at(0));
+    }
+
+    #[test]
+    fn an_old_open_alert_read_late_is_closed_by_the_one_raised_since_the_start() {
+      // The database came back only after the check had raised a new alert.
+      let mut run = Run::raised();
+      let restart_alert = AlertRecord {
+        raised_at: at(-HOLD * 5),
+        ..open_record(0)
+      };
+      let closed = run.tracker.restore(vec![restart_alert]);
+      assert_eq!(closed.len(), 1);
+      assert_eq!(closed[0].maybe_resolved_at, Some(at(HOLD)));
+      let alerts = run.tracker.alerts();
+      assert_eq!(alerts.len(), 2);
+      assert!(alerts[0].maybe_resolved_at.is_none(), "the new one stays open");
+    }
+
+    #[test]
+    fn restoring_twice_keeps_one_copy_and_the_history_stays_newest_first() {
+      let mut run = Run::new();
+      let resolved = AlertRecord {
+        check: HealthCheckId::Certificate,
+        raised_at: at(-7200),
+        maybe_resolved_at: Some(at(-3600)),
+      };
+      run.tracker.restore(vec![open_record(0), resolved.clone()]);
+      run.tracker.restore(vec![open_record(0), resolved]);
+      let alerts = run.tracker.alerts();
+      assert_eq!(alerts.len(), 2);
+      assert!(alerts[0].raised_at > alerts[1].raised_at);
+    }
+  }
+
+  mod pruning {
+    use super::*;
+
+    #[test]
+    fn resolved_alerts_older_than_the_history_go_and_open_ones_stay() {
+      let mut tracker = AlertTracker::default();
+      let old_resolved = AlertRecord {
+        check: HealthCheckId::Certificate,
+        raised_at: at(-7200),
+        maybe_resolved_at: Some(at(-3600)),
+      };
+      let old_open = AlertRecord {
+        raised_at: at(-7200),
+        ..open_record(0)
+      };
+      tracker.restore(vec![old_resolved, old_open]);
+      tracker.prune(at(0));
+      let alerts = tracker.alerts();
+      assert_eq!(alerts.len(), 1);
+      assert_eq!(alerts[0].check, CHECK);
+    }
+  }
+
   // --- helpers -------------------------------------------------------------------------------
+
+  fn open_record(seconds: i64) -> AlertRecord {
+    AlertRecord {
+      check: CHECK,
+      raised_at: at(seconds),
+      maybe_resolved_at: None,
+    }
+  }
 
   const HOLD: i64 = 600;
   const CLEAR: i64 = 300;
