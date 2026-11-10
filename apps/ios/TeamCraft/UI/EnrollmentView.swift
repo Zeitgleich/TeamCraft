@@ -677,49 +677,48 @@ struct LinkThisDeviceView: View {
   private enum AskState { case idle, asking, asked, failed }
 
   var body: some View {
-    ScrollView {
-      VStack(spacing: Theme.spacing) {
-        StepProgress(step: 2, steps: 2)
-        Text("link_new_title").font(.app(.title).bold()).accessibilityAddTraits(.isHeader)
-        if let shortCode = progress.maybeShortCode {
-          // Connected: only the comparison matters now.
-          Text("link_compare").foregroundStyle(Theme.textMuted)
-          Text(shortCode)
-            .font(.system(.largeTitle, design: .monospaced).bold())
-            .accessibilityLabel(Text(verbatim: shortCode.map(String.init).joined(separator: " ")))
-          Text("link_confirm_on_other").foregroundStyle(Theme.textMuted)
-          ProgressView()
-        } else {
-          if let notice = progress.maybeNotice {
-            Text(notice).font(.app(.footnote)).foregroundStyle(Theme.danger).frame(maxWidth: .infinity, alignment: .leading)
-          }
-          Text("link_phone_intro").foregroundStyle(Theme.textMuted).frame(maxWidth: .infinity, alignment: .leading)
-          // The prompt on the other devices needs the request's key at the server; scanning does not.
-          if askState == .asked {
-            Text("link_asked").foregroundStyle(Theme.textMuted)
-            ProgressView("link_waiting")
-          } else {
-            Button("link_ask") {
-              askState = .asking
-              Task { askState = await model.askOtherDevices() ? .asked : .failed }
-            }
-            .buttonStyle(PrimaryButtonStyle())
-            .disabled(askState == .asking)
-            Text("link_ask_hint").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
-            if askState == .failed {
-              Text("link_ask_failed").font(.app(.footnote)).foregroundStyle(Theme.danger)
-            }
-          }
-          Divider()
-          Button("link_scan_code", systemImage: "qrcode.viewfinder") { isScanning = true }
-            .buttonStyle(.bordered)
-          Text("link_scan_code_hint").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
-          Divider()
-          Text("link_no_other_device").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
+    StepPage(
+      step: 2, steps: 2, title: "link_new_title",
+      lead: progress.maybeShortCode == nil ? "link_phone_intro" : "link_compare"
+    ) {
+      if let shortCode = progress.maybeShortCode {
+        // Connected: only the comparison matters now.
+        Text(shortCode)
+          .font(.system(.largeTitle, design: .monospaced).bold())
+          .accessibilityLabel(Text(verbatim: shortCode.map(String.init).joined(separator: " ")))
+        Text("link_confirm_on_other").foregroundStyle(Theme.textMuted)
+        ProgressView()
+      } else {
+        if let notice = progress.maybeNotice {
+          Text(notice).font(.app(.footnote)).foregroundStyle(Theme.danger)
         }
-        Button("cancel") { model.cancelLinking() }.padding(.top, 16)
+        if askState == .asked {
+          Text("link_asked").foregroundStyle(Theme.textMuted)
+          ProgressView("link_waiting")
+        } else {
+          Text("link_ask_hint").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
+          if askState == .failed {
+            Text("link_ask_failed").font(.app(.footnote)).foregroundStyle(Theme.danger)
+          }
+        }
+        Divider()
+        Text("link_scan_code_hint").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
+        Button("link_scan_code", systemImage: "qrcode.viewfinder") { isScanning = true }
+          .buttonStyle(.bordered)
+        Divider()
+        Text("link_no_other_device").font(.app(.footnote)).foregroundStyle(Theme.textMuted)
       }
-      .padding(24)
+    } actions: {
+      // The prompt on the other devices needs the request's key at the server; scanning does not.
+      if progress.maybeShortCode == nil, askState != .asked {
+        Button("link_ask") {
+          askState = .asking
+          Task { askState = await model.askOtherDevices() ? .asked : .failed }
+        }
+        .buttonStyle(PrimaryButtonStyle())
+        .disabled(askState == .asking)
+      }
+      Button("onboarding_back") { model.cancelLinking() }
     }
     .sheet(isPresented: $isScanning) {
       // Without a camera the prompt above is the way: it needs none.

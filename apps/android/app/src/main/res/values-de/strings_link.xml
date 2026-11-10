@@ -37,7 +37,7 @@
   <string name="link_phone_intro">Bestätige dieses Handy auf einem Gerät, auf dem du schon angemeldet bist.</string>
   <string name="link_scan_code">Code scannen</string>
   <string name="link_scan_code_hint">Öffne auf einem Computer TeamCraft, dann Einstellungen, Geräte und Sicherheit, Neues Gerät verknüpfen: Dort steht ein Code, den dieses Handy scannt.</string>
-  <string name="link_no_other_device">Nur auf einem anderen Handy angemeldet? Frag deine anderen Geräte: Auch das Handy zeigt die Anfrage. Gar kein anderes Gerät? Geh zurück und nutze deinen Wiederherstellungsschlüssel oder die Wiederherstellung durch die Organisation.</string>
+  <string name="link_no_other_device">Nur auf einem anderen Handy angemeldet? Frag deine anderen Geräte: Auch das Handy zeigt die Anfrage. Gar kein anderes Gerät? Geh zurück und nutze dein Wiederherstellungs-Kit oder frag deine IT-Abteilung.</string>
   <string name="link_expired_restarted">Die Anfrage oder der Code ist abgelaufen. Frag deine Geräte erneut oder scanne einen neuen Code.</string>
   <string name="link_code_invalid">Das ist kein TeamCraft-Verknüpfungscode.</string>
   <string name="link_code_for_new_device">Dieser Code ist für das neue Handy: Scanne ihn dort mit „Code scannen“.</string>

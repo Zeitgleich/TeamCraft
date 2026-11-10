@@ -37,7 +37,7 @@
   <string name="link_phone_intro">Approve this phone from a device where you are already signed in.</string>
   <string name="link_scan_code">Scan code</string>
   <string name="link_scan_code_hint">On a computer, open TeamCraft, then Settings, Devices and security, Link a new device: it shows a code for this phone to scan.</string>
-  <string name="link_no_other_device">Only signed in on another phone? Ask your other devices: the phone shows the prompt too. No other device at all? Go back and use your recovery key or organization recovery.</string>
+  <string name="link_no_other_device">Only signed in on another phone? Ask your other devices: the phone shows the prompt too. No other device at all? Go back and use your recovery kit, or ask your IT department.</string>
   <string name="link_expired_restarted">The request or code ran out. Ask your devices again, or scan a new code.</string>
   <string name="link_code_invalid">That is not a TeamCraft link code.</string>
   <string name="link_code_for_new_device">This code is for the new phone: scan it there with Scan code.</string>

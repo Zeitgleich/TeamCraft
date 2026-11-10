@@ -583,14 +583,26 @@ fun LinkThisDeviceScreen(
       }
     }
   }
-  Centered {
-    StepProgress(step = 2, steps = 2)
-    Title(R.string.link_new_title)
-    val maybeShortCode = state.maybeShortCode
+  val askOtherDevices: () -> Unit = {
+    ask = LinkAsk.ASKING
+    scope.launch { ask = if (onAskOtherDevices().isSuccess) LinkAsk.ASKED else LinkAsk.FAILED }
+  }
+  val maybeShortCode = state.maybeShortCode
+  StepPage(
+    step = 2,
+    steps = 2,
+    title = stringResource(R.string.link_new_title),
+    maybeLead = if (maybeShortCode == null) R.string.link_phone_intro else R.string.link_compare,
+    actions = {
+      secondary { TextButton(onClick = onCancel) { Text(stringResource(R.string.onboarding_back)) } }
+      // The prompt on the other devices needs the request's key at the server; scanning does not.
+      if (maybeShortCode == null && ask != LinkAsk.ASKED) {
+        primary { Button(onClick = askOtherDevices, enabled = ask != LinkAsk.ASKING) { Text(stringResource(R.string.link_ask)) } }
+      }
+    },
+  ) {
     if (maybeShortCode == null) {
       state.maybeNotice?.let { ErrorLine(it) }
-      Text(stringResource(R.string.link_phone_intro), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.fillMaxWidth())
-      // The prompt on the other devices needs the request's key at the server; scanning does not.
       when (ask) {
         LinkAsk.ASKED -> {
           Text(stringResource(R.string.link_asked), modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
@@ -600,28 +612,17 @@ fun LinkThisDeviceScreen(
           }
         }
         else -> {
-          Button(
-            enabled = ask != LinkAsk.ASKING,
-            onClick = {
-              ask = LinkAsk.ASKING
-              scope.launch { ask = if (onAskOtherDevices().isSuccess) LinkAsk.ASKED else LinkAsk.FAILED }
-            },
-            modifier = Modifier.fillMaxWidth(),
-          ) { Text(stringResource(R.string.link_ask)) }
-          Text(stringResource(R.string.link_ask_hint), style = MaterialTheme.typography.bodySmall)
+          Text(stringResource(R.string.link_ask_hint), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
           if (ask == LinkAsk.FAILED) ErrorLine(R.string.link_ask_failed)
         }
       }
       HorizontalDivider()
-      OutlinedButton(onClick = { isScanning = true }, modifier = Modifier.fillMaxWidth()) {
-        Text(stringResource(R.string.link_scan_code))
-      }
-      Text(stringResource(R.string.link_scan_code_hint), style = MaterialTheme.typography.bodySmall)
+      Text(stringResource(R.string.link_scan_code_hint), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+      OutlinedButton(onClick = { isScanning = true }) { Text(stringResource(R.string.link_scan_code)) }
       HorizontalDivider()
-      Text(stringResource(R.string.link_no_other_device), style = MaterialTheme.typography.bodySmall)
+      Text(stringResource(R.string.link_no_other_device), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     } else {
       // Connected: only the comparison matters now, large and read out at once.
-      Text(stringResource(R.string.link_compare))
       Text(
         maybeShortCode,
         style = MaterialTheme.typography.displaySmall,
@@ -634,7 +635,6 @@ fun LinkThisDeviceScreen(
       Text(stringResource(R.string.link_confirm_on_other))
       PageLoadingIndicator()
     }
-    OutlinedButton(onClick = onCancel) { Text(stringResource(R.string.cancel)) }
   }
 }
 

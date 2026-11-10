@@ -10990,13 +10990,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Only signed in on another phone? Ask your other devices: the phone shows the prompt too. No other device at all? Go back and use your recovery key or organization recovery."
+            "value": "Only signed in on another phone? Ask your other devices: the phone shows the prompt too. No other device at all? Go back and use your recovery kit, or ask your IT department."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Nur auf einem anderen Handy angemeldet? Frag deine anderen Geräte: Auch das Handy zeigt die Anfrage. Gar kein anderes Gerät? Geh zurück und nutze deinen Wiederherstellungsschlüssel oder die Wiederherstellung durch die Organisation."
+            "value": "Nur auf einem anderen Handy angemeldet? Frag deine anderen Geräte: Auch das Handy zeigt die Anfrage. Gar kein anderes Gerät? Geh zurück und nutze dein Wiederherstellungs-Kit oder frag deine IT-Abteilung."
           }
         }
       }
