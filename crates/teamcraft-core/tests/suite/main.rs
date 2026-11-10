@@ -23,6 +23,7 @@ mod coming_back;
 #[path = "../common/mod.rs"]
 mod common;
 mod connection;
+mod custom_emoji;
 mod custom_status;
 mod dev_stack;
 mod devices;

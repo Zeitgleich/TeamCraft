@@ -552,6 +552,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.refresh_stale_expiring_guests().await;
     self.refresh_stale_user_groups().await;
+    self.refresh_stale_custom_emoji().await;
     Ok(())
   }
 
@@ -729,6 +730,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // owner could otherwise still sign one naming an older roster (A7).
         if kind == teamcraft_proto::WorkspaceLogKind::Roster {
           self.note_role_evidence_update();
+          // Who may sign custom emoji follows the roster: verify the set again.
+          self.is_custom_emoji_stale = true;
         }
         self.sync_workspace_and_recovery().await
       },
@@ -825,6 +828,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       // Read with the event's frame, or batched when a sync changes many groups at once.
       GatewayEvent::UserGroupUpdate { .. } => {
         self.are_user_groups_stale = true;
+        Ok(())
+      },
+      // Read with the event's frame; a burst of changes costs one read.
+      GatewayEvent::CustomEmojiUpdate => {
+        self.is_custom_emoji_stale = true;
         Ok(())
       },
       GatewayEvent::OrgRecoveryUpdate { .. }

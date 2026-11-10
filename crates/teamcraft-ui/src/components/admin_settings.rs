@@ -192,6 +192,9 @@ const DAYS: &str = "settings-unit-days";
 const PERCENT: &str = "settings-unit-percent";
 const MILLISECONDS: &str = "settings-unit-ms";
 const MEGABYTES: &str = "settings-unit-mib";
+const KILOBYTES: &str = "settings-unit-kib";
+const PIXELS: &str = "settings-unit-px";
+const KIB: u64 = 1024;
 const U32_MAX: u64 = u32::MAX as u64;
 const U64_MAX: u64 = 9_000_000_000_000_000;
 
@@ -373,6 +376,19 @@ const LIMITS: &[FieldDef] = &[
   count("max_user_group_members"),
   count("max_meeting_mails_per_user_per_hour"),
   count("max_large_mentions_per_user_per_hour"),
+  count("max_custom_emoji"),
+  amount(
+    "max_custom_emoji_bytes",
+    KIB,
+    teamcraft_proto::MAX_CUSTOM_EMOJI_BYTES_LIMIT,
+    KILOBYTES,
+  ),
+  amount(
+    "max_custom_emoji_side_px",
+    1,
+    teamcraft_proto::MAX_CUSTOM_EMOJI_SIDE_PX_LIMIT as u64,
+    PIXELS,
+  ),
 ];
 const INTEGRATION: &[FieldDef] = &[
   amount("default_retention_days", 1, U32_MAX, DAYS),
@@ -1394,7 +1410,9 @@ mod tests {
       "admin-error-ids".into(),
       "admin-error-invalid".into(),
     ];
-    for unit in [SECONDS, MINUTES, HOURS, DAYS, MEGABYTES, PERCENT] {
+    for unit in [
+      SECONDS, MINUTES, HOURS, DAYS, MEGABYTES, KILOBYTES, PIXELS, PERCENT,
+    ] {
       keys.push(unit.into());
     }
     for error in [

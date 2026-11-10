@@ -329,6 +329,8 @@ struct State {
   revoked_share_links: std::collections::HashSet<String>,
   backgrounds: HashMap<BackgroundId, FakeBackground>,
   org_backgrounds: HashMap<OrgBackgroundId, FakeBackground>,
+  /// Custom emoji (issue #207) and their pictures; admins only change them, like the server.
+  custom_emoji: BTreeMap<teamcraft_proto::CustomEmojiId, (teamcraft_proto::CustomEmojiResponse, Vec<u8>)>,
   /// Spaces besides the default one, and changes to the default one.
   spaces: BTreeMap<SpaceId, SpaceResponse>,
   categories: BTreeMap<CategoryId, CategoryResponse>,
@@ -3005,6 +3007,125 @@ impl ServerApi for FakeServerApi {
   /// Every known user is in every fake space, except the outsiders.
   async fn list_space_members(&self, space: SpaceId) -> Result<ListSpaceMembersResponse, ApiError> {
     self.with(|state, _| state.space_members_answer(space))
+  }
+
+  async fn list_custom_emoji(&self) -> Result<teamcraft_proto::ListCustomEmojiResponse, ApiError> {
+    self.with(|state, _| {
+      let mut emoji: Vec<teamcraft_proto::CustomEmojiResponse> = state
+        .custom_emoji
+        .values()
+        .map(|(emoji, _)| emoji.clone())
+        .collect();
+      emoji.sort_by(|a, b| a.shortcode.cmp(&b.shortcode));
+      Ok(teamcraft_proto::ListCustomEmojiResponse {
+        emoji,
+        limits: teamcraft_proto::CustomEmojiLimits::default(),
+      })
+    })
+  }
+
+  async fn create_custom_emoji(
+    &self,
+    request: &teamcraft_proto::CreateCustomEmojiRequest,
+  ) -> Result<teamcraft_proto::CustomEmojiResponse, ApiError> {
+    self.with(|state, user| {
+      if !state.admins.contains(&user) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "admins only"));
+      }
+      let limits = teamcraft_proto::CustomEmojiLimits::default();
+      let picture = teamcraft_proto::inspect_custom_emoji_picture(
+        request.picture.as_slice(),
+        limits.max_bytes,
+        limits.max_side_px,
+      )
+      .map_err(|error| ApiError::status(400, ErrorCode::InvalidRequest, &error.to_string()))?;
+      let document: teamcraft_proto::CustomEmojiDocument =
+        serde_json::from_slice(request.signed.payload.as_slice())
+          .map_err(|_| ApiError::status(400, ErrorCode::InvalidRequest, "unreadable document"))?;
+      if state
+        .custom_emoji
+        .values()
+        .any(|(emoji, _)| emoji.shortcode == document.shortcode)
+      {
+        return Err(ApiError::status(409, ErrorCode::CustomEmojiNameTaken, "taken"));
+      }
+      let id: teamcraft_proto::CustomEmojiId = state.next_id();
+      let response = teamcraft_proto::CustomEmojiResponse {
+        id,
+        shortcode: document.shortcode,
+        sha256: document.sha256,
+        format: picture.format,
+        size_bytes: request.picture.as_slice().len() as u64,
+        width: picture.width,
+        height: picture.height,
+        maybe_created_by: Some(user),
+        created_at: UnixMillis(0),
+        signed: request.signed.clone(),
+      };
+      state
+        .custom_emoji
+        .insert(id, (response.clone(), request.picture.as_slice().to_vec()));
+      let everyone: Vec<UserId> = state.users.keys().copied().collect();
+      state.publish(everyone, &GatewayEvent::CustomEmojiUpdate);
+      Ok(response)
+    })
+  }
+
+  async fn rename_custom_emoji(
+    &self,
+    emoji: teamcraft_proto::CustomEmojiId,
+    request: &teamcraft_proto::RenameCustomEmojiRequest,
+  ) -> Result<teamcraft_proto::CustomEmojiResponse, ApiError> {
+    self.with(|state, user| {
+      if !state.admins.contains(&user) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "admins only"));
+      }
+      let document: teamcraft_proto::CustomEmojiDocument =
+        serde_json::from_slice(request.signed.payload.as_slice())
+          .map_err(|_| ApiError::status(400, ErrorCode::InvalidRequest, "unreadable document"))?;
+      let (entry, _) = state
+        .custom_emoji
+        .get_mut(&emoji)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::CustomEmojiNotFound, "unknown"))?;
+      entry.shortcode = document.shortcode;
+      entry.signed = request.signed.clone();
+      let renamed = entry.clone();
+      let everyone: Vec<UserId> = state.users.keys().copied().collect();
+      state.publish(everyone, &GatewayEvent::CustomEmojiUpdate);
+      Ok(renamed)
+    })
+  }
+
+  async fn delete_custom_emoji(&self, emoji: teamcraft_proto::CustomEmojiId) -> Result<(), ApiError> {
+    self.with(|state, user| {
+      if !state.admins.contains(&user) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "admins only"));
+      }
+      state
+        .custom_emoji
+        .remove(&emoji)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::CustomEmojiNotFound, "unknown"))?;
+      let everyone: Vec<UserId> = state.users.keys().copied().collect();
+      state.publish(everyone, &GatewayEvent::CustomEmojiUpdate);
+      Ok(())
+    })
+  }
+
+  async fn download_custom_emoji(
+    &self,
+    emoji: teamcraft_proto::CustomEmojiId,
+  ) -> Result<teamcraft_proto::CustomEmojiDownloadResponse, ApiError> {
+    self.with(|state, _| {
+      let (entry, _) = state
+        .custom_emoji
+        .get(&emoji)
+        .ok_or_else(|| ApiError::status(404, ErrorCode::CustomEmojiNotFound, "unknown"))?;
+      Ok(teamcraft_proto::CustomEmojiDownloadResponse {
+        download_url: format!("{CUSTOM_EMOJI_SCHEME}{emoji}"),
+        size_bytes: entry.size_bytes,
+        expires_at: UnixMillis(0),
+      })
+    })
   }
 
   async fn list_user_group_rosters(&self) -> Result<ListUserGroupRostersResponse, ApiError> {
@@ -6265,6 +6386,22 @@ impl ServerApi for FakeServerApi {
   }
 
   async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {
+    if let Some(raw) = url.strip_prefix(CUSTOM_EMOJI_SCHEME) {
+      return self.with(|state, _| {
+        let picture = raw
+          .parse::<i64>()
+          .ok()
+          .and_then(|raw| Snowflake::new(raw).ok())
+          .map(teamcraft_proto::CustomEmojiId::from_snowflake)
+          .and_then(|id| state.custom_emoji.get(&id))
+          .map(|(_, picture)| picture.clone());
+        picture.ok_or(ApiError::Status {
+          status: 404,
+          maybe_body: None,
+          maybe_retry_after: None,
+        })
+      });
+    }
     if let Some(raw) = url.strip_prefix(ORG_BACKGROUND_SCHEME) {
       return self.with(|state, _| {
         org_background_blob(state, raw)?
@@ -7604,6 +7741,7 @@ const PART_SCHEME: &str = "fake-part://";
 pub const FAKE_MIN_PART_BYTES: u64 = 1024;
 const BACKGROUND_SCHEME: &str = "fake-background://";
 const ORG_BACKGROUND_SCHEME: &str = "fake-org-background://";
+const CUSTOM_EMOJI_SCHEME: &str = "fake-custom-emoji://";
 
 fn org_background_blob<'a>(state: &'a mut State, raw: &str) -> Result<&'a mut FakeBackground, ApiError> {
   raw

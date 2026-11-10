@@ -1288,6 +1288,7 @@ mod tests {
       target: root.client_message_id,
       emoji: "+1".into(),
       is_added: true,
+      maybe_custom: None,
     };
     let later = message(conversation, 4, Some(130), None, 4);
     {

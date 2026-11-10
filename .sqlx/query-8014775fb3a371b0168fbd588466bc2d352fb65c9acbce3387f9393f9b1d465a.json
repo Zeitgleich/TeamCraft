@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO custom_emoji\n         (id, shortcode, sha256, format, s3_key, size_bytes, width, height, payload, signature, created_by)\n       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Bytea",
+        "Text",
+        "Text",
+        "Int8",
+        "Int4",
+        "Int4",
+        "Bytea",
+        "Bytea",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8014775fb3a371b0168fbd588466bc2d352fb65c9acbce3387f9393f9b1d465a"
+}

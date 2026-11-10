@@ -242,6 +242,7 @@ fn conversation_items(
       target,
       emoji,
       is_added: true,
+      ..
     } = &stored.content
     else {
       continue;
@@ -799,6 +800,7 @@ mod tests {
         target: client_id(target),
         emoji: emoji.into(),
         is_added,
+        maybe_custom: None,
       },
       None,
     )

@@ -201,3 +201,89 @@
   line-height: 1;
 }
 
+
+/* ---- Custom emoji (issue #207) ---- */
+
+/* A workspace emoji's picture at text size: in messages, the jumbo sizes grow it with the text.
+   The negative margin keeps the line as high as the text around it. */
+.custom-emoji {
+  display: inline-block;
+  width: auto;
+  max-width: 2.75em;
+  height: 1.375em;
+  margin: -0.2em 0.05em;
+  object-fit: contain;
+  vertical-align: middle;
+}
+
+.custom-emoji-text {
+  white-space: nowrap;
+}
+
+.emoji-cell .custom-emoji,
+.emoji-preview .custom-emoji {
+  max-width: 1.75rem;
+  height: 1.75rem;
+  margin: 0;
+}
+
+.reaction .custom-emoji {
+  max-width: 2.25rem;
+  height: 1.125rem;
+  margin: 0;
+}
+
+.suggestion-emoji {
+  display: inline-flex;
+  flex: none;
+}
+
+.suggestion-emoji .custom-emoji {
+  height: 1.25rem;
+  margin: 0;
+}
+
+/* Admin console: the list of emoji and the form that adds one. */
+.admin-emoji-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.admin-emoji-add .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 12rem;
+}
+
+.admin-emoji-add > .btn {
+  align-self: flex-end;
+}
+
+.admin-emoji-row {
+  flex-wrap: wrap;
+}
+
+.admin-emoji-picture {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+}
+
+.admin-emoji-picture .custom-emoji {
+  max-width: 2.25rem;
+  height: 2.25rem;
+  margin: 0;
+}
+
+.admin-emoji-rename {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}

@@ -257,6 +257,41 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.inner.list_user_group_rosters()
   }
 
+  fn list_custom_emoji(
+    &self,
+  ) -> impl Future<Output = Result<teamcraft_proto::ListCustomEmojiResponse, ApiError>> {
+    self.inner.list_custom_emoji()
+  }
+
+  fn create_custom_emoji(
+    &self,
+    _request: &teamcraft_proto::CreateCustomEmojiRequest,
+  ) -> impl Future<Output = Result<teamcraft_proto::CustomEmojiResponse, ApiError>> {
+    self.refused("create_custom_emoji")
+  }
+
+  fn rename_custom_emoji(
+    &self,
+    _emoji: teamcraft_proto::CustomEmojiId,
+    _request: &teamcraft_proto::RenameCustomEmojiRequest,
+  ) -> impl Future<Output = Result<teamcraft_proto::CustomEmojiResponse, ApiError>> {
+    self.refused("rename_custom_emoji")
+  }
+
+  fn delete_custom_emoji(
+    &self,
+    _emoji: teamcraft_proto::CustomEmojiId,
+  ) -> impl Future<Output = Result<(), ApiError>> {
+    self.refused("delete_custom_emoji")
+  }
+
+  fn download_custom_emoji(
+    &self,
+    _emoji: teamcraft_proto::CustomEmojiId,
+  ) -> impl Future<Output = Result<teamcraft_proto::CustomEmojiDownloadResponse, ApiError>> {
+    self.refused("download_custom_emoji")
+  }
+
   fn conversation(
     &self,
     conversation: ConversationId,

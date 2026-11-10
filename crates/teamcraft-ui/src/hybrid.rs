@@ -522,6 +522,26 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.set_org_background_rule(rule);
   }
 
+  fn custom_emoji(&self) -> teamcraft_client_api::custom_emoji::CustomEmojiSet {
+    self.chat.custom_emoji()
+  }
+
+  fn custom_emoji_picture(&self, sha256: teamcraft_proto::CustomEmojiHash) -> Option<Vec<u8>> {
+    self.chat.custom_emoji_picture(sha256)
+  }
+
+  fn add_custom_emoji(&self, shortcode: &str, picture: Vec<u8>) {
+    self.chat.add_custom_emoji(shortcode, picture);
+  }
+
+  fn rename_custom_emoji(&self, id: teamcraft_proto::CustomEmojiId, shortcode: &str) {
+    self.chat.rename_custom_emoji(id, shortcode);
+  }
+
+  fn delete_custom_emoji(&self, id: teamcraft_proto::CustomEmojiId) {
+    self.chat.delete_custom_emoji(id);
+  }
+
   fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {
     self.chat.permalink(conversation, message)
   }

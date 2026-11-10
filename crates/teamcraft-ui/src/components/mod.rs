@@ -10,6 +10,7 @@ pub mod admin_brands;
 pub mod admin_calendar;
 pub mod admin_channels;
 pub mod admin_console;
+pub mod admin_emoji;
 pub mod admin_fields;
 pub mod admin_group_mappings;
 pub mod admin_guests;

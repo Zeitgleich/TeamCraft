@@ -2467,6 +2467,7 @@ mod tests {
           target: newest.client_message_id,
           emoji: "+1".into(),
           is_added: true,
+          maybe_custom: None,
         };
         store.upsert_message(&reaction).unwrap();
         let mut reply = numbered(1, MESSAGES + 1);

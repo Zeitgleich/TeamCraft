@@ -469,7 +469,7 @@ async fn reactions_and_thread_replies_are_encrypted_messages() {
     .filter(|m| m.is_reaction())
     .collect();
   assert!(
-    matches!(&reactions[0].content, MessageContent::Reaction { target, emoji, is_added: true } if *target == root && emoji == "+1")
+    matches!(&reactions[0].content, MessageContent::Reaction { target, emoji, is_added: true, .. } if *target == root && emoji == "+1")
   );
 }
 

@@ -63,6 +63,7 @@ pub(crate) fn note_received(
       target,
       emoji,
       is_added,
+      ..
     },
     Some(reaction),
   ) = (&stored.content, stored.maybe_server_id)
@@ -375,6 +376,7 @@ mod tests {
         target: client_id(target),
         emoji: emoji.into(),
         is_added,
+        maybe_custom: None,
       },
     )
   }

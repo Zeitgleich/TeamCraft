@@ -234,6 +234,8 @@ impl PendingEnrollment {
       maybe_expiring_guests_read_ms: None,
       are_user_groups_stale: false,
       maybe_user_groups_read_ms: None,
+      is_custom_emoji_stale: false,
+      are_custom_emoji_pictures_due: false,
       device_activity: DeviceActivity::Active,
       member_join_attempts: HashMap::new(),
       device_add_requests_handled: HashMap::new(),

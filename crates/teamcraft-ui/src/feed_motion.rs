@@ -360,6 +360,7 @@ mod tests {
           emoji: (*emoji).to_owned(),
           count: *count,
           reacted_by_me: false,
+          maybe_custom: None,
         })
         .collect(),
       conversation: id_from_raw(1),
@@ -374,6 +375,7 @@ mod tests {
       maybe_source: None,
       maybe_placeholder: None,
       group_mentions: Vec::new(),
+      custom_emoji: Vec::new(),
       mentions_me: false,
     }
   }

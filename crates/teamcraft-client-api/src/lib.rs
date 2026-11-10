@@ -20,6 +20,7 @@ pub mod canvas;
 pub mod color_theme;
 pub mod composer_format;
 pub mod crash_reporting;
+pub mod custom_emoji;
 pub mod custom_status;
 pub mod debug_log;
 pub mod drafts;

@@ -823,6 +823,7 @@ mod tests {
       target: client_id(1),
       emoji: "x".into(),
       is_added: true,
+      maybe_custom: None,
     };
     fixture.write(&reaction);
     assert_eq!(fixture.check(), 0);

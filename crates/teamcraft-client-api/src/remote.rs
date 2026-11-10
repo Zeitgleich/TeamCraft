@@ -846,6 +846,18 @@ pub enum ChatAction {
   SetOrgBackgroundRule {
     rule: OrgBackgroundRule,
   },
+  /// Admins: custom emoji (issue #207), signed by the host's core.
+  AddCustomEmoji {
+    shortcode: String,
+    picture: Base64Bytes,
+  },
+  RenameCustomEmoji {
+    id: teamcraft_proto::CustomEmojiId,
+    shortcode: String,
+  },
+  DeleteCustomEmoji {
+    id: teamcraft_proto::CustomEmojiId,
+  },
   MarkUnread {
     conversation: ConversationId,
     from: MessageId,
@@ -1343,6 +1355,9 @@ impl ChatAction {
       Self::AddOrgBackground { name, picture } => backend.add_org_background(&name, picture.into_vec()),
       Self::DeleteOrgBackground { id } => backend.delete_org_background(id),
       Self::SetOrgBackgroundRule { rule } => backend.set_org_background_rule(rule),
+      Self::AddCustomEmoji { shortcode, picture } => backend.add_custom_emoji(&shortcode, picture.into_vec()),
+      Self::RenameCustomEmoji { id, shortcode } => backend.rename_custom_emoji(id, &shortcode),
+      Self::DeleteCustomEmoji { id } => backend.delete_custom_emoji(id),
       Self::MarkUnread { conversation, from } => backend.mark_unread(conversation, from),
       Self::SetDraft {
         conversation,
@@ -1612,6 +1627,10 @@ pub enum ChatQuery {
   ScheduledMessages,
   BackgroundImages,
   OrgBackgrounds,
+  CustomEmoji,
+  CustomEmojiPicture {
+    sha256: teamcraft_proto::CustomEmojiHash,
+  },
   Permalink {
     conversation: ConversationId,
     message: MessageId,
@@ -1854,6 +1873,13 @@ pub enum ChatAnswer {
   OrgBackgrounds {
     backgrounds: OrgBackgrounds,
   },
+  CustomEmoji {
+    set: crate::custom_emoji::CustomEmojiSet,
+  },
+  CustomEmojiPicture {
+    #[serde(rename = "picture", default)]
+    maybe_picture: Option<teamcraft_proto::Base64Bytes>,
+  },
   Link {
     maybe_link: Option<String>,
   },
@@ -2033,6 +2059,14 @@ impl ChatQuery {
       },
       Self::OrgBackgrounds => ChatAnswer::OrgBackgrounds {
         backgrounds: backend.org_backgrounds(),
+      },
+      Self::CustomEmoji => ChatAnswer::CustomEmoji {
+        set: backend.custom_emoji(),
+      },
+      Self::CustomEmojiPicture { sha256 } => ChatAnswer::CustomEmojiPicture {
+        maybe_picture: backend
+          .custom_emoji_picture(sha256)
+          .map(teamcraft_proto::Base64Bytes::new),
       },
       Self::Permalink {
         conversation,

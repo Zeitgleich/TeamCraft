@@ -112,6 +112,9 @@ pub enum ApiError {
   AdminJoinRequestTooSoon,
   #[error("the user has no key package left")]
   KeyPackageExhausted,
+  /// Another custom emoji has the shortcode.
+  #[error("another custom emoji has this name")]
+  CustomEmojiNameTaken,
   /// An uploaded key package doesn't parse, isn't validly signed, or is (nearly) expired.
   #[error("invalid key package: {0}")]
   InvalidKeyPackage(String),
@@ -312,6 +315,13 @@ impl ApiError {
     }
   }
 
+  pub fn custom_emoji_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::CustomEmojiNotFound,
+      what: "custom emoji",
+    }
+  }
+
   pub fn user_group_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::UserGroupNotFound,
@@ -426,6 +436,7 @@ impl ApiError {
       | Self::ScheduledMessageLimit { .. }
       | Self::EpochConflict { .. }
       | Self::VersionConflict { .. }
+      | Self::CustomEmojiNameTaken
       | Self::InviteAlreadyOpen => StatusCode::CONFLICT,
       Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
       Self::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -468,6 +479,7 @@ impl ApiError {
       Self::InviteAlreadyOpen => ErrorCode::InviteAlreadyOpen,
       Self::UnknownHost => ErrorCode::UnknownHost,
       Self::Conflict(_) => ErrorCode::Conflict,
+      Self::CustomEmojiNameTaken => ErrorCode::CustomEmojiNameTaken,
       Self::LastOwner => ErrorCode::LastOwner,
       Self::CannotDeleteSelf => ErrorCode::CannotDeleteSelf,
       Self::LeaverClaimed => ErrorCode::LeaverClaimed,

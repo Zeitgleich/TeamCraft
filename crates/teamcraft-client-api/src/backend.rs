@@ -394,6 +394,21 @@ pub trait ChatBackend {
   fn delete_org_background(&self, _id: OrgBackgroundId) {}
   /// Owners: the rule, the default and the order of the organization's backgrounds.
   fn set_org_background_rule(&self, _rule: OrgBackgroundRule) {}
+  /// The workspace's custom emoji this device verified (issue #207), and the limits for new ones.
+  fn custom_emoji(&self) -> crate::custom_emoji::CustomEmojiSet {
+    crate::custom_emoji::CustomEmojiSet::default()
+  }
+  /// A custom emoji's picture when this device holds it, checked against its hash: of the set, or
+  /// of an emoji deleted since that earlier messages still show.
+  fn custom_emoji_picture(&self, _sha256: teamcraft_proto::CustomEmojiHash) -> Option<Vec<u8>> {
+    None
+  }
+  /// Admins: signs and adds an emoji (a still PNG or WebP picture within the limits).
+  fn add_custom_emoji(&self, _shortcode: &str, _picture: Vec<u8>) {}
+  /// Admins: a new name for an emoji, signed again.
+  fn rename_custom_emoji(&self, _id: teamcraft_proto::CustomEmojiId, _shortcode: &str) {}
+  /// Admins: deletes an emoji; messages that use it stay as they are.
+  fn delete_custom_emoji(&self, _id: teamcraft_proto::CustomEmojiId) {}
   /// A link to the message that only members of the conversation can open.
   fn permalink(&self, _conversation: ConversationId, _message: MessageId) -> Option<String> {
     None

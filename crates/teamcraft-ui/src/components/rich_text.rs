@@ -1,5 +1,9 @@
 use leptos::prelude::*;
+use teamcraft_client_api::custom_emoji::{EmojiSegment, segments};
+use teamcraft_proto::CustomEmojiRef;
 use wasm_bindgen::JsCast;
+
+use crate::custom_emoji::CustomEmojiGlyph;
 
 use crate::highlight::{TokenKind, highlight};
 use crate::i18n::use_i18n;
@@ -15,6 +19,8 @@ struct MentionMarks {
   me: String,
   groups: Vec<String>,
   mentions_me: bool,
+  /// The workspace emoji the sender named (issue #207): these `:shortcode:` words show as pictures.
+  custom_emoji: Vec<CustomEmojiRef>,
 }
 
 /// Renders a message body through the safe Markdown subset.
@@ -28,6 +34,9 @@ pub fn RichText(
   /// The sender named this user among the people to notify (through a group or by name).
   #[prop(optional)]
   mentions_me: bool,
+  /// Custom emoji the sender named, from inside the ciphertext.
+  #[prop(optional, into)]
+  custom_emoji: Vec<CustomEmojiRef>,
 ) -> impl IntoView {
   let i18n = use_i18n();
   let blocks = markdown::parse(&body);
@@ -35,6 +44,7 @@ pub fn RichText(
     me,
     groups: group_mentions,
     mentions_me,
+    custom_emoji,
   });
   blocks
     .into_iter()
@@ -214,7 +224,8 @@ fn render_inlines(inlines: Vec<Inline>, me: MentionMarks) -> Vec<AnyView> {
   inlines
     .into_iter()
     .map(|inline| match inline {
-      Inline::Text(text) => text.into_any(),
+      Inline::Text(text) if me.custom_emoji.is_empty() => text.into_any(),
+      Inline::Text(text) => render_text_with_emoji(&text, &me.custom_emoji),
       Inline::Bold(inner) => view! { <strong>{render_inlines(inner, me.clone())}</strong> }.into_any(),
       Inline::Italic(inner) => view! { <em>{render_inlines(inner, me.clone())}</em> }.into_any(),
       Inline::Strike(inner) => view! { <s>{render_inlines(inner, me.clone())}</s> }.into_any(),
@@ -251,6 +262,18 @@ fn render_inlines(inlines: Vec<Inline>, me: MentionMarks) -> Vec<AnyView> {
       },
     })
     .collect()
+}
+
+/// Text with the `:shortcode:` words of custom emoji as their pictures.
+fn render_text_with_emoji(text: &str, refs: &[CustomEmojiRef]) -> AnyView {
+  segments(text, refs)
+    .into_iter()
+    .map(|segment| match segment {
+      EmojiSegment::Text(text) => text.to_owned().into_any(),
+      EmojiSegment::Emoji(reference) => view! { <CustomEmojiGlyph reference=reference.clone() /> }.into_any(),
+    })
+    .collect_view()
+    .into_any()
 }
 
 /// A permalink to a message: names the conversation and opens it; links the user can't open say so.

@@ -1048,6 +1048,7 @@ impl ChatBackend for MockBackend {
         emoji: emoji.to_owned(),
         count: 1,
         reacted_by_me: true,
+        maybe_custom: None,
       }),
     }
   }
@@ -1505,6 +1506,7 @@ impl State {
         maybe_source: None,
         maybe_placeholder: None,
         group_mentions: Vec::new(),
+        custom_emoji: Vec::new(),
         mentions_me: false,
       };
       if matches!(message.kind, MessageKind::User) {
@@ -1515,6 +1517,7 @@ impl State {
               emoji: emoji.to_owned(),
               count: 1 + rng.below(4) as u32,
               reacted_by_me: rng.below(4) == 0,
+              maybe_custom: None,
             });
           }
         }
@@ -1552,6 +1555,7 @@ impl State {
               maybe_source: None,
               maybe_placeholder: None,
               group_mentions: Vec::new(),
+              custom_emoji: Vec::new(),
               mentions_me: false,
             });
           }
@@ -1624,6 +1628,7 @@ fn log_line(conversation: ConversationId, index: usize, total: usize, now: Times
     maybe_source: None,
     maybe_placeholder: None,
     group_mentions: Vec::new(),
+    custom_emoji: Vec::new(),
     mentions_me: false,
   }
 }

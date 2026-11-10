@@ -14,6 +14,7 @@ mod auth;
 mod brand;
 mod calls;
 mod conversations;
+mod custom_emoji;
 mod devices;
 mod directory;
 mod e2ee;
@@ -135,6 +136,7 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
     .merge(brand::routes())
     .merge(calls::routes())
     .merge(conversations::routes())
+    .merge(custom_emoji::routes())
     .merge(devices::routes())
     .merge(directory::routes())
     .merge(e2ee::routes())

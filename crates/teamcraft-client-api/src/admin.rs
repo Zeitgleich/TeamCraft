@@ -792,6 +792,8 @@ pub enum AdminSection {
   People,
   Announcement,
   Backgrounds,
+  /// The workspace's custom emoji (issue #207).
+  Emoji,
   /// Brands: host names, colors, images and texts per brand.
   Brands,
   /// The outgoing mail server.
@@ -819,7 +821,7 @@ pub enum AdminSection {
 }
 
 impl AdminSection {
-  pub const ALL: [AdminSection; 20] = [
+  pub const ALL: [AdminSection; 21] = [
     Self::Channels,
     Self::Users,
     Self::Permissions,
@@ -827,6 +829,7 @@ impl AdminSection {
     Self::People,
     Self::Announcement,
     Self::Backgrounds,
+    Self::Emoji,
     Self::Brands,
     Self::Mail,
     Self::Calendar,
@@ -851,6 +854,7 @@ impl AdminSection {
       Self::People => "people",
       Self::Announcement => "announcement",
       Self::Backgrounds => "backgrounds",
+      Self::Emoji => "emoji",
       Self::Brands => "brands",
       Self::Mail => "mail",
       Self::Calendar => "calendar",

@@ -272,6 +272,30 @@ pub trait ServerApi {
   fn list_conversations(&self) -> impl Future<Output = Result<ListConversationsResponse, ApiError>>;
   /// Every user group with its members (`GET /user-groups/rosters`); refused for guests.
   fn list_user_group_rosters(&self) -> impl Future<Output = Result<ListUserGroupRostersResponse, ApiError>>;
+  /// The workspace's custom emoji with their signed documents (`GET /custom-emoji`, issue #207).
+  fn list_custom_emoji(
+    &self,
+  ) -> impl Future<Output = Result<teamcraft_proto::ListCustomEmojiResponse, ApiError>>;
+  /// Admins: adds a custom emoji with the document this device signed.
+  fn create_custom_emoji(
+    &self,
+    request: &teamcraft_proto::CreateCustomEmojiRequest,
+  ) -> impl Future<Output = Result<teamcraft_proto::CustomEmojiResponse, ApiError>>;
+  /// Admins: a new name, signed over the same picture.
+  fn rename_custom_emoji(
+    &self,
+    emoji: teamcraft_proto::CustomEmojiId,
+    request: &teamcraft_proto::RenameCustomEmojiRequest,
+  ) -> impl Future<Output = Result<teamcraft_proto::CustomEmojiResponse, ApiError>>;
+  fn delete_custom_emoji(
+    &self,
+    emoji: teamcraft_proto::CustomEmojiId,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Where to fetch a custom emoji's picture.
+  fn download_custom_emoji(
+    &self,
+    emoji: teamcraft_proto::CustomEmojiId,
+  ) -> impl Future<Output = Result<teamcraft_proto::CustomEmojiDownloadResponse, ApiError>>;
   fn conversation(
     &self,
     conversation: ConversationId,

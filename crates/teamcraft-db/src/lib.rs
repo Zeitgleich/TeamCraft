@@ -14,6 +14,7 @@ mod call_history;
 mod channel_deletion;
 mod channel_role_log;
 mod conversation;
+mod custom_emoji;
 mod database;
 mod device;
 mod device_list;
@@ -91,6 +92,7 @@ pub use conversation::{
   Conversation, ConversationChanges, ConversationFilter, ConversationMember, ConversationView, ImageChange,
   Membership, MembershipChanges, NewConversation, participants_key,
 };
+pub use custom_emoji::{CustomEmojiWrite, NewCustomEmoji, StoredCustomEmoji};
 pub use database::{Database, DatabaseOptions};
 pub use device::{Device, NewDevice};
 pub use device_list::{DeviceList, DeviceListOutcome};
