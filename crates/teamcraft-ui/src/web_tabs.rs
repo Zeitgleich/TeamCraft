@@ -177,31 +177,70 @@ async fn request_lock(name: &str, if_available: bool) -> Result<Option<OwnerLock
     .ok_or("no navigator.locks.request")?;
   let options = js_sys::Object::new();
   js_sys::Reflect::set(&options, &"ifAvailable".into(), &if_available.into()).map_err(|_| "lock options")?;
-  let (granted, answer) = oneshot::channel::<Option<js_sys::Function>>();
-  let callback = Closure::once_into_js(move |lock: JsValue| -> JsValue {
+  let (sender, answer) = oneshot::channel();
+  let sender: LockAnswer = Rc::new(RefCell::new(Some(sender)));
+  let pending = request
+    .call3(&locks, &name.into(), &options, &lock_callback(sender.clone()))
+    .map_err(|error| platform::describe_js_error(&error))?;
+  watch_lock_request(pending, sender);
+  match answer.await {
+    Ok(Ok(maybe_release)) => Ok(maybe_release.map(|release| OwnerLock { release })),
+    Ok(Err(reason)) => Err(reason),
+    Err(_) => Err("the lock request ended without an answer".to_owned()),
+  }
+}
+
+/// Where a lock request's outcome goes: the lock's release function, `None` when it wasn't free
+/// (`ifAvailable`), or why the request failed. Taken by the first of the callback and the request's
+/// rejection.
+type LockAnswer = Rc<RefCell<Option<oneshot::Sender<Result<Option<js_sys::Function>, String>>>>>;
+
+/// The callback the browser calls with the lock. It is owned by the page's garbage collector (it
+/// lives as long as the browser holds it, not as long as the waiting future) and answers only once:
+/// a call after that returns nothing instead of throwing "closure invoked recursively or after
+/// being dropped" into the lock request's promise (GlitchTip TEAMCRAFT-1I).
+fn lock_callback(answer: LockAnswer) -> JsValue {
+  Closure::<dyn FnMut(JsValue) -> JsValue>::new(move |lock: JsValue| -> JsValue {
+    let Some(sender) = answer.borrow_mut().take() else {
+      return JsValue::NULL;
+    };
     if lock.is_null() {
       // The receiver only disappears if the waiting future was dropped; nobody is left to tell.
-      let _ = granted.send(None);
+      let _ = sender.send(Ok(None));
       return JsValue::NULL;
     }
     let mut maybe_release = None;
     let held = js_sys::Promise::new(&mut |resolve, _reject| maybe_release = Some(resolve));
     // Nobody waits any more (the caller gave up): let go of the lock right away.
-    if let Err(Some(release)) = granted.send(maybe_release)
+    if let Err(Ok(Some(release))) = sender.send(Ok(maybe_release))
       && release.call0(&JsValue::NULL).is_err()
     {
       tracing::debug!("could not release an unwanted lock");
     }
     held.into()
+  })
+  .into_js_value()
+}
+
+/// Handles the promise `navigator.locks.request` returned: it settles when the lock is released,
+/// and rejects when the request failed (aborted, or the callback threw). Unhandled, a rejection
+/// is an uncaught error of the page; and a request that failed before the callback ran answers the
+/// waiting caller instead of leaving it waiting forever.
+fn watch_lock_request(pending: JsValue, answer: LockAnswer) {
+  let Ok(pending) = pending.dyn_into::<js_sys::Promise>() else {
+    return;
+  };
+  wasm_bindgen_futures::spawn_local(async move {
+    let Err(error) = wasm_bindgen_futures::JsFuture::from(pending).await else {
+      return;
+    };
+    let reason = platform::describe_js_error(&error);
+    tracing::warn!(%reason, "a Web Lock request failed");
+    if let Some(sender) = answer.borrow_mut().take() {
+      // The receiver only disappears if the waiting future was dropped; nobody is left to tell.
+      let _ = sender.send(Err(reason));
+    }
   });
-  request
-    .call3(&locks, &name.into(), &options, &callback)
-    .map_err(|error| platform::describe_js_error(&error))?;
-  match answer.await {
-    Ok(Some(release)) => Ok(Some(OwnerLock { release })),
-    Ok(None) => Ok(None),
-    Err(_) => Err("the lock request ended without an answer".to_owned()),
-  }
 }
 
 impl OwnerChannel {

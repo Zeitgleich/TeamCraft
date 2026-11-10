@@ -81,8 +81,9 @@ async fn open(name: &str, maybe_version: Option<u32>, supported: u32) -> Result<
     move |_| upgrade(&request)
   });
   request.set_onupgradeneeded(Some(on_upgrade.as_ref().unchecked_ref()));
+  let detach = OnDrop::new(|| request.set_onupgradeneeded(None));
   let result = request_result(&request).await;
-  request.set_onupgradeneeded(None);
+  drop(detach);
   // A newer version of the app upgraded the database (issue #160): refused by the browser itself.
   if result.is_err()
     && request
@@ -113,6 +114,7 @@ pub(crate) async fn delete_database(name: &str) -> Result<(), StoreError> {
   let sender = std::rc::Rc::new(std::cell::RefCell::new(Some(sender)));
   let on_blocked = completion(&sender, Err(()));
   request.set_onblocked(Some(on_blocked.as_ref().unchecked_ref()));
+  let _detach = OnDrop::new(|| request.set_onblocked(None));
   let deleted = Box::pin(request_result(&request));
   let blocked = Box::pin(async {
     let timeout = Box::pin(crate::platform::sleep(DELETE_TIMEOUT));
@@ -120,7 +122,6 @@ pub(crate) async fn delete_database(name: &str) -> Result<(), StoreError> {
     drop(futures_util::future::select(receiver, timeout).await);
   });
   let outcome = futures_util::future::select(deleted, blocked).await;
-  request.set_onblocked(None);
   match outcome {
     futures_util::future::Either::Left((result, _)) => result.map(|_| ()),
     futures_util::future::Either::Right(((), _)) => Err(StoreError::InUse),
@@ -135,9 +136,12 @@ pub(crate) async fn request_result(request: &IdbRequest) -> Result<JsValue, Stor
   let on_error = completion(&sender, Err(()));
   request.set_onsuccess(Some(on_success.as_ref().unchecked_ref()));
   request.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+  let detach = OnDrop::new(|| {
+    request.set_onsuccess(None);
+    request.set_onerror(None);
+  });
   let outcome = receiver.await;
-  request.set_onsuccess(None);
-  request.set_onerror(None);
+  drop(detach);
   match outcome {
     Ok(Ok(())) => request.result().map_err(|error| js_error("request", &error)),
     _ => Err(StoreError::Database(dom_error(
@@ -156,10 +160,13 @@ pub(crate) async fn transaction_done(transaction: &IdbTransaction) -> Result<(),
   transaction.set_oncomplete(Some(on_complete.as_ref().unchecked_ref()));
   transaction.set_onerror(Some(on_error.as_ref().unchecked_ref()));
   transaction.set_onabort(Some(on_error.as_ref().unchecked_ref()));
+  let detach = OnDrop::new(|| {
+    transaction.set_oncomplete(None);
+    transaction.set_onerror(None);
+    transaction.set_onabort(None);
+  });
   let outcome = receiver.await;
-  transaction.set_oncomplete(None);
-  transaction.set_onerror(None);
-  transaction.set_onabort(None);
+  drop(detach);
   match outcome {
     Ok(Ok(())) => Ok(()),
     _ => Err(StoreError::Database(dom_error(
@@ -178,6 +185,26 @@ pub(crate) fn js_error(context: &'static str, error: &JsValue) -> StoreError {
     "IndexedDB {context}: {}",
     crate::platform::describe_js_error(error)
   ))
+}
+
+/// Runs its function when dropped. Handlers set on a request or transaction are unset by one
+/// declared after their closures, so it runs first also when the waiting future is dropped (it lost
+/// a `select`, its task went): an event that fires later then finds no handler, not a dropped
+/// closure ("closure invoked recursively or after being dropped", GlitchTip TEAMCRAFT-1I).
+struct OnDrop<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> OnDrop<F> {
+  fn new(run: F) -> Self {
+    Self(Some(run))
+  }
+}
+
+impl<F: FnOnce()> Drop for OnDrop<F> {
+  fn drop(&mut self) {
+    if let Some(run) = self.0.take() {
+      run();
+    }
+  }
 }
 
 type Completion = std::rc::Rc<std::cell::RefCell<Option<oneshot::Sender<Result<(), ()>>>>>;
