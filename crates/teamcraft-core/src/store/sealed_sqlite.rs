@@ -255,6 +255,7 @@ impl SealedStore<SqliteRecords> {
     let (maybe_purge, maybe_purger) = match purging {
       Purging::None => (None, None),
       Purging::Runs(path) => {
+        LogPurger::take_over_checkpoints(&connection)?;
         let purger = LogPurger::start(path)?;
         (Some(Arc::clone(purger.purge())), Some(purger))
       },
@@ -391,6 +392,12 @@ impl RecordBackend for SqliteRecords {
       connection, group, ..
     } = &mut *inner;
     let ended = group.end(connection);
+    if ended.is_ok()
+      && !inner.group.is_open()
+      && let Some(purger) = &self.maybe_purger
+    {
+      purger.after_commit();
+    }
     let maybe_staged = inner.maybe_staged_stamp.take();
     if ended.is_ok() && maybe_staged.is_some() {
       inner.maybe_known_stamp = maybe_staged;
@@ -862,6 +869,33 @@ mod tests {
       Some(1),
       "another process's commit still counts"
     );
+    drop(store);
+    std::fs::remove_dir_all(&directory).unwrap();
+  }
+
+  /// Issue #1681: the writer's commit no longer runs SQLite's automatic checkpoint (two syncs under
+  /// its lock); a long log is written back on the purge's connection.
+  #[test]
+  fn a_long_log_is_written_back_off_the_writer() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let store = open_purged(&path);
+    let autocheckpoint: i64 = store
+      .backend()
+      .lock()
+      .connection
+      .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
+      .unwrap();
+    assert_eq!(autocheckpoint, 0);
+    crate::store::write_group(&store, || {
+      for index in 0..80_u8 {
+        store.put(Table::MlsStorage, &format!("entry {index}"), &[index; 64 * 1024])?;
+      }
+      Ok::<_, StoreError>(())
+    })
+    .unwrap();
+    let purge = Arc::clone(store.backend().maybe_purge.as_ref().unwrap());
+    assert!(purge.wait_for_backfill(PURGE_WAIT), "the commit asked for none");
     drop(store);
     std::fs::remove_dir_all(&directory).unwrap();
   }

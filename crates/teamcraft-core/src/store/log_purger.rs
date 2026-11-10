@@ -17,19 +17,29 @@
 //! that begins after the log was written back reads from the database file alone (SQLite gives it
 //! read mark 0), so the readers that pin the log only get fewer, and the truncation follows as soon
 //! as the reads open at that moment end. Reads are never held back.
+//!
+//! The thread also takes over SQLite's automatic checkpoint (issue #1681): on the writer it ran
+//! inside the commit that crossed [`BACKFILL_PAGES`], two syncs under the writer's lock. The writer
+//! turns it off and asks for a passive checkpoint here instead, which waits for nobody.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::ffi::c_int;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
+use rusqlite::hooks::Wal;
 use rusqlite::{Connection, OpenFlags};
 
 use super::StoreError;
 use super::sql_group::sqlite_error;
 use super::sqlite_log::{LOG_PRAGMAS, PURGE_INTERVAL, checkpoint_truncate_now};
 
+/// Pages in the log after which a commit asks for a passive checkpoint: SQLite's own default for
+/// its automatic checkpoint.
+const BACKFILL_PAGES: c_int = 1000;
 /// The default of [`LogPurgeLimits::max_delay`]: how late a due purge may run while readers keep
 /// the log. Short against the time somebody needs to take a phone and copy its files, long against
 /// a read group's length, so writes are rarely held back.
@@ -92,6 +102,10 @@ struct Schedule {
   is_holding_writes: bool,
   is_closing: bool,
   has_tried_closing: bool,
+  /// The log grew past [`BACKFILL_PAGES`] since the last checkpoint.
+  is_backfill_due: bool,
+  #[cfg(test)]
+  backfills: u32,
 }
 
 /// When a due purge may run, and when it must.
@@ -105,6 +119,8 @@ struct Due {
 #[derive(Debug, PartialEq, Eq)]
 enum Step {
   Checkpoint,
+  /// A passive checkpoint: writes the log back as far as the readers allow, truncates nothing.
+  Backfill,
   /// Until the schedule changes, or at most this long.
   Wait(Option<Duration>),
   Stop,
@@ -113,6 +129,12 @@ enum Step {
 /// The purges of this process, by database path: a reading connection, opened after the writing
 /// one, reports its transactions to the writer's purge.
 static PURGES: Mutex<Vec<(String, Weak<LogPurge>)>> = Mutex::new(Vec::new());
+
+thread_local! {
+  /// Pages in the log after this thread's last commit on a writing connection, from SQLite's
+  /// write-ahead log hook (which takes no state of its own); 0 once read.
+  static LOG_PAGES: Cell<c_int> = const { Cell::new(0) };
+}
 
 impl Default for LogPurgeLimits {
   fn default() -> Self {
@@ -145,6 +167,25 @@ impl LogPurger {
 
   pub(crate) fn purge(&self) -> &Arc<LogPurge> {
     &self.purge
+  }
+
+  /// Turns SQLite's automatic checkpoint off on the writing `connection`: [`Self::after_commit`]
+  /// hands it to the purge's thread.
+  pub(crate) fn take_over_checkpoints(connection: &Connection) -> Result<(), StoreError> {
+    // Before the hook: setting the pragma replaces the connection's hook.
+    connection
+      .execute_batch("PRAGMA wal_autocheckpoint = 0;")
+      .map_err(sqlite_error)?;
+    connection.wal_hook(Some(note_log_pages));
+    Ok(())
+  }
+
+  /// After a commit on the writing connection, on the thread that committed: asks for a passive
+  /// checkpoint once the log is long.
+  pub(crate) fn after_commit(&self) {
+    if LOG_PAGES.with(|pages| pages.replace(0)) >= BACKFILL_PAGES {
+      self.purge.request_backfill();
+    }
   }
 }
 
@@ -213,6 +254,21 @@ impl LogPurge {
     schedule.add_due(due);
     drop(schedule);
     self.changed.notify_all();
+  }
+
+  fn request_backfill(&self) {
+    self.lock().is_backfill_due = true;
+    self.changed.notify_all();
+  }
+
+  /// Waits until a passive checkpoint ran, at most `max_wait`; whether one did.
+  #[cfg(test)]
+  pub(crate) fn wait_for_backfill(&self, max_wait: Duration) -> bool {
+    let (schedule, _) = self
+      .changed
+      .wait_timeout_while(self.lock(), max_wait, |schedule| schedule.backfills == 0)
+      .unwrap_or_else(|poisoned| poisoned.into_inner());
+    schedule.backfills > 0
   }
 
   /// A connection began a transaction (a read snapshot or a group of writes).
@@ -289,6 +345,9 @@ impl Schedule {
       is_holding_writes: false,
       is_closing: false,
       has_tried_closing: false,
+      is_backfill_due: false,
+      #[cfg(test)]
+      backfills: 0,
     }
   }
 
@@ -309,8 +368,15 @@ impl Schedule {
     self.open.values().any(|owner| *owner == thread)
   }
 
-  /// What the purge thread does at `now`.
+  /// What the purge thread does at `now`: the purge if it can run, else a due backfill.
   fn next_step(&mut self, now: Instant) -> Step {
+    match self.next_purge_step(now) {
+      Step::Wait(_) if self.is_backfill_due && !self.is_closing => Step::Backfill,
+      step => step,
+    }
+  }
+
+  fn next_purge_step(&mut self, now: Instant) -> Step {
     if self.is_closing {
       // One last try of a due purge; SQLite's own checkpoint when the last connection closes and
       // the next start of the app cover what it can't finish.
@@ -380,6 +446,7 @@ impl Schedule {
     let maybe_next = self.maybe_due_next.take();
     match outcome {
       Ok(true) => {
+        self.is_backfill_due = false;
         self.maybe_due = maybe_next;
         self.maybe_last_purge = Some(started);
         // The pause is for tries that failed: the next purge runs as soon as the readers allow.
@@ -435,6 +502,21 @@ fn run(purge: &LogPurge, connection: &Connection) {
           .unwrap_or_else(|poisoned| poisoned.into_inner())
           .0
       },
+      Step::Backfill => {
+        schedule.is_backfill_due = false;
+        drop(schedule);
+        if let Err(error) = connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(())) {
+          tracing::warn!(%error, "could not write the write-ahead log back");
+        }
+        #[cfg_attr(not(test), allow(unused_mut))]
+        let mut schedule = purge.lock();
+        #[cfg(test)]
+        {
+          schedule.backfills += 1;
+        }
+        purge.changed.notify_all();
+        schedule
+      },
       Step::Checkpoint => {
         let started = Instant::now();
         schedule.begin_attempt(started);
@@ -460,6 +542,12 @@ fn open_connection(path: &Path) -> Result<Connection, StoreError> {
   connection.execute_batch(LOG_PRAGMAS).map_err(sqlite_error)?;
   connection.busy_timeout(Duration::ZERO).map_err(sqlite_error)?;
   Ok(connection)
+}
+
+/// SQLite's write-ahead log hook on the writing connection, after each commit.
+fn note_log_pages(_wal: &Wal, pages: c_int) -> rusqlite::Result<()> {
+  LOG_PAGES.with(|cell| cell.set(pages));
+  Ok(())
 }
 
 fn register(path: &Path, purge: &Arc<LogPurge>) {
@@ -611,6 +699,28 @@ mod tests {
       purge.wait_before_writes();
       assert!(started.elapsed() < MAX_WRITE_HOLD / 2, "it would wait for itself");
       purge.transaction_ended(ticket);
+    }
+  }
+
+  mod backfill {
+    use super::*;
+
+    #[test]
+    fn a_backfill_runs_while_the_purge_waits_for_readers() {
+      let (mut schedule, now) = due_now();
+      schedule.open.insert(0, thread::current().id());
+      schedule.is_backfill_due = true;
+      assert_eq!(schedule.next_step(now), Step::Backfill);
+    }
+
+    #[test]
+    fn a_purge_that_can_run_goes_first_and_covers_the_backfill() {
+      let (mut schedule, now) = due_now();
+      schedule.is_backfill_due = true;
+      assert_eq!(schedule.next_step(now), Step::Checkpoint);
+      schedule.begin_attempt(now);
+      schedule.end_attempt(&Ok(true), now);
+      assert_eq!(schedule.next_step(now), Step::Wait(None));
     }
   }
 

@@ -5302,7 +5302,10 @@ through the writer, and its next read sees them. The notification extension open
 write-ahead log is purged on a connection of its own, which counts the connections' open transactions
 and truncates when they are idle (§4.3.1, issue #1684). A truncation moves SQLite's data version on
 the other connections; the writer counts it as another process's commit (which drops its caches and
-makes the next MLS save write everything) only if the commit number moved too.
+makes the next MLS save write everything) only if the commit number moved too. The same connection
+takes over SQLite's automatic checkpoint (issue #1681): the writer turns it off, and a commit that
+leaves more than 1000 pages in the log asks the purge's thread for a passive checkpoint, instead of
+syncing twice inside the commit under the writer's lock.
 
 **MLS state (issue #424).** The openmls provider storage (every group's tree, context, epoch and
 message secrets; key package private keys) is a map from storage key to value; each entry is one

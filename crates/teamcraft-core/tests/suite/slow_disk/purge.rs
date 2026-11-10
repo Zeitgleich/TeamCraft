@@ -34,7 +34,7 @@ const MAX_HELD_TURN: Duration = BOUND_SLACK;
 fn a_purge_that_a_read_holds_up_does_not_hold_up_the_writer() {
   let store = SlowStore::open(PHONE_SYNC_DELAY);
   seed(&store);
-  assert!(store.writer.wait_for_purge(PURGE_WAIT), "the purge at opening");
+  settle(&store);
   // The query lane is in the middle of a long read: its snapshot keeps the log's frames.
   pin(&store.second_reader);
 
@@ -62,7 +62,7 @@ fn a_purge_that_a_read_holds_up_does_not_hold_up_the_writer() {
   let syncs: u64 = turns.iter().map(|turn| turn.syncs.syncs()).sum();
   assert_eq!(
     syncs, 0,
-    "the writer's turns synced: the purge ran on its connection, or while the read held the log"
+    "the writer's turns synced: the purge ran on its connection, or while the read held the log: {turns:?}"
   );
   assert_log_truncated(&store);
 }
@@ -133,6 +133,34 @@ fn a_purge_finishes_within_its_bound_while_readers_keep_reading() {
   );
 }
 
+/// Issue #1681: SQLite's automatic checkpoint ran inside the commit that made the log long, two
+/// syncs under the writer's lock. The purge's thread writes the log back instead.
+#[test]
+fn a_long_log_is_written_back_without_holding_the_writer() {
+  let store = SlowStore::open(PHONE_SYNC_DELAY);
+  seed(&store);
+  settle(&store);
+  let mut turns = Vec::new();
+  // 64 groups of 64 KiB: the log passes SQLite's 1000 pages several times.
+  for index in 0..64_u8 {
+    turns.push(measure(&store.disk, || {
+      write_group(&*store.writer, || {
+        store.writer.put(
+          Table::MlsStorage,
+          &format!("large {}", index % 4),
+          &[index; 64 * 1024],
+        )
+      })
+    }));
+  }
+  let database_syncs: u64 = turns.iter().map(|turn| turn.syncs.database_syncs).sum();
+  eprintln!("64 large groups: {turns:?}");
+  // A checkpoint syncs the database file; a commit never does. The log's header is synced once by
+  // the first commit after the log was restarted, which is no checkpoint.
+  assert_eq!(database_syncs, 0, "a checkpoint ran inside a commit: {turns:?}");
+  assert_turns_bounded(&turns);
+}
+
 /// Reads on the two read connections in turn, the next always before the last ends, until
 /// `is_done`; how long each took.
 fn keep_reading(store: &SlowStore, is_done: &AtomicBool) -> Vec<Duration> {
@@ -165,6 +193,13 @@ fn keep_writing(store: &SlowStore, is_done: &AtomicBool) -> Vec<Duration> {
     index = (index + 1) % GROUPS;
   }
   took
+}
+
+/// Waits for the purge at opening, then commits once: the first commit after the log was
+/// truncated syncs the log's header, which is no part of what the scenarios measure.
+fn settle(store: &SlowStore) {
+  assert!(store.writer.wait_for_purge(PURGE_WAIT), "the purge at opening");
+  store.writer.put(Table::Account, "settled", &[1]).unwrap();
 }
 
 fn seed(store: &SlowStore) {
