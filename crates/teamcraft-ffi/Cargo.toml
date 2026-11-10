@@ -65,7 +65,7 @@ tracing-oslog = "0.3.0"
 
 [dev-dependencies]
 base64 = "0.23.1"
-tokio = { workspace = true, features = ["rt", "macros", "time", "net", "io-util"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "net", "io-util", "test-util"] }
 # The Happy Eyeballs test kit (`api::black_hole`) for `http_fetch`'s tests.
 teamcraft-core = { path = "../teamcraft-core", default-features = false, features = ["ui", "sealed-sqlite", "test-support"] }
 # The other side of the dev-stack conversation is a plain core client.
