@@ -680,6 +680,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.group_leftovers()
   }
 
+  fn leavers_held_by_limit(&self) -> usize {
+    self.chat.leavers_held_by_limit()
+  }
+
   fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {
     self.chat.draft(conversation, maybe_thread)
   }
@@ -1670,6 +1674,35 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
   fn confirm_oidc_sync_brake(&self, revision: i64) {
     if let Some(admin) = self.maybe_admin.as_ref() {
       admin.confirm_oidc_sync_brake(revision);
+    }
+  }
+
+  fn provider_event_hook(&self) -> Option<teamcraft_proto::ProviderEventHookResponse> {
+    self.maybe_admin.as_ref().and_then(AdminLive::provider_event_hook)
+  }
+
+  fn create_provider_event_secret(&self) {
+    if let Some(admin) = self.maybe_admin.as_ref() {
+      admin.create_provider_event_secret();
+    }
+  }
+
+  fn delete_provider_event_hook(&self) {
+    if let Some(admin) = self.maybe_admin.as_ref() {
+      admin.delete_provider_event_hook();
+    }
+  }
+
+  fn revealed_provider_event_secret(&self) -> Option<teamcraft_proto::WebhookSecretText> {
+    self
+      .maybe_admin
+      .as_ref()
+      .and_then(AdminLive::revealed_provider_event_secret)
+  }
+
+  fn dismiss_provider_event_secret(&self) {
+    if let Some(admin) = self.maybe_admin.as_ref() {
+      admin.dismiss_provider_event_secret();
     }
   }
 

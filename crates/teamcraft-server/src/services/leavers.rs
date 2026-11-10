@@ -31,12 +31,17 @@ pub async fn list(
     .database
     .list_leavers(query.maybe_after, query.maybe_device_id, page)
     .await?;
-  let now = OffsetDateTime::now_utc();
+  // The page is cut before the rank filter, so `next` still pages through everybody.
   let maybe_next = (rows.len() == LEAVERS_PAGE_SIZE as usize)
     .then(|| rows.last().map(|row| row.user_id))
     .flatten();
+  let is_owner = caller.role.as_str() == "owner";
+  let now = OffsetDateTime::now_utc();
   let leavers = rows
     .into_iter()
+    // Only owners act on admins and owners (admin.rs `ensure_may_act_on`): an admin's app isn't
+    // shown who it couldn't remove, so it neither fails on them nor asks again.
+    .filter(|row| is_owner || !matches!(row.maybe_oidc_role.as_deref(), Some("admin" | "owner")))
     .map(|row| Leaver {
       user_id: row.user_id,
       deactivated_for_secs: u64::try_from((now - row.deactivated_at).whole_seconds()).unwrap_or(0),

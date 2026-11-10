@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT secret_sha256, created_at, last_event_at FROM identity_provider_event_hook WHERE id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "secret_sha256",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "identity_provider_event_hook",
+            "name": "secret_sha256"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "identity_provider_event_hook",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "last_event_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "identity_provider_event_hook",
+            "name": "last_event_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "399ec9e4e265e95dcfcac971165f7b581bf1258206c34ebe257ea8a18e1479ef"
+}

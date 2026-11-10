@@ -79,6 +79,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
+  /// [`Self::admin_remove_from_all_chats`] for a leaver this device claimed (docs/provisioning.md
+  /// §3): the server step is refused if the provider enabled them again since the claim.
+  pub(crate) async fn remove_leaver_from_all_chats(&mut self, user: UserId) -> Result<(), CoreError> {
+    self.sign_removals_from_all_chats(user).await?;
+    self.api.admin_remove_leaver_from_chats(user).await?;
+    Ok(())
+  }
+
   /// "Delete account" (admin.md §3.2.1, issue #630): the same signed removals as
   /// [`Self::admin_remove_from_all_chats`] first (the server never fakes a membership change), then
   /// the server deletes the account (`DELETE /admin/users/{id}`): devices, key material and

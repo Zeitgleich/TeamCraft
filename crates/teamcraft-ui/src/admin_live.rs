@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use futures_util::future::{join, join5};
+use futures_util::future::{join, join3, join5};
 use futures_util::stream::{self, StreamExt};
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
@@ -47,6 +47,7 @@ use crate::server_backend::hue_from_seed;
 const REFRESH_DELAY: Duration = Duration::from_millis(500);
 const HEALTH_PATH: &str = "/api/v1/admin/health";
 const OIDC_SYNC_PATH: &str = "/api/v1/admin/oidc-sync";
+const PROVIDER_EVENT_HOOK_PATH: &str = "/api/v1/admin/identity-provider/event-hook";
 const LIST_LIMIT: u32 = 200;
 /// Guest memberships the overview shows at once; the filters narrow a longer list, and the console
 /// says that it is cut.
@@ -144,6 +145,9 @@ pub struct AdminData {
   health: Option<AdminHealthResponse>,
   oidc_sync: Option<AdminOidcSyncResponse>,
   oidc_sync_preview: Option<AdminOidcSyncPreviewResponse>,
+  provider_event_hook: Option<teamcraft_proto::ProviderEventHookResponse>,
+  /// A secret for the provider's events just made, shown once until dismissed.
+  revealed_provider_event_secret: Option<teamcraft_proto::WebhookSecretText>,
   brands: Option<AdminBrandsResponse>,
   mail: Option<AdminMailSettingsResponse>,
   /// Loaded when the console shows the notetaker page.
@@ -440,6 +444,40 @@ impl AdminLive {
       Some("{}".to_owned()),
       Stored::OidcSyncPreview,
     );
+  }
+
+  pub fn provider_event_hook(&self) -> Option<teamcraft_proto::ProviderEventHookResponse> {
+    self.data.borrow().provider_event_hook.clone()
+  }
+
+  /// A new secret for the identity provider's events, shown once.
+  pub fn create_provider_event_secret(&self) {
+    self.send_stored(
+      ApiMethod::Post,
+      PROVIDER_EVENT_HOOK_PATH.to_owned(),
+      Some("{}".to_owned()),
+      Stored::ProviderEventSecret,
+    );
+  }
+
+  /// Turns the identity provider's events off.
+  pub fn delete_provider_event_hook(&self) {
+    self.data.borrow_mut().revealed_provider_event_secret = None;
+    self.send_stored(
+      ApiMethod::Delete,
+      PROVIDER_EVENT_HOOK_PATH.to_owned(),
+      None,
+      Stored::ProviderEventHookGone,
+    );
+  }
+
+  pub fn revealed_provider_event_secret(&self) -> Option<teamcraft_proto::WebhookSecretText> {
+    self.data.borrow().revealed_provider_event_secret.clone()
+  }
+
+  pub fn dismiss_provider_event_secret(&self) {
+    self.data.borrow_mut().revealed_provider_event_secret = None;
+    self.changed();
   }
 
   /// Confirms the deactivations the safety brake holds back.
@@ -1061,7 +1099,7 @@ impl AdminLive {
     let mut errors: Vec<String> = Vec::new();
     let (
       ((spaces, conversations, users, policy, announcement), (instance, brands, mail, calendar, runtime)),
-      (health, oidc_sync),
+      (health, oidc_sync, provider_event_hook),
     ) = join(
       join(
         join5(
@@ -1082,9 +1120,13 @@ impl AdminLive {
           self.fetch_if::<RuntimeSettingsResponse>(reads.has(Reads::RUNTIME), "/api/v1/admin/settings"),
         ),
       ),
-      join(
+      join3(
         self.fetch_if::<AdminHealthResponse>(reads.has(Reads::HEALTH), HEALTH_PATH),
         self.fetch_if::<AdminOidcSyncResponse>(reads.has(Reads::HEALTH), OIDC_SYNC_PATH),
+        self.fetch_if::<teamcraft_proto::ProviderEventHookResponse>(
+          reads.has(Reads::HEALTH),
+          PROVIDER_EVENT_HOOK_PATH,
+        ),
       ),
     )
     .await;
@@ -1096,6 +1138,7 @@ impl AdminLive {
     let instance = settle(instance, &mut errors).flatten();
     let health = settle(health, &mut errors).flatten();
     let oidc_sync = settle(oidc_sync, &mut errors).flatten();
+    let provider_event_hook = settle(provider_event_hook, &mut errors).flatten();
     let brands = settle(brands, &mut errors).flatten();
     let mail = settle(mail, &mut errors).flatten();
     let calendar = settle(calendar, &mut errors).flatten();
@@ -1251,6 +1294,9 @@ impl AdminLive {
       if let Some(health) = health {
         self.open_alert_count.set(health.open_alert_count()); // async-ok: a Cell, not a signal.
         data.health = Some(health);
+      }
+      if provider_event_hook.is_some() {
+        data.provider_event_hook = provider_event_hook;
       }
       if oidc_sync.is_some() {
         data.oidc_sync = oidc_sync;
@@ -2141,6 +2187,10 @@ pub enum Stored {
   Notetaker,
   OidcSync,
   OidcSyncPreview,
+  /// A new secret for the identity provider's events, with the hook.
+  ProviderEventSecret,
+  /// The identity provider's event hook was turned off (no body).
+  ProviderEventHookGone,
   /// A webhook was changed: the list is read again; `has_secret` answers carry a new secret.
   Webhooks {
     has_secret: bool,
@@ -2177,6 +2227,18 @@ impl Stored {
       Self::Notetaker => data.notetaker = Some(serde_json::from_str(body)?),
       Self::OidcSync => data.oidc_sync = Some(serde_json::from_str(body)?),
       Self::OidcSyncPreview => data.oidc_sync_preview = Some(serde_json::from_str(body)?),
+      Self::ProviderEventSecret => {
+        let answer: teamcraft_proto::CreateProviderEventSecretResponse = serde_json::from_str(body)?;
+        data.provider_event_hook = Some(answer.hook.clone());
+        data.revealed_provider_event_secret = Some(answer.secret.clone());
+      },
+      Self::ProviderEventHookGone => {
+        if let Some(hook) = data.provider_event_hook.as_mut() {
+          hook.is_configured = false;
+          hook.maybe_created_at = None;
+          hook.maybe_last_event_at = None;
+        }
+      },
       Self::Webhooks { has_secret } => {
         data.webhooks = None;
         data.has_asked_webhooks = false;
@@ -3059,11 +3121,11 @@ mod tests {
       block_on(live.refresh_once());
 
       let paths = server.paths();
-      // Twelve lists and settings, the audit log, the guests and the owners and admins by role:
+      // Thirteen lists and settings, the audit log, the guests and the owners and admins by role:
       // the same 17 requests however many channels, users and spaces there are (it used to be
       // about 650, then 28, with a page of 200 repeated up to 5 times for each list).
       assert!(
-        paths.len() <= 12 + 1 + 1 + 2,
+        paths.len() <= 13 + 1 + 1 + 2,
         "{} requests: {paths:?}",
         paths.len()
       );
@@ -3115,7 +3177,11 @@ mod tests {
           "{section:?}: {paths:?}"
         );
         if section == AdminSection::Health {
-          assert_eq!(paths, [HEALTH_PATH, OIDC_SYNC_PATH], "two small requests");
+          assert_eq!(
+            paths,
+            [HEALTH_PATH, OIDC_SYNC_PATH, PROVIDER_EVENT_HOOK_PATH],
+            "three small requests"
+          );
         }
       }
     }
@@ -3250,8 +3316,9 @@ mod tests {
       let live = AdminLive::new(server.clone());
       block_on(live.refresh_once());
 
-      // Only the first round of reads went out (the twelve lists); nothing followed once the server said to wait.
-      assert!(server.paths().len() <= 12, "{:?}", server.paths());
+      // Only the first round of reads went out (the thirteen lists and states); nothing followed once
+      // the server said to wait.
+      assert!(server.paths().len() <= 13, "{:?}", server.paths());
       assert!(live.is_quiet());
       let detail = live.maybe_error().unwrap_or_default();
       assert_eq!(detail, "rate_limited:42");

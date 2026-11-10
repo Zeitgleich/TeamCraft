@@ -366,14 +366,19 @@ pub enum AfterDeactivation {
 
 /// The admin action "Remove from all chats" for a deactivated user (admin.md §3.4): their devices
 /// are removed and they leave every conversation and space; the members' clients commit the
-/// removals with a key rotation (e2ee.md §4.6). Not reversible by a reactivation.
+/// removals with a key rotation (e2ee.md §4.6). Not reversible by a reactivation. `as_leaver`: an
+/// app's automatic removal (docs/provisioning.md §3), refused unless the user is still a leaver.
 pub async fn remove_from_chats_as_admin(
   state: &AppState,
   caller: &AuthenticatedUser,
   user: UserId,
+  as_leaver: bool,
 ) -> Result<(), ApiError> {
   require(state, caller, Permission::ManageUsers, &Target::Instance)?;
   ensure_may_act_on(state, caller, user).await?;
+  if as_leaver && !state.database.is_leaver(user).await? {
+    return Err(ApiError::Conflict("the user is no longer a leaver".into()));
+  }
   remove_from_all_chats(state, Some(caller.user.id), user).await
 }
 

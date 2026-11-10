@@ -48,6 +48,16 @@ pub struct Leaver {
   pub is_claimed: bool,
 }
 
+/// Query of `POST /api/v1/admin/users/{user_id}/remove-from-chats`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct RemoveFromChatsQuery {
+  /// The removal comes from an app's automatic claim (docs/provisioning.md §3): refused with 409
+  /// unless the user is still a leaver, e.g. because the provider enabled them again meanwhile.
+  #[serde(default)]
+  pub as_leaver: bool,
+}
+
 /// Body of `POST /api/v1/admin/leavers/{user_id}/claim`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ClaimLeaverRequest {

@@ -51,6 +51,9 @@ pub(crate) struct LeaverRun {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct AutomaticRemovals {
   at_ms: Vec<i64>,
+  /// Leavers the last round left for an admin because of the limit, for the admin console.
+  #[serde(default)]
+  held_by_limit: usize,
 }
 
 /// What one round did.
@@ -190,7 +193,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         // Counted before the removal, so that a crash in the middle can't loop past the limit.
         removals.at_ms.push(now);
         records::put_json(&self.store, Table::SyncState, AUTOMATIC_REMOVALS_KEY, &removals)?;
-        match self.admin_remove_from_all_chats(user).await {
+        match self.remove_leaver_from_all_chats(user).await {
           Ok(()) => {
             tracing::info!(user_id = %user, "a leaver was removed from all chats");
             outcome.round.removed += 1;
@@ -205,6 +208,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Some(next) => maybe_after = Some(next),
         None => break,
       }
+    }
+    if removals.held_by_limit != outcome.round.held_by_limit {
+      removals.held_by_limit = outcome.round.held_by_limit;
+      records::put_json(&self.store, Table::SyncState, AUTOMATIC_REMOVALS_KEY, &removals)?;
     }
     if outcome.round.held_by_limit > 0 {
       tracing::warn!(
@@ -237,6 +244,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 }
 
+/// How many leavers this device's last round left for an admin because it reached its daily limit
+/// (the admin console shows it, docs/provisioning.md §3.2).
+pub fn leavers_held_by_limit(store: &impl LocalStore) -> Result<usize, CoreError> {
+  let removals: Option<AutomaticRemovals> =
+    records::get_json(store, Table::SyncState, AUTOMATIC_REMOVALS_KEY)?;
+  Ok(removals.map_or(0, |removals| removals.held_by_limit))
+}
+
 /// Whether `user` is on the verified roster, in any role.
 fn is_on_roster(workspace: &WorkspaceState, user: UserId) -> bool {
   workspace
@@ -246,15 +261,9 @@ fn is_on_roster(workspace: &WorkspaceState, user: UserId) -> bool {
     .any(|member| member.user_id == user)
 }
 
-/// A claim that lost to another device, a leaver who is none any more, or one only an owner may
-/// remove (an admin's app leaves an admin account to an owner's).
+/// A claim that lost to another device, or a leaver who is none any more. Anything else (a 403
+/// included) is a failure: the round backs off and says so.
 fn is_taken(error: &ApiError) -> bool {
   matches!(error.error_code(), Some(ErrorCode::LeaverClaimed))
-    || matches!(
-      error,
-      ApiError::Status {
-        status: 403 | 404,
-        ..
-      }
-    )
+    || matches!(error, ApiError::Status { status: 404, .. })
 }

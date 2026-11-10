@@ -13,6 +13,8 @@ use crate::ids::{from_db, to_db};
 pub struct StoredLeaver {
   pub user_id: UserId,
   pub deactivated_at: OffsetDateTime,
+  /// The role the identity provider last gave them (`owner`, `admin`, `member`, …).
+  pub maybe_oidc_role: Option<String>,
   /// Another device's claim that hasn't run out.
   pub is_claimed_by_other: bool,
 }
@@ -38,9 +40,10 @@ impl Database {
     limit: i64,
   ) -> Result<Vec<StoredLeaver>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT l.user_id AS "user_id!", l.deactivated_at AS "deactivated_at!",
+      r#"SELECT l.user_id AS "user_id!", l.deactivated_at AS "deactivated_at!", u.oidc_role,
                 COALESCE(c.claimed_until > now() AND c.device_id IS DISTINCT FROM $2, false) AS "is_claimed!"
          FROM identity_provider_leavers l
+         JOIN users u ON u.id = l.user_id
          LEFT JOIN leaver_removal_claims c ON c.user_id = l.user_id
          WHERE l.user_id > $1
          ORDER BY l.user_id
@@ -57,6 +60,7 @@ impl Database {
         Ok(StoredLeaver {
           user_id: from_db(row.user_id)?,
           deactivated_at: row.deactivated_at,
+          maybe_oidc_role: row.oidc_role,
           is_claimed_by_other: row.is_claimed,
         })
       })
@@ -116,7 +120,8 @@ impl Database {
     Ok(())
   }
 
-  async fn is_leaver(&self, user: UserId) -> Result<bool, DbError> {
+  /// Whether `user` is a leaver: deactivated by the identity provider with something left to remove.
+  pub async fn is_leaver(&self, user: UserId) -> Result<bool, DbError> {
     let is_leaver = sqlx::query_scalar!(
       r#"SELECT EXISTS (SELECT 1 FROM identity_provider_leavers WHERE user_id = $1) AS "leaver!""#,
       to_db(user),

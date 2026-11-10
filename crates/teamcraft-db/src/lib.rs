@@ -42,6 +42,7 @@ mod org_background;
 mod org_recovery;
 mod permission_override;
 mod profile;
+mod provider_events;
 mod push;
 mod push_retry;
 mod retention;
@@ -126,6 +127,7 @@ pub use org_recovery::{
 };
 pub use permission_override::{OverrideEdit, StoredOverride};
 pub use profile::{StoredAvatar, StoredProfile, StoredWorkingHours};
+pub use provider_events::ProviderEventHook;
 pub use push::{PushDeviceRow, PushRecipientRow};
 pub use push_retry::{NewPushRetry, PushRetryClaim, PushRetryRow};
 pub use retention::{RetentionTarget, StoredObject, StoredRetention};

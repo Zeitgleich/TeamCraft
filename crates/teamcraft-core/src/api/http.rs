@@ -816,6 +816,16 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn admin_remove_leaver_from_chats(&self, user: UserId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(
+        Method::POST,
+        &format!("/admin/users/{user}/remove-from-chats?as_leaver=true"),
+        None,
+      )
+      .await
+  }
+
   async fn admin_list_leavers(
     &self,
     query: &teamcraft_proto::ListLeaversQuery,
