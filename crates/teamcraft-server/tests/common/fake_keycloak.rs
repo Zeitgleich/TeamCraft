@@ -76,6 +76,10 @@ impl FakeKeycloak {
         "/admin/realms/test/groups/{id}/members",
         get(group_members).with_state(groups.clone()),
       )
+      .route(
+        "/admin/realms/test/group-by-path/{*path}",
+        get(group_by_path).with_state(groups.clone()),
+      )
       .with_state(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -259,6 +263,22 @@ async fn list_groups(
     .map(|group| json!({"id": group.id, "name": group.name, "path": format!("/{}", group.name)}))
     .collect();
   Ok(Json(Value::Array(page)))
+}
+
+async fn group_by_path(
+  State(groups): State<SharedGroups>,
+  headers: HeaderMap,
+  Path(path): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+  authorized(&headers)?;
+  let groups = groups.lock().unwrap();
+  let group = groups
+    .iter()
+    .find(|group| group.name == path.trim_matches('/'))
+    .ok_or(StatusCode::NOT_FOUND)?;
+  Ok(Json(
+    json!({"id": group.id, "name": group.name, "path": format!("/{}", group.name)}),
+  ))
 }
 
 async fn group_members(

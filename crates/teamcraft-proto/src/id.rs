@@ -220,6 +220,10 @@ define_id!(
   UserGroupId
 );
 define_id!(
+  /// A rule that maps an identity provider group to spaces and channels (docs/provisioning.md §5).
+  GroupMappingId
+);
+define_id!(
   /// An audit log entry; IDs increase with time.
   AuditEntryId
 );

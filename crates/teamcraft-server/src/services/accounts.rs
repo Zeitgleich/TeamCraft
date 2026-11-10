@@ -165,6 +165,11 @@ pub async fn authenticate(state: &AppState, identity: TokenIdentity) -> Result<A
   // The flag comes with the sign-in read: members who already got their defaults cost nothing.
   if user.kind == UserKind::Member && synced.is_awaiting_default_memberships {
     apply_default_memberships(state, &user).await?;
+    // A new account: its provider groups may map to spaces (docs/provisioning.md §5), which the
+    // sync applies; asked now, it does within seconds instead of at its next interval.
+    if state.settings.get().maybe_oidc_sync.is_some() && state.database.has_group_mappings().await? {
+      state.oidc_sync.request_run();
+    }
   }
   Ok(AuthenticatedUser {
     user,
@@ -221,7 +226,7 @@ async fn apply_pending_invites(
   announce_applied(state, user, applied).await
 }
 
-async fn announce_applied(
+pub(crate) async fn announce_applied(
   state: &AppState,
   user: &teamcraft_db::User,
   applied: Vec<AppliedInvite>,

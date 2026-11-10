@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM identity_provider_group_mappings WHERE NOT (group_path = ANY($1))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "915b94a3377f90272cdd80cd9de94975ac8c36d62873cdf912be5a567dd6df76"
+}

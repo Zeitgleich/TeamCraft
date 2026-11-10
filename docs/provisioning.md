@@ -11,8 +11,8 @@ default, its safety brake, sync health, the deactivation sequence and its audit)
 | Leavers leave every encryption group automatically (§3) | This document                 |
 | IdP events start a sync at once (§4)                    | This document                 |
 | IdP group to space and channel mapping (§5)             | This document                 |
-| SCIM 2.0 endpoint (§6)                                  | Follow-up (v1.1)              |
-| Accounts listed before their first sign-in (§6)         | Follow-up (v1.1)              |
+| SCIM 2.0 endpoint (§6)                                  | Follow-up (v1.1), #1631       |
+| Accounts listed before their first sign-in (§6)         | Follow-up (v1.1), #1632       |
 
 ## 1. The shape
 
@@ -154,18 +154,27 @@ during a run start one more run after it, never more than one.
 
 ## 5. Group to space and channel mapping
 
-The console (Administration → Identity provider → "Group mapping") keeps rules: a provider group (its
-path, e.g. `/engineering`) to spaces and public channels of those spaces. Stored in the database as
-instance settings, applied by the sync run:
+The console (Administration → Settings, "Groups from the identity provider") keeps rules: a provider
+group (its path, e.g. `/engineering`) to spaces and public channels of those spaces, entered as IDs like
+the default spaces. Stored in the database (`GET`/`PUT /api/v1/admin/identity-provider/group-mappings`,
+`ManageWorkspace`, audit `group_mappings_changed`) and applied by every sync run:
 
-- For each rule and each active account the provider lists in the group, the spaces and channels are
-  added **once** per account and rule (`group_mapping_applied`), like default spaces. Somebody who
-  leaves a mapped channel by choice is not added back on the next run.
+- For each rule, the provider's direct members of the group who have an active account here join the
+  spaces (as members) and those of the listed channels that are public, **once per account and revision
+  of the rule** (`identity_provider_group_mapping_applied`). Somebody who leaves a mapped channel by
+  choice is not added back by the next run. Changing a rule's spaces or channels raises its revision, so
+  it applies once more to everybody in the group. Each addition is audited (`group_mapping_applied`,
+  `source: oidc_sync`) and announced like a default space.
 - Only additions. Leaving the provider group removes nobody (a removal needs a signed change, and
   people often stay in channels after changing teams); leavers are handled by §3.
-- A rule naming a deleted or archived space or channel skips it. A private channel can't be chosen.
-- Dry run and the brake don't apply: additions are no risk to the instance's availability. The run
-  reports how many it added; each addition is audited (`group_mapping_applied`, `source: oidc_sync`).
+- A rule names 1 to 20 spaces and up to 100 channels; the server refuses unknown spaces and channels
+  that are private or not in the rule's spaces. Archived or deleted ones are skipped when applying.
+  Private channels need a member's signed add and can't be mapped. At most 100 rules.
+- A group the provider doesn't have (renamed, deleted) is skipped with a warning; the other rules apply.
+- It runs with the sync's apply phase: a dry run and a run the safety brake holds change nothing here
+  either. A first sign-in and saving the rules ask for a run (§4), so a new colleague lands in their
+  spaces within seconds.
+- Accounts are mapped once they exist, i.e. after the first sign-in (or a pre-creation, §6).
 
 ## 6. Not yet (follow-up issues, v1.1)
 
