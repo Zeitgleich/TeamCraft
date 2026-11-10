@@ -27,6 +27,8 @@ permissions: {}
 jobs:
   build:
     name: Build the site
+    # Only product releases (v*); the `ci-deps` mirror release is not one (docs/release.md).
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     permissions:
       contents: read

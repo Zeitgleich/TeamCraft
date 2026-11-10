@@ -46,7 +46,7 @@ use teamcraft_core::client::{
   CatchUpFocus, LinkAnnouncement, LinkApproval, LinkReceipt, LinkWait, LinkWaitCancel, LinkedSecrets,
   ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE,
 };
-use teamcraft_core::clock::{Clock, SystemClock};
+use teamcraft_core::clock::{Clock, SystemClock, rewound, sleep_ms_until};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
 use teamcraft_core::downloads::{Downloads, Finished};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
@@ -1594,7 +1594,9 @@ impl Core {
     } else {
       deadline
     };
-    let until_tick_ms = deadline.saturating_sub(now_ms()).max(0);
+    // Never longer than a tick: after the wall clock went back, deadlines lie in the "future" by
+    // the jump, and the tick notices the jump and moves them (robustness.md, "Time").
+    let until_tick_ms = sleep_ms_until(deadline, now_ms(), TICK);
     let is_reading = !self.is_sync_paused;
     let Self {
       connection,
@@ -2846,6 +2848,8 @@ impl Core {
   /// for what the pages changed, and once more when they are done.
   async fn load_background_history(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) {
     let started = now_ms();
+    // The wall clock went back: the pause counts from now, not from the time before the jump.
+    self.background.next_page_ms = rewound(self.background.next_page_ms, started, TICK);
     if self.is_background_history_due() && started >= self.background.next_page_ms {
       let read = self
         .serve_during(requests, async |client: &mut Client<Api, Store>| {
@@ -2997,6 +3001,8 @@ impl Core {
     if self.client.as_ref().is_some_and(Client::drop_expired_typing) {
       notify_changed();
     }
+    // The clock went back: the upkeep runs now, not after the jump.
+    self.next_tick_ms = rewound(self.next_tick_ms, now, TICK);
     if now < self.next_tick_ms {
       // Woken for the connection only.
       return;

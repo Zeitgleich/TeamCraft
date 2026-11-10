@@ -859,12 +859,17 @@ device (e2ee.md §4.4). Admins limit who may do that with `use_group_mentions` (
 scheme and channel moderation). The server can't read which handle a message mentions, so what it enforces
 differs from what devices do:
 
-| Who enforces it | What                                                                                                                          |
-|-----------------|-------------------------------------------------------------------------------------------------------------------------------|
-| The apps        | No suggestion and no expansion without the permission                                                                         |
-| The server      | At most `[limits] max_mentions_without_group_mentions` (default 10) mentioned people per message without the permission       |
-| The server      | At most `[limits] max_mentions_per_message` (default 200) for everybody; mentioned people must be members of the conversation |
-| Nobody          | Whether a list of people really came from a group, or was typed: a modified client can name up to the limit                   |
+| Who enforces it | What                                                                                                                           |
+|-----------------|--------------------------------------------------------------------------------------------------------------------------------|
+| The apps        | No suggestion and no expansion without the permission                                                                          |
+| The server      | At most `[limits] max_mentions_without_group_mentions` (default 10) mentioned people per message without the permission        |
+| The server      | At most `[limits] max_mentions_per_message` (default 200) for everybody; mentioned people must be members of the conversation  |
+| The server      | At most `limits.max_large_mentions_per_user_per_hour` (default 30, `0` off) messages per hour naming more than the first limit |
+| Nobody          | Whether a list of people really came from a group, or was typed: a modified client can name up to the limit                    |
+
+`@admins` is a built-in group of the active admins and owners (notifications.md, "Group mentions"); the
+notification setting `is_admins_mention_enabled` (admin console, default on) switches it off. Members
+(not guests) then learn who the admins are from the rosters, as they would by mentioning them.
 
 Group membership stays visible only to whom it already was: members of the workspace, never guests.
 
@@ -1262,9 +1267,9 @@ notices, the brand of the recipient's domain or else the inviter's for invitatio
 the organizer's for meeting invitations. Each server is a transport of its own. A broken one fails
 only its own brand's mail and shows that at the brand, and its mail **never** moves to the instance's
 server, which would send with the wrong SPF and DKIM. Jobs that mail many people run one queue per
-server side by side; one mail is limited to three network timeouts, and a server that could not be
-reached is left alone for a minute (those mails fail at once and take their usual failure path, a
-test mail still asks the server). A changed server is in force at once, without a restart.
+server side by side. On every server, the instance's own too (#743), one mail is limited to three
+network timeouts, and a server that could not be reached is left alone for a minute (those mails
+fail at once and take their usual failure path, a test mail still asks the server). A changed server is in force at once, without a restart.
 
 The CalDAV calendar of meetings has URL, account, password and the
 optional free/busy URL template, and a connection test; it needs `[meetings]`.

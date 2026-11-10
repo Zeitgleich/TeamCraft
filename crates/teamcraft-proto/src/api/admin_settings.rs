@@ -578,6 +578,10 @@ pub struct NotificationRuntimeSettings {
   /// While a desktop is in use, phone pushes wait this long (0: none while the desktop is attentive).
   pub mobile_push_delay_secs: u64,
   pub is_desktop_attention_enabled: bool,
+  /// `@admins` mentions the instance's admins and owners (notifications.md, "Group mentions").
+  /// Absent from older clients' requests: on.
+  #[serde(default = "enabled")]
+  pub is_admins_mention_enabled: bool,
 }
 
 /// Groups stored before the setting existed get the built-in default.
@@ -625,6 +629,10 @@ pub struct LimitSettings {
   pub max_group_dm_participants: u32,
   pub max_user_group_members: u32,
   pub max_meeting_mails_per_user_per_hour: u32,
+  /// Messages per hour and sender that name more people than `max_mentions_without_group_mentions`
+  /// (large group mentions); 0 = no limit. Absent from older clients' requests: the default.
+  #[serde(default = "default_max_large_mentions_per_user_per_hour")]
+  pub max_large_mentions_per_user_per_hour: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -683,6 +691,10 @@ fn enabled() -> bool {
 
 fn default_max_space_image_bytes() -> u64 {
   DEFAULT_MAX_SPACE_IMAGE_BYTES
+}
+
+fn default_max_large_mentions_per_user_per_hour() -> u32 {
+  crate::DEFAULT_MAX_LARGE_MENTIONS_PER_USER_PER_HOUR
 }
 
 /// Texts of the server's own mail. Placeholders: invitation `{inviter}` `{space}` `{role}` `{url}`,

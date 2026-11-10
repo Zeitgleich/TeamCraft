@@ -50,7 +50,7 @@ DEFAULT_STYLESHEET_DIR = pathlib.Path("crates/teamcraft-ui/style/main")
 DEFAULT_LOADER_STYLESHEET = pathlib.Path("crates/teamcraft-ui/style/loader.css")
 DEFAULT_RUST_DIR = pathlib.Path("crates/teamcraft-ui/src")
 # Set on elements at runtime: from Rust (`style:--x=…`, `style.setProperty`) or loader.js.
-RUNTIME_VARIABLES = re.compile(r"^--(vv-.*|indicator-.*|hue|media-.*|cols|banners-h|window-controls-.*|tok-.*|tc-loader-.*|link-menu-.*|date-jump-.*|rail-menu-.*|setup-.*|tv-digits|tv-columns|downloads-progress)$")
+RUNTIME_VARIABLES = re.compile(r"^--(vv-.*|indicator-.*|hue|media-.*|cols|banners-h|window-controls-.*|tok-.*|tc-loader-.*|link-menu-.*|date-jump-.*|rail-menu-.*|setup-.*|tv-digits|tv-columns|downloads-progress|md-head-shift)$")
 # Keyframes that are known duplicates, each with the issue that removes it.
 KNOWN_DUPLICATE_KEYFRAMES = {
 }
@@ -82,6 +82,9 @@ WILL_CHANGE = {
 ALLOWED_FONT_SIZES = {
     "inherit": "takes the parent's size",
     "0.9em": "inline code follows the heading or text it sits in",
+    "2.5em": "jumbomoji (1 emoji) follow the message text, which the text size setting scales (#1603)",
+    "2em": "jumbomoji (2 emoji) follow the message text, which the text size setting scales (#1603)",
+    "1.6em": "jumbomoji (3 emoji) follow the message text, which the text size setting scales (#1603)",
     "max(16px, 1em)": "iOS zooms into fields with text below 16 px",
     "calc(100% * var(--text-scale))": "the root size the scale is built on",
 }

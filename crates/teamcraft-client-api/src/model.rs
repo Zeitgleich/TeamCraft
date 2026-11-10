@@ -851,11 +851,25 @@ pub struct Message {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MentionableGroup {
   pub handle: String,
+  /// The group's name; for a built-in group the UI shows its own translated name instead.
   pub name: String,
+  #[serde(default)]
+  pub kind: MentionableGroupKind,
   /// The group's members who are in the conversation, without the user.
   pub notified: Vec<UserId>,
   /// The group's members who aren't in the conversation.
   pub outside_count: u32,
+}
+
+/// What kind of group a [`MentionableGroup`] is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MentionableGroupKind {
+  /// A user group admins (or the identity provider) maintain.
+  #[default]
+  Custom,
+  /// The built-in `@admins`: the instance's active admins and owners.
+  Admins,
 }
 
 /// The integration source a message shows, see [`Message::maybe_source`].

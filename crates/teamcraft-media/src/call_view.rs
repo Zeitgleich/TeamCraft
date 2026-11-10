@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use teamcraft_client_api::call_view::CallView;
 use teamcraft_client_api::calls::{
-  ActiveCall, CallEndReason, CallStatusSounds, Participant, RemoteVideoTrack, ScreenShareSound,
+  ActiveCall, CallEndReason, CallStatusSounds, EncryptionFailure, Participant, RemoteVideoTrack,
+  ScreenShareSound,
 };
 use teamcraft_proto::{DeviceId, MediaStreamId, UserId, VideoTrackKind};
 
@@ -117,6 +118,13 @@ impl CallRoster {
       CallEngineEvent::Secured { privacy_code, .. } => {
         active.is_secured = true;
         active.maybe_privacy_code = Some(privacy_code);
+        active.maybe_encryption_failure = None;
+      },
+      CallEngineEvent::EncryptionFailed { retry_after } => {
+        active.is_secured = false;
+        active.maybe_encryption_failure = Some(EncryptionFailure {
+          retry_after_secs: u32::try_from(retry_after.as_secs()).unwrap_or(u32::MAX),
+        });
       },
       CallEngineEvent::MuteChanged(is_muted) => {
         active.is_muted = is_muted;
@@ -330,6 +338,44 @@ mod transport_tests {
     assert!(is_limited(&view));
     assert!(roster.apply(&mut view, CallEngineEvent::TransportChanged(CallTransport::Quic)));
     assert!(!is_limited(&view));
+  }
+
+  /// A refusal shows until the call is secured (#1555).
+  #[test]
+  fn an_encryption_failure_shows_until_secured() {
+    let device = DeviceId::from_snowflake(Snowflake::new(1).unwrap());
+    let mut roster = CallRoster::new(device);
+    let mut view = CallView::default();
+    view.start_active(
+      CallRequest {
+        conversation: ConversationId::from_snowflake(Snowflake::new(2).unwrap()),
+        kind: CallKind::Group,
+      },
+      BackgroundEffect::default(),
+      0,
+    );
+    let failure = |view: &CallView| view.maybe_active.as_ref().unwrap().maybe_encryption_failure;
+
+    assert!(roster.apply(
+      &mut view,
+      CallEngineEvent::EncryptionFailed {
+        retry_after: std::time::Duration::from_secs(300),
+      }
+    ));
+    assert_eq!(
+      failure(&view),
+      Some(EncryptionFailure {
+        retry_after_secs: 300
+      })
+    );
+    assert!(roster.apply(
+      &mut view,
+      CallEngineEvent::Secured {
+        epoch: 1,
+        privacy_code: "1".to_owned(),
+      }
+    ));
+    assert_eq!(failure(&view), None);
   }
 }
 

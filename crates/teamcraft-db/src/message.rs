@@ -77,7 +77,7 @@ impl Database {
   }
 
   /// The message stored under a client message ID.
-  pub(crate) async fn get_message_by_client_id(
+  pub async fn get_message_by_client_id(
     &self,
     conversation: ConversationId,
     client_message_id: ClientMessageId,

@@ -7,12 +7,12 @@
 use std::collections::BTreeSet;
 
 #[cfg(feature = "ui")]
-use teamcraft_client_api::model::MentionableGroup;
+use teamcraft_client_api::model::{MentionableGroup, MentionableGroupKind};
 #[cfg(feature = "ui")]
 use teamcraft_client_api::notify::{MAX_GROUP_MENTIONS_PER_MESSAGE, is_group_handle};
 use teamcraft_proto::ListUserGroupRostersResponse;
 #[cfg(feature = "ui")]
-use teamcraft_proto::{ConversationResponse, Permission, UserGroupRoster, UserId};
+use teamcraft_proto::{ADMINS_GROUP_HANDLE, ConversationResponse, Permission, UserId};
 
 use crate::error::CoreError;
 use crate::records;
@@ -22,12 +22,17 @@ use crate::store::{LocalStore, Table};
 
 const ROSTER_RECORD: &str = "user_group_rosters";
 
-/// The device's copy of the groups (all of them, with members); empty before the first read.
+/// The name the built-in `@admins` has where a UI shows no translated one of its own.
 #[cfg(feature = "ui")]
-pub(crate) fn stored_rosters(store: &impl LocalStore) -> Result<Vec<UserGroupRoster>, CoreError> {
+const ADMINS_GROUP_NAME: &str = "Admins";
+
+/// The device's copy of the groups (all of them, with members, and the built-in `@admins`); empty
+/// before the first read.
+#[cfg(feature = "ui")]
+pub(crate) fn stored_rosters(store: &impl LocalStore) -> Result<ListUserGroupRostersResponse, CoreError> {
   let stored: Option<ListUserGroupRostersResponse> =
     records::get_json(store, Table::Workspace, ROSTER_RECORD)?;
-  Ok(stored.map(|list| list.groups).unwrap_or_default())
+  Ok(stored.unwrap_or_default())
 }
 
 /// Replaces the copy; whether it changed.
@@ -57,9 +62,11 @@ pub(crate) fn may_mention_groups(response: &ConversationResponse) -> bool {
 
 /// What the composer offers in a conversation, and what a send of `@handle` expands through:
 /// `members` are the conversation's. Nothing without the permission (no suggestion, no expansion).
+/// The built-in `@admins` comes last, while the server announces it (notifications.md, "Group
+/// mentions"); a stored group can't take its handle.
 #[cfg(feature = "ui")]
 pub(crate) fn mentionable_groups(
-  rosters: &[UserGroupRoster],
+  rosters: &ListUserGroupRostersResponse,
   members: &BTreeSet<UserId>,
   me: UserId,
   may_mention: bool,
@@ -67,28 +74,59 @@ pub(crate) fn mentionable_groups(
   if !may_mention {
     return Vec::new();
   }
-  rosters
+  let stored = rosters
+    .groups
     .iter()
+    .filter(|roster| roster.handle != ADMINS_GROUP_HANDLE)
     .map(|roster| {
-      let notified: Vec<UserId> = roster
-        .member_ids
-        .iter()
-        .copied()
-        .filter(|user| *user != me && members.contains(user))
-        .collect();
-      let outside = roster
-        .member_ids
-        .iter()
-        .filter(|user| !members.contains(user))
-        .count();
-      MentionableGroup {
-        handle: roster.handle.clone(),
-        name: roster.name.clone(),
-        notified,
-        outside_count: u32::try_from(outside).unwrap_or(u32::MAX),
-      }
-    })
-    .collect()
+      mentionable(
+        &roster.handle,
+        &roster.name,
+        MentionableGroupKind::Custom,
+        &roster.member_ids,
+        members,
+        me,
+      )
+    });
+  let admins = (!rosters.admin_ids.is_empty()).then(|| {
+    mentionable(
+      ADMINS_GROUP_HANDLE,
+      ADMINS_GROUP_NAME,
+      MentionableGroupKind::Admins,
+      &rosters.admin_ids,
+      members,
+      me,
+    )
+  });
+  stored.chain(admins).collect()
+}
+
+/// One group as offered: who of `group_members` a mention notifies here, and how many it can't.
+#[cfg(feature = "ui")]
+fn mentionable(
+  handle: &str,
+  name: &str,
+  kind: MentionableGroupKind,
+  group_members: &[UserId],
+  members: &BTreeSet<UserId>,
+  me: UserId,
+) -> MentionableGroup {
+  let notified: Vec<UserId> = group_members
+    .iter()
+    .copied()
+    .filter(|user| *user != me && members.contains(user))
+    .collect();
+  let outside = group_members
+    .iter()
+    .filter(|user| !members.contains(user))
+    .count();
+  MentionableGroup {
+    handle: handle.to_owned(),
+    name: name.to_owned(),
+    kind,
+    notified,
+    outside_count: u32::try_from(outside).unwrap_or(u32::MAX),
+  }
 }
 
 /// The handles a message claims to mention, for showing them: from the ciphertext, so bounded and

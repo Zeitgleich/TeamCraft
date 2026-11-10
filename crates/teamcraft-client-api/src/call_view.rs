@@ -141,6 +141,7 @@ impl CallView {
       is_on_limited_network: false,
       maybe_moved_to: None,
       maybe_joined_at: Some(joined_at),
+      maybe_encryption_failure: None,
     });
     self.maybe_end_reason = None;
   }

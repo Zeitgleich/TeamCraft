@@ -347,6 +347,34 @@ them, a candidate tag builds without FCM and warns. Store builds seal their FCM 
 gateway in the repository variable `TEAMCRAFT_ANDROID_PUSH_GATEWAY_URL` (e.g.
 `https://push-gw.zeitgleich.de`); without it they use the gateway the server names.
 
+## CI dependency mirror and Actions cache
+
+GitHub Free gives the repository 10 GB of Actions cache; the least recently used entry is evicted
+when it is full, which used to be the rarely read one that mattered.
+
+- **Rust caches** are saved by runs on `main` only (`save-if`), one key per job. The key ends in the
+  hash of `Cargo.lock`, so each dependency change leaves the previous ~1 GB entry behind.
+  `cache-prune.yml` (`scripts/prune-caches.sh`) runs after each CI run on `main` and daily: it deletes
+  every pull request cache and all but the newest entry of a key family. The vendored/fuzz and
+  CodeQL-Android jobs only restore; saving them did not fit the budget. Look at the budget with
+  `gh cache list --sort size_in_bytes --json key,sizeInBytes`.
+- **GStreamer packages** (Windows installer, macOS runtime and development pkgs) are big and the
+  upstream server drops connections. They are not cached; `scripts/fetch-gstreamer.sh` takes them from
+  the assets of the `ci-deps` release of this repository, falls back to
+  upstream with backoff, and checks every file against `scripts/gstreamer-pins.env`, the one place
+  version and hashes are pinned.
+- **The `ci-deps` release is not a product release.** Its tag does not match `v*`, so no release
+  workflow starts, and it is created with `gh release create ci-deps --prerelease --latest=false`: it
+  must never become "Latest" (the desktop updater reads `releases/latest/download/latest.json`).
+  The release logic only looks at `v<major>.<minor>.<patch>` tags: `nightly-release.yml` (last tag and
+  its release), `scripts/package-site.sh` and `scripts/fdroid-repo.py` (tag patterns), so they skip it. `packages.yml` and `google-play.yml` run on `release: published`, so their jobs
+  have an `if` on a `v*` tag: without it creating the mirror release builds the site and fails the
+  Pages deploy.
+- **Bumping GStreamer:** download the new files from gstreamer.freedesktop.org, compute their SHA-256,
+  update `scripts/gstreamer-pins.env`, upload the files to the `ci-deps` release
+  (`gh release upload ci-deps <files>`; keep the old ones until the old pins are gone from all
+  branches).
+
 ## Google Play
 
 `google-play.yml` runs when a release or candidate is published (or by hand: *Actions → Google Play

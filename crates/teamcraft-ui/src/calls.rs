@@ -905,6 +905,7 @@ mod tests {
         is_on_limited_network: false,
         maybe_moved_to: None,
         maybe_joined_at: None,
+        maybe_encryption_failure: None,
       };
       call.resume(&active);
       assert_eq!(call.phase.get_untracked(), CallPhase::Active);
@@ -990,6 +991,7 @@ mod tests {
       is_on_limited_network: false,
       maybe_moved_to: None,
       maybe_joined_at: None,
+      maybe_encryption_failure: None,
     }
   }
 

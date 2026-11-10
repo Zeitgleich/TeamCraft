@@ -354,10 +354,14 @@ mod tests {
       guard.record_failure();
     }
     let cache = JwksCache::new(Box::new(source.clone()), OPTIONS).with_guard(guard);
-    assert!(matches!(
-      cache.key(TEST_KEY_ID).await,
-      Err(AuthError::KeysUnavailable(_))
-    ));
+    match cache.key(TEST_KEY_ID).await {
+      Err(AuthError::ProviderDown(open)) => {
+        assert_eq!(open.dependency, DependencyName::IdentityProvider);
+        assert!(open.retry_after > Duration::ZERO, "until the next probe");
+      },
+      Err(other) => panic!("expected the open breaker, got {other}"),
+      Ok(_) => panic!("expected the open breaker, got a key"),
+    }
     assert_eq!(source.fetches(), 0, "the open breaker answered");
   }
 

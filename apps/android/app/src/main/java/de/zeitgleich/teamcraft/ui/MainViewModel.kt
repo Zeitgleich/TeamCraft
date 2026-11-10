@@ -93,6 +93,8 @@ import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.CreateOutcome
 import de.zeitgleich.teamcraft.ui.forms.CreateResult
 import uniffi.teamcraft_ffi.LeaveChoice
+import uniffi.teamcraft_ffi.GroupMentionReachItem
+import uniffi.teamcraft_ffi.MentionableGroupItem
 import uniffi.teamcraft_ffi.LinkPlatform
 import uniffi.teamcraft_ffi.LinkRequestItem
 import uniffi.teamcraft_ffi.LoginBrand
@@ -901,6 +903,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /** Whether the menu offers "Leave" for this conversation: the core's rule. */
   suspend fun takeSuspectDeletions(): UInt = readChat { takeSuspectDeletions() } ?: 0u
+
+  suspend fun mentionableGroups(conversationId: String): List<MentionableGroupItem> =
+    readChat { mentionableGroups(conversationId) }.orEmpty()
+
+  suspend fun groupMentionReach(conversationId: String, body: String): GroupMentionReachItem =
+    readChat { groupMentionReach(conversationId, body) } ?: GroupMentionReachItem(0u, 0u)
 
   suspend fun leaveChoice(conversationId: String): LeaveChoice =
     readChat { leaveChoice(conversationId) } ?: LeaveChoice.HIDDEN

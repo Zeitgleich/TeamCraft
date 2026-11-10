@@ -13,10 +13,23 @@ struct MarkupColors: Equatable {
 }
 
 /// Who can be mentioned (lower-case usernames), to tell `@alex` from an e-mail-like word, and the
-/// user's own username.
+/// user's own username. `groupHandles` are the groups the message's sender expanded (issue #206):
+/// those `@words` show as group mentions, like a mention of the user when the message's list names
+/// them (`isMentionedThroughGroup`).
 struct MentionNames: Equatable {
   var usernames: Set<String> = []
   var myUsername = ""
+  var groupHandles: Set<String> = []
+  var isMentionedThroughGroup = false
+
+  /// These names with the group mentions of `message`.
+  func forMessage(_ message: MessageItem) -> MentionNames {
+    guard !message.groupMentions.isEmpty else { return self }
+    var names = self
+    names.groupHandles = Set(message.groupMentions)
+    names.isMentionedThroughGroup = message.mentionsMe
+    return names
+  }
 }
 
 /// The core's names for "everyone here" (teamcraft-client-api `notify::CHANNEL_MENTIONS`).
@@ -56,12 +69,14 @@ private func styledRun(
   case .mention(let name):
     piece = AttributedString(run.text)
     let lowered = name.lowercased()
+    let isGroup = names.groupHandles.contains(lowered)
     let isMe = everyoneMentions.contains(lowered) || (!names.myUsername.isEmpty && lowered == names.myUsername.lowercased())
+      || (isGroup && names.isMentionedThroughGroup)
     if isMe {
       piece.inlinePresentationIntent = .stronglyEmphasized
       piece.foregroundColor = colors.mentionMe
       piece.backgroundColor = colors.mentionMeBackground
-    } else if names.usernames.contains(lowered) {
+    } else if isGroup || names.usernames.contains(lowered) {
       piece.inlinePresentationIntent = .stronglyEmphasized
       piece.foregroundColor = colors.mention
     }

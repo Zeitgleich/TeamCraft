@@ -270,6 +270,12 @@ calls-background-hint = Wird auf deinem Gerät angewendet, bevor dein Video gese
 call-connecting = Verbindung wird hergestellt …
 call-reconnecting = Verbindung unterbrochen, wird wiederhergestellt …
 call-limited-network = Eingeschränktes Netzwerk, die Gesprächsqualität kann geringer sein
+call-encryption-failed = Dein Gerät konnte nicht in die Verschlüsselung des Anrufs aufgenommen werden, du hörst also niemanden und wirst nicht gehört. Andere im Anruf können dieses Gerät eventuell nicht überprüfen.
+call-encryption-retry = Erneut versuchen
+call-encryption-retry-in = { $count ->
+    [one] Du kannst es in { $count } Minute erneut versuchen.
+   *[other] Du kannst es in { $count } Minuten erneut versuchen.
+  }
 call-ended = Anruf beendet
 control-deafen = Anrufton stummschalten
 control-undeafen = Anrufton einschalten

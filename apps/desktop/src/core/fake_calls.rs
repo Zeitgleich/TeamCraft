@@ -165,6 +165,7 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
     is_on_limited_network: false,
     maybe_moved_to: None,
     maybe_joined_at: None,
+    maybe_encryption_failure: None,
     is_deafened: false,
     is_secured: true,
     maybe_privacy_code: Some("31 07 58".to_owned()),

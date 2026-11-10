@@ -232,6 +232,11 @@ pub struct CallStateInfo {
   pub maybe_privacy_code: Option<String>,
   /// Why the call ended (with [`CallPhase::Ended`]).
   pub maybe_end_reason: Option<CallEndReason>,
+  /// This device couldn't be added to the call's end-to-end encryption (#1555): no media flows.
+  /// The app offers to leave, or to join again once this many seconds after the failure passed
+  /// (0: at once).
+  #[uniffi(default = None)]
+  pub maybe_encryption_retry_after_secs: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -582,6 +587,7 @@ pub(crate) async fn join(
     is_on_limited_network: false,
     maybe_privacy_code: None,
     maybe_end_reason: None,
+    maybe_encryption_retry_after_secs: None,
   };
   hub.report(state.clone());
   let thread_hub = hub.clone();
@@ -1034,6 +1040,12 @@ fn apply_event(
     CallEngineEvent::Secured { privacy_code, .. } => {
       state.is_secured = true;
       state.maybe_privacy_code = Some(privacy_code);
+      state.maybe_encryption_retry_after_secs = None;
+    },
+    CallEngineEvent::EncryptionFailed { retry_after } => {
+      state.is_secured = false;
+      state.maybe_encryption_retry_after_secs =
+        Some(u32::try_from(retry_after.as_secs()).unwrap_or(u32::MAX));
     },
     CallEngineEvent::ActiveSpeakers(devices) => {
       let mut speaking: Vec<String> = Vec::new();
@@ -1120,6 +1132,7 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     is_on_limited_network: false,
     maybe_privacy_code: None,
     maybe_end_reason: Some(reason),
+    maybe_encryption_retry_after_secs: None,
   }
 }
 

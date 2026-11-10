@@ -59,11 +59,11 @@ date-jump-pick = Pick a day
 
 ## First-run key setup
 message-seen-by = Seen by { $names }
-typing-one = { $name } is typing…
-typing-two = { $first } and { $second } are typing…
-typing-several = Several people are typing…
+typing-one = { $name } is typing
+typing-two = { $first } and { $second } are typing
+typing-several = Several people are typing
 # In the chat list and under the name of a direct conversation, while the other person types.
-typing-direct = typing…
+typing-direct = typing
 
 # ---- Meetings ----
 composer-confirm-channel = This message notifies everyone in this conversation ({ $count } people). Send it?
@@ -123,6 +123,7 @@ message-table-label = Table
 
 # Composer: mentions, slash commands, formatting
 mention-channel = Notify everyone in this conversation
+mention-admins = Admins and owners
 composer-suggestions = Suggestions
 composer-format = Formatting
 composer-format-toggle = Show formatting

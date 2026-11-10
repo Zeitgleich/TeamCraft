@@ -226,7 +226,42 @@ attached at sending: who is in the group later doesn't change who was mentioned.
   `confirm_channel_over`) also asks before group mentions that notify more than that many people.
 - **Limit:** a message names at most `[limits] max_mentions_per_message` people (default 200). Beyond it a
   device notifies the first ones and says so in the confirmation; the rest see the message without a
-  mention. Older clients and the phones render `@accounting` as text; the people listed are still mentioned.
+  mention. Older clients render `@accounting` as text; the people listed are still mentioned.
+- **`@admins`:** a built-in group of the instance's active admins and owners, mentioned like any group
+  (same permission, only those in the conversation, never the sender). It is no stored group: the
+  server adds it to the rosters (`admin_ids`) while the admin console's notification setting
+  `is_admins_mention_enabled` (default on) allows it, so it follows role changes without anyone keeping
+  a list. Off, the rosters carry no `admin_ids` and devices neither suggest nor expand `@admins`; the
+  handle stays reserved, so no stored group can take it.
+- **Hourly budget for large mentions:** a message that names more people than
+  `max_mentions_without_group_mentions` counts against its sender's hourly budget,
+  `limits.max_large_mentions_per_user_per_hour` (admin console, default 30; `0` switches it off).
+  Once it is used up the send is refused with `429 rate_limited` and a `Retry-After`; the message stays
+  in the device's outbox as pending and goes out when the budget refills, so nothing is lost. Only a
+  stored new message spends the budget: a retry the server already has (same idempotency key) is free.
+  The budget is per server process and in memory (like the meeting mail budget): a restart refills it.
+- **Phones:** Android and iOS suggest groups after `@` from the same core list as desktop and web
+  (name, how many it notifies, and the hint about members outside the conversation), ask before large
+  group mentions with the same `confirm_channel_over` setting, and render `@accounting` as a group
+  mention, highlighted like a mention of the user when the message's list names them (`mentions_me`).
+  Push needs nothing new: the server routes by the list as for any mention.
+- **Identity provider:** user groups are managed in the app. The existing mirror of the provider's
+  top-level groups (`[oidc.sync] sync_groups`, off by default, admin.md §3.2.3) stays as it is; nested
+  groups and further sync options are not planned.
+
+### Group mentions under real-world conditions
+
+| Condition                   | What happens                                                                                                                                                                          |
+|-----------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Offline sender              | The core expands from its stored copy of the rosters; the message waits in the outbox with its list.                                                                                  |
+| Stale rosters               | The copy is refreshed on every connect and on `user_group_update`; `admin_ids` too, so a role change shows from the next connect or group change. A mention uses the copy at sending. |
+| Server restart              | The hourly budget refills (in memory, bounded by the number of senders); rosters are read again on reconnect.                                                                         |
+| Retry after a lost response | The idempotency key finds the stored message; the budget isn't spent twice.                                                                                                           |
+| Over the budget             | `429` with `Retry-After`: the outbox backs off and resends; the message shows as pending meanwhile.                                                                                   |
+| Large groups                | Confirmation above `confirm_channel_over`; at most `max_mentions_per_message` people per message; the roster read is one request per connect, not one per group.                      |
+| Multi-device                | Each device expands from its own copy; receivers only use the list on the message, so devices never disagree about who was mentioned.                                                 |
+| Older clients and servers   | An older client shows the handle as text and still counts the mention; a newer core against an older server finds no `admin_ids` and offers no `@admins`.                             |
+| Guests                      | Read no rosters, so they never suggest or expand groups, `@admins` included.                                                                                                          |
 
 ## Push routing
 

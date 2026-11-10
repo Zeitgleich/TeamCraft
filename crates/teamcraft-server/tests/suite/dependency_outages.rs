@@ -1,12 +1,14 @@
-//! Fault injection against fakes (issue #743): object storage, push gateway and SFU control fail on
-//! demand, and the tests check that the server degrades gracefully — retries, then a breaker that
-//! fails fast with 503 and `Retry-After`, readiness that reports it — and recovers by itself once
-//! the dependency is back. Time is a manual clock the tests step; nothing sleeps.
+//! Fault injection against fakes (issue #743): object storage, push gateway, SFU control and the
+//! mail server fail on demand, and the tests check that the server degrades gracefully — retries,
+//! then a breaker that fails fast with 503 and `Retry-After`, readiness that reports it — and
+//! recovers by itself once the dependency is back. Time is a manual clock the tests step; nothing
+//! sleeps, except the mail cases, which run the real SMTP client against a closed port and a
+//! silent listener (one network timeout of a second).
 //!
-//! The storage cases at the store level and the database gate need nothing else; the HTTP, push and
-//! SFU cases need the dev Postgres (`--features integration`). The heavier cases against the real binaries (Postgres
-//! cut, identity provider cut, server restarts) are in the nightly e2e suite
-//! (`tests/e2e/tests/suite/dependency_outages.rs`).
+//! The storage cases at the store level, the mail cases and the database gate need nothing else;
+//! the HTTP, push and SFU cases need the dev Postgres (`--features integration`). The heavier
+//! cases against the real binaries (Postgres cut, identity provider cut, server restarts) are in
+//! the nightly e2e suite (`tests/e2e/tests/suite/dependency_outages.rs`).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::collections::HashMap;
@@ -1238,4 +1240,101 @@ async fn serve(app: Router) -> String {
     axum::serve(listener, app).await.unwrap();
   });
   format!("http://{address}")
+}
+
+/// The mail server, through the real SMTP client: a refused connection and a server that accepts
+/// and says nothing are outages that pause the transport, so a job mailing many people fails fast
+/// instead of waiting a timeout per recipient. Needs no service.
+mod mail {
+  use teamcraft_server::config::{SmtpConfig, SmtpSecurity};
+  use teamcraft_server::meetings::ical::Method as IcalMethod;
+  use teamcraft_server::meetings::mailer::{MailError, Mailer, OutgoingMail, SmtpMailer};
+  use teamcraft_server::runtime::mail_status::{MailStatus, MailTransport};
+  use tokio::net::TcpListener;
+
+  use super::*;
+
+  #[tokio::test]
+  async fn a_refused_connection_pauses_the_server() {
+    let address = {
+      let listener = std::net::TcpListener::bind("[::1]:0").unwrap();
+      listener.local_addr().unwrap()
+    };
+    let (transport, status) = transport(address.port(), 5);
+    assert!(matches!(
+      transport.send(&mail()).await,
+      Err(MailError::Unreachable(_))
+    ));
+    assert!(matches!(transport.send(&mail()).await, Err(MailError::Paused)));
+    assert!(
+      status.snapshot().maybe_last_error.is_some(),
+      "the console sees it"
+    );
+    // A test mail from the console still asks the server.
+    assert!(matches!(
+      transport.attempt(&mail()).await,
+      Err(MailError::Unreachable(_))
+    ));
+  }
+
+  #[tokio::test]
+  async fn a_silent_server_costs_one_timeout_then_pauses() {
+    let listener = TcpListener::bind("[::1]:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // Accepts and never greets.
+    let silent = tokio::spawn(async move {
+      let mut held = Vec::new();
+      loop {
+        let (socket, _) = listener.accept().await.unwrap();
+        held.push(socket);
+      }
+    });
+    let (transport, _) = transport(port, 1);
+    let started = std::time::Instant::now();
+    assert!(matches!(
+      transport.send(&mail()).await,
+      Err(MailError::Unreachable(_))
+    ));
+    assert!(
+      started.elapsed() < Duration::from_secs(4),
+      "bounded by the deadline"
+    );
+    let started = std::time::Instant::now();
+    assert!(matches!(transport.send(&mail()).await, Err(MailError::Paused)));
+    assert!(started.elapsed() < Duration::from_millis(100), "no second wait");
+    silent.abort();
+  }
+
+  fn transport(port: u16, timeout_secs: u64) -> (MailTransport, Arc<MailStatus>) {
+    let config = SmtpConfig {
+      host: "::1".into(),
+      port,
+      security: SmtpSecurity::None,
+      username: None,
+      password: None,
+      from_address: "server@example.com".into(),
+      from_name: None,
+      timeout_secs,
+    };
+    let status = Arc::new(MailStatus::default());
+    let transport = MailTransport::new(
+      Arc::new(SmtpMailer::new(&config).unwrap()),
+      status.clone(),
+      Duration::from_secs(timeout_secs),
+    );
+    (transport, status)
+  }
+
+  fn mail() -> OutgoingMail {
+    OutgoingMail {
+      to_address: "someone@example.com".into(),
+      maybe_to_name: None,
+      subject: "Subject".into(),
+      text: "Text".into(),
+      method: IcalMethod::Request,
+      ics: String::new(),
+      maybe_from_name: None,
+      maybe_from_address: None,
+    }
+  }
 }

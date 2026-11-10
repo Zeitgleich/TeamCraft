@@ -129,6 +129,8 @@ pub struct FakeGateway {
 struct State {
   /// `GET /user-groups/rosters` as a real server answers it.
   user_groups: Vec<UserGroupRoster>,
+  /// The built-in `@admins` the rosters announce.
+  admin_ids: Vec<UserId>,
   /// Users the groups are refused to (guests).
   user_groups_refused: HashSet<UserId>,
   /// The identity provider's tokens each user's app holds (e2ee.md §3.1.3).
@@ -1723,6 +1725,11 @@ impl FakeServer {
   }
 
   /// Like a guest's: the groups are refused from now on.
+  /// The admins and owners the rosters announce as `@admins` (empty: switched off).
+  pub fn set_admin_ids(&self, admins: Vec<UserId>) {
+    self.lock().admin_ids = admins;
+  }
+
   pub fn refuse_user_groups_to(&self, user: UserId) {
     self.lock().user_groups_refused.insert(user);
   }
@@ -2948,6 +2955,7 @@ impl ServerApi for FakeServerApi {
     }
     Ok(ListUserGroupRostersResponse {
       groups: state.user_groups.clone(),
+      admin_ids: state.admin_ids.clone(),
     })
   }
 

@@ -270,6 +270,12 @@ calls-background-hint = Applied on your device before your video is sent.
 call-connecting = Connecting…
 call-reconnecting = Connection lost, reconnecting…
 call-limited-network = Limited network, call quality may be lower
+call-encryption-failed = Your device couldn't be added to the call's encryption, so you can't hear or be heard. Others in the call may not be able to verify this device.
+call-encryption-retry = Try again
+call-encryption-retry-in = { $count ->
+    [one] You can try again in { $count } minute.
+   *[other] You can try again in { $count } minutes.
+  }
 call-ended = Call ended
 control-deafen = Mute the call audio
 control-undeafen = Unmute the call audio

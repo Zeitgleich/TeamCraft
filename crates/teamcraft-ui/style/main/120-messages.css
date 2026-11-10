@@ -207,6 +207,24 @@
   overflow-wrap: anywhere;
 }
 
+/* A message of only 1-3 emoji (jumbomoji, #1603). The steps mirror `jumbo_emoji_scale` in
+   teamcraft-client-api; em keeps them following the user's font size. */
+.msg-jumbo {
+  line-height: 1.2;
+}
+
+.msg-jumbo-1 {
+  font-size: 2.5em;
+}
+
+.msg-jumbo-2 {
+  font-size: 2em;
+}
+
+.msg-jumbo-3 {
+  font-size: 1.6em;
+}
+
 .md-p + .md-p,
 .md-p + .md-code,
 .md-code + .md-p {

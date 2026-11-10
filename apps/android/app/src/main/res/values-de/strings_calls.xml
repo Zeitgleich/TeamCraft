@@ -46,6 +46,21 @@
     <item quantity="one">Diese Nachricht benachrichtigt %d Mitglied.</item>
     <item quantity="other">Diese Nachricht benachrichtigt alle %d Mitglieder.</item>
   </plurals>
+  <string name="group_mention_confirm_title">Gruppen benachrichtigen?</string>
+  <plurals name="group_mention_confirm">
+    <item quantity="one">Diese Nachricht benachrichtigt %d Person in den erwähnten Gruppen.</item>
+    <item quantity="other">Diese Nachricht benachrichtigt %d Personen in den erwähnten Gruppen.</item>
+  </plurals>
+  <string name="group_mention_confirm_capped">Diese Nachricht benachrichtigt nur die ersten %1$d von %2$d Personen in den erwähnten Gruppen.</string>
+  <plurals name="group_mention_outside">
+    <item quantity="one">%d Mitglied der erwähnten Gruppen ist nicht in dieser Unterhaltung und wird nicht benachrichtigt.</item>
+    <item quantity="other">%d Mitglieder der erwähnten Gruppen sind nicht in dieser Unterhaltung und werden nicht benachrichtigt.</item>
+  </plurals>
+  <plurals name="group_mention_people">
+    <item quantity="one">%d Person</item>
+    <item quantity="other">%d Personen</item>
+  </plurals>
+  <string name="group_mention_admins">Admins und Eigentümer</string>
   <string name="mention_title">Erwähnungen auf diesem Gerät</string>
   <string name="mention_first_name">Mein Vorname zählt als Erwähnung</string>
   <string name="mention_channel">Bei @channel, @here und @all benachrichtigen</string>
@@ -83,6 +98,11 @@
   <plurals name="mention_confirm_over_unit">
     <item quantity="one">Mitglied</item>
     <item quantity="other">Mitglieder</item>
+  </plurals>
+  <string name="call_encryption_failed">Dein Gerät konnte nicht in die Verschlüsselung des Anrufs aufgenommen werden, du hörst also niemanden und wirst nicht gehört. Andere im Anruf können dieses Gerät eventuell nicht überprüfen. Leg auf und ruf aus der Unterhaltung zurück.</string>
+  <plurals name="call_encryption_retry_in">
+    <item quantity="one">Du kannst in %d Minute zurückrufen.</item>
+    <item quantity="other">Du kannst in %d Minuten zurückrufen.</item>
   </plurals>
   <string name="call_join_failed_title">Anruf nicht verbunden</string>
   <string name="call_join_failed">Der Beitritt zum Anruf hat nicht geklappt. Ruf aus der Unterhaltung zurück.</string>

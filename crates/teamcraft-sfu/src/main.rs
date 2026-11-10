@@ -139,6 +139,16 @@ async fn run() -> anyhow::Result<()> {
     );
     config.dave_transition_deadline = deadline;
   }
+  if let Some(deadline) = env_duration_secs("TEAMCRAFT_SFU_DAVE_COMMIT_DEADLINE_SECS")? {
+    anyhow::ensure!(
+      !deadline.is_zero(),
+      "TEAMCRAFT_SFU_DAVE_COMMIT_DEADLINE_SECS must be at least 1"
+    );
+    config.dave_commit_deadline = deadline;
+  }
+  if let Some(window) = env_duration_secs("TEAMCRAFT_SFU_DAVE_REFUSAL_WINDOW_SECS")? {
+    config.dave_refusal_window = window;
+  }
   if let Some(bytes) = env_count("TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES")? {
     config.udp_receive_buffer_bytes = bytes;
   }

@@ -425,6 +425,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
       urgent_max_pushes: 5,
       mobile_push_delay_secs: 30,
       is_desktop_attention_enabled: true,
+      is_admins_mention_enabled: true,
     },
     email_digest: EmailDigestSettings {
       is_enabled: true,
@@ -453,6 +454,7 @@ fn default_runtime() -> RuntimeSettingsResponse {
       max_group_dm_participants: 9,
       max_user_group_members: 200,
       max_meeting_mails_per_user_per_hour: 20,
+      max_large_mentions_per_user_per_hour: 30,
     },
     integration: IntegrationSettings {
       default_retention_days: 30,

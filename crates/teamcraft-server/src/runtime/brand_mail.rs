@@ -10,19 +10,10 @@ use std::time::Duration;
 
 use futures_util::future::join_all;
 use teamcraft_proto::{BrandMailServer, MailDeliveryStatus, SmtpSecurityMode};
-use time::OffsetDateTime;
-use tokio::time::Instant;
 
-use super::mail_status::MailStatus;
+use super::mail_status::{MailStatus, MailTransport};
 use crate::auth::BoxFuture;
 use crate::meetings::mailer::{MailError, Mailer, OutgoingMail};
-
-/// How long a server that could not be reached is left alone. Queues that cross many recipients
-/// then fail fast instead of waiting a full timeout per mail; the mail keeps its usual failure path.
-const UNREACHABLE_PAUSE: Duration = Duration::from_secs(60);
-/// Longest time one mail may take, in multiples of the transport's network timeout (which only
-/// limits each step), so a server that answers a byte at a time cannot hold a queue up.
-const DEADLINE_TIMEOUTS: u32 = 3;
 
 /// The transports in force by brand id.
 #[derive(Default)]
@@ -49,14 +40,10 @@ pub enum MailRoute {
   Brand(String),
 }
 
-/// A brand's transport. Every mail it takes is recorded in its status, except those refused while
-/// it is paused (they say nothing new about the server).
+/// A brand's transport: its server's settings for the console and the shared [`MailTransport`].
 pub struct BrandTransport {
   view: BrandServerView,
-  inner: Arc<dyn Mailer>,
-  status: Arc<MailStatus>,
-  deadline: Duration,
-  paused_until: Mutex<Option<Instant>>,
+  transport: MailTransport,
 }
 
 /// Stands in for a brand's server when its settings can't be used (a password that can't be
@@ -138,56 +125,23 @@ impl BrandTransport {
   ) -> Self {
     Self {
       view,
-      inner,
-      status,
-      deadline: timeout.saturating_mul(DEADLINE_TIMEOUTS),
-      paused_until: Mutex::new(None),
+      transport: MailTransport::new(inner, status, timeout),
     }
   }
 
   /// What the console shows about this server.
   pub fn to_response(&self) -> BrandMailServer {
-    self.view.to_response(self.status.snapshot())
-  }
-
-  /// One attempt, also while the transport is paused: a test mail always asks the server.
-  pub async fn attempt(&self, mail: &OutgoingMail) -> Result<(), MailError> {
-    let result = match tokio::time::timeout(self.deadline, self.inner.send(mail)).await {
-      Ok(result) => result,
-      Err(_) => Err(MailError::Unreachable(format!(
-        "no answer within {} seconds",
-        self.deadline.as_secs()
-      ))),
-    };
-    self.status.record(&result, OffsetDateTime::now_utc());
-    let maybe_pause = match &result {
-      Ok(()) => Some(None),
-      Err(MailError::Unreachable(_)) => Some(Some(Instant::now() + UNREACHABLE_PAUSE)),
-      Err(_) => None,
-    };
-    if let Some(pause) = maybe_pause {
-      *self.paused_until.lock().unwrap_or_else(PoisonError::into_inner) = pause;
-    }
-    result
-  }
-
-  fn is_paused(&self) -> bool {
-    self
-      .paused_until
-      .lock()
-      .unwrap_or_else(PoisonError::into_inner)
-      .is_some_and(|until| Instant::now() < until)
+    self.view.to_response(self.transport.status().snapshot())
   }
 }
 
 impl Mailer for BrandTransport {
   fn send<'a>(&'a self, mail: &'a OutgoingMail) -> BoxFuture<'a, Result<(), MailError>> {
-    Box::pin(async move {
-      if self.is_paused() {
-        return Err(MailError::Paused);
-      }
-      self.attempt(mail).await
-    })
+    self.transport.send(mail)
+  }
+
+  fn attempt<'a>(&'a self, mail: &'a OutgoingMail) -> BoxFuture<'a, Result<(), MailError>> {
+    self.transport.attempt(mail)
   }
 }
 
@@ -221,23 +175,10 @@ where
 
 #[cfg(test)]
 mod tests {
-  use std::sync::atomic::{AtomicUsize, Ordering};
+  use time::OffsetDateTime;
 
   use super::*;
-  use crate::meetings::ical::Method;
-
-  fn mail() -> OutgoingMail {
-    OutgoingMail {
-      to_address: "a@example.com".into(),
-      maybe_to_name: None,
-      subject: "s".into(),
-      text: "t".into(),
-      method: Method::Request,
-      ics: String::new(),
-      maybe_from_name: None,
-      maybe_from_address: None,
-    }
-  }
+  use crate::runtime::mail_status::tests::{mail, scripted};
 
   fn view() -> BrandServerView {
     BrandServerView {
@@ -249,97 +190,13 @@ mod tests {
     }
   }
 
-  /// Answers as told, counting what reaches the server.
-  struct Scripted {
-    calls: AtomicUsize,
-    answer: fn() -> Result<(), MailError>,
-  }
-
-  impl Mailer for Scripted {
-    fn send<'a>(&'a self, _mail: &'a OutgoingMail) -> BoxFuture<'a, Result<(), MailError>> {
-      Box::pin(async move {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        (self.answer)()
-      })
-    }
-  }
-
-  fn transport(answer: fn() -> Result<(), MailError>) -> (BrandTransport, Arc<Scripted>) {
-    let scripted = Arc::new(Scripted {
-      calls: AtomicUsize::new(0),
-      answer,
-    });
-    let transport = BrandTransport::new(
+  fn transport() -> BrandTransport {
+    BrandTransport::new(
       view(),
-      scripted.clone(),
+      scripted(|| Ok(())),
       Arc::new(MailStatus::default()),
       Duration::from_secs(20),
-    );
-    (transport, scripted)
-  }
-
-  #[tokio::test(start_paused = true)]
-  async fn an_unreachable_server_is_left_alone_for_a_moment() {
-    let (transport, scripted) = transport(|| Err(MailError::Unreachable("connect".into())));
-    assert!(matches!(
-      transport.send(&mail()).await,
-      Err(MailError::Unreachable(_))
-    ));
-    assert!(matches!(transport.send(&mail()).await, Err(MailError::Paused)));
-    assert_eq!(scripted.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-      transport.to_response().status.maybe_last_error.as_deref(),
-      Some("the mail server could not be reached: connect"),
-      "the pause doesn't replace what the server said"
-    );
-
-    // A test mail asks the server all the same.
-    assert!(matches!(
-      transport.attempt(&mail()).await,
-      Err(MailError::Unreachable(_))
-    ));
-    assert_eq!(scripted.calls.load(Ordering::SeqCst), 2);
-
-    tokio::time::advance(UNREACHABLE_PAUSE + Duration::from_secs(1)).await;
-    assert!(matches!(
-      transport.send(&mail()).await,
-      Err(MailError::Unreachable(_))
-    ));
-    assert_eq!(scripted.calls.load(Ordering::SeqCst), 3);
-  }
-
-  #[tokio::test(start_paused = true)]
-  async fn a_refused_mail_does_not_pause_the_server() {
-    let (transport, scripted) = transport(|| Err(MailError::Send("550 no such user".into())));
-    assert!(matches!(transport.send(&mail()).await, Err(MailError::Send(_))));
-    assert!(matches!(transport.send(&mail()).await, Err(MailError::Send(_))));
-    assert_eq!(scripted.calls.load(Ordering::SeqCst), 2);
-  }
-
-  #[tokio::test(start_paused = true)]
-  async fn a_server_that_hangs_runs_into_the_deadline() {
-    struct Hanging;
-    impl Mailer for Hanging {
-      fn send<'a>(&'a self, _mail: &'a OutgoingMail) -> BoxFuture<'a, Result<(), MailError>> {
-        Box::pin(std::future::pending())
-      }
-    }
-    let transport = BrandTransport::new(
-      view(),
-      Arc::new(Hanging),
-      Arc::new(MailStatus::default()),
-      Duration::from_secs(1),
-    );
-    let started = Instant::now();
-    assert!(matches!(
-      transport.send(&mail()).await,
-      Err(MailError::Unreachable(_))
-    ));
-    assert_eq!(
-      started.elapsed(),
-      Duration::from_secs(u64::from(DEADLINE_TIMEOUTS))
-    );
-    assert!(transport.to_response().status.maybe_last_failure_at.is_some());
+    )
   }
 
   #[tokio::test]
@@ -353,8 +210,7 @@ mod tests {
     let servers = BrandMailServers::default();
     let status = servers.status_of("a");
     status.record(&Err(MailError::Send("x".into())), OffsetDateTime::now_utc());
-    let (transport_a, _) = transport(|| Ok(()));
-    servers.install(HashMap::from([("a".to_owned(), Arc::new(transport_a))]));
+    servers.install(HashMap::from([("a".to_owned(), Arc::new(transport()))]));
     assert!(servers.status_of("a").snapshot().maybe_last_error.is_some());
     assert_eq!(servers.route_of("a"), MailRoute::Brand("a".into()));
     assert_eq!(servers.route_of("b"), MailRoute::Instance);

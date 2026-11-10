@@ -36,9 +36,13 @@ pub struct UserGroupRoster {
 
 /// `GET /api/v1/user-groups/rosters`: every group with its members in one answer, so a device
 /// doesn't read them one by one each time it connects.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct ListUserGroupRostersResponse {
   pub groups: Vec<UserGroupRoster>,
+  /// The built-in `@admins`: the instance's active admins and owners. Empty while the instance
+  /// switched `@admins` off (`is_admins_mention_enabled`), and from servers before it existed.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub admin_ids: Vec<UserId>,
 }
 
 /// `GET /api/v1/user-groups/{id}`

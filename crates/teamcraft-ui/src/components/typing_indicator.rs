@@ -1,4 +1,4 @@
-//! "Alice is typing…" under a conversation's messages, and when the composer tells the others that
+//! "Alice is typing" under a conversation's messages, and when the composer tells the others that
 //! the user types (#733), as the phone apps do. Also in the chat list and in a direct
 //! conversation's header, and in a thread for the replies typed there (#882). Typing is metadata the
 //! server sees (e2ee.md §4.4); the user can stop sharing their own in Settings > Privacy.
@@ -90,7 +90,7 @@ pub fn users_at(
 }
 
 /// What a place shows while people type there, or `None`. `is_direct`: a direct conversation's row
-/// and header say only "typing…", the name is right there.
+/// and header say only "typing", the name is right there.
 pub fn typing_text(
   conversation: ConversationId,
   maybe_thread: Option<ThreadId>,
@@ -225,8 +225,8 @@ mod tests {
         }
       }
       let two = TypingLine::Two("Alice".to_owned(), "Bob".to_owned());
-      assert_eq!(rendered(Locale::En, &two), "Alice and Bob are typing…");
-      assert_eq!(rendered(Locale::De, &two), "Alice und Bob schreiben …");
+      assert_eq!(rendered(Locale::En, &two), "Alice and Bob are typing");
+      assert_eq!(rendered(Locale::De, &two), "Alice und Bob schreiben");
     }
   }
 
@@ -291,10 +291,10 @@ mod tests {
         state.backend_changed();
         assert_eq!(
           channel.get_untracked().as_deref(),
-          Some("Sam Rivera and Jordan Lee are typing…")
+          Some("Sam Rivera and Jordan Lee are typing")
         );
-        assert_eq!(thread.get_untracked().as_deref(), Some("Robin Chen is typing…"));
-        assert_eq!(direct.get_untracked().as_deref(), Some("typing…"));
+        assert_eq!(thread.get_untracked().as_deref(), Some("Robin Chen is typing"));
+        assert_eq!(direct.get_untracked().as_deref(), Some("typing"));
         assert_eq!(quiet.get_untracked(), None);
 
         // The indicators ran out.
@@ -311,9 +311,13 @@ mod tests {
       for locale in [Locale::En, Locale::De] {
         let text = translate(locale, "typing-direct", None);
         assert_ne!(text, "typing-direct", "{locale:?}");
-        assert!(text.ends_with('…'), "{locale:?}: {text}");
+        // The dots are drawn next to the text, so the text carries no ellipsis of its own (#1601).
+        assert!(
+          !text.contains('…') && !text.ends_with(" ..."),
+          "{locale:?}: {text}"
+        );
       }
-      assert_eq!(translate(Locale::En, "typing-direct", None), "typing…");
+      assert_eq!(translate(Locale::En, "typing-direct", None), "typing");
     }
   }
 

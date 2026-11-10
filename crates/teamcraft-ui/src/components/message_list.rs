@@ -20,6 +20,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::message_row::MessageRow;
 use crate::components::message_toolbar::{MessageToolbar, ToolbarHost};
 use crate::components::reaction_jump::ReactionJump;
+use crate::components::rich_text::place_sticky_table_headers;
 use crate::components::skeleton::MessageSkeleton;
 use crate::feed_motion::{FeedMotion, Shown, newest_confirmed};
 use crate::i18n::{I18n, use_i18n};
@@ -799,6 +800,7 @@ pub fn MessageList(
     };
     let top = exact_scroll_top(&element);
     let bottom_gap = f64::from(element.scroll_height()) - top - f64::from(element.client_height());
+    place_sticky_table_headers(&element);
     let height = f64::from(element.client_height());
     scroll_top.set(top + drift_px.get_value());
     viewport.set(height);
