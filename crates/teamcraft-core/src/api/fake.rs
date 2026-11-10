@@ -3224,6 +3224,13 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn admin_remove_leaver_from_chats(&self, user: UserId) -> Result<(), ApiError> {
+    if !self.server.lock().leavers.contains_key(&user) {
+      return Err(ApiError::status(409, ErrorCode::Conflict, "no longer a leaver"));
+    }
+    self.admin_remove_from_chats(user).await
+  }
+
   async fn admin_list_leavers(
     &self,
     query: &teamcraft_proto::ListLeaversQuery,

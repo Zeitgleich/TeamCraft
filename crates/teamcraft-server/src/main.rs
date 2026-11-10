@@ -334,6 +334,7 @@ async fn run() -> anyhow::Result<()> {
       state.clone(),
       Duration::from_secs(config.oidc.sync.initial_delay_secs),
       Duration::from_secs(config.oidc.sync.interval_secs),
+      Duration::from_secs(config.oidc.sync.event_min_gap_secs),
     );
   }
   if config.retention.is_enabled {
@@ -993,14 +994,25 @@ fn build_oidc_sync(config: &Config) -> anyhow::Result<Option<OidcSyncSettings>> 
   }))
 }
 
-/// Compares users with the identity provider periodically.
-fn spawn_oidc_sync(state: AppState, initial_delay: Duration, interval: Duration) {
+/// Compares users with the identity provider periodically, and soon after the provider reports a
+/// change (docs/provisioning.md §4): such runs are at least `event_gap` apart, and events during a
+/// run start one more after it, never more.
+fn spawn_oidc_sync(state: AppState, initial_delay: Duration, interval: Duration, event_gap: Duration) {
   tokio::spawn(async move {
     oidc::load_brake_state(&state).await;
     tokio::time::sleep(initial_delay).await;
     let mut ticker = tokio::time::interval(interval.max(Duration::from_secs(1)));
+    let mut maybe_last_run: Option<tokio::time::Instant> = None;
     loop {
-      ticker.tick().await;
+      tokio::select! {
+        _ = ticker.tick() => {},
+        () = state.oidc_sync.requested() => {
+          if let Some(wait) = maybe_last_run.and_then(|last| event_gap.checked_sub(last.elapsed())) {
+            tokio::time::sleep(wait).await;
+          }
+        },
+      }
+      maybe_last_run = Some(tokio::time::Instant::now());
       match oidc::sync_once(&state).await {
         // Changes that failed count as a run that failed: repeated, it becomes an alert.
         Ok(report) if report.failed > 0 => warn!(failed = report.failed, "oidc sync: some changes failed"),

@@ -215,6 +215,8 @@ pub struct OidcSyncConfig {
   pub brake_min_allowed: u32,
   /// Overdue (a warning in the console, then an alert) after this many intervals without a run.
   pub stale_after_intervals: u32,
+  /// Runs that identity provider events start are at least this far apart (docs/provisioning.md §4).
+  pub event_min_gap_secs: u64,
 }
 
 /// `[oidc.sync] mode`.
@@ -1597,6 +1599,7 @@ impl Default for OidcSyncConfig {
       brake_max_percent: DEFAULT_BRAKE_MAX_PERCENT,
       brake_min_allowed: DEFAULT_BRAKE_MIN_ALLOWED,
       stale_after_intervals: DEFAULT_STALE_AFTER_INTERVALS,
+      event_min_gap_secs: 10,
     }
   }
 }

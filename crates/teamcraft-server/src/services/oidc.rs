@@ -44,9 +44,22 @@ const NOTE_NO_ROLE: &str = "no TeamCraft role at the identity provider";
 pub struct OidcSyncRuntime {
   run: tokio::sync::Mutex<()>,
   held: AtomicU32,
+  /// A run was asked for (an identity provider event, a first sign-in). One stored permit: any
+  /// number of requests while one waits start a single run.
+  wake: tokio::sync::Notify,
 }
 
 impl OidcSyncRuntime {
+  /// Asks the sync loop for a run soon (docs/provisioning.md §4).
+  pub fn request_run(&self) {
+    self.wake.notify_one();
+  }
+
+  /// Resolves once a run was asked for.
+  pub async fn requested(&self) {
+    self.wake.notified().await;
+  }
+
   pub fn held(&self) -> u32 {
     self.held.load(Ordering::Relaxed)
   }

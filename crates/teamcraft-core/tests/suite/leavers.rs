@@ -13,7 +13,7 @@ use common::{PASSPHRASE, Peer, options, settings, settle};
 use teamcraft_core::PendingEnrollment;
 use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_core::client::LeaverRound;
+use teamcraft_core::client::{LeaverRound, leavers_held_by_limit};
 use teamcraft_core::clock::ManualClock;
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_proto::{
@@ -184,6 +184,8 @@ mod refused {
     assert_eq!(round.removed, 1);
     assert_eq!(round.held_by_limit, 1);
     assert!(setup.server.is_listed_leaver(bob_id) ^ setup.server.is_listed_leaver(carol_id));
+    // The console shows who waits.
+    assert_eq!(leavers_held_by_limit(setup.admin.store.as_ref()).unwrap(), 1);
 
     // A new connection reads the list again, still at the limit.
     setup.admin = reconnect(setup.admin, &setup.clock).await;
@@ -193,6 +195,7 @@ mod refused {
     setup.clock.advance(DAY_MS);
     assert_eq!(run(&mut setup.admin).await.removed, 1);
     assert!(!setup.server.is_listed_leaver(bob_id) && !setup.server.is_listed_leaver(carol_id));
+    assert_eq!(leavers_held_by_limit(setup.admin.store.as_ref()).unwrap(), 0);
   }
 }
 

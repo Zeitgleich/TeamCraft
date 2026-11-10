@@ -971,6 +971,18 @@ health-check-media_server-hint = Reports to the server every few seconds while i
 health-check-oidc_sync = Identity provider sync
 health-check-oidc_sync-hint = Compares users with the identity provider on a schedule. Late after the set number of missed runs, three by default.
 oidc-sync-title = Identity provider sync
+provider-events-title = Identity provider events
+provider-events-hint = With a secret set, the identity provider can report changes (a user disabled, a role or group changed) to POST /api/v1/identity-provider/events with the header "Authorization: Bearer" and the secret. The sync then runs within seconds instead of at its next interval. The report only starts a run: the sync reads the provider itself.
+provider-events-needs-sync = Events only start the sync, which is not running on this instance.
+provider-events-off = Off: changes are picked up at the sync's next interval.
+provider-events-none-yet = On. No event has arrived yet.
+provider-events-last = On. Last event { $when }.
+provider-events-secret-once = Copy it now: it is shown only once. Enter it in the identity provider's event listener. A new secret replaces this one at once.
+provider-events-create = Create secret
+provider-events-rotate = New secret
+provider-events-delete = Turn off
+provider-events-delete-question = Turn events off? The provider's reports are refused; the sync still runs at its interval.
+provider-events-delete-yes = Turn off
 oidc-sync-not-configured = Not set up. Without it, someone disabled at the identity provider keeps access until their sign-in ends. Set oidc.sync.client_secret: it is required for production.
 oidc-sync-switched-off = Switched off by oidc.sync.is_enabled = false. Someone disabled at the identity provider keeps access until their sign-in ends. It is required for production.
 oidc-sync-dry-run = Dry run: the sync only reports what it would change and changes nothing.
@@ -983,6 +995,10 @@ oidc-sync-held = { $count ->
    *[other] The safety brake is holding back { $count } deactivations.
 }
 oidc-sync-held-hint = This looks more like a mistake at the identity provider than like people leaving. Check the provider first: if it was a mistake, fix it there and this list clears by itself. Other leavers are still deactivated as usual.
+oidc-sync-leavers-held = { $count ->
+    [one] This app reached its daily limit of automatic removals: { $count } more person who left waits to be removed from all chats by an admin.
+   *[other] This app reached its daily limit of automatic removals: { $count } more people who left wait to be removed from all chats by an admin.
+  }
 oidc-sync-confirm = Confirm these deactivations
 oidc-sync-confirm-question = { $count ->
     [one] Deactivate this person now? Their sessions end at once. This is undone when the identity provider enables them again.

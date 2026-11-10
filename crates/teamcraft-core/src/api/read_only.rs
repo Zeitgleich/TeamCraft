@@ -347,6 +347,10 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.inner.admin_channels_of(user)
   }
 
+  fn admin_remove_leaver_from_chats(&self, _user: UserId) -> impl Future<Output = Result<(), ApiError>> {
+    self.refused("admin_remove_leaver_from_chats")
+  }
+
   fn admin_list_leavers(
     &self,
     query: &teamcraft_proto::ListLeaversQuery,

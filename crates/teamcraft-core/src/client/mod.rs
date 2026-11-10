@@ -121,7 +121,7 @@ pub use guest::{
   is_open_by_own_record,
 };
 pub use join_requests::is_open_private_channel;
-pub use leavers::LeaverRound;
+pub use leavers::{LeaverRound, leavers_held_by_limit};
 pub use linking::{
   LinkAnnouncement, LinkApproval, LinkCodeKind, LinkOffer, LinkReceipt, LinkRequestInfo, LinkRequestList,
   LinkWait, LinkWaitCancel, LinkedSecrets, NewDeviceLink, ReceiptCancel,

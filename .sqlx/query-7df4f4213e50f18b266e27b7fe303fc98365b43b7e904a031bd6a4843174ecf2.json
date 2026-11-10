@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE identity_provider_event_hook SET last_event_at = now() WHERE id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "7df4f4213e50f18b266e27b7fe303fc98365b43b7e904a031bd6a4843174ecf2"
+}

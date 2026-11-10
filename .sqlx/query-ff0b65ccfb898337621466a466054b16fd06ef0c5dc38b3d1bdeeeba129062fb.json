@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT l.user_id AS \"user_id!\", l.deactivated_at AS \"deactivated_at!\",\n                COALESCE(c.claimed_until > now() AND c.device_id IS DISTINCT FROM $2, false) AS \"is_claimed!\"\n         FROM identity_provider_leavers l\n         LEFT JOIN leaver_removal_claims c ON c.user_id = l.user_id\n         WHERE l.user_id > $1\n         ORDER BY l.user_id\n         LIMIT $3",
+  "query": "SELECT l.user_id AS \"user_id!\", l.deactivated_at AS \"deactivated_at!\", u.oidc_role,\n                COALESCE(c.claimed_until > now() AND c.device_id IS DISTINCT FROM $2, false) AS \"is_claimed!\"\n         FROM identity_provider_leavers l\n         JOIN users u ON u.id = l.user_id\n         LEFT JOIN leaver_removal_claims c ON c.user_id = l.user_id\n         WHERE l.user_id > $1\n         ORDER BY l.user_id\n         LIMIT $3",
   "describe": {
     "columns": [
       {
@@ -27,6 +27,17 @@
       },
       {
         "ordinal": 2,
+        "name": "oidc_role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "oidc_role"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
         "name": "is_claimed!",
         "type_info": "Bool",
         "origin": "Expression"
@@ -42,8 +53,9 @@
     "nullable": [
       true,
       true,
+      true,
       null
     ]
   },
-  "hash": "1e820fbec26d9d2cc91237e377858178d9a0c920b146d7fc755c6f3e66d41d32"
+  "hash": "ff0b65ccfb898337621466a466054b16fd06ef0c5dc38b3d1bdeeeba129062fb"
 }

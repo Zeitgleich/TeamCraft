@@ -71,6 +71,26 @@ swap it.
 
 Both should be on in production; see [Users, devices and guests](users-devices-guests.md).
 
+- **Leavers leave the encrypted chats** on their own: once the sync has deactivated somebody, an
+  owner's or admin's app takes them out of every channel after a waiting time (one hour by default,
+  Administration → Security, "People who leave"). See [provisioning.md](../../provisioning.md) §3.
+
+### Events: seconds instead of minutes
+
+Polling reacts within the interval. To react within seconds, let Keycloak report changes:
+
+1. In TeamCraft, **System health → Identity provider events → Create secret**, and copy it.
+2. In Keycloak, install an event listener that posts admin and user events to a URL (Keycloak has
+   none built in; a community "events to HTTP" or webhook provider, or an own event listener SPI).
+   Point it at `https://chat.example.com/api/v1/identity-provider/events`, with the header
+   `Authorization: Bearer <secret>`, and enable it for the realm under **Realm settings → Events**
+   with admin events on.
+3. Disable a test user: the card shows the event, and the sync runs within seconds
+   (`event_min_gap_secs`, 10 by default, keeps runs apart).
+
+TeamCraft doesn't read what the event says: it only starts a run, which reads Keycloak itself. A
+forged or replayed event can't change anybody. Polling stays on as the safety net for missed events.
+
 ### What the sync does when Keycloak looks wrong
 
 A misconfigured Keycloak (wrong realm, a client role mapping removed) must not lock a company out:

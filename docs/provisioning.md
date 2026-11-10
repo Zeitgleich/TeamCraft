@@ -88,13 +88,16 @@ The leaver round (`client/leavers.rs`) runs in every app of an owner or admin th
 - **Its own brake:** at most `leavers.max_per_day` (default 10) automatic removals per device in 24
   hours of its own clock. The server's brake protects against a provider's mistake; this one protects
   against a hostile server, which could otherwise get every member removed by reporting them
-  deactivated. Over the limit, the console lists the rest for an admin ("Remove from all chats", also
-  in bulk), which is the same signed action by hand.
+  deactivated. Over the limit, System health says how many wait, and the Users page lists them for an
+  admin ("Remove from all chats"), which is the same signed action by hand.
 - **One at a time per user:** before signing, the app claims the user (`POST /admin/leavers/{id}/claim`,
   a lease of 10 minutes in the database, one statement, so also safe with several server
   instances). Another device that claims meanwhile gets 409 `leaver_claimed` and skips the user; a
   lease that ran out (the app crashed) is claimed by the next one. Everything after the claim is
-  idempotent (admin.md §3.2.1), so a retry finishes what is left.
+  idempotent (admin.md §3.2.1), so a retry finishes what is left. The server step of an automatic
+  removal (`remove-from-chats?as_leaver=true`) is refused if the provider enabled the person again
+  since the claim. An admin's app is only shown leavers it may act on: an admin who left is removed
+  by an owner's app (admin.md §3.2.1, only owners act on admins).
 - **Mode:** `leavers.mode = manual` in the signed policy turns the automation off; the console then
   lists leavers for an admin to remove by hand.
 
@@ -131,17 +134,18 @@ switch the automation on, raise the limit or shorten the grace:
 ## 4. Identity provider events
 
 `POST /api/v1/identity-provider/events` with `Authorization: Bearer <secret>`. The body is ignored
-(any JSON up to 64 KiB is accepted), because the request is only a hint: it starts a sync run soon,
+(anything up to 64 KiB is accepted), because the request is only a hint: it starts a sync run soon,
 which reads the provider itself. So a forged or replayed event can't deactivate or create anybody; at
 worst it starts a run, and runs are at least `event_min_gap_secs` (default 10) apart. Events arriving
 during a run start one more run after it, never more than one.
 
-- **The secret** is generated in the console (Administration → Identity provider, "Event webhook"),
+- **The secret** is generated in the console (System health, the identity provider card),
   shown once, stored as a SHA-256 hash (it is 32 random bytes, so no slow hash is needed) and compared
-  in constant time. Rotating it replaces it at once; deleting it turns the endpoint off (404).
-- **Answers:** 202 when accepted, 401 `invalid_token` for a wrong or missing secret, 404 when no
-  secret is set, 413 for a body too large, 503 `unavailable` when the sync isn't configured. All of it is
-  rate limited per address like other unauthenticated endpoints.
+  in constant time. Rotating it replaces it at once; deleting it turns the endpoint off.
+- **Answers:** 202 when accepted; 401 `invalid_token` for a missing or wrong secret, and also while
+  no secret is set (the same answer, so the endpoint says nothing about the setup); 413 for a body over
+  64 KiB; 503 `unavailable` when the sync isn't configured. A wrong secret costs one read of one row and
+  a constant-time comparison; runs stay at least the gap apart whatever arrives.
 - **Keycloak** has no built-in HTTP event sender; an event listener extension posts admin and user
   events to a URL (e.g. a community "events to HTTP" provider or an own SPI). Which events: user
   updated, deleted, role mapping and group membership changes. Setup in the Keycloak guide.
