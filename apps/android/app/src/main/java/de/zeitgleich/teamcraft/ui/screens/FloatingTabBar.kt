@@ -63,6 +63,9 @@ private val ITEM_PADDING = 12.dp
 private val ICON_LABEL_GAP = 8.dp
 private val ICON_SIZE = 24.dp
 
+/** Shadow under the bar; the tonal level alone is too close to the background in light mode. */
+private val BAR_SHADOW = 8.dp
+
 /** The toolbar's content padding on both sides plus the screen margins around it. */
 private val TOOLBAR_CHROME = 16.dp + 32.dp
 
@@ -112,7 +115,12 @@ fun FloatingTabBar(
   val selectedWidth = if (showsLabel) labelWidths.getValue(selected) else ITEM_SIZE
   val longestWidth = if (showsLabel) labelWidths.values.max() else ITEM_SIZE
   val otherWidth = ITEM_SIZE + (longestWidth - selectedWidth) / (tabs.size - 1).coerceAtLeast(1)
-  HorizontalFloatingToolbar(expanded = true, modifier = modifier) {
+  // The default container (surfaceContainer) is nearly the screen background in light mode, with
+  // dynamic colour too: a higher tonal level and a clearer shadow lift the bar off the lists.
+  val colors = FloatingToolbarDefaults.standardFloatingToolbarColors().copy(
+    toolbarContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+  )
+  HorizontalFloatingToolbar(expanded = true, modifier = modifier, colors = colors, expandedShadowElevation = BAR_SHADOW) {
     Row(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
       for (tab in tabs) {
         val badge = when (tab) {
