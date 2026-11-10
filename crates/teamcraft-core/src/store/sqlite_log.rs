@@ -30,15 +30,20 @@ pub(crate) struct PurgeState {
   pub(crate) is_forced: bool,
   maybe_last_attempt: Option<Instant>,
   min_interval: Duration,
+  /// How long the connection's other statements wait for a lock: given back after a checkpoint,
+  /// which itself never waits.
+  busy_timeout: Duration,
 }
 
 impl PurgeState {
-  pub(crate) fn new() -> Self {
+  /// For a connection whose statements wait `busy_timeout` for another connection's lock.
+  pub(crate) fn new(busy_timeout: Duration) -> Self {
     Self {
       is_due: false,
       is_forced: false,
       maybe_last_attempt: None,
       min_interval: PURGE_INTERVAL,
+      busy_timeout,
     }
   }
 
@@ -57,12 +62,13 @@ impl PurgeState {
       return;
     }
     self.maybe_last_attempt = Some(now);
-    match checkpoint_truncate(connection) {
+    match checkpoint_truncate(connection, self.busy_timeout) {
       Ok(true) => {
         self.is_due = false;
         self.is_forced = false;
       },
-      Ok(false) => tracing::warn!("the write-ahead log could not be truncated yet; trying again later"),
+      // A read thread holds a snapshot: expected, and retried by the next write or purge.
+      Ok(false) => tracing::debug!("the write-ahead log could not be truncated yet; trying again later"),
       Err(error) => tracing::warn!(%error, "could not truncate the write-ahead log; trying again later"),
     }
   }
@@ -78,12 +84,22 @@ impl PurgeState {
 
 /// `PRAGMA wal_checkpoint(TRUNCATE)`; `true` only if it ran to the end: not blocked by a reader
 /// or writer (`busy`) and every frame of the log written back.
-fn checkpoint_truncate(connection: &Connection) -> Result<bool, StoreError> {
-  let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = connection
-    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
-      Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-    })
-    .map_err(sqlite_error)?;
+///
+/// It doesn't wait for a lock: a truncating checkpoint waits until every reader left its snapshot,
+/// and it runs at the end of a group of writes, under the writer's locks. With the connection's
+/// busy timeout it held up the engine and every read thread's write for that long whenever a read
+/// thread was reading (TEAMCRAFT-F). Frames it could write back are written back; the truncation
+/// is tried again later ([`PurgeState::run_if_due`]).
+fn checkpoint_truncate(connection: &Connection, busy_timeout: Duration) -> Result<bool, StoreError> {
+  connection.busy_timeout(Duration::ZERO).map_err(sqlite_error)?;
+  let checkpointed = connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+  });
+  if let Err(error) = connection.busy_timeout(busy_timeout) {
+    // The connection's statements then fail at once on a lock instead of waiting for it.
+    tracing::warn!(%error, "could not restore the local store's busy timeout");
+  }
+  let (busy, log_frames, checkpointed_frames): (i64, i64, i64) = checkpointed.map_err(sqlite_error)?;
   // Without a log (a database that is not in WAL mode) SQLite answers -1 for both counts.
   Ok(busy == 0 && log_frames == checkpointed_frames)
 }

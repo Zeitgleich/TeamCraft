@@ -84,9 +84,9 @@ logs content) and the debug log's own redaction:
 - **Source paths lose the build machine:** a frame keeps the path inside its crate, Cargo package
   or the standard library (`/home/<user>/…/crates/x/src/a.rs` becomes `x/src/a.rs`), anything else
   only its file name; a script URL only its path. An error the browser raises itself
-  (`window.onerror` without a line, such as "ResizeObserver loop completed with undelivered
-  notifications") has no frame: its "file" is the page's address (`dm/<id>`), which split one
-  error into an issue per conversation.
+  (`window.onerror` without a stack or a line, such as "ResizeObserver loop completed with
+  undelivered notifications") has no frame: its "file" is the page's address (`dm/<id>`), which
+  split one error into an issue per conversation.
 - **Lengths are cut:** message 512, type 128, function 256 and breadcrumb 512 characters; 100
   frames (the innermost), 50 breadcrumbs (the newest).
 - Breadcrumbs run through the same steps again, though the ring redacted them already.
@@ -398,6 +398,10 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
   release's commit with `strip = false` (the build is reproducible) and map the frame with
   `wasm-tools addr2line` or `llvm-symbolizer`. Keeping the name section in the shipped module would
   cost download size against the budget; panics carry their message and location either way.
+  Uncaught script errors and rejected promises carry the thrown `Error`'s `stack`, read in the
+  Safari/Firefox (`name@url:line:column`) and Chrome (`at name (url:line:column)`) shapes
+  (`frames_from_script_stack`); frames from the page's origin and wasm frames are in-app, and
+  script URLs are scrubbed to their path like any other frame.
 - **Android:** the release workflow (`release.yml`, job `android`) gives the full release a fresh
   ProGuard UUID (`-Pteamcraft.proguardUuid`, written to the app's `sentry-debug-meta.properties`)
   and uploads `mapping.txt` under it (`sentry-cli upload-proguard`) and the unstripped libraries

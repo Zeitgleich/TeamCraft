@@ -6,6 +6,7 @@
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
@@ -180,7 +181,7 @@ impl SqlCipherStore {
       inner: Mutex::new(Inner {
         connection,
         group,
-        purge: PurgeState::new(),
+        purge: PurgeState::new(Duration::ZERO),
       }),
     })
   }

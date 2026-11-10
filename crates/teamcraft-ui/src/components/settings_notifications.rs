@@ -218,6 +218,17 @@ pub fn NotificationsSection() -> impl IntoView {
           value=Signal::derive(move || notes.get().plays_ringtone)
           on_change=Callback::new(move |value: bool| edit(Box::new(move |n| n.plays_ringtone = value)))
         />
+        <SelectRow
+          label="notif-ringtone-volume"
+          options=slug_options(&["25", "50", "75", "100"], "notif-ringtone-volume-")
+          is_disabled=Signal::derive(move || !notes.get().plays_ringtone)
+          value=Signal::derive(move || notes.get().ringtone_volume_percent.to_string())
+          on_change=Callback::new(move |value: String| {
+            if let Ok(percent) = value.parse::<u8>() {
+              edit(Box::new(move |n| n.ringtone_volume_percent = percent));
+            }
+          })
+        />
         <SwitchRow
           label="notif-call-window"
           hint="notif-call-window-hint"

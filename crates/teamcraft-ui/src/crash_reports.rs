@@ -19,6 +19,7 @@ use teamcraft_client_api::crash_reporting::trace::{self, TraceSettings, WireTrac
 use teamcraft_client_api::crash_reporting::{
   AppInfo, AppPlatform, CrashEvent, CrashLevel, CrashReporter, CrashReportingConfig, CrashReportingConsent,
   CrashSendOutcome, ErrorSource, EventId, InstallationId, PanicParts, PendingPanic, StackFrame, Transaction,
+  frames_from_script_stack,
 };
 use teamcraft_client_api::debug_log;
 use teamcraft_client_api::server_entry::SERVER_INFO_PATH;
@@ -297,9 +298,14 @@ fn listen_to_window() {
     return;
   };
   let on_error = Closure::<dyn Fn(web_sys::ErrorEvent)>::new(|event: web_sys::ErrorEvent| {
-    let frames = StackFrame::from_error_event(&event.filename(), event.lineno(), event.colno())
-      .into_iter()
-      .collect();
+    let mut frames = frames_of(&event.error());
+    if frames.is_empty() {
+      frames.extend(StackFrame::from_error_event(
+        &event.filename(),
+        event.lineno(),
+        event.colno(),
+      ));
+    }
     capture_script_error("Error", event.message(), frames);
   });
   let on_rejection =
@@ -310,7 +316,7 @@ fn listen_to_window() {
         .map(|error| String::from(error.message()))
         .or_else(|| reason.as_string())
         .unwrap_or_else(|| "a promise was rejected".to_owned());
-      capture_script_error("UnhandledRejection", message, Vec::new());
+      capture_script_error("UnhandledRejection", message, frames_of(&reason));
     });
   let on_online = Closure::<dyn Fn()>::new(flush);
   // Performance data lives in memory; it is stored when the page may go away (hidden, closed).
@@ -338,6 +344,24 @@ fn listen_to_window() {
   on_online.forget();
   on_hidden.forget();
   on_pagehide.forget();
+}
+
+/// The frames of a thrown value's `stack` (an `Error`; anything else has none). Without them a
+/// rejection only says what failed, not where (GlitchTip TEAMCRAFT-1I).
+fn frames_of(thrown: &wasm_bindgen::JsValue) -> Vec<StackFrame> {
+  if !thrown.is_object() {
+    return Vec::new();
+  }
+  let Some(stack) = js_sys::Reflect::get(thrown, &"stack".into())
+    .ok()
+    .and_then(|stack| stack.as_string())
+  else {
+    return Vec::new();
+  };
+  let origin = web_sys::window()
+    .and_then(|window| window.location().origin().ok())
+    .unwrap_or_default();
+  frames_from_script_stack(&stack, &origin)
 }
 
 /// The app lost a sign-in the user didn't end (a refused or missing saved sign-in, a lost device

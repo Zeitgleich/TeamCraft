@@ -73,6 +73,17 @@ pub fn test_sound() -> Vec<f32> {
   samples
 }
 
+/// The ringtone's loudness setting at full volume.
+pub const FULL_VOLUME_PERCENT: u8 = 100;
+
+/// The factor the ringtone's samples are multiplied by for a volume setting in percent (0 to 100,
+/// larger values count as 100). Squared, so the steps sound about even instead of bunching up at
+/// the loud end.
+pub fn volume_gain(volume_percent: u8) -> f32 {
+  let level = f32::from(volume_percent.min(FULL_VOLUME_PERCENT)) / f32::from(FULL_VOLUME_PERCENT);
+  level * level
+}
+
 /// One note: a sine carrier phase-modulated by a sine at the same frequency, with a fading index.
 /// The message sound "Keys" plays the same voice.
 pub(crate) fn electric_piano(frequency_hz: f32, velocity: f32) -> Vec<f32> {
@@ -139,13 +150,14 @@ mod player {
   }
 
   impl RingtonePlayer {
-    /// Starts ringing on `device`. A missing or failing device is logged; the call still shows.
-    pub fn start(device: AudioDeviceChoice) -> Self {
+    /// Starts ringing on `device` at `volume_percent` (see [`super::volume_gain`]). A missing or
+    /// failing device is logged and the default output tried instead; the call still shows.
+    pub fn start(device: AudioDeviceChoice, volume_percent: u8) -> Self {
       let is_stopped = Arc::new(AtomicBool::new(false));
       let stop = is_stopped.clone();
       let spawned = std::thread::Builder::new()
         .name("ringtone".to_owned())
-        .spawn(move || ring(&device, &stop));
+        .spawn(move || ring(&device, volume_percent, &stop));
       let maybe_thread = spawned
         .inspect_err(|error| warn!(%error, "could not start the ringtone"))
         .ok();
@@ -179,17 +191,26 @@ mod player {
     Ok(())
   }
 
-  fn ring(device: &AudioDeviceChoice, is_stopped: &AtomicBool) {
+  fn ring(device: &AudioDeviceChoice, volume_percent: u8, is_stopped: &AtomicBool) {
     let ahead = (AHEAD_SECONDS * SAMPLE_RATE_HZ as f32) as usize;
     let buffer = Arc::new(PlaybackBuffer::new(ahead * 2));
-    let _output = match AudioOutput::open(device, buffer.clone()) {
+    let opened = AudioOutput::open(device, buffer.clone()).or_else(|error| {
+      if *device == AudioDeviceChoice::Default {
+        return Err(error);
+      }
+      warn!(%error, "the chosen speakers can't be opened for the ringtone; using the default");
+      AudioOutput::open(&AudioDeviceChoice::Default, buffer.clone())
+    });
+    let _output = match opened {
       Ok(output) => output,
       Err(error) => {
         warn!(%error, "no speakers for the ringtone");
         return;
       },
     };
-    let pass = super::synthesize();
+    let gain = super::volume_gain(volume_percent);
+    let mut pass = super::synthesize();
+    pass.iter_mut().for_each(|sample| *sample *= gain);
     let mut position = 0;
     while !is_stopped.load(Ordering::Relaxed) {
       while buffer.len() < ahead {
@@ -226,6 +247,15 @@ mod tests {
     let peak = samples.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
     assert!(peak > 0.3, "peaks at {peak}");
     assert!(samples[samples.len() - 1].abs() < 1e-6);
+  }
+
+  #[test]
+  fn the_volume_setting_scales_the_ringtone_from_silent_to_unchanged() {
+    assert_eq!(volume_gain(0), 0.0);
+    assert_eq!(volume_gain(100), 1.0);
+    assert_eq!(volume_gain(200), 1.0);
+    assert!((volume_gain(50) - 0.25).abs() < 1e-6);
+    assert!(volume_gain(25) < volume_gain(50) && volume_gain(50) < volume_gain(75));
   }
 
   #[test]
