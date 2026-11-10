@@ -19,13 +19,14 @@ use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use prometheus::{Encoder, HistogramOpts, HistogramVec, Opts, Registry, TextEncoder};
+use prometheus::core::Collector;
+use prometheus::{Encoder, HistogramVec, Registry, TextEncoder};
 use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::bind_dual_stack;
 
-pub use prometheus::{IntCounterVec, IntGauge, IntGaugeVec};
+pub use prometheus::{Histogram, HistogramOpts, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts};
 
 /// The path of the endpoint, the only one the listener serves.
 pub const METRICS_PATH: &str = "/metrics";
@@ -118,6 +119,13 @@ impl Metrics {
     let counter = IntCounterVec::new(Opts::new(name, help), labels)?;
     self.registry.register(Box::new(counter.clone()))?;
     Ok(counter)
+  }
+
+  /// Adds a metric made elsewhere (one that is counted whether or not metrics are served); it
+  /// shares its counts with `collector`.
+  pub fn register<C: Collector + Clone + 'static>(&self, collector: &C) -> Result<(), MetricsError> {
+    self.registry.register(Box::new(collector.clone()))?;
+    Ok(())
   }
 
   /// The output of the endpoint.
