@@ -6,6 +6,7 @@
 #   scripts/e2e.sh --no-browser     # without the web client build and Chromium
 #   scripts/e2e.sh --down           # stop the dev stack afterwards
 #   scripts/e2e.sh --prebuilt-web   # use the web client already in target/e2e-web (or $E2E_WEB_DIR)
+#   scripts/e2e.sh --desktop        # the desktop app's tests only (E2E_DESKTOP_BIN, tests/e2e/README.md)
 #   scripts/e2e.sh -- calls::       # arguments after -- go to the test binary (a name filter, --ignored, ...)
 #
 # Needs Docker with Compose, python3 (dev tokens), a Rust toolchain and, for the browser tests, Chrome
@@ -18,6 +19,7 @@ cd "$root"
 compose=(docker compose -f docker-compose.dev.yml)
 features="browser"
 is_down=false
+is_desktop=false
 has_prebuilt_web=false
 test_args=()
 
@@ -26,8 +28,9 @@ while [ $# -gt 0 ]; do
     --no-browser) features="e2e" ;;
     --down) is_down=true ;;
     --prebuilt-web) has_prebuilt_web=true ;;
+    --desktop) features="desktop"; is_desktop=true ;;
     --) shift; test_args=("$@"); break ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
   shift
@@ -78,7 +81,7 @@ SQLX_OFFLINE=true cargo build -p teamcraft-server -p teamcraft-sfu -p teamcraft-
 if $has_prebuilt_web; then
   web_dir="${E2E_WEB_DIR:-$root/target/e2e-web}"
   if [ ! -f "$web_dir/index.html" ]; then echo "no web client in $web_dir" >&2; exit 1; fi
-elif [ "$features" = "browser" ]; then
+elif [ "$features" != "e2e" ]; then
   step "Web client (trunk in a container)"
   tests/e2e/web/build.sh
 fi
@@ -95,6 +98,9 @@ drop_test_databases
 # #1203). Memory is only reserved, not used.
 RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}" E2E_REQUIRED=1 SQLX_OFFLINE=true \
   cargo test -p teamcraft-e2e --features "$features" --test suite -- ${test_args[@]+"${test_args[@]}"}
+
+# The desktop job runs only the desktop app's tests; the full suite's job runs the rest.
+if $is_desktop; then exit 0; fi
 
 # The integration tests that need the dev stack and skip themselves without it (#1284): the server's
 # S3, Mailpit and CalCraft tests, and the `dev_stack` tests of core and ffi against a running server.

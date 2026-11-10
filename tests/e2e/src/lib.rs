@@ -11,6 +11,8 @@ pub mod bridge;
 #[cfg(feature = "browser")]
 pub mod browser;
 pub mod call;
+#[cfg(feature = "desktop")]
+pub mod desktop;
 pub mod mail;
 pub mod netem;
 pub mod peer;

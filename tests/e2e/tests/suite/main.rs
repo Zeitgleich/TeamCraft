@@ -27,6 +27,8 @@ mod calls;
 mod client_outages;
 mod conversion;
 mod dependency_outages;
+#[cfg(feature = "desktop")]
+mod desktop_perf;
 mod deployed;
 mod devices;
 mod display_names;

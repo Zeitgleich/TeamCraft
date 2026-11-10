@@ -574,6 +574,8 @@ pub fn MessageList(
   // scroll could never get there. Read again when a request ends, so a page without a visible row
   // (or the next connection after a failure) goes on by itself.
   let older_history = Memo::new(move |_| state.read(|backend| backend.older_history(conversation)));
+  let fits_on_screen =
+    move || heights.with_value(|heights| f64::from(heights.iter().sum::<f32>())) <= viewport.get();
   // Until the list took its opening position it stands at the top, whatever the reader will see.
   let is_positioned = RwSignal::new(false);
   Effect::new(move |_| {
@@ -584,21 +586,20 @@ pub fn MessageList(
       return;
     }
     let first_visible = window.get().first_visible;
-    let fits = heights.with_value(|heights| f64::from(heights.iter().sum::<f32>())) <= viewport.get();
-    if asks_for_older(first_visible, stick_to_bottom.get(), fits) {
+    if asks_for_older(first_visible, stick_to_bottom.get(), fits_on_screen()) {
       // A request, not a change: the page tells the UI once its rows are here. Telling it now too
       // re-read everything shown while the reader scrolls, a stall per page (#1595).
       untrack(|| state.read(|backend| backend.load_older_history(conversation)));
     }
   });
-  // At the top with more to read, a page is on its way: it is asked for as soon as the reader is
-  // near the oldest row, so "available" there means "loading".
   let older_status = move || {
-    let is_near = window.get().first_visible < OLDER_STATUS_ROWS;
-    is_near.then(|| match older_history.get() {
-      OlderHistory::Available => OlderHistory::Loading,
-      status => status,
-    })
+    let first_visible = window.get().first_visible;
+    shown_older_status(
+      first_visible,
+      stick_to_bottom.get(),
+      fits_on_screen(),
+      older_history.get(),
+    )
   };
   // A jump to a date can leave a hole between the rows held (#1156). Near one, a page of it comes
   // from the server, from the reader's side, so what the reader looks at stays where it is. Asked
@@ -1061,6 +1062,27 @@ pub fn MessageList(
 /// Whether the list asks for older history with `first_visible` as the first row on screen.
 fn asks_for_older(first_visible: usize, is_following: bool, fits_on_screen: bool) -> bool {
   first_visible < OLDER_AHEAD_ROWS && (!is_following || fits_on_screen)
+}
+
+/// What the top of the list says about older history, if anything. At the top with more to read, a
+/// page is on its way when the list asks for one ([`asks_for_older`]), so "available" there means
+/// "loading". A list a little taller than the screen, read at its bottom, asks for nothing until
+/// the reader scrolls: a spinner there would turn forever and keep the page painting (#1022).
+fn shown_older_status(
+  first_visible: usize,
+  is_following: bool,
+  fits_on_screen: bool,
+  history: OlderHistory,
+) -> Option<OlderHistory> {
+  if first_visible >= OLDER_STATUS_ROWS {
+    return None;
+  }
+  match history {
+    OlderHistory::Available => {
+      asks_for_older(first_visible, is_following, fits_on_screen).then_some(OlderHistory::Loading)
+    },
+    status => Some(status),
+  }
 }
 
 /// The first hole in the history within `ahead` rows of the rendered ones, and the side the reader
@@ -1750,6 +1772,36 @@ mod tests {
     assert!(
       asks_for_older(0, true, true),
       "a list too short to scroll can't get any nearer"
+    );
+  }
+
+  /// #1022: a list a little taller than the screen, opened at its bottom, showed "Loading older
+  /// messages" for good while nothing was asked, and its spinner kept the app painting.
+  #[test]
+  fn the_top_shows_loading_only_while_a_page_is_asked_for() {
+    let available = OlderHistory::Available;
+    assert_eq!(shown_older_status(0, true, false, available), None);
+    assert_eq!(
+      shown_older_status(0, false, false, available),
+      Some(OlderHistory::Loading),
+      "scrolled up to the top: the page is asked for"
+    );
+    assert_eq!(
+      shown_older_status(0, true, true, available),
+      Some(OlderHistory::Loading),
+      "a list too short to scroll asks at once"
+    );
+    assert_eq!(
+      shown_older_status(OLDER_STATUS_ROWS, false, false, available),
+      None
+    );
+    assert_eq!(
+      shown_older_status(0, true, false, OlderHistory::Failed),
+      Some(OlderHistory::Failed)
+    );
+    assert_eq!(
+      shown_older_status(0, true, false, OlderHistory::Loading),
+      Some(OlderHistory::Loading)
     );
   }
 

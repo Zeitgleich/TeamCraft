@@ -197,30 +197,30 @@ async fn the_web_client_stays_fast_and_lean_with_a_large_workspace() {
 
 /// The size of the generated workspace.
 #[derive(Clone, Copy, Debug)]
-struct Scale {
-  name: &'static str,
-  spaces: usize,
-  channels_per_space: usize,
-  messages: usize,
-  long_channel_messages: usize,
-  images: usize,
+pub(crate) struct Scale {
+  pub(crate) name: &'static str,
+  pub(crate) spaces: usize,
+  pub(crate) channels_per_space: usize,
+  pub(crate) messages: usize,
+  pub(crate) long_channel_messages: usize,
+  pub(crate) images: usize,
   /// Messages each busy channel gets while Carol is away the last time, beyond what a capped
   /// catch-up reads (issue #1572).
-  backlog_messages: usize,
+  pub(crate) backlog_messages: usize,
   /// Messages every channel but two gets while Carol is away once more: fewer than a capped
   /// catch-up reads, so all of them are decrypted in the catch-up itself (issue #1575).
-  catch_up_messages: usize,
-  idle: Duration,
-  is_regression_check: bool,
+  pub(crate) catch_up_messages: usize,
+  pub(crate) idle: Duration,
+  pub(crate) is_regression_check: bool,
 }
 
 /// What the seeding produced, for the measurements to navigate.
-struct Seeded {
-  spaces: Vec<SpaceId>,
-  channels: Vec<ConversationId>,
+pub(crate) struct Seeded {
+  pub(crate) spaces: Vec<SpaceId>,
+  pub(crate) channels: Vec<ConversationId>,
   /// Channel names of the first space (shown in the sidebar), with each channel's newest message.
-  first_space_channels: Vec<(String, String)>,
-  long_channel: (String, String),
+  pub(crate) first_space_channels: Vec<(String, String)>,
+  pub(crate) long_channel: (String, String),
 }
 
 struct Rig {
@@ -377,7 +377,7 @@ struct Report {
 }
 
 impl Scale {
-  fn from_env() -> Self {
+  pub(crate) fn from_env() -> Self {
     match std::env::var("PERF_SCALE").as_deref() {
       Ok("large") => Self {
         name: "large",
@@ -476,7 +476,7 @@ pub(crate) async fn sign_in_and_unlock(page: &Page, user: &str) {
 /// Alice owns every space; Bob and Carol (the browser) are in all of them. Channels get their
 /// share of the messages round-robin, the first channel of the first space a long history, and
 /// images are spread over the first space.
-async fn seed(stack: &Stack, alice: &mut Peer, bob: &mut Peer, scale: Scale) -> Seeded {
+pub(crate) async fn seed(stack: &Stack, alice: &mut Peer, bob: &mut Peer, scale: Scale) -> Seeded {
   let carol_tokens = stack.tokens("carol");
   let carol: UserId = stack.get(&carol_tokens, "/me").await.id().parse().unwrap();
   let mut channels: Vec<(ConversationId, String)> = Vec::new();
@@ -1307,11 +1307,11 @@ fn field_of(line: &str, name: &str) -> Option<f64> {
   digits.parse().ok()
 }
 
-fn mib(bytes: u64) -> f64 {
+pub(crate) fn mib(bytes: u64) -> f64 {
   bytes as f64 / MIB
 }
 
-fn percentile(sorted: &[f64], percent: usize) -> f64 {
+pub(crate) fn percentile(sorted: &[f64], percent: usize) -> f64 {
   if sorted.is_empty() {
     return 0.0;
   }
