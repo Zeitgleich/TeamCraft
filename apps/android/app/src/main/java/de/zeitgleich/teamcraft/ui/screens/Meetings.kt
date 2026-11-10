@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.consumeWindowInsets
 import android.text.format.DateUtils
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -34,7 +35,7 @@ import de.zeitgleich.teamcraft.ui.MainViewModel
 fun MeetingsScreen(viewModel: MainViewModel, onBack: () -> Unit) {
   val read = rememberRead(viewModel) { meetings() }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.meetings_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
-    LazyColumn(Modifier.fillMaxSize().padding(padding)) {
+    LazyColumn(Modifier.fillMaxSize().consumeWindowInsets(padding), contentPadding = padding) {
       val list = upcomingMeetings(read.maybeValue.orEmpty())
       placeholderItem(read.phase { upcomingMeetings(it) }, read.retry) { EmptyText(R.string.meetings_empty) }
       // A repeating meeting is listed once per occurrence, all with the series' ID.

@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,7 +30,7 @@ fun LockScreen(onUnlock: () -> Unit, isUnlockRefused: Boolean) {
   LaunchedEffect(Unit) { onUnlock() }
   Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
     Column(
-      Modifier.fillMaxSize().padding(32.dp),
+      Modifier.fillMaxSize().safeDrawingPadding().padding(32.dp),
       verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
       horizontalAlignment = Alignment.CenterHorizontally,
     ) {

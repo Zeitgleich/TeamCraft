@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.consumeWindowInsets
 import android.text.format.DateUtils
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -55,7 +56,7 @@ fun ThreadsScreen(viewModel: MainViewModel, onOpenThread: (String, String) -> Un
       .toSet()
   }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.threads_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
-    LazyColumn(Modifier.fillMaxSize().padding(padding)) {
+    LazyColumn(Modifier.fillMaxSize().consumeWindowInsets(padding), contentPadding = padding) {
       placeholderItem(threads.phase(isSyncing) { it }, threads.retry) { EmptyText(R.string.threads_empty) }
       items(threads.maybeValue.orEmpty(), key = { it.conversation + "/" + it.root.id }) { thread ->
         Column(Modifier.fillMaxWidth().clickable { onOpenThread(thread.conversation, thread.root.id) }.padding(16.dp)) {
@@ -90,12 +91,12 @@ fun SavedScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () -
   val isSyncing = rememberNewestSyncing(viewModel)
   LaunchedEffect(changes) { snapshot = viewModel.readChat { snapshot() } }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.saved_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
-    Column(Modifier.fillMaxSize().padding(padding)) {
+    Column(Modifier.fillMaxSize().padding(padding.withoutBottom()).consumeWindowInsets(padding)) {
       PrimaryTabRow(selectedTabIndex = tab) {
         Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text(stringResource(R.string.saved_items)) })
         Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text(stringResource(R.string.mentions)) })
       }
-      LazyColumn(Modifier.fillMaxSize()) {
+      LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.bottomOnly()) {
         if (tab == 0) {
           // Saved items are the user's own, kept on this device: only a failed read is no answer.
           placeholderItem(saved.phase { it }, saved.retry) { EmptyText(R.string.saved_empty) }

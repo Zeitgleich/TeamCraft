@@ -481,7 +481,7 @@ private fun LoadingBadge(maybeProgress: Float?, modifier: Modifier) {
     if (maybeProgress != null) {
       CircularProgressIndicator(progress = { maybeProgress }, color = Color.White, modifier = Modifier.size(28.dp))
     } else {
-      CircularProgressIndicator(color = Color.White, modifier = Modifier.size(28.dp))
+      PageLoadingIndicator(color = Color.White)
     }
   }
 }

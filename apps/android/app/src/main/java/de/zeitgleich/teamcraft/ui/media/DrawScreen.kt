@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconToggleButton
@@ -68,6 +67,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import de.zeitgleich.teamcraft.ui.screens.PageLoadingIndicator
 import de.zeitgleich.teamcraft.ui.screens.textKeyboard
 import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
@@ -171,7 +171,7 @@ fun DrawScreen(uri: String, initial: PictureEdit, onCancel: () -> Unit, onDone: 
         Box(Modifier.weight(1f).fillMaxHeight(), contentAlignment = Alignment.Center) {
           val picture = maybePicture
           if (picture == null) {
-            CircularProgressIndicator(color = Color.White)
+            PageLoadingIndicator(color = Color.White)
           } else {
             DrawCanvas(
               picture = picture,

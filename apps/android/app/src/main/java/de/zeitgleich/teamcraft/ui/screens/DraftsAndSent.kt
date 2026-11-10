@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.consumeWindowInsets
 import android.text.format.DateUtils
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -77,12 +78,12 @@ fun DraftsAndSentScreen(
   val sent = rememberRead(viewModel, enabled = tab == 1) { query(ChatQueries.sentMessages()).sent }
   var maybeDeleting by remember { mutableStateOf<DraftItem?>(null) }
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.drafts_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
-    Column(Modifier.fillMaxSize().padding(padding)) {
+    Column(Modifier.fillMaxSize().padding(padding.withoutBottom()).consumeWindowInsets(padding)) {
       PrimaryTabRow(selectedTabIndex = tab) {
         Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text(stringResource(R.string.drafts_tab_drafts)) })
         Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text(stringResource(R.string.drafts_tab_sent)) })
       }
-      LazyColumn(Modifier.fillMaxSize()) {
+      LazyColumn(Modifier.fillMaxSize(), contentPadding = padding.bottomOnly()) {
         if (tab == 0) {
           placeholderItem(drafts.phase { it }, drafts.retry) { EmptyText(R.string.drafts_empty) }
           items(drafts.maybeValue.orEmpty(), key = { it.conversation + "/" + it.maybeThread.orEmpty() }) { draft ->

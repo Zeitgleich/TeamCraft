@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -99,7 +98,7 @@ fun PictureEditor(viewModel: MainViewModel, file: PickedFile, onCancel: () -> Un
         val shown = maybeShown
         when {
           isFailed -> Text(stringResource(R.string.picture_edit_failed), color = Color.White)
-          shown == null -> CircularProgressIndicator(color = Color.White)
+          shown == null -> PageLoadingIndicator(color = Color.White)
           else -> CropCanvas(shown, frame, onFrame = { frame = it })
         }
       }

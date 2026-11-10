@@ -89,10 +89,12 @@
   <string name="call_unmute">Stumm aus</string>
   <string name="call_hang_up">Auflegen</string>
   <string name="call_car_title">Anrufen</string>
-  <plurals name="call_participants">
-    <item quantity="one">%d weitere Person im Anruf</item>
-    <item quantity="other">%d weitere Personen im Anruf</item>
+  <plurals name="call_people">
+    <item quantity="one">%d Person</item>
+    <item quantity="other">%d Personen</item>
   </plurals>
+  <string name="call_calling">Wird angerufen…</string>
+  <string name="call_waiting_for_others">Warte auf andere…</string>
   <string name="call_start">Anruf starten</string>
   <string name="mention_confirm_over_range">Gib eine Zahl von 0 bis 99999 ein.</string>
   <plurals name="mention_confirm_over_unit">
