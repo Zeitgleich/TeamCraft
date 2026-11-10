@@ -15,11 +15,12 @@
 #![cfg(feature = "sealed-sqlite")]
 #![allow(clippy::unwrap_used, reason = "test helpers: a failure fails the test")]
 
+mod catch_up;
 mod purge;
 mod vfs;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use teamcraft_core::store::{
@@ -104,5 +105,83 @@ pub fn measure(disk: &SlowDisk, turn: impl FnOnce() -> Result<(), StoreError>) -
   Turn {
     took: started.elapsed(),
     syncs: disk.tally().since(before),
+  }
+}
+
+/// A group of writes the store logged as long (`long write group`, issue #1681).
+#[derive(Clone, Debug, Default)]
+pub struct LongGroup {
+  /// Where the group was begun, `file:line`.
+  pub site: String,
+  pub held_ms: u64,
+  pub writing_ms: u64,
+}
+
+/// Collects the store's `long write group` events of the thread it is set on.
+#[derive(Clone, Default)]
+pub struct LongGroups {
+  seen: Arc<Mutex<Vec<LongGroup>>>,
+}
+
+impl LongGroups {
+  /// The groups logged so far, the longest first.
+  pub fn longest_first(&self) -> Vec<LongGroup> {
+    let mut seen = self.seen.lock().unwrap().clone();
+    seen.sort_by_key(|group| std::cmp::Reverse(group.held_ms));
+    seen
+  }
+}
+
+impl tracing::Subscriber for LongGroups {
+  fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+    metadata.is_event()
+  }
+
+  fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+    tracing::span::Id::from_u64(1)
+  }
+
+  fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+  fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+  fn event(&self, event: &tracing::Event<'_>) {
+    let mut visitor = LongGroupVisitor::default();
+    event.record(&mut visitor);
+    if visitor.is_long_group {
+      self.seen.lock().unwrap().push(visitor.group);
+    }
+  }
+
+  fn enter(&self, _: &tracing::span::Id) {}
+
+  fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[derive(Default)]
+struct LongGroupVisitor {
+  is_long_group: bool,
+  group: LongGroup,
+}
+
+impl tracing::field::Visit for LongGroupVisitor {
+  fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+    match field.name() {
+      "held_ms" => self.group.held_ms = value,
+      "writing_ms" => self.group.writing_ms = value,
+      _ => {},
+    }
+  }
+
+  fn record_u128(&mut self, field: &tracing::field::Field, value: u128) {
+    self.record_u64(field, u64::try_from(value).unwrap_or(u64::MAX));
+  }
+
+  fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+    match field.name() {
+      "message" => self.is_long_group = format!("{value:?}") == "long write group",
+      "site" => self.group.site = format!("{value:?}"),
+      _ => {},
+    }
   }
 }

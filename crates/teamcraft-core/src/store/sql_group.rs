@@ -1,9 +1,15 @@
 //! What the SQLite stores share: groups of writes as one transaction
 //! ([`super::LocalStore::begin_writes`]), numbered layout migrations, and error mapping.
 
+use std::time::{Duration, Instant};
+
 use rusqlite::{Connection, ErrorCode};
 
-use super::{StoreError, WriteTally};
+use super::{GroupSite, StoreError, WriteTally};
+
+/// A group of writes open this long is logged (issue #1681): every read thread's action and every
+/// read through the writing connection waits for it. The same bound as a slow engine job.
+pub(crate) const LONG_GROUP: Duration = Duration::from_millis(250);
 
 /// Upkeep steps a marker passed over after they failed ([`MigrationKind::Marker`]): run again on
 /// every open until they succeed.
@@ -21,6 +27,8 @@ pub(crate) struct WriteGroup {
   /// `PRAGMA data_version` when last looked at: it changes when another connection (another
   /// process: the iOS notification extension) committed. `None` until the store watches it.
   maybe_data_version: Option<i64>,
+  /// When the outermost group began, once it holds the write lock.
+  maybe_began: Option<Instant>,
 }
 
 impl WriteGroup {
@@ -31,6 +39,7 @@ impl WriteGroup {
         .execute_batch("BEGIN IMMEDIATE")
         .map_err(sqlite_error)?;
       self.has_failed = false;
+      self.maybe_began = Some(Instant::now());
     }
     self.depth += 1;
     Ok(())
@@ -47,9 +56,13 @@ impl WriteGroup {
       },
     }
     self.depth = 0;
+    let maybe_writing = self.maybe_began.take().map(|began| (began, began.elapsed()));
     let ended = Self::commit_or_roll_back(self.has_failed, connection);
     if ended.is_err() {
       self.tally.lost = self.tally.lost.saturating_add(1);
+    }
+    if let Some((began, writing)) = maybe_writing {
+      Self::note_length(began.elapsed(), writing);
     }
     ended
   }
@@ -105,6 +118,27 @@ impl WriteGroup {
     } else {
       self.tally.lost = self.tally.lost.saturating_add(1);
     }
+  }
+
+  /// Logs a group that held the write lock for long: `held` from its beginning to the end of its
+  /// commit, `writing` until the commit began, so a slow sync (a checkpoint of the log in the
+  /// commit) tells apart from slow steps. `site` names the code that began it ([`GroupSite`]).
+  fn note_length(held: Duration, writing: Duration) {
+    if held < LONG_GROUP {
+      return;
+    }
+    let site = GroupSite::current().map_or_else(
+      || "unknown".to_owned(),
+      |at| format!("{}:{}", at.file(), at.line()),
+    );
+    tracing::info!(
+      target: "teamcraft_lifecycle",
+      site = %site,
+      held_ms = held.as_millis(),
+      writing_ms = writing.as_millis(),
+      commit_ms = held.saturating_sub(writing).as_millis(),
+      "long write group"
+    );
   }
 
   /// Ends the outermost group's transaction: commits it, or rolls it back if one of its writes

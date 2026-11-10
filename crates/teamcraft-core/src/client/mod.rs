@@ -935,6 +935,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// [`Self::persist_group`] after an MLS entry was processed: the state and the cursor past the
   /// entry go to the store together, so a restart never processes it again on a state that
   /// already moved on.
+  #[track_caller]
   pub(crate) fn persist_group_at(
     &mut self,
     conversation: ConversationId,
@@ -1180,10 +1181,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Runs `writes` as one group of store writes (issue #160): after a crash or a failed write, the
   /// store holds all of them or none. For steps whose records must agree (MLS state, cursor, keys);
   /// synchronous, so a group never stays open across a network request.
+  #[track_caller]
   pub(crate) fn atomically<T>(
     &mut self,
     writes: impl FnOnce(&mut Self) -> Result<T, CoreError>,
   ) -> Result<T, CoreError> {
+    let _site = crate::store::GroupSite::enter(std::panic::Location::caller());
     self.store.begin_writes()?;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| writes(self)));
     crate::store::end_group(&self.store, result)
