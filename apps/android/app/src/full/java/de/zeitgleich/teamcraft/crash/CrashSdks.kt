@@ -128,7 +128,8 @@ private object SentryCrashSdk : CrashSdk {
     // Breadcrumbs come from the core's redacted log only, set in beforeSend.
     options.beforeBreadcrumb = SentryOptions.BeforeBreadcrumbCallback { _, _ -> null }
     options.beforeSendTransaction = SentryOptions.BeforeSendTransactionCallback { transaction, _ ->
-      if (transaction.getTag(SentryPerfHandle.DROPPED_TAG) != null) {
+      val isDropped = transaction.getTag(SentryPerfHandle.DROPPED_TAG) != null
+      if (isDropped || SentryTransactionScrub.isUnseenScreenLoad(transaction)) {
         null
       } else {
         SentryTransactionScrub.prepare(transaction, installationId = settings.installationId)

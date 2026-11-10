@@ -12,6 +12,19 @@ import io.sentry.protocol.User
  * and span data and tags (which can hold full URLs, queries and file paths) are dropped.
  */
 object SentryTransactionScrub {
+  /**
+   * Whether [transaction] is a screen load (`ui.load`) nobody saw (#1641): its time to initial
+   * display waited longer than [StartVisibility] allows for the first frame, because the activity
+   * was created while not visible (screen off, locked, started or restored in the background). Its
+   * duration is the time until the user came back, not a slow screen: it is not sent.
+   */
+  fun isUnseenScreenLoad(transaction: SentryTransaction): Boolean {
+    if (transaction.contexts.trace?.operation != SCREEN_LOAD_OP) return false
+    val initialDisplay = transaction.spans.firstOrNull { it.op == INITIAL_DISPLAY_OP } ?: return false
+    val endSeconds = initialDisplay.timestamp ?: return false
+    return (endSeconds - initialDisplay.startTimestamp) * 1000.0 > StartVisibility.FIRST_FRAME_SEEN_WITHIN_MS
+  }
+
   /** The transaction to send, scrubbed in place. */
   fun prepare(transaction: SentryTransaction, installationId: String): SentryTransaction {
     transaction.request = null
@@ -48,6 +61,8 @@ object SentryTransactionScrub {
       span.data?.filterKeys { it in KEPT_DATA }?.filterValues { it is Number || (it is String && it in KEPT_QUEUES) },
     )
 
+  private const val SCREEN_LOAD_OP = "ui.load"
+  private const val INITIAL_DISPLAY_OP = "ui.load.initial_display"
   private const val MAX_DESCRIPTION_CHARS = 256
   private val KEPT_DATA = setOf("teamcraft.queue_depth", "teamcraft.queue")
   private val KEPT_QUEUES = setOf("core.read", "core.engine", "store.lock_wait", "store.write_group", "core.step")

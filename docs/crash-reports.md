@@ -250,7 +250,7 @@ thread) and the Android fixes #1431, #1428 and #1375: each of them must be visib
 
 | Transaction             | From → to                                                                   | Apps                       | Answers                                                                                                                         |
 |-------------------------|-----------------------------------------------------------------------------|----------------------------|---------------------------------------------------------------------------------------------------------------------------------|
-| `start.channel_list`    | Process start (cold) or activity create (warm) / page navigation → chat list shows the core's rows | All                        | How long a start takes, by `start` (cold, warm) and `entry` (launcher, notification, share, link); `first_frame` step and `start_cache` (hit, miss) say whether the first frame showed the cached list (#1431, #1428); `activities` counts copies of the activity (#1375); status `internal_error` when the chat list couldn't be read |
+| `start.channel_list`    | Process start (cold) or activity create (warm) / page navigation → chat list shows the core's rows on a drawn frame | All                        | How long a start takes, by `start` (cold, warm) and `entry` (launcher, notification, share, link); `first_frame` step and `start_cache` (hit, miss) say whether the first frame showed the cached list (#1431, #1428); `activities` counts copies of the activity (#1375); status `internal_error` when the chat list couldn't be read |
 | `channel.switch`        | Opening a conversation → its first read is shown (rows or empty state)      | All                        | Where a slow open spent its time: `source` (seed, memory, store) and the core's jobs as steps (below)                           |
 | `conversation.catch_up` | Opening a conversation, or the app back in the foreground, while it is behind → the newest server message is stored and shown | All | "The push came, the chat lacks it", even when the switch was fast from the seed; `source` (push, open, foreground), `gap_fill`, `resync` |
 | `history.older_page`    | A page of older history asked for from the server while the reader scrolls back → its rows show | All | Whether scrolling back waits on the server (`core.action load_older_history`, the core's `older_history_page` step) or stalls the list: web and desktop add the refresh that reads the rows (`ui.refresh`) and the frame that shows them (`ui.render`, measurement `render_ms`) |
@@ -303,6 +303,22 @@ name only if it looks like code (`[a-z0-9_]`, at most 48 characters).
 
 Not yet measured: uploads and MLS commits as transactions of their own (they show as steps). A start that showed a sign-in page first is not a signed-in
 start and is not measured. A measure the user moved on from is dropped, not sent as slow.
+
+**Starts and screen loads nobody saw (Android, #1641).** An activity created while not visible
+(screen off, locked, started or restored in the background) draws its first frame only when it is
+shown, minutes or hours later; timed, that reads as a start of 746 s, not as a slow start, and such
+outliers made the averages of `start.channel_list` and the SDK's `ui.load` meaningless. The rule
+(`StartVisibility` in `Perf.kt`):
+
+- A first frame more than 10 s after the activity was created was not watched: the
+  `start.channel_list` measure is dropped, and so is the SDK's `ui.load` transaction whose
+  `ui.load.initial_display` took longer than that (`SentryTransactionScrub.isUnseenScreenLoad`, in
+  `beforeSendTransaction`). A main thread blocked that long is an ANR, which is reported as one.
+- `start.channel_list` ends when the chat list shows the core's rows *and* a frame was drawn: rows
+  read before the first frame (the activity not visible yet) end the start with that frame.
+- The process's first activity is a cold start, timed from the process start, only when it is
+  created within 30 s of it; a process started for a push and opened later makes a warm start from
+  the activity's creation.
 
 ### What a transaction contains
 

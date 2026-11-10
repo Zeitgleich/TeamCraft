@@ -1,6 +1,7 @@
 package de.zeitgleich.teamcraft.ui
 
 import de.zeitgleich.teamcraft.crash.Perf
+import de.zeitgleich.teamcraft.crash.StartVisibility
 import android.content.Intent
 import android.widget.Toast
 import android.content.pm.ActivityInfo
@@ -74,14 +75,17 @@ class MainActivity : FragmentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     // Performance data: the signed-in start until the chat list shows the core's rows (#1521).
-    // The first activity of a process starts cold, from the process start; later ones warm.
-    val isCold = !hasStartedBefore
+    // The first activity of a process starts cold, from the process start; later ones warm, and so
+    // does a first one long after the process start (a push started the process, #1641).
+    val createdAtMs = System.currentTimeMillis()
+    val processStartedAtMs = processStartedAtMs()
+    val isCold = !hasStartedBefore && StartVisibility.isColdStart(processStartedAtMs, createdAtMs)
     hasStartedBefore = true
     liveActivities++
-    val startedAtMs = if (isCold) processStartedAtMs() else System.currentTimeMillis()
+    val startedAtMs = if (isCold) processStartedAtMs else createdAtMs
     // The entry path, the copies of the activity (each re-reads everything, #1375), and later the
     // first frame and whether it showed the start cache (#1431, #1428).
-    Perf.beginStart(startedAtMs, isCold, entryOf(intent), liveActivities)
+    Perf.beginStart(startedAtMs, createdAtMs, isCold, entryOf(intent), liveActivities)
     reportFirstFrame(startedAtMs)
     // A language change recreates the activity: the core names deleted accounts in the new one.
     // Off the main thread, like at start (TeamCraftApplication).

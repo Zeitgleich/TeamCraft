@@ -21,6 +21,12 @@ object Perf {
   @Volatile private var sdk: CrashSdk = NoCrashSdk
   private val pending = LinkedHashMap<Pair<PerfMeasure, String>, PerfHandle>()
 
+  /** When the running start's activity was created: its first frame is judged from there. */
+  private var startCreatedAtMs = 0L
+  private var isStartFrameDrawn = false
+  /** The chat list's outcome when it came before the first frame: the start ends with that frame. */
+  private var maybeStartOutcome: StartOutcome? = null
+
   /** The crash SDK of this build, set once at start. */
   fun install(crashSdk: CrashSdk) {
     sdk = crashSdk
@@ -57,34 +63,63 @@ object Perf {
 
   /**
    * The signed-in start (`start.channel_list`): from [startedAtMs] until the chat list shows the
-   * core's rows, tagged cold or warm and by [entry] (launcher, notification, share, link), with the
-   * copies of the activity alive as a measurement.
+   * core's rows on a drawn frame, tagged cold or warm and by [entry] (launcher, notification, share,
+   * link), with the copies of the activity alive as a measurement. [createdAtMs] is when the
+   * activity was created: a first frame long after it means nobody saw the start (#1641).
    */
-  fun beginStart(startedAtMs: Long, isCold: Boolean, entry: String, activities: Int) {
+  @Synchronized
+  fun beginStart(startedAtMs: Long, createdAtMs: Long, isCold: Boolean, entry: String, activities: Int) {
+    startCreatedAtMs = createdAtMs
+    isStartFrameDrawn = false
+    maybeStartOutcome = null
     begin(PerfMeasure.START_TO_CHANNEL_LIST, NO_KEY, startedAtMs)
     tag(PerfMeasure.START_TO_CHANNEL_LIST, NO_KEY, "start", if (isCold) "cold" else "warm")
     tag(PerfMeasure.START_TO_CHANNEL_LIST, NO_KEY, "entry", entry)
     measure(PerfMeasure.START_TO_CHANNEL_LIST, NO_KEY, "activities", activities.toDouble())
   }
 
-  /** The first frame was drawn: a step of the start, and whether it showed the cached chat list. */
+  /**
+   * The first frame was drawn: a step of the start, and whether it showed the cached chat list. A
+   * first frame that came long after the activity was created (screen off, locked, started in the
+   * background) ends a start nobody watched: it is dropped, not sent as slow (#1641).
+   */
   @Synchronized
   fun firstFrame(startedAtMs: Long, isCachedChatList: Boolean) {
     val handle = pending[PerfMeasure.START_TO_CHANNEL_LIST to NO_KEY] ?: return
-    handle.step("ui.render", "first_frame", startedAtMs, System.currentTimeMillis())
+    val nowMs = System.currentTimeMillis()
+    if (!StartVisibility.isSeen(startCreatedAtMs, nowMs)) {
+      cancel(PerfMeasure.START_TO_CHANNEL_LIST)
+      return
+    }
+    handle.step("ui.render", "first_frame", startedAtMs, nowMs)
     handle.tag("start_cache", if (isCachedChatList) "hit" else "miss")
+    isStartFrameDrawn = true
+    maybeStartOutcome?.let { endStart(it) }
   }
 
-  /** The chat list shows rows read from the core: the start is done (once per start). */
-  fun chatListShown() = end(PerfMeasure.START_TO_CHANNEL_LIST)
+  /** The chat list shows rows read from the core: the start is done once a frame shows them. */
+  fun chatListShown() = startOutcome(StartOutcome.SHOWN)
 
   /** The chat list couldn't be read from the core. */
-  fun chatListFailed() = end(PerfMeasure.START_TO_CHANNEL_LIST, isOk = false)
+  fun chatListFailed() = startOutcome(StartOutcome.FAILED)
 
   @Synchronized
   fun measure(measure: PerfMeasure, key: String, name: String, value: Double) {
     pending[measure to key]?.measure(name, value)
   }
+
+  @Synchronized
+  private fun startOutcome(outcome: StartOutcome) {
+    if (!isRunning(PerfMeasure.START_TO_CHANNEL_LIST)) return
+    // Read before the first frame (the activity not visible yet): the frame decides.
+    if (!isStartFrameDrawn) {
+      if (maybeStartOutcome == null) maybeStartOutcome = outcome
+      return
+    }
+    endStart(outcome)
+  }
+
+  private fun endStart(outcome: StartOutcome) = end(PerfMeasure.START_TO_CHANNEL_LIST, isOk = outcome == StartOutcome.SHOWN)
 
   /** The core's connection changed: a reconnect runs from connecting again until connected. */
   fun connectionChanged(previous: ConnectionState?, current: ConnectionState?) {
@@ -99,6 +134,33 @@ object Perf {
       else -> cancel(PerfMeasure.RESYNC)
     }
   }
+}
+
+/**
+ * Whether the user saw a start or a screen load (#1641, docs/crash-reports.md "Performance data").
+ * An activity created while not visible (screen off, locked, restored or started in the background)
+ * draws its first frame only once it is shown, minutes or hours later; timed, that is not a slow
+ * start but one nobody waited for. Likewise a process started for a push and opened later is not a
+ * cold start from the process start.
+ */
+object StartVisibility {
+  /** A first frame later than this after the activity's creation was not watched. */
+  const val FIRST_FRAME_SEEN_WITHIN_MS = 10_000L
+
+  /** The first activity created later than this after the process start makes a warm start. */
+  const val COLD_START_WITHIN_MS = 30_000L
+
+  /** Whether a first frame at [firstFrameAtMs] of an activity created at [createdAtMs] was seen. */
+  fun isSeen(createdAtMs: Long, firstFrameAtMs: Long): Boolean = firstFrameAtMs - createdAtMs <= FIRST_FRAME_SEEN_WITHIN_MS
+
+  /** Whether the process's first activity, created at [createdAtMs], started cold. */
+  fun isColdStart(processStartedAtMs: Long, createdAtMs: Long): Boolean = createdAtMs - processStartedAtMs <= COLD_START_WITHIN_MS
+}
+
+/** How the start's chat list read ended. */
+private enum class StartOutcome {
+  SHOWN,
+  FAILED,
 }
 
 /**

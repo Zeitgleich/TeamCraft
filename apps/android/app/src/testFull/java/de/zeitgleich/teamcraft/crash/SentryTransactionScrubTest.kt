@@ -38,6 +38,40 @@ class SentryTransactionScrubTest {
     assertTrue(json.contains("ui.load"))
   }
 
+  @Test
+  fun aScreenLoadWhoseFirstFrameWaitedWhileHiddenIsUnseen() {
+    assertTrue(SentryTransactionScrub.isUnseenScreenLoad(screenLoad(initialDisplaySeconds = 746.0)))
+    assertTrue(SentryTransactionScrub.isUnseenScreenLoad(screenLoad(initialDisplaySeconds = 10.5)))
+  }
+
+  @Test
+  fun aScreenLoadDrawnInTimeIsSeen() {
+    assertFalse(SentryTransactionScrub.isUnseenScreenLoad(screenLoad(initialDisplaySeconds = 0.4)))
+    assertFalse(SentryTransactionScrub.isUnseenScreenLoad(screenLoad(initialDisplaySeconds = 10.0)))
+  }
+
+  @Test
+  fun onlyScreenLoadsAreJudged() {
+    assertFalse(SentryTransactionScrub.isUnseenScreenLoad(screenLoad(initialDisplaySeconds = 60.0, op = "app.start")))
+    // Not finished: nothing to judge by.
+    assertFalse(SentryTransactionScrub.isUnseenScreenLoad(screenLoad(initialDisplaySeconds = null)))
+    assertFalse(SentryTransactionScrub.isUnseenScreenLoad(transaction(op = "ui.load", spans = emptyList())))
+  }
+
+  private fun screenLoad(initialDisplaySeconds: Double?, op: String = "ui.load"): SentryTransaction {
+    val created = span("activity.load", 100.0, 100.2)
+    val initialDisplay = span("ui.load.initial_display", 100.0, initialDisplaySeconds?.let { 100.0 + it })
+    return transaction(op, listOf(created, initialDisplay))
+  }
+
+  private fun span(op: String, start: Double, end: Double?) =
+    SentrySpan(start, end, SentryId(), SpanId(), SpanId(), op, "MainActivity", SpanStatus.OK, "auto.ui.activity", emptyMap(), emptyMap(), null)
+
+  private fun transaction(op: String, spans: List<SentrySpan>) =
+    SentryTransaction("MainActivity", 100.0, 900.0, spans.toMutableList(), emptyMap(), TransactionInfo("component")).apply {
+      contexts.setTrace(io.sentry.SpanContext(op))
+    }
+
   private fun leakyTransaction(): SentryTransaction {
     val span = SentrySpan(
       1.0,
