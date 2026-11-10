@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use futures_util::future::join_all;
 use futures_util::task::AtomicWaker;
@@ -50,6 +50,12 @@ pub struct CatchUpFocus {
   /// The host waiting in [`CatchUpFocus::caught_up_since`] (one waiter).
   waker: Arc<AtomicWaker>,
 }
+
+/// Set once the host's sync loop is told to stop ([`crate::runner::RunnerCommand::Stop`]): a
+/// catch-up then ends at the next conversation boundary with [`CoreError::SyncStopping`] instead of
+/// holding up the stop until every conversation is through (issue #1656). Clones share it.
+#[derive(Clone, Debug, Default)]
+pub struct SyncStopRequest(Arc<AtomicBool>);
 
 /// Welcomes a catch-up keeps after the focus first read them, for the next focus; with more waiting,
 /// each focus reads them again.
@@ -129,6 +135,16 @@ impl CatchUpFocus {
   }
 }
 
+impl SyncStopRequest {
+  pub fn request(&self) {
+    self.0.store(true, Ordering::SeqCst);
+  }
+
+  pub fn is_requested(&self) -> bool {
+    self.0.load(Ordering::SeqCst)
+  }
+}
+
 /// Whether the conversation is still being caught up.
 pub fn is_catching_up(store: &impl LocalStore, conversation: ConversationId) -> Result<bool, CoreError> {
   Ok(store.get(Table::SyncState, &marker_key(conversation))?.is_some())
@@ -154,6 +170,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// (a desktop command while the core thread is busy syncing).
   pub fn share_catch_up_focus(&mut self, focus: CatchUpFocus) {
     self.catch_up_focus = focus;
+  }
+
+  /// Takes the host loop's stop request: a catch-up asks it between conversations. A client handed
+  /// back by a stopped loop gets a fresh one, so work outside a loop is never cut short.
+  pub fn share_stop_request(&mut self, stop: SyncStopRequest) {
+    self.stop_request = stop;
+  }
+
+  /// Ends a catch-up at a conversation boundary once the host's loop was told to stop. Called only
+  /// between conversations: each one's groups of writes are complete there.
+  fn check_not_stopping(&self) -> Result<(), CoreError> {
+    if self.stop_request.is_requested() {
+      return Err(CoreError::SyncStopping);
+    }
+    Ok(())
   }
 
   /// Catches up the stored conversations: member lists (in `members_order`), welcomes, groups to
@@ -241,6 +272,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     phases: &PhaseTimer,
   ) -> Result<(), CoreError> {
     while !waiting.is_empty() {
+      self.check_not_stopping()?;
       let batch = next_batch(
         &mut waiting,
         self.catch_up_focus.get(),
@@ -257,6 +289,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.apply_live_during_catch_up().await?;
         // The UI reads what this conversation brought before the next one is decrypted.
         self.hand_back_thread().await;
+        self.check_not_stopping()?;
       }
     }
     Ok(())
@@ -549,6 +582,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     while !due.is_empty() {
+      self.check_not_stopping()?;
       let place = self
         .catch_up_focus
         .get()

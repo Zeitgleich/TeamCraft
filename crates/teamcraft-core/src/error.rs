@@ -117,6 +117,12 @@ pub enum CoreError {
   /// stopped). The keys were sent; whether they arrived is unknown.
   #[error("stopped waiting for the new device to confirm the keys")]
   LinkCancelled,
+  /// The host's sync loop was told to stop (the app went to the background), so a catch-up ended
+  /// between two conversations instead of finishing all of them (issue #1656). Nothing committed is
+  /// lost: the connection's session is kept only after a complete sync, so the next connection
+  /// syncs again, as after a dropped one.
+  #[error("the sync stopped before its catch-up finished")]
+  SyncStopping,
   /// The server gave this device the ID of another (or a revoked) device of the user.
   #[error("the server assigned device ID {0}, which the signed device list gives another device")]
   DeviceIdTaken(DeviceId),
