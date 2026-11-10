@@ -140,7 +140,7 @@ pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange, pe
 pub use pending_add::{UserAddWait, pending_user_additions};
 pub use role_signing::{RoleSigningProblem, RoleSigningRecord, role_signing_record};
 #[cfg(not(target_arch = "wasm32"))]
-pub use segments::SegmentPrefetch;
+pub use segments::{SegmentPlan, SegmentPrefetch};
 pub use self_add::{is_waiting_for_admission, self_add_attempts};
 pub use sources::HistoryScan;
 pub use sync_progress::{SyncProgressSignal, notify_sync_progress_during};

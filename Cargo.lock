@@ -11080,6 +11080,7 @@ dependencies = [
  "paranoid-android",
  "rand_core 0.6.4",
  "reqwest",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
  "teamcraft-client-api",

@@ -14,6 +14,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use teamcraft_core::timing::{self, Timed, TimedKind};
 
+use crate::logging;
+
 /// Jobs kept at most; the oldest drop out. A measure looks back seconds, not minutes.
 const MAX_RECORDS: usize = 512;
 /// Steps handed to one measure at most: the ones that waited or ran longest.
@@ -34,7 +36,9 @@ static ENGINE_DEPTH: AtomicU32 = AtomicU32::new(0);
 static SLOW_MS: AtomicU64 = AtomicU64::new(DEFAULT_SLOW_MS);
 static SLOW_REPORTS: AtomicU32 = AtomicU32::new(0);
 static LISTENER: Mutex<Option<Arc<dyn PerfListener>>> = Mutex::new(None);
-static LAST_SLOW: Mutex<Option<HashMap<&'static str, Instant>>> = Mutex::new(None);
+static LAST_SLOW: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+/// Longest query kind a step is named after; anything else is named `unknown`.
+const MAX_KIND_LEN: usize = 48;
 
 /// One job, as a step of a measure.
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
@@ -48,6 +52,10 @@ pub struct PerfJobSpan {
   pub done_at_ms: f64,
   /// Jobs in the queue when this one was queued, itself included.
   pub queue_depth: u32,
+  /// CPU time of the job's thread while it ran, where the system tells it (issue #1634): far below
+  /// the run, the job waited (a lock, or the process frozen in the background); about the run, it
+  /// worked.
+  pub maybe_cpu_ms: Option<f64>,
 }
 
 /// Which thread a job waited for.
@@ -86,6 +94,7 @@ pub(crate) struct Running {
   queued: Queued,
   started_at_ms: f64,
   started: Instant,
+  maybe_cpu_at_start: Option<Duration>,
 }
 
 /// Steps of the measure from `start_ms` to `end_ms` (Unix milliseconds): the jobs that overlap it,
@@ -136,6 +145,7 @@ impl Queued {
     Running {
       started_at_ms: now_ms(),
       started: Instant::now(),
+      maybe_cpu_at_start: logging::thread_cpu_time(),
       queued: self,
     }
   }
@@ -160,6 +170,10 @@ impl Running {
       started_at_ms: self.started_at_ms,
       done_at_ms: self.started_at_ms + duration_ms(ran),
       queue_depth: self.queued.depth,
+      maybe_cpu_ms: self
+        .maybe_cpu_at_start
+        .zip(logging::thread_cpu_time())
+        .map(|(before, after)| duration_ms(after.saturating_sub(before))),
     };
     keep(span.clone());
     if is_slow(waited, ran) {
@@ -181,8 +195,37 @@ fn on_timed(timed: Timed) {
     started_at_ms: started,
     done_at_ms: started + duration_ms(timed.took),
     queue_depth: 0,
+    maybe_cpu_ms: None,
   };
   keep(span);
+}
+
+/// A query of the app's answered on the read thread (issue #1634): kept as a step named after its
+/// kind (`query_feed_extras`), and reported when slow, so a slow `query` job says which one it
+/// was. `kind` is the query's tag from the app's code; anything else is named `unknown`.
+pub(crate) fn query_ran(kind: &str, started_at_ms: f64, ran: Duration) {
+  if ran < MIN_KEPT {
+    return;
+  }
+  let is_code_name = !kind.is_empty()
+    && kind.len() <= MAX_KIND_LEN
+    && kind
+      .bytes()
+      .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+  let name = format!("query_{}", if is_code_name { kind } else { "unknown" });
+  let span = PerfJobSpan {
+    kind: PerfJobKind::CoreStep,
+    name: name.clone(),
+    enqueued_at_ms: started_at_ms,
+    started_at_ms,
+    done_at_ms: started_at_ms + duration_ms(ran),
+    queue_depth: 0,
+    maybe_cpu_ms: None,
+  };
+  keep(span.clone());
+  if is_slow(Duration::ZERO, ran) {
+    report_slow(&name, span);
+  }
 }
 
 fn keep(span: PerfJobSpan) {
@@ -210,7 +253,7 @@ fn is_slow(waited: Duration, ran: Duration) -> bool {
   threshold_ms > 0 && (duration_ms(waited) >= threshold_ms as f64 || duration_ms(ran) >= threshold_ms as f64)
 }
 
-fn report_slow(name: &'static str, span: PerfJobSpan) {
+fn report_slow(name: &str, span: PerfJobSpan) {
   let now = Instant::now();
   {
     let mut last = LAST_SLOW.lock().unwrap_or_else(PoisonError::into_inner);
@@ -224,7 +267,7 @@ fn report_slow(name: &'static str, span: PerfJobSpan) {
     if SLOW_REPORTS.fetch_add(1, Ordering::Relaxed) >= MAX_SLOW_REPORTS {
       return;
     }
-    last.insert(name, now);
+    last.insert(name.to_owned(), now);
   }
   let maybe_listener = LISTENER.lock().unwrap_or_else(PoisonError::into_inner).clone();
   if let Some(listener) = maybe_listener {
@@ -281,6 +324,21 @@ mod tests {
   }
 
   #[test]
+  fn a_query_is_named_by_its_kind_and_only_by_code_names() {
+    let started = now_ms() + 1.0e9;
+    query_ran("feed_extras", started, Duration::from_millis(30));
+    query_ran("Robert's files", started, Duration::from_millis(30));
+    query_ran("threads", started, Duration::ZERO);
+    let names: Vec<String> = perf_job_spans(started, started + 100.0)
+      .into_iter()
+      .map(|span| span.name)
+      .collect();
+    assert!(names.contains(&"query_feed_extras".to_owned()));
+    assert!(names.contains(&"query_unknown".to_owned()), "never data");
+    assert!(!names.contains(&"query_threads".to_owned()), "too short to keep");
+  }
+
+  #[test]
   fn queue_depth_counts_what_waits() {
     let first = queued(PerfJobKind::EngineQueue, "x::first::{{closure}}");
     let second = queued(PerfJobKind::EngineQueue, "x::second::{{closure}}");
@@ -308,6 +366,7 @@ mod tests {
       started_at_ms: enqueued,
       done_at_ms: enqueued + took,
       queue_depth: 1,
+      maybe_cpu_ms: None,
     }
   }
 }

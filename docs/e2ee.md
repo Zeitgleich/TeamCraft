@@ -5687,8 +5687,10 @@ Implemented (`teamcraft-core::search`, first version):
 - Prefetch: the mobile core has a setting (`teamcraft_core::prefetch::SegmentPrefetch`: off, unmetered
   networks only (default), any network) in the sealed store, and `Client::fetch_index_segments` does the
   download. The platform decides when it can run: iOS schedules a `BGProcessingTask` (external power and
-  network), the app asks the core with the network's metered flag (`TeamCraft.prefetch_segments`). No size
-  cap yet.
+  network), the app asks the core with the network's metered flag (`TeamCraft.prefetch_segments`); Android
+  runs a daily WorkManager job (unmetered, charging) with a size cap. The prefetch runs beside the sync
+  (#1634, `SegmentPlan`): it never takes the client, looks through the announcements on a read
+  connection of its own, holds no lock while downloading, and writes each segment on its own.
 
 ### 10.2 Optional: vault node for compliance and file contents
 
