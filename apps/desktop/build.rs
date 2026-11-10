@@ -68,6 +68,7 @@ const COMMANDS: &[&str] = &[
   "core_attachment",
   "core_save_attachment",
   "core_save_attachments",
+  "core_data_export",
   "core_stage_file",
   "core_stage_dropped_file",
   "core_focus",

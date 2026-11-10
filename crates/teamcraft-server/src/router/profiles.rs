@@ -1,4 +1,4 @@
-//! Profiles, avatars and call backgrounds.
+//! Profiles, avatars, call backgrounds and the caller's personal data for an export.
 
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -24,4 +24,5 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
     .routes(routes!(handlers::download_org_background_handler))
     .routes(routes!(handlers::get_user_avatar_handler))
     .routes(routes!(handlers::get_user_profile_handler))
+    .routes(routes!(handlers::get_personal_data_handler))
 }

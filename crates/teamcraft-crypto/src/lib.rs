@@ -10,6 +10,7 @@ pub mod attestation;
 pub mod backup;
 pub mod call_binding;
 pub mod change_digest;
+pub mod checksum;
 pub mod content_key;
 pub mod device_list;
 pub mod dpop;

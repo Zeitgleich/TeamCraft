@@ -10887,6 +10887,7 @@ name = "teamcraft-core"
 version = "1.0.29"
 dependencies = [
  "base64 0.23.1",
+ "crc32fast",
  "futures-channel",
  "futures-util",
  "http",
@@ -10926,6 +10927,7 @@ dependencies = [
  "webpki-roots",
  "zbus",
  "zeroize",
+ "zip",
 ]
 
 [[package]]

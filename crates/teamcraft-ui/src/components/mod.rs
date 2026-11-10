@@ -137,6 +137,7 @@ pub mod section_tabs;
 pub mod security_ui;
 pub mod settings_account;
 pub mod settings_color_theme;
+pub mod settings_data_export;
 pub mod settings_font;
 pub mod settings_keyboard;
 pub mod settings_modal;

@@ -24,6 +24,7 @@ mod coming_back;
 mod common;
 mod connection;
 mod custom_status;
+mod data_export;
 mod dev_stack;
 mod devices;
 mod direct_uploads;
