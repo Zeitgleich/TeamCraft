@@ -19,7 +19,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.filled.Call
 import androidx.activity.compose.ReportDrawnWhen
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.material.icons.filled.Close
@@ -57,7 +56,6 @@ import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Button
-import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Icon
@@ -114,12 +112,9 @@ import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Surface
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.collectAsState
@@ -189,9 +184,10 @@ import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.RowBadge
 import uniffi.teamcraft_ffi.RowBadgeTone
 import uniffi.teamcraft_ffi.rowBadge
+import androidx.compose.material3.FloatingToolbarDefaults
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.navigationBars
 
-/** Room below the last conversation so the New message button doesn't cover it. */
-private val FAB_CLEARANCE = 88.dp
 private val AVATAR_SIZE = 40.dp
 private val BRAND_LOGO_HEIGHT = 28.dp
 private val QUICK_CARD_WIDTH = 148.dp
@@ -536,16 +532,14 @@ internal fun MainScaffold(
   // The spaces layout shows one space at a time on Home and names it in the header (#1526).
   val maybeSpace = if (isList) null else selectedSpace(spaces, maybeRememberedSpaceId)
   val hasDirect = maybeConversations.orEmpty().any { it.isDirect }
-  // The button shrinks to its icon once the list scrolls, so it never covers a row's text.
   val homeList = rememberLazyListState()
   val directList = rememberLazyListState()
-  val isFabExpanded by remember(shownTab) {
-    derivedStateOf { (if (shownTab == ChatTab.Direct) directList else homeList).firstVisibleItemIndex == 0 }
-  }
   // The theme's colour (#202) fills the header and the status bar behind it; the lists sit on a
   // neutral card with rounded top corners, so the theme never colours content.
   Scaffold(
-    contentWindowInsets = ScreenInsets,
+    // Edge to edge: the lists' card reaches under the navigation bar; the floating tab bar and the
+    // lists' bottom room keep content clear of it.
+    contentWindowInsets = ScreenInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
     containerColor = LocalTeamCraftColors.current.chrome,
     topBar = {
       maybeSelectionBar?.invoke() ?: BrandTopBar(
@@ -560,47 +554,57 @@ internal fun MainScaffold(
         spaceMenu = list.spaceMenu,
       )
     },
-    bottomBar = {
-      if (maybeSelectionBar == null) MainNavigation(shownTab, isList, maybeConversations.orEmpty(), joinRequestCount, onSelect = onTab)
-    },
     snackbarHost = snackbarHost,
-    floatingActionButton = {
-      // Home and DMs, in the theme's color; not twice: empty DMs have the same action in the middle.
-      // On Home it opens the "New" menu (message, channel, space); on DMs it starts a message.
-      if (maybeSelectionBar == null && (shownTab == ChatTab.Home || (shownTab == ChatTab.Direct && hasDirect))) {
-        val isHome = shownTab == ChatTab.Home
-        ExtendedFloatingActionButton(
-          onClick = if (isHome) onCreate else ({ onNavigate("browse?people=true") }),
-          expanded = isFabExpanded,
-          containerColor = MaterialTheme.colorScheme.primary,
-          contentColor = MaterialTheme.colorScheme.onPrimary,
-          icon = { Icon(if (isHome) Icons.Filled.Add else Icons.Filled.Edit, contentDescription = null) },
-          text = { Text(stringResource(if (isHome) R.string.create_new else R.string.dm_new)) },
-        )
-      }
-    },
   ) { padding ->
-    Column(
-      Modifier
-        .fillMaxSize()
-        .padding(padding)
-        .clip(RoundedCornerShape(topStart = CONTENT_CARD_RADIUS, topEnd = CONTENT_CARD_RADIUS))
-        .background(MaterialTheme.colorScheme.background),
-    ) {
-      banners()
-      when {
-        maybeConversations == null && maybeReadFailure != null ->
-          ListFailed(ListPhase.Failed(maybeReadFailure), onRetry)
-        maybeConversations == null -> LoadingScreen()
-        // Nothing yet while the first sync brings the conversations: not "no conversations".
-        maybeConversations.isEmpty() && isSyncing && shownTab != ChatTab.Activity -> ListSkeleton()
-        isList && shownTab == ChatTab.Home && grouping == ChatListGrouping.BySpace ->
-          ListBySpaceTab(maybeConversations, spaces, list, homeList, onNavigate, canBrowse = !isGuest, quickAccess)
-        isList && shownTab == ChatTab.Home ->
-          ListTab(maybeConversations, spaces, list, homeList, onNavigate, canBrowse = !isGuest, quickAccess)
-        shownTab == ChatTab.Home -> HomeTab(maybeConversations, maybeSpace, list, homeList, onNavigate, canBrowse = !isGuest, quickAccess)
-        shownTab == ChatTab.Direct -> DirectTab(maybeConversations, list, directList, onNavigate)
-        else -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests, guestNoticeCount, guestNotices, isSyncing)
+    Box(Modifier.fillMaxSize().padding(padding)) {
+      Column(
+        Modifier
+          .fillMaxSize()
+          .clip(RoundedCornerShape(topStart = CONTENT_CARD_RADIUS, topEnd = CONTENT_CARD_RADIUS))
+          .background(MaterialTheme.colorScheme.background),
+      ) {
+        banners()
+        when {
+          maybeConversations == null && maybeReadFailure != null ->
+            ListFailed(ListPhase.Failed(maybeReadFailure), onRetry)
+          maybeConversations == null -> LoadingScreen()
+          // Nothing yet while the first sync brings the conversations: not "no conversations".
+          maybeConversations.isEmpty() && isSyncing && shownTab != ChatTab.Activity -> ListSkeleton()
+          isList && shownTab == ChatTab.Home && grouping == ChatListGrouping.BySpace ->
+            ListBySpaceTab(maybeConversations, spaces, list, homeList, onNavigate, canBrowse = !isGuest, quickAccess)
+          isList && shownTab == ChatTab.Home ->
+            ListTab(maybeConversations, spaces, list, homeList, onNavigate, canBrowse = !isGuest, quickAccess)
+          shownTab == ChatTab.Home -> HomeTab(maybeConversations, maybeSpace, list, homeList, onNavigate, canBrowse = !isGuest, quickAccess)
+          shownTab == ChatTab.Direct -> DirectTab(maybeConversations, list, directList, onNavigate)
+          else -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests, guestNotices = guestNotices, guestNoticeCount = guestNoticeCount, isSyncing = isSyncing)
+        }
+      }
+      if (maybeSelectionBar == null) {
+        // Home and DMs get the action, not twice: empty DMs have the same action in the middle.
+        // On Home it opens the "New" menu (message, channel, space); on DMs it starts a message.
+        val maybeAction = when {
+          shownTab == ChatTab.Home -> MainAction.New
+          shownTab == ChatTab.Direct && hasDirect -> MainAction.NewMessage
+          else -> null
+        }
+        FloatingTabBar(
+          selected = shownTab,
+          isList = isList,
+          conversations = maybeConversations.orEmpty(),
+          joinRequestCount = joinRequestCount,
+          maybeAction = maybeAction,
+          onSelect = onTab,
+          onAction = { action ->
+            when (action) {
+              MainAction.New -> onCreate()
+              MainAction.NewMessage -> onNavigate("browse?people=true")
+            }
+          },
+          modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .padding(bottom = FloatingToolbarDefaults.ScreenOffset),
+        )
       }
     }
   }
@@ -650,7 +654,7 @@ private fun HomeTab(
   val context = LocalContext.current
   val collapsing = remember { CollapsedSections.of(context) }
   val collapsed by collapsing.collapsed.collectAsState()
-  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
+  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = floatingTabBarClearance())) {
     item(key = "quick-access") { QuickAccessRow(quickAccess, onNavigate) }
     if (sections.isEmpty()) {
       item(key = "empty") {
@@ -688,7 +692,7 @@ private fun DirectTab(conversations: List<ConversationItem>, list: ListState, li
     return
   }
   val sections = directSections(conversations, list.lastActivity, dmFilter, homeChip)
-  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
+  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = floatingTabBarClearance())) {
     item(key = "filter") {
       FilterBar(dmFilter, onChange = { dmFilter = it }) {
         HomeChips(homeChip, onSelect = { homeChip = if (homeChip == it) HomeFilter.All else it })
@@ -718,7 +722,7 @@ private fun ListTab(
   var chip by rememberSaveable { mutableStateOf(HomeFilter.All) }
   val sections = listSections(conversations, list.lastActivity, filter, chip)
   val isFiltering = filter.isNotBlank() || chip != HomeFilter.All
-  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
+  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = floatingTabBarClearance())) {
     item(key = "quick-access") { QuickAccessRow(quickAccess, onNavigate) }
     item(key = "filter") {
       FilterBar(filter, onChange = { filter = it }) {
@@ -761,7 +765,7 @@ private fun ListBySpaceTab(
   val context = LocalContext.current
   val collapsing = remember { CollapsedSections.of(context) }
   val collapsed by collapsing.collapsed.collectAsState()
-  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = FAB_CLEARANCE)) {
+  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = floatingTabBarClearance())) {
     item(key = "quick-access") { QuickAccessRow(quickAccess, onNavigate) }
     item(key = "filter") {
       FilterBar(filter, onChange = { filter = it }) {
@@ -828,7 +832,7 @@ private fun ActivityTab(
         maybeAction = null,
       )
     } else {
-      LazyColumn(Modifier.fillMaxSize()) {
+      LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = floatingTabBarClearance())) {
         if (guestNoticeCount > 0) item(key = "guest-notices") { guestNotices() }
         if (joinRequestCount > 0) item(key = "join-requests") { joinRequests() }
         conversationRows(listOf(Section(SectionTitle.Activity, waiting)), list, hasHeader = false)
@@ -1169,78 +1173,6 @@ private fun BrandTitle(brand: MainBrand) {
       overflow = TextOverflow.Ellipsis,
       modifier = Modifier.semantics { heading() },
     )
-  }
-}
-
-/** Home, DMs and Activity, each with what is new in it (#1488). */
-@Composable
-private fun MainNavigation(
-  selected: ChatTab,
-  isList: Boolean,
-  conversations: List<ConversationItem>,
-  joinRequestCount: Int,
-  onSelect: (ChatTab) -> Unit,
-) {
-  val (direct, channels) = conversations.partition { it.isDirect }
-  // In landscape the bar's items stay clear of a side cutout too (#309).
-  NavigationBar(
-    containerColor = MaterialTheme.colorScheme.surfaceContainer,
-    windowInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom + WindowInsetsSides.Horizontal),
-  ) {
-    // The list layout has the DMs on Home and no tab of their own for them.
-    for (tab in ChatTab.entries.filterNot { isList && it == ChatTab.Direct }) {
-      val label = stringResource(
-        when (tab) {
-          ChatTab.Home -> R.string.nav_home
-          ChatTab.Direct -> R.string.nav_direct
-          ChatTab.Activity -> R.string.nav_activity
-        },
-      )
-      val badge = when (tab) {
-        // Channels count as "something new" there too; a number is for what is addressed to the user.
-        ChatTab.Home -> if (isList) TabBadge(maxOf(tabBadge(conversations).mentions, tabBadge(direct).unread), tabBadge(channels).unread) else tabBadge(channels)
-        ChatTab.Direct -> tabBadge(direct)
-        // A request waits for a decision like a mention waits for an answer.
-        ChatTab.Activity -> TabBadge(mentions = tabBadge(conversations).mentions + joinRequestCount, unread = 0)
-      }
-      // Channels and Activity count only mentions; DMs count every unread message.
-      val countsUnread = tab == ChatTab.Direct || (isList && tab == ChatTab.Home)
-      val count = if (countsUnread) maxOf(badge.mentions, badge.unread) else badge.mentions
-      val description = when {
-        count > 0 -> pluralStringResource(R.plurals.chat_tab_unread, count, label, count)
-        badge.unread > 0 -> stringResource(R.string.chat_tab_new, label)
-        else -> label
-      }
-      NavigationBarItem(
-        selected = tab == selected,
-        onClick = { onSelect(tab) },
-        modifier = Modifier.semantics(mergeDescendants = true) { contentDescription = description },
-        label = { Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        icon = {
-          BadgedBox(
-            badge = {
-              when {
-                count > 0 -> Badge(
-                  containerColor = LocalTeamCraftColors.current.badge,
-                  contentColor = LocalTeamCraftColors.current.chromeText,
-                ) { Text(count.toString()) }
-                badge.unread > 0 -> Badge(containerColor = MaterialTheme.colorScheme.outline)
-              }
-            },
-          ) { NavigationIcon(tab) }
-        },
-      )
-    }
-  }
-}
-
-@Composable
-private fun NavigationIcon(tab: ChatTab) {
-  when (tab) {
-    ChatTab.Home -> Icon(Icons.Filled.Home, contentDescription = null)
-    // The marker of DMs elsewhere in the app (their empty state).
-    ChatTab.Direct -> Icon(Icons.Filled.Email, contentDescription = null)
-    ChatTab.Activity -> Icon(Icons.Filled.Notifications, contentDescription = null)
   }
 }
 
