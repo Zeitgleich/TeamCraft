@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM health_alerts\n     WHERE resolved_at IS NOT NULL\n       AND (resolved_at < $1\n            OR (check_id, raised_at) NOT IN (SELECT check_id, raised_at FROM health_alerts\n                                             WHERE resolved_at IS NOT NULL\n                                             ORDER BY raised_at DESC\n                                             LIMIT $2))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "190b94d10c7b1b0681ad8c0f99bef6575b57ae5ee95ee2cd5e8cf4bb2eaf6c8f"
+}

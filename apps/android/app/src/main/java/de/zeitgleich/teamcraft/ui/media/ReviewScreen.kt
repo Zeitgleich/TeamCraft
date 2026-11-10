@@ -67,6 +67,7 @@ import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import de.zeitgleich.teamcraft.ui.screens.PageLoadingIndicator
 import de.zeitgleich.teamcraft.ui.screens.textKeyboard
 import kotlinx.coroutines.flow.distinctUntilChanged
 import de.zeitgleich.teamcraft.R
@@ -175,7 +176,7 @@ private fun PicturePage(item: MediaDraftItem) {
   BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
     val picture = maybePicture
     if (picture == null) {
-      CircularProgressIndicator(color = Color.White)
+      PageLoadingIndicator(color = Color.White)
     } else {
       val fit = PictureFit.of(picture, item.picture.crop, isFramed = true, constraints.maxWidth.toFloat(), constraints.maxHeight.toFloat(), 0f)
       EditedPictureCanvas(picture, item.picture, fit, Modifier.fillMaxSize())

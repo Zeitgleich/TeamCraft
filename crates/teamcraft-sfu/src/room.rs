@@ -47,6 +47,7 @@ use crate::{
   config::SfuConfig,
   dave_coordinator::{DaveCoordinator, DaveCoordinatorError, DaveDeadlines, Outbound},
   forwarding::{Effect, ForwardError, Forwarder},
+  quality::CallQuality,
   rate_limit::TokenBucket,
   signaling::Outgoing,
 };
@@ -70,6 +71,8 @@ pub struct Rooms {
   next_session: AtomicU64,
   /// The SFU is shutting down; see [`Rooms::go_away`].
   is_going_away: AtomicBool,
+  /// How the calls go, in aggregates (#1648).
+  quality: Arc<CallQuality>,
 }
 
 /// The rooms in numbers, for the metrics endpoint.
@@ -153,6 +156,7 @@ struct RoomState {
   /// The video codecs each device was last told the others decode (#565); a device without an
   /// entry hears them with its next (re)join.
   decodable_announced: HashMap<DeviceId, Vec<VideoCodec>>,
+  quality: Arc<CallQuality>,
 }
 
 /// What releasing a session's slot did.
@@ -307,7 +311,13 @@ impl Rooms {
       control: Mutex::new(ControlState::default()),
       next_session: AtomicU64::new(1),
       is_going_away: AtomicBool::new(false),
+      quality: Arc::new(CallQuality::new()),
     }
+  }
+
+  /// How the calls go, in aggregates, for the sessions and the metrics endpoint.
+  pub fn quality(&self) -> &Arc<CallQuality> {
+    &self.quality
   }
 
   /// The SFU is shutting down (a restart, a rolling deploy): closes every participant's
@@ -474,7 +484,12 @@ impl Rooms {
     let room = match rooms.get(&call_id) {
       Some(room) => Arc::clone(room),
       None => {
-        let room = Arc::new(Room::new(&grant, unix_now_millis(), &self.config)?);
+        let room = Arc::new(Room::new(
+          &grant,
+          unix_now_millis(),
+          &self.config,
+          Arc::clone(&self.quality),
+        )?);
         rooms.insert(call_id, Arc::clone(&room));
         info!(call_id = %call_id, "room created");
         room
@@ -538,7 +553,12 @@ impl Rooms {
 
 impl Room {
   /// The room of `first`'s call, opened by its join at `now`.
-  fn new(first: &JoinGrant, now: UnixMillis, config: &SfuConfig) -> Result<Self, RoomError> {
+  fn new(
+    first: &JoinGrant,
+    now: UnixMillis,
+    config: &SfuConfig,
+    quality: Arc<CallQuality>,
+  ) -> Result<Self, RoomError> {
     let call_id = first.call_id;
     let state = RoomState {
       participants: HashMap::new(),
@@ -554,6 +574,7 @@ impl Room {
       )?,
       next_stream_id: 1,
       decodable_announced: HashMap::new(),
+      quality,
     };
     Ok(Self {
       call_id,
@@ -686,6 +707,9 @@ impl Room {
       let mut state = lock(&self.state);
       let route = state.forwarder.route(sender, datagram, now)?;
       state.apply(route.effects);
+      // One atomic add per datagram, whatever the number of receivers.
+      let forwarded_bytes = route.deliveries.iter().map(|(_, bytes)| bytes.len()).sum();
+      state.quality.forwarded(forwarded_bytes);
       route
         .deliveries
         .into_iter()
@@ -1361,13 +1385,16 @@ impl RoomState {
           publisher,
           stream_id,
           layer,
-        } => self.send_to(
-          publisher,
-          CallEvent::KeyframeRequested {
-            stream_id: MediaStreamId(stream_id.0),
-            layer,
-          },
-        ),
+        } => {
+          self.quality.keyframe_requested();
+          self.send_to(
+            publisher,
+            CallEvent::KeyframeRequested {
+              stream_id: MediaStreamId(stream_id.0),
+              layer,
+            },
+          );
+        },
         Effect::LayersNeeded {
           publisher,
           stream_id,

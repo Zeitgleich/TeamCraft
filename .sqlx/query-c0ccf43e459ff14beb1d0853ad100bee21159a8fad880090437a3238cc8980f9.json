@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT check_id, raised_at, resolved_at FROM health_alerts\n       ORDER BY raised_at DESC, check_id\n       LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "check_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "health_alerts",
+            "name": "check_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "raised_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "health_alerts",
+            "name": "raised_at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "resolved_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "health_alerts",
+            "name": "resolved_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "c0ccf43e459ff14beb1d0853ad100bee21159a8fad880090437a3238cc8980f9"
+}

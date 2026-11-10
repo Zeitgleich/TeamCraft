@@ -17,6 +17,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
@@ -46,16 +47,14 @@ import uniffi.teamcraft_ffi.Presence
  * "Reset status" back to automatic. Available is automatic and takes no end.
  */
 @Composable
-internal fun StatusRow(presence: Presence, isManual: Boolean, onChoose: (Presence, Instant?) -> Unit) {
+internal fun StatusRow(shapes: ListItemShapes, presence: Presence, isManual: Boolean, onChoose: (Presence, Instant?) -> Unit) {
   var isOpen by rememberSaveable { mutableStateOf(false) }
-  ListItem(
-    headlineContent = { Text(stringResource(R.string.presence_title)) },
-    supportingContent = { Text(stringResource(presencePickLabel(presence))) },
+  SettingsLinkRow(
+    shapes,
+    stringResource(R.string.presence_title),
+    stringResource(presencePickLabel(presence)),
     leadingContent = { PresenceDot(presence, size = 12.dp) },
-    trailingContent = {
-      Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-    },
-    modifier = Modifier.clickable { isOpen = true },
+    onClick = { isOpen = true },
   )
   if (isOpen) {
     StatusSheet(presence, isManual, onDismiss = { isOpen = false }) { choice, maybeUntil ->

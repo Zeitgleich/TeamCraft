@@ -3,6 +3,7 @@ use leptos::prelude::*;
 use crate::areas::{self, Place, lazy_area};
 use crate::auth::tauri;
 use crate::brand::Brand;
+use crate::components::account_switcher::OtherAccountsBadge;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::brand_logo::BrandLogo;
 use crate::components::channel_glyph::{ChannelGlyph, channel_fallback_icon};
@@ -93,6 +94,10 @@ pub fn TopBar() -> impl IntoView {
           >
             {move || view! { <Avatar user=me.get() size=AvatarSize::Medium show_presence=true /> }}
           </button>
+          // Something unread in another account on this computer (#214).
+          <Show when=tauri::is_available fallback=|| ()>
+            <OtherAccountsBadge />
+          </Show>
           // On phones the menu opens from the bottom navigation instead (app.rs).
           <Show when=move || menu_open() && !state.is_compact() fallback=|| ()>
             {lazy_area(Place::Overlay, || areas::status_menu(()))}

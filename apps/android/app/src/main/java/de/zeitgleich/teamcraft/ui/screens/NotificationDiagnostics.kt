@@ -1,5 +1,8 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.heading
 import android.app.NotificationManager
@@ -75,9 +78,18 @@ fun NotificationDiagnosticsScreen(
   LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { refresh++ }
   val handled by viewModel.pushHandledCount.collectAsState()
   val health = remember(refresh, handled) { NotificationHealth.read(context) }
-  Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.diagnostics_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
+  Scaffold(
+    topBar = { ChromeTopBar(title = stringResource(R.string.diagnostics_title), maybeOnBack = onBack) },
+    // Edge to edge: the page scrolls behind the navigation bar and ends clear of it (see Settings).
+    contentWindowInsets = ScreenInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
+  ) { padding ->
     Column(
-      Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
+      Modifier
+        .fillMaxSize()
+        .padding(padding)
+        .verticalScroll(rememberScrollState())
+        .windowInsetsPadding(ScreenInsets.only(WindowInsetsSides.Bottom))
+        .padding(16.dp),
       verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
       PushServiceSection(viewModel, health, onChanged = { refresh++ })

@@ -4,7 +4,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -12,6 +11,10 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.LoadingIndicator
+import androidx.compose.material3.LoadingIndicatorDefaults
+import androidx.compose.ui.graphics.Color
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -45,6 +48,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
@@ -66,50 +73,68 @@ val ScreenInsets: WindowInsets
 val TopBarInsets: WindowInsets
   @Composable get() = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
 
-/** The top bar of the screens behind the main one: back, title and actions on the theme's surface. */
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Edge to edge for a screen with a fixed header above its list: the header side of a Scaffold's
+ * padding (top and sides) pads the column, and [bottomOnly] goes to the list as content padding,
+ * so the list scrolls behind the navigation bar instead of being clipped above it.
+ */
+@Composable
+fun PaddingValues.withoutBottom(): PaddingValues {
+  val direction = LocalLayoutDirection.current
+  return PaddingValues(start = calculateStartPadding(direction), top = calculateTopPadding(), end = calculateEndPadding(direction))
+}
+
+/** The bottom of a Scaffold's padding (navigation bar or keyboard): a list's last item ends clear of it. */
+fun PaddingValues.bottomOnly(): PaddingValues = PaddingValues(bottom = calculateBottomPadding())
+
+/**
+ * The top bar of the screens behind the main one: back, title and actions on the theme's surface.
+ * A subtitle uses Material's expressive two-line bar (issue #454).
+ */
 @Composable
 fun ChromeTopBar(
   title: String,
   maybeSubtitle: String? = null,
   maybeOnBack: (() -> Unit)? = null,
   actions: @Composable RowScope.() -> Unit = {},
+  containerColor: Color = MaterialTheme.colorScheme.surface,
   maybeIcon: (@Composable () -> Unit)? = null,
 ) {
-  TopAppBar(
-    title = {
-      androidx.compose.foundation.layout.Row(
-        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
-      ) {
-        maybeIcon?.invoke()
-        androidx.compose.foundation.layout.Column {
-          Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.semantics { heading() })
-          maybeSubtitle?.takeIf { it.isNotBlank() }?.let {
-            Text(
-              it,
-              maxLines = 1,
-              overflow = TextOverflow.Ellipsis,
-              style = MaterialTheme.typography.bodySmall,
-              color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-          }
-        }
+  val titleSlot = @Composable {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      maybeIcon?.invoke()
+      Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.semantics { heading() })
+    }
+  }
+  val navigationIcon = @Composable {
+    if (maybeOnBack != null) {
+      IconButton(onClick = maybeOnBack) {
+        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.back))
       }
-    },
-    navigationIcon = {
-      if (maybeOnBack != null) {
-        IconButton(onClick = maybeOnBack) {
-          Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.back))
-        }
-      }
-    },
-    actions = actions,
-    windowInsets = TopBarInsets,
-    // The theme's surface, as on the main screen: one header style in light and dark (the status
-    // bar icons follow the theme).
-    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
-  )
+    }
+  }
+  // The theme's surface by default, as on the main screen: one header style in light and dark (the
+  // status bar icons follow the theme); pages on another colour (settings) pass theirs.
+  val colors = TopAppBarDefaults.topAppBarColors(containerColor = containerColor)
+  val maybeSubtitleText = maybeSubtitle?.takeIf { it.isNotBlank() }
+  if (maybeSubtitleText == null) {
+    TopAppBar(
+      title = titleSlot,
+      navigationIcon = navigationIcon,
+      actions = actions,
+      windowInsets = TopBarInsets,
+      colors = colors,
+    )
+  } else {
+    TopAppBar(
+      title = titleSlot,
+      subtitle = { Text(maybeSubtitleText, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+      navigationIcon = navigationIcon,
+      actions = actions,
+      windowInsets = TopBarInsets,
+      colors = colors,
+    )
+  }
 }
 
 /**
@@ -261,3 +286,17 @@ private const val COUNTDOWN_MILLIS = 1_000L
 /** How long syncing goes on before [SyncingLine] shows it. */
 private const val SYNCING_LINE_DELAY_MILLIS = 300L
 private val SYNCING_LINE_HEIGHT = 2.dp
+
+/**
+ * Material 3 Expressive's loading indicator (issue #454) for a screen or pane whose content is
+ * coming: the morphing shape instead of a spinner. Small waits inside buttons and rows keep the
+ * thin circular indicator.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun PageLoadingIndicator(
+  modifier: Modifier = Modifier,
+  color: Color = LoadingIndicatorDefaults.indicatorColor,
+) {
+  LoadingIndicator(modifier = modifier, color = color)
+}

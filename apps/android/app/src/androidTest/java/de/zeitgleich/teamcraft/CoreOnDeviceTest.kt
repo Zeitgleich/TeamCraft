@@ -15,6 +15,7 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.security.KeystoreBox
 import de.zeitgleich.teamcraft.security.SealedFile
+import uniffi.teamcraft_ffi.AccessToken
 import uniffi.teamcraft_ffi.AppConfig
 import uniffi.teamcraft_ffi.EventListener
 import uniffi.teamcraft_ffi.LinkPlatform
@@ -111,7 +112,7 @@ class CoreOnDeviceTest {
   )
 
   private class Tokens(private val maybeToken: String?) : TokenProvider {
-    override fun accessToken(): String? = maybeToken
+    override fun accessToken(): AccessToken = maybeToken?.let { AccessToken.Token(it) } ?: AccessToken.SignedOut
   }
 
   private object Listener : EventListener {

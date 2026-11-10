@@ -83,7 +83,10 @@ logs content) and the debug log's own redaction:
   or base64 runs go; e-mail addresses and paths become `[email]` and `[path]`.
 - **Source paths lose the build machine:** a frame keeps the path inside its crate, Cargo package
   or the standard library (`/home/<user>/…/crates/x/src/a.rs` becomes `x/src/a.rs`), anything else
-  only its file name; a script URL only its path.
+  only its file name; a script URL only its path. An error the browser raises itself
+  (`window.onerror` without a stack or a line, such as "ResizeObserver loop completed with
+  undelivered notifications") has no frame: its "file" is the page's address (`dm/<id>`), which
+  split one error into an issue per conversation.
 - **Lengths are cut:** message 512, type 128, function 256 and breadcrumb 512 characters; 100
   frames (the innermost), 50 breadcrumbs (the newest).
 - Breadcrumbs run through the same steps again, though the ring redacted them already.

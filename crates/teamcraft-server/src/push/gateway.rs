@@ -190,6 +190,33 @@ impl GatewayClient {
     Ok(info.kinds)
   }
 
+  /// Asks the gateway whether it answers (its `/v1/info`, which needs no signature), within
+  /// `timeout`, for the health checks (#1647). The answer feeds the gateway's breaker, so an outage
+  /// shows, and ends, on an instance that sends no push. `None` while the breaker is open and its
+  /// next probe isn't due; otherwise whether the gateway answered with a success.
+  pub async fn probe(&self, timeout: Duration) -> Option<bool> {
+    let maybe_guard = self.guard.get();
+    if let Some(guard) = maybe_guard
+      && guard.check().is_err()
+    {
+      return None;
+    }
+    let request = self
+      .http
+      .get(format!("{}{GATEWAY_INFO_PATH}", self.base_url))
+      .timeout(timeout)
+      .send();
+    let is_answered = matches!(request.await, Ok(response) if response.status().is_success());
+    if let Some(guard) = maybe_guard {
+      if is_answered {
+        guard.record_success();
+      } else {
+        guard.record_failure();
+      }
+    }
+    Some(is_answered)
+  }
+
   /// Makes the gateway know this server's public key. Idempotent; safe to repeat.
   pub async fn register(&self) -> Result<(), PushError> {
     let body = serde_json::to_vec(&GatewayRegisterRequest {

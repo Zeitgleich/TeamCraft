@@ -308,6 +308,50 @@ const HEALTH_ALERTS: &[FieldDef] = &[
     "settings-error-health-percent",
   ),
   flag("is_email_enabled"),
+  ranged(
+    "history_days",
+    1,
+    (1, 3650),
+    DAYS,
+    "settings-error-health-history-days",
+  ),
+  ranged("secret_min_days", 1, (1, 365), DAYS, "settings-error-health-days"),
+  flag("is_probing_enabled"),
+  ranged(
+    "probe_interval_secs",
+    1,
+    (10, 3_600),
+    SECONDS,
+    "settings-error-health-probe-interval",
+  ),
+  ranged(
+    "probe_timeout_secs",
+    1,
+    (1, 60),
+    SECONDS,
+    "settings-error-health-probe-timeout",
+  ),
+  ranged(
+    "call_max_loss_percent",
+    1,
+    (1, 50),
+    PERCENT,
+    "settings-error-health-call-loss",
+  ),
+  ranged(
+    "call_max_fallback_percent",
+    1,
+    (10, 100),
+    PERCENT,
+    "settings-error-health-call-fallback",
+  ),
+  ranged(
+    "call_window_secs",
+    MINUTE,
+    (MINUTE, 3_600),
+    MINUTES,
+    "settings-error-health-call-window",
+  ),
 ];
 const HOLIDAYS: &[FieldDef] = &[
   FieldDef {

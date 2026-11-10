@@ -622,6 +622,169 @@ async fn sending_the_same_client_message_id_twice_stores_one_message() {
   test_db.drop_database().await;
 }
 
+mod health_alerts {
+  use teamcraft_db::{
+    HealthNoticeChannel, HealthNoticeKind, HealthStateChanges, HealthStateRetention, StoredHealthAlert,
+    StoredHealthNotice,
+  };
+  use teamcraft_proto::{HealthCheckId, HealthNoticeId, Snowflake};
+  use time::{Duration, OffsetDateTime};
+
+  use super::*;
+
+  #[tokio::test]
+  async fn the_history_and_the_outbox_read_back_as_written_and_a_second_write_changes_nothing() {
+    let Some(test_db) = TestDatabase::create().await else {
+      return;
+    };
+    let db = &test_db.db;
+    let now = start();
+    let changes = HealthStateChanges {
+      alerts: vec![
+        alert(HealthCheckId::Backup, now - hours(2), Some(now - hours(1))),
+        alert(HealthCheckId::Database, now, None),
+      ],
+      notices: vec![notice(1, now), mail(2, now)],
+      removed_notices: Vec::new(),
+    };
+    for _ in 0..2 {
+      db.save_health_state(&changes, &keep_all(now)).await.unwrap();
+    }
+    let alerts = db.health_alerts(500).await.unwrap();
+    assert_eq!(alerts.len(), 2);
+    assert_eq!(alerts[0].check, HealthCheckId::Database, "newest first");
+    assert_eq!(alerts[1], changes.alerts[0]);
+    assert_eq!(db.health_notices().await.unwrap(), changes.notices);
+
+    // Resolving updates the alert in place; a delivered notice goes, a retried one keeps its row.
+    let mut retried = changes.notices[1].clone();
+    retried.failures = 1;
+    retried.next_attempt_at = now + Duration::seconds(30);
+    let update = HealthStateChanges {
+      alerts: vec![alert(HealthCheckId::Database, now, Some(now + hours(1)))],
+      notices: vec![retried.clone()],
+      removed_notices: vec![id(1)],
+    };
+    db.save_health_state(&update, &keep_all(now)).await.unwrap();
+    let alerts = db.health_alerts(500).await.unwrap();
+    assert_eq!(alerts.len(), 2);
+    assert_eq!(alerts[0].maybe_resolved_at, Some(now + hours(1)));
+    assert_eq!(db.health_notices().await.unwrap(), [retried]);
+  }
+
+  #[tokio::test]
+  async fn retention_drops_old_and_surplus_resolved_alerts_and_stale_notices_but_never_open_alerts() {
+    let Some(test_db) = TestDatabase::create().await else {
+      return;
+    };
+    let db = &test_db.db;
+    let now = start();
+    let changes = HealthStateChanges {
+      alerts: vec![
+        // Open for long: stays whatever its age.
+        alert(HealthCheckId::DiskSpace, now - hours(24 * 200), None),
+        // Ended before the history: goes.
+        alert(
+          HealthCheckId::Backup,
+          now - hours(24 * 100),
+          Some(now - hours(24 * 99)),
+        ),
+        // Three recent ones, of which the count keeps the newest two.
+        alert(HealthCheckId::Certificate, now - hours(3), Some(now - hours(2))),
+        alert(HealthCheckId::Certificate, now - hours(5), Some(now - hours(4))),
+        alert(HealthCheckId::Certificate, now - hours(7), Some(now - hours(6))),
+      ],
+      notices: vec![notice(1, now - hours(25)), notice(2, now - hours(1))],
+      removed_notices: Vec::new(),
+    };
+    let retention = HealthStateRetention {
+      resolved_before: now - hours(24 * 90),
+      max_alerts: 2,
+      notices_queued_before: now - hours(24),
+    };
+    db.save_health_state(&changes, &retention).await.unwrap();
+    let raised: Vec<(HealthCheckId, OffsetDateTime)> = db
+      .health_alerts(500)
+      .await
+      .unwrap()
+      .into_iter()
+      .map(|alert| (alert.check, alert.raised_at))
+      .collect();
+    assert_eq!(
+      raised,
+      [
+        (HealthCheckId::Certificate, now - hours(3)),
+        (HealthCheckId::Certificate, now - hours(5)),
+        (HealthCheckId::DiskSpace, now - hours(24 * 200)),
+      ]
+    );
+    let left: Vec<HealthNoticeId> = db
+      .health_notices()
+      .await
+      .unwrap()
+      .into_iter()
+      .map(|notice| notice.id)
+      .collect();
+    assert_eq!(left, [id(2)]);
+  }
+
+  /// Whole seconds: Postgres keeps microseconds.
+  fn start() -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap()
+  }
+
+  fn hours(hours: i64) -> Duration {
+    Duration::hours(hours)
+  }
+
+  fn keep_all(now: OffsetDateTime) -> HealthStateRetention {
+    HealthStateRetention {
+      resolved_before: now - hours(24 * 365),
+      max_alerts: 500,
+      notices_queued_before: now - hours(24 * 365),
+    }
+  }
+
+  fn alert(
+    check: HealthCheckId,
+    raised_at: OffsetDateTime,
+    maybe_resolved_at: Option<OffsetDateTime>,
+  ) -> StoredHealthAlert {
+    StoredHealthAlert {
+      check,
+      raised_at,
+      maybe_resolved_at,
+    }
+  }
+
+  fn notice(n: i64, queued_at: OffsetDateTime) -> StoredHealthNotice {
+    StoredHealthNotice {
+      id: id(n),
+      check: HealthCheckId::Database,
+      kind: HealthNoticeKind::Raised,
+      changed_at: queued_at,
+      channel: HealthNoticeChannel::Webhook,
+      queued_at,
+      next_attempt_at: queued_at,
+      failures: 0,
+    }
+  }
+
+  fn mail(n: i64, queued_at: OffsetDateTime) -> StoredHealthNotice {
+    StoredHealthNotice {
+      kind: HealthNoticeKind::Resolved,
+      channel: HealthNoticeChannel::Mail {
+        address: "admin@example.com".into(),
+      },
+      ..notice(n, queued_at)
+    }
+  }
+
+  fn id(n: i64) -> HealthNoticeId {
+    HealthNoticeId::from_snowflake(Snowflake::new(n).unwrap())
+  }
+}
+
 fn identity<'a>(subject: &'a str, display_name: &'a str) -> OidcIdentity<'a> {
   OidcIdentity {
     issuer: ISSUER,

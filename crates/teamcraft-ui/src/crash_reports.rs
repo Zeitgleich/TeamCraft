@@ -300,13 +300,11 @@ fn listen_to_window() {
   let on_error = Closure::<dyn Fn(web_sys::ErrorEvent)>::new(|event: web_sys::ErrorEvent| {
     let mut frames = frames_of(&event.error());
     if frames.is_empty() {
-      frames.push(StackFrame {
-        maybe_function: None,
-        maybe_file: Some(event.filename()).filter(|file| !file.is_empty()),
-        maybe_line: Some(event.lineno()).filter(|line| *line > 0),
-        maybe_column: Some(event.colno()).filter(|column| *column > 0),
-        is_in_app: true,
-      });
+      frames.extend(StackFrame::from_error_event(
+        &event.filename(),
+        event.lineno(),
+        event.colno(),
+      ));
     }
     capture_script_error("Error", event.message(), frames);
   });

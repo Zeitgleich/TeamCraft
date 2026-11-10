@@ -22,7 +22,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -44,13 +43,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.heading
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SegmentedButton
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 import de.zeitgleich.teamcraft.ui.theme.LocalThemePolicy
@@ -68,6 +68,9 @@ import uniffi.teamcraft_ffi.colorThemeShareCode
 import uniffi.teamcraft_ffi.colorThemeSurprise
 import uniffi.teamcraft_ffi.colorThemeTokens
 import kotlin.random.Random
+
+/** Presets or the user's own colours. */
+private val THEME_MODE_CHOICES = listOf(false to R.string.color_theme_presets, true to R.string.color_theme_custom)
 
 /** The app's own colours (navigation, selection, presence, notifications), where custom starts. */
 private val PRODUCT_COLORS = listOf(0x1A2434u, 0x0064FCu, 0x2EB67Du, 0xC8441Du)
@@ -91,57 +94,63 @@ fun ColorThemeSetting() {
   val hasChoices = canCustomize || maybePolicy?.maybeAllowedPresets?.isNotEmpty() != false
   var wantsCustom by remember { mutableStateOf(value.startsWith(CUSTOM_PREFIX)) }
   val isCustom = wantsCustom && canCustomize
-  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+  SettingsGroup(R.string.color_theme) {
+    row { shapes -> SettingsContentRow(shapes) { ColorThemeContent(value, stored, hasChoices, canCustomize, isCustom, maybePolicy, prefs, onWantsCustom = { wantsCustom = it }) } }
+  }
+}
+
+@Composable
+private fun ColorThemeContent(
+  value: String,
+  stored: String,
+  hasChoices: Boolean,
+  canCustomize: Boolean,
+  isCustom: Boolean,
+  maybePolicy: AppThemePolicy?,
+  prefs: AppearancePrefs,
+  onWantsCustom: (Boolean) -> Unit,
+) {
+  Text(
+    stringResource(R.string.color_theme_hint),
+    style = MaterialTheme.typography.bodySmall,
+    color = MaterialTheme.colorScheme.onSurfaceVariant,
+  )
+  if (value != stored) {
     Text(
-      stringResource(R.string.color_theme),
-      style = MaterialTheme.typography.titleMedium,
-      modifier = Modifier.semantics { heading() },
-    )
-    Text(
-      stringResource(R.string.color_theme_hint),
+      stringResource(R.string.color_theme_withheld),
       style = MaterialTheme.typography.bodySmall,
       color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    if (value != stored) {
-      Text(
-        stringResource(R.string.color_theme_withheld),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
-    }
-    if (!hasChoices) {
-      Text(
-        stringResource(R.string.color_theme_fixed),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
-    }
-    if (canCustomize) {
-      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilterChip(
-          selected = !isCustom,
-          onClick = { wantsCustom = false },
-          label = { Text(stringResource(R.string.color_theme_presets)) },
-        )
-        FilterChip(
-          selected = isCustom,
+  }
+  if (!hasChoices) {
+    Text(
+      stringResource(R.string.color_theme_fixed),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+  }
+  if (canCustomize) {
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+      THEME_MODE_CHOICES.forEachIndexed { index, (custom, label) ->
+        SegmentedButton(
+          selected = isCustom == custom,
           onClick = {
-            wantsCustom = true
+            onWantsCustom(custom)
             // Custom starts from what is on screen, so the switch itself changes nothing.
-            if (!value.startsWith(CUSTOM_PREFIX)) {
+            if (custom && !value.startsWith(CUSTOM_PREFIX)) {
               val onScreen = maybePolicy?.let { colorThemeEffective(value, it) } ?: value
               colorThemeCustom(colorThemeColors(onScreen) ?: PRODUCT_COLORS)?.let(prefs::setColorTheme)
             }
           },
-          label = { Text(stringResource(R.string.color_theme_custom)) },
-        )
+          shape = SegmentedButtonDefaults.itemShape(index = index, count = THEME_MODE_CHOICES.size),
+        ) { Text(stringResource(label)) }
       }
     }
-    if (isCustom) {
-      CustomTheme(value, prefs::setColorTheme)
-    } else {
-      PresetGallery(value, maybePolicy, prefs::setColorTheme)
-    }
+  }
+  if (isCustom) {
+    CustomTheme(value, prefs::setColorTheme)
+  } else {
+    PresetGallery(value, maybePolicy, prefs::setColorTheme)
   }
 }
 

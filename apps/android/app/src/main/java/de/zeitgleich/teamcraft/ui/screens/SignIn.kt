@@ -142,7 +142,7 @@ fun LoginScreen(
       maybeError?.takeIf { localSignInErrorField(it) == null }?.let { SignInError(it, maybeErrorCode) }
       if (maybePage == null) {
         val loading = stringResource(R.string.sign_in_loading)
-        CircularProgressIndicator(Modifier.size(32.dp).semantics { contentDescription = loading })
+        PageLoadingIndicator(Modifier.semantics { contentDescription = loading })
       } else {
         SignInMethods(maybePage, maybeSsoIcon, maybeError, isBusy, onSso, onLocal)
         SignInHelp(maybePage)

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO health_alerts (check_id, raised_at, resolved_at) VALUES ($1, $2, $3)\n         ON CONFLICT (check_id, raised_at) DO UPDATE SET resolved_at = EXCLUDED.resolved_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7925dd886dd811b64f77fa86e0c11bbe5a3706a1306ea0bca11ef19bcbce9a36"
+}

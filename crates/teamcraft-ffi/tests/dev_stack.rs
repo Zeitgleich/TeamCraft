@@ -18,7 +18,7 @@ use teamcraft_core::{ClientSettings, EnrollmentOptions, EnrollmentSecret, Pendin
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_ffi::{
-  AccountState, AppConfig, ConnectionState, EventListener, PushService, TeamCraft, TokenProvider,
+  AccessToken, AccountState, AppConfig, ConnectionState, EventListener, PushService, TeamCraft, TokenProvider,
 };
 use teamcraft_proto::{CreateSpaceRequest, JoinPolicy, SpaceResponse};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -254,8 +254,10 @@ async fn push_upkeep_leaves_the_gateway_connection_open() {
 struct Token(String);
 
 impl TokenProvider for Token {
-  fn access_token(&self) -> Option<String> {
-    Some(self.0.clone())
+  fn access_token(&self) -> AccessToken {
+    AccessToken::Token {
+      value: self.0.clone(),
+    }
   }
 }
 

@@ -53,7 +53,8 @@ pub enum ConnectionState {
   },
 }
 
-/// A tick this much earlier than the previous one means the wall clock was set back.
+/// A time this much earlier than the latest one the supervisor was given means the wall clock was
+/// set back.
 const CLOCK_JUMP_BACK_MS: i64 = 1_000;
 /// The measured round trip counts up to this much: the time limits grow with it (twice the round
 /// trip on top of each), but a link that slow is as good as dead.
@@ -129,6 +130,10 @@ pub struct ConnectionSupervisor<G> {
   /// When the oldest heartbeat nothing has answered yet went out.
   maybe_unanswered_since_ms: Option<i64>,
   maybe_last_tick_ms: Option<i64>,
+  /// The latest time the supervisor was given, by a tick or a frame alike: a busy connection (a
+  /// frame every second) can keep the shell's loop from ticking for long, so a clock set back is
+  /// noticed on any call, not on the next tick only (issue #1673).
+  maybe_last_seen_ms: Option<i64>,
   /// Work ran without a connection since the last tick ([`Self::keep_alive`]): a long gap until
   /// this tick was the work, not a sleep.
   has_worked_since_tick: bool,
@@ -229,6 +234,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       maybe_probe_deadline_ms: None,
       maybe_unanswered_since_ms: None,
       maybe_last_tick_ms: None,
+      maybe_last_seen_ms: None,
       has_worked_since_tick: false,
       maybe_refused_token: None,
       held: HeldFrames::default(),
@@ -319,6 +325,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     };
     let result = client.start_gateway(timing).await;
     let now = client.now_ms();
+    self.follow_clock(now);
     // The attempt kept the loop busy, maybe for long on a slow link; that was no sleep, and taking
     // it for one would skip the backoff after every slow failure (issue #1064).
     self.maybe_last_tick_ms = Some(now);
@@ -355,6 +362,12 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
           _ => SignInReason::Unknown,
         };
         self.set_state(ConnectionState::SignInRequired { reason });
+        None
+      },
+      Err(CoreError::SyncStopping) => {
+        // The loop stops (issue #1656); the next one connects and syncs again.
+        tracing::info!("gateway connection left during its catch-up: the sync stops");
+        self.schedule_attempt(now, None, None);
         None
       },
       Err(error) => {
@@ -396,6 +409,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     S: LocalStore,
   {
     let now = client.now_ms();
+    self.follow_clock(now);
     let outcome = match maybe_frame {
       Some(Ok(frame)) => {
         self.last_heard_ms = now;
@@ -426,15 +440,6 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   /// seconds and at [`Self::next_deadline_ms`].
   pub async fn on_tick(&mut self, now_ms: i64) {
     self.note_kept_alive(now_ms);
-    if let Some(last) = self.maybe_last_tick_ms
-      && last.saturating_sub(now_ms) >= CLOCK_JUMP_BACK_MS
-    {
-      tracing::info!(
-        back_ms = last - now_ms,
-        "the clock went back; keeping the gateway's pace"
-      );
-      self.shift_timers(now_ms.saturating_sub(last));
-    }
     let has_slept = !std::mem::take(&mut self.has_worked_since_tick)
       && self
         .maybe_last_tick_ms
@@ -546,6 +551,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   /// A network that reports changes again and again gets the immediate attempt once per
   /// [`ConnectionSettings::stable_after`]; after that the backoff runs on.
   pub async fn network_changed(&mut self, now_ms: i64) {
+    self.follow_clock(now_ms);
     if self.maybe_gateway.is_some() {
       let slack = self.round_trip_slack_ms();
       self.maybe_probe_deadline_ms = Some(
@@ -573,6 +579,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
   /// Counts what [`Self::keep_alive`] did: heartbeats sent and answers heard move the timers, and a
   /// long work isn't mistaken for a device that slept.
   fn note_kept_alive(&mut self, now_ms: i64) {
+    self.follow_clock(now_ms);
     let kept = self.held.take_kept_alive();
     if kept.heartbeats_sent > 0 {
       self.last_heartbeat_ms = now_ms;
@@ -676,6 +683,22 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     });
   }
 
+  /// Notices a wall clock set back since the last call and moves the timers with it. Every entry
+  /// point calls it before it stores a time, so the timers never mix times from before and after
+  /// a jump.
+  fn follow_clock(&mut self, now_ms: i64) {
+    if let Some(last) = self.maybe_last_seen_ms
+      && last.saturating_sub(now_ms) >= CLOCK_JUMP_BACK_MS
+    {
+      tracing::info!(
+        back_ms = last - now_ms,
+        "the clock went back; keeping the gateway's pace"
+      );
+      self.shift_timers(now_ms.saturating_sub(last));
+    }
+    self.maybe_last_seen_ms = Some(now_ms);
+  }
+
   /// Moves every timer by `delta_ms` (negative after the wall clock went back), so a clock that
   /// jumps back an hour doesn't postpone heartbeats, dead-connection checks and reconnects by an
   /// hour (robustness.md, "Time").
@@ -694,6 +717,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
       &mut self.maybe_unanswered_since_ms,
       &mut self.maybe_timed_heartbeat_ms,
       &mut self.maybe_skipped_backoff_ms,
+      &mut self.maybe_last_tick_ms,
     ] {
       if let Some(at) = maybe_at.as_mut() {
         shift(at);

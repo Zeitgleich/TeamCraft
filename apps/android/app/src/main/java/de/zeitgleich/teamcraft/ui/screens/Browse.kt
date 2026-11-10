@@ -1,5 +1,10 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.WindowInsetsSides
 import de.zeitgleich.teamcraft.ui.presenceOf
 import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import androidx.annotation.StringRes
@@ -19,7 +24,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
@@ -136,17 +140,19 @@ fun BrowseScreen(
       isOpening = false
     }
   }
+  val hasStartBar = isShowingPeople && picked.isNotEmpty()
   Scaffold(
     contentWindowInsets = ScreenInsets,
     // Opened from "New message", the screen says so (it lists people first).
     topBar = { ChromeTopBar(title = stringResource(if (isPeopleFirst) R.string.dm_new else R.string.browse_title), maybeOnBack = onBack) },
     snackbarHost = { SnackbarHost(snackbars) },
     bottomBar = {
-      if (isShowingPeople && picked.isNotEmpty()) {
+      if (hasStartBar) {
         Button(
           onClick = startConversation,
           enabled = !isOpening,
-          modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp),
+          // Above the navigation bar, and above the keyboard while the people search is open.
+          modifier = Modifier.fillMaxWidth().windowInsetsPadding(ScreenInsets.only(WindowInsetsSides.Bottom)).padding(16.dp),
         ) {
           if (isOpening) {
             CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
@@ -157,7 +163,10 @@ fun BrowseScreen(
       }
     },
   ) { padding ->
-    Column(Modifier.fillMaxSize().padding(padding)) {
+    // The lists scroll behind the navigation bar, but not behind the start button's bar.
+    val listPadding = if (hasStartBar) PaddingValues() else padding.bottomOnly()
+    val columnPadding = if (hasStartBar) padding else padding.withoutBottom()
+    Column(Modifier.fillMaxSize().padding(columnPadding).consumeWindowInsets(padding)) {
       if (!isGuest) {
         PrimaryTabRow(selectedTabIndex = if (showPeople) 1 else 0) {
           Tab(selected = !showPeople, onClick = { showPeople = false }, text = { Text(stringResource(R.string.channels)) })
@@ -178,6 +187,7 @@ fun BrowseScreen(
           onPick = { user -> picked = toggled(picked, user.id) },
           isEnabled = !isOpening,
           modifier = Modifier.weight(1f),
+          contentPadding = listPadding,
         )
       } else {
         CompactSearchField(
@@ -219,7 +229,7 @@ fun BrowseScreen(
             Switch(checked = showsArchived, onCheckedChange = null)
           }
         }
-        LazyColumn(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = listPadding) {
           items(visibleChannels, key = { it.conversation }) { channel ->
             val maybeJoin = BrowseJoin.of(channel.join)
             Row(

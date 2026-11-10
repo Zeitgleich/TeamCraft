@@ -60,6 +60,7 @@ use tracing::{Instrument, debug, info_span, warn};
 use crate::auth::{JoinGrant, JoinTokenVerifier};
 use crate::config::FallbackConfig;
 use crate::prejoin::PreJoinSlot;
+use crate::quality::Transport;
 use crate::room::{ParticipantHandle, ParticipantLink, Room, SESSION_CLOSE_TIMEOUT, SessionId};
 use crate::server::{
   Admission, ParticipantSession, SessionEnd, Shared, admit, register_switch, release_slot,
@@ -368,6 +369,15 @@ async fn handle_connection(
   drop(maybe_device_slot);
   drop(unjoined_slot);
   let (room, grant, session_id) = (admitted.room, admitted.grant, admitted.session_id);
+  let client_ip = if is_from_proxy {
+    maybe_forwarded_ip.unwrap_or(peer_ip)
+  } else {
+    peer_ip
+  };
+  shared
+    .rooms
+    .quality()
+    .session_joined(Transport::Fallback, client_ip);
   // Dropped when the connection ends, before the slot is: a session that is lost can't move.
   let _registration = register_switch(
     shared,

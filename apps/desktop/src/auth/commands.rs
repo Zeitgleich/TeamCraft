@@ -32,7 +32,7 @@ pub struct CommandError {
 }
 
 impl CommandError {
-  fn new(kind: &'static str, message: String) -> Self {
+  pub(super) fn new(kind: &'static str, message: String) -> Self {
     Self { kind, message }
   }
 }

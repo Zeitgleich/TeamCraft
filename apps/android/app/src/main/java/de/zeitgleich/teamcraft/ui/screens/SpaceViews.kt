@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.consumeWindowInsets
 import android.text.format.DateUtils
 import androidx.annotation.StringRes
 import androidx.compose.foundation.clickable
@@ -118,7 +120,9 @@ fun SpaceViewsScreen(
     },
     contentWindowInsets = ScreenInsets,
   ) { padding ->
-    Column(Modifier.fillMaxSize().padding(padding)) {
+    // The tabs' lists take the bottom inset as content padding: they scroll behind the navigation bar.
+    val listPadding = padding.bottomOnly()
+    Column(Modifier.fillMaxSize().padding(padding.withoutBottom()).consumeWindowInsets(padding)) {
       PrimaryScrollableTabRow(selectedTabIndex = tab.ordinal) {
         for (entry in SpaceViewTab.entries) {
           Tab(selected = tab == entry, onClick = { tab = entry }, text = { Text(stringResource(entry.label)) })
@@ -126,13 +130,13 @@ fun SpaceViewsScreen(
       }
       when (tab) {
         // The directory of this space (#1337): people, channels, external people, invitations.
-        SpaceViewTab.People -> DirectoryContent(viewModel, maybeSpaceId = spaceId, onOpen = onOpen, modifier = Modifier.fillMaxSize())
+        SpaceViewTab.People -> DirectoryContent(viewModel, maybeSpaceId = spaceId, onOpen = onOpen, modifier = Modifier.fillMaxSize(), contentPadding = listPadding)
         SpaceViewTab.DirectMessages ->
-          SpaceDirectMessages(viewModel, spaces.firstOrNull { it.id == spaceId }?.directConversations.orEmpty(), onOpen)
-        SpaceViewTab.Calls -> SpaceCalls(viewModel, spaceId, snapshot)
-        SpaceViewTab.Meetings -> SpaceMeetings(viewModel, spaceId)
-        SpaceViewTab.Saved -> SpaceSaved(viewModel, spaceId, snapshot, onOpen)
-        SpaceViewTab.Files -> SpaceFiles(viewModel, spaceId)
+          SpaceDirectMessages(viewModel, spaces.firstOrNull { it.id == spaceId }?.directConversations.orEmpty(), onOpen, listPadding)
+        SpaceViewTab.Calls -> SpaceCalls(viewModel, spaceId, snapshot, listPadding)
+        SpaceViewTab.Meetings -> SpaceMeetings(viewModel, spaceId, listPadding)
+        SpaceViewTab.Saved -> SpaceSaved(viewModel, spaceId, snapshot, onOpen, listPadding)
+        SpaceViewTab.Files -> SpaceFiles(viewModel, spaceId, listPadding)
       }
     }
   }
@@ -143,11 +147,11 @@ fun SpaceViewsScreen(
  * conversations, shown here too; opening one opens it as from Home.
  */
 @Composable
-private fun SpaceDirectMessages(viewModel: MainViewModel, ids: List<String>, onOpen: (String) -> Unit) {
+private fun SpaceDirectMessages(viewModel: MainViewModel, ids: List<String>, onOpen: (String) -> Unit, contentPadding: PaddingValues) {
   val kept by viewModel.chatList.collectAsState()
   val lastActivity = kept.previews.mapValues { it.value.preview.sentAt }
   val conversations = spaceDirectMessages(kept.maybeConversations.orEmpty(), ids, lastActivity)
-  LazyColumn(Modifier.fillMaxSize()) {
+  LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
     if (conversations.isEmpty()) item { EmptyHint(stringResource(R.string.space_direct_messages_empty)) }
     items(conversations, key = { it.id }) { conversation ->
       Row(
@@ -194,7 +198,7 @@ private fun SpaceSwitcher(spaces: List<Space>, onSelect: (String) -> Unit) {
 }
 
 @Composable
-private fun SpaceCalls(viewModel: MainViewModel, spaceId: String, snapshot: ChatSnapshot?) {
+private fun SpaceCalls(viewModel: MainViewModel, spaceId: String, snapshot: ChatSnapshot?, contentPadding: PaddingValues) {
   val context = LocalContext.current
   val read = rememberRead(viewModel, spaceId) { query(ChatQueries.spaceCallHistory(spaceId)).calls }
   // The call history comes from the server: the core says whether that answer is here (#297).
@@ -210,7 +214,7 @@ private fun SpaceCalls(viewModel: MainViewModel, spaceId: String, snapshot: Chat
     load.retry()
     read.retry()
   }
-  LazyColumn(Modifier.fillMaxSize()) {
+  LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
     placeholderItem(phase, retry) { EmptyHint(stringResource(R.string.space_calls_empty)) }
     items(calls, key = { it.id }) { call ->
       val name = snapshot?.conversation(call.conversation)?.name.orEmpty()
@@ -238,10 +242,10 @@ private fun callDirectionLabel(direction: String): Int = when (direction) {
 }
 
 @Composable
-private fun SpaceMeetings(viewModel: MainViewModel, spaceId: String) {
+private fun SpaceMeetings(viewModel: MainViewModel, spaceId: String, contentPadding: PaddingValues) {
   val read = rememberRead(viewModel) { meetings() }
   val meetings = meetingsOfSpace(read.maybeValue.orEmpty(), spaceId)
-  LazyColumn(Modifier.fillMaxSize()) {
+  LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
     placeholderItem(read.phase { meetingsOfSpace(it, spaceId) }, read.retry) { EmptyHint(stringResource(R.string.space_meetings_empty)) }
     items(meetings, key = { "${it.id}-${it.startsAt}" }) { meeting ->
       MeetingRow(viewModel, meeting)
@@ -251,9 +255,9 @@ private fun SpaceMeetings(viewModel: MainViewModel, spaceId: String) {
 }
 
 @Composable
-private fun SpaceSaved(viewModel: MainViewModel, spaceId: String, snapshot: ChatSnapshot?, onOpen: (String) -> Unit) {
+private fun SpaceSaved(viewModel: MainViewModel, spaceId: String, snapshot: ChatSnapshot?, onOpen: (String) -> Unit, contentPadding: PaddingValues) {
   val saved = rememberRead(viewModel, spaceId) { query(ChatQueries.spaceSavedItems(spaceId)).items }
-  LazyColumn(Modifier.fillMaxSize()) {
+  LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
     placeholderItem(saved.phase { it }, saved.retry) { EmptyHint(stringResource(R.string.space_saved_empty)) }
     items(saved.maybeValue.orEmpty(), key = { it.message.id }) { item ->
       Column(Modifier.fillMaxWidth().clickable { onOpen(item.message.conversation) }.padding(16.dp)) {
@@ -266,7 +270,7 @@ private fun SpaceSaved(viewModel: MainViewModel, spaceId: String, snapshot: Chat
 }
 
 @Composable
-private fun SpaceFiles(viewModel: MainViewModel, spaceId: String) {
+private fun SpaceFiles(viewModel: MainViewModel, spaceId: String, contentPadding: PaddingValues) {
   val files = rememberFiles(viewModel, ChatQueries.spaceFiles(spaceId))
-  FilesContent(viewModel, files, R.string.space_files_empty, Modifier.fillMaxSize())
+  FilesContent(viewModel, files, R.string.space_files_empty, Modifier.fillMaxSize(), contentPadding)
 }

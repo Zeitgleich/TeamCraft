@@ -1,5 +1,10 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.consumeWindowInsets
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -143,10 +148,20 @@ fun ReportProblemScreen(viewModel: MainViewModel, account: AppState.Ready, onBac
 
   Scaffold(
     topBar = { ChromeTopBar(title = stringResource(R.string.report_title), maybeOnBack = onBack) },
-    contentWindowInsets = ScreenInsets,
+    // Edge to edge: the page scrolls behind the navigation bar and ends clear of it (see Settings).
+    contentWindowInsets = ScreenInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
   ) { padding ->
     Column(
-      Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
+      Modifier
+        .fillMaxSize()
+        .padding(padding)
+        .consumeWindowInsets(padding)
+        // The keyboard shrinks the scroll viewport, so the focused field scrolls into view above it;
+        // the navigation bar inset below is then consumed and only applies with the keyboard closed.
+        .imePadding()
+        .verticalScroll(rememberScrollState())
+        .windowInsetsPadding(ScreenInsets.only(WindowInsetsSides.Bottom))
+        .padding(16.dp),
       verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
       Text(

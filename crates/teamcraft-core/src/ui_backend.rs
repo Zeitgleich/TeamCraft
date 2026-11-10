@@ -883,6 +883,23 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
+  /// The user and the accounts among `ids` this device knows, former ones included, from one pass
+  /// over the users: a feed draws names and the user's own messages with them before the snapshot
+  /// is read. The user comes first.
+  pub fn me_and_known_users(&self, ids: &BTreeSet<UserId>) -> (User, Vec<User>) {
+    let summaries = self.summaries();
+    let me = summaries
+      .get(&self.me)
+      .map_or_else(|| self.me(), |summary| self.to_user(summary));
+    let known = ids
+      .iter()
+      .filter(|id| **id != self.me)
+      .filter_map(|id| summaries.get(id))
+      .map(|summary| self.to_user(summary))
+      .collect();
+    (me, known)
+  }
+
   pub(crate) fn me_id(&self) -> UserId {
     self.me
   }
@@ -4957,6 +4974,44 @@ mod tests {
     // Not part of the feed, but the window says they exist (an otherwise empty conversation).
     let window = teamcraft_client_api::remote::MessageWindow::read(&backend, conversation, 0, 50);
     assert_eq!((window.total, window.undecrypted), (0, 2));
+  }
+
+  /// A feed opened before the snapshot was read (from a notification, on a cold start) names its
+  /// authors and knows the user's own messages from the tail alone.
+  #[test]
+  fn the_tail_s_authors_are_the_known_ones_and_the_user_comes_first() {
+    let store = MemoryStore::new();
+    let summary = |raw: i64, name: &str, is_deactivated: bool| UserSummary {
+      id: id(raw),
+      maybe_username: None,
+      display_name: name.into(),
+      kind: teamcraft_proto::UserKind::Member,
+      maybe_email: None,
+      maybe_organization: None,
+      maybe_has_devices: None,
+      is_deactivated,
+      is_deleted: false,
+    };
+    for user in [
+      summary(1, "Alice Example", false),
+      summary(2, "Bob Example", false),
+      summary(3, "Carol Example", true),
+      summary(4, "Dan Example", false),
+    ] {
+      records::put_json(&store, Table::Users, &user.id.to_string(), &user).unwrap();
+    }
+    let backend = CoreChatBackend::new(store, id(1), Box::new(ManualClock::new(0)));
+
+    let authors = BTreeSet::from([id(1), id(2), id(3), id(99)]);
+    let (me, known) = backend.me_and_known_users(&authors);
+
+    assert_eq!(me.display_name, "Alice Example");
+    let names: Vec<_> = known.iter().map(|user| user.display_name.as_str()).collect();
+    assert_eq!(
+      names,
+      ["Bob Example", "Carol Example"],
+      "a former account names its old messages; an unknown one and people who wrote nothing are left out"
+    );
   }
 
   #[test]

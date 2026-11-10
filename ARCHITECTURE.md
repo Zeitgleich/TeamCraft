@@ -963,6 +963,16 @@ All logic (sync, crypto, storage, search, media) lives in the shared Rust core. 
 instead of Tauri mobile because the Notification Service Extension, CallKit and Android's Telecom /
 Car App integration need native targets.
 
+**Several accounts** (#214, desktop first). The desktop app holds accounts on several servers, one per
+server origin, and isolates them by that origin: tokens, DPoP key and the database and backup keys
+in the sealed file of local secrets are items named by it, and each server's store, media cache and
+upload staging live in a directory of their own. One account is active and runs the core; the
+others keep their session and are asked for their unread counts (`GET /unread`) for a badge.
+Switching reloads the webview, so no state of one account stays in its memory. Removing an account
+deletes its items and directory and re-keys the sealed file. A `lock_server` policy allows one
+account, on the managed server (docs/operations.md, "The lock with several accounts"). Web, Android
+and iOS still hold one account.
+
 ## 8. Repository layout
 
 Monorepo. Deployment configuration lives in a separate private `teamcraft-deploy` repository.

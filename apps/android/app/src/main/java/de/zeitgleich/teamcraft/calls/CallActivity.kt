@@ -11,6 +11,7 @@ import android.util.Log
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams.FLAG_SECURE
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -45,6 +46,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
@@ -112,7 +115,11 @@ class CallActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     maybeAnswerAfterPermission = savedInstanceState?.getString(STATE_ANSWER_AFTER_PERMISSION)
-    enableEdgeToEdge()
+    // The call is dark by design, whatever the system's mode: light status and navigation bar icons.
+    enableEdgeToEdge(
+      statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+      navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+    )
     if (prefs(this).isSecureScreen) window.setFlags(FLAG_SECURE, FLAG_SECURE)
     setShowWhenLocked(true)
     setTurnScreenOn(true)
@@ -120,7 +127,8 @@ class CallActivity : ComponentActivity() {
     if (intent?.action != ACTION_SHOW_INCOMING) requestMicrophoneIfMissing()
     handle(intent)
     setContent {
-      TeamCraftTheme {
+      // The dark scheme keeps the theme's status bar icons light, as the window's style sets them.
+      TeamCraftTheme(isAlwaysDark = true) {
         val maybeState by calls.callState.collectAsStateWithLifecycle()
         val maybeRing by calls.incomingRing.collectAsStateWithLifecycle()
         val isJoining by calls.isJoining.collectAsStateWithLifecycle()
@@ -240,73 +248,79 @@ private fun JoinFailedScreen(failure: JoinFailure, onClose: () -> Unit) {
 }
 
 /**
- * Who calls, with answer and decline (the ring's full-screen screen), laid out like the phone's own:
- * the caller's initial and name in the middle, two round buttons in thumb reach at the bottom,
- * red to decline on the left, green to answer on the right. Dark like the call itself.
+ * Who calls, with answer and decline (the ring's full-screen screen), laid out like Google Phone's:
+ * "Incoming call" over the caller's avatar and name, two large round Material 3 Expressive buttons
+ * in thumb reach at the bottom, red to decline on the left, green to answer on the right. Dark like
+ * the call itself.
  */
 @Composable
 private fun IncomingCallScreen(ring: IncomingRing, onAnswer: () -> Unit, onDecline: () -> Unit) {
-  Box(Modifier.fillMaxSize().background(CALL_BACKGROUND).safeDrawingPadding()) {
+  Box(Modifier.fillMaxSize().background(CALL_STAGE_COLOR).safeDrawingPadding()) {
     Column(
-      Modifier.align(Alignment.Center).padding(horizontal = 32.dp),
+      Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(top = 72.dp, start = 32.dp, end = 32.dp),
       horizontalAlignment = Alignment.CenterHorizontally,
-      verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+      Text(
+        ring.maybeCallerName?.takeIf { it != ring.displayName }?.let { stringResource(R.string.call_incoming_from, it) }
+          ?: stringResource(R.string.call_incoming),
+        style = MaterialTheme.typography.titleMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+      )
       Box(
-        Modifier.size(112.dp).background(avatarColor(null, ring.displayName), CircleShape),
+        Modifier.padding(top = 40.dp, bottom = 24.dp).size(INCOMING_AVATAR_SIZE).background(avatarColor(null, ring.displayName), CircleShape),
         contentAlignment = Alignment.Center,
       ) {
         Text(
           ring.displayName.firstOrNull()?.uppercase().orEmpty(),
-          style = MaterialTheme.typography.displaySmall,
+          style = MaterialTheme.typography.displayMedium,
           color = Color.White,
           modifier = Modifier.clearAndSetSemantics {},
         )
       }
       Text(
         ring.displayName,
-        style = MaterialTheme.typography.headlineMedium,
-        color = Color.White,
+        style = MaterialTheme.typography.headlineLarge,
+        color = MaterialTheme.colorScheme.onSurface,
         textAlign = TextAlign.Center,
         maxLines = 2,
         overflow = TextOverflow.Ellipsis,
       )
-      Text(
-        ring.maybeCallerName?.takeIf { it != ring.displayName }?.let { stringResource(R.string.call_incoming_from, it) }
-          ?: stringResource(R.string.call_incoming),
-        style = MaterialTheme.typography.bodyLarge,
-        color = Color.White.copy(alpha = 0.7f),
-        textAlign = TextAlign.Center,
-      )
     }
     Row(
-      Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 48.dp, end = 48.dp, bottom = 56.dp),
+      Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(start = 40.dp, end = 40.dp, bottom = 48.dp),
       horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-      RingButton(CallIcons.CallEnd, stringResource(R.string.call_decline), DECLINE_RED, onDecline)
-      RingButton(Icons.Filled.Call, stringResource(R.string.call_answer), ANSWER_GREEN, onAnswer)
+      RingButton(CallIcons.CallEnd, stringResource(R.string.call_decline), HANG_UP_RED, HapticFeedbackType.Reject, onDecline)
+      RingButton(Icons.Filled.Call, stringResource(R.string.call_answer), ANSWER_GREEN, HapticFeedbackType.Confirm, onAnswer)
     }
   }
 }
 
-/** A large round button with its label under it. */
+/** A large round Material icon button (it morphs when pressed) with its label under it. */
 @Composable
-private fun RingButton(icon: ImageVector, label: String, color: Color, onClick: () -> Unit) {
-  Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+private fun RingButton(icon: ImageVector, label: String, color: Color, haptic: HapticFeedbackType, onClick: () -> Unit) {
+  val haptics = LocalHapticFeedback.current
+  Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
     FilledIconButton(
-      onClick = onClick,
-      modifier = Modifier.size(72.dp),
+      onClick = {
+        haptics.performHapticFeedback(haptic)
+        onClick()
+      },
+      shapes = IconButtonDefaults.shapes(
+        shape = IconButtonDefaults.largeRoundShape,
+        pressedShape = IconButtonDefaults.largePressedShape,
+      ),
+      modifier = Modifier.size(IconButtonDefaults.largeContainerSize()),
       colors = IconButtonDefaults.filledIconButtonColors(containerColor = color, contentColor = Color.White),
     ) {
-      Icon(icon, contentDescription = label, modifier = Modifier.size(32.dp))
+      Icon(icon, contentDescription = label, modifier = Modifier.size(IconButtonDefaults.largeIconSize))
     }
-    Text(label, style = MaterialTheme.typography.labelLarge, color = Color.White)
+    Text(label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurface)
   }
 }
 
-private val CALL_BACKGROUND = Color(0xFF11151B)
-private val DECLINE_RED = Color(0xFFD93A3A)
-private val ANSWER_GREEN = Color(0xFF2E9E5B)
+private val INCOMING_AVATAR_SIZE = 128.dp
 
 @Composable
 private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
@@ -405,6 +419,8 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       areControlsShown = areControlsShown,
       names = names,
       isNotetakerPresent = maybeNotetaker?.isPresent == true,
+      // "Add people" is offered in DM and group DM calls only: its choice says which this is.
+      isDirectCall = addChoice != null,
     ),
     actions = CallUiActions(
       onToggleControls = { areControlsShown = !areControlsShown },

@@ -1,0 +1,76 @@
+/* Several accounts in the desktop app (#214): the account menu's entries, the badge on the account
+   button, the accounts dialog and the way back to them on the sign-in screens. */
+
+.account-item .badge-count,
+.account-item .unread-dot {
+  flex: none;
+}
+
+/* Another account has something unread: on the account button's corner, over the avatar. */
+.account-others-badge {
+  position: absolute;
+  top: -2px;
+  right: -4px;
+  pointer-events: none;
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.accounts-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.accounts-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.accounts-name {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.accounts-name small {
+  font-size: var(--text-xs);
+}
+
+.accounts-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.accounts-confirm {
+  flex-basis: 100%;
+  font-size: var(--text-sm);
+}
+
+.auth-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-5);
+  text-align: center;
+}
+
+.auth-account {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+}

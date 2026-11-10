@@ -8,6 +8,9 @@ activityCompose = "1.13.0"
 lifecycle = "2.11.0"
 navigation = "2.10.2"
 composeBom = "2026.09.00"
+# Material 3 Expressive (MaterialExpressiveTheme, MotionScheme, button groups, loading indicator,
+# flexible app bars) is public from 1.5; the BOM still pins 1.4.
+material3 = "1.5.0-rc01"
 appauth = "0.11.1"
 browser = "1.10.0"
 firebaseMessaging = "26.0.1"
@@ -36,7 +39,7 @@ androidx-navigation-compose = { module = "androidx.navigation:navigation-compose
 androidx-browser = { module = "androidx.browser:browser", version.ref = "browser" }
 compose-bom = { module = "androidx.compose:compose-bom", version.ref = "composeBom" }
 compose-ui = { module = "androidx.compose.ui:ui" }
-compose-material3 = { module = "androidx.compose.material3:material3" }
+compose-material3 = { module = "androidx.compose.material3:material3", version.ref = "material3" }
 compose-material-icons = { module = "androidx.compose.material:material-icons-core" }
 compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }

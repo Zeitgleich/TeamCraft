@@ -60,6 +60,11 @@ struct ChatPane: View {
   /// The groups the composer offers after `@` here (issue #206), and who the text's reach.
   @State private var mentionableGroups: [MentionableGroupItem] = []
   @State private var groupReach = GroupMentionReachItem(notifiedCount: 0, outsideCount: 0)
+  /// The people the composer offers after `@` (issue #1619), and how many members there are.
+  @State private var mentionPeople: [PeopleSnapshot.Person] = []
+  @State private var memberCount = 0
+  /// A send waiting for the user's yes to a mention that notifies many; `nil` due time: send now.
+  @State private var maybePendingMention: PendingMention?
   @State private var maybeHighlighted: String?
   @State private var isPermalinkMissing = false
   @State private var displayNames: [String: String] = [:]
@@ -129,6 +134,7 @@ struct ChatPane: View {
       await reloadDraftFiles()
       runningCallCount = await model.runningCalls()[conversation.id] ?? 0
       mentionableGroups = await model.mentionableGroups(conversation.id)
+      (mentionPeople, memberCount) = await model.mentionMembers(conversation.id)
       await followTransfers()
     }
     .task(id: draft) {
@@ -310,8 +316,9 @@ struct ChatPane: View {
       Text("delete_confirm_text")
     }
     .sheet(isPresented: $isSchedulingSend) {
-      SendLaterSheet { dueAtMs in Task { await schedule(dueAtMs: dueAtMs) } }
+      SendLaterSheet { dueAtMs in Task { await confirmThenSend(dueAtMs: dueAtMs) } }
     }
+    .modifier(MentionConfirmationAlert(pending: $maybePendingMention, onSend: sendConfirmed))
     .task(id: model.changeCount) {
       isSchedulingAllowed = await model.scheduledOverview()?.policy.isEnabled == true
     }
@@ -594,7 +601,9 @@ struct ChatPane: View {
       VStack(alignment: .leading, spacing: 6) {
         if let reply = maybeReply { replyBar(reply) }
         EmojiSuggestionBar(text: draft) { emoji in draft = completeEmoji(in: draft, with: emoji) }
-        GroupMentionBar(text: draft, groups: mentionableGroups) { handle in draft = completeMention(in: draft, handle: handle) }
+        MentionSuggestionBar(text: draft, people: mentionPeople, groups: mentionableGroups) { handle in
+          draft = completeMention(in: draft, handle: handle)
+        }
         if groupReach.outsideCount > 0 {
           Text("group_mention_outside \(Int(groupReach.outsideCount))")
             .font(.app(.caption))
@@ -636,7 +645,7 @@ struct ChatPane: View {
           Task { await sendVoice() }
         }
       } else {
-        Button { Task { await submit() } } label: {
+        Button { Task { await confirmThenSend(dueAtMs: nil) } } label: {
           Image(systemName: maybeEditing == nil ? "arrow.up" : "checkmark")
             .font(.app(.body).weight(.semibold))
             .foregroundStyle(canSubmit ? Theme.onAccent : Theme.textMuted)
@@ -1130,6 +1139,35 @@ struct ChatPane: View {
     }
   }
 
+  /// Sends (or schedules for `dueAtMs`) after the confirmations the text needs: `@channel`, or
+  /// group mentions that notify more people than the same setting (issue #1619). The reach is read
+  /// for this text; an edit is not asked about.
+  private func confirmThenSend(dueAtMs: Int64?) async {
+    let checked = draft
+    if maybeEditing == nil, checked.contains("@") {
+      let reach = await model.groupMentionReach(conversation.id, body: checked)
+      // Typed on while it was read: the next tap asks again for the new text.
+      guard draft == checked else { return }
+      if let needed = MentionConfirmation.needed(
+        body: checked, memberCount: memberCount, notified: Int(reach.notifiedCount),
+        confirmOver: AppSettingsStores.confirmChannelOver())
+      {
+        maybePendingMention = PendingMention(confirmation: needed, dueAtMs: dueAtMs)
+        return
+      }
+    }
+    await sendNow(dueAtMs: dueAtMs)
+  }
+
+  private func sendConfirmed(_ pending: PendingMention) async {
+    maybePendingMention = nil
+    await sendNow(dueAtMs: pending.dueAtMs)
+  }
+
+  private func sendNow(dueAtMs: Int64?) async {
+    if let dueAtMs { await schedule(dueAtMs: dueAtMs) } else { await submit() }
+  }
+
   private func submit() async {
     // `:)` and `:tada:` become emoji, as on desktop and Android.
     let body = emojiConvert(text: draft.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -1568,29 +1606,78 @@ struct EmojiSuggestionBar: View {
   }
 }
 
-/// Groups to mention after `@` (issue #206), each with how many it notifies here.
-struct GroupMentionBar: View {
+/// A send that waits for the user's yes (issue #1619).
+struct PendingMention: Equatable {
+  let confirmation: MentionConfirmation
+  let dueAtMs: Int64?
+
+  var titleKey: LocalizedStringKey {
+    switch confirmation {
+    case .channel: "channel_mention_confirm_title"
+    case .groups: "group_mention_confirm_title"
+    }
+  }
+
+  var message: Text {
+    switch confirmation {
+    case .channel(let count): Text("channel_mention_confirm \(count)")
+    case .groups(let notified):
+      notified > Int(maxMentionsPerMessage())
+        ? Text("group_mention_confirm_capped \(Int(maxMentionsPerMessage())) \(notified)")
+        : Text("group_mention_confirm \(notified)")
+    }
+  }
+}
+
+/// Asks before a send that notifies many people (issue #1619); a modifier of its own keeps the
+/// conversation view's body light enough for the type checker.
+struct MentionConfirmationAlert: ViewModifier {
+  @Binding var pending: PendingMention?
+  let onSend: (PendingMention) async -> Void
+
+  private var isShown: Binding<Bool> {
+    Binding<Bool>(get: { pending != nil }, set: { if !$0 { pending = nil } })
+  }
+
+  func body(content: Content) -> some View {
+    let title: LocalizedStringKey = pending?.titleKey ?? "channel_mention_confirm_title"
+    content.alert(title, isPresented: isShown, presenting: pending) { (item: PendingMention) in
+      Button("send") { Task { await onSend(item) } }
+      Button("cancel", role: .cancel) {}
+    } message: { (item: PendingMention) in
+      item.message
+    }
+  }
+}
+
+/// People and groups to mention after `@` (issues #206, #1619), the groups with how many they notify here.
+struct MentionSuggestionBar: View {
   let text: String
+  let people: [PeopleSnapshot.Person]
   let groups: [MentionableGroupItem]
   let onPick: (String) -> Void
 
   var body: some View {
     if let query = activeMentionQuery(text) {
       let adminsName = String(localized: "group_mention_admins")
-      let shown = groupSuggestions(query: query, groups: groups, adminsName: adminsName)
-      if !shown.isEmpty {
+      let shownPeople = personSuggestions(query: query, people: people)
+      let shownGroups = groupSuggestions(query: query, groups: groups, adminsName: adminsName)
+      if !shownPeople.isEmpty || !shownGroups.isEmpty {
         ScrollView(.horizontal, showsIndicators: false) {
           HStack(spacing: 6) {
-            ForEach(shown, id: \.handle) { group in
+            ForEach(shownPeople, id: \.id) { person in
+              Button { onPick(person.username) } label: {
+                Text(verbatim: "@\(person.username) · \(person.displayName)").chip()
+              }
+              .buttonStyle(.plain)
+            }
+            ForEach(shownGroups, id: \.handle) { group in
               Button { onPick(group.handle) } label: {
                 HStack(spacing: 4) {
                   Text(verbatim: "@\(group.handle) · \(shownGroupName(group, adminsName: adminsName)) ·")
                   Text("group_mention_people \(Int(group.notifiedCount))")
                 }
-                .font(.app(.caption))
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(Theme.surface)
-                .clipShape(Capsule())
+                .chip()
               }
               .buttonStyle(.plain)
             }
@@ -1598,6 +1685,15 @@ struct GroupMentionBar: View {
         }
       }
     }
+  }
+}
+
+private extension View {
+  func chip() -> some View {
+    font(.app(.caption))
+      .padding(.horizontal, 10).padding(.vertical, 6)
+      .background(Theme.surface)
+      .clipShape(Capsule())
   }
 }
 
