@@ -114,7 +114,7 @@ pub use voice::{
 };
 
 use crate::engine::{DrainGoal, Engine, EngineThreads, Job, PushOpening, PushReader};
-use crate::logging::{LifecycleStep, outcome};
+use crate::logging::{JobClock, LifecycleStep, outcome};
 use crate::reads::{ReadQueue, Reads};
 
 uniffi::setup_scaffolding!();
@@ -946,19 +946,26 @@ impl TeamCraft {
     max_total_bytes: u64,
   ) -> Result<SegmentPrefetchResult, TeamCraftError> {
     self
-      .call(move |engine| Box::pin(engine.prefetch_segments(is_network_metered, max_total_bytes)))
+      .call(move |engine| {
+        Box::pin(async move { engine.begin_prefetch_segments(is_network_metered, max_total_bytes) })
+      })
+      .await?
+      .finished()
       .await
   }
 
   /// Downloads the conversations' published search segments (e2ee.md §10.1), newest first, while
   /// the segments kept on the device stay within `max_total_bytes`. The app calls it on unmetered
-  /// networks while charging.
+  /// networks while charging. It runs beside the sync and the other calls, which don't wait for it
+  /// (issue #1634); cancelling the call stops it.
   pub async fn prefetch_search_segments(
     &self,
     max_total_bytes: u64,
   ) -> Result<SegmentPrefetchResult, TeamCraftError> {
     self
-      .call(move |engine| Box::pin(engine.prefetch_search_segments(max_total_bytes)))
+      .call(move |engine| Box::pin(async move { engine.begin_prefetch_search_segments(max_total_bytes) }))
+      .await?
+      .finished()
       .await
   }
 
@@ -1620,9 +1627,9 @@ impl TeamCraft {
     let boxed: Job = Box::new(move |engine| {
       Box::pin(async move {
         let running = timing.start();
-        let started = Instant::now();
+        let clock = JobClock::start();
         let result = job(engine).await;
-        logging::slow_job(std::any::type_name::<F>(), started - queued, started.elapsed());
+        logging::slow_job(std::any::type_name::<F>(), clock.started() - queued, clock.ran());
         running.done();
         // The caller may have given up waiting (cancelled coroutine); nothing to tell it then.
         let _ = reply.send(result);
@@ -2007,6 +2014,48 @@ mod tests {
       assert!(matches!(request.await.unwrap(), Err(TeamCraftError::Network(_))));
     }
 
+    /// A segment prefetch waiting for its download (issue #1634) holds neither the engine's jobs,
+    /// nor its client (the sync loop keeps it), nor the store: before, it took the client and held
+    /// the engine thread for the whole run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_segment_prefetch_holds_neither_the_jobs_nor_the_client_nor_the_store() {
+      let directory = TestDir::new("prefetch-beside");
+      enroll(&directory).await;
+      announce_segment(&directory);
+      let (entered, in_download) = mpsc::channel();
+      let (finish, finished) = mpsc::channel::<()>();
+      let tokens = Arc::new(BlockedTokens {
+        entered,
+        finished: Mutex::new(finished),
+      });
+      let core = open_with(&directory, tokens, Arc::new(Quiet));
+
+      let prefetch = {
+        let core = core.clone();
+        tokio::spawn(async move { core.prefetch_search_segments(u64::MAX).await })
+      };
+      in_download.recv().unwrap();
+      let has_client = core
+        .call(|engine| Box::pin(async move { Ok(!matches!(engine.client, engine::ClientSlot::Missing)) }))
+        .await
+        .unwrap();
+      assert!(has_client, "the client stays where the sync loop needs it");
+      core
+        .set_segment_prefetch(SegmentPrefetchMode::Always)
+        .await
+        .expect("a job writes to the store meanwhile");
+      assert!(core.conversations().await.is_ok(), "the read thread answers");
+      assert_eq!(
+        core.segment_prefetch().await.unwrap(),
+        SegmentPrefetchMode::Always
+      );
+      assert!(!prefetch.is_finished(), "still downloading");
+
+      drop(finish);
+      // The server is unreachable: the download fails, and nothing was stored.
+      assert!(matches!(prefetch.await.unwrap(), Err(TeamCraftError::Network(_))));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_store_only_the_client_finds_unreadable_leads_to_the_recovery() {
       let directory = TestDir::new("late-problem");
@@ -2148,6 +2197,47 @@ mod tests {
         .await
         .unwrap();
       drop(client);
+    }
+
+    /// A conversation whose history announces one published search segment this device lacks.
+    fn announce_segment(directory: &TestDir) {
+      let store = SealedSqliteStore::open(
+        &directory.store(),
+        &StaticKeySource::new(SymmetricKey::from_bytes(KEY)),
+      )
+      .unwrap();
+      let conversation: teamcraft_proto::ConversationId = CONVERSATION.parse().unwrap();
+      let record = serde_json::json!({
+        "id": conversation,
+        "kind": "channel",
+        "name": "general",
+        "visibility": "public",
+        "history_policy": "full",
+        "is_archived": false,
+        "moderation": teamcraft_proto::ChannelModeration::default(),
+        "contains_guests": false,
+      });
+      serde_json::from_value::<teamcraft_proto::ConversationResponse>(record.clone()).unwrap();
+      teamcraft_core::records::put_json(&store, Table::Conversations, CONVERSATION, &record).unwrap();
+      let segment: teamcraft_core::store::AttachmentRef = serde_json::from_value(serde_json::json!({
+        "attachment_id": "5",
+        "key": "AAAA",
+        "ciphertext_sha256": "AAAA",
+        "file_name": "index-2026-01",
+        "media_type": "application/x-teamcraft-index-segment",
+        "size_bytes": 1024,
+      }))
+      .unwrap();
+      let message: teamcraft_core::store::StoredMessage = serde_json::from_value(serde_json::json!({
+        "conversation_id": conversation,
+        "client_message_id": teamcraft_proto::ClientMessageId::from_bytes([7; 16]),
+        "server_id": "9000",
+        "sender_user_id": "77",
+        "sent_at_ms": 1_770_000_000_000_i64,
+        "content": { "type": "index_segment", "month": "2026-01", "segment": segment, "message_count": 3 },
+      }))
+      .unwrap();
+      store.upsert_message(&message).unwrap();
     }
 
     /// A sync state that doesn't decode: only the client reads it.

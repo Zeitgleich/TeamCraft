@@ -193,18 +193,23 @@ impl BlobDownload {
       reference, request, ..
     } = self;
     let ciphertext = request.await?;
-    if !ciphertext_matches(&ciphertext, reference.ciphertext_sha256.as_slice()) {
-      return Err(CoreError::Corrupt(
-        "attachment blob doesn't match its hash".into(),
-      ));
-    }
-    let key = SymmetricKey::from_slice(reference.key.as_slice())
-      .ok_or_else(|| CoreError::Corrupt("bad attachment key".into()))?;
-    Ok(decrypt_attachment(&AttachmentKey::from_key(key), &ciphertext)?)
+    open_blob(&reference, &ciphertext)
   }
 
   #[cfg(target_arch = "wasm32")]
   pub(crate) fn reference(&self) -> &AttachmentRef {
     &self.reference
   }
+}
+
+/// Checks a received blob against the hash its message carries and decrypts it.
+pub(crate) fn open_blob(reference: &AttachmentRef, ciphertext: &[u8]) -> Result<SecretBytes, CoreError> {
+  if !ciphertext_matches(ciphertext, reference.ciphertext_sha256.as_slice()) {
+    return Err(CoreError::Corrupt(
+      "attachment blob doesn't match its hash".into(),
+    ));
+  }
+  let key = SymmetricKey::from_slice(reference.key.as_slice())
+    .ok_or_else(|| CoreError::Corrupt("bad attachment key".into()))?;
+  Ok(decrypt_attachment(&AttachmentKey::from_key(key), ciphertext)?)
 }

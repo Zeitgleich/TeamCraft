@@ -23,7 +23,7 @@ use teamcraft_core::client::NewDeviceLink;
 use teamcraft_core::client::files::sweep_staged_copies;
 use teamcraft_core::client::{
   CatchUpFocus, HistoryBackfill, LinkAnnouncement, LinkApproval, LinkRequestList, PushRegistrar,
-  ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE,
+  ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE, SegmentPlan,
 };
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
@@ -74,6 +74,13 @@ const MAX_APPROVAL_MISSES: u8 = 3;
 const DOWNLOADS_DIR: &str = "downloads";
 /// The caches of the open chat's read connection: it reads a few conversations' pages, not the
 /// whole chat list, so half the default (docs/performance.md, "Local store").
+/// The segment prefetch's connection: it reads each message once, so small caches do.
+const SEGMENT_PLAN_LIMITS: SealedStoreLimits = SealedStoreLimits {
+  max_entry_bytes: 1024 * 1024,
+  max_message_bytes: 1024 * 1024,
+  max_index_node_bytes: 512 * 1024,
+};
+
 const READ_LANE_LIMITS: SealedStoreLimits = SealedStoreLimits {
   max_entry_bytes: 4 * 1024 * 1024,
   max_message_bytes: 2 * 1024 * 1024,
@@ -144,6 +151,8 @@ pub(crate) struct Engine {
   /// thread, which has its own ([`ReadQueue`]).
   maybe_backend: Option<CoreChatBackend<Store>>,
   reads: ReadQueue,
+  /// Opens read connections of their own beside the writer's (the segment prefetch).
+  lanes: LaneOpener,
   /// This device, once enrolled; readable while the sync loop owns the client.
   maybe_device_id: Option<DeviceId>,
   /// One push registration at a time, beside the sync loop and the jobs ([`PushRegistrar`]).
@@ -643,6 +652,7 @@ impl Engine {
       is_memory_constrained,
       ..
     } = start;
+    let key_source_key = key.duplicate();
     let key_source = StaticKeySource::new(key);
     let (store, cached_bytes) = if is_memory_constrained {
       // Never the catalog's build: a first push after an update would run it under the limit.
@@ -662,20 +672,26 @@ impl Engine {
     // The apps keep drafts of conversations, which go with them (#1161).
     let engine_store = TrackedStore::with_message_cache(LaneStore::writer(Arc::clone(&store)), cached_bytes)
       .with_conversation_purges();
-    let lanes = read_lanes(
-      &engine_store,
-      &store,
-      &path,
-      &key_source,
-      &journal,
+    let lanes = LaneOpener {
+      engine: engine_store.clone(),
+      writer: Arc::clone(&store),
+      path,
+      key: key_source_key,
+      journal,
       is_memory_constrained,
-    );
+    };
+    let read_lanes = lanes.read_lanes();
     let store = engine_store;
     // A broken record only costs the preferences, not the store.
     let mentions: MentionSettings = load_mention_preferences(&store).unwrap_or_default().into();
     let maybe_account = records::load_account(&store).map_err(open_error)?;
-    let reads = ReadQueue::start(lanes, listener.clone(), signals.catch_up_focus.clone(), own_jobs)
-      .map_err(OpenError::Failed)?;
+    let reads = ReadQueue::start(
+      read_lanes,
+      listener.clone(),
+      signals.catch_up_focus.clone(),
+      own_jobs,
+    )
+    .map_err(OpenError::Failed)?;
     let tokens =
       ForeignTokens::new(tokens, signals.id_tokens.clone(), maybe_device_key).map_err(OpenError::Failed)?;
     let mut engine = Self {
@@ -690,6 +706,7 @@ impl Engine {
       client: ClientSlot::Missing,
       maybe_backend: None,
       reads,
+      lanes,
       shared_downloads,
       maybe_device_id: None,
       push_turn: Rc::default(),
@@ -1549,37 +1566,46 @@ impl Engine {
     Ok(save_segment_prefetch(&self.store, mode.into())?)
   }
 
-  /// Prefetches the search segments if the saved mode allows it on this network; nothing is
+  /// Starts the search segment prefetch if the saved mode allows it on this network; nothing is
   /// fetched otherwise.
-  pub(crate) async fn prefetch_segments(
+  pub(crate) fn begin_prefetch_segments(
     &mut self,
     is_network_metered: bool,
     max_total_bytes: u64,
-  ) -> Result<SegmentPrefetchResult, TeamCraftError> {
+  ) -> Result<SegmentPrefetchRun, TeamCraftError> {
     if !load_segment_prefetch(&self.store)?.allows(is_network_metered) {
-      return Ok(SegmentPrefetchResult {
+      return Ok(SegmentPrefetchRun::done(SegmentPrefetchResult {
         fetched: 0,
         skipped: 0,
         stored_bytes: 0,
-      });
+      }));
     }
-    self.prefetch_search_segments(max_total_bytes).await
+    self.begin_prefetch_search_segments(max_total_bytes)
   }
 
-  /// Downloads missing search segments, newest first, within `max_total_bytes`; pauses syncing
-  /// meanwhile.
-  pub(crate) async fn prefetch_search_segments(
+  /// Starts downloading the missing search segments, newest first, within `max_total_bytes`, as a
+  /// task beside the jobs (issue #1634): the sync loop keeps running and the jobs don't wait. Its
+  /// look through the store reads on a connection of its own, off this thread; a download holds no
+  /// lock, and each segment is one short write. Dropping the run stops it.
+  pub(crate) fn begin_prefetch_search_segments(
     &mut self,
     max_total_bytes: u64,
-  ) -> Result<SegmentPrefetchResult, TeamCraftError> {
-    let was_running = matches!(self.client, ClientSlot::Running { .. });
-    let mut client = self.take_client().await?;
-    let result = client.prefetch_index_segments(max_total_bytes).await;
-    self.client = ClientSlot::Idle(client);
-    if was_running {
-      self.start().await?;
+  ) -> Result<SegmentPrefetchRun, TeamCraftError> {
+    if self.maybe_backend.is_none() {
+      return Err(TeamCraftError::NotEnrolled);
     }
-    Ok(result?.into())
+    let store = self.lanes.open(SEGMENT_PLAN_LIMITS);
+    let api = self.api();
+    let (reply, answer) = oneshot::channel();
+    let task = tokio::task::spawn_local(async move {
+      let result = prefetch_segments_beside(api, store, max_total_bytes).await;
+      // The caller may have stopped waiting; the task ends anyway.
+      let _ = reply.send(result);
+    });
+    Ok(SegmentPrefetchRun {
+      answer,
+      _stop: AbortOnDrop(Some(task.abort_handle())),
+    })
   }
 
   pub(crate) async fn complete_enrollment(
@@ -2012,33 +2038,96 @@ async fn run_offline_tolerant(client: &mut CoreClient, command: CoreCommand) -> 
 
 /// An error of opening the store or the client on it: data this version can't read, now or after a
 /// restart, gets its own answer (issue #414); anything else stays a plain failure.
-/// The read threads' views of the store: each reads through a connection of its own, beside the
-/// engine's groups of writes (issue #1476). A process that must stay small (the notification
-/// extension) opens none, and a reader that doesn't open leaves its thread on the writer as before.
-fn read_lanes(
-  engine: &Store,
-  writer: &Arc<SealedSqliteStore>,
-  path: &std::path::Path,
-  key_source: &StaticKeySource,
-  journal: &Arc<CommitJournal>,
+/// Opens read connections beside the engine's writer (issue #1476). A process that must stay small
+/// (the notification extension) opens none, and a reader that doesn't open leaves its user on the
+/// writer as before.
+pub(crate) struct LaneOpener {
+  engine: Store,
+  writer: Arc<SealedSqliteStore>,
+  path: PathBuf,
+  key: SymmetricKey,
+  journal: Arc<CommitJournal>,
   is_memory_constrained: bool,
-) -> ReadLanes {
-  let lane = |limits: SealedStoreLimits| {
-    if is_memory_constrained {
-      return engine.clone();
+}
+
+impl LaneOpener {
+  /// The read threads' views of the store: each reads through a connection of its own, beside the
+  /// engine's groups of writes.
+  fn read_lanes(&self) -> ReadLanes {
+    ReadLanes {
+      main: self.open(SealedStoreLimits::default()),
+      query: self.open(READ_LANE_LIMITS),
     }
-    match SealedSqliteStore::open_reader(path, key_source, limits, Arc::clone(journal)) {
-      Ok(reader) => engine.sharing(LaneStore::reader(Arc::clone(writer), Arc::new(reader))),
+  }
+
+  /// A view that reads through a new connection and writes through the writer's.
+  fn open(&self, limits: SealedStoreLimits) -> Store {
+    if self.is_memory_constrained {
+      return self.engine.clone();
+    }
+    let key_source = StaticKeySource::new(self.key.duplicate());
+    match SealedSqliteStore::open_reader(&self.path, &key_source, limits, Arc::clone(&self.journal)) {
+      Ok(reader) => self
+        .engine
+        .sharing(LaneStore::reader(Arc::clone(&self.writer), Arc::new(reader))),
       Err(error) => {
         tracing::warn!(%error, "could not open a read connection; reading through the writer's");
-        engine.clone()
+        self.engine.clone()
       },
     }
-  };
-  ReadLanes {
-    main: lane(SealedStoreLimits::default()),
-    query: lane(READ_LANE_LIMITS),
   }
+}
+
+/// A segment prefetch running beside the engine's jobs ([`Engine::begin_prefetch_search_segments`]).
+/// Dropping it, as a cancelled caller does, stops the prefetch.
+pub(crate) struct SegmentPrefetchRun {
+  answer: oneshot::Receiver<Result<SegmentPrefetchResult, TeamCraftError>>,
+  _stop: AbortOnDrop,
+}
+
+/// Stops a task beside the jobs when its caller goes.
+struct AbortOnDrop(Option<tokio::task::AbortHandle>);
+
+impl SegmentPrefetchRun {
+  fn done(result: SegmentPrefetchResult) -> Self {
+    let (reply, answer) = oneshot::channel();
+    // Invariant: `answer` is alive right here, so the send can't fail.
+    let _ = reply.send(Ok(result));
+    Self {
+      answer,
+      _stop: AbortOnDrop(None),
+    }
+  }
+
+  /// Waits for the prefetch to end.
+  pub(crate) async fn finished(self) -> Result<SegmentPrefetchResult, TeamCraftError> {
+    self.answer.await.map_err(|_| TeamCraftError::EngineStopped)?
+  }
+}
+
+impl Drop for AbortOnDrop {
+  fn drop(&mut self) {
+    if let Some(abort) = self.0.take() {
+      abort.abort();
+    }
+  }
+}
+
+/// The prefetch itself: the look through the store on a blocking thread (it reads every
+/// conversation's announcements), then the downloads.
+async fn prefetch_segments_beside(
+  api: Api,
+  store: Store,
+  max_total_bytes: u64,
+) -> Result<SegmentPrefetchResult, TeamCraftError> {
+  let reading = store.clone();
+  let plan = tokio::task::spawn_blocking(move || SegmentPlan::read(&reading))
+    .await
+    .map_err(|error| TeamCraftError::Storage(format!("the segment look-up ended abnormally: {error}")))??;
+  if plan.missing_count() > 0 {
+    tracing::info!(missing = plan.missing_count(), "prefetching search segments");
+  }
+  Ok(plan.fetch(&api, &store, max_total_bytes).await?.into())
 }
 
 fn open_error(error: CoreError) -> OpenError {

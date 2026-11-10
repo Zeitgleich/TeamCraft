@@ -275,9 +275,13 @@ queue depth 41, next to forty `core.read conversations` steps. A test reproduces
 
 **Slow jobs as warnings.** A job that waits or runs longer than the instance's threshold
 (Administration → Crash reports → `slow_job_ms`, 1000 ms by default, 0: never) is sent as a warning
-event `Slow core job: <name>`, grouped per job, tagged with `job`, `queue`, `wait_ms`, `run_ms` and
-`queue_depth`, sampled like handled errors; at most one per job a minute and 20 per process. It
-shows slow jobs that no measure was open for (a background sync holding the read thread).
+event `Slow core job: <name>`, grouped per job, tagged with `job`, `queue`, `wait_ms`, `run_ms`,
+`cpu_ms` and `queue_depth`, sampled like handled errors; at most one per job a minute and 20 per
+process. It shows slow jobs that no measure was open for (a background sync holding the read thread).
+`cpu_ms` is the CPU time the job's thread used while it ran (Android; #1634): far below `run_ms`,
+the job waited (a lock, or the process frozen in the background, which counts on the wall clock),
+about `run_ms`, it worked. The app's queries all run as the job `query`; each is also kept as a step
+named after its kind (`query_feed_extras`), and reported as `Slow core job: query_<kind>` when slow.
 
 **Named steps inside the core (all platforms).** `teamcraft_core::timing::step("name")` times the
 rest of a function; about seventy places carry one, among them: store open and catalog build

@@ -4,7 +4,7 @@
 //! Never secrets (security.md): events carry IDs and error causes, no content.
 
 use std::sync::Once;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 use tracing::Level;
@@ -83,13 +83,14 @@ fn panic_message<'a>(info: &'a std::panic::PanicHookInfo<'_>) -> Option<&'a str>
 /// Logs an engine job that held the engine thread, or waited for it, for long. Everything the apps
 /// ask for runs on that thread beside the sync loop, so this names what a slow start waits for
 /// (issue #1142). `job` is the job's type name: code, never data.
-pub(crate) fn slow_job(job: &str, waited: Duration, ran: Duration) {
-  if waited >= SLOW_JOB || ran >= SLOW_JOB {
+pub(crate) fn slow_job(job: &str, waited: Duration, ran: Ran) {
+  if waited >= SLOW_JOB || ran.wall >= SLOW_JOB {
     tracing::info!(
       target: LIFECYCLE,
       job,
       waited_ms = waited.as_millis(),
-      ran_ms = ran.as_millis(),
+      ran_ms = ran.wall.as_millis(),
+      cpu_ms = ran.maybe_cpu.map(|cpu| cpu.as_millis()),
       "slow engine job"
     );
   }
@@ -97,16 +98,70 @@ pub(crate) fn slow_job(job: &str, waited: Duration, ran: Duration) {
 
 /// Logs a read on the read thread that took long or waited long, which should be rare: nothing but
 /// another read and another thread's group of writes holds it up.
-pub(crate) fn slow_read(job: &str, waited: Duration, ran: Duration) {
-  if waited >= SLOW_JOB || ran >= SLOW_JOB {
+pub(crate) fn slow_read(job: &str, waited: Duration, ran: Ran) {
+  if waited >= SLOW_JOB || ran.wall >= SLOW_JOB {
     tracing::info!(
       target: LIFECYCLE,
       job,
       waited_ms = waited.as_millis(),
-      ran_ms = ran.as_millis(),
+      ran_ms = ran.wall.as_millis(),
+      cpu_ms = ran.maybe_cpu.map(|cpu| cpu.as_millis()),
       "slow read"
     );
   }
+}
+
+/// When a job started, by the wall clock and by its thread's CPU time (issue #1634): a job that
+/// ran for long on the wall but used little CPU waited (a lock, or the process frozen in the
+/// background), one that used it all worked.
+pub(crate) struct JobClock {
+  started: Instant,
+  maybe_cpu: Option<Duration>,
+}
+
+/// How long a job ran ([`JobClock`]). On the engine thread the CPU time includes what ran beside
+/// the job there meanwhile (the sync loop).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Ran {
+  wall: Duration,
+  maybe_cpu: Option<Duration>,
+}
+
+impl JobClock {
+  pub(crate) fn start() -> Self {
+    Self {
+      started: Instant::now(),
+      maybe_cpu: thread_cpu_time(),
+    }
+  }
+
+  pub(crate) fn started(&self) -> Instant {
+    self.started
+  }
+
+  pub(crate) fn ran(&self) -> Ran {
+    Ran {
+      wall: self.started.elapsed(),
+      maybe_cpu: self
+        .maybe_cpu
+        .zip(thread_cpu_time())
+        .map(|(before, after)| after.saturating_sub(before)),
+    }
+  }
+}
+
+/// The CPU time this thread used so far, where the system tells it.
+#[cfg(any(target_os = "android", target_os = "linux"))]
+pub(crate) fn thread_cpu_time() -> Option<Duration> {
+  let now = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
+  let seconds = u64::try_from(now.tv_sec).ok()?;
+  let nanos = u32::try_from(now.tv_nsec).ok()?;
+  Some(Duration::new(seconds, nanos))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "linux")))]
+pub(crate) fn thread_cpu_time() -> Option<Duration> {
+  None
 }
 
 /// Logs a query of the app's that ran long, by its kind (issue #1575): a "slow read" line names
