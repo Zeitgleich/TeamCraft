@@ -20,7 +20,7 @@ sqlcipher = ["dep:rusqlite", "rusqlite/bundled-sqlcipher"]
 # no libcrypto for SQLCipher.
 sealed-sqlite = ["dep:rusqlite", "rusqlite/bundled"]
 # Adapter implementing the UI's backend traits (crates/teamcraft-client-api).
-ui = ["dep:teamcraft-client-api"]
+ui = ["dep:teamcraft-client-api", "dep:crc32fast"]
 # The Web Push service worker's entry points (`handlePush`, `handleNotificationClick`), exported
 # with wasm-bindgen for web/service-worker.js. Only has an effect on wasm32. The worker reads the
 # notification's picture from the media cache, whose keys are the UI contract's (#543).
@@ -56,6 +56,8 @@ teamcraft-client-api = { path = "../teamcraft-client-api", optional = true }
 # The shared retry policy (src/retry.rs); natively also Happy Eyeballs for the WebSocket connects
 # (src/api/connect.rs).
 teamcraft-net.workspace = true
+# Checksums of the data export's ZIP entries (src/export/zip.rs); already in the tree.
+crc32fast = { version = "1.5.3", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Thumbnails of image attachments, made by the sender's client (already in the tree via the
@@ -187,6 +189,9 @@ base64 = "0.23.1"
 # Peak heap use in the large-upload memory test (tests/upload_memory.rs): a counting global
 # allocator needs `unsafe`, which the workspace forbids in our own code.
 peak_alloc = "0.3.0"
+# Reads the data export's archives back in the tests (src/export, tests/suite/data_export.rs), as a
+# reader that isn't ours; already in the tree through the desktop updater, without compression.
+zip = { version = "9.2.2", default-features = false }
 
 # The desktop build's zbus features, so the keystore tests see the same Secret Service backend: with
 # `tokio`, zbus' blocking API nests a tokio runtime (store/key_source.rs). Already in the tree

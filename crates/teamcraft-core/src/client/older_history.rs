@@ -100,6 +100,33 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(position)
   }
 
+  /// One page before what this device holds of `conversation`, for a data export that needs the
+  /// whole history in the store (issue #211); `true` once the beginning is reached, at once when an
+  /// earlier read (the reader's or an export's) reached it. The page stays in the store like one
+  /// the reader scrolled to, and the place is the same record, so neither reads a page twice; the
+  /// UI's request bookkeeping is left as it is.
+  #[cfg(feature = "ui")]
+  pub(crate) async fn read_older_page_for_export(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<bool, CoreError> {
+    let key = record_key(conversation);
+    let record =
+      records::get_json::<OlderHistoryRecord>(&self.store, Table::SyncState, &key)?.unwrap_or_default();
+    if record.is_at_beginning() {
+      return Ok(true);
+    }
+    let position = self
+      .read_page_before_held(conversation, record.maybe_position)
+      .await?;
+    let answer = OlderHistoryRecord {
+      maybe_position: Some(position),
+      ..record
+    };
+    records::put_json(&self.store, Table::SyncState, &key, &answer)?;
+    Ok(position == PagingPosition::Beginning)
+  }
+
   /// A new connection: failures from before it no longer stand, so a reader at the top of the
   /// list gets the page without doing anything.
   pub(super) fn note_older_history_connection(&self) -> Result<(), CoreError> {

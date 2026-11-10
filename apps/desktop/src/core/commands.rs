@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_dialog::FilePath;
+use teamcraft_client_api::data_export::{DataExportRequest, DataExportStatus};
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{AttachmentPriority, LinkRequestView};
 use teamcraft_client_api::remote::{
@@ -13,6 +14,7 @@ use teamcraft_client_api::remote::{
   CoreStatus, EnrollRequest, LinkStatus, MessageWindow, PhoneLinkStatus,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
+use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::store::SecretVault;
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_media::effects::normalize_background_file;
@@ -487,6 +489,38 @@ pub async fn core_save_attachments(
   }
 }
 
+/// "Export my data" (issue #211, docs/data-export.md): starts, continues, stops or reads the export
+/// the core writes. A start first asks where to save the archive (the downloads folder,
+/// `teamcraft-export-<date>.zip`); a cancelled dialog starts nothing and answers where things
+/// stand. An export already under way is never replaced.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn core_data_export(
+  window: tauri::WebviewWindow,
+  host: State<'_, CoreHost>,
+  request: DataExportRequest,
+) -> Result<DataExportStatus, CommandError> {
+  let runtime = host.current()?;
+  let maybe_target = match &request {
+    DataExportRequest::Start { .. } => {
+      let current = runtime.data_export(DataExportRequest::Status, None).await?;
+      if current.is_active() {
+        return Ok(current);
+      }
+      let name = teamcraft_core::export::suggested_file_name(SystemClock.now_ms());
+      match ask_save_path(&window, &name).await {
+        Ok(Some(path)) => Some(path),
+        Ok(None) => return Ok(current),
+        Err(error) => {
+          tracing::warn!(%error, "no data export started");
+          return Err(CommandError(error.to_string()));
+        },
+      }
+    },
+    _ => None,
+  };
+  Ok(runtime.data_export(request, maybe_target).await?)
+}
+
 /// Why the save dialog gave no place to save to, though the user didn't cancel it.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 enum SaveDialogError {
@@ -629,6 +663,13 @@ pub async fn core_stop(app: AppHandle, host: State<'_, CoreHost>) -> Result<(), 
   // Signing out of a device that isn't set up yet leaves no keys of the attempt behind (#168).
   if let Ok(runtime) = host.current() {
     runtime.forget_unfinished_setup().await;
+    // An export of the account's data doesn't outlive its session either: the partial file is
+    // plaintext (#211). Quitting the app keeps it, to continue after the next start.
+    for request in [DataExportRequest::Cancel, DataExportRequest::Discard] {
+      if let Err(error) = runtime.data_export(request, None).await {
+        tracing::debug!(%error, "no data export to end");
+      }
+    }
   }
   Ok(host.stop()?)
 }

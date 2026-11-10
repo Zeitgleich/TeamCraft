@@ -62,6 +62,7 @@
     "allow-core-attachment",
     "allow-core-save-attachment",
     "allow-core-save-attachments",
+    "allow-core-data-export",
     "allow-core-stage-file",
     "allow-core-focus",
     "allow-core-stop",

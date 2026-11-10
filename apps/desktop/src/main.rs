@@ -331,6 +331,7 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_attachment,
       core::commands::core_save_attachment,
       core::commands::core_save_attachments,
+      core::commands::core_data_export,
       core::commands::core_stage_file,
       core::commands::core_stage_dropped_file,
       core::commands::core_stop,

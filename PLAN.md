@@ -355,6 +355,7 @@ them. Details: [docs/admin.md](docs/admin.md).
 | Custom profile attributes (admin-defined fields)                                                                                       | v1.x  |                                                                                                                           |
 | Statistics (users, channels, activity – metadata only), site health page                                                               | v1.x  |                                                                                                                           |
 | Compliance archive, export, legal hold                                                                                                 | later | Built into the protocol from day one (policy field, reserved archive credential); runs on the vault node. See e2ee.md §11 |
+| Personal data export (GDPR Art. 15/20): archive written by the user's own device, `GET /me/personal-data`                              | v1.x  | Desktop and web; docs/data-export.md (#211)                                                                               |
 
 Permission names (modelled on Mattermost, adapted): `create_post`, `add_reaction`, `remove_others_reactions`,
 `edit_others_posts`, `delete_others_posts`, `use_channel_mentions`, `use_group_mentions`,

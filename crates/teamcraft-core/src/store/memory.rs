@@ -8,8 +8,8 @@ use teamcraft_proto::{ClientMessageId, ConversationId, MessageId, ThreadId};
 use zeroize::Zeroize as _;
 
 use super::{
-  Attached, AttachedRange, LocalStore, MessageFilter, MessageOrder, StoreError, StoredMessage, Table,
-  pick_attached,
+  Attached, AttachedRange, LocalStore, MessageEdge, MessageFilter, MessageOrder, StoreError, StoredMessage,
+  Table, pick_attached,
 };
 
 #[derive(Debug, Default)]
@@ -154,6 +154,24 @@ impl LocalStore for MemoryStore {
       .collect();
     messages.sort_by_key(StoredMessage::sort_key);
     Ok(messages)
+  }
+
+  // Walks the conversation like the default, without copying its messages.
+  fn edge_server_id(
+    &self,
+    conversation: ConversationId,
+    edge: MessageEdge,
+  ) -> Result<Option<MessageId>, StoreError> {
+    let inner = self.lock();
+    let server_ids = inner
+      .messages
+      .values()
+      .filter(|message| message.conversation_id == conversation && message.maybe_unreadable.is_none())
+      .filter_map(|message| message.maybe_server_id);
+    Ok(match edge {
+      MessageEdge::Oldest => server_ids.min(),
+      MessageEdge::Newest => server_ids.max(),
+    })
   }
 
   fn attached_messages(

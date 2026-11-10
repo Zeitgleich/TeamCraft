@@ -69,6 +69,7 @@ use teamcraft_proto::{
   ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,
   ProvisionUsersRequest, ProvisionUsersResponse,
 };
+use teamcraft_proto::{ListAuditQuery, ListAuditResponse, PersonalDataResponse};
 use teamcraft_proto::{
   ListCallHistoryQuery, ListCallHistoryResponse, ListPresenceResponse, PrivacyResponse, UpdatePrivacyRequest,
 };
@@ -1459,6 +1460,18 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn key_bag(&self) -> Result<KeyBagResponse, ApiError> {
     self.get("/me/key-bag").await
+  }
+
+  async fn personal_data(&self) -> Result<PersonalDataResponse, ApiError> {
+    self.get("/me/personal-data").await
+  }
+
+  async fn security_log(&self, query: &ListAuditQuery) -> Result<ListAuditResponse, ApiError> {
+    let parameters = encoded_query(&[
+      ("before", query.maybe_before.map(|before| before.to_string())),
+      ("limit", query.maybe_limit.map(|limit| limit.to_string())),
+    ]);
+    self.get(&format!("/me/security-log{parameters}")).await
   }
 
   async fn schedule_message(

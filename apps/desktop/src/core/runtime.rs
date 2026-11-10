@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use secrecy::ExposeSecret;
 use teamcraft_client_api::backend::ChatBackend;
+use teamcraft_client_api::data_export::{DataExportProgress, DataExportRequest, DataExportStatus};
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::AttachmentPriority;
 use teamcraft_client_api::remote::{
@@ -29,6 +30,7 @@ use teamcraft_core::connection::{
   ConnectionSettings, ConnectionState, ConnectionStatus, ConnectionSupervisor,
 };
 use teamcraft_core::downloads::Downloads;
+use teamcraft_core::export::{ExportError, ExportJob, ExportStep};
 use teamcraft_core::media_cache::FileMediaCache;
 use teamcraft_core::records;
 use teamcraft_core::store::{
@@ -55,6 +57,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::LocalSet;
 use tracing::Instrument as _;
 
+use super::data_export::{ExportRun, ExportSlot, FileSink, discard_checkpoint, failed, not_resumable};
 use super::media::{KeptKey, MediaSlot};
 use crate::auth::{AuthError, AuthService, TokenPeek, TokenStore, token_fingerprint};
 
@@ -425,6 +428,12 @@ enum Request {
   LinkRequestReject {
     id: String,
     reply: oneshot::Sender<Result<(), String>>,
+  },
+  /// "Export my data" (issue #211): `maybe_target` is the file the user picked for a start.
+  DataExport {
+    request: DataExportRequest,
+    maybe_target: Option<PathBuf>,
+    reply: oneshot::Sender<DataExportStatus>,
   },
   /// The network changed or the computer woke up: check the connection now.
   NetworkChanged,
@@ -798,6 +807,23 @@ impl CoreRuntime {
       .unwrap_or_else(|| Err(stopped()))
   }
 
+  /// "Export my data" (issue #211, `super::data_export`): starts, continues, stops or reads the
+  /// export. A start writes to `maybe_target`, the file the user picked.
+  pub async fn data_export(
+    &self,
+    request: DataExportRequest,
+    maybe_target: Option<PathBuf>,
+  ) -> Result<DataExportStatus, String> {
+    self
+      .ask(|reply| Request::DataExport {
+        request,
+        maybe_target,
+        reply,
+      })
+      .await
+      .ok_or_else(stopped)
+  }
+
   /// One of the user's own background pictures, downloaded and decrypted.
   pub async fn background_picture(&self, id: BackgroundId) -> Result<Vec<u8>, String> {
     self
@@ -946,6 +972,8 @@ struct Core {
   downloads: Downloads,
   /// Filled when the store opens, with the store's key (#749).
   media: MediaSlot,
+  /// "Export my data" (issue #211): the export running beside the loop, or how the last one ended.
+  export: ExportSlot,
 }
 
 /// Why the client could not be opened.
@@ -1053,6 +1081,7 @@ impl Core {
       maybe_reported_bytes: None,
       downloads: Downloads::default(),
       media,
+      export: ExportSlot::default(),
     }
   }
 
@@ -1108,6 +1137,13 @@ impl Core {
         // ready gets its turn.
         () = std::future::ready(()), if self.is_background_history_due() => {
           if on_heap(|| self.load_background_history(&mut requests)).await == Flow::Stop {
+            break;
+          }
+        },
+        // A data export (issue #211): one bounded step per turn, like a page of history. A step that
+        // waits for the network comes due again with the flush tick.
+        () = std::future::ready(()), if self.is_export_due() => {
+          if on_heap(|| self.export_step(&mut requests)).await == Flow::Stop {
             break;
           }
         },
@@ -1490,7 +1526,15 @@ impl Core {
       Request::LinkRequests(reply) => drop(reply.send(self.link_requests())),
       Request::LinkRequestReview { id, reply } => drop(reply.send(self.link_request_review(&id).await)),
       Request::LinkRequestReject { id, reply } => drop(reply.send(self.link_request_reject(&id).await)),
+      Request::DataExport {
+        request,
+        maybe_target,
+        reply,
+      } => drop(reply.send(self.data_export(request, maybe_target))),
       Request::NetworkChanged => {
+        if let ExportSlot::Running(run) = &mut self.export {
+          run.job.network_back();
+        }
         // Pooled connections from before a suspend or on the old network are dead; a command on
         // one would hang until the HTTP/2 keep-alive gives up (issue #883).
         if let Some(client) = &self.client {
@@ -2326,6 +2370,193 @@ impl Core {
       self.changed();
     }
     self.handle_later(served.later, served.is_closed).await
+  }
+
+  fn is_export_due(&self) -> bool {
+    self.client.is_some()
+      && matches!(&self.export, ExportSlot::Running(run)
+        if run.job.retry_at_ms().is_none_or(|at| SystemClock.now_ms() >= at))
+  }
+
+  /// One step of the data export; the UI's reads are answered meanwhile.
+  async fn export_step(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) -> Flow {
+    let Self {
+      client: Some(client),
+      connection,
+      backend,
+      store,
+      snapshots,
+      status,
+      catch_up_focus,
+      on_change,
+      export: ExportSlot::Running(run),
+      ..
+    } = self
+    else {
+      return Flow::Go;
+    };
+    let mut reads = ReadsWhileBusy {
+      backend: backend.as_ref(),
+      store: store.as_ref(),
+      snapshots,
+      status,
+      focus: catch_up_focus,
+      maybe_security: security_of(client).ok(),
+      on_change: on_change.as_ref(),
+    };
+    let ExportRun { job, sink } = run.as_mut();
+    let stepping = Box::pin(connection.keep_alive(SystemClock.now_ms(), job.step(client, sink)));
+    let served = serve_reads_during(stepping, requests, &mut reads).await;
+    self.has_queued_sends |= served.has_queued;
+    self.after_export_step(served.output);
+    self.handle_later(served.later, served.is_closed).await
+  }
+
+  /// A finished archive takes its name; a failed export's file and checkpoint are deleted.
+  fn after_export_step(&mut self, outcome: Result<ExportStep, ExportError>) {
+    let maybe_error = match outcome {
+      Ok(ExportStep::Continue | ExportStep::RetryAt(_)) => return,
+      Ok(ExportStep::Done) => None,
+      Err(error) => Some(error),
+    };
+    let ExportSlot::Running(run) = std::mem::take(&mut self.export) else {
+      return;
+    };
+    let ExportRun { job, sink } = *run;
+    let progress = job.progress();
+    let status = match maybe_error {
+      None => match sink.finish() {
+        Ok(path) => {
+          tracing::info!("the data export was saved");
+          DataExportStatus::Done {
+            progress,
+            file_name: path.to_string_lossy().into_owned(),
+          }
+        },
+        Err(error) => {
+          tracing::warn!(%error, "the data export could not be saved");
+          failed(&error, progress)
+        },
+      },
+      Some(error) => {
+        sink.discard();
+        self.forget_export();
+        failed(&error, progress)
+      },
+    };
+    self.export = ExportSlot::Ended(status);
+  }
+
+  fn forget_export(&self) {
+    if let Some(store) = &self.store
+      && let Err(error) = ExportJob::forget(store)
+    {
+      tracing::warn!(%error, "could not delete the data export's checkpoint");
+    }
+  }
+
+  /// Answers a request of the export card.
+  fn data_export(&mut self, request: DataExportRequest, maybe_target: Option<PathBuf>) -> DataExportStatus {
+    match request {
+      DataExportRequest::Status => {},
+      DataExportRequest::Start { options, labels } => self.start_export(options, *labels, maybe_target),
+      DataExportRequest::Cancel => match std::mem::take(&mut self.export) {
+        ExportSlot::Running(run) => {
+          run.sink.discard();
+          self.forget_export();
+          tracing::info!("the data export was cancelled");
+          self.export = ExportSlot::Ended(DataExportStatus::Cancelled);
+        },
+        other => self.export = other,
+      },
+      DataExportRequest::Resume => self.resume_export(),
+      DataExportRequest::Discard => {
+        if let Some((store, checkpoint)) = self.stored_export() {
+          discard_checkpoint(store, &checkpoint);
+        }
+      },
+      DataExportRequest::Dismiss => {
+        if matches!(self.export, ExportSlot::Ended(_)) {
+          self.export = ExportSlot::Idle;
+        }
+      },
+    }
+    self.export_status()
+  }
+
+  fn start_export(
+    &mut self,
+    options: teamcraft_client_api::data_export::DataExportOptions,
+    labels: teamcraft_client_api::data_export::DataExportLabels,
+    maybe_target: Option<PathBuf>,
+  ) {
+    if matches!(self.export, ExportSlot::Running(_)) {
+      return;
+    }
+    let (Some(client), Some(target)) = (self.client.as_ref(), maybe_target) else {
+      return;
+    };
+    // A new export replaces what an unfinished one left.
+    if let Some((store, checkpoint)) = self.stored_export() {
+      discard_checkpoint(store, &checkpoint);
+    }
+    let started = FileSink::create(&target).and_then(|sink| {
+      ExportJob::start(client, options, labels, target.to_string_lossy().into_owned())
+        .map(|job| ExportRun { job, sink })
+    });
+    self.export = match started {
+      Ok(run) => ExportSlot::Running(Box::new(run)),
+      Err(error) => {
+        tracing::warn!(%error, "the data export could not start");
+        ExportSlot::Ended(failed(&error, DataExportProgress::default()))
+      },
+    };
+  }
+
+  fn resume_export(&mut self) {
+    if matches!(self.export, ExportSlot::Running(_)) {
+      return;
+    }
+    let Some((store, checkpoint)) = self.stored_export() else {
+      return;
+    };
+    let progress = checkpoint.progress(checkpoint.len());
+    self.export = match FileSink::reopen(&checkpoint) {
+      Ok(sink) => ExportSlot::Running(Box::new(ExportRun {
+        job: ExportJob::resume(checkpoint),
+        sink,
+      })),
+      Err(error) => {
+        tracing::warn!(%error, "the unfinished data export can't continue");
+        discard_checkpoint(store, &checkpoint);
+        ExportSlot::Ended(not_resumable(progress))
+      },
+    };
+  }
+
+  /// The checkpoint an earlier run left, with the store it is in.
+  fn stored_export(&self) -> Option<(&Store, teamcraft_core::export::ExportCheckpoint)> {
+    let store = self.store.as_ref()?;
+    match ExportJob::stored(store) {
+      Ok(maybe_checkpoint) => maybe_checkpoint.map(|checkpoint| (store, checkpoint)),
+      Err(error) => {
+        tracing::warn!(%error, "could not read the data export's checkpoint");
+        None
+      },
+    }
+  }
+
+  fn export_status(&self) -> DataExportStatus {
+    match &self.export {
+      ExportSlot::Running(run) => run.job.status(),
+      ExportSlot::Ended(status) => status.clone(),
+      ExportSlot::Idle => match self.stored_export() {
+        Some((_, checkpoint)) => DataExportStatus::Interrupted {
+          progress: checkpoint.progress(checkpoint.len()),
+        },
+        None => DataExportStatus::Idle,
+      },
+    }
   }
 
   /// The periodic work besides the gateway, the same as in the other apps (teamcraft-core upkeep).

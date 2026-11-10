@@ -8,6 +8,7 @@
 //! [`CORE_CHANGED_EVENT`](teamcraft_client_api::remote::CORE_CHANGED_EVENT) and the UI re-reads.
 
 pub mod commands;
+mod data_export;
 pub mod media;
 mod runtime;
 mod saved_files;

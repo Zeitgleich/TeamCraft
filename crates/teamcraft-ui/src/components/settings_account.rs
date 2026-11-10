@@ -1,6 +1,6 @@
 //! Settings > Account: the profile header (picture, name, user ID), the profile details others
-//! see on the user's card (title, department, phone, time zone, working hours), and whose public
-//! holidays the user's repeating meetings skip.
+//! see on the user's card (title, department, phone, time zone, working hours), whose public
+//! holidays the user's repeating meetings skip, and the export of the user's data (issue #211).
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -19,6 +19,7 @@ use crate::components::image_crop_dialog::{
 use crate::components::message_actions::copy_and_confirm;
 use crate::components::pending_button::PendingButton;
 use crate::components::profile_views::{Weekday, format_minutes, parse_minutes};
+use crate::components::settings_data_export::DataExportCard;
 use crate::components::settings_rows::{SettingRow, SettingsCard, SwitchRow, row_id};
 use crate::feedback::{ActionFailure, FailureKind, PendingAction};
 use crate::form_errors::{FieldError, FieldErrors, FormErrors, focus_first_invalid};
@@ -57,6 +58,7 @@ pub fn AccountSection() -> impl IntoView {
     <ProfileHeader maybe_hub=Some(hub) />
     <ProfileDetails hub=hub />
     {use_context::<MeetingsHub>().map(|meetings| view! { <HolidayRegionCard meetings=meetings /> })}
+    {crate::auth::tauri::has_core().then(|| view! { <DataExportCard /> })}
   }
   .into_any()
 }
