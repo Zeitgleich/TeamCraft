@@ -736,6 +736,7 @@ settings-f-clear_secs = Eine Warnung endet, wenn die Prüfung in Ordnung war fü
 settings-f-backup_max_age_secs = Das letzte Backup ist zu alt nach
 settings-f-certificate_min_days = Das Zertifikat läuft zu bald ab bei weniger als
 settings-f-disk_max_percent = Die Platte ist zu voll über
+settings-f-is_email_enabled = Warnungen auch per E-Mail an Eigentümer und Admins senden
 settings-error-health-minutes = Gib 1 bis 1.440 Minuten ein.
 settings-error-health-backup-hours = Gib 1 bis 720 Stunden ein.
 settings-error-health-days = Gib 1 bis 365 Tage ein.

@@ -12,19 +12,22 @@ display names, no message content, no file names. A receiver that wants names lo
 the API with its own credentials, under the normal permission checks.
 
 Only **channels** are reported. Direct and group messages are private conversations; nothing about
-them (not even that a call took place) goes out.
+them (not even that a call took place) goes out. Besides those, the instance's **health alerts**
+(docs/operations.md, "Health and alerts"): the name of a check, from a fixed list.
 
-| Event                | When                                                   | `data`                                              |
-|----------------------|--------------------------------------------------------|-----------------------------------------------------|
-| `channel.created`    | A channel was created                                  | `conversation_id`, `actor_id`                       |
-| `channel.archived`   | A channel was archived                                 | `conversation_id`, `actor_id`                       |
-| `channel.unarchived` | An archived channel was restored                       | `conversation_id`, `actor_id`                       |
-| `channel.deleted`    | A channel was deleted                                  | `conversation_id`, `actor_id`                       |
-| `member.joined`      | Somebody joined a channel or was added                 | `conversation_id`, `actor_id`, `subject_id`         |
-| `member.left`        | Somebody left or was removed (`actor_id ≠ subject_id`) | `conversation_id`, `actor_id`, `subject_id`         |
-| `call.started`       | The first person joined a channel's call               | `conversation_id`, `actor_id`, `call_id`            |
-| `call.ended`         | The last person left a channel's call (best effort)    | `conversation_id`, `call_id`                        |
-| `ping`               | The console's "Send test" button                       | –                                                   |
+| Event                   | When                                                   | `data`                                      |
+|-------------------------|--------------------------------------------------------|---------------------------------------------|
+| `channel.created`       | A channel was created                                  | `conversation_id`, `actor_id`               |
+| `channel.archived`      | A channel was archived                                 | `conversation_id`, `actor_id`               |
+| `channel.unarchived`    | An archived channel was restored                       | `conversation_id`, `actor_id`               |
+| `channel.deleted`       | A channel was deleted                                  | `conversation_id`, `actor_id`               |
+| `member.joined`         | Somebody joined a channel or was added                 | `conversation_id`, `actor_id`, `subject_id` |
+| `member.left`           | Somebody left or was removed (`actor_id ≠ subject_id`) | `conversation_id`, `actor_id`, `subject_id` |
+| `call.started`          | The first person joined a channel's call               | `conversation_id`, `actor_id`, `call_id`    |
+| `call.ended`            | The last person left a channel's call (best effort)    | `conversation_id`, `call_id`                |
+| `health.alert_raised`   | A health check failed for the hold time                | `check` (`backup`, `disk_space`, …)         |
+| `health.alert_resolved` | An alerting check was fine for the clear time          | `check`                                     |
+| `ping`                  | The console's "Send test" button                       | –                                           |
 
 Deleting a space sends `channel.deleted` for each of its channels. `call.ended` is best effort: a call
 that vanishes without its last leave (the media server lost across a restart) sends none, so a

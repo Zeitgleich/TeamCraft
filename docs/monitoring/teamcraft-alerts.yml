@@ -1,0 +1,97 @@
+# Prometheus alert rules for TeamCraft (docs/operations.md, "Metrics" and "Health and alerts").
+#
+# The scrape jobs are expected to be named `teamcraft-server`, `teamcraft-sfu` and
+# `teamcraft-bridge`; change the `job` matchers if yours differ. The health checks' thresholds
+# (backup age, certificate days, disk percent, hold time) are the admin console's settings: these
+# rules follow the server's own verdict instead of keeping a second copy of them.
+#
+# Check with: promtool check rules docs/monitoring/teamcraft-alerts.yml
+groups:
+  - name: teamcraft-availability
+    rules:
+      - alert: TeamCraftTargetDown
+        expr: up{job=~"teamcraft-(server|sfu|bridge)"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} does not answer scrapes"
+          description: >-
+            Prometheus could not scrape {{ $labels.job }} on {{ $labels.instance }} for 5 minutes.
+            The process is down, or its metrics listener is not reachable. Probe /readyz from
+            outside as well.
+
+  - name: teamcraft-health
+    rules:
+      - alert: TeamCraftHealthAlert
+        expr: teamcraft_health_check_status{state="alert"} == 1
+        labels:
+          severity: warning
+        annotations:
+          summary: "TeamCraft health check {{ $labels.check }} is alerting"
+          description: >-
+            The server's health check {{ $labels.check }} has failed for longer than the hold time
+            set in the admin console. Administration > System health shows what it measures.
+
+  - name: teamcraft-server
+    rules:
+      - alert: TeamCraftServerErrors
+        expr: |
+          sum by (job, instance) (rate(teamcraft_http_requests_total{status="5xx"}[5m]))
+            / sum by (job, instance) (rate(teamcraft_http_requests_total[5m])) > 0.05
+          and sum by (job, instance) (rate(teamcraft_http_requests_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5 % of requests to {{ $labels.job }} fail with 5xx"
+          description: >-
+            For 10 minutes, more than one request in twenty answered with a server error.
+
+      - alert: TeamCraftDatabasePoolSaturated
+        expr: |
+          sum by (job, instance) (teamcraft_db_pool_connections{state="in_use"})
+            / max by (job, instance) (teamcraft_db_pool_max_connections) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The database pool of {{ $labels.job }} is nearly exhausted"
+          description: >-
+            More than 90 % of [database] max_connections have been in use for 10 minutes.
+            Requests wait for a connection.
+
+      - alert: TeamCraftPushFailing
+        expr: teamcraft_push_provider_failing == 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Push through {{ $labels.provider }} keeps failing"
+          description: >-
+            The last attempt that says anything about the push service {{ $labels.provider }}
+            failed, for 15 minutes. Phones are not woken for new messages.
+
+      - alert: TeamCraftPushRetriesPiling
+        expr: teamcraft_push_retries_pending > 1000
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 1000 wake-ups wait for another attempt"
+          description: >-
+            The push retry queue has stayed above 1000 for 30 minutes.
+
+      # The metric's own `job` label collides with the scrape job's: Prometheus keeps it as
+      # `exported_job` (unless the scrape sets honor_labels).
+      - alert: TeamCraftJobStale
+        expr: |
+          time() - teamcraft_job_last_success_timestamp_seconds{exported_job=~"retention|partition_maintenance|oidc_sync"} > 2 * 86400
+          and teamcraft_job_last_success_timestamp_seconds > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "The background job {{ $labels.exported_job }} has not succeeded for two days"
+          description: >-
+            The health checks report this earlier, with the job's own schedule; this rule is
+            a backstop for when they are switched off.

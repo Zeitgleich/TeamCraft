@@ -1,12 +1,13 @@
 //! Outgoing webhooks (docs/webhooks.md): the server tells external systems about events it sees
-//! anyway. Metadata only — IDs and times, never names or content, which the server cannot read.
+//! anyway. Metadata only — IDs, times and the names of the server's own health checks, never names
+//! or content of anything people made, which the server cannot read.
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::wire_enum::wire_enum;
-use crate::{CallId, ConversationId, UnixMillis, UserId, WebhookId};
+use crate::{CallId, ConversationId, HealthCheckId, UnixMillis, UserId, WebhookId};
 
 /// Most webhooks one instance may have.
 pub const MAX_WEBHOOKS: usize = 20;
@@ -17,7 +18,8 @@ pub const MAX_WEBHOOK_DESCRIPTION_CHARS: usize = 200;
 
 wire_enum! {
   /// What happened. Only channels: direct and group messages are private conversations whose
-  /// metadata is not passed on.
+  /// metadata is not passed on. Besides those, the instance's health alerts (operations.md, "Health
+  /// and alerts").
   pub enum WebhookEventKind {
     /// A channel was created.
     ChannelCreated => "channel.created",
@@ -33,6 +35,10 @@ wire_enum! {
     CallStarted => "call.started",
     /// The last person left a channel's call.
     CallEnded => "call.ended",
+    /// A health check failed for the hold time: admins are told (issue #213).
+    HealthAlertRaised => "health.alert_raised",
+    /// A health check that alerted has been fine for the clear time.
+    HealthAlertResolved => "health.alert_resolved",
     /// Sent by the console's test button; no webhook subscribes to it.
     Ping => "ping",
   }
@@ -40,7 +46,7 @@ wire_enum! {
 
 impl WebhookEventKind {
   /// The events a webhook can subscribe to, in the console's order.
-  pub const SUBSCRIBABLE: [Self; 8] = [
+  pub const SUBSCRIBABLE: [Self; 10] = [
     Self::ChannelCreated,
     Self::ChannelArchived,
     Self::ChannelUnarchived,
@@ -49,6 +55,8 @@ impl WebhookEventKind {
     Self::MemberLeft,
     Self::CallStarted,
     Self::CallEnded,
+    Self::HealthAlertRaised,
+    Self::HealthAlertResolved,
   ];
 
   pub fn is_subscribable(&self) -> bool {
@@ -81,6 +89,9 @@ pub struct WebhookEventData {
   pub maybe_subject_id: Option<UserId>,
   #[serde(rename = "call_id", default, skip_serializing_if = "Option::is_none")]
   pub maybe_call_id: Option<CallId>,
+  /// The health check an alert is about: one of a fixed list, never built from input.
+  #[serde(rename = "check", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_check: Option<HealthCheckId>,
 }
 
 /// A webhook as the console shows it. The secret is never sent back after creation.
@@ -251,6 +262,29 @@ mod tests {
         "data": {"conversation_id": "7", "subject_id": "9"},
       })
     );
+  }
+
+  #[test]
+  fn a_health_alert_names_its_check_and_nothing_else() {
+    let payload = WebhookPayload {
+      id: "43".into(),
+      kind: WebhookEventKind::HealthAlertRaised,
+      created_at: UnixMillis(1_700_000_000_000),
+      data: WebhookEventData {
+        maybe_check: Some(HealthCheckId::Backup),
+        ..WebhookEventData::default()
+      },
+    };
+    assert_eq!(
+      serde_json::to_value(&payload).unwrap(),
+      serde_json::json!({
+        "id": "43",
+        "type": "health.alert_raised",
+        "created_at": 1_700_000_000_000_i64,
+        "data": {"check": "backup"},
+      })
+    );
+    assert!(WebhookEventKind::HealthAlertResolved.is_subscribable());
   }
 
   #[test]

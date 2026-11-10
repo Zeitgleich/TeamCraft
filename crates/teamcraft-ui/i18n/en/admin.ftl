@@ -862,6 +862,8 @@ admin-webhooks-event-member-joined = Member joined
 admin-webhooks-event-member-left = Member left
 admin-webhooks-event-call-started = Call started
 admin-webhooks-event-call-ended = Call ended
+admin-webhooks-event-health-alert_raised = Health alert raised
+admin-webhooks-event-health-alert_resolved = Health alert resolved
 admin-webhooks-event-ping = Test
 
 ## Notetaker (admin.md §3.7)
@@ -947,7 +949,7 @@ health-not-checked = Not checked yet.
 health-footnote = This page updates when an alert changes, and every 30 seconds while it is open.
 health-alerts = Alerts
 health-alerts-none = No alerts since the server started.
-health-alerts-hint = Admins and owners see new alerts here and on the Administration menu. The list starts again when the server restarts.
+health-alerts-hint = Admins and owners see new alerts here and on the Administration menu, by e-mail when that is on in the settings, and through webhooks subscribed to health alerts. The list starts again when the server restarts.
 health-alert-open = Raised { $raised }, still open.
 health-alert-resolved = Raised { $raised }, resolved { $resolved }.
 health-failing-since = Failing since { $when }.

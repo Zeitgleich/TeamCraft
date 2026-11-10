@@ -736,6 +736,7 @@ settings-f-clear_secs = An alert ends after the check was fine for
 settings-f-backup_max_age_secs = The last backup is too old after
 settings-f-certificate_min_days = The certificate is too close to expiry with fewer than
 settings-f-disk_max_percent = The disk is too full above
+settings-f-is_email_enabled = Also e-mail alerts to owners and admins
 settings-error-health-minutes = Enter 1 to 1,440 minutes.
 settings-error-health-backup-hours = Enter 1 to 720 hours.
 settings-error-health-days = Enter 1 to 365 days.

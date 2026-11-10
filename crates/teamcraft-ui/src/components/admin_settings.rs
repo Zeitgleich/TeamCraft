@@ -307,6 +307,7 @@ const HEALTH_ALERTS: &[FieldDef] = &[
     PERCENT,
     "settings-error-health-percent",
   ),
+  flag("is_email_enabled"),
 ];
 const HOLIDAYS: &[FieldDef] = &[
   FieldDef {

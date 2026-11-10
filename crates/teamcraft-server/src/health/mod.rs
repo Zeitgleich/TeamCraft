@@ -6,13 +6,15 @@
 //! small files the deployment writes (backup, certificate, disk). It costs no database query and
 //! no call to a backend. A check that fails for the hold time becomes an alert (see [`tracker`]),
 //! and the admins are told through the gateway; the console reads `GET /api/v1/admin/health` when
-//! it is told, or when the health page is open.
+//! it is told, or when the health page is open. Raised and resolved alerts also go out by e-mail and
+//! to the webhooks subscribed to them ([`notices`]).
 //!
 //! Nothing here carries content, names or addresses: a check is one of a fixed list, with a state,
 //! times and one number.
 
 mod checks;
 mod heartbeat;
+mod notices;
 mod tracker;
 
 use std::path::PathBuf;
@@ -20,8 +22,11 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration as StdDuration;
 
 use serde::Deserialize;
-use teamcraft_proto::{AdminHealthResponse, GatewayEvent, HealthAlertSettings, PushProvider, UserId};
+use teamcraft_proto::{
+  AdminHealthResponse, GatewayEvent, HealthAlertSettings, HealthCheckResponse, PushProvider, UserId,
+};
 use time::{Duration, OffsetDateTime};
+use tokio::sync::Notify;
 use tracing::{info, warn};
 
 use crate::metrics::BackgroundJob;
@@ -30,7 +35,8 @@ use crate::state::AppState;
 pub use checks::{ALL_CHECKS, JobSchedule, JobSchedules};
 use checks::{Facts, MediaServerFacts, PushFacts, observe};
 use heartbeat::Heartbeats;
-use tracker::{AlertChangeKind, AlertPolicy, AlertTracker};
+use notices::{Channel, Notice, Outbox, Outcome};
+use tracker::{AlertChange, AlertChangeKind, AlertPolicy, AlertTracker};
 
 /// Shortest interval between two evaluations: they are cheap, but never a busy loop.
 const MIN_CHECK_INTERVAL_SECS: u64 = 5;
@@ -72,6 +78,8 @@ pub struct HealthMonitor {
   schedules: JobSchedules,
   started_at: OffsetDateTime,
   inner: Mutex<Inner>,
+  /// Wakes the delivery task when notices were queued.
+  wake: Notify,
 }
 
 #[derive(Default)]
@@ -79,6 +87,10 @@ struct Inner {
   tracker: AlertTracker,
   /// Who is told. Read from the database; kept for when the database is what failed.
   admins: Vec<UserId>,
+  /// Their e-mail addresses, read and kept the same way.
+  addresses: Vec<String>,
+  /// Mail and webhook events waiting to go out.
+  outbox: Outbox,
   evaluations: u64,
 }
 
@@ -105,7 +117,13 @@ impl HealthMonitor {
       schedules,
       started_at,
       inner: Mutex::new(Inner::default()),
+      wake: Notify::new(),
     }
+  }
+
+  /// How each check stands after the last evaluation, for the metrics.
+  pub fn checks(&self) -> Vec<HealthCheckResponse> {
+    self.lock().tracker.checks(&ALL_CHECKS)
   }
 
   /// The last evaluation, as the console reads it.
@@ -143,9 +161,58 @@ impl HealthMonitor {
     }
     if !changes.is_empty() {
       self.tell_admins(state).await;
+      self.queue_notices(state, &settings, &changes, now);
     } else if is_admin_refresh_due {
       self.read_admins(state).await;
     }
+  }
+
+  /// Makes one attempt at every notice that is due; what fails waits for its backoff. Called by the
+  /// delivery task, never by the evaluation, so a hanging mail server can't hold up the checks.
+  pub async fn deliver_notices(&self, state: &AppState, now: OffsetDateTime) {
+    let due = self.lock().outbox.take_due(now);
+    for pending in due {
+      if notices::deliver(state, &pending).await == Outcome::Retry {
+        self.lock().outbox.retry_later(pending, now);
+      }
+    }
+  }
+
+  /// One webhook event per change, and one mail per change and address when mail is on.
+  fn queue_notices(
+    &self,
+    state: &AppState,
+    settings: &HealthAlertSettings,
+    changes: &[AlertChange],
+    now: OffsetDateTime,
+  ) {
+    let is_mailing = settings.is_email_enabled && state.can_send_mail();
+    {
+      let mut inner = self.lock();
+      let addresses = if is_mailing {
+        inner.addresses.clone()
+      } else {
+        Vec::new()
+      };
+      for change in changes {
+        let notice = Notice {
+          check: change.check.clone(),
+          kind: change.kind,
+          at: now,
+        };
+        inner.outbox.push(notice.clone(), Channel::Webhook, now);
+        for address in &addresses {
+          inner.outbox.push(
+            notice.clone(),
+            Channel::Mail {
+              address: address.clone(),
+            },
+            now,
+          );
+        }
+      }
+    }
+    self.wake.notify_one();
   }
 
   fn facts(
@@ -210,6 +277,7 @@ impl HealthMonitor {
     match state.database.list_active_admin_ids().await {
       Ok(admins) => {
         self.lock().admins.clone_from(&admins);
+        self.read_addresses(state, &admins).await;
         admins
       },
       Err(error) => {
@@ -219,13 +287,28 @@ impl HealthMonitor {
     }
   }
 
+  async fn read_addresses(&self, state: &AppState, admins: &[UserId]) {
+    match state.database.get_user_emails(admins).await {
+      Ok(emails) => {
+        let mut addresses: Vec<String> = emails.into_values().collect();
+        addresses.sort();
+        addresses.dedup();
+        self.lock().addresses = addresses;
+      },
+      Err(error) => {
+        warn!(%error, "reading the admins' addresses for health alerts failed: using the last known")
+      },
+    }
+  }
+
   fn lock(&self) -> MutexGuard<'_, Inner> {
     self.inner.lock().unwrap_or_else(PoisonError::into_inner)
   }
 }
 
-/// Evaluates the checks until the process ends.
+/// Evaluates the checks until the process ends, and delivers the notices beside it.
 pub fn spawn(state: AppState) {
+  spawn_delivery(state.clone());
   tokio::spawn(async move {
     let mut interval = tokio::time::interval(state.health.config.check_interval());
     // A late tick is not made up for: the checks look at the state now.
@@ -233,6 +316,21 @@ pub fn spawn(state: AppState) {
     loop {
       interval.tick().await;
       state.health.evaluate(&state, OffsetDateTime::now_utc()).await;
+    }
+  });
+}
+
+/// Delivers queued notices when told, and looks for retries that came due once per check interval.
+fn spawn_delivery(state: AppState) {
+  tokio::spawn(async move {
+    let interval = state.health.config.check_interval();
+    loop {
+      // Either is fine: a lost wake-up is found by the next tick.
+      let _ = tokio::time::timeout(interval, state.health.wake.notified()).await;
+      state
+        .health
+        .deliver_notices(&state, OffsetDateTime::now_utc())
+        .await;
     }
   });
 }
