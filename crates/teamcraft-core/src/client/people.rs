@@ -194,16 +194,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  /// The person registered a device (`device_add`): the cache stops saying they have none.
+  /// The person registered a device (`device_add`): the cache stops saying they have none, and
+  /// that they never signed in (a device needs a sign-in).
   pub(crate) fn remember_has_devices(&self, user: UserId) -> Result<(), CoreError> {
     let mut cache = DirectoryCache::load(&self.store, self.now_ms())?;
     let Some(entry) = cache.entries.iter_mut().find(|entry| entry.user.id == user) else {
       return Ok(());
     };
-    if entry.user.maybe_has_devices == Some(true) {
+    if entry.user.maybe_has_devices == Some(true) && !entry.user.is_awaiting_first_sign_in {
       return Ok(());
     }
     entry.user.maybe_has_devices = Some(true);
+    entry.user.is_awaiting_first_sign_in = false;
     records::put_json(&self.store, Table::SyncState, DIRECTORY_CACHE_KEY, &cache)
   }
 
@@ -307,6 +309,7 @@ mod tests {
       maybe_email: None,
       maybe_organization: None,
       maybe_has_devices: None,
+      is_awaiting_first_sign_in: false,
       is_deactivated: false,
       is_deleted: false,
     }

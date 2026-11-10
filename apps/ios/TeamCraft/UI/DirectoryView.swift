@@ -204,6 +204,9 @@ private struct PersonRow: View {
           if !detail.isEmpty {
             Text(detail).font(.app(.caption)).foregroundStyle(Theme.textMuted).lineLimit(1)
           }
+          if person.isAwaitingFirstSignIn {
+            Text("directory_not_signed_in").font(.app(.caption)).foregroundStyle(Theme.textMuted).lineLimit(1)
+          }
         }
         Spacer()
         if person.isGuest { GuestBadge() }

@@ -24,6 +24,10 @@ pub struct OidcSyncRun<'a> {
   pub role_changes: u32,
   pub groups_changed: u32,
   pub failed: u32,
+  /// Accounts made before their first sign-in (docs/provisioning.md §6).
+  pub created: u32,
+  /// Accounts that never signed in, removed outright.
+  pub deleted: u32,
 }
 
 /// The stored status of the sync.
@@ -41,6 +45,8 @@ pub struct OidcSyncStatusRow {
   pub role_changes: u32,
   pub groups_changed: u32,
   pub failed: u32,
+  pub created: u32,
+  pub deleted: u32,
   pub held_revision: i64,
 }
 
@@ -79,8 +85,8 @@ impl Database {
     sqlx::query!(
       r#"INSERT INTO oidc_sync_status (id, last_started_at, last_finished_at, last_success_at, last_duration_ms,
                                        last_outcome, last_error, consecutive_failures, deactivated, reactivated,
-                                       role_changes, groups_changed, failed)
-         VALUES (true, $1, $2::timestamptz, CASE WHEN $3::boolean THEN $2::timestamptz END, $4, $5, $6, CASE WHEN $3::boolean THEN 0 ELSE 1 END, $7, $8, $9, $10, $11)
+                                       role_changes, groups_changed, failed, created, deleted)
+         VALUES (true, $1, $2::timestamptz, CASE WHEN $3::boolean THEN $2::timestamptz END, $4, $5, $6, CASE WHEN $3::boolean THEN 0 ELSE 1 END, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (id) DO UPDATE SET
            last_started_at = EXCLUDED.last_started_at,
            last_finished_at = EXCLUDED.last_finished_at,
@@ -93,7 +99,9 @@ impl Database {
            reactivated = EXCLUDED.reactivated,
            role_changes = EXCLUDED.role_changes,
            groups_changed = EXCLUDED.groups_changed,
-           failed = EXCLUDED.failed"#,
+           failed = EXCLUDED.failed,
+           created = EXCLUDED.created,
+           deleted = EXCLUDED.deleted"#,
       run.started_at,
       run.finished_at,
       run.is_success,
@@ -105,6 +113,8 @@ impl Database {
       as_i32(run.role_changes),
       as_i32(run.groups_changed),
       as_i32(run.failed),
+      as_i32(run.created),
+      as_i32(run.deleted),
     )
     .execute(self.pool())
     .await?;
@@ -115,7 +125,8 @@ impl Database {
   pub async fn oidc_sync_status(&self) -> Result<OidcSyncStatusRow, DbError> {
     let maybe_row = sqlx::query!(
       r#"SELECT last_started_at, last_finished_at, last_success_at, last_duration_ms, last_outcome, last_error,
-                consecutive_failures, deactivated, reactivated, role_changes, groups_changed, failed, held_revision
+                consecutive_failures, deactivated, reactivated, role_changes, groups_changed, failed, created, deleted,
+                held_revision
          FROM oidc_sync_status"#
     )
     .fetch_optional(self.pool())
@@ -137,6 +148,8 @@ impl Database {
       role_changes: as_u32(row.role_changes),
       groups_changed: as_u32(row.groups_changed),
       failed: as_u32(row.failed),
+      created: as_u32(row.created),
+      deleted: as_u32(row.deleted),
       held_revision: row.held_revision,
     })
   }

@@ -219,6 +219,12 @@ pub struct OidcSyncConfig {
   pub stale_after_intervals: u32,
   /// Runs that identity provider events start are at least this far apart (docs/provisioning.md §4).
   pub event_min_gap_secs: u64,
+  /// Make the accounts of the provider's members before their first sign-in, so they are listed
+  /// and can be added to channels (docs/provisioning.md §6). Guests are not made in advance.
+  pub precreate_accounts: bool,
+  /// One run looks up the roles of at most this many people without an account, and so makes at
+  /// most this many accounts; the others follow in the next runs (at least 1).
+  pub max_created_per_run: u32,
 }
 
 /// `[oidc.sync] mode`.
@@ -1650,6 +1656,8 @@ impl Default for OidcSyncConfig {
       brake_min_allowed: DEFAULT_BRAKE_MIN_ALLOWED,
       stale_after_intervals: DEFAULT_STALE_AFTER_INTERVALS,
       event_min_gap_secs: 10,
+      precreate_accounts: true,
+      max_created_per_run: DEFAULT_MAX_CREATED_PER_RUN,
     }
   }
 }
@@ -1694,6 +1702,8 @@ impl Default for PolicyConfig {
 /// Longest `limits.draft_file_retention_days` taken: ten years, far beyond any useful draft.
 const MAX_DRAFT_FILE_RETENTION_DAYS: u32 = 3650;
 const DEFAULT_BRAKE_MAX_PERCENT: u32 = 10;
+/// `[oidc.sync] max_created_per_run` (docs/provisioning.md §6).
+const DEFAULT_MAX_CREATED_PER_RUN: u32 = 100;
 const DEFAULT_BRAKE_MIN_ALLOWED: u32 = 2;
 const DEFAULT_STALE_AFTER_INTERVALS: u32 = 3;
 

@@ -692,6 +692,8 @@ impl AdminBackend for MockBackend {
         role_changes: 2,
         groups_changed: 0,
         failed: 0,
+        created: 3,
+        deleted: 0,
       }),
       is_stale: false,
       held: vec![
@@ -715,6 +717,7 @@ impl AdminBackend for MockBackend {
       would_hold: Vec::new(),
       would_reactivate: 0,
       would_change_roles: 1,
+      would_create: 2,
       active_users: 48,
       allowed: 5,
     })

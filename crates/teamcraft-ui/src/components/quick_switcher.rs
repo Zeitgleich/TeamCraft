@@ -14,8 +14,8 @@ use crate::components::space_tile::SpaceTile;
 use crate::i18n::use_i18n;
 use crate::keys::{ENTER, ESCAPE, SEARCH_MESSAGES, ShortcutKeys};
 use crate::model::{
-  Conversation, ConversationId, ConversationKind, DeviceSetup, JoinableSpace, Space, SpaceId, ThreadSummary,
-  User, UserId, thread_id_of,
+  Conversation, ConversationId, ConversationKind, JoinableSpace, Space, SpaceId, ThreadSummary, User, UserId,
+  thread_id_of,
 };
 use crate::navigation::fuzzy_score;
 use crate::reactive::use_debounced;
@@ -483,11 +483,10 @@ fn SwitcherRow(item: SwitcherItem, index: usize, selected: RwSignal<usize>) -> i
   let i18n = use_i18n();
   let (leading, name, context, is_unread) = match &item {
     SwitcherItem::Person(user) => {
-      let context = if user.device_setup == DeviceSetup::NoDevices {
-        i18n.t("directory-no-devices")
-      } else {
-        i18n.t("switcher-context-person")
-      };
+      let context = i18n.t(
+        crate::components::directory_people::device_setup_note(user.device_setup)
+          .unwrap_or("switcher-context-person"),
+      );
       let avatar =
         view! { <Avatar user=user.clone() size=AvatarSize::Small show_presence=true /> }.into_any();
       (avatar, user.display_name.clone(), context, false)
@@ -862,7 +861,9 @@ fn first_line(body: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-  use crate::model::{JoinPolicy, Message, MessageKind, PresenceStatus, SidebarCategory, id_from_raw};
+  use crate::model::{
+    DeviceSetup, JoinPolicy, Message, MessageKind, PresenceStatus, SidebarCategory, id_from_raw,
+  };
 
   use super::*;
 

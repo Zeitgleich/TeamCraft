@@ -1059,7 +1059,7 @@ oidc-sync-error-invalid = Der Identitätsanbieter hat eine unerwartete Antwort g
 oidc-sync-error-no-users = Der Identitätsanbieter hat keine Personen aufgelistet.
 oidc-sync-error-database = Die Datenbank hat abgelehnt.
 oidc-sync-failures = { $count } Fehlschläge in Folge.
-oidc-sync-changes = { $deactivated } deaktiviert, { $reactivated } reaktiviert, { $roles } Rollenänderungen, { $groups } Gruppenänderungen, { $failed } fehlgeschlagen
+oidc-sync-changes = { $deactivated } deaktiviert, { $reactivated } reaktiviert, { $roles } Rollenänderungen, { $groups } Gruppenänderungen, { $created } Konten vor der ersten Anmeldung angelegt, { $deleted } nie angemeldet und entfernt, { $failed } fehlgeschlagen
 oidc-sync-unfinished = { $count ->
     [one] 1 Deaktivierung wird noch abgeschlossen; der Zugang ist bereits gesperrt.
    *[other] { $count } Deaktivierungen werden noch abgeschlossen; der Zugang ist bereits gesperrt.
@@ -1071,7 +1071,7 @@ oidc-sync-pending-removals = { $count ->
 oidc-sync-open-users = Personen öffnen
 oidc-sync-preview = Prüfen, was ein Lauf ändern würde
 oidc-sync-preview-title = Was ein Lauf jetzt ändern würde
-oidc-sync-preview-summary = { $deactivate } deaktiviert, { $held } zurückgehalten, { $reactivate } reaktiviert, { $roles } Rollenänderungen. Ein Lauf darf { $allowed } von { $active } aktiven Personen deaktivieren.
+oidc-sync-preview-summary = { $deactivate } deaktiviert, { $held } zurückgehalten, { $reactivate } reaktiviert, { $roles } Rollenänderungen, { $created } Konten vor der ersten Anmeldung angelegt. Ein Lauf darf { $allowed } von { $active } aktiven Personen deaktivieren.
 health-detail-held = { $count ->
     [one] 1 Deaktivierung wartet auf eine Entscheidung.
    *[other] { $count } Deaktivierungen warten auf eine Entscheidung.

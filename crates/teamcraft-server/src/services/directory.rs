@@ -309,13 +309,16 @@ async fn add_emails(
   Ok(())
 }
 
-/// Marks who has a device, so the directory can tell who hasn't set up the app yet. Only for
-/// people the caller may see anyway; one query for the whole page.
+/// Marks who has a device and who never signed in (an account made from the identity provider,
+/// docs/provisioning.md §6), so the directory and the pickers can tell who hasn't set up the app
+/// yet. Only for people the caller may see anyway; two queries for the whole page.
 async fn add_device_presence(state: &AppState, summaries: &mut [UserSummary]) -> Result<(), ApiError> {
   let ids: Vec<UserId> = summaries.iter().map(|summary| summary.id).collect();
   let with_devices = state.database.users_with_active_devices(&ids).await?;
+  let awaiting = state.database.users_awaiting_first_sign_in(&ids).await?;
   for summary in summaries {
     summary.maybe_has_devices = Some(with_devices.contains(&summary.id));
+    summary.is_awaiting_first_sign_in = awaiting.contains(&summary.id);
   }
   Ok(())
 }

@@ -33,6 +33,12 @@ pub struct UserSummary {
   /// older servers and from member lists.
   #[serde(rename = "has_devices", default, skip_serializing_if = "Option::is_none")]
   pub maybe_has_devices: Option<bool>,
+  /// Made from the identity provider before the person's first sign-in (docs/provisioning.md §6):
+  /// listed as "not yet signed in" and addable to channels; the encryption group takes them in once
+  /// their first device registers. Only directory answers carry it; absent (false) from older
+  /// servers. The server's word, for display only: nothing anyone signs depends on it.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_awaiting_first_sign_in: bool,
   /// The account is deactivated: still named on its old messages, never offered to pick (issue
   /// #654). Absent (false) from older servers.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -439,6 +445,7 @@ mod tests {
       maybe_email: None,
       maybe_organization: None,
       maybe_has_devices: None,
+      is_awaiting_first_sign_in: false,
       is_deactivated: true,
       is_deleted: true,
     };

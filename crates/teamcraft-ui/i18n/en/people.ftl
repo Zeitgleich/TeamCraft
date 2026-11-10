@@ -94,6 +94,7 @@ directory-groups = Groups
 directory-filter = Find a person
 directory-empty = Try a different name, title or department.
 directory-no-devices = hasn't finished setting up TeamCraft yet
+directory-not-signed-in = hasn't signed in yet
 directory-organization = Organization
 directory-all-organizations = All organizations
 groups-unavailable = User groups need a signed-in session.

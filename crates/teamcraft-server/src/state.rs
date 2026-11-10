@@ -214,6 +214,8 @@ pub struct OidcSyncSettings {
   pub sync_groups: bool,
   pub mode: crate::config::OidcSyncRunMode,
   pub brake: crate::services::oidc_brake::Brake,
+  /// Accounts made before their first sign-in (docs/provisioning.md §6).
+  pub precreation: crate::services::oidc::AccountPrecreation,
   pub interval: std::time::Duration,
   pub stale_after_intervals: u32,
 }

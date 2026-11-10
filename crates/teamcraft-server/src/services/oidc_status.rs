@@ -97,6 +97,8 @@ fn last_run(row: &OidcSyncStatusRow) -> Option<OidcSyncRunResponse> {
     role_changes: row.role_changes,
     groups_changed: row.groups_changed,
     failed: row.failed,
+    created: row.created,
+    deleted: row.deleted,
   })
 }
 
@@ -141,6 +143,7 @@ pub async fn preview(
     would_hold: decision.hold.iter().map(response).collect(),
     would_reactivate: plan_count(plan.reactivation_count()),
     would_change_roles: plan_count(plan.role_change_count()),
+    would_create: plan_count(plan.creation_count()),
     active_users: plan_count(plan.active_user_count()),
     allowed: plan_count(sync.brake.allowed(plan.active_user_count())),
   })

@@ -129,6 +129,8 @@ impl FakeKeycloak {
       sync_groups: false,
       mode: teamcraft_server::config::OidcSyncRunMode::Apply,
       brake: teamcraft_server::services::oidc_brake::Brake::default(),
+      // Tests that sign people in by hand compare whole reports; those about pre-creation turn it on.
+      precreation: teamcraft_server::services::oidc::AccountPrecreation::Off,
       interval: std::time::Duration::from_secs(300),
       stale_after_intervals: 3,
     }

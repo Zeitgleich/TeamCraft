@@ -1,7 +1,7 @@
 //! Deleting a user (admin.md §3.2.1, issue #630): the account becomes a tombstone that only names
 //! old messages, its key material and sessions go, and its direct messages are deleted.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use teamcraft_proto::{ConversationId, UserId};
 use time::OffsetDateTime;
@@ -26,6 +26,19 @@ pub enum UserDeletion {
     effects: ChatRemovalEffects,
   },
   UnknownUser,
+  /// [`DeletionGuard::NeverSignedIn`] and the account signed in meanwhile: nothing changed.
+  SignedIn,
+}
+
+/// Which accounts [`Database::delete_user_guarded`] may delete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeletionGuard {
+  /// Any account (an admin's "Delete account").
+  Any,
+  /// Only an account made from the provider that never signed in (docs/provisioning.md §6), checked
+  /// under the row lock, so a first sign-in at the same moment wins. Its identity is not released:
+  /// it never had a token to refuse, and the provider may bring it back with the next sync.
+  NeverSignedIn,
 }
 
 /// A direct message or group DM that goes with a deleted user, with who else was in it.
@@ -230,6 +243,18 @@ impl Database {
     Ok(released)
   }
 
+  /// The subjects of `issuer` a deletion released: the sync doesn't make these accounts again
+  /// before their next sign-in (docs/provisioning.md §6).
+  pub async fn released_subjects(&self, issuer: &str) -> Result<HashSet<String>, DbError> {
+    let subjects = sqlx::query_scalar!(
+      "SELECT subject FROM released_identities WHERE issuer = $1",
+      issuer,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    Ok(subjects.into_iter().collect())
+  }
+
   /// Owners and admins whose accounts are active (by the role the identity provider gave them).
   pub async fn active_admin_counts(&self) -> Result<ActiveAdminCounts, DbError> {
     let row = sqlx::query!(
@@ -253,18 +278,33 @@ impl Database {
   /// account. The user's objects in storage are deleted before ([`Self::user_object_keys`]).
   /// Idempotent: a retry finds nothing left and reports `was_already_deleted`.
   pub async fn delete_user(&self, user: UserId) -> Result<UserDeletion, DbError> {
+    self.delete_user_guarded(user, DeletionGuard::Any).await
+  }
+
+  /// [`Self::delete_user`], only if `guard` allows it.
+  pub async fn delete_user_guarded(
+    &self,
+    user: UserId,
+    guard: DeletionGuard,
+  ) -> Result<UserDeletion, DbError> {
     let id = to_db(user);
     let mut tx = self.pool().begin().await?;
-    // Locks the row so a concurrent reactivation or deactivation waits.
-    let maybe_deleted = sqlx::query_scalar!(
-      r#"SELECT deleted_at IS NOT NULL AS "is_deleted!" FROM users WHERE id = $1 FOR UPDATE"#,
+    // Locks the row so a concurrent reactivation, deactivation or first sign-in waits.
+    let maybe_row = sqlx::query!(
+      r#"SELECT deleted_at IS NOT NULL AS "is_deleted!",
+                awaiting_first_sign_in_since IS NOT NULL AS "is_awaiting_first_sign_in!"
+         FROM users WHERE id = $1 FOR UPDATE"#,
       id,
     )
     .fetch_optional(&mut *tx)
     .await?;
-    let Some(was_already_deleted) = maybe_deleted else {
+    let Some(row) = maybe_row else {
       return Ok(UserDeletion::UnknownUser);
     };
+    let was_already_deleted = row.is_deleted;
+    if guard == DeletionGuard::NeverSignedIn && !was_already_deleted && !row.is_awaiting_first_sign_in {
+      return Ok(UserDeletion::SignedIn);
+    }
 
     let devices = sqlx::query_scalar!(
       "UPDATE devices SET revoked_at = now(), push_provider = NULL, push_token = NULL, push_key = NULL
@@ -306,13 +346,17 @@ impl Database {
     )
     .execute(&mut *tx)
     .await?;
-    // Released before it changes; the first deletion's time counts.
+    // Released before it changes; the first deletion's time counts. Not by the guard
+    // `NeverSignedIn`: there is no token to refuse, and the provider may bring the account back.
+    // An admin's deletion of such an account is released, so the sync leaves it gone.
     sqlx::query!(
       r#"INSERT INTO released_identities (issuer, subject)
          SELECT oidc_issuer, oidc_subject FROM users
          WHERE id = $1 AND deleted_at IS NULL AND oidc_issuer IS NOT NULL AND oidc_subject IS NOT NULL
+           AND NOT $2
          ON CONFLICT (issuer, subject) DO UPDATE SET released_at = EXCLUDED.released_at"#,
       id,
+      guard == DeletionGuard::NeverSignedIn,
     )
     .execute(&mut *tx)
     .await?;
@@ -323,7 +367,7 @@ impl Database {
            deactivated_at = COALESCE(deactivated_at, now()),
            deactivation_reason = COALESCE(deactivation_reason, 'admin'),
            username = NULL, email = NULL, display_name = $2, idp_display_name = NULL, display_name_override = NULL, oidc_role = NULL, organization = NULL,
-           last_seen_at = NULL, dnd_until = NULL, presence_pref = 'auto',
+           last_seen_at = NULL, dnd_until = NULL, presence_pref = 'auto', awaiting_first_sign_in_since = NULL,
            oidc_issuer = CASE WHEN deleted_at IS NULL AND oidc_issuer IS NOT NULL
                               THEN 'deleted:' || id::text || ':' || oidc_issuer
                               ELSE oidc_issuer END

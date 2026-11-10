@@ -1059,7 +1059,7 @@ oidc-sync-error-invalid = The identity provider sent an unexpected answer.
 oidc-sync-error-no-users = The identity provider listed no users.
 oidc-sync-error-database = The database refused.
 oidc-sync-failures = { $count } failures in a row.
-oidc-sync-changes = { $deactivated } deactivated, { $reactivated } reactivated, { $roles } role changes, { $groups } group changes, { $failed } failed
+oidc-sync-changes = { $deactivated } deactivated, { $reactivated } reactivated, { $roles } role changes, { $groups } group changes, { $created } accounts made before their first sign-in, { $deleted } never signed in and removed, { $failed } failed
 oidc-sync-unfinished = { $count ->
     [one] 1 deactivation is still being finished; access is already refused.
    *[other] { $count } deactivations are still being finished; access is already refused.
@@ -1071,7 +1071,7 @@ oidc-sync-pending-removals = { $count ->
 oidc-sync-open-users = Open Users
 oidc-sync-preview = Check what a run would change
 oidc-sync-preview-title = What a run would change now
-oidc-sync-preview-summary = { $deactivate } deactivated, { $held } held back, { $reactivate } reactivated, { $roles } role changes. A run may deactivate { $allowed } of { $active } active users.
+oidc-sync-preview-summary = { $deactivate } deactivated, { $held } held back, { $reactivate } reactivated, { $roles } role changes, { $created } accounts made before their first sign-in. A run may deactivate { $allowed } of { $active } active users.
 health-detail-held = { $count ->
     [one] 1 deactivation is waiting for a decision.
    *[other] { $count } deactivations are waiting for a decision.

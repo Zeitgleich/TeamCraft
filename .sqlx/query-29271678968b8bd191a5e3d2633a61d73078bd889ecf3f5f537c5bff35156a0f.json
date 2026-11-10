@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, oidc_subject AS \"subject!\", deactivated_at IS NOT NULL AS \"is_deactivated!\",\n                deactivation_reason, oidc_role, kind\n         FROM users WHERE oidc_issuer = $1 AND oidc_subject IS NOT NULL ORDER BY id",
+  "query": "SELECT id, oidc_subject AS \"subject!\", deactivated_at IS NOT NULL AS \"is_deactivated!\",\n                deactivation_reason, oidc_role, kind,\n                awaiting_first_sign_in_since IS NOT NULL AS \"is_awaiting_first_sign_in!\"\n         FROM users WHERE oidc_issuer = $1 AND oidc_subject IS NOT NULL ORDER BY id",
   "describe": {
     "columns": [
       {
@@ -63,6 +63,12 @@
             "name": "kind"
           }
         }
+      },
+      {
+        "ordinal": 6,
+        "name": "is_awaiting_first_sign_in!",
+        "type_info": "Bool",
+        "origin": "Expression"
       }
     ],
     "parameters": {
@@ -76,8 +82,9 @@
       null,
       true,
       true,
-      false
+      false,
+      null
     ]
   },
-  "hash": "10663e3bc6008227d12a9033cab870cc6b65a6d4bc2e877860bd3bd3ad3ecfd0"
+  "hash": "29271678968b8bd191a5e3d2633a61d73078bd889ecf3f5f537c5bff35156a0f"
 }

@@ -133,8 +133,9 @@ private fun PersonRow(user: User, isPicked: Boolean, mode: PickMode, modifier: M
     }
     Column(Modifier.weight(1f).padding(start = Spacing.m)) {
       Text(user.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
+      val notSignedIn = if (user.isAwaitingFirstSignIn) stringResource(R.string.directory_not_signed_in) else null
       Text(
-        listOfNotNull("@" + user.username, user.maybeCustomStatus?.let { it.emoji + " " + it.text }).joinToString(" · "),
+        listOfNotNull("@" + user.username, notSignedIn, user.maybeCustomStatus?.let { it.emoji + " " + it.text }).joinToString(" · "),
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         maxLines = 1,

@@ -200,10 +200,27 @@ pub enum DeviceSetup {
   HasDevices,
   /// Hasn't set up the app yet: a DM is made, they get it once their first device appears.
   NoDevices,
+  /// Never signed in: the account was made from the identity provider ahead of time
+  /// (docs/provisioning.md §6). Addable like somebody without a device; the encryption group takes
+  /// them in once their first device appears.
+  NotSignedIn,
   /// The backend doesn't know (older server, or only seen in member lists).
   #[default]
   #[serde(other)]
   Unknown,
+}
+
+impl DeviceSetup {
+  /// What a directory answer says: whether the person has a device (`None`: not said) and whether
+  /// they never signed in.
+  pub fn from_directory(maybe_has_devices: Option<bool>, is_awaiting_first_sign_in: bool) -> Self {
+    match (maybe_has_devices, is_awaiting_first_sign_in) {
+      (Some(true), _) => Self::HasDevices,
+      (_, true) => Self::NotSignedIn,
+      (Some(false), false) => Self::NoDevices,
+      (None, false) => Self::Unknown,
+    }
+  }
 }
 
 impl User {

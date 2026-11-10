@@ -59,6 +59,9 @@ pub struct DirectoryPersonItem {
   pub department: String,
   /// `online`, `away`, `dnd` or `offline`, as of this answer.
   pub presence: String,
+  /// Made from the identity provider and never signed in (docs/provisioning.md §6): shown as "not
+  /// yet signed in", addable to channels like anybody.
+  pub is_awaiting_first_sign_in: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -348,6 +351,7 @@ fn person_item(person: DirectoryPerson) -> DirectoryPersonItem {
     title: person.maybe_title.unwrap_or_default(),
     department: person.maybe_department.unwrap_or_default(),
     presence: person.presence.as_str().to_owned(),
+    is_awaiting_first_sign_in: person.user.is_awaiting_first_sign_in,
   }
 }
 

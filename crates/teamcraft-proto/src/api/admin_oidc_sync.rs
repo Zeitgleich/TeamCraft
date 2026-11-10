@@ -113,6 +113,14 @@ pub struct OidcSyncRunResponse {
   pub groups_changed: u32,
   /// Changes that failed in this run; the next run tries them again.
   pub failed: u32,
+  /// Accounts made before their first sign-in (docs/provisioning.md §6). Absent (0) from older
+  /// servers.
+  #[serde(default)]
+  pub created: u32,
+  /// Accounts that never signed in, removed outright because the provider disabled or deleted
+  /// them. Absent (0) from older servers.
+  #[serde(default)]
+  pub deleted: u32,
 }
 
 /// A deactivation the safety brake holds back.
@@ -174,6 +182,10 @@ pub struct AdminOidcSyncPreviewResponse {
   pub would_hold: Vec<PlannedDeactivationResponse>,
   pub would_reactivate: u32,
   pub would_change_roles: u32,
+  /// Accounts a run now would make before their first sign-in (at most `max_created_per_run`).
+  /// Absent (0) from older servers.
+  #[serde(default)]
+  pub would_create: u32,
   /// Active users of the provider, the base of the safety brake's share.
   pub active_users: u32,
   /// How many one run may deactivate with this many active users.

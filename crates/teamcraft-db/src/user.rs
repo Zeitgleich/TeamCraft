@@ -95,7 +95,8 @@ impl Database {
                kind = EXCLUDED.kind,
                oidc_role = EXCLUDED.oidc_role,
                oidc_role_seen = EXCLUDED.oidc_role,
-               organization = CASE WHEN $9 THEN EXCLUDED.organization ELSE users.organization END
+               organization = CASE WHEN $9 THEN EXCLUDED.organization ELSE users.organization END,
+               awaiting_first_sign_in_since = NULL
          RETURNING id, username, display_name, kind, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!", deleted_at IS NOT NULL AS "is_deleted!",
                    default_memberships_at IS NULL AS "is_awaiting_defaults!""#,
       to_db(new_id),
@@ -146,7 +147,8 @@ impl Database {
     let existing = sqlx::query!(
       r#"SELECT id, username, email, display_name, COALESCE(idp_display_name, display_name) AS "idp_display_name!", kind, oidc_role, COALESCE(oidc_role_seen, oidc_role) AS seen_role, created_at, organization, deactivated_at IS NOT NULL AS "is_deactivated!", deleted_at IS NOT NULL AS "is_deleted!",
                 default_memberships_at IS NULL AS "is_awaiting_defaults!",
-                EXISTS (SELECT 1 FROM role_losses WHERE role_losses.user_id = users.id) AS "has_role_loss!"
+                EXISTS (SELECT 1 FROM role_losses WHERE role_losses.user_id = users.id) AS "has_role_loss!",
+                awaiting_first_sign_in_since IS NOT NULL AS "is_awaiting_first_sign_in!"
          FROM users WHERE oidc_issuer = $1 AND oidc_subject = $2"#,
       identity.issuer,
       identity.subject,
@@ -155,7 +157,9 @@ impl Database {
     .await?;
 
     if let Some(row) = existing {
-      let is_unchanged = row.username.as_deref() == identity.maybe_username
+      // A first sign-in of an account made before it (docs/provisioning.md §6) writes once.
+      let is_unchanged = !row.is_awaiting_first_sign_in
+        && row.username.as_deref() == identity.maybe_username
         && row.email.as_deref() == identity.maybe_email
         // The provider's name, not the shown one: an override is not a change to sync.
         && row.idp_display_name == identity.display_name
@@ -490,9 +494,72 @@ pub struct OidcUserRow {
   pub maybe_deactivation_reason: Option<String>,
   pub maybe_oidc_role: Option<String>,
   pub kind: UserKind,
+  /// Made from the provider and never signed in (docs/provisioning.md §6).
+  pub is_awaiting_first_sign_in: bool,
+}
+
+/// What [`Database::provision_oidc_user`] found or made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProvisionedAccount {
+  pub user: UserId,
+  /// Made now; `false`: the account was there (signed in, or made before).
+  pub is_created: bool,
 }
 
 impl Database {
+  /// Makes the account of a provider identity before its first sign-in (docs/provisioning.md §6,
+  /// admin.md §3.8), marked as awaiting it. An account that exists already, also one a concurrent
+  /// sign-in just made, is left as it is.
+  pub async fn provision_oidc_user(
+    &self,
+    identity: &OidcIdentity<'_>,
+    new_id: UserId,
+  ) -> Result<ProvisionedAccount, DbError> {
+    let maybe_created = sqlx::query_scalar!(
+      r#"INSERT INTO users (id, oidc_issuer, oidc_subject, username, email, display_name, idp_display_name, kind, oidc_role, oidc_role_seen, awaiting_first_sign_in_since)
+         VALUES ($1, $2, $3, $4, $5, $6, $6, $7, $8, $8, now())
+         ON CONFLICT (oidc_issuer, oidc_subject) DO NOTHING
+         RETURNING id"#,
+      to_db(new_id),
+      identity.issuer,
+      identity.subject,
+      identity.maybe_username,
+      identity.maybe_email,
+      identity.display_name,
+      identity.kind.as_str(),
+      identity.maybe_oidc_role,
+    )
+    .fetch_optional(self.pool())
+    .await?;
+    if let Some(id) = maybe_created {
+      return Ok(ProvisionedAccount {
+        user: from_db(id)?,
+        is_created: true,
+      });
+    }
+    let existing = self
+      .find_user_by_oidc_subject(identity.issuer, identity.subject)
+      .await?
+      // The conflict was this very identity, so its row is there.
+      .ok_or(DbError::Query(sqlx::Error::RowNotFound))?;
+    Ok(ProvisionedAccount {
+      user: existing,
+      is_created: false,
+    })
+  }
+
+  /// Which of `users` were made from the provider and never signed in (the directory's "not yet
+  /// signed in").
+  pub async fn users_awaiting_first_sign_in(&self, users: &[UserId]) -> Result<HashSet<UserId>, DbError> {
+    let ids = sqlx::query_scalar!(
+      "SELECT id FROM users WHERE id = ANY($1) AND awaiting_first_sign_in_since IS NOT NULL",
+      &to_db_all(users),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    ids.into_iter().map(from_db).collect()
+  }
+
   pub async fn find_user_by_oidc_subject(
     &self,
     issuer: &str,
@@ -511,7 +578,8 @@ impl Database {
   pub async fn list_oidc_users(&self, issuer: &str) -> Result<Vec<OidcUserRow>, DbError> {
     let rows = sqlx::query!(
       r#"SELECT id, oidc_subject AS "subject!", deactivated_at IS NOT NULL AS "is_deactivated!",
-                deactivation_reason, oidc_role, kind
+                deactivation_reason, oidc_role, kind,
+                awaiting_first_sign_in_since IS NOT NULL AS "is_awaiting_first_sign_in!"
          FROM users WHERE oidc_issuer = $1 AND oidc_subject IS NOT NULL ORDER BY id"#,
       issuer,
     )
@@ -527,6 +595,7 @@ impl Database {
           maybe_deactivation_reason: row.deactivation_reason,
           maybe_oidc_role: row.oidc_role,
           kind: UserKind::from(row.kind),
+          is_awaiting_first_sign_in: row.is_awaiting_first_sign_in,
         })
       })
       .collect()

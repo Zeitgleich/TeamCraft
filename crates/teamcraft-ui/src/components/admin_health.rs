@@ -249,6 +249,8 @@ fn OidcSyncContent(
               ("reactivated", &run.reactivated.to_string()),
               ("roles", &run.role_changes.to_string()),
               ("groups", &run.groups_changed.to_string()),
+              ("created", &run.created.to_string()),
+              ("deleted", &run.deleted.to_string()),
               ("failed", &run.failed.to_string()),
             ],
           );
@@ -319,6 +321,7 @@ fn OidcSyncContent(
         let held = preview.would_hold.len();
         let reactivate = preview.would_reactivate;
         let roles = preview.would_change_roles;
+        let created = preview.would_create;
         let allowed = preview.allowed;
         let active = preview.active_users;
         let would = preview.would_deactivate.clone();
@@ -332,6 +335,7 @@ fn OidcSyncContent(
                 ("held", &held.to_string()),
                 ("reactivate", &reactivate.to_string()),
                 ("roles", &roles.to_string()),
+                ("created", &created.to_string()),
                 ("allowed", &allowed.to_string()),
                 ("active", &active.to_string()),
               ])}

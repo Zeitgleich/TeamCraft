@@ -740,6 +740,12 @@ it never stops the server from starting.
 the provider's answer, tokens or addresses), how many runs failed in a row, and warns when the sync has
 not run for `stale_after_intervals` intervals (default 3), raising the `oidc_sync` alert like other jobs.
 
+**Accounts before the first sign-in.** A run also makes the accounts of the provider's members
+(not guests) that don't have one yet, at most `max_created_per_run` (default 100) per run, listed as
+"not yet signed in"; one that the provider disables before it ever signed in is removed outright
+instead of deactivated. `precreate_accounts = false` turns it off. See
+[provisioning.md §6](provisioning.md).
+
 **One run.** It reads the whole provider first: all users, then the role of each. If any of that fails,
 or the provider lists nobody while the instance has users, nothing changes. Then it applies; one change
 that fails doesn't stop the others and is tried again by the next run.
@@ -1110,8 +1116,9 @@ never had an account) is like a deleted account: their channel messages stay and
 direct messages with them are not imported. Accounts are pre-provisioned so the importer can make
 them members before they sign in; until then the conversation says they haven't set up the app yet,
 and the importer adds them with the history when they do (it keeps running, `teamcraft-import serve`).
-Pre-provisioned accounts are ordinary accounts: the identity provider sync deactivates them like
-any other.
+Pre-provisioned accounts are the accounts the identity provider sync makes before a first sign-in
+anyway ([provisioning.md §6](provisioning.md)): listed as "not yet signed in", and removed outright
+when the provider disables them before they ever signed in.
 
 **Guests.** Guests otherwise see history only from their join on. In the channels, DMs and notes the
 import made or took over, the import device also gives the guests the mapping names there the keys

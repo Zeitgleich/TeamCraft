@@ -10,7 +10,7 @@ use wasm_bindgen::JsCast;
 use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
-use crate::model::{DeviceSetup, User, UserId};
+use crate::model::{User, UserId};
 use crate::reactive::use_debounced;
 use crate::state::use_app_state;
 
@@ -243,7 +243,7 @@ pub fn PeoplePicker(
               <span class="person-name" translate="no">{user.display_name.clone()}</span>
               {(!user.username.is_empty()).then(|| view! { <span class="muted-text person-handle" translate="no">{format!("@{}", user.username)}</span> })}
               {(user.is_guest && state.shows_guest_markers()).then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
-              {(user.device_setup == DeviceSetup::NoDevices).then(|| view! { <span class="muted-text">{move || i18n.t("directory-no-devices")}</span> })}
+              {crate::components::directory_people::device_setup_note(user.device_setup).map(|key| view! { <span class="muted-text">{move || i18n.t(key)}</span> })}
               {is_already_in.then(|| view! { <span class="muted-text person-note">{move || i18n.t(already_in_key)}</span> })}
               <span class="person-check" aria-hidden="true">{is_checked.then(|| view! { <Icon name=IconName::Check /> })}</span>
             </li>
@@ -321,7 +321,7 @@ fn candidates(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::{PresenceStatus, id_from_raw};
+  use crate::model::{DeviceSetup, PresenceStatus, id_from_raw};
 
   const ME: u64 = 1;
 
