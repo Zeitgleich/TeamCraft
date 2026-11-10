@@ -170,6 +170,12 @@ impl Upkeep {
       Ok(loaded) => is_changed |= loaded > 0,
       Err(error) => tracing::debug!(%error, "imported history not read further yet"),
     }
+    // The local search index (issue #154): one bounded batch of what was written since; a read of
+    // the queue while nothing waits. Searches find what waits anyway, so nothing shown changes.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Err(error) = client.index_search_step(crate::search_index::DEFAULT_STEP_MESSAGES) {
+      tracing::warn!(%error, "the local search index was not brought up to date");
+    }
     #[cfg(feature = "ui")]
     {
       // On the heap: sealing catches groups up, too big a future for the frame of every tick's caller.

@@ -22,7 +22,8 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 | `read_state`   | Followed threads, unread counts, read receipts, acknowledgements as the server reports them                                                                        |
 | `attestation`  | Writes the identity key fingerprint to the Keycloak attribute `tc_identity_key` (e2ee.md §3.1)                                                                     |
 | `workspace`    | Verified admin roster and workspace policy (`WorkspaceState`, `RosterDocument`)                                                                                    |
-| `search`       | tantivy index of the store and shared encrypted segments (native only)                                                                                             |
+| `search`       | Full-text search over the local index and shared encrypted segments (native only)                                                                                  |
+| `search_index` | The local tantivy index, kept sealed in the store and updated from a queue written with each message (native only, issue #154)                                     |
 | `ui_backend`   | `CoreChatBackend`: teamcraft-client-api's `ChatBackend` and `SearchBackend` over the store (feature `ui`); `ui_actions`, `ui_files`, `ui_workspace` hold its parts |
 | `clock`        | Injectable wall clock (`SystemClock`, `ManualClock`)                                                                                                               |
 
@@ -120,8 +121,8 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
   short code before anything is transferred.
 - **Organization recovery** (e2ee.md §6.3.1): owner setup with shares sealed to admin devices,
   member opt-in, two admins recovering a user into a one-time request key.
-- **Search** (e2ee.md §10.1): see `search`; `publish_index_segments`, `fetch_index_segments`,
-  `fetch_search_hits`.
+- **Search** (e2ee.md §10.1): see `search` and `search_index`; `index_search_step` (on the upkeep's
+  tick), `publish_index_segments`, `fetch_index_segments`, `fetch_search_hits`.
 
 ## Trust decisions
 
@@ -150,8 +151,9 @@ the server API, the sync engine and first-run enrollment. All cryptography is de
 - Passkey PRF wrapper wiring; sending read receipts.
 - Moving a channel to another space (no server endpoint).
 - The other UI traits (`CallBackend`, `AdminBackend`, `SecurityBackend`).
-- The MLS storage and the search index are rebuilt or rewritten whole; fine at today's sizes,
-  incremental later.
+- The MLS storage is rewritten whole; fine at today's sizes, incremental later. The local search
+  index is incremental (issue #154), but a search holds it in memory whole (about 2 % of the
+  messages' size, docs/performance.md).
 
 ## Server and environment gaps found
 

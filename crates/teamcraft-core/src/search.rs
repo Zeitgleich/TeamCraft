@@ -1,8 +1,10 @@
 //! Full-text search (e2ee.md §10.1) with tantivy, over the decrypted local store and over shared
 //! index segments.
 //!
-//! - Every search builds an in-memory index of the local store's messages (native only; the
-//!   browser scans the store instead, see the crate README). The index never touches the disk.
+//! - The local store's messages are searched through the local index ([`crate::search_index`]):
+//!   kept in the store, sealed like it, and brought up to date as messages are written. What it
+//!   doesn't hold yet is indexed in memory for the search (native only; the browser scans the store
+//!   instead, see the crate README).
 //! - A *segment* is the index of one conversation and month, exported as a bundle of tantivy's files.
 //!   Members publish closed months encrypted like attachments; other devices import them, so full
 //!   history is searchable without re-indexing (see [`crate::Client::publish_index_segments`]).
@@ -30,18 +32,19 @@ use teamcraft_proto::{ClientMessageId, ConversationId, Id, MessageId, Snowflake,
 pub use crate::search_scope::ConversationScope;
 
 use crate::error::CoreError;
+use crate::search_index::{self, LoadedIndex};
 use crate::store::{LocalStore, MessageContent, MessageFilter, StoredMessage, Table};
 
-/// Matches per search, counted after the filters: a filter applied after the cap would drop
-/// everything when other conversations fill it (issue #873).
-const MAX_CANDIDATES: usize = 2_000;
+/// Matches per search of the local messages, counted after the filters: a filter applied after the
+/// cap would drop everything when other conversations fill it (issue #873). The newest ones.
+pub(crate) const MAX_CANDIDATES: usize = 2_000;
 /// Indexing memory per writer (tantivy's minimum is 15 MB).
-const WRITER_MEMORY_BYTES: usize = 15_000_000;
-const ENGLISH: &str = "teamcraft_en";
-const GERMAN: &str = "teamcraft_de";
-const FLAG_FILE: u64 = 1;
-const FLAG_LINK: u64 = 2;
-const FLAG_THREAD: u64 = 4;
+pub(crate) const WRITER_MEMORY_BYTES: usize = 15_000_000;
+pub(crate) const ENGLISH: &str = "teamcraft_en";
+pub(crate) const GERMAN: &str = "teamcraft_de";
+pub(crate) const FLAG_FILE: u64 = 1;
+pub(crate) const FLAG_LINK: u64 = 2;
+pub(crate) const FLAG_THREAD: u64 = 4;
 
 /// What to look for. Terms must all match (in English or German word forms); the rest filters.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -74,10 +77,12 @@ pub struct SearchResults {
   pub to_fetch: Vec<SearchMatch>,
 }
 
-/// Imported segments, kept open between searches.
+/// The local index and the imported segments, kept open between searches.
 #[derive(Default)]
 pub struct SearchService {
   segments: HashMap<String, Index>,
+  /// The local index as last read from the store ([`crate::search_index`]).
+  maybe_local: Option<LoadedIndex>,
 }
 
 #[derive(Clone, Copy)]
@@ -94,7 +99,7 @@ struct Fields {
 
 /// A tantivy directory in memory that remembers which files exist, so an index can be exported.
 #[derive(Clone, Debug, Default)]
-struct BundleDirectory {
+pub(crate) struct BundleDirectory {
   inner: RamDirectory,
   files: Arc<Mutex<BTreeSet<PathBuf>>>,
 }
@@ -107,10 +112,9 @@ impl SearchService {
   /// Searches the local store and every imported segment.
   pub fn search(&mut self, store: &impl LocalStore, query: &SearchQuery) -> Result<SearchResults, CoreError> {
     let _step = crate::timing::step("search_query");
-    let local_messages = searchable_messages(store, &query.conversations)?;
-    let local_index = build_index(local_messages.iter())?;
+    let allowed = allowed_conversations(store, &query.conversations)?;
     let mut matches: BTreeMap<[u8; 16], SearchMatch> = BTreeMap::new();
-    for found in run_query(&local_index, query)? {
+    for found in self.search_local(store, query, &allowed)? {
       matches.insert(*found.client_message_id.as_bytes(), found);
     }
     self.load_segments(store)?;
@@ -135,6 +139,47 @@ impl SearchService {
     Ok(SearchResults { hits, to_fetch })
   }
 
+  /// The newest [`MAX_CANDIDATES`] matches among the local messages: from the saved index, and for
+  /// what waits to be indexed (or all of it, before there is an index) from the messages, indexed in
+  /// memory for this search.
+  fn search_local(
+    &mut self,
+    store: &impl LocalStore,
+    query: &SearchQuery,
+    allowed: &BTreeSet<ConversationId>,
+  ) -> Result<Vec<SearchMatch>, CoreError> {
+    let (maybe_saved, pending) = match search_index::read_saved(store, self.maybe_local.take()) {
+      Ok(saved) => saved,
+      Err(CoreError::Corrupt(error)) => {
+        // The indexer starts the index over; meanwhile every message is read.
+        tracing::warn!(%error, "the local search index is unreadable; searching the store");
+        (None, search_index::Pending::default())
+      },
+      Err(error) => return Err(error),
+    };
+    let mut found = Vec::new();
+    let unindexed: Vec<StoredMessage> = match &maybe_saved {
+      Some(saved) => {
+        found.extend(search_index::find(
+          &saved.searcher(),
+          query,
+          allowed,
+          Some(&pending),
+        )?);
+        pending_messages(store, &pending, allowed)?
+      },
+      None => searchable_messages(store, allowed)?,
+    };
+    self.maybe_local = maybe_saved;
+    if let Some(index) = search_index::index_in_memory(unindexed.iter())? {
+      let reader = index.reader().map_err(search_error)?;
+      found.extend(search_index::find(&reader.searcher(), query, allowed, None)?);
+    }
+    found.sort_by_key(|hit| std::cmp::Reverse(hit.sent_at_ms));
+    found.truncate(MAX_CANDIDATES);
+    Ok(found)
+  }
+
   fn load_segments(&mut self, store: &impl LocalStore) -> Result<(), CoreError> {
     for (key, bundle) in store.list(Table::SearchSegments)? {
       if let std::collections::hash_map::Entry::Vacant(slot) = self.segments.entry(key) {
@@ -154,6 +199,7 @@ impl std::fmt::Debug for SearchService {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("SearchService")
       .field("segments", &self.segments.len())
+      .field("has_local_index", &self.maybe_local.is_some())
       .finish()
   }
 }
@@ -204,23 +250,31 @@ pub fn is_searchable(message: &StoredMessage) -> bool {
   )
 }
 
-fn searchable_messages(
+/// The conversations a search may look in: the scope's, or for all of them those the store lists.
+fn allowed_conversations(
   store: &impl LocalStore,
   scope: &ConversationScope,
-) -> Result<Vec<StoredMessage>, CoreError> {
-  let conversations: Vec<ConversationId> = match scope {
-    ConversationScope::Only(conversations) => conversations.iter().copied().collect(),
+) -> Result<BTreeSet<ConversationId>, CoreError> {
+  Ok(match scope {
+    ConversationScope::Only(conversations) => conversations.clone(),
     ConversationScope::All => store
       .list(Table::Conversations)?
       .into_iter()
       .filter_map(|(key, _)| serde_json::from_value(serde_json::Value::String(key)).ok())
       .collect(),
-  };
+  })
+}
+
+/// Every searchable message of the `allowed` conversations.
+fn searchable_messages(
+  store: &impl LocalStore,
+  allowed: &BTreeSet<ConversationId>,
+) -> Result<Vec<StoredMessage>, CoreError> {
   let mut messages = Vec::new();
-  for conversation in conversations {
+  for conversation in allowed {
     messages.extend(
       store
-        .messages(conversation, MessageFilter::All)?
+        .messages(*conversation, MessageFilter::All)?
         .into_iter()
         .filter(is_searchable),
     );
@@ -228,9 +282,32 @@ fn searchable_messages(
   Ok(messages)
 }
 
-fn build_index<'a>(messages: impl Iterator<Item = &'a StoredMessage>) -> Result<Index, CoreError> {
-  let bundle = export_segment(messages)?;
-  import_segment(&bundle)
+/// The searchable messages of `allowed` conversations that wait to be indexed, as the store holds
+/// them now.
+fn pending_messages(
+  store: &impl LocalStore,
+  pending: &search_index::Pending,
+  allowed: &BTreeSet<ConversationId>,
+) -> Result<Vec<StoredMessage>, CoreError> {
+  let whole: BTreeSet<ConversationId> = pending
+    .conversations
+    .keys()
+    .filter(|conversation| allowed.contains(conversation))
+    .copied()
+    .collect();
+  let mut messages = searchable_messages(store, &whole)?;
+  for (conversation, client_message_id) in pending.messages.keys() {
+    if !allowed.contains(conversation) || whole.contains(conversation) {
+      continue;
+    }
+    if let Some(message) = store
+      .message(*conversation, ClientMessageId::from_bytes(*client_message_id))?
+      .filter(is_searchable)
+    {
+      messages.push(message);
+    }
+  }
+  Ok(messages)
 }
 
 fn import_segment(bundle: &[u8]) -> Result<Index, CoreError> {
@@ -253,7 +330,7 @@ fn run_query(index: &Index, query: &SearchQuery) -> Result<Vec<SearchMatch>, Cor
   let parsed: Box<dyn Query> = if query.terms.is_empty() {
     Box::new(AllQuery)
   } else {
-    fuzzy_query(&query.terms, &fields)
+    fuzzy_query(&query.terms, [fields.body_en, fields.body_de])
   };
   // Every match in score order, so the filters see all of them before the cap.
   let all_docs = usize::try_from(searcher.num_docs()).unwrap_or(usize::MAX);
@@ -277,15 +354,12 @@ fn run_query(index: &Index, query: &SearchQuery) -> Result<Vec<SearchMatch>, Cor
 /// typos: edit distance 0 up to 3 characters, 1 up to 7, then 2. Words with digits (amounts, years,
 /// ticket numbers) match exactly: `3000` must not find `2000`. User input is never parsed as query
 /// syntax, only tokenised.
-fn fuzzy_query(terms: &[String], fields: &Fields) -> Box<dyn Query> {
+pub(crate) fn fuzzy_query(terms: &[String], [body_en, body_de]: [Field; 2]) -> Box<dyn Query> {
   let mut analyzers = analyzers();
   let mut required: Vec<(Occur, Box<dyn Query>)> = Vec::new();
   for term in terms {
     let mut words: Vec<Vec<(tantivy::schema::Field, String)>> = Vec::new();
-    for (field, (_, analyzer)) in [fields.body_en, fields.body_de]
-      .into_iter()
-      .zip(analyzers.iter_mut())
-    {
+    for (field, (_, analyzer)) in [body_en, body_de].into_iter().zip(analyzers.iter_mut()) {
       let mut stream = analyzer.token_stream(term);
       let mut index = 0;
       while stream.advance() {
@@ -366,11 +440,13 @@ fn passes_filters(message: &StoredMessage, query: &SearchQuery) -> bool {
       .is_none_or(|after| message.sent_at_ms > after)
 }
 
-fn document(fields: &Fields, message: &StoredMessage) -> TantivyDocument {
+/// The text search indexes of a message and its [`FLAG_FILE`], [`FLAG_LINK`] and [`FLAG_THREAD`];
+/// `None` for a message search doesn't cover ([`is_searchable`]).
+pub(crate) fn searchable_body(message: &StoredMessage) -> Option<(String, u64)> {
   let (body, mut flags) = match &message.content {
     MessageContent::Text { body, .. } => (body.clone(), 0),
     MessageContent::File { attachment } => (attachment.file_name.clone(), FLAG_FILE),
-    _ => (String::new(), 0),
+    _ => return None,
   };
   if body.contains("http://") || body.contains("https://") {
     flags |= FLAG_LINK;
@@ -378,6 +454,11 @@ fn document(fields: &Fields, message: &StoredMessage) -> TantivyDocument {
   if message.maybe_thread_id.is_some() {
     flags |= FLAG_THREAD;
   }
+  Some((body, flags))
+}
+
+fn document(fields: &Fields, message: &StoredMessage) -> TantivyDocument {
+  let (body, flags) = searchable_body(message).unwrap_or_default();
   let mut document = TantivyDocument::default();
   document.add_text(fields.client_message_id, message.client_message_id.to_hex());
   document.add_u64(fields.conversation_id, raw(message.conversation_id));
@@ -393,7 +474,7 @@ fn document(fields: &Fields, message: &StoredMessage) -> TantivyDocument {
   document
 }
 
-fn raw(id: impl Id) -> u64 {
+pub(crate) fn raw(id: impl Id) -> u64 {
   u64::try_from(id.snowflake().get()).unwrap_or(0)
 }
 
@@ -424,7 +505,7 @@ fn fields() -> Fields {
   schema().1
 }
 
-fn analyzers() -> [(&'static str, TextAnalyzer); 2] {
+pub(crate) fn analyzers() -> [(&'static str, TextAnalyzer); 2] {
   let analyzer = |language| {
     TextAnalyzer::builder(SimpleTokenizer::default())
       .filter(LowerCaser)
@@ -438,7 +519,7 @@ fn analyzers() -> [(&'static str, TextAnalyzer); 2] {
   ]
 }
 
-fn tokenizers() -> tantivy::tokenizer::TokenizerManager {
+pub(crate) fn tokenizers() -> tantivy::tokenizer::TokenizerManager {
   let manager = tantivy::tokenizer::TokenizerManager::default();
   for (name, analyzer) in analyzers() {
     manager.register(name, analyzer);
@@ -446,11 +527,49 @@ fn tokenizers() -> tantivy::tokenizer::TokenizerManager {
   manager
 }
 
-fn search_error(error: tantivy::TantivyError) -> CoreError {
+pub(crate) fn search_error(error: tantivy::TantivyError) -> CoreError {
   CoreError::Corrupt(format!("search index: {error}"))
 }
 
 impl BundleDirectory {
+  /// Writes a whole file.
+  pub(crate) fn write(&self, path: &Path, data: &[u8]) -> Result<(), CoreError> {
+    self
+      .atomic_write(path, data)
+      .map_err(|error| CoreError::Corrupt(format!("search index: {error}")))
+  }
+
+  /// Reads a whole file.
+  pub(crate) fn read(&self, path: &Path) -> Result<Vec<u8>, CoreError> {
+    self
+      .inner
+      .open_read(path)
+      .and_then(|slice| {
+        slice
+          .read_bytes()
+          .map_err(|error| OpenReadError::wrap_io_error(error, path.to_path_buf()))
+      })
+      .map(|bytes| bytes.as_slice().to_vec())
+      .map_err(|error| CoreError::Corrupt(format!("search index: {error}")))
+  }
+
+  /// Removes a file, if it is there.
+  pub(crate) fn remove(&self, path: &Path) {
+    // A file that isn't there is what was asked for.
+    let _ = Directory::delete(self, path);
+  }
+
+  /// The files there are.
+  pub(crate) fn paths(&self) -> Vec<PathBuf> {
+    self
+      .files
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .iter()
+      .cloned()
+      .collect()
+  }
+
   fn record(&self, path: &Path, is_present: bool) {
     let mut files = self.files.lock().unwrap_or_else(PoisonError::into_inner);
     if is_present {

@@ -901,8 +901,64 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.command(command);
   }
 
-  pub(crate) fn message_view(&self, stored: &StoredMessage, all: &[StoredMessage]) -> Message {
-    self.to_message(stored, all)
+  /// A message as a list shows it but without its reactions and replies: what search filters on
+  /// (author, text, time, thread), without reading anything else of the conversation.
+  pub(crate) fn bare_message_view(&self, stored: &StoredMessage, maybe_importer: Option<UserId>) -> Message {
+    self.to_message_among(stored, &Relations::none(maybe_importer))
+  }
+
+  /// Messages of any conversations as a list shows them, in the order given (search hits, issue
+  /// #154): their reactions and replies come from the store's indexes where it keeps them, so a hit
+  /// in a big channel doesn't read the channel whole.
+  pub(crate) fn scattered_message_views(&self, stored: &[&StoredMessage]) -> Vec<Message> {
+    let maybe_importer = self.importer();
+    let mut by_conversation: BTreeMap<ConversationId, Vec<usize>> = BTreeMap::new();
+    for (at, message) in stored.iter().enumerate() {
+      by_conversation
+        .entry(message.conversation_id)
+        .or_default()
+        .push(at);
+    }
+    let mut views: Vec<Option<Message>> = vec![None; stored.len()];
+    for (conversation, positions) in by_conversation {
+      let rows: Vec<&StoredMessage> = positions.iter().map(|&at| stored[at]).collect();
+      if self.store.indexes_feed() {
+        let targets: Vec<ClientMessageId> = rows.iter().map(|row| row.client_message_id).collect();
+        let threads: Vec<ThreadId> = rows
+          .iter()
+          .filter_map(|row| row.maybe_server_id)
+          .map(|server_id| ThreadId::from_snowflake(server_id.snowflake()))
+          .collect();
+        let reactions = self.read(
+          self
+            .store
+            .reactions_to(conversation, &targets)
+            .map_err(CoreError::from),
+        );
+        let counts = self.read(
+          self
+            .store
+            .reply_counts(conversation, &threads)
+            .map_err(CoreError::from),
+        );
+        let relations = Relations::indexed(&reactions, &threads, &counts, maybe_importer);
+        for (&at, row) in positions.iter().zip(&rows) {
+          views[at] = Some(self.to_message_among(row, &relations));
+        }
+      } else {
+        let all = self.read(
+          self
+            .store
+            .messages(conversation, MessageFilter::All)
+            .map_err(CoreError::from),
+        );
+        let relations = Relations::of(&all, maybe_importer);
+        for (&at, row) in positions.iter().zip(&rows) {
+          views[at] = Some(self.to_message_among(row, &relations));
+        }
+      }
+    }
+    views.into_iter().flatten().collect()
   }
 
   pub(crate) fn command(&self, command: CoreCommand) {
@@ -3899,6 +3955,15 @@ impl FeedView {
 }
 
 impl<'a> Relations<'a> {
+  /// No reactions and no replies.
+  fn none(maybe_importer: Option<UserId>) -> Self {
+    Self {
+      reactions: HashMap::new(),
+      replies: HashMap::new(),
+      maybe_importer,
+    }
+  }
+
   fn of(all: &'a [StoredMessage], maybe_importer: Option<UserId>) -> Self {
     let mut reactions: HashMap<ClientMessageId, Vec<&'a StoredMessage>> = HashMap::new();
     let mut replies: HashMap<ThreadId, usize> = HashMap::new();
