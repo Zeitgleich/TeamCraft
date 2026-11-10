@@ -878,6 +878,9 @@ pub struct Message {
   /// they were in when it was sent.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub mentions_me: bool,
+  /// A poll (issue #205): shown instead of `body`, which is the text versions before polls show.
+  #[serde(rename = "poll", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_poll: Option<Box<crate::polls::PollView>>,
 }
 
 /// A user group this user may mention in a conversation (`use_group_mentions`) and who a mention
@@ -1235,6 +1238,7 @@ mod tests {
         group_mentions: Vec::new(),
         custom_emoji: Vec::new(),
         mentions_me: false,
+        maybe_poll: None,
       })
     };
     assert_eq!(line("[ERROR] disk full").kind, MessageKind::Log(LogLevel::Error));
@@ -1265,6 +1269,7 @@ mod tests {
       group_mentions: Vec::new(),
       custom_emoji: Vec::new(),
       mentions_me: false,
+      maybe_poll: None,
     };
     as_chat_message(&mut message);
     assert_eq!(

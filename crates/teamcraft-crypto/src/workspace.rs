@@ -1,6 +1,6 @@
 //! Signatures on the workspace's append-only logs: the admin roster and the policy (admin.md §2.3,
 //! e2ee.md §11), each channel's role log (e2ee.md §4.6.1, issue #380), and a channel's deletion
-//! (e2ee.md §4.6, issue #1135) and a custom emoji (e2ee.md §4.12, issue #207), which are entries of
+//! (e2ee.md §4.6, issue #1135) and a custom emoji (e2ee.md §4.13, issue #207), which are entries of
 //! no log but signed and verified the same way.
 //!
 //! An entry is signed by a device key over its log, version and payload; the signature travels

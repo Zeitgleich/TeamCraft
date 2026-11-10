@@ -1,4 +1,4 @@
-//! Custom emoji of the workspace (issue #207, e2ee.md §4.12, admin.md §3.11). Admins add, rename
+//! Custom emoji of the workspace (issue #207, e2ee.md §4.13, admin.md §3.11). Admins add, rename
 //! and delete them; everybody signed in lists them and downloads their pictures.
 //!
 //! The pictures are stored unencrypted, as sent: the document an admin's device signed names the

@@ -533,6 +533,16 @@ impl<S: LocalStore> TrackedStore<S> {
     }
   }
 
+  /// [`Self::grouped`] for a write of messages: natively always a group, so the search index's
+  /// queue record (issue #154) reaches the disk with the message or not at all.
+  fn message_group<T>(&self, write: impl FnOnce() -> Result<T, StoreError>) -> Result<T, StoreError> {
+    if cfg!(target_arch = "wasm32") {
+      self.grouped(write)
+    } else {
+      super::write_group(self, write)
+    }
+  }
+
   /// A reader takes a new snapshot if notes were published of commits its snapshot doesn't hold.
   /// Called after taking them: what was published before is covered by the number read here.
   fn catch_up(&self) {
@@ -605,6 +615,14 @@ impl<S: LocalStore> TrackedStore<S> {
       touches_files,
     );
     self.inner.upsert_message(message)?;
+    // Search covers it, or may have covered it before (an edit, a deletion; issue #154).
+    #[cfg(not(target_arch = "wasm32"))]
+    if matches!(
+      message.content,
+      MessageContent::Text { .. } | MessageContent::File { .. } | MessageContent::Deleted
+    ) {
+      crate::search_index::queue_message(&self.inner, message.conversation_id, message.client_message_id)?;
+    }
     // After the write: a commit of another process before it is counted by now.
     self.follow_disk();
     self.cache().upsert(message);
@@ -617,6 +635,8 @@ impl<S: LocalStore> TrackedStore<S> {
     self.note_removed_conversation(conversation)?;
     self.note_written(conversation, Written::Conversation, true);
     self.inner.delete_messages(conversation)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::search_index::queue_conversation(&self.inner, conversation)?;
     self
       .inner
       .delete(Table::EntryTallies, &conversation.to_string())?;
@@ -639,6 +659,8 @@ impl<S: LocalStore> TrackedStore<S> {
     }
     self.note_written(conversation, Written::Message(client_message_id), touches_files);
     self.inner.delete_message(conversation, client_message_id)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::search_index::queue_message(&self.inner, conversation, client_message_id)?;
     // After the write: a commit of another process before it is counted by now.
     self.follow_disk();
     self.cache().remove(conversation, client_message_id);
@@ -705,7 +727,7 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   }
 
   fn upsert_message(&self, message: &StoredMessage) -> Result<(), StoreError> {
-    self.grouped(|| self.upsert_message_grouped(message))
+    self.message_group(|| self.upsert_message_grouped(message))
   }
 
   fn message(
@@ -905,7 +927,7 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
   }
 
   fn delete_messages(&self, conversation: ConversationId) -> Result<(), StoreError> {
-    self.grouped(|| self.delete_messages_grouped(conversation))
+    self.message_group(|| self.delete_messages_grouped(conversation))
   }
 
   fn delete_message(
@@ -913,7 +935,7 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     conversation: ConversationId,
     client_message_id: ClientMessageId,
   ) -> Result<(), StoreError> {
-    self.grouped(|| self.delete_message_grouped(conversation, client_message_id))
+    self.message_group(|| self.delete_message_grouped(conversation, client_message_id))
   }
 
   fn purge_freed(&self) -> Result<(), StoreError> {
@@ -922,6 +944,10 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
 
   fn purge_freed_soon(&self) {
     self.inner.purge_freed_soon();
+  }
+
+  fn wait_for_purge(&self, max_wait: std::time::Duration) -> bool {
+    self.inner.wait_for_purge(max_wait)
   }
 
   fn begin_writes(&self) -> Result<(), StoreError> {
@@ -1047,6 +1073,8 @@ fn classify(table: Table, key: &str) -> Change {
     | Table::FileTransfers
     | Table::Downloads
     | Table::EntryTallies
+    | Table::SearchIndex
+    | Table::SearchQueue
     | Table::ShareLinks
     | Table::ChannelBrowser
     | Table::DeviceLists

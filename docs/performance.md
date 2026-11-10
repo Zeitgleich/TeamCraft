@@ -2062,6 +2062,55 @@ TEAMCRAFT_STORE_BUDGET_MESSAGES=100000 cargo test --release -p teamcraft-core --
   A catalog from before the feed indexes is built again under a new generation too, and SQLCipher
   fills its new columns from every record in one layout step when it opens.
 
+### Search on a large workspace (issue #154)
+
+Every search used to read every stored message, build a tantivy index of them in memory (with a
+15 MB writer) and throw it away: time and memory grew with the history, on every query. The local
+index (docs/e2ee.md §10.1, "Local index", `teamcraft_core::search_index`) is now kept in the store,
+sealed like it, and brought up to date from a queue written with each message; the upkeep indexes a
+bounded batch per tick. A search reads the saved index (once, then only the files a save added) and
+indexes in memory only what still waits. Hits are rendered from the store's indexes of reactions and
+replies instead of reading each hit's conversation whole.
+
+Measured with `tests/search_scale.rs`: 300 conversations, 100,000 messages of about a hundred bytes
+(half in one channel), SQLCipher with the desktop's message cache, release build, Apple M-series
+laptop, November 2026, store on the internal SSD (`TEAMCRAFT_SEARCH_DIR`); "before" is the same
+test on `main` 5119fc2e. Medians of seven searches; the machine was busy with other builds, so the
+"before" column has outliers of several seconds.
+
+```sh
+TEAMCRAFT_SEARCH_DIR=$TMPDIR TEAMCRAFT_SEARCH_MESSAGES=100000 cargo test --release -p teamcraft-core \
+  --all-features --test search_scale -- --nocapture
+```
+
+| 100,000 messages                                      | Before               | After                        |
+|-------------------------------------------------------|----------------------|------------------------------|
+| Core search, a rare word (100–200 hits)               | 0.96 s, 175 MiB peak | 0.7 ms, 1 MiB peak           |
+| Core search, the same with a typo                     | 0.84 s, 141 MiB peak | 0.6 ms                       |
+| Core search, a word in half the messages (2,000 hits) | 0.89 s, 141 MiB peak | 7.6 ms                       |
+| UI search, a rare word (hits rendered)                | 0.95 s, 141 MiB peak | 3.5 ms, 6.7 MiB peak         |
+| UI search, a word in half the messages                | 2.7 s, 118 MiB peak  | 17 ms, 2.1 MiB peak          |
+| UI search, `in:` one channel                          | 0.91 s, 98 MiB peak  | 2.9 ms                       |
+| Held between searches (the index read from the store) | nothing              | 5.3 MiB                      |
+| The index in the store                                | –                    | 5.3 MiB (about 55 B/message) |
+| Building it once (a store from before), 12 steps      | –                    | 1.9 s; slowest step 0.8 s    |
+| 100 new messages, one step                            | –                    | 3 ms                         |
+
+- **Bounded per step:** a step takes 5,000 queued messages (`DEFAULT_STEP_MESSAGES`) or one
+  conversation queued whole (a store from before the index, a conversation whose history went), read
+  once through the message cache. Its memory is tantivy's 15 MB writer plus that conversation; the
+  50,000-message channel took the build's peak to 148 MiB (the cache holds the conversation already
+  in the app). Merges stop at segments of 200,000 messages, so no step rewrites the whole index.
+- **Writes:** every write of a text or file message (or one deleted or removed) also writes one
+  small queue record in the same group of writes (one more row per message), and a step deletes the
+  records it handled.
+- **On the SD card** of the same laptop (the default target directory) the searches are the same,
+  but steps that save a merged segment wait for SQLite's log (one took 13 s): the writes are a few
+  MB, the card's sync is slow. Phones' flash is far faster; not measured on a phone yet.
+- **The browser** keeps its substring scan (tantivy doesn't target wasm32) and writes no queue.
+- **Still open** (#154): full-history search on a new device (segments are fetched on mobile, but
+  no app publishes them), search off the UI thread on the desktop, a measured 500,000-message run.
+
 ### Android (first numbers)
 
 Release Rust core, debug Kotlin build (`assembleLibreDebug`), API 35 emulator (the Pixel 10 / API 37

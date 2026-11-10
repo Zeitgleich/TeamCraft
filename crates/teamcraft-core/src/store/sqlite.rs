@@ -177,11 +177,15 @@ impl SqlCipherStore {
     run_migrations(&connection, MIGRATIONS)?;
     let mut group = WriteGroup::default();
     group.watch_other_connections(&connection)?;
+    // A crash may have left a log that still holds a deleted record's pages (issue #1684).
+    let mut purge = PurgeState::new(Duration::ZERO);
+    purge.force();
+    purge.run_if_due(&connection);
     Ok(Self {
       inner: Mutex::new(Inner {
         connection,
         group,
-        purge: PurgeState::new(Duration::ZERO),
+        purge,
       }),
     })
   }
@@ -1008,7 +1012,7 @@ impl FeedColumns {
     Self {
       is_feed_row: message.is_feed_row(),
       is_event: message.is_event(),
-      maybe_reaction_target: message.reaction_target().map(|target| *target.as_bytes()),
+      maybe_reaction_target: message.relation_target().map(|target| *target.as_bytes()),
       is_reply: message.counts_as_reply(),
     }
   }
@@ -1348,8 +1352,9 @@ mod tests {
     let directory = scratch_dir();
     let path = directory.join("store.db");
     let key = SymmetricKey::generate(&mut OsRng);
-    let ours = SqlCipherStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
-    let theirs = SqlCipherStore::open(&path, &StaticKeySource::new(key)).unwrap();
+    // Theirs first: opening truncates the log, which moves the other connection's data version.
+    let theirs = SqlCipherStore::open(&path, &StaticKeySource::new(key.duplicate())).unwrap();
+    let ours = SqlCipherStore::open(&path, &StaticKeySource::new(key)).unwrap();
     ours.put(Table::Users, "1", b"ours").unwrap();
     assert_eq!(ours.write_tally(), Some(WriteTally::default()));
     theirs.put(Table::Users, "2", b"theirs").unwrap();
@@ -1552,6 +1557,47 @@ mod tests {
     connection
       .execute_batch(&format!("PRAGMA key = \"x'{hex}'\";"))
       .unwrap();
+  }
+
+  /// Issue #1684: a crash left the log on disk; the next opening truncates it.
+  #[test]
+  fn opening_the_store_clears_a_log_left_by_a_crash() {
+    let directory = scratch_dir();
+    let path = directory.join("store.db");
+    let key = || StaticKeySource::new(SymmetricKey::from_bytes([5; 32]));
+    let store = SqlCipherStore::open(&path, &key()).unwrap();
+    store.put(Table::MlsStorage, "state", &[7; 4096]).unwrap();
+    let crashed = scratch_dir();
+    let crashed_path = crashed.join("store.db");
+    std::fs::copy(&path, &crashed_path).unwrap();
+    std::fs::copy(
+      path.with_extension("db-wal"),
+      crashed_path.with_extension("db-wal"),
+    )
+    .unwrap();
+    assert!(
+      std::fs::metadata(crashed_path.with_extension("db-wal"))
+        .unwrap()
+        .len()
+        > 0
+    );
+    drop(store);
+
+    let reopened = SqlCipherStore::open(&crashed_path, &key()).unwrap();
+    assert_eq!(
+      std::fs::metadata(crashed_path.with_extension("db-wal"))
+        .unwrap()
+        .len(),
+      0,
+      "the log the crash left was not truncated"
+    );
+    assert_eq!(
+      reopened.get(Table::MlsStorage, "state").unwrap(),
+      Some(vec![7; 4096])
+    );
+    drop(reopened);
+    std::fs::remove_dir_all(&directory).unwrap();
+    std::fs::remove_dir_all(&crashed).unwrap();
   }
 
   fn scratch_dir() -> std::path::PathBuf {

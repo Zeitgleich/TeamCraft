@@ -220,6 +220,7 @@ mod tests {
       group_mentions: Vec::new(),
       custom_emoji: Vec::new(),
       mentions_me: false,
+      maybe_poll: None,
     }
   }
 }

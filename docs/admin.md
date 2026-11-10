@@ -907,12 +907,14 @@ Admins can't read reported content unless a member shows it to them:
 | Backups status (a heartbeat from the deployment, System health page; operations.md "Health and alerts")           | v1.x |
 
 **System health** (issue #213, [operations.md](operations.md) "Health and alerts"). Administration →
-System health lists the server's checks (database, storage, identity provider, push, media server,
-jobs, and the backup, certificate and disk the deployment reports), each as OK, failing, alert, no
-data or not set up, and the alerts raised since the server started. Owners and admins see a count on
+System health lists the server's checks (database, storage, identity provider, push, media server
+and whether its UDP port answers over IPv4 and IPv6, call quality, jobs, expiring keys, the disk,
+and the backup and certificate the deployment reports), each as OK, failing, alert, no data or not
+set up, and the alerts raised since the server started. Owners and admins see a count on
 the Administration menu when a check has failed for the hold time, pushed by the gateway
 (`health_alert_update`, to admins only), not polled. It carries names, states, times and numbers,
-never content. Only people who may manage the workspace can read it (`GET /api/v1/admin/health`), and
+never content. Thresholds, the probes' interval and timeout, and switching the probes off are under
+Settings → Health alerts. Only people who may manage the workspace can read it (`GET /api/v1/admin/health`), and
 the console shows the page only to them.
 
 ### 3.5 Call backgrounds
@@ -1165,7 +1167,7 @@ picture. They rename and delete them there too. Everybody uses them in messages 
 through the emoji picker's "Workspace" section and the `:` suggestions of the composer.
 
 - **Who:** `manage_workspace` on the server, and on every device an admin or owner of the verified
-  roster, whose device signs each emoji (e2ee.md §4.12). Members adding their own emoji, enabling
+  roster, whose device signs each emoji (e2ee.md §4.13). Members adding their own emoji, enabling
   emoji per space, and reporting one are left for later in #207.
 - **Storage:** unencrypted in object storage, like the organization's call backgrounds; the server
   operator can see the pictures, which the page says. Messages that use them stay encrypted.

@@ -22,8 +22,8 @@ use crate::convert;
 use crate::error::CoreError;
 use crate::records::{self, OutboxEntry};
 use crate::store::{
-  EditRecord, LocalStore, MessageContent, MessageEdge, MessageFilter, Priority, StoredMessage, Table,
-  Unreadable,
+  EditRecord, LocalStore, MessageContent, MessageEdge, MessageFilter, MessageMeta, Priority, StoredMessage,
+  Table, Unreadable,
 };
 
 /// Result of [`Client::flush_outbox`].
@@ -148,6 +148,58 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_custom: None,
     };
     let id = self.enqueue(conversation, None, content)?;
+    self.flush_outbox().await?;
+    Ok(id)
+  }
+
+  /// Sends a poll (issue #205, e2ee.md §4.12): a text message carrying `spec`, whose text
+  /// `fallback` is what versions before polls show. Refused when `spec` breaks the default limits.
+  pub async fn post_poll(
+    &mut self,
+    conversation: ConversationId,
+    spec: teamcraft_proto::PollSpec,
+    fallback: &str,
+  ) -> Result<ClientMessageId, CoreError> {
+    spec
+      .check(&teamcraft_proto::PollLimits::default())
+      .map_err(|error| CoreError::InvalidRequest(error.to_string()))?;
+    let content = MessageContent::Text {
+      body: fallback.to_owned(),
+      mentions: Vec::new(),
+      meta: MessageMeta {
+        maybe_poll: Some(Box::new(spec)),
+        ..MessageMeta::default()
+      },
+    };
+    let id = self.enqueue(conversation, None, content)?;
+    self.flush_outbox().await?;
+    Ok(id)
+  }
+
+  /// Votes in the poll `poll` for the options at `choices`, replacing the user's earlier vote; none
+  /// withdraws it. Like a reaction, an encrypted message the conversation's devices count.
+  pub async fn vote_in_poll(
+    &mut self,
+    conversation: ConversationId,
+    poll: ClientMessageId,
+    choices: Vec<u32>,
+  ) -> Result<ClientMessageId, CoreError> {
+    let content = MessageContent::PollVote {
+      target: poll,
+      choices,
+    };
+    let id = self.enqueue(conversation, None, content)?;
+    self.flush_outbox().await?;
+    Ok(id)
+  }
+
+  /// Closes the poll `poll`; only a close by the poll's sender counts.
+  pub async fn close_poll(
+    &mut self,
+    conversation: ConversationId,
+    poll: ClientMessageId,
+  ) -> Result<ClientMessageId, CoreError> {
+    let id = self.enqueue(conversation, None, MessageContent::PollClose { target: poll })?;
     self.flush_outbox().await?;
     Ok(id)
   }

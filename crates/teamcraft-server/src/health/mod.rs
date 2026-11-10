@@ -2,9 +2,11 @@
 //! "Health and alerts").
 //!
 //! A background task evaluates a fixed list of checks every `[health] check_interval_secs` from
-//! facts the server keeps anyway: circuit breakers, push results, when jobs last ran, and three
-//! small files the deployment writes (backup, certificate, disk). It costs no database query and
-//! no call to a backend. A check that fails for the hold time becomes an alert (see [`tracker`]),
+//! facts the server keeps anyway: circuit breakers, push results, when jobs last ran, the last
+//! readings of its own probes ([`probes`], [`secrets`]), the SFU's call aggregates
+//! ([`call_quality`]), `statvfs` of the data disk ([`disk`]) and three small files the deployment
+//! writes (backup, certificate, disk). It costs no database query and no call to a backend: the
+//! probes run in tasks of their own. A check that fails for the hold time becomes an alert (see [`tracker`]),
 //! and the admins are told through the gateway; the console reads `GET /api/v1/admin/health` when
 //! it is told, or when the health page is open. Raised and resolved alerts also go out by e-mail and
 //! to the webhooks subscribed to them ([`notices`]). The alert history and the notices waiting are
@@ -13,10 +15,14 @@
 //! Nothing here carries content, names or addresses: a check is one of a fixed list, with a state,
 //! times and one number.
 
+mod call_quality;
 mod checks;
+mod disk;
 mod heartbeat;
 mod notices;
 mod persistence;
+mod probes;
+mod secrets;
 mod tracker;
 
 use std::path::PathBuf;
@@ -26,7 +32,7 @@ use std::time::Duration as StdDuration;
 use serde::Deserialize;
 use teamcraft_proto::{
   AdminHealthResponse, GatewayEvent, HealthAlertSettings, HealthCheckResponse, HealthNoticeId, PushProvider,
-  UserId,
+  SfuCallQuality, UserId,
 };
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Notify;
@@ -35,11 +41,15 @@ use tracing::{info, warn};
 use crate::metrics::BackgroundJob;
 use crate::state::AppState;
 
+use call_quality::CallQualityWindow;
 pub use checks::{ALL_CHECKS, JobSchedule, JobSchedules};
-use checks::{Facts, MediaServerFacts, PushFacts, observe};
+use checks::{CallQualityFacts, Facts, MediaServerFacts, ProbeFacts, PushFacts, observe};
+use disk::DiskGauge;
 use heartbeat::Heartbeats;
 use notices::{Channel, Notice, Outbox, Outcome};
 use persistence::Persistence;
+pub use probes::{Probe, ProbeReading, ProbeResults};
+pub use secrets::{SecretExpiries, SecretReading};
 use tracker::{AlertChange, AlertChangeKind, AlertPolicy, AlertTracker};
 
 /// Shortest interval between two evaluations: they are cheap, but never a busy loop.
@@ -74,6 +84,9 @@ pub struct HealthConfig {
   /// After a start, checks that need history (a job that ran, the media server's first report)
   /// give no verdict for this long, so a restart raises nothing.
   pub startup_grace_secs: u64,
+  /// The file systems the server measures for the disk check (`statvfs`), e.g. the data volumes
+  /// mounted into its container; the fullest counts. Empty: only the deployment's report.
+  pub disk_paths: Vec<PathBuf>,
 }
 
 /// The checks, their state and the alerts raised, kept across restarts.
@@ -86,6 +99,11 @@ pub struct HealthMonitor {
   wake: Notify,
   /// Wakes the task that writes the alerts and the outbox to the database.
   persist_wake: Notify,
+  probes: ProbeResults,
+  secrets: SecretExpiries,
+  disk: DiskGauge,
+  /// The SFU's call aggregates of the last minutes.
+  call_quality: Mutex<CallQualityWindow>,
 }
 
 #[derive(Default)]
@@ -108,6 +126,7 @@ impl Default for HealthConfig {
       maybe_heartbeat_dir: None,
       check_interval_secs: 30,
       startup_grace_secs: 300,
+      disk_paths: vec![PathBuf::from("/")],
     }
   }
 }
@@ -121,6 +140,10 @@ impl HealthConfig {
 impl HealthMonitor {
   pub fn new(config: HealthConfig, schedules: JobSchedules, started_at: OffsetDateTime) -> Self {
     Self {
+      disk: DiskGauge::new(config.disk_paths.clone()),
+      probes: ProbeResults::default(),
+      secrets: SecretExpiries::default(),
+      call_quality: Mutex::default(),
       config,
       schedules,
       started_at,
@@ -128,6 +151,24 @@ impl HealthMonitor {
       wake: Notify::new(),
       persist_wake: Notify::new(),
     }
+  }
+
+  /// The last reading of each probe.
+  pub fn probes(&self) -> &ProbeResults {
+    &self.probes
+  }
+
+  pub fn secrets(&self) -> &SecretExpiries {
+    &self.secrets
+  }
+
+  /// The SFU reported how calls went since its last report.
+  pub fn note_call_quality(&self, now: OffsetDateTime, quality: SfuCallQuality) {
+    self
+      .call_quality
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .record(now, quality);
   }
 
   /// How each check stands after the last evaluation, for the metrics.
@@ -151,7 +192,8 @@ impl HealthMonitor {
   /// One evaluation at `now`. Tells the admins if an alert was raised or resolved.
   pub async fn evaluate(&self, state: &AppState, now: OffsetDateTime) {
     let settings = state.settings.get().health_alerts.clone();
-    let heartbeats = Heartbeats::read(self.config.maybe_heartbeat_dir.as_deref()).await;
+    let mut heartbeats = Heartbeats::read(self.config.maybe_heartbeat_dir.as_deref()).await;
+    heartbeats.disk_percent = disk::fuller(heartbeats.disk_percent, self.disk.measure().await);
     let observations = observe(&self.facts(state, now, settings.clone(), heartbeats));
     let (changes, is_admin_refresh_due) = {
       let mut inner = self.lock();
@@ -258,12 +300,34 @@ impl HealthMonitor {
         is_failing: state.push.health(provider).is_failing(),
       })
       .collect();
+    let is_sfu_reporting = state
+      .maybe_calls
+      .as_ref()
+      .is_some_and(|calls| calls.is_reporting_enabled());
     let media = match &state.maybe_calls {
-      Some(calls) if calls.is_reporting_enabled() => MediaServerFacts::Reporting {
+      Some(calls) if is_sfu_reporting => MediaServerFacts::Reporting {
         maybe_last_contact: calls.last_sfu_contact(),
       },
       _ => MediaServerFacts::NotMonitored,
     };
+    let call_quality = if is_sfu_reporting {
+      let window = Duration::seconds(i64::try_from(settings.call_window_secs).unwrap_or(i64::MAX));
+      let summary = self
+        .call_quality
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .summary(now, window);
+      CallQualityFacts::Reporting(summary)
+    } else {
+      CallQualityFacts::NotMonitored
+    };
+    let mut secrets = Vec::new();
+    if state.push.fcm_key().is_some() {
+      secrets.push(self.secrets.fcm());
+    }
+    if self.schedules.maybe_oidc_sync.is_some() {
+      secrets.push(state.oidc_sync.secret_expiry());
+    }
     Facts {
       now,
       started_at: self.started_at,
@@ -273,6 +337,14 @@ impl HealthMonitor {
       has_object_storage: state.maybe_blob_store.is_some(),
       push,
       media,
+      call_quality,
+      probes: ProbeFacts {
+        object_storage: self.probes.get(Probe::ObjectStorage),
+        push_gateway: self.probes.get(Probe::PushGateway),
+        media_udp_ipv4: self.probes.get(Probe::MediaUdpIpv4),
+        media_udp_ipv6: self.probes.get(Probe::MediaUdpIpv6),
+      },
+      secrets,
       schedules: self.schedules,
       oidc_sync_last_success: state.metrics.job_last_success(BackgroundJob::OidcSync),
       oidc_sync_held: state.oidc_sync.held(),
@@ -339,6 +411,8 @@ impl HealthMonitor {
 pub fn spawn(state: AppState) {
   spawn_delivery(state.clone());
   persistence::spawn(state.clone());
+  probes::spawn(state.clone());
+  secrets::spawn(state.clone());
   tokio::spawn(async move {
     let mut interval = tokio::time::interval(state.health.config.check_interval());
     // A late tick is not made up for: the checks look at the state now.

@@ -122,6 +122,7 @@ async fn reports_reach_the_server_in_the_order_they_were_made() {
       maybe_started_by: None,
       maybe_started_at: None,
     }],
+    maybe_quality: None,
   };
 
   // A quick move to another device: the old device's leave comes after its join, and the

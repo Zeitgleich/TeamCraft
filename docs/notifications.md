@@ -79,6 +79,12 @@ DMs and group DMs live outside spaces (their `space_id` is null), so no space co
 | "Unreads" group of a space's sidebar | That space's channels only                                                                 |
 | App badge (dock, taskbar, tray)      | Mentions everywhere plus unread DMs and group DMs (`badge_count`); on macOS also as a number next to the menu bar icon, up to "99+" |
 | Mobile chat list tabs                | "Spaces": mentions (a dot for other unread messages); "Direct messages": as the rail entry |
+| Other accounts (desktop, #214)       | Account menu and the account button: the other accounts' mentions, a dot for other unread  |
+
+The desktop app's accounts that are not active run no core: the shell reads their `GET /unread` every
+2 minutes with each account's own session. The server counts muted conversations as well (mutes are
+in the encrypted account data), so these badges show mentions as a number and anything else as a dot;
+they bring no notifications of their own yet.
 
 **Chats** (desktop and web; the first rail entry, a phone's first tab) lists every DM and
 group DM, newest message first (or by name), favorites on top, with avatar and presence, a bot marker,

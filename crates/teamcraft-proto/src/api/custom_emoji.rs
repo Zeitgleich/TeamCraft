@@ -1,4 +1,4 @@
-//! Custom emoji of the workspace (issue #207, e2ee.md §4.12, admin.md §3.11): small pictures named
+//! Custom emoji of the workspace (issue #207, e2ee.md §4.13, admin.md §3.11): small pictures named
 //! `:shortcode:` that admins add, and everybody uses in messages and reactions.
 //!
 //! The pictures are workspace assets like the organization's call backgrounds: stored unencrypted

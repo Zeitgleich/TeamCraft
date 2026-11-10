@@ -901,6 +901,23 @@ impl<S: LocalStore> CoreChatBackend<S> {
       .collect()
   }
 
+  /// The user and the accounts among `ids` this device knows, former ones included, from one pass
+  /// over the users: a feed draws names and the user's own messages with them before the snapshot
+  /// is read. The user comes first.
+  pub fn me_and_known_users(&self, ids: &BTreeSet<UserId>) -> (User, Vec<User>) {
+    let summaries = self.summaries();
+    let me = summaries
+      .get(&self.me)
+      .map_or_else(|| self.me(), |summary| self.to_user(summary));
+    let known = ids
+      .iter()
+      .filter(|id| **id != self.me)
+      .filter_map(|id| summaries.get(id))
+      .map(|summary| self.to_user(summary))
+      .collect();
+    (me, known)
+  }
+
   pub(crate) fn me_id(&self) -> UserId {
     self.me
   }
@@ -923,8 +940,64 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.command(command);
   }
 
-  pub(crate) fn message_view(&self, stored: &StoredMessage, all: &[StoredMessage]) -> Message {
-    self.to_message(stored, all)
+  /// A message as a list shows it but without its reactions and replies: what search filters on
+  /// (author, text, time, thread), without reading anything else of the conversation.
+  pub(crate) fn bare_message_view(&self, stored: &StoredMessage, maybe_importer: Option<UserId>) -> Message {
+    self.to_message_among(stored, &Relations::none(maybe_importer))
+  }
+
+  /// Messages of any conversations as a list shows them, in the order given (search hits, issue
+  /// #154): their reactions and replies come from the store's indexes where it keeps them, so a hit
+  /// in a big channel doesn't read the channel whole.
+  pub(crate) fn scattered_message_views(&self, stored: &[&StoredMessage]) -> Vec<Message> {
+    let maybe_importer = self.importer();
+    let mut by_conversation: BTreeMap<ConversationId, Vec<usize>> = BTreeMap::new();
+    for (at, message) in stored.iter().enumerate() {
+      by_conversation
+        .entry(message.conversation_id)
+        .or_default()
+        .push(at);
+    }
+    let mut views: Vec<Option<Message>> = vec![None; stored.len()];
+    for (conversation, positions) in by_conversation {
+      let rows: Vec<&StoredMessage> = positions.iter().map(|&at| stored[at]).collect();
+      if self.store.indexes_feed() {
+        let targets: Vec<ClientMessageId> = rows.iter().map(|row| row.client_message_id).collect();
+        let threads: Vec<ThreadId> = rows
+          .iter()
+          .filter_map(|row| row.maybe_server_id)
+          .map(|server_id| ThreadId::from_snowflake(server_id.snowflake()))
+          .collect();
+        let reactions = self.read(
+          self
+            .store
+            .reactions_to(conversation, &targets)
+            .map_err(CoreError::from),
+        );
+        let counts = self.read(
+          self
+            .store
+            .reply_counts(conversation, &threads)
+            .map_err(CoreError::from),
+        );
+        let relations = Relations::indexed(&reactions, &threads, &counts, maybe_importer);
+        for (&at, row) in positions.iter().zip(&rows) {
+          views[at] = Some(self.to_message_among(row, &relations));
+        }
+      } else {
+        let all = self.read(
+          self
+            .store
+            .messages(conversation, MessageFilter::All)
+            .map_err(CoreError::from),
+        );
+        let relations = Relations::of(&all, maybe_importer);
+        for (&at, row) in positions.iter().zip(&rows) {
+          views[at] = Some(self.to_message_among(row, &relations));
+        }
+      }
+    }
+    views.into_iter().flatten().collect()
   }
 
   pub(crate) fn command(&self, command: CoreCommand) {
@@ -1661,6 +1734,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       // The UI recognizes files by their name in the body (search filter `has:file`).
       MessageContent::File { attachment } => attachment.file_name.clone(),
       MessageContent::Reaction { .. }
+      | MessageContent::PollVote { .. }
+      | MessageContent::PollClose { .. }
       | MessageContent::Edit { .. }
       | MessageContent::Delete { .. }
       | MessageContent::Pin { .. }
@@ -1711,6 +1786,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
       group_mentions: crate::group_mentions::shown_group_mentions(&stored.content),
       custom_emoji: shown_custom_emoji(&stored.content),
       mentions_me: matches!(&stored.content, MessageContent::Text { mentions, .. } if mentions.contains(&self.me)),
+      maybe_poll: crate::polls::poll_of(stored).map(|spec| {
+        Box::new(crate::polls::tally(
+          stored,
+          spec,
+          relations.reactions_to(stored.client_message_id),
+          self.me,
+        ))
+      }),
     }
   }
 
@@ -2795,6 +2878,18 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn pinned_messages(&self, conversation: ConversationId) -> Vec<Message> {
     self.ui_pinned_messages(conversation)
+  }
+
+  fn post_poll(&self, conversation: ConversationId, poll: teamcraft_client_api::polls::NewPoll) {
+    self.ui_post_poll(conversation, poll);
+  }
+
+  fn vote_in_poll(&self, conversation: ConversationId, message: MessageId, choices: Vec<u32>) {
+    self.ui_vote_in_poll(conversation, message, choices);
+  }
+
+  fn close_poll(&self, conversation: ConversationId, message: MessageId) {
+    self.ui_close_poll(conversation, message);
   }
 
   fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {
@@ -3947,7 +4042,8 @@ impl MentionMemo {
 /// What the messages of a conversation say about each other, gathered in one pass: a page of rows
 /// would otherwise scan the whole conversation once per row for its reactions and replies.
 struct Relations<'a> {
-  /// Reaction messages by the message they react to, in conversation order (the latest counts).
+  /// Reactions, poll votes and closes by the message they are about, in conversation order (the
+  /// latest counts).
   reactions: HashMap<ClientMessageId, Vec<&'a StoredMessage>>,
   /// Shown replies per thread.
   replies: HashMap<ThreadId, usize>,
@@ -3968,7 +4064,8 @@ struct FeedView {
   messages: usize,
   /// Positions of the rows among the conversation's messages, in display order.
   rows: Vec<usize>,
-  /// Positions of the reactions to each message, in conversation order (the latest counts).
+  /// Positions of the reactions to each message (and of the votes and closes of a poll), in
+  /// conversation order (the latest counts).
   reactions: HashMap<ClientMessageId, Vec<usize>>,
   /// Shown replies per thread.
   replies: HashMap<ThreadId, usize>,
@@ -4036,8 +4133,8 @@ impl FeedView {
       if message.is_feed_row() && !additions.hides(message) {
         rows.push(at);
       }
-      if let MessageContent::Reaction { target, .. } = &message.content {
-        reactions.entry(*target).or_default().push(at);
+      if let Some(target) = message.relation_target() {
+        reactions.entry(target).or_default().push(at);
       }
       if message.counts_as_reply()
         && let Some(thread) = message.maybe_thread_id
@@ -4100,12 +4197,21 @@ impl FeedView {
 }
 
 impl<'a> Relations<'a> {
+  /// No reactions and no replies.
+  fn none(maybe_importer: Option<UserId>) -> Self {
+    Self {
+      reactions: HashMap::new(),
+      replies: HashMap::new(),
+      maybe_importer,
+    }
+  }
+
   fn of(all: &'a [StoredMessage], maybe_importer: Option<UserId>) -> Self {
     let mut reactions: HashMap<ClientMessageId, Vec<&'a StoredMessage>> = HashMap::new();
     let mut replies: HashMap<ThreadId, usize> = HashMap::new();
     for message in all {
-      if let MessageContent::Reaction { target, .. } = &message.content {
-        reactions.entry(*target).or_default().push(message);
+      if let Some(target) = message.relation_target() {
+        reactions.entry(target).or_default().push(message);
       }
       if message.counts_as_reply()
         && let Some(thread) = message.maybe_thread_id
@@ -4130,7 +4236,7 @@ impl<'a> Relations<'a> {
   ) -> Self {
     let mut by_target: HashMap<ClientMessageId, Vec<&'a StoredMessage>> = HashMap::new();
     for message in reactions {
-      if let Some(target) = message.reaction_target() {
+      if let Some(target) = message.relation_target() {
         by_target.entry(target).or_default().push(message);
       }
     }
@@ -4975,6 +5081,44 @@ mod tests {
     // Not part of the feed, but the window says they exist (an otherwise empty conversation).
     let window = teamcraft_client_api::remote::MessageWindow::read(&backend, conversation, 0, 50);
     assert_eq!((window.total, window.undecrypted), (0, 2));
+  }
+
+  /// A feed opened before the snapshot was read (from a notification, on a cold start) names its
+  /// authors and knows the user's own messages from the tail alone.
+  #[test]
+  fn the_tail_s_authors_are_the_known_ones_and_the_user_comes_first() {
+    let store = MemoryStore::new();
+    let summary = |raw: i64, name: &str, is_deactivated: bool| UserSummary {
+      id: id(raw),
+      maybe_username: None,
+      display_name: name.into(),
+      kind: teamcraft_proto::UserKind::Member,
+      maybe_email: None,
+      maybe_organization: None,
+      maybe_has_devices: None,
+      is_deactivated,
+      is_deleted: false,
+    };
+    for user in [
+      summary(1, "Alice Example", false),
+      summary(2, "Bob Example", false),
+      summary(3, "Carol Example", true),
+      summary(4, "Dan Example", false),
+    ] {
+      records::put_json(&store, Table::Users, &user.id.to_string(), &user).unwrap();
+    }
+    let backend = CoreChatBackend::new(store, id(1), Box::new(ManualClock::new(0)));
+
+    let authors = BTreeSet::from([id(1), id(2), id(3), id(99)]);
+    let (me, known) = backend.me_and_known_users(&authors);
+
+    assert_eq!(me.display_name, "Alice Example");
+    let names: Vec<_> = known.iter().map(|user| user.display_name.as_str()).collect();
+    assert_eq!(
+      names,
+      ["Bob Example", "Carol Example"],
+      "a former account names its old messages; an unknown one and people who wrote nothing are left out"
+    );
   }
 
   #[test]

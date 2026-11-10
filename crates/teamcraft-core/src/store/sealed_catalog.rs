@@ -161,7 +161,7 @@ impl Relation {
   /// The relations `message` has.
   pub(crate) fn of(message: &StoredMessage) -> Vec<Self> {
     let mut relations = Vec::new();
-    relations.extend(message.reaction_target().map(Self::ReactionTo));
+    relations.extend(message.relation_target().map(Self::ReactionTo));
     if message.counts_as_reply() {
       relations.extend(message.maybe_thread_id.map(Self::ReplyIn));
     }

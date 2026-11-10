@@ -116,6 +116,9 @@ class MainActivity : FragmentActivity() {
       startShare = sharedContent(intent, packageName)
       startShare?.let { viewModel.receiveShare(it, isRedelivery = savedInstanceState != null) }
     }
+    // A fresh start without a share (launcher, notification, link) never brings back the share
+    // screen of a task the user closed; a restored activity keeps what waited.
+    viewModel.onActivityCreated(isFreshStartWithoutShare = savedInstanceState == null && startShare == null)
     // Not again when the activity is recreated with the same intent (a rotation): it was acted on.
     appLink.value = when (savedInstanceState) {
       null -> appLinkOf(intent)

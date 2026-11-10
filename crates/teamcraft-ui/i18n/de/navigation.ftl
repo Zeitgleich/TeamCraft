@@ -94,8 +94,30 @@ dm-setup-pending = Verschlüsselung wird eingerichtet… Die Gruppe der anderen 
 dm-setup-failed = Die Verschlüsselung dieser Unterhaltung konnte noch nicht eingerichtet werden. Erneut versuchen bittet die Geräte der anderen Seite, dieses Gerät aufzunehmen.
 
 ## Anmeldung
-menu-switch-account = Konto wechseln
 menu-log-out-demo = Du verwendest Demodaten, es gibt nichts abzumelden.
+
+## Konten auf diesem Computer (Desktop)
+accounts-title = Konten
+accounts-hint = Jedes Konto hat auf diesem Computer eigene Nachrichten, Schlüssel und Anmeldung. Entfernen meldet es ab und löscht seine Daten hier; die anderen Konten bleiben, wie sie sind.
+accounts-add = Konto hinzufügen
+accounts-manage = Konten verwalten…
+accounts-switch = Wechseln
+accounts-switch-to = Zu { $name } wechseln
+accounts-remove = Entfernen
+accounts-remove-confirm = { $name } von diesem Computer entfernen? Das Konto wird abgemeldet, seine Nachrichten und Schlüssel auf diesem Computer werden gelöscht.
+accounts-active = In Verwendung
+accounts-signed-out = Abgemeldet
+accounts-mentions = { $count ->
+    [one] Eine Erwähnung
+   *[other] { $count } Erwähnungen
+}
+accounts-unread = Ungelesene Nachrichten
+accounts-others-mentions = { $count ->
+    [one] Eine Erwähnung in einem anderen Konto
+   *[other] { $count } Erwähnungen in anderen Konten
+}
+accounts-others-unread = Ungelesene Nachrichten in einem anderen Konto
+accounts-other-title = Deine anderen Konten auf diesem Computer
 
 ## Suche
 sidebar-show-more = { $count ->

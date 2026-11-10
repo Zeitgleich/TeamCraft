@@ -374,6 +374,79 @@ impl SecretVault {
     outcome
   }
 
+  /// The user removed the account of `server` from this computer (#214). Everything kept for it
+  /// goes: its tokens and session notes (named by the server, or by `{server}|…` like the refresh
+  /// token's key), and the database and backup keys of each of its users (`{server}|{user}`). Items
+  /// of other servers are not touched. Then, as at a sign-out, the files get a new key, so an older
+  /// copy put back brings none of it back (#1155); set-aside files, which may hold the items, go,
+  /// and so do old keychain entries of the items.
+  ///
+  /// Answers the accounts whose database key went: what those keys sealed can't be read any more,
+  /// and the caller deletes it. `Err` means the items may still be in the files. A new key or an
+  /// old entry that the keychain refuses is logged and doesn't fail the call: the items are gone
+  /// from the files already.
+  pub fn forget_server(&self, server: &str) -> Result<Vec<String>, KeySourceError> {
+    if server.is_empty() || server.contains(['@', '|']) {
+      return Err(KeySourceError::SecretsFile("not a server origin".to_owned()));
+    }
+    let mut state = self.lock();
+    // The user asked for this: a failure still standing doesn't hold it back.
+    state.maybe_blocked = None;
+    self.ensure_open(&mut state)?;
+    let contents = contents_of(&mut state)?;
+    let names: Vec<String> = contents
+      .secrets
+      .keys()
+      .filter(|name| is_item_of(name, server))
+      .cloned()
+      .collect();
+    let mut accounts = BTreeSet::new();
+    for name in &names {
+      forget_secret(contents, name);
+      if let Some(account) = scope_of(name, DATABASE_KEY_KIND).or_else(|| scope_of(name, BACKUP_KEY_KIND)) {
+        accounts.insert(account.to_owned());
+      }
+    }
+    contents
+      .failed_deletes
+      .retain(|name, _| !is_item_of(name, server));
+    state.is_dirty |= !names.is_empty();
+    state.are_keys_dirty |= names.iter().any(|name| is_key_item(name));
+    flush_all(&mut state)?;
+    if let Some(directory) = &state.maybe_directory {
+      remove_if_there(&directory.join(SECRETS.set_aside));
+      remove_if_there(&directory.join(KEYS.set_aside));
+    }
+    if let Err(error) = self.change_file_key(&mut state) {
+      tracing::warn!(%error, "the secrets files keep their key after removing an account");
+    }
+    state.maybe_blocked = None;
+    // Also where the files record an entry as gone: an older version of the app, run after the
+    // move, may have written it again. Deleting an entry that isn't there raises no dialog.
+    for name in &names {
+      let entries: Vec<(&str, &str)> = if is_key_item(name) {
+        OLD_KEY_ENTRIES
+          .iter()
+          .filter_map(|(kind, service)| scope_of(name, kind).map(|account| (*service, account)))
+          .collect()
+      } else if [TokenKind::RefreshToken, TokenKind::LocalSession]
+        .into_iter()
+        .any(|kind| scope_of(name, kind.name()).is_some())
+      {
+        vec![(VAULT_SERVICE, name.as_str())]
+      } else {
+        // Session notes never had a keychain entry.
+        Vec::new()
+      };
+      for (service, account) in entries {
+        if let Err(error) = self.call(&mut state, |keystore| keystore.delete(service, account)) {
+          tracing::warn!(%error, "could not delete an old keychain entry of a removed account");
+        }
+      }
+    }
+    Ok(accounts.into_iter().collect())
+  }
+
   /// The database key of `account`, creating it on first use. It lives in the sealed files; an
   /// install from before #1223 has it in the keychain, where it is read once and then deleted.
   pub fn database_key(&self, account: &str) -> Result<SymmetricKey, KeySourceError> {
@@ -879,6 +952,23 @@ fn token_name(kind: TokenKind, server: &str) -> String {
 
 fn item_name(kind: &str, scope: &str) -> String {
   format!("{kind}@{scope}")
+}
+
+/// The scope of an item of `kind` ([`item_name`]), `None` for an item of another kind.
+fn scope_of<'a>(name: &'a str, kind: &str) -> Option<&'a str> {
+  name.strip_prefix(kind)?.strip_prefix('@')
+}
+
+/// Whether an item belongs to the server with origin `server`: its scope is the origin, or starts
+/// with the origin and `|` (a refresh token's key, an account's keys). An origin has neither `@`
+/// nor `|`, and the `|` keeps `https://a.example.com:8443` apart from `https://a.example.com`.
+fn is_item_of(name: &str, server: &str) -> bool {
+  name.split_once('@').is_some_and(|(_, scope)| {
+    scope == server
+      || scope
+        .strip_prefix(server)
+        .is_some_and(|rest| rest.starts_with('|'))
+  })
 }
 
 /// Whether keychain bytes are `key`, compared in constant time.
@@ -3213,6 +3303,193 @@ mod tests {
 
   fn denied() -> KeySourceError {
     KeySourceError::Keystore("the user denied access".to_owned())
+  }
+
+  /// Removing an account (#214): the server's items go, every other server's stay.
+  mod removing_an_account {
+    use super::*;
+
+    /// Starts like A's origin, so only the `|` keeps them apart.
+    const SERVER_A_PORT: &str = "https://a.example.com:8443";
+    const ACCOUNT_A_PORT: &str = "https://a.example.com:8443|3";
+    const TOKEN_KEY_A: &str = "https://a.example.com|https://auth.example.com/realms/a|teamcraft";
+
+    fn token(vault: &SecretVault, kind: TokenKind, scope: &str) -> Option<String> {
+      vault
+        .load_token(kind, scope)
+        .unwrap()
+        .map(|token| token.as_str().to_owned())
+    }
+
+    fn note(vault: &SecretVault, kind: SessionNote, scope: &str) -> Option<String> {
+      vault
+        .load_session_note(kind, scope)
+        .unwrap()
+        .map(|note| note.as_str().to_owned())
+    }
+
+    #[test]
+    fn the_servers_tokens_notes_and_keys_go_and_nothing_else() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let key_a = vault.database_key(ACCOUNT_A).unwrap();
+      vault
+        .save_token(TokenKind::RefreshToken, TOKEN_KEY_A, "refresh-a")
+        .unwrap();
+      vault
+        .save_token(TokenKind::LocalSession, SERVER_A, "session-a")
+        .unwrap();
+      vault
+        .save_session_note(SessionNote::DpopKey, SERVER_A, "dpop-a")
+        .unwrap();
+      vault
+        .save_session_note(SessionNote::CachedAccount, SERVER_A, "account-a")
+        .unwrap();
+      vault
+        .save_session_note(SessionNote::TokenSubject, TOKEN_KEY_A, "subject-a")
+        .unwrap();
+      vault
+        .save_token(TokenKind::RefreshToken, SERVER_B, "refresh-b")
+        .unwrap();
+      vault
+        .save_session_note(SessionNote::DpopKey, SERVER_B, "dpop-b")
+        .unwrap();
+      let key_b = vault.database_key(ACCOUNT_B).unwrap();
+      vault
+        .keep_backup_key(ACCOUNT_B, &SymmetricKey::from_bytes([7; 32]))
+        .unwrap();
+      vault
+        .save_token(TokenKind::RefreshToken, SERVER_A_PORT, "refresh-a-port")
+        .unwrap();
+      let key_a_port = vault.database_key(ACCOUNT_A_PORT).unwrap();
+
+      assert_eq!(vault.forget_server(SERVER_A).unwrap(), vec![ACCOUNT_A.to_owned()]);
+      drop(vault);
+
+      // A new run reads the files from disk: nothing of A is there any more.
+      let vault = reopen(&fake, &directory);
+      for (kind, scope) in [
+        (TokenKind::RefreshToken, SERVER_A),
+        (TokenKind::RefreshToken, TOKEN_KEY_A),
+        (TokenKind::LocalSession, SERVER_A),
+      ] {
+        assert_eq!(token(&vault, kind, scope), None, "{kind:?} of {scope}");
+      }
+      for (kind, scope) in [
+        (SessionNote::DpopKey, SERVER_A),
+        (SessionNote::CachedAccount, SERVER_A),
+        (SessionNote::TokenSubject, TOKEN_KEY_A),
+      ] {
+        assert_eq!(note(&vault, kind, scope), None, "{kind:?} of {scope}");
+      }
+      assert!(vault.kept_backup_key(ACCOUNT_A).unwrap().is_none());
+      assert!(
+        !vault.database_key(ACCOUNT_A).unwrap().is_same_key(&key_a),
+        "the old database key is gone: a new one is made"
+      );
+      // B and the server on another port keep everything.
+      assert_eq!(
+        token(&vault, TokenKind::RefreshToken, SERVER_B).as_deref(),
+        Some("refresh-b")
+      );
+      assert_eq!(
+        note(&vault, SessionNote::DpopKey, SERVER_B).as_deref(),
+        Some("dpop-b")
+      );
+      assert!(vault.database_key(ACCOUNT_B).unwrap().is_same_key(&key_b));
+      assert_eq!(
+        vault.kept_backup_key(ACCOUNT_B).unwrap().unwrap().expose_secret(),
+        &[7; 32]
+      );
+      assert_eq!(
+        token(&vault, TokenKind::RefreshToken, SERVER_A_PORT).as_deref(),
+        Some("refresh-a-port")
+      );
+      assert!(
+        vault
+          .database_key(ACCOUNT_A_PORT)
+          .unwrap()
+          .is_same_key(&key_a_port)
+      );
+    }
+
+    /// The keys file is a second copy of the keys: it must lose them too, or the next start would
+    /// take them back from there.
+    #[test]
+    fn the_keys_file_loses_the_keys_too() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let key_a = vault.database_key(ACCOUNT_A).unwrap();
+      vault.forget_server(SERVER_A).unwrap();
+      drop(vault);
+      // Only the keys file is left.
+      fs::remove_file(directory.path().join(VAULT_FILE)).unwrap();
+
+      let vault = reopen(&fake, &directory);
+      assert!(!vault.database_key(ACCOUNT_A).unwrap().is_same_key(&key_a));
+    }
+
+    /// A copy of the files from before the removal, put back, doesn't open under the new key.
+    #[test]
+    fn an_older_copy_put_back_brings_nothing_back() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let copies: Vec<(PathBuf, Vec<u8>)> = [VAULT_FILE, KEYS_FILE]
+        .into_iter()
+        .map(|name| {
+          let path = directory.path().join(name);
+          let bytes = fs::read(&path).unwrap();
+          (path, bytes)
+        })
+        .collect();
+
+      vault.forget_server(SERVER_A).unwrap();
+      drop(vault);
+      for (path, bytes) in copies {
+        fs::write(path, bytes).unwrap();
+      }
+
+      let vault = reopen(&fake, &directory);
+      assert_eq!(token(&vault, TokenKind::RefreshToken, SERVER_A), None);
+    }
+
+    #[test]
+    fn old_keychain_entries_of_the_server_go() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = reopen(&fake, &directory);
+      vault.database_key(ACCOUNT_A).unwrap();
+      vault
+        .save_token(TokenKind::RefreshToken, SERVER_A, "refresh-a")
+        .unwrap();
+      // Written by an older version after the move: the files record them as gone.
+      fake.put_secret(DATABASE_KEY_SERVICE, ACCOUNT_A, &[8; 32]);
+      fake.put_text(VAULT_SERVICE, OLD_REFRESH_A, "from-an-older-app");
+      fake.put_secret(DATABASE_KEY_SERVICE, ACCOUNT_B, &[9; 32]);
+
+      vault.forget_server(SERVER_A).unwrap();
+
+      assert!(!fake.has(VAULT_SERVICE, OLD_REFRESH_A));
+      assert!(!fake.has(DATABASE_KEY_SERVICE, ACCOUNT_A));
+      assert!(
+        fake.has(DATABASE_KEY_SERVICE, ACCOUNT_B),
+        "another server's entry stays"
+      );
+    }
+
+    #[test]
+    fn only_an_origin_is_taken() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      for scope in ["", ACCOUNT_A, "https://a.example.com@b"] {
+        assert!(vault.forget_server(scope).is_err(), "{scope:?}");
+      }
+      assert!(token(&vault, TokenKind::RefreshToken, SERVER_A).is_some());
+    }
   }
 
   /// What the desktop app asks for on a start, in its order (`main.rs` setup, `restore`, the core).

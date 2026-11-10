@@ -245,7 +245,7 @@ class ShareInboxTest {
   }
 
   @Test
-  fun aNewShareReusingAUriWaitsForTheCopyUnderWay() = runBlocking {
+  fun aNewShareReusingAUriWaitsForTheCopyUnderWayThenTakesItsPlace() = runBlocking {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val receiver = ShareReceiver(root, maxFileBytes = 1000, scope)
     val release = CountDownLatch(1)
@@ -259,7 +259,38 @@ class ShareInboxTest {
     assertEquals(2, copies.size)
     release.countDown()
     copies.joinAll()
-    assertEquals(2, root.listFiles()!!.size)
+    // The newer share is the one the user means; the one that waited doesn't come up after it.
+    assertEquals(1, root.listFiles()!!.size)
+    scope.cancel()
+  }
+
+  @Test
+  fun aNewShareReplacesWaitingOnesButNotOneOnItsWayIntoAComposer() = runBlocking {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val receiver = ShareReceiver(root, maxFileBytes = 1000, scope)
+    receiver.receive(content("handed over")) { emptyList() }
+    scope.coroutineContext[Job]!!.children.toList().joinAll()
+    val handedOver = receiver.next()!!
+    receiver.handOver(handedOver)
+    receiver.receive(content("waiting")) { emptyList() }
+    receiver.receive(content("newest")) { emptyList() }
+    scope.coroutineContext[Job]!!.children.toList().joinAll()
+    assertEquals("newest", receiver.next()!!.text)
+    receiver.finished(handedOver)
+    assertEquals(listOf("handed over", "newest"), waitingTexts())
+    scope.cancel()
+  }
+
+  @Test
+  fun aFreshStartDropsWaitingSharesButNotOneOnItsWayIntoAComposer() = runBlocking {
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val receiver = ShareReceiver(root, maxFileBytes = 1000, scope)
+    stored(content("handed over"), emptyList(), NOW_MS)
+    receiver.handOver(receiver.next()!!)
+    stored(content("waiting"), emptyList(), NOW_MS + 1)
+    receiver.dropWaiting()
+    assertNull(receiver.next())
+    assertEquals(listOf("handed over"), waitingTexts())
     scope.cancel()
   }
 
@@ -286,6 +317,11 @@ class ShareInboxTest {
 
   private fun stored(content: SharedContent, sources: List<ShareSource>, nowMs: Long): StagedShare =
     (inbox.stage(content, sources, nowMs) as ShareStageResult.Stored).share
+
+  /** What every share in the inbox holds, oldest first. */
+  private fun waitingTexts(): List<String> = generateSequence(inbox.oldest()) { previous ->
+    inbox.oldest(except = root.listFiles()!!.map { it.name }.filter { it <= previous.id }.toSet())
+  }.map { it.text }.toList()
 
   private fun content(text: String, leftOut: Int = 0) = SharedContent(text, emptyList(), leftOut = leftOut)
 

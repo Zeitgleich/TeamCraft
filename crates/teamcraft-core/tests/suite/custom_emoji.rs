@@ -1,4 +1,4 @@
-//! Custom emoji of the workspace (issue #207, e2ee.md §4.12): an admin's device signs them, the
+//! Custom emoji of the workspace (issue #207, e2ee.md §4.13): an admin's device signs them, the
 //! members' devices keep only what an admin of their verified roster signed, and messages and
 //! reactions name them inside the ciphertext, so renames and deletions leave earlier ones alone.
 #![cfg(feature = "ui")]

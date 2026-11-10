@@ -514,10 +514,12 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
           lazy_area(Place::Overlay, move || areas::edit_history(conversation, message))
         },
         Overlay::Bookmarks(conversation) => lazy_area(Place::Overlay, move || areas::bookmarks(conversation)),
+        Overlay::NewPoll(conversation) => lazy_area(Place::Overlay, move || areas::new_poll(conversation)),
         Overlay::QuietHours(conversation) => lazy_area(Place::Overlay, move || areas::quiet_hours(conversation)),
         Overlay::UserProfile(user) => lazy_area(Place::Overlay, move || areas::user_profile(user)),
         Overlay::CallsUnavailable => lazy_area(Place::Overlay, || areas::calls_unavailable(())),
         Overlay::ReportProblem => lazy_area(Place::Overlay, || areas::report_problem(())),
+        Overlay::Accounts => lazy_area(Place::Overlay, || areas::accounts(())),
         // The admin console renders its own dialog, in its part of the app.
         // The downloads list hangs under its button in the top bar.
         Overlay::None | Overlay::StatusMenu | Overlay::Downloads | Overlay::DeleteUser(_) => ().into_any(),

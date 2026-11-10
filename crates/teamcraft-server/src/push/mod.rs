@@ -18,7 +18,10 @@ mod unified_push;
 mod web_push;
 
 pub use apns::{APNS_PRODUCTION_URL, APNS_SANDBOX_URL, ApnsSender, ApnsSettings};
-pub use fcm::{FCM_BASE_URL, FcmSender, FcmSettings, ServiceAccount};
+pub use fcm::{
+  FCM_BASE_URL, FCM_CERTIFICATES_URL_PREFIX, FcmKeyExpiry, FcmKeyIdentity, FcmSender, FcmSettings,
+  ServiceAccount,
+};
 pub use gateway::{
   GatewayClient, GatewaySender, GatewaySettings, load_or_create_gateway_key, parse_gateway_key,
 };

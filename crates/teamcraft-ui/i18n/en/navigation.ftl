@@ -94,8 +94,30 @@ dm-setup-pending = Setting up encryption… The other side's group is being join
 dm-setup-failed = Encryption couldn't be set up for this conversation yet. Retry asks the other side's devices to let this device in.
 
 ## Sign-in
-menu-switch-account = Switch account
 menu-log-out-demo = You are using demo data, there is nothing to sign out of.
+
+## Accounts on this computer (desktop)
+accounts-title = Accounts
+accounts-hint = Each account has its own messages, keys and sign-in on this computer. Removing one signs it out and deletes its data here; the other accounts stay as they are.
+accounts-add = Add account
+accounts-manage = Manage accounts…
+accounts-switch = Switch
+accounts-switch-to = Switch to { $name }
+accounts-remove = Remove
+accounts-remove-confirm = Remove { $name } from this computer? It is signed out, and its messages and keys on this computer are deleted.
+accounts-active = In use
+accounts-signed-out = Signed out
+accounts-mentions = { $count ->
+    [one] One mention
+   *[other] { $count } mentions
+}
+accounts-unread = Unread messages
+accounts-others-mentions = { $count ->
+    [one] One mention in another account
+   *[other] { $count } mentions in other accounts
+}
+accounts-others-unread = Unread messages in another account
+accounts-other-title = Your other accounts on this computer
 
 ## Search
 sidebar-show-more = { $count ->

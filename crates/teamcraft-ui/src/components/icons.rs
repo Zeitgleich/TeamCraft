@@ -117,6 +117,8 @@ pub enum IconName {
   Undo,
   /// A curved arrow onward: redo.
   Redo,
+  /// Bars of different lengths on an axis: a poll.
+  Poll,
 }
 
 impl IconName {
@@ -254,6 +256,7 @@ impl IconName {
       Self::Activity => "M22 12h-4l-3 9L9 3l-3 9H2",
       Self::Undo => "M9 14 4 9l5-5 M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
       Self::Redo => "M15 14l5-5-5-5 M20 9H9.5a5.5 5.5 0 0 0 0 11H13",
+      Self::Poll => "M4 4v16 M8 7h9 M8 12h12 M8 17h5",
       Self::Alert => {
         "M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z M12 9v4 M12 17h.01"
       },

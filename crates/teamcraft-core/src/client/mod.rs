@@ -526,6 +526,10 @@ pub struct Client<A, S> {
   /// Set once no conversation has imported history left to page through; a finished import
   /// clears it ([`Client::page_imported_history`]).
   is_imported_history_paged: bool,
+  /// Keeps the local search index up to date ([`Client::index_search_step`]); boxed, as it is
+  /// seldom touched.
+  #[cfg(not(target_arch = "wasm32"))]
+  search_indexer: Box<crate::search_index::SearchIndexer>,
 }
 
 impl Default for ClientSettings {
@@ -696,6 +700,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_last_heard_ms: None,
       is_checking_as_before_v1_0_9: false,
       is_imported_history_paged: false,
+      #[cfg(not(target_arch = "wasm32"))]
+      search_indexer: Box::default(),
     };
     client.resume_first_sync()?;
     // The rest is the app's: it writes, and the app may be catching up next to this process (its
@@ -936,6 +942,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// [`Self::persist_group`] after an MLS entry was processed: the state and the cursor past the
   /// entry go to the store together, so a restart never processes it again on a state that
   /// already moved on.
+  #[track_caller]
   pub(crate) fn persist_group_at(
     &mut self,
     conversation: ConversationId,
@@ -1181,10 +1188,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Runs `writes` as one group of store writes (issue #160): after a crash or a failed write, the
   /// store holds all of them or none. For steps whose records must agree (MLS state, cursor, keys);
   /// synchronous, so a group never stays open across a network request.
+  #[track_caller]
   pub(crate) fn atomically<T>(
     &mut self,
     writes: impl FnOnce(&mut Self) -> Result<T, CoreError>,
   ) -> Result<T, CoreError> {
+    let _site = crate::store::GroupSite::enter(std::panic::Location::caller());
     self.store.begin_writes()?;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| writes(self)));
     crate::store::end_group(&self.store, result)

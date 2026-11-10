@@ -467,6 +467,13 @@ pub struct MessageTail {
   /// once the reader comes near, asks for it ([`ChatAction::FillHistoryGap`]).
   #[serde(default)]
   pub gaps: Vec<crate::model::HistoryGap>,
+  /// The reader, so a list knows which messages are their own before it read a snapshot.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_me: Option<crate::model::User>,
+  /// The other authors of [`Self::messages`] this device knows: a list opened before it read a
+  /// snapshot (from a notification, on a cold start) names them at once.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub authors: Vec<crate::model::User>,
 }
 
 /// Where the local client stands.
@@ -826,6 +833,21 @@ pub enum ChatAction {
     conversation: ConversationId,
     message: MessageId,
     is_saved: bool,
+  },
+  /// Sends a poll (issue #205).
+  PostPoll {
+    conversation: ConversationId,
+    poll: crate::polls::NewPoll,
+  },
+  /// Votes in a poll; no choices withdraw the vote.
+  VoteInPoll {
+    conversation: ConversationId,
+    message: MessageId,
+    choices: Vec<u32>,
+  },
+  ClosePoll {
+    conversation: ConversationId,
+    message: MessageId,
   },
   /// A picture file for the user's backgrounds (JPEG or PNG; the host normalizes it).
   AddBackgroundImage {
@@ -1230,6 +1252,9 @@ impl ChatAction {
         | Self::ToggleReaction { .. }
         | Self::ForwardMessage { .. }
         | Self::SetPinned { .. }
+        | Self::PostPoll { .. }
+        | Self::VoteInPoll { .. }
+        | Self::ClosePoll { .. }
     )
   }
 
@@ -1352,6 +1377,16 @@ impl ChatAction {
         message,
         is_saved,
       } => backend.set_saved(conversation, message, is_saved),
+      Self::PostPoll { conversation, poll } => backend.post_poll(conversation, poll),
+      Self::VoteInPoll {
+        conversation,
+        message,
+        choices,
+      } => backend.vote_in_poll(conversation, message, choices),
+      Self::ClosePoll {
+        conversation,
+        message,
+      } => backend.close_poll(conversation, message),
       Self::AddBackgroundImage { name, picture } => backend.add_background_image(&name, picture.into_vec()),
       Self::DeleteBackgroundImage { id } => backend.delete_background_image(id),
       Self::AddOrgBackground { name, picture } => backend.add_org_background(&name, picture.into_vec()),
@@ -2329,6 +2364,18 @@ mod tests {
   use super::*;
   use crate::model::id_from_raw;
 
+  /// A tail from a core before the authors were added reads as one without them; one without
+  /// authors writes no keys for them, as before.
+  #[test]
+  fn a_message_tail_without_authors_keeps_its_wire_form() {
+    let json = r#"{"conversation":"7","messages":[],"has_older":false}"#;
+    let tail: MessageTail = serde_json::from_str(json).expect("parse");
+    assert_eq!(tail.maybe_me, None);
+    assert!(tail.authors.is_empty());
+    let written = serde_json::to_value(&tail).expect("serialize");
+    assert!(written.get("maybe_me").is_none() && written.get("authors").is_none());
+  }
+
   /// The mobile apps write these by hand (#954); the names are part of the bridge.
   #[test]
   fn queries_of_a_space_read_as_the_apps_write_them() {
@@ -2456,6 +2503,15 @@ mod tests {
         message,
         is_pinned: true,
       },
+      ChatAction::VoteInPoll {
+        conversation,
+        message,
+        choices: vec![1],
+      },
+      ChatAction::ClosePoll {
+        conversation,
+        message,
+      },
       ChatAction::PostMessage {
         conversation,
         maybe_thread: None,
@@ -2469,6 +2525,45 @@ mod tests {
     assert!(!ChatAction::MarkRead { conversation }.is_outbox_write());
     assert!(!ChatAction::LoadOlderHistory { conversation }.is_outbox_write());
     assert!(!ChatAction::OpenDm { user: id_from_raw(2) }.is_outbox_write());
+  }
+
+  #[test]
+  fn poll_actions_keep_their_wire_names() {
+    // The mobile apps will send these by name (issue #205).
+    let (conversation, message) = (id_from_raw(7), id_from_raw(70));
+    let vote = ChatAction::VoteInPoll {
+      conversation,
+      message,
+      choices: vec![0, 2],
+    };
+    let json = r#"{"action":"vote_in_poll","conversation":"7","message":"70","choices":[0,2]}"#;
+    assert_eq!(serde_json::to_string(&vote).unwrap(), json);
+    assert_eq!(serde_json::from_str::<ChatAction>(json).unwrap(), vote);
+    let close = ChatAction::ClosePoll {
+      conversation,
+      message,
+    };
+    assert_eq!(
+      serde_json::to_string(&close).unwrap(),
+      r#"{"action":"close_poll","conversation":"7","message":"70"}"#
+    );
+    let post = ChatAction::PostPoll {
+      conversation,
+      poll: crate::polls::NewPoll {
+        spec: crate::polls::PollSpec {
+          question: "Q".into(),
+          options: vec!["A".into(), "B".into()],
+          choice: crate::polls::PollChoice::Single,
+          voters: crate::polls::PollVoters::Hidden,
+        },
+        fallback: "Poll: Q".into(),
+      },
+    };
+    assert_eq!(
+      serde_json::to_string(&post).unwrap(),
+      r#"{"action":"post_poll","conversation":"7","poll":{"spec":{"question":"Q","options":["A","B"],"choice":"single","voters":"hidden"},"fallback":"Poll: Q"}}"#
+    );
+    assert!(post.is_outbox_write());
   }
 
   #[test]

@@ -289,6 +289,10 @@ impl LocalStore for LaneStore {
     self.writer.purge_freed_soon();
   }
 
+  fn wait_for_purge(&self, max_wait: std::time::Duration) -> bool {
+    self.writer.wait_for_purge(max_wait)
+  }
+
   fn begin_writes(&self) -> Result<(), StoreError> {
     self.writer.begin_writes()?;
     self.writing.fetch_add(1, Ordering::AcqRel);

@@ -6,7 +6,10 @@ use teamcraft_proto::{
 };
 use time::{Duration, OffsetDateTime};
 
+use super::call_quality::{CallQualitySummary, MIN_SESSIONS};
 use super::heartbeat::{Heartbeats, Reading};
+use super::probes::ProbeReading;
+use super::secrets::SecretReading;
 use super::tracker::{Observation, Verdict};
 use crate::holidays::feed::FeedHealth;
 
@@ -17,19 +20,23 @@ const SFU_SILENT_AFTER: Duration = Duration::seconds(120);
 const SECONDS_PER_DAY: i64 = 86_400;
 
 /// Every check, in the order the console shows them.
-pub const ALL_CHECKS: [HealthCheckId; 15] = [
+pub const ALL_CHECKS: [HealthCheckId; 19] = [
   HealthCheckId::Database,
   HealthCheckId::ObjectStorage,
   HealthCheckId::IdentityProvider,
   HealthCheckId::PushGateway,
   HealthCheckId::PushService,
   HealthCheckId::MediaServer,
+  HealthCheckId::MediaUdpIpv4,
+  HealthCheckId::MediaUdpIpv6,
+  HealthCheckId::CallQuality,
   HealthCheckId::OidcSync,
   HealthCheckId::OidcSyncBrake,
   HealthCheckId::Retention,
   HealthCheckId::PartitionMaintenance,
   HealthCheckId::Backup,
   HealthCheckId::Certificate,
+  HealthCheckId::SecretExpiry,
   HealthCheckId::DiskSpace,
   HealthCheckId::HolidayFeed,
   HealthCheckId::HolidayResync,
@@ -69,6 +76,23 @@ pub enum MediaServerFacts {
   },
 }
 
+/// The calls as the SFU's aggregates show them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallQualityFacts {
+  /// No media server, or it does not report to this server.
+  NotMonitored,
+  Reporting(CallQualitySummary),
+}
+
+/// The last reading of each probe.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProbeFacts {
+  pub object_storage: ProbeReading,
+  pub push_gateway: ProbeReading,
+  pub media_udp_ipv4: ProbeReading,
+  pub media_udp_ipv6: ProbeReading,
+}
+
 /// A direct push service (not the gateway) that is set up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PushFacts {
@@ -87,6 +111,10 @@ pub struct Facts {
   pub has_object_storage: bool,
   pub push: Vec<PushFacts>,
   pub media: MediaServerFacts,
+  pub call_quality: CallQualityFacts,
+  pub probes: ProbeFacts,
+  /// The secrets set up whose expiry can be read, one reading each.
+  pub secrets: Vec<SecretReading>,
   pub schedules: JobSchedules,
   pub oidc_sync_last_success: Option<OffsetDateTime>,
   /// How many deactivations the sync's safety brake holds back.
@@ -108,7 +136,10 @@ pub fn observe(facts: &Facts) -> Vec<(HealthCheckId, Observation)> {
     (
       HealthCheckId::ObjectStorage,
       if facts.has_object_storage {
-        dependency(facts, &DependencyName::ObjectStorage, Absent::Healthy)
+        with_latency(
+          dependency(facts, &DependencyName::ObjectStorage, Absent::Healthy),
+          facts.probes.object_storage,
+        )
       } else {
         Observation::new(Verdict::NotConfigured)
       },
@@ -119,10 +150,22 @@ pub fn observe(facts: &Facts) -> Vec<(HealthCheckId, Observation)> {
     ),
     (
       HealthCheckId::PushGateway,
-      dependency(facts, &DependencyName::PushGateway, Absent::NotConfigured),
+      with_latency(
+        dependency(facts, &DependencyName::PushGateway, Absent::NotConfigured),
+        facts.probes.push_gateway,
+      ),
     ),
     (HealthCheckId::PushService, push(&facts.push)),
     (HealthCheckId::MediaServer, media(facts)),
+    (
+      HealthCheckId::MediaUdpIpv4,
+      udp_probe(facts.probes.media_udp_ipv4),
+    ),
+    (
+      HealthCheckId::MediaUdpIpv6,
+      udp_probe(facts.probes.media_udp_ipv6),
+    ),
+    (HealthCheckId::CallQuality, call_quality(facts)),
     (
       HealthCheckId::OidcSync,
       job(
@@ -150,6 +193,7 @@ pub fn observe(facts: &Facts) -> Vec<(HealthCheckId, Observation)> {
     ),
     (HealthCheckId::Backup, backup(facts)),
     (HealthCheckId::Certificate, certificate(facts)),
+    (HealthCheckId::SecretExpiry, secret_expiry(facts)),
     (HealthCheckId::DiskSpace, disk(facts)),
     (HealthCheckId::HolidayFeed, holiday_feed(facts)),
     (
@@ -186,6 +230,79 @@ fn dependency(facts: &Facts, name: &DependencyName, absent: Absent) -> Observati
     },
   };
   Observation::new(verdict)
+}
+
+/// A dependency's verdict with the milliseconds its last probe took, when it answered.
+fn with_latency(observation: Observation, probe: ProbeReading) -> Observation {
+  let is_judged = matches!(observation.verdict, Verdict::Healthy | Verdict::Unhealthy);
+  match probe.latency_millis() {
+    Some(millis) if is_judged && observation.maybe_value.is_none() => {
+      Observation::with_value(observation.verdict, millis)
+    },
+    _ => observation,
+  }
+}
+
+/// The SFU's UDP port from the outside. A family the server can't probe from where it is (no IPv6
+/// route) or the SFU has no address in counts as not set up: that says nothing about the SFU.
+fn udp_probe(probe: ProbeReading) -> Observation {
+  match probe {
+    ProbeReading::NotConfigured | ProbeReading::Unavailable => Observation::new(Verdict::NotConfigured),
+    ProbeReading::Failed { .. } => Observation::new(Verdict::Unhealthy),
+    ProbeReading::Answered { .. } => {
+      Observation::with_value(Verdict::Healthy, probe.latency_millis().unwrap_or(0))
+    },
+  }
+}
+
+/// Calls go badly: the 95th percentile of the downlink loss above the limit, or nearly every new
+/// session on the WebSocket fallback. Too few calls to tell are fine: nobody suffers.
+fn call_quality(facts: &Facts) -> Observation {
+  let CallQualityFacts::Reporting(summary) = facts.call_quality else {
+    return Observation::new(Verdict::NotConfigured);
+  };
+  let max_loss_permille = facts.settings.call_max_loss_percent.saturating_mul(10);
+  let is_lossy = summary
+    .maybe_loss_p95_permille
+    .is_some_and(|p95| p95 > max_loss_permille);
+  let sessions = summary.quic_sessions + summary.fallback_sessions;
+  let is_udp_blocked = sessions >= MIN_SESSIONS
+    && summary.fallback_sessions * 100 > u64::from(facts.settings.call_max_fallback_percent) * sessions;
+  Observation {
+    verdict: verdict(!is_lossy && !is_udp_blocked),
+    maybe_value: summary.maybe_loss_p95_permille.map(i64::from),
+  }
+}
+
+/// The days until the soonest of the secrets expires. A secret the provider no longer knows counts
+/// as expired; secrets without an expiry are fine.
+fn secret_expiry(facts: &Facts) -> Observation {
+  if facts.secrets.is_empty() {
+    return Observation::new(Verdict::NotConfigured);
+  }
+  let now = facts.now.unix_timestamp();
+  let maybe_soonest = facts
+    .secrets
+    .iter()
+    .filter_map(|reading| match reading {
+      SecretReading::ExpiresAt(at) => Some(*at),
+      SecretReading::Gone => Some(now - 1),
+      SecretReading::Unknown | SecretReading::NoExpiry => None,
+    })
+    .min();
+  let Some(soonest) = maybe_soonest else {
+    let is_unknown = facts.secrets.contains(&SecretReading::Unknown);
+    return Observation::new(if is_unknown {
+      Verdict::NoData
+    } else {
+      Verdict::Healthy
+    });
+  };
+  let days_left = (soonest - now).div_euclid(SECONDS_PER_DAY);
+  Observation::with_value(
+    verdict(days_left >= i64::from(facts.settings.secret_min_days)),
+    days_left,
+  )
 }
 
 fn push(providers: &[PushFacts]) -> Observation {
@@ -607,6 +724,157 @@ mod tests {
     }
   }
 
+  mod probes {
+    use super::*;
+
+    #[test]
+    fn a_dependency_shows_how_long_its_probe_took_and_keeps_its_breakers_verdict() {
+      let mut facts = facts_with(&[health(DependencyName::PushGateway, DependencyState::Ok)]);
+      facts.probes.push_gateway = answered(23);
+      let observation = observation_of(&facts, HealthCheckId::PushGateway);
+      assert_eq!(
+        (observation.verdict, observation.maybe_value),
+        (Verdict::Healthy, Some(23))
+      );
+      // A failed probe counts through the breaker, which needs several failures in a row.
+      facts.probes.push_gateway = ProbeReading::Failed { at: facts.now };
+      let observation = observation_of(&facts, HealthCheckId::PushGateway);
+      assert_eq!(
+        (observation.verdict, observation.maybe_value),
+        (Verdict::Healthy, None)
+      );
+    }
+
+    #[test]
+    fn the_udp_port_is_judged_by_its_probe_per_family() {
+      let mut facts = facts_with(&[]);
+      facts.probes.media_udp_ipv4 = answered(4);
+      facts.probes.media_udp_ipv6 = ProbeReading::Failed { at: facts.now };
+      let ipv4 = observation_of(&facts, HealthCheckId::MediaUdpIpv4);
+      assert_eq!((ipv4.verdict, ipv4.maybe_value), (Verdict::Healthy, Some(4)));
+      assert_eq!(
+        verdict_of(&facts, HealthCheckId::MediaUdpIpv6),
+        Verdict::Unhealthy
+      );
+      facts.probes.media_udp_ipv6 = ProbeReading::Unavailable;
+      assert_eq!(
+        verdict_of(&facts, HealthCheckId::MediaUdpIpv6),
+        Verdict::NotConfigured,
+        "a server without an IPv6 route can't tell"
+      );
+    }
+
+    fn answered(millis: u64) -> ProbeReading {
+      ProbeReading::Answered {
+        latency: std::time::Duration::from_millis(millis),
+        at: OffsetDateTime::UNIX_EPOCH,
+      }
+    }
+  }
+
+  mod calls {
+    use super::*;
+
+    #[test]
+    fn loss_above_the_limit_fails() {
+      let mut facts = facts_with(&[]);
+      facts.call_quality = reporting(Some(51), 10, 0);
+      let observation = observation_of(&facts, HealthCheckId::CallQuality);
+      assert_eq!(
+        (observation.verdict, observation.maybe_value),
+        (Verdict::Unhealthy, Some(51))
+      );
+      facts.call_quality = reporting(Some(50), 10, 0);
+      assert_eq!(verdict_of(&facts, HealthCheckId::CallQuality), Verdict::Healthy);
+    }
+
+    #[test]
+    fn nearly_every_session_on_the_fallback_fails() {
+      let mut facts = facts_with(&[]);
+      facts.call_quality = reporting(None, 1, 9);
+      assert_eq!(verdict_of(&facts, HealthCheckId::CallQuality), Verdict::Unhealthy);
+      facts.call_quality = reporting(None, 2, 8);
+      assert_eq!(
+        verdict_of(&facts, HealthCheckId::CallQuality),
+        Verdict::Healthy,
+        "80 % is the limit, not above it"
+      );
+      facts.call_quality = reporting(None, 0, 4);
+      assert_eq!(
+        verdict_of(&facts, HealthCheckId::CallQuality),
+        Verdict::Healthy,
+        "four sessions say nothing"
+      );
+    }
+
+    #[test]
+    fn without_reports_the_check_is_not_set_up() {
+      assert_eq!(
+        verdict_of(&facts_with(&[]), HealthCheckId::CallQuality),
+        Verdict::NotConfigured
+      );
+    }
+
+    fn reporting(
+      maybe_loss_p95_permille: Option<u32>,
+      quic_sessions: u64,
+      fallback_sessions: u64,
+    ) -> CallQualityFacts {
+      CallQualityFacts::Reporting(CallQualitySummary {
+        loss_samples: 100,
+        maybe_loss_p95_permille,
+        quic_sessions,
+        fallback_sessions,
+      })
+    }
+  }
+
+  mod secrets {
+    use super::*;
+
+    #[test]
+    fn the_soonest_secret_counts() {
+      let mut facts = facts_with(&[]);
+      let now = facts.now.unix_timestamp();
+      facts.secrets = vec![
+        SecretReading::ExpiresAt(now + 400 * SECONDS_PER_DAY),
+        SecretReading::ExpiresAt(now + 10 * SECONDS_PER_DAY + 60),
+        SecretReading::NoExpiry,
+      ];
+      let observation = observation_of(&facts, HealthCheckId::SecretExpiry);
+      assert_eq!(
+        (observation.verdict, observation.maybe_value),
+        (Verdict::Unhealthy, Some(10))
+      );
+      facts.secrets = vec![SecretReading::ExpiresAt(now + 14 * SECONDS_PER_DAY + 60)];
+      assert_eq!(verdict_of(&facts, HealthCheckId::SecretExpiry), Verdict::Healthy);
+    }
+
+    #[test]
+    fn a_secret_the_provider_no_longer_knows_is_expired() {
+      let mut facts = facts_with(&[]);
+      facts.secrets = vec![SecretReading::Gone];
+      let observation = observation_of(&facts, HealthCheckId::SecretExpiry);
+      assert_eq!(
+        (observation.verdict, observation.maybe_value),
+        (Verdict::Unhealthy, Some(-1))
+      );
+    }
+
+    #[test]
+    fn unread_secrets_give_no_verdict_and_secrets_without_expiry_are_fine() {
+      let mut facts = facts_with(&[]);
+      assert_eq!(
+        verdict_of(&facts, HealthCheckId::SecretExpiry),
+        Verdict::NotConfigured
+      );
+      facts.secrets = vec![SecretReading::Unknown, SecretReading::NoExpiry];
+      assert_eq!(verdict_of(&facts, HealthCheckId::SecretExpiry), Verdict::NoData);
+      facts.secrets = vec![SecretReading::NoExpiry];
+      assert_eq!(verdict_of(&facts, HealthCheckId::SecretExpiry), Verdict::Healthy);
+    }
+  }
+
   #[test]
   fn the_holiday_feed_is_judged_by_the_age_of_its_copy() {
     let mut facts = facts_with(&[]);
@@ -656,6 +924,9 @@ mod tests {
       has_object_storage: false,
       push: Vec::new(),
       media: MediaServerFacts::NotMonitored,
+      call_quality: CallQualityFacts::NotMonitored,
+      probes: ProbeFacts::default(),
+      secrets: Vec::new(),
       schedules: JobSchedules::default(),
       oidc_sync_last_success: None,
       oidc_sync_held: 0,

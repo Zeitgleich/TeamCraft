@@ -172,6 +172,28 @@ pub struct SfuRosterReport {
   /// the server gives the devices that were in them time to rejoin before it drops them.
   pub uptime_secs: u64,
   pub calls: Vec<SfuCallRoster>,
+  /// How calls went since the SFU's last roster report, for the server's health check
+  /// `call_quality` (#1666). Absent from older SFUs.
+  #[serde(rename = "quality", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_quality: Option<SfuCallQuality>,
+}
+
+/// The upper bounds, in tenths of a percent, of the buckets [`SfuCallQuality::loss_buckets`] counts
+/// in; one more bucket counts what is above the last. The same as the SFU's
+/// `teamcraft_sfu_downlink_loss_ratio` histogram.
+pub const CALL_LOSS_BUCKETS_PERMILLE: [u32; 8] = [1, 5, 10, 20, 50, 100, 200, 500];
+
+/// Aggregates over every call on the SFU since its last report: no call, user, device or address.
+/// Counts that add up, so the server can sum reports over its own window.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SfuCallQuality {
+  /// Samples of the downlink loss of busy QUIC sessions (one per session every 10 s), counted per
+  /// bucket of [`CALL_LOSS_BUCKETS_PERMILLE`], plus one for above the last bound. Not cumulative.
+  pub loss_buckets: Vec<u32>,
+  /// Sessions that joined a call over QUIC (UDP).
+  pub quic_sessions: u32,
+  /// Sessions that joined over the WebSocket fallback (UDP blocked on the way).
+  pub fallback_sessions: u32,
 }
 
 /// One call on the SFU, with every device in it (also those reconnecting). Also the answer of the
@@ -246,6 +268,7 @@ mod tests {
         maybe_started_by: Some(UserId::from_snowflake(Snowflake::new(2).unwrap())),
         maybe_started_at: Some(UnixMillis(1000)),
       }],
+      maybe_quality: None,
     };
     let json = serde_json::to_string(&report).unwrap();
     assert_eq!(
@@ -256,6 +279,26 @@ mod tests {
     let older: SfuRosterReport =
       serde_json::from_str(r#"{"uptime_secs":1,"calls":[{"call_id":"7","participants":[]}]}"#).unwrap();
     assert_eq!(older.calls[0].maybe_conversation_id, None);
+    assert_eq!(older.maybe_quality, None);
+  }
+
+  #[test]
+  fn call_quality_rides_along_with_the_roster() {
+    let report = SfuRosterReport {
+      uptime_secs: 5,
+      calls: Vec::new(),
+      maybe_quality: Some(SfuCallQuality {
+        loss_buckets: vec![3, 0, 0, 0, 1, 0, 0, 0, 0],
+        quic_sessions: 4,
+        fallback_sessions: 1,
+      }),
+    };
+    let json = serde_json::to_string(&report).unwrap();
+    assert_eq!(
+      json,
+      r#"{"uptime_secs":5,"calls":[],"quality":{"loss_buckets":[3,0,0,0,1,0,0,0,0],"quic_sessions":4,"fallback_sessions":1}}"#
+    );
+    assert_eq!(serde_json::from_str::<SfuRosterReport>(&json).unwrap(), report);
   }
 
   #[test]

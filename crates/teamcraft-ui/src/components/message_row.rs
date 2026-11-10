@@ -19,6 +19,7 @@ use crate::components::long_press::LongPress;
 use crate::components::message_actions::{MessageAction, QuotedImage, run_message_action};
 use crate::components::message_link_card::MessageLinkPreviews;
 use crate::components::message_toolbar::{ActiveMessage, ToolbarHost};
+use crate::components::poll_card::PollCard;
 use crate::components::profile_views::UserHoverCard;
 use crate::components::rich_text::RichText;
 use crate::custom_emoji::EmojiGlyph;
@@ -408,6 +409,9 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   let reactions = message.reactions.clone();
   // Imported messages are the import account's: nobody edits them as their own.
   let is_mine = message.author == me.id && maybe_imported.is_none();
+  // A poll shows its card; its text is only what versions before polls show (issue #205).
+  let maybe_poll = message.maybe_poll.clone();
+  let is_poll = maybe_poll.is_some();
   let author_id = message.author;
   let author_name = author
     .as_ref()
@@ -424,7 +428,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
   let is_editing = RwSignal::new(false);
   // ↑ in the empty composer asks this row to open its editor.
   Effect::new(move |_| {
-    if state.edit_request.get() == Some(message_id) && is_mine {
+    if state.edit_request.get() == Some(message_id) && is_mine && !is_poll {
       state.edit_request.set(None);
       is_editing.set(true);
     }
@@ -930,6 +934,10 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
     move || {
       if extras.get().is_some_and(|extras| extras.is_deleted) {
         return view! { <em class="msg-deleted">{i18n.t("message-deleted")}</em> }.into_any();
+      }
+      if let Some(poll) = maybe_poll.clone() {
+        let can_vote = can_react_in(state, conversation);
+        return view! { <PollCard conversation=conversation message=message_id poll=*poll can_write=can_vote /> }.into_any();
       }
       if is_editing.get() {
         return view! {
@@ -1558,6 +1566,7 @@ mod tests {
       group_mentions: Vec::new(),
       custom_emoji: Vec::new(),
       mentions_me: false,
+      maybe_poll: None,
     }
   }
 }

@@ -12,7 +12,7 @@ use crate::tray::MAIN_WINDOW;
 
 /// How long a quitting close waits for the composers' drafts: the event, their write through the
 /// core's command queue. Short enough not to feel like a hang.
-const CLOSE_GRACE: Duration = Duration::from_millis(300);
+pub(crate) const CLOSE_GRACE: Duration = Duration::from_millis(300);
 
 /// Set once the drafts were asked for before a quitting close, so the close that follows goes through.
 static IS_CLOSE_FLUSHED: AtomicBool = AtomicBool::new(false);
@@ -20,6 +20,13 @@ static IS_CLOSE_FLUSHED: AtomicBool = AtomicBool::new(false);
 /// Asks the main window's composers to store a waiting draft now.
 pub fn persist(window: &Window) {
   if let Err(error) = window.emit_to(MAIN_WINDOW, PERSIST_DRAFTS_SHELL_EVENT, ()) {
+    tracing::debug!(%error, "could not ask the composers for their drafts");
+  }
+}
+
+/// The same from anywhere in the shell: the account is changing (#214).
+pub fn persist_from(app: &tauri::AppHandle) {
+  if let Err(error) = app.emit_to(MAIN_WINDOW, PERSIST_DRAFTS_SHELL_EVENT, ()) {
     tracing::debug!(%error, "could not ask the composers for their drafts");
   }
 }

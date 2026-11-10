@@ -1,4 +1,4 @@
-//! Custom emoji of the workspace (issue #207, e2ee.md §4.12): signing an emoji's document on an
+//! Custom emoji of the workspace (issue #207, e2ee.md §4.13): signing an emoji's document on an
 //! admin's device, verifying the server's list against this device's own verified roster, and
 //! keeping the verified set and the pictures on the device.
 //!

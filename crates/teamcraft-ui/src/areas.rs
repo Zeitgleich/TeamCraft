@@ -26,6 +26,7 @@ use leptos::wasm_split::{SplitLoaderError, wasm_split};
 use crate::admin::AdminSection;
 use crate::admin_live::{AdminLive, AdminTask};
 use crate::calls::CallRequest;
+use crate::components::account_switcher::AccountsDialog;
 use crate::components::activity_view::{ActivityHome, ActivitySidebar};
 use crate::components::add_to_call::AddToCallDialog;
 use crate::components::admin_console::AdminConsole;
@@ -57,6 +58,7 @@ use crate::components::meetings_view::{
 };
 use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
+use crate::components::poll_dialog::PollDialog;
 use crate::components::profile_views::UserProfileDialog;
 use crate::components::quick_switcher::QuickSwitcher;
 use crate::components::report_problem::ReportProblemDialog;
@@ -208,6 +210,8 @@ areas! {
   forward(from: ConversationId, message: MessageId, maybe_attachment: Option<AttachmentId>) => dialogs: view! { <ForwardDialog from=from message=message maybe_attachment=maybe_attachment /> };
   edit_history(conversation: ConversationId, message: MessageId) => dialogs: view! { <EditHistoryDialog conversation=conversation message=message /> };
   bookmarks(conversation: ConversationId) => dialogs: view! { <BookmarksDialog conversation=conversation /> };
+  /// A new poll (issue #205).
+  new_poll(conversation: ConversationId) => dialogs: view! { <PollDialog conversation=conversation /> };
   quiet_hours(conversation: ConversationId) => dialogs: view! { <QuietHoursDialog conversation=conversation /> };
   share_file(conversation: ConversationId, message: MessageId, file: AttachmentId) => dialogs: view! { <ShareLinkDialog conversation=conversation message=message file=file /> };
   verify_key(conversation: ConversationId) => dialogs: view! { <VerifyKeyDialog conversation=conversation /> };
@@ -219,6 +223,8 @@ areas! {
   link_device(_unit: ()) => dialogs: view! { <LinkDeviceDialog /> };
   /// "Report a problem" (docs/bug-reports.md).
   report_problem(_unit: ()) => dialogs: view! { <ReportProblemDialog /> };
+  /// The accounts on this computer (desktop, #214).
+  accounts(_unit: ()) => dialogs: view! { <AccountsDialog /> };
   device_approval(_unit: ()) => dialogs: view! { <DeviceApprovalDialog /> };
   calls_unavailable(_unit: ()) => dialogs: view! { <CallsUnavailableDialog /> };
   /// Another device asking to be linked to this account, once one asks.

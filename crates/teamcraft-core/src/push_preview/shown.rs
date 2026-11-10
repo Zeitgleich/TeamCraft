@@ -116,6 +116,9 @@ impl From<&MessageContent> for ShownContent {
       | MessageContent::Canvas { .. }
       | MessageContent::Event { .. }
       | MessageContent::Reaction { .. }
+      // Votes and closes of a poll (e2ee.md §4.12) are hidden like reactions.
+      | MessageContent::PollVote { .. }
+      | MessageContent::PollClose { .. }
       | MessageContent::IntegrationSource { .. }
       | MessageContent::Notetaker { .. }
       | MessageContent::ChannelRolesEntry { .. } => Self::Change,
@@ -148,6 +151,8 @@ enum ContentWire {
   Bookmarks,
   Canvas,
   Reaction,
+  PollVote,
+  PollClose,
   IntegrationSource,
   Notetaker,
   ChannelRolesEntry,
@@ -214,6 +219,8 @@ impl From<ContentWire> for ShownContent {
       | ContentWire::Bookmarks
       | ContentWire::Canvas
       | ContentWire::Reaction
+      | ContentWire::PollVote
+      | ContentWire::PollClose
       | ContentWire::IntegrationSource
       | ContentWire::Notetaker
       | ContentWire::ChannelRolesEntry => Self::Change,
@@ -269,9 +276,11 @@ mod tests {
       MessageContent::Notetaker { .. } => 12,
       MessageContent::ChannelRolesEntry { .. } => 13,
       MessageContent::Unknown => 14,
+      MessageContent::PollVote { .. } => 15,
+      MessageContent::PollClose { .. } => 16,
     }
   }
-  const KINDS: usize = 15;
+  const KINDS: usize = 17;
 
   fn every_kind() -> Vec<MessageContent> {
     let target = ClientMessageId::from_bytes([9; 16]);
@@ -375,6 +384,11 @@ mod tests {
         signature: Base64Bytes::new(vec![2]),
       },
       MessageContent::Unknown,
+      MessageContent::PollVote {
+        target,
+        choices: vec![1],
+      },
+      MessageContent::PollClose { target },
     ]
   }
 

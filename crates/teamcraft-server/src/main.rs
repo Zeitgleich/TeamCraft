@@ -32,9 +32,10 @@ use teamcraft_server::meetings::{MeetingBackends, MeetingService};
 use teamcraft_server::metrics::{BackgroundJob, MetricsConfig, ServerMetrics};
 use teamcraft_server::push::crypto::VapidKey;
 use teamcraft_server::push::{
-  APNS_PRODUCTION_URL, APNS_SANDBOX_URL, ApnsSender, ApnsSettings, FCM_BASE_URL, FcmSender, FcmSettings,
-  GatewayBinding, GatewayClient, GatewaySettings, PushDispatcher, ServiceAccount, UnifiedPushSender, Vapid,
-  WebPushSender, load_or_create_gateway_key, parse_gateway_key, spawn_retry_workers,
+  APNS_PRODUCTION_URL, APNS_SANDBOX_URL, ApnsSender, ApnsSettings, FCM_BASE_URL, FCM_CERTIFICATES_URL_PREFIX,
+  FcmSender, FcmSettings, GatewayBinding, GatewayClient, GatewaySettings, PushDispatcher, ServiceAccount,
+  UnifiedPushSender, Vapid, WebPushSender, load_or_create_gateway_key, parse_gateway_key,
+  spawn_retry_workers,
 };
 use teamcraft_server::rendezvous::RendezvousHub;
 use teamcraft_server::router::router;
@@ -514,7 +515,12 @@ fn spawn_storage_probe(state: AppState) {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
       interval.tick().await;
-      if let Err(error) = store.probe().await {
+      let started = std::time::Instant::now();
+      let result = store.probe().await;
+      let reading =
+        health::ProbeReading::of(result.is_ok(), started.elapsed(), time::OffsetDateTime::now_utc());
+      state.health.probes().set(health::Probe::ObjectStorage, reading);
+      if let Err(error) = result {
         tracing::debug!(%error, "the storage probe failed");
       }
     }
@@ -1060,6 +1066,12 @@ fn build_push(config: &Config, dependencies: &Dependencies) -> anyhow::Result<Pu
     "push.fcm.service_account",
   )? {
     let account = ServiceAccount::from_json(json.expose_secret()).context("push.fcm.service_account")?;
+    if let Some(key) = account.key_identity() {
+      // Only Google's own address: the URL comes from the key file and is fetched unsigned.
+      if key.certificates_url.starts_with(FCM_CERTIFICATES_URL_PREFIX) {
+        dispatcher = dispatcher.with_fcm_key(key);
+      }
+    }
     let base_url = push
       .fcm
       .maybe_base_url
@@ -1083,6 +1095,7 @@ fn build_push(config: &Config, dependencies: &Dependencies) -> anyhow::Result<Pu
     dispatcher = dispatcher.with_sender(&PushProvider::Fcm, Arc::new(gateway.sender(PushProvider::Fcm)));
   }
   if let Some(gateway) = &maybe_gateway {
+    dispatcher = dispatcher.with_gateway_client(gateway.clone());
     let providers: Vec<PushProvider> = [PushProvider::Apns, PushProvider::Fcm]
       .into_iter()
       .filter(|provider| dispatcher.is_gateway(provider))

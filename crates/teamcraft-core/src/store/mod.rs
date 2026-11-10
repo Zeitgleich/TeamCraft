@@ -20,6 +20,8 @@ mod key_source;
 mod lane;
 #[cfg(not(target_arch = "wasm32"))]
 mod lock;
+#[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+mod log_purger;
 mod lru;
 mod memory;
 mod message_cache;
@@ -66,6 +68,8 @@ pub use key_source::{KeystoreThreadError, run_outside_runtime};
 pub use lane::LaneStore;
 #[cfg(not(target_arch = "wasm32"))]
 pub use lock::StoreLock;
+#[cfg(all(feature = "sealed-sqlite", not(target_arch = "wasm32")))]
+pub use log_purger::{DEFAULT_MAX_PURGE_DELAY, LogPurgeLimits};
 pub use memory::MemoryStore;
 pub use overlay::OverlayStore;
 pub use sealed::SealedStoreLimits;
@@ -164,6 +168,12 @@ pub enum Table {
   /// (`crate::entry_tally`). Derived: checked against [`LocalStore::feed_version`], so a lost or
   /// stale record only means counting again.
   EntryTallies,
+  /// The local search index's files in chunks and its manifest (`crate::search_index`, issue #154):
+  /// derived from the messages, and built again from them when it is lost.
+  SearchIndex,
+  /// Messages (`conversation/message`) and conversations (`conversation`) the local search index
+  /// has to look at again, written with the message (`crate::search_index`). Native only.
+  SearchQueue,
 }
 
 /// A decrypted (or own, not yet sent) message, or a line this device derived itself: from a
@@ -351,6 +361,16 @@ pub enum MessageContent {
     #[serde(rename = "custom", default, skip_serializing_if = "Option::is_none")]
     maybe_custom: Option<teamcraft_proto::CustomEmojiRef>,
   },
+  /// The sender's vote in a poll (issue #205, e2ee.md §4.12): the options it chooses, by position,
+  /// replace the sender's earlier vote; none withdraws it. The newest valid vote of each sender in
+  /// the server's order counts ([`crate::polls`]).
+  PollVote {
+    target: ClientMessageId,
+    #[serde(default)]
+    choices: Vec<u32>,
+  },
+  /// Ends a poll: votes the server took after this aren't counted. Only the poll's sender closes it.
+  PollClose { target: ClientMessageId },
   /// A change to the channel's integration-bridge sources (docs/bridge.md, "Sources"); applied
   /// to the conversation's [`SourceLedger`](crate::integration_sources::SourceLedger).
   IntegrationSource { change: teamcraft_proto::SourceChange },
@@ -501,6 +521,11 @@ pub struct MessageMeta {
   /// they hold; an older client ignores the field and shows the text.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub custom_emoji: Vec<teamcraft_proto::CustomEmojiRef>,
+  /// A poll (issue #205, e2ee.md §4.12): the message's text is what an older version shows (the
+  /// question and options as text), this is what a current one shows. Votes and the close are
+  /// [`MessageContent::PollVote`] and [`MessageContent::PollClose`] messages naming the message.
+  #[serde(rename = "poll", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_poll: Option<Box<teamcraft_proto::PollSpec>>,
 }
 
 /// The quoted message: the reference, plus enough to show it where it isn't loaded.
@@ -1055,7 +1080,7 @@ pub trait LocalStore {
     let mut reactions = self.messages(conversation, MessageFilter::All)?;
     reactions.retain(|message| {
       message
-        .reaction_target()
+        .relation_target()
         .is_some_and(|target| targets.contains(&target))
     });
     reactions.sort_by_key(StoredMessage::order);
@@ -1090,11 +1115,19 @@ pub trait LocalStore {
 
   /// Overwrites what deleted or replaced records left behind in the store's files (free pages, a
   /// write-ahead log), so a secret that was deleted can't be read back from them, also not by
-  /// somebody who later gets the database key (issue #391). The store may still hold it until this
-  /// returns; data the file system or flash controller copied elsewhere is out of reach. Stores
-  /// without such files do nothing.
+  /// somebody who later gets the database key (issue #391). A store may do it in the background,
+  /// within the bound docs/e2ee.md §4.3.1 states (the sealed SQLite store: issue #1684);
+  /// [`Self::wait_for_purge`] waits for it. Data the file system or flash controller copied
+  /// elsewhere is out of reach. Stores without such files do nothing.
   fn purge_freed(&self) -> Result<(), StoreError> {
     Ok(())
+  }
+
+  /// Waits until the purges asked for so far ran, at most `max_wait`; whether they did. Stores
+  /// that purge before [`Self::purge_freed`] returns keep the default.
+  fn wait_for_purge(&self, max_wait: std::time::Duration) -> bool {
+    let _ = max_wait;
+    true
   }
 
   /// [`Self::purge_freed`], but for writes that come in bursts (the MLS storage is saved for
@@ -1179,14 +1212,63 @@ where
 
 /// Runs `writes` as one group of writes ([`LocalStore::begin_writes`]). An error of `writes` doesn't
 /// undo what it wrote before; only a crash, a failed write of the group or a panic does.
+#[track_caller]
 pub fn write_group<S, T, E>(store: &S, writes: impl FnOnce() -> Result<T, E>) -> Result<T, E>
 where
   S: LocalStore + ?Sized,
   E: From<StoreError>,
 {
+  let _site = GroupSite::enter(std::panic::Location::caller());
   store.begin_writes()?;
   let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(writes));
   end_group(store, result)
+}
+
+thread_local! {
+  /// Where this thread's outermost group of writes was begun ([`GroupSite`]).
+  static GROUP_SITE: std::cell::Cell<Option<&'static std::panic::Location<'static>>> =
+    const { std::cell::Cell::new(None) };
+}
+
+/// Names the code that holds a group of writes open (issue #1681): a store that finds a group open
+/// for long logs where it was begun, a place in the code, never data. Set by the outermost
+/// [`write_group`] (or `Client::atomically`) of a thread until it returns; nested groups keep it.
+pub(crate) struct GroupSite {
+  is_outermost: bool,
+}
+
+impl GroupSite {
+  pub(crate) fn enter(site: &'static std::panic::Location<'static>) -> Self {
+    let is_outermost = GROUP_SITE.with(|current| {
+      if current.get().is_some() {
+        return false;
+      }
+      current.set(Some(site));
+      true
+    });
+    Self { is_outermost }
+  }
+
+  /// The site of the thread's open group, as `file:line`; `None` outside [`write_group`]. Read by
+  /// the SQLite stores only.
+  #[cfg_attr(
+    not(all(
+      any(feature = "sqlcipher", feature = "sealed-sqlite"),
+      not(target_arch = "wasm32")
+    )),
+    allow(dead_code)
+  )]
+  pub(crate) fn current() -> Option<&'static std::panic::Location<'static>> {
+    GROUP_SITE.with(std::cell::Cell::get)
+  }
+}
+
+impl Drop for GroupSite {
+  fn drop(&mut self) {
+    if self.is_outermost {
+      GROUP_SITE.with(|current| current.set(None));
+    }
+  }
 }
 
 /// Ends a group of writes after its steps ran under `catch_unwind`. A panic must not leave the group
@@ -1423,6 +1505,10 @@ macro_rules! forward_local_store {
         (**self).purge_freed_soon()
       }
 
+      fn wait_for_purge(&self, max_wait: std::time::Duration) -> bool {
+        (**self).wait_for_purge(max_wait)
+      }
+
       fn begin_writes(&self) -> Result<(), StoreError> {
         (**self).begin_writes()
       }
@@ -1547,10 +1633,13 @@ impl StoredMessage {
     }
   }
 
-  /// The message a reaction reacts to.
-  pub fn reaction_target(&self) -> Option<ClientMessageId> {
+  /// The message a reaction reacts to, or a vote or close of a poll is about: what the stores
+  /// index, so a page of the feed reads what is shown on its rows with it.
+  pub fn relation_target(&self) -> Option<ClientMessageId> {
     match &self.content {
-      MessageContent::Reaction { target, .. } => Some(*target),
+      MessageContent::Reaction { target, .. }
+      | MessageContent::PollVote { target, .. }
+      | MessageContent::PollClose { target } => Some(*target),
       _ => None,
     }
   }
@@ -1579,7 +1668,7 @@ impl StoredMessage {
     self.line_position().is_some() || matches!(self.content, MessageContent::Event { .. })
   }
 
-  /// Reactions, edits, deletes and pins act on other messages and aren't listed themselves. Nor
+  /// Reactions, poll votes, edits, deletes and pins act on other messages and aren't listed themselves. Nor
   /// is a message saying that an admin joined: only the line this device derived from the commit
   /// shows that (issue #811), so a member can't make it up by sending one. The same goes for a
   /// message saying that the channel was archived, restored, made private or public, or moved:
@@ -1593,6 +1682,8 @@ impl StoredMessage {
       content => matches!(
         content,
         MessageContent::Reaction { .. }
+          | MessageContent::PollVote { .. }
+          | MessageContent::PollClose { .. }
           | MessageContent::Edit { .. }
           | MessageContent::Delete { .. }
           | MessageContent::Pin { .. }
@@ -1693,7 +1784,7 @@ pub fn pick_attached(
 
 impl Table {
   /// Every table; a new variant goes here too (stores that load by name skip unknown tables).
-  pub const ALL: [Self; 37] = [
+  pub const ALL: [Self; 39] = [
     Self::Account,
     Self::Spaces,
     Self::Conversations,
@@ -1731,6 +1822,8 @@ impl Table {
     Self::AnnouncedPresence,
     Self::Downloads,
     Self::EntryTallies,
+    Self::SearchIndex,
+    Self::SearchQueue,
   ];
 
   /// The table with this [`Self::name`], if this version knows it.
@@ -1778,6 +1871,8 @@ impl Table {
       Self::AnnouncedPresence => "announced_presence",
       Self::Downloads => "downloads",
       Self::EntryTallies => "entry_tallies",
+      Self::SearchIndex => "search_index",
+      Self::SearchQueue => "search_queue",
     }
   }
 }
@@ -1787,6 +1882,151 @@ pub(crate) mod tests {
   use teamcraft_proto::{Id, Snowflake};
 
   use super::*;
+
+  mod poll_wire {
+    use super::*;
+
+    /// A version before polls (issue #205): its content enum without the poll kinds, and a meta
+    /// that, like [`MessageMeta`], skips fields it doesn't know.
+    #[derive(Debug, PartialEq, Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum OlderContent {
+      Text {
+        body: String,
+        #[serde(default)]
+        meta: OlderMeta,
+      },
+      Reaction {
+        target: ClientMessageId,
+      },
+      #[serde(other)]
+      Unknown,
+    }
+
+    #[derive(Debug, Default, PartialEq, Deserialize)]
+    struct OlderMeta {
+      #[serde(default)]
+      is_silent: bool,
+    }
+
+    #[test]
+    fn votes_and_closes_keep_their_wire_names() {
+      let target = ClientMessageId::from_bytes([7; 16]);
+      let vote = MessageContent::PollVote {
+        target,
+        choices: vec![0, 2],
+      };
+      let json = serde_json::to_value(&vote).unwrap();
+      assert_eq!(json["type"], "poll_vote");
+      assert_eq!(json["choices"], serde_json::json!([0, 2]));
+      assert_eq!(json["target"], serde_json::to_value(target).unwrap());
+      assert_eq!(serde_json::from_value::<MessageContent>(json).unwrap(), vote);
+      let close = serde_json::to_value(MessageContent::PollClose { target }).unwrap();
+      assert_eq!(close["type"], "poll_close");
+      // A vote without choices withdraws (a newer sender may leave the empty list out).
+      let mut withdrawn = close.clone();
+      withdrawn["type"] = "poll_vote".into();
+      assert_eq!(
+        serde_json::from_value::<MessageContent>(withdrawn).unwrap(),
+        MessageContent::PollVote {
+          target,
+          choices: Vec::new()
+        }
+      );
+    }
+
+    #[test]
+    fn a_poll_is_a_text_with_the_poll_in_its_meta() {
+      let poll = poll_text();
+      let json = serde_json::to_value(&poll).unwrap();
+      assert_eq!(json["type"], "text");
+      assert_eq!(json["meta"]["poll"]["question"], "Lunch?");
+      assert_eq!(json["meta"]["poll"]["voters"], "hidden");
+      assert_eq!(serde_json::from_value::<MessageContent>(json).unwrap(), poll);
+    }
+
+    #[test]
+    fn a_version_before_polls_shows_the_text_and_keeps_votes_as_unknown() {
+      let poll = serde_json::to_string(&poll_text()).unwrap();
+      assert_eq!(
+        serde_json::from_str::<OlderContent>(&poll).unwrap(),
+        OlderContent::Text {
+          body: "**Poll:** Lunch?\n- Pizza\n- Salad".into(),
+          meta: OlderMeta::default(),
+        }
+      );
+      let target = ClientMessageId::from_bytes([7; 16]);
+      for hidden in [
+        MessageContent::PollVote {
+          target,
+          choices: vec![1],
+        },
+        MessageContent::PollClose { target },
+      ] {
+        let json = serde_json::to_string(&hidden).unwrap();
+        assert_eq!(
+          serde_json::from_str::<OlderContent>(&json).unwrap(),
+          OlderContent::Unknown
+        );
+      }
+    }
+
+    #[test]
+    fn this_version_keeps_poll_kinds_of_a_newer_one_as_unknown() {
+      let json = r#"{"type":"poll_reopen","target":"x"}"#;
+      assert_eq!(
+        serde_json::from_str::<MessageContent>(json).unwrap(),
+        MessageContent::Unknown
+      );
+    }
+
+    #[test]
+    fn votes_and_closes_are_hidden_and_name_their_poll() {
+      let target = ClientMessageId::from_bytes([7; 16]);
+      let mut vote = message(id(1), 2, Some(20), None, 20);
+      vote.content = MessageContent::PollVote {
+        target,
+        choices: vec![0],
+      };
+      assert!(vote.is_hidden() && !vote.is_feed_row());
+      assert_eq!(vote.relation_target(), Some(target));
+      vote.content = MessageContent::PollClose { target };
+      assert!(vote.is_hidden());
+      assert_eq!(vote.relation_target(), Some(target));
+    }
+
+    fn poll_text() -> MessageContent {
+      MessageContent::Text {
+        body: "**Poll:** Lunch?\n- Pizza\n- Salad".into(),
+        mentions: Vec::new(),
+        meta: MessageMeta {
+          maybe_poll: Some(Box::new(teamcraft_proto::PollSpec {
+            question: "Lunch?".into(),
+            options: vec!["Pizza".into(), "Salad".into()],
+            choice: teamcraft_proto::PollChoice::Single,
+            voters: teamcraft_proto::PollVoters::Hidden,
+          })),
+          ..MessageMeta::default()
+        },
+      }
+    }
+  }
+
+  #[test]
+  fn a_group_is_named_after_its_outermost_beginning() {
+    let store = MemoryStore::new();
+    assert!(GroupSite::current().is_none());
+    let outer_line = line!() + 1;
+    write_group(&store, || -> Result<(), StoreError> {
+      write_group(&store, || -> Result<(), StoreError> {
+        let site = GroupSite::current().unwrap();
+        assert_eq!((site.file(), site.line()), (file!(), outer_line));
+        Ok(())
+      })
+    })
+    .unwrap();
+    assert!(GroupSite::current().is_none());
+  }
 
   #[test]
   fn every_table_round_trips_through_its_name() {
@@ -1831,9 +2071,26 @@ pub(crate) mod tests {
       event: ConversationEvent::Joined,
     };
     let later = message(conversation, 66, Some(1_400), None, 1_400);
-    for stored in [&pending, &root, &reply, &reaction, &joined, &later] {
+    // Votes and closes of a poll are read with the reactions (issue #205).
+    let mut vote = message(conversation, 67, Some(1_250), None, 1_250);
+    vote.content = MessageContent::PollVote {
+      target: root.client_message_id,
+      choices: vec![0],
+    };
+    let mut close = message(conversation, 68, Some(1_450), None, 1_450);
+    close.content = MessageContent::PollClose {
+      target: later.client_message_id,
+    };
+    for stored in [&pending, &root, &reply, &reaction, &joined, &later, &vote, &close] {
       store.upsert_message(stored).unwrap();
     }
+    assert_eq!(
+      store
+        .reactions_to(conversation, &[root.client_message_id, later.client_message_id])
+        .unwrap()
+        .len(),
+      3
+    );
     check_feed_reads(
       store,
       conversation,
@@ -1856,6 +2113,8 @@ pub(crate) mod tests {
       meta: Default::default(),
     };
     store.upsert_message(&reaction).unwrap();
+    vote.content = MessageContent::Deleted;
+    store.upsert_message(&vote).unwrap();
     root.content = MessageContent::Deleted;
     store.upsert_message(&root).unwrap();
     store
@@ -1908,7 +2167,7 @@ pub(crate) mod tests {
       .iter()
       .filter(|message| {
         message
-          .reaction_target()
+          .relation_target()
           .is_some_and(|target| targets.contains(&target))
       })
       .cloned()

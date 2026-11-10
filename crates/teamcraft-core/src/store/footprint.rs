@@ -44,11 +44,12 @@ impl MessageContent {
       Self::Canvas { update, .. } => update.len(),
       Self::Event { event } => event.heap_bytes(),
       Self::Reaction { emoji, .. } => emoji.len(),
+      Self::PollVote { choices, .. } => choices.capacity() * size_of::<u32>(),
       Self::IntegrationSource { .. } | Self::Notetaker { .. } => SMALL_PART_ALLOWANCE_BYTES,
       Self::ChannelRolesEntry {
         payload, signature, ..
       } => payload.len() + signature.len(),
-      Self::Delete { .. } | Self::Pin { .. } | Self::Deleted | Self::Unknown => 0,
+      Self::Delete { .. } | Self::Pin { .. } | Self::PollClose { .. } | Self::Deleted | Self::Unknown => 0,
     }
   }
 }
@@ -77,6 +78,12 @@ impl MessageMeta {
         + identity.name.len()
         + identity.maybe_picture.as_ref().map_or(0, |picture| picture.len())
     });
+    let poll = self.maybe_poll.as_ref().map_or(0, |poll| {
+      size_of::<teamcraft_proto::PollSpec>()
+        + poll.question.len()
+        + poll.options.capacity() * size_of::<String>()
+        + poll.options.iter().map(String::len).sum::<usize>()
+    });
     self.maybe_reply_to.as_ref().map_or(0, ReplyRef::heap_bytes)
       + self.maybe_forwarded.as_ref().map_or(0, Forwarded::heap_bytes)
       + self.attachments.capacity() * size_of::<AttachmentRef>()
@@ -93,6 +100,7 @@ impl MessageMeta {
       + roles_head
       + imported
       + source
+      + poll
   }
 }
 

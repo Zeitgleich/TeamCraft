@@ -425,6 +425,7 @@ impl ChatBackend for RestChat {
       group_mentions: Vec::new(),
       custom_emoji: Vec::new(),
       mentions_me: false,
+      maybe_poll: None,
     };
     self
       .local_messages

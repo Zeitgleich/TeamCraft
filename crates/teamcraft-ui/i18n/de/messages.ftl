@@ -318,3 +318,44 @@ scheduled-cancel-question = Diese Nachricht verwerfen? Niemand wird sie sehen.
 scheduled-cancel-confirm = Verwerfen
 scheduled-keep = Behalten
 schedule-refused-limit = Du hast so viele geplante Nachrichten, wie dein Workspace erlaubt. Sende oder verwirf zuerst eine.
+
+## Umfragen (Issue #205)
+composer-poll = Umfrage
+poll-title = Umfrage
+poll-fallback-note = Aktualisiere TeamCraft, um in dieser Umfrage abzustimmen.
+poll-new-title = Neue Umfrage
+poll-question = Frage
+poll-options = Antworten
+poll-option = Antwort { $number }
+poll-add-option = Antwort hinzufügen
+poll-remove-option = Antwort { $number } entfernen
+poll-multiple = Mehrere Antworten erlauben
+poll-hide-voters = Verbergen, wer abgestimmt hat
+poll-hide-voters-hint = Die Umfrage zeigt nur die Zahlen. Anonym ist sie nicht: Die App jedes Mitglieds erhält jede Stimme mit ihrem Absender.
+poll-send = Umfrage senden
+poll-error-question = Gib eine Frage ein.
+poll-error-question-long = Eine Frage darf höchstens { $max } Zeichen haben.
+poll-error-options = Eine Umfrage braucht mindestens { $min } Antworten.
+poll-error-options-many = Eine Umfrage darf höchstens { $max } Antworten haben.
+poll-error-option-long = Eine Antwort darf höchstens { $max } Zeichen haben.
+poll-error-option-duplicate = Diese Antwort gibt es schon.
+poll-single-choice = Eine Antwort
+poll-multiple-choice = Mehrere Antworten
+poll-hidden-voters = Namen verborgen
+poll-closed = Beendet
+poll-votes = { $count ->
+    [one] { $count } Stimme
+   *[other] { $count } Stimmen
+  }
+poll-option-count = { $count } · { $percent } %
+poll-option-label = { $option }: { $count ->
+    [one] { $count } Stimme
+   *[other] { $count } Stimmen
+  }, { $percent } Prozent
+poll-voters-more = { $count ->
+    [one] und { $count } weitere Person
+   *[other] und { $count } weitere
+  }
+poll-close = Umfrage beenden
+poll-close-confirm = Für alle beenden? Spätere Stimmen zählen nicht.
+poll-unknown-choice = Zum Abstimmen braucht diese Umfrage eine neuere Version von TeamCraft.

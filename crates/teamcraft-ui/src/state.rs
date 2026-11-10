@@ -288,6 +288,8 @@ pub enum Overlay {
   EditHistory(ConversationId, MessageId),
   /// Edit the bookmarks bar of a conversation.
   Bookmarks(ConversationId),
+  /// Make a poll in a conversation (issue #205).
+  NewPoll(ConversationId),
   /// Another person's profile card.
   UserProfile(UserId),
   /// Calls aren't available in this client (the browser, for now): where the apps are.
@@ -296,6 +298,8 @@ pub enum Overlay {
   DeleteUser(UserId),
   /// "Report a problem" (docs/bug-reports.md).
   ReportProblem,
+  /// The accounts on this computer: switch, add, remove (desktop, #214).
+  Accounts,
 }
 
 /// The sections of the settings dialog (PLAN.md §4 and §5, issue #327).

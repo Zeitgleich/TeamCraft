@@ -35,6 +35,9 @@ pub mod pending_work;
 pub mod people_names;
 pub mod picked_files;
 pub mod platform;
+/// Counting polls into the UI's view (issue #205).
+#[cfg(feature = "ui")]
+pub mod polls;
 pub mod prefetch;
 pub mod push_guard;
 #[cfg(any(feature = "ui", feature = "service-worker"))]
@@ -52,6 +55,8 @@ pub mod row_badge;
 pub mod runner;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod search;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod search_index;
 pub mod search_scope;
 pub mod store;
 #[cfg(not(target_arch = "wasm32"))]

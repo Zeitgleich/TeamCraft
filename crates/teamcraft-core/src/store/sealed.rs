@@ -194,6 +194,16 @@ pub trait RecordBackend {
   /// See [`LocalStore::purge_freed_soon`].
   fn purge_freed_soon(&self) {}
 
+  /// See [`LocalStore::wait_for_purge`].
+  fn wait_for_purge(&self, max_wait: std::time::Duration) -> bool {
+    let _ = max_wait;
+    true
+  }
+
+  /// Called before a group of writes begins, before any lock of the store is taken: a backend may
+  /// hold it back here (an overdue purge of the log, issue #1684).
+  fn before_writes(&self) {}
+
   /// Puts the record `seal` makes, about `size_hint` bytes. A backend that collects writes may
   /// call `seal` only when it writes the record, and not at all when a newer write of the same
   /// record comes first. Writes keep their order either way.
@@ -431,7 +441,7 @@ impl<B: RecordBackend> SealedStore<B> {
     })
   }
 
-  #[cfg(any(target_arch = "wasm32", all(test, feature = "sealed-sqlite")))]
+  #[cfg(any(target_arch = "wasm32", feature = "sealed-sqlite"))]
   pub(crate) fn backend(&self) -> &B {
     &self.backend
   }
@@ -1915,7 +1925,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
       keys.dedup();
       self.load_listed(state, conversation, &keys, |message| {
         message
-          .reaction_target()
+          .relation_target()
           .is_some_and(|target| targets.contains(&target))
       })
     })
@@ -1994,6 +2004,10 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     self.backend.purge_freed_soon();
   }
 
+  fn wait_for_purge(&self, max_wait: std::time::Duration) -> bool {
+    self.backend.wait_for_purge(max_wait)
+  }
+
   fn is_awaited(&self) -> bool {
     self.lock().awaiting > 0
   }
@@ -2037,6 +2051,7 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
   }
 
   fn begin_writes(&self) -> Result<(), StoreError> {
+    self.backend.before_writes();
     let mut state = self.lock_to_begin();
     if state.depth == 0 && state.read_depth > 0 {
       // A read group's snapshot ends for the writes, and begins again after them.

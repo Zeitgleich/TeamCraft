@@ -18,7 +18,8 @@ default = ["sqlcipher"]
 sqlcipher = ["dep:rusqlite", "rusqlite/bundled-sqlcipher"]
 # Plain SQLite with records sealed by teamcraft-crypto (e2ee.md §9.1): for Android, whose NDK has
 # no libcrypto for SQLCipher.
-sealed-sqlite = ["dep:rusqlite", "rusqlite/bundled"]
+# `hooks`: the writer hands its checkpoints to the log purge's connection (`store::log_purger`).
+sealed-sqlite = ["dep:rusqlite", "rusqlite/bundled", "rusqlite/hooks"]
 # Adapter implementing the UI's backend traits (crates/teamcraft-client-api).
 ui = ["dep:teamcraft-client-api"]
 # The Web Push service worker's entry points (`handlePush`, `handleNotificationClick`), exported
@@ -187,6 +188,9 @@ base64 = "0.23.1"
 # Peak heap use in the large-upload memory test (tests/upload_memory.rs): a counting global
 # allocator needs `unsafe`, which the workspace forbids in our own code.
 peak_alloc = "0.3.0"
+# A SQLite VFS whose syncs are slow, as on a phone (tests/suite/slow_disk, issue #1680): its `Vfs`
+# trait is safe, the FFI glue a VFS needs is `unsafe`, which the workspace forbids in our own code.
+sqlite-plugin = "0.11.0"
 
 # The desktop build's zbus features, so the keystore tests see the same Secret Service backend: with
 # `tokio`, zbus' blocking API nests a tokio runtime (store/key_source.rs). Already in the tree

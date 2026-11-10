@@ -1438,6 +1438,11 @@ pub async fn report_left(state: &AppState, report: SfuParticipantReport) -> Resu
 /// with nobody end, and devices whose join the server missed join (#684).
 pub async fn report_roster(state: &AppState, report: SfuRosterReport) -> Result<(), ApiError> {
   let calls = calls_of(state)?;
+  if let Some(quality) = &report.maybe_quality {
+    state
+      .health
+      .note_call_quality(time::OffsetDateTime::now_utc(), quality.clone());
+  }
   let changes = calls.reconcile(&report, Instant::now(), unix_now_millis()?);
   publish_roster_changes(state, changes).await;
   Ok(())
@@ -2829,6 +2834,7 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
           maybe_started_at: None,
         })
         .collect(),
+      maybe_quality: None,
     }
   }
 
@@ -2848,6 +2854,7 @@ MCowBQYDK2VwAyEA8YVjY2Zv9XPhv003tFAgzW7J6gfDn+ICj5xCB2LXMVg=
         maybe_started_by: Some(id(4)),
         maybe_started_at: Some(UnixMillis(1234)),
       }],
+      maybe_quality: None,
     }
   }
 

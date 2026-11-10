@@ -10,6 +10,7 @@ use teamcraft_client_api::model::{
   Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, PENDING_ID_BIT,
   ThreadId, UserId, is_pending,
 };
+use teamcraft_client_api::polls::{NewPoll, PollLimits};
 use teamcraft_client_api::receipts::{is_delivered, is_read_by_all, seen_by};
 use teamcraft_client_api::scheduled::{ScheduledMessage, ScheduledOverview, ScheduledStatus, status_of};
 use teamcraft_proto::{
@@ -368,6 +369,59 @@ impl<S: LocalStore> CoreChatBackend<S> {
       target: target.client_message_id,
       is_pinned,
     });
+  }
+
+  /// Sends a poll (issue #205, e2ee.md §4.12): a text message whose text is what versions before
+  /// polls show, with the poll inside the ciphertext.
+  pub(crate) fn ui_post_poll(&self, conversation: ConversationId, poll: NewPoll) {
+    if let Err(error) = poll.spec.check(&PollLimits::default()) {
+      tracing::warn!(conversation_id = %conversation, %error, "not sending a poll the limits refuse");
+      return;
+    }
+    let meta = MessageMeta {
+      maybe_poll: Some(Box::new(poll.spec)),
+      ..MessageMeta::default()
+    };
+    let content = MessageContent::Text {
+      body: poll.fallback,
+      mentions: Vec::new(),
+      meta,
+    };
+    self.enqueue(conversation, None, content);
+  }
+
+  /// Votes in the poll `message` (no choices withdraw the vote): a hidden message like a reaction.
+  pub(crate) fn ui_vote_in_poll(&self, conversation: ConversationId, message: MessageId, choices: Vec<u32>) {
+    let Some(poll) = self.find_stored(conversation, message) else {
+      tracing::warn!(conversation_id = %conversation, "voting in a poll that isn't loaded");
+      return;
+    };
+    let is_allowed =
+      crate::polls::poll_of(&poll).is_some_and(|spec| spec.choice.allows(&choices, spec.options.len()));
+    if !is_allowed {
+      tracing::warn!(conversation_id = %conversation, "not sending a vote the poll doesn't take");
+      return;
+    }
+    let content = MessageContent::PollVote {
+      target: poll.client_message_id,
+      choices,
+    };
+    self.enqueue(conversation, None, content);
+  }
+
+  /// Closes one of the user's own polls. Others' devices only take a close from the poll's sender.
+  pub(crate) fn ui_close_poll(&self, conversation: ConversationId, message: MessageId) {
+    let Some(poll) = self.find_stored(conversation, message) else {
+      return;
+    };
+    if poll.sender_user_id != self.me_id() || crate::polls::poll_of(&poll).is_none() {
+      tracing::warn!(conversation_id = %conversation, "only the poll's sender closes it");
+      return;
+    }
+    let content = MessageContent::PollClose {
+      target: poll.client_message_id,
+    };
+    self.enqueue(conversation, None, content);
   }
 
   pub(crate) fn ui_set_bookmarks(&self, conversation: ConversationId, bookmarks: Vec<Bookmark>) {

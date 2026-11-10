@@ -171,6 +171,14 @@ class ShareInbox(
     File(root, id).deleteRecursively()
   }
 
+  /**
+   * Every waiting share goes except those in [keep], and copies cut short with them: the user
+   * moved on from them (a newer share, a fresh start of the app).
+   */
+  fun deleteAllExcept(keep: Set<String>) {
+    folders().filterNot { it.name in keep }.forEach { it.deleteRecursively() }
+  }
+
   /** Everything goes (sign-out): shared content doesn't outlive the session on this device. */
   fun wipe() {
     root.deleteRecursively()
@@ -286,6 +294,11 @@ class ShareReceiver(root: File, maxFileBytes: Long, private val scope: Coroutine
         if (isCancelled()) return@launch
         val result = inbox.stage(content, sources(), System.currentTimeMillis(), isRedelivery, isCancelled)
         if (result is ShareStageResult.Failed) failure.value = true
+        // The newest share is the one the user means: shares that waited (one that hung, shared
+        // again) don't come up one after another once this one is done with.
+        if (result is ShareStageResult.Stored && !isRedelivery) {
+          inbox.deleteAllExcept(synchronized(handedOver) { handedOver.toSet() } + result.share.id)
+        }
       }
       job.invokeOnCompletion { changeCount.update { it + 1 } }
       copies.add(Copy(content, job))
@@ -304,6 +317,16 @@ class ShareReceiver(root: File, maxFileBytes: Long, private val scope: Coroutine
     }
     jobs.forEach { it.cancel() }
     withTimeoutOrNull(timeoutMs) { jobs.joinAll() }
+  }
+
+  /**
+   * Drops every share that waits for a conversation (not those on their way into a composer): the
+   * app started afresh, without a share, after the user closed the task that had them.
+   */
+  suspend fun dropWaiting() {
+    stopCopies()
+    inbox.deleteAllExcept(synchronized(handedOver) { handedOver.toSet() })
+    changeCount.update { it + 1 }
   }
 
   /** The oldest share not on its way into a composer. */

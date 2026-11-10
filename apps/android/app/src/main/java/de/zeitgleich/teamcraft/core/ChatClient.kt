@@ -100,6 +100,12 @@ class ChatClient(
       core().messageTail(conversation, maybeOldest?.id, maybeOldest?.sentAt ?: 0, older.toUInt()),
     )
 
+  /** [MessageTail.authorsSnapshot], with deleted accounts named like the snapshot's. */
+  fun authorsSnapshot(tail: MessageTail): ChatSnapshot? {
+    val snapshot = tail.authorsSnapshot() ?: return null
+    return deletedUserName?.let { snapshot.namingDeletedUsers(it()) } ?: snapshot
+  }
+
   /** The newest [len] messages, read ahead without moving the catch-up focus (the user isn't there yet). */
   suspend fun tailAhead(conversation: String, len: Int): MessageTail =
     WireJson.decodeFromString(MessageTail.serializer(), core().messageTailAhead(conversation, len.toUInt()))

@@ -592,7 +592,11 @@ impl TestApp {
       )),
       metrics: Arc::new(crate::metrics::ServerMetrics::new().unwrap()),
       health: Arc::new(crate::health::HealthMonitor::new(
-        crate::health::HealthConfig::default(),
+        // The disk of whatever machine runs the tests says nothing about them.
+        crate::health::HealthConfig {
+          disk_paths: Vec::new(),
+          ..crate::health::HealthConfig::default()
+        },
         crate::health::JobSchedules::default(),
         time::OffsetDateTime::now_utc(),
       )),

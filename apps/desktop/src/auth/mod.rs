@@ -10,7 +10,9 @@
 //! sign in, and [`servers`] keeps that per account (docs/operations.md "Server address in the
 //! apps"). Tokens are stored per server origin.
 
+pub mod accounts;
 mod avatars;
+pub mod background;
 mod callback_page;
 pub mod commands;
 mod local;
