@@ -42,7 +42,9 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.R
+import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.SectionTitle
 import de.zeitgleich.teamcraft.ui.ShareShortcuts
@@ -83,7 +85,8 @@ fun SharePickerScreen(
   // Once per visit: the order rarely changes while the picker is open.
   var hasPublished by remember { mutableStateOf(false) }
   val pick: (String) -> Unit = { conversation ->
-    ShareShortcuts.reportUsed(context, conversation)
+    // In the app's scope: the picker leaves with the pick, the report goes on without it.
+    TeamCraftApplication.graph(context).scope.launch { ShareShortcuts.reportUsed(context, conversation) }
     maybeContent?.let { onPick(it, conversation) }
   }
   LaunchedEffect(attempt, maybeContent?.id) {

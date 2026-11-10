@@ -6,12 +6,12 @@ import android.content.Intent
 import android.net.Uri
 import android.util.Log
 import androidx.core.app.RemoteInput
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.ConversationNotificationSettings
+import de.zeitgleich.teamcraft.push.WakeUpWork
 import de.zeitgleich.teamcraft.ui.JoinStep
 import uniffi.teamcraft_ffi.JoinRequestItem
 
@@ -23,55 +23,64 @@ class NotificationActionReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
     val conversationId = intent.getStringExtra(EXTRA_CONVERSATION_ID) ?: return
     val graph = TeamCraftApplication.graph(context)
-    if (intent.action == ACTION_DISMISSED) {
-      // Swiped away: the next message starts a fresh notification.
-      graph.notifier.dismiss(conversationId)
-      return
-    }
     val pending = goAsync()
-    CoroutineScope(Dispatchers.Default).launch {
+    // On the process's scope, and the broadcast ends after [WakeUpWork.RECEIVER_BUDGET_MS] at most:
+    // a core waiting behind a busy store kept the broadcast open until Android declared the app not
+    // responding and killed it (a background ANR, with nothing on the main thread). The action goes
+    // on without the broadcast while the process lives. A swipe too: the notifier's lock can wait.
+    val work = graph.scope.launch { act(context, intent, conversationId) }
+    graph.scope.launch {
       try {
-        when (intent.action) {
-          ACTION_REPLY -> {
-            val reply = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(KEY_REPLY)
-            if (!reply.isNullOrBlank()) {
-              // Through the core's outbox: queued and retried if the phone is offline.
-              graph.core.core().sendMessage(conversationId, intent.getStringExtra(EXTRA_THREAD_ID), reply.toString())
-              graph.notifier.showOwnReply(conversationId, reply)
-            }
-          }
-          ACTION_MUTE -> {
-            // Quiet for a while through the server's per-conversation setting (all devices follow).
-            val mutedUntil = System.currentTimeMillis() + MUTE_DURATION_MS
-            val chat = ChatClient { graph.core.core() }
-            val current = chat.conversationNotifications(conversationId)
-            chat.setConversationNotifications(
-              conversationId,
-              ConversationNotificationSettings(level = current.level, mutedUntil = mutedUntil),
-            )
-            graph.notifier.dismiss(conversationId)
-          }
-          ACTION_MARK_READ -> {
-            graph.core.core().markRead(conversationId)
-            graph.notifier.dismiss(conversationId)
-          }
-          ACTION_MEETING_DISMISSED -> {
-            val meetingId = intent.getStringExtra(EXTRA_MEETING_ID) ?: return@launch
-            val startsAtMs = intent.getLongExtra(EXTRA_MEETING_STARTS_AT_MS, -1L).takeIf { it >= 0 } ?: return@launch
-            MeetingNoticeReport.send(ChatClient { graph.core.core() }, meetingId, startsAtMs)
-          }
-          ACTION_APPROVE_JOIN, ACTION_DECLINE_JOIN -> {
-            val user = intent.getStringExtra(EXTRA_USER_ID) ?: return@launch
-            val tag = intent.getStringExtra(EXTRA_TAG) ?: return@launch
-            val step = if (intent.action == ACTION_APPROVE_JOIN) JoinStep.Approve else JoinStep.Decline
-            graph.joinRequestNotifier.decide(graph.core, step, conversationId, user, tag)
-          }
-        }
-      } catch (failure: Exception) {
-        Log.w(TAG, "notification action failed: ${failure.javaClass.simpleName}")
+        withTimeoutOrNull(WakeUpWork.RECEIVER_BUDGET_MS) { work.join() }
       } finally {
         pending.finish()
       }
+    }
+  }
+
+  private suspend fun act(context: Context, intent: Intent, conversationId: String) {
+    val graph = TeamCraftApplication.graph(context)
+    try {
+      when (intent.action) {
+        // Swiped away: the next message starts a fresh notification.
+        ACTION_DISMISSED -> graph.notifier.dismiss(conversationId)
+        ACTION_REPLY -> {
+          val reply = RemoteInput.getResultsFromIntent(intent)?.getCharSequence(KEY_REPLY)
+          if (!reply.isNullOrBlank()) {
+            // Through the core's outbox: queued and retried if the phone is offline.
+            graph.core.core().sendMessage(conversationId, intent.getStringExtra(EXTRA_THREAD_ID), reply.toString())
+            graph.notifier.showOwnReply(conversationId, reply)
+          }
+        }
+        ACTION_MUTE -> {
+          // Quiet for a while through the server's per-conversation setting (all devices follow).
+          val mutedUntil = System.currentTimeMillis() + MUTE_DURATION_MS
+          val chat = ChatClient { graph.core.core() }
+          val current = chat.conversationNotifications(conversationId)
+          chat.setConversationNotifications(
+            conversationId,
+            ConversationNotificationSettings(level = current.level, mutedUntil = mutedUntil),
+          )
+          graph.notifier.dismiss(conversationId)
+        }
+        ACTION_MARK_READ -> {
+          graph.core.core().markRead(conversationId)
+          graph.notifier.dismiss(conversationId)
+        }
+        ACTION_MEETING_DISMISSED -> {
+          val meetingId = intent.getStringExtra(EXTRA_MEETING_ID) ?: return
+          val startsAtMs = intent.getLongExtra(EXTRA_MEETING_STARTS_AT_MS, -1L).takeIf { it >= 0 } ?: return
+          MeetingNoticeReport.send(ChatClient { graph.core.core() }, meetingId, startsAtMs)
+        }
+        ACTION_APPROVE_JOIN, ACTION_DECLINE_JOIN -> {
+          val user = intent.getStringExtra(EXTRA_USER_ID) ?: return
+          val tag = intent.getStringExtra(EXTRA_TAG) ?: return
+          val step = if (intent.action == ACTION_APPROVE_JOIN) JoinStep.Approve else JoinStep.Decline
+          graph.joinRequestNotifier.decide(graph.core, step, conversationId, user, tag)
+        }
+      }
+    } catch (failure: Exception) {
+      Log.w(TAG, "notification action failed: ${failure.javaClass.simpleName}")
     }
   }
 

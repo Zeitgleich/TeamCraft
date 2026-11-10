@@ -6,6 +6,8 @@ import android.util.Log
 import androidx.core.content.LocusIdCompat
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import de.zeitgleich.teamcraft.notifications.LaunchToken
 import de.zeitgleich.teamcraft.notifications.PersonIcons
 import de.zeitgleich.teamcraft.security.AppLockPrefs
@@ -32,9 +34,12 @@ object ShareShortcuts {
   /**
    * Offers [targets] (the first [MAX_TARGETS]) in the share sheet. Not while the app lock is on:
    * the share sheet would show conversation names of the locked app, and a pick reaches into it.
+   * Off the main thread: every shortcut call waits for the system's shortcut service, which can
+   * take seconds while it is busy (the share sheet asking it at the same time); on the main thread
+   * that froze the share picker until Android killed the app (ANR).
    */
-  fun publish(context: Context, targets: List<Target>) {
-    if (AppLockPrefs.prefs(context).isEnabled) return
+  suspend fun publish(context: Context, targets: List<Target>): Unit = withContext(Dispatchers.IO) {
+    if (AppLockPrefs.prefs(context).isEnabled) return@withContext
     for (target in targets.filter { it.label.isNotBlank() }.take(MAX_TARGETS)) {
       val label = target.label
       val shortcut = ShortcutInfoCompat.Builder(context, target.conversationId)
@@ -54,9 +59,12 @@ object ShareShortcuts {
     }
   }
 
-  /** Tells the system the user shared to this conversation, so it ranks it higher next time. */
-  fun reportUsed(context: Context, conversationId: String) {
-    runCatching { ShortcutManagerCompat.reportShortcutUsed(context, conversationId) }
+  /**
+   * Tells the system the user shared to this conversation, so it ranks it higher next time. Off the
+   * main thread, like [publish].
+   */
+  suspend fun reportUsed(context: Context, conversationId: String) {
+    withContext(Dispatchers.IO) { runCatching { ShortcutManagerCompat.reportShortcutUsed(context, conversationId) } }
   }
 
   /**
