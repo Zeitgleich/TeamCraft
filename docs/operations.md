@@ -157,6 +157,7 @@ the start; only an IPv6 address that fails after another one worked is skipped (
 | `teamcraft_dependency_state`                   | gauge     | `dependency`, `state`     | server         | 1 for the state the circuit breaker is in (`[dependencies]`), else 0              |
 | `teamcraft_job_last_success_timestamp_seconds` | gauge     | `job`                     | server         | Unix time of the last success; 0: not since the start, or the job is switched off |
 | `teamcraft_dpop_requests_total`                | counter   | `outcome`                 | server         | Requests with an identity provider's token: `bound`, `unbound`, `refused`         |
+| `teamcraft_health_check_status`                | gauge     | `check`, `state`          | server         | 1 for the state a health check is in ("Health and alerts"), else 0                |
 | `teamcraft_sfu_rooms`                          | gauge     |                           | SFU            | Calls running                                                                     |
 | `teamcraft_sfu_participants`                   | gauge     |                           | SFU            | Devices in those calls, reconnecting ones included                                |
 | `teamcraft_sfu_fallback_connections`           | gauge     |                           | SFU            | Open connections on the WebSocket fallback, for networks that block UDP           |
@@ -173,6 +174,8 @@ no error texts.**
 - `provider`: `apns`, `fcm`, `unifiedpush`, `webpush`.
 - `dependency`: `database`, `object_storage`, `identity_provider`, `push_gateway`, `sfu`, once in use.
   `state`: `ok`, `down`, `recovering`.
+- `check`: the checks of "Health and alerts" below. `state` of a check: `ok`, `failing`, `alert`,
+  `no_data`, `not_configured`; the values come from the last evaluation (every 30 seconds).
 - `job`: `database_check`, `email_digest`, `guest_expiry`, `holiday_resync`, `key_package_pruning`,
   `meeting_notices`, `oidc_sync`, `partition_maintenance`, `retention`, `scheduled_messages`,
   `urgent_scheduler`.
@@ -236,7 +239,22 @@ to the instance's owners and admins and nobody else. It has no payload: the cons
 start), so nothing polls. The System health page itself reloads every 30 seconds while it is open and
 the page is visible; every other page reads nothing for it. Alerts are kept in memory (the last 50);
 a restart starts the list again, and a failure that lasts is raised again after the hold time.
-Delivery by e-mail or to a webhook is not part of this yet (#213).
+
+Outside the app, each raised and resolved alert goes out two more ways:
+
+- **E-mail** to every owner and admin with an address, when the server can send mail
+  (`is_email_enabled`, on by default). One mail per alert change and person: the check's name,
+  raised or resolved, the time and the instance's address. Nothing else, no error text.
+- **Webhooks** subscribed to `health.alert_raised` or `health.alert_resolved` (docs/webhooks.md):
+  the event carries the check's name (`data.check`) and nothing else, signed like every webhook. For
+  a chat-ops channel or a paging system.
+
+The evaluation only queues these; a task of its own delivers them, so a mail server that hangs does
+not hold up the checks. The queue is in memory on purpose, as are the admins' addresses (read with
+the admins, and the last ones kept when that fails): when the database is what failed, the mail
+still goes out, and the webhook event is queued once the database is back. A delivery that fails is
+tried again after 30 seconds, doubling up to an hour, and given up after a day; at most 200 wait.
+A restart loses what was waiting, like the alert list; a failure that lasts is raised again. Keeping both across restarts is #1646.
 
 **Settings** (Administration → Settings → Health alerts; the configuration file only names paths):
 
@@ -248,6 +266,7 @@ Delivery by e-mail or to a webhook is not part of this yet (#213).
 | `backup_max_age_secs`  | 36 hours | The backup is too old after this (1 hour to 30 days)         |
 | `certificate_min_days` | 14       | Too close to expiry with fewer days (1 to 365)               |
 | `disk_max_percent`     | 85       | Too full above this (50 to 99)                               |
+| `is_email_enabled`     | on       | Also mail raised and resolved alerts to owners and admins    |
 
 **What the deployment reports.** The server cannot see its backups, its certificate or the disk
 from inside its container. With `[health] heartbeat_dir = "/path"` it reads three files there at
@@ -264,10 +283,26 @@ shows as *No data yet* (the deployment should write `backup_last_success` once a
 every backup, so that a backup that never works is still found) and one that is not a number as well.
 A timestamp a little in the future (clock skew) counts as just now. The files are read-only for the
 server, at most 64 bytes each. The deployment repository has to write them and mount the directory
-into the server container; that is tracked as a follow-up of #213.
+into the server container; that is tracked in Zeitgleich/teamcraft-deploy#25.
 
 An external probe of `/readyz` stays part of the story: the built-in alerts cannot tell you that
 the server itself is down.
+
+### With Prometheus
+
+For those who run Prometheus, [docs/monitoring/](monitoring/) ships alert rules
+(`teamcraft-alerts.yml`) and a Grafana dashboard (`teamcraft-dashboard.json`) over the metrics
+above. The rules alert on the health checks' own verdict (`teamcraft_health_check_status{state="alert"}`),
+so the thresholds stay the console's settings and are not kept twice, and add what only an
+outside view can tell: the server, the SFU or the bridge not answering scrapes, a burst of 5xx, a
+saturated database pool and push failures. Labels and annotations name checks and services only.
+
+```sh
+promtool check rules docs/monitoring/teamcraft-alerts.yml
+```
+
+Alertmanager routes them wherever the operator wants (mail, a chat, a pager); TeamCraft does not
+depend on any of it.
 
 ## Reverse proxy and network
 

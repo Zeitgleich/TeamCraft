@@ -14,7 +14,10 @@ use teamcraft_db::{Database, DbError, InstanceStats, PoolStats};
 use teamcraft_ops::metrics::{
   HttpMetrics, IntCounterVec, IntGauge, IntGaugeVec, Metrics, MetricsError, loopback_addrs,
 };
-use teamcraft_proto::{DependencyHealth, DependencyName, DependencyState, PushProvider};
+use teamcraft_proto::{
+  DependencyHealth, DependencyName, DependencyState, HealthCheckId, HealthCheckResponse, HealthCheckStatus,
+  PushProvider,
+};
 use time::OffsetDateTime;
 use tracing::warn;
 
@@ -39,6 +42,9 @@ const PUSH_PROVIDERS: [(PushProvider, &str); 4] = [
 
 /// Every value of the `state` label of `teamcraft_dependency_state`.
 const DEPENDENCY_STATES: [&str; 3] = ["ok", "down", "recovering"];
+
+/// Every value of the `state` label of `teamcraft_health_check_status`.
+const HEALTH_STATES: [&str; 5] = ["ok", "failing", "alert", "no_data", "not_configured"];
 
 /// `[metrics]`: the optional `GET /metrics` listener. Bootstrap configuration: it has to be known
 /// before the database is read, and it decides what is reachable on the host.
@@ -97,6 +103,7 @@ pub struct ServerMetrics {
   dependency_state: IntGaugeVec,
   job_last_success: IntGaugeVec,
   dpop_requests: IntCounterVec,
+  health_check_status: IntGaugeVec,
   /// One scrape at a time: the push counters are brought up to date by their difference.
   scrape: Mutex<()>,
 }
@@ -107,6 +114,7 @@ struct Snapshot {
   pool: PoolStats,
   providers: Vec<(&'static str, ProviderHealth)>,
   dependencies: Vec<DependencyHealth>,
+  health: Vec<HealthCheckResponse>,
 }
 
 impl Default for MetricsConfig {
@@ -239,6 +247,11 @@ impl ServerMetrics {
         "Requests with an identity provider's token, by what DPoP made of them.",
         &["outcome"],
       )?,
+      health_check_status: metrics.int_gauge_vec(
+        "teamcraft_health_check_status",
+        "1 for the state the health check is in (System health in the console), else 0.",
+        &["check", "state"],
+      )?,
       scrape: Mutex::new(()),
       metrics,
     };
@@ -324,6 +337,23 @@ impl ServerMetrics {
     for dependency in &snapshot.dependencies {
       self.record_dependency(dependency);
     }
+    for check in &snapshot.health {
+      self.record_health_check(check);
+    }
+  }
+
+  fn record_health_check(&self, check: &HealthCheckResponse) {
+    // The server's own list; an unknown value can't come up, but no label comes from anywhere else.
+    if matches!(check.check, HealthCheckId::Unknown(_)) {
+      return;
+    }
+    let current = health_state_label(&check.status);
+    for state in HEALTH_STATES {
+      self
+        .health_check_status
+        .with_label_values(&[check.check.as_str(), state])
+        .set(i64::from(Some(state) == current));
+    }
   }
 
   fn record_pool(&self, pool: &PoolStats) {
@@ -376,6 +406,7 @@ fn snapshot(state: &AppState) -> Snapshot {
       .map(|(provider, label)| (*label, state.push.health(provider)))
       .collect(),
     dependencies: state.dependencies.health(),
+    health: state.health.checks(),
   }
 }
 
@@ -391,6 +422,17 @@ fn dependency_label(name: &DependencyName) -> Option<&'static str> {
     DependencyName::PushGateway => Some("push_gateway"),
     DependencyName::Sfu => Some("sfu"),
     DependencyName::Unknown(_) => None,
+  }
+}
+
+fn health_state_label(status: &HealthCheckStatus) -> Option<&'static str> {
+  match status {
+    HealthCheckStatus::Ok => Some("ok"),
+    HealthCheckStatus::Failing => Some("failing"),
+    HealthCheckStatus::Alert => Some("alert"),
+    HealthCheckStatus::NoData => Some("no_data"),
+    HealthCheckStatus::NotConfigured => Some("not_configured"),
+    HealthCheckStatus::Unknown(_) => None,
   }
 }
 
@@ -717,6 +759,20 @@ mod tests {
           state: DependencyState::Unknown("made-up-state".to_owned()),
         },
       ],
+      health: crate::health::ALL_CHECKS
+        .iter()
+        .map(|check| health_check(check.clone(), HealthCheckStatus::Ok))
+        .chain([
+          health_check(
+            HealthCheckId::Unknown("made-up-check".to_owned()),
+            HealthCheckStatus::Alert,
+          ),
+          health_check(
+            HealthCheckId::Backup,
+            HealthCheckStatus::Unknown("made-up-status".to_owned()),
+          ),
+        ])
+        .collect(),
     });
     metrics.on_database_check(Ok(stats(1, 1)), at(1_700_000_000));
     for path in SECRET_PATHS.into_iter().map(str::to_owned).chain(sample_paths()) {
@@ -738,6 +794,7 @@ mod tests {
         "teamcraft_gateway_connections",
         "teamcraft_gateway_resume_buffer_bytes",
         "teamcraft_gateway_sessions",
+        "teamcraft_health_check_status",
         "teamcraft_http_request_duration_seconds",
         "teamcraft_http_requests_total",
         "teamcraft_job_last_success_timestamp_seconds",
@@ -787,9 +844,39 @@ mod tests {
         ),
         (
           "state",
-          BTreeSet::from(["down", "idle", "in_use", "ok", "recovering"]),
+          BTreeSet::from([
+            "alert",
+            "down",
+            "failing",
+            "idle",
+            "in_use",
+            "no_data",
+            "not_configured",
+            "ok",
+            "recovering",
+          ]),
         ),
         ("outcome", BTreeSet::from(["bound", "refused", "unbound"])),
+        (
+          "check",
+          BTreeSet::from([
+            "backup",
+            "certificate",
+            "database",
+            "disk_space",
+            "holiday_feed",
+            "holiday_resync",
+            "identity_provider",
+            "media_server",
+            "object_storage",
+            "oidc_sync",
+            "oidc_sync_brake",
+            "partition_maintenance",
+            "push_gateway",
+            "push_service",
+            "retention",
+          ]),
+        ),
         (
           "job",
           BTreeSet::from([
@@ -807,6 +894,15 @@ mod tests {
           ]),
         ),
       ]),
+    }
+  }
+
+  fn health_check(check: HealthCheckId, status: HealthCheckStatus) -> HealthCheckResponse {
+    HealthCheckResponse {
+      check,
+      status,
+      maybe_failing_since: None,
+      maybe_value: Some(7),
     }
   }
 

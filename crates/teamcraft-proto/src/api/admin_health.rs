@@ -129,6 +129,10 @@ pub struct HealthAlertSettings {
   pub certificate_min_days: u32,
   /// The disk is too full above this percentage.
   pub disk_max_percent: u32,
+  /// Raised and resolved alerts are also mailed to the owners and admins with an e-mail address,
+  /// when the server can send mail. Settings saved before this existed read as on.
+  #[serde(default = "default_true")]
+  pub is_email_enabled: bool,
 }
 
 impl Default for HealthAlertSettings {
@@ -141,8 +145,13 @@ impl Default for HealthAlertSettings {
       backup_max_age_secs: 36 * 3600,
       certificate_min_days: 14,
       disk_max_percent: 85,
+      is_email_enabled: true,
     }
   }
+}
+
+fn default_true() -> bool {
+  true
 }
 
 #[cfg(test)]
@@ -181,5 +190,14 @@ mod tests {
       r#"{"checks":[{"check":"backup","status":"alert","failing_since":1000,"value":172800}],"alerts":[{"check":"backup","raised_at":2000}],"is_alerting_enabled":true,"hold_secs":600,"started_at":500}"#
     );
     assert_eq!(response.open_alert_count(), 1);
+  }
+
+  #[test]
+  fn settings_saved_before_the_mail_switch_read_as_mailing() {
+    let settings: HealthAlertSettings = serde_json::from_str(
+      r#"{"is_enabled":true,"hold_secs":600,"clear_secs":300,"backup_max_age_secs":129600,"certificate_min_days":14,"disk_max_percent":85}"#,
+    )
+    .unwrap();
+    assert_eq!(settings, HealthAlertSettings::default());
   }
 }

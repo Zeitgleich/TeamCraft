@@ -75,6 +75,17 @@ pub enum AttemptResult {
   },
 }
 
+/// Why an event could not be queued.
+#[derive(Debug, thiserror::Error)]
+pub enum WebhookEmitError {
+  #[error("no ID for the event: {0}")]
+  NoId(String),
+  #[error("serializing the event failed: {0}")]
+  Serialize(serde_json::Error),
+  #[error("queueing the event failed: {0}")]
+  Queue(#[from] DbError),
+}
+
 impl WebhookDispatcher {
   pub fn new(config: &WebhooksConfig) -> Result<Self, reqwest::Error> {
     // No proxy from the environment: a proxy resolves names itself, past the resolver. No
@@ -205,49 +216,49 @@ pub async fn emit_for_conversation(
       maybe_actor_id: maybe_actor,
       maybe_subject_id: maybe_subject,
       maybe_call_id: maybe_call,
+      maybe_check: None,
     },
   )
   .await;
 }
 
-/// Queues the event for every enabled webhook subscribed to it and wakes the workers.
+/// Queues the event for every enabled webhook subscribed to it and wakes the workers. A failure is
+/// logged: the action that raised the event has happened.
 pub async fn emit(state: &AppState, kind: WebhookEventKind, data: WebhookEventData) {
-  let event_id: WebhookEventId = match state.next_id() {
-    Ok(id) => id,
-    Err(error) => {
-      warn!(%error, "no ID for a webhook event");
-      return;
-    },
-  };
+  if let Err(error) = try_emit(state, kind.clone(), data).await {
+    warn!(%error, event = %kind, "queueing a webhook event failed");
+  }
+}
+
+/// [`emit`] for a caller that tries again later when the event could not be queued (the health
+/// alerts, whose database may be what failed).
+pub async fn try_emit(
+  state: &AppState,
+  kind: WebhookEventKind,
+  data: WebhookEventData,
+) -> Result<(), WebhookEmitError> {
+  let event_id: WebhookEventId = state
+    .next_id()
+    .map_err(|error| WebhookEmitError::NoId(error.to_string()))?;
   let payload = WebhookPayload {
     id: event_id.to_string(),
     kind: kind.clone(),
     created_at: UnixMillis(unix_now_millis()),
     data,
   };
-  let body = match serde_json::to_string(&payload) {
-    Ok(body) => body,
-    Err(error) => {
-      warn!(%error, "serializing a webhook event failed");
-      return;
-    },
-  };
+  let body = serde_json::to_string(&payload).map_err(WebhookEmitError::Serialize)?;
   let max_queued = state.settings.get().webhooks.max_queued_per_webhook;
-  match state
+  let outcome = state
     .database
     .enqueue_webhook_event(event_id.snowflake().get(), &kind, &body, max_queued)
-    .await
-  {
-    Ok(outcome) => {
-      if outcome.dropped > 0 {
-        warn!(event = %kind, dropped = outcome.dropped, "webhook queues full; event dropped for them");
-      }
-      if outcome.queued > 0 {
-        state.webhooks.notify();
-      }
-    },
-    Err(error) => warn!(%error, event = %kind, "queueing a webhook event failed"),
+    .await?;
+  if outcome.dropped > 0 {
+    warn!(event = %kind, dropped = outcome.dropped, "webhook queues full; event dropped for them");
   }
+  if outcome.queued > 0 {
+    state.webhooks.notify();
+  }
+  Ok(())
 }
 
 /// Starts the delivery workers and the sweeper of expired deliveries.

@@ -6,13 +6,14 @@
 
 use crate::common;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 use teamcraft_proto::{DependencyName, GatewayEvent, HealthAlertSettings};
-use teamcraft_server::testing::TestApp;
+use teamcraft_server::testing::{FakeMailer, TestApp};
 use time::OffsetDateTime;
 
 macro_rules! app {
@@ -206,6 +207,80 @@ mod alerting {
   }
 }
 
+mod passing_on {
+  use super::*;
+
+  #[tokio::test]
+  async fn an_alert_is_mailed_to_the_admins_and_queued_for_subscribed_webhooks() {
+    let mailer = Arc::new(FakeMailer::default());
+    let Some(app) = TestApp::start_with_mailer(
+      |settings| settings.webhooks.allow_private_targets = true,
+      mailer.clone(),
+    )
+    .await
+    else {
+      return;
+    };
+    let bob = admin();
+    // Nobody answers there: the event stays queued, which is what the test looks at.
+    let subscribed = create_webhook(&app, &["health.alert_raised"]).await;
+    let other = create_webhook(&app, &["channel.created"]).await;
+    // A member's address is never used.
+    app.get(&member("carol"), "/me").await;
+
+    let hold = HealthAlertSettings::default().hold_secs as i64;
+    break_identity_provider(&app);
+    for seconds in (0..=hold).step_by(30) {
+      evaluate(&app, seconds).await;
+    }
+    app.state.health.deliver_notices(&app.state, at_fixed(hold)).await;
+
+    let mails = mailer.sent();
+    assert_eq!(mails.len(), 1, "one mail per admin and alert");
+    assert_eq!(mails[0].to_address, bob.email);
+    assert_eq!(mails[0].subject, "TeamCraft health alert: identity_provider");
+    assert_eq!(queued(&app, &subscribed).await, 1);
+    assert_eq!(queued(&app, &other).await, 0);
+
+    // Nothing is sent twice.
+    app
+      .state
+      .health
+      .deliver_notices(&app.state, at_fixed(hold + 3600))
+      .await;
+    assert_eq!(mailer.sent().len(), 1);
+    assert_eq!(queued(&app, &subscribed).await, 1);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn mail_switched_off_in_the_settings_sends_none() {
+    let mailer = Arc::new(FakeMailer::default());
+    let Some(app) = TestApp::start_with_mailer(|_| {}, mailer.clone()).await else {
+      return;
+    };
+    let settings = HealthAlertSettings {
+      is_email_enabled: false,
+      ..HealthAlertSettings::default()
+    };
+    let reply = app.put(&admin(), "/admin/settings", section(&settings)).await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    break_identity_provider(&app);
+    for seconds in (0..=settings.hold_secs as i64).step_by(30) {
+      evaluate(&app, seconds).await;
+    }
+    app
+      .state
+      .health
+      .deliver_notices(&app.state, at_fixed(settings.hold_secs as i64))
+      .await;
+    let reply = app.get(&admin(), "/admin/health").await;
+    assert_eq!(status_of(&reply.body, "identity_provider"), "alert");
+    assert!(mailer.sent().is_empty());
+    app.stop().await;
+  }
+}
+
 // --- helpers -----------------------------------------------------------------------------------
 
 /// A time well after the server's start, `seconds` further on.
@@ -249,4 +324,26 @@ fn status_of(body: &Value, check: &str) -> String {
 
 fn section(settings: &HealthAlertSettings) -> Value {
   json!({"section": "health_alerts", "values": settings})
+}
+
+/// A webhook to an address nobody answers on; returns its ID.
+async fn create_webhook(app: &TestApp, events: &[&str]) -> String {
+  let reply = app
+    .post(
+      &admin(),
+      "/admin/webhooks",
+      json!({"url": "http://[::1]:9/hook", "description": "CI", "events": events, "is_enabled": true}),
+    )
+    .await;
+  assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+  reply.body["webhook"]["id"].as_str().unwrap().to_owned()
+}
+
+async fn queued(app: &TestApp, webhook: &str) -> u64 {
+  app
+    .state
+    .database
+    .count_webhook_deliveries(webhook.parse().unwrap())
+    .await
+    .unwrap()
 }

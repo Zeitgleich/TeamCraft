@@ -1268,6 +1268,7 @@ pub async fn report_joined(state: &AppState, report: SfuParticipantReport) -> Re
             maybe_actor_id: Some(report.user_id),
             maybe_subject_id: None,
             maybe_call_id: Some(snapshot.call_id),
+            maybe_check: None,
           },
         )
         .await;

@@ -862,6 +862,8 @@ admin-webhooks-event-member-joined = Mitglied beigetreten
 admin-webhooks-event-member-left = Mitglied gegangen
 admin-webhooks-event-call-started = Anruf begonnen
 admin-webhooks-event-call-ended = Anruf beendet
+admin-webhooks-event-health-alert_raised = Systemwarnung ausgelöst
+admin-webhooks-event-health-alert_resolved = Systemwarnung beendet
 admin-webhooks-event-ping = Test
 
 ## Notetaker (admin.md §3.7)
@@ -947,7 +949,7 @@ health-not-checked = Noch nicht geprüft.
 health-footnote = Diese Seite aktualisiert sich, wenn sich eine Warnung ändert, und alle 30 Sekunden, solange sie offen ist.
 health-alerts = Warnungen
 health-alerts-none = Seit dem Start des Servers gab es keine Warnungen.
-health-alerts-hint = Admins und Eigentümer sehen neue Warnungen hier und im Menü Administration. Die Liste beginnt neu, wenn der Server neu startet.
+health-alerts-hint = Admins und Eigentümer sehen neue Warnungen hier und im Menü Administration, per E-Mail, wenn das in den Einstellungen an ist, und über Webhooks, die Systemwarnungen abonniert haben. Die Liste beginnt neu, wenn der Server neu startet.
 health-alert-open = Ausgelöst { $raised }, noch offen.
 health-alert-resolved = Ausgelöst { $raised }, behoben { $resolved }.
 health-failing-since = Schlägt fehl seit { $when }.
