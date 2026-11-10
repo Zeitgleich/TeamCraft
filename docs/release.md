@@ -160,9 +160,11 @@ jobs).
 ## Nightly releases
 
 Normal case: pull requests are merged into `main` as soon as they are done, and
-`nightly-release.yml` releases `main` every night. It is scheduled at 22:00 (Europe/Berlin) because
-GitHub starts scheduled runs several hours late, so the release usually lands between 03:00 and
-06:00. The steps of [Release procedure](#release-procedure) are only done by hand for a candidate or a prerelease.
+`nightly-release.yml` releases `main` every night. It has no GitHub schedule, because GitHub starts
+scheduled runs hours late or not at all: an external scheduler (the operator's own CI) dispatches it
+every day at 04:30 (Europe/Berlin) through the API (`workflow_dispatch` on `main`, with a token
+that may only write Actions of this repository). `gh workflow run nightly-release.yml --ref main`
+starts it by hand. The steps of [Release procedure](#release-procedure) are only done by hand for a candidate or a prerelease.
 
 | Situation                                                                                | Result                                                                              |
 |------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------|
