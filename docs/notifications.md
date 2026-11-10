@@ -296,8 +296,9 @@ DND is on without an override.
 
 ## Mobile push delivery
 
-The push design is in e2ee.md §7: the server seals a content-free wake-up for the device, the app opens
-it, fetches the message and decrypts it itself. This section is about *when* a push goes out and what the
+The push design is in e2ee.md §7: the server seals a wake-up for the device, the app opens it and
+decrypts the message itself, from the end-to-end encrypted ciphertext the wake-up carries when it fits
+(e2ee.md §7.3), else fetched. This section is about *when* a push goes out and what the
 apps do with it. Bad push ruins a chat product, so v1 ships only when every row of the target table holds
 on real devices.
 
@@ -456,6 +457,10 @@ DMs, and the text (cut at 240 characters, `@mentions` in bold) or a label for fi
 audio, file name). How the core gets there, within `PUSH_PREVIEW_BUDGET` (7 s; FCM gives about 10 s):
 
 1. From the store if the app already has the message: no access token, no connection (issue #1662).
+   Then from the message's ciphertext in the wake-up, if it carries one (a message of up to about
+   1 KB, e2ee.md §7.3), checked like a fetched message: again no token and no connection
+   (issue #1670). A message this device can't read yet (a key or a sender's device it doesn't know)
+   goes on as if the wake-up carried none.
 2. Otherwise, while the sync loop runs (the app in the foreground), nothing more: the sync brings the
    message, and the app fills the placeholder in from the store (`notification_from_store`). A push
    then holds the engine for milliseconds instead of a fetch on a connection that may be cold.

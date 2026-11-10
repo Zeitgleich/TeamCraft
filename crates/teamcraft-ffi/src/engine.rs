@@ -2970,6 +2970,7 @@ mod tests {
         maybe_badge: None,
         maybe_sent_at: None,
         maybe_meeting: None,
+        maybe_message: None,
       };
       seal_wakeup(
         &SymmetricKey::from_slice(&key).unwrap(),

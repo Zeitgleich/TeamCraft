@@ -175,6 +175,7 @@ async fn push_payloads_open_with_the_registered_key() {
     maybe_badge: None,
     maybe_sent_at: None,
     maybe_meeting: None,
+    maybe_message: None,
   };
   let key = SymmetricKey::from_slice(registration.push_key.as_slice()).unwrap();
   let sealed = seal_wakeup(

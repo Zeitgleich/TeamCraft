@@ -330,6 +330,7 @@ fn wake_up_for(
     maybe_badge: None,
     maybe_sent_at: None,
     maybe_meeting: None,
+    maybe_message: None,
   };
   seal_wakeup(&key, &serde_json::to_vec(&wake_up).unwrap(), &mut OsRng).unwrap()
 }

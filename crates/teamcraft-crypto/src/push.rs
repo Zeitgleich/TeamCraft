@@ -3,7 +3,9 @@
 //! * **Wake-up payload:** XChaCha20-Poly1305 under the device's 256-bit push key, so Apple, Google
 //!   and push relays see only ciphertext. The server seals, the app or its notification extension
 //!   opens. Layout: `version (1) || nonce (24) || ciphertext || tag (16)`. The plaintext is opaque
-//!   bytes to this crate (the server uses JSON naming the conversation and message).
+//!   bytes to this crate (the server uses JSON naming the conversation and message). Visible
+//!   wake-ups are padded to one fixed size ([`seal_wakeup_padded`]), so their length says nothing
+//!   about whether they carry the message's ciphertext or how long it is.
 //! * **Web Push:** RFC 8291 `aes128gcm` content encryption (single record) for a browser
 //!   subscription, and the RFC 8292 VAPID `Authorization` header (ES256 JWT).
 //! * **Subscription change:** the service worker proves that a rotated Web Push subscription comes
@@ -86,6 +88,32 @@ pub fn seal_wakeup(
   sealed.extend_from_slice(&nonce);
   sealed.extend_from_slice(&ciphertext);
   Ok(sealed)
+}
+
+/// What [`seal_wakeup`] adds to the plaintext: version, nonce and tag.
+pub const WAKEUP_OVERHEAD: usize = 1 + NONCE_LEN + TAG_LEN;
+
+/// Seals a wake-up padded to exactly `sealed_len` bytes, so that every wake-up of one size class
+/// looks the same to push services and gateways, whatever it names or carries (e2ee.md §7, "Message
+/// in the wake-up"). The plaintext is JSON: it is padded with trailing spaces inside the AEAD, which
+/// every JSON reader skips, so readers that predate the padding open it unchanged. Refused with
+/// [`PushCryptoError::TooLarge`] when the plaintext doesn't fit.
+pub fn seal_wakeup_padded(
+  push_key: &SymmetricKey,
+  json: &[u8],
+  sealed_len: usize,
+  rng: &mut (impl CryptoRngCore + ?Sized),
+) -> Result<Vec<u8>, PushCryptoError> {
+  let padded_len = sealed_len
+    .checked_sub(WAKEUP_OVERHEAD)
+    .ok_or(PushCryptoError::TooLarge)?;
+  if json.len() > padded_len {
+    return Err(PushCryptoError::TooLarge);
+  }
+  let mut padded = Zeroizing::new(Vec::with_capacity(padded_len));
+  padded.extend_from_slice(json);
+  padded.resize(padded_len, b' ');
+  seal_wakeup(push_key, &padded, rng)
 }
 
 /// Opens a sealed wake-up (apps and notification extensions do this).
@@ -479,6 +507,31 @@ mod tests {
       for bad in [&[][..], &[1][..], &sealed[..20]] {
         assert!(open_wakeup(&key(7), bad).is_err());
       }
+    }
+
+    #[test]
+    fn padded_wake_ups_have_one_size_and_open_as_the_json_plus_spaces() {
+      let short = seal_wakeup_padded(&key(7), b"{\"a\":1}", 512, &mut OsRng).unwrap();
+      let long = seal_wakeup_padded(&key(7), &[b'x'; 512 - WAKEUP_OVERHEAD], 512, &mut OsRng).unwrap();
+      assert_eq!(short.len(), 512);
+      assert_eq!(long.len(), 512);
+      let opened = open_wakeup(&key(7), &short).unwrap();
+      let opened = opened.expose_secret();
+      assert!(opened.starts_with(b"{\"a\":1}"));
+      assert!(opened[7..].iter().all(|byte| *byte == b' '));
+    }
+
+    #[test]
+    fn a_wake_up_larger_than_its_size_is_refused() {
+      let fits = 512 - WAKEUP_OVERHEAD;
+      assert!(matches!(
+        seal_wakeup_padded(&key(7), &vec![b'x'; fits + 1], 512, &mut OsRng),
+        Err(PushCryptoError::TooLarge)
+      ));
+      assert!(matches!(
+        seal_wakeup_padded(&key(7), b"{}", WAKEUP_OVERHEAD - 1, &mut OsRng),
+        Err(PushCryptoError::TooLarge)
+      ));
     }
 
     #[test]

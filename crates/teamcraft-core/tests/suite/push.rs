@@ -576,6 +576,7 @@ async fn a_message_past_the_read_position_counts_as_read() {
     maybe_badge: None,
     maybe_sent_at: None,
     maybe_meeting: None,
+    maybe_message: None,
   };
   assert!(!is_read(bob.store.as_ref(), &wake_up(first)));
 
@@ -615,6 +616,198 @@ async fn assert_hidden(bob: &Peer, sealed: &[u8]) {
   assert_eq!(preview.content, PreviewContent::Unavailable);
   // Doesn't read as a failure: nothing to catch up, and it can be told apart for the app.
   assert!(!preview.needs_catch_up());
+}
+
+/// The message in the wake-up (issue #1670): read without a token or a connection, checked like a
+/// fetched one, and every failure goes the way a push without it goes.
+mod message_in_the_wake_up {
+  use super::*;
+
+  use teamcraft_core::push_guard;
+  use teamcraft_proto::{ListMessagesQuery, MessageResponse, PushedMessage, UserId};
+
+  #[tokio::test]
+  async fn it_shows_without_a_session_or_the_network() {
+    let (server, mut alice, bob, channel) = channel_with_two().await;
+    let message = alice_says(&mut alice, channel, "lunch at noon?").await;
+    let stored = stored(&alice, channel, message).await;
+    let sealed = carrying(&server, &bob, &stored, pushed(&stored));
+    server.set_offline(bob.client.user_id(), true);
+
+    let preview = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+      .await
+      .unwrap();
+    assert_eq!(preview.content, PreviewContent::Text("lunch at noon?".into()));
+    assert_eq!(preview.maybe_gap, None);
+    assert!(preview.is_conversation_verified);
+    // Nothing for the server to add: the engine asks for no token and fetches nothing.
+    assert!(!preview.needs_server());
+    assert!(!preview.needs_catch_up());
+  }
+
+  #[tokio::test]
+  async fn before_the_commit_it_needs_it_goes_to_the_fetch_and_the_catch_up() {
+    let (server, mut alice, mut bob, channel) = channel_with_two().await;
+    let carol = Peer::enroll(&server, "Carol").await;
+    let carol_id = carol.client.user_id();
+    alice.client.add_member(channel, carol_id).await.unwrap();
+    alice.client.remove_member(channel, carol_id).await.unwrap();
+    let message = alice_says(&mut alice, channel, "after the rotation").await;
+    let stored = stored(&alice, channel, message).await;
+    let sealed = carrying(&server, &bob, &stored, pushed(&stored));
+
+    // The store's look: a key this device doesn't hold yet reads as no message at all, so the
+    // engine fetches as it did before.
+    let store_only = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+      .await
+      .unwrap();
+    assert_eq!(store_only.maybe_gap, Some(PreviewGap::NoSession));
+    assert!(store_only.needs_server());
+    let fetched = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+      .await
+      .unwrap();
+    assert_eq!(fetched.maybe_gap, Some(PreviewGap::NotDecrypted));
+    assert!(fetched.needs_catch_up());
+
+    bob.client.catch_up_for_push(channel).await.unwrap();
+    server.set_offline(bob.client.user_id(), true);
+    let after = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+      .await
+      .unwrap();
+    assert_eq!(after.content, PreviewContent::Text("after the rotation".into()));
+  }
+
+  #[tokio::test]
+  async fn a_ciphertext_under_another_sender_or_message_is_not_shown_from_the_wake_up() {
+    let (server, mut alice, bob, channel) = channel_with_two().await;
+    let first = alice_says(&mut alice, channel, "the real one").await;
+    let second = alice_says(&mut alice, channel, "swapped in").await;
+    let first = stored(&alice, channel, first).await;
+    let second = stored(&alice, channel, second).await;
+
+    // The server names the first message but carries the second's ciphertext with the first's
+    // client ID: the signature binds the client ID, so it doesn't open.
+    let swapped = PushedMessage {
+      client_message_id: first.client_message_id,
+      ..pushed(&second)
+    };
+    let sealed = carrying(&server, &bob, &first, swapped);
+    let without_session = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+      .await
+      .unwrap();
+    assert_eq!(without_session.content, PreviewContent::Unavailable);
+    assert!(!without_session.is_conversation_verified);
+    // The fetch still finds the real message.
+    let fetched = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+      .await
+      .unwrap();
+    assert_eq!(fetched.content, PreviewContent::Text("the real one".into()));
+
+    // A sender it doesn't come from.
+    let other_sender = MessageResponse {
+      sender_user_id: bob.client.user_id(),
+      ..first.clone()
+    };
+    let sealed = carrying(&server, &bob, &other_sender, pushed(&first));
+    let preview = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+      .await
+      .unwrap();
+    assert_eq!(preview.content, PreviewContent::Unavailable);
+  }
+
+  #[tokio::test]
+  async fn a_ciphertext_named_for_another_conversation_is_not_shown() {
+    let (server, mut alice, mut bob, channel) = channel_with_two().await;
+    let other = alice
+      .client
+      .create_channel(alice.space().await, "other")
+      .await
+      .unwrap();
+    alice
+      .client
+      .add_member(other, bob.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let message = alice_says(&mut alice, channel, "for the planning channel").await;
+    let stored = stored(&alice, channel, message).await;
+    let elsewhere = MessageResponse {
+      conversation_id: other,
+      ..stored.clone()
+    };
+    let sealed = carrying(&server, &bob, &elsewhere, pushed(&stored));
+    let preview = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+      .await
+      .unwrap();
+    assert_eq!(preview.content, PreviewContent::Unavailable);
+    assert!(!preview.is_conversation_verified);
+  }
+
+  /// A push delivered again (a gateway's replay, a retry) and the sync that brings the message
+  /// later: one notification, and the store then shows the same text.
+  #[tokio::test]
+  async fn a_message_read_from_the_wake_up_is_announced_once() {
+    let (server, mut alice, mut bob, channel) = channel_with_two().await;
+    let message = alice_says(&mut alice, channel, "only once").await;
+    let stored = stored(&alice, channel, message).await;
+    let sealed = carrying(&server, &bob, &stored, pushed(&stored));
+
+    let first = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+      .await
+      .unwrap();
+    assert!(!push_guard::is_duplicate(bob.store.as_ref(), &first.wake_up).unwrap());
+    let again = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+      .await
+      .unwrap();
+    assert!(push_guard::is_duplicate(bob.store.as_ref(), &again.wake_up).unwrap());
+
+    settle(&mut [&mut alice, &mut bob]).await;
+    let synced = push_preview::<FakeServerApi>(bob.store.as_ref(), None, &sealed)
+      .await
+      .unwrap();
+    assert_eq!(synced.content, first.content);
+    assert!(push_guard::is_duplicate(bob.store.as_ref(), &synced.wake_up).unwrap());
+  }
+
+  /// What the server stores for the message, as a fetch returns it.
+  async fn stored(sender: &Peer, channel: ConversationId, message: MessageId) -> MessageResponse {
+    sender
+      .api
+      .list_messages(channel, &ListMessagesQuery::default())
+      .await
+      .unwrap()
+      .messages
+      .into_iter()
+      .find(|stored| stored.id == message)
+      .unwrap()
+  }
+
+  fn pushed(message: &MessageResponse) -> PushedMessage {
+    PushedMessage {
+      client_message_id: message.client_message_id,
+      sender_device_id: message.sender_device_id,
+      content_key_id: message.content_key_id.clone(),
+      ciphertext: message.ciphertext.clone(),
+    }
+  }
+
+  /// Seals what the server pushes for `named` with `carried` inside, padded as it pads.
+  fn carrying(server: &FakeServer, bob: &Peer, named: &MessageResponse, carried: PushedMessage) -> Vec<u8> {
+    let registration = server.push_registration(bob.client.device_id()).unwrap();
+    let key = SymmetricKey::from_slice(registration.push_key.as_slice()).unwrap();
+    let sender: UserId = named.sender_user_id;
+    let wake_up = PushWakeUp {
+      maybe_message: Some(carried),
+      ..PushWakeUp::for_message(PushKind::Message, named.conversation_id, named.id, sender, false)
+    };
+    teamcraft_crypto::push::seal_wakeup_padded(
+      &key,
+      &serde_json::to_vec(&wake_up).unwrap(),
+      2048,
+      &mut rand_core::OsRng,
+    )
+    .unwrap()
+  }
 }
 
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {
@@ -676,6 +869,7 @@ fn wake_up_for(
     maybe_badge: None,
     maybe_sent_at: None,
     maybe_meeting: None,
+    maybe_message: None,
   };
   seal_wakeup(
     &key,

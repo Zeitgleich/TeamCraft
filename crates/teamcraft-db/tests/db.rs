@@ -360,6 +360,7 @@ async fn dms_go_with_their_deleted_participant_not_with_other_members() {
       maybe_badge: None,
       maybe_sent_at: None,
       maybe_meeting: None,
+      maybe_message: None,
     },
     attempts: 1,
     delay: std::time::Duration::from_secs(60),

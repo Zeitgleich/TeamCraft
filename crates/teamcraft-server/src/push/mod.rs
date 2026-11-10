@@ -1,8 +1,9 @@
 //! Push notifications (e2ee.md §7): encrypted wake-ups through Web Push, APNs, FCM and UnifiedPush.
 //!
-//! A wake-up names the conversation and message but carries no content; the app fetches and decrypts
-//! the message itself. The payload is sealed with the device's push key, so push services only see
-//! ciphertext.
+//! A wake-up names the conversation and message and, when it fits, carries the message's end-to-end
+//! encrypted ciphertext (e2ee.md §7.3); otherwise the app fetches it. The payload is sealed with the
+//! device's push key and visible wake-ups are padded to one size, so push services only see ciphertext
+//! of a fixed length.
 
 mod apns;
 pub mod crypto;

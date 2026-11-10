@@ -512,6 +512,8 @@ fn classify(
         status,
       };
     },
+    // A gateway whose `max_sealed_bytes` is below the padded size: the dispatcher sends it small.
+    (_, Some(GatewayErrorCode::PayloadTooLarge)) | (413, _) => PushError::TooLarge,
     (_, Some(GatewayErrorCode::InvalidRequest)) => {
       PushError::Invalid("the push gateway refused the request".into())
     },
