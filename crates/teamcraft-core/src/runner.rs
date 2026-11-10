@@ -256,6 +256,11 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
 
   async fn next_wake(&mut self) -> Wake {
     let now = self.client.now_ms();
+    // A clock set back leaves the tick an hour away, and a busy connection wakes the loop more
+    // often than the clamp below lets a tick through: rewind on every wake, not in the tick only,
+    // so the tick comes now (issue #1673).
+    self.next_tick_ms = rewound(self.next_tick_ms, now, self.settings.tick);
+    self.next_background_page_ms = rewound(self.next_background_page_ms, now, self.settings.tick);
     let deadline = self
       .connection
       .next_deadline_ms()
@@ -265,8 +270,8 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       Some(_) => deadline.min(now.saturating_add(millis(TRANSFER_PROGRESS))),
       None => deadline,
     };
-    // Never longer than a tick: after the wall clock went back, deadlines lie in the "future" by
-    // the jump, and the tick notices the jump and moves them (robustness.md, "Time").
+    // Never longer than a tick: after the wall clock went back, the connection's deadlines lie in
+    // the "future" by the jump until it notices the jump and moves them (robustness.md, "Time").
     let until_ms = sleep_ms_until(deadline, now, self.settings.tick);
     // A catch-up's backlogs and a first sync's older history: at once, but only after everything
     // the select below looks at first (commands, frames, network changes, transfers).
