@@ -32,6 +32,7 @@ import de.zeitgleich.teamcraft.ui.AnimatedImagesMode
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MediaPrefs
 import de.zeitgleich.teamcraft.ui.media.MediaQuality
+import kotlinx.coroutines.launch
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 import de.zeitgleich.teamcraft.ui.theme.ChatListGrouping
 import de.zeitgleich.teamcraft.ui.theme.ChatListLayout
@@ -69,8 +70,10 @@ fun rememberAppLock(): Pair<Boolean, (Boolean) -> Unit> {
     isEnabled = isOn
     prefs.setEnabled(isOn)
     if (!isOn) deleteAppLockKey()
-    // Notifications already shown follow the new setting at once.
-    TeamCraftApplication.graph(context).notifier.repostAll()
+    // Notifications already shown follow the new setting at once; off the main thread (the
+    // notifier's lock waits behind a push).
+    val graph = TeamCraftApplication.graph(context)
+    graph.scope.launch { graph.notifier.repostAll() }
   }
 }
 

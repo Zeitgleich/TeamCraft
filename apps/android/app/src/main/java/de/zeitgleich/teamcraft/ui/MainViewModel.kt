@@ -884,7 +884,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   fun markRead(conversationId: String) = viewModelScope.launch {
     runCatching { graph.core.core().markRead(conversationId) }
-    graph.notifier.dismiss(conversationId)
+    // Not on the main thread: the notifier's lock is held while a push posts a notification and
+    // pushes its shortcut, which waits for the system's shortcut service; opening a conversation
+    // (after a share pick, a notification tap) froze behind it.
+    withContext(Dispatchers.IO) { graph.notifier.dismiss(conversationId) }
   }
 
   /** Sets the status; with [maybeUntil] it is automatic again from then ("Reset after", #1578). */
@@ -1439,8 +1442,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** Sets how much notifications show; those already in the shade follow at once. */
   fun setNotificationContent(content: NotificationContent) {
     graph.notificationContent.update(content)
-    graph.notifier.repostAll()
-    viewModelScope.launch { read { setNotificationContent(content) } }
+    viewModelScope.launch {
+      // The notifier's lock and the system's services: off the main thread, as in [markRead].
+      withContext(Dispatchers.IO) { graph.notifier.repostAll() }
+      read { setNotificationContent(content) }
+    }
   }
 
   /** The workspace policy's limit for notifications; `null` when the core can't answer. */
@@ -1588,7 +1594,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     runCatching { graph.core.core().deletePlaintextFiles() }
     graph.core.close()
     graph.auth.signOut()
-    graph.notifier.clearAll()
+    withContext(Dispatchers.IO) { graph.notifier.clearAll() }
     graph.pushStats.clear()
   }
 
