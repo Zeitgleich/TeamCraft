@@ -194,11 +194,13 @@ val LocalThemePolicy = staticCompositionLocalOf<AppThemePolicy?> { null }
  * The app's theme: Material 3 Expressive (issue #454) with TeamCraft's colours. Motion is the
  * expressive spring scheme, or the standard one without overshoot when the system's "remove
  * animations" is on. [maybeBrand]: the server's brand, whose accent colors (branding.md §4) replace
- * TeamCraft's teal; status, danger and text colors stay the app's own.
+ * TeamCraft's teal; status, danger and text colors stay the app's own. [isAlwaysDark]: the dark
+ * scheme whatever the system's mode, for screens that are dark by design (the call), so their
+ * components and the status bar's icons match the dark stage.
  */
 @Composable
-fun TeamCraftTheme(maybeBrand: LoginBrand? = null, content: @Composable () -> Unit) {
-  val isDark = isSystemInDarkTheme()
+fun TeamCraftTheme(maybeBrand: LoginBrand? = null, isAlwaysDark: Boolean = false, content: @Composable () -> Unit) {
+  val isDark = isAlwaysDark || isSystemInDarkTheme()
   val context = LocalContext.current
   val prefs = remember { AppearancePrefs.prefs(context) }
   val isDynamic by prefs.isDynamicColor.collectAsState()
