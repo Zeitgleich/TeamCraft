@@ -491,10 +491,6 @@ pub struct Client<A, S> {
   /// A gateway event said a user group changed, and the groups weren't read since.
   are_user_groups_stale: bool,
   maybe_user_groups_read_ms: Option<i64>,
-  /// A gateway event said the custom emoji changed, and they weren't read since.
-  is_custom_emoji_stale: bool,
-  /// Pictures of the set are still to be downloaded (a round fetches only so many).
-  are_custom_emoji_pictures_due: bool,
   /// What the device last said about its activity; a new gateway session identifies with it.
   device_activity: DeviceActivity,
   /// The conversation the user looks at; a catch-up takes it first (issue #247).
@@ -681,8 +677,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_expiring_guests_read_ms: None,
       are_user_groups_stale: false,
       maybe_user_groups_read_ms: None,
-      is_custom_emoji_stale: false,
-      are_custom_emoji_pictures_due: false,
       device_activity: DeviceActivity::Active,
       member_join_attempts: HashMap::new(),
       device_add_requests_handled: HashMap::new(),

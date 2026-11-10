@@ -77,6 +77,10 @@ async fn an_admins_emoji_reaches_members_messages_and_reactions() {
     .unwrap();
   settle(&mut [&mut t.alice, &mut t.bob]).await;
   let (alice_ui, bob_ui) = (backend_of(&t.alice), backend_of(&t.bob));
+  // Nothing is read until the UI needs the set.
+  assert!(bob_ui.custom_emoji().emoji.is_empty());
+  bob_ui.want_custom_emoji();
+  run_commands(&mut t.bob, &bob_ui).await;
 
   let set = bob_ui.custom_emoji();
   assert_eq!(set.emoji.len(), 1);
@@ -124,6 +128,8 @@ async fn renames_and_deletions_leave_earlier_messages_alone() {
     .unwrap();
   settle(&mut [&mut t.alice, &mut t.bob]).await;
   let (alice_ui, bob_ui) = (backend_of(&t.alice), backend_of(&t.bob));
+  bob_ui.want_custom_emoji();
+  run_commands(&mut t.bob, &bob_ui).await;
   let party = bob_ui.custom_emoji().emoji[0].clone();
   alice_ui.post_message(t.channel, None, ":party:");
   run_commands(&mut t.alice, &alice_ui).await;
@@ -135,12 +141,17 @@ async fn renames_and_deletions_leave_earlier_messages_alone() {
     .await
     .unwrap();
   settle(&mut [&mut t.alice, &mut t.bob]).await;
+  // The gateway said they changed: the next need reads them again, within the minute.
+  bob_ui.want_custom_emoji();
+  run_commands(&mut t.bob, &bob_ui).await;
   let renamed = bob_ui.custom_emoji();
   assert_eq!(renamed.emoji[0].shortcode, "celebrate");
   assert_eq!(renamed.emoji[0].sha256, party.sha256, "the same picture");
 
   t.alice.client.delete_custom_emoji(party.id).await.unwrap();
   settle(&mut [&mut t.alice, &mut t.bob]).await;
+  bob_ui.want_custom_emoji();
+  run_commands(&mut t.bob, &bob_ui).await;
   assert!(bob_ui.custom_emoji().emoji.is_empty());
   let earlier = bob_ui
     .messages(t.channel, 0, 20)
@@ -174,7 +185,10 @@ async fn emoji_signed_by_somebody_the_roster_does_not_name_are_refused() {
     .await
     .unwrap();
   settle(&mut [&mut t.alice, &mut t.bob, &mut t.carol]).await;
-  let shown: Vec<String> = backend_of(&t.bob)
+  let bob_ui = backend_of(&t.bob);
+  bob_ui.want_custom_emoji();
+  run_commands(&mut t.bob, &bob_ui).await;
+  let shown: Vec<String> = bob_ui
     .custom_emoji()
     .emoji
     .into_iter()

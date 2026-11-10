@@ -41,11 +41,29 @@ pub(crate) struct RequestLog {
   maybe_privacy: Option<i64>,
   maybe_call_history: Option<i64>,
   maybe_own_devices: Option<i64>,
+  /// When the custom emoji were last asked for, and the change mark they were asked for at.
+  maybe_custom_emoji: Option<(i64, u64)>,
   /// Member lists asked for because a member list had none, bounded like the searches.
   members: HashMap<ConversationId, i64>,
 }
 
 impl<S: LocalStore> CoreChatBackend<S> {
+  /// The UI needs the custom emoji (issue #207): read them unless asked for within a minute and
+  /// nothing changed since (`LiveMarks::custom_emoji`).
+  pub(crate) fn ui_want_custom_emoji(&self) {
+    let mark = self.read(crate::read_state::marks(self.store_ref())).custom_emoji;
+    let now = self.now_ms();
+    let mut log = self.requests.borrow_mut();
+    let is_due = log
+      .maybe_custom_emoji
+      .is_none_or(|(requested, asked_at)| asked_at != mark || now - requested > FRESH_FOR_MS);
+    if is_due {
+      log.maybe_custom_emoji = Some((now, mark));
+      drop(log);
+      self.command(CoreCommand::RefreshCustomEmoji);
+    }
+  }
+
   /// People by name from the local store (which keeps earlier directory answers) and, unless the
   /// same query went to the server within [`FRESH_FOR_MS`], a directory search whose answer shows
   /// on the next read.

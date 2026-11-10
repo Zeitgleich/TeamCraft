@@ -3521,9 +3521,11 @@ signature: a server can always withhold an emoji, and a deleted one just leaves 
 them. Which emoji a message or reaction uses is inside the ciphertext only: the text keeps the
 `:shortcode:`, `meta.custom_emoji` names each emoji it uses with its picture's hash (an edit carries
 the ones it adds), and a reaction's `emoji` is the `:shortcode:` with the hash in `custom`. Devices
-read the whole set and download all its pictures in the background, a few at a time, never one
-because a message on screen uses it, so fetches don't tell which message used which emoji. The
-storage host learns that a device read the set.
+read the whole set when the app first needs it (the picker, the `:` suggestions, a message with a
+picture the device lacks), at most once a minute and again after the gateway said the set or the
+roster changed, and download all its pictures, a round at a time, never one because a message on
+screen uses it. Fetches tell the server when a device needed the set, not which message used which
+emoji; the storage host learns that a device read the set.
 
 **Old messages and old apps.** A message shows the picture whose hash it names, as long as the
 device holds it: pictures stay on the device after their emoji is renamed or deleted (those of the

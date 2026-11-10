@@ -18,7 +18,7 @@ use teamcraft_crypto::workspace::{WorkspaceLog, claimed_signer, sign_log_entry, 
 use teamcraft_proto::custom_emoji_set::{CustomEmoji, CustomEmojiSet};
 use teamcraft_proto::{
   Base64Bytes, CustomEmojiDocument, CustomEmojiFormat, CustomEmojiHash, CustomEmojiResponse,
-  ListCustomEmojiResponse, SignedCustomEmoji, check_custom_emoji_shortcode,
+  SignedCustomEmoji, check_custom_emoji_shortcode,
 };
 
 use crate::convert;
@@ -29,8 +29,6 @@ use crate::workspace::{RosterRole, WorkspaceState};
 
 /// The verified set, in [`Table::Workspace`].
 const SET_KEY: &str = "custom_emoji";
-/// The server's list as read last, to verify again when the roster changes.
-const LISTING_KEY: &str = "custom_emoji_listed";
 /// The hashes of the pictures held, oldest use first.
 const PICTURES_KEY: &str = "custom_emoji_pictures";
 const PICTURE_PREFIX: &str = "custom_emoji_picture/";
@@ -110,18 +108,6 @@ pub fn verify(response: &CustomEmojiResponse, workspace: &WorkspaceState) -> Opt
 /// The set this device verified last; empty before the first read.
 pub fn stored_set(store: &impl LocalStore) -> Result<CustomEmojiSet, CoreError> {
   Ok(records::get_json(store, Table::Workspace, SET_KEY)?.unwrap_or_default())
-}
-
-/// The server's list as read last; empty before the first read.
-pub(crate) fn stored_listing(store: &impl LocalStore) -> Result<ListCustomEmojiResponse, CoreError> {
-  Ok(records::get_json(store, Table::Workspace, LISTING_KEY)?.unwrap_or_default())
-}
-
-pub(crate) fn store_listing(
-  store: &impl LocalStore,
-  listed: &ListCustomEmojiResponse,
-) -> Result<(), CoreError> {
-  records::put_json(store, Table::Workspace, LISTING_KEY, listed)
 }
 
 pub(crate) fn store_set(store: &impl LocalStore, set: &CustomEmojiSet) -> Result<(), CoreError> {

@@ -993,6 +993,7 @@ pub fn Composer(
         mention_suggestions(&found.query, &people, &groups, &labels)
       },
       TriggerKind::Emoji => {
+        crate::custom_emoji::want_set();
         let set = state.read(|backend| backend.custom_emoji());
         let mut list = custom_emoji_suggestions(&found.query, &set);
         list.extend(emoji_suggestions(

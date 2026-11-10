@@ -1367,6 +1367,10 @@ impl ChatBackend for RemoteChat {
     }
   }
 
+  fn want_custom_emoji(&self) {
+    self.act(ChatAction::WantCustomEmoji);
+  }
+
   fn add_custom_emoji(&self, shortcode: &str, picture: Vec<u8>) {
     self.act(ChatAction::AddCustomEmoji {
       shortcode: shortcode.to_owned(),

@@ -846,6 +846,8 @@ pub enum ChatAction {
   SetOrgBackgroundRule {
     rule: OrgBackgroundRule,
   },
+  /// The UI needs the custom emoji (issue #207).
+  WantCustomEmoji,
   /// Admins: custom emoji (issue #207), signed by the host's core.
   AddCustomEmoji {
     shortcode: String,
@@ -1355,6 +1357,7 @@ impl ChatAction {
       Self::AddOrgBackground { name, picture } => backend.add_org_background(&name, picture.into_vec()),
       Self::DeleteOrgBackground { id } => backend.delete_org_background(id),
       Self::SetOrgBackgroundRule { rule } => backend.set_org_background_rule(rule),
+      Self::WantCustomEmoji => backend.want_custom_emoji(),
       Self::AddCustomEmoji { shortcode, picture } => backend.add_custom_emoji(&shortcode, picture.into_vec()),
       Self::RenameCustomEmoji { id, shortcode } => backend.rename_custom_emoji(id, &shortcode),
       Self::DeleteCustomEmoji { id } => backend.delete_custom_emoji(id),

@@ -552,7 +552,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     self.refresh_stale_expiring_guests().await;
     self.refresh_stale_user_groups().await;
-    self.refresh_stale_custom_emoji().await;
     Ok(())
   }
 
@@ -734,9 +733,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         }
         let synced = self.sync_workspace_and_recovery().await;
         if is_roster {
-          // Who may sign custom emoji follows the roster: the list read last is verified again,
-          // here, without a request.
-          self.reverify_custom_emoji();
+          // Who may sign custom emoji follows the roster: verified again with the next read.
+          read_state::update_marks(&self.store, |marks| marks.custom_emoji += 1)?;
         }
         synced
       },
@@ -835,10 +833,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.are_user_groups_stale = true;
         Ok(())
       },
-      // Read with the event's frame; a burst of changes costs one read.
+      // The UI has the set read again when it next needs it (`want_custom_emoji`).
       GatewayEvent::CustomEmojiUpdate => {
-        self.is_custom_emoji_stale = true;
-        Ok(())
+        read_state::update_marks(&self.store, |marks| marks.custom_emoji += 1)
       },
       GatewayEvent::OrgRecoveryUpdate { .. }
       | GatewayEvent::SystemEvent { .. }

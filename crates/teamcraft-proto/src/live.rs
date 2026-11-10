@@ -33,6 +33,10 @@ pub struct LiveMarks {
   /// does not poll for it.
   #[serde(default)]
   pub health_alerts: u64,
+  /// The workspace's custom emoji changed, or the roster that decides whose count (issue #207):
+  /// the UI asks the core to read them again when it next needs them.
+  #[serde(default)]
+  pub custom_emoji: u64,
 }
 
 /// How far another member of a DM has read, from `read_receipt` events.

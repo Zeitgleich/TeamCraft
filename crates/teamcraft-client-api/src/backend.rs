@@ -403,6 +403,9 @@ pub trait ChatBackend {
   fn custom_emoji_picture(&self, _sha256: teamcraft_proto::CustomEmojiHash) -> Option<Vec<u8>> {
     None
   }
+  /// The UI needs the custom emoji (the picker, the `:` suggestions, a picture it lacks): a backend
+  /// that reads them from the server does so now unless it did lately and nothing changed.
+  fn want_custom_emoji(&self) {}
   /// Admins: signs and adds an emoji (a still PNG or WebP picture within the limits).
   fn add_custom_emoji(&self, _shortcode: &str, _picture: Vec<u8>) {}
   /// Admins: a new name for an emoji, signed again.

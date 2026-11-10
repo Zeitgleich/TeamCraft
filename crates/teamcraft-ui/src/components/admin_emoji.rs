@@ -26,6 +26,7 @@ const FILE_FIELD: &str = "admin-emoji-file";
 pub fn EmojiSection() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
+  crate::custom_emoji::want_set();
   let set = Memo::new(move |_| state.read(|backend| backend.custom_emoji()));
   view! {
     <SectionHeader

@@ -175,6 +175,8 @@ pub enum CoreCommand {
   SetOrgBackgroundRule {
     rule: OrgBackgroundRule,
   },
+  /// Reads the workspace's custom emoji and fetches pictures this device lacks (issue #207).
+  RefreshCustomEmoji,
   /// Custom emoji (admins; each is signed on this device, issue #207).
   AddCustomEmoji {
     shortcode: String,
@@ -581,7 +583,8 @@ impl CoreCommand {
       | Self::RemoveSpaceMember { .. }
       | Self::RevokeSpaceInvite { .. }
       | Self::ResendSpaceInvite { .. }
-      | Self::AddSpaceMembers { .. } => CommandPart::Workspace,
+      | Self::AddSpaceMembers { .. }
+      | Self::RefreshCustomEmoji => CommandPart::Workspace,
       Self::AddOrgBackground { .. }
       | Self::DeleteOrgBackground { .. }
       | Self::SetOrgBackgroundRule { .. }
@@ -2642,6 +2645,10 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn custom_emoji_picture(&self, sha256: teamcraft_proto::CustomEmojiHash) -> Option<Vec<u8>> {
     self.read(crate::custom_emoji::picture(&self.store, sha256))
+  }
+
+  fn want_custom_emoji(&self) {
+    self.ui_want_custom_emoji();
   }
 
   fn add_custom_emoji(&self, shortcode: &str, picture: Vec<u8>) {

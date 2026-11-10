@@ -2,7 +2,7 @@
 //! CSP lets images come from `blob:`), one per picture for the session, and the glyph that shows a
 //! picture or, without one, the `:shortcode:` text older apps show too.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use leptos::prelude::*;
@@ -16,8 +16,28 @@ use crate::state::use_app_state;
 /// URLs kept for the session; past this they are dropped together. Each is one small picture.
 const MAX_URLS: usize = 512;
 
+/// The UI asks the backend for the set at most this often; the backend paces its reads itself.
+const WANT_EVERY_MS: i64 = 30_000;
+
 thread_local! {
   static URLS: RefCell<HashMap<CustomEmojiHash, String>> = RefCell::new(HashMap::new());
+  static LAST_WANTED_MS: Cell<Option<i64>> = const { Cell::new(None) };
+}
+
+/// The set is needed here (the picker, the `:` suggestions, a picture this device lacks): the
+/// backend reads it unless it did lately and nothing changed. Asking changes nothing to read.
+pub fn want_set() {
+  let now = crate::clock::now_ms();
+  let is_due = LAST_WANTED_MS.with(|last| {
+    let is_due = last.get().is_none_or(|wanted| now - wanted >= WANT_EVERY_MS);
+    if is_due {
+      last.set(Some(now));
+    }
+    is_due
+  });
+  if is_due {
+    use_app_state().read(|backend| backend.want_custom_emoji());
+  }
 }
 
 /// The picture's URL, once this device holds it (checked against its hash by the core). Reactive.

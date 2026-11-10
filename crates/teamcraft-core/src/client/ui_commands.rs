@@ -484,6 +484,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         users,
         is_guest,
       } => self.add_space_members(space, &users, is_guest).await,
+      CoreCommand::RefreshCustomEmoji => Box::pin(self.refresh_custom_emoji()).await,
       other => Err(runs_elsewhere(&other)),
     }
   }

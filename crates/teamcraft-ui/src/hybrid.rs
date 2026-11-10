@@ -530,6 +530,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.custom_emoji_picture(sha256)
   }
 
+  fn want_custom_emoji(&self) {
+    self.chat.want_custom_emoji();
+  }
+
   fn add_custom_emoji(&self, shortcode: &str, picture: Vec<u8>) {
     self.chat.add_custom_emoji(shortcode, picture);
   }
