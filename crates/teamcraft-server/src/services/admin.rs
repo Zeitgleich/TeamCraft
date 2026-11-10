@@ -3,8 +3,8 @@
 use serde_json::json;
 use teamcraft_db::{
   ActiveAdminCounts, AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow,
-  AdminUserRow, AuditEntry, AuditQuery, ChatRemoval, ChatRemovalEffects, DeactivationAudit, LOCAL_ISSUER,
-  UserDeletion, UserStatusFilter,
+  AdminUserRow, AuditEntry, AuditQuery, ChatRemoval, ChatRemovalEffects, DeactivationAudit, DeletionGuard,
+  LOCAL_ISSUER, UserDeletion, UserStatusFilter,
 };
 use teamcraft_proto::{
   AdminConversationSummary, AdminDeviceResponse, AdminHealthResponse, AdminInstanceResponse,
@@ -480,42 +480,80 @@ pub async fn delete_user_as_admin(
     ensure_may_act_on(state, caller, user).await?;
     ensure_admins_remain(state, user, target.is_deactivated).await?;
   }
+  delete_account(state, Some(caller.user.id), user, DeletionGuard::Any, &json!({})).await?;
+  Ok(())
+}
+
+/// How [`delete_account`] went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountDeletion {
+  Deleted,
+  /// Deleted before (a retry): nothing was left to change.
+  WasAlreadyDeleted,
+  /// The guard refused: the account signed in meanwhile. Nothing changed.
+  SignedIn,
+}
+
+/// The work of "Delete account" without the permission checks, for an admin and for the identity
+/// provider sync (an account that never signed in, docs/provisioning.md §6). `detail` adds to the
+/// audit entry. Errors with `user_not_found` for an unknown account.
+pub async fn delete_account(
+  state: &AppState,
+  maybe_actor: Option<UserId>,
+  user: UserId,
+  guard: DeletionGuard,
+  detail: &serde_json::Value,
+) -> Result<AccountDeletion, ApiError> {
+  if guard == DeletionGuard::NeverSignedIn
+    && state
+      .database
+      .users_awaiting_first_sign_in(&[user])
+      .await?
+      .is_empty()
+  {
+    return Ok(AccountDeletion::SignedIn);
+  }
   let direct_conversations = delete_direct_conversations(state, user).await?;
   for key in state.database.user_object_keys(user).await? {
     super::retention::delete_object(state, &key).await?;
   }
-  let (was_already_deleted, effects) = match state.database.delete_user(user).await? {
+  let (was_already_deleted, effects) = match state.database.delete_user_guarded(user, guard).await? {
     UserDeletion::Deleted {
       was_already_deleted,
       effects,
     } => (was_already_deleted, effects),
     UserDeletion::UnknownUser => return Err(ApiError::user_not_found()),
+    UserDeletion::SignedIn => return Ok(AccountDeletion::SignedIn),
   };
   // Also on a retry: a crash after the commit must not leave a connection or a call running.
   state.hub.revoke_user(user);
   announce_chat_removal(state, user, &effects).await;
   if was_already_deleted {
-    return Ok(());
+    return Ok(AccountDeletion::WasAlreadyDeleted);
   }
   // Clients fetch the profile again and show the tombstone.
   state.hub.publish(
     effects.co_members.iter().copied(),
     &GatewayEvent::ProfileUpdate { user_id: user },
   );
+  let mut entry = json!({
+    "devices": effects.devices.len(),
+    "conversations": effects.conversations.len(),
+    "spaces": effects.spaces.len(),
+    "direct_conversations_deleted": direct_conversations,
+  });
+  if let (Some(entry), Some(extra)) = (entry.as_object_mut(), detail.as_object()) {
+    entry.extend(extra.clone());
+  }
   audit::record(
     state,
-    Some(caller.user.id),
+    maybe_actor,
     "user_deleted",
     Some(AuditTarget::new("user", user)),
-    &json!({
-      "devices": effects.devices.len(),
-      "conversations": effects.conversations.len(),
-      "spaces": effects.spaces.len(),
-      "direct_conversations_deleted": direct_conversations,
-    }),
+    &entry,
   )
   .await?;
-  Ok(())
+  Ok(AccountDeletion::Deleted)
 }
 
 /// Deleting an active owner or admin must leave the workspace with another active one.

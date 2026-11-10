@@ -996,6 +996,11 @@ fn build_oidc_sync(config: &Config) -> anyhow::Result<Option<OidcSyncSettings>> 
       oidc.sync.brake_max_percent,
       oidc.sync.brake_min_allowed,
     ),
+    precreation: if oidc.sync.precreate_accounts {
+      oidc::AccountPrecreation::UpTo(oidc.sync.max_created_per_run.max(1))
+    } else {
+      oidc::AccountPrecreation::Off
+    },
     interval: Duration::from_secs(oidc.sync.interval_secs.max(1)),
     stale_after_intervals: oidc.sync.stale_after_intervals.max(1),
   }))

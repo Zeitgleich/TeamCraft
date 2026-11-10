@@ -13,8 +13,8 @@ use secrecy::ExposeSecret;
 use serde::Deserialize;
 use serde_json::json;
 use teamcraft_db::{
-  GroupCreateOutcome, HeldDeactivation, NewHeldDeactivation, NewUserGroup, OidcIdentity, OidcSyncRun,
-  OidcUserRow,
+  DeletionGuard, GroupCreateOutcome, HeldDeactivation, NewHeldDeactivation, NewUserGroup, OidcIdentity,
+  OidcSyncRun, OidcUserRow,
 };
 use teamcraft_proto::{
   DeactivationCause, DeactivationReason, OidcSyncError, OidcSyncOutcome, ProvisionStatus, ProvisionedUser,
@@ -23,7 +23,9 @@ use teamcraft_proto::{
 use time::OffsetDateTime;
 use tracing::{debug, info, warn};
 
-use super::admin::{AfterDeactivation, deactivate_user, reactivate_and_announce};
+use super::admin::{
+  AccountDeletion, AfterDeactivation, deactivate_user, delete_account, reactivate_and_announce,
+};
 use super::audit::{self, Target as AuditTarget};
 use super::oidc_brake::{Decision, HeldEntry, PlannedDeactivation};
 use super::user_groups;
@@ -54,6 +56,19 @@ pub struct OidcSyncRuntime {
   /// When the server client's secret expires, as the last run read it (health check
   /// `secret_expiry`).
   secret_expiry: Mutex<SecretReading>,
+  /// The subject the last run's role lookups for new accounts stopped at; the next run goes on
+  /// after it (docs/provisioning.md §6). Lost on a restart, which only starts the round again.
+  maybe_precreate_cursor: Mutex<Option<String>>,
+}
+
+/// Whether the sync makes the accounts of the provider's members before their first sign-in
+/// (docs/provisioning.md §6), `[oidc.sync] precreate_accounts` and `max_created_per_run`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountPrecreation {
+  Off,
+  /// One run looks up the roles of at most this many people without an account, and so makes at
+  /// most this many accounts.
+  UpTo(u32),
 }
 
 impl OidcSyncRuntime {
@@ -81,6 +96,21 @@ impl OidcSyncRuntime {
 
   fn set_secret_expiry(&self, reading: SecretReading) {
     *self.secret_expiry.lock().unwrap_or_else(PoisonError::into_inner) = reading;
+  }
+
+  fn precreate_cursor(&self) -> Option<String> {
+    self
+      .maybe_precreate_cursor
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .clone()
+  }
+
+  fn set_precreate_cursor(&self, maybe_cursor: Option<String>) {
+    *self
+      .maybe_precreate_cursor
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner) = maybe_cursor;
   }
 }
 
@@ -139,6 +169,11 @@ pub struct SyncReport {
   pub groups_deleted: u32,
   /// Space and channel memberships the group mapping added (docs/provisioning.md §5).
   pub mapped_memberships: u32,
+  /// Accounts made before their first sign-in (docs/provisioning.md §6).
+  pub created: u32,
+  /// Accounts that never signed in and that the provider disabled or deleted: removed outright
+  /// instead of deactivated.
+  pub deleted: u32,
   /// Deactivations the safety brake holds back after this run.
   pub held: u32,
   /// Changes that failed; the next run tries them again.
@@ -152,16 +187,29 @@ struct RoleChange {
   role: Role,
 }
 
+/// An account to make before its first sign-in.
+struct PlannedCreation {
+  remote: RemoteUser,
+  role: Role,
+}
+
 /// What the provider says should change, read in full before anything is applied.
 pub(super) struct Plan {
   provider_session: ProviderSession,
   deactivations: Vec<PlannedDeactivation>,
   reactivations: Vec<UserId>,
   role_changes: Vec<RoleChange>,
+  creations: Vec<PlannedCreation>,
+  /// Where the next run's lookups for new accounts start.
+  maybe_next_cursor: Option<String>,
   active_users: usize,
 }
 
 impl Plan {
+  pub(super) fn creation_count(&self) -> usize {
+    self.creations.len()
+  }
+
   pub(super) fn reactivation_count(&self) -> usize {
     self.reactivations.len()
   }
@@ -263,6 +311,7 @@ async fn read_plan(state: &AppState, settings: &OidcSyncSettings) -> Result<Plan
       note,
     })
   };
+  let known: HashSet<String> = users.iter().map(|user| user.subject.clone()).collect();
   let (mut deactivations, mut reactivations, mut role_changes) = (Vec::new(), Vec::new(), Vec::new());
   for user in users {
     let Some(remote_user) = remote.get(user.subject.as_str()) else {
@@ -296,13 +345,71 @@ async fn read_plan(state: &AppState, settings: &OidcSyncSettings) -> Result<Plan
       },
     }
   }
+  let (creations, maybe_next_cursor) = match settings.precreation {
+    AccountPrecreation::Off => (Vec::new(), None),
+    AccountPrecreation::UpTo(budget) => {
+      let released = state.database.released_subjects(&settings.issuer).await?;
+      let candidates: Vec<&RemoteUser> = remote_users
+        .iter()
+        .filter(|user| user.enabled && !known.contains(&user.id) && !released.contains(&user.id))
+        .collect();
+      let cursor = state.oidc_sync.precreate_cursor();
+      let (batch, maybe_next_cursor) = next_round(candidates, cursor.as_deref(), budget as usize);
+      let mut creations = Vec::new();
+      for remote_user in batch {
+        let roles = provider.client_roles(&remote_user.id, &client_uuid).await?;
+        // Guests are not made in advance: they come from outside and appear at their first
+        // sign-in (docs/provisioning.md §6).
+        match mapping.resolve(roles.iter().map(String::as_str)) {
+          Some(role) if role != Role::Guest => creations.push(PlannedCreation {
+            remote: remote_user.clone(),
+            role,
+          }),
+          _ => {},
+        }
+      }
+      (creations, maybe_next_cursor)
+    },
+  };
   Ok(Plan {
     provider_session: provider.into_session(),
     deactivations,
     reactivations,
     role_changes,
+    creations,
+    maybe_next_cursor,
     active_users,
   })
+}
+
+/// The next at most `budget` people of a round over `candidates` (in subject order), starting
+/// after `maybe_cursor` and wrapping around, and where the following round starts: `None` once
+/// one round covered everybody. So people the provider gives no TeamCraft role, looked up and
+/// skipped every run, never keep the others waiting.
+fn next_round<'a>(
+  mut candidates: Vec<&'a RemoteUser>,
+  maybe_cursor: Option<&str>,
+  budget: usize,
+) -> (Vec<&'a RemoteUser>, Option<String>) {
+  candidates.sort_by(|a, b| a.id.cmp(&b.id));
+  if candidates.len() <= budget {
+    return (candidates, None);
+  }
+  let start = maybe_cursor.map_or(0, |cursor| {
+    candidates
+      .iter()
+      .position(|user| user.id.as_str() > cursor)
+      .unwrap_or(0)
+  });
+  let batch: Vec<&RemoteUser> = candidates
+    .iter()
+    .cycle()
+    .skip(start)
+    .take(budget)
+    .copied()
+    .collect();
+  let maybe_next = batch.last().map(|user| user.id.clone());
+  (batch, maybe_next)
 }
 
 fn decide(settings: &OidcSyncSettings, plan: &Plan, held: &[HeldDeactivation]) -> Decision {
@@ -333,12 +440,14 @@ async fn run(state: &AppState, settings: &OidcSyncSettings) -> Result<SyncReport
       would_hold = decision.hold.len(),
       would_reactivate = plan.reactivations.len(),
       would_change_roles = plan.role_changes.len(),
+      would_create = plan.creations.len(),
       "oidc sync dry run"
     );
     return Ok(SyncReport {
       deactivated: count(decision.apply.len()),
       reactivated: count(plan.reactivations.len()),
       role_changes: count(plan.role_changes.len()),
+      created: count(plan.creations.len()),
       held: count(decision.hold.len()),
       ..SyncReport::default()
     });
@@ -395,20 +504,10 @@ async fn apply(
   }
   let mut still_confirmed: Vec<&PlannedDeactivation> = Vec::new();
   for deactivation in &decision.apply {
-    match Box::pin(deactivate_user(
-      state,
-      None,
-      deactivation.user,
-      DeactivationReason::Oidc,
-      deactivation.note,
-      // Suspended like by an admin: the provider may enable the user again, and the sync then
-      // reactivates them with everything intact. The automatic removal setting covers people who left.
-      AfterDeactivation::KeepChats,
-    ))
-    .await
-    {
-      Ok(true) => report.deactivated += 1,
-      Ok(false) => {},
+    match Box::pin(deprovision(state, deactivation)).await {
+      Ok(Deprovisioned::Deactivated) => report.deactivated += 1,
+      Ok(Deprovisioned::Deleted) => report.deleted += 1,
+      Ok(Deprovisioned::Nothing) => {},
       Err(error) => {
         warn!(user_id = %deactivation.user, %error, "deactivating a user failed");
         report.failed += 1;
@@ -442,6 +541,25 @@ async fn apply(
         report.failed += 1;
       },
     }
+  }
+  // Before the group mapping, so that new accounts land in their spaces in the same run.
+  let mut has_failed_creation = false;
+  for creation in &plan.creations {
+    match create_account(state, settings, creation).await {
+      Ok(true) => report.created += 1,
+      Ok(false) => {},
+      Err(error) => {
+        warn!(%error, "making an account before its first sign-in failed");
+        report.failed += 1;
+        has_failed_creation = true;
+      },
+    }
+  }
+  // After a failure the next run looks at the same people again instead of going on.
+  if !has_failed_creation {
+    state
+      .oidc_sync
+      .set_precreate_cursor(plan.maybe_next_cursor.clone());
   }
   if settings.sync_groups {
     let provider = Provider::resume(settings, &plan.provider_session);
@@ -477,6 +595,109 @@ async fn store_held(
   let held = state.database.set_held_deactivations(&entries).await?;
   state.oidc_sync.set_held(held);
   Ok(held)
+}
+
+/// What [`deprovision`] did.
+enum Deprovisioned {
+  Deactivated,
+  Deleted,
+  /// Deactivated before: nothing to do.
+  Nothing,
+}
+
+/// Takes away the account of somebody the provider disabled, deleted or stripped of their roles.
+/// An account that never signed in (docs/provisioning.md §6) is deleted outright: it has no device
+/// in any group, so there is nothing to suspend or rotate. Every other account is suspended like by
+/// an admin: the provider may enable the user again, and the sync then reactivates them with
+/// everything intact; the leaver round (§3) covers people who left.
+async fn deprovision(
+  state: &AppState,
+  deactivation: &PlannedDeactivation,
+) -> Result<Deprovisioned, ApiError> {
+  let deleted = Box::pin(delete_account(
+    state,
+    None,
+    deactivation.user,
+    DeletionGuard::NeverSignedIn,
+    &json!({"source": "oidc_sync", "reason": "never_signed_in", "cause": deactivation.cause.as_str()}),
+  ))
+  .await?;
+  match deleted {
+    AccountDeletion::Deleted | AccountDeletion::WasAlreadyDeleted => return Ok(Deprovisioned::Deleted),
+    AccountDeletion::SignedIn => {},
+  }
+  let is_deactivated = Box::pin(deactivate_user(
+    state,
+    None,
+    deactivation.user,
+    DeactivationReason::Oidc,
+    deactivation.note,
+    AfterDeactivation::KeepChats,
+  ))
+  .await?;
+  Ok(if is_deactivated {
+    Deprovisioned::Deactivated
+  } else {
+    Deprovisioned::Nothing
+  })
+}
+
+/// Makes one account before its first sign-in; `false` if it was there already (a sign-in at the
+/// same moment).
+async fn create_account(
+  state: &AppState,
+  settings: &OidcSyncSettings,
+  creation: &PlannedCreation,
+) -> Result<bool, ApiError> {
+  let (user, is_created) = provision_account(state, settings, &creation.remote, &creation.role).await?;
+  if is_created {
+    audit::record(
+      state,
+      None,
+      "user_provisioned",
+      Some(AuditTarget::new("user", user)),
+      &json!({"source": "oidc_sync", "role": creation.role.as_str()}),
+    )
+    .await?;
+  }
+  Ok(is_created)
+}
+
+/// Makes the account of `remote` before its first sign-in, marked as awaiting it, or finds the one
+/// there. Returns it and whether it was made now.
+async fn provision_account(
+  state: &AppState,
+  settings: &OidcSyncSettings,
+  remote: &RemoteUser,
+  role: &Role,
+) -> Result<(UserId, bool), ApiError> {
+  let kind = if *role == Role::Guest {
+    UserKind::Guest
+  } else {
+    UserKind::Member
+  };
+  let display_name = remote.display_name();
+  let account = state
+    .database
+    .provision_oidc_user(
+      &OidcIdentity {
+        issuer: &settings.issuer,
+        subject: &remote.id,
+        maybe_username: remote.maybe_username.as_deref(),
+        maybe_email: remote.maybe_email.as_deref(),
+        display_name: &display_name,
+        kind,
+        maybe_oidc_role: Some(role.as_str()),
+        maybe_organization: None,
+        should_sync_organization: false,
+      },
+      state.next_id()?,
+    )
+    .await?;
+  if account.is_created {
+    info!(user_id = %account.user, "provisioned an account from the identity provider");
+  }
+  Ok((account.user, account.is_created))
 }
 
 async fn reactivate_from_sync(state: &AppState, user: UserId) -> Result<bool, ApiError> {
@@ -550,6 +771,8 @@ async fn record_run(
     role_changes: report.role_changes,
     groups_changed: report.groups_created + report.groups_changed + report.groups_deleted,
     failed: report.failed,
+    created: report.created,
+    deleted: report.deleted,
   };
   if let Err(error) = state.database.record_oidc_sync_run(&run).await {
     warn!(%error, "storing how the oidc sync went failed");
@@ -641,31 +864,13 @@ async fn provision_one(
     };
     return Ok((Some(existing), status));
   }
-  let kind = if role == teamcraft_proto::Role::Guest {
-    UserKind::Guest
+  let (user, is_created) = provision_account(state, settings, remote, &role).await?;
+  let status = if is_created {
+    ProvisionStatus::Created
   } else {
-    UserKind::Member
+    ProvisionStatus::Existing
   };
-  let display_name = remote.display_name();
-  let user = state
-    .database
-    .upsert_oidc_user(
-      &OidcIdentity {
-        issuer: &settings.issuer,
-        subject: &remote.id,
-        maybe_username: remote.maybe_username.as_deref(),
-        maybe_email: remote.maybe_email.as_deref(),
-        display_name: &display_name,
-        kind,
-        maybe_oidc_role: Some(role.as_str()),
-        maybe_organization: None,
-        should_sync_organization: false,
-      },
-      state.next_id()?,
-    )
-    .await?;
-  info!(user_id = %user.id, "provisioned an account from the identity provider");
-  Ok((Some(user.id), ProvisionStatus::Created))
+  Ok((Some(user), status))
 }
 
 /// Adds the provider's members of each mapped group to the rule's spaces and public channels, once
@@ -810,7 +1015,7 @@ pub(crate) enum ProviderError {
   Unexpected(String),
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct RemoteUser {
   id: String,
   #[serde(default)]
@@ -1101,6 +1306,48 @@ mod tests {
     );
     assert_eq!(admin_url_from_issuer("https://accounts.example.com"), None);
     assert_eq!(admin_url_from_issuer("https://auth.example.com/realms/a/b"), None);
+  }
+
+  mod next_round {
+    use super::*;
+
+    #[test]
+    fn everybody_fits_in_one_round() {
+      let users = remote_users(&["c", "a", "b"]);
+      let (batch, maybe_next) = next_round(users.iter().collect(), Some("b"), 3);
+      assert_eq!(ids(&batch), ["a", "b", "c"]);
+      assert_eq!(maybe_next, None);
+    }
+
+    #[test]
+    fn a_round_goes_on_after_the_cursor_and_wraps_around() {
+      let users = remote_users(&["a", "b", "c", "d", "e"]);
+      let (batch, maybe_next) = next_round(users.iter().collect(), None, 2);
+      assert_eq!(ids(&batch), ["a", "b"]);
+      let (batch, maybe_next) = next_round(users.iter().collect(), maybe_next.as_deref(), 2);
+      assert_eq!(ids(&batch), ["c", "d"]);
+      let (batch, maybe_next) = next_round(users.iter().collect(), maybe_next.as_deref(), 2);
+      assert_eq!(ids(&batch), ["e", "a"]);
+      assert_eq!(maybe_next.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn a_cursor_past_everybody_starts_again() {
+      let users = remote_users(&["a", "b", "c"]);
+      let (batch, _) = next_round(users.iter().collect(), Some("z"), 2);
+      assert_eq!(ids(&batch), ["a", "b"]);
+    }
+
+    fn remote_users(ids: &[&str]) -> Vec<RemoteUser> {
+      ids
+        .iter()
+        .map(|id| serde_json::from_value(json!({"id": id, "enabled": true})).unwrap())
+        .collect()
+    }
+
+    fn ids<'a>(users: &[&'a RemoteUser]) -> Vec<&'a str> {
+      users.iter().map(|user| user.id.as_str()).collect()
+    }
   }
 
   #[test]

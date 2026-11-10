@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT last_started_at, last_finished_at, last_success_at, last_duration_ms, last_outcome, last_error,\n                consecutive_failures, deactivated, reactivated, role_changes, groups_changed, failed, held_revision\n         FROM oidc_sync_status",
+  "query": "SELECT last_started_at, last_finished_at, last_success_at, last_duration_ms, last_outcome, last_error,\n                consecutive_failures, deactivated, reactivated, role_changes, groups_changed, failed, created, deleted,\n                held_revision\n         FROM oidc_sync_status",
   "describe": {
     "columns": [
       {
@@ -137,6 +137,28 @@
       },
       {
         "ordinal": 12,
+        "name": "created",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "created"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "deleted",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "oidc_sync_status",
+            "name": "deleted"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
         "name": "held_revision",
         "type_info": "Int8",
         "origin": {
@@ -163,8 +185,10 @@
       false,
       false,
       false,
+      false,
+      false,
       false
     ]
   },
-  "hash": "750c4fd2a8481b3eba782aa0a74b865b7f6152833a8b9d0b1bba0c0b99c5af44"
+  "hash": "d7cc419125492be9a001004b0603af590546b29226843ffc3fd858f528b5ff9b"
 }

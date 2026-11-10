@@ -27,6 +27,7 @@ async fn addresses_kept_from_earlier_answers_go_when_the_policy_does_not_show_th
     maybe_email: Some("bob@example.com".into()),
     maybe_organization: None,
     maybe_has_devices: None,
+    is_awaiting_first_sign_in: false,
     is_deactivated: false,
     is_deleted: false,
   };
@@ -72,6 +73,53 @@ async fn a_dm_with_somebody_without_a_device_adds_them_when_their_first_device_a
   alice.client.send_text(dm, None, "now you are in").await.unwrap();
   settle(&mut [&mut alice, &mut bob]).await;
   assert_eq!(bob.texts(dm), vec!["welcome Bob", "now you are in"]);
+}
+
+/// A colleague the identity provider sync made before their first sign-in (docs/provisioning.md
+/// §6, #1632) is added to a channel like somebody without a device: the server lists them at once,
+/// the encryption group takes them in with their first device.
+#[tokio::test]
+async fn a_colleague_made_before_their_first_sign_in_joins_the_channel_with_their_first_device() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let kim_api = server.add_precreated_user("Kim");
+  let kim_id = kim_api.user_id();
+  let channel = alice
+    .client
+    .create_channel(alice.space().await, "team")
+    .await
+    .unwrap();
+
+  alice.client.add_member(channel, kim_id).await.unwrap();
+  assert_eq!(
+    pending_user_additions(alice.store.as_ref(), channel).unwrap(),
+    vec![(kim_id, UserAddWait::NoDevice)]
+  );
+  alice
+    .client
+    .send_text(channel, None, "welcome Kim")
+    .await
+    .unwrap();
+
+  let mut kim = Peer::enroll_as(kim_api, "Kim").await;
+  settle(&mut [&mut alice, &mut kim]).await;
+  alice.client.apply_pending_changes().await.unwrap();
+  settle(&mut [&mut alice, &mut kim]).await;
+  assert!(
+    pending_user_additions(alice.store.as_ref(), channel)
+      .unwrap()
+      .is_empty()
+  );
+  assert!(kim.client.has_group(channel).unwrap());
+  alice
+    .client
+    .send_text(channel, None, "glad you are here")
+    .await
+    .unwrap();
+  settle(&mut [&mut alice, &mut kim]).await;
+  // Not on the signed roster yet, so without an explicit choice Kim reads from the join on
+  // (e2ee.md §4.3), like anybody added before setting up the app.
+  assert_eq!(kim.texts(channel), vec!["glad you are here"]);
 }
 
 /// Somebody who never sets up the app doesn't keep the conversation waiting forever (#288): after
@@ -286,6 +334,26 @@ mod directory_search {
   }
 
   #[tokio::test]
+  async fn a_colleague_made_before_their_first_sign_in_is_listed_as_not_signed_in() {
+    let server = FakeServer::new();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let kim_api = server.add_precreated_user("Kim");
+    let ui = backend_of(&alice);
+    ui.search_people("kim");
+    run_commands(&mut alice, &ui).await;
+    let found = ui.search_people("kim");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].device_setup, DeviceSetup::NotSignedIn);
+
+    // Their first device ends it, also in what the cache kept from the directory.
+    let _kim = Peer::enroll_as(kim_api, "Kim").await;
+    alice.client.full_sync().await.unwrap();
+    ui.search_people("ki");
+    run_commands(&mut alice, &ui).await;
+    assert_eq!(ui.search_people("kim")[0].device_setup, DeviceSetup::HasDevices);
+  }
+
+  #[tokio::test]
   async fn a_member_list_keeps_what_the_directory_said_about_devices() {
     let server = FakeServer::new();
     let mut alice = Peer::enroll(&server, "Alice").await;
@@ -395,6 +463,7 @@ fn server_summary(id: teamcraft_proto::UserId, name: &str) -> UserSummary {
     maybe_email: None,
     maybe_organization: None,
     maybe_has_devices: None,
+    is_awaiting_first_sign_in: false,
     is_deactivated: false,
     is_deleted: false,
   }

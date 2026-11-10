@@ -86,14 +86,17 @@ impl<S: LocalStore> CoreChatBackend<S> {
   }
 
   /// The people of the user's spaces and conversations and, once each, those the directory found
-  /// lately; whether somebody has a device comes from the directory.
+  /// lately; whether somebody has a device or never signed in comes from the directory.
   fn known_people(&self) -> Vec<User> {
     let cache = self.read(DirectoryCache::load(self.store_ref(), self.now_ms()));
     let mut summaries = self.summaries();
     for entry in cache.entries {
       summaries
         .entry(entry.user.id)
-        .and_modify(|known| known.maybe_has_devices = entry.user.maybe_has_devices)
+        .and_modify(|known| {
+          known.maybe_has_devices = entry.user.maybe_has_devices;
+          known.is_awaiting_first_sign_in = entry.user.is_awaiting_first_sign_in;
+        })
         .or_insert(entry.user);
     }
     summaries.values().map(|summary| self.to_user(summary)).collect()

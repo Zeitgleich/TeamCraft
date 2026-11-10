@@ -566,6 +566,7 @@ impl FakeServer {
         maybe_email: None,
         maybe_organization: None,
         maybe_has_devices: None,
+        is_awaiting_first_sign_in: false,
         is_deactivated: false,
         is_deleted: false,
       },
@@ -575,6 +576,16 @@ impl FakeServer {
       server: self.clone(),
       user: id,
     }
+  }
+
+  /// A user the identity provider sync made before their first sign-in (docs/provisioning.md §6):
+  /// the directory lists them as not yet signed in until their first device registers.
+  pub fn add_precreated_user(&self, name: &str) -> FakeServerApi {
+    let api = self.add_user(name);
+    if let Some(user) = self.lock().users.get_mut(&api.user) {
+      user.is_awaiting_first_sign_in = true;
+    }
+    api
   }
 
   /// The user's name changes (at the identity provider, say): everyone is told, like the server's
@@ -2505,6 +2516,10 @@ impl ServerApi for FakeServerApi {
           response: response.clone(),
         },
       );
+      // A device needs a sign-in.
+      if let Some(user) = state.users.get_mut(&me) {
+        user.is_awaiting_first_sign_in = false;
+      }
       // Like the server: everybody sharing a conversation, and the user's other devices.
       let mut audience = state.users_sharing_conversation(me);
       audience.insert(me);

@@ -365,14 +365,20 @@ fn user_of_summary(summary: &UserSummary, presence: PresenceStatus) -> User {
     is_guest: summary.kind == UserKind::Guest,
     is_bot: summary.kind == UserKind::Bot,
     maybe_organization: summary.maybe_organization.clone(),
-    device_setup: match summary.maybe_has_devices {
-      Some(true) => DeviceSetup::HasDevices,
-      Some(false) => DeviceSetup::NoDevices,
-      None => DeviceSetup::Unknown,
-    },
+    device_setup: DeviceSetup::from_directory(summary.maybe_has_devices, summary.is_awaiting_first_sign_in),
     is_deactivated: summary.is_deactivated,
     is_deleted: summary.is_deleted,
     maybe_email: summary.maybe_email.clone(),
+  }
+}
+
+/// The note next to somebody who can't read yet: never signed in (an account made ahead of time,
+/// docs/provisioning.md §6), or signed in without setting up a device.
+pub(crate) fn device_setup_note(setup: DeviceSetup) -> Option<&'static str> {
+  match setup {
+    DeviceSetup::NotSignedIn => Some("directory-not-signed-in"),
+    DeviceSetup::NoDevices => Some("directory-no-devices"),
+    DeviceSetup::HasDevices | DeviceSetup::Unknown => None,
   }
 }
 
@@ -403,7 +409,7 @@ fn PersonCard(card: PersonCardData) -> impl IntoView {
   let user = card.user;
   let id = user.id;
   let is_me = id == state.me().id;
-  let no_devices = user.device_setup == DeviceSetup::NoDevices;
+  let maybe_setup_note = device_setup_note(user.device_setup);
   let direct = (!is_me).then(|| state.direct_with(&[id])).flatten();
   // Hidden, not failing after the click: a guest who may not start conversations is offered none.
   let can_message = crate::channel_access::can_start_direct(state, &[id]);
@@ -419,7 +425,7 @@ fn PersonCard(card: PersonCardData) -> impl IntoView {
         </span>
         <span class="person-card-facts" translate="no">{facts}</span>
         <span class="person-card-presence">{move || i18n.t(presence)}</span>
-        {no_devices.then(|| view! { <span class="person-card-facts">{move || i18n.t("directory-no-devices")}</span> })}
+        {maybe_setup_note.map(|key| view! { <span class="person-card-facts">{move || i18n.t(key)}</span> })}
         <span class="person-card-badges">
           <crate::components::profile_views::InMeetingBadge user=id />
           {(user.is_guest && state.shows_guest_markers()).then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
@@ -481,6 +487,7 @@ mod tests {
           maybe_email: None,
           maybe_organization: Some("Org A".to_owned()),
           maybe_has_devices: None,
+          is_awaiting_first_sign_in: false,
           is_deactivated: false,
           is_deleted: false,
         },
@@ -558,6 +565,7 @@ mod tests {
       maybe_email: None,
       maybe_organization: None,
       maybe_has_devices: Some(false),
+      is_awaiting_first_sign_in: false,
       is_deactivated: false,
       is_deleted: false,
     };

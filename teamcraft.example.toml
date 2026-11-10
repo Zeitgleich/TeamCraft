@@ -119,6 +119,12 @@ stale_after_intervals = 3
 # Events from the provider (POST /api/v1/identity-provider/events, secret set in the admin console)
 # start a run soon; runs started by events are at least this far apart (docs/provisioning.md 4).
 event_min_gap_secs = 10
+# Make the accounts of the provider's members (not guests) before their first sign-in: they are
+# listed as "not yet signed in" and can be added to channels (docs/provisioning.md 6).
+precreate_accounts = true
+# One run looks up the roles of at most this many people without an account, and makes at most
+# this many accounts; the rest follow in the next runs.
+max_created_per_run = 100
 
 [logging]
 # `tracing` filter, e.g. "info" or "teamcraft_server=debug,info". The RUST_LOG variable wins.

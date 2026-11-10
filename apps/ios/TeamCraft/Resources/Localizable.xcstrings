@@ -16953,6 +16953,22 @@
         }
       }
     },
+    "directory_not_signed_in": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "hasn't signed in yet"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "hat sich noch nicht angemeldet"
+          }
+        }
+      }
+    },
     "directory_open": {
       "localizations": {
         "en": {

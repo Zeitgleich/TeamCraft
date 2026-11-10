@@ -342,6 +342,14 @@ private fun PersonRow(person: DirectoryPersonItem, onMessage: (() -> Unit)?) {
           overflow = TextOverflow.Ellipsis,
         )
       }
+      if (person.isAwaitingFirstSignIn) {
+        Text(
+          stringResource(R.string.directory_not_signed_in),
+          style = MaterialTheme.typography.bodySmall,
+          color = MaterialTheme.colorScheme.onSurfaceVariant,
+          maxLines = 1,
+        )
+      }
     }
     if (person.isGuest) GuestBadge()
   }

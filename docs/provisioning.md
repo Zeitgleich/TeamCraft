@@ -11,8 +11,8 @@ default, its safety brake, sync health, the deactivation sequence and its audit)
 | Leavers leave every encryption group automatically (§3) | This document                 |
 | IdP events start a sync at once (§4)                    | This document                 |
 | IdP group to space and channel mapping (§5)             | This document                 |
-| SCIM 2.0 endpoint (§6)                                  | Follow-up (v1.1), #1631       |
-| Accounts listed before their first sign-in (§6)         | Follow-up (v1.1), #1632       |
+| Accounts listed before their first sign-in (§6)         | This document (#1632)         |
+| SCIM 2.0 endpoint (§7)                                  | Follow-up (v1.1), #1631       |
 
 ## 1. The shape
 
@@ -39,15 +39,16 @@ default, its safety brake, sync health, the deactivation sequence and its audit)
   is idempotent, so a missed, duplicated or forged event costs at most an extra run.
 - **Vendor-neutral.** The provider is behind one interface: the sync reads users, roles and groups
   from an admin API (Keycloak today), and an event is only "something changed". SCIM, where a
-  provider pushes instead, is a second implementation of the same plan (§6).
+  provider pushes instead, is a second implementation of the same plan (§7).
 
 ## 2. Joiners
 
-| Path                             | What happens                                                                                                                                                                         |
-|----------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| First sign-in (just in time)     | The account is created from the token; default spaces and channels apply once (admin.md §3.4); the group mapping applies at the next sync run, which the sign-in starts at once (§4) |
-| The provider adds a group member | The next sync run, by event within seconds or by polling within an interval, applies the mapping (§5)                                                                                |
-| An import names a user           | Created from the provider before the first sign-in (admin.md §3.8), as today                                                                                                         |
+| Path                             | What happens                                                                                                                                                                                                          |
+|----------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| The provider adds a member       | The next sync run makes the account before the first sign-in, listed as "not yet signed in" and addable to channels (§6); the group mapping applies to it in the same run (§5)                                        |
+| First sign-in (just in time)     | The account is created from the token, or the one made before is taken; default spaces and channels apply once (admin.md §3.4); the group mapping applies at the next sync run, which the sign-in starts at once (§4) |
+| The provider adds a group member | The next sync run, by event within seconds or by polling within an interval, applies the mapping (§5)                                                                                                                 |
+| An import names a user           | Created from the provider before the first sign-in (admin.md §3.8), the same way as §6                                                                                                                                |
 
 Group mapping only ever adds: spaces, and *public* channels of those spaces, on the server, which is
 what a self-join is (the member's own app joins the encryption group, e2ee.md §4.4). Private channels
@@ -174,19 +175,76 @@ the default spaces. Stored in the database (`GET`/`PUT /api/v1/admin/identity-pr
 - It runs with the sync's apply phase: a dry run and a run the safety brake holds change nothing here
   either. A first sign-in and saving the rules ask for a run (§4), so a new colleague lands in their
   spaces within seconds.
-- Accounts are mapped once they exist, i.e. after the first sign-in (or a pre-creation, §6).
+- Accounts are mapped once they exist, which with pre-creation (§6) is before the first sign-in: a
+  new colleague is in their spaces and public channels when they first open the app.
 
-## 6. Not yet (follow-up issues, v1.1)
+## 6. Accounts before their first sign-in
+
+A new colleague is listed in the directory as "not yet signed in" and can be added to channels before
+they ever open the app (#1632). Each sync run makes the accounts the provider has and TeamCraft doesn't,
+the way the import already does (admin.md §3.8, both use the same function, and SCIM will too):
+
+- **Who.** Enabled provider users whose TeamCraft role is owner, admin or member, without an account
+  here. **Guests are not made in advance:** they come from outside, are only found by people they share
+  a conversation with, and are added through a guest invitation or their own sign-in, as before. An
+  identity whose account an admin deleted (admin.md §3.2.1, "released") isn't made again before its
+  own next sign-in, so a deletion sticks.
+- **The account.** The provider's name, user name, e-mail and role, like the account a first sign-in
+  makes, plus the time it was made (`users.awaiting_first_sign_in_since`). The first sign-in finds it
+  by issuer and subject, refreshes it from the token and clears the mark; default spaces and channels
+  apply then, as for any new account (admin.md §3.4). Audit `user_provisioned` with `source: oidc_sync`.
+- **Listed.** The directory and every people picker (desktop, web, the phones) mark such a person "not
+  yet signed in" instead of "hasn't finished setting up". The mark is only in directory answers and is
+  the server's word for display; nothing anybody signs depends on it.
+- **Added to a channel.** Like anybody without a device (e2ee.md §4.3, "Nobody to add yet"): the
+  server records the membership at once, the adding device keeps a pending addition and commits the
+  signed add when the person's first device registers, with the history choice made when adding. Who
+  may add them is who may add anybody (`manage_members`, channel roles, guests never: the same checks,
+  tested per role). Channels of the group mapping (§5) are public: the person's first device joins
+  them with its own signed self-join.
+- **Brake on creation.** A run looks up the roles of at most `[oidc.sync] max_created_per_run`
+  (default 100) people without an account and so makes at most that many; the next run goes on where
+  this one stopped (in subject order, round after round), so people without a TeamCraft role, who are
+  looked up and skipped every round, never keep others waiting. Not a hold for an admin like the
+  deactivation brake: a wrong creation costs a directory entry nobody signed in to, and the next run
+  after the provider is fixed removes it (below). A dry run and the console's preview say how many a
+  run would make; a run the deactivation brake holds makes none. `precreate_accounts = false` turns
+  it off: accounts then appear at the first sign-in, as before.
+- **Removed outright.** When the provider disables or deletes such an account, or takes its last role,
+  before it ever signed in, the run deletes it (admin.md §3.2.1, audit `user_deleted` with `source:
+  oidc_sync`, `reason: never_signed_in`) instead of deactivating it: no device ever joined a group, so
+  there is nothing to suspend or to rotate, and no leaver round (§3) is needed. These removals count
+  for the deactivation brake like any other, so a provider that suddenly loses many people holds them
+  for an admin. Its server memberships go, and its 1:1 direct messages go with it as with any deleted
+  account (admin.md §3.2.1). The identity isn't released: if the provider enables the person again,
+  the next run makes the account again. The check is made under the account's row lock, so a first
+  sign-in at the same moment wins and the account is deactivated instead, like any other.
+
+| Setting                           | Default | Meaning                                                  |
+|-----------------------------------|---------|----------------------------------------------------------|
+| `[oidc.sync] precreate_accounts`  | `true`  | Make the provider's members' accounts in advance         |
+| `[oidc.sync] max_created_per_run` | 100     | Role lookups, and so accounts made, per run (at least 1) |
+
+**What a hostile server can do with it.** Nothing it can't already: it makes accounts at a sign-in
+anyway, and the directory is its word. It can't put anybody into an encryption group (§4.6 of
+e2ee.md): an addition is signed by a member allowed to make it and committed by members, whether the
+person has a device yet or not. Listing a real member as "not yet signed in" changes a label; a device
+the server made up for a pre-made account fails the checks of a first device like any other
+(identity key, signed device list).
+
+**Imported accounts** (admin.md §3.8) carry the same mark, set by the migration for accounts an
+import made that never signed in, and are removed the same way when the provider disables them before
+a sign-in.
+
+## 7. Not yet (follow-up issues, v1.1)
 
 - **SCIM 2.0** (`/scim/v2/Users`, `/Groups`, its own bearer token): the provider pushes create, update,
   disable, delete and group membership. It plugs in as a second source of the same plan: a SCIM
-  disable runs the deactivation sequence with `source: scim`, group changes feed §5, and the brake
-  applies per minute instead of per run.
-- **Accounts listed before their first sign-in:** pre-created from the provider (the import already
-  does this, admin.md §3.8), shown as "not yet signed in", addable to channels; the encryption group
-  takes them in once their first device registers.
+  create makes the account as in §6 (`source: scim`), a SCIM disable runs the deactivation sequence
+  with `source: scim` (or removes a never-signed-in account outright, §6), group changes feed §5, and
+  the brakes apply per minute instead of per run.
 
-## 7. Robustness
+## 8. Robustness
 
 | Condition                         | Behaviour                                                                                                                                                                                          |
 |-----------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -198,5 +256,7 @@ the default spaces. Stored in the database (`GET`/`PUT /api/v1/admin/identity-pr
 | App crash midway                  | The removals already posted stay in the groups' queues (e2ee.md §4.6); the next round claims again and finishes                                                                                    |
 | Server restart                    | Leaver state and claims are in the database; a run in flight is redone by the next                                                                                                                 |
 | Several server instances          | Claims are single SQL statements. The sync's lock is per process: several instances would run it twice, which is idempotent but not supported (the server is single-instance, robustness-audit.md) |
-| Large instance                    | `GET /admin/leavers` is paged (100); a round handles at most `max_per_day` users; group mapping adds in batches                                                                                    |
+| Large instance                    | `GET /admin/leavers` is paged (100); a round handles at most `max_per_day` users; group mapping adds in batches; a run makes at most `max_created_per_run` accounts (§6)                           |
+| First sign-in during a run        | Making the account is one insert that leaves an existing one alone; a removal of a never-signed-in account checks the mark under the row lock, so the sign-in wins                                 |
+| Server restart mid-creation       | Accounts are made one by one and idempotently; the round's position is in memory and starts over, which only repeats lookups                                                                       |
 | Clock skew                        | The grace is judged by the server's clock (`deactivated_for_secs`); the per-day limit by the device's own                                                                                          |

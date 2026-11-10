@@ -44,7 +44,12 @@ data class User(
   @SerialName("is_deactivated") val isDeactivated: Boolean = false,
   /** Deleted (issue #630): a tombstone the app names by its own "Deleted user" (issue #751). */
   @SerialName("is_deleted") val isDeleted: Boolean = false,
+  /** `has_devices`, `no_devices`, `not_signed_in` (made before the first sign-in) or `unknown`. */
+  @SerialName("device_setup") val deviceSetup: String = "unknown",
 ) {
+  /** Made from the identity provider and never signed in: the pickers say so. */
+  val isAwaitingFirstSignIn: Boolean get() = deviceSetup == "not_signed_in"
+
   /** Whether lists, pickers and mentions may offer this person. */
   val isOffered: Boolean get() = !isDeactivated && !isDeleted
 

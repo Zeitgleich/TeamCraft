@@ -1117,11 +1117,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       maybe_organization: summary.maybe_organization.clone(),
       is_deactivated: summary.is_deactivated,
       is_deleted: summary.is_deleted,
-      device_setup: match summary.maybe_has_devices {
-        Some(true) => DeviceSetup::HasDevices,
-        Some(false) => DeviceSetup::NoDevices,
-        None => DeviceSetup::Unknown,
-      },
+      device_setup: DeviceSetup::from_directory(summary.maybe_has_devices, summary.is_awaiting_first_sign_in),
       maybe_email: summary.maybe_email.clone(),
     }
   }
@@ -5097,6 +5093,7 @@ mod tests {
       maybe_email: None,
       maybe_organization: None,
       maybe_has_devices: None,
+      is_awaiting_first_sign_in: false,
       is_deactivated,
       is_deleted: false,
     };
@@ -5133,6 +5130,7 @@ mod tests {
       maybe_email: None,
       maybe_organization: None,
       maybe_has_devices: None,
+      is_awaiting_first_sign_in: false,
       is_deactivated: false,
       is_deleted: false,
     };
@@ -5784,6 +5782,7 @@ mod tests {
           maybe_email: None,
           maybe_organization: None,
           maybe_has_devices: None,
+          is_awaiting_first_sign_in: false,
           is_deactivated: false,
           is_deleted: false,
         };
@@ -6413,6 +6412,7 @@ mod tests {
         maybe_email: None,
         maybe_organization: None,
         maybe_has_devices: None,
+        is_awaiting_first_sign_in: false,
         is_deactivated: false,
         is_deleted: false,
       };

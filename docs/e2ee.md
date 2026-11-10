@@ -752,6 +752,13 @@ Result:
   conversation says "X never set up the app" instead; a DM's setup record that only waited for the
   device is dropped. The marker costs nothing but a device-list check at a full sync (like any
   waiting addition), and X's first device, should it ever appear, still makes the addition due.
+  An account the identity provider sync made before the person's first sign-in
+  (provisioning.md §6) is such a person, and the trust model doesn't change: the account and its
+  "not yet signed in" mark are the server's word, like any account a sign-in makes, so the server
+  gains no power over a group. Its membership on the server is not membership of the group; that
+  needs the signed addition of a member allowed to make it, committed by members, or for a public
+  channel the person's own signed self-join, and the first device passes the usual checks (pinned
+  identity, signed device list).
 
 #### 4.3.1 Key package lifecycle
 

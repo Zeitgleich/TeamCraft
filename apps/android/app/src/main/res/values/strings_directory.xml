@@ -21,6 +21,8 @@
   <string name="directory_filter_any">Any</string>
   <!-- A filter chip with its chosen value, e.g. "Department: Sales" -->
   <string name="directory_filter_chosen">%1$s: %2$s</string>
+  <!-- Next to somebody whose account was made from the identity provider before their first sign-in -->
+  <string name="directory_not_signed_in">hasn\'t signed in yet</string>
   <string name="directory_guest">Guest</string>
   <string name="directory_message">Message %1$s</string>
   <plurals name="directory_channel_members">

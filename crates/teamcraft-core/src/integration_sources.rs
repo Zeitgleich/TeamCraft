@@ -1450,6 +1450,7 @@ mod tests {
       maybe_email: None,
       maybe_organization: None,
       maybe_has_devices: None,
+      is_awaiting_first_sign_in: false,
       is_deactivated: false,
       is_deleted: false,
     }
