@@ -306,7 +306,7 @@ mod tests {
     let body = ScimErrorBody::new(
       400,
       Some(ScimType::InvalidFilter),
-      "scim_invalid_filter",
+      &ScimErrorCode::InvalidFilter,
       "bad".into(),
     );
     assert_eq!(

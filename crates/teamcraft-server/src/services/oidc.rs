@@ -593,7 +593,8 @@ async fn store_held(
     })
     .collect();
   let held = state.database.set_held_deactivations(&entries).await?;
-  state.oidc_sync.set_held(held);
+  // The health check counts SCIM's holds on the same list too.
+  load_brake_state(state).await;
   Ok(held)
 }
 
@@ -806,7 +807,8 @@ async fn sync_held(state: &AppState) -> Result<Vec<HeldDeactivation>, teamcraft_
   )
 }
 
-/// Reads what the brake holds after a start, for the health check.
+/// Reads what the brake holds (the sync's and SCIM's) for the health check, after a start and after
+/// every change of the list.
 pub async fn load_brake_state(state: &AppState) {
   match state.database.list_held_deactivations().await {
     Ok(held) => state.oidc_sync.set_held(count(held.len())),

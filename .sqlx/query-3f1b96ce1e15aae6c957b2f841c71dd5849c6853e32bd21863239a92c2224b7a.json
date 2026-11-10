@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM scim_group_members m USING scim_groups g\n       WHERE g.id = m.group_id AND g.client_id = $1 AND m.user_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3f1b96ce1e15aae6c957b2f841c71dd5849c6853e32bd21863239a92c2224b7a"
+}

@@ -1039,6 +1039,44 @@ provider-events-rotate = Neues Secret
 provider-events-delete = Ausschalten
 provider-events-delete-question = Ereignisse ausschalten? Meldungen des Providers werden abgelehnt; der Abgleich läuft weiter im Intervall.
 provider-events-delete-yes = Ausschalten
+scim-title = SCIM-Provisionierung
+scim-hint = Identitätsanbieter, die Konten und Gruppen übertragen, etwa per SCIM, nutzen diese Basis-URL und einen hier erstellten Token.
+scim-base-url = Basis-URL
+scim-loading = SCIM-Clients werden geladen…
+scim-empty = Noch kein SCIM-Client.
+scim-limit-reached = { $count ->
+    [one] Höchstens { $count } SCIM-Client. Widerrufe einen, um einen weiteren hinzuzufügen.
+   *[other] Höchstens { $count } SCIM-Clients. Widerrufe einen, um einen weiteren hinzuzufügen.
+  }
+scim-token = Token
+scim-token-once = Jetzt kopieren: Er wird nur einmal angezeigt. Im Identitätsanbieter als Bearer-Token eintragen. Ein neuer Token ersetzt diesen sofort.
+scim-client-attribute = Anmelde-Subjekt: { $attribute }
+scim-client-users = { $count ->
+    [one] { $count } Konto
+   *[other] { $count } Konten
+  }
+scim-client-groups = { $count ->
+    [one] { $count } Gruppe
+   *[other] { $count } Gruppen
+  }
+scim-client-last-used = Zuletzt genutzt { $when }
+scim-client-never-used = Noch nicht genutzt
+scim-client-token-rotated = Token vom { $date }
+scim-rotate = Neuer Token
+scim-rotate-question = Neuen Token erstellen? Der aktuelle funktioniert sofort nicht mehr.
+scim-rotate-yes = Neuen Token erstellen
+scim-revoke = Widerrufen
+scim-revoke-question = Diesen Client widerrufen? Sein Token funktioniert nicht mehr; die Konten, die er angelegt hat, bleiben.
+scim-revoke-yes = Widerrufen
+scim-new = Neuer SCIM-Client
+scim-name = Name
+scim-name-hint = Woran du ihn erkennst, zum Beispiel der Name der Anwendung im Identitätsanbieter.
+scim-error-name = Gib einen Namen mit höchstens 100 Zeichen ein.
+scim-attribute = Identitätsattribut
+scim-attribute-hint = Das SCIM-Attribut, das dem Anmelde-Subjekt (sub) entspricht, damit die erste Anmeldung das von SCIM angelegte Konto findet.
+scim-attribute-external-id-hint = Okta und Anbieter, die dort ihre eigene Benutzer-ID senden.
+scim-attribute-user-name-hint = Wenn der Benutzername das Anmelde-Subjekt ist.
+scim-create = Client hinzufügen
 oidc-sync-not-configured = Nicht eingerichtet. Ohne ihn behält eine beim Identitätsanbieter gesperrte Person ihren Zugang, bis ihre Anmeldung endet. Setze oidc.sync.client_secret: für den Betrieb ist er erforderlich.
 oidc-sync-switched-off = Durch oidc.sync.is_enabled = false ausgeschaltet. Eine beim Identitätsanbieter gesperrte Person behält ihren Zugang, bis ihre Anmeldung endet. Für den Betrieb ist er erforderlich.
 oidc-sync-dry-run = Probelauf: Der Abgleich meldet nur, was er ändern würde, und ändert nichts.

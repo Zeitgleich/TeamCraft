@@ -1363,6 +1363,23 @@ pub trait AdminBackend {
     None
   }
   fn dismiss_provider_event_secret(&self) {}
+  /// The SCIM clients (docs/provisioning.md §7); loaded on the first ask, `None` until then.
+  fn scim_clients(&self) -> Option<teamcraft_proto::ScimClientsResponse> {
+    None
+  }
+  /// Adds a SCIM client; its token shows as [`Self::revealed_scim_token`].
+  fn create_scim_client(&self, _request: teamcraft_proto::CreateScimClientRequest) {}
+  /// Makes a new token for a SCIM client; the old one stops working at once.
+  fn rotate_scim_client_token(&self, _id: teamcraft_proto::ScimClientId) {}
+  /// Revokes a SCIM client: its token stops, its groups go, the accounts it made stay.
+  fn delete_scim_client(&self, _id: teamcraft_proto::ScimClientId) {}
+  /// The token of the SCIM client just added or rotated: shown once, until dismissed.
+  fn revealed_scim_token(
+    &self,
+  ) -> Option<(teamcraft_proto::ScimClientId, teamcraft_proto::WebhookSecretText)> {
+    None
+  }
+  fn dismiss_scim_token(&self) {}
   /// How many health checks are alerting (the badges of the admin console); 0 for non-admins.
   fn health_alert_count(&self) -> usize {
     0

@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM scim_users s JOIN users u ON u.id = s.user_id\n                        WHERE s.client_id = $1 AND s.user_id <> $2 AND u.deleted_at IS NULL\n                          AND lower(s.user_name) = lower($3)) AS \"is_taken!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_taken!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b2ce292bd87c81251c3924825ca225b93629fdfd70a3ee31587f173e6ec7fbeb"
+}

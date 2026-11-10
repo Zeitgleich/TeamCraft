@@ -1,0 +1,1 @@
+not (active eq false) or (meta.lastModified gt "2026-01-01T00:00:00Z")

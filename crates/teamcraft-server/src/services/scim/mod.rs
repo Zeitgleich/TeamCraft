@@ -58,6 +58,17 @@ impl ScimResponse {
     }
   }
 
+  /// 204 with the resource's new `ETag`: what a group PATCH answers (RFC 7644 §3.5.2 allows it), so
+  /// a large group is not sent back for every member change.
+  fn no_content(version: i64) -> Self {
+    Self {
+      status: StatusCode::NO_CONTENT,
+      body: Value::Null,
+      maybe_version: Some(version),
+      maybe_location: None,
+    }
+  }
+
   fn resource(status: StatusCode, body: Value, version: i64, location: String) -> Self {
     Self {
       status,
@@ -70,9 +81,16 @@ impl ScimResponse {
 
 impl IntoResponse for ScimResponse {
   fn into_response(self) -> Response {
-    let mut response = (self.status, axum::Json(self.body)).into_response();
+    let mut response = if self.status == StatusCode::NO_CONTENT {
+      StatusCode::NO_CONTENT.into_response()
+    } else {
+      let mut response = (self.status, axum::Json(self.body)).into_response();
+      response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(SCIM_MEDIA_TYPE));
+      response
+    };
     let headers = response.headers_mut();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(SCIM_MEDIA_TYPE));
     if let Some(version) = self.maybe_version
       && let Ok(value) = HeaderValue::from_str(&etag(version))
     {

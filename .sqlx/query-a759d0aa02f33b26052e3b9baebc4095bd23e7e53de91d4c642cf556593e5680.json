@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE users SET username = $2, email = $3, idp_display_name = $4,\n                      display_name = COALESCE(display_name_override, $4)\n     WHERE id = $1 AND awaiting_first_sign_in_since IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a759d0aa02f33b26052e3b9baebc4095bd23e7e53de91d4c642cf556593e5680"
+}

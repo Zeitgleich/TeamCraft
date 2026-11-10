@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT m.group_id, count(*) AS \"count!\" FROM scim_group_members m JOIN users u ON u.id = m.user_id\n         WHERE m.group_id = ANY($1) AND u.deleted_at IS NULL GROUP BY m.group_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "group_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scim_group_members",
+            "name": "group_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "ecf78a6b50a185425343f2b3e6d02ec3ea773cc29fab5d982685c2b5dffd441c"
+}

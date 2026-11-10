@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM scim_users s USING users u\n       WHERE u.id = s.user_id AND u.deleted_at IS NOT NULL\n         AND (s.user_id = $2 OR (s.client_id = $1 AND lower(s.user_name) = lower($3)))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "00443d6e014193bd6f3f39f9b6350398d8306563bdb4da7a5d3b29597165d43c"
+}

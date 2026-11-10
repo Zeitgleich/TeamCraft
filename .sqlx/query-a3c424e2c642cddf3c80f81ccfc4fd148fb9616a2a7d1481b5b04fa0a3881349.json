@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT deactivated_at IS NOT NULL AS \"is_deactivated!\", deactivation_reason, oidc_role,\n                awaiting_first_sign_in_since IS NOT NULL AS \"is_awaiting_first_sign_in!\"\n         FROM users WHERE id = $1 AND deleted_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_deactivated!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "deactivation_reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "deactivation_reason"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "oidc_role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "oidc_role"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "is_awaiting_first_sign_in!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "a3c424e2c642cddf3c80f81ccfc4fd148fb9616a2a7d1481b5b04fa0a3881349"
+}

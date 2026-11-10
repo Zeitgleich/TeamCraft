@@ -776,6 +776,26 @@ calendar_lookahead_secs = 900
 # Share links for external download (e2ee.md §4.5.1): anyone with <base>/f/<id>#<file-key> downloads one
 # file's ciphertext; the key stays in the fragment. Who may create links is the create_share_link
 # permission (members yes, guests no by default).
+# SCIM 2.0 provisioning (docs/provisioning.md 7): identity providers that push accounts and groups to
+# /scim/v2. The clients and their tokens are made in the admin console (System health); these are the
+# limits of one client.
+[scim]
+# Requests of one SCIM client per minute (and its burst); more get 429 with Retry-After.
+requests_per_minute = 600
+# Safety brake: deactivations and removals by SCIM within brake_window_secs may reach this share of
+# the active accounts, and always brake_min_allowed; beyond it they wait for an admin to confirm.
+# Owners and admins always wait.
+brake_max_percent = 10
+brake_min_allowed = 2
+brake_window_secs = 3600
+# The most members of one SCIM group.
+max_group_members = 20000
+# The largest request body, in bytes.
+max_body_bytes = 1048576
+# The most resources a filter no index narrows may read; filter by userName, externalId or
+# displayName for more.
+max_filter_scan = 10000
+
 [webhooks]
 # Outgoing webhooks are set in the admin console (Integrations > Webhooks, docs/webhooks.md); these
 # are the limits. Webhook URLs may not point into private networks or use plain http unless this is

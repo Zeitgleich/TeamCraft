@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE scim_clients SET token_sha256 = $2, token_rotated_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6988889c3a9a30811f835e5a027a66b6931e697cedee3bbe150d76b5fe8c537e"
+}

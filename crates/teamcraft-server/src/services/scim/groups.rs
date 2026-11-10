@@ -239,11 +239,11 @@ pub async fn patch_group(
     row,
     &changes,
     expected_version(headers),
-    StatusCode::OK,
+    // Entra ID and Okta don't read the answer of a group PATCH, and a large group's members would
+    // go back for every change.
+    StatusCode::NO_CONTENT,
   ))
   .await?;
-  // Entra ID and Okta don't read the answer of a group PATCH; members of a large group are not
-  // sent back.
   Ok(answer.into_response())
 }
 
@@ -342,6 +342,9 @@ async fn update(
       &json!({"scim_client": caller.client.to_string(), "group": row.id.to_string(), "added": added.len(), "is_renamed": is_renamed}),
     )
     .await?;
+  }
+  if status == StatusCode::NO_CONTENT {
+    return Ok(ScimResponse::no_content(row.version));
   }
   answer(state, row, status, true).await
 }

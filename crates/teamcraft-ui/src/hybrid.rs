@@ -1746,6 +1746,40 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
+  fn scim_clients(&self) -> Option<teamcraft_proto::ScimClientsResponse> {
+    self.maybe_admin.as_ref().and_then(AdminLive::scim_clients)
+  }
+
+  fn create_scim_client(&self, request: teamcraft_proto::CreateScimClientRequest) {
+    if let Some(admin) = self.maybe_admin.as_ref() {
+      admin.create_scim_client(request);
+    }
+  }
+
+  fn rotate_scim_client_token(&self, id: teamcraft_proto::ScimClientId) {
+    if let Some(admin) = self.maybe_admin.as_ref() {
+      admin.rotate_scim_client_token(id);
+    }
+  }
+
+  fn delete_scim_client(&self, id: teamcraft_proto::ScimClientId) {
+    if let Some(admin) = self.maybe_admin.as_ref() {
+      admin.delete_scim_client(id);
+    }
+  }
+
+  fn revealed_scim_token(
+    &self,
+  ) -> Option<(teamcraft_proto::ScimClientId, teamcraft_proto::WebhookSecretText)> {
+    self.maybe_admin.as_ref().and_then(AdminLive::revealed_scim_token)
+  }
+
+  fn dismiss_scim_token(&self) {
+    if let Some(admin) = self.maybe_admin.as_ref() {
+      admin.dismiss_scim_token();
+    }
+  }
+
   fn instance_status(&self) -> Option<AdminInstanceResponse> {
     match &self.maybe_admin {
       Some(admin) => admin.instance(),

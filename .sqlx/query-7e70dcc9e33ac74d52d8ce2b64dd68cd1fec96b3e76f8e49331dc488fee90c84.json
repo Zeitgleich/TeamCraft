@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM scim_deprovisions WHERE at < now() - make_interval(secs => $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7e70dcc9e33ac74d52d8ce2b64dd68cd1fec96b3e76f8e49331dc488fee90c84"
+}

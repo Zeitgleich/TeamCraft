@@ -8,6 +8,7 @@ use teamcraft_proto::{
 use crate::admin::AdminSection;
 use crate::clock::{format_relative, now_ms};
 use crate::components::admin_console::SectionHeader;
+use crate::components::admin_scim::ScimClientsCard;
 use crate::components::copy_button::CopyButton;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
@@ -34,6 +35,7 @@ pub fn HealthSection() -> impl IntoView {
     }}
     <OidcSyncCard />
     <ProviderEventsCard />
+    <ScimClientsCard />
   }
 }
 

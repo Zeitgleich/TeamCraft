@@ -771,6 +771,11 @@ configured. While it is engaged:
 
 The brake limits what one run may do; several small runs in a row each pass it.
 
+**SCIM.** Identity providers that push accounts through SCIM 2.0 (`/scim/v2`) go through the same
+sequence and the same list of held deactivations, with the brake counted per time window instead of per
+run, and owners and admins always held for a confirmation ([provisioning.md §7](provisioning.md)). Their
+clients and tokens are made, rotated and revoked under System health, "SCIM provisioning".
+
 **Dry run.** `[oidc.sync] mode = "dry_run"` runs the sync and reports what it would do; nothing changes, and
 groups are not looked at. `POST /admin/oidc-sync/preview` answers the same for one run, whatever the mode.
 
@@ -778,7 +783,7 @@ groups are not looked at. `POST /admin/oidc-sync/preview` answers the same for o
 
 | Step | What happens                                                                                                   | If it fails                                                                       |
 |------|----------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------|
-| 1    | One transaction: account marked deactivated, audit entry with `source` (`oidc_sync`, `manual`, later `scim`, `system`), the bots the user created paused and audited, a follow-up record | Nothing happened. The sync re-plans the user next run; the admin sees the error   |
+| 1    | One transaction: account marked deactivated, audit entry with `source` (`oidc_sync`, `manual`, `scim`, `system`), the bots the user created paused and audited, a follow-up record | Nothing happened. The sync re-plans the user next run; the admin sees the error   |
 | 2    | Gateway connections close and can't resume                                                                     | Cannot fail; a crash ends the connections with the process                        |
 | 3    | Local sessions end, the user leaves running calls                                                              | Retried from the follow-up record                                                 |
 | 4    | Clients that share a conversation are told; the follow-up record goes                                         | Retried from the follow-up record                                                 |
@@ -1224,6 +1229,7 @@ What the server offers for the features above (all under `/api/v1`; instance adm
 | Deactivate, reactivate, remove (§3.2.1)  | `POST /admin/users/{id}/deactivate`, `.../reactivate`, `.../remove-from-chats`      |
 | Admin join requests (§2.4.1)             | `GET /admin-join-requests`; `POST /conversations/{id}/admin-join-requests`, `POST .../{user}/approve`, `DELETE .../{user}` (owners decide, the admin withdraws) |
 | Delete an account (§3.2.1)               | `DELETE /admin/users/{id}`                                                         |
+| SCIM clients (provisioning.md §7)        | `GET/POST /admin/scim/clients`, `POST /admin/scim/clients/{id}/token`, `DELETE /admin/scim/clients/{id}`; the endpoint itself is `/scim/v2` with the client's token |
 
 Session length, idle timeout, required second factor, display name format and the privacy of names and
 e-mail addresses, and the presence switches (statuses on/off, custom status on/off, presets, away

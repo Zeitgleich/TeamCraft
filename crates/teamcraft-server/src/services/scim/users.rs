@@ -272,6 +272,7 @@ pub async fn apply_confirmed_holds(state: &AppState) -> Result<u32, ApiError> {
       Err(error) => warn!(user_id = %user, %error, "a confirmed SCIM deactivation failed"),
     }
   }
+  crate::services::oidc::load_brake_state(state).await;
   Ok(applied)
 }
 
@@ -307,7 +308,8 @@ async fn write(
       ));
     },
   }
-  if attributes.is_active != row.is_active {
+  // Also when it says active and the account is: a held deactivation comes off the list.
+  if attributes.is_active || row.is_active {
     set_active(
       state,
       caller,
@@ -385,7 +387,9 @@ async fn set_active(
   if !is_active {
     return deprovision(state, caller.client, user, cause).await;
   }
-  state.database.release_scim_hold(user).await?;
+  if state.database.release_scim_hold(user).await? {
+    crate::services::oidc::load_brake_state(state).await;
+  }
   let Some(account) = state.database.scim_account_state(user).await? else {
     return Ok(());
   };
@@ -436,7 +440,12 @@ async fn deprovision(
     .await?;
     return Ok(());
   }
-  Ok(Box::pin(apply_deprovision(state, user, &cause)).await?)
+  Box::pin(apply_deprovision(state, user, &cause)).await?;
+  // Held earlier and repeated now within the window: no longer waiting for an admin.
+  if state.database.release_scim_hold(user).await? {
+    crate::services::oidc::load_brake_state(state).await;
+  }
+  Ok(())
 }
 
 /// Takes a place in the brake's window.

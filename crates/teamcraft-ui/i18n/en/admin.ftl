@@ -1039,6 +1039,44 @@ provider-events-rotate = New secret
 provider-events-delete = Turn off
 provider-events-delete-question = Turn events off? The provider's reports are refused; the sync still runs at its interval.
 provider-events-delete-yes = Turn off
+scim-title = SCIM provisioning
+scim-hint = Identity providers that push accounts and groups, for example through SCIM, use this base URL and a token made here.
+scim-base-url = Base URL
+scim-loading = Loading SCIM clients…
+scim-empty = No SCIM client yet.
+scim-limit-reached = { $count ->
+    [one] At most { $count } SCIM client. Revoke one to add another.
+   *[other] At most { $count } SCIM clients. Revoke one to add another.
+  }
+scim-token = Token
+scim-token-once = Copy it now: it is shown only once. Enter it in the identity provider as the bearer token. A new token replaces this one at once.
+scim-client-attribute = Sign-in subject: { $attribute }
+scim-client-users = { $count ->
+    [one] { $count } account
+   *[other] { $count } accounts
+  }
+scim-client-groups = { $count ->
+    [one] { $count } group
+   *[other] { $count } groups
+  }
+scim-client-last-used = Last used { $when }
+scim-client-never-used = Not used yet
+scim-client-token-rotated = Token from { $date }
+scim-rotate = New token
+scim-rotate-question = Make a new token? The current one stops working at once.
+scim-rotate-yes = Make new token
+scim-revoke = Revoke
+scim-revoke-question = Revoke this client? Its token stops working; the accounts it made stay.
+scim-revoke-yes = Revoke
+scim-new = New SCIM client
+scim-name = Name
+scim-name-hint = How you recognise it, for example the identity provider's application name.
+scim-error-name = Enter a name of at most 100 characters.
+scim-attribute = Identity attribute
+scim-attribute-hint = The SCIM attribute that equals the sign-in subject (sub), so the first sign-in finds the account SCIM made.
+scim-attribute-external-id-hint = Okta, and providers that send their own user ID there.
+scim-attribute-user-name-hint = When the user name is the sign-in subject.
+scim-create = Add client
 oidc-sync-not-configured = Not set up. Without it, someone disabled at the identity provider keeps access until their sign-in ends. Set oidc.sync.client_secret: it is required for production.
 oidc-sync-switched-off = Switched off by oidc.sync.is_enabled = false. Someone disabled at the identity provider keeps access until their sign-in ends. It is required for production.
 oidc-sync-dry-run = Dry run: the sync only reports what it would change and changes nothing.

@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT s.version FROM scim_users s JOIN users u ON u.id = s.user_id\n       WHERE s.client_id = $1 AND s.user_id = $2 AND u.deleted_at IS NULL\n       FOR UPDATE OF s",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "scim_users",
+            "name": "version"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1db197be4c38c0bbfdbb1dbf0f11db444a2d8c1b9dcf1c58da3c5b281deace43"
+}
