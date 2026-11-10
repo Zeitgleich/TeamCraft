@@ -27,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
@@ -84,9 +85,19 @@ class SettingsGroupScope internal constructor() {
   }
 }
 
-/** The segments' colour: the cards of the settings pages, on the page's background. */
+/**
+ * The settings pages' background ([SettingsPageColor]) and their segments' colour, as Android's
+ * own settings pair them: bright segments on the container colour. Both are roles of every scheme,
+ * the wallpaper's (dynamic colour) included, where `surface` is the background itself.
+ */
+val SettingsPageColor: Color
+  @Composable get() = MaterialTheme.colorScheme.surfaceContainer
+
+val SettingsRowColor: Color
+  @Composable get() = MaterialTheme.colorScheme.surfaceBright
+
 @Composable
-fun settingsRowColors(): ListItemColors = ListItemDefaults.segmentedColors(containerColor = MaterialTheme.colorScheme.surface)
+fun settingsRowColors(): ListItemColors = ListItemDefaults.segmentedColors(containerColor = SettingsRowColor)
 
 /** A switch setting; the whole row toggles it, with Material's toggle haptics. */
 @Composable
@@ -208,11 +219,11 @@ fun SettingsLinkRow(
 /** A row that only shows something (a fingerprint, a status). */
 @Composable
 fun SettingsInfoRow(shapes: ListItemShapes, title: String, maybeSummary: String? = null, leadingContent: (@Composable () -> Unit)? = null) {
-  Surface(shape = shapes.shape, color = MaterialTheme.colorScheme.surface) {
+  Surface(shape = shapes.shape, color = SettingsRowColor) {
     ListItem(
       supportingContent = maybeSummary?.let { { Text(it) } },
       leadingContent = leadingContent,
-      colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surface),
+      colors = ListItemDefaults.colors(containerColor = SettingsRowColor),
     ) { Text(title) }
   }
 }
@@ -220,7 +231,7 @@ fun SettingsInfoRow(shapes: ListItemShapes, title: String, maybeSummary: String?
 /** A segment with free content (pickers, forms) in the group's container. */
 @Composable
 fun SettingsContentRow(shapes: ListItemShapes, content: @Composable () -> Unit) {
-  Surface(shape = shapes.shape, color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()) {
+  Surface(shape = shapes.shape, color = SettingsRowColor, modifier = Modifier.fillMaxWidth()) {
     Column(Modifier.padding(Spacing.l), verticalArrangement = Arrangement.spacedBy(Spacing.m)) { content() }
   }
 }

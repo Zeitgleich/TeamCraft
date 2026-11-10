@@ -79,6 +79,7 @@ fun ChromeTopBar(
   maybeSubtitle: String? = null,
   maybeOnBack: (() -> Unit)? = null,
   actions: @Composable RowScope.() -> Unit = {},
+  containerColor: Color = MaterialTheme.colorScheme.surface,
   maybeIcon: (@Composable () -> Unit)? = null,
 ) {
   val titleSlot = @Composable {
@@ -94,9 +95,9 @@ fun ChromeTopBar(
       }
     }
   }
-  // The theme's surface, as on the main screen: one header style in light and dark (the status
-  // bar icons follow the theme).
-  val colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+  // The theme's surface by default, as on the main screen: one header style in light and dark (the
+  // status bar icons follow the theme); pages on another colour (settings) pass theirs.
+  val colors = TopAppBarDefaults.topAppBarColors(containerColor = containerColor)
   val maybeSubtitleText = maybeSubtitle?.takeIf { it.isNotBlank() }
   if (maybeSubtitleText == null) {
     TopAppBar(

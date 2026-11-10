@@ -22,6 +22,7 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.IntOffset
@@ -93,6 +94,7 @@ fun <T> SeekablePages(
   rootPage: T,
   onBack: () -> Unit,
   modifier: Modifier = Modifier,
+  background: Color = MaterialTheme.colorScheme.background,
   content: @Composable (T) -> Unit,
 ) {
   val transitions = rememberScreenTransitions()
@@ -115,6 +117,6 @@ fun <T> SeekablePages(
     transitionSpec = { transitions.between(isForward = targetState != rootPage) },
   ) { shown ->
     // Opaque, so the page beneath doesn't show through while the back gesture moves this one.
-    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) { content(shown) }
+    Box(Modifier.fillMaxSize().background(background)) { content(shown) }
   }
 }

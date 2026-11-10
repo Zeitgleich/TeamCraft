@@ -96,6 +96,9 @@ import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
 import de.zeitgleich.teamcraft.ui.theme.Spacing
 import androidx.compose.material3.ListItemShapes
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.WindowInsetsSides
 
 /** The settings' pages; the hub lists them, each opens on top of it. */
 private enum class SettingsPage(val title: Int, val summary: Int) {
@@ -122,18 +125,32 @@ fun SettingsScreen(
   var maybePage by rememberSaveable { mutableStateOf(if (opensSecurity) SettingsPage.Security else null) }
   val page = maybePage
   Scaffold(
-    contentWindowInsets = ScreenInsets,
+    // Edge to edge: the pages scroll behind the navigation bar and end clear of it (and of the
+    // keyboard) with the bottom inset inside the scrolling content.
+    contentWindowInsets = ScreenInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
+    containerColor = SettingsPageColor,
     topBar = {
       ChromeTopBar(
         title = stringResource(page?.title ?: R.string.settings_title),
         maybeOnBack = { if (page != null) maybePage = null else onBack() },
+        containerColor = SettingsPageColor,
       )
     },
   ) { padding ->
     // Back from a page to the hub: the predictive back gesture previews it (issue #454).
-    SeekablePages(page = page, rootPage = null, onBack = { maybePage = null }, modifier = Modifier.padding(padding)) { shown ->
+    SeekablePages(
+      page = page,
+      rootPage = null,
+      onBack = { maybePage = null },
+      modifier = Modifier.padding(padding),
+      background = SettingsPageColor,
+    ) { shown ->
       Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = Spacing.l, vertical = Spacing.m),
+        Modifier
+          .fillMaxSize()
+          .verticalScroll(rememberScrollState())
+          .windowInsetsPadding(ScreenInsets.only(WindowInsetsSides.Bottom))
+          .padding(horizontal = Spacing.l, vertical = Spacing.m),
         verticalArrangement = Arrangement.spacedBy(Spacing.xl),
       ) {
         when (shown) {
