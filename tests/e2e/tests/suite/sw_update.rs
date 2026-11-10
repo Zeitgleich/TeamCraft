@@ -64,8 +64,8 @@ async fn a_verified_update_waits_for_the_reload_and_the_old_release_goes_with_it
       let second_opened = Instant::now();
       eval(
         &second,
-        "window.__controllerChanges = 0; \
-         navigator.serviceWorker.addEventListener('controllerchange', () => window.__controllerChanges++);",
+        "(() => { window.__controllerChanges = 0; \
+         navigator.serviceWorker.addEventListener('controllerchange', () => window.__controllerChanges++); })()",
       )
       .await;
       assert_eq!(marker(&first).await, "release 1");
@@ -270,7 +270,8 @@ fn mirror(from: &Path, to: &Path) {
   }
 }
 
-/// Runs a script in the page and returns its (awaited) result.
+/// Runs a script in the page and returns its (awaited) result. The script must be one expression
+/// (wrap statements in an IIFE).
 async fn eval(page: &Page, script: &str) -> serde_json::Value {
   let wrapped = format!("(async () => {{ return await ({script}); }})()");
   page
