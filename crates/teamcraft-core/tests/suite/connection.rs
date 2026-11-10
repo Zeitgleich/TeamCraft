@@ -264,6 +264,41 @@ async fn a_clock_set_back_postpones_neither_heartbeats_nor_reconnects() {
     .await;
 }
 
+/// Issue #1673: the wall clock jumps back an hour while a busy conversation sends a frame more
+/// often than the runner ticks. The frames must not keep the runner from heartbeating until the
+/// server drops it.
+#[tokio::test(start_paused = true)]
+async fn a_clock_set_back_in_a_busy_conversation_keeps_the_connection() {
+  let rig = Rig::start("Mallory").await;
+  // The server's clock doesn't jump with the device's.
+  let (server_clock, _) = TokioClock::new();
+  rig
+    .server
+    .enforce_heartbeat_timeout(Arc::new(server_clock), Duration::from_secs(60));
+  rig
+    .drive(|rig| async move {
+      rig.wait_for(is_connected, Duration::from_secs(5)).await;
+      let beats = rig.server.heartbeat_count();
+      rig.jump.backward(Duration::from_secs(60 * 60));
+      // Two minutes of a frame every 1.5 s, faster than the runner's tick (5 s).
+      for _ in 0..80 {
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        rig
+          .server
+          .publish_event(&[rig.user], &GatewayEvent::AnnouncementUpdate);
+      }
+      assert_eq!(rig.server.heartbeat_timeout_count(), 0, "the server dropped it");
+      assert_eq!(rig.server.gateway_connect_count(), 1, "it reconnected");
+      assert!(
+        rig.server.heartbeat_count() >= beats + 4,
+        "{} heartbeats after the jump",
+        rig.server.heartbeat_count() - beats
+      );
+      assert!(is_connected(rig.status.get()), "{:?}", rig.status.get());
+    })
+    .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_refused_token_asks_to_sign_in_and_stops_retrying() {
   let rig = Rig::start("Frank").await;
