@@ -592,8 +592,8 @@ restart) finishes the job (`teamcraft-core::client::enroll`):
    it with the passphrase, like any further device. A server older than this protocol ignores the
    bag; the client then stores it with `PUT /me/key-bag` right away.
 3. **An organization recovery** switches to a fresh backup key (§6.3.1) before anything is stored
-   locally; interrupted, the device recovers again (with the new passphrase if the new bag reached
-   the server).
+   locally; interrupted, the device recovers again (with the new recovery kit, or a legacy
+   client's new passphrase, if the new bag reached the server).
 4. **The account is stored locally** only now, marked as unfinished, with the wrapped backup keys
    it uploaded.
 5. **Key packages and the signed device list** are published; an unfinished account does this
@@ -3911,8 +3911,9 @@ sharing); nothing below is a new primitive.
 - **Custodians** are taken from the signed roster: setting up shares for a user who isn't an admin
   there fails, and shares are sealed only to devices in the admin's signed device list (§3).
 - **New backup key.** The admins saw the user's backup key, so the recovered device does not keep
-  it: it draws a new backup key, re-encrypts the key bag and wraps it with a new passphrase the user
-  chooses and the current org key. Older wraps (passkeys) are dropped and enrolled again; the user's
+  it: it draws a new backup key, re-encrypts the key bag and wraps it with the key of a new recovery
+  kit the user saves and checks during the recovery (§6.5.4; `NewBackupSecret::RecoveryKey`, since
+  #1701; `NewBackupSecret::Passphrase` remains for a legacy passphrase) and the current org key. Older wraps (passkeys) are dropped and enrolled again; the user's
   other devices, if any survived, link again.
 - **Consequences.** The combining admin learns `s` (Shamir over GF(2⁸) can't do threshold decryption
   without reconstructing it), so an owner rotates the org key after each recovery: new `s`, new
@@ -4182,9 +4183,19 @@ The file name carries the server's host name, never the key (`teamcraft-recovery
 4. The device records when the kit was made in the account data (`recovery_key_set_at`, merged
    like `recovery_passphrase_set_at`, §6.4).
 
-The browser and the desktop no longer offer inventing a passphrase at first sign-in. The phone apps
-keep doing so until they get the kit (follow-up), and the bridge's bot keeps its configured
-passphrase (docs/bridge.md).
+The screen leads through this as four steps with a step indicator (issue #1701): what the kit is
+for → save it → check it → how to keep it, the device's name, finish. A restart mid-way keeps no
+secret: the page makes a new key and says that a kit saved before no longer works (only a marker
+that a key was shown is kept, per account, in `localStorage`). An account with keys first chooses
+the way (this computer's keychain, another device, the kit); the chosen way survives a restart.
+
+No client offers inventing a passphrase at first sign-in any more; the bridge's bot keeps its
+configured passphrase (docs/bridge.md). The phone apps (since #1701) make the same kit through
+teamcraft-ffi (`RecoveryKitDraft`: the key stays in the core, the app shows its groups, saves the
+page from `teamcraft-client-api::recovery_kit` with the system's file picker and checks a group or
+the saved file) and enroll with `enroll_with_recovery_kit`. Their unlock field reads a kit file or a
+typed key; a legacy passphrase still works there. The organization recovery on the phones makes a
+new kit the same way before it finishes (`finish_org_recovery` takes the draft, §6.3.1).
 
 #### 6.5.5 Recovery (all devices lost)
 

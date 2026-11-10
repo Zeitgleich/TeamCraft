@@ -37,6 +37,11 @@ yrs = "0.28"
 # the web calls module already use.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+# The recovery kit page (src/recovery_kit.rs, e2ee.md §6.5.3) for every client, and the QR codes of
+# the kit and the device link code (src/qr.rs): pure Rust, no image support needed. Its text forms
+# of the key are cleared after use. Both were in the tree through the web client and the crypto.
+qrcode = { version = "0.14", default-features = false }
+zeroize = "1.9.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # The log's wall clock in the browser (`Date.now()`); already in the tree through the web client.
@@ -47,3 +52,5 @@ js-sys = "0.3.83"
 # The source of the generated emoji catalog (src/emoji_catalog.tsv): a test writes it and checks
 # that it is current. Not linked into the clients.
 emojis.workspace = true
+# Fresh recovery keys for the kit's tests.
+rand_core = { version = "0.6.4", features = ["getrandom"] }

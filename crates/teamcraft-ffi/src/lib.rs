@@ -29,6 +29,7 @@ mod notetaker;
 mod perf_jobs;
 mod picture_retries;
 mod reads;
+mod recovery_kit;
 mod row_badge;
 mod server_entry;
 mod server_pool;
@@ -317,6 +318,22 @@ impl TeamCraft {
       LifecycleStep::Enroll,
       self
         .call(move |engine| Box::pin(engine.enroll(device_name, passphrase)))
+        .await,
+    )
+  }
+
+  /// First device of an account: creates the identity with the recovery kit the user saved and
+  /// checked (e2ee.md §6.5.4); its key wraps the backup key. No passphrase to invent.
+  pub async fn enroll_with_recovery_kit(
+    &self,
+    device_name: String,
+    kit: Arc<recovery_kit::RecoveryKitDraft>,
+  ) -> Result<AccountState, TeamCraftError> {
+    let recovery_key = kit.key();
+    outcome(
+      LifecycleStep::Enroll,
+      self
+        .call(move |engine| Box::pin(engine.enroll_with_recovery_key(device_name, recovery_key)))
         .await,
     )
   }
@@ -1150,17 +1167,19 @@ impl TeamCraft {
     )
   }
 
-  /// After the admins approved: enrolls with the recovered key and a new passphrase. Fails with
+  /// After the admins approved: enrolls with the recovered key and protects the account with the
+  /// new recovery kit the user saved and checked (the admins saw the old backup key). Fails with
   /// `RecoveryPending` while they haven't.
   pub async fn finish_org_recovery(
     &self,
     device_name: String,
-    new_passphrase: String,
+    kit: Arc<recovery_kit::RecoveryKitDraft>,
   ) -> Result<AccountState, TeamCraftError> {
+    let recovery_key = kit.key();
     outcome(
       LifecycleStep::FinishOrgRecovery,
       self
-        .call(move |engine| Box::pin(engine.finish_org_recovery(device_name, new_passphrase)))
+        .call(move |engine| Box::pin(engine.finish_org_recovery(device_name, recovery_key)))
         .await,
     )
   }

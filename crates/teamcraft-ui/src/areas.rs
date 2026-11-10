@@ -52,12 +52,13 @@ use crate::components::huddle_bar::{CallBar, HuddleBarContent};
 use crate::components::lightbox::Lightbox;
 use crate::components::link_request_prompt::{LinkRequestCards, Step as LinkStep};
 use crate::components::log_view::IntegrationFeed;
-use crate::components::login::{EnrollScreen, SessionGate};
+use crate::components::login::SessionGate;
 use crate::components::meetings_view::{
   CancelMeetingDialog, MeetingCreatedDialog, MeetingsView, ScheduleMeetingDialog,
 };
 use crate::components::members_panel::MembersPanel;
 use crate::components::message_actions::{EditHistoryDialog, ForwardDialog, PinsPanel, SavedView};
+use crate::components::onboarding::EnrollScreen;
 use crate::components::poll_dialog::PollDialog;
 use crate::components::profile_views::UserProfileDialog;
 use crate::components::quick_switcher::QuickSwitcher;

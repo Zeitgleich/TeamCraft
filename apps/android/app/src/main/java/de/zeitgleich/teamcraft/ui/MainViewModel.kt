@@ -124,6 +124,7 @@ import uniffi.teamcraft_ffi.ssoOnlySignInPage
 import uniffi.teamcraft_ffi.TeamCraft
 import uniffi.teamcraft_ffi.TeamCraftException
 import uniffi.teamcraft_ffi.TestPushResult
+import uniffi.teamcraft_ffi.RecoveryKitDraft
 
 /** What the app shows at the top level. */
 sealed interface AppState {
@@ -578,6 +579,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
+  /**
+   * First device of the account: creates the keys with the recovery kit the user saved and checked
+   * (e2ee.md §6.5.4, issue #1701).
+   */
+  fun enrollWithRecoveryKit(kit: RecoveryKitDraft) = launchBusy {
+    val current = state.value as? AppState.NeedsEnrollment ?: return@launchBusy
+    state.value = try {
+      ready(graph.core.core().enrollWithRecoveryKit(deviceName(), kit))
+    } catch (failure: TeamCraftException) {
+      Log.w(TAG, "enrollment with the recovery kit failed", failure)
+      current.copy(maybeError = errorText(failure))
+    }
+  }
+
   /** The running link of this (new) phone; a scan or a fresh start replaces it. */
   private var linkJob: Job? = null
 
@@ -639,11 +654,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
   }
 
-  /** After the admins approved: enrolls with the recovered keys and the new passphrase. */
-  fun finishOrgRecovery(newPassphrase: String) = launchBusy {
+  /** After the admins approved: enrolls with the recovered keys and the new recovery kit. */
+  fun finishOrgRecovery(kit: RecoveryKitDraft) = launchBusy {
     val current = state.value as? AppState.RecoveringThroughOrganization ?: return@launchBusy
     state.value = try {
-      ready(graph.core.core().finishOrgRecovery(deviceName(), newPassphrase))
+      ready(graph.core.core().finishOrgRecovery(deviceName(), kit))
     } catch (failure: TeamCraftException.RecoveryPending) {
       current.copy(maybeError = R.string.org_recovery_pending)
     } catch (failure: TeamCraftException) {
@@ -1890,6 +1905,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       is TeamCraftException.LinkCodeForNewDevice -> R.string.link_code_for_new_device
       is TeamCraftException.LinkCodeForSignedInDevice -> R.string.link_code_for_signed_in_device
       is TeamCraftException.LinkCodeExpired -> R.string.link_code_expired
+      is TeamCraftException.OrgRecoveryUnavailable -> R.string.error_org_recovery_unavailable
       is TeamCraftException.BugReportNoRecipients -> R.string.report_error_no_recipients
       is TeamCraftException.BugReportQueueFull -> R.string.report_error_queue_full
       else -> R.string.error_generic

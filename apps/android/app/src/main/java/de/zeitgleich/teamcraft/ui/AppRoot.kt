@@ -175,7 +175,9 @@ fun AppRoot(
         hasExistingIdentity = current.hasExistingIdentity,
         maybeError = current.maybeError,
         isBusy = isBusy,
-        onEnroll = viewModel::enroll,
+        serverHost = maybeServer?.address?.host.orEmpty(),
+        onEnrollWithKit = viewModel::enrollWithRecoveryKit,
+        onUnlock = viewModel::enroll,
         onLink = { viewModel.linkThisDevice() },
         onOrgRecovery = viewModel::recoverThroughOrganization,
       )
@@ -183,6 +185,7 @@ fun AppRoot(
         code = current.code,
         maybeError = current.maybeError,
         isBusy = isBusy,
+        serverHost = maybeServer?.address?.host.orEmpty(),
         onFinish = viewModel::finishOrgRecovery,
         onCancel = viewModel::cancelLinking,
       )

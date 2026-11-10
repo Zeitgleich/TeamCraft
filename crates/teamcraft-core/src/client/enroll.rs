@@ -61,12 +61,20 @@ pub enum EnrollmentSecret {
   KeptBackupKey(SymmetricKey),
   /// Secrets received from an existing device by linking (e2ee.md §5).
   Linked(super::LinkedSecrets),
-  /// Recovering through the organization (e2ee.md §6.3.1); `new_passphrase` wraps the fresh backup
-  /// key the device switches to, since the admins saw the old one.
+  /// Recovering through the organization (e2ee.md §6.3.1); `new_secret` wraps the fresh backup key
+  /// the device switches to, since the admins saw the old one.
   OrgRecovery {
     unlock: OrgRecoveryUnlock,
-    new_passphrase: SecretBytes,
+    new_secret: NewBackupSecret,
   },
+}
+
+/// What protects the fresh backup key after a recovery through the organization (e2ee.md §6.3.1).
+pub enum NewBackupSecret {
+  /// The key of a new recovery kit the user saved and checked (e2ee.md §6.5).
+  RecoveryKey(RecoveryKey),
+  /// A legacy recovery passphrase.
+  Passphrase(SecretBytes),
 }
 
 impl EnrollmentSecret {
@@ -262,8 +270,8 @@ impl PendingEnrollment {
     // The admins who recovered the account saw its backup key (security review B5). Before the
     // account is stored: interrupted, the device recovers again (with the new passphrase if the
     // new bag reached the server).
-    if let EnrollmentSecret::OrgRecovery { new_passphrase, .. } = &options.secret {
-      client.rotate_backup_key(new_passphrase, options.argon2).await?;
+    if let EnrollmentSecret::OrgRecovery { new_secret, .. } = &options.secret {
+      client.rotate_backup_key(new_secret, options.argon2).await?;
     }
     // A key bag from the link is as fresh as the user's other device; one the server served may not
     // be (e2ee.md §4.6, joining by external commit).
@@ -454,27 +462,37 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Switches the account to a fresh backup key, after a recovery in which others saw the old one
-  /// (e2ee.md §6.3.1). The key bag is re-encrypted and wrapped with `passphrase` and, if the
-  /// workspace has one, the current org recovery key; other factors (passkeys) must be enrolled
-  /// again, and the user's other devices link again.
+  /// (e2ee.md §6.3.1). The key bag is re-encrypted and wrapped with `new_secret` (a new recovery
+  /// kit's key, or a legacy passphrase) and, if the workspace has one, the current org recovery
+  /// key; other factors (passkeys) must be enrolled again, and the user's other devices link again.
   ///
   /// Only during enrollment, before the account is stored: the new backup key is stored with the
   /// account once the bag encrypted with it is on the server.
   pub(crate) async fn rotate_backup_key(
     &mut self,
-    passphrase: &SecretBytes,
+    new_secret: &NewBackupSecret,
     argon2: Argon2Settings,
   ) -> Result<(), CoreError> {
     self.account.backup_secret = SymmetricKey::generate(&mut OsRng);
     self.sync.is_key_bag_dirty = true;
     self.persist_sync()?;
-    let mut keys = vec![self.passphrase_wrap(passphrase, argon2)?];
+    let mut keys = vec![match new_secret {
+      NewBackupSecret::RecoveryKey(recovery_key) => RecoveryKeyWrapper::new(recovery_key).wrap_key(
+        convert::user(self.account.user_id),
+        &self.account.backup_key(),
+        &mut OsRng,
+      )?,
+      NewBackupSecret::Passphrase(passphrase) => self.passphrase_wrap(passphrase, argon2)?,
+    }];
     self.sync_workspace().await?;
     if let Some(org_wrap) = self.org_recovery_wrap()? {
       keys.push(org_wrap);
     }
     self.store_wrapped_keys(&keys)?;
-    self.note_passphrase_set()?;
+    match new_secret {
+      NewBackupSecret::RecoveryKey(_) => self.note_recovery_key_set()?,
+      NewBackupSecret::Passphrase(_) => self.note_passphrase_set()?,
+    }
     self.upload_key_bag_keeping(WrapsOnMerge::KeepOwn).await
   }
 

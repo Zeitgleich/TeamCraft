@@ -456,7 +456,8 @@ fn DemoLinkDialog() -> impl IntoView {
 #[component]
 pub(crate) fn QrImage(data: String) -> impl IntoView {
   let i18n = use_i18n();
-  let Some(crate::qr::QrPath { size, path }) = crate::qr::svg_path(&data) else {
+  let Some(teamcraft_client_api::qr::QrPath { size, path }) = teamcraft_client_api::qr::svg_path(&data)
+  else {
     tracing::warn!("could not encode the link QR code");
     return ().into_any();
   };

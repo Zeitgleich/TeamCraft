@@ -51,7 +51,9 @@ pub mod page_calls;
 pub mod picture_edit;
 pub mod polls;
 pub mod privacy;
+pub mod qr;
 pub mod receipts;
+pub mod recovery_kit;
 pub mod remote;
 pub mod scheduled;
 /// Shared with the core, which verifies signed channel roles with the same rules (issue #380).

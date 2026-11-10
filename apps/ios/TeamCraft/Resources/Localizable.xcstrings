@@ -4249,54 +4249,6 @@
         }
       }
     },
-    "enroll_button": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Create keys"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Schlüssel erstellen"
-          }
-        }
-      }
-    },
-    "enroll_new_hint": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Choose a recovery passphrase. It protects your key backup; without it (or another device) your message history can't be restored."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Wähle eine Wiederherstellungs-Passphrase. Sie schützt dein Schlüssel-Backup; ohne sie (oder ein anderes Gerät) lässt sich dein Nachrichtenverlauf nicht wiederherstellen."
-          }
-        }
-      }
-    },
-    "enroll_title": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Set up this device"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Dieses Gerät einrichten"
-          }
-        }
-      }
-    },
     "error_backup_damaged": {
       "localizations": {
         "en": {
@@ -5529,22 +5481,6 @@
         }
       }
     },
-    "link_instead": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Link from another device"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Über ein anderes Gerät verknüpfen"
-          }
-        }
-      }
-    },
     "link_new_title": {
       "localizations": {
         "en": {
@@ -6297,22 +6233,6 @@
         }
       }
     },
-    "passphrase_repeat": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Repeat passphrase"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Passphrase wiederholen"
-          }
-        }
-      }
-    },
     "passphrase_too_short": {
       "localizations": {
         "en": {
@@ -6697,38 +6617,6 @@
         }
       }
     },
-    "recover_button": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Restore"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Wiederherstellen"
-          }
-        }
-      }
-    },
-    "recover_with_admins": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Ask my administrators to recover"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Administratoren um Wiederherstellung bitten"
-          }
-        }
-      }
-    },
     "recovery_finish": {
       "localizations": {
         "en": {
@@ -6757,22 +6645,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nenne diesen Code einem Administrator deiner Organisation. Er prüft ihn und genehmigt die Anfrage."
-          }
-        }
-      }
-    },
-    "recovery_new_passphrase": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Choose a new recovery passphrase for your account."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Wähle eine neue Wiederherstellungs-Passphrase für dein Konto."
           }
         }
       }
@@ -8241,22 +8113,6 @@
         }
       }
     },
-    "passphrase_rule %lld": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "At least %lld characters. Keep it in a password manager or write it down: nobody, not even your admins, can read it back to you."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Mindestens %lld Zeichen. Bewahre sie in einem Passwortmanager auf oder schreib sie auf: Niemand, auch nicht deine Admins, kann sie dir nennen."
-          }
-        }
-      }
-    },
     "passphrase_show": {
       "localizations": {
         "en": {
@@ -8285,38 +8141,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Passphrase verbergen"
-          }
-        }
-      }
-    },
-    "restore_link_hint": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Your account is already set up on another device. Link this phone from it: it's quickest, and your message history comes along."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Dein Konto ist schon auf einem anderen Gerät eingerichtet. Verknüpfe dieses Telefon von dort: Das geht am schnellsten, und dein Nachrichtenverlauf kommt mit."
-          }
-        }
-      }
-    },
-    "restore_passphrase_hint": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No other device at hand? Enter your recovery passphrase."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kein anderes Gerät zur Hand? Gib deine Wiederherstellungs-Passphrase ein."
           }
         }
       }
@@ -18605,6 +18429,1254 @@
           "stringUnit": {
             "state": "translated",
             "value": "Diese Nachricht benachrichtigt nur die ersten %1$lld von %2$lld Personen in den erwähnten Gruppen."
+          }
+        }
+      }
+    },
+    "onboarding_step %lld %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Step %1$lld of %2$lld"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schritt %1$lld von %2$lld"
+          }
+        }
+      }
+    },
+    "onboarding_back": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Back"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zurück"
+          }
+        }
+      }
+    },
+    "onboarding_continue": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Weiter"
+          }
+        }
+      }
+    },
+    "onboarding_start": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Let's start"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Los geht's"
+          }
+        }
+      }
+    },
+    "onboarding_finish": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish setup"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einrichtung abschließen"
+          }
+        }
+      }
+    },
+    "onboarding_recommended": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recommended"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Empfohlen"
+          }
+        }
+      }
+    },
+    "onboarding_intro_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Welcome to TeamCraft"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Willkommen bei TeamCraft"
+          }
+        }
+      }
+    },
+    "onboarding_intro_lead": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Before you start, TeamCraft protects your messages on this device. It takes about two minutes."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bevor es losgeht, schützt TeamCraft deine Nachrichten auf diesem Gerät. Das dauert etwa zwei Minuten."
+          }
+        }
+      }
+    },
+    "onboarding_intro_locked": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your messages are locked"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Nachrichten sind verschlossen"
+          }
+        }
+      }
+    },
+    "onboarding_intro_locked_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only your own devices can read them. Not the server, not your IT department."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur deine eigenen Geräte können sie lesen. Nicht der Server, nicht deine IT-Abteilung."
+          }
+        }
+      }
+    },
+    "onboarding_intro_kit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You get a recovery kit"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du bekommst ein Wiederherstellungs-Kit"
+          }
+        }
+      }
+    },
+    "onboarding_intro_kit_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A file with your personal key. It is the spare key to your messages, like the spare key to your home."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eine Datei mit deinem persönlichen Schlüssel. Sie ist der Ersatzschlüssel zu deinen Nachrichten, wie der Ersatzschlüssel für deine Wohnung."
+          }
+        }
+      }
+    },
+    "onboarding_intro_keep": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep it safe, don't lose it"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bewahre es gut auf, verliere es nicht"
+          }
+        }
+      }
+    },
+    "onboarding_intro_keep_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If you ever lose all your devices, the kit is the only way back to your messages. Nobody can make you a new one."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn du einmal alle deine Geräte verlierst, ist das Kit der einzige Weg zurück zu deinen Nachrichten. Niemand kann dir ein neues machen."
+          }
+        }
+      }
+    },
+    "onboarding_save_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save your recovery kit"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speichere dein Wiederherstellungs-Kit"
+          }
+        }
+      }
+    },
+    "onboarding_save_lead": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save the kit and keep it where you keep important papers or passwords: in your password manager, in your files, or print it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speichere das Kit und bewahre es dort auf, wo du wichtige Unterlagen oder Passwörter aufbewahrst: im Passwort-Manager, in deinen Dateien oder ausgedruckt."
+          }
+        }
+      }
+    },
+    "onboarding_save_new_key": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You started this before. For your safety this is a new key: a kit you saved earlier does not work. Delete it and save this one."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du hattest schon einmal angefangen. Zu deiner Sicherheit ist das ein neuer Schlüssel: Ein vorher gespeichertes Kit funktioniert nicht. Lösche es und speichere dieses."
+          }
+        }
+      }
+    },
+    "kit_key_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery key"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wiederherstellungsschlüssel"
+          }
+        }
+      }
+    },
+    "kit_save": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save recovery kit"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wiederherstellungs-Kit speichern"
+          }
+        }
+      }
+    },
+    "kit_save_again": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save again"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Noch einmal speichern"
+          }
+        }
+      }
+    },
+    "kit_saved": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved. Keep the file safe, not only on this device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gespeichert. Bewahre die Datei sicher auf, nicht nur auf diesem Gerät."
+          }
+        }
+      }
+    },
+    "kit_save_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The kit could not be saved. Pick another place, or write the key down."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Kit konnte nicht gespeichert werden. Wähle einen anderen Ort oder schreib den Schlüssel auf."
+          }
+        }
+      }
+    },
+    "kit_save_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The kit is a file with your key, a QR code and what to do with it. It is made on this device and never sent to the server."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Kit ist eine Datei mit deinem Schlüssel, einem QR-Code und einer Anleitung. Es entsteht auf diesem Gerät und wird nie an den Server geschickt."
+          }
+        }
+      }
+    },
+    "kit_wrote_down": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Can't save a file? I wrote the key down on paper"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Datei speichern klappt nicht? Ich habe den Schlüssel auf Papier notiert"
+          }
+        }
+      }
+    },
+    "onboarding_check_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check your recovery kit"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prüfe dein Wiederherstellungs-Kit"
+          }
+        }
+      }
+    },
+    "onboarding_check_lead": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make sure you really have it: look at your saved kit and type the group asked for below, or open the file."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stell sicher, dass du es wirklich hast: Schau in dein gespeichertes Kit und gib unten die gefragte Gruppe ein oder öffne die Datei."
+          }
+        }
+      }
+    },
+    "kit_check_group %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Group %1$lld of your key"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gruppe %1$lld deines Schlüssels"
+          }
+        }
+      }
+    },
+    "kit_check_wrong %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That isn't group %1$lld. Look at your saved recovery kit again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das ist nicht Gruppe %1$lld. Schau noch einmal in dein gespeichertes Wiederherstellungs-Kit."
+          }
+        }
+      }
+    },
+    "kit_check_missing %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Type group %1$lld from your saved kit, or open the kit file."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib Gruppe %1$lld aus deinem gespeicherten Kit ein oder öffne die Kit-Datei."
+          }
+        }
+      }
+    },
+    "kit_check_group_ok": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That's right."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stimmt."
+          }
+        }
+      }
+    },
+    "kit_check_show_again": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show the key again"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schlüssel noch einmal zeigen"
+          }
+        }
+      }
+    },
+    "kit_open": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open recovery kit…"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wiederherstellungs-Kit öffnen …"
+          }
+        }
+      }
+    },
+    "kit_check_file_ok": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This is your new recovery kit."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das ist dein neues Wiederherstellungs-Kit."
+          }
+        }
+      }
+    },
+    "kit_check_file_other": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This file holds another recovery key, not the one just made. Pick the kit you just saved."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Datei enthält einen anderen Wiederherstellungsschlüssel, nicht den gerade erstellten. Wähle das Kit, das du gerade gespeichert hast."
+          }
+        }
+      }
+    },
+    "kit_file_no_key": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No recovery key was found in this file. Pick the recovery kit TeamCraft saved for you."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In dieser Datei wurde kein Wiederherstellungsschlüssel gefunden. Wähle das Wiederherstellungs-Kit, das TeamCraft für dich gespeichert hat."
+          }
+        }
+      }
+    },
+    "onboarding_finish_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep your kit safe"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bewahre dein Kit sicher auf"
+          }
+        }
+      }
+    },
+    "onboarding_finish_lead": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Almost done. Remember these three things, then finish the setup."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fast geschafft. Merk dir diese drei Dinge, dann schließ die Einrichtung ab."
+          }
+        }
+      }
+    },
+    "onboarding_finish_where": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep it somewhere safe"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bewahre es sicher auf"
+          }
+        }
+      }
+    },
+    "onboarding_finish_where_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "With your important papers, or in your password manager. Not only on this device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bei deinen wichtigen Unterlagen oder in deinem Passwort-Manager. Nicht nur auf diesem Gerät."
+          }
+        }
+      }
+    },
+    "onboarding_finish_share": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Never send it"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verschicke es nie"
+          }
+        }
+      }
+    },
+    "onboarding_finish_share_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not by e-mail, not in a chat, not even in TeamCraft. Whoever has it can read your messages."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht per E-Mail, nicht im Chat, auch nicht in TeamCraft. Wer es hat, kann deine Nachrichten lesen."
+          }
+        }
+      }
+    },
+    "onboarding_finish_ask": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nobody will ask you for it"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Niemand wird danach fragen"
+          }
+        }
+      }
+    },
+    "onboarding_finish_ask_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not TeamCraft, not your IT department. Anyone who asks wants to trick you."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht TeamCraft, nicht deine IT-Abteilung. Wer danach fragt, will dich täuschen."
+          }
+        }
+      }
+    },
+    "onboarding_unlock_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock your messages here"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entsperre deine Nachrichten hier"
+          }
+        }
+      }
+    },
+    "onboarding_unlock_lead": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your account already has a key. To read your messages on this device, bring the key here. Choose how:"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dein Konto hat schon einen Schlüssel. Damit du deine Nachrichten auf diesem Gerät lesen kannst, bring den Schlüssel hierher. Wähle wie:"
+          }
+        }
+      }
+    },
+    "onboarding_way_link": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use another device"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mit einem anderen Gerät"
+          }
+        }
+      }
+    },
+    "onboarding_way_link_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Approve this device on a computer or phone where you're signed in. The quickest way, and your history comes along."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bestätige dieses Gerät auf einem Computer oder Handy, auf dem du angemeldet bist. Der schnellste Weg, und dein Verlauf kommt mit."
+          }
+        }
+      }
+    },
+    "onboarding_way_kit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use my recovery kit"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mit meinem Wiederherstellungs-Kit"
+          }
+        }
+      }
+    },
+    "onboarding_way_kit_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open the kit file or type the key from it. For when no other device is at hand."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Öffne die Kit-Datei oder gib den Schlüssel daraus ein. Für den Fall, dass kein anderes Gerät zur Hand ist."
+          }
+        }
+      }
+    },
+    "onboarding_way_admins": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask my IT department"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Meine IT-Abteilung fragen"
+          }
+        }
+      }
+    },
+    "onboarding_way_admins_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No other device and no kit? Your IT department can help."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kein anderes Gerät und kein Kit? Deine IT-Abteilung hilft dir."
+          }
+        }
+      }
+    },
+    "onboarding_kit_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock with your recovery kit"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mit dem Wiederherstellungs-Kit entsperren"
+          }
+        }
+      }
+    },
+    "onboarding_kit_lead": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open the kit file you saved when you set up your first device. You can also type the key printed in it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Öffne die Kit-Datei, die du beim Einrichten deines ersten Geräts gespeichert hast. Du kannst auch den darin gedruckten Schlüssel eingeben."
+          }
+        }
+      }
+    },
+    "kit_secret_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery key or passphrase"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wiederherstellungsschlüssel oder Passphrase"
+          }
+        }
+      }
+    },
+    "kit_secret_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The key from your recovery kit (8 groups of 4 characters), or your passphrase if you set one up before recovery kits existed."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Schlüssel aus deinem Wiederherstellungs-Kit (8 Gruppen à 4 Zeichen) oder deine Passphrase, falls du eine eingerichtet hast, bevor es Wiederherstellungs-Kits gab."
+          }
+        }
+      }
+    },
+    "kit_secret_missing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open your kit file, or type the key from it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Öffne deine Kit-Datei oder gib den Schlüssel daraus ein."
+          }
+        }
+      }
+    },
+    "kit_read": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The recovery key was read from the file."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Wiederherstellungsschlüssel wurde aus der Datei gelesen."
+          }
+        }
+      }
+    },
+    "onboarding_unlock": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Entsperren"
+          }
+        }
+      }
+    },
+    "kit_file_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft recovery kit"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft-Wiederherstellungs-Kit"
+          }
+        }
+      }
+    },
+    "kit_file_account %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server: %1$@ · Made on %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server: %1$@ · Erstellt am %2$@"
+          }
+        }
+      }
+    },
+    "kit_file_intro": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This is the key to your encrypted messages. If you lose all your devices, it is the only way to read your messages again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das ist der Schlüssel zu deinen verschlüsselten Nachrichten. Wenn du alle deine Geräte verlierst, ist er der einzige Weg, deine Nachrichten wieder zu lesen."
+          }
+        }
+      }
+    },
+    "kit_file_keep_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep it safe"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bewahre es sicher auf"
+          }
+        }
+      }
+    },
+    "kit_file_keep_print": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Print this page and keep it somewhere safe, or keep the file in your password manager."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Drucke diese Seite aus und bewahre sie an einem sicheren Ort auf, oder lege die Datei in deinem Passwort-Manager ab."
+          }
+        }
+      }
+    },
+    "kit_file_keep_share": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Don't send it by e-mail or chat, and don't store it in TeamCraft."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schicke es nicht per E-Mail oder Chat und speichere es nicht in TeamCraft."
+          }
+        }
+      }
+    },
+    "kit_file_keep_anyone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anyone who has this key and can sign in as you can read your messages."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wer diesen Schlüssel hat und sich als du anmelden kann, kann deine Nachrichten lesen."
+          }
+        }
+      }
+    },
+    "kit_file_use_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When you need it"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wann du es brauchst"
+          }
+        }
+      }
+    },
+    "kit_file_use": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only when you set up a device and none of your other devices is at hand: sign in to TeamCraft, choose “Open recovery kit…” and pick this file, or type the key. If another of your devices is at hand, link the new one from it instead."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur wenn du ein Gerät einrichtest und keines deiner anderen Geräte zur Hand ist: Melde dich bei TeamCraft an, wähle „Wiederherstellungs-Kit öffnen …“ und diese Datei, oder gib den Schlüssel ein. Ist ein anderes deiner Geräte zur Hand, verbinde das neue stattdessen von dort aus."
+          }
+        }
+      }
+    },
+    "kit_file_lost_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If it is lost or someone else saw it"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn es verloren ist oder jemand anderes es gesehen hat"
+          }
+        }
+      }
+    },
+    "kit_file_lost": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Make a new recovery kit in TeamCraft on a computer under Settings, Security & privacy. This kit then stops working."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Erstelle in TeamCraft an einem Computer unter Einstellungen, Sicherheit & Datenschutz ein neues Wiederherstellungs-Kit. Dieses Kit funktioniert dann nicht mehr."
+          }
+        }
+      }
+    },
+    "kit_file_never": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft and your IT department will never ask you for this key."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft und deine IT-Abteilung werden dich nie nach diesem Schlüssel fragen."
+          }
+        }
+      }
+    },
+    "org_recovery_next": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When the admins approve, you finish here. Meanwhile, save a new recovery kit: the admins saw your old key, so your account gets a new one."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sobald die Admins zustimmen, schließt du hier ab. Speichere bis dahin ein neues Wiederherstellungs-Kit: Die Admins haben deinen alten Schlüssel gesehen, deshalb bekommt dein Konto einen neuen."
+          }
+        }
+      }
+    },
+    "org_recovery_finish_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finish the recovery"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wiederherstellung abschließen"
+          }
+        }
+      }
+    },
+    "org_recovery_finish_lead": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Once two admins have approved, finish here. Keep your new kit safe:"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sobald zwei Admins zugestimmt haben, schließt du hier ab. Bewahre dein neues Kit sicher auf:"
+          }
+        }
+      }
+    },
+    "onboarding_it_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask your IT department"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Frag deine IT-Abteilung"
+          }
+        }
+      }
+    },
+    "onboarding_it_lead": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tell your IT department that you lost all your devices and your recovery kit. They can reset your account: you then start with new keys, and your old messages are lost."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sag deiner IT-Abteilung, dass du alle deine Geräte und dein Wiederherstellungs-Kit verloren hast. Sie kann dein Konto zurücksetzen: Du startest dann mit neuen Schlüsseln, und deine alten Nachrichten sind verloren."
+          }
+        }
+      }
+    },
+    "onboarding_it_code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If your organization set up recovery, your IT department may ask you for a code to get your messages back."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hat deine Organisation die Wiederherstellung eingerichtet, fragt dich deine IT-Abteilung vielleicht nach einem Code, um deine Nachrichten zurückzuholen."
+          }
+        }
+      }
+    },
+    "onboarding_it_show_code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show the code for my IT department"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code für meine IT-Abteilung zeigen"
+          }
+        }
+      }
+    },
+    "error_org_recovery_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization hasn't set up recovery for you. Your IT department can only reset your account."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Organisation hat die Wiederherstellung für dich nicht eingerichtet. Deine IT-Abteilung kann dein Konto nur zurücksetzen."
           }
         }
       }

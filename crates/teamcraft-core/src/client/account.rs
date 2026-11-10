@@ -81,6 +81,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.persist_sync()
   }
 
+  /// The account's recovery kit was made now (e2ee.md §6.5.4), for Settings to show when.
+  pub(crate) fn note_recovery_key_set(&mut self) -> Result<(), CoreError> {
+    let mut data = self.account_data();
+    data.maybe_recovery_key_set_at = Some(self.now_ms());
+    self.store_account_data(&data)?;
+    self.sync.is_key_bag_dirty = true;
+    self.persist_sync()
+  }
+
   /// Whether local key bag changes (content keys or account data) wait for upload.
   pub fn is_key_bag_dirty(&self) -> bool {
     self.sync.is_key_bag_dirty

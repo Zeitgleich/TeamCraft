@@ -10870,6 +10870,8 @@ dependencies = [
  "js-sys",
  "oauth2",
  "psl",
+ "qrcode",
+ "rand_core 0.6.4",
  "semver",
  "serde",
  "serde_json",
@@ -10880,6 +10882,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "yrs",
+ "zeroize",
 ]
 
 [[package]]
@@ -11360,7 +11363,6 @@ dependencies = [
  "js-sys",
  "leptos",
  "oauth2",
- "qrcode",
  "rand_core 0.6.4",
  "secrecy",
  "serde",

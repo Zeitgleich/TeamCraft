@@ -48,6 +48,7 @@ use teamcraft_core::{
   PendingEnrollment,
 };
 use teamcraft_crypto::backup::Argon2Settings;
+use teamcraft_crypto::recovery_key::RecoveryKey;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
   CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, DeviceActivity, DeviceId, Id, PushKind,
@@ -950,6 +951,15 @@ impl Engine {
       device_name,
       EnrollmentSecret::Passphrase(SecretBytes::new(passphrase.into_bytes())),
     );
+    self.complete_enrollment(options).await
+  }
+
+  pub(crate) async fn enroll_with_recovery_key(
+    &mut self,
+    device_name: String,
+    recovery_key: RecoveryKey,
+  ) -> Result<AccountState, TeamCraftError> {
+    let options = enrollment_options(device_name, EnrollmentSecret::RecoveryKey(recovery_key));
     self.complete_enrollment(options).await
   }
 

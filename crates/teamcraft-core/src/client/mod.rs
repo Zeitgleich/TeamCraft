@@ -105,7 +105,8 @@ pub use channel_roles::RoleSigning;
 #[cfg(feature = "ui")]
 pub(crate) use channel_roles::{channel_roles_alarmed_key, channel_roles_key, role_key_standings_key};
 pub use enroll::{
-  EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment, parse_recovery_key,
+  EnrollmentOptions, EnrollmentSecret, NewBackupSecret, OrgRecoveryUnlock, PendingEnrollment,
+  parse_recovery_key,
 };
 pub use first_sync::{FirstSyncProgress, FirstSyncStage, HistoryBackfill, first_sync_progress};
 pub use gateway::{
