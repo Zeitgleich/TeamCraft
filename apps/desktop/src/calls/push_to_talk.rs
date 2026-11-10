@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use tauri::AppHandle;
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::ShortcutState;
 use tracing::warn;
 
 use super::CallHost;
@@ -42,7 +42,9 @@ fn register_with_plugin(
   maybe_previous: Option<&str>,
   maybe_shortcut: Option<&str>,
 ) -> bool {
-  let shortcuts = app.global_shortcut();
+  let Some(shortcuts) = crate::global_keys::shortcuts(app, maybe_shortcut.is_some()) else {
+    return false;
+  };
   if let Some(previous) = maybe_previous
     && let Err(error) = shortcuts.unregister(previous)
   {

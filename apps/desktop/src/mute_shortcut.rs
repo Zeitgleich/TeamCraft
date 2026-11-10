@@ -11,7 +11,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{Shortcut, ShortcutState};
 use teamcraft_client_api::tray_menu::{MuteShortcutStatus, TRAY_ACTION_EVENT, TrayAction};
 
 use crate::tray::MAIN_WINDOW;
@@ -57,7 +57,12 @@ pub async fn mute_shortcut_set(
 
 fn set_with_plugin(app: &AppHandle, maybe_shortcut: Option<String>, is_active: bool) -> MuteShortcutStatus {
   let state = app.state::<MuteShortcutState>();
-  let shortcuts = app.global_shortcut();
+  let Some(shortcuts) = crate::global_keys::shortcuts(app, maybe_shortcut.is_some()) else {
+    return match maybe_shortcut {
+      None => MuteShortcutStatus::Off,
+      Some(_) => MuteShortcutStatus::Taken,
+    };
+  };
   let mut registered = state
     .maybe_registered
     .lock()

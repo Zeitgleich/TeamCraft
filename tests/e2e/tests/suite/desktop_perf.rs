@@ -25,7 +25,7 @@ use serde_json::json;
 use teamcraft_e2e::browser::artifact_dir;
 use teamcraft_e2e::desktop::{DesktopApp, DesktopSession};
 use teamcraft_e2e::peer::PASSPHRASE;
-use teamcraft_e2e::resources::ProcessUsage;
+use teamcraft_e2e::resources::{ProcessUsage, thread_wakeups, wakeups_between};
 use teamcraft_e2e::{Peer, Stack};
 
 use crate::perf::{Scale, Seeded, mib, percentile, seed};
@@ -59,7 +59,7 @@ async fn the_desktop_app_hidden_in_the_tray_stays_idle() {
     .with_env("TEAMCRAFT_SECURITY__RATE_LIMITS__IS_ENABLED", "false")
     .with_env("TEAMCRAFT_DATABASE__MAX_CONNECTIONS", "16")
     // Every request of the server, to count the app's while it is hidden.
-    .with_env("RUST_LOG", "info,tower_http=debug")
+    .with_env("RUST_LOG", "info,tower_http=debug,teamcraft_server::router=debug")
     .start()
     .await
   else {
@@ -278,8 +278,10 @@ async fn measure_idle(stack: &Stack, app: &mut DesktopApp, period: Duration) -> 
   app.detach_inspector();
   let log_before = stack.server_log().len();
   let before = ProcessUsage::of_tree(app.pid());
+  let wakeups_before = thread_wakeups(app.pid());
   tokio::time::sleep(period).await;
   let after = ProcessUsage::of_tree(app.pid());
+  let wakeups = wakeups_between(&wakeups_before, &thread_wakeups(app.pid()));
   let log = stack.server_log();
   let requests: Vec<String> = log
     .get(log_before..)
@@ -304,7 +306,7 @@ async fn measure_idle(stack: &Stack, app: &mut DesktopApp, period: Duration) -> 
       name.clone(),
       ProcessIdle {
         cpu_percent: cpu_percent(end.cpu_time.saturating_sub(start.cpu_time), period),
-        wakeups_per_second: end.context_switches.saturating_sub(start.context_switches) as f64 / seconds,
+        wakeups_per_second: wakeups.get(name).copied().unwrap_or(0) as f64 / seconds,
         pss_mib: mib(end.pss_bytes),
         pss_anon_mib: mib(end.pss_anon_bytes),
         processes: end.process_count,

@@ -27,6 +27,7 @@ mod external_links;
 mod file_manager_entries;
 #[cfg(target_os = "linux")]
 mod freedesktop;
+mod global_keys;
 mod message_sound;
 mod mute_shortcut;
 mod notifications;
@@ -131,7 +132,7 @@ fn main() -> anyhow::Result<()> {
     .plugin(tauri_plugin_opener::init())
     // The save and folder dialogs of "Save…" and "Download all" (core_save_attachment[s]); the webview gets no dialog permission.
     .plugin(tauri_plugin_dialog::init())
-    .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+    // The global-shortcut plugin is added when a shortcut is first set (global_keys.rs).
     .plugin(tauri_plugin_notification::init())
     // The shell drives it (updates.rs); the webview gets no updater permission.
     .plugin(tauri_plugin_updater::Builder::new().build())

@@ -46,36 +46,9 @@ impl ProcessUsage {
   /// process name (`comm`, e.g. `teamcraft-deskt`, `WebKitWebProces`).
   pub fn of_tree(pid: u32) -> std::collections::BTreeMap<String, Self> {
     let mut kinds = std::collections::BTreeMap::<String, Self>::new();
-    let mut parents = std::collections::BTreeMap::<u32, u32>::new();
-    if let Ok(entries) = std::fs::read_dir("/proc") {
-      for entry in entries.filter_map(Result::ok) {
-        let Some(child) = entry
-          .file_name()
-          .to_str()
-          .and_then(|name| name.parse::<u32>().ok())
-        else {
-          continue;
-        };
-        if let Some(parent) = parent_pid(&entry.path()) {
-          parents.insert(child, parent);
-        }
-      }
-    }
-    let is_in_tree = |mut candidate: u32| loop {
-      if candidate == pid {
-        return true;
-      }
-      match parents.get(&candidate) {
-        Some(&parent) if parent > 1 => candidate = parent,
-        _ => return false,
-      }
-    };
-    for &member in parents.keys().filter(|&&candidate| is_in_tree(candidate)) {
+    for member in tree_pids(pid) {
       let dir = Path::new("/proc").join(member.to_string());
-      let name = std::fs::read_to_string(dir.join("comm"))
-        .map(|name| name.trim().to_owned())
-        .unwrap_or_default();
-      let sum = kinds.entry(name).or_default();
+      let sum = kinds.entry(process_name(&dir)).or_default();
       *sum = sum.plus(Self::of_process(&dir));
     }
     kinds
@@ -141,6 +114,94 @@ impl ProcessUsage {
 fn command_line(dir: &Path) -> String {
   std::fs::read(dir.join("cmdline"))
     .map(|bytes| String::from_utf8_lossy(&bytes).replace('\0', " "))
+    .unwrap_or_default()
+}
+
+/// Voluntary context switches (the thread slept and was woken) of every thread of a process tree,
+/// by thread ID, with the name of the thread's process. Wakeups over a period are the growth per
+/// thread: a thread that ended meanwhile drops out instead of making a sum shrink, and being
+/// preempted on a busy machine (an involuntary switch) is no wakeup.
+pub fn thread_wakeups(pid: u32) -> std::collections::BTreeMap<u32, (String, u64)> {
+  let mut threads = std::collections::BTreeMap::new();
+  for member in tree_pids(pid) {
+    let dir = Path::new("/proc").join(member.to_string());
+    let name = process_name(&dir);
+    let Ok(tasks) = std::fs::read_dir(dir.join("task")) else {
+      continue;
+    };
+    for task in tasks.filter_map(Result::ok) {
+      let Some(tid) = task
+        .file_name()
+        .to_str()
+        .and_then(|name| name.parse::<u32>().ok())
+      else {
+        continue;
+      };
+      let switches = std::fs::read_to_string(task.path().join("status"))
+        .ok()
+        .and_then(|status| {
+          status
+            .lines()
+            .find_map(|line| line.strip_prefix("voluntary_ctxt_switches:"))
+            .and_then(|count| count.trim().parse::<u64>().ok())
+        })
+        .unwrap_or(0);
+      threads.insert(tid, (name.clone(), switches));
+    }
+  }
+  threads
+}
+
+/// Wakeups per process name between two readings of [`thread_wakeups`].
+pub fn wakeups_between(
+  before: &std::collections::BTreeMap<u32, (String, u64)>,
+  after: &std::collections::BTreeMap<u32, (String, u64)>,
+) -> std::collections::BTreeMap<String, u64> {
+  let mut wakeups = std::collections::BTreeMap::<String, u64>::new();
+  for (tid, (name, count)) in after {
+    let earlier = before.get(tid).map_or(0, |(_, count)| *count);
+    *wakeups.entry(name.clone()).or_default() += count.saturating_sub(earlier);
+  }
+  wakeups
+}
+
+/// `pid` and every process below it.
+fn tree_pids(pid: u32) -> Vec<u32> {
+  let mut parents = std::collections::BTreeMap::<u32, u32>::new();
+  if let Ok(entries) = std::fs::read_dir("/proc") {
+    for entry in entries.filter_map(Result::ok) {
+      let Some(child) = entry
+        .file_name()
+        .to_str()
+        .and_then(|name| name.parse::<u32>().ok())
+      else {
+        continue;
+      };
+      if let Some(parent) = parent_pid(&entry.path()) {
+        parents.insert(child, parent);
+      }
+    }
+  }
+  let is_in_tree = |mut candidate: u32| loop {
+    if candidate == pid {
+      return true;
+    }
+    match parents.get(&candidate) {
+      Some(&parent) if parent > 1 => candidate = parent,
+      _ => return false,
+    }
+  };
+  parents
+    .keys()
+    .copied()
+    .filter(|&candidate| is_in_tree(candidate))
+    .collect()
+}
+
+/// The process's name (`comm`), cut to 15 bytes by the kernel.
+fn process_name(dir: &Path) -> String {
+  std::fs::read_to_string(dir.join("comm"))
+    .map(|name| name.trim().to_owned())
     .unwrap_or_default()
 }
 

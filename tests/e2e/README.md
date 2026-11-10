@@ -50,6 +50,7 @@ four-core runner, most of it the browser tests, which share two ports).
 | `web.rs` (`browser`)    | The web client in headless Chromium: Keycloak login page, welcome screen, the channel list shows the account's channels                     |
 | `web_directory.rs`      | The directory in the web client: people cards, the Channels tab, resending and revoking an invitation |
 | `web_single_image.rs`   | One picture of an album in the web client: tile menu, a quote with its picture that opens it, a forward of it alone |
+| `desktop_perf.rs` (`desktop`) | The Linux desktop app on a large workspace, visible and closed to the tray: CPU, wakeups, memory per process, the server's requests (#1022) |
 
 The `acceptance_*` scenarios cover the v1 sections of PLAN.md one by one; what each proves, the known gaps
 and the bugs found are in [docs/acceptance.md](../../docs/acceptance.md).
@@ -105,6 +106,29 @@ checkouts (a lock file in the temp directory). Tests on the two ports run at the
 both, as it measures. Its default Content-Security-Policy allows only
 `https:` for `connect-src`; the tests widen it to the plain-http dev Keycloak.
 
+### The desktop app
+
+`desktop_perf.rs` (feature `desktop`) starts the Linux desktop app as it ships, a debug build with the
+web client embedded, and drives its page over WebKit's remote inspector (`crate::desktop`). Nothing of
+the user's session is used: each run gets its own session bus (`dbus-daemon`), a keyring on it
+(`gnome-keyring-daemon`, where the app keeps the key of its secrets file), a tray watcher (so closing
+the window hides it to the tray), and its own home and XDG directories. The sign-in opens the "system
+browser", a script that writes the address down; the harness fills in Keycloak's form from there. The
+inspector is closed while anything is measured: an attached one instruments the page.
+
+```sh
+cp -r target/e2e-web crates/teamcraft-ui/dist          # the web client the app embeds
+cargo build -p teamcraft-desktop --features custom-protocol
+E2E_DESKTOP_BIN=$PWD/target/debug/teamcraft-desktop xvfb-run -a \
+  cargo test -p teamcraft-e2e --features desktop --test suite -- --nocapture desktop_perf::
+```
+
+Without `custom-protocol` a debug build loads its page from the dev server URL instead
+(`devUrl`, port 8082, where the browser tests start their servers). `PERF_SCALE` is the one of
+`perf.rs`; `PERF_DESKTOP_HOLD_SECS` keeps the app open after the channel switches, to look at it
+with `WEBKIT_INSPECTOR_HTTP_SERVER`'s port from its environment. The nightly workflow runs it in a
+job of its own (`desktop`), and `scripts/e2e.sh --desktop` runs only these tests.
+
 ## Running by hand
 
 ```sh
@@ -115,15 +139,17 @@ cargo test -p teamcraft-e2e --features browser --test suite            # or --fe
 cargo test -p teamcraft-e2e --features browser --test suite -- --include-ignored web::
 ```
 
-| Variable         | Meaning                                                                                    |
-|------------------|--------------------------------------------------------------------------------------------|
-| `E2E_REQUIRED=1` | A missing dev stack, binary, web build or browser fails instead of skipping                |
-| `E2E_BIN_DIR`    | Directory with the server, SFU and bridge binaries (default: the test binary's profile)    |
-| `E2E_WEB_DIR`    | The `trunk build` output (default `target/e2e-web`)                                        |
-| `E2E_ARTIFACTS`  | Where failure screenshots go (default `target/e2e-artifacts`)                              |
-| `CHROME`         | Chrome or Chromium executable (default: first of `google-chrome`, `chromium`, ... on PATH) |
-| `E2E_CONSOLE`    | Browser tests print the page's console as it happens (`web_calls.rs`)                      |
-| `RUST_MIN_STACK` | Stack of a test thread: 16 MiB in `scripts/e2e.sh`, set it for a plain `cargo test`        |
+| Variable                 | Meaning                                                                                    |
+|--------------------------|--------------------------------------------------------------------------------------------|
+| `E2E_REQUIRED=1`         | A missing dev stack, binary, web build or browser fails instead of skipping                |
+| `E2E_BIN_DIR`            | Directory with the server, SFU and bridge binaries (default: the test binary's profile)    |
+| `E2E_WEB_DIR`            | The `trunk build` output (default `target/e2e-web`)                                        |
+| `E2E_ARTIFACTS`          | Where failure screenshots go (default `target/e2e-artifacts`)                              |
+| `CHROME`                 | Chrome or Chromium executable (default: first of `google-chrome`, `chromium`, ... on PATH) |
+| `E2E_CONSOLE`            | Browser tests print the page's console as it happens (`web_calls.rs`)                      |
+| `RUST_MIN_STACK`         | Stack of a test thread: 16 MiB in `scripts/e2e.sh`, set it for a plain `cargo test`        |
+| `E2E_DESKTOP_BIN`        | The desktop app's binary for `desktop_perf.rs` (without it the test skips)                 |
+| `E2E_DESKTOP_REQUIRED=1` | A missing desktop binary or session (bus, keyring) fails instead of skipping               |
 
 A test that aborts (a stack overflow, a kill) leaves its server and Chromium running; the web tests share port
 8082, so stop them (`ss -ltnp | grep 8082`) before the next run, or every web test talks to the stale server.
