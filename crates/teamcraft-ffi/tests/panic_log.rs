@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
-use teamcraft_ffi::{AppConfig, EventListener, TeamCraft, TokenProvider};
+use teamcraft_ffi::{AccessToken, AppConfig, EventListener, TeamCraft, TokenProvider};
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt as _};
 
@@ -63,8 +63,8 @@ impl Visit for Text<'_> {
 struct NoToken;
 
 impl TokenProvider for NoToken {
-  fn access_token(&self) -> Option<String> {
-    None
+  fn access_token(&self) -> AccessToken {
+    AccessToken::SignedOut
   }
 }
 

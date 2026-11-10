@@ -148,11 +148,24 @@ pub struct TeamCraft {
   running_calls: calls::RunningCalls,
 }
 
-/// Supplies the current OIDC access token. The app owns login and refresh (AppAuth on Android);
-/// `None` means signed out.
+/// Supplies the current OIDC access token. The app owns login and refresh (AppAuth on Android).
 #[uniffi::export(with_foreign)]
 pub trait TokenProvider: Send + Sync {
-  fn access_token(&self) -> Option<String>;
+  fn access_token(&self) -> AccessToken;
+}
+
+/// What the app's [`TokenProvider`] answers: a token, none for now, or none for good (issue #1671).
+/// Only the last one signs the user out; a refresh that failed is retried like the network.
+#[derive(uniffi::Enum)]
+pub enum AccessToken {
+  /// A current access token.
+  Token { value: String },
+  /// None right now while the session lives: a due refresh failed or timed out (offline, Doze, the
+  /// identity provider down or slow). Requests count as a network problem and are retried later.
+  Unavailable,
+  /// The session has ended: signed out, a local session expired, or the identity provider refused
+  /// the refresh token.
+  SignedOut,
 }
 
 /// Told when the local store changed, so the UI re-reads what it shows. Called on the engine
@@ -2293,10 +2306,12 @@ mod tests {
     }
 
     impl TokenProvider for BlockedTokens {
-      fn access_token(&self) -> Option<String> {
+      fn access_token(&self) -> AccessToken {
         let _ = self.entered.send(());
         let _ = self.finished.lock().unwrap().recv();
-        Some("token".into())
+        AccessToken::Token {
+          value: "token".into(),
+        }
       }
     }
   }
@@ -2320,8 +2335,8 @@ mod tests {
   struct NoTokens;
 
   impl TokenProvider for NoTokens {
-    fn access_token(&self) -> Option<String> {
-      None
+    fn access_token(&self) -> AccessToken {
+      AccessToken::SignedOut
     }
   }
 

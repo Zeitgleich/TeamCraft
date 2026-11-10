@@ -455,8 +455,10 @@ audio, file name). How the core gets there, within `PUSH_PREVIEW_BUDGET` (7 s; F
    then holds the engine for milliseconds instead of a fetch on a connection that may be cold.
 3. Otherwise it fetches and decrypts the one message, reading nothing else. The wait for the app's
    access token and the fetch share 4 s: a slow token refresh leaves less time for the fetch rather
-   than adding to it. Without a token (a refresh that failed offline, which the app can't tell from a
-   sign-out) the store's preview stays and the app tries again later; nothing is reported as signed out.
+   than adding to it. Without a token the store's preview stays and the app tries again later. The
+   app's token provider says why there is none (issue #1671): a refresh that failed for now (offline,
+   the identity provider down) is a network problem everywhere in the core and is retried; only an
+   ended session (signed out, refresh token refused) is a sign-out, which the app handles itself.
 4. If that fails or names no sender (a first DM from somebody new, keys that changed while the app was
    closed), the sync loop isn't running and the token wasn't missing, the app's own client catches that one conversation up
    (`Client::catch_up_for_push`: record and members, welcomes, MLS backlog, new messages) and reads the
