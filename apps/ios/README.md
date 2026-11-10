@@ -44,7 +44,8 @@ make test        # unit tests
 
 Or open Xcode: `make generate && open TeamCraft.xcodeproj` (run `make core` once first).
 `scripts/build-xcframework.sh --debug` builds the dev profile (faster, large); `--device-only`
-skips the simulator slices (archives).
+skips the simulator slices (archives); `--simulator-arm64-only` leaves out the x86_64 simulator
+slice (CI on Apple silicon runners: one Rust build less).
 
 The XCFramework holds the static library of `teamcraft-ffi` for `aarch64-apple-ios`,
 `aarch64-apple-ios-sim` and `x86_64-apple-ios` (the two simulator slices merged with `lipo`). The Swift

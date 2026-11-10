@@ -68,7 +68,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Rust core as XCFramework and Swift bindings
         # Debug profile: much faster to build than release, and the tests never run the core.
-        run: apps/ios/scripts/build-xcframework.sh --debug
+        run: apps/ios/scripts/build-xcframework.sh --debug --simulator-arm64-only
       - name: Generate the Xcode project
         working-directory: apps/ios
         run: xcodegen generate
