@@ -290,6 +290,15 @@ fun ConversationScreen(
       val maybeTail = feed.reread()
       val tail = maybeTail?.messages ?: emptyList()
       val maybeExtras = viewModel.readChat { extras(conversationId, tail.map { it.id }) }
+      // The snapshot is read on the main read thread, behind the chat list and the actions: while
+      // the store was slow it came 20 s after the messages, and the chat stayed empty (1.0.29). When
+      // the kept one names every author, the messages show with it now.
+      val maybeKept = snapshot
+      if (maybeKept != null && tail.all { maybeKept.user(it.author) != null }) {
+        messages = tail
+        extras = maybeExtras ?: extras
+        Perf.end(PerfMeasure.CHANNEL_SWITCH, conversationId)
+      }
       val maybeSnapshot = viewModel.readChat { snapshot() }
       messages = tail
       Perf.end(PerfMeasure.CHANNEL_SWITCH, conversationId)
