@@ -99,7 +99,8 @@
     <item quantity="one">member</item>
     <item quantity="other">members</item>
   </plurals>
-  <string name="call_encryption_failed">Your device couldn\'t be added to the call\'s encryption, so you can\'t hear or be heard. Others in the call may not be able to verify this device. Hang up and call back from the conversation.</string>
+  <string name="call_encryption_failed">Your device couldn\'t be added to the call\'s encryption, so you can\'t hear or be heard. Others in the call may not be able to verify this device.</string>
+  <string name="call_encryption_retry">Try again</string>
   <plurals name="call_encryption_retry_in">
     <item quantity="one">You can call back in %d minute.</item>
     <item quantity="other">You can call back in %d minutes.</item>

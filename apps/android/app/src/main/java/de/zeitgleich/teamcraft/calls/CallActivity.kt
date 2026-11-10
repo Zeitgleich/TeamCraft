@@ -422,6 +422,7 @@ private fun CallScreen(calls: CallController, maybeState: CallStateInfo?) {
       },
       maybeNotetakerRefusal = maybeNotetakerRefusal,
       onHangUp = { calls.hangUp() },
+      onRetryEncryption = { calls.retryEncryption() },
     ),
     banner = {
       Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

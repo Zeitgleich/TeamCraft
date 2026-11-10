@@ -206,6 +206,8 @@ internal class CallUiActions(
   val onSpeaker: (Boolean) -> Unit,
   val maybeOnAddPeople: (() -> Unit)?,
   val onHangUp: () -> Unit,
+  /** "Try again" on the encryption failure banner: rejoins the call in place (#1624). */
+  val onRetryEncryption: () -> Unit = {},
   /** "Add notetaker" (e2ee.md §8.2): offered to whoever the policy lets ask it in. */
   val maybeOnAddNotetaker: (() -> Unit)? = null,
   /**
@@ -242,7 +244,7 @@ internal fun InCallContent(
       }
       Column(Modifier.weight(1f).padding(horizontal = 16.dp), verticalArrangement = Arrangement.Bottom) {
         StatusHint(ui.maybeState)
-        EncryptionFailureBanner(ui.maybeState, actions.onHangUp)
+        EncryptionFailureBanner(ui.maybeState, actions.onRetryEncryption, actions.onHangUp)
         banner()
       }
       AnimatedVisibility(
@@ -579,7 +581,7 @@ private fun StatusHint(maybeState: CallStateInfo?) {
  * hears why, how long until calling back may work (counted from when this showed), and can hang up.
  */
 @Composable
-private fun EncryptionFailureBanner(maybeState: CallStateInfo?, onHangUp: () -> Unit) {
+private fun EncryptionFailureBanner(maybeState: CallStateInfo?, onRetry: () -> Unit, onHangUp: () -> Unit) {
   val retryAfterSecs = maybeState?.maybeEncryptionRetryAfterSecs ?: return
   val shownAt = remember(retryAfterSecs) { SystemClock.elapsedRealtime() }
   var now by remember { mutableLongStateOf(shownAt) }
@@ -608,12 +610,23 @@ private fun EncryptionFailureBanner(maybeState: CallStateInfo?, onHangUp: () -> 
           style = MaterialTheme.typography.bodySmall,
         )
       }
-      TextButton(onClick = onHangUp, modifier = Modifier.align(Alignment.End)) {
-        Text(stringResource(R.string.call_hang_up), color = Color.White)
+      Row(Modifier.align(Alignment.End), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        TextButton(onClick = onHangUp) {
+          Text(stringResource(R.string.call_hang_up), color = Color.White)
+        }
+        // Disabled until the SFU's wait has passed; the line above says how long.
+        TextButton(onClick = onRetry, enabled = canRetryEncryption(minutesLeft)) {
+          Icon(Icons.Filled.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+          Spacer(Modifier.width(6.dp))
+          Text(stringResource(R.string.call_encryption_retry))
+        }
       }
     }
   }
 }
+
+/** "Try again" works once the wait has passed. */
+internal fun canRetryEncryption(minutesLeft: Int): Boolean = minutesLeft <= 0
 
 /** Whole minutes until calling back may work, rounded up; 0 once it may. */
 internal fun encryptionRetryMinutesLeft(retryAfterSecs: Long, shownAtMs: Long, nowMs: Long): Int {

@@ -1324,6 +1324,8 @@ fn lock(state: &Mutex<HubState>) -> MutexGuard<'_, HubState> {
 
 #[cfg(test)]
 mod tests {
+  use std::time::Duration;
+
   use teamcraft_proto::{CallId, Id, Snowflake, VideoPublicationId, VideoTrack};
 
   use super::*;
@@ -1469,6 +1471,55 @@ mod tests {
         CallEngineEvent::EndedByHost { by_user_id: user(1) }
       ),
       Some(CallEndReason::EndedByHost)
+    );
+  }
+
+  #[test]
+  fn an_encryption_failure_sets_the_retry_wait_until_the_call_is_secured() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    state.phase = CallPhase::Connected;
+    apply_to(
+      &mut state,
+      CallEngineEvent::EncryptionFailed {
+        retry_after: Duration::from_secs(300),
+      },
+    );
+    assert_eq!(state.maybe_encryption_retry_after_secs, Some(300));
+    assert!(!state.is_secured);
+    // A zero wait is "try again at once", still a failure.
+    apply_to(
+      &mut state,
+      CallEngineEvent::EncryptionFailed {
+        retry_after: Duration::ZERO,
+      },
+    );
+    assert_eq!(state.maybe_encryption_retry_after_secs, Some(0));
+    // Waits beyond u32 saturate instead of wrapping.
+    apply_to(
+      &mut state,
+      CallEngineEvent::EncryptionFailed {
+        retry_after: Duration::from_secs(u64::MAX),
+      },
+    );
+    assert_eq!(state.maybe_encryption_retry_after_secs, Some(u32::MAX));
+    apply_to(
+      &mut state,
+      CallEngineEvent::Secured {
+        epoch: 1,
+        privacy_code: "123".into(),
+      },
+    );
+    assert_eq!(state.maybe_encryption_retry_after_secs, None);
+    assert!(state.is_secured);
+  }
+
+  fn apply_to(state: &mut CallStateInfo, event: CallEngineEvent) {
+    apply_event(
+      state,
+      &mut BTreeSet::new(),
+      &mut BTreeMap::new(),
+      &mut BTreeSet::new(),
+      event,
     );
   }
 
