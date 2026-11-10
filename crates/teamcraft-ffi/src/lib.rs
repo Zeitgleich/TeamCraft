@@ -27,6 +27,7 @@ mod markup;
 mod media_viewer;
 mod notetaker;
 mod perf_jobs;
+mod picture_retries;
 mod reads;
 mod row_badge;
 mod server_entry;

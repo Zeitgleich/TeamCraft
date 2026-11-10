@@ -40,6 +40,7 @@ compose-material3 = { module = "androidx.compose.material3:material3" }
 compose-material-icons = { module = "androidx.compose.material:material-icons-core" }
 compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "coroutines" }
+kotlinx-coroutines-test = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-test", version.ref = "coroutines" }
 kotlinx-serialization-json = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "serialization" }
 appauth = { module = "net.openid:appauth", version.ref = "appauth" }
 firebase-messaging = { module = "com.google.firebase:firebase-messaging", version.ref = "firebaseMessaging" }

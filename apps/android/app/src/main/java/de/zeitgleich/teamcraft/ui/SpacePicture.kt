@@ -37,11 +37,13 @@ import uniffi.teamcraft_ffi.TeamCraft
  * whose picture was removed loses its files. Only spaces on screen ask for theirs ([SpacePicture]),
  * never all of a big workspace at once. The disk holds at most [MAX_FILES] pictures (the least
  * recently written go first), memory the last [MEMORY_ENTRIES] decoded ones. A failed download is
- * retried when the device comes back online; until then the screen shows no picture.
+ * asked for again in the next shared round ([PictureRetries]), at once when the device comes back
+ * online; until then the screen shows no picture.
  */
 class SpacePictureCache(
   private val context: Context,
   private val core: suspend () -> TeamCraft,
+  private val retries: PictureRetries,
 ) {
   private val inFlight = ConcurrentHashMap.newKeySet<String>()
   private val memory = LruCache<String, Bitmap>(MEMORY_ENTRIES)
@@ -86,6 +88,7 @@ class SpacePictureCache(
     val startedIn = synchronized(writeLock) { generation }
     return try {
       val bytes = core().spacePicture(spaceId, MAX_PICTURE_BYTES)
+      retries.succeeded()
       synchronized(writeLock) {
         when {
           generation != startedIn -> false
@@ -111,8 +114,10 @@ class SpacePictureCache(
     } catch (cancelled: CancellationException) {
       throw cancelled
     } catch (failure: Exception) {
-      // Offline, signed out or a storage error: the screen shows no picture, the next look retries.
+      // Offline, signed out or a storage error: the screen shows no picture. Trouble that passes is
+      // asked for again in the next shared round (issue #1616), the rest at the next look.
       Log.w(TAG, "space picture not fetched: ${failure.javaClass.simpleName}")
+      if (isTransient(failure)) retries.failed()
       false
     } finally {
       inFlight.remove(flight)
@@ -199,6 +204,7 @@ fun SpacePicture(spaceId: String, maybeVersion: String?, size: Dp = 24.dp, modif
   val pictures = graph.spacePictures
   val changes by pictures.changes.collectAsState()
   val isOnline by graph.network.isOnline.collectAsState()
+  val retryRound by graph.pictureRetries.round.collectAsState()
   val maybePicture by produceState<ImageBitmap?>(
     maybeVersion?.let { pictures.maybeDecoded(spaceId, it) }?.asImageBitmap(),
     spaceId,
@@ -207,7 +213,7 @@ fun SpacePicture(spaceId: String, maybeVersion: String?, size: Dp = 24.dp, modif
   ) {
     value = maybeVersion?.let { pictures.loadBitmap(spaceId, it) }?.asImageBitmap()
   }
-  LaunchedEffect(spaceId, maybeVersion, isOnline) {
+  LaunchedEffect(spaceId, maybeVersion, isOnline, retryRound) {
     when {
       maybeVersion == null -> pictures.forget(spaceId)
       isOnline -> pictures.ensure(spaceId, maybeVersion)
