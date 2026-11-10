@@ -70,6 +70,9 @@ fun <T> ChoiceButtonGroup(
           index == choices.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
           else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
         },
+        // Unselected buttons on the highest container: the default one is nearly the page's
+        // background in the light theme.
+        colors = ToggleButtonDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerHighest),
         modifier = buttonModifier.semantics { role = Role.RadioButton },
       ) {
         Text(labels[index], textAlign = TextAlign.Center)
