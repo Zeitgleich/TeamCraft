@@ -13,6 +13,7 @@ mod bridge;
 mod calls;
 mod channel_roles;
 mod color_theme;
+mod composer_format;
 mod crash_reports;
 mod creating;
 mod device_proofs;
@@ -47,6 +48,10 @@ pub use channel_roles::{
   ChannelMemberItem, ChannelMemberRole, ChannelMembersInfo, ChannelRolesReviewItem, ReviewedRolesOutcome,
   RoleKeyMarkItem, RoleReviewRefusalItem, RoleReviewRowItem, channel_roles_review_has_changed,
   channel_roles_review_has_new,
+};
+pub use composer_format::{
+  ComposerEdit, ComposerFormat, ComposerSpan, ComposerSpanKind, composer_active_formats,
+  composer_apply_format, composer_backspace, composer_enter, composer_style_spans,
 };
 pub use crash_reports::{CrashReportsConfig, crash_reports_config};
 pub use device_proofs::{
