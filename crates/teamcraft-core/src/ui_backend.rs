@@ -8,6 +8,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use teamcraft_client_api::actions::{
   BrowsableChannel, CategoryInfo, ChannelChanges, NewChannel, NewSpace, SpaceChanges, SpaceInvite,
@@ -67,6 +68,7 @@ use crate::store::{
   MessageMeta, MessageOrder, MessageSlot, StoreError, StoredMessage, Table, Unreadable, Written,
   read_together, write_group,
 };
+use crate::user_directory::{UserDirectory, UserMap};
 
 /// Rows read at a time when a list's anchor is looked for by its time ([`FeedAnchor`]).
 const ANCHOR_WALK_ROWS: usize = 64;
@@ -741,6 +743,8 @@ pub struct CoreChatBackend<S> {
   pub(crate) activity: RefCell<HashMap<ConversationId, crate::ui_activity::KeptActivity>>,
   /// The user's own messages per conversation, kept while it doesn't change (#1220).
   pub(crate) sent: RefCell<HashMap<ConversationId, crate::ui_drafts::KeptSent>>,
+  /// The decoded users, kept while the store's users don't change (#1682).
+  users: Arc<UserDirectory>,
   /// Each space's members as a set, kept while its stored member list doesn't change (#701).
   pub(crate) space_members_kept: RefCell<HashMap<SpaceId, crate::space_dms::KeptMembers>>,
   /// The Files view's page last read, kept while no message with files changes (#1509).
@@ -819,6 +823,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       mentions: RefCell::default(),
       activity: RefCell::default(),
       sent: RefCell::default(),
+      users: UserDirectory::new(),
       space_members_kept: RefCell::default(),
       files_page_kept: RefCell::default(),
       entry_tallies: RefCell::default(),
@@ -853,6 +858,14 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
   pub(crate) fn entry_need(&self) -> EntryNeed {
     self.entry_need
+  }
+
+  /// Shares the decoded users with the other read threads of the same account, so a lookup on
+  /// one thread uses what another one read (a chat opened from a notification on a cold start).
+  #[must_use]
+  pub fn with_user_directory(mut self, users: Arc<UserDirectory>) -> Self {
+    self.users = users;
+    self
   }
 
   /// Reads the progress of file transfers from the client ([`crate::Client::transfers`]).
@@ -938,9 +951,11 @@ impl<S: LocalStore> CoreChatBackend<S> {
     })
   }
 
-  pub(crate) fn summaries(&self) -> BTreeMap<UserId, UserSummary> {
-    let list: Vec<UserSummary> = self.read(records::list_json(&self.store, Table::Users));
-    list.into_iter().map(|user| (user.id, user)).collect()
+  /// The users this device knows, by ID: decoded once and kept until the store's users change.
+  pub(crate) fn summaries(&self) -> Arc<UserMap> {
+    self
+      .users
+      .users(&self.store, || records::list_json(&self.store, Table::Users))
   }
 
   /// The conversations of `spaces` and every direct message, in one pass over the store, in the
@@ -4947,6 +4962,152 @@ mod tests {
       ["Bob Example", "Carol Example"],
       "a former account names its old messages; an unknown one and people who wrote nothing are left out"
     );
+  }
+
+  /// The users are decoded once and kept (issue #1682): a lookup reads nothing while they stay,
+  /// and a change is seen by the next one, on every read thread of the account.
+  mod user_directory {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::store::TrackedStore;
+
+    #[test]
+    fn lookups_read_the_users_once_while_they_stay() {
+      let store = tracked();
+      put_user(&store, 1, "Alice Example");
+      put_user(&store, 2, "Bob Example");
+      let backend = backend_over(store.clone(), UserDirectory::new());
+
+      let first = backend.summaries();
+      assert_eq!(backend.me().display_name, "Alice Example");
+      assert_eq!(backend.user(id(2)).unwrap().display_name, "Bob Example");
+      // A write elsewhere doesn't move the users.
+      store.put(Table::Spaces, "1", b"{}").unwrap();
+
+      assert!(Arc::ptr_eq(&first, &backend.summaries()));
+    }
+
+    #[test]
+    fn a_rename_and_a_deactivation_are_seen_by_the_next_lookup() {
+      let store = tracked();
+      put_user(&store, 1, "Alice Example");
+      put_user(&store, 2, "Bob Example");
+      let backend = backend_over(store.clone(), UserDirectory::new());
+      assert_eq!(backend.users().len(), 2);
+
+      put_user(&store, 2, "Bob Renamed");
+      assert_eq!(backend.user(id(2)).unwrap().display_name, "Bob Renamed");
+
+      let mut former = summary(2, "Bob Renamed");
+      former.is_deactivated = true;
+      records::put_json(&store, Table::Users, "2", &former).unwrap();
+      assert_eq!(backend.users().len(), 1);
+      assert_eq!(backend.former_users().len(), 1);
+
+      store.delete(Table::Users, "2").unwrap();
+      assert!(backend.user(id(2)).is_none());
+    }
+
+    /// The cold start of #1678: the snapshot is read on one read thread and a chat opened from a
+    /// notification on the other. Sharing the directory, the second reads no user.
+    #[test]
+    fn read_threads_sharing_the_directory_decode_the_users_once() {
+      let store = tracked();
+      put_user(&store, 1, "Alice Example");
+      put_user(&store, 2, "Bob Example");
+      let users = UserDirectory::new();
+      let main = backend_over(store.sharing(store.inner().clone()), Arc::clone(&users));
+      let query = backend_over(store.sharing(store.inner().clone()), Arc::clone(&users));
+
+      let read_by_main = main.summaries();
+      let (me, authors) = query.me_and_known_users(&BTreeSet::from([id(2)]));
+
+      assert!(Arc::ptr_eq(&read_by_main, &query.summaries()));
+      assert_eq!(me.display_name, "Alice Example");
+      assert_eq!(authors[0].display_name, "Bob Example");
+
+      // A rename written by the engine is seen on both.
+      put_user(&store, 2, "Bob Renamed");
+      assert_eq!(main.user(id(2)).unwrap().display_name, "Bob Renamed");
+      assert_eq!(query.user(id(2)).unwrap().display_name, "Bob Renamed");
+    }
+
+    #[test]
+    fn a_directory_forgotten_at_sign_out_keeps_no_users() {
+      let store = tracked();
+      put_user(&store, 1, "Alice Example");
+      let users = UserDirectory::new();
+      let backend = backend_over(store.clone(), Arc::clone(&users));
+      let before = backend.summaries();
+
+      users.forget();
+
+      assert!(!Arc::ptr_eq(&before, &backend.summaries()));
+    }
+
+    /// Two threads look users up while the engine renames somebody over and over: once the
+    /// renames stop, every lookup shows the last name.
+    #[test]
+    fn concurrent_renames_end_with_the_last_name_everywhere() {
+      let store = tracked();
+      put_user(&store, 1, "Alice Example");
+      put_user(&store, 2, "Name 0");
+      let users = UserDirectory::new();
+      let renames = 200;
+      std::thread::scope(|scope| {
+        for _ in 0..2 {
+          let lane = store.sharing(store.inner().clone());
+          let users = Arc::clone(&users);
+          scope.spawn(move || {
+            let backend = backend_over(lane, users);
+            for _ in 0..renames {
+              assert!(backend.user(id(2)).is_some());
+            }
+          });
+        }
+        for index in 1..=renames {
+          put_user(&store, 2, &format!("Name {index}"));
+        }
+      });
+
+      for lane in [store.clone(), store.sharing(store.inner().clone())] {
+        let backend = backend_over(lane, Arc::clone(&users));
+        assert_eq!(
+          backend.user(id(2)).unwrap().display_name,
+          format!("Name {renames}")
+        );
+      }
+    }
+
+    fn tracked() -> TrackedStore<Arc<MemoryStore>> {
+      TrackedStore::new(Arc::new(MemoryStore::new()))
+    }
+
+    fn backend_over(
+      store: TrackedStore<Arc<MemoryStore>>,
+      users: Arc<UserDirectory>,
+    ) -> CoreChatBackend<TrackedStore<Arc<MemoryStore>>> {
+      CoreChatBackend::new(store, id(1), Box::new(ManualClock::new(0))).with_user_directory(users)
+    }
+
+    fn put_user(store: &impl LocalStore, raw: i64, name: &str) {
+      records::put_json(store, Table::Users, &raw.to_string(), &summary(raw, name)).unwrap();
+    }
+
+    fn summary(raw: i64, name: &str) -> UserSummary {
+      UserSummary {
+        id: id(raw),
+        maybe_username: None,
+        display_name: name.into(),
+        kind: teamcraft_proto::UserKind::Member,
+        maybe_email: None,
+        maybe_organization: None,
+        maybe_has_devices: None,
+        is_deactivated: false,
+        is_deleted: false,
+      }
+    }
   }
 
   #[test]

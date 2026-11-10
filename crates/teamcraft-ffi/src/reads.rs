@@ -35,6 +35,7 @@ use teamcraft_core::store::{read_together, write_group};
 use teamcraft_core::transfers::Transfers;
 use teamcraft_core::ui_backend::{CoreChatBackend, EntryNeed};
 use teamcraft_core::ui_snapshot::SnapshotCache;
+use teamcraft_core::user_directory::UserDirectory;
 use teamcraft_proto::{ConversationId, ThreadId, UserId};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
@@ -227,6 +228,9 @@ impl ReadQueue {
 
   /// The account the store holds: from now on the app can read. A new account starts over.
   pub(crate) fn know_account(&self, user: UserId, identity_fingerprint: String) {
+    // The read threads share the decoded users (#1682): a chat opened on the query lane right
+    // after a start uses what the snapshot read on the main lane, and the other way round.
+    let users = UserDirectory::new();
     self.post_all(move |reads| {
       let is_known = reads
         .maybe_account
@@ -239,7 +243,8 @@ impl ReadQueue {
       // The apps show no message count or last activity of the snapshot: their counts never read
       // history older than the read position (issue #1466).
       let backend = CoreChatBackend::new(reads.store.clone(), user, Box::new(SystemClock))
-        .with_entry_need(EntryNeed::Unread);
+        .with_entry_need(EntryNeed::Unread)
+        .with_user_directory(Arc::clone(&users));
       reads.maybe_account = Some(ReadAccount {
         backend,
         snapshots: SnapshotCache::new(u64::try_from(SystemClock.now_ms()).unwrap_or_default()),
