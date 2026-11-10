@@ -315,7 +315,7 @@ fn body(random: &mut u64, has_budget: bool) -> String {
   if has_budget {
     body.insert(3, "budget review".into());
   }
-  if next(random) % 20 == 0 {
+  if next(random).is_multiple_of(20) {
     body.push("https://example.com/page".into());
   }
   body.join(" ")
