@@ -61,8 +61,12 @@ mod reading {
       "object_storage",
       "push_gateway",
       "media_server",
+      "media_udp_ipv4",
+      "media_udp_ipv6",
+      "call_quality",
       "backup",
       "certificate",
+      "secret_expiry",
       "disk_space",
     ] {
       assert_eq!(status_of(&reply.body, check), "not_configured", "{check}");
@@ -391,7 +395,10 @@ mod restarting {
   /// A new monitor on the same database, as after a restart, with what was kept read back.
   async fn restart(app: &TestApp, seconds: i64) -> HealthMonitor {
     let monitor = HealthMonitor::new(
-      HealthConfig::default(),
+      HealthConfig {
+        disk_paths: Vec::new(),
+        ..HealthConfig::default()
+      },
       JobSchedules::default(),
       at_fixed(seconds),
     );

@@ -22,6 +22,7 @@ use time::OffsetDateTime;
 use tracing::warn;
 
 use crate::gateway::HubStats;
+use crate::health::{Probe, ProbeReading};
 use crate::push::ProviderHealth;
 use crate::state::AppState;
 
@@ -104,6 +105,8 @@ pub struct ServerMetrics {
   job_last_success: IntGaugeVec,
   dpop_requests: IntCounterVec,
   health_check_status: IntGaugeVec,
+  probe_up: IntGaugeVec,
+  probe_milliseconds: IntGaugeVec,
   /// One scrape at a time: the push counters are brought up to date by their difference.
   scrape: Mutex<()>,
 }
@@ -115,6 +118,7 @@ struct Snapshot {
   providers: Vec<(&'static str, ProviderHealth)>,
   dependencies: Vec<DependencyHealth>,
   health: Vec<HealthCheckResponse>,
+  probes: Vec<(Probe, ProbeReading)>,
 }
 
 impl Default for MetricsConfig {
@@ -252,6 +256,16 @@ impl ServerMetrics {
         "1 for the state the health check is in (System health in the console), else 0.",
         &["check", "state"],
       )?,
+      probe_up: metrics.int_gauge_vec(
+        "teamcraft_health_probe_up",
+        "1 when the server's last probe of the dependency got an answer, 0 when not; absent while not probed.",
+        &["probe"],
+      )?,
+      probe_milliseconds: metrics.int_gauge_vec(
+        "teamcraft_health_probe_milliseconds",
+        "How long the server's last answered probe of the dependency took.",
+        &["probe"],
+      )?,
       scrape: Mutex::new(()),
       metrics,
     };
@@ -340,6 +354,27 @@ impl ServerMetrics {
     for check in &snapshot.health {
       self.record_health_check(check);
     }
+    for (probe, reading) in &snapshot.probes {
+      self.record_probe(*probe, *reading);
+    }
+  }
+
+  /// A probe that doesn't run has no series: a 0 would read as "down".
+  fn record_probe(&self, probe: Probe, reading: ProbeReading) {
+    let label = [probe.label()];
+    match reading {
+      ProbeReading::Answered { latency, .. } => {
+        self.probe_up.with_label_values(&label).set(1);
+        let millis = i64::try_from(latency.as_millis()).unwrap_or(i64::MAX);
+        self.probe_milliseconds.with_label_values(&label).set(millis);
+      },
+      ProbeReading::Failed { .. } => self.probe_up.with_label_values(&label).set(0),
+      ProbeReading::NotConfigured | ProbeReading::Unavailable => {
+        // Ignored: the series may never have existed.
+        let _ = self.probe_up.remove_label_values(&label);
+        let _ = self.probe_milliseconds.remove_label_values(&label);
+      },
+    }
   }
 
   fn record_health_check(&self, check: &HealthCheckResponse) {
@@ -407,6 +442,10 @@ fn snapshot(state: &AppState) -> Snapshot {
       .collect(),
     dependencies: state.dependencies.health(),
     health: state.health.checks(),
+    probes: Probe::ALL
+      .iter()
+      .map(|probe| (*probe, state.health.probes().get(*probe)))
+      .collect(),
   }
 }
 
@@ -773,6 +812,18 @@ mod tests {
           ),
         ])
         .collect(),
+      probes: Probe::ALL
+        .iter()
+        .map(|probe| {
+          (
+            *probe,
+            ProbeReading::Answered {
+              latency: Duration::from_millis(12),
+              at: at(1_700_000_000),
+            },
+          )
+        })
+        .collect(),
     });
     metrics.on_database_check(Ok(stats(1, 1)), at(1_700_000_000));
     for path in SECRET_PATHS.into_iter().map(str::to_owned).chain(sample_paths()) {
@@ -795,6 +846,8 @@ mod tests {
         "teamcraft_gateway_resume_buffer_bytes",
         "teamcraft_gateway_sessions",
         "teamcraft_health_check_status",
+        "teamcraft_health_probe_milliseconds",
+        "teamcraft_health_probe_up",
         "teamcraft_http_request_duration_seconds",
         "teamcraft_http_requests_total",
         "teamcraft_job_last_success_timestamp_seconds",
@@ -861,6 +914,7 @@ mod tests {
           "check",
           BTreeSet::from([
             "backup",
+            "call_quality",
             "certificate",
             "database",
             "disk_space",
@@ -868,6 +922,8 @@ mod tests {
             "holiday_resync",
             "identity_provider",
             "media_server",
+            "media_udp_ipv4",
+            "media_udp_ipv6",
             "object_storage",
             "oidc_sync",
             "oidc_sync_brake",
@@ -875,6 +931,16 @@ mod tests {
             "push_gateway",
             "push_service",
             "retention",
+            "secret_expiry",
+          ]),
+        ),
+        (
+          "probe",
+          BTreeSet::from([
+            "media_udp_ipv4",
+            "media_udp_ipv6",
+            "object_storage",
+            "push_gateway",
           ]),
         ),
         (

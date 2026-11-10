@@ -382,7 +382,9 @@ async fn report_rosters(shared: Arc<Shared>) {
     if shared.rooms.is_going_away() {
       return;
     }
-    shared.reporter.roster(shared.roster());
+    let mut report = shared.roster();
+    report.maybe_quality = Some(shared.rooms.quality().take_window());
+    shared.reporter.roster(report);
   }
 }
 
@@ -391,6 +393,9 @@ impl Shared {
     SfuRosterReport {
       uptime_secs: self.started_at.elapsed().as_secs(),
       calls: self.rooms.roster(),
+      // Only the periodic report takes the window: a server reading the roster at its start
+      // must not empty it.
+      maybe_quality: None,
     }
   }
 }

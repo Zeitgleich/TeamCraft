@@ -615,11 +615,18 @@ impl AdminBackend for MockBackend {
     Some(AdminHealthResponse {
       checks: vec![
         check(HealthCheckId::Database, HealthCheckStatus::Ok, None),
-        check(HealthCheckId::ObjectStorage, HealthCheckStatus::Ok, None),
+        check(HealthCheckId::ObjectStorage, HealthCheckStatus::Ok, Some(18)),
         check(HealthCheckId::IdentityProvider, HealthCheckStatus::Ok, None),
         check(HealthCheckId::PushGateway, HealthCheckStatus::NotConfigured, None),
         check(HealthCheckId::PushService, HealthCheckStatus::Ok, None),
         check(HealthCheckId::MediaServer, HealthCheckStatus::Ok, Some(4)),
+        check(HealthCheckId::MediaUdpIpv4, HealthCheckStatus::Ok, Some(9)),
+        check(
+          HealthCheckId::MediaUdpIpv6,
+          HealthCheckStatus::NotConfigured,
+          None,
+        ),
+        check(HealthCheckId::CallQuality, HealthCheckStatus::Ok, Some(8)),
         check(HealthCheckId::OidcSync, HealthCheckStatus::Ok, Some(1_200)),
         check(HealthCheckId::OidcSyncBrake, HealthCheckStatus::Failing, Some(2)),
         check(HealthCheckId::Retention, HealthCheckStatus::NoData, None),
@@ -633,6 +640,7 @@ impl AdminBackend for MockBackend {
           ..check(HealthCheckId::Backup, HealthCheckStatus::Alert, Some(40 * hours))
         },
         check(HealthCheckId::Certificate, HealthCheckStatus::Ok, Some(52)),
+        check(HealthCheckId::SecretExpiry, HealthCheckStatus::Ok, Some(140)),
         check(HealthCheckId::DiskSpace, HealthCheckStatus::Ok, Some(41)),
         check(HealthCheckId::HolidayFeed, HealthCheckStatus::NotConfigured, None),
         check(

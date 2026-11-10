@@ -158,6 +158,8 @@ the start; only an IPv6 address that fails after another one worked is skipped (
 | `teamcraft_job_last_success_timestamp_seconds` | gauge     | `job`                     | server         | Unix time of the last success; 0: not since the start, or the job is switched off |
 | `teamcraft_dpop_requests_total`                | counter   | `outcome`                 | server         | Requests with an identity provider's token: `bound`, `unbound`, `refused`         |
 | `teamcraft_health_check_status`                | gauge     | `check`, `state`          | server         | 1 for the state a health check is in ("Health and alerts"), else 0                |
+| `teamcraft_health_probe_up`                    | gauge     | `probe`                   | server         | 1 when the server's last probe got an answer, 0 when not; absent while not probed |
+| `teamcraft_health_probe_milliseconds`          | gauge     | `probe`                   | server         | How long the last answered probe took                                             |
 | `teamcraft_sfu_rooms`                          | gauge     |                           | SFU            | Calls running                                                                     |
 | `teamcraft_sfu_participants`                   | gauge     |                           | SFU            | Devices in those calls, reconnecting ones included                                |
 | `teamcraft_sfu_fallback_connections`           | gauge     |                           | SFU            | Open connections on the WebSocket fallback, for networks that block UDP           |
@@ -183,6 +185,8 @@ no error texts.**
   its forwarded address.
 - `dependency`: `database`, `object_storage`, `identity_provider`, `push_gateway`, `sfu`, once in use.
   `state`: `ok`, `down`, `recovering`.
+- `probe`: `object_storage`, `push_gateway`, `media_udp_ipv4`, `media_udp_ipv6` (the server's own
+  probes, "Health and alerts").
 - `check`: the checks of "Health and alerts" below. `state` of a check: `ok`, `failing`, `alert`,
   `no_data`, `not_configured`; the values come from the last evaluation (every 30 seconds).
 - `job`: `database_check`, `email_digest`, `guest_expiry`, `holiday_resync`, `key_package_pruning`,
@@ -215,6 +219,12 @@ UDP to the SFU's port (`3478/udp`) got blocked: check the firewall before people
 can't tell why a client fell back (it only sees it arrive on the fallback), and
 `teamcraft_sfu_session_switches_total` counts those that reached QUIC after all.
 
+The server judges the same numbers without Prometheus (#1666): with each roster report (every 30 s)
+the SFU sends what happened since the last one, as counts that add up (loss samples per bucket of
+the histogram above, new sessions per transport). The health check `call_quality` sums the reports of
+the last `call_window_secs` and fails on a high loss or on nearly every session arriving on the
+fallback ("Health and alerts").
+
 ## Health and alerts
 
 The server watches a fixed list of checks and tells owners and admins inside the app when one
@@ -222,28 +232,33 @@ keeps failing (issue #213). Administration → **System health** shows the check
 Administration menu shows a count of open alerts. Names, states, times and one number per check:
 nothing from any conversation, no addresses, no error texts.
 
-| Check                   | Fails when                                                                      | Set up                                   |
-|-------------------------|---------------------------------------------------------------------------------|------------------------------------------|
-| `database`              | the database's breaker is down                                                  | always                                   |
-| `object_storage`        | the storage's breaker is down                                                   | with `[storage]`                         |
-| `identity_provider`     | the identity provider's breaker is down                                         | always                                   |
-| `push_gateway`          | the push gateway's breaker is down                                              | with a push gateway                      |
-| `push_service`          | the last attempt of a direct push service (APNs, FCM, Web Push) was refused     | with one of them                         |
-| `media_server`          | the SFU has not reported for 2 minutes                                          | with `[calls]` and SFU reports           |
-| `oidc_sync`             | the sync missed `[oidc.sync] stale_after_intervals` runs (default three)        | with the sync on                         |
-| `oidc_sync_brake`       | its safety brake holds deactivations back (admin.md §3.2.3)                     | with the sync on                         |
-| `retention`             | the job missed three runs (`[retention] interval_secs`)                         | with `[retention] enabled`               |
-| `partition_maintenance` | the job missed three runs (every 12 hours)                                      | always                                   |
-| `backup`                | the last backup is older than the limit (36 hours)                              | the deployment's heartbeat, see below    |
-| `certificate`           | the served certificate expires within the limit (14 days)                       | the deployment's heartbeat, see below    |
-| `disk_space`            | the disk is fuller than the limit (85 %)                                        | the deployment's heartbeat, see below    |
-| `holiday_feed`          | the holiday feed's copy is older than `holidays.feed_max_age_secs` (7 days), or no fetch worked yet | with `holidays.feed_url` (console)       |
-| `holiday_resync`        | the job that writes calendar events again when holidays change missed three weekly runs (docs/meetings.md, "Holidays") | with `[meetings]`                        |
+| Check                   | Fails when                                                                                                                                               | Set up                                |
+|-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------|
+| `database`              | the database's breaker is down                                                                                                                           | always                                |
+| `object_storage`        | the storage's breaker is down (probed every `storage_probe_secs`, 10 s)                                                                                  | with `[storage]`                      |
+| `identity_provider`     | the identity provider's breaker is down                                                                                                                  | always                                |
+| `push_gateway`          | the push gateway's breaker is down (probed every `probe_interval_secs`)                                                                                  | with a push gateway                   |
+| `push_service`          | the last attempt of a direct push service (APNs, FCM, Web Push) was refused                                                                              | with one of them                      |
+| `media_server`          | the SFU has not reported for 2 minutes                                                                                                                   | with `[calls]` and SFU reports        |
+| `media_udp_ipv4`        | the SFU's public UDP port gave no QUIC handshake to the server over IPv4                                                                                 | with `[calls]`, probes on             |
+| `media_udp_ipv6`        | the same over IPv6                                                                                                                                       | as above, and both sides have IPv6    |
+| `call_quality`          | the 95th percentile of the calls' downlink loss is above the limit (5 %), or more than the limit (80 %) of new sessions came over the WebSocket fallback | with `[calls]` and SFU reports        |
+| `oidc_sync`             | the sync missed `[oidc.sync] stale_after_intervals` runs (default three)                                                                                 | with the sync on                      |
+| `oidc_sync_brake`       | its safety brake holds deactivations back (admin.md §3.2.3)                                                                                              | with the sync on                      |
+| `retention`             | the job missed three runs (`[retention] interval_secs`)                                                                                                  | with `[retention] enabled`            |
+| `partition_maintenance` | the job missed three runs (every 12 hours)                                                                                                               | always                                |
+| `backup`                | the last backup is older than the limit (36 hours)                                                                                                       | the deployment's heartbeat, see below |
+| `certificate`           | the served certificate expires within the limit (14 days)                                                                                                | the deployment's heartbeat, see below |
+| `secret_expiry`         | a secret whose expiry the server can read expires within the limit (14 days)                                                                             | with FCM sent directly, or the sync   |
+| `disk_space`            | the fullest of `[health] disk_paths` and the deployment's report is fuller than the limit (85 %)                                                         | `disk_paths` (default `/`), see below |
+| `holiday_feed`          | the holiday feed's copy is older than `holidays.feed_max_age_secs` (7 days), or no fetch worked yet                                                      | with `holidays.feed_url` (console)    |
+| `holiday_resync`        | the job that writes calendar events again when holidays change missed three weekly runs (docs/meetings.md, "Holidays")                                   | with `[meetings]`                     |
 
 **When a failure becomes an alert.** A background task evaluates the checks every
 `[health] check_interval_secs` (30). It reads what the server keeps anyway (breakers, push results,
-when jobs last ran) and three small files: no database query and no call to a backend, so a slow
-dependency cannot slow it down. A failing check shows as *Failing*; it becomes an *Alert* only after
+when jobs last ran, the last result of each probe, the SFU's call figures), three small files and
+`statvfs` of the disk: no database query and no call to a backend, so a slow dependency cannot slow
+it down. The probes run in tasks of their own (below). A failing check shows as *Failing*; it becomes an *Alert* only after
 failing for the hold time **without a break** (default 10 minutes). It ends only after the check has
 been fine for the clear time (default 5 minutes). So:
 
@@ -299,19 +314,67 @@ Pruning runs with each write and at least every six hours: resolved alerts older
 
 **Settings** (Administration → Settings → Health alerts; the configuration file only names paths):
 
-| Setting                | Default  | Meaning                                                      |
-|------------------------|----------|--------------------------------------------------------------|
-| `is_enabled`           | on       | Off: the checks still show, nobody is told                   |
-| `hold_secs`            | 10 min   | How long a check must fail before it is an alert (1 min up)  |
-| `clear_secs`           | 5 min    | How long it must be fine before the alert ends (1 min up)    |
-| `backup_max_age_secs`  | 36 hours | The backup is too old after this (1 hour to 30 days)         |
-| `certificate_min_days` | 14       | Too close to expiry with fewer days (1 to 365)               |
-| `disk_max_percent`     | 85       | Too full above this (50 to 99)                               |
-| `is_email_enabled`     | on       | Also mail raised and resolved alerts to owners and admins    |
-| `history_days`         | 90       | Resolved alerts stay in the history this long (1 to 3650)    |
+| Setting                     | Default  | Meaning                                                      |
+|-----------------------------|----------|--------------------------------------------------------------|
+| `is_enabled`                | on       | Off: the checks still show, nobody is told                   |
+| `hold_secs`                 | 10 min   | How long a check must fail before it is an alert (1 min up)  |
+| `clear_secs`                | 5 min    | How long it must be fine before the alert ends (1 min up)    |
+| `backup_max_age_secs`       | 36 hours | The backup is too old after this (1 hour to 30 days)         |
+| `certificate_min_days`      | 14       | Too close to expiry with fewer days (1 to 365)               |
+| `disk_max_percent`          | 85       | Too full above this (50 to 99)                               |
+| `is_email_enabled`          | on       | Also mail raised and resolved alerts to owners and admins    |
+| `history_days`              | 90       | Resolved alerts stay in the history this long (1 to 3650)    |
+| `secret_min_days`           | 14       | A secret is too close to expiry with fewer days (1 to 365)   |
+| `is_probing_enabled`        | on       | The probes of the push gateway and of the SFU's UDP port     |
+| `probe_interval_secs`       | 60       | How often they run (10 to 3600)                              |
+| `probe_timeout_secs`        | 5        | No answer within this is a failure (1 to 60, ≤ the interval) |
+| `call_max_loss_percent`     | 5        | Calls go badly above this 95th-percentile loss (1 to 50)     |
+| `call_max_fallback_percent` | 80       | ... or with more new sessions on the fallback (10 to 100)    |
+| `call_window_secs`          | 5 min    | The calls are judged over this time (1 to 60 minutes)        |
 
-**What the deployment reports.** The server cannot see its backups, its certificate or the disk
-from inside its container. With `[health] heartbeat_dir = "/path"` it reads three files there at
+**The server's own probes** (#1647, #1666). Some dependencies are only seen through calls people
+happen to make: an instance where nobody uploads, needs a wake-up or calls for an hour could not
+tell that one is down. So the server asks them itself, each probe in a task of its own, bounded by
+`probe_timeout_secs`, keeping only its last result (answered or not, and milliseconds). Nothing on
+a request path waits for one, and a probe that fails only changes its check: it never stops or
+restarts anything.
+
+- **Object storage:** one `HEAD` of a key that doesn't exist every `[dependencies] storage_probe_secs`
+  (10 s), through the storage's breaker (see "Outages" above); "not found" is an answer.
+- **Push gateway:** `GET /v1/info` (no signature, nothing about devices) every
+  `probe_interval_secs`, through the gateway's breaker, so an outage opens it and the next answer
+  closes it again, as with pushes. While the breaker is open the probe waits for the breaker's own
+  retry time.
+- **The SFU's public UDP port:** a QUIC handshake to the address of `[calls] sfu_url`, once to its
+  first IPv4 and once to its first IPv6 address, each from a socket of that family. It asks for a
+  path that is not a call, so the SFU answers "not found" right after the handshake and keeps
+  nothing; no token, no join, nothing about anybody is sent. Any answer counts, also a certificate
+  the server doesn't trust (a self-signed SFU): what is checked is that UDP gets through. A family
+  the SFU has no address in, or the server has no route for (a container network without IPv6), shows
+  as not set up rather than failing. **Limit:** where the server and the SFU run on the same host,
+  the packets to the host's own public address don't leave it, so a firewall in front of the host
+  (a cloud provider's) is not crossed; the probe then shows that the SFU listens on its public
+  address and the host's own firewall lets UDP in. To see the provider's firewall, run the server
+  elsewhere or probe from outside as well.
+- **Secrets that expire:** the FCM service account key's certificate, which Google publishes for each
+  key and which ends when the key expires, is read twice a day (one public `GET` of the key file's
+  `client_x509_cert_url`, only from `https://www.googleapis.com/`); a key Google no longer lists counts
+  as expired. The identity provider's client secret of `[oidc] server_client` is read with each sync
+  run, where Keycloak's client secret rotation keeps it (`client.secret.expiration.time`). APNs keys
+  (`.p8`) and the push gateway key don't expire and are not counted.
+
+`teamcraft_health_probe_up` and `teamcraft_health_probe_milliseconds` show the probes' results for
+Prometheus; the checks show the milliseconds too. No address and no error text goes into either.
+
+**The disk.** The server measures the file systems of `[health] disk_paths` itself (`statvfs`,
+default `/`: in a container the image's file system, which usually lies on the host's main disk);
+list the data volumes mounted into its container there. The fullest of them counts, and so does the
+deployment's `disk_used_percent` below if it writes one. A measurement may take 2 seconds; a mount
+that hangs costs one thread until it answers, never one per evaluation. `disk_paths = []` measures
+nothing.
+
+**What the deployment reports.** The server cannot see its backups or its certificate from inside
+its container. With `[health] heartbeat_dir = "/path"` it reads three files there at
 every evaluation, each holding one number as text (a trailing newline and a decimal are fine):
 
 | File                    | Content                                                          | Written by the deployment                 |
@@ -320,7 +383,8 @@ every evaluation, each holding one number as text (a trailing newline and a deci
 | `certificate_not_after` | Unix time in seconds when the served certificate expires         | a probe of the public endpoint, daily     |
 | `disk_used_percent`     | Percent of the busiest data disk in use, 0 to 100                | a cron job, at least every 15 minutes     |
 
-Without the directory these three checks show as *Not set up*. With it, a file that is not there yet
+Without the directory `backup` and `certificate` show as *Not set up* (and `disk_space` relies on
+`disk_paths`). With it, a file that is not there yet
 shows as *No data yet* (the deployment should write `backup_last_success` once at install time and after
 every backup, so that a backup that never works is still found) and one that is not a number as well.
 A timestamp a little in the future (clock skew) counts as just now. The files are read-only for the

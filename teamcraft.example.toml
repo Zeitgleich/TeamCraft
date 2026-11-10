@@ -147,6 +147,12 @@ database_check_interval_secs = 60
 check_interval_secs = 30
 # After a start, checks that need history give no verdict for this long, so a restart raises nothing.
 startup_grace_secs = 300
+# The file systems the server measures itself for the disk check (statvfs), e.g. the data volumes
+# mounted into its container; the fullest counts, and so does disk_used_percent if the deployment
+# writes it. [] measures nothing.
+disk_paths = ["/"]
+# Probes of the push gateway and the SFU's UDP port, secret expiry and call quality are settings in
+# the admin console (Administration -> Settings -> Health alerts).
 
 # Rules only the server enforces (PLAN.md §12, §13). Seed of Administration → Settings → server rules;
 # guest rules there and in the signed policy win over guests_dm_start.

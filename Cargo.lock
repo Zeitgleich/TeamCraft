@@ -11276,6 +11276,7 @@ dependencies = [
  "p256",
  "rand_core 0.6.4",
  "reqwest",
+ "rustix 1.1.5",
  "rusty-s3",
  "secrecy",
  "serde",
@@ -11302,6 +11303,7 @@ dependencies = [
  "utoipa",
  "utoipa-axum",
  "wtransport",
+ "x509-parser",
  "zeroize",
 ]
 

@@ -19,6 +19,9 @@ use super::sender::{PushError, PushMessage, PushSender, PushTarget, Urgency, ret
 use crate::auth::BoxFuture;
 
 pub const FCM_BASE_URL: &str = "https://fcm.googleapis.com";
+/// Where Google publishes the certificates of a service account's keys; the only place the
+/// server reads a key's expiry from.
+pub const FCM_CERTIFICATES_URL_PREFIX: &str = "https://www.googleapis.com/robot/v1/metadata/x509/";
 const SCOPE: &str = "https://www.googleapis.com/auth/firebase.messaging";
 const ASSERTION_LIFETIME_SECS: u64 = 3600;
 /// An access token is renewed this long before Google says it expires.
@@ -37,6 +40,30 @@ pub struct ServiceAccount {
   pub private_key: SecretString,
   pub project_id: String,
   pub token_uri: String,
+  /// Which of the account's keys this is; its certificate says when it expires.
+  #[serde(rename = "private_key_id", default)]
+  pub maybe_private_key_id: Option<String>,
+  /// Where Google publishes the certificates of the account's keys (public, no credentials).
+  #[serde(rename = "client_x509_cert_url", default)]
+  pub maybe_client_x509_cert_url: Option<String>,
+}
+
+/// Where the expiry of a service account key can be read: the public certificate Google keeps for
+/// each of the account's keys, valid until the key expires (year 9999 for a key without expiry).
+/// Nothing secret: the key's ID and a public URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FcmKeyIdentity {
+  pub key_id: String,
+  pub certificates_url: String,
+}
+
+/// What the published certificates say about the key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FcmKeyExpiry {
+  /// Valid until then (Unix seconds).
+  ExpiresAt(i64),
+  /// Google no longer lists the key: it was deleted or disabled, and sending with it fails.
+  Gone,
 }
 
 impl ServiceAccount {
@@ -48,6 +75,41 @@ impl ServiceAccount {
       ))
     })
   }
+
+  /// Where this key's expiry can be read; `None` for a key file without the fields.
+  pub fn key_identity(&self) -> Option<FcmKeyIdentity> {
+    Some(FcmKeyIdentity {
+      key_id: self.maybe_private_key_id.clone()?,
+      certificates_url: self.maybe_client_x509_cert_url.clone()?,
+    })
+  }
+}
+
+impl FcmKeyIdentity {
+  /// Reads the key's certificate from Google and its `notAfter`. One small public GET.
+  pub async fn read_expiry(&self, http: &reqwest::Client) -> Result<FcmKeyExpiry, PushError> {
+    let certificates: std::collections::HashMap<String, String> = http
+      .get(&self.certificates_url)
+      .send()
+      .await
+      .and_then(reqwest::Response::error_for_status)
+      .map_err(|e| PushError::unavailable(e.without_url().to_string()))?
+      .json()
+      .await
+      .map_err(|e| PushError::unavailable(e.without_url().to_string()))?;
+    let Some(pem) = certificates.get(&self.key_id) else {
+      return Ok(FcmKeyExpiry::Gone);
+    };
+    certificate_not_after(pem).map(FcmKeyExpiry::ExpiresAt)
+  }
+}
+
+/// The `notAfter` of a PEM certificate, in Unix seconds.
+fn certificate_not_after(pem: &str) -> Result<i64, PushError> {
+  let invalid = || PushError::Invalid("the key's published certificate can't be read".into());
+  let (_, pem) = x509_parser::pem::parse_x509_pem(pem.as_bytes()).map_err(|_| invalid())?;
+  let certificate = pem.parse_x509().map_err(|_| invalid())?;
+  Ok(certificate.validity().not_after.timestamp())
 }
 
 pub struct FcmSettings {
@@ -272,6 +334,75 @@ fn classify(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// A certificate valid until 2030-01-01T00:00:00Z, as Google publishes one per key.
+  const KEY_CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----
+MIIBojCCAUegAwIBAgIUZcaaX8nqxhqFPCkDdJ2/C4dtjcQwCgYIKoZIzj0EAwIw
+JjEkMCIGA1UEAwwbc2VydmljZS1hY2NvdW50LmV4YW1wbGUuY29tMB4XDTI2MDEw
+MTAwMDAwMFoXDTMwMDEwMTAwMDAwMFowJjEkMCIGA1UEAwwbc2VydmljZS1hY2Nv
+dW50LmV4YW1wbGUuY29tMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEq1v0mIEj
+aVfVyjJPAom4deJ6maHhXieKxRf9ANrlMwuPtYEhMD3erOiX50Bb2nC+S6vKYenb
+K7YroUgCy/dby6NTMFEwHQYDVR0OBBYEFCdNhEoNwKQk93hDfroo6tusqeQhMB8G
+A1UdIwQYMBaAFCdNhEoNwKQk93hDfroo6tusqeQhMA8GA1UdEwEB/wQFMAMBAf8w
+CgYIKoZIzj0EAwIDSQAwRgIhAL13momC5nP19L4hQ60RH01mePdYre1PpKeLCPOx
+UvocAiEAoOay6e/8K1jcQbs1pvw2JLkZY79MM/ASWDazOIJBMi4=
+-----END CERTIFICATE-----
+";
+  const KEY_NOT_AFTER: i64 = 1_893_456_000;
+
+  mod key_expiry {
+    use super::*;
+
+    #[test]
+    fn the_expiry_is_the_certificates_not_after() {
+      assert_eq!(certificate_not_after(KEY_CERTIFICATE).unwrap(), KEY_NOT_AFTER);
+      assert!(certificate_not_after("not a certificate").is_err());
+    }
+
+    #[test]
+    fn a_key_file_without_the_fields_has_no_identity() {
+      let mut account = ServiceAccount::from_json(
+        r#"{"client_email":"a@example.com","private_key":"k","project_id":"p","token_uri":"https://oauth2.example.com/token"}"#,
+      )
+      .unwrap();
+      assert_eq!(account.key_identity(), None);
+      account.maybe_private_key_id = Some("key-1".into());
+      account.maybe_client_x509_cert_url = Some("https://certs.example.com/a".into());
+      assert_eq!(
+        account.key_identity(),
+        Some(FcmKeyIdentity {
+          key_id: "key-1".into(),
+          certificates_url: "https://certs.example.com/a".into(),
+        })
+      );
+    }
+
+    #[tokio::test]
+    async fn the_published_certificates_tell_the_expiry_or_that_the_key_is_gone() {
+      let app = axum::Router::new().route(
+        "/x509/account",
+        axum::routing::get(|| async { axum::Json(json!({ "key-1": KEY_CERTIFICATE })) }),
+      );
+      let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+      let address = listener.local_addr().unwrap();
+      tokio::spawn(async move { axum::serve(listener, app).await });
+      let http = reqwest::Client::new();
+      let key = |key_id: &str| FcmKeyIdentity {
+        key_id: key_id.into(),
+        certificates_url: format!("http://{address}/x509/account"),
+      };
+      assert_eq!(
+        key("key-1").read_expiry(&http).await.unwrap(),
+        FcmKeyExpiry::ExpiresAt(KEY_NOT_AFTER)
+      );
+      assert_eq!(key("key-2").read_expiry(&http).await.unwrap(), FcmKeyExpiry::Gone);
+      let missing = FcmKeyIdentity {
+        key_id: "key-1".into(),
+        certificates_url: format!("http://{address}/nothing"),
+      };
+      assert!(missing.read_expiry(&http).await.is_err());
+    }
+  }
 
   #[test]
   fn a_malformed_key_file_is_not_echoed() {

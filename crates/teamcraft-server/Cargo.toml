@@ -61,6 +61,17 @@ url.workspace = true
 utoipa.workspace = true
 utoipa-axum.workspace = true
 tracing-subscriber.workspace = true
+# The health probe of the SFU's public UDP port: a QUIC handshake from the outside (#1666). The
+# same vendored crate the SFU and the native clients use, already in the tree.
+wtransport = "0.7.2"
+# Reads when the FCM service account key's published certificate expires (#1647); already in the
+# tree (through wtransport), pure Rust.
+x509-parser = "0.18.1"
+
+[target.'cfg(unix)'.dependencies]
+# `statvfs` of the data directory for the disk check (#1647), with a safe API (the workspace
+# forbids `unsafe`); already in the tree through tokio, tempfile and others.
+rustix = { version = "1.1.5", default-features = false, features = ["std", "fs"] }
 
 [features]
 # Tests that need the dev Postgres (DATABASE_URL); they skip when it is not set.
@@ -85,4 +96,3 @@ teamcraft-crypto.workspace = true
 # The client core's DPoP proofs against the real server path (tests/suite/dpop_clients.rs).
 teamcraft-core = { path = "../teamcraft-core", default-features = false }
 rand_core.workspace = true
-wtransport = "0.7.2"
