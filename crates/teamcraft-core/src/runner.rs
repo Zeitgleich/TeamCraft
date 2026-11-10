@@ -15,9 +15,9 @@ use futures_util::future::{Either, select};
 use teamcraft_proto::{DeviceActivity, GatewayClientMessage, GatewayServerMessage};
 
 use crate::api::{ApiError, ServerApi};
-use crate::client::Client;
 use crate::client::files::BlobUpload;
 use crate::client::notify_sync_progress_during;
+use crate::client::{Client, SyncStopRequest};
 use crate::clock::{rewound, sleep_ms_until};
 use crate::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor, NetworkChanges};
 use crate::downloads::{Downloads, Finished};
@@ -86,6 +86,9 @@ pub struct RunnerSettings {
 #[derive(Clone, Debug)]
 pub struct RunnerHandle {
   sender: mpsc::UnboundedSender<RunnerCommand>,
+  /// Raised with [`RunnerCommand::Stop`], so a catch-up running now ends at its next conversation
+  /// instead of after all of them (issue #1656).
+  stop: SyncStopRequest,
 }
 
 /// What an app asks the runner to do.
@@ -145,6 +148,8 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
     if let Err(error) = client.read_backlogs_in_background() {
       tracing::warn!(%error, "backlogs left by an earlier run not found; the next catch-up reads them");
     }
+    let stop = SyncStopRequest::default();
+    client.share_stop_request(stop.clone());
     let (sender, commands) = mpsc::unbounded();
     let on_change: std::rc::Rc<dyn Fn()> = on_change.into();
     let mut connection = ConnectionSupervisor::new(settings.connection.clone(), ConnectionStatus::new());
@@ -170,7 +175,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
       drained: Vec::new(),
       caught_up: Vec::new(),
     };
-    (runner, RunnerHandle { sender })
+    (runner, RunnerHandle { sender, stop })
   }
 
   /// Reconnects at once whenever `changes` reports a network change or a wake-up.
@@ -220,6 +225,8 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
           if self.connection.is_connected() {
             self.client.note_gateway_closing();
           }
+          // Work on the returned client outside a loop is never cut short by this loop's stop.
+          self.client.share_stop_request(SyncStopRequest::default());
           return self.client;
         },
         Wake::Command(Some(command)) => self.on_command(command).await,
@@ -582,6 +589,9 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
 impl RunnerHandle {
   /// Queues a command; returns `false` if the runner has stopped.
   pub fn send(&self, command: RunnerCommand) -> bool {
+    if matches!(command, RunnerCommand::Stop) {
+      self.stop.request();
+    }
     self.sender.unbounded_send(command).is_ok()
   }
 }

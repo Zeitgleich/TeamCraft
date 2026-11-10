@@ -357,6 +357,12 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
         self.set_state(ConnectionState::SignInRequired { reason });
         None
       },
+      Err(CoreError::SyncStopping) => {
+        // The loop stops (issue #1656); the next one connects and syncs again.
+        tracing::info!("gateway connection left during its catch-up: the sync stops");
+        self.schedule_attempt(now, None, None);
+        None
+      },
       Err(error) => {
         tracing::warn!(%error, "gateway connection failed");
         let maybe_interception = match &error {
