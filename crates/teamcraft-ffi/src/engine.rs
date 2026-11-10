@@ -2760,7 +2760,10 @@ mod tests {
     /// Issue #1662 and GlitchTip TEAMCRAFT-1O: an app without a token right now (a refresh that
     /// failed offline) gets the store's preview at once, without a catch-up that would only fail
     /// and be logged as a sign-out.
-    #[tokio::test(start_paused = true)]
+    ///
+    /// Real time, not paused: the token is answered by the app's thread, outside the runtime, so a
+    /// paused clock sees an idle runtime while it waits and jumps past [`PUSH_FETCH_BUDGET`] first.
+    #[tokio::test]
     async fn a_push_without_a_token_shows_what_the_store_has_and_skips_the_catch_up() {
       in_engine_thread(async {
         let directory = TestDir::new("push-no-token");
