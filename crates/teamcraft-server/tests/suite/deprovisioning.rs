@@ -1134,3 +1134,155 @@ mod provider_events {
       .is_ok()
   }
 }
+
+/// Identity provider groups to spaces and public channels (docs/provisioning.md §5).
+mod group_mapping {
+  use super::*;
+  use common::fake_keycloak::fake_group;
+
+  const PATH: &str = "/admin/identity-provider/group-mappings";
+
+  #[tokio::test]
+  async fn members_of_a_mapped_group_join_once_per_rule_revision() {
+    let (app, provider) = rig!(vec![
+      fake_user("sub-carol", &["member"]),
+      fake_user("sub-dave", &["member"])
+    ]);
+    let carol_id = user_id(&app, &member("carol")).await;
+    let dave_id = user_id(&app, &member("dave")).await;
+    let space = create_space(&app, &admin(), "Engineering", "invite_only").await;
+    let general = create_channel(&app, &admin(), &space, "general", "public").await;
+    let standup = create_channel(&app, &admin(), &space, "standup", "public").await;
+    provider.set_groups(vec![fake_group("g-eng", "engineering", &["sub-carol"])]);
+
+    let reply = put(
+      &app,
+      json!([{"group_path": "engineering", "space_ids": [space], "channel_ids": [general]}]),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["mappings"][0]["group_path"], "/engineering");
+    sync_once(&app.state).await.unwrap();
+
+    assert!(is_space_member(&app, &space, &carol_id).await);
+    assert!(is_member(&app, &general, &carol_id).await);
+    assert!(
+      !is_member(&app, &standup, &carol_id).await,
+      "not named by the rule"
+    );
+    assert!(!is_space_member(&app, &space, &dave_id).await, "not in the group");
+    let audit = audit_of(&app, &carol_id).await;
+    let entry = audit
+      .iter()
+      .find(|entry| entry["action"] == "group_mapping_applied")
+      .expect("an audit entry");
+    assert_eq!(detail_of(entry)["source"], "oidc_sync");
+
+    // She leaves the channel by choice: the next run doesn't add her back.
+    leave(&app, &general, &carol_id).await;
+    sync_once(&app.state).await.unwrap();
+    assert!(!is_member(&app, &general, &carol_id).await);
+
+    // The rule changes: it applies once more.
+    let reply = put(
+      &app,
+      json!([{"group_path": "/engineering", "space_ids": [space], "channel_ids": [general, standup]}]),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    sync_once(&app.state).await.unwrap();
+    assert!(is_member(&app, &standup, &carol_id).await);
+    assert!(is_member(&app, &general, &carol_id).await);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_group_the_provider_lacks_is_skipped_and_the_others_apply() {
+    let (app, provider) = rig!(vec![fake_user("sub-carol", &["member"])]);
+    let carol_id = user_id(&app, &member("carol")).await;
+    let space = create_space(&app, &admin(), "Sales", "invite_only").await;
+    provider.set_groups(vec![fake_group("g-sales", "sales", &["sub-carol"])]);
+    let reply = put(
+      &app,
+      json!([
+        {"group_path": "/gone", "space_ids": [space]},
+        {"group_path": "/sales", "space_ids": [space]}
+      ]),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let report = sync_once(&app.state).await.unwrap();
+    assert_eq!(report.failed, 0);
+    assert!(is_space_member(&app, &space, &carol_id).await);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn bad_rules_are_refused_and_members_can_not_set_any() {
+    let (app, _provider) = rig!(vec![fake_user("sub-dave", &["member"])]);
+    let space = create_space(&app, &admin(), "Ops", "invite_only").await;
+    let other = create_space(&app, &admin(), "Other", "invite_only").await;
+    let private = create_channel(&app, &admin(), &space, "secret", "private").await;
+    let elsewhere = create_channel(&app, &admin(), &other, "general", "public").await;
+    for rules in [
+      json!([{"group_path": "/ops", "space_ids": []}]),
+      json!([{"group_path": "/", "space_ids": [space]}]),
+      json!([{"group_path": "/ops", "space_ids": ["123"]}]),
+      json!([{"group_path": "/ops", "space_ids": [space], "channel_ids": [private]}]),
+      json!([{"group_path": "/ops", "space_ids": [space], "channel_ids": [elsewhere]}]),
+      json!([{"group_path": "/ops", "space_ids": [space]}, {"group_path": "ops/", "space_ids": [space]}]),
+    ] {
+      let reply = put(&app, rules.clone()).await;
+      assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{rules}: {}", reply.body);
+    }
+    assert!(
+      app.get(&admin(), PATH).await.body["mappings"]
+        .as_array()
+        .unwrap()
+        .is_empty()
+    );
+    let dave = member("dave");
+    user_id(&app, &dave).await;
+    assert_eq!(app.get(&dave, PATH).await.status, StatusCode::FORBIDDEN);
+    let reply = app.put(&dave, PATH, json!({"mappings": []})).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    app.stop().await;
+  }
+
+  async fn put(app: &TestApp, rules: Value) -> teamcraft_server::testing::Reply {
+    app.put(&admin(), PATH, json!({ "mappings": rules })).await
+  }
+
+  async fn is_member(app: &TestApp, channel: &str, user: &str) -> bool {
+    teamcraft_db::testing::sqlx::query_scalar::<_, bool>(
+      "SELECT EXISTS (SELECT 1 FROM memberships WHERE conversation_id = $1::text::bigint AND user_id = $2::text::bigint)",
+    )
+    .bind(channel)
+    .bind(user)
+    .fetch_one(app.sql_pool())
+    .await
+    .unwrap()
+  }
+
+  async fn is_space_member(app: &TestApp, space: &str, user: &str) -> bool {
+    teamcraft_db::testing::sqlx::query_scalar::<_, bool>(
+      "SELECT EXISTS (SELECT 1 FROM space_members WHERE space_id = $1::text::bigint AND user_id = $2::text::bigint)",
+    )
+    .bind(space)
+    .bind(user)
+    .fetch_one(app.sql_pool())
+    .await
+    .unwrap()
+  }
+
+  async fn leave(app: &TestApp, channel: &str, user: &str) {
+    teamcraft_db::testing::sqlx::query(
+      "DELETE FROM memberships WHERE conversation_id = $1::text::bigint AND user_id = $2::text::bigint",
+    )
+    .bind(channel)
+    .bind(user)
+    .execute(app.sql_pool())
+    .await
+    .unwrap();
+  }
+}

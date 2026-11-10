@@ -48,6 +48,7 @@ const REFRESH_DELAY: Duration = Duration::from_millis(500);
 const HEALTH_PATH: &str = "/api/v1/admin/health";
 const OIDC_SYNC_PATH: &str = "/api/v1/admin/oidc-sync";
 const PROVIDER_EVENT_HOOK_PATH: &str = "/api/v1/admin/identity-provider/event-hook";
+const GROUP_MAPPINGS_PATH: &str = "/api/v1/admin/identity-provider/group-mappings";
 const LIST_LIMIT: u32 = 200;
 /// Guest memberships the overview shows at once; the filters narrow a longer list, and the console
 /// says that it is cut.
@@ -158,6 +159,9 @@ pub struct AdminData {
   /// again.
   webhooks: Option<teamcraft_proto::AdminWebhooksResponse>,
   has_asked_webhooks: bool,
+  /// Loaded when the settings page first asks for it.
+  group_mappings: Option<teamcraft_proto::GroupMappingsResponse>,
+  has_asked_group_mappings: bool,
   webhook_deliveries: HashMap<teamcraft_proto::WebhookId, teamcraft_proto::WebhookDeliveriesResponse>,
   /// Logs asked for since the last change: a refused one is not asked again on every render.
   asked_webhook_deliveries: HashSet<teamcraft_proto::WebhookId>,
@@ -735,6 +739,34 @@ impl AdminLive {
 
   pub fn last_settings_test(&self) -> Option<(SettingsTestKind, SettingsTestResponse)> {
     self.data.borrow().last_test.clone()
+  }
+
+  /// The group mapping; loaded once the settings page asks for it.
+  pub fn group_mappings(&self) -> Option<teamcraft_proto::GroupMappingsResponse> {
+    let maybe_mappings = self.data.borrow().group_mappings.clone();
+    // Once: a refusal must not ask again on every render.
+    let is_first_ask = !std::mem::replace(&mut self.data.borrow_mut().has_asked_group_mappings, true);
+    if maybe_mappings.is_none() && is_first_ask {
+      self.load(
+        "group_mappings".to_owned(),
+        GROUP_MAPPINGS_PATH.to_owned(),
+        Loaded::GroupMappings,
+      );
+    }
+    maybe_mappings
+  }
+
+  /// Replaces the group mapping; the answer is the stored list.
+  pub fn save_group_mappings(&self, rules: Vec<teamcraft_proto::GroupMappingRule>) {
+    let request = teamcraft_proto::PutGroupMappingsRequest { mappings: rules };
+    if let Ok(body) = serde_json::to_string(&request) {
+      self.send_stored(
+        ApiMethod::Put,
+        GROUP_MAPPINGS_PATH.to_owned(),
+        Some(body),
+        Stored::GroupMappings,
+      );
+    }
   }
 
   /// The webhooks; loaded once the console shows their page, and again after each change.
@@ -1658,6 +1690,10 @@ impl AdminLive {
         .fetch::<teamcraft_proto::AdminNotetakerResponse>(&path, &mut errors)
         .await
         .map(|settings| Box::new(move |data: &mut AdminData| data.notetaker = Some(settings)) as Store),
+      Loaded::GroupMappings => self
+        .fetch::<teamcraft_proto::GroupMappingsResponse>(&path, &mut errors)
+        .await
+        .map(|mappings| Box::new(move |data: &mut AdminData| data.group_mappings = Some(mappings)) as Store),
       Loaded::Webhooks => self
         .fetch::<teamcraft_proto::AdminWebhooksResponse>(&path, &mut errors)
         .await
@@ -2189,6 +2225,8 @@ pub enum Stored {
   OidcSyncPreview,
   /// A new secret for the identity provider's events, with the hook.
   ProviderEventSecret,
+  /// The group mapping as stored after a change.
+  GroupMappings,
   /// The identity provider's event hook was turned off (no body).
   ProviderEventHookGone,
   /// A webhook was changed: the list is read again; `has_secret` answers carry a new secret.
@@ -2206,6 +2244,7 @@ pub enum Loaded {
   Notetaker,
   Webhooks,
   WebhookDeliveries(teamcraft_proto::WebhookId),
+  GroupMappings,
 }
 
 /// Stores a loaded value in the cache.
@@ -2232,6 +2271,7 @@ impl Stored {
         data.provider_event_hook = Some(answer.hook.clone());
         data.revealed_provider_event_secret = Some(answer.secret.clone());
       },
+      Self::GroupMappings => data.group_mappings = Some(serde_json::from_str(body)?),
       Self::ProviderEventHookGone => {
         if let Some(hook) = data.provider_event_hook.as_mut() {
           hook.is_configured = false;

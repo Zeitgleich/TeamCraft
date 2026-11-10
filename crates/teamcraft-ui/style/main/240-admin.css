@@ -349,3 +349,11 @@
   justify-content: center;
   padding: 12px 0;
 }
+
+/* One rule of the identity provider group mapping (docs/provisioning.md §5). */
+.settings-row-group {
+  display: grid;
+  gap: var(--space-2);
+  padding-block: var(--space-3);
+  border-top: 1px solid var(--border);
+}

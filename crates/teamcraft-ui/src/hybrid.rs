@@ -2174,6 +2174,15 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
       admin.save_runtime_settings(section);
     }
   }
+  fn group_mappings(&self) -> Option<teamcraft_proto::GroupMappingsResponse> {
+    self.maybe_admin.as_ref().and_then(AdminLive::group_mappings)
+  }
+
+  fn save_group_mappings(&self, rules: Vec<teamcraft_proto::GroupMappingRule>) {
+    if let Some(admin) = self.maybe_admin.as_ref() {
+      admin.save_group_mappings(rules);
+    }
+  }
 
   fn reset_runtime_settings(&self, key: RuntimeSettingsKey) {
     if let Some(admin) = &self.maybe_admin {

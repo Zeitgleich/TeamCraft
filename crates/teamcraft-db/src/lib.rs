@@ -20,6 +20,7 @@ mod device_list;
 mod directory;
 mod email_digest;
 mod error;
+mod group_mapping;
 mod idempotency;
 mod identity;
 mod ids;
@@ -99,6 +100,7 @@ pub use directory::{
 };
 pub use email_digest::{DueDigest, StoredEmailDigest};
 pub use error::DbError;
+pub use group_mapping::{GroupMapping, NewGroupMapping};
 pub use idempotency::Created;
 pub use identity::{IdentityKey, IdentityKeyOutcome, InitialKeyBag, NewIdentityKey};
 pub use import::{ImportOutcome, NewImportedMessage};

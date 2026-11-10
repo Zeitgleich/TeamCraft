@@ -1454,6 +1454,13 @@ pub trait AdminBackend {
     None
   }
   fn save_runtime_settings(&self, _section: RuntimeSettingsSection) {}
+  /// Identity provider groups mapped to spaces and channels (docs/provisioning.md §5); loaded when
+  /// asked for the first time, `None` until then.
+  fn group_mappings(&self) -> Option<teamcraft_proto::GroupMappingsResponse> {
+    None
+  }
+  /// Replaces the group mapping.
+  fn save_group_mappings(&self, _rules: Vec<teamcraft_proto::GroupMappingRule>) {}
   fn reset_runtime_settings(&self, _key: RuntimeSettingsKey) {}
 
   /// The last administrative action that the server or the core refused, in words for the user.
