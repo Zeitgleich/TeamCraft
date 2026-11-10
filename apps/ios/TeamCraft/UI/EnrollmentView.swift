@@ -293,7 +293,8 @@ private struct RestoreFlowView: View {
         }
       }
       .disabled(model.isBusy)
-      if let failure, failure != .wrongPassphrase, !model.isBusy {
+      // A refused key belongs to the kit step, "recovery not set up" to the IT step.
+      if let failure, failure != .wrongPassphrase, failure != .orgRecoveryUnavailable, !model.isBusy {
         Text(failure.message).foregroundStyle(Theme.danger)
       }
     } actions: {

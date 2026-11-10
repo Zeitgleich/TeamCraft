@@ -362,7 +362,8 @@ private fun RestoreFlow(
           },
         ),
       )
-      maybeError?.takeUnless { isPassphraseRefusal(it) || isBusy }?.let { ErrorLine(it) }
+      // A refused key belongs to the kit step, "recovery not set up" to the IT step.
+      maybeError?.takeUnless { isPassphraseRefusal(it) || it == R.string.error_org_recovery_unavailable || isBusy }?.let { ErrorLine(it) }
     }
     RestoreStep.KIT -> UnlockWithKitStep(maybeError, isBusy, onUnlock, onBack = { step = RestoreStep.CHOOSE })
     RestoreStep.IT -> AskTheItDepartmentStep(maybeError, isBusy, onShowCode = onOrgRecovery, onBack = { step = RestoreStep.CHOOSE })
