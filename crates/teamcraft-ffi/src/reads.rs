@@ -19,7 +19,7 @@ use std::time::Instant;
 use teamcraft_client_api::backend::{ChatBackend as _, SearchBackend as _};
 use teamcraft_client_api::entry_rules::{channel_leave, space_leave};
 use teamcraft_client_api::model::{
-  FirstSyncStage, Message as MessageView, MessageKind, SpaceRole, SpaceRoster, is_pending,
+  FirstSyncStage, Message as MessageView, MessageKind, SpaceRole, SpaceRoster, TimestampMs, is_pending,
 };
 use teamcraft_client_api::search::parse_query;
 use teamcraft_core::TypingState;
@@ -554,7 +554,7 @@ impl Reads {
       .map(|item| {
         let maybe_last_activity_ms = parse_id::<ConversationId>(&item.id)
           .ok()
-          .and_then(|id| backend.last_activity(id));
+          .and_then(|id| last_readable_at(backend, id));
         ConversationItem {
           maybe_last_activity_ms,
           ..item
@@ -892,6 +892,31 @@ fn preview_message(backend: &CoreChatBackend<Store>, conversation: ConversationI
   }
 }
 
+/// When the newest message of `conversation` the user can read was sent, from the newest rows of
+/// its feed, as [`preview_message`] reads them. The share picker orders by it for every
+/// conversation at once: reading each one whole for it took the picker minutes on a phone with a
+/// long history, a spinner without end.
+fn last_readable_at(backend: &CoreChatBackend<Store>, conversation: ConversationId) -> Option<TimestampMs> {
+  let mut rows = PREVIEW_ROWS;
+  loop {
+    let tail = backend.feed_tail(conversation, None, rows);
+    let maybe_newest = newest_readable_at(&tail.messages);
+    if maybe_newest.is_some() || !tail.has_older || rows > PREVIEW_ROWS {
+      return maybe_newest;
+    }
+    rows *= PREVIEW_FURTHER;
+  }
+}
+
+/// When the newest of `rows` that isn't a placeholder (its key missing) was sent.
+fn newest_readable_at(rows: &[MessageView]) -> Option<TimestampMs> {
+  rows
+    .iter()
+    .filter(|message| message.maybe_placeholder.is_none())
+    .map(|message| message.sent_at)
+    .max()
+}
+
 /// The newest row that isn't a system line (a join, a rename), of rows oldest first.
 fn newest_written(rows: &[MessageView]) -> Option<&MessageView> {
   rows
@@ -904,7 +929,7 @@ fn newest_written(rows: &[MessageView]) -> Option<&MessageView> {
 mod tests {
   use std::sync::atomic::{AtomicUsize, Ordering};
 
-  use teamcraft_client_api::model::{SystemEvent, id_from_raw};
+  use teamcraft_client_api::model::{Placeholder, SystemEvent, id_from_raw};
   use teamcraft_core::store::{LaneStore, SealedSqliteStore, StaticKeySource, TrackedStore};
   use teamcraft_crypto::secret::SymmetricKey;
 
@@ -1137,6 +1162,25 @@ mod tests {
       newest_written(&rows).map(|message| message.id),
       Some(id_from_raw(3))
     );
+  }
+
+  #[test]
+  fn the_last_activity_skips_placeholders() {
+    let waiting = MessageView {
+      maybe_placeholder: Some(Placeholder::Waiting),
+      ..row(3, MessageKind::User)
+    };
+    let rows = [row(1, MessageKind::User), row(2, MessageKind::User), waiting];
+    assert_eq!(newest_readable_at(&rows), Some(2));
+  }
+
+  #[test]
+  fn placeholders_only_have_no_last_activity() {
+    let waiting = MessageView {
+      maybe_placeholder: Some(Placeholder::NotAvailable),
+      ..row(1, MessageKind::User)
+    };
+    assert_eq!(newest_readable_at(&[waiting]), None);
   }
 
   #[test]
