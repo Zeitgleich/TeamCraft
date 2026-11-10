@@ -21,6 +21,7 @@ mod directory;
 mod email_digest;
 mod error;
 mod group_mapping;
+mod health_alert;
 mod idempotency;
 mod identity;
 mod ids;
@@ -101,6 +102,10 @@ pub use directory::{
 pub use email_digest::{DueDigest, StoredEmailDigest};
 pub use error::DbError;
 pub use group_mapping::{GroupMapping, NewGroupMapping};
+pub use health_alert::{
+  HealthNoticeChannel, HealthNoticeKind, HealthStateChanges, HealthStateRetention, StoredHealthAlert,
+  StoredHealthNotice,
+};
 pub use idempotency::Created;
 pub use identity::{IdentityKey, IdentityKeyOutcome, InitialKeyBag, NewIdentityKey};
 pub use import::{ImportOutcome, NewImportedMessage};

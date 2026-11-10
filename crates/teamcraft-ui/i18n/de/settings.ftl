@@ -742,10 +742,12 @@ settings-f-backup_max_age_secs = Das letzte Backup ist zu alt nach
 settings-f-certificate_min_days = Das Zertifikat läuft zu bald ab bei weniger als
 settings-f-disk_max_percent = Die Platte ist zu voll über
 settings-f-is_email_enabled = Warnungen auch per E-Mail an Eigentümer und Admins senden
+settings-f-history_days = Beendete Warnungen im Verlauf behalten für
 settings-error-health-minutes = Gib 1 bis 1.440 Minuten ein.
 settings-error-health-backup-hours = Gib 1 bis 720 Stunden ein.
 settings-error-health-days = Gib 1 bis 365 Tage ein.
 settings-error-health-percent = Gib 50 bis 99 Prozent ein.
+settings-error-health-history-days = Gib 1 bis 3.650 Tage ein.
 
 settings-group-crash_reports = Absturzberichte
 settings-group-crash_reports-hint = Wohin die Apps Absturz- und Fehlerberichte senden: standardmäßig an den Dienst des Herausgebers (wer die Apps und diesen Server gebaut hat) oder an ein eigenes Backend mit Sentry-Protokoll, etwa GlitchTip. Berichte enthalten Stacktraces, Versionen und eine zufällige Installations-ID, niemals Nachrichten, Namen, Dateinamen oder Schlüssel. Jede Person kann sie in ihren Datenschutzeinstellungen abschalten.

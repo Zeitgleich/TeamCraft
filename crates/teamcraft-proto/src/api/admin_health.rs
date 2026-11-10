@@ -8,6 +8,9 @@ use utoipa::ToSchema;
 use crate::UnixMillis;
 use crate::wire_enum::wire_enum;
 
+/// A quarter of a year: long enough to see what came back, short enough to stay small.
+const DEFAULT_HISTORY_DAYS: u32 = 90;
+
 wire_enum! {
   /// One thing the server watches. A fixed list: the value is shown, never built from input.
   pub enum HealthCheckId {
@@ -133,6 +136,10 @@ pub struct HealthAlertSettings {
   /// when the server can send mail. Settings saved before this existed read as on.
   #[serde(default = "default_true")]
   pub is_email_enabled: bool,
+  /// Resolved alerts are kept in the history this many days (at most the last 500 alerts). Open
+  /// alerts are kept until they end. Settings saved before this existed read as the default.
+  #[serde(default = "default_history_days")]
+  pub history_days: u32,
 }
 
 impl Default for HealthAlertSettings {
@@ -146,12 +153,17 @@ impl Default for HealthAlertSettings {
       certificate_min_days: 14,
       disk_max_percent: 85,
       is_email_enabled: true,
+      history_days: DEFAULT_HISTORY_DAYS,
     }
   }
 }
 
 fn default_true() -> bool {
   true
+}
+
+fn default_history_days() -> u32 {
+  DEFAULT_HISTORY_DAYS
 }
 
 #[cfg(test)]
