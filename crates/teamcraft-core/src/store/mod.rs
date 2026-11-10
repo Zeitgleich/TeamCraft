@@ -1201,7 +1201,15 @@ impl GroupSite {
     Self { is_outermost }
   }
 
-  /// The site of the thread's open group, as `file:line`; `None` outside [`write_group`].
+  /// The site of the thread's open group, as `file:line`; `None` outside [`write_group`]. Read by
+  /// the SQLite stores only.
+  #[cfg_attr(
+    not(all(
+      any(feature = "sqlcipher", feature = "sealed-sqlite"),
+      not(target_arch = "wasm32")
+    )),
+    allow(dead_code)
+  )]
   pub(crate) fn current() -> Option<&'static std::panic::Location<'static>> {
     GROUP_SITE.with(std::cell::Cell::get)
   }
