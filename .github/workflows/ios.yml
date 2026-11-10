@@ -68,7 +68,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Rust core as XCFramework and Swift bindings
         # Debug profile: much faster to build than release, and the tests never run the core.
-        run: apps/ios/scripts/build-xcframework.sh --debug
+        run: apps/ios/scripts/build-xcframework.sh --debug --simulator-arm64-only
       - name: Generate the Xcode project
         working-directory: apps/ios
         run: xcodegen generate
@@ -91,7 +91,7 @@ jobs:
         run: >
           set -o pipefail &&
           xcodebuild test -project TeamCraft.xcodeproj -scheme TeamCraft
-          -destination "id=${{ steps.simulator.outputs.id }}"
+          -destination "id=${{ steps.simulator.outputs.id }},arch=arm64"
           -derivedDataPath build/DerivedData -resultBundlePath build/TeamCraft.xcresult
           CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""
           | tail -n 200
@@ -103,7 +103,7 @@ jobs:
         run: >
           set -o pipefail &&
           xcodebuild build -project TeamCraft.xcodeproj -scheme TeamCraft
-          -destination "id=${{ steps.simulator.outputs.id }}"
+          -destination "id=${{ steps.simulator.outputs.id }},arch=arm64"
           -derivedDataPath build/DerivedDataSwift6
           CODE_SIGNING_ALLOWED=NO CODE_SIGN_IDENTITY=""
           SWIFT_VERSION=6.0 SWIFT_STRICT_CONCURRENCY=complete

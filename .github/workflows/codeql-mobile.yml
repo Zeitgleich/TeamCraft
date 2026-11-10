@@ -141,7 +141,7 @@ jobs:
           save-if: false
       - name: Rust core as XCFramework and Swift bindings
         if: matrix.build == 'ios'
-        run: apps/ios/scripts/build-xcframework.sh --debug
+        run: apps/ios/scripts/build-xcframework.sh --debug --simulator-arm64-only
       - name: Generate the Xcode project
         if: matrix.build == 'ios'
         working-directory: apps/ios
