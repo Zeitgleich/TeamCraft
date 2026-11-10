@@ -357,11 +357,18 @@ impl Engine {
       request_public_key: Base64Bytes::new(key.public_key().as_bytes().to_vec()),
     })
     .map_err(|error| TeamCraftError::Core(error.to_string()))?;
-    let reply: RecoveryRequestResponse = from_json(
-      &self
-        .api_request("POST", "/org-recovery/requests", Some(body))
-        .await?,
-    )?;
+    // Switched off for this person (403), not set up or nothing to recover (409): say so plainly.
+    let reply: RecoveryRequestResponse = match self
+      .api()
+      .raw_request("POST", "/org-recovery/requests", Some(body))
+      .await
+    {
+      Ok(text) => from_json(&text)?,
+      Err(error) if error.is_forbidden() || error.is_conflict() => {
+        return Err(TeamCraftError::OrgRecoveryUnavailable);
+      },
+      Err(error) => return Err(teamcraft_core::CoreError::from(error).into()),
+    };
     let request = teamcraft_core::client::recovery_request(reply.id, me.id, key.public_key());
     let start = OrgRecoveryStart {
       request_id: reply.id.to_string(),
@@ -376,11 +383,12 @@ impl Engine {
   }
 
   /// Once the admins answered: opens the backup key, enrolls this device and switches the account
-  /// to a new backup key wrapped with `new_passphrase`. Fails with `RecoveryPending` before that.
+  /// to a new backup key wrapped with the key of a new recovery kit (`recovery_key`, e2ee.md
+  /// §6.5). Fails with `RecoveryPending` before that.
   pub(crate) async fn finish_org_recovery(
     &mut self,
     device_name: String,
-    new_passphrase: String,
+    recovery_key: teamcraft_crypto::recovery_key::RecoveryKey,
   ) -> Result<AccountState, TeamCraftError> {
     let pending = self
       .maybe_recovery
@@ -408,7 +416,7 @@ impl Engine {
           request,
           sealed_backup_key: result.sealed_backup_key.into_vec(),
         },
-        new_passphrase: teamcraft_crypto::secret::SecretBytes::new(new_passphrase.into_bytes()),
+        new_secret: teamcraft_core::NewBackupSecret::RecoveryKey(recovery_key),
       },
       argon2: teamcraft_crypto::backup::Argon2Settings::default(),
       maybe_attestation: None,

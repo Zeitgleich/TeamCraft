@@ -115,6 +115,7 @@ pub mod message_toolbar;
 pub mod modal;
 pub mod notification_prompt;
 pub mod offline_banner;
+pub mod onboarding;
 pub mod org_badge;
 pub mod page;
 pub mod pdf_pane;

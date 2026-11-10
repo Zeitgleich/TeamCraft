@@ -65,6 +65,10 @@ pub enum TeamCraftError {
   /// The admins haven't answered the recovery request yet; try again later.
   #[error("the recovery request isn't answered yet")]
   RecoveryPending,
+  /// The organization hasn't set up recovery, or it is off for this person (or there is nothing to
+  /// recover): the IT department can only reset the account.
+  #[error("organization recovery is not available")]
+  OrgRecoveryUnavailable,
   /// The engine thread is gone (the app closed the handle).
   #[error("the engine has stopped")]
   EngineStopped,

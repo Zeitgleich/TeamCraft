@@ -8,7 +8,7 @@ import UserNotifications
 /// Why something failed, as the screens show it (translated per case). An `Error`, so calls can
 /// answer `Result<_, AppFailure>` (the directory's invitations).
 enum AppFailure: Error, Equatable {
-  case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, callMoveRefused, callDeviceLimit, callEncryptionPending, generic
+  case network, signedOut, wrongPassphrase, storage, signInFailed, recoveryPending, orgRecoveryUnavailable, callMoveRefused, callDeviceLimit, callEncryptionPending, generic
   case tooLarge
   case backupOutOfMemory, backupTooNew, backupDamaged
   case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
@@ -28,6 +28,7 @@ enum AppFailure: Error, Equatable {
     case .backupDamaged: self = .backupDamaged
     case .storage: self = .storage
     case .recoveryPending: self = .recoveryPending
+    case .orgRecoveryUnavailable: self = .orgRecoveryUnavailable
     case .callMoveRefused: self = .callMoveRefused
     case .callDeviceLimit: self = .callDeviceLimit
     case .callEncryptionPending: self = .callEncryptionPending
@@ -52,6 +53,7 @@ enum AppFailure: Error, Equatable {
     case .storage: return "error_storage"
     case .signInFailed: return "sign_in_failed"
     case .recoveryPending: return "recovery_pending"
+    case .orgRecoveryUnavailable: return "error_org_recovery_unavailable"
     case .callMoveRefused: return "call_move_refused"
     case .callDeviceLimit: return "call_device_limit"
     case .callEncryptionPending: return "call_encryption_pending"
@@ -485,6 +487,21 @@ final class AppModel {
     }
   }
 
+  /// First device of the account: creates the keys with the recovery kit the user saved and
+  /// checked (e2ee.md §6.5.4, issue #1701). No passphrase to invent.
+  func enroll(recoveryKit kit: RecoveryKitDraft) async {
+    guard case .needsEnrollment(let hasExisting, _) = phase else { return }
+    await busy {
+      do {
+        let account = try await core().enrollWithRecoveryKit(deviceName: deviceName, kit: kit)
+        await adopt(account)
+      } catch {
+        AppLog.failure("enrollment with the recovery kit", error)
+        phase = .needsEnrollment(hasExistingIdentity: hasExisting, failure: AppFailure(CoreFailure(error)))
+      }
+    }
+  }
+
   /// New phone: waits in the relay so the other devices can be asked, then receives the keys
   /// (e2ee.md §5). A wait that ran out starts again by itself, saying why.
   func startLinking(notice maybeNotice: LocalizedStringKey? = nil) {
@@ -565,11 +582,13 @@ final class AppModel {
     }
   }
 
-  func finishRecovery(newPassphrase: String) async {
+  /// After the admins approved: enrolls with the recovered keys and protects the account with the
+  /// new recovery kit (the admins saw the old backup key, e2ee.md §6.3.1).
+  func finishRecovery(recoveryKit kit: RecoveryKitDraft) async {
     guard case .recovering(let progress, _) = phase else { return }
     await busy {
       do {
-        let account = try await core().finishOrgRecovery(deviceName: deviceName, newPassphrase: newPassphrase)
+        let account = try await core().finishOrgRecovery(deviceName: deviceName, kit: kit)
         await adopt(account)
       } catch {
         AppLog.failure("recovery through the organization", error)

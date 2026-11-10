@@ -9,15 +9,41 @@ use crate::common;
 use std::sync::Arc;
 
 use common::{PASSPHRASE, Peer, clock, options, settings, settle};
+use rand_core::OsRng;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::store::MemoryStore;
 use teamcraft_core::workspace::RosterRole;
-use teamcraft_core::{EnrollmentOptions, EnrollmentSecret, OrgRecoveryUnlock, PendingEnrollment};
+use teamcraft_core::{
+  EnrollmentOptions, EnrollmentSecret, NewBackupSecret, OrgRecoveryUnlock, PendingEnrollment,
+};
 use teamcraft_crypto::org_recovery::{RecoveryRequest, RecoveryRequestKey};
+use teamcraft_crypto::recovery_key::RecoveryKey;
 use teamcraft_crypto::secret::SecretBytes;
 
 #[tokio::test]
 async fn two_admins_recover_a_user_who_lost_everything() {
+  let new_passphrase = || SecretBytes::new(b"Dave's new passphrase".to_vec());
+  recover_through_two_admins(
+    NewBackupSecret::Passphrase(new_passphrase()),
+    EnrollmentSecret::Passphrase(new_passphrase()),
+  )
+  .await;
+}
+
+/// The phones (#1701): the recovered account is protected by a new recovery kit, not a passphrase.
+#[tokio::test]
+async fn a_recovered_user_gets_a_new_recovery_kit() {
+  let kit = RecoveryKey::generate(&mut OsRng);
+  recover_through_two_admins(
+    NewBackupSecret::RecoveryKey(kit.duplicate()),
+    EnrollmentSecret::RecoveryKey(kit),
+  )
+  .await;
+}
+
+/// Two admins recover Dave, who lost everything, with `new_secret` protecting his fresh backup key;
+/// afterwards the old passphrase opens nothing and `unlock_after` sets up another device.
+async fn recover_through_two_admins(new_secret: NewBackupSecret, unlock_after: EnrollmentSecret) {
   let server = FakeServer::new();
   let mut owner = Peer::enroll(&server, "Owner").await;
   let mut bob = Peer::enroll(&server, "Bob").await;
@@ -104,7 +130,7 @@ async fn two_admins_recover_a_user_who_lost_everything() {
         request,
         sealed_backup_key,
       },
-      new_passphrase: SecretBytes::new(b"Dave's new passphrase".to_vec()),
+      new_secret,
     },
     ..options(PASSPHRASE)
   };
@@ -142,7 +168,7 @@ async fn two_admins_recover_a_user_who_lost_everything() {
   assert_eq!(texts, vec!["before Dave lost his phone"]);
 
   // The admins saw the old backup key, so the account moved to a new one (security review B5):
-  // the old passphrase no longer opens the key bag, the new one does.
+  // the old passphrase no longer opens the key bag, the new secret does.
   assert_ne!(
     server.wrapped_backup_keys_of(dave.client.user_id()).unwrap(),
     wrapped
@@ -163,7 +189,10 @@ async fn two_admins_recover_a_user_who_lost_everything() {
       Arc::new(MemoryStore::new()),
       clock(),
       settings(),
-      options("Dave's new passphrase"),
+      EnrollmentOptions {
+        secret: unlock_after,
+        ..options(PASSPHRASE)
+      },
     )
     .await
     .unwrap();

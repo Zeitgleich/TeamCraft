@@ -94,7 +94,6 @@ pub mod picture_retries;
 pub mod prefs;
 pub mod preview;
 pub mod profiles;
-pub mod qr;
 pub mod raster;
 pub mod reactive;
 pub mod recovery_kit;

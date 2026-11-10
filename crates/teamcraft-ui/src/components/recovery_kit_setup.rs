@@ -1,6 +1,8 @@
 //! Making a recovery kit (e2ee.md §6.5.4): a fresh recovery key, its kit file to save, and a check
-//! that the user kept it before the key protects anything. Used at first sign-in and in Settings >
-//! Security & privacy; [`KitFilePicker`] also reads a saved kit back when recovering.
+//! that the user kept it before the key protects anything. The two steps ([`KitSaveStep`],
+//! [`KitCheckStep`]) are the guided first sign-in's (onboarding.rs) and, joined by
+//! [`RecoveryKitSetup`], Settings > Security & privacy's. [`KitFilePicker`] also reads a saved kit
+//! back when recovering.
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -10,18 +12,37 @@ use wasm_bindgen::JsCast;
 
 use crate::clock::{format_date, now_ms};
 use crate::components::icons::{Icon, IconName};
+use crate::form_errors::focus_first_invalid;
 use crate::i18n::{I18n, use_i18n};
 use crate::reactive::SetIfAlive;
 use crate::recovery_kit::{self, KitFile, KitTexts};
 
 /// Files the kit picker offers: the saved kit (HTML), or a text file with the key.
 const KIT_FILE_TYPES: &str = ".html,.htm,.txt,text/html,text/plain";
+/// The check step's form, so a refused check can focus its field (forms.md).
+const CHECK_FORM_ID: &str = "kit-check-form";
+const CHECK_FIELD_ERROR_ID: &str = "kit-confirm-group-error";
+
+/// The recovery key being made, kept in the page until it protects the account.
+pub type KitKey = StoredValue<RecoveryKey, LocalStorage>;
+
+/// Makes a fresh recovery key for [`KitSaveStep`] and [`KitCheckStep`].
+pub fn new_kit_key() -> KitKey {
+  StoredValue::new_local(RecoveryKey::generate(&mut OsRng))
+}
+
+/// The quieter button of a step's action row: "Back", "Cancel".
+#[derive(Clone, Copy)]
+pub struct SecondaryAction {
+  pub label: Signal<String>,
+  pub on_click: Callback<()>,
+}
 
 /// Where the user is in making the kit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Step {
   Save,
-  Confirm,
+  Check,
 }
 
 /// What a file opened at the check showed.
@@ -34,8 +55,8 @@ enum FileCheck {
   NoKey,
 }
 
-/// Shows a new recovery key with its kit to download, then asks for one group of it (or the saved
-/// file) before `on_confirmed` gets the key as text for the core.
+/// Settings: shows a new recovery key with its kit to download, then asks for one group of it (or
+/// the saved file) before `on_confirmed` gets the key as text for the core.
 #[component]
 pub fn RecoveryKitSetup(
   /// The account's name, printed in the kit.
@@ -45,34 +66,69 @@ pub fn RecoveryKitSetup(
   finish_label: Signal<String>,
   #[prop(into)] is_busy: Signal<bool>,
   on_confirmed: Callback<String>,
-  /// Leaves without a new kit (Settings); first sign-in has no way around it.
+  /// Leaves without a new kit.
   #[prop(optional)]
   maybe_on_cancel: Option<Callback<()>>,
 ) -> impl IntoView {
   let i18n = use_i18n();
-  let key = StoredValue::new_local(RecoveryKey::generate(&mut OsRng));
-  let groups: Vec<String> = key.with_value(|key| key.groups().to_vec());
-  let server = StoredValue::new(server_host());
+  let key = new_kit_key();
   let step = RwSignal::new(Step::Save);
-  let has_downloaded = RwSignal::new(false);
-  let has_download_failed = RwSignal::new(false);
-  // Not a secret: which group the user types back, so they look at their saved kit.
-  let group_index = StoredValue::new(OsRng.next_u32() as usize % RECOVERY_KEY_GROUPS);
-  let group_number = move || (group_index.get_value() + 1).to_string();
-  let typed = RwSignal::new(String::new());
-  let file_check = RwSignal::new(FileCheck::Unchecked);
-  let is_group_right = move || {
-    let typed = typed.get();
-    key.with_value(|key| recovery_kit::is_group(key, group_index.get_value(), &typed))
-  };
-  let is_confirmed = move || file_check.get() == FileCheck::Matches || is_group_right();
-  let is_group_wrong = move || {
-    let typed = typed.get();
-    typed.trim().chars().count() >= 4 && !is_group_right()
+  let account = StoredValue::new(account);
+  let cancel = maybe_on_cancel.map(|on_click| SecondaryAction {
+    label: Signal::derive(move || i18n.t("cancel")),
+    on_click,
+  });
+  let back = SecondaryAction {
+    label: Signal::derive(move || i18n.t("kit-confirm-back")),
+    on_click: Callback::new(move |()| step.set(Step::Save)),
   };
 
+  view! {
+    <div class="kit-setup">
+      {move || match step.get() {
+        Step::Save => view! {
+          <p>{move || i18n.t("kit-setup-intro")}</p>
+          <KitSaveStep
+            key=key
+            account=account.get_value()
+            on_continue=Callback::new(move |()| step.set(Step::Check))
+            maybe_secondary=cancel
+          />
+        }
+        .into_any(),
+        Step::Check => view! {
+          <p>{move || i18n.t("kit-confirm-intro-short")}</p>
+          <KitCheckStep
+            key=key
+            finish_label=finish_label
+            is_busy=is_busy
+            on_confirmed=on_confirmed
+            secondary=back
+          />
+        }
+        .into_any(),
+      }}
+    </div>
+  }
+}
+
+/// The key in large groups and **Download recovery kit**. Once downloaded, the main action moves
+/// on; a user who can't download writes the key down and moves on from the link below.
+#[component]
+pub fn KitSaveStep(
+  key: KitKey,
+  /// The account's name, printed in the kit.
+  account: String,
+  on_continue: Callback<()>,
+  #[prop(default = None)] maybe_secondary: Option<SecondaryAction>,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let groups: Vec<String> = key.with_value(|key| key.groups().to_vec());
+  let server = StoredValue::new(server_host());
   let account = StoredValue::new(account);
-  let save = move |_| {
+  let has_downloaded = RwSignal::new(false);
+  let has_download_failed = RwSignal::new(false);
+  let save = move || {
     let server = server.get_value();
     let texts = kit_texts(i18n, &account.get_value(), &server);
     let html = key.with_value(|key| recovery_kit::kit_html(key, &texts));
@@ -87,7 +143,92 @@ pub fn RecoveryKitSetup(
       },
     }
   };
-  // The file is read after an await: the setup may be gone by then.
+  let primary = move |_| {
+    if has_downloaded.get_untracked() {
+      on_continue.run(());
+    } else {
+      save();
+    }
+  };
+
+  view! {
+    <p class="kit-key" role="group" aria-label=move || i18n.t("kit-key-label") translate="no">
+      {groups.into_iter().map(|group| view! { <span class="kit-group">{group}</span> }).collect_view()}
+    </p>
+    <p class="kit-status muted-text small" role="status">
+      {move || if has_downloaded.get() {
+        view! {
+          <Icon name=IconName::Check />
+          <span>{move || i18n.t("kit-downloaded")}</span>
+          " "
+          <button type="button" class="link-btn" on:click=move |_| save()>{move || i18n.t("kit-download-again")}</button>
+        }
+        .into_any()
+      } else {
+        view! { <span>{move || i18n.t("kit-save-hint")}</span> }.into_any()
+      }}
+    </p>
+    <Show when=move || has_download_failed.get() fallback=|| ()>
+      <p class="field-error" role="alert">{move || i18n.t("kit-download-failed")}</p>
+    </Show>
+    <div class="step-actions">
+      <button type="button" class="btn btn-primary" data-autofocus on:click=primary>
+        {move || if has_downloaded.get() {
+          view! { <span>{move || i18n.t("onboarding-continue")}</span> }.into_any()
+        } else {
+          view! { <Icon name=IconName::Download /><span>{move || i18n.t("kit-download-short")}</span> }.into_any()
+        }}
+      </button>
+      {maybe_secondary.map(|secondary| view! {
+        <button type="button" class="btn" on:click=move |_| secondary.on_click.run(())>{move || secondary.label.get()}</button>
+      })}
+    </div>
+    <Show when=move || !has_downloaded.get() fallback=|| ()>
+      <p class="step-aside small">
+        <button type="button" class="link-btn" on:click=move |_| on_continue.run(())>{move || i18n.t("kit-wrote-down")}</button>
+      </p>
+    </Show>
+  }
+}
+
+/// Asks for one group of the key (chosen at random, the key is hidden here) or the saved file.
+/// A refused check says what to do at the field and focuses it (forms.md); a right one gives
+/// `on_confirmed` the key as text for the core.
+#[component]
+pub fn KitCheckStep(
+  key: KitKey,
+  #[prop(into)] finish_label: Signal<String>,
+  #[prop(into)] is_busy: Signal<bool>,
+  on_confirmed: Callback<String>,
+  secondary: SecondaryAction,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  // Not a secret: which group the user types back, so they look at their saved kit.
+  let group_index = StoredValue::new(OsRng.next_u32() as usize % RECOVERY_KEY_GROUPS);
+  let group_number = move || (group_index.get_value() + 1).to_string();
+  let typed = RwSignal::new(String::new());
+  let file_check = RwSignal::new(FileCheck::Unchecked);
+  let has_tried = RwSignal::new(false);
+  let is_group_right = move || {
+    let typed = typed.get();
+    key
+      .try_with_value(|key| recovery_kit::is_group(key, group_index.get_value(), &typed))
+      .unwrap_or(false)
+  };
+  let is_confirmed = move || file_check.get() == FileCheck::Matches || is_group_right();
+  // Wrong while typing (a full group that isn't it), or missing after a refused check.
+  let maybe_field_error = move || {
+    if is_confirmed() {
+      None
+    } else if typed.with(|typed| typed.trim().chars().count() >= 4) {
+      Some(i18n.t_with("kit-confirm-wrong", &[("number", &group_number())]))
+    } else if has_tried.get() {
+      Some(i18n.t_with("kit-check-missing", &[("number", &group_number())]))
+    } else {
+      None
+    }
+  };
+  let has_field_error = move || maybe_field_error().is_some();
   let on_file = Callback::new(move |read: KitFile| {
     let check = match read {
       KitFile::Key(found) if key.try_with_value(|key| key.is_same_key(&found)) == Some(true) => {
@@ -98,97 +239,65 @@ pub fn RecoveryKitSetup(
     };
     file_check.set_if_alive(check);
   });
-  let finish = move |_| {
-    if is_confirmed() && !is_busy.get_untracked() {
-      let text = key.with_value(|key| key.to_display().to_string());
+  let submit = move |ev: web_sys::SubmitEvent| {
+    ev.prevent_default();
+    if is_busy.get_untracked() {
+      return;
+    }
+    if !is_confirmed() {
+      has_tried.set(true);
+      focus_first_invalid(CHECK_FORM_ID);
+      return;
+    }
+    if let Some(text) = key.try_with_value(|key| key.to_display().to_string()) {
       on_confirmed.run(text);
     }
   };
 
   view! {
-    <div class="kit-setup">
-      <Show
-        when=move || step.get() == Step::Confirm
-        fallback=move || {
-          let groups = groups.clone();
-          view! {
-            <p>{move || i18n.t("kit-setup-intro")}</p>
-            <p class="kit-key" role="group" aria-label=move || i18n.t("kit-key-label") translate="no">
-              {groups.into_iter().map(|group| view! { <span class="kit-group">{group}</span> }).collect_view()}
-            </p>
-            <div class="kit-actions">
-              <button type="button" class="btn" class:btn-primary=move || !has_downloaded.get() on:click=save>
-                <Icon name=IconName::Download />
-                <span>{move || i18n.t("kit-download")}</span>
-              </button>
-              <button
-                type="button"
-                class="btn"
-                class:btn-primary=move || has_downloaded.get()
-                on:click=move |_| step.set(Step::Confirm)
-              >
-                {move || i18n.t("kit-saved-continue")}
-              </button>
-            </div>
-            <p class="muted-text small" role="status">
-              {move || if has_downloaded.get() { i18n.t("kit-downloaded") } else { i18n.t("kit-save-hint") }}
-            </p>
-            <Show when=move || has_download_failed.get() fallback=|| ()>
-              <p class="field-error" role="alert">{move || i18n.t("kit-download-failed")}</p>
-            </Show>
-            {maybe_on_cancel.map(|cancel| view! {
-              <div class="kit-actions">
-                <button type="button" class="btn btn-small" on:click=move |_| cancel.run(())>{move || i18n.t("cancel")}</button>
-              </div>
-            })}
-          }
-        }
-      >
-        <p>{move || i18n.t_with("kit-confirm-intro", &[("number", &group_number())])}</p>
-        <div class="field">
-          <label for="kit-confirm-group">{move || i18n.t_with("kit-confirm-group", &[("number", &group_number())])}</label>
-          <input
-            id="kit-confirm-group"
-            class="input kit-group-input"
-            autocomplete="off"
-            autocapitalize="characters"
-            spellcheck="false"
-            maxlength="6"
-            aria-invalid=move || is_group_wrong().then_some("true")
-            aria-describedby=move || is_group_wrong().then_some("kit-confirm-group-error")
-            prop:value=move || typed.get()
-            on:input=move |ev| typed.set(event_target_value(&ev))
-          />
-          <Show when=is_group_wrong fallback=|| ()>
-            <p id="kit-confirm-group-error" class="field-error" role="alert">{move || i18n.t_with("kit-confirm-wrong", &[("number", &group_number())])}</p>
+    <form id=CHECK_FORM_ID class="kit-check" novalidate on:submit=submit>
+      <div class="field">
+        <label for="kit-confirm-group">{move || i18n.t_with("kit-confirm-group", &[("number", &group_number())])}</label>
+        <input
+          id="kit-confirm-group"
+          class="input kit-group-input"
+          autocomplete="off"
+          autocapitalize="characters"
+          spellcheck="false"
+          maxlength="6"
+          data-autofocus
+          aria-invalid=move || has_field_error().then_some("true")
+          aria-describedby=move || has_field_error().then_some(CHECK_FIELD_ERROR_ID)
+          prop:value=move || typed.get()
+          on:input=move |ev| typed.set(event_target_value(&ev))
+        />
+        {move || maybe_field_error().map(|message| view! {
+          <p id=CHECK_FIELD_ERROR_ID class="field-error" role="alert">{message}</p>
+        })}
+        <Show when=is_group_right fallback=|| ()>
+          <p class="ok-text small" role="status">{move || i18n.t("kit-check-group-ok")}</p>
+        </Show>
+      </div>
+      <div class="kit-or">
+        <span class="muted-text small">{move || i18n.t("kit-check-or")}</span>
+        <KitFilePicker label=Signal::derive(move || i18n.t("kit-open")) on_read=on_file />
+      </div>
+      {move || match file_check.get() {
+        FileCheck::Unchecked => ().into_any(),
+        FileCheck::Matches => view! { <p class="ok-text small" role="status">{move || i18n.t("kit-confirm-file-ok")}</p> }.into_any(),
+        FileCheck::OtherKey => view! { <p class="field-error" role="alert">{move || i18n.t("kit-confirm-file-other")}</p> }.into_any(),
+        FileCheck::NoKey => view! { <p class="field-error" role="alert">{move || i18n.t("kit-file-no-key")}</p> }.into_any(),
+      }}
+      <div class="step-actions">
+        <button type="submit" class="btn btn-primary" aria-busy=move || is_busy.get().then_some("true")>
+          <Show when=move || is_busy.get() fallback=|| ()>
+            <span class="spinner" aria-hidden="true"></span>
           </Show>
-        </div>
-        <div class="kit-actions">
-          <KitFilePicker label=Signal::derive(move || i18n.t("kit-open")) on_read=on_file />
-        </div>
-        {move || match file_check.get() {
-          FileCheck::Unchecked => ().into_any(),
-          FileCheck::Matches => view! { <p class="ok-text small" role="status">{move || i18n.t("kit-confirm-file-ok")}</p> }.into_any(),
-          FileCheck::OtherKey => view! { <p class="field-error" role="alert">{move || i18n.t("kit-confirm-file-other")}</p> }.into_any(),
-          FileCheck::NoKey => view! { <p class="field-error" role="alert">{move || i18n.t("kit-file-no-key")}</p> }.into_any(),
-        }}
-        <div class="kit-actions">
-          <button
-            type="button"
-            class="btn btn-primary"
-            prop:disabled=move || !is_confirmed() || is_busy.get()
-            aria-busy=move || is_busy.get().then_some("true")
-            on:click=finish
-          >
-            <Show when=move || is_busy.get() fallback=|| ()>
-              <span class="spinner" aria-hidden="true"></span>
-            </Show>
-            {move || finish_label.get()}
-          </button>
-          <button type="button" class="btn" on:click=move |_| step.set(Step::Save)>{move || i18n.t("kit-confirm-back")}</button>
-        </div>
-      </Show>
-    </div>
+          {move || finish_label.get()}
+        </button>
+        <button type="button" class="btn" on:click=move |_| secondary.on_click.run(())>{move || secondary.label.get()}</button>
+      </div>
+    </form>
   }
 }
 
