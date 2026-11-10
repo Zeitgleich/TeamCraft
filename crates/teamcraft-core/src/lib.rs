@@ -54,6 +54,8 @@ pub mod row_badge;
 pub mod runner;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod search;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod search_index;
 pub mod search_scope;
 pub mod store;
 #[cfg(not(target_arch = "wasm32"))]

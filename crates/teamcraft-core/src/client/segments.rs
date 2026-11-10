@@ -24,6 +24,12 @@ const BACKFILL_DONE: &str = "segment_announcements/done";
 const BACKFILL_PREFIX: &str = "segment_announcements/scanned/";
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// Indexes what waits for the local search index, up to `budget` messages, and saves it
+  /// ([`crate::search_index`], issue #154). Local work only; the upkeep runs it on every tick.
+  pub fn index_search_step(&mut self, budget: usize) -> Result<crate::search_index::IndexStep, CoreError> {
+    self.search_indexer.step(&self.store, budget)
+  }
+
   /// Publishes the segment of every closed month that has no published segment yet. Returns how
   /// many were published. If two members publish the same month, readers use the first one.
   pub async fn publish_index_segments(&mut self) -> Result<usize, CoreError> {

@@ -253,6 +253,8 @@ impl PendingEnrollment {
       maybe_last_heard_ms: None,
       is_checking_as_before_v1_0_9: false,
       is_imported_history_paged: false,
+      #[cfg(not(target_arch = "wasm32"))]
+      search_indexer: Box::default(),
     };
     client.persist_sync()?;
     client.store_wrapped_keys_blob(&wrapped_keys)?;

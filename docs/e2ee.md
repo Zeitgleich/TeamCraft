@@ -4930,7 +4930,7 @@ Add it to meeting chats and to the channels where it is used, not everywhere.
 - Android: plain SQLite with records sealed like the browser store (§9.1), because SQLCipher needs
   a libcrypto the NDK doesn't ship. The database key is random, wrapped by an AES-GCM key in the
   Android Keystore (hardware-backed where available); see §9.2.
-- Decrypted search index (`tantivy`) also stored encrypted.
+- Decrypted search index (`tantivy`) stored in the same store, so encrypted with it (§10.1).
 - Attachments cached encrypted.
 - Pictures shown again and again (avatars, space and channel pictures, inline renditions of image
   attachments) are kept in a persistent media cache, sealed (§9.6).
@@ -5751,8 +5751,30 @@ Implemented (`teamcraft-core::search`, first version):
 - A segment is a tantivy index (English and German stemming, ASCII folding) exported as a bundle of
   its files. The client publishes closed months it has messages for; when two clients publish the
   same month, readers use the earliest announcement.
-- The local index is built in memory from the encrypted store when searching and never written to
-  disk. The browser has no tantivy (it doesn't target wasm32) and scans the store instead.
+- The local index (`teamcraft-core::search_index`, issue #154) is a tantivy index of the messages
+  this device decrypted, kept in the local store itself: its files are records of the
+  `search_index` table, cut into chunks of 512 KiB, so they are encrypted exactly like the store
+  (SQLCipher on the desktop, sealed records on the phones, §9) and never written anywhere else.
+  It holds the stemmed words (no positions, no stored text) and what a search filters on
+  (conversation, sender, time, file/link/thread); hits are shown from the decrypted messages, as
+  before. Nothing of it leaves the device.
+- Updates: every write of a text or file message, or of one that turns `Deleted` or is removed,
+  writes a record `conversation/message` into the `search_queue` table in the same group of writes
+  as the message; a conversation whose messages all go writes `conversation`. The upkeep's tick
+  indexes a bounded batch of them (5,000 messages) with what the store holds *now*, and saves the
+  index's new files and drops the records it handled in one group of writes. A record is only
+  dropped if nobody wrote it again meanwhile (its value is a nonce), so an edit during a step is
+  indexed by the next one. Handling a record is idempotent and order-independent: a crash at any
+  point loses nothing.
+- A search reads the saved index for everything except what waits in the queue and indexes what
+  waits in memory, so it finds what an index of the whole store would find, whether or not the
+  indexer caught up. Of the local matches the 2,000 newest are candidates (before: the 2,000 best
+  scored).
+- A store from before the index (or one whose index is damaged or of another format) starts over:
+  the indexer queues every conversation, and searches read those from the store until they are
+  indexed.
+- The browser has no tantivy (it doesn't target wasm32) and scans the store instead; it writes no
+  queue.
 - Finding segments: when a device stores a segment announcement (received, or its own on
   publishing), it also records the announced segment under `conversation/month` in the encrypted
   store's `segment_announcements` table, in the same group of writes as the message; of two

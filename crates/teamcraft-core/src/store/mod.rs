@@ -164,6 +164,12 @@ pub enum Table {
   /// (`crate::entry_tally`). Derived: checked against [`LocalStore::feed_version`], so a lost or
   /// stale record only means counting again.
   EntryTallies,
+  /// The local search index's files in chunks and its manifest (`crate::search_index`, issue #154):
+  /// derived from the messages, and built again from them when it is lost.
+  SearchIndex,
+  /// Messages (`conversation/message`) and conversations (`conversation`) the local search index
+  /// has to look at again, written with the message (`crate::search_index`). Native only.
+  SearchQueue,
 }
 
 /// A decrypted (or own, not yet sent) message, or a line this device derived itself: from a
@@ -1747,7 +1753,7 @@ pub fn pick_attached(
 
 impl Table {
   /// Every table; a new variant goes here too (stores that load by name skip unknown tables).
-  pub const ALL: [Self; 37] = [
+  pub const ALL: [Self; 39] = [
     Self::Account,
     Self::Spaces,
     Self::Conversations,
@@ -1785,6 +1791,8 @@ impl Table {
     Self::AnnouncedPresence,
     Self::Downloads,
     Self::EntryTallies,
+    Self::SearchIndex,
+    Self::SearchQueue,
   ];
 
   /// The table with this [`Self::name`], if this version knows it.
@@ -1832,6 +1840,8 @@ impl Table {
       Self::AnnouncedPresence => "announced_presence",
       Self::Downloads => "downloads",
       Self::EntryTallies => "entry_tallies",
+      Self::SearchIndex => "search_index",
+      Self::SearchQueue => "search_queue",
     }
   }
 }

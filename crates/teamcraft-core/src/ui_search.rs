@@ -39,7 +39,13 @@ struct SavedSearchRecord {
 struct HitContext {
   conversations: HashMap<ConversationId, Conversation>,
   space_names: HashMap<SpaceId, String>,
-  messages: HashMap<ConversationId, Vec<StoredMessage>>,
+  maybe_importer: Option<teamcraft_client_api::model::UserId>,
+}
+
+/// A message that passed the search's filters, before it is shown.
+struct Passed<'a> {
+  stored: &'a StoredMessage,
+  sent_at: i64,
 }
 
 /// Search state kept between calls: imported segments stay open.
@@ -54,18 +60,18 @@ impl<S: LocalStore> SearchBackend for CoreChatBackend<S> {
     if query.is_empty() {
       return SearchResults::default();
     }
-    let mut context = self.hit_context();
+    let context = self.hit_context();
     let scope = conversation_scope(query, &context);
     let candidates = self.term_candidates(query, &scope);
-    let mut hits: Vec<SearchHit> = candidates
+    let mut passed: Vec<Passed<'_>> = candidates
       .iter()
-      .filter_map(|stored| self.to_hit(stored, query, &mut context))
+      .filter_map(|stored| self.passes(stored, query, &context))
       .collect();
-    hits.sort_by_key(|hit| std::cmp::Reverse(hit.message.sent_at));
-    let total = hits.len();
-    hits.truncate(MAX_HITS);
+    passed.sort_by_key(|hit| std::cmp::Reverse(hit.sent_at));
+    let total = passed.len();
+    passed.truncate(MAX_HITS);
     SearchResults {
-      hits,
+      hits: self.shown_hits(&passed, query, &context),
       total,
       is_pending: false,
     }
@@ -81,11 +87,12 @@ impl<S: LocalStore> SearchBackend for CoreChatBackend<S> {
     mentions.sort_by_key(|message| std::cmp::Reverse(message.sent_at_ms));
     mentions.truncate(MAX_HITS);
     let empty = teamcraft_client_api::search::parse_query("");
-    let mut context = self.hit_context();
-    mentions
+    let context = self.hit_context();
+    let passed: Vec<Passed<'_>> = mentions
       .iter()
-      .filter_map(|stored| self.to_hit(stored, &empty, &mut context))
-      .collect()
+      .filter_map(|stored| self.passes(stored, &empty, &context))
+      .collect();
+    self.shown_hits(&passed, &empty, &context)
   }
 
   /// Saved searches live in the synced account data (e2ee.md §6.4); ones saved on this device
@@ -211,56 +218,76 @@ impl<S: LocalStore> CoreChatBackend<S> {
         .into_iter()
         .map(|space| (space.id, space.name))
         .collect(),
-      messages: HashMap::new(),
+      maybe_importer: self.importer(),
     }
   }
 
-  fn to_hit(
+  /// Whether `stored` passes the query's filters. Looks at the message alone: its reactions and
+  /// replies are read only for the hits shown ([`Self::shown_hits`]).
+  fn passes<'a>(
     &self,
-    stored: &StoredMessage,
+    stored: &'a StoredMessage,
     query: &ParsedQuery,
-    context: &mut HitContext,
-  ) -> Option<SearchHit> {
+    context: &HitContext,
+  ) -> Option<Passed<'a>> {
     if !matches!(
       stored.content,
       MessageContent::Text { .. } | MessageContent::File { .. }
     ) {
       return None;
     }
-    let conversation = context.conversations.get(&stored.conversation_id)?.clone();
-    let all = context
-      .messages
-      .entry(stored.conversation_id)
-      .or_insert_with(|| self.stored(stored.conversation_id));
-    let message: Message = self.message_view(stored, all);
-    // The author the hit shows: the original one of an imported message.
-    let author = ChatBackend::user(self, message.author);
-    let (username, display_name) = author
-      .map(|user| (user.username, user.display_name))
-      .unwrap_or_default();
-    let maybe_space_name = conversation
-      .maybe_space
-      .and_then(|space| context.space_names.get(&space).cloned());
-    let passes = query.filters().iter().all(|filter| match filter {
-      Filter::From(name) => username.eq_ignore_ascii_case(name) || find_ci(&display_name, name).is_some(),
-      Filter::In(name) => is_named(&conversation, name),
-      Filter::InSpace(name) => is_in_space(maybe_space_name.as_deref().unwrap_or_default(), name),
+    let conversation = context.conversations.get(&stored.conversation_id)?;
+    let message: Message = self.bare_message_view(stored, context.maybe_importer);
+    let filters = query.filters();
+    let passes = filters.iter().all(|filter| match filter {
+      Filter::From(name) => {
+        // The author the hit shows: the original one of an imported message.
+        let (username, display_name) = ChatBackend::user(self, message.author)
+          .map(|user| (user.username, user.display_name))
+          .unwrap_or_default();
+        username.eq_ignore_ascii_case(name) || find_ci(&display_name, name).is_some()
+      },
+      Filter::In(name) => is_named(conversation, name),
+      Filter::InSpace(name) => is_in_space(
+        conversation
+          .maybe_space
+          .and_then(|space| context.space_names.get(&space))
+          .map_or("", String::as_str),
+        name,
+      ),
       Filter::HasFile => matches!(stored.content, MessageContent::File { .. }) || has_file(&message.body),
       Filter::HasLink => has_link(&message.body),
       Filter::Before(limit) => message.sent_at < *limit,
       Filter::After(limit) => message.sent_at >= *limit,
       Filter::InThread => message.maybe_thread.is_some(),
     });
-    if !passes {
-      return None;
-    }
-    Some(SearchHit {
-      snippet: make_snippet(&message.body, &query.terms()),
-      message,
-      conversation_name: conversation.name,
-      is_notes_to_self: conversation.is_notes_to_self,
-      maybe_space_name,
+    passes.then_some(Passed {
+      stored,
+      sent_at: message.sent_at,
     })
+  }
+
+  /// The hits as the list shows them, with their reactions and replies.
+  fn shown_hits(&self, passed: &[Passed<'_>], query: &ParsedQuery, context: &HitContext) -> Vec<SearchHit> {
+    let stored: Vec<&StoredMessage> = passed.iter().map(|hit| hit.stored).collect();
+    let terms = query.terms();
+    self
+      .scattered_message_views(&stored)
+      .into_iter()
+      .filter_map(|message| {
+        let conversation = context.conversations.get(&message.conversation)?;
+        let maybe_space_name = conversation
+          .maybe_space
+          .and_then(|space| context.space_names.get(&space).cloned());
+        Some(SearchHit {
+          snippet: make_snippet(&message.body, &terms),
+          conversation_name: conversation.name.clone(),
+          is_notes_to_self: conversation.is_notes_to_self,
+          maybe_space_name,
+          message,
+        })
+      })
+      .collect()
   }
 
   pub(crate) fn conversation_ids(&self) -> Vec<ConversationId> {
