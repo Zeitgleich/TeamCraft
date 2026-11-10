@@ -16,11 +16,13 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.annotation.StringRes
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -213,6 +215,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val shares = graph.shares
   private val shareState = MutableStateFlow<ShareState?>(null)
   private val shareOfOtherAccount = MutableStateFlow(false)
+  private val isFreshStartWithoutShare = CompletableDeferred<Boolean>()
 
   /** A share couldn't be kept (full disk, too many waiting); the user has to be told. */
   val hasShareFailed: StateFlow<Boolean> = shares.hasFailed
@@ -347,12 +350,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private var pageFetchedAtMillis = 0L
 
   init {
-    // What waited when the process ended comes back; what is past its time goes.
+    // What waited when the process ended comes back (the system restoring the activity); what is
+    // past its time goes, and all of it on a fresh start without a share ([onActivityCreated]).
     viewModelScope.launch {
       withContext(Dispatchers.IO) { shares.inbox.prune(System.currentTimeMillis()) }
+      if (isFreshStartWithoutShare.await()) shares.dropWaiting()
       // Also what a copy started by an activity that is gone leaves.
       shares.changes.collect { refreshShare() }
     }
+  }
+
+  /**
+   * How the activity this model belongs to started. A fresh start without a share (the launcher, a
+   * notification, a link) after the user closed the task drops the shares that waited: they come
+   * back only when the system restores the activity, never as a screen the user didn't ask for.
+   */
+  fun onActivityCreated(isFreshStartWithoutShare: Boolean) {
+    // The first activity decides; a recreated one (rotation) finds it decided.
+    this.isFreshStartWithoutShare.complete(isFreshStartWithoutShare)
   }
 
   init {
@@ -680,8 +695,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /** The conversations as of the newest change, shared with every other screen that asks ([CoreRepository.conversations]). */
   suspend fun conversations(): List<ConversationItem> = runCatching { graph.core.conversations() }.getOrNull() ?: emptyList()
 
-  /** Where a share can go (notes first, then by last activity), or null when it can't be read. */
-  suspend fun shareTargets(): List<ConversationItem>? = read { shareTargets() }
+  /**
+   * Where a share can go (notes first, then by last activity); `null` when it can't be read or
+   * the core can't answer in [SHARE_TARGETS_TIMEOUT_MS]: the picker says so and offers a retry,
+   * not a spinner without end (a store that stalls).
+   */
+  suspend fun shareTargets(): List<ConversationItem>? = withTimeoutOrNull(SHARE_TARGETS_TIMEOUT_MS) { read { shareTargets() } }
 
   /** The user asked to read the chat list again: it shows as loading until the read ends. */
   fun retryChatList() = chatListState.update { it.copy(maybeReadFailure = null) }
@@ -1913,6 +1932,9 @@ internal fun copyAtMost(
 /** A provider's display name without control or direction-override characters (spoofed extensions). */
 internal fun cleanFileName(name: String): String =
   name.filterNot { it.isISOControl() || it in BIDI_CONTROLS }.trim().take(MAX_FILE_NAME_CHARS)
+
+/** How long the share picker waits for its conversations before it offers a retry. */
+private const val SHARE_TARGETS_TIMEOUT_MS = 10_000L
 
 private const val MAX_FILE_NAME_CHARS = 255
 
