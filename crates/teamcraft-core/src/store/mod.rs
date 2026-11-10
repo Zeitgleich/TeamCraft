@@ -1164,14 +1164,55 @@ where
 
 /// Runs `writes` as one group of writes ([`LocalStore::begin_writes`]). An error of `writes` doesn't
 /// undo what it wrote before; only a crash, a failed write of the group or a panic does.
+#[track_caller]
 pub fn write_group<S, T, E>(store: &S, writes: impl FnOnce() -> Result<T, E>) -> Result<T, E>
 where
   S: LocalStore + ?Sized,
   E: From<StoreError>,
 {
+  let _site = GroupSite::enter(std::panic::Location::caller());
   store.begin_writes()?;
   let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(writes));
   end_group(store, result)
+}
+
+thread_local! {
+  /// Where this thread's outermost group of writes was begun ([`GroupSite`]).
+  static GROUP_SITE: std::cell::Cell<Option<&'static std::panic::Location<'static>>> =
+    const { std::cell::Cell::new(None) };
+}
+
+/// Names the code that holds a group of writes open (issue #1681): a store that finds a group open
+/// for long logs where it was begun, a place in the code, never data. Set by the outermost
+/// [`write_group`] (or `Client::atomically`) of a thread until it returns; nested groups keep it.
+pub(crate) struct GroupSite {
+  is_outermost: bool,
+}
+
+impl GroupSite {
+  pub(crate) fn enter(site: &'static std::panic::Location<'static>) -> Self {
+    let is_outermost = GROUP_SITE.with(|current| {
+      if current.get().is_some() {
+        return false;
+      }
+      current.set(Some(site));
+      true
+    });
+    Self { is_outermost }
+  }
+
+  /// The site of the thread's open group, as `file:line`; `None` outside [`write_group`].
+  pub(crate) fn current() -> Option<&'static std::panic::Location<'static>> {
+    GROUP_SITE.with(std::cell::Cell::get)
+  }
+}
+
+impl Drop for GroupSite {
+  fn drop(&mut self) {
+    if self.is_outermost {
+      GROUP_SITE.with(|current| current.set(None));
+    }
+  }
 }
 
 /// Ends a group of writes after its steps ran under `catch_unwind`. A panic must not leave the group
@@ -1772,6 +1813,22 @@ pub(crate) mod tests {
   use teamcraft_proto::{Id, Snowflake};
 
   use super::*;
+
+  #[test]
+  fn a_group_is_named_after_its_outermost_beginning() {
+    let store = MemoryStore::new();
+    assert!(GroupSite::current().is_none());
+    let outer_line = line!() + 1;
+    write_group(&store, || -> Result<(), StoreError> {
+      write_group(&store, || -> Result<(), StoreError> {
+        let site = GroupSite::current().unwrap();
+        assert_eq!((site.file(), site.line()), (file!(), outer_line));
+        Ok(())
+      })
+    })
+    .unwrap();
+    assert!(GroupSite::current().is_none());
+  }
 
   #[test]
   fn every_table_round_trips_through_its_name() {
