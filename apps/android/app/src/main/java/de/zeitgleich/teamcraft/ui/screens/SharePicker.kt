@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -113,7 +115,7 @@ fun SharePickerScreen(
       )
     },
   ) { padding ->
-    Column(Modifier.fillMaxSize().padding(padding)) {
+    Column(Modifier.fillMaxSize().padding(padding.withoutBottom()).consumeWindowInsets(padding)) {
       if (maybeContent != null && maybeContent.leftOut > 0) {
         Text(
           pluralStringResource(R.plurals.share_left_out, maybeContent.leftOut, maybeContent.leftOut),
@@ -155,14 +157,17 @@ fun SharePickerScreen(
             maybeAction = null,
           )
         } else {
-          ShareTargetList(current.targets, notesTitle, filter, onFilter = { filter = it }, onPick = pick)
+          ShareTargetList(current.targets, notesTitle, filter, onFilter = { filter = it }, onPick = pick, contentPadding = padding.bottomOnly())
         }
       }
     }
   }
 }
 
-/** The search field and the sections; only the visible rows are composed. */
+/**
+ * The search field and the sections; only the visible rows are composed. [contentPadding] is the
+ * bottom inset: the list scrolls behind the navigation bar and the keyboard.
+ */
 @Composable
 private fun ShareTargetList(
   targets: List<ConversationItem>,
@@ -170,10 +175,11 @@ private fun ShareTargetList(
   filter: String,
   onFilter: (String) -> Unit,
   onPick: (String) -> Unit,
+  contentPadding: PaddingValues,
 ) {
   // Grouping runs over the list in memory, once per keystroke or change, never against the core.
   val sections = remember(targets, notesTitle, filter) { shareSections(targets, notesTitle, filter) }
-  LazyColumn(Modifier.fillMaxSize()) {
+  LazyColumn(Modifier.fillMaxSize(), contentPadding = contentPadding) {
     item(key = "filter") { ShareFilter(filter, onFilter) }
     if (sections.isEmpty()) item(key = "no-match") { EmptyHint(stringResource(R.string.share_no_match)) }
     for (section in sections) {

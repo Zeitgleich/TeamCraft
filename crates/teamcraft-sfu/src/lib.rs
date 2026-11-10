@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod net;
 pub mod prejoin;
 pub mod probe;
+pub mod quality;
 pub mod rate_limit;
 pub mod rejoin;
 pub mod reporting;

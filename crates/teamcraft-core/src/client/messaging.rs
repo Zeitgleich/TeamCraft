@@ -366,16 +366,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         None => self.api.list_messages(conversation, &query).await?,
       };
       total += page.messages.len();
+      let maybe_newest = page.messages.iter().map(|message| message.id).max();
       self.receive_page(page.messages).await?;
       records::put_json(&self.store, Table::SyncState, &history_key(conversation), &true)?;
       if query.maybe_before.is_none() {
         // That was the newest page: what came since arrives as gateway events.
+        self.note_read_through(conversation, maybe_newest)?;
         return Ok(total);
       }
     }
     // Without a stored server message (an empty conversation, or only own messages not sent yet)
     // there is no cursor: the newest page is read, and what came since arrives as events.
-    let mut maybe_cursor = self.store.edge_server_id(conversation, MessageEdge::Newest)?;
+    let mut maybe_cursor = self.catch_up_cursor(conversation)?;
     let mut pages = 0_u32;
     loop {
       let is_newest_page = maybe_cursor.is_none();
@@ -393,6 +395,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       total += page.messages.len();
       maybe_cursor = maybe_cursor.max(page.messages.iter().map(|message| message.id).max());
       self.receive_page(page.messages).await?;
+      // After the page is stored: a crash in between reads it again rather than skip it.
+      self.note_read_through(conversation, maybe_cursor)?;
       // The newest page's `has_more` speaks of older messages, not newer ones.
       if is_newest_page || !page.has_more {
         return Ok(total + self.load_imported_history(conversation).await?);
@@ -429,8 +433,51 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.note_backlog(conversation, cursor, oldest)?;
     }
     let count = page.messages.len();
+    let maybe_newest = page.messages.iter().map(|message| message.id).max();
     self.receive_page(page.messages).await?;
+    // What lies before the page is the backlog, noted above.
+    self.note_read_through(conversation, maybe_newest)?;
     Ok(count)
+  }
+
+  /// Where a catch-up of `conversation` goes on: after the newest message stored or the newest one
+  /// an in-order read reached, whichever is newer. The stored edge leaves out placeholders (their
+  /// IDs are the server's unverified word, issue #888), so in a conversation whose newest messages
+  /// wait for keys it stood before all of them, and every catch-up fetched and tried them again,
+  /// page after page, and noted them as a backlog once more.
+  pub(crate) fn catch_up_cursor(&self, conversation: ConversationId) -> Result<Option<MessageId>, CoreError> {
+    let maybe_edge = self.store.edge_server_id(conversation, MessageEdge::Newest)?;
+    let maybe_read: Option<MessageId> =
+      records::get_json(&self.store, Table::SyncState, &read_through_key(conversation))?;
+    Ok(maybe_edge.max(maybe_read))
+  }
+
+  /// A page asked for everything after the catch-up cursor (or the newest page) was stored, up to
+  /// `maybe_newest`: no message up to it was left out but by the server, which could withhold it
+  /// anyway. Only moves forward.
+  fn note_read_through(
+    &self,
+    conversation: ConversationId,
+    maybe_newest: Option<MessageId>,
+  ) -> Result<(), CoreError> {
+    let Some(newest) = maybe_newest else {
+      return Ok(());
+    };
+    let key = read_through_key(conversation);
+    let maybe_read: Option<MessageId> = records::get_json(&self.store, Table::SyncState, &key)?;
+    if maybe_read.is_some_and(|read| read >= newest) {
+      return Ok(());
+    }
+    records::put_json(&self.store, Table::SyncState, &key, &newest)
+  }
+
+  /// A conversation that is gone takes its cursor with it: the history it shows if it comes back
+  /// may differ.
+  pub(super) fn forget_read_through(&self, conversation: ConversationId) -> Result<(), CoreError> {
+    self
+      .store
+      .delete(Table::SyncState, &read_through_key(conversation))?;
+    Ok(())
   }
 
   /// Takes the controls of `conversation` from `from` on again, in their order, whose outcome
@@ -1537,6 +1584,11 @@ fn imported_key(conversation: ConversationId) -> String {
 /// Marks in [`Table::SyncState`] that a conversation's first page of history was loaded.
 fn history_key(conversation: ConversationId) -> String {
   format!("history_loaded/{conversation}")
+}
+
+/// The newest message an in-order read of `conversation` reached ([`Client::catch_up_cursor`]).
+fn read_through_key(conversation: ConversationId) -> String {
+  format!("read_through/{conversation}")
 }
 
 pub(crate) fn bookmarks_key(conversation: ConversationId) -> String {

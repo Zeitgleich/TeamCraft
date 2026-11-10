@@ -160,6 +160,21 @@ impl ErrorSource {
 }
 
 impl StackFrame {
+  /// The frame of an uncaught error event of a page (`window.onerror`): the script position it
+  /// names, if any. An error the browser raises itself ("ResizeObserver loop completed with
+  /// undelivered notifications") has no line, and its file is the page's address. That is where the
+  /// reader was (`dm/<id>`), not where the error came from: as a frame it split one error into an
+  /// issue per conversation (crash-reports.md, "Scrubbing").
+  pub fn from_error_event(file: &str, line: u32, column: u32) -> Option<Self> {
+    (line > 0).then(|| Self {
+      maybe_function: None,
+      maybe_file: Some(file.to_owned()).filter(|file| !file.is_empty()),
+      maybe_line: Some(line),
+      maybe_column: Some(column).filter(|column| *column > 0),
+      is_in_app: true,
+    })
+  }
+
   fn to_json(&self) -> Value {
     let mut frame = json!({ "in_app": self.is_in_app });
     if let Some(function) = &self.maybe_function {
@@ -268,6 +283,30 @@ pub(super) fn seconds_f64(timestamp_ms: f64) -> f64 {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn an_error_event_without_a_line_has_no_frame() {
+    // WebKit's ResizeObserver loop error names the page, not a script.
+    assert_eq!(
+      StackFrame::from_error_event("https://chat.example.com/dm/123456789", 0, 0),
+      None
+    );
+    assert_eq!(StackFrame::from_error_event("", 0, 0), None);
+  }
+
+  #[test]
+  fn an_error_event_of_a_script_keeps_its_position() {
+    assert_eq!(
+      StackFrame::from_error_event("https://chat.example.com/app.js", 12, 0),
+      Some(StackFrame {
+        maybe_function: None,
+        maybe_file: Some("https://chat.example.com/app.js".to_owned()),
+        maybe_line: Some(12),
+        maybe_column: None,
+        is_in_app: true,
+      })
+    );
+  }
 
   #[test]
   fn ids_are_32_hex_digits_and_round_trip() {

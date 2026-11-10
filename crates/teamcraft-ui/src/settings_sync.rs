@@ -197,6 +197,7 @@ pub const DEVICE_PREFS: &[&str] = &[
   "calls.mute_shortcut_enabled",
   "calls.mute_shortcut",
   "notifications.attention_input_secs",
+  "notifications.ringtone_volume_percent",
   "notifications.message_sound",
   "notifications.own_sound_limits",
   "notifications.level_defaults_revision",

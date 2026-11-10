@@ -61,12 +61,13 @@ use crate::device_proofs::{DeviceKeyProofs, DeviceProofKey};
 use crate::error::TeamCraftError;
 use crate::logging::LIFECYCLE;
 use crate::reads::{ReadLanes, ReadQueue};
+use crate::server_pool::ServerPool;
 use crate::types::{
   AccountState, AppConfig, DirectPeer, LinkPlatform, LinkRequestItem, MentionSettings, NotificationContent,
   Presence, PushNotification, PushService, SegmentPrefetchMode, SegmentPrefetchResult, StoreProblem,
   TestPushResult,
 };
-use crate::{EventListener, TokenProvider};
+use crate::{AccessToken, EventListener, TokenProvider};
 
 /// Decrypted downloads, one folder per account below it.
 /// Wrong short codes allowed before a link approval is dropped.
@@ -135,7 +136,6 @@ pub(crate) type CoreClient = Client<Api, Store>;
 pub(crate) struct Engine {
   /// A process short of memory (the iOS notification extension): the client leaves upkeep to the app.
   is_memory_constrained: bool,
-  pub(crate) server_url: String,
   /// Where downloaded files are decrypted to (inside the app's private storage).
   download_dir: PathBuf,
   maybe_push_gateway_url: Option<String>,
@@ -144,6 +144,10 @@ pub(crate) struct Engine {
   /// The folder of downloads older versions shared between accounts.
   shared_downloads: PathBuf,
   tokens: ForeignTokens,
+  /// The engine thread's connections to the server, shared by every request made here.
+  http: ServerPool,
+  /// The connections of the requests on the HTTP runtime (pictures, directory), off this thread.
+  side_http: Arc<ServerPool>,
   listener: Arc<dyn EventListener>,
   pub(crate) store: Store,
   pub(crate) client: ClientSlot,
@@ -203,6 +207,19 @@ pub(crate) struct SyncSignals {
   pub(crate) running_calls: RunningCalls,
 }
 
+/// Where a push's preview spent its time, for the `push opened` line: durations only.
+#[derive(Clone, Copy, Debug, Default)]
+struct PushTimes {
+  /// Waiting for the app's access token (a refresh may ask the identity provider).
+  auth_wait: Duration,
+  /// Fetching and decrypting the message (a connection to the server first, after a pause).
+  fetch: Duration,
+  /// The app's own client catching the conversation up.
+  catch_up: Duration,
+  /// The notification extension's probe.
+  probe: Duration,
+}
+
 /// The new device's wait in the relay ([`Engine::wait_for_link_peer`]): a task on the engine thread
 /// beside the jobs, and the link it leaves once the other device answered. Dropping it ends the wait.
 #[derive(Default)]
@@ -238,6 +255,8 @@ pub(crate) struct EngineStart {
 pub(crate) struct EngineThreads {
   pub(crate) jobs: mpsc::UnboundedSender<Job>,
   pub(crate) reads: ReadQueue,
+  /// The server for requests that run on the HTTP runtime and need nothing of the engine.
+  pub(crate) http: Arc<ServerPool>,
 }
 
 /// Told when the client finds the store unreadable after the engine started: why, and what opens the
@@ -337,6 +356,59 @@ impl PushReader {
   fn probes(self, needs_catch_up: bool) -> bool {
     self == Self::ProbingExtension && needs_catch_up
   }
+}
+
+/// Whether a push asks the server for its message, after the store's preview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PushFetch {
+  /// The store's preview is what a fetch would show too.
+  NotNeeded,
+  /// The sync loop runs and brings the message itself; the app fills the notification in from the
+  /// store then (issue #1249), and the push keeps the engine for milliseconds, not seconds.
+  LeftToSync,
+  Fetch,
+}
+
+impl PushFetch {
+  fn of(needs_server: bool, is_sync_running: bool) -> Self {
+    match (needs_server, is_sync_running) {
+      (false, _) => Self::NotNeeded,
+      (true, true) => Self::LeftToSync,
+      (true, false) => Self::Fetch,
+    }
+  }
+}
+
+/// What came of asking the app for an access token for a push.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PushAccess {
+  /// Nothing to fetch: not asked.
+  NotAsked,
+  Supplied,
+  /// The app had none: signed out, or a refresh that failed for now (offline, Doze). Either way
+  /// more requests would fail; only the first is a sign-out, which the app handles itself.
+  Missing,
+  /// The app's refresh took longer than the fetch's time.
+  TimedOut,
+}
+
+impl PushAccess {
+  /// Whether more requests would only fail or wait for the same refresh again.
+  fn is_missing(self) -> bool {
+    matches!(self, Self::Missing | Self::TimedOut)
+  }
+}
+
+/// A preview whose message couldn't be read in time: a missing message is the timeout's fault; a
+/// policy or setting cut stays as it is.
+fn timed_out(mut preview: PushPreview) -> PushPreview {
+  if matches!(
+    preview.maybe_gap,
+    Some(PreviewGap::NoSession | PreviewGap::NotDecrypted)
+  ) {
+    preview.maybe_gap = Some(PreviewGap::TimedOut);
+  }
+  preview
 }
 
 /// The newest ID token of the session, as the app hands it over ([`crate::TeamCraft::note_id_token`]),
@@ -478,9 +550,9 @@ pub(crate) fn spawn(start: &EngineStart, late_problem: LateProblem) -> Result<En
             return;
           }
           drop(recovery_start);
-          let _ = ready.send(Ok(engine.reads.clone()));
+          let _ = ready.send(Ok((engine.reads.clone(), engine.side_http.clone())));
         } else {
-          let _ = ready.send(Ok(engine.reads.clone()));
+          let _ = ready.send(Ok((engine.reads.clone(), engine.side_http.clone())));
           if let Err(problem) = engine.finish_opening() {
             // The store closes first: a reset sets its files aside, and a connection closing after
             // that would delete the log of the new database, which has the old one's name.
@@ -502,10 +574,10 @@ pub(crate) fn spawn(start: &EngineStart, late_problem: LateProblem) -> Result<En
       });
     })
     .map_err(|error| OpenError::Failed(TeamCraftError::Core(error.to_string())))?;
-  let reads = opened
+  let (reads, http) = opened
     .recv()
     .map_err(|_| OpenError::Failed(TeamCraftError::EngineStopped))??;
-  Ok(EngineThreads { jobs, reads })
+  Ok(EngineThreads { jobs, reads, http })
 }
 
 /// A step of opening the engine, with a panic turned into an error that says where it happened.
@@ -694,13 +766,22 @@ impl Engine {
     .map_err(OpenError::Failed)?;
     let tokens =
       ForeignTokens::new(tokens, signals.id_tokens.clone(), maybe_device_key).map_err(OpenError::Failed)?;
+    let http = ServerPool::new(
+      HttpServerApi::new(server_url.clone(), tokens.clone()),
+      &signals.network,
+    );
+    let side_http = Arc::new(ServerPool::new(
+      HttpServerApi::new(server_url, tokens.clone()),
+      &signals.network,
+    ));
     let mut engine = Self {
       is_memory_constrained,
-      server_url,
       maybe_push_gateway_url,
       download_dir,
       upload_staging_dir,
       tokens,
+      http,
+      side_http,
       listener,
       store,
       client: ClientSlot::Missing,
@@ -1328,10 +1409,13 @@ impl Engine {
   ) -> Result<PushNotification, TeamCraftError> {
     let _step = teamcraft_core::timing::step("push_notification");
     let opened_at = std::time::Instant::now();
+    let mut times = PushTimes::default();
     let preview = if opening == PushOpening::StoreOnly {
       push_preview::<Api>(&self.store, None, &payload).await?
     } else {
-      self.push_preview_within_budget(&payload, reader).await?
+      self
+        .push_preview_within_budget(&payload, reader, &mut times)
+        .await?
     };
     // Why a notification said less, and how long it took: IDs and reasons only (security.md), so
     // an exported diagnostics log shows how often each path is taken.
@@ -1341,6 +1425,10 @@ impl Engine {
         ?opening,
         gap = ?preview.maybe_gap,
         ran_ms = opened_at.elapsed().as_millis(),
+        auth_wait_ms = times.auth_wait.as_millis(),
+        fetch_ms = times.fetch.as_millis(),
+        catch_up_ms = times.catch_up.as_millis(),
+        probe_ms = times.probe.as_millis(),
         is_client_idle = matches!(self.client, ClientSlot::Idle(_)),
         "push opened"
       );
@@ -1424,64 +1512,105 @@ impl Engine {
     &mut self,
     payload: &[u8],
     reader: PushReader,
+    times: &mut PushTimes,
   ) -> Result<PushPreview, TeamCraftError> {
     let started = tokio::time::Instant::now();
     let deadline = started + PUSH_PREVIEW_BUDGET;
-    let api = self.api();
-    // Without a token the preview still names conversation and sender, also when a refresh would
-    // use up the time for the fetch.
-    let maybe_token = tokio::time::timeout(PUSH_FETCH_BUDGET, self.tokens.fresh_token()).await;
-    if !matches!(maybe_token, Ok(Ok(_))) {
-      let is_timed_out = maybe_token.is_err();
-      tracing::info!(target: LIFECYCLE, is_timed_out, "no access token for the push");
-    }
-    let maybe_api = matches!(maybe_token, Ok(Ok(_))).then_some(&api);
-    // Cancel-safe: the preview only reads the store.
-    let fetched =
-      tokio::time::timeout(PUSH_FETCH_BUDGET, push_preview(&self.store, maybe_api, payload)).await;
-    let mut preview = match fetched {
-      Ok(result) => result?,
-      Err(_elapsed) => {
-        let mut preview = push_preview::<Api>(&self.store, None, payload).await?;
-        // Only a missing message is the timeout's fault; a policy or setting cut stays as it is.
-        if matches!(
-          preview.maybe_gap,
-          Some(PreviewGap::NoSession | PreviewGap::NotDecrypted)
-        ) {
-          preview.maybe_gap = Some(PreviewGap::TimedOut);
-        }
-        preview
+    // The store first: a message the sync already brought needs no token and no connection, which
+    // after a pause costs the radio's wake-up, DNS, TCP and TLS (issue #1662).
+    let stored = push_preview::<Api>(&self.store, None, payload).await?;
+    let is_sync_running = matches!(self.client, ClientSlot::Running { .. });
+    let (mut preview, access) = match PushFetch::of(stored.needs_server(), is_sync_running) {
+      PushFetch::NotNeeded => (stored, PushAccess::NotAsked),
+      PushFetch::LeftToSync => {
+        tracing::info!(target: LIFECYCLE, "push left to the running sync");
+        (stored, PushAccess::NotAsked)
+      },
+      PushFetch::Fetch => {
+        self
+          .fetch_for_push(payload, stored, started + PUSH_FETCH_BUDGET, times)
+          .await?
       },
     };
     // The app's own client may catch the conversation up: a conversation this device was just
     // added to, or keys that changed while the app was closed. Not while the sync loop runs: it
     // brings the message itself, and taking the client would cut its connection. Never in a
-    // notification extension ([`PushReader::Extension`]).
+    // notification extension ([`PushReader::Extension`]). Not without a token either: every
+    // request would ask the app for one again and fail, which is no sign-out.
     let is_client_idle = matches!(self.client, ClientSlot::Idle(_));
     if reader.catches_up(preview.needs_catch_up(), is_client_idle)
+      && !access.is_missing()
       && let ClientSlot::Idle(client) = &mut self.client
     {
       let conversation = preview.wake_up.conversation_id;
-      if let Err(error) = catch_up_for_push(client, conversation, deadline).await {
+      let catch_up_started = tokio::time::Instant::now();
+      let caught = catch_up_for_push(client, conversation, deadline).await;
+      times.catch_up = catch_up_started.elapsed();
+      if let Err(error) = caught {
         // The class only: an error's text can carry what a server said.
         let cause = error_class(&error);
         tracing::info!(target: LIFECYCLE, cause, conversation_id = %conversation, "push catch-up stopped");
       }
       let caught_up = push_preview::<Api>(&self.store, None, payload).await?;
-      // The store-only preview names `NoSession` while the message is still missing: then the first
-      // try's reason stays (a failed decryption, a timeout), with any names the catch-up learned.
+      // The store-only preview names `NoSession` while the message is still missing: then the
+      // first try's reason stays (a failed decryption, a timeout), with any names the catch-up
+      // learned.
       if caught_up.maybe_gap != Some(PreviewGap::NoSession) {
         preview = caught_up;
       } else {
         preview = with_names_of(preview, caught_up);
       }
     }
-    if reader.probes(preview.needs_catch_up()) {
+    if reader.probes(preview.needs_catch_up()) && !access.is_missing() {
+      let probe_started = tokio::time::Instant::now();
       preview = self
         .probe_for_push(payload, started + PUSH_PROBE_BUDGET, preview)
         .await;
+      times.probe = probe_started.elapsed();
     }
     Ok(preview)
+  }
+
+  /// The preview with the message fetched from the server, within `fetch_deadline` for the token
+  /// and the fetch together: a slow token refresh leaves less time for the fetch instead of adding
+  /// to it, so a push never holds the engine longer than [`PUSH_FETCH_BUDGET`] here. Without a
+  /// token in time `stored` stays, the store's preview, and the app tries again later.
+  async fn fetch_for_push(
+    &self,
+    payload: &[u8],
+    stored: PushPreview,
+    fetch_deadline: tokio::time::Instant,
+    times: &mut PushTimes,
+  ) -> Result<(PushPreview, PushAccess), TeamCraftError> {
+    let auth_started = tokio::time::Instant::now();
+    let access = match tokio::time::timeout_at(fetch_deadline, self.tokens.fresh_token()).await {
+      Ok(Ok(_)) => PushAccess::Supplied,
+      Ok(Err(_)) => PushAccess::Missing,
+      Err(_elapsed) => PushAccess::TimedOut,
+    };
+    times.auth_wait = auth_started.elapsed();
+    if access.is_missing() {
+      // Either way the store's preview stays: a refresh that failed for now (offline, Doze, the
+      // identity provider slow) is retried later, and the app signs out itself when its session ends.
+      tracing::info!(target: LIFECYCLE, ?access, "no access token for the push");
+      let preview = if access == PushAccess::TimedOut {
+        timed_out(stored)
+      } else {
+        stored
+      };
+      return Ok((preview, access));
+    }
+    let api = self.api();
+    // Cancel-safe: the preview only reads the store.
+    let fetch_started = tokio::time::Instant::now();
+    let fetched =
+      tokio::time::timeout_at(fetch_deadline, push_preview(&self.store, Some(&api), payload)).await;
+    times.fetch = fetch_started.elapsed();
+    let preview = match fetched {
+      Ok(result) => result?,
+      Err(_elapsed) => timed_out(stored),
+    };
+    Ok((preview, access))
   }
 
   /// The preview of a wake-up the extension couldn't read, after catching its conversation up on a
@@ -1855,8 +1984,9 @@ impl Engine {
     }
   }
 
+  /// A handle on the server whose requests share the engine thread's open connections.
   pub(crate) fn api(&self) -> Api {
-    HttpServerApi::new(self.server_url.clone(), self.tokens.clone())
+    self.http.api()
   }
 }
 
@@ -1932,6 +2062,22 @@ fn loop_restart_delay(deaths: u32) -> Duration {
   }
 }
 
+/// A server handle for tests, with a provider that has a fixed token.
+#[cfg(test)]
+pub(crate) fn test_api(server_url: &str) -> Api {
+  struct FixedToken;
+  impl TokenProvider for FixedToken {
+    fn access_token(&self) -> AccessToken {
+      AccessToken::Token {
+        value: "token".into(),
+      }
+    }
+  }
+  let tokens = ForeignTokens::new(Arc::new(FixedToken), IdTokens::default(), None)
+    .unwrap_or_else(|error| panic!("token thread: {error}"));
+  HttpServerApi::new(server_url, tokens)
+}
+
 impl ForeignTokens {
   /// The asking thread lives as long as a clone of this: a token refresh in the app (AppAuth blocks
   /// for up to 10 s) holds it, never the engine thread with the sync loop (e2ee.md §7.2 is untouched:
@@ -2004,10 +2150,16 @@ impl AccessTokenSource for ForeignTokens {
   }
 }
 
+/// The app's answer as the core's: only an ended session is a sign-out; a refresh that failed is a
+/// network problem, so callers retry with backoff and keep their state (issue #1671).
 fn signed_in_token(provider: &dyn TokenProvider) -> Result<String, ApiError> {
-  provider
-    .access_token()
-    .ok_or_else(|| ApiError::Token("signed out".into()))
+  match provider.access_token() {
+    AccessToken::Token { value } => Ok(value),
+    AccessToken::Unavailable => Err(ApiError::Network(
+      "the app could not refresh its access token".into(),
+    )),
+    AccessToken::SignedOut => Err(ApiError::Token("signed out".into())),
+  }
 }
 
 /// Runs a UI command on an idle client; offline is fine (the outbox keeps messages).
@@ -2310,6 +2462,63 @@ mod tests {
     assert!(!PushReader::ProbingExtension.catches_up(true, true));
   }
 
+  /// Issue #1662: a push goes to the server only for what the store lacks, and not while the sync
+  /// loop runs: it brings the message itself, and the app fills the notification in from the store.
+  #[test]
+  fn a_push_fetches_only_what_the_store_lacks_and_the_sync_does_not_bring() {
+    assert_eq!(PushFetch::of(false, false), PushFetch::NotNeeded);
+    assert_eq!(PushFetch::of(false, true), PushFetch::NotNeeded);
+    assert_eq!(PushFetch::of(true, true), PushFetch::LeftToSync);
+    assert_eq!(PushFetch::of(true, false), PushFetch::Fetch);
+  }
+
+  /// Issue #1671: only an ended session is a sign-out. A refresh that failed for now is a network
+  /// problem: the connection, the sync and queued work retry it with backoff and keep their state,
+  /// and the apps don't show the sign-in.
+  #[test]
+  fn only_an_ended_session_is_a_sign_out() {
+    struct Answers(fn() -> AccessToken);
+    impl TokenProvider for Answers {
+      fn access_token(&self) -> AccessToken {
+        (self.0)()
+      }
+    }
+    let answer = |token: fn() -> AccessToken| signed_in_token(&Answers(token));
+
+    let supplied = answer(|| AccessToken::Token {
+      value: "token".into(),
+    });
+    assert_eq!(supplied.ok().as_deref(), Some("token"));
+
+    let Err(failed_refresh) = answer(|| AccessToken::Unavailable) else {
+      panic!("a failed refresh supplies no token");
+    };
+    assert!(failed_refresh.is_transient());
+    assert!(!failed_refresh.is_sign_in_required());
+    assert!(matches!(
+      TeamCraftError::from(CoreError::Api(failed_refresh)),
+      TeamCraftError::Network(_)
+    ));
+
+    let Err(signed_out) = answer(|| AccessToken::SignedOut) else {
+      panic!("a signed-out app supplies no token");
+    };
+    assert!(!signed_out.is_transient());
+    assert!(signed_out.is_sign_in_required());
+    assert!(matches!(
+      TeamCraftError::from(CoreError::Api(signed_out)),
+      TeamCraftError::SignedOut
+    ));
+  }
+
+  #[test]
+  fn only_a_token_the_app_could_not_give_stops_more_requests() {
+    assert!(PushAccess::Missing.is_missing());
+    assert!(PushAccess::TimedOut.is_missing());
+    assert!(!PushAccess::Supplied.is_missing());
+    assert!(!PushAccess::NotAsked.is_missing());
+  }
+
   #[test]
   fn only_an_extension_that_may_probes_and_only_for_what_it_could_not_read() {
     assert!(PushReader::ProbingExtension.probes(true));
@@ -2445,7 +2654,12 @@ mod tests {
   /// The client's slot and the sync loop (issue #1142). The server is unreachable, so the loop stays
   /// at its first connection attempts; what matters here is the slot.
   mod client_slot {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use teamcraft_core::push_preview::PUSH_KEY_RECORD;
+    use teamcraft_core::store::Table;
+    use teamcraft_crypto::push::seal_wakeup;
+    use teamcraft_proto::{Base64Bytes, MessageId, Snowflake};
 
     use teamcraft_core::api::fake::FakeServer;
     use teamcraft_crypto::backup::Argon2Settings;
@@ -2591,6 +2805,172 @@ mod tests {
       assert_eq!(loop_restart_delay(100), MAX_LOOP_RESTART_DELAY);
     }
 
+    /// Issue #1662 and GlitchTip TEAMCRAFT-1O: an app without a token right now (a refresh that
+    /// failed offline) gets the store's preview at once, without a catch-up that would only fail
+    /// and be logged as a sign-out.
+    ///
+    /// Real time, not paused: the token is answered by the app's thread, outside the runtime, so a
+    /// paused clock sees an idle runtime while it waits and jumps past [`PUSH_FETCH_BUDGET`] first.
+    #[tokio::test]
+    async fn a_push_without_a_token_shows_what_the_store_has_and_skips_the_catch_up() {
+      in_engine_thread(async {
+        let directory = TestDir::new("push-no-token");
+        let tokens = Arc::new(CountedTokens::default());
+        let mut engine = enrolled_engine_with(&directory, Listener::default(), tokens.clone()).await;
+        let payload = sealed_message_push(&engine);
+        let asked_before = tokens.asked();
+        let mut times = PushTimes::default();
+
+        let preview = engine
+          .push_preview_within_budget(&payload, PushReader::App, &mut times)
+          .await
+          .unwrap();
+
+        assert_eq!(
+          preview.maybe_gap,
+          Some(PreviewGap::NoSession),
+          "tried again later"
+        );
+        assert_eq!(
+          tokens.asked() - asked_before,
+          1,
+          "one ask, no catch-up asking again"
+        );
+        assert_eq!(times.fetch, Duration::ZERO);
+        assert_eq!(times.catch_up, Duration::ZERO);
+        assert!(matches!(engine.client, ClientSlot::Idle(_)));
+      })
+      .await;
+    }
+
+    /// A token refresh that hangs (AppAuth waits up to 10 s) uses up the fetch's time, not more:
+    /// the token wait and the fetch share [`PUSH_FETCH_BUDGET`], and the engine is free again.
+    #[tokio::test(start_paused = true)]
+    async fn a_hanging_token_refresh_holds_a_push_no_longer_than_the_fetch_budget() {
+      in_engine_thread(async {
+        let directory = TestDir::new("push-hanging-token");
+        let tokens = Arc::new(CountedTokens::default());
+        let mut engine = enrolled_engine_with(&directory, Listener::default(), tokens.clone()).await;
+        let payload = sealed_message_push(&engine);
+        let hang = tokens.hang();
+        let started = tokio::time::Instant::now();
+        let mut times = PushTimes::default();
+
+        let preview = engine
+          .push_preview_within_budget(&payload, PushReader::App, &mut times)
+          .await
+          .unwrap();
+
+        assert_eq!(started.elapsed(), PUSH_FETCH_BUDGET);
+        assert_eq!(preview.maybe_gap, Some(PreviewGap::TimedOut));
+        assert_eq!(
+          times.catch_up,
+          Duration::ZERO,
+          "no second wait for the same refresh"
+        );
+        drop(hang);
+      })
+      .await;
+    }
+
+    /// What the store answers alone (a ring shows no message) needs no token and no connection.
+    #[tokio::test]
+    async fn a_push_the_store_answers_asks_for_no_token() {
+      in_engine_thread(async {
+        let directory = TestDir::new("push-stored");
+        let tokens = Arc::new(CountedTokens::default());
+        let mut engine = enrolled_engine_with(&directory, Listener::default(), tokens.clone()).await;
+        let payload = sealed_push(&engine, PushKind::Call, None);
+        let asked_before = tokens.asked();
+        let mut times = PushTimes::default();
+
+        engine
+          .push_preview_within_budget(&payload, PushReader::App, &mut times)
+          .await
+          .unwrap();
+
+        assert_eq!(tokens.asked(), asked_before);
+        assert_eq!(times.auth_wait, Duration::ZERO);
+      })
+      .await;
+    }
+
+    /// Tokens as an app hands them over: none (signed out, or a refresh that failed), and on
+    /// request a refresh that doesn't end until the returned guard goes.
+    #[derive(Default)]
+    struct CountedTokens {
+      asked: AtomicUsize,
+      maybe_hang: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl CountedTokens {
+      fn asked(&self) -> usize {
+        self.asked.load(Ordering::SeqCst)
+      }
+
+      fn hang(&self) -> std::sync::mpsc::Sender<()> {
+        let (release, released) = std::sync::mpsc::channel();
+        *self.maybe_hang.lock().unwrap() = Some(released);
+        release
+      }
+    }
+
+    impl TokenProvider for CountedTokens {
+      fn access_token(&self) -> AccessToken {
+        self.asked.fetch_add(1, Ordering::SeqCst);
+        if let Some(released) = self.maybe_hang.lock().unwrap().take() {
+          // Ends when the test drops its sender.
+          let _ = released.recv();
+        }
+        AccessToken::Unavailable
+      }
+    }
+
+    fn sealed_message_push(engine: &Engine) -> Vec<u8> {
+      let message = MessageId::from_snowflake(Snowflake::new(2).unwrap());
+      sealed_push(engine, PushKind::Message, Some(message))
+    }
+
+    /// A wake-up as the server seals it, with a push key put into the store as registering does.
+    fn sealed_push(engine: &Engine, kind: PushKind, maybe_message_id: Option<MessageId>) -> Vec<u8> {
+      let key = [9u8; 32];
+      records::put_json(
+        &engine.store,
+        Table::Account,
+        PUSH_KEY_RECORD,
+        &Base64Bytes::new(key.to_vec()),
+      )
+      .unwrap();
+      // A workspace whose policy shows the text: without one a notification fails closed.
+      let mut policy = teamcraft_proto::WorkspacePolicy::default();
+      policy.notifications.push_content = teamcraft_proto::PushContentMode::Full;
+      records::put_json(
+        &engine.store,
+        Table::Workspace,
+        "state",
+        &serde_json::json!({ "policy": policy }),
+      )
+      .unwrap();
+      let wake_up = PushWakeUp {
+        kind,
+        conversation_id: ConversationId::from_snowflake(Snowflake::new(1).unwrap()),
+        maybe_message_id,
+        maybe_sender_id: None,
+        is_urgent: false,
+        maybe_thread_id: None,
+        maybe_call_id: None,
+        maybe_badge: None,
+        maybe_sent_at: None,
+        maybe_meeting: None,
+      };
+      seal_wakeup(
+        &SymmetricKey::from_slice(&key).unwrap(),
+        &serde_json::to_vec(&wake_up).unwrap(),
+        &mut rand_core::OsRng,
+      )
+      .unwrap()
+    }
+
     /// Panics once when armed, like a bug anywhere in what the sync loop runs.
     #[derive(Clone, Default)]
     struct Listener(Arc<AtomicBool>);
@@ -2610,8 +2990,10 @@ mod tests {
     struct Token;
 
     impl TokenProvider for Token {
-      fn access_token(&self) -> Option<String> {
-        Some("token".into())
+      fn access_token(&self) -> AccessToken {
+        AccessToken::Token {
+          value: "token".into(),
+        }
       }
     }
 
@@ -2621,6 +3003,15 @@ mod tests {
 
     /// An engine as a restarted app has it: the device enrolled earlier, the account in the store.
     async fn enrolled_engine(directory: &TestDir, listener: Listener) -> Engine {
+      enrolled_engine_with(directory, listener, Arc::new(Token)).await
+    }
+
+    /// [`enrolled_engine`] whose app hands over tokens as `tokens` does.
+    async fn enrolled_engine_with(
+      directory: &TestDir,
+      listener: Listener,
+      tokens: Arc<dyn TokenProvider>,
+    ) -> Engine {
       let config = AppConfig {
         server_url: UNREACHABLE_SERVER.into(),
         data_dir: directory.path().to_string_lossy().into_owned(),
@@ -2636,7 +3027,7 @@ mod tests {
         id_tokens: Default::default(),
         running_calls: Default::default(),
       };
-      let start = EngineStart::new(config, Arc::new(Token), None, Arc::new(listener), signals).unwrap();
+      let start = EngineStart::new(config, tokens, None, Arc::new(listener), signals).unwrap();
       let key_source = StaticKeySource::new(SymmetricKey::from_slice(&KEY).unwrap());
       let store = SealedSqliteStore::open(&start.store_path(), &key_source).unwrap();
       let client = PendingEnrollment::new()
@@ -2712,8 +3103,10 @@ mod tests {
     struct OneToken(String);
 
     impl TokenProvider for OneToken {
-      fn access_token(&self) -> Option<String> {
-        Some(self.0.clone())
+      fn access_token(&self) -> AccessToken {
+        AccessToken::Token {
+          value: self.0.clone(),
+        }
       }
     }
 

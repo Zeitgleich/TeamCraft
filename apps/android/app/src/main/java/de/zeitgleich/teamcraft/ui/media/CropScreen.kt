@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconToggleButton
@@ -49,6 +48,7 @@ import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
+import de.zeitgleich.teamcraft.ui.screens.PageLoadingIndicator
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.CropCorner
 import de.zeitgleich.teamcraft.ui.CropFrame
@@ -77,7 +77,7 @@ fun CropScreen(uri: String, initial: PictureEdit, onCancel: () -> Unit, onDone: 
     Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
       val picture = maybePicture
       if (picture == null) {
-        CircularProgressIndicator(color = Color.White)
+        PageLoadingIndicator(color = Color.White)
       } else {
         CropCanvas(picture, initial.copy(crop = crop), onStart = history::record, onCrop = { history.value = it })
       }

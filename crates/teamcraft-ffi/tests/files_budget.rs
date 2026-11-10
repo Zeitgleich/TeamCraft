@@ -24,7 +24,7 @@ use teamcraft_core::store::{
 use teamcraft_core::{ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
-use teamcraft_ffi::{AccountState, AppConfig, EventListener, TeamCraft, TokenProvider};
+use teamcraft_ffi::{AccessToken, AccountState, AppConfig, EventListener, TeamCraft, TokenProvider};
 use teamcraft_proto::{
   ChannelModeration, ClientMessageId, ConversationId, ConversationResponse, Id, Snowflake, UserId,
 };
@@ -265,7 +265,9 @@ impl EventListener for Quiet {
 struct ValidToken;
 
 impl TokenProvider for ValidToken {
-  fn access_token(&self) -> Option<String> {
-    Some("token".into())
+  fn access_token(&self) -> AccessToken {
+    AccessToken::Token {
+      value: "token".into(),
+    }
   }
 }

@@ -64,6 +64,8 @@ const MAX_ADMIN_JOIN_REQUEST_DAYS: u64 = 90;
 const MIN_ALERT_HOLD_SECS: u64 = 60;
 /// Longest backup age an admin can allow: a month.
 const MAX_BACKUP_AGE_SECS: u64 = 30 * 86_400;
+/// Longest time resolved health alerts can be kept: ten years (the history is capped by count too).
+const MAX_HEALTH_HISTORY_DAYS: u64 = 3650;
 
 /// Holiday feed: fetched at most hourly and at least weekly; a copy may be allowed to age between a
 /// day and a quarter.
@@ -802,7 +804,13 @@ fn check_health_alerts(values: &HealthAlertSettings) -> Result<(), ApiError> {
     1,
     365,
   )?;
-  check_range("disk_max_percent", u64::from(values.disk_max_percent), 50, 99)
+  check_range("disk_max_percent", u64::from(values.disk_max_percent), 50, 99)?;
+  check_range(
+    "history_days",
+    u64::from(values.history_days),
+    1,
+    MAX_HEALTH_HISTORY_DAYS,
+  )
 }
 
 /// At least one known method, each once; short help texts; an https help link.

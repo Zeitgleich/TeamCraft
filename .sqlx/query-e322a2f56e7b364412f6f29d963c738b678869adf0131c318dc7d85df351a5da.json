@@ -1,0 +1,122 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, check_id, kind, changed_at, channel, mail_address, queued_at, next_attempt_at,\n              failures\n       FROM health_alert_notices\n       ORDER BY queued_at, id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "health_alert_notices",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "check_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "health_alert_notices",
+            "name": "check_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "health_alert_notices",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "changed_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "health_alert_notices",
+            "name": "changed_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "channel",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "health_alert_notices",
+            "name": "channel"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "mail_address",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "health_alert_notices",
+            "name": "mail_address"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "queued_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "health_alert_notices",
+            "name": "queued_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "next_attempt_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "health_alert_notices",
+            "name": "next_attempt_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "failures",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "health_alert_notices",
+            "name": "failures"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e322a2f56e7b364412f6f29d963c738b678869adf0131c318dc7d85df351a5da"
+}

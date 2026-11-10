@@ -1,11 +1,13 @@
 //! What the SFU exposes on `GET /metrics` (operations.md, "Metrics"; issue #213): how many calls run
 //! and how many devices are in them, read when a scrape comes. Forwarding media pays nothing for it.
-//! Counts only: no call, user or device IDs, and the SFU can't read media anyway.
+//! Counts only: no call, user or device IDs, and the SFU can't read media anyway. How the calls go
+//! (loss, round-trip time, transports; #1648) comes from [`CallQuality`], counted as it happens.
 
 use std::net::SocketAddr;
 
 use teamcraft_ops::metrics::{IntGauge, Metrics, MetricsError, loopback_addrs};
 
+use crate::quality::CallQuality;
 use crate::room::RoomStats;
 
 /// Default port of the metrics listener.
@@ -29,8 +31,9 @@ pub enum MetricsConfigError {
 }
 
 impl SfuMetrics {
-  pub fn new() -> Result<Self, MetricsError> {
+  pub fn new(quality: &CallQuality) -> Result<Self, MetricsError> {
     let metrics = Metrics::new("sfu", env!("CARGO_PKG_VERSION"))?;
+    quality.register(&metrics)?;
     Ok(Self {
       rooms: metrics.int_gauge("teamcraft_sfu_rooms", "Calls running on this SFU.")?,
       participants: metrics.int_gauge(
@@ -98,7 +101,9 @@ mod tests {
 
     #[test]
     fn it_holds_the_counts_and_nothing_else() {
-      let output = SfuMetrics::new()
+      let quality = CallQuality::new();
+      quality.keyframe_requested();
+      let output = SfuMetrics::new(&quality)
         .unwrap()
         .render(
           RoomStats {
@@ -111,14 +116,24 @@ mod tests {
       assert!(output.contains("teamcraft_sfu_rooms 2"));
       assert!(output.contains("teamcraft_sfu_fallback_connections 3"));
       assert!(output.contains("teamcraft_sfu_participants 5"));
+      assert!(output.contains("teamcraft_sfu_keyframe_requests_total 1"));
+      assert!(output.contains(r#"teamcraft_sfu_sessions_total{family="ipv6",transport="fallback"} 0"#));
       let allowed = AllowList {
         metrics: BTreeSet::from([
           "teamcraft_build_info",
+          "teamcraft_sfu_downlink_loss_ratio",
           "teamcraft_sfu_fallback_connections",
+          "teamcraft_sfu_forwarded_bytes_total",
+          "teamcraft_sfu_keyframe_requests_total",
           "teamcraft_sfu_participants",
           "teamcraft_sfu_rooms",
+          "teamcraft_sfu_rtt_seconds",
+          "teamcraft_sfu_session_switches_total",
+          "teamcraft_sfu_sessions_total",
         ]),
         labels: BTreeMap::from([
+          ("transport", BTreeSet::from(["quic", "fallback"])),
+          ("family", BTreeSet::from(["ipv4", "ipv6"])),
           ("service", BTreeSet::from(["sfu"])),
           ("version", BTreeSet::from([env!("CARGO_PKG_VERSION")])),
         ]),

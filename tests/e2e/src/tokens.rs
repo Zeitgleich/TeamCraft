@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -97,4 +97,55 @@ fn fetch(user: &str) -> Result<String, String> {
     ));
   }
   Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// The access token as an app holds it (`WebTokens` in the web client, the mobile engine's
+/// `ForeignTokens`): one token, used until it runs out, then a fresh one from the identity provider.
+/// While the provider can't be reached the source answers as the apps do, "waiting for a fresh
+/// access token" (a network error, not a sign-out): the session stays, and requests wait.
+#[derive(Clone)]
+pub struct AppTokens {
+  inner: UserTokens,
+  held: Arc<Mutex<Option<String>>>,
+  is_provider_reachable: Arc<AtomicBool>,
+}
+
+impl AppTokens {
+  pub fn new(inner: UserTokens) -> Self {
+    Self {
+      inner,
+      held: Arc::default(),
+      is_provider_reachable: Arc::new(AtomicBool::new(true)),
+    }
+  }
+
+  /// The identity provider can't be reached (or is back): refreshing fails (or works again).
+  pub fn set_provider_reachable(&self, is_reachable: bool) {
+    self.is_provider_reachable.store(is_reachable, Ordering::SeqCst);
+  }
+
+  /// The held token ran out: the next request needs a fresh one from the provider.
+  pub fn expire(&self) {
+    if let Ok(mut held) = self.held.lock() {
+      *held = None;
+    }
+  }
+}
+
+impl AccessTokenSource for AppTokens {
+  fn access_token(&self) -> Result<String, ApiError> {
+    let mut held = self
+      .held
+      .lock()
+      .map_err(|_| ApiError::Token("token slot poisoned".to_owned()))?;
+    if let Some(token) = held.as_ref() {
+      return Ok(token.clone());
+    }
+    if !self.is_provider_reachable.load(Ordering::SeqCst) {
+      return Err(ApiError::Network("waiting for a fresh access token".to_owned()));
+    }
+    let token = self.inner.access_token()?;
+    *held = Some(token.clone());
+    Ok(token)
+  }
 }

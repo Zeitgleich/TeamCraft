@@ -3,6 +3,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::Duration;
 
 use leptos::ev;
@@ -775,7 +776,7 @@ pub fn MessageList(
   // The list itself shrinks or grows when the composer does (it grows with its text, and with the
   // window): the viewport height follows, and a following reader stays at the newest line instead
   // of having it slide behind the composer.
-  observe_size_changes(list_id, [rows, container], move || {
+  observe_size_changes(list_id, container, rows, move || {
     if let Some(element) = container.get_untracked() {
       viewport.set(f64::from(element.client_height()));
     }
@@ -1429,71 +1430,125 @@ fn is_window_focused() -> bool {
     .is_some_and(|document| !document.hidden() && document.has_focus().unwrap_or(true))
 }
 
-/// Calls `on_change` whenever one of the `targets` changes size (the rendered rows, the scrolling
-/// list around them): after layout, before the frame is painted, unless the list that asked for it
-/// was unmounted in the meantime.
+/// Calls `on_change` whenever the scrolling list or one of its rendered rows changes size: after
+/// layout, before the frame is painted, unless the list that asked for it was unmounted in the
+/// meantime.
 ///
-/// At most once per frame: `on_change` measures rows and moves the list, which renders other rows
-/// and resizes the targets again. The browser hands that resize to the observer within the same
-/// frame, the list moved again, and so on until it gives up ("ResizeObserver loop completed with
-/// undelivered notifications", one layout per round). A resize that comes from the list's own
-/// correction waits for the next frame instead, and the frame is painted with the first round's
-/// correction.
-fn observe_size_changes<const N: usize>(
+/// `on_change` measures rows and moves the list, which changes the rows rendered. It never watches
+/// what that resizes: a resize of an element the browser already reported in a frame is not
+/// delivered again in that frame, and the browser reports "ResizeObserver loop completed with
+/// undelivered notifications" instead. Watching the element that holds the rows did that whenever
+/// a row grew: WebKit (Safari, the desktop app on macOS and Linux) on every such frame, even with
+/// the correction put off to the next frame (#1575). So each row is watched on its own, which the
+/// corrections don't resize: a row they render is watched from the next frame on ([`RowWatch`]).
+fn observe_size_changes(
   list_id: u64,
-  targets: [NodeRef<html::Div>; N],
-  on_change: impl Fn() + Copy + 'static,
+  container: NodeRef<html::Div>,
+  rows: NodeRef<html::Div>,
+  on_change: impl Fn() + 'static,
 ) {
-  let turn = std::rc::Rc::new(FrameTurn::default());
   let callback = Closure::<dyn FnMut()>::new(move || {
     if is_live(list_id) {
-      turn.run(list_id, on_change);
+      on_change();
     }
   });
   let Ok(observer) = web_sys::ResizeObserver::new(callback.as_ref().unchecked_ref()) else {
     tracing::debug!("ResizeObserver unavailable");
     return;
   };
-  let handle = StoredValue::new_local((observer, callback));
-  for target in targets {
-    Effect::new(move |_| {
-      if let Some(element) = target.get() {
-        handle.with_value(|(observer, _)| observer.observe(&element));
+  let watch = Rc::new(RowWatch::new(observer.clone()));
+  let on_rows_changed = Closure::<dyn FnMut()>::new({
+    let watch = Rc::clone(&watch);
+    move || {
+      if is_live(list_id)
+        && let Some(element) = rows.try_get_untracked().flatten()
+      {
+        watch.follow(list_id, &element);
       }
-    });
-  }
+    }
+  });
+  let Ok(mutations) = web_sys::MutationObserver::new(on_rows_changed.as_ref().unchecked_ref()) else {
+    tracing::debug!("MutationObserver unavailable");
+    return;
+  };
+  let handle = StoredValue::new_local((observer, callback, mutations, on_rows_changed));
+  Effect::new(move |_| {
+    if let Some(element) = container.get() {
+      handle.with_value(|(observer, ..)| observer.observe(&element));
+    }
+  });
+  Effect::new(move |_| {
+    if let Some(element) = rows.get() {
+      let options = web_sys::MutationObserverInit::new();
+      options.set_child_list(true);
+      handle.with_value(|(_, _, mutations, _)| {
+        if mutations.observe_with_options(&element, &options).is_err() {
+          tracing::debug!("could not watch the rendered rows");
+        }
+      });
+      watch.follow(list_id, &element);
+    }
+  });
   on_cleanup(move || {
-    handle.try_with_value(|(observer, _)| observer.disconnect());
+    handle.try_with_value(|(observer, _, mutations, _)| {
+      mutations.disconnect();
+      observer.disconnect();
+    });
   });
 }
 
-/// Whether a frame's resize round already ran ([`observe_size_changes`]), and whether a later
-/// round of the same frame waits for the next one.
-#[derive(Default)]
-struct FrameTurn {
-  has_run: std::cell::Cell<bool>,
-  is_waiting: std::cell::Cell<bool>,
+/// The rendered rows the list's size observer watches ([`observe_size_changes`]).
+struct RowWatch {
+  observer: web_sys::ResizeObserver,
+  watched: RefCell<Vec<web_sys::Element>>,
+  is_pending: Cell<bool>,
 }
 
-impl FrameTurn {
-  /// Runs `on_change` now if it hasn't run in this frame, otherwise once on the next frame.
-  fn run(self: &std::rc::Rc<Self>, list_id: u64, on_change: impl Fn() + Copy + 'static) {
-    if !self.has_run.replace(true) {
-      on_change();
-      let turn = std::rc::Rc::clone(self);
-      // The next frame's callbacks run before its resize rounds: the first round there is new.
-      // async-ok: the observer's own cell, not a signal.
-      request_animation_frame(move || turn.has_run.set(false));
-      return;
+impl RowWatch {
+  fn new(observer: web_sys::ResizeObserver) -> Self {
+    Self {
+      observer,
+      watched: RefCell::new(Vec::new()),
+      is_pending: Cell::new(false),
     }
-    if self.is_waiting.replace(true) {
-      return;
-    }
-    let turn = std::rc::Rc::clone(self);
-    defer_while_alive(list_id, move || {
-      turn.is_waiting.set(false);
-      on_change();
+  }
+
+  /// After the rendered rows changed: a row that left is let go at once (its size would drop to
+  /// zero, a resize within the frame that removed it), a new one is watched from the next frame on.
+  /// Its first report comes in that frame, after it was laid out, and is measured like any other.
+  fn follow(self: &Rc<Self>, list_id: u64, rows: &web_sys::Element) {
+    self.watched.borrow_mut().retain(|row| {
+      let is_rendered = row.parent_element().as_ref() == Some(rows);
+      if !is_rendered {
+        self.observer.unobserve(row);
+      }
+      is_rendered
     });
+    if self.is_pending.replace(true) {
+      return;
+    }
+    let watch = Rc::clone(self);
+    let rows = rows.clone();
+    // async-ok: the observer's own cells, not signals; an unmounted list skips it.
+    defer_while_alive(list_id, move || {
+      watch.is_pending.set(false);
+      watch.watch_new(&rows);
+    });
+  }
+
+  fn watch_new(&self, rows: &web_sys::Element) {
+    let children = rows.children();
+    let mut watched = self.watched.borrow_mut();
+    for index in 0..children.length() {
+      let Some(row) = children.item(index) else {
+        continue;
+      };
+      // Observing a row again would start it over and report it once more.
+      if !watched.contains(&row) {
+        self.observer.observe(&row);
+        watched.push(row);
+      }
+    }
   }
 }
 

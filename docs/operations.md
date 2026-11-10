@@ -161,6 +161,12 @@ the start; only an IPv6 address that fails after another one worked is skipped (
 | `teamcraft_sfu_rooms`                          | gauge     |                           | SFU            | Calls running                                                                     |
 | `teamcraft_sfu_participants`                   | gauge     |                           | SFU            | Devices in those calls, reconnecting ones included                                |
 | `teamcraft_sfu_fallback_connections`           | gauge     |                           | SFU            | Open connections on the WebSocket fallback, for networks that block UDP           |
+| `teamcraft_sfu_rtt_seconds`                    | histogram |                           | SFU            | Round-trip time of its QUIC paths, per session every 10 s (10 ms to 2 s)          |
+| `teamcraft_sfu_downlink_loss_ratio`            | histogram |                           | SFU            | Share of its packets to a client lost, per session that sent ≥ 100 in 10 s        |
+| `teamcraft_sfu_keyframe_requests_total`        | counter   |                           | SFU            | Keyframes asked of publishers: the SFU's PLI (media is never retransmitted)       |
+| `teamcraft_sfu_forwarded_bytes_total`          | counter   |                           | SFU            | Media bytes forwarded to receivers; its `rate()` is the bitrate forwarded         |
+| `teamcraft_sfu_sessions_total`                 | counter   | `transport`, `family`     | SFU            | Sessions that joined a call, by transport and the client's address family         |
+| `teamcraft_sfu_session_switches_total`         | counter   |                           | SFU            | Sessions that moved to QUIC, from the fallback once UDP got through               |
 | `teamcraft_bridge_queue_depth`                 | gauge     |                           | bridge         | Submissions waiting for the worker (it holds 4096)                                |
 
 Label values come from fixed lists, so the number of series is bounded, and each binary's tests check
@@ -172,6 +178,9 @@ no error texts.**
   `web` (everything outside `/api/`). Bridge: `health`, `hooks`, `ingest`, `other`.
 - `status`: `1xx` (WebSocket upgrades), `2xx`, `3xx`, `4xx` without 429, `429`, `5xx`.
 - `provider`: `apns`, `fcm`, `unifiedpush`, `webpush`.
+- `transport`, SFU: `quic`, `fallback` (the WebSocket fallback). `family`: `ipv4`, `ipv6`; an
+  IPv4 client of the dual-stack socket counts as `ipv4`, a fallback client behind a trusted proxy by
+  its forwarded address.
 - `dependency`: `database`, `object_storage`, `identity_provider`, `push_gateway`, `sfu`, once in use.
   `state`: `ok`, `down`, `recovering`.
 - `check`: the checks of "Health and alerts" below. `state` of a check: `ok`, `failing`, `alert`,
@@ -188,6 +197,23 @@ the last values stay, and the timestamp of `database_check` shows how old they a
 at 0 with the process, which Prometheus handles, and everything is per instance.
 
 The endpoint can't tell you that the server is down: probe `/readyz` from outside as well.
+
+**How calls go** (SFU, #1648). Calls run on QUIC datagrams, not RTP, so there are no RTCP reports:
+round-trip time and loss come from the QUIC connection, which acknowledges every packet, so the loss
+is that of the SFU's packets to the clients (the downlink, where receivers suffer). Each session
+reads them once every 10 seconds beside its other timers; a 10-second window in which the SFU sent
+fewer than 100 packets to the client counts for the round-trip time but not for loss. Sessions on the
+WebSocket fallback run on TCP, which hides loss as delay: they count in `teamcraft_sfu_sessions_total`
+only. Forwarding a datagram costs one more atomic add (its bytes, for all its receivers together), a
+keyframe request one more; memory is fixed (two histograms, a few counters), whatever the number of
+calls. Aggregates only, over every call on the SFU: no call, user, device or address in a label.
+
+Reading them: `histogram_quantile(0.95, rate(teamcraft_sfu_downlink_loss_ratio_bucket[5m]))` above
+about 0.02 means audio suffers somewhere, above 0.1 video does. A rising share of
+`transport="fallback"` in `rate(teamcraft_sfu_sessions_total[1h])`, or `quic` falling to zero, means
+UDP to the SFU's port (`3478/udp`) got blocked: check the firewall before people complain. The SFU
+can't tell why a client fell back (it only sees it arrive on the fallback), and
+`teamcraft_sfu_session_switches_total` counts those that reached QUIC after all.
 
 ## Health and alerts
 
@@ -237,8 +263,8 @@ shows as an alert, and it ends with the next successful send.
 to the instance's owners and admins and nobody else. It has no payload: the console reads
 `GET /api/v1/admin/health` once when told (and once after the gateway reconnects, and once at the
 start), so nothing polls. The System health page itself reloads every 30 seconds while it is open and
-the page is visible; every other page reads nothing for it. Alerts are kept in memory (the last 50);
-a restart starts the list again, and a failure that lasts is raised again after the hold time.
+the page is visible; every other page reads nothing for it. The alert history keeps resolved alerts
+for `history_days` (90) and at most the last 500; open alerts stay until they end.
 
 Outside the app, each raised and resolved alert goes out two more ways:
 
@@ -250,11 +276,26 @@ Outside the app, each raised and resolved alert goes out two more ways:
   a chat-ops channel or a paging system.
 
 The evaluation only queues these; a task of its own delivers them, so a mail server that hangs does
-not hold up the checks. The queue is in memory on purpose, as are the admins' addresses (read with
-the admins, and the last ones kept when that fails): when the database is what failed, the mail
+not hold up the checks. The queue works from memory on purpose, as do the admins' addresses (read
+with the admins, and the last ones kept when that fails): when the database is what failed, the mail
 still goes out, and the webhook event is queued once the database is back. A delivery that fails is
 tried again after 30 seconds, doubling up to an hour, and given up after a day; at most 200 wait.
-A restart loses what was waiting, like the alert list; a failure that lasts is raised again. Keeping both across restarts is #1646.
+
+**Across restarts** (#1646). The alert history and the deliveries waiting are written to the
+database (`health_alerts`, `health_alert_notices`) behind memory, by a task of its own: a write
+never holds up the checks or a delivery, and one that fails (the database is down) is tried again
+every check interval, together with whatever changed meanwhile. At a start the server reads both
+back before it writes anything, retrying while the database is unavailable. So a restart or a
+rolling deploy:
+
+- keeps the history the System health page shows;
+- keeps an open alert open: its check stays in alert, a failure that lasts is not raised a second
+  time, and the alert ends (and is reported as ended) once the check has been fine for the clear time;
+- sends what was still waiting, and not what already went out. A delivery is written as done right
+  after it was made; only one made in the moment before the process died can go out a second time.
+
+Pruning runs with each write and at least every six hours: resolved alerts older than
+`history_days`, the oldest beyond 500 resolved ones, and deliveries older than a day.
 
 **Settings** (Administration → Settings → Health alerts; the configuration file only names paths):
 
@@ -267,6 +308,7 @@ A restart loses what was waiting, like the alert list; a failure that lasts is r
 | `certificate_min_days` | 14       | Too close to expiry with fewer days (1 to 365)               |
 | `disk_max_percent`     | 85       | Too full above this (50 to 99)                               |
 | `is_email_enabled`     | on       | Also mail raised and resolved alerts to owners and admins    |
+| `history_days`         | 90       | Resolved alerts stay in the history this long (1 to 3650)    |
 
 **What the deployment reports.** The server cannot see its backups, its certificate or the disk
 from inside its container. With `[health] heartbeat_dir = "/path"` it reads three files there at
