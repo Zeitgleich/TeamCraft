@@ -151,6 +151,96 @@ async fn a_download_that_keeps_failing_stops_for_the_user() {
 }
 
 #[tokio::test]
+async fn a_save_that_failed_on_an_outage_resumes_when_the_network_is_back() {
+  let mut setup = Setup::new("outage").await;
+  for _ in 0..3 {
+    setup.server.cut_next_download_after(1000);
+  }
+  let mut downloads = Downloads::new(1);
+  downloads.save(setup.channel, setup.attachment);
+  for _ in 0..3 {
+    setup.run(&mut downloads).await;
+    setup.clock.advance(60_000);
+  }
+  assert!(matches!(setup.status(), DownloadStatus::Failed { .. }));
+
+  // Nothing happens by itself while no connection came back.
+  setup.run(&mut downloads).await;
+  assert_eq!(setup.server.download_starts(), vec![0, 1000, 2000]);
+
+  downloads.network_back();
+  setup.run(&mut downloads).await;
+  assert_eq!(
+    setup.server.download_starts(),
+    vec![0, 1000, 2000, 3000],
+    "continues with a Range from the partial file"
+  );
+  setup.assert_saved();
+}
+
+#[tokio::test]
+async fn a_failed_save_resumes_once_per_reconnect_and_not_after_the_age_limit() {
+  let mut setup = Setup::new("outage-rounds").await;
+  for _ in 0..6 {
+    setup.server.cut_next_download_after(1000);
+  }
+  let mut downloads = Downloads::new(1);
+  downloads.save(setup.channel, setup.attachment);
+  for _ in 0..3 {
+    setup.run(&mut downloads).await;
+    setup.clock.advance(60_000);
+  }
+  // The outage lasts: one round of attempts per reconnect, then it waits for the next one.
+  downloads.network_back();
+  for _ in 0..3 {
+    setup.run(&mut downloads).await;
+    setup.clock.advance(60_000);
+  }
+  assert_eq!(setup.server.download_starts().len(), 6);
+  assert!(matches!(setup.status(), DownloadStatus::Failed { .. }));
+  setup.run(&mut downloads).await;
+  assert_eq!(
+    setup.server.download_starts().len(),
+    6,
+    "no loop without a reconnect"
+  );
+
+  setup.clock.advance(25 * 60 * 60 * 1000);
+  downloads.network_back();
+  setup.run(&mut downloads).await;
+  assert_eq!(
+    setup.server.download_starts().len(),
+    6,
+    "too old to resume by itself"
+  );
+}
+
+#[tokio::test]
+async fn a_failure_the_user_has_to_look_at_does_not_resume() {
+  let mut setup = Setup::new("no-resume").await;
+  setup.server.tamper_blobs();
+  let mut downloads = Downloads::new(1);
+  downloads.save(setup.channel, setup.attachment);
+  setup.run(&mut downloads).await;
+  assert_eq!(setup.server.download_starts(), vec![0]);
+
+  downloads.network_back();
+  setup.run(&mut downloads).await;
+  assert_eq!(
+    setup.server.download_starts(),
+    vec![0],
+    "a corrupt blob stays failed"
+  );
+
+  // A cancel stays cancelled too.
+  downloads.control(setup.attachment, DownloadControl::Cancel);
+  setup.run(&mut downloads).await;
+  downloads.network_back();
+  setup.run(&mut downloads).await;
+  assert_eq!(setup.server.download_starts(), vec![0]);
+}
+
+#[tokio::test]
 async fn a_paused_download_waits_for_the_user_and_continues_from_its_partial_file() {
   let mut setup = Setup::new("pause").await;
   setup.server.cut_next_download_after(MIB);

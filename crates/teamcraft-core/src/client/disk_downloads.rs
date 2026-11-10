@@ -20,6 +20,10 @@ use crate::store::{AttachmentRef, LocalStore, Table};
 /// Downloads kept in the list; older finished ones are dropped (and their partial files deleted).
 pub const MAX_DOWNLOAD_RECORDS: usize = 100;
 
+/// How long after the user asked for a save it still resumes by itself after a transient failure
+/// (issue #1618); later it waits for the user's retry.
+pub const RESUME_FAILED_WITHIN_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// The folder under the upload staging directory that holds partial downloads (ciphertext only).
 #[cfg(not(target_arch = "wasm32"))]
 const PARTIAL_DIR: &str = "partial-downloads";
@@ -144,6 +148,37 @@ pub fn due_downloads(
     }
   }
   Ok((due, maybe_next_ms))
+}
+
+/// A save that failed for a transient reason (storage unavailable, network, intercepted) and was
+/// asked for less than [`RESUME_FAILED_WITHIN_MS`] ago continues, once per call: the host calls this
+/// when the connection came back or the network changed (issue #1618). Permanent failures (missing,
+/// corrupted, a local file error), cancelled and paused saves stay as they are. The returned saves
+/// are marked running with a fresh attempt round, keeping when the user asked for them.
+pub fn resume_failed_downloads(store: &impl LocalStore, now_ms: i64) -> Result<Vec<DueDownload>, CoreError> {
+  let mut resumed = Vec::new();
+  for record in download_records(store)? {
+    let DownloadStatus::Failed { reason } = record.status else {
+      continue;
+    };
+    if !is_transient(reason) || now_ms.saturating_sub(record.started_at_ms) > RESUME_FAILED_WITHIN_MS {
+      continue;
+    }
+    resumed.push(DueDownload {
+      conversation_id: record.conversation_id,
+      attachment_id: record.attachment_id,
+      target: record.target.clone(),
+    });
+    save(
+      store,
+      &DownloadRecord {
+        status: DownloadStatus::Running,
+        retry: UploadRetry::Fresh,
+        ..record
+      },
+    )?;
+  }
+  Ok(resumed)
 }
 
 /// Records that a download (re)starts. A download asked for again after it finished counts its
@@ -284,6 +319,14 @@ fn is_retried(reason: TransferFailure) -> bool {
   matches!(
     reason,
     TransferFailure::Network | TransferFailure::StorageUnavailable
+  )
+}
+
+/// Failures that an outage ends: a save that failed for one resumes by itself.
+fn is_transient(reason: TransferFailure) -> bool {
+  matches!(
+    reason,
+    TransferFailure::Network | TransferFailure::StorageUnavailable | TransferFailure::Intercepted
   )
 }
 
@@ -735,6 +778,56 @@ mod tests {
       serde_json::json!({"state": "failed", "reason": "missing"})
     );
     assert_eq!(serde_json::from_value::<DownloadRecord>(json).unwrap(), record);
+  }
+
+  #[test]
+  fn only_a_recent_transient_failure_resumes() {
+    let store = MemoryStore::new();
+    let now_ms = 10 * RESUME_FAILED_WITHIN_MS;
+    let put = |raw: i64, status: DownloadStatus, started_at_ms: i64| {
+      record_start(
+        &store,
+        conversation(),
+        &file(raw),
+        &DownloadTarget::DownloadDirectory,
+        now_ms,
+      )
+      .unwrap();
+      let mut record = download_record(&store, file(raw).attachment_id).unwrap().unwrap();
+      record.status = status;
+      record.started_at_ms = started_at_ms;
+      save(&store, &record).unwrap();
+    };
+    let failed = |reason| DownloadStatus::Failed { reason };
+    put(1, failed(TransferFailure::StorageUnavailable), now_ms - 1000);
+    put(2, failed(TransferFailure::Missing), now_ms - 1000);
+    put(3, failed(TransferFailure::Corrupted), now_ms - 1000);
+    put(
+      4,
+      failed(TransferFailure::Network),
+      now_ms - RESUME_FAILED_WITHIN_MS - 1,
+    );
+    put(5, failed(TransferFailure::Intercepted), now_ms - 1000);
+    put(6, DownloadStatus::Cancelled, now_ms - 1000);
+
+    let mut resumed: Vec<_> = resume_failed_downloads(&store, now_ms)
+      .unwrap()
+      .into_iter()
+      .map(|due| due.attachment_id)
+      .collect();
+    resumed.sort_by_key(ToString::to_string);
+    assert_eq!(resumed, [file(1).attachment_id, file(5).attachment_id]);
+    let record = download_record(&store, file(1).attachment_id).unwrap().unwrap();
+    assert_eq!(record.status, DownloadStatus::Running);
+    assert_eq!(
+      record.started_at_ms,
+      now_ms - 1000,
+      "the age keeps counting from the ask"
+    );
+    assert!(
+      resume_failed_downloads(&store, now_ms).unwrap().is_empty(),
+      "once per call: nothing is failed any more"
+    );
   }
 
   fn settings() -> UploadRetrySettings {

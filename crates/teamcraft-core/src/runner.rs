@@ -207,6 +207,8 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         self.report_activity().await;
         // Back online: what waited goes out now, not on the next tick.
         self.is_upload_due = true;
+        // And saves that failed on the outage continue.
+        self.downloads.network_back();
         self.flush().await;
         self.changed();
         self.answer_caught_up();
@@ -224,6 +226,7 @@ impl<A: ServerApi, S: LocalStore> SyncRunner<A, S> {
         Wake::Frame(maybe_frame) => self.on_frame(maybe_frame).await,
         Wake::NetworkChanged => {
           let now = self.client.now_ms();
+          self.downloads.network_back();
           self.connection.network_changed(now).await;
         },
         Wake::Uploaded(sent) => self.on_uploaded(sent).await,
