@@ -26,6 +26,7 @@ use leptos::wasm_split::{SplitLoaderError, wasm_split};
 use crate::admin::AdminSection;
 use crate::admin_live::{AdminLive, AdminTask};
 use crate::calls::CallRequest;
+use crate::components::account_switcher::AccountsDialog;
 use crate::components::activity_view::{ActivityHome, ActivitySidebar};
 use crate::components::add_to_call::AddToCallDialog;
 use crate::components::admin_console::AdminConsole;
@@ -219,6 +220,8 @@ areas! {
   link_device(_unit: ()) => dialogs: view! { <LinkDeviceDialog /> };
   /// "Report a problem" (docs/bug-reports.md).
   report_problem(_unit: ()) => dialogs: view! { <ReportProblemDialog /> };
+  /// The accounts on this computer (desktop, #214).
+  accounts(_unit: ()) => dialogs: view! { <AccountsDialog /> };
   device_approval(_unit: ()) => dialogs: view! { <DeviceApprovalDialog /> };
   calls_unavailable(_unit: ()) => dialogs: view! { <CallsUnavailableDialog /> };
   /// Another device asking to be linked to this account, once one asks.

@@ -1,5 +1,7 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.consumeWindowInsets
 import android.text.format.Formatter
 import androidx.annotation.StringRes
 import androidx.compose.foundation.Image
@@ -57,18 +59,27 @@ import de.zeitgleich.teamcraft.ui.thumbnailKey
 fun FilesScreen(viewModel: MainViewModel, conversationId: String, onBack: () -> Unit) {
   val files = rememberFiles(viewModel, ChatQueries.files(conversationId))
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.files_title), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
-    FilesContent(viewModel, files, R.string.files_empty, Modifier.fillMaxSize().padding(padding))
+    FilesContent(viewModel, files, R.string.files_empty, Modifier.fillMaxSize().consumeWindowInsets(padding), contentPadding = padding)
   }
 }
 
-/** The files grid, or the placeholder, failure or empty state of a list that has no files to show. */
+/**
+ * The files grid, or the placeholder, failure or empty state of a list that has no files to show.
+ * The grid takes [contentPadding] so it scrolls behind the navigation bar.
+ */
 @Composable
-internal fun FilesContent(viewModel: MainViewModel, files: ReadState<List<FileInfo>>, @StringRes emptyText: Int, modifier: Modifier) {
+internal fun FilesContent(
+  viewModel: MainViewModel,
+  files: ReadState<List<FileInfo>>,
+  @StringRes emptyText: Int,
+  modifier: Modifier,
+  contentPadding: PaddingValues = PaddingValues(),
+) {
   val phase = files.phase { it }
   if (phase == ListPhase.Rows) {
-    FilesGrid(viewModel, files.maybeValue.orEmpty(), modifier)
+    FilesGrid(viewModel, files.maybeValue.orEmpty(), modifier, contentPadding)
   } else {
-    Column(modifier) { ListPlaceholder(phase, files.retry) { EmptyText(emptyText) } }
+    Column(modifier.padding(contentPadding)) { ListPlaceholder(phase, files.retry) { EmptyText(emptyText) } }
   }
 }
 
@@ -89,7 +100,7 @@ internal fun rememberFiles(viewModel: MainViewModel, request: String): ReadState
 
 /** The tiles of [files]: a picture opens in the viewer, anything else from disk or after its download. */
 @Composable
-internal fun FilesGrid(viewModel: MainViewModel, files: List<FileInfo>, modifier: Modifier) {
+internal fun FilesGrid(viewModel: MainViewModel, files: List<FileInfo>, modifier: Modifier, contentPadding: PaddingValues = PaddingValues()) {
   val context = LocalContext.current
   // Saveable: a rotation keeps the viewer open (the conversation, message and file it opened on).
   var maybeViewing by rememberSaveable { mutableStateOf<List<String>?>(null) }
@@ -99,7 +110,7 @@ internal fun FilesGrid(viewModel: MainViewModel, files: List<FileInfo>, modifier
   LaunchedEffect(maybeViewing != null) {
     if (maybeViewing != null && maybeSnapshot == null) maybeSnapshot = viewModel.readChat { snapshot() }
   }
-  LazyVerticalGrid(GridCells.Adaptive(120.dp), modifier) {
+  LazyVerticalGrid(GridCells.Adaptive(120.dp), modifier, contentPadding = contentPadding) {
     items(files, key = { it.fileId }) { file ->
       Column(
         Modifier.padding(4.dp).clickable {

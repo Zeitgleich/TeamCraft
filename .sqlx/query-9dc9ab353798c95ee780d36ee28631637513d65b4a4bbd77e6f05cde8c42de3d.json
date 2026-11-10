@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO health_alert_notices\n           (id, check_id, kind, changed_at, channel, mail_address, queued_at, next_attempt_at,\n            failures)\n         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n         ON CONFLICT (id) DO UPDATE SET next_attempt_at = EXCLUDED.next_attempt_at,\n                                        failures = EXCLUDED.failures",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9dc9ab353798c95ee780d36ee28631637513d65b4a4bbd77e6f05cde8c42de3d"
+}

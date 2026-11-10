@@ -113,7 +113,7 @@ pub fn restorable(route: Route) -> Option<Route> {
   }
 }
 
-fn key(user: UserId) -> String {
+pub(crate) fn key(user: UserId) -> String {
   format!("{KEY_PREFIX}{user}")
 }
 

@@ -1584,6 +1584,12 @@ impl Core {
   }
 
   async fn next_wake(&mut self, requests: &mut mpsc::UnboundedReceiver<Request>) -> Wake {
+    // A clock set back leaves the tick an hour away, and a busy connection wakes the loop more
+    // often than the clamp below lets a tick through: rewind on every wake, not in the tick only,
+    // so the tick comes now (issue #1673).
+    let now = now_ms();
+    self.next_tick_ms = rewound(self.next_tick_ms, now, TICK);
+    self.background.next_page_ms = rewound(self.background.next_page_ms, now, TICK);
     // The connection's deadlines count only once there is a client to connect.
     // A connect waits while the sync is paused: its due attempt must not wake the loop for nothing.
     let is_waiting_to_connect = self.is_sync_paused && !self.connection.is_connected();
@@ -1593,7 +1599,7 @@ impl Core {
     };
     // While a file goes up, the UI reads its progress again every so often.
     let deadline = match self.maybe_reported_bytes {
-      Some(_) => deadline.min(now_ms().saturating_add(millis(TRANSFER_PROGRESS))),
+      Some(_) => deadline.min(now.saturating_add(millis(TRANSFER_PROGRESS))),
       None => deadline,
     };
     // Someone stopped typing: no event says so, the indicator runs out ([`Self::on_tick`]).
@@ -1614,7 +1620,7 @@ impl Core {
     };
     // Never longer than a tick: after the wall clock went back, deadlines lie in the "future" by
     // the jump, and the tick notices the jump and moves them (robustness.md, "Time").
-    let until_tick_ms = sleep_ms_until(deadline, now_ms(), TICK);
+    let until_tick_ms = sleep_ms_until(deadline, now, TICK);
     let is_reading = !self.is_sync_paused;
     let Self {
       connection,

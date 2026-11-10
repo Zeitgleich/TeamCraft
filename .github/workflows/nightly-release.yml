@@ -1,6 +1,7 @@
 # Nightly release (docs/release.md, "Nightly releases"): every night the state of `main` is released
-# if it changed since the last release. Scheduled at 22:00 (Berlin) because GitHub starts scheduled
-# runs hours late; the release usually lands between 03:00 and 06:00.
+# if it changed since the last release. It has no GitHub schedule: GitHub starts scheduled runs hours
+# late or not at all, so an external scheduler dispatches it every day at 04:30 (Berlin) through the
+# API (workflow_dispatch on main, token with "Actions: write" on this repository only).
 #
 # - No commit since the last release tag, or only docs: nothing happens.
 # - CI of main must be green for the newest code change; else the run fails and nothing is tagged.
@@ -17,9 +18,6 @@
 name: Nightly release
 
 on:
-  schedule:
-    - cron: "0 22 * * *"
-      timezone: Europe/Berlin
   workflow_dispatch:
     inputs:
       dry_run:
@@ -27,7 +25,7 @@ on:
         type: boolean
         default: false
 
-# Never two nightly runs at once; a manual run waits for the scheduled one.
+# Never two nightly runs at once; a second dispatch waits for the running one.
 concurrency:
   group: nightly-release
   cancel-in-progress: false
@@ -80,7 +78,7 @@ jobs:
           git log -1 --format='code_sha=%H' "$last_tag..HEAD" -- . ':!docs' ':!*.md' >> "$GITHUB_OUTPUT"
       # The newest code change must be covered by a green CI run on main: a run of that commit or of
       # a later one (a later commit contains the earlier one). A run that is still queued or running
-      # is waited for, at most CI_WAIT_MINUTES (the scheduled run often meets the CI of the last
+      # is waited for, at most CI_WAIT_MINUTES (the nightly run often meets the CI of the last
       # merges); a red one stops the release. Only commits on main when this run started count: runs
       # of later merges aren't in this checkout (`merge-base` can't see them) and are never waited for.
       - name: CI of main is green

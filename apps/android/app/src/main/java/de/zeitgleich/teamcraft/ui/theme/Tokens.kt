@@ -1,7 +1,5 @@
 package de.zeitgleich.teamcraft.ui.theme
 
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -30,13 +28,6 @@ object Radius {
   val medium = 8.dp
   val large = 12.dp
 }
-
-internal val TeamCraftShapes = Shapes(
-  extraSmall = RoundedCornerShape(Radius.small),
-  small = RoundedCornerShape(Radius.small),
-  medium = RoundedCornerShape(Radius.medium),
-  large = RoundedCornerShape(Radius.large),
-)
 
 /**
  * One type scale: Material's sizes (sp, so they follow the system font scale) with the desktop's

@@ -75,6 +75,7 @@ mod server_changes;
 mod settings_sync;
 mod signed_deletions;
 mod single_image;
+mod slow_disk;
 mod snapshot_cache;
 mod store_integrity;
 mod sync_engine;

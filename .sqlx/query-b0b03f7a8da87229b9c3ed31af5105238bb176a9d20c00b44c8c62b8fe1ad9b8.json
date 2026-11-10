@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM health_alert_notices WHERE id = ANY($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b0b03f7a8da87229b9c3ed31af5105238bb176a9d20c00b44c8c62b8fe1ad9b8"
+}

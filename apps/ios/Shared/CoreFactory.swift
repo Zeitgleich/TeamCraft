@@ -28,12 +28,15 @@ final class VaultTokenProvider: TokenProvider, @unchecked Sendable {
   }
 
   /// A core that went away meanwhile only ends the ID token's part: the access token is still good.
-  func accessToken() -> String? {
+  /// No token while the session is kept is a refresh that failed for now, not a sign-out (#1671): a
+  /// refused refresh token or an expired local session leaves no OIDC session behind.
+  func accessToken() -> AccessToken {
     // Taken at most once per request of the core, so one request is one forced refresh.
     let forceRefresh = receiver?.takeIdTokenRequest() == true
     let token = vault.currentAccessToken(forceRefresh: forceRefresh)
     receiver?.noteIdToken(idToken: vault.currentIdToken())
-    return token
+    if let token { return .token(value: token) }
+    return vault.load() != nil ? .unavailable : .signedOut
   }
 
   /// Read anew for each use, so that a refresh in progress doesn't hold the core.

@@ -19,7 +19,7 @@ use teamcraft_core::store::{DatabaseKeySource, KeySourceError};
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::UserId;
 
-use super::commands::{CommandError, CoreHost, base_dir};
+use super::commands::{CommandError, CoreHost};
 use crate::notifications::pictures::NotificationPictures;
 
 /// Folder of the caches inside a server's core directory.
@@ -198,7 +198,7 @@ pub async fn core_media_clear(
   }
   // The notifications' copies of the pictures go with the cache.
   pictures.forget_all();
-  let core_dir = base_dir(&app)?.join("core");
+  let core_dir = super::commands::core_dir(&app)?;
   tauri::async_runtime::spawn_blocking(move || delete_all(&core_dir))
     .await
     .map_err(|error| CommandError::from(error.to_string()))?

@@ -9,6 +9,7 @@ use crate::clock::{
   end_of_local_day, end_of_local_week, format_date_time, format_local_datetime_input, format_time, local_day,
   now_ms, parse_local_datetime,
 };
+use crate::components::account_switcher::AccountsMenuSection;
 use crate::components::avatar::{Avatar, AvatarSize, PresenceDot};
 use crate::components::emoji_picker::EmojiPicker;
 use crate::components::icons::{Icon, IconName};
@@ -227,10 +228,11 @@ pub fn StatusMenu() -> impl IntoView {
         </button>
       </Show>
       <div class="menu-sep" role="separator"></div>
-      <button class="menu-item" role="menuitem" tabindex="-1" disabled title=move || i18n.t("admin-soon")>
-        <Icon name=IconName::Users />
-        <span class="menu-label">{move || i18n.t("menu-switch-account")}</span>
-      </button>
+      // Several accounts (#214) are the desktop app's; a browser tab holds one.
+      <Show when=crate::auth::tauri::is_available fallback=|| ()>
+        <AccountsMenuSection />
+        <div class="menu-sep" role="separator"></div>
+      </Show>
       <button
         class="menu-item"
         role="menuitem"

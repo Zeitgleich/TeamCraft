@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use teamcraft_ffi::{
-  AppConfig, EventListener, LinkPlatform, TeamCraft, TeamCraftError, TokenProvider, login_brand,
+  AccessToken, AppConfig, EventListener, LinkPlatform, TeamCraft, TeamCraftError, TokenProvider, login_brand,
 };
 
 /// A brand answer as the server sends it, with one asset path and one link that must be dropped.
@@ -60,6 +60,19 @@ async fn without_a_token_calls_report_signed_out() {
   std::fs::remove_dir_all(&directory).unwrap();
 }
 
+/// Issue #1671: an app whose token refresh failed (offline, the identity provider down) keeps its
+/// session. Calls report the network, which the apps retry, not a sign-out, which they act on.
+#[tokio::test]
+async fn a_failed_token_refresh_reports_the_network_not_a_sign_out() {
+  let directory = temp_dir();
+  let teamcraft = TeamCraft::new(config(&directory, [7; 32]), Arc::new(RefreshFailing), listener()).unwrap();
+  assert!(matches!(
+    teamcraft.account_state().await,
+    Err(TeamCraftError::Network(_))
+  ));
+  std::fs::remove_dir_all(&directory).unwrap();
+}
+
 #[test]
 fn bad_configuration_is_rejected() {
   let directory = temp_dir();
@@ -90,8 +103,20 @@ fn reopening_with_the_same_key_works() {
 struct Tokens(Option<String>);
 
 impl TokenProvider for Tokens {
-  fn access_token(&self) -> Option<String> {
-    self.0.clone()
+  fn access_token(&self) -> AccessToken {
+    match &self.0 {
+      Some(value) => AccessToken::Token { value: value.clone() },
+      None => AccessToken::SignedOut,
+    }
+  }
+}
+
+/// An app whose session lives but whose refresh fails right now.
+struct RefreshFailing;
+
+impl TokenProvider for RefreshFailing {
+  fn access_token(&self) -> AccessToken {
+    AccessToken::Unavailable
   }
 }
 

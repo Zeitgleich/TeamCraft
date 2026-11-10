@@ -266,8 +266,18 @@ async fn typing_goes_out_once_per_interval_and_never_late() {
   assert!(handle.send(typing(channel)));
   assert!(handle.send(typing(channel)));
   assert!(handle.send(typing(other)));
-  assert!(handle.send(RunnerCommand::Stop));
-  let client = runner.run().await;
+  // A stop sent now would end the connection's catch-up before the typing goes out (issue #1656).
+  let stop = async {
+    while server.typing_reports(me).len() < 2 {
+      tokio::task::yield_now().await;
+    }
+    assert!(handle.send(RunnerCommand::Stop));
+  };
+  let (client, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+    tokio::join!(runner.run(), stop)
+  })
+  .await
+  .expect("the typing never went out");
   assert_eq!(server.typing_reports(me), [channel, other]);
 
   server.set_offline(me, true);

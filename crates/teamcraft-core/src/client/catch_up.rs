@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 use futures_util::future::join_all;
 use futures_util::task::AtomicWaker;
@@ -50,6 +50,12 @@ pub struct CatchUpFocus {
   /// The host waiting in [`CatchUpFocus::caught_up_since`] (one waiter).
   waker: Arc<AtomicWaker>,
 }
+
+/// Set once the host's sync loop is told to stop ([`crate::runner::RunnerCommand::Stop`]): a
+/// catch-up then ends at the next conversation boundary with [`CoreError::SyncStopping`] instead of
+/// holding up the stop until every conversation is through (issue #1656). Clones share it.
+#[derive(Clone, Debug, Default)]
+pub struct SyncStopRequest(Arc<AtomicBool>);
 
 /// Welcomes a catch-up keeps after the focus first read them, for the next focus; with more waiting,
 /// each focus reads them again.
@@ -129,6 +135,16 @@ impl CatchUpFocus {
   }
 }
 
+impl SyncStopRequest {
+  pub fn request(&self) {
+    self.0.store(true, Ordering::SeqCst);
+  }
+
+  pub fn is_requested(&self) -> bool {
+    self.0.load(Ordering::SeqCst)
+  }
+}
+
 /// Whether the conversation is still being caught up.
 pub fn is_catching_up(store: &impl LocalStore, conversation: ConversationId) -> Result<bool, CoreError> {
   Ok(store.get(Table::SyncState, &marker_key(conversation))?.is_some())
@@ -154,6 +170,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// (a desktop command while the core thread is busy syncing).
   pub fn share_catch_up_focus(&mut self, focus: CatchUpFocus) {
     self.catch_up_focus = focus;
+  }
+
+  /// Takes the host loop's stop request: a catch-up asks it between conversations. A client handed
+  /// back by a stopped loop gets a fresh one, so work outside a loop is never cut short.
+  pub fn share_stop_request(&mut self, stop: SyncStopRequest) {
+    self.stop_request = stop;
+  }
+
+  /// Ends a catch-up at a conversation boundary once the host's loop was told to stop. Called only
+  /// between conversations: each one's groups of writes are complete there.
+  fn check_not_stopping(&self) -> Result<(), CoreError> {
+    if self.stop_request.is_requested() {
+      return Err(CoreError::SyncStopping);
+    }
+    Ok(())
   }
 
   /// Catches up the stored conversations: member lists (in `members_order`), welcomes, groups to
@@ -241,6 +272,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     phases: &PhaseTimer,
   ) -> Result<(), CoreError> {
     while !waiting.is_empty() {
+      self.check_not_stopping()?;
       let batch = next_batch(
         &mut waiting,
         self.catch_up_focus.get(),
@@ -257,6 +289,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self.apply_live_during_catch_up().await?;
         // The UI reads what this conversation brought before the next one is decrypted.
         self.hand_back_thread().await;
+        self.check_not_stopping()?;
       }
     }
     Ok(())
@@ -311,13 +344,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let mls_written_before = self.saved_mls.written_bytes();
     // One conversation's failure (a 403 right after a removal) marks it for another try and the
     // catch-up goes on with the others (issue #159).
+    let mut times = ContentTimes::default();
     let result = self
-      .catch_up_content_from(conversation, first, self.settings.catch_up_message_pages)
+      .catch_up_content_timed(
+        conversation,
+        first,
+        self.settings.catch_up_message_pages,
+        &mut times,
+      )
       .await;
-    // One line each, so a slow conversation shows (issue #972).
+    // One line each, so a slow conversation shows (issue #972), with where its time went.
     tracing::info!(
       conversation_id = %conversation,
       ms = self.now_ms().saturating_sub(started_ms),
+      mls_ms = times.mls_ms,
+      messages_ms = times.messages_ms,
+      messages = times.messages,
+      keys_ms = times.keys_ms,
       mls_written_bytes = self.saved_mls.written_bytes().saturating_sub(mls_written_before),
       is_ok = result.is_ok(),
       "catch-up: conversation done"
@@ -549,6 +592,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       }
     }
     while !due.is_empty() {
+      self.check_not_stopping()?;
       let place = self
         .catch_up_focus
         .get()
@@ -592,19 +636,45 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     first: FirstPages,
     maybe_pages: Option<u32>,
   ) -> Result<(), CoreError> {
+    let mut times = ContentTimes::default();
+    self
+      .catch_up_content_timed(conversation, first, maybe_pages, &mut times)
+      .await
+  }
+
+  /// [`Self::catch_up_content_from`], noting in `times` how long each part took.
+  async fn catch_up_content_timed(
+    &mut self,
+    conversation: ConversationId,
+    first: FirstPages,
+    maybe_pages: Option<u32>,
+    times: &mut ContentTimes,
+  ) -> Result<(), CoreError> {
+    let mut lap_ms = self.now_ms();
     if self.has_group(conversation)? {
       self
         .sync_mls_from(conversation, first.maybe_mls, first.maybe_members)
         .await?;
     }
-    self
+    times.mls_ms = self.ms_since_lap(&mut lap_ms);
+    times.messages = self
       .catch_up_messages_from(conversation, first.maybe_messages, maybe_pages)
       .await?;
+    times.messages_ms = self.ms_since_lap(&mut lap_ms);
     self.retry_undecrypted(conversation)?;
     // Senders this device has no verified key for yet (it isn't in the group, or just joined).
     self.learn_sender_keys(conversation).await?;
+    times.keys_ms = self.ms_since_lap(&mut lap_ms);
     self.note_content_seen(conversation);
     self.note_delivered(conversation)
+  }
+
+  /// Milliseconds since `lap_ms`, which moves to now.
+  fn ms_since_lap(&self, lap_ms: &mut i64) -> i64 {
+    let now_ms = self.now_ms();
+    let elapsed_ms = now_ms.saturating_sub(*lap_ms);
+    *lap_ms = now_ms;
+    elapsed_ms
   }
 
   /// Reads the first page of each conversation's MLS queue and messages at once. Failures are
@@ -660,10 +730,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
   ) -> Result<ListMessagesQuery, CoreError> {
     let (maybe_before, maybe_after) = if self.is_history_loaded(conversation)? {
-      (
-        None,
-        self.store.edge_server_id(conversation, MessageEdge::Newest)?,
-      )
+      (None, self.catch_up_cursor(conversation)?)
     } else {
       (
         self.store.edge_server_id(conversation, MessageEdge::Oldest)?,
@@ -741,6 +808,19 @@ fn next_batch(
   }
   let size = size.max(1).min(waiting.len());
   waiting.drain(..size).collect()
+}
+
+/// Where one conversation's catch-up spent its time, for its log line: IDs and durations only.
+#[derive(Clone, Copy, Debug, Default)]
+struct ContentTimes {
+  /// Its MLS queue (and the member list and device lists that verify it).
+  mls_ms: i64,
+  /// Its new messages: fetched, decrypted and stored.
+  messages_ms: i64,
+  /// How many messages the server sent.
+  messages: usize,
+  /// Messages waiting for keys tried again, and their senders' keys.
+  keys_ms: i64,
 }
 
 /// Logs how long each phase of a catch-up took (docs/performance.md: where the time to a readable

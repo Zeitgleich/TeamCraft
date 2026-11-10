@@ -9547,6 +9547,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a0219bd7d979d58245a4f41f695e1ac9f8befdffadd7f61f1bae9e39abc6620"
 
 [[package]]
+name = "sqlite-plugin"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fcd2cdd9d0ff6b949fb491073c79c38401374a8a34f327be1f29f5386ad2dd6"
+dependencies = [
+ "bindgen 0.72.1",
+]
+
+[[package]]
 name = "sqlite-wasm-rs"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10899,6 +10908,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "sqlite-plugin",
  "tantivy",
  "teamcraft-client-api",
  "teamcraft-crypto",
@@ -11278,6 +11288,7 @@ dependencies = [
  "p256",
  "rand_core 0.6.4",
  "reqwest",
+ "rustix 1.1.5",
  "rusty-s3",
  "secrecy",
  "serde",
@@ -11304,6 +11315,7 @@ dependencies = [
  "utoipa",
  "utoipa-axum",
  "wtransport",
+ "x509-parser",
  "zeroize",
 ]
 

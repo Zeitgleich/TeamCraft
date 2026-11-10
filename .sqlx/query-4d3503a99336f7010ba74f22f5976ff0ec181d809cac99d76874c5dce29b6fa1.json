@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM health_alert_notices WHERE queued_at < $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4d3503a99336f7010ba74f22f5976ff0ec181d809cac99d76874c5dce29b6fa1"
+}

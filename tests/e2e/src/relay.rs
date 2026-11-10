@@ -1,6 +1,7 @@
 //! A TCP relay between the server and a dependency of the dev stack (Postgres, object storage, the
 //! identity provider) that a test can cut, stall and restore, to make the dependency "briefly
-//! unavailable" or "slow" for one server without touching what the other tests share.
+//! unavailable" or "slow" for one server without touching what the other tests share. Between a
+//! client and the server it can also play a captive portal ([`TcpRelay::intercept`]).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -14,6 +15,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
+/// The most a portal reads of a request before it answers anyway.
+const PORTAL_MAX_HEAD_BYTES: usize = 64 * 1024;
+/// A client that sends no request within this long is dropped by the portal.
+const PORTAL_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Forwards `127.0.0.1:<port>` to a target address until dropped.
 pub struct TcpRelay {
   pub port: u16,
@@ -26,6 +32,18 @@ pub struct TcpRelay {
   is_stalled: Arc<AtomicBool>,
   /// Added to every round trip through the relay.
   latency: Duration,
+  /// Every request is answered by a captive portal instead of being forwarded.
+  portal: Arc<Mutex<Option<PortalAnswer>>>,
+}
+
+/// What a captive portal answers to any HTTP request, the WebSocket handshake included (a hotel or
+/// train Wi-Fi before the user signed in to it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PortalAnswer {
+  /// `200 OK` with the portal's HTML sign-in page.
+  SignInPage,
+  /// `511 Network Authentication Required` (RFC 6585), with an HTML page.
+  NetworkAuthenticationRequired,
 }
 
 impl TcpRelay {
@@ -46,6 +64,7 @@ impl TcpRelay {
       accepting: Mutex::new(None),
       is_stalled: Arc::new(AtomicBool::new(false)),
       latency,
+      portal: Arc::default(),
     };
     relay.accept_on(listener)?;
     Ok(relay)
@@ -67,8 +86,19 @@ impl TcpRelay {
     self.cuts.send_modify(|cuts| *cuts += 1);
   }
 
-  /// Listens on the same port again (after a cut) or forwards again (after a stall).
+  /// Answers every new connection as a captive portal does, with `answer`, instead of forwarding
+  /// it. Open connections are closed (the network switched to the portal); [`Self::restore`] ends
+  /// it (the user signed in to the network).
+  pub fn intercept(&self, answer: PortalAnswer) {
+    *self.portal.lock().expect("relay state") = Some(answer);
+    self.cuts.send_modify(|cuts| *cuts += 1);
+  }
+
+  /// Listens on the same port again (after a cut) or forwards again (after a stall or a portal).
   pub fn restore(&self) {
+    if self.portal.lock().expect("relay state").take().is_some() {
+      return;
+    }
     if self.is_stalled.swap(false, Ordering::SeqCst) {
       self.cuts.send_modify(|cuts| *cuts += 1);
       return;
@@ -87,6 +117,7 @@ impl TcpRelay {
       self.cuts.clone(),
       self.is_stalled.clone(),
       self.latency,
+      self.portal.clone(),
     ));
     *self.accepting.lock().expect("relay state") = Some(task);
     Ok(())
@@ -105,12 +136,18 @@ async fn accept_loop(
   cuts: watch::Sender<u64>,
   is_stalled: Arc<AtomicBool>,
   latency: Duration,
+  portal: Arc<Mutex<Option<PortalAnswer>>>,
 ) {
   while let Ok((mut inbound, _)) = listener.accept().await {
     let target = target.clone();
     let mut cut = cuts.subscribe();
     let is_stalled = is_stalled.load(Ordering::SeqCst);
+    let maybe_portal = *portal.lock().expect("relay state");
     tokio::spawn(async move {
+      if let Some(answer) = maybe_portal {
+        answer_as_portal(inbound, answer).await;
+        return;
+      }
       if is_stalled {
         // Held open without a byte until the stall ends or the relay is cut.
         let _ = cut.changed().await;
@@ -138,6 +175,37 @@ async fn accept_loop(
       }
     });
   }
+}
+
+/// Reads the request's head and answers it as a captive portal, then closes the connection.
+async fn answer_as_portal(mut inbound: TcpStream, answer: PortalAnswer) {
+  let mut head = Vec::new();
+  let mut buffer = [0u8; 4096];
+  let reading = async {
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") && head.len() < PORTAL_MAX_HEAD_BYTES {
+      match inbound.read(&mut buffer).await {
+        Ok(0) | Err(_) => return,
+        Ok(read) => head.extend_from_slice(&buffer[..read]),
+      }
+    }
+  };
+  if tokio::time::timeout(PORTAL_READ_TIMEOUT, reading).await.is_err() {
+    return;
+  }
+  let status = match answer {
+    PortalAnswer::SignInPage => "200 OK",
+    PortalAnswer::NetworkAuthenticationRequired => "511 Network Authentication Required",
+  };
+  let body = "<!doctype html><html><head><title>Guest Wi-Fi</title></head>\
+              <body><form action=\"/login\"><button>Accept and connect</button></form></body></html>";
+  let response = format!(
+    "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\n\
+     connection: close\r\ncache-control: no-store\r\n\r\n{body}",
+    body.len()
+  );
+  // A client that went away before the answer is fine.
+  let _ = inbound.write_all(response.as_bytes()).await;
+  let _ = inbound.shutdown().await;
 }
 
 /// Copies `from` to `to`, each chunk `delay` after it arrived; chunks keep their order and don't

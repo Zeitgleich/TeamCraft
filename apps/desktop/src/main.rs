@@ -67,6 +67,7 @@ use tracing_subscriber::Layer as _;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
+use crate::auth::background::BackgroundAccounts;
 use crate::auth::servers::{ManagedServer, ServerDirectory, ServerState};
 use crate::auth::{AuthService, DesktopConfig, VaultStore};
 use crate::calls::{BUNDLED_MODEL, CALL_CHANGED_EVENT, CallHost, FailureReporter, MediaFiles};
@@ -157,27 +158,30 @@ fn main() -> anyhow::Result<()> {
     .setup(move |app| {
       app.manage(Arc::new(WebviewRecovery::for_this_system(app.handle())));
       vault.set_directory(&core::commands::base_dir(app.handle())?);
-      app.manage(vault);
+      app.manage(Arc::clone(&vault));
       let servers = Arc::new(ServerState::new(
         ServerDirectory::load(&core::commands::base_dir(app.handle())?),
         ManagedServer::load(),
       ));
-      match servers.startup_account() {
-        Ok(Some(profile)) => {
-          let config = DesktopConfig::from_profile(&profile);
-          if let Err(error) = tauri::async_runtime::block_on(service.forget_origin_only_token(&config)) {
-            tracing::warn!(%error, "could not delete an outdated token entry");
-          }
-          tauri::async_runtime::block_on(service.set_server(Some(config)));
-        },
-        Ok(None) => {},
-        Err(forbidden) => {
-          let config = DesktopConfig::from_profile(&forbidden);
-          if let Err(error) = tauri::async_runtime::block_on(service.forget_tokens(&config)) {
-            tracing::warn!(%error, "could not delete the token of a forbidden server");
-          }
-        },
+      let startup = servers.startup_accounts();
+      for forbidden in &startup.forbidden {
+        let config = DesktopConfig::from_profile(forbidden);
+        if let Err(error) = tauri::async_runtime::block_on(service.forget_tokens(&config)) {
+          tracing::warn!(%error, "could not delete the token of a forbidden server");
+        }
       }
+      if let Some(profile) = &startup.maybe_active {
+        let config = DesktopConfig::from_profile(profile);
+        if let Err(error) = tauri::async_runtime::block_on(service.forget_origin_only_token(&config)) {
+          tracing::warn!(%error, "could not delete an outdated token entry");
+        }
+        tauri::async_runtime::block_on(service.set_server(Some(config)));
+      }
+      // Accounts someone removed while their data was still in use are deleted now (#214).
+      auth::accounts::finish_pending_removals(&core::commands::core_dir(app.handle())?);
+      let background = Arc::new(BackgroundAccounts::new(vault.clone(), app.handle().clone()));
+      background.watch_all(&servers);
+      app.manage(background);
       app.manage(servers);
       let emitter = app.handle().clone();
       let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
@@ -301,6 +305,10 @@ fn main() -> anyhow::Result<()> {
       auth::commands::server_suggest,
       auth::commands::server_confirm,
       auth::commands::server_forget,
+      auth::accounts::accounts_list,
+      auth::accounts::account_switch,
+      auth::accounts::account_add,
+      auth::accounts::account_remove,
       deep_links::deep_link_take,
       core::commands::core_start,
       core::commands::core_retry_keychain,

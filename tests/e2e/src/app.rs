@@ -9,12 +9,14 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use teamcraft_client_api::remote::{ChatSnapshot, SecuritySnapshot};
-use teamcraft_core::api::HttpServerApi;
-use teamcraft_core::clock::SystemClock;
+use teamcraft_core::api::{AccessTokenSource, HttpServerApi};
+use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::connection::{ConnectionState, ConnectionStatus, NetworkChanges};
+use teamcraft_core::records::{self, Draft};
 use teamcraft_core::runner::{RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
 use teamcraft_core::store::{
   LocalStore, MessageContent, MessageFilter, SealedSqliteStore, SqlCipherStore, StaticKeySource, TrackedStore,
@@ -22,7 +24,7 @@ use teamcraft_core::store::{
 use teamcraft_core::ui_backend::CoreChatBackend;
 use teamcraft_core::{Client, ClientSettings};
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_proto::{ConversationId, UserId};
+use teamcraft_proto::{ClientMessageId, ConversationId, UserId};
 
 use crate::process::binary_dir;
 use crate::tokens::UserTokens;
@@ -46,6 +48,8 @@ pub struct App<S = DiskStore> {
   status: ConnectionStatus,
   handle: RunnerHandle,
   task: tokio::task::JoinHandle<()>,
+  /// The app's wall clock, for what the UI writes.
+  clock: Arc<dyn Clock>,
 }
 
 /// What [`App::read_like_mobile`] saw.
@@ -65,6 +69,13 @@ pub type StateLog = Rc<RefCell<Vec<(Instant, ConnectionState)>>>;
 /// A fresh directory on a disk, removed when dropped.
 pub struct DiskDir(PathBuf);
 
+/// The system clock, set forward or back by the test while the app runs (a user correcting the
+/// time, a dead clock battery, NTP after a long sleep). Shared: hand an `Arc` to the app.
+#[derive(Debug, Default)]
+pub struct SkewedClock {
+  offset_ms: AtomicI64,
+}
+
 impl<S: LocalStore + Clone + 'static> App<S> {
   /// Opens the enrolled `store` and starts the runner against `base_url`.
   pub fn start(base_url: &str, tokens: UserTokens, store: S) -> Self {
@@ -78,12 +89,24 @@ impl<S: LocalStore + Clone + 'static> App<S> {
     store: S,
     maybe_focus: Option<ConversationId>,
   ) -> Self {
+    Self::start_with(base_url, tokens, store, maybe_focus, Arc::new(SystemClock))
+  }
+
+  /// Like [`Self::start_focused`], with the app's own token source (one whose identity provider
+  /// can go away, [`crate::tokens::AppTokens`]) and wall clock (one that jumps, [`SkewedClock`]).
+  pub fn start_with<T: AccessTokenSource + 'static>(
+    base_url: &str,
+    tokens: T,
+    store: S,
+    maybe_focus: Option<ConversationId>,
+    clock: Arc<dyn Clock>,
+  ) -> Self {
     init_log();
     let api = HttpServerApi::new(base_url, tokens);
     let client = Client::open(
       api,
       store.clone(),
-      Box::new(SystemClock),
+      Box::new(clock.clone()),
       // As every app has it (issue #1457): a catch-up reads a capped number of pages of a busy
       // conversation, the rest is left to the loop, so that path is the one measured.
       ClientSettings::default().with_capped_catch_up(),
@@ -106,7 +129,31 @@ impl<S: LocalStore + Clone + 'static> App<S> {
       status,
       handle,
       task,
+      clock,
     }
+  }
+
+  /// Writes `text` into the outbox as the UI does and tells the runner, which sends it when it
+  /// can. The message shows at once; [`Self::is_sent`] says when the server took it.
+  pub fn send_text(&self, me: UserId, channel: ConversationId, text: &str) -> ClientMessageId {
+    let draft = Draft {
+      conversation_id: channel,
+      maybe_thread_id: None,
+      content: MessageContent::text(text, Vec::new()),
+    };
+    let id =
+      records::enqueue_message(&self.store, me, self.clock.now_ms(), draft).expect("queueing the message");
+    self.handle.send(RunnerCommand::Flush);
+    id
+  }
+
+  /// The server took the message (it has the server's ID); `false` while it waits in the outbox.
+  pub fn is_sent(&self, channel: ConversationId, id: ClientMessageId) -> bool {
+    self
+      .store
+      .message(channel, id)
+      .unwrap()
+      .is_some_and(|message| message.maybe_server_id.is_some())
   }
 
   pub fn state(&self) -> ConnectionState {
@@ -259,6 +306,19 @@ impl<S: LocalStore + Clone + 'static> App<S> {
   pub async fn stop(self) {
     self.handle.send(RunnerCommand::Stop);
     drop(self.task.await);
+  }
+}
+
+impl SkewedClock {
+  /// Moves the clock by `delta_ms`: negative sets it back.
+  pub fn jump(&self, delta_ms: i64) {
+    self.offset_ms.fetch_add(delta_ms, Ordering::SeqCst);
+  }
+}
+
+impl Clock for SkewedClock {
+  fn now_ms(&self) -> i64 {
+    SystemClock.now_ms() + self.offset_ms.load(Ordering::SeqCst)
   }
 }
 

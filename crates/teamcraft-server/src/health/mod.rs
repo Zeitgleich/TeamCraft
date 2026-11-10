@@ -2,19 +2,27 @@
 //! "Health and alerts").
 //!
 //! A background task evaluates a fixed list of checks every `[health] check_interval_secs` from
-//! facts the server keeps anyway: circuit breakers, push results, when jobs last ran, and three
-//! small files the deployment writes (backup, certificate, disk). It costs no database query and
-//! no call to a backend. A check that fails for the hold time becomes an alert (see [`tracker`]),
+//! facts the server keeps anyway: circuit breakers, push results, when jobs last ran, the last
+//! readings of its own probes ([`probes`], [`secrets`]), the SFU's call aggregates
+//! ([`call_quality`]), `statvfs` of the data disk ([`disk`]) and three small files the deployment
+//! writes (backup, certificate, disk). It costs no database query and no call to a backend: the
+//! probes run in tasks of their own. A check that fails for the hold time becomes an alert (see [`tracker`]),
 //! and the admins are told through the gateway; the console reads `GET /api/v1/admin/health` when
 //! it is told, or when the health page is open. Raised and resolved alerts also go out by e-mail and
-//! to the webhooks subscribed to them ([`notices`]).
+//! to the webhooks subscribed to them ([`notices`]). The alert history and the notices waiting are
+//! written to the database behind memory, and read back at a start ([`persistence`]).
 //!
 //! Nothing here carries content, names or addresses: a check is one of a fixed list, with a state,
 //! times and one number.
 
+mod call_quality;
 mod checks;
+mod disk;
 mod heartbeat;
 mod notices;
+mod persistence;
+mod probes;
+mod secrets;
 mod tracker;
 
 use std::path::PathBuf;
@@ -23,7 +31,8 @@ use std::time::Duration as StdDuration;
 
 use serde::Deserialize;
 use teamcraft_proto::{
-  AdminHealthResponse, GatewayEvent, HealthAlertSettings, HealthCheckResponse, PushProvider, UserId,
+  AdminHealthResponse, GatewayEvent, HealthAlertSettings, HealthCheckResponse, HealthNoticeId, PushProvider,
+  SfuCallQuality, UserId,
 };
 use time::{Duration, OffsetDateTime};
 use tokio::sync::Notify;
@@ -32,10 +41,15 @@ use tracing::{info, warn};
 use crate::metrics::BackgroundJob;
 use crate::state::AppState;
 
+use call_quality::CallQualityWindow;
 pub use checks::{ALL_CHECKS, JobSchedule, JobSchedules};
-use checks::{Facts, MediaServerFacts, PushFacts, observe};
+use checks::{CallQualityFacts, Facts, MediaServerFacts, ProbeFacts, PushFacts, observe};
+use disk::DiskGauge;
 use heartbeat::Heartbeats;
 use notices::{Channel, Notice, Outbox, Outcome};
+use persistence::Persistence;
+pub use probes::{Probe, ProbeReading, ProbeResults};
+pub use secrets::{SecretExpiries, SecretReading};
 use tracker::{AlertChange, AlertChangeKind, AlertPolicy, AlertTracker};
 
 /// Shortest interval between two evaluations: they are cheap, but never a busy loop.
@@ -70,9 +84,12 @@ pub struct HealthConfig {
   /// After a start, checks that need history (a job that ran, the media server's first report)
   /// give no verdict for this long, so a restart raises nothing.
   pub startup_grace_secs: u64,
+  /// The file systems the server measures for the disk check (`statvfs`), e.g. the data volumes
+  /// mounted into its container; the fullest counts. Empty: only the deployment's report.
+  pub disk_paths: Vec<PathBuf>,
 }
 
-/// The checks, their state and the alerts raised since the start.
+/// The checks, their state and the alerts raised, kept across restarts.
 pub struct HealthMonitor {
   config: HealthConfig,
   schedules: JobSchedules,
@@ -80,6 +97,13 @@ pub struct HealthMonitor {
   inner: Mutex<Inner>,
   /// Wakes the delivery task when notices were queued.
   wake: Notify,
+  /// Wakes the task that writes the alerts and the outbox to the database.
+  persist_wake: Notify,
+  probes: ProbeResults,
+  secrets: SecretExpiries,
+  disk: DiskGauge,
+  /// The SFU's call aggregates of the last minutes.
+  call_quality: Mutex<CallQualityWindow>,
 }
 
 #[derive(Default)]
@@ -91,6 +115,8 @@ struct Inner {
   addresses: Vec<String>,
   /// Mail and webhook events waiting to go out.
   outbox: Outbox,
+  /// What is not in the database yet.
+  persistence: Persistence,
   evaluations: u64,
 }
 
@@ -100,6 +126,7 @@ impl Default for HealthConfig {
       maybe_heartbeat_dir: None,
       check_interval_secs: 30,
       startup_grace_secs: 300,
+      disk_paths: vec![PathBuf::from("/")],
     }
   }
 }
@@ -113,12 +140,35 @@ impl HealthConfig {
 impl HealthMonitor {
   pub fn new(config: HealthConfig, schedules: JobSchedules, started_at: OffsetDateTime) -> Self {
     Self {
+      disk: DiskGauge::new(config.disk_paths.clone()),
+      probes: ProbeResults::default(),
+      secrets: SecretExpiries::default(),
+      call_quality: Mutex::default(),
       config,
       schedules,
       started_at,
       inner: Mutex::new(Inner::default()),
       wake: Notify::new(),
+      persist_wake: Notify::new(),
     }
+  }
+
+  /// The last reading of each probe.
+  pub fn probes(&self) -> &ProbeResults {
+    &self.probes
+  }
+
+  pub fn secrets(&self) -> &SecretExpiries {
+    &self.secrets
+  }
+
+  /// The SFU reported how calls went since its last report.
+  pub fn note_call_quality(&self, now: OffsetDateTime, quality: SfuCallQuality) {
+    self
+      .call_quality
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .record(now, quality);
   }
 
   /// How each check stands after the last evaluation, for the metrics.
@@ -142,13 +192,16 @@ impl HealthMonitor {
   /// One evaluation at `now`. Tells the admins if an alert was raised or resolved.
   pub async fn evaluate(&self, state: &AppState, now: OffsetDateTime) {
     let settings = state.settings.get().health_alerts.clone();
-    let heartbeats = Heartbeats::read(self.config.maybe_heartbeat_dir.as_deref()).await;
+    let mut heartbeats = Heartbeats::read(self.config.maybe_heartbeat_dir.as_deref()).await;
+    heartbeats.disk_percent = disk::fuller(heartbeats.disk_percent, self.disk.measure().await);
     let observations = observe(&self.facts(state, now, settings.clone(), heartbeats));
     let (changes, is_admin_refresh_due) = {
       let mut inner = self.lock();
       let changes = inner
         .tracker
         .evaluate(now, &self.policy(&settings), &observations);
+      inner.tracker.prune(persistence::history_start(&settings, now));
+      inner.persistence.note(&changes);
       let is_due = inner.evaluations.is_multiple_of(ADMIN_REFRESH_EVERY);
       inner.evaluations += 1;
       (changes, is_due)
@@ -162,6 +215,7 @@ impl HealthMonitor {
     if !changes.is_empty() {
       self.tell_admins(state).await;
       self.queue_notices(state, &settings, &changes, now);
+      self.persist_wake.notify_one();
     } else if is_admin_refresh_due {
       self.read_admins(state).await;
     }
@@ -171,11 +225,19 @@ impl HealthMonitor {
   /// delivery task, never by the evaluation, so a hanging mail server can't hold up the checks.
   pub async fn deliver_notices(&self, state: &AppState, now: OffsetDateTime) {
     let due = self.lock().outbox.take_due(now);
+    if due.is_empty() {
+      return;
+    }
     for pending in due {
-      if notices::deliver(state, &pending).await == Outcome::Retry {
-        self.lock().outbox.retry_later(pending, now);
+      let outcome = notices::deliver(state, &pending).await;
+      let mut inner = self.lock();
+      match outcome {
+        Outcome::Retry => inner.outbox.retry_later(pending.id, now),
+        Outcome::Delivered | Outcome::Dropped => inner.outbox.finish(pending.id),
       }
     }
+    // A delivery made is written at once, so a restart right after does not send it again.
+    self.persist_wake.notify_one();
   }
 
   /// One webhook event per change, and one mail per change and address when mail is on.
@@ -187,6 +249,13 @@ impl HealthMonitor {
     now: OffsetDateTime,
   ) {
     let is_mailing = settings.is_email_enabled && state.can_send_mail();
+    let next_id = || match state.next_id::<HealthNoticeId>() {
+      Ok(id) => Some(id),
+      Err(error) => {
+        warn!(%error, "no ID for a health alert notice; it is not sent");
+        None
+      },
+    };
     {
       let mut inner = self.lock();
       let addresses = if is_mailing {
@@ -200,15 +269,17 @@ impl HealthMonitor {
           kind: change.kind,
           at: now,
         };
-        inner.outbox.push(notice.clone(), Channel::Webhook, now);
+        if let Some(id) = next_id() {
+          inner.outbox.push(id, notice.clone(), Channel::Webhook, now);
+        }
         for address in &addresses {
-          inner.outbox.push(
-            notice.clone(),
-            Channel::Mail {
-              address: address.clone(),
-            },
-            now,
-          );
+          let Some(id) = next_id() else {
+            continue;
+          };
+          let channel = Channel::Mail {
+            address: address.clone(),
+          };
+          inner.outbox.push(id, notice.clone(), channel, now);
         }
       }
     }
@@ -229,12 +300,34 @@ impl HealthMonitor {
         is_failing: state.push.health(provider).is_failing(),
       })
       .collect();
+    let is_sfu_reporting = state
+      .maybe_calls
+      .as_ref()
+      .is_some_and(|calls| calls.is_reporting_enabled());
     let media = match &state.maybe_calls {
-      Some(calls) if calls.is_reporting_enabled() => MediaServerFacts::Reporting {
+      Some(calls) if is_sfu_reporting => MediaServerFacts::Reporting {
         maybe_last_contact: calls.last_sfu_contact(),
       },
       _ => MediaServerFacts::NotMonitored,
     };
+    let call_quality = if is_sfu_reporting {
+      let window = Duration::seconds(i64::try_from(settings.call_window_secs).unwrap_or(i64::MAX));
+      let summary = self
+        .call_quality
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .summary(now, window);
+      CallQualityFacts::Reporting(summary)
+    } else {
+      CallQualityFacts::NotMonitored
+    };
+    let mut secrets = Vec::new();
+    if state.push.fcm_key().is_some() {
+      secrets.push(self.secrets.fcm());
+    }
+    if self.schedules.maybe_oidc_sync.is_some() {
+      secrets.push(state.oidc_sync.secret_expiry());
+    }
     Facts {
       now,
       started_at: self.started_at,
@@ -244,6 +337,14 @@ impl HealthMonitor {
       has_object_storage: state.maybe_blob_store.is_some(),
       push,
       media,
+      call_quality,
+      probes: ProbeFacts {
+        object_storage: self.probes.get(Probe::ObjectStorage),
+        push_gateway: self.probes.get(Probe::PushGateway),
+        media_udp_ipv4: self.probes.get(Probe::MediaUdpIpv4),
+        media_udp_ipv6: self.probes.get(Probe::MediaUdpIpv6),
+      },
+      secrets,
       schedules: self.schedules,
       oidc_sync_last_success: state.metrics.job_last_success(BackgroundJob::OidcSync),
       oidc_sync_held: state.oidc_sync.held(),
@@ -309,6 +410,9 @@ impl HealthMonitor {
 /// Evaluates the checks until the process ends, and delivers the notices beside it.
 pub fn spawn(state: AppState) {
   spawn_delivery(state.clone());
+  persistence::spawn(state.clone());
+  probes::spawn(state.clone());
+  secrets::spawn(state.clone());
   tokio::spawn(async move {
     let mut interval = tokio::time::interval(state.health.config.check_interval());
     // A late tick is not made up for: the checks look at the state now.

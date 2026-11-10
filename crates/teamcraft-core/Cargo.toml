@@ -192,6 +192,9 @@ peak_alloc = "0.3.0"
 # Reads the data export's archives back in the tests (src/export, tests/suite/data_export.rs), as a
 # reader that isn't ours; already in the tree through the desktop updater, without compression.
 zip = { version = "9.2.2", default-features = false }
+# A SQLite VFS whose syncs are slow, as on a phone (tests/suite/slow_disk, issue #1680): its `Vfs`
+# trait is safe, the FFI glue a VFS needs is `unsafe`, which the workspace forbids in our own code.
+sqlite-plugin = "0.11.0"
 
 # The desktop build's zbus features, so the keystore tests see the same Secret Service backend: with
 # `tokio`, zbus' blocking API nests a tokio runtime (store/key_source.rs). Already in the tree

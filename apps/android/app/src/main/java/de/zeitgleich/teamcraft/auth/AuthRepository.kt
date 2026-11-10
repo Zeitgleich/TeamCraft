@@ -187,8 +187,9 @@ class AuthRepository(
   }
 
   /**
-   * A valid access token, refreshed if it is about to expire; `null` when signed out. A local
-   * session has no refresh: once it expired the user is signed out. Blocks for at most
+   * A valid access token, refreshed if it is about to expire; `null` when signed out or when a due
+   * refresh failed ([isSessionKept] tells which). A local session has no refresh: once it expired
+   * the user is signed out. Blocks for at most
    * [REFRESH_TIMEOUT_SECONDS]: called on the Rust engine thread, never on the UI thread.
    */
   fun accessToken(): String? {
@@ -204,6 +205,16 @@ class AuthRepository(
     return runBlocking {
       withTimeoutOrNull(TimeUnit.SECONDS.toMillis(REFRESH_TIMEOUT_SECONDS)) { refresh(session, current) }
     }
+  }
+
+  /**
+   * Whether the active server still has a session that may refresh. A refresh that failed for now
+   * (offline, Doze, the identity provider down or slow) keeps it; a sign-out, an expired local
+   * session or a refused refresh token ends it (issue #1671).
+   */
+  fun isSessionKept(): Boolean {
+    val session = session() ?: return false
+    return synchronized(this) { session.maybeLocal == null && session.state.isAuthorized }
   }
 
   /** The session's newest ID token, for the role evidence (`null`: a local session, or signed out). */

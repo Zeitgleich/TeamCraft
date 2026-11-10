@@ -303,16 +303,14 @@ impl TeamCraft {
 }
 
 impl TeamCraft {
-  /// Takes the server API from the engine (no request), then runs `request` on the HTTP runtime.
+  /// Runs `request` on the HTTP runtime, without waiting for the engine.
   async fn directory_request<R, F, Fut>(&self, request: F) -> Result<R, TeamCraftError>
   where
     R: Send + 'static,
     F: FnOnce(Api) -> Fut + Send + 'static,
     Fut: Future<Output = Result<R, ApiError>> + Send + 'static,
   {
-    let api = self
-      .call(|engine| Box::pin(async move { Ok(engine.api()) }))
-      .await?;
+    let api = self.server_api()?;
     run_request(request(api))
       .await
       .map_err(TeamCraftError::Network)?

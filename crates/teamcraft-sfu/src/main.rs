@@ -264,8 +264,8 @@ fn serve_metrics(sfu: &Sfu) -> anyhow::Result<()> {
     return Ok(());
   };
   let listeners = bind_metrics(&addrs)?;
-  let metrics = SfuMetrics::new()?;
   let control = sfu.control();
+  let metrics = SfuMetrics::new(control.quality())?;
   spawn_metrics_endpoint(listeners, move || {
     metrics.render(control.room_stats(), control.fallback_connections())
   });

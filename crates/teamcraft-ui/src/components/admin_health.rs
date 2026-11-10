@@ -577,6 +577,10 @@ enum Detail {
   },
   Days(i64),
   Percent(i64),
+  /// Milliseconds the last probe took.
+  Probe(i64),
+  /// The 95th percentile of the calls' loss, in tenths of a percent.
+  Loss(i64),
   /// Deactivations waiting for a decision.
   Held(usize),
   /// A job that has not run since the server started.
@@ -593,6 +597,8 @@ impl Detail {
       Self::Days(days) if *days < 0 => i18n.t("health-detail-certificate-expired"),
       Self::Days(days) => i18n.t_count("health-detail-certificate", usize::try_from(*days).unwrap_or(0)),
       Self::Percent(percent) => i18n.t_with("health-detail-disk", &[("percent", &percent.to_string())]),
+      Self::Probe(millis) => i18n.t_with("health-detail-probe", &[("ms", &millis.to_string())]),
+      Self::Loss(permille) => i18n.t_with("health-detail-loss", &[("percent", &tenths(*permille))]),
       Self::Held(count) => i18n.t_count("health-detail-held", *count),
       Self::NeverRan => i18n.t("health-detail-job-not-yet"),
     }
@@ -632,8 +638,13 @@ fn measured(check: &HealthCheckId, value: i64) -> Option<Detail> {
       key: "health-detail-job",
       secs: value,
     }),
-    HealthCheckId::Certificate => Some(Detail::Days(value)),
+    HealthCheckId::Certificate | HealthCheckId::SecretExpiry => Some(Detail::Days(value)),
     HealthCheckId::DiskSpace => Some(Detail::Percent(value)),
+    HealthCheckId::ObjectStorage
+    | HealthCheckId::PushGateway
+    | HealthCheckId::MediaUdpIpv4
+    | HealthCheckId::MediaUdpIpv6 => Some(Detail::Probe(value)),
+    HealthCheckId::CallQuality => Some(Detail::Loss(value)),
     HealthCheckId::OidcSyncBrake if value > 0 => {
       Some(Detail::Held(usize::try_from(value).unwrap_or(usize::MAX)))
     },
@@ -643,6 +654,12 @@ fn measured(check: &HealthCheckId, value: i64) -> Option<Detail> {
     }),
     _ => None,
   }
+}
+
+/// Tenths as a decimal number with one place: 51 is "5.1". Plain digits in every language, as the
+/// other details' numbers.
+fn tenths(value: i64) -> String {
+  format!("{}.{}", value.div_euclid(10), value.rem_euclid(10))
 }
 
 /// The part of the i18n keys that names a check.
@@ -698,6 +715,24 @@ mod tests {
       check_detail(&check(HealthCheckId::Database, HealthCheckStatus::Ok, None)),
       None
     );
+    assert_eq!(
+      check_detail(&check(
+        HealthCheckId::MediaUdpIpv6,
+        HealthCheckStatus::Ok,
+        Some(14)
+      )),
+      Some(Detail::Probe(14))
+    );
+    assert_eq!(
+      check_detail(&check(
+        HealthCheckId::CallQuality,
+        HealthCheckStatus::Alert,
+        Some(73)
+      )),
+      Some(Detail::Loss(73))
+    );
+    assert_eq!(tenths(73), "7.3");
+    assert_eq!(tenths(5), "0.5");
   }
 
   #[test]

@@ -49,10 +49,10 @@ pub use gateway::{
 };
 pub use id::{
   AnnouncementId, AttachmentId, AuditEntryId, BackgroundId, CallId, CategoryId, ConversationId, DeviceId,
-  GroupMappingId, Id, IdError, InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId, MessageId,
-  MlsMessageId, OrgBackgroundId, PushRetryId, RecoveryRequestId, SNOWFLAKE_EPOCH_MS, SNOWFLAKE_SEQUENCE_BITS,
-  SNOWFLAKE_WORKER_BITS, ScheduledMessageId, Snowflake, SpaceId, SystemEventId, ThreadId, UserGroupId,
-  UserId, WebhookEventId, WebhookId,
+  GroupMappingId, HealthNoticeId, Id, IdError, InviteId, MeetingAttendeeId, MeetingId, MeetingInviteId,
+  MessageId, MlsMessageId, OrgBackgroundId, PushRetryId, RecoveryRequestId, SNOWFLAKE_EPOCH_MS,
+  SNOWFLAKE_SEQUENCE_BITS, SNOWFLAKE_WORKER_BITS, ScheduledMessageId, Snowflake, SpaceId, SystemEventId,
+  ThreadId, UserGroupId, UserId, WebhookEventId, WebhookId,
 };
 pub use import::{
   IMPORT_WORKER, ImportDmRequest, ImportMemberStateRequest, ImportMessagesRequest, ImportMessagesResponse,

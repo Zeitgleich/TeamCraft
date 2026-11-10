@@ -25,7 +25,8 @@ use crate::store::{LocalStore, Table};
 mod shown;
 pub use shown::{ShownContent, ShownFile, ShownMessage};
 
-pub(crate) const PUSH_KEY_RECORD: &str = "push_key";
+/// The account record holding this device's push key, which opens its wake-ups.
+pub const PUSH_KEY_RECORD: &str = "push_key";
 const PUSH_SESSION_RECORD: &str = "push_session";
 const DEVICE_PUSH_CONTENT_RECORD: &str = "device_push_content";
 /// Longest text shown in a notification; the rest is cut at a character boundary.
@@ -298,6 +299,16 @@ impl PushPreview {
         self.maybe_gap,
         Some(PreviewGap::NotDecrypted | PreviewGap::NoSession | PreviewGap::TimedOut)
       ) || (self.maybe_gap.is_none() && self.maybe_sender_name.is_none()))
+  }
+
+  /// Whether a preview made from the store alone ([`push_preview`] without an API) misses what the
+  /// server could add: a message the store doesn't hold yet, or the chat of a meeting notice the
+  /// store doesn't know. Otherwise asking the server (and waiting for a token first) only costs
+  /// time: the store's preview is what a fetch would show too (issue #1662).
+  pub fn needs_server(&self) -> bool {
+    let is_message_missing = is_message(&self.wake_up) && self.maybe_gap == Some(PreviewGap::NoSession);
+    let is_meeting_chat_unknown = is_meeting_notice(&self.wake_up) && self.maybe_conversation_name.is_none();
+    is_message_missing || is_meeting_chat_unknown
   }
 }
 
@@ -924,6 +935,67 @@ mod tests {
       ..device
     };
     assert_eq!(dismiss.limited_to(&PushContentMode::Generic).maybe_gap, None);
+  }
+
+  #[test]
+  fn only_what_the_store_lacks_asks_the_server() {
+    let missing = PushPreview {
+      wake_up: PushWakeUp {
+        kind: teamcraft_proto::PushKind::Message,
+        conversation_id: ConversationId::from_snowflake(Snowflake::new(1).unwrap()),
+        maybe_message_id: Some(MessageId::from_snowflake(Snowflake::new(2).unwrap())),
+        maybe_sender_id: None,
+        is_urgent: false,
+        maybe_thread_id: None,
+        maybe_call_id: None,
+        maybe_badge: None,
+        maybe_sent_at: None,
+        maybe_meeting: None,
+      },
+      maybe_conversation_name: Some("Project A".into()),
+      maybe_sender_name: Some("Alice".into()),
+      is_sender_source: false,
+      content: PreviewContent::Unavailable,
+      is_direct: false,
+      is_silent: false,
+      is_conversation_verified: false,
+      maybe_gap: Some(PreviewGap::NoSession),
+    };
+    assert!(missing.needs_server());
+
+    // The store held it, or a setting withholds the text anyway: a fetch would show the same.
+    for maybe_gap in [
+      None,
+      Some(PreviewGap::WorkspacePolicy),
+      Some(PreviewGap::DeviceSetting),
+      Some(PreviewGap::Hidden),
+    ] {
+      let preview = PushPreview {
+        maybe_gap,
+        ..missing.clone()
+      };
+      assert!(!preview.needs_server(), "{maybe_gap:?}");
+    }
+
+    // A meeting notice of a chat the store doesn't know yet names it from the server.
+    let mut meeting = PushPreview {
+      maybe_gap: None,
+      maybe_conversation_name: None,
+      ..missing.clone()
+    };
+    meeting.wake_up.kind = teamcraft_proto::PushKind::MeetingStart;
+    meeting.wake_up.maybe_message_id = None;
+    assert!(meeting.needs_server());
+    meeting.maybe_conversation_name = Some("Project A".into());
+    assert!(!meeting.needs_server());
+
+    // A ring shows no message: nothing to fetch.
+    let mut ring = PushPreview {
+      maybe_gap: None,
+      ..missing
+    };
+    ring.wake_up.kind = teamcraft_proto::PushKind::Call;
+    assert!(!ring.needs_server());
   }
 
   #[test]

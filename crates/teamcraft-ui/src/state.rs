@@ -296,6 +296,8 @@ pub enum Overlay {
   DeleteUser(UserId),
   /// "Report a problem" (docs/bug-reports.md).
   ReportProblem,
+  /// The accounts on this computer: switch, add, remove (desktop, #214).
+  Accounts,
 }
 
 /// The sections of the settings dialog (PLAN.md §4 and §5, issue #327).

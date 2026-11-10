@@ -1,5 +1,6 @@
 //! Leptos components, one module per screen area.
 
+pub mod account_switcher;
 pub mod activity_view;
 pub mod add_to_call;
 pub mod admin_announcement;

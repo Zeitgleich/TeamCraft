@@ -467,6 +467,13 @@ pub struct MessageTail {
   /// once the reader comes near, asks for it ([`ChatAction::FillHistoryGap`]).
   #[serde(default)]
   pub gaps: Vec<crate::model::HistoryGap>,
+  /// The reader, so a list knows which messages are their own before it read a snapshot.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_me: Option<crate::model::User>,
+  /// The other authors of [`Self::messages`] this device knows: a list opened before it read a
+  /// snapshot (from a notification, on a cold start) names them at once.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub authors: Vec<crate::model::User>,
 }
 
 /// Where the local client stands.
@@ -2291,6 +2298,18 @@ impl ChatQuery {
 mod tests {
   use super::*;
   use crate::model::id_from_raw;
+
+  /// A tail from a core before the authors were added reads as one without them; one without
+  /// authors writes no keys for them, as before.
+  #[test]
+  fn a_message_tail_without_authors_keeps_its_wire_form() {
+    let json = r#"{"conversation":"7","messages":[],"has_older":false}"#;
+    let tail: MessageTail = serde_json::from_str(json).expect("parse");
+    assert_eq!(tail.maybe_me, None);
+    assert!(tail.authors.is_empty());
+    let written = serde_json::to_value(&tail).expect("serialize");
+    assert!(written.get("maybe_me").is_none() && written.get("authors").is_none());
+  }
 
   /// The mobile apps write these by hand (#954); the names are part of the bridge.
   #[test]

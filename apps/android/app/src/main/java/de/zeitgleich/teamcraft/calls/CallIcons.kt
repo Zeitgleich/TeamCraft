@@ -8,7 +8,8 @@ import androidx.compose.ui.unit.dp
 
 /**
  * The call controls' icons, from the Material symbol set. `material-icons-core` has no microphone,
- * camera or speaker, and the extended set is large; these few are drawn from their path data.
+ * camera, speaker, headset or "add person", and the extended set is large; these few are drawn from
+ * their path data.
  */
 internal object CallIcons {
   val Mic = icon(
@@ -50,6 +51,33 @@ internal object CallIcons {
       " 0,-0.28 0.11,-0.53 0.29,-0.71C3.34,8.78 7.46,7 12,7s8.66,1.78 11.71,4.67c0.18,0.18 0.29,0.43 0.29,0.71" +
       " 0,0.28 -0.11,0.53 -0.29,0.71l-2.48,2.48c-0.18,0.18 -0.43,0.29 -0.71,0.29 -0.27,0 -0.52,-0.11 -0.7,-0.28" +
       "-0.79,-0.74 -1.69,-1.36 -2.67,-1.85 -0.33,-0.16 -0.56,-0.5 -0.56,-0.9v-3.1C15.15,9.25 13.6,9 12,9z",
+  )
+
+  /** Switch between the front and the back camera. */
+  val Cameraswitch = icon(
+    "Cameraswitch",
+    "M16,7h-1l-1,-1h-4L9,7H8C6.9,7 6,7.9 6,9v6c0,1.1 0.9,2 2,2h8c1.1,0 2,-0.9 2,-2V9C18,7.9 17.1,7 16,7z" +
+      "M12,14c-1.1,0 -2,-0.9 -2,-2c0,-1.1 0.9,-2 2,-2s2,0.9 2,2C14,13.1 13.1,14 12,14z" +
+      "M8.57,0.51l4.48,4.48V2.04c4.72,0.47 8.48,4.23 8.95,8.95h2C23.34,3.02 15.49,-1.59 8.57,0.51z" +
+      "M10.95,21.96C6.23,21.49 2.47,17.73 2,13.01H0c0.66,7.97 8.51,12.58 15.43,10.48l-4.48,-4.48V21.96z",
+  )
+  val Headset = icon(
+    "Headset",
+    "M12,1c-4.97,0 -9,4.03 -9,9v7c0,1.66 1.34,3 3,3h3v-8H5v-2c0,-3.87 3.13,-7 7,-7s7,3.13 7,7v2h-4v8h3" +
+      "c1.66,0 3,-1.34 3,-3v-7c0,-4.97 -4.03,-9 -9,-9z",
+  )
+  val HeadsetOff = icon(
+    "HeadsetOff",
+    "M12,4c3.87,0 7,3.13 7,7v2h-2.92L21,17.92V11c0,-4.97 -4.03,-9 -9,-9 -1.95,0 -3.76,0.62 -5.23,1.68" +
+      "l1.44,1.44C9.3,4.41 10.6,4 12,4z" +
+      "M2.27,1.72L1,3l3.33,3.32C3.49,7.68 3,9.29 3,11v7c0,1.66 1.34,3 3,3h3v-8H5v-2c0,-1.17 0.29,-2.26 0.79,-3.22" +
+      "L15,17v4h3c0.3,0 0.59,-0.06 0.86,-0.14L21,23l1.27,-1.27 -20,-20.01z",
+  )
+  val PersonAdd = icon(
+    "PersonAdd",
+    "M15,12c2.21,0 4,-1.79 4,-4s-1.79,-4 -4,-4 -4,1.79 -4,4 1.79,4 4,4z" +
+      "M6,10L6,7L4,7v3L1,10v2h3v3h2v-3h3v-2L6,10z" +
+      "M15,14c-2.67,0 -8,1.34 -8,4v2h16v-2c0,-2.66 -5.33,-4 -8,-4z",
   )
 
   private fun icon(name: String, pathData: String): ImageVector =

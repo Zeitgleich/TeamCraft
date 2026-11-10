@@ -13,9 +13,8 @@ use chromiumoxide::cdp::browser_protocol::emulation::{
 };
 use chromiumoxide::page::{Page, ScreenshotParams};
 use futures_util::StreamExt;
-use sha2::{Digest, Sha256};
 use teamcraft_e2e::browser::artifact_dir;
-use teamcraft_e2e::call::join_call;
+use teamcraft_e2e::call::{SfuIdentity, join_call};
 use teamcraft_e2e::netem::{Condition, PortConditions};
 use teamcraft_media::call_engine::CallEngineEvent;
 use teamcraft_media::call_native::NativeCall;
@@ -289,12 +288,11 @@ async fn the_web_client_moves_back_to_quic_when_udp_comes_back() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "needs the network namespace: scripts/e2e-network.sh"]
 async fn the_web_client_turned_away_from_a_full_sfu_retries_with_backoff() {
-  let identity = sfu_identity();
-  let sha256: String = Sha256::digest(identity.cert.der())
-    .iter()
-    .map(|byte| format!("{byte:02x}"))
-    .collect();
-  let (certificate, key) = (identity.cert.pem(), identity.signing_key.serialize_pem());
+  let SfuIdentity {
+    certificate_pem: certificate,
+    key_pem: key,
+    sha256_hex: sha256,
+  } = SfuIdentity::generate();
   let Some(mut rig) = Rig::start_with(
     |builder| {
       builder
@@ -614,12 +612,11 @@ async fn call_and_leave(rig: &mut Rig, page: &Page, certificate_hash: [u8; 32]) 
 async fn start_rig() -> Option<Rig> {
   // The SFU's certificate is self-signed and short-lived; the server hands out its hash with join
   // tokens, which browsers accept (`serverCertificateHashes`), like the native clients' pin.
-  let identity = sfu_identity();
-  let sha256: String = Sha256::digest(identity.cert.der())
-    .iter()
-    .map(|byte| format!("{byte:02x}"))
-    .collect();
-  let (certificate, key) = (identity.cert.pem(), identity.signing_key.serialize_pem());
+  let SfuIdentity {
+    certificate_pem: certificate,
+    key_pem: key,
+    sha256_hex: sha256,
+  } = SfuIdentity::generate();
   Rig::start_with(
     |builder| builder.with_calls().with_sfu_identity(certificate, key, sha256),
     &MEDIA_ARGS,
@@ -629,12 +626,11 @@ async fn start_rig() -> Option<Rig> {
 
 /// [`start_rig`] with the SFU's WebSocket fallback on offer.
 async fn start_rig_with_fallback() -> Option<Rig> {
-  let identity = sfu_identity();
-  let sha256: String = Sha256::digest(identity.cert.der())
-    .iter()
-    .map(|byte| format!("{byte:02x}"))
-    .collect();
-  let (certificate, key) = (identity.cert.pem(), identity.signing_key.serialize_pem());
+  let SfuIdentity {
+    certificate_pem: certificate,
+    key_pem: key,
+    sha256_hex: sha256,
+  } = SfuIdentity::generate();
   Rig::start_with(
     |builder| {
       builder
@@ -775,21 +771,6 @@ async fn wait_until_true(page: &Page, expression: &str) {
     assert!(Instant::now() < deadline, "never true: {expression}");
     tokio::time::sleep(Duration::from_millis(100)).await;
   }
-}
-
-/// A self-signed certificate valid for ten days: certificate hash pins (the native clients) accept
-/// at most two weeks.
-pub(crate) fn sfu_identity() -> rcgen::CertifiedKey<rcgen::KeyPair> {
-  let mut params =
-    rcgen::CertificateParams::new(vec!["localhost".to_owned(), "::1".to_owned()]).expect("certificate names");
-  let now = time::OffsetDateTime::now_utc();
-  params.not_before = now - time::Duration::days(1);
-  params.not_after = now + time::Duration::days(9);
-  let signing_key = rcgen::KeyPair::generate().expect("a key pair");
-  let cert = params
-    .self_signed(&signing_key)
-    .expect("a self-signed certificate");
-  rcgen::CertifiedKey { cert, signing_key }
 }
 
 /// Waits until the call with the browser is secured and its camera is published; returns the DAVE

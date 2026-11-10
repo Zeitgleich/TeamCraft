@@ -61,8 +61,12 @@ mod reading {
       "object_storage",
       "push_gateway",
       "media_server",
+      "media_udp_ipv4",
+      "media_udp_ipv6",
+      "call_quality",
       "backup",
       "certificate",
+      "secret_expiry",
       "disk_space",
     ] {
       assert_eq!(status_of(&reply.body, check), "not_configured", "{check}");
@@ -278,6 +282,138 @@ mod passing_on {
     assert_eq!(status_of(&reply.body, "identity_provider"), "alert");
     assert!(mailer.sent().is_empty());
     app.stop().await;
+  }
+}
+
+mod restarting {
+  use teamcraft_proto::{HealthCheckId, HealthCheckStatus};
+  use teamcraft_server::health::{HealthConfig, HealthMonitor, JobSchedules};
+
+  use super::*;
+
+  #[tokio::test]
+  async fn an_open_alert_survives_a_restart_and_a_failure_that_lasts_is_not_raised_again() {
+    let mailer = Arc::new(FakeMailer::default());
+    let Some(app) = TestApp::start_with_mailer(|_| {}, mailer.clone()).await else {
+      return;
+    };
+    let bob = admin();
+    app.get(&bob, "/admin/health").await;
+    assert!(app.state.health.restore(&app.state).await);
+    let hold = HealthAlertSettings::default().hold_secs as i64;
+    break_identity_provider(&app);
+    for seconds in (0..=hold).step_by(30) {
+      evaluate(&app, seconds).await;
+    }
+    app.state.health.deliver_notices(&app.state, at_fixed(hold)).await;
+    assert_eq!(mailer.sent().len(), 1);
+    assert!(app.state.health.persist(&app.state, at_fixed(hold)).await);
+
+    let restarted = restart(&app, hold + 30).await;
+    let response = restarted.response(&HealthAlertSettings::default());
+    assert_eq!(response.alerts.len(), 1, "the history is back");
+    assert_eq!(response.alerts[0].check, HealthCheckId::IdentityProvider);
+    assert!(response.alerts[0].maybe_resolved_at.is_none());
+    assert_eq!(
+      status(&response, HealthCheckId::IdentityProvider),
+      HealthCheckStatus::Alert
+    );
+
+    // Still failing for longer than the hold after the restart: the same alert, nothing new.
+    for seconds in (hold + 30..=hold * 3).step_by(30) {
+      restarted.evaluate(&app.state, at_fixed(seconds)).await;
+    }
+    restarted.deliver_notices(&app.state, at_fixed(hold * 3)).await;
+    assert_eq!(
+      restarted.response(&HealthAlertSettings::default()).alerts.len(),
+      1
+    );
+    assert_eq!(mailer.sent().len(), 1, "nobody is told twice");
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_notice_waiting_at_a_restart_goes_out_after_it_and_a_delivered_one_does_not() {
+    let mailer = Arc::new(FakeMailer::default());
+    let Some(app) = TestApp::start_with_mailer(|_| {}, mailer.clone()).await else {
+      return;
+    };
+    let bob = admin();
+    app.get(&bob, "/admin/health").await;
+    assert!(app.state.health.restore(&app.state).await);
+    let settings = HealthAlertSettings::default();
+    let (hold, clear) = (settings.hold_secs as i64, settings.clear_secs as i64);
+    break_identity_provider(&app);
+    for seconds in (0..=hold).step_by(30) {
+      evaluate(&app, seconds).await;
+    }
+    // The raise is delivered and written; then the alert ends, and the process stops before that
+    // notice went out.
+    app.state.health.deliver_notices(&app.state, at_fixed(hold)).await;
+    assert!(app.state.health.persist(&app.state, at_fixed(hold)).await);
+    app
+      .state
+      .dependencies
+      .guard(DependencyName::IdentityProvider)
+      .record_success();
+    let resolved_at = hold + 30 + clear;
+    for seconds in (hold + 30..=resolved_at).step_by(30) {
+      evaluate(&app, seconds).await;
+    }
+    assert!(app.state.health.persist(&app.state, at_fixed(resolved_at)).await);
+    assert_eq!(mailer.sent().len(), 1);
+
+    let restarted = restart(&app, resolved_at + 30).await;
+    restarted
+      .deliver_notices(&app.state, at_fixed(resolved_at + 30))
+      .await;
+    let subjects: Vec<String> = mailer.sent().into_iter().map(|mail| mail.subject).collect();
+    assert_eq!(
+      subjects,
+      [
+        "TeamCraft health alert: identity_provider",
+        "TeamCraft health alert resolved: identity_provider",
+      ]
+    );
+    let response = restarted.response(&settings);
+    assert!(response.alerts[0].maybe_resolved_at.is_some());
+    assert_eq!(
+      status(&response, HealthCheckId::IdentityProvider),
+      HealthCheckStatus::NoData
+    );
+
+    // Written as delivered: a second restart sends nothing.
+    assert!(restarted.persist(&app.state, at_fixed(resolved_at + 30)).await);
+    let again = restart(&app, resolved_at + 60).await;
+    again
+      .deliver_notices(&app.state, at_fixed(resolved_at + 60))
+      .await;
+    assert_eq!(mailer.sent().len(), 2);
+    app.stop().await;
+  }
+
+  /// A new monitor on the same database, as after a restart, with what was kept read back.
+  async fn restart(app: &TestApp, seconds: i64) -> HealthMonitor {
+    let monitor = HealthMonitor::new(
+      HealthConfig {
+        disk_paths: Vec::new(),
+        ..HealthConfig::default()
+      },
+      JobSchedules::default(),
+      at_fixed(seconds),
+    );
+    assert!(monitor.restore(&app.state).await);
+    monitor
+  }
+
+  fn status(response: &teamcraft_proto::AdminHealthResponse, check: HealthCheckId) -> HealthCheckStatus {
+    response
+      .checks
+      .iter()
+      .find(|entry| entry.check == check)
+      .unwrap()
+      .status
+      .clone()
   }
 }
 

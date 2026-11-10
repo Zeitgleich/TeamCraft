@@ -8,6 +8,16 @@ use utoipa::ToSchema;
 use crate::UnixMillis;
 use crate::wire_enum::wire_enum;
 
+/// A quarter of a year: long enough to see what came back, short enough to stay small.
+const DEFAULT_HISTORY_DAYS: u32 = 90;
+const DEFAULT_SECRET_MIN_DAYS: u32 = 14;
+const DEFAULT_PROBE_INTERVAL_SECS: u64 = 60;
+const DEFAULT_PROBE_TIMEOUT_SECS: u64 = 5;
+/// About where video starts to suffer (docs/operations.md, "How calls go").
+const DEFAULT_CALL_MAX_LOSS_PERCENT: u32 = 5;
+const DEFAULT_CALL_MAX_FALLBACK_PERCENT: u32 = 80;
+const DEFAULT_CALL_WINDOW_SECS: u64 = 300;
+
 wire_enum! {
   /// One thing the server watches. A fixed list: the value is shown, never built from input.
   pub enum HealthCheckId {
@@ -35,12 +45,22 @@ wire_enum! {
     Backup => "backup",
     /// The served certificate is valid for long enough. Reported by the deployment.
     Certificate => "certificate",
-    /// The disk is not nearly full. Reported by the deployment.
+    /// The disk is not nearly full. Measured by the server (`[health] disk_paths`), and reported
+    /// by the deployment where it writes `disk_used_percent`; the fuller one counts.
     DiskSpace => "disk_space",
     /// The copy of the holiday feed is recent enough (`holidays.feed_max_age_secs`).
     HolidayFeed => "holiday_feed",
     /// The job that writes calendar events again when the holidays change ran lately (#1441).
     HolidayResync => "holiday_resync",
+    /// The secrets the server holds whose expiry it can read (the FCM service account key, the
+    /// identity provider's client secret) are valid for long enough.
+    SecretExpiry => "secret_expiry",
+    /// Calls go well: the downlink loss is low and most sessions reach the SFU over UDP (#1666).
+    CallQuality => "call_quality",
+    /// The SFU's public UDP port answers a QUIC handshake from the server, over IPv4.
+    MediaUdpIpv4 => "media_udp_ipv4",
+    /// The same over IPv6.
+    MediaUdpIpv6 => "media_udp_ipv6",
   }
 }
 
@@ -69,7 +89,9 @@ pub struct HealthCheckResponse {
   #[serde(rename = "failing_since", default, skip_serializing_if = "Option::is_none")]
   pub maybe_failing_since: Option<UnixMillis>,
   /// What the check measures, where it measures something: the age in seconds of the last backup
-  /// or job run, the days until the certificate expires, the percent of the disk in use.
+  /// or job run, the days until the certificate or the soonest secret expires, the percent of the
+  /// disk in use, the 95th percentile of the calls' downlink loss in tenths of a percent, the
+  /// milliseconds a probe took.
   #[serde(rename = "value", default, skip_serializing_if = "Option::is_none")]
   pub maybe_value: Option<i64>,
 }
@@ -133,6 +155,33 @@ pub struct HealthAlertSettings {
   /// when the server can send mail. Settings saved before this existed read as on.
   #[serde(default = "default_true")]
   pub is_email_enabled: bool,
+  /// Resolved alerts are kept in the history this many days (at most the last 500 alerts). Open
+  /// alerts are kept until they end. Settings saved before this existed read as the default.
+  #[serde(default = "default_history_days")]
+  pub history_days: u32,
+  /// A secret whose expiry the server can read is too close to it with fewer days than this.
+  #[serde(default = "default_secret_min_days")]
+  pub secret_min_days: u32,
+  /// The server's own probes of the push gateway and of the SFU's UDP port. Off: those checks
+  /// show as not set up (the push gateway then only by its breaker).
+  #[serde(default = "default_true")]
+  pub is_probing_enabled: bool,
+  /// How often the probes run.
+  #[serde(default = "default_probe_interval_secs")]
+  pub probe_interval_secs: u64,
+  /// How long one probe may take before it counts as failed.
+  #[serde(default = "default_probe_timeout_secs")]
+  pub probe_timeout_secs: u64,
+  /// Calls go badly when the 95th percentile of the downlink loss is above this percentage.
+  #[serde(default = "default_call_max_loss_percent")]
+  pub call_max_loss_percent: u32,
+  /// ... or when more than this percentage of the new sessions came over the WebSocket fallback
+  /// (UDP to the SFU blocked).
+  #[serde(default = "default_call_max_fallback_percent")]
+  pub call_max_fallback_percent: u32,
+  /// The time the call quality is judged over.
+  #[serde(default = "default_call_window_secs")]
+  pub call_window_secs: u64,
 }
 
 impl Default for HealthAlertSettings {
@@ -146,12 +195,48 @@ impl Default for HealthAlertSettings {
       certificate_min_days: 14,
       disk_max_percent: 85,
       is_email_enabled: true,
+      history_days: DEFAULT_HISTORY_DAYS,
+      secret_min_days: DEFAULT_SECRET_MIN_DAYS,
+      is_probing_enabled: true,
+      probe_interval_secs: DEFAULT_PROBE_INTERVAL_SECS,
+      probe_timeout_secs: DEFAULT_PROBE_TIMEOUT_SECS,
+      call_max_loss_percent: DEFAULT_CALL_MAX_LOSS_PERCENT,
+      call_max_fallback_percent: DEFAULT_CALL_MAX_FALLBACK_PERCENT,
+      call_window_secs: DEFAULT_CALL_WINDOW_SECS,
     }
   }
 }
 
 fn default_true() -> bool {
   true
+}
+
+fn default_history_days() -> u32 {
+  DEFAULT_HISTORY_DAYS
+}
+
+fn default_secret_min_days() -> u32 {
+  DEFAULT_SECRET_MIN_DAYS
+}
+
+fn default_probe_interval_secs() -> u64 {
+  DEFAULT_PROBE_INTERVAL_SECS
+}
+
+fn default_probe_timeout_secs() -> u64 {
+  DEFAULT_PROBE_TIMEOUT_SECS
+}
+
+fn default_call_max_loss_percent() -> u32 {
+  DEFAULT_CALL_MAX_LOSS_PERCENT
+}
+
+fn default_call_max_fallback_percent() -> u32 {
+  DEFAULT_CALL_MAX_FALLBACK_PERCENT
+}
+
+fn default_call_window_secs() -> u64 {
+  DEFAULT_CALL_WINDOW_SECS
 }
 
 #[cfg(test)]

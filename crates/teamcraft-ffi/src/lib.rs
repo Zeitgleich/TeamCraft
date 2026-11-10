@@ -31,6 +31,7 @@ mod picture_retries;
 mod reads;
 mod row_badge;
 mod server_entry;
+mod server_pool;
 mod settings_sync;
 mod types;
 mod video;
@@ -121,6 +122,7 @@ pub use voice::{
 };
 
 use crate::engine::{DrainGoal, Engine, EngineThreads, Job, PushOpening, PushReader};
+use crate::http_fetch::run_request;
 use crate::logging::{JobClock, LifecycleStep, outcome};
 use crate::reads::{ReadQueue, Reads};
 
@@ -146,11 +148,24 @@ pub struct TeamCraft {
   running_calls: calls::RunningCalls,
 }
 
-/// Supplies the current OIDC access token. The app owns login and refresh (AppAuth on Android);
-/// `None` means signed out.
+/// Supplies the current OIDC access token. The app owns login and refresh (AppAuth on Android).
 #[uniffi::export(with_foreign)]
 pub trait TokenProvider: Send + Sync {
-  fn access_token(&self) -> Option<String>;
+  fn access_token(&self) -> AccessToken;
+}
+
+/// What the app's [`TokenProvider`] answers: a token, none for now, or none for good (issue #1671).
+/// Only the last one signs the user out; a refresh that failed is retried like the network.
+#[derive(uniffi::Enum)]
+pub enum AccessToken {
+  /// A current access token.
+  Token { value: String },
+  /// None right now while the session lives: a due refresh failed or timed out (offline, Doze, the
+  /// identity provider down or slow). Requests count as a network problem and are retried later.
+  Unavailable,
+  /// The session has ended: signed out, a local session expired, or the identity provider refused
+  /// the refresh token.
+  SignedOut,
 }
 
 /// Told when the local store changed, so the UI re-reads what it shows. Called on the engine
@@ -1086,17 +1101,16 @@ impl TeamCraft {
   }
 
   /// The profile picture of a person (image bytes, at most `max_bytes`), or `None` without one.
-  /// Fetched on demand; the app keeps its own cache.
+  /// Fetched on demand, beside the engine's queue; the app keeps its own cache.
   pub async fn avatar_picture(
     &self,
     user_id: String,
     max_bytes: u32,
   ) -> Result<Option<Vec<u8>>, TeamCraftError> {
-    self
-      .call(move |engine| {
-        Box::pin(async move { engine.avatar_picture(&user_id, u64::from(max_bytes)).await })
-      })
+    let api = self.server_api()?;
+    run_request(async move { bridge::avatar_picture(&api, &user_id, u64::from(max_bytes)).await })
       .await
+      .map_err(TeamCraftError::Network)?
   }
 
   /// The picture of a space (PNG bytes, at most `max_bytes`), or `None` without one. Fetched on
@@ -1107,11 +1121,10 @@ impl TeamCraft {
     space_id: String,
     max_bytes: u32,
   ) -> Result<Option<Vec<u8>>, TeamCraftError> {
-    self
-      .call(move |engine| {
-        Box::pin(async move { engine.space_picture(&space_id, u64::from(max_bytes)).await })
-      })
+    let api = self.server_api()?;
+    run_request(async move { bridge::space_picture(&api, &space_id, u64::from(max_bytes)).await })
       .await
+      .map_err(TeamCraftError::Network)?
   }
 
   /// An integration source's picture (a small PNG) as this device holds it, or `None`: the app
@@ -1683,6 +1696,12 @@ impl TeamCraft {
 
   fn read_queue(&self) -> Result<ReadQueue, TeamCraftError> {
     Ok(self.threads()?.reads)
+  }
+
+  /// A handle on the server for a request on the HTTP runtime ([`run_request`]): no engine job, so
+  /// it neither waits behind the engine's queue nor holds it up.
+  fn server_api(&self) -> Result<engine::Api, TeamCraftError> {
+    Ok(self.threads()?.http.api())
   }
 
   fn late_problem(&self) -> engine::LateProblem {
@@ -2287,10 +2306,12 @@ mod tests {
     }
 
     impl TokenProvider for BlockedTokens {
-      fn access_token(&self) -> Option<String> {
+      fn access_token(&self) -> AccessToken {
         let _ = self.entered.send(());
         let _ = self.finished.lock().unwrap().recv();
-        Some("token".into())
+        AccessToken::Token {
+          value: "token".into(),
+        }
       }
     }
   }
@@ -2314,8 +2335,8 @@ mod tests {
   struct NoTokens;
 
   impl TokenProvider for NoTokens {
-    fn access_token(&self) -> Option<String> {
-      None
+    fn access_token(&self) -> AccessToken {
+      AccessToken::SignedOut
     }
   }
 

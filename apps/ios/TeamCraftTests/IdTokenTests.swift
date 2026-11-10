@@ -148,8 +148,8 @@ final class IdTokenTests: XCTestCase {
     let provider = VaultTokenProvider(vault: vault)
     provider.attach(core)
     core.isRequestPending = true
-    XCTAssertEqual(provider.accessToken(), "new-access")
-    XCTAssertEqual(provider.accessToken(), "new-access")
+    XCTAssertEqual(token(provider.accessToken()), "new-access")
+    XCTAssertEqual(token(provider.accessToken()), "new-access")
     XCTAssertEqual(refreshes.value, 1)
     XCTAssertEqual(core.noted.last, newer)
   }
@@ -165,8 +165,8 @@ final class IdTokenTests: XCTestCase {
     let provider = VaultTokenProvider(vault: vault)
     provider.attach(core)
     core.isRequestPending = true
-    XCTAssertEqual(provider.accessToken(), "old-access")
-    XCTAssertEqual(provider.accessToken(), "old-access")
+    XCTAssertEqual(token(provider.accessToken()), "old-access")
+    XCTAssertEqual(token(provider.accessToken()), "old-access")
     XCTAssertEqual(refreshes.value, 1)
   }
 
@@ -181,7 +181,7 @@ final class IdTokenTests: XCTestCase {
       provider.attach(core)
     }
     XCTAssertNil(weakCore)
-    XCTAssertEqual(provider.accessToken(), "old-access")
+    XCTAssertEqual(token(provider.accessToken()), "old-access")
   }
 
   func testAProviderWithoutACoreNeverForcesARefresh() throws {
@@ -191,11 +191,38 @@ final class IdTokenTests: XCTestCase {
       return $0
     })
     try vault.save(session(idToken: Self.jwt(iat: 1)))
-    XCTAssertEqual(VaultTokenProvider(vault: vault).accessToken(), "old-access")
+    XCTAssertEqual(token(VaultTokenProvider(vault: vault).accessToken()), "old-access")
     XCTAssertEqual(refreshes.value, 0)
   }
 
+  /// Issue #1671: a refresh that fails for now keeps the session, and the core hears it is not a
+  /// sign-out; a refused refresh token ends the session, and the core hears that.
+  func testAFailedRefreshIsNoSignOutButARefusedOneIs() throws {
+    let offline = makeVault(refresh: { _ in throw OidcError.network("offline") })
+    try offline.save(session(idToken: nil, expiresIn: -60))
+    XCTAssertTrue(isUnavailable(VaultTokenProvider(vault: offline).accessToken()))
+
+    let refused = makeVault(refresh: { _ in throw OidcError.sessionExpired })
+    try refused.save(session(idToken: nil, expiresIn: -60))
+    XCTAssertTrue(isSignedOut(VaultTokenProvider(vault: refused).accessToken()))
+  }
+
   // MARK: Helpers
+
+  private func token(_ answer: AccessToken) -> String? {
+    if case .token(let value) = answer { return value }
+    return nil
+  }
+
+  private func isUnavailable(_ answer: AccessToken) -> Bool {
+    if case .unavailable = answer { return true }
+    return false
+  }
+
+  private func isSignedOut(_ answer: AccessToken) -> Bool {
+    if case .signedOut = answer { return true }
+    return false
+  }
 
   private func makeVault(
     refreshTimeout: TimeInterval = 5,

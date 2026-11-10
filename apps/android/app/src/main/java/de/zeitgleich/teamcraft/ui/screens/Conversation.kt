@@ -230,6 +230,9 @@ fun ConversationScreen(
 ) {
   val changes by viewModel.changeCount.collectAsState()
   var snapshot by remember { mutableStateOf(viewModel.chat.maybeKeptSnapshot()) }
+  // Names the messages until a snapshot that knows their authors is read (from the tail itself).
+  var maybeStandIn by remember(conversationId) { mutableStateOf<ChatSnapshot?>(null) }
+  val naming = maybeStandIn ?: snapshot
   // What it showed last or was read ahead with: the messages are there in the first frame.
   val maybeSeed = remember(conversationId) { viewModel.feedSeed(conversationId) }
   var messages by remember(conversationId) { mutableStateOf(maybeSeed?.messages ?: emptyList()) }
@@ -290,7 +293,20 @@ fun ConversationScreen(
       val maybeTail = feed.reread()
       val tail = maybeTail?.messages ?: emptyList()
       val maybeExtras = viewModel.readChat { extras(conversationId, tail.map { it.id }) }
+      // The snapshot is read on the main read thread, behind the chat list and the actions: while
+      // the store was slow it came 20 s after the messages, and the chat stayed empty (1.0.29). The
+      // messages show now, named by the kept snapshot when it knows every author, else by the tail.
+      val maybeKept = snapshot
+      val isKeptNaming = maybeKept != null && tail.all { maybeKept.user(it.author) != null }
+      val maybeEarly = if (isKeptNaming) null else maybeTail?.let { viewModel.chat.authorsSnapshot(it) }
+      if (isKeptNaming || maybeEarly != null) {
+        maybeStandIn = maybeEarly
+        messages = tail
+        extras = maybeExtras ?: extras
+        Perf.end(PerfMeasure.CHANNEL_SWITCH, conversationId)
+      }
       val maybeSnapshot = viewModel.readChat { snapshot() }
+      if (maybeSnapshot != null) maybeStandIn = null
       messages = tail
       Perf.end(PerfMeasure.CHANNEL_SWITCH, conversationId)
       if (Perf.isRunning(PerfMeasure.MESSAGE_SEND, conversationId) && tail.none { it.isPending }) {
@@ -372,17 +388,17 @@ fun ConversationScreen(
     MessageList(
       viewModel = viewModel,
       conversationId = conversationId,
-      snapshot = snapshot,
-      messages = drawnMessages(messages, maybeNotified, snapshot),
+      snapshot = naming,
+      messages = drawnMessages(messages, maybeNotified, naming),
       extras = extras,
       firstUnread = firstUnread,
       sentCount = sentCount,
       onOpenThread = onOpenThread,
       maybeOnReply = { message: Message ->
-        ReplyTarget.set(conversationId, message, snapshot?.name(message.author).orEmpty())
+        ReplyTarget.set(conversationId, message, naming?.name(message.author).orEmpty())
       }.takeIf { rights.canPost },
       maybeOnReplyImage = { file: FileInfo ->
-        ReplyTarget.setImage(file, file.maybeSender?.let { snapshot?.name(it) }.orEmpty())
+        ReplyTarget.setImage(file, file.maybeSender?.let { naming?.name(it) }.orEmpty())
       }.takeIf { rights.canPost },
       rights = rights,
       modifier = Modifier.weight(1f),
@@ -2245,13 +2261,10 @@ internal fun PreJoinDialog(
             modifier = Modifier.padding(bottom = 8.dp),
           )
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Switch(checked = isCameraOn, onCheckedChange = { isCameraOn = it })
-          Text(stringResource(R.string.call_prejoin_camera), modifier = Modifier.padding(start = 8.dp))
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Switch(checked = isMuted, onCheckedChange = { isMuted = it })
-          Text(stringResource(R.string.call_prejoin_muted), modifier = Modifier.padding(start = 8.dp))
+        // The settings' switch rows: the whole row toggles, with Material's toggle haptics.
+        SettingsGroup {
+          row { shapes -> SettingsSwitchRow(shapes, stringResource(R.string.call_prejoin_camera), isCameraOn) { isCameraOn = it } }
+          row { shapes -> SettingsSwitchRow(shapes, stringResource(R.string.call_prejoin_muted), isMuted) { isMuted = it } }
         }
       }
     },

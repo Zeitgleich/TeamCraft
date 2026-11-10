@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -77,7 +78,7 @@ fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
   }
   val hits = (read as? Read.Loaded)?.value.orEmpty()
   Scaffold(topBar = { ChromeTopBar(title = stringResource(R.string.search), maybeOnBack = onBack) }, contentWindowInsets = ScreenInsets) { padding ->
-    Column(Modifier.fillMaxSize().padding(padding)) {
+    Column(Modifier.fillMaxSize().padding(padding.withoutBottom()).consumeWindowInsets(padding)) {
       // Opening search is for typing: the keyboard comes up with it.
       val focus = remember { FocusRequester() }
       LaunchedEffect(Unit) { focus.requestFocus() }
@@ -90,12 +91,15 @@ fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
       )
       SearchFilterBar(snapshot, query) { query = it }
       if (query.isBlank()) {
-        EmptyState(
-          icon = Icons.Filled.Search,
-          title = stringResource(R.string.search_start_title),
-          text = stringResource(R.string.search_start_text),
-          maybeAction = null,
-        )
+        // Centred in the space above the keyboard, which comes up with the screen.
+        Box(Modifier.padding(padding.bottomOnly())) {
+          EmptyState(
+            icon = Icons.Filled.Search,
+            title = stringResource(R.string.search_start_title),
+            text = stringResource(R.string.search_start_text),
+            maybeAction = null,
+          )
+        }
       } else {
         ListPlaceholder(
           listPhase(read),
@@ -116,7 +120,7 @@ fun SearchScreen(viewModel: MainViewModel, onOpen: (String) -> Unit, onBack: () 
           )
         }
       }
-      LazyColumn {
+      LazyColumn(contentPadding = padding.bottomOnly()) {
         items(hits, key = { it.message.id }) { hit ->
           Column(Modifier.fillMaxWidth().clickable { onOpen(hit.message.conversationId) }) {
             Text(

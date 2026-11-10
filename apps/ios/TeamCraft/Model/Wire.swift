@@ -343,6 +343,8 @@ struct PeopleSnapshot: Decodable, Sendable {
     let displayName: String
     /// Deleted (issue #630): a tombstone the app names by its own "Deleted user" (issue #751).
     let isDeleted: Bool?
+    /// An integration's account: never offered after `@`.
+    let isBot: Bool?
 
     /// The name to show: the app's own "Deleted user" for a deleted account, as on desktop and web.
     var shownName: String { isDeleted == true ? deletedUserName : displayName }
@@ -353,6 +355,13 @@ struct PeopleSnapshot: Decodable, Sendable {
   let users: [Person]?
   /// Deactivated and deleted accounts: offered nowhere, they only name their old messages.
   let formerUsers: [Person]?
+  /// Who is in which conversation, for the people the composer offers after `@`.
+  let conversations: [Conversation]?
+
+  struct Conversation: Decodable, Sendable {
+    let id: String
+    let memberIds: [String]?
+  }
 
   /// Names by user ID for reply quotes and calls: everyone this device knows, former accounts
   /// included.
