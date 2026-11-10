@@ -233,8 +233,8 @@ fun TeamCraftTheme(maybeBrand: LoginBrand? = null, content: @Composable () -> Un
     MaterialExpressiveTheme(
       colorScheme = scheme,
       motionScheme = if (isMotionReduced) MotionScheme.standard() else MotionScheme.expressive(),
-      shapes = TeamCraftShapes,
       typography = typography,
+      // No shapes: Material's own, as Google's apps use them (segmented lists, dialogs, buttons).
       content = content,
     )
   }

@@ -39,47 +39,59 @@ import de.zeitgleich.teamcraft.ui.MessageLayout
 import de.zeitgleich.teamcraft.ui.MessageLayoutPrefs
 import uniffi.teamcraft_ffi.CallStatusSounds
 import uniffi.teamcraft_ffi.OriginalDownload
+import androidx.compose.material3.ListItemShapes
 
-/** App lock on or off, and after how long in the background it locks again. */
+/**
+ * App lock on or off, and after how long in the background it locks again: rows of the security
+ * page's group.
+ */
+fun SettingsGroupScope.appLockRows(isAvailable: Boolean, isEnabled: Boolean, onEnabled: (Boolean) -> Unit) {
+  row { shapes ->
+    SettingsSwitchRow(
+      shapes,
+      stringResource(R.string.app_lock),
+      isEnabled,
+      maybeSummary = if (isAvailable) null else stringResource(R.string.app_lock_unavailable),
+      isEnabled = isAvailable || isEnabled,
+      onChange = onEnabled,
+    )
+  }
+  if (isEnabled) row { shapes -> LockAfterRow(shapes) }
+}
+
+/** The app lock's state for [appLockRows]: switching it off deletes the key and reposts notifications. */
 @Composable
-fun AppLockSetting() {
+fun rememberAppLock(): Pair<Boolean, (Boolean) -> Unit> {
   val context = LocalContext.current
   val prefs = remember { AppLockPrefs.prefs(context) }
-  val isAvailable = remember { AppLockPrefs.isAvailable(context) }
   var isEnabled by remember { mutableStateOf(prefs.isEnabled) }
+  return isEnabled to { isOn: Boolean ->
+    isEnabled = isOn
+    prefs.setEnabled(isOn)
+    if (!isOn) deleteAppLockKey()
+    // Notifications already shown follow the new setting at once.
+    TeamCraftApplication.graph(context).notifier.repostAll()
+  }
+}
+
+@Composable
+private fun LockAfterRow(shapes: ListItemShapes) {
+  val context = LocalContext.current
+  val prefs = remember { AppLockPrefs.prefs(context) }
   var lockAfter by remember { mutableStateOf(prefs.lockAfter) }
-  Column {
-    SettingSwitch(R.string.app_lock, isEnabled, isEnabled = isAvailable || isEnabled) {
-      isEnabled = it
-      prefs.setEnabled(it)
-      if (!it) deleteAppLockKey()
-      // Notifications already shown follow the new setting at once.
-      TeamCraftApplication.graph(context).notifier.repostAll()
-    }
-    if (!isAvailable) {
-      Text(
-        stringResource(R.string.app_lock_unavailable),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-      )
-    }
-    if (isEnabled) {
-      Text(stringResource(R.string.app_lock_after), style = MaterialTheme.typography.bodySmall)
-      ChoiceButtonGroup(LOCK_AFTER_CHOICES, selected = lockAfter) { choice ->
-        lockAfter = choice
-        prefs.setLockAfter(choice)
-      }
-    }
+  SettingsChoiceRow(shapes, stringResource(R.string.app_lock_after), LOCK_AFTER_CHOICES, lockAfter) {
+    lockAfter = it
+    prefs.setLockAfter(it)
   }
 }
 
 /** Whether others see "… is typing" while the user writes. */
 @Composable
-fun ShareTypingSetting() {
+fun ShareTypingSetting(shapes: ListItemShapes) {
   val context = LocalContext.current
   val prefs = remember { ComposerPrefs.prefs(context) }
   var isOn by remember { mutableStateOf(prefs.isSharingTyping) }
-  SettingSwitch(R.string.share_typing, isOn) {
+  SettingsSwitchRow(shapes, stringResource(R.string.share_typing), isOn) {
     isOn = it
     prefs.setSharingTyping(it)
   }
@@ -87,21 +99,19 @@ fun ShareTypingSetting() {
 
 /** Which call status sounds play (reconnecting, reconnected, call lost); applies from the next call. */
 @Composable
-fun CallStatusSoundsSetting() {
+fun CallStatusSoundsSetting(shapes: ListItemShapes) {
   val context = LocalContext.current
   val prefs = remember { CallSoundPrefs.prefs(context) }
   var sounds by remember { mutableStateOf(prefs.statusSounds) }
-  Column {
-    Text(stringResource(R.string.call_status_sounds))
-    ChoiceButtonGroup(STATUS_SOUND_CHOICES, selected = sounds) { choice ->
-      sounds = choice
-      prefs.setStatusSounds(choice)
-    }
-    Text(
-      stringResource(R.string.call_status_sounds_hint),
-      style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+  SettingsChoiceRow(
+    shapes,
+    stringResource(R.string.call_status_sounds),
+    STATUS_SOUND_CHOICES,
+    sounds,
+    maybeHint = stringResource(R.string.call_status_sounds_hint),
+  ) {
+    sounds = it
+    prefs.setStatusSounds(it)
   }
 }
 
@@ -110,132 +120,129 @@ fun CallStatusSoundsSetting() {
  * never ("Load original" then). The preview shows at once either way.
  */
 @Composable
-fun OriginalDownloadSetting() {
+fun OriginalDownloadSetting(shapes: ListItemShapes) {
   val context = LocalContext.current
   val prefs = remember { MediaPrefs.prefs(context) }
   var choice by remember { mutableStateOf(prefs.originalDownload) }
-  Column {
-    Text(stringResource(R.string.original_download_title))
-    ChoiceButtonGroup(ORIGINAL_DOWNLOAD_CHOICES, selected = choice) { option ->
-      choice = option
-      prefs.setOriginalDownload(option)
-    }
-    Text(
-      stringResource(R.string.original_download_hint),
-      style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+  SettingsChoiceRow(
+    shapes,
+    stringResource(R.string.original_download_title),
+    ORIGINAL_DOWNLOAD_CHOICES,
+    choice,
+    maybeHint = stringResource(R.string.original_download_hint),
+  ) {
+    choice = it
+    prefs.setOriginalDownload(it)
   }
 }
 
 /** The quality photos and videos are sent at unless changed while sending (#1358). */
 @Composable
-fun SendQualitySetting() {
+fun SendQualitySetting(shapes: ListItemShapes) {
   val context = LocalContext.current
   val prefs = remember { MediaPrefs.prefs(context) }
   var choice by remember { mutableStateOf(prefs.sendQuality) }
-  Column {
-    Text(stringResource(R.string.send_quality_title))
-    ChoiceButtonGroup(SEND_QUALITY_CHOICES, selected = choice) { option ->
-      choice = option
-      prefs.setSendQuality(option)
-    }
-    Text(
-      stringResource(R.string.send_quality_hint),
-      style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
+  SettingsChoiceRow(
+    shapes,
+    stringResource(R.string.send_quality_title),
+    SEND_QUALITY_CHOICES,
+    choice,
+    maybeHint = stringResource(R.string.send_quality_hint),
+  ) {
+    choice = it
+    prefs.setSendQuality(it)
   }
 }
 
 /** Whether animated images start by themselves or from their play button (#201). Takes effect at once. */
 @Composable
-fun AnimatedImagesSetting() {
+fun AnimatedImagesSetting(shapes: ListItemShapes) {
   val context = LocalContext.current
   val prefs = remember { MediaPrefs.prefs(context) }
   val choice by prefs.animatedImages.collectAsState()
-  Column {
-    Text(stringResource(R.string.animated_images_title))
-    ChoiceButtonGroup(ANIMATED_IMAGES_CHOICES, selected = choice) { option -> prefs.setAnimatedImages(option) }
-    Text(
-      stringResource(R.string.animated_images_hint),
-      style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-  }
+  SettingsChoiceRow(
+    shapes,
+    stringResource(R.string.animated_images_title),
+    ANIMATED_IMAGES_CHOICES,
+    choice,
+    maybeHint = stringResource(R.string.animated_images_hint),
+    onSelect = prefs::setAnimatedImages,
+  )
 }
 
 /** One list of all conversations, or Home and Spaces apart (#1151). Takes effect at once. */
 @Composable
-fun ChatListLayoutSetting() {
+fun ChatListLayoutSetting(shapes: ListItemShapes) {
   val context = LocalContext.current
   val prefs = remember { AppearancePrefs.prefs(context) }
   val layout by prefs.chatListLayout.collectAsState()
-  Column {
-    Text(stringResource(R.string.chat_list_layout))
-    ChoiceButtonGroup(CHAT_LIST_LAYOUT_CHOICES, selected = layout) { choice -> prefs.setChatListLayout(choice) }
-    Text(
-      stringResource(R.string.chat_list_layout_hint),
-      style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-  }
+  SettingsChoiceRow(
+    shapes,
+    stringResource(R.string.chat_list_layout),
+    CHAT_LIST_LAYOUT_CHOICES,
+    layout,
+    maybeHint = stringResource(R.string.chat_list_layout_hint),
+    onSelect = prefs::setChatListLayout,
+  )
 }
 
 /** Messages as bubbles or as the desktop's comfortable or compact list (#598, #1488). A setting of this device; takes effect at once. */
 @Composable
-fun MessageLayoutSetting() {
+fun MessageLayoutSetting(shapes: ListItemShapes) {
   val context = LocalContext.current
   val prefs = remember { MessageLayoutPrefs.of(context) }
   val layout by prefs.layout.collectAsState()
-  Column {
-    Text(stringResource(R.string.message_layout))
-    ChoiceButtonGroup(MESSAGE_LAYOUT_CHOICES, selected = layout) { choice -> prefs.setLayout(choice) }
-    Text(
-      stringResource(R.string.message_layout_hint),
-      style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-  }
+  SettingsChoiceRow(
+    shapes,
+    stringResource(R.string.message_layout),
+    MESSAGE_LAYOUT_CHOICES,
+    layout,
+    maybeHint = stringResource(R.string.message_layout_hint),
+    onSelect = prefs::setLayout,
+  )
 }
 
 /** In the list layout: DMs and channels together, or the channels grouped by space (#1345). */
 @Composable
-fun ChatListGroupingSetting() {
+fun ChatListGroupingSetting(shapes: ListItemShapes) {
+  val context = LocalContext.current
+  val prefs = remember { AppearancePrefs.prefs(context) }
+  val grouping by prefs.chatListGrouping.collectAsState()
+  SettingsChoiceRow(
+    shapes,
+    stringResource(R.string.chat_list_grouping),
+    CHAT_LIST_GROUPING_CHOICES,
+    grouping,
+    maybeHint = stringResource(R.string.chat_list_grouping_hint),
+    onSelect = prefs::setChatListGrouping,
+  )
+}
+
+/** Whether the list layout is on, so the page shows [ChatListGroupingSetting] (only the list has an order to choose). */
+@Composable
+fun isChatListLayoutList(): Boolean {
   val context = LocalContext.current
   val prefs = remember { AppearancePrefs.prefs(context) }
   val layout by prefs.chatListLayout.collectAsState()
-  val grouping by prefs.chatListGrouping.collectAsState()
-  // Only the list has this order to choose.
-  if (layout != ChatListLayout.List) return
-  Column {
-    Text(stringResource(R.string.chat_list_grouping))
-    ChoiceButtonGroup(CHAT_LIST_GROUPING_CHOICES, selected = grouping) { choice -> prefs.setChatListGrouping(choice) }
-    Text(
-      stringResource(R.string.chat_list_grouping_hint),
-      style = MaterialTheme.typography.bodySmall,
-      color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-  }
+  return layout == ChatListLayout.List
 }
 
-/** The wallpaper's colors instead of TeamCraft's (Android 12+). */
+/** The wallpaper's colors instead of TeamCraft's (Android 12+; the page leaves the row out before). */
 @Composable
-fun DynamicColorSetting() {
-  if (!AppearancePrefs.isSupported) return
+fun DynamicColorSetting(shapes: ListItemShapes) {
   val context = LocalContext.current
   val prefs = remember { AppearancePrefs.prefs(context) }
   val isOn by prefs.isDynamicColor.collectAsState()
-  SettingSwitch(R.string.dynamic_color, isOn, onChange = prefs::setDynamicColor)
+  SettingsSwitchRow(shapes, stringResource(R.string.dynamic_color), isOn, onChange = prefs::setDynamicColor)
 }
 
 /** Enter sends (hardware keyboards); Shift+Enter is a new line then. */
 @Composable
-fun SendWithEnterSetting() {
+fun SendWithEnterSetting(shapes: ListItemShapes) {
   val context = LocalContext.current
   val prefs = remember { ComposerPrefs.prefs(context) }
   var isOn by remember { mutableStateOf(prefs.isSendWithEnter) }
-  SettingSwitch(R.string.send_with_enter, isOn) {
+  SettingsSwitchRow(shapes, stringResource(R.string.send_with_enter), isOn) {
     isOn = it
     prefs.setSendWithEnter(it)
   }
@@ -285,23 +292,3 @@ private val LOCK_AFTER_CHOICES = listOf(
   LockAfter.FiveMinutes to R.string.app_lock_five_minutes,
   LockAfter.FifteenMinutes to R.string.app_lock_fifteen_minutes,
 )
-
-/** A switch with its label; the whole row toggles it (a bigger target than the switch alone). */
-@Composable
-fun SettingSwitch(label: Int, isOn: Boolean, isEnabled: Boolean = true, onChange: (Boolean) -> Unit) {
-  val haptics = LocalHapticFeedback.current
-  Row(
-    Modifier
-      .fillMaxWidth()
-      .toggleable(value = isOn, enabled = isEnabled, role = Role.Switch) {
-        // Material haptics: a switch confirms its new state.
-        haptics.performHapticFeedback(if (it) HapticFeedbackType.ToggleOn else HapticFeedbackType.ToggleOff)
-        onChange(it)
-      }
-      .padding(vertical = 4.dp),
-    verticalAlignment = Alignment.CenterVertically,
-  ) {
-    Switch(checked = isOn, onCheckedChange = null, enabled = isEnabled)
-    Text(stringResource(label), modifier = Modifier.padding(start = 8.dp))
-  }
-}

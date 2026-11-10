@@ -38,11 +38,11 @@ private val SHARED_AXIS_OFFSET = 30.dp
 private const val BACK_PREVIEW_SCALE = 0.9f
 
 /**
- * Transitions between the app's screens (issue #454): Material's horizontal shared axis, driven by
- * the theme's motion scheme (expressive springs, or standard ones with "remove animations").
- * Navigation (and [SeekablePages]) seek the pop transitions with the predictive back gesture, so the
- * screen being left shrinks and slides away under the finger and settles with the same spring when
- * released.
+ * Transitions between the app's screens (issue #454): Material's horizontal shared axis forward,
+ * driven by the theme's motion scheme (expressive springs, or standard ones with "remove
+ * animations"). Back follows developer.android.com's predictive back setup: Navigation (and
+ * [SeekablePages]) seek the pop transition with the back gesture, so the screen being left shrinks
+ * under the finger and settles with the same spring when the gesture is released or cancelled.
  */
 @Immutable
 class ScreenTransitions(
@@ -73,11 +73,10 @@ fun rememberScreenTransitions(): ScreenTransitions {
     ScreenTransitions(
       enter = slideInHorizontally(spatial) { forward * offsetPx } + fadeIn(motion.defaultEffectsSpec()),
       exit = slideOutHorizontally(spatial) { -forward * offsetPx } + fadeOut(motion.fastEffectsSpec()),
-      // Going back, the screen being left stays on top, shrinks and slides away with the finger
-      // (the back gesture seeks this transition); the one returned to fades in beneath it.
-      popEnter = slideInHorizontally(spatial) { -forward * offsetPx } + fadeIn(motion.defaultSpatialSpec()),
-      popExit = scaleOut(motion.defaultSpatialSpec(), targetScale = BACK_PREVIEW_SCALE) +
-        slideOutHorizontally(spatial) { fullWidth -> forward * fullWidth },
+      // Going back as in Android's predictive back guide: the screen being left (on top) shrinks
+      // to 90 % while the back gesture seeks the transition; the one returned to waits beneath it.
+      popEnter = EnterTransition.None,
+      popExit = scaleOut(motion.defaultSpatialSpec(), targetScale = BACK_PREVIEW_SCALE),
     )
   }
 }

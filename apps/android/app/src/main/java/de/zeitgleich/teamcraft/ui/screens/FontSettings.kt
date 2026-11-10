@@ -6,7 +6,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemShapes
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
@@ -17,12 +17,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -41,26 +39,23 @@ import de.zeitgleich.teamcraft.ui.theme.appFontFamily
  * fonts, each in its own face, grouped. Follows the account; applies at once (Theme.kt).
  */
 @Composable
-fun FontSetting() {
+fun FontSetting(shapes: ListItemShapes) {
   val context = LocalContext.current
   val prefs = remember { AppearancePrefs.prefs(context) }
   val value by prefs.fontValue.collectAsState()
   var isOpen by remember { mutableStateOf(false) }
   val chosen = APP_FONTS.firstOrNull { it.id == value } ?: APP_FONTS.first()
   Box {
-    ListItem(
-      headlineContent = { Text(stringResource(R.string.font)) },
-      supportingContent = {
+    SettingsLinkRow(
+      shapes,
+      stringResource(R.string.font),
+      summaryContent = {
         Column {
-          Text(fontName(chosen), style = inFont(chosen, MaterialTheme.typography.bodyLarge))
-          Text(
-            stringResource(R.string.font_hint),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-          )
+          Text(fontName(chosen), style = inFont(chosen, MaterialTheme.typography.bodyMedium))
+          Text(stringResource(R.string.font_hint), style = MaterialTheme.typography.bodySmall)
         }
       },
-      modifier = Modifier.clickable(role = Role.DropdownList) { isOpen = true },
+      onClick = { isOpen = true },
     )
     DropdownMenu(expanded = isOpen, onDismissRequest = { isOpen = false }) {
       AppFontGroup.entries.forEachIndexed { index, group ->

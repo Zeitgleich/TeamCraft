@@ -295,4 +295,18 @@
   <string name="message_layout_compact">Kompakt</string>
   <string name="message_layout_hint">Blasen zeigen deine Nachrichten rechts. Komfortabel und Kompakt zeigen jede Nachricht mit Bild, Name und Uhrzeit, wie am Desktop.</string>
   <string name="react_add">Reaktion hinzufügen</string>
+  <!-- Settings groups (issue #454) -->
+  <string name="settings_group_profile">Profil</string>
+  <string name="settings_group_help">Hilfe</string>
+  <string name="settings_group_writing">Schreiben</string>
+  <string name="settings_group_appearance">Darstellung</string>
+  <string name="settings_group_media">Fotos und Videos</string>
+  <string name="settings_group_calls">Anrufe</string>
+  <string name="settings_group_messages">Nachrichten</string>
+  <string name="settings_group_meetings">Besprechungen</string>
+  <string name="settings_group_push">Push</string>
+  <string name="settings_group_privacy">Privatsphäre</string>
+  <string name="push_mode_title">Push-Benachrichtigungen</string>
+  <string name="push_service_title">Push-Dienst</string>
+  <string name="search_prefetch_limit">Speicherlimit</string>
 </resources>

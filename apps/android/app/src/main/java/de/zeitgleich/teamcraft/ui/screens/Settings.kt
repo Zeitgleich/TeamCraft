@@ -92,6 +92,10 @@ import de.zeitgleich.teamcraft.ui.rememberIsOnline
 import uniffi.teamcraft_ffi.Presence
 import uniffi.teamcraft_ffi.PushService
 import uniffi.teamcraft_ffi.TeamCraftException
+import de.zeitgleich.teamcraft.security.AppLockPrefs
+import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
+import de.zeitgleich.teamcraft.ui.theme.Spacing
+import androidx.compose.material3.ListItemShapes
 
 /** The settings' pages; the hub lists them, each opens on top of it. */
 private enum class SettingsPage(val title: Int, val summary: Int) {
@@ -129,15 +133,17 @@ fun SettingsScreen(
     // Back from a page to the hub: the predictive back gesture previews it (issue #454).
     SeekablePages(page = page, rootPage = null, onBack = { maybePage = null }, modifier = Modifier.padding(padding)) { shown ->
       Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = Spacing.l, vertical = Spacing.m),
+        verticalArrangement = Arrangement.spacedBy(Spacing.xl),
       ) {
         when (shown) {
           null -> SettingsHub(viewModel, account, onOpen = { maybePage = it }, onReportProblem = onReportProblem)
           SettingsPage.Notifications -> NotificationsPage(viewModel, onDnd, onDiagnostics)
           SettingsPage.Chats -> ChatsPage(viewModel)
           SettingsPage.Security -> SecurityPage(viewModel, account)
-          SettingsPage.Devices -> ApproveDevice(viewModel)
+          SettingsPage.Devices -> SettingsGroup(R.string.approve_title) {
+            row { shapes -> SettingsContentRow(shapes) { ApproveDevice(viewModel) } }
+          }
         }
       }
     }
@@ -176,53 +182,59 @@ private fun SettingsHub(
     }
   }
   DisplayNameSection(viewModel)
-  // Guests have no meetings of their own to skip holidays in; the server refuses them anyway.
-  if (maybeMe?.isGuest != true) HolidayRegionSection(viewModel)
-  // Busy during a call on this phone is the server's doing, not a status to reset.
-  StatusRow(presence, isManual = presence != Presence.ONLINE && !(presence == Presence.BUSY && isInCall)) { choice, maybeUntil ->
-    presence = choice
-    viewModel.setPresence(choice, maybeUntil)
-  }
   var isEditingStatus by rememberSaveable { mutableStateOf(false) }
-  ListItem(
-    headlineContent = { Text(stringResource(R.string.custom_status_title)) },
-    supportingContent = {
+  SettingsGroup(R.string.settings_group_profile) {
+    // Busy during a call on this phone is the server's doing, not a status to reset.
+    row { shapes ->
+      StatusRow(shapes, presence, isManual = presence != Presence.ONLINE && !(presence == Presence.BUSY && isInCall)) { choice, maybeUntil ->
+        presence = choice
+        viewModel.setPresence(choice, maybeUntil)
+      }
+    }
+    row { shapes ->
       val status = maybeMe?.maybeCustomStatus
-      Text(status?.let { listOf(it.emoji, it.text).filter(String::isNotBlank).joinToString(" ") } ?: stringResource(R.string.custom_status_hint))
-    },
-    trailingContent = { Chevron(isOpen = isEditingStatus) },
-    modifier = Modifier.clickable { isEditingStatus = !isEditingStatus },
-  )
-  if (isEditingStatus) CustomStatusSection(viewModel)
-  HorizontalDivider()
-  Column {
-    for (entry in SettingsPage.entries) {
-      ListItem(
-        headlineContent = { Text(stringResource(entry.title)) },
-        supportingContent = { Text(stringResource(entry.summary)) },
-        trailingContent = { Chevron() },
-        modifier = Modifier.clickable { onOpen(entry) },
+      SettingsLinkRow(
+        shapes,
+        stringResource(R.string.custom_status_title),
+        maybeSummary = status?.let { listOf(it.emoji, it.text).filter(String::isNotBlank).joinToString(" ") }
+          ?: stringResource(R.string.custom_status_hint),
+        trailingContent = { Chevron(isOpen = isEditingStatus) },
+        onClick = { isEditingStatus = !isEditingStatus },
       )
+    }
+    if (isEditingStatus) row { shapes -> SettingsContentRow(shapes) { CustomStatusSection(viewModel) } }
+    // Guests have no meetings of their own to skip holidays in; the server refuses them anyway.
+    if (maybeMe?.isGuest != true) row { shapes -> HolidayRegionRow(shapes, viewModel) }
+  }
+  SettingsGroup {
+    for (entry in SettingsPage.entries) {
+      row { shapes -> SettingsLinkRow(shapes, stringResource(entry.title), stringResource(entry.summary), onClick = { onOpen(entry) }) }
     }
   }
   val context = LocalContext.current
-  ListItem(
-    headlineContent = { Text(stringResource(R.string.export_diagnostics)) },
-    supportingContent = { Text(stringResource(R.string.export_diagnostics_summary)) },
-    leadingContent = { Icon(Icons.Filled.Share, contentDescription = null) },
-    modifier = Modifier.clickable { exportDiagnostics(context) },
-  )
-  // Every member can report; guests share no DM with the organization's admins.
-  if (maybeMe?.isGuest != true) {
-    ListItem(
-      headlineContent = { Text(stringResource(R.string.report_title)) },
-      supportingContent = { Text(stringResource(R.string.report_summary)) },
-      leadingContent = { Icon(painterResource(R.drawable.ic_help), contentDescription = null) },
-      trailingContent = { Chevron() },
-      modifier = Modifier.clickable(onClick = onReportProblem),
-    )
+  SettingsGroup(R.string.settings_group_help) {
+    row { shapes ->
+      SettingsLinkRow(
+        shapes,
+        stringResource(R.string.export_diagnostics),
+        stringResource(R.string.export_diagnostics_summary),
+        leadingContent = { Icon(Icons.Filled.Share, contentDescription = null) },
+        onClick = { exportDiagnostics(context) },
+      )
+    }
+    // Every member can report; guests share no DM with the organization's admins.
+    if (maybeMe?.isGuest != true) {
+      row { shapes ->
+        SettingsLinkRow(
+          shapes,
+          stringResource(R.string.report_title),
+          stringResource(R.string.report_summary),
+          leadingContent = { Icon(painterResource(R.drawable.ic_help), contentDescription = null) },
+          onClick = onReportProblem,
+        )
+      }
+    }
   }
-  HorizontalDivider()
   OutlinedButton(onClick = viewModel::signOut, modifier = Modifier.fillMaxWidth()) {
     Text(stringResource(R.string.sign_out))
   }
@@ -230,65 +242,71 @@ private fun SettingsHub(
 
 @Composable
 private fun NotificationsPage(viewModel: MainViewModel, onDnd: () -> Unit, onDiagnostics: () -> Unit) {
-  NotificationSettingsSection(viewModel)
-  Heading(R.string.notification_content_title)
-  NotificationContentSection(viewModel)
-  Heading(R.string.mention_title)
-  MentionSettingsSection(viewModel)
-  Text(
-    stringResource(
-      when (viewModel.pushService()) {
-        PushService.FCM -> R.string.push_fcm
-        PushService.UNIFIED_PUSH -> R.string.push_unifiedpush
-        // APNs is the iOS app's service; Android never registers with it.
-        PushService.APNS, null -> R.string.push_none
-      },
-    ),
-  )
-  Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-    OutlinedButton(onClick = onDnd) { Text(stringResource(R.string.dnd_title)) }
-    OutlinedButton(onClick = onDiagnostics) { Text(stringResource(R.string.diagnostics_title)) }
+  NotificationSettingsGroups(viewModel) {
+    row { shapes ->
+      SettingsInfoRow(
+        shapes,
+        stringResource(R.string.push_service_title),
+        stringResource(
+          when (viewModel.pushService()) {
+            PushService.FCM -> R.string.push_fcm
+            PushService.UNIFIED_PUSH -> R.string.push_unifiedpush
+            // APNs is the iOS app's service; Android never registers with it.
+            PushService.APNS, null -> R.string.push_none
+          },
+        ),
+      )
+    }
+    row { shapes -> SettingsLinkRow(shapes, stringResource(R.string.dnd_title), onClick = onDnd) }
+    row { shapes -> SettingsLinkRow(shapes, stringResource(R.string.diagnostics_title), onClick = onDiagnostics) }
   }
+  NotificationContentGroup(viewModel)
+  MentionSettingsGroup(viewModel)
 }
 
 @Composable
 private fun ChatsPage(viewModel: MainViewModel) {
-  SendWithEnterSetting()
-  ShareTypingSetting()
-  DynamicColorSetting()
-  HorizontalDivider()
-  FontSetting()
-  HorizontalDivider()
+  SettingsGroup(R.string.settings_group_writing) {
+    row { SendWithEnterSetting(it) }
+    row { ShareTypingSetting(it) }
+  }
+  val isList = isChatListLayoutList()
+  SettingsGroup(R.string.settings_group_appearance) {
+    if (AppearancePrefs.isSupported) row { DynamicColorSetting(it) }
+    row { FontSetting(it) }
+    row { ChatListLayoutSetting(it) }
+    if (isList) row { ChatListGroupingSetting(it) }
+    row { MessageLayoutSetting(it) }
+  }
   ColorThemeSetting()
-  HorizontalDivider()
-  ChatListLayoutSetting()
-  ChatListGroupingSetting()
-  HorizontalDivider()
-  MessageLayoutSetting()
-  HorizontalDivider()
-  CallStatusSoundsSetting()
-  HorizontalDivider()
-  OriginalDownloadSetting()
-  HorizontalDivider()
-  SendQualitySetting()
-  HorizontalDivider()
-  AnimatedImagesSetting()
-  HorizontalDivider()
-  Heading(R.string.search_prefetch_title)
-  SearchPrefetchSection(viewModel.segmentPrefetch)
+  SettingsGroup(R.string.settings_group_media) {
+    row { OriginalDownloadSetting(it) }
+    row { SendQualitySetting(it) }
+    row { AnimatedImagesSetting(it) }
+  }
+  SettingsGroup(R.string.settings_group_calls) {
+    row { CallStatusSoundsSetting(it) }
+  }
+  SearchPrefetchGroup(viewModel.segmentPrefetch)
 }
 
 @Composable
 private fun SecurityPage(viewModel: MainViewModel, account: AppState.Ready) {
-  Heading(R.string.fingerprint_title)
-  Text(account.identityFingerprint, fontFamily = FontFamily.Monospace)
-  Text(stringResource(R.string.fingerprint_hint), style = MaterialTheme.typography.bodySmall)
+  SettingsGroup(R.string.fingerprint_title, maybeFooter = stringResource(R.string.fingerprint_hint)) {
+    row { shapes ->
+      SettingsContentRow(shapes) { Text(account.identityFingerprint, fontFamily = FontFamily.Monospace) }
+    }
+  }
   KeyChanges(viewModel)
-  HorizontalDivider()
-  SecureScreenSetting()
-  AppLockSetting()
-  CrashReportsSetting(viewModel.crashReports)
-  HorizontalDivider()
+  val maybeCrashStatus by viewModel.crashReports.status.collectAsState()
+  val (isAppLockOn, setAppLock) = rememberAppLock()
+  val context = LocalContext.current
+  val isAppLockAvailable = remember { AppLockPrefs.isAvailable(context) }
+  SettingsGroup(R.string.settings_group_privacy) {
+    row { SecureScreenSetting(it) }
+    appLockRows(isAppLockAvailable, isAppLockOn, setAppLock)
+    maybeCrashStatus?.let { status -> row { CrashReportsRow(it, viewModel.crashReports, status) } }
+  }
   KeyBackupStatus(viewModel)
   ChangePassphrase(viewModel)
 }
@@ -300,13 +318,11 @@ private fun KeyBackupStatus(viewModel: MainViewModel) {
   var backup by remember { mutableStateOf<KeyBackup?>(null) }
   LaunchedEffect(changes) { backup = viewModel.readChat { snapshot() }?.security?.backup }
   val state = backup ?: return
-  Heading(R.string.backup_title)
   val title = when {
     !state.isStored -> R.string.backup_missing
     state.hasPassphrase -> R.string.backup_ok
     else -> R.string.backup_no_recovery
   }
-  Text(stringResource(title), style = MaterialTheme.typography.titleSmall)
   val setAt = state.passphraseSetAt
   val detail = when {
     !state.isStored -> stringResource(R.string.backup_missing_hint)
@@ -317,9 +333,11 @@ private fun KeyBackupStatus(viewModel: MainViewModel) {
     )
     else -> stringResource(R.string.backup_passphrase)
   }
-  Text(detail, style = MaterialTheme.typography.bodySmall)
-  if (state.hasOrganization) {
-    Text(stringResource(R.string.backup_organization), style = MaterialTheme.typography.bodySmall)
+  SettingsGroup(
+    R.string.backup_title,
+    maybeFooter = if (state.hasOrganization) stringResource(R.string.backup_organization) else null,
+  ) {
+    row { shapes -> SettingsInfoRow(shapes, stringResource(title), detail) }
   }
 }
 
@@ -373,7 +391,6 @@ private fun ApproveDevice(viewModel: MainViewModel) {
   DisposableEffect(isOpen) {
     onDispose { if (isOpen) viewModel.cancelLinkApproval() }
   }
-  Heading(R.string.approve_title)
   when {
     isDone -> Text(stringResource(R.string.approve_done))
     isTyping -> LinkCodeStep(
@@ -528,7 +545,7 @@ private fun DisplayNameSection(viewModel: MainViewModel) {
  * meeting list reads afresh whenever it is opened, so it shows the skipped occurrences.
  */
 @Composable
-private fun HolidayRegionSection(viewModel: MainViewModel) {
+private fun HolidayRegionRow(shapes: ListItemShapes, viewModel: MainViewModel) {
   val scope = rememberCoroutineScope()
   val isOnline = rememberIsOnline()
   var maybeLoaded by remember { mutableStateOf<HolidayRegion?>(null) }
@@ -555,22 +572,22 @@ private fun HolidayRegionSection(viewModel: MainViewModel) {
     else -> holidayHint(loaded)
   }
   Box {
-    ListItem(
-      headlineContent = { Text(stringResource(R.string.holiday_title)) },
-      supportingContent = {
+    SettingsLinkRow(
+      shapes,
+      stringResource(R.string.holiday_title),
+      isEnabled = isEnabled,
+      summaryContent = {
         Column {
           Text(HOLIDAY_REGION_LABELS[current]?.let { stringResource(it) } ?: current)
           if (hint.isNotEmpty()) Text(hint, style = MaterialTheme.typography.bodySmall)
+          // A refusal is said in the row it belongs to (forms.md: at the field).
+          maybeFailure?.let { Text(stringResource(it), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
         }
       },
-      trailingContent = { Chevron(isOpen = isOpen) },
-      modifier = Modifier.clickable(
-        enabled = isEnabled,
-        onClick = {
-          maybeFailure = null
-          isOpen = true
-        },
-      ),
+      onClick = {
+        maybeFailure = null
+        isOpen = true
+      },
     )
     DropdownMenu(expanded = isOpen, onDismissRequest = { isOpen = false }) {
       for (code in listOf("") + HOLIDAY_REGIONS) {
@@ -596,7 +613,6 @@ private fun HolidayRegionSection(viewModel: MainViewModel) {
       }
     }
   }
-  maybeFailure?.let { ErrorLine(it) }
 }
 
 @Composable
@@ -688,13 +704,17 @@ private fun KeyChanges(viewModel: MainViewModel) {
   LaunchedEffect(changes) { snapshot = viewModel.readChat { snapshot() } }
   val changed = snapshot?.security?.contacts.orEmpty().filter { it.maybeNewFingerprint != null }
   if (changed.isEmpty()) return
-  HorizontalDivider()
-  Heading(R.string.key_changes_title)
-  for (contact in changed) {
-    Text(snapshot?.name(contact.user).orEmpty(), style = MaterialTheme.typography.titleSmall)
-    Text(stringResource(R.string.key_changes_new, contact.maybeNewFingerprint.orEmpty()), fontFamily = FontFamily.Monospace)
-    OutlinedButton(onClick = { viewModel.act(ChatActions.acceptKeyChange(contact.user)) }) {
-      Text(stringResource(R.string.key_changes_accept))
+  SettingsGroup(R.string.key_changes_title) {
+    for (contact in changed) {
+      row { shapes ->
+        SettingsContentRow(shapes) {
+          Text(snapshot?.name(contact.user).orEmpty(), style = MaterialTheme.typography.titleSmall)
+          Text(stringResource(R.string.key_changes_new, contact.maybeNewFingerprint.orEmpty()), fontFamily = FontFamily.Monospace)
+          OutlinedButton(onClick = { viewModel.act(ChatActions.acceptKeyChange(contact.user)) }) {
+            Text(stringResource(R.string.key_changes_accept))
+          }
+        }
+      }
     }
   }
 }
@@ -732,39 +752,39 @@ private fun ChangePassphrase(viewModel: MainViewModel) {
       }
     }
   }
-  Heading(R.string.change_passphrase_title)
-  OutlinedTextField(
-    value = passphrase,
-    onValueChange = {
-      passphrase = it
-      isDone = false
-      maybeFailure = null
-    },
-    label = { Text(stringResource(R.string.passphrase)) },
-    singleLine = true,
-    visualTransformation = PasswordVisualTransformation(),
-    keyboardOptions = PASSPHRASE_KEYBOARD.copy(imeAction = ImeAction.Done),
-    keyboardActions = KeyboardActions(onDone = { submit() }),
-    isError = maybeError != null,
-    supportingText = supportingText(maybeError, R.string.passphrase_rule_short),
-    modifier = Modifier.fillMaxWidth().focusRequester(focus).fieldError(maybeError),
-  )
-  Button(onClick = submit, enabled = !isSaving) { Text(stringResource(R.string.change_passphrase_button)) }
-  if (isDone) Text(stringResource(R.string.change_passphrase_done), style = MaterialTheme.typography.bodySmall)
-}
-
-@Composable
-private fun Heading(text: Int) {
-  Text(stringResource(text), style = MaterialTheme.typography.titleMedium, modifier = Modifier.semantics { heading() })
+  SettingsGroup(R.string.change_passphrase_title) {
+    row { shapes ->
+      SettingsContentRow(shapes) {
+        OutlinedTextField(
+          value = passphrase,
+          onValueChange = {
+            passphrase = it
+            isDone = false
+            maybeFailure = null
+          },
+          label = { Text(stringResource(R.string.passphrase)) },
+          singleLine = true,
+          visualTransformation = PasswordVisualTransformation(),
+          keyboardOptions = PASSPHRASE_KEYBOARD.copy(imeAction = ImeAction.Done),
+          keyboardActions = KeyboardActions(onDone = { submit() }),
+          isError = maybeError != null,
+          supportingText = supportingText(maybeError, R.string.passphrase_rule_short),
+          modifier = Modifier.fillMaxWidth().focusRequester(focus).fieldError(maybeError),
+        )
+        Button(onClick = submit, enabled = !isSaving) { Text(stringResource(R.string.change_passphrase_button)) }
+        if (isDone) Text(stringResource(R.string.change_passphrase_done), style = MaterialTheme.typography.bodySmall)
+      }
+    }
+  }
 }
 
 /** No screenshots or app-switcher thumbnails; applies the next time a screen opens. */
 @Composable
-private fun SecureScreenSetting() {
+private fun SecureScreenSetting(shapes: ListItemShapes) {
   val context = LocalContext.current
   val prefs = remember { ScreenPrefs.prefs(context) }
   var isSecure by remember { mutableStateOf(prefs.isSecureScreen) }
-  SettingSwitch(R.string.secure_screen, isSecure) {
+  SettingsSwitchRow(shapes, stringResource(R.string.secure_screen), isSecure) {
     isSecure = it
     prefs.setSecureScreen(it)
     (context as? Activity)?.let { activity ->

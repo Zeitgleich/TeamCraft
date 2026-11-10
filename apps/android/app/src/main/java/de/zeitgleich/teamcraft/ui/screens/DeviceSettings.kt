@@ -31,77 +31,95 @@ import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.forms.confirmOverCount
 import de.zeitgleich.teamcraft.ui.forms.fieldError
 import de.zeitgleich.teamcraft.ui.forms.supportingText
+import uniffi.teamcraft_ffi.MentionSettings
 
 /** Mentions decided on this device, as on desktop: keywords, first name, `@channel`. */
 @Composable
-fun MentionSettingsSection(viewModel: MainViewModel) {
+fun MentionSettingsGroup(viewModel: MainViewModel) {
   val prefs = viewModel.mentionPrefs
   val settings by prefs.settings.collectAsState()
   var keywords by remember { mutableStateOf(settings.keywords.joinToString(", ")) }
   var confirmOver by remember { mutableStateOf(prefs.confirmChannelOver.toString()) }
-  Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-    SettingSwitch(R.string.mention_first_name, settings.isFirstNameMention) {
-      prefs.update(settings.copy(isFirstNameMention = it))
+  SettingsGroup(R.string.mention_title) {
+    row { shapes ->
+      SettingsSwitchRow(shapes, stringResource(R.string.mention_first_name), settings.isFirstNameMention) {
+        prefs.update(settings.copy(isFirstNameMention = it))
+      }
     }
-    SettingSwitch(R.string.mention_channel, settings.doChannelMentionsNotify) {
-      prefs.update(settings.copy(doChannelMentionsNotify = it))
+    row { shapes ->
+      SettingsSwitchRow(shapes, stringResource(R.string.mention_channel), settings.doChannelMentionsNotify) {
+        prefs.update(settings.copy(doChannelMentionsNotify = it))
+      }
     }
-    OutlinedTextField(
-      value = keywords,
-      onValueChange = {
-        keywords = it
-        prefs.update(settings.copy(keywords = MentionPrefs.parseKeywords(it)))
-      },
-      label = { Text(stringResource(R.string.mention_keywords)) },
-      supportingText = { Text(stringResource(R.string.mention_keywords_hint)) },
-      keyboardOptions = textKeyboard(KeyboardCapitalization.None),
-      modifier = Modifier.fillMaxWidth(),
-    )
-    // Saved as typed; an empty field keeps the last count and says what it takes.
-    val maybeCount = confirmOverCount(confirmOver)
-    val maybeError = if (maybeCount == null) R.string.mention_confirm_over_range else null
-    OutlinedTextField(
-      value = confirmOver,
-      onValueChange = { text ->
-        confirmOver = text.filter { it.isDigit() }.take(MAX_COUNT_DIGITS)
-        confirmOverCount(confirmOver)?.let(prefs::setConfirmChannelOver)
-      },
-      label = { Text(stringResource(R.string.mention_confirm_over)) },
-      suffix = {
-        Text(pluralStringResource(R.plurals.mention_confirm_over_unit, maybeCount ?: prefs.confirmChannelOver))
-      },
-      isError = maybeError != null,
-      supportingText = supportingText(maybeError, R.string.mention_confirm_over_hint),
-      keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
-      singleLine = true,
-      modifier = Modifier.fillMaxWidth().fieldError(maybeError),
-    )
+    row { shapes -> SettingsContentRow(shapes) { MentionFields(prefs, settings, keywords, { keywords = it }, confirmOver, { confirmOver = it }) } }
   }
 }
 
-/** Older history searchable offline: segments downloaded on Wi-Fi while charging, with a cap. */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun SearchPrefetchSection(prefetch: SegmentPrefetch) {
+private fun MentionFields(
+  prefs: MentionPrefs,
+  settings: MentionSettings,
+  keywords: String,
+  onKeywords: (String) -> Unit,
+  confirmOver: String,
+  onConfirmOver: (String) -> Unit,
+) {
+  OutlinedTextField(
+    value = keywords,
+    onValueChange = {
+      onKeywords(it)
+      prefs.update(settings.copy(keywords = MentionPrefs.parseKeywords(it)))
+    },
+    label = { Text(stringResource(R.string.mention_keywords)) },
+    supportingText = { Text(stringResource(R.string.mention_keywords_hint)) },
+    keyboardOptions = textKeyboard(KeyboardCapitalization.None),
+    modifier = Modifier.fillMaxWidth(),
+  )
+  // Saved as typed; an empty field keeps the last count and says what it takes.
+  val maybeCount = confirmOverCount(confirmOver)
+  val maybeError = if (maybeCount == null) R.string.mention_confirm_over_range else null
+  OutlinedTextField(
+    value = confirmOver,
+    onValueChange = { text ->
+      val digits = text.filter { it.isDigit() }.take(MAX_COUNT_DIGITS)
+      onConfirmOver(digits)
+      confirmOverCount(digits)?.let(prefs::setConfirmChannelOver)
+    },
+    label = { Text(stringResource(R.string.mention_confirm_over)) },
+    suffix = {
+      Text(pluralStringResource(R.plurals.mention_confirm_over_unit, maybeCount ?: prefs.confirmChannelOver))
+    },
+    isError = maybeError != null,
+    supportingText = supportingText(maybeError, R.string.mention_confirm_over_hint),
+    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+    singleLine = true,
+    modifier = Modifier.fillMaxWidth().fieldError(maybeError),
+  )
+}
+
+/** Older history searchable offline: segments downloaded on Wi-Fi while charging, with a cap. */
+@Composable
+fun SearchPrefetchGroup(prefetch: SegmentPrefetch) {
   var isEnabled by remember { mutableStateOf(prefetch.isEnabled) }
   var maxMegabytes by remember { mutableStateOf(prefetch.maxMegabytes) }
-  Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-    SettingSwitch(R.string.search_prefetch, isEnabled) {
-      isEnabled = it
-      prefetch.update(it, maxMegabytes)
+  SettingsGroup(R.string.search_prefetch_title) {
+    row { shapes ->
+      SettingsSwitchRow(shapes, stringResource(R.string.search_prefetch), isEnabled, maybeSummary = stringResource(R.string.search_prefetch_hint)) {
+        isEnabled = it
+        prefetch.update(it, maxMegabytes)
+      }
     }
-    Text(stringResource(R.string.search_prefetch_hint), style = MaterialTheme.typography.bodySmall)
     if (isEnabled) {
-      FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        for (choice in SegmentPrefetch.CHOICES_MB) {
-          FilterChip(
-            selected = maxMegabytes == choice,
-            onClick = {
-              maxMegabytes = choice
-              prefetch.update(isEnabled, choice)
-            },
-            label = { Text(stringResource(R.string.search_prefetch_cap, choice)) },
-          )
+      row { shapes ->
+        SettingsChoiceRow(
+          shapes,
+          stringResource(R.string.search_prefetch_limit),
+          SegmentPrefetch.CHOICES_MB,
+          maxMegabytes,
+          label = { stringResource(R.string.search_prefetch_cap, it) },
+        ) {
+          maxMegabytes = it
+          prefetch.update(isEnabled, it)
         }
       }
     }

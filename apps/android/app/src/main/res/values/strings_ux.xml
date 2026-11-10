@@ -301,4 +301,18 @@
   <string name="message_layout_compact">Compact</string>
   <string name="message_layout_hint">Bubbles put your messages on the right. Comfortable and Compact show every message with the sender\'s picture, name and time, as on the desktop.</string>
   <string name="react_add">Add a reaction</string>
+  <!-- Settings groups (issue #454) -->
+  <string name="settings_group_profile">Profile</string>
+  <string name="settings_group_help">Help</string>
+  <string name="settings_group_writing">Writing</string>
+  <string name="settings_group_appearance">Appearance</string>
+  <string name="settings_group_media">Photos and videos</string>
+  <string name="settings_group_calls">Calls</string>
+  <string name="settings_group_messages">Messages</string>
+  <string name="settings_group_meetings">Meetings</string>
+  <string name="settings_group_push">Push</string>
+  <string name="settings_group_privacy">Privacy</string>
+  <string name="push_mode_title">Push notifications</string>
+  <string name="push_service_title">Push service</string>
+  <string name="search_prefetch_limit">Storage limit</string>
 </resources>
