@@ -211,7 +211,7 @@ pub(crate) struct SyncSignals {
 #[derive(Clone, Copy, Debug, Default)]
 struct PushTimes {
   /// Waiting for the app's access token (a refresh may ask the identity provider).
-  token: Duration,
+  auth_wait: Duration,
   /// Fetching and decrypting the message (a connection to the server first, after a pause).
   fetch: Duration,
   /// The app's own client catching the conversation up.
@@ -1372,7 +1372,7 @@ impl Engine {
         ?opening,
         gap = ?preview.maybe_gap,
         ran_ms = opened_at.elapsed().as_millis(),
-        token_ms = times.token.as_millis(),
+        auth_wait_ms = times.auth_wait.as_millis(),
         fetch_ms = times.fetch.as_millis(),
         catch_up_ms = times.catch_up.as_millis(),
         probe_ms = times.probe.as_millis(),
@@ -1467,7 +1467,7 @@ impl Engine {
     // Without a token the preview still names conversation and sender, also when a refresh would
     // use up the time for the fetch.
     let maybe_token = tokio::time::timeout(PUSH_FETCH_BUDGET, self.tokens.fresh_token()).await;
-    times.token = started.elapsed();
+    times.auth_wait = started.elapsed();
     if !matches!(maybe_token, Ok(Ok(_))) {
       let is_timed_out = maybe_token.is_err();
       tracing::info!(target: LIFECYCLE, is_timed_out, "no access token for the push");
