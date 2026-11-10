@@ -7,6 +7,7 @@
 //! re-read and an answer with one entry; a presence event one person's entry and the live state.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::live::LiveSnapshot;
@@ -29,6 +30,7 @@ use crate::read_state::PresenceIndex;
 use crate::records;
 use crate::store::{LocalStore, StoreChanges, Table};
 use crate::ui_backend::CoreChatBackend;
+use crate::user_directory::UserMap;
 
 /// The parts of the snapshot as last built, each with the revision it last changed at.
 pub struct SnapshotCache {
@@ -68,7 +70,7 @@ struct Revised<T> {
 
 /// What every conversation entry reads, read once per refresh.
 struct Shared {
-  users: BTreeMap<UserId, UserSummary>,
+  users: Arc<UserMap>,
   preferences: MentionPreferences,
   account: AccountData,
 }
@@ -338,7 +340,8 @@ impl Parts {
       .filter(|conversation| self.conversations.contains_key(conversation))
       .collect();
     if !known.is_empty() {
-      let shared = Shared::read(backend, BTreeMap::new());
+      // The users as they are now, from the backend's directory: no read when they didn't change.
+      let shared = Shared::read(backend, backend.summaries());
       for conversation in known {
         let maybe_response: Option<ConversationResponse> = backend.read(records::get_json(
           backend.store_ref(),
@@ -348,7 +351,6 @@ impl Parts {
         let (Some(response), Some(part)) = (maybe_response, self.conversations.get_mut(&conversation)) else {
           continue;
         };
-        let shared = shared.with_people_of(backend, &response);
         is_changed |= part.set(part_of(backend, &response, &shared), revision);
         match backend.mute_end(&response) {
           Some(end) => self.mute_ends.insert(conversation, end),
@@ -444,35 +446,11 @@ impl<T: PartialEq> Revised<T> {
 }
 
 impl Shared {
-  fn read<S: LocalStore>(backend: &CoreChatBackend<S>, users: BTreeMap<UserId, UserSummary>) -> Self {
+  fn read<S: LocalStore>(backend: &CoreChatBackend<S>, users: Arc<UserMap>) -> Self {
     Self {
       users,
       preferences: backend.mention_preferences(),
       account: backend.read(crate::client::stored_account_data(backend.store_ref())),
-    }
-  }
-
-  /// With the people one conversation's entry names: its members and the user (mentions).
-  fn with_people_of<S: LocalStore>(
-    &self,
-    backend: &CoreChatBackend<S>,
-    response: &ConversationResponse,
-  ) -> Self {
-    let mut users = BTreeMap::new();
-    for user in backend.members(response.id).into_iter().chain([backend.me_id()]) {
-      let maybe_summary: Option<UserSummary> = backend.read(records::get_json(
-        backend.store_ref(),
-        Table::Users,
-        &user.to_string(),
-      ));
-      if let Some(summary) = maybe_summary {
-        users.insert(user, summary);
-      }
-    }
-    Self {
-      users,
-      preferences: self.preferences.clone(),
-      account: self.account.clone(),
     }
   }
 }

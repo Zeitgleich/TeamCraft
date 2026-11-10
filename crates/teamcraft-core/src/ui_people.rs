@@ -2,7 +2,7 @@
 //! store; a read that finds nothing (or something old) queues a refresh and answers with what it
 //! has. Repeated reads don't repeat the request within [`RETRY_AFTER_MS`].
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 
 use teamcraft_client_api::admin::{DeviceInfo, DevicePushStatus, DeviceVerification};
@@ -71,7 +71,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
   /// lately; whether somebody has a device comes from the directory.
   fn known_people(&self) -> Vec<User> {
     let cache = self.read(DirectoryCache::load(self.store_ref(), self.now_ms()));
-    let mut summaries = self.summaries();
+    let mut summaries = BTreeMap::clone(&self.summaries());
     for entry in cache.entries {
       summaries
         .entry(entry.user.id)

@@ -86,6 +86,11 @@ pub struct TrackedStore<S> {
   /// The number of the newest commit whose notes were published: a reader's snapshot must hold it
   /// before the reader takes them.
   published: Arc<AtomicU64>,
+  /// Moves with every published write to [`Table::Users`] ([`LocalStore::users_revision`]).
+  users: Arc<AtomicU64>,
+  /// What this view's disk counted when it last looked, for [`Self::users`]: each view looks on
+  /// its own, so another process's commit moves the revision once it can be read here.
+  users_tally: Arc<Mutex<Option<WriteTally>>>,
 }
 
 /// The notes of the open group of writes over a store with numbered commits, held back until the
@@ -101,6 +106,8 @@ struct GroupNotes {
   written: Vec<(ConversationId, Written, bool)>,
   /// Conversations the group wrote to: a reader keeps nothing derived from them meanwhile.
   conversations: BTreeSet<ConversationId>,
+  /// The group wrote to [`Table::Users`]: a reader keeps no users meanwhile.
+  writes_users: bool,
 }
 
 /// The newest writes of messages, by number: a reader that keeps its own number since asks what
@@ -254,6 +261,7 @@ impl<S: LocalStore> TrackedStore<S> {
   pub fn with_message_cache(inner: S, max_size_bytes: usize) -> Self {
     Self {
       is_numbered: inner.last_commit().is_some(),
+      users_tally: Arc::new(Mutex::new(inner.write_tally())),
       inner,
       changes: Arc::default(),
       removed_renditions: Arc::default(),
@@ -269,6 +277,7 @@ impl<S: LocalStore> TrackedStore<S> {
       seen_foreign: Arc::default(),
       group: Arc::default(),
       published: Arc::default(),
+      users: Arc::default(),
     }
   }
 
@@ -280,6 +289,7 @@ impl<S: LocalStore> TrackedStore<S> {
   {
     Self {
       is_numbered: inner.last_commit().is_some(),
+      users_tally: Arc::new(Mutex::new(inner.write_tally())),
       inner,
       ..self.clone()
     }
@@ -567,6 +577,42 @@ impl<S: LocalStore> TrackedStore<S> {
     for change in notes.changes {
       self.publish_change(change);
     }
+    if notes.writes_users {
+      self.users.fetch_add(1, Ordering::SeqCst);
+    }
+  }
+
+  /// A write to [`Table::Users`] is done: the revision moves once it is published.
+  fn note_users(&self) {
+    if self.is_numbered {
+      let mut group = self.group();
+      if group.is_mine() {
+        group.writes_users = true;
+        return;
+      }
+    }
+    self.users.fetch_add(1, Ordering::SeqCst);
+  }
+
+  /// Another process committed, or the disk lost a write, since this view last looked: the users
+  /// it holds may differ from what was read before.
+  fn follow_users_disk(&self) {
+    let maybe_tally = self.inner.write_tally();
+    // Invariant-free data: at worst the revision moves once more and the users are read again.
+    let mut seen = self.users_tally.lock().unwrap_or_else(PoisonError::into_inner);
+    if *seen != maybe_tally {
+      *seen = maybe_tally;
+      self.users.fetch_add(1, Ordering::SeqCst);
+    }
+  }
+
+  /// Whether a reader may keep the users it reads now: no open group wrote to them, and its
+  /// snapshot holds every published commit.
+  fn may_keep_users(&self) -> bool {
+    let Some(seen) = self.inner.snapshot_commit() else {
+      return true;
+    };
+    !self.group().writes_users && seen >= self.published.load(Ordering::SeqCst)
   }
 
   fn delete_grouped(&self, table: Table, key: &str) -> Result<(), StoreError> {
@@ -585,6 +631,9 @@ impl<S: LocalStore> TrackedStore<S> {
     }
     self.inner.delete(table, key)?;
     self.note(classify(table, key));
+    if table == Table::Users {
+      self.note_users();
+    }
     Ok(())
   }
 
@@ -688,6 +737,9 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
       }
       self.inner.put(table, key, value)?;
       self.note(change);
+      if table == Table::Users {
+        self.note_users();
+      }
       Ok(())
     })
   }
@@ -759,6 +811,14 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     slot: MessageSlot,
   ) -> Result<Vec<StoredMessage>, StoreError> {
     self.inner.messages_at(conversation, slot)
+  }
+
+  fn users_revision(&self) -> Option<u64> {
+    self.follow_users_disk();
+    self.catch_up();
+    let revision = self.users.load(Ordering::SeqCst);
+    // Checked after the revision is read: a write that moved it is still open, or published.
+    self.may_keep_users().then_some(revision)
   }
 
   fn message_revision(&self, conversation: ConversationId) -> Option<u64> {
@@ -953,6 +1013,10 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     if let Some(notes) = maybe_notes {
       self.publish(notes);
     }
+    if ended.is_err() {
+      // A rolled-back group may have written users a reader already took.
+      self.users.fetch_add(1, Ordering::SeqCst);
+    }
     ended
   }
 
@@ -1074,6 +1138,30 @@ mod tests {
   #[test]
   fn it_is_a_store() {
     exercise_store(&TrackedStore::new(MemoryStore::new()));
+  }
+
+  /// Issue #1682: only writes to the users move their revision, each once.
+  #[test]
+  fn the_users_revision_moves_with_writes_to_the_users_only() {
+    let store = TrackedStore::new(MemoryStore::new());
+    let start = store.users_revision().unwrap();
+
+    store.put(Table::Spaces, "1", b"{}").unwrap();
+    store.put(Table::Account, "x", b"{}").unwrap();
+    assert_eq!(store.users_revision(), Some(start));
+
+    store.put(Table::Users, "1", b"a").unwrap();
+    let written = store.users_revision().unwrap();
+    assert_ne!(written, start);
+    store.put(Table::Users, "1", b"a").unwrap();
+    assert_eq!(
+      store.users_revision(),
+      Some(written),
+      "the same bytes again change nothing"
+    );
+
+    store.delete(Table::Users, "1").unwrap();
+    assert_ne!(store.users_revision(), Some(written));
   }
 
   #[test]
@@ -1502,6 +1590,39 @@ mod tests {
           StoreChanges::default(),
           "no other commit, no change"
         );
+        drop((ours, theirs));
+        std::fs::remove_dir_all(&directory).unwrap();
+      }
+
+      /// Issue #1682: the decoded users are kept while the revision stays.
+      #[test]
+      fn another_connections_commit_moves_the_users_revision() {
+        let (directory, ours, theirs) = two_connections();
+        let before = ours.users_revision().unwrap();
+        assert_eq!(ours.users_revision(), Some(before), "nothing changed");
+
+        theirs.put(Table::Users, "9", b"theirs").unwrap();
+
+        assert_ne!(ours.users_revision(), Some(before));
+        drop((ours, theirs));
+        std::fs::remove_dir_all(&directory).unwrap();
+      }
+
+      #[test]
+      fn a_rolled_back_group_moves_the_users_revision() {
+        let (directory, ours, theirs) = two_connections();
+        ours.begin_writes().unwrap();
+        ours.put(Table::Users, "9", b"lost").unwrap();
+        let during = ours.users_revision();
+        ours.fail_writes();
+        assert!(ours.end_writes().is_err());
+
+        assert_ne!(
+          ours.users_revision(),
+          during,
+          "a reader may have taken the lost write"
+        );
+        assert_eq!(ours.get(Table::Users, "9").unwrap(), None);
         drop((ours, theirs));
         std::fs::remove_dir_all(&directory).unwrap();
       }

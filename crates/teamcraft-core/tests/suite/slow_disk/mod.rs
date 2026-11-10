@@ -16,6 +16,8 @@
 #![allow(clippy::unwrap_used, reason = "test helpers: a failure fails the test")]
 
 mod purge;
+#[cfg(feature = "ui")]
+mod user_map;
 mod vfs;
 
 use std::path::PathBuf;

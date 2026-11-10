@@ -2239,6 +2239,23 @@ The storm's sync writes through a connection of its own (another process to the 
 commits still drop every cache on both sides; the engine's own commits now cost the reader what they
 changed (the last two rows), where a plain second connection would pay the cold pass every time.
 
+### Users kept decoded (issue #1682)
+
+Every name on screen (the snapshot, a chat list row, a message's author, a mention, a member
+picker) used to read and decrypt every user record: one lookup was a pass over the whole workspace,
+16 call sites, several per snapshot. The core now keeps the decoded users in memory
+(`crates/teamcraft-core/src/user_directory.rs`) while the store's users revision stays: it moves
+with every committed write to the users (a rename, a deactivation, a new member), a rolled-back
+group of writes and another process's commit, so a read thread never keeps a name older than
+the commit it can see. The mobile apps' two read threads share one directory per account: a chat
+opened from a notification right after a start finds the names the snapshot already decoded
+(the cold start #1678 left).
+
+Memory: one entry per user record, about 300 bytes each (the summary, its names and the map's
+node; an estimate, not measured), so about 3 MiB for a workspace of 10,000 people, once per
+process. A lookup that finds the users unchanged reads and decrypts nothing; the names are
+overwritten when the map is dropped (sign-out, a newer revision read).
+
 ### Files view on a large workspace (issue #1509)
 
 `crates/teamcraft-ffi/tests/files_budget.rs` measures the Files view through the API the apps call:

@@ -875,6 +875,13 @@ pub trait LocalStore {
     messages.retain(|message| slot.holds(message));
     Ok(messages)
   }
+  /// A number that moves whenever [`Table::Users`] may have changed for this view of the store
+  /// (written, deleted, rolled back, or committed by another process), so a reader may keep what
+  /// it decoded of the users while it stays (issue #1682). `None` when the store can't tell, or a
+  /// group of writes to the users is still open: read them again.
+  fn users_revision(&self) -> Option<u64> {
+    None
+  }
   /// A number that changes with every write to `conversation`'s messages, for a reader that keeps
   /// what it derived from them (the activity feed) until they change. `None`: the store doesn't
   /// count, read them again.
@@ -1317,6 +1324,10 @@ macro_rules! forward_local_store {
 
       fn written_cursor(&self) -> Option<u64> {
         (**self).written_cursor()
+      }
+
+      fn users_revision(&self) -> Option<u64> {
+        (**self).users_revision()
       }
 
       fn is_awaited(&self) -> bool {
