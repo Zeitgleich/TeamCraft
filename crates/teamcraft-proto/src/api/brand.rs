@@ -51,6 +51,43 @@ pub struct BrandResponse {
   pub login_text: BTreeMap<String, String>,
   #[serde(default)]
   pub links: BrandLinks,
+  /// What this brand lets people choose (docs/branding.md §5.1). Absent: nothing is restricted.
+  /// Presentation only, like the rest of this answer: not signed (docs/admin.md, "Signed or not").
+  #[serde(rename = "theme_policy", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_theme_policy: Option<BrandThemePolicy>,
+}
+
+/// The default colour theme of a brand and which themes its people may pick (docs/branding.md
+/// §5.1, issue #1495). A client that gets one shows a theme it doesn't allow as the default,
+/// without changing the person's synced choice: another brand may allow it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(default)]
+pub struct BrandThemePolicy {
+  /// `brand` (the brand's colours), `preset:<id>` or `custom:<four colours>`: the wire form of a
+  /// colour theme (`teamcraft_client_api::color_theme::ColorTheme`).
+  pub default_theme: String,
+  /// The preset ids people may pick. Absent: every preset, also ones added later.
+  #[serde(rename = "allowed_presets", skip_serializing_if = "Option::is_none")]
+  pub maybe_allowed_presets: Option<Vec<String>>,
+  /// Whether people may make a theme of their own colours.
+  pub is_custom_allowed: bool,
+}
+
+impl BrandThemePolicy {
+  /// Whether this restricts nothing, which is the same as having no policy.
+  pub fn is_unrestricted(&self) -> bool {
+    *self == Self::default()
+  }
+}
+
+impl Default for BrandThemePolicy {
+  fn default() -> Self {
+    Self {
+      default_theme: "brand".to_owned(),
+      maybe_allowed_presets: None,
+      is_custom_allowed: true,
+    }
+  }
 }
 
 /// Color overrides for the light and the dark theme. Keys are token names (`accent`,
@@ -152,6 +189,7 @@ mod tests {
         maybe_support: Some("https://support.example.com".into()),
         ..BrandLinks::default()
       },
+      maybe_theme_policy: None,
     };
     assert_eq!(
       serde_json::to_string(&brand).unwrap(),
@@ -171,6 +209,25 @@ mod tests {
     );
     let older: BrandLinks = serde_json::from_str(r#"{"support":"https://support.example.com"}"#).unwrap();
     assert_eq!(older.maybe_documentation, None);
+  }
+
+  #[test]
+  fn a_theme_policy_is_additive_and_defaults_to_no_restriction() {
+    let older: BrandResponse =
+      serde_json::from_str(r#"{"id":"x","display_name":"X","origin":"https://x.example.com"}"#).unwrap();
+    assert_eq!(older.maybe_theme_policy, None);
+    let policy: BrandThemePolicy = serde_json::from_str("{}").unwrap();
+    assert!(policy.is_unrestricted());
+    let fixed = BrandThemePolicy {
+      default_theme: "preset:pine".into(),
+      maybe_allowed_presets: Some(vec!["pine".into()]),
+      is_custom_allowed: false,
+    };
+    assert_eq!(
+      serde_json::to_string(&fixed).unwrap(),
+      r#"{"default_theme":"preset:pine","allowed_presets":["pine"],"is_custom_allowed":false}"#
+    );
+    assert!(!fixed.is_unrestricted());
   }
 
   #[test]

@@ -8,7 +8,9 @@ use figment::providers::{Env, Format, Toml};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::dpop::PublicOrigin;
-use teamcraft_proto::{ConversationId, GuestDmStart, NotificationLevel, SignInMethod, SpaceId};
+use teamcraft_proto::{
+  BrandThemePolicy, ConversationId, GuestDmStart, NotificationLevel, SignInMethod, SpaceId,
+};
 
 /// Prefix of environment overrides. Nested keys are separated by a double underscore:
 /// `TEAMCRAFT_OIDC__ISSUER`, `TEAMCRAFT_OIDC__ROLES__GUEST`, `TEAMCRAFT_DATABASE__URL`.
@@ -1069,6 +1071,9 @@ pub struct BrandConfig {
   pub login_title: BTreeMap<String, String>,
   pub login_text: BTreeMap<String, String>,
   pub colors: BrandColorsConfig,
+  /// The default colour theme and which themes people may pick (docs/branding.md §5.1).
+  #[serde(rename = "theme_policy", skip_serializing_if = "Option::is_none")]
+  pub maybe_theme_policy: Option<BrandThemePolicyConfig>,
   /// Origins added to `connect-src` for this brand only.
   pub connect_origins: Vec<String>,
   /// Replaces `[web].content_security_policy` for this brand.
@@ -1083,6 +1088,44 @@ pub struct BrandConfig {
 pub struct BrandColorsConfig {
   pub light: BTreeMap<String, String>,
   pub dark: BTreeMap<String, String>,
+}
+
+/// The default colour theme of a brand and what its people may pick; unset parts restrict nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BrandThemePolicyConfig {
+  /// `brand`, `preset:<id>` or `custom:<four colours>`.
+  pub default_theme: String,
+  /// Preset ids; absent means every preset.
+  #[serde(rename = "allowed_presets", skip_serializing_if = "Option::is_none")]
+  pub maybe_allowed_presets: Option<Vec<String>>,
+  pub is_custom_allowed: bool,
+}
+
+impl Default for BrandThemePolicyConfig {
+  fn default() -> Self {
+    BrandThemePolicy::default().into()
+  }
+}
+
+impl From<BrandThemePolicyConfig> for BrandThemePolicy {
+  fn from(config: BrandThemePolicyConfig) -> Self {
+    Self {
+      default_theme: config.default_theme,
+      maybe_allowed_presets: config.maybe_allowed_presets,
+      is_custom_allowed: config.is_custom_allowed,
+    }
+  }
+}
+
+impl From<BrandThemePolicy> for BrandThemePolicyConfig {
+  fn from(policy: BrandThemePolicy) -> Self {
+    Self {
+      default_theme: policy.default_theme,
+      maybe_allowed_presets: policy.maybe_allowed_presets,
+      is_custom_allowed: policy.is_custom_allowed,
+    }
+  }
 }
 
 /// Mail identity of a brand. Unset values fall back to `[mail]` and `[meetings]`.

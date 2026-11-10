@@ -388,6 +388,7 @@ fn demo_brand(id: &str, name: &str, source: BrandSource, is_default: bool, hosts
       },
       mail: BrandMailSettings::default(),
       maybe_sso_label: None,
+      maybe_theme_policy: None,
     },
     assets: Vec::new(),
     maybe_updated_at: None,

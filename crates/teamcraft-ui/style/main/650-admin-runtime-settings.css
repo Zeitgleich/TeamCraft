@@ -86,6 +86,26 @@
   cursor: pointer;
 }
 
+.brand-theme-custom {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px 16px;
+  margin-top: 8px;
+}
+
+.brand-theme-presets {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 2px 16px;
+}
+
+.brand-theme-presets h5 {
+  grid-column: 1 / -1;
+  margin: 8px 0 2px;
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+}
+
 .brand-preview {
   --bp-bg: #fff;
   --bp-text: #1a1d21;

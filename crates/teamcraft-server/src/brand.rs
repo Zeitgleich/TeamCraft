@@ -17,9 +17,10 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use teamcraft_client_api::color_theme::{ColorTheme, ThemePolicy};
 use teamcraft_proto::{
-  BrandAssetSlot, BrandColors, BrandLinks, BrandResponse, BrandSource, BrandSummary, brand_color_properties,
-  is_brand_hex_color,
+  BrandAssetSlot, BrandColors, BrandLinks, BrandResponse, BrandSource, BrandSummary, BrandThemePolicy,
+  brand_color_properties, is_brand_hex_color,
 };
 use time::OffsetDateTime;
 
@@ -533,6 +534,15 @@ impl Brand {
       light: checked_colors(&config.colors.light, &id)?,
       dark: checked_colors(&config.colors.dark, &id)?,
     };
+    let maybe_theme_policy: Option<BrandThemePolicy> = config.maybe_theme_policy.clone().map(Into::into);
+    if let Some(policy) = &maybe_theme_policy {
+      ThemePolicy::check(policy).map_err(|error| invalid(format!("theme_policy: {error}")))?;
+    }
+    let default_theme = maybe_theme_policy
+      .as_ref()
+      .map(ThemePolicy::from_wire)
+      .unwrap_or_default()
+      .default_theme;
     let canonical_host = config.hostnames.first().cloned().unwrap_or_default();
     let response = BrandResponse {
       id: id.clone(),
@@ -547,6 +557,7 @@ impl Brand {
       login_title: config.login_title.clone(),
       login_text: config.login_text.clone(),
       links,
+      maybe_theme_policy,
     };
     let (source, is_overriding_config, maybe_updated_at) = match origin {
       BrandOrigin::Builtin => (BrandSource::Builtin, false, None),
@@ -558,8 +569,8 @@ impl Brand {
     };
     Ok(Self {
       content_security_policy: brand_policy(config, web, &id)?,
-      theme_css: theme_css(&colors),
-      web_manifest: web_manifest(&config.display_name, &colors, &assets),
+      theme_css: theme_css(&colors, &default_theme),
+      web_manifest: web_manifest(&config.display_name, &colors, &default_theme, &assets),
       source,
       is_default: config.is_default,
       is_overriding_config,
@@ -930,8 +941,9 @@ fn brand_policy(config: &BrandConfig, web: &WebConfig, brand: &str) -> Result<He
 
 /// The colors as CSS custom properties, in the three places `main.css` sets its own: the base, the
 /// dark preference unless light is forced, and forced dark. Only validated hex values and fixed
-/// property names are written.
-fn theme_css(colors: &BrandColors) -> String {
+/// property names are written. A brand's default theme (§5.1) follows the brand's colours, so it wins
+/// from the first paint on, before the app has read the policy.
+fn theme_css(colors: &BrandColors, default_theme: &ColorTheme) -> String {
   let declarations = |values: &BTreeMap<String, String>| {
     let mut out = String::new();
     for (key, value) in values {
@@ -941,8 +953,14 @@ fn theme_css(colors: &BrandColors) -> String {
     }
     out
   };
-  let light = declarations(&colors.light);
-  let dark = declarations(&colors.dark);
+  let with_default_theme = |mut out: String, is_dark: bool| {
+    for (property, value) in default_theme.css_properties(is_dark) {
+      out.push_str(&format!("{property}:{value};"));
+    }
+    out
+  };
+  let light = with_default_theme(declarations(&colors.light), false);
+  let dark = with_default_theme(declarations(&colors.dark), true);
   let mut css = String::new();
   if !light.is_empty() {
     css.push_str(&format!(":root{{{light}}}\n"));
@@ -961,11 +979,22 @@ fn theme_css(colors: &BrandColors) -> String {
 /// `share_target` makes the browser POST what is shared to `/share-target`. Only a service worker
 /// that knows the path keeps that in the browser; with none, the plaintext reaches the proxy and this
 /// server (docs/e2ee.md §9.3), which refuse it unread.
-fn web_manifest(display_name: &str, colors: &BrandColors, assets: &HashMap<String, BrandAsset>) -> String {
-  let chrome = colors
-    .light
-    .get("chrome")
-    .map_or(DEFAULT_CHROME_COLOR, String::as_str);
+fn web_manifest(
+  display_name: &str,
+  colors: &BrandColors,
+  default_theme: &ColorTheme,
+  assets: &HashMap<String, BrandAsset>,
+) -> String {
+  let chrome = default_theme.colors().map_or_else(
+    || {
+      colors
+        .light
+        .get("chrome")
+        .map_or(DEFAULT_CHROME_COLOR, String::as_str)
+        .to_owned()
+    },
+    |theme| theme.tokens(false).chrome.to_string(),
+  );
   let icons = match assets.get(BrandAssetSlot::Icon.as_str()) {
     Some(icon) => vec![serde_json::json!({
       "src": format!("/api/v1/brand/assets/{}", BrandAssetSlot::Icon.as_str()),
@@ -1402,7 +1431,62 @@ mod tests {
   }
 
   mod theme_and_policy {
+    use teamcraft_client_api::color_theme::ThemeColors;
+
     use super::*;
+
+    fn with_policy(policy: BrandThemePolicy) -> Vec<BrandConfig> {
+      let mut brands = two_brands();
+      brands[0].maybe_theme_policy = Some(policy.into());
+      brands
+    }
+
+    #[test]
+    fn a_broken_theme_policy_stops_the_start() {
+      for policy in [
+        BrandThemePolicy {
+          default_theme: "preset:nope".into(),
+          ..BrandThemePolicy::default()
+        },
+        BrandThemePolicy {
+          maybe_allowed_presets: Some(vec!["nope".into()]),
+          ..BrandThemePolicy::default()
+        },
+      ] {
+        assert!(registry(&with_policy(policy), UnknownHostPolicy::Default).is_err());
+      }
+    }
+
+    #[test]
+    fn a_default_theme_is_in_the_stylesheet_and_the_manifest_with_its_contrast_checked_colours() {
+      let policy = BrandThemePolicy {
+        default_theme: "custom:#ffffff,#ffffff,#ffffff,#ffffff".into(),
+        ..BrandThemePolicy::default()
+      };
+      let mut brands = with_policy(policy);
+      brands[0].colors = BrandColorsConfig {
+        light: BTreeMap::from([("accent".to_owned(), "#0b7f78".to_owned())]),
+        dark: BTreeMap::new(),
+      };
+      let registry = registry(&brands, UnknownHostPolicy::Default).unwrap();
+      let brand = registry.default_brand();
+      let css = &brand.theme_css;
+      let colors = ThemeColors::from_share_code("#ffffff,#ffffff,#ffffff,#ffffff").unwrap();
+      for (property, value) in colors.tokens(false).css_properties() {
+        assert!(
+          css.contains(&format!("{property}:{value};")),
+          "{property} in {css}"
+        );
+      }
+      // The theme comes after the brand's own colours, so it wins.
+      assert!(css.find("--accent:#0b7f78").unwrap() < css.rfind("--accent:").unwrap());
+      assert!(!colors.tokens(false).css_properties().is_empty());
+      let manifest: serde_json::Value = serde_json::from_str(&brand.web_manifest).unwrap();
+      assert_eq!(
+        manifest["theme_color"].as_str().unwrap(),
+        colors.tokens(false).chrome.to_string()
+      );
+    }
 
     #[test]
     fn the_theme_contains_only_known_properties_and_hex_values() {

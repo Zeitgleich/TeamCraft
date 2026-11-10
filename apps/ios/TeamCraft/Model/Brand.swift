@@ -34,20 +34,20 @@ final class BrandStore {
   /// Shows the brand of `address`: the cached one, or `initial` (from the server check) when given.
   func select(_ address: ServerAddress?, initial maybeInitial: LoginBrand? = nil) {
     maybeAddress = address
-    brand = nil
+    show(nil)
     logo = nil
     darkLogo = nil
     icon = nil
     darkIcon = nil
     guard let address else { return }
     if let json = UserDefaults.standard.string(forKey: Self.cacheKey(address)) {
-      brand = check(json, address: address)
+      show(check(json, address: address))
       logo = cachedImage(address, name: "logo")
       darkLogo = cachedImage(address, name: "logo_dark")
       icon = cachedImage(address, name: "icon")
       darkIcon = cachedImage(address, name: "icon_dark")
     }
-    if let maybeInitial { brand = maybeInitial }
+    if let maybeInitial { show(maybeInitial) }
   }
 
   /// Asks the selected server again; the cached brand stays when it can't be reached.
@@ -57,11 +57,11 @@ final class BrandStore {
       let json = String(data: data, encoding: .utf8), isSelected(address)
     else { return }
     guard let checked = check(json, address: address) else {
-      brand = nil
+      show(nil)
       return
     }
     UserDefaults.standard.set(json, forKey: Self.cacheKey(address))
-    brand = checked
+    show(checked)
     let light = await saveImage(checked.maybeLogoUrl, address: address, name: "logo")
     let dark = await saveImage(checked.maybeLogoDarkUrl, address: address, name: "logo_dark")
     let lightIcon = await saveImage(checked.maybeIconUrl, address: address, name: "icon")
@@ -72,6 +72,12 @@ final class BrandStore {
     darkLogo = dark
     icon = lightIcon
     darkIcon = darkIconImage
+  }
+
+  /// The brand on screen, and with it the rules for colour themes (branding.md §5.1).
+  private func show(_ maybeBrand: LoginBrand?) {
+    brand = maybeBrand
+    ColorThemeModel.shared.usePolicy(maybeBrand?.themePolicy)
   }
 
   private static func cacheKey(_ address: ServerAddress) -> String {

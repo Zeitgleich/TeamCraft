@@ -53,12 +53,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.ui.theme.AppearancePrefs
+import de.zeitgleich.teamcraft.ui.theme.LocalThemePolicy
 import de.zeitgleich.teamcraft.ui.theme.brandArgb
 import de.zeitgleich.teamcraft.ui.theme.rgb
+import uniffi.teamcraft_ffi.AppThemePolicy
 import uniffi.teamcraft_ffi.AppThemePreset
 import uniffi.teamcraft_ffi.colorThemeColors
 import uniffi.teamcraft_ffi.colorThemeCustom
+import uniffi.teamcraft_ffi.colorThemeEffective
 import uniffi.teamcraft_ffi.colorThemeFromCode
+import uniffi.teamcraft_ffi.colorThemeInForce
 import uniffi.teamcraft_ffi.colorThemePresets
 import uniffi.teamcraft_ffi.colorThemeShareCode
 import uniffi.teamcraft_ffi.colorThemeSurprise
@@ -71,14 +75,22 @@ private val PRODUCT_COLORS = listOf(0x1A2434u, 0x0064FCu, 0x2EB67Du, 0xC8441Du)
 /**
  * The colour theme (#202): the server's default, a preset, or a custom theme of four colours. It
  * colours the accent, selections, badges and the online dot; message surfaces stay neutral. It
- * follows the account; light or dark stays with the device.
+ * follows the account; light or dark stays with the device. The brand decides what is on offer and
+ * what the default is (#1495); a stored choice it doesn't allow is shown as the default and only
+ * ever replaced by the person picking something else.
  */
 @Composable
 fun ColorThemeSetting() {
   val context = LocalContext.current
   val prefs = remember { AppearancePrefs.prefs(context) }
-  val value by prefs.colorThemeValue.collectAsState()
-  var isCustom by remember { mutableStateOf(value.startsWith(CUSTOM_PREFIX)) }
+  val stored by prefs.colorThemeValue.collectAsState()
+  val maybePolicy = LocalThemePolicy.current
+  // What the picker marks: the stored choice where it is allowed, else the server's default.
+  val value = remember(stored, maybePolicy) { maybePolicy?.let { colorThemeInForce(stored, it) } ?: stored }
+  val canCustomize = maybePolicy?.isCustomAllowed != false
+  val hasChoices = canCustomize || maybePolicy?.maybeAllowedPresets?.isNotEmpty() != false
+  var wantsCustom by remember { mutableStateOf(value.startsWith(CUSTOM_PREFIX)) }
+  val isCustom = wantsCustom && canCustomize
   Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
     Text(
       stringResource(R.string.color_theme),
@@ -90,37 +102,66 @@ fun ColorThemeSetting() {
       style = MaterialTheme.typography.bodySmall,
       color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-      FilterChip(
-        selected = !isCustom,
-        onClick = { isCustom = false },
-        label = { Text(stringResource(R.string.color_theme_presets)) },
-      )
-      FilterChip(
-        selected = isCustom,
-        onClick = {
-          isCustom = true
-          // Custom starts from what is on screen, so the switch itself changes nothing.
-          if (!value.startsWith(CUSTOM_PREFIX)) {
-            colorThemeCustom(colorThemeColors(value) ?: PRODUCT_COLORS)?.let(prefs::setColorTheme)
-          }
-        },
-        label = { Text(stringResource(R.string.color_theme_custom)) },
+    if (value != stored) {
+      Text(
+        stringResource(R.string.color_theme_withheld),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
       )
     }
-    if (isCustom) CustomTheme(value, prefs::setColorTheme) else PresetGallery(value, prefs::setColorTheme)
+    if (!hasChoices) {
+      Text(
+        stringResource(R.string.color_theme_fixed),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+    }
+    if (canCustomize) {
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+          selected = !isCustom,
+          onClick = { wantsCustom = false },
+          label = { Text(stringResource(R.string.color_theme_presets)) },
+        )
+        FilterChip(
+          selected = isCustom,
+          onClick = {
+            wantsCustom = true
+            // Custom starts from what is on screen, so the switch itself changes nothing.
+            if (!value.startsWith(CUSTOM_PREFIX)) {
+              val onScreen = maybePolicy?.let { colorThemeEffective(value, it) } ?: value
+              colorThemeCustom(colorThemeColors(onScreen) ?: PRODUCT_COLORS)?.let(prefs::setColorTheme)
+            }
+          },
+          label = { Text(stringResource(R.string.color_theme_custom)) },
+        )
+      }
+    }
+    if (isCustom) {
+      CustomTheme(value, prefs::setColorTheme)
+    } else {
+      PresetGallery(value, maybePolicy, prefs::setColorTheme)
+    }
   }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun PresetGallery(value: String, onChoose: (String) -> Unit) {
-  val presets = remember { colorThemePresets() }
+private fun PresetGallery(value: String, maybePolicy: AppThemePolicy?, onChoose: (String) -> Unit) {
+  val allPresets = remember { colorThemePresets() }
+  val presets = remember(allPresets, maybePolicy) {
+    allPresets.filter { maybePolicy?.maybeAllowedPresets?.contains(it.id) ?: true }
+  }
   val isDark = isSystemInDarkTheme()
+  val maybeDefaultTokens = remember(maybePolicy, isDark) {
+    maybePolicy?.let { colorThemeTokens(it.defaultValue, isDark) }
+  }
   Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
     Swatch(
       name = stringResource(R.string.color_theme_brand),
-      colors = SwatchColors(
+      colors = maybeDefaultTokens?.let {
+        SwatchColors(rgb(it.chrome), rgb(it.selected), rgb(it.presence), rgb(it.badge))
+      } ?: SwatchColors(
         navigation = if (isDark) Color(0xFF141414) else Color(0xFF1A2434),
         selected = Color(0xFF0064FC),
         presence = Color(0xFF2EB67D),
@@ -130,6 +171,7 @@ private fun PresetGallery(value: String, onChoose: (String) -> Unit) {
       onClick = { onChoose(AppearancePrefs.DEFAULT_COLOR_THEME) },
     )
     for ((group, label) in GROUPS) {
+      if (presets.none { it.group == group }) continue
       Text(stringResource(label), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
       FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         for (preset in presets.filter { it.group == group }) {

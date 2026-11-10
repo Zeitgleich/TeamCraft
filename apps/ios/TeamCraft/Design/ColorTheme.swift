@@ -55,7 +55,11 @@ final class ColorThemeModel {
 
   /// The stored value, as it is.
   private(set) var value: String
-  /// The colours of `value`; `nil` for the server's default and for a value this build doesn't know.
+  /// The brand's rules for colour themes (branding.md §5.1, #1495); `nil` without a brand. They only
+  /// decide what is shown: `value` stays the account's choice.
+  private(set) var maybePolicy: AppThemePolicy?
+  /// The colours to show for `value`; `nil` for the server's default and for a value this build
+  /// doesn't know.
   private(set) var maybeColors: (light: AppThemeTokens, dark: AppThemeTokens)?
 
   @ObservationIgnored private let defaults: UserDefaults
@@ -79,12 +83,30 @@ final class ColorThemeModel {
   /// Whether the theme gives the app colours of its own (not the server's default).
   var isThemed: Bool { maybeColors != nil }
 
+  /// What the picker marks: `value` where the brand allows it, else the server's default.
+  var inForce: String { maybePolicy.map { colorThemeInForce(value: value, policy: $0) } ?? value }
+  /// The theme the screens show: `value` where the brand allows it, else the brand's default.
+  var effectiveValue: String { maybePolicy.map { colorThemeEffective(value: value, policy: $0) } ?? value }
+  /// The account's choice isn't allowed here, so the default is shown instead.
+  var isWithheld: Bool { inForce != value }
+  var canCustomize: Bool { maybePolicy?.isCustomAllowed ?? true }
+  /// Whether anything besides the default can be picked.
+  var hasChoices: Bool { canCustomize || maybePolicy?.maybeAllowedPresets?.isEmpty != true }
+
+  func allowsPreset(id: String) -> Bool { maybePolicy?.maybeAllowedPresets?.contains(id) ?? true }
+
+  /// Takes the rules of the selected server's brand; `nil` without one.
+  func usePolicy(_ maybePolicy: AppThemePolicy?) {
+    self.maybePolicy = maybePolicy
+    maybeColors = Self.colors(of: effectiveValue)
+  }
+
   /// Takes the value from the defaults, if it moved.
   func reload() {
     let stored = ColorThemeSetting.stored(in: defaults)
     guard stored != value else { return }
     value = stored
-    maybeColors = Self.colors(of: stored)
+    maybeColors = Self.colors(of: effectiveValue)
   }
 
   /// The user's choice: stored (the sync takes it from there) and shown at once.

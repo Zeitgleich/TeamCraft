@@ -21,6 +21,37 @@ final class ColorThemeTests: XCTestCase {
     return UInt32((r * 255).rounded()) << 16 | UInt32((g * 255).rounded()) << 8 | UInt32((b * 255).rounded())
   }
 
+  func testAThemeTheBrandDoesNotAllowShowsTheDefaultAndStaysStored() throws {
+    defaults.set("preset:paper", forKey: ColorThemeSetting.key)
+    let model = ColorThemeModel(defaults: defaults)
+    let open = try XCTUnwrap(model.maybeColors?.light.chrome)
+
+    model.usePolicy(
+      AppThemePolicy(defaultValue: "preset:harbor", maybeAllowedPresets: ["pine"], isCustomAllowed: false))
+    XCTAssertEqual(model.value, "preset:paper")
+    XCTAssertEqual(ColorThemeSetting.stored(in: defaults), "preset:paper")
+    XCTAssertEqual(model.effectiveValue, "preset:harbor")
+    XCTAssertEqual(model.inForce, ColorThemeSetting.defaultValue)
+    XCTAssertTrue(model.isWithheld)
+    XCTAssertFalse(model.canCustomize)
+    XCTAssertTrue(model.hasChoices)
+    XCTAssertTrue(model.allowsPreset(id: "pine"))
+    XCTAssertFalse(model.allowsPreset(id: "paper"))
+    XCTAssertEqual(
+      model.maybeColors?.light.chrome, ColorThemeModel.colors(of: "preset:harbor")?.light.chrome)
+
+    model.usePolicy(nil)
+    XCTAssertEqual(model.maybeColors?.light.chrome, open)
+    XCTAssertFalse(model.isWithheld)
+  }
+
+  func testAPolicyWithoutChoicesIsAFixedLook() {
+    let model = ColorThemeModel(defaults: defaults)
+    model.usePolicy(AppThemePolicy(defaultValue: "brand", maybeAllowedPresets: [], isCustomAllowed: false))
+    XCTAssertFalse(model.hasChoices)
+    XCTAssertFalse(model.isThemed)
+  }
+
   func testAnEmptyDeviceHasTheDefault() {
     XCTAssertEqual(ColorThemeSetting.stored(in: defaults), "brand")
     let model = ColorThemeModel(defaults: defaults)

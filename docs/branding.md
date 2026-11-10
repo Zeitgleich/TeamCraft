@@ -71,6 +71,11 @@ sidebar = "#1a2434"
 [brands.colors.dark]
 accent = "#35c6ba"
 
+[brands.theme_policy]                  # the default colour theme and what people may pick (§5.1)
+default_theme = "preset:harbor"        # "brand" (default), "preset:<id>" or "custom:<four colours>"
+allowed_presets = ["harbor", "paper"]  # absent: every preset
+is_custom_allowed = false              # default true
+
 [brands.mail]
 sender_name = "Brand A Team"           # display name of the From header
 from_address = "chat@brand-a.example.com" # optional, else [mail.smtp].from_address
@@ -88,7 +93,8 @@ Validation at startup (the server refuses to start otherwise):
 - asset names are relative, without `..`, and the files exist and are regular files below
   `assets_dir`; size limit per file (`[branding].max_asset_bytes`, default 512 KiB);
 - URLs are `https://` (or `http://` for localhost);
-- `connect_origins` are origins as in `[web]`.
+- `connect_origins` are origins as in `[web]`;
+- `theme_policy`: `default_theme` is a real theme, `allowed_presets` are ids of existing presets (§5.1).
 
 ### 2.1 Brands in the admin console
 
@@ -233,7 +239,7 @@ brand's host, so its links can open in an installed app ([app-links.md](app-link
 
 The brand's colours are the **default theme** of every client of that brand. Each user can replace
 them with a colour theme of their own (Settings > Appearance > Colours on web and desktop, Settings >
-Chats on Android):
+Chats on Android, Settings > Colours on iOS):
 
 - **Server default:** the brand's colours (or the product's without a brand).
 - **Presets:** built-in themes in groups (calm, bright sidebars, vivid, accessibility: red–green and
@@ -255,6 +261,30 @@ themes change them.
 The choice follows the account (the encrypted settings, [e2ee.md](e2ee.md) §6.4, key
 `display.color_theme`); light or dark stays per device. Web and desktop set the theme's tokens
 through the CSSOM after the brand's, so they win; Android maps them onto its Material scheme.
+
+**What a brand allows.** A brand can set the default theme and limit what its people may pick
+(`theme_policy` in `GET /api/v1/brand`, issue #1495): the default theme (the brand's colours, a preset
+or custom colours), which presets may be picked, and whether custom themes are allowed. It is set in
+the admin console's brand editor (with a preview in light and dark) or in `[brands.theme_policy]`; it
+is checked like the rest of the brand. Without a policy nothing changes.
+
+- A theme the policy doesn't allow shows the default **on that client**, and the synced value stays
+  as it is: another brand may allow it, so the same account can show different colours on another
+  brand's host. The picker marks the default and says the choice is withheld, and writes nothing
+  until the person picks something else.
+- The default theme applies to who chose nothing ("Server default" and, on web, the first paint: the
+  brand's `theme.css` carries its tokens). It always stays available.
+- A default theme is colours like any other theme, so the shared code above enforces contrast on it:
+  an admin's default can't produce unreadable text, however bad the colours.
+- The console's editor sends an unrestricted policy to remove one; a request without `theme_policy`
+  (an older console) keeps what is stored.
+
+Why this is not signed: it is presentation, read before sign-in together with the brand, and the
+brand itself is the server's to set (admin.md §6.3, "Signed or not"). A hostile or compromised server
+can use a policy to show its default colours instead of someone's chosen theme, on its own clients,
+and to shorten the picker. It can't change the stored choice or any other setting, and whatever it
+serves still passes through the contrast rules. It already chooses the name, logo and colours of the
+brand, and on the web the application itself, so a signature would protect nothing worth having.
 
 Why keep brand colours: a company that runs several brands on one instance wants each brand's people
 to see their own colours without doing anything, and the sign-in screen (before any user setting

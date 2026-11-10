@@ -79,11 +79,13 @@ pub fn App() -> impl IntoView {
   crate::fonts::apply_font(settings);
   apply_language_attribute();
   apply_deleted_user_name(i18n);
+  crate::brand::provide_brand(settings);
+  let brand = crate::brand::Brand::use_current();
   crate::viewport::sync_theme_color(move || {
     settings.theme.track();
     settings.prefs.with(|prefs| prefs.display.color_theme.to_string());
+    brand.0.track();
   });
-  crate::brand::provide_brand(settings);
   provide_window_chrome();
   if tauri::is_available() {
     sync_tray_labels(i18n);

@@ -1230,7 +1230,8 @@ never a password. All endpoints need `manage_workspace` (instance admins and own
 
 Admins list, create, edit and delete brands (docs/branding.md §2.1): display name, organization name,
 host names, e-mail domains, colors for the light and dark theme (with a live preview and a contrast
-check), login title and text per language, support/privacy/terms/imprint links, the mail sender
+check), the default colour theme and which themes people may pick (branding.md §5.1, with a live
+preview of the default), login title and text per language, support/privacy/terms/imprint links, the mail sender
 (name and From address) and the images (logo, icon, favicon, each with a dark variant), which are
 kept in the object storage. Brands of the configuration file are shown as "from configuration file"
 and are read-only; "Take over into the database" copies one (with its images) into the database,
@@ -1329,6 +1330,10 @@ Everything in this section is enforced
 by the server alone (the server sends the mail, checks the sizes, applies invites): a compromised
 server could ignore these settings whether they were signed or not, so a signature would protect
 nothing. Brands, mail and calendar are server-side presentation and transport for the same reason.
+A brand's colour theme policy (branding.md §5.1) is enforced by the clients, but it decides colours
+alone, on a host whose name, logo and colours the server already sets, so it is presentation too and
+not signed: a server that tampers with it can show its default instead of someone's chosen theme,
+and shorten the picker, nothing else, and the synced choice is never touched.
 
 "Scheduled messages" under People (signed policy, `scheduled_messages`): whether people may schedule, how
 far ahead, and how many messages one person can have waiting. The server holds these messages encrypted
