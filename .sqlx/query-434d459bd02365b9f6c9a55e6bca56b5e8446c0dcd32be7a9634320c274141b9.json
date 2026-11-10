@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM identity_provider_group_mappings) AS \"has!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "has!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "434d459bd02365b9f6c9a55e6bca56b5e8446c0dcd32be7a9634320c274141b9"
+}

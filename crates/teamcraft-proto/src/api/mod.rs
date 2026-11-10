@@ -1,6 +1,7 @@
 //! Request and response bodies of the REST API (`/api/v1`).
 
 mod admin;
+mod admin_group_mappings;
 mod admin_health;
 mod admin_join_requests;
 mod admin_leavers;
@@ -50,6 +51,7 @@ mod webhooks;
 mod workspace;
 
 pub use admin::*;
+pub use admin_group_mappings::*;
 pub use admin_health::*;
 pub use admin_join_requests::*;
 pub use admin_leavers::*;

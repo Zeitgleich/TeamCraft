@@ -621,7 +621,7 @@ max_deactivations_per_run` (default 50) per run. §3.2.2 has the expiry that end
 | Start org recovery for a user (needs a second admin, see e2ee.md §6.3)                                           | v1   |
 | Invite guests, set expiry and sponsor, see all guests and where they are; extend them, also in bulk (§3.2.2)     | v1   |
 | Local accounts: create, reset password/TOTP                                                                      | v1   |
-| OIDC group → role/space mapping                                                                                  | v1   |
+| OIDC group → space/channel mapping ([provisioning.md](provisioning.md) §5)                                       | v1   |
 | User groups (`@devteam`)                                                                                         | v1   |
 
 #### 3.2.1 Deactivating, reactivating, removing and deleting users

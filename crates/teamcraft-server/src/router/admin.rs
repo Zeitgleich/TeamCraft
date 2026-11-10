@@ -47,6 +47,10 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
       handlers::admin_create_provider_event_secret_handler,
       handlers::admin_delete_provider_event_hook_handler
     ))
+    .routes(routes!(
+      handlers::admin_group_mappings_handler,
+      handlers::admin_put_group_mappings_handler
+    ))
     .routes(routes!(handlers::admin_oidc_sync_preview_handler))
     .routes(routes!(handlers::admin_oidc_sync_confirm_brake_handler))
     .routes(routes!(handlers::admin_instance_handler))
