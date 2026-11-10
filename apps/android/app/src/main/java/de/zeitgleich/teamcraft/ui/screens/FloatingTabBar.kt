@@ -105,6 +105,13 @@ fun FloatingTabBar(
   val needed = labelWidths.values.max() + (ITEM_SIZE + 4.dp) * (tabs.size - 1) + TOOLBAR_CHROME
   val showsLabel = needed <= LocalWindowInfo.current.containerDpSize.width
   val (direct, channels) = conversations.partition { it.isDirect }
+  // The pill keeps one width whichever tab is selected, so it never wanders sideways (it is
+  // centred): it is laid out for the longest label, the selected tab is as wide as its own label,
+  // and the rest goes to the icon-only tabs as air around their icons. Selected and other tabs
+  // animate with the same spring, so their widths add up to the same total in every frame.
+  val selectedWidth = if (showsLabel) labelWidths.getValue(selected) else ITEM_SIZE
+  val longestWidth = if (showsLabel) labelWidths.values.max() else ITEM_SIZE
+  val otherWidth = ITEM_SIZE + (longestWidth - selectedWidth) / (tabs.size - 1).coerceAtLeast(1)
   HorizontalFloatingToolbar(expanded = true, modifier = modifier) {
     Row(Modifier.selectableGroup(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
       for (tab in tabs) {
@@ -117,8 +124,8 @@ fun FloatingTabBar(
         }
         // Channels and Activity count only mentions; DMs count every unread message.
         val countsUnread = tab == ChatTab.Direct || (isList && tab == ChatTab.Home)
-        val selectedWidth = if (showsLabel) labelWidths.getValue(tab) else ITEM_SIZE
-        TabItem(tab, badge, countsUnread, isSelected = tab == selected, selectedWidth, showsLabel) {
+        val isSelected = tab == selected
+        TabItem(tab, badge, countsUnread, isSelected, if (isSelected) selectedWidth else otherWidth, showsLabel) {
           if (tab != selected) haptics.performHapticFeedback(HapticFeedbackType.SegmentTick)
           onSelect(tab)
         }
@@ -127,7 +134,7 @@ fun FloatingTabBar(
   }
 }
 
-/** Each tab's width while selected: its icon and its own label, so no tab carries empty space. */
+/** Each tab's width while selected: its icon and its own label, so the selected pill has no empty space. */
 @Composable
 private fun rememberSelectedItemWidths(tabs: List<ChatTab>): Map<ChatTab, Dp> {
   val measurer = rememberTextMeasurer()
@@ -148,7 +155,7 @@ private fun TabItem(
   badge: TabBadge,
   countsUnread: Boolean,
   isSelected: Boolean,
-  selectedWidth: Dp,
+  targetWidth: Dp,
   showsLabel: Boolean,
   onClick: () -> Unit,
 ) {
@@ -163,7 +170,13 @@ private fun TabItem(
     motion.fastEffectsSpec(),
     label = "tab content",
   )
-  val width by animateDpAsState(if (isSelected) selectedWidth else ITEM_SIZE, motion.fastSpatialSpec(), label = "tab width")
+  val width by animateDpAsState(targetWidth, motion.fastSpatialSpec(), label = "tab width")
+  // The icon sits at the start of the selected pill and in the middle of an icon-only tab.
+  val iconStart by animateDpAsState(
+    if (isSelected && showsLabel) ITEM_PADDING else (targetWidth - ICON_SIZE) / 2,
+    motion.fastSpatialSpec(),
+    label = "tab icon",
+  )
   val labelAlpha by animateFloatAsState(if (isSelected && showsLabel) 1f else 0f, motion.fastEffectsSpec(), label = "tab label")
   val label = stringResource(tabLabel(tab))
   val count = if (countsUnread) maxOf(badge.mentions, badge.unread) else badge.mentions
@@ -180,7 +193,7 @@ private fun TabItem(
       .background(container)
       .selectable(selected = isSelected, onClick = onClick, role = Role.Tab, indication = ripple(), interactionSource = null)
       .semantics(mergeDescendants = true) { contentDescription = description }
-      .padding(horizontal = ITEM_PADDING),
+      .padding(start = iconStart),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     BadgedBox(
