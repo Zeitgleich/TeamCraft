@@ -297,14 +297,10 @@ fn listen_to_window() {
     return;
   };
   let on_error = Closure::<dyn Fn(web_sys::ErrorEvent)>::new(|event: web_sys::ErrorEvent| {
-    let frame = StackFrame {
-      maybe_function: None,
-      maybe_file: Some(event.filename()).filter(|file| !file.is_empty()),
-      maybe_line: Some(event.lineno()).filter(|line| *line > 0),
-      maybe_column: Some(event.colno()).filter(|column| *column > 0),
-      is_in_app: true,
-    };
-    capture_script_error("Error", event.message(), vec![frame]);
+    let frames = StackFrame::from_error_event(&event.filename(), event.lineno(), event.colno())
+      .into_iter()
+      .collect();
+    capture_script_error("Error", event.message(), frames);
   });
   let on_rejection =
     Closure::<dyn Fn(web_sys::PromiseRejectionEvent)>::new(|event: web_sys::PromiseRejectionEvent| {
