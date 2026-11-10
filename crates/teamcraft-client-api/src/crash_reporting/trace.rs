@@ -48,15 +48,16 @@ const MIN_BLOCKED_MS: f64 = 50.0;
 /// Numbers per span at most.
 const MAX_DATA: usize = 6;
 /// Kept trees waiting for the shell; the oldest drop out.
-const MAX_KEPT: usize = 20;
-/// Slow or failed roots kept per process start at most, and one per description in this time.
-const MAX_SLOW_PER_PROCESS: u32 = 30;
-const SLOW_GAP_MS: f64 = 60_000.0;
-/// Sampled (neither slow nor failed) roots: this share of the trace rate (roots are many: every
-/// queue job and request), at most so many a minute, and not shorter than [`MIN_SAMPLED_MS`].
-const ROOT_SHARE_OF_TRACE_RATE: f64 = 0.01;
-const MAX_SAMPLED_PER_MINUTE: u32 = 2;
+const MAX_KEPT: usize = 100;
+/// Slow or failed roots: every one is kept at any trace rate, except in a storm of the same one
+/// (every request failing while offline): at most this many per description a minute.
+const MAX_SLOW_PER_DESCRIPTION_PER_MINUTE: u32 = 10;
+/// Sampled (neither slow nor failed) roots: kept at the instance's trace rate (100 %: all of them),
+/// not shorter than [`MIN_SAMPLED_MS`], and at most this many a minute, below the relay's
+/// per-address limit (`public_requests_per_minute`, 30) so crash reports keep room.
+const MAX_SAMPLED_PER_MINUTE: u32 = 20;
 const MIN_SAMPLED_MS: f64 = 5.0;
+const MINUTE_MS: f64 = 60_000.0;
 /// Closed spans a crash report carries as breadcrumbs, the newest.
 pub const BREADCRUMB_SPANS: usize = 30;
 /// Steps handed to one measure at most: the longest.
@@ -215,8 +216,8 @@ struct Shared {
   ring: VecDeque<ClosedSpan>,
   maybe_open: Option<HashMap<u64, OpenSpan>>,
   kept: VecDeque<TraceTree>,
-  maybe_last_slow: Option<HashMap<&'static str, f64>>,
-  slow_kept: u32,
+  /// Per description: when its minute began and how many were kept in it.
+  maybe_slow_windows: Option<HashMap<&'static str, (f64, u32)>>,
   sample_window_start_ms: f64,
   sampled_in_window: u32,
 }
@@ -233,7 +234,7 @@ where
 /// Turns collection on or off and sets the sampling; takes effect for spans made from now on.
 pub fn configure(settings: TraceSettings) {
   // Rounding: a millionth is finer than any rate an admin sets.
-  let per_million = (settings.trace_rate.get() * ROOT_SHARE_OF_TRACE_RATE * 1_000_000.0).round() as u32;
+  let per_million = (settings.trace_rate.get() * 1_000_000.0).round() as u32;
   SAMPLE_PER_MILLION.store(per_million, Ordering::Relaxed);
   SLOW_MS.store(u64::from(settings.slow_ms), Ordering::Relaxed);
   IS_ON.store(settings.is_on, Ordering::Relaxed);
@@ -923,28 +924,28 @@ impl Shared {
       ring: VecDeque::new(),
       maybe_open: None,
       kept: VecDeque::new(),
-      maybe_last_slow: None,
-      slow_kept: 0,
+      maybe_slow_windows: None,
       sample_window_start_ms: 0.0,
       sampled_in_window: 0,
     }
   }
 
   fn allows_slow(&mut self, description: &'static str, now_ms: f64) -> bool {
-    if self.slow_kept >= MAX_SLOW_PER_PROCESS {
+    let windows = self.maybe_slow_windows.get_or_insert_with(HashMap::new);
+    let (started_ms, kept) = windows.entry(description).or_insert((now_ms, 0));
+    if now_ms - *started_ms >= MINUTE_MS {
+      *started_ms = now_ms;
+      *kept = 0;
+    }
+    if *kept >= MAX_SLOW_PER_DESCRIPTION_PER_MINUTE {
       return false;
     }
-    let last = self.maybe_last_slow.get_or_insert_with(HashMap::new);
-    if last.get(description).is_some_and(|at| now_ms - at < SLOW_GAP_MS) {
-      return false;
-    }
-    last.insert(description, now_ms);
-    self.slow_kept += 1;
+    *kept += 1;
     true
   }
 
   fn allows_sampled(&mut self, now_ms: f64) -> bool {
-    if now_ms - self.sample_window_start_ms >= 60_000.0 {
+    if now_ms - self.sample_window_start_ms >= MINUTE_MS {
       self.sample_window_start_ms = now_ms;
       self.sampled_in_window = 0;
     }

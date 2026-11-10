@@ -237,24 +237,35 @@ async fn send_traces(state: &AppState, reporter: &mut CrashReporter, config: &Cr
   if !relay.allows_private && check_public_url(&url).is_err() {
     return;
   }
-  reporter.begin_flush();
-  while let Some(pending) = reporter.next_send(now_ms()) {
-    let sent = tokio::time::timeout(
-      FORWARD_TIMEOUT,
-      relay
-        .http
-        .post(url.clone())
-        .header(CONTENT_TYPE, ENVELOPE_CONTENT_TYPE)
-        .body(pending.request.body)
-        .send(),
-    )
-    .await;
-    let outcome = match sent {
-      Ok(Ok(response)) => outcome_of(response.status().as_u16(), response.headers().get(RETRY_AFTER)),
-      _ => CrashSendOutcome::Unreachable,
-    };
-    if !reporter.record_outcome(pending.event_id, outcome, now_ms()) {
-      break;
+  // A flush's share at a time, again while the backend takes them: at a full trace rate one share
+  // may not empty the queue. A refusal or a wait ends it until the next wake.
+  loop {
+    reporter.begin_flush();
+    let mut accepted = 0_u32;
+    while let Some(pending) = reporter.next_send(now_ms()) {
+      let sent = tokio::time::timeout(
+        FORWARD_TIMEOUT,
+        relay
+          .http
+          .post(url.clone())
+          .header(CONTENT_TYPE, ENVELOPE_CONTENT_TYPE)
+          .body(pending.request.body)
+          .send(),
+      )
+      .await;
+      let outcome = match sent {
+        Ok(Ok(response)) => outcome_of(response.status().as_u16(), response.headers().get(RETRY_AFTER)),
+        _ => CrashSendOutcome::Unreachable,
+      };
+      if outcome == CrashSendOutcome::Accepted {
+        accepted += 1;
+      }
+      if !reporter.record_outcome(pending.event_id, outcome, now_ms()) {
+        return;
+      }
+    }
+    if accepted == 0 || !reporter.has_transaction_batch() {
+      return;
     }
   }
 }

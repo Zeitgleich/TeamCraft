@@ -142,6 +142,21 @@ mod keeping {
   }
 
   #[test]
+  fn at_full_rate_every_root_worth_a_look_is_sampled() {
+    let _serial = serial();
+    configure(TraceSettings {
+      is_on: true,
+      trace_rate: SampleRate::ALL,
+      slow_ms: 0,
+    });
+    let mut root = closed("queue.read", "full_rate_sample", 0.0, MIN_SAMPLED_MS, None);
+    assert_eq!(keep_reason(&root), Some(KeepReason::Sampled));
+    root.end_ms = MIN_SAMPLED_MS / 2.0;
+    assert_eq!(keep_reason(&root), None, "too short to say anything");
+    configure(settings(false));
+  }
+
+  #[test]
   fn nothing_is_collected_while_off() {
     let _serial = serial();
     configure(settings(false));
@@ -159,14 +174,26 @@ mod keeping {
   }
 
   #[test]
-  fn slow_roots_are_capped_per_description() {
+  fn slow_roots_are_all_kept_except_in_a_storm_of_one() {
     let mut shared = Shared::new();
-    assert!(shared.allows_slow("messages", 0.0));
-    assert!(!shared.allows_slow("messages", 1_000.0));
-    assert!(shared.allows_slow("conversations", 1_000.0));
-    assert!(shared.allows_slow("messages", SLOW_GAP_MS + 1.0));
-    shared.slow_kept = MAX_SLOW_PER_PROCESS;
-    assert!(!shared.allows_slow("snapshot", 0.0));
+    let kept = (0..50).filter(|_| shared.allows_slow("messages", 0.0)).count();
+    assert_eq!(kept, MAX_SLOW_PER_DESCRIPTION_PER_MINUTE as usize);
+    assert!(
+      shared.allows_slow("conversations", 1_000.0),
+      "another one is not held up"
+    );
+    assert!(
+      shared.allows_slow("messages", MINUTE_MS + 1.0),
+      "the next minute starts over"
+    );
+    let many = (0..1_000)
+      .filter(|index| shared.allows_slow(if index % 2 == 0 { "a" } else { "b" }, 0.0))
+      .count();
+    assert_eq!(
+      many,
+      2 * MAX_SLOW_PER_DESCRIPTION_PER_MINUTE as usize,
+      "no cap per process"
+    );
   }
 
   #[test]
@@ -174,7 +201,7 @@ mod keeping {
     let mut shared = Shared::new();
     let allowed = (0..50).filter(|_| shared.allows_sampled(10.0)).count();
     assert_eq!(allowed, MAX_SAMPLED_PER_MINUTE as usize);
-    assert!(shared.allows_sampled(70_001.0));
+    assert!(shared.allows_sampled(MINUTE_MS + 10.0));
   }
 
   #[test]
@@ -437,4 +464,54 @@ mod boundary {
     wire.trace_id = "not hex".to_owned();
     assert_eq!(wire.into_span(), None);
   }
+}
+
+/// The sizes behind docs/tracing.md's data volume: a typical kept root (a queue job with a request,
+/// its body and a few steps) and a full one (31 descendants, 8 that blocked it).
+#[test]
+fn a_kept_trace_is_a_few_kilobytes() {
+  let envelope_bytes = |children: usize, blocked: usize| {
+    let mut root = closed("queue.engine", "send_message", 0.0, 2_000.0, None);
+    root.maybe_phases = Some(Phases {
+      queued_ms: 500.0,
+      busy_ms: 300.0,
+      idle_ms: 1_200.0,
+    });
+    root.maybe_cpu_ms = Some(250.0);
+    root.data = vec![("depth", 3.0)];
+    let span = |index: usize, parent: SpanId| {
+      let mut span = closed(
+        "http.client",
+        "POST /api/v1/conversations/{id}/messages",
+        10.0,
+        900.0,
+        Some(parent),
+      );
+      span.data = vec![("status", 201.0), ("body_bytes", 512.0)];
+      span.maybe_phases = Some(Phases {
+        queued_ms: 0.0,
+        busy_ms: 3.0,
+        idle_ms: 880.0 + index as f64,
+      });
+      span
+    };
+    let tree = TraceTree {
+      spans: (0..children).map(|index| span(index, root.span_id)).collect(),
+      blocked_by: (0..blocked).map(|index| span(index, root.span_id)).collect(),
+      root,
+      reason: KeepReason::Sampled,
+    };
+    Transaction::from_trace(&tree, [7; 16])
+      .to_envelope(
+        &app(),
+        &Environment::default(),
+        InstallationId::from_random_bytes([1; 16]),
+      )
+      .len()
+  };
+  let typical = envelope_bytes(5, 0);
+  let full = envelope_bytes(MAX_CHILDREN, MAX_BLOCKED_BY);
+  println!("a kept trace: {typical} bytes typical, {full} bytes full");
+  assert!(typical < 4 * 1024, "{typical}");
+  assert!(full < 16 * 1024, "{full}");
 }

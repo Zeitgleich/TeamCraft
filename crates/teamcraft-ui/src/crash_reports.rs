@@ -119,6 +119,7 @@ pub fn should_trace() -> bool {
 
 /// Queues a finished measure; a full batch is sent at once.
 pub fn capture_transaction(transaction: &Transaction) {
+  take_traces();
   let is_batch = with_reporter(|reporter| {
     reporter.capture_transaction(transaction);
     reporter.has_transaction_batch()
@@ -153,8 +154,12 @@ pub fn flush() {
   with_reporter(CrashReporter::begin_flush);
   wasm_bindgen_futures::spawn_local(async {
     take_shell_traces().await;
+    let mut accepted = 0_u32;
     while let Some(pending) = with_reporter(|reporter| reporter.next_send(now_ms())).flatten() {
       let outcome = post(pending.request.body).await;
+      if outcome == CrashSendOutcome::Accepted {
+        accepted += 1;
+      }
       let should_go_on =
         with_reporter(|reporter| reporter.record_outcome(pending.event_id, outcome, now_ms()))
           .unwrap_or(false);
@@ -166,6 +171,12 @@ pub fn flush() {
     store_transactions();
     // async-ok: a thread-local Cell, not a signal.
     IS_FLUSHING.with(|flushing| flushing.set(false));
+    // At a full trace rate a flush's share (5) may not empty the queue: go on while the backend
+    // takes what is sent; a refusal or a wait ends it until the next trigger.
+    let is_more = accepted > 0 && with_reporter(|reporter| reporter.has_transaction_batch()).unwrap_or(false);
+    if is_more {
+      flush();
+    }
   });
 }
 

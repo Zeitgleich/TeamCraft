@@ -60,11 +60,48 @@ events on the server) and does four things:
 3. **Tracks open spans** (at most 256): a crash, an ANR or an app hang report carries the spans that
    were still open and how long, which is where it hung.
 4. **Decides at the end (tail-based)** whether a root span (one without a parent) becomes a
-   transaction of its own: always when it failed or took longer than the slow threshold
-   (`slow_job_ms`), otherwise sampled at the trace rate (`trace_percent`) and capped per minute.
+   transaction of its own:
+   - **failed or slow** (longer than `slow_job_ms`): always, at any trace rate above 0, with all
+     its descendants. The only limit is against a storm of the same one (every request failing
+     while offline): at most 10 per description a minute.
+   - **anything else** of at least 5 ms: sampled at the instance's trace rate, the same
+     `trace_percent` the measures use (100 %: every one), at most 20 a minute.
+
    The transaction holds its descendants (at most 31, the longest) and, when it waited, the spans
    that overlapped its wait on the same queue (`blocked_by`, at most 8): so #1466 reads as
    "`queue.read messages` queued 6.2 s, blocked by 40 × `queue.read conversations`".
+
+### Sampling: one admin setting
+
+The instance traces at 100 % on purpose while the team develops (full detail is the point) and is
+meant to go down to 1–5 % later. That is only Administration → Crash reports → `trace_percent`;
+no build or code change. Every process follows a change without a restart: the web page and
+desktop with their next settings refresh, the mobile apps when they start the crash SDK with the
+new setting, the server within a minute. Slow and failed work stays fully captured at any rate
+above 0; 0 turns performance data off.
+
+### Data volume
+
+Sizes measured (`a_kept_trace_is_a_few_kilobytes`): a typical kept trace (a queue job with its
+request, body and a few steps) is about 2.5 KB, a full one (31 descendants, 8 that blocked it)
+about 11.5 KB, a measure with its steps about 4 KB. One envelope per request, uncompressed.
+
+Per active user and day (the app in use for a working day), **estimated** from the counts the
+backend saw so far (about 170 measures per user and day) and an assumed 1,500 roots of 5 ms or
+more (queue jobs, gateway events, shell requests; requests inside a job are its children, not
+roots). GlitchTip's own counts per release replace the estimate after a week of data.
+
+| Rate  | Sampled roots  | Slow or failed | Measures   | Requests to the backend | Data per user and day |
+|-------|----------------|----------------|------------|-------------------------|-----------------------|
+| 100 % | 1,500 × 2.5 KB | ~30 × 6 KB     | 170 × 4 KB | ~1,700                  | ~4.6 MB               |
+| 5 %   | 75 × 2.5 KB    | ~30 × 6 KB     | 9 × 4 KB   | ~115                    | ~0.4 MB               |
+
+The caps bound the worst case whatever the estimate: 20 sampled roots a minute and 10 slow or
+failed per description a minute, so a client that is busy for 8 hours sends at most about 9,600
+sampled traces (~24 MB) a day; the relay's per-address limit (30 requests a minute) and its `429`
+pause both queues before that. The server's own traces (`http.server` with SQL, about 3 KB) share
+the same caps per instance: at 100 % a busy instance sends up to 20 a minute (~85 MB a day at
+the cap), at 5 % about one a minute plus its slow and failed requests.
 
 ### What a span may carry (privacy)
 
@@ -107,8 +144,8 @@ derived from anything the user did.
   slot; no allocation per field, no formatting.
 - **Bounded:** ring 512, open spans 256, descriptions 1024, transaction 32 spans; the queue and the
   flushes are those of crash-reports.md ("Sampling and sending": 50 transactions, 256 KiB, sent
-  with the crash reports' flushes, never by a timer). Slow-root transactions: at most one per
-  description a minute and 30 per process start.
+  with the crash reports' flushes, never by a timer; a flush goes on while the backend takes what
+  it sends, so a full rate doesn't pile up).
 - **No wakeups:** the layer has no thread and no timer; the mobile shells send with their flushes.
 - **Measured** (`a_span_costs_little`, release build, x86-64): a span costs about 0.1 µs with
   collection off and 0.85 µs with it on. A channel switch or a send makes about ten spans (queue
