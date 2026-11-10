@@ -45,6 +45,15 @@ pub fn seal_wakeup(push_key: &[u8], wake_up: &PushWakeUp) -> Result<Vec<u8>, Pus
   }
 }
 
+/// Seals a wake-up without its message and without padding, for a push service that refuses
+/// [`VISIBLE_WAKEUP_BYTES`]: the device fetches the message, and the length shows what it names as
+/// before the padding.
+pub fn seal_wakeup_compact(push_key: &[u8], wake_up: &PushWakeUp) -> Result<Vec<u8>, PushCryptoError> {
+  let key = SymmetricKey::from_slice(push_key).ok_or(PushCryptoError::BadPushKey)?;
+  let plaintext = to_json(&wake_up.clone().without_message())?;
+  crypto::seal_wakeup(&key, &plaintext, &mut OsRng)
+}
+
 fn to_json(wake_up: &PushWakeUp) -> Result<Vec<u8>, PushCryptoError> {
   serde_json::to_vec(wake_up).map_err(|_| PushCryptoError::BadWakeUp)
 }

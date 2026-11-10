@@ -130,7 +130,9 @@ they need nothing new from a gateway.
 
 **Size.** Every visible wake-up the server sends is padded to exactly 2048 sealed bytes (e2ee.md §7.3),
 which is the gateway's default `limits.max_sealed_bytes`; silent ones are smaller. A gateway configured
-below 2048 refuses visible wake-ups (`413 payload_too_large`), so it must accept at least that. Base64url
+below 2048 refuses them (`413 payload_too_large`); the server then sends the same wake-up again without
+the message and unpadded, does so at once for that provider for an hour, and counts the refusals in the
+provider's health. Such a gateway works, but its pushes lose the carried message and the fixed size. Base64url
 encoded (2731 characters) the wake-up leaves room under the 4 KB that APNs and FCM take for the alert
 and the data key.
 

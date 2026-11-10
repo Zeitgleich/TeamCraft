@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use teamcraft_proto::{DeviceId, PushKind, PushProvider, PushWakeUp, UnixMillis, UserId};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
-use tracing::debug;
+use tracing::{debug, warn};
 
-use super::crypto::{PushCryptoError, seal_wakeup};
+use super::crypto::{PushCryptoError, VISIBLE_WAKEUP_BYTES, seal_wakeup, seal_wakeup_compact};
 use super::fcm::FcmKeyIdentity;
 use super::gateway::GatewayClient;
 use super::status::{ProviderHealth, ProviderHealthTracker};
@@ -83,6 +83,10 @@ pub enum PushError {
   NotConfigured,
   #[error("the registration is invalid: {0}")]
   Invalid(String),
+  /// The push service (a gateway configured below [`VISIBLE_WAKEUP_BYTES`]) refused the wake-up as
+  /// too large: [`PushDispatcher::deliver`] sends it again small.
+  #[error("the push service refused the wake-up as too large")]
+  TooLarge,
   #[error(transparent)]
   Crypto(#[from] PushCryptoError),
 }
@@ -284,6 +288,11 @@ impl PushDispatcher {
   }
 
   /// Seals the wake-up with the device's push key and sends it.
+  ///
+  /// A push service that refuses the padded wake-up as too large (a gateway whose `max_sealed_bytes`
+  /// is below [`VISIBLE_WAKEUP_BYTES`]) gets it again small: without the message and unpadded, so
+  /// the device fetches and its length is visible again (e2ee.md §7.3). For an hour after that,
+  /// that provider gets every wake-up small at once.
   pub async fn deliver(
     &self,
     target: &PushTarget,
@@ -293,8 +302,14 @@ impl PushDispatcher {
   ) -> Result<(), PushError> {
     let name = known_name(&target.provider).ok_or(PushError::NotConfigured)?;
     let sender = self.senders.get(name).ok_or(PushError::NotConfigured)?;
-    let message = PushMessage {
-      sealed: seal_wakeup(&target.push_key, wake_up)?,
+    let is_compact = self.health.sends_compact(name, now_millis());
+    let sealed = if is_compact {
+      seal_wakeup_compact(&target.push_key, wake_up)?
+    } else {
+      seal_wakeup(&target.push_key, wake_up)?
+    };
+    let mut message = PushMessage {
+      sealed,
       kind: wake_up.kind.clone(),
       urgency,
       ttl,
@@ -317,7 +332,17 @@ impl PushDispatcher {
       .await
       .map_err(|_| PushError::unavailable("shutting down"))?;
     debug!(provider = %target.provider, device_id = %target.device, "sending push");
-    let result = sender.send(target, &message).await;
+    let mut result = sender.send(target, &message).await;
+    if matches!(result, Err(PushError::TooLarge)) && message.sealed.len() >= VISIBLE_WAKEUP_BYTES {
+      warn!(
+        provider = %target.provider,
+        size_bytes = message.sealed.len(),
+        "the push service refuses wake-ups of this size; sending them small, without the message"
+      );
+      self.health.record_too_large(name, now_millis());
+      message.sealed = seal_wakeup_compact(&target.push_key, wake_up)?;
+      result = sender.send(target, &message).await;
+    }
     self.health.record(name, is_user_endpoint, &result, now_millis());
     result
   }

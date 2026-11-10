@@ -738,7 +738,9 @@ pub async fn send_test(
     Err(PushError::Gone) => TestPushOutcome::Gone,
     Err(PushError::NotConfigured) => TestPushOutcome::NotConfigured,
     Err(PushError::Unavailable { .. }) => TestPushOutcome::Unavailable,
-    Err(PushError::Rejected(_) | PushError::Invalid(_) | PushError::Crypto(_)) => TestPushOutcome::Rejected,
+    Err(PushError::Rejected(_) | PushError::Invalid(_) | PushError::Crypto(_) | PushError::TooLarge) => {
+      TestPushOutcome::Rejected
+    },
   };
   Ok(TestPushResponse {
     outcome,

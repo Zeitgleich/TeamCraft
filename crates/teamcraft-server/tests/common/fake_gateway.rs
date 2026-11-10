@@ -57,6 +57,8 @@ struct Inner {
   /// `/v1/info` answers 503.
   is_info_down: bool,
   info_reads: usize,
+  /// Refuses larger sealed wake-ups with `413 payload_too_large`, as the real one's limit does.
+  maybe_max_sealed_bytes: Option<usize>,
 }
 
 #[derive(Clone, Default)]
@@ -157,6 +159,11 @@ impl FakeGateway {
     self.push_attempts()
   }
 
+  /// Refuses sealed wake-ups larger than this (the gateway's `limits.max_sealed_bytes`).
+  pub fn set_max_sealed_bytes(&self, max: usize) {
+    self.inner.lock().unwrap().maybe_max_sealed_bytes = Some(max);
+  }
+
   /// Answers every following push with this status and error body (the push is not recorded);
   /// `None` goes back to accepting.
   pub fn set_reply(&self, maybe_reply: Option<(u16, Value)>) {
@@ -211,6 +218,12 @@ async fn push(State(fake): State<FakeGateway>, headers: HeaderMap, body: axum::b
   let mut inner = fake.inner.lock().unwrap();
   if let Some((status, body)) = inner.reply.clone() {
     return (StatusCode::from_u16(status).unwrap(), axum::Json(body)).into_response();
+  }
+  if inner
+    .maybe_max_sealed_bytes
+    .is_some_and(|max| request.sealed.as_slice().len() > max)
+  {
+    return error(413, "payload_too_large");
   }
   // Like the real gateway: a sealed token is opened and must name this server and be valid; a raw
   // one is only taken during a transition.

@@ -275,6 +275,53 @@ mod registration {
 mod what_comes_back {
   use super::*;
 
+  /// A gateway configured below the padded size (e2ee.md §7.3): the wake-up goes again small and
+  /// arrives, the provider's health says so, and for a while every wake-up goes small at once.
+  #[tokio::test]
+  async fn a_gateway_with_a_smaller_limit_gets_the_wake_up_small() {
+    let stack = Stack::start().await;
+    stack.client.register().await.unwrap();
+    stack.fake.set_max_sealed_bytes(1024);
+    let carrying = PushWakeUp {
+      maybe_message_id: Some(teamcraft_proto::MessageId::from_snowflake(
+        Snowflake::new(5).unwrap(),
+      )),
+      maybe_sender_id: Some(UserId::from_snowflake(Snowflake::new(6).unwrap())),
+      maybe_message: Some(teamcraft_proto::PushedMessage {
+        client_message_id: teamcraft_proto::ClientMessageId::from_bytes([1; 16]),
+        sender_device_id: DeviceId::from_snowflake(Snowflake::new(7).unwrap()),
+        content_key_id: teamcraft_proto::Base64Bytes::new(vec![2; 16]),
+        ciphertext: teamcraft_proto::Base64Bytes::new(vec![3; 200]),
+      }),
+      ..wake_up(PushKind::Message)
+    };
+    let sealed_token = stack.sealed_token("apns", APNS_TOKEN);
+    let target = target(PushProvider::Apns, &sealed_token);
+
+    stack
+      .dispatcher
+      .deliver(&target, &carrying, Urgency::High, TTL)
+      .await
+      .unwrap();
+    assert_eq!(stack.fake.push_attempts(), 2, "refused once, then sent small");
+    let pushes = stack.fake.pushes();
+    assert_eq!(pushes.len(), 1);
+    let sealed = pushes[0].request.sealed.as_slice();
+    assert!(sealed.len() < 1024);
+    let opened = open_wakeup(&PUSH_KEY, sealed).unwrap();
+    assert_eq!(opened, carrying.clone().without_message());
+    let health = stack.dispatcher.health(&PushProvider::Apns);
+    assert_eq!(health.too_large_count, 1);
+    assert!(!health.is_failing());
+
+    stack
+      .dispatcher
+      .deliver(&target, &carrying, Urgency::High, TTL)
+      .await
+      .unwrap();
+    assert_eq!(stack.fake.push_attempts(), 3, "small at once");
+  }
+
   async fn answer(status: u16, code: &str) -> Result<(), PushError> {
     let stack = Stack::start().await;
     stack
