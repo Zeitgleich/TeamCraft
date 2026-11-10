@@ -157,9 +157,11 @@ impl SealedStore<SqliteRecords> {
     limits: SealedStoreLimits,
     journal: Arc<CommitJournal>,
   ) -> Result<Self, StoreError> {
+    // URI: like `open`, so a test can open both connections on a VFS of its own
+    // (`file:…?vfs=`, tests/suite/slow_disk); an app's path is never a `file:` URI.
     let connection = Connection::open_with_flags(
       path,
-      OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+      OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_URI,
     )
     .map_err(database_error)?;
     Self::set_up_connection(&connection)?;
