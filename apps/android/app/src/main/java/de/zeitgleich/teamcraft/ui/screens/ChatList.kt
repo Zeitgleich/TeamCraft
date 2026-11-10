@@ -187,6 +187,8 @@ import uniffi.teamcraft_ffi.rowBadge
 import androidx.compose.material3.FloatingToolbarDefaults
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.runtime.derivedStateOf
 
 private val AVATAR_SIZE = 40.dp
 private val BRAND_LOGO_HEIGHT = 28.dp
@@ -532,8 +534,12 @@ internal fun MainScaffold(
   // The spaces layout shows one space at a time on Home and names it in the header (#1526).
   val maybeSpace = if (isList) null else selectedSpace(spaces, maybeRememberedSpaceId)
   val hasDirect = maybeConversations.orEmpty().any { it.isDirect }
+  // The button shrinks to its icon once the list scrolls, so it never covers a row's text.
   val homeList = rememberLazyListState()
   val directList = rememberLazyListState()
+  val isFabExpanded by remember(shownTab) {
+    derivedStateOf { (if (shownTab == ChatTab.Direct) directList else homeList).firstVisibleItemIndex == 0 }
+  }
   // The theme's colour (#202) fills the header and the status bar behind it; the lists sit on a
   // neutral card with rounded top corners, so the theme never colours content.
   Scaffold(
@@ -580,31 +586,31 @@ internal fun MainScaffold(
         }
       }
       if (maybeSelectionBar == null) {
-        // Home and DMs get the action, not twice: empty DMs have the same action in the middle.
-        // On Home it opens the "New" menu (message, channel, space); on DMs it starts a message.
-        val maybeAction = when {
-          shownTab == ChatTab.Home -> MainAction.New
-          shownTab == ChatTab.Direct && hasDirect -> MainAction.NewMessage
-          else -> null
-        }
+        val barModifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = FloatingToolbarDefaults.ScreenOffset)
         FloatingTabBar(
           selected = shownTab,
           isList = isList,
           conversations = maybeConversations.orEmpty(),
           joinRequestCount = joinRequestCount,
-          maybeAction = maybeAction,
           onSelect = onTab,
-          onAction = { action ->
-            when (action) {
-              MainAction.New -> onCreate()
-              MainAction.NewMessage -> onNavigate("browse?people=true")
-            }
-          },
-          modifier = Modifier
-            .align(Alignment.BottomCenter)
-            .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(bottom = FloatingToolbarDefaults.ScreenOffset),
+          modifier = Modifier.align(Alignment.BottomCenter).then(barModifier),
         )
+        // Home and DMs, not twice: empty DMs have the same action in the middle. On Home it opens
+        // the "New" menu (message, channel, space); on DMs it starts a message. It sits above the
+        // tab bar at the end, as the floating action button of Google's apps.
+        if (shownTab == ChatTab.Home || (shownTab == ChatTab.Direct && hasDirect)) {
+          val isHome = shownTab == ChatTab.Home
+          ExtendedFloatingActionButton(
+            onClick = if (isHome) onCreate else ({ onNavigate("browse?people=true") }),
+            expanded = isFabExpanded,
+            icon = { Icon(if (isHome) Icons.Filled.Add else Icons.Filled.Edit, contentDescription = null) },
+            text = { Text(stringResource(if (isHome) R.string.create_new else R.string.dm_new)) },
+            modifier = Modifier
+              .align(Alignment.BottomEnd)
+              .then(barModifier)
+              .padding(end = Spacing.l, bottom = FloatingToolbarDefaults.ContainerSize + Spacing.l),
+          )
+        }
       }
     }
   }
