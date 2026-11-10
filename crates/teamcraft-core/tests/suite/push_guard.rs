@@ -55,6 +55,7 @@ async fn a_withdrawal_of_a_meeting_notice_names_the_meeting_and_no_conversation(
     maybe_message_id: None,
     maybe_sender_id: None,
     maybe_meeting: Some(meeting),
+    maybe_message: None,
     ..wake_up(
       &alice,
       channel,
@@ -242,6 +243,7 @@ async fn the_diagnostics_remember_the_last_push_and_its_delay() {
   let pushed = PushWakeUp {
     maybe_sent_at: Some(UnixMillis(MONDAY_NOON_MS - 1500)),
     maybe_meeting: None,
+    maybe_message: None,
     ..wake_up(&alice, channel, message)
   };
   push_guard::record_received(store, &pushed, MONDAY_NOON_MS);

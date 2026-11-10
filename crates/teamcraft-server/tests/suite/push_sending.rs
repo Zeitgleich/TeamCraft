@@ -45,6 +45,7 @@ struct Recorded {
   device: String,
   wake_up: PushWakeUp,
   urgency: Urgency,
+  sealed_len: usize,
 }
 
 #[derive(Clone, Default)]
@@ -65,6 +66,7 @@ impl PushSender for Recorder {
         device: target.device.to_string(),
         wake_up,
         urgency: message.urgency,
+        sealed_len: message.sealed.len(),
       });
       Ok(())
     })
@@ -185,6 +187,41 @@ mod routing {
     assert!(push.wake_up.maybe_sent_at.is_some());
     // A channel message that doesn't mention carol is not part of the badge.
     assert_eq!(push.wake_up.maybe_badge, Some(0));
+    app.stop().await;
+  }
+
+  /// The message's ciphertext rides along when it fits (issue #1670); every visible wake-up has one
+  /// size, so that says nothing about the message.
+  #[tokio::test]
+  async fn a_short_message_travels_in_the_wake_up_and_a_long_one_is_fetched() {
+    let recorder = Recorder::default();
+    let Some(app) = start(&recorder).await else { return };
+    let s = scene(&app).await;
+    set_level(&app, &s.carol, &s.channel, "all").await;
+
+    send(&app, &s.alice, &s.channel, &s.alice_device, 1).await;
+    let mut long = message_body(2, &s.alice_device);
+    long["ciphertext"] = json!(STANDARD.encode(vec![7u8; 4000]));
+    let reply = app
+      .post(&s.alice, &format!("/conversations/{}/messages", s.channel), long)
+      .await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+
+    let pushes = recorder.wait_for(2).await;
+    assert_eq!(pushes.len(), 2, "{pushes:?}");
+    let short = pushes
+      .iter()
+      .find(|push| push.wake_up.maybe_message.is_some())
+      .expect("the short message is carried");
+    let carried = short.wake_up.maybe_message.as_ref().unwrap();
+    assert_eq!(carried.ciphertext.as_slice(), b"ciphertext");
+    assert_eq!(carried.content_key_id.as_slice(), b"key");
+    assert_eq!(carried.sender_device_id.to_string(), s.alice_device);
+    assert!(
+      pushes.iter().any(|push| push.wake_up.maybe_message.is_none()),
+      "the long one is fetched"
+    );
+    assert!(pushes.iter().all(|push| push.sealed_len == 2048), "{pushes:?}");
     app.stop().await;
   }
 

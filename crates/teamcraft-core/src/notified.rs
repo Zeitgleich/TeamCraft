@@ -281,6 +281,7 @@ mod tests {
         maybe_badge: None,
         maybe_sent_at: None,
         maybe_meeting: None,
+        maybe_message: None,
       },
       maybe_conversation_name: Some("planning".into()),
       maybe_sender_name: Some("Alice".into()),

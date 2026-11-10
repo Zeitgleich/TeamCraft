@@ -113,6 +113,7 @@ async fn service_worker_previews_a_push_from_the_encrypted_store() {
       maybe_badge: None,
       maybe_sent_at: None,
       maybe_meeting: None,
+      maybe_message: None,
     };
     seal_wakeup(
       &SymmetricKey::from_slice(push_key.as_slice()).unwrap(),

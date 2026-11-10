@@ -38,7 +38,8 @@ Related: [e2ee.md §7](e2ee.md), [notifications.md](notifications.md), [operatio
    `POST /v1/push` of the gateway, signed with the server's gateway key.
 3. The gateway checks signature and limits and forwards to Apple or Google with the publisher's
    credentials; it answers whether the token is dead (`410 token_gone`).
-4. The device opens the wake-up with the push key and fetches the message from its own server.
+4. The device opens the wake-up with the push key and decrypts the message from the ciphertext the
+   wake-up carries when it had room for it, or fetches it from its own server (e2ee.md §7.3).
 
 The server picks the sender per provider: credentials under `[push.apns]` / `[push.fcm]` win; otherwise
 `[push.gateway]` is used when set; otherwise the provider is not configured and registrations for it are
@@ -126,6 +127,12 @@ only if the gateway's `GET /v1/info` lists it, read at most hourly. A gateway wi
 for store apps, not a refused request for each. A planned meeting's reminder and start notice go to the
 gateway as `message`: the same visible alert at high priority, with the real kind in the sealed wake-up, so
 they need nothing new from a gateway.
+
+**Size.** Every visible wake-up the server sends is padded to exactly 2048 sealed bytes (e2ee.md §7.3),
+which is the gateway's default `limits.max_sealed_bytes`; silent ones are smaller. A gateway configured
+below 2048 refuses visible wake-ups (`413 payload_too_large`), so it must accept at least that. Base64url
+encoded (2731 characters) the wake-up leaves room under the 4 KB that APNs and FCM take for the alert
+and the data key.
 
 The contract is the versioned HTTP API `/v1` (api.md in the gateway repository). Both repositories carry
 the same JSON fixtures, one per request and response plus a known-answer signature; keep them

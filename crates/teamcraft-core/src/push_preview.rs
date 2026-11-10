@@ -2,16 +2,17 @@
 //! store alone, without a [`crate::Client`].
 //!
 //! Notification extensions and the browser's service worker run next to the app and must not
-//! advance its state, so everything here only reads the store. With a [`ServerApi`] (a still valid
-//! access token, see [`PushSession`]) the message is fetched and decrypted for a preview; without
-//! one, or if that fails, the notification names the conversation and sender only.
+//! advance its state, so everything here only reads the store. A message the store doesn't hold is
+//! decrypted from the ciphertext the wake-up carries when it had room for it; otherwise, with a
+//! [`ServerApi`] (a still valid access token, see [`PushSession`]), it is fetched and decrypted.
+//! Without either, or if that fails, the notification names the conversation and sender only.
 
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::push::open_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
-  Base64Bytes, ConversationKind, ConversationResponse, Id, ListMessagesQuery, MessageId, PushContentMode,
-  PushKind, PushWakeUp, Snowflake, UserId, UserSummary,
+  Base64Bytes, ConversationKind, ConversationResponse, Id, ListMessagesQuery, MessageId, MessageResponse,
+  PushContentMode, PushKind, PushWakeUp, Snowflake, UserId, UserSummary,
 };
 
 use crate::api::ServerApi;
@@ -360,6 +361,20 @@ async fn preview_content<A: ServerApi>(
   if let Some(message) = local {
     return readable_preview(store, message.sender_user_id, &message.content);
   }
+  // The ciphertext the wake-up carries, read like a fetched message: no token, no connection
+  // (issue #1670). If this device can't read it yet (a key or a sender's device it doesn't know),
+  // it goes the way it went without it: the fetch, then the catch-up.
+  if let Some(message) = pushed_message(wake_up, message_id) {
+    match check_and_decrypt(store, wake_up, &message) {
+      Ok((sender, content)) => return readable_preview(store, sender, &content),
+      Err(error) => tracing::info!(
+        target: "teamcraft_lifecycle",
+        cause = failure_class(&error),
+        conversation_id = %conversation,
+        "message in the push not readable"
+      ),
+    }
+  }
   let Some(api) = maybe_api else {
     return (Err(PreviewGap::NoSession), false, false, None);
   };
@@ -481,6 +496,34 @@ async fn fetch_and_decrypt<A: ServerApi>(
     .into_iter()
     .find(|message| message.id == message_id)
     .ok_or_else(|| CoreError::Corrupt("pushed message not found".into()))?;
+  check_and_decrypt(store, wake_up, &message)
+}
+
+/// The message the wake-up carries, completed from the IDs it names. Its sender, conversation and
+/// device are bound to the ciphertext and its signature, so a server that names others makes it
+/// fail to decrypt, as a fetched message would.
+fn pushed_message(wake_up: &PushWakeUp, message_id: MessageId) -> Option<MessageResponse> {
+  let pushed = wake_up.maybe_message.as_ref()?;
+  Some(MessageResponse {
+    id: message_id,
+    client_message_id: pushed.client_message_id,
+    conversation_id: wake_up.conversation_id,
+    sender_user_id: wake_up.maybe_sender_id?,
+    sender_device_id: pushed.sender_device_id,
+    maybe_thread_id: wake_up.maybe_thread_id,
+    mentioned_user_ids: Vec::new(),
+    is_urgent: wake_up.is_urgent,
+    content_key_id: pushed.content_key_id.clone(),
+    ciphertext: pushed.ciphertext.clone(),
+  })
+}
+
+/// Checks a message for the wake-up as the app checks what it receives, then decrypts it.
+fn check_and_decrypt(
+  store: &impl LocalStore,
+  wake_up: &PushWakeUp,
+  message: &MessageResponse,
+) -> Result<(UserId, ShownContent), CoreError> {
   // The key ring follows the message's own conversation: a message of another conversation
   // would decrypt fine and be shown (and answered) as if it belonged to this one.
   if message.conversation_id != wake_up.conversation_id {
@@ -509,7 +552,7 @@ async fn fetch_and_decrypt<A: ServerApi>(
     records::device_signing_key(store, message.sender_user_id, message.sender_device_id)?;
   // Previews never show unsigned messages. The content is read as `Client` reads it,
   // but only as far as the notification shows it (#1452).
-  let plaintext = decrypt_plaintext(&account.key_bag, &message, maybe_sender_key.as_ref(), false)?;
+  let plaintext = decrypt_plaintext(&account.key_bag, message, maybe_sender_key.as_ref(), false)?;
   let content = serde_json::from_slice(plaintext.expose_secret()).unwrap_or(ShownContent::Unknown);
   Ok((message.sender_user_id, content))
 }
@@ -644,6 +687,7 @@ mod tests {
         maybe_badge: None,
         maybe_sent_at: None,
         maybe_meeting: None,
+        maybe_message: None,
       },
       maybe_conversation_name: None,
       maybe_sender_name: None,
@@ -847,6 +891,7 @@ mod tests {
         maybe_badge: None,
         maybe_sent_at: None,
         maybe_meeting: None,
+        maybe_message: None,
       },
       maybe_conversation_name: Some("planning".into()),
       maybe_sender_name: Some("Alice".into()),
@@ -904,6 +949,7 @@ mod tests {
       maybe_badge: None,
       maybe_sent_at: None,
       maybe_meeting: None,
+      maybe_message: None,
     };
     let failed = PushPreview {
       wake_up: wake_up.clone(),
@@ -951,6 +997,7 @@ mod tests {
         maybe_badge: None,
         maybe_sent_at: None,
         maybe_meeting: None,
+        maybe_message: None,
       },
       maybe_conversation_name: Some("Project A".into()),
       maybe_sender_name: Some("Alice".into()),

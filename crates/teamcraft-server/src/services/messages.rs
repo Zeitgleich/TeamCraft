@@ -269,6 +269,7 @@ pub(super) async fn deliver_stored(
       is_urgent: message.is_urgent,
       is_channel_mention: audience.is_channel_mention,
       is_integration: conversation.is_integration,
+      maybe_pushed: crate::push::routing::pushed_message(message),
     },
   ));
   Ok(())

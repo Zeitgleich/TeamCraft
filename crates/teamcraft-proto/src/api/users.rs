@@ -327,8 +327,9 @@ impl PushKind {
 
 /// The plaintext of a push payload. The server seals it with the device's push key
 /// (XChaCha20-Poly1305), so Apple, Google and push relays see only ciphertext. The app (or the iOS
-/// notification service extension) opens it, fetches the real message and decrypts that locally.
-/// It names the conversation and message but carries no content.
+/// notification service extension) opens it and decrypts the message locally: from the
+/// end-to-end encrypted ciphertext the wake-up carries when it fits (`message`), else fetched. It
+/// never carries plaintext content.
 ///
 /// A `dismiss` names the conversation (and thread) whose notifications to remove, with
 /// `message_id` the newest message read; or, with `call_id`, the call whose ring ended.
@@ -361,6 +362,23 @@ pub struct PushWakeUp {
   /// The meeting and occurrence of a `meeting_reminder` or `meeting_start`.
   #[serde(rename = "meeting", default, skip_serializing_if = "Option::is_none")]
   pub maybe_meeting: Option<PushMeeting>,
+  /// The message itself, still end-to-end encrypted, when the sealed wake-up has room for it
+  /// (`message`, `mention`; e2ee.md §7, "Message in the wake-up"). The device decrypts it like a
+  /// fetched message and fetches only without it. Older devices ignore it; older servers never send
+  /// it.
+  #[serde(rename = "message", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_message: Option<PushedMessage>,
+}
+
+/// What a wake-up carries of its message besides the IDs it names anyway: the rest of a
+/// [`crate::MessageResponse`]. The mention list stays out: a notification doesn't need it, and its
+/// length would only cost room.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PushedMessage {
+  pub client_message_id: crate::ClientMessageId,
+  pub sender_device_id: crate::DeviceId,
+  pub content_key_id: Base64Bytes,
+  pub ciphertext: Base64Bytes,
 }
 
 /// Which meeting a wake-up tells about. Its title stays out of the wake-up: the device names it from
@@ -392,6 +410,16 @@ impl PushWakeUp {
       maybe_badge: None,
       maybe_sent_at: None,
       maybe_meeting: None,
+      maybe_message: None,
+    }
+  }
+
+  /// The wake-up without the message it carries: the device fetches it instead.
+  #[must_use]
+  pub fn without_message(self) -> Self {
+    Self {
+      maybe_message: None,
+      ..self
     }
   }
 }
@@ -400,6 +428,86 @@ impl PushWakeUp {
 mod tests {
   use super::*;
   use crate::{Id, Snowflake};
+
+  mod wake_up_message {
+    use super::*;
+    use crate::{ConversationId, MessageId};
+
+    #[test]
+    fn a_wake_up_carries_its_message_under_a_stable_key() {
+      let wake_up = PushWakeUp {
+        maybe_message: Some(PushedMessage {
+          client_message_id: crate::ClientMessageId::from_bytes([1; 16]),
+          sender_device_id: DeviceId::from_snowflake(Snowflake::new(9).unwrap()),
+          content_key_id: Base64Bytes::new(vec![4, 5]),
+          ciphertext: Base64Bytes::new(vec![6, 7, 8]),
+        }),
+        ..message_wake_up()
+      };
+      let json = serde_json::to_value(&wake_up).unwrap();
+      let message = &json["message"];
+      assert_eq!(message["sender_device_id"], "9");
+      assert_eq!(message["content_key_id"], "BAU=");
+      assert_eq!(message["ciphertext"], "BgcI");
+      assert_eq!(serde_json::from_value::<PushWakeUp>(json).unwrap(), wake_up);
+    }
+
+    #[test]
+    fn a_wake_up_without_a_message_reads_as_before() {
+      let wake_up = message_wake_up();
+      let json = serde_json::to_string(&wake_up).unwrap();
+      assert!(!json.contains("\"message\":"));
+      // What servers before the field send, and what older devices read.
+      assert_eq!(
+        serde_json::from_str::<PushWakeUp>(
+          r#"{"kind":"message","conversation_id":"3","message_id":"4","sender_id":"5","is_urgent":false}"#
+        )
+        .unwrap(),
+        wake_up
+      );
+    }
+
+    #[test]
+    fn fields_a_reader_doesnt_know_and_padding_are_skipped() {
+      // An older device knows no `message`; any reader skips the padding after the JSON.
+      let padded = format!(
+        "{}{}",
+        r#"{"kind":"message","conversation_id":"3","message_id":"4","sender_id":"5","is_urgent":false,"later":{"x":1}}"#,
+        " ".repeat(1500)
+      );
+      assert_eq!(
+        serde_json::from_slice::<PushWakeUp>(padded.as_bytes()).unwrap(),
+        message_wake_up()
+      );
+    }
+
+    #[test]
+    fn without_message_drops_only_the_message() {
+      let wake_up = PushWakeUp {
+        maybe_badge: Some(2),
+        maybe_message: Some(PushedMessage {
+          client_message_id: crate::ClientMessageId::from_bytes([1; 16]),
+          sender_device_id: DeviceId::from_snowflake(Snowflake::new(9).unwrap()),
+          content_key_id: Base64Bytes::new(Vec::new()),
+          ciphertext: Base64Bytes::new(Vec::new()),
+        }),
+        ..message_wake_up()
+      };
+      let stripped = wake_up.without_message();
+      assert_eq!(stripped.maybe_message, None);
+      assert_eq!(stripped.maybe_badge, Some(2));
+    }
+
+    fn message_wake_up() -> PushWakeUp {
+      PushWakeUp::for_message(
+        PushKind::Message,
+        ConversationId::from_snowflake(Snowflake::new(3).unwrap()),
+        MessageId::from_snowflake(Snowflake::new(4).unwrap()),
+        UserId::from_snowflake(Snowflake::new(5).unwrap()),
+        false,
+      )
+    }
+  }
 
   #[test]
   fn enrollment_of_a_user_without_keys_is_an_empty_object() {

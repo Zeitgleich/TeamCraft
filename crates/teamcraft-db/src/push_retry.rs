@@ -143,6 +143,9 @@ impl Database {
       maybe_badge: row.badge.map(|badge| u32::try_from(badge).unwrap_or(0)),
       maybe_sent_at: row.sent_at_ms.map(UnixMillis),
       maybe_meeting,
+      // The queue keeps no ciphertext (it would outlive a retention purge by the TTL): a retried
+      // wake-up has the device fetch its message (e2ee.md §7).
+      maybe_message: None,
     };
     Ok(Some(PushRetryClaim {
       transaction,

@@ -5,16 +5,17 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use teamcraft_db::{DueReminder, PushDeviceRow, PushRecipientRow};
+use teamcraft_db::{DueReminder, PushDeviceRow, PushRecipientRow, StoredMessage};
 use teamcraft_proto::{
-  CallId, ConversationId, ConversationKind, DeviceId, DndCandidate, DndSchedule, Id, MessageId,
-  NotificationLevel, PushKind, PushMeeting, PushMode, PushProvider, PushWakeUp, Snowflake, TestPushOutcome,
-  TestPushResponse, ThreadId, UserId,
+  Base64Bytes, CallId, ConversationId, ConversationKind, DeviceId, DndCandidate, DndSchedule, Id, MessageId,
+  NotificationLevel, PushKind, PushMeeting, PushMode, PushProvider, PushWakeUp, PushedMessage, Snowflake,
+  TestPushOutcome, TestPushResponse, ThreadId, UserId,
 };
 use time::OffsetDateTime;
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
+use super::crypto::MAX_PUSHED_CIPHERTEXT_BYTES;
 use super::delivery::{self, can_dismiss};
 use super::sender::{PushError, now_millis};
 use super::tracker::{DeliveryEvent, DismissKey, HeldPush, Holding, Ring};
@@ -37,6 +38,22 @@ pub struct NewMessageEvent {
   pub is_channel_mention: bool,
   /// The conversation is an integration channel (logs, monitoring).
   pub is_integration: bool,
+  /// The message's ciphertext for the wake-ups, if it is short enough to fit one
+  /// ([`pushed_message`]).
+  pub maybe_pushed: Option<PushedMessage>,
+}
+
+/// What a wake-up may carry of a stored message: nothing when its ciphertext could never fit, so a
+/// long message isn't copied for every recipient only to be dropped when sealed.
+pub fn pushed_message(message: &StoredMessage) -> Option<PushedMessage> {
+  (message.ciphertext.len() + message.content_key_id.len() <= MAX_PUSHED_CIPHERTEXT_BYTES).then(|| {
+    PushedMessage {
+      client_message_id: message.client_message_id,
+      sender_device_id: message.sender_device_id,
+      content_key_id: Base64Bytes::new(message.content_key_id.clone()),
+      ciphertext: Base64Bytes::new(message.ciphertext.clone()),
+    }
+  })
 }
 
 /// Why a user is not pushed to.
@@ -203,6 +220,7 @@ pub async fn notify_reminder(
     is_urgent: true,
     is_channel_mention: false,
     is_integration: false,
+    maybe_pushed: pushed_message(&message),
   };
   let recipients = state
     .database
@@ -265,6 +283,7 @@ async fn push_to_recipient(
     maybe_badge: badge(state, recipient.user, &recipient.devices).await,
     maybe_sent_at: Some(now_millis()),
     maybe_meeting: None,
+    maybe_message: event.maybe_pushed.clone(),
     ..PushWakeUp::for_message(
       decision.kind,
       event.conversation,
@@ -351,6 +370,7 @@ pub async fn notify_ring(
       maybe_badge: None,
       maybe_sent_at: Some(now_millis()),
       maybe_meeting: None,
+      maybe_message: None,
     };
     for device in recipient.devices {
       if state.hub.is_device_connected(recipient.user, device.device) {
@@ -408,6 +428,7 @@ pub async fn notify_meeting(
     maybe_badge: None,
     maybe_sent_at: Some(now_millis()),
     maybe_meeting: Some(notice.meeting),
+    maybe_message: None,
   };
   for recipient in recipients
     .into_iter()
@@ -485,6 +506,7 @@ pub async fn end_ring(state: AppState, call: CallId) {
       maybe_badge: None,
       maybe_sent_at: Some(now_millis()),
       maybe_meeting: None,
+      maybe_message: None,
     };
     send_dismissal(&state, user, &devices, wake_up).await;
   }
@@ -515,6 +537,7 @@ pub async fn dismiss_meeting(state: AppState, user: UserId, meeting: PushMeeting
     maybe_badge: None,
     maybe_sent_at: Some(now_millis()),
     maybe_meeting: Some(meeting),
+    maybe_message: None,
   };
   for row in rows {
     if can_dismiss(&row.provider) {
@@ -571,6 +594,7 @@ pub async fn dismiss_read(
     maybe_badge,
     maybe_sent_at: Some(now_millis()),
     maybe_meeting: None,
+    maybe_message: None,
   };
   send_dismissal(&state, user, &devices, wake_up).await;
 }
@@ -615,6 +639,7 @@ pub fn wake_to_seal(state: AppState, user: UserId, conversation: ConversationId)
       maybe_badge: None,
       maybe_sent_at: Some(now_millis()),
       maybe_meeting: None,
+      maybe_message: None,
     };
     for row in rows {
       if can_dismiss(&row.provider) && !state.hub.is_device_connected(user, row.device) {
@@ -670,6 +695,7 @@ fn wake_to_sync(state: &AppState, recipient: &PushRecipientRow) {
       maybe_badge: None,
       maybe_sent_at: Some(now_millis()),
       maybe_meeting: None,
+      maybe_message: None,
     };
     for row in rows {
       if can_dismiss(&row.provider) && !state.hub.is_device_connected(user, row.device) {
@@ -705,6 +731,7 @@ pub async fn send_test(
     maybe_badge: None,
     maybe_sent_at: Some(sent_at),
     maybe_meeting: None,
+    maybe_message: None,
   };
   let outcome = match delivery::deliver_once(state, user, &row, &wake_up).await {
     Ok(()) => TestPushOutcome::Sent,
@@ -1277,6 +1304,7 @@ mod tests {
         is_urgent: false,
         is_channel_mention: false,
         is_integration: false,
+        maybe_pushed: None,
       }
     }
 

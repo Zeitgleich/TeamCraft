@@ -4255,9 +4255,9 @@ TeamCraft does the same, per platform:
 
 | Platform                | Mechanism                                                                                                                                                                                                                                                                                                       |
 |-------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **iOS**                 | APNs with `mutable-content`, payload = XChaCha20-Poly1305(push key, {conversation, message ID, sender}). A **Notification Service Extension** decrypts it, fetches the message ciphertext, decrypts it with the content key from the shared App Group keychain, rewrites the notification with sender + preview |
+| **iOS**                 | APNs with `mutable-content`, payload = XChaCha20-Poly1305(push key, {conversation, message ID, sender, the message ciphertext when it fits}). A **Notification Service Extension** decrypts it, takes the message ciphertext from it or fetches it (§7.3), decrypts that with the content key from the shared App Group keychain, rewrites the notification with sender + preview |
 | **iOS calls**           | Call offer arrives as a normal encrypted push; the NSE decrypts it and calls `CXProvider.reportNewIncomingVoIPPushPayload` (iOS 14.5+), which wakes the app into CallKit. This is how Threema does it, and it avoids PushKit's rule that every VoIP push must ring                                              |
-| **Android (Google)**    | FCM high-priority data message, empty or encrypted payload → app wakes, fetches, decrypts, shows local notification                                                                                                                                                                                             |
+| **Android (Google)**    | FCM high-priority data message, encrypted payload → app wakes, decrypts the message it carries or fetches it (§7.3), shows local notification                                                                                                                                                                  |
 | **Android (no Google)** | **UnifiedPush** (e.g. self-hosted ntfy), or a foreground service that keeps the gateway connection open (Threema's libre build does the latter)                                                                                                                                                                 |
 | **Desktop**             | Persistent gateway connection; decrypt locally; native OS notification                                                                                                                                                                                                                                          |
 | **Browser**             | Web Push (VAPID, RFC 8291 payload encryption) → service worker fetches + decrypts                                                                                                                                                                                                                               |
@@ -4324,8 +4324,9 @@ Details:
   `scheduled_seal` (above), `sync` (catch up in the background, silent, names nothing; above) and `test`
   (diagnostics), and `meeting_reminder` and `meeting_start` (a planned meeting's time, docs/meetings.md
   "Starting"; alerts like a message, and a gateway is told `message`). Besides conversation, message,
-  sender, thread, call and meeting IDs the sealed wake-up carries the badge count, the send time and
-  a meeting's start; all of it is inside the ciphertext. What push services
+  sender, thread, call and meeting IDs the sealed wake-up carries the badge count, the send time,
+  a meeting's start and, when it fits, the message's own end-to-end encrypted ciphertext (§7.3); all of
+  it is inside the ciphertext. What push services
   and a gateway additionally learn is the push type and priority: that a push was a silent withdrawal
   rather than an alert.
 - iOS calls go as mutable alerts on the app's topic, never as VoIP pushes: those need the separate
@@ -4390,7 +4391,8 @@ The wake-up is sealed with the device's push key *before* it leaves the server, 
 exactly what Apple and Google handle: a device token and ciphertext. Threat model:
 
 - A **malicious gateway** can drop or delay pushes, refuse a server, replay a wake-up it has seen
-  (the device fetches the named message again: at worst a duplicate notification) and correlate device
+  (the device reads or fetches the named message again; the device's record of shown messages
+  suppresses the duplicate notification unless the wake-up is urgent) and correlate device
   tokens with servers and timing. It **cannot read** a wake-up (no push key), **cannot forge** one (a
   ciphertext it makes up fails authentication and is discarded by the app), and does not learn user,
   device or conversation IDs. Messages are never lost by a gateway failure: apps catch up when they
@@ -4454,6 +4456,58 @@ sync state, key bag, conversations and device keys whenever it takes the lock.
 Neither the push nor the keys in the shared Keychain access group change; the server sees the same
 reads a catch-up makes (lists of the conversation's record, members, MLS queue and messages) and none
 of its writes.
+
+### 7.3 Message in the wake-up (issue #1670)
+
+A push for a message the device doesn't hold yet used to cost a fetch (`GET
+/conversations/{id}/messages`), mostly on a connection that was cold after a pause: radio wake-up, DNS,
+TCP, TLS, and before that the wait for an access token. The wake-up now carries the message itself
+when it fits, still end-to-end encrypted:
+
+- **What.** `message` (`PushedMessage`) in the sealed wake-up of a `message` or `mention`: the client
+  message ID, the sender's device, the content key ID and the ciphertext exactly as the server stores
+  them. Conversation, server message ID, sender and thread are the wake-up's own fields. The mention list
+  stays out. Only the server's copy of the ciphertext goes in: no plaintext, no key.
+- **Size.** Every visible wake-up (`message`, `mention`, `call`, `meeting_reminder`, `meeting_start`,
+  `test`) is sealed to exactly **2048 bytes**: the JSON, then spaces up to that size, inside the AEAD
+  (`seal_wakeup_padded`; JSON readers skip trailing whitespace, so older apps read it unchanged). That is
+  a push gateway's default `max_sealed_bytes`, and 2731 characters base64url, which leaves room under
+  the 4 KB of APNs and FCM next to the alert or the data key. A message whose wake-up doesn't fit (a
+  ciphertext of more than about 1.2 KB; with signature, nonce and key ID that is a text of more than
+  about 1000 bytes of UTF-8, so most chat messages fit) goes without it, padded the same; the server never copies a ciphertext longer than could
+  fit (`MAX_PUSHED_CIPHERTEXT_BYTES`). Silent kinds (`dismiss`, `scheduled_seal`, `sync`) carry no message
+  and are not padded: their priority tells them apart anyway.
+- **On the device.** `push_preview` reads the store first, then the carried message, then fetches.
+  The carried message is checked as a fetched one is: it is put together with the wake-up's
+  conversation, sender and message ID, so a server that names another conversation, sender or device
+  makes it fail to decrypt (they are bound into the message's AEAD data and signature); a sender
+  device that had left the conversation is refused; unsigned messages are never shown. Anything that
+  doesn't read (no content key yet after a rotation or an added member, a commit the device hasn't
+  processed, a sender's new device) is no error: the push goes on exactly as without it, to the fetch
+  and the catch-up (Android: the app's client; iOS: the probe, §7.2), after which the carried message
+  reads from the same wake-up. The notification extension still never touches MLS state; decrypting
+  needs only the content keys of the key bag.
+- **No duplicates.** A message is announced by its push only, as before: the device's record of shown
+  messages (`push_guard::is_duplicate`) catches the same wake-up delivered twice (a retry, a gateway's
+  replay), and the sync that later stores the message shows nothing of its own.
+- **Not in the retry queue.** A wake-up waiting in the server's retry queue (notifications.md, "Mobile
+  push delivery") is stored without the ciphertext, so no copy of it outlives a retention purge in that
+  table; a retried wake-up has the device fetch.
+- **Compatibility.** Older apps ignore the field and fetch; older servers don't send it; the push
+  gateway's contract is unchanged (it forwards `sealed`, at most 2048 bytes by default).
+
+**What this leaks, and to whom:**
+
+| Party                                   | Before                                                                                     | Now                                                                                                                                                                                                                                        |
+|-----------------------------------------|--------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Apple, Google, a push gateway           | A sealed wake-up whose length varied by some bytes with the IDs, thread, badge and meeting | Every visible wake-up has one length: nothing about whether it carries the message, how long the message is, or (unlike before) whether it names a thread. Push type, priority and timing as before                                        |
+| The same, plus the push key             | Conversation, message and sender IDs, badge, times                                         | The same, plus the message's ciphertext under the conversation's content key: unreadable without that key, as on the server                                                                                                                |
+| The same, plus the device's whole store | Could read the IDs; the content needed the server's copy of the message                    | Can read short messages from captured wake-ups without asking the server. Whoever holds a device's store holds its content keys anyway and would read the server's copies with its tokens; the push path adds no new key, only a new place |
+| The server                              | Holds every ciphertext                                                                     | Nothing new                                                                                                                                                                                                                                |
+| Retention                               | —                                                                                          | Apple, Google (and a gateway in transit) may keep an undelivered wake-up for its TTL (`push.ttl_secs`, 1 day by default) after the message was purged on the server: doubly encrypted, as above                                            |
+
+Size and cost: a visible push is 2 KB instead of a few hundred bytes, against a fetch saved for most
+messages; silent pushes stay small.
 
 ## 8. Calls
 
