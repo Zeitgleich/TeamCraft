@@ -7,6 +7,8 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 use tracing::debug;
 
 use super::crypto::{PushCryptoError, seal_wakeup};
+use super::fcm::FcmKeyIdentity;
+use super::gateway::GatewayClient;
 use super::status::{ProviderHealth, ProviderHealthTracker};
 use crate::auth::BoxFuture;
 
@@ -160,6 +162,10 @@ pub struct PushDispatcher {
   maybe_web_public_key: Option<String>,
   /// How this server reaches its push gateway, if it has one (told to the apps).
   maybe_gateway_binding: Option<GatewayBinding>,
+  /// The push gateway, for the health probe.
+  maybe_gateway_client: Option<Arc<GatewayClient>>,
+  /// Where the expiry of the FCM service account key can be read, when FCM is sent directly.
+  maybe_fcm_key: Option<FcmKeyIdentity>,
   /// Wakes the retry workers when a wake-up is queued for an immediate attempt.
   retry_signal: Notify,
 }
@@ -184,6 +190,8 @@ impl PushDispatcher {
       health: ProviderHealthTracker::default(),
       maybe_web_public_key: None,
       maybe_gateway_binding: None,
+      maybe_gateway_client: None,
+      maybe_fcm_key: None,
       retry_signal: Notify::new(),
     }
   }
@@ -204,6 +212,26 @@ impl PushDispatcher {
   pub fn with_gateway_binding(mut self, binding: GatewayBinding) -> Self {
     self.maybe_gateway_binding = Some(binding);
     self
+  }
+
+  /// The push gateway this server sends through, for its health probe.
+  pub fn with_gateway_client(mut self, client: Arc<GatewayClient>) -> Self {
+    self.maybe_gateway_client = Some(client);
+    self
+  }
+
+  /// The FCM service account key, for the check of its expiry.
+  pub fn with_fcm_key(mut self, key: FcmKeyIdentity) -> Self {
+    self.maybe_fcm_key = Some(key);
+    self
+  }
+
+  pub fn gateway_client(&self) -> Option<&Arc<GatewayClient>> {
+    self.maybe_gateway_client.as_ref()
+  }
+
+  pub fn fcm_key(&self) -> Option<&FcmKeyIdentity> {
+    self.maybe_fcm_key.as_ref()
   }
 
   pub(super) fn retry_signal(&self) -> &Notify {

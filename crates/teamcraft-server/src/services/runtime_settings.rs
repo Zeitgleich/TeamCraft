@@ -810,7 +810,29 @@ fn check_health_alerts(values: &HealthAlertSettings) -> Result<(), ApiError> {
     u64::from(values.history_days),
     1,
     MAX_HEALTH_HISTORY_DAYS,
-  )
+  )?;
+  check_range("secret_min_days", u64::from(values.secret_min_days), 1, 365)?;
+  check_range("probe_interval_secs", values.probe_interval_secs, 10, 3600)?;
+  // Shorter than the interval, so one round ends before the next.
+  check_range(
+    "probe_timeout_secs",
+    values.probe_timeout_secs,
+    1,
+    values.probe_interval_secs.clamp(1, 60),
+  )?;
+  check_range(
+    "call_max_loss_percent",
+    u64::from(values.call_max_loss_percent),
+    1,
+    50,
+  )?;
+  check_range(
+    "call_max_fallback_percent",
+    u64::from(values.call_max_fallback_percent),
+    10,
+    100,
+  )?;
+  check_range("call_window_secs", values.call_window_secs, 60, 3600)
 }
 
 /// At least one known method, each once; short help texts; an https help link.
@@ -1127,6 +1149,35 @@ mod tests {
       },
       HealthAlertSettings {
         disk_max_percent: 10,
+        ..good.clone()
+      },
+      HealthAlertSettings {
+        secret_min_days: 0,
+        ..good.clone()
+      },
+      HealthAlertSettings {
+        probe_interval_secs: 5,
+        ..good.clone()
+      },
+      HealthAlertSettings {
+        probe_timeout_secs: 0,
+        ..good.clone()
+      },
+      HealthAlertSettings {
+        probe_interval_secs: 20,
+        probe_timeout_secs: 30,
+        ..good.clone()
+      },
+      HealthAlertSettings {
+        call_max_loss_percent: 0,
+        ..good.clone()
+      },
+      HealthAlertSettings {
+        call_max_fallback_percent: 5,
+        ..good.clone()
+      },
+      HealthAlertSettings {
+        call_window_secs: 30,
         ..good.clone()
       },
     ] {

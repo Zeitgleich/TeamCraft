@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use secrecy::ExposeSecret;
@@ -29,9 +30,12 @@ use super::user_groups;
 use crate::auth::RoleMapping;
 use crate::config::OidcSyncRunMode;
 use crate::error::ApiError;
+use crate::health::SecretReading;
 use crate::state::{AppState, OidcSyncSettings};
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Where Keycloak's client secret rotation keeps when the current secret expires (Unix seconds).
+const SECRET_EXPIRY_ATTRIBUTE: &str = "client.secret.expiration.time";
 
 /// Why a deactivated user is deactivated, in words for the audit log.
 const NOTE_REMOVED: &str = "removed from the identity provider";
@@ -47,6 +51,9 @@ pub struct OidcSyncRuntime {
   /// A run was asked for (an identity provider event, a first sign-in). One stored permit: any
   /// number of requests while one waits start a single run.
   wake: tokio::sync::Notify,
+  /// When the server client's secret expires, as the last run read it (health check
+  /// `secret_expiry`).
+  secret_expiry: Mutex<SecretReading>,
 }
 
 impl OidcSyncRuntime {
@@ -66,6 +73,14 @@ impl OidcSyncRuntime {
 
   fn set_held(&self, count: u32) {
     self.held.store(count, Ordering::Relaxed);
+  }
+
+  pub fn secret_expiry(&self) -> SecretReading {
+    *self.secret_expiry.lock().unwrap_or_else(PoisonError::into_inner)
+  }
+
+  fn set_secret_expiry(&self, reading: SecretReading) {
+    *self.secret_expiry.lock().unwrap_or_else(PoisonError::into_inner) = reading;
   }
 }
 
@@ -229,6 +244,9 @@ async fn read_plan(state: &AppState, settings: &OidcSyncSettings) -> Result<Plan
   let provider = Provider::new(settings).await?;
   let remote_users = provider.list_users().await?;
   let client_uuid = provider.client_uuid().await?;
+  if let Some(reading) = provider.server_client_secret_expiry().await {
+    state.oidc_sync.set_secret_expiry(reading);
+  }
   let mapping = RoleMapping::new(settings.roles.clone());
   let remote: HashMap<&str, &RemoteUser> = remote_users.iter().map(|user| (user.id.as_str(), user)).collect();
 
@@ -836,6 +854,13 @@ struct RemoteClient {
   id: String,
 }
 
+/// The attributes of a client, where Keycloak keeps the secret's expiry.
+#[derive(Deserialize)]
+struct RemoteClientAttributes {
+  #[serde(default)]
+  attributes: HashMap<String, serde_json::Value>,
+}
+
 #[derive(Deserialize)]
 struct RemoteRole {
   name: String,
@@ -1009,6 +1034,26 @@ impl<'a> Provider<'a> {
       .ok_or_else(|| ProviderError::Unexpected(format!("client {} not found", self.settings.client_id)))
   }
 
+  /// When the secret of the server's own client expires, if the provider keeps that (Keycloak's
+  /// client secret rotation). `None` when it can't be read: the last reading stays, and the sync
+  /// goes on either way.
+  async fn server_client_secret_expiry(&self) -> Option<SecretReading> {
+    let encoded: String =
+      url::form_urlencoded::byte_serialize(self.settings.server_client.as_bytes()).collect();
+    match self
+      .get::<Vec<RemoteClientAttributes>>(&format!("/clients?clientId={encoded}"))
+      .await
+    {
+      Ok(clients) => Some(clients.first().map_or(SecretReading::Unknown, |client| {
+        secret_expiry_of(&client.attributes)
+      })),
+      Err(error) => {
+        debug!(%error, "the server client's secret expiry could not be read");
+        None
+      },
+    }
+  }
+
   /// Client roles of the user including those inherited from groups.
   async fn client_roles(&self, user: &str, client_uuid: &str) -> Result<Vec<String>, ProviderError> {
     let roles: Vec<RemoteRole> = self
@@ -1021,6 +1066,20 @@ impl<'a> Provider<'a> {
 }
 
 /// Derives the admin API URL of a Keycloak realm from its issuer (`<base>/realms/<realm>`).
+/// The secret's expiry from a client's attributes: Unix seconds, as text or a number; absent or 0
+/// means it doesn't expire.
+fn secret_expiry_of(attributes: &HashMap<String, serde_json::Value>) -> SecretReading {
+  let maybe_seconds = match attributes.get(SECRET_EXPIRY_ATTRIBUTE) {
+    None => None,
+    Some(serde_json::Value::String(text)) => text.trim().parse::<i64>().ok(),
+    Some(value) => value.as_i64(),
+  };
+  match maybe_seconds {
+    Some(seconds) if seconds > 0 => SecretReading::ExpiresAt(seconds),
+    _ => SecretReading::NoExpiry,
+  }
+}
+
 pub fn admin_url_from_issuer(issuer: &str) -> Option<String> {
   let (base, realm) = issuer.trim_end_matches('/').rsplit_once("/realms/")?;
   (!realm.is_empty() && !realm.contains('/')).then(|| format!("{base}/admin/realms/{realm}"))
@@ -1042,5 +1101,20 @@ mod tests {
     );
     assert_eq!(admin_url_from_issuer("https://accounts.example.com"), None);
     assert_eq!(admin_url_from_issuer("https://auth.example.com/realms/a/b"), None);
+  }
+
+  #[test]
+  fn the_client_secret_expiry_is_read_from_keycloaks_attribute() {
+    let attributes = |value: serde_json::Value| HashMap::from([(SECRET_EXPIRY_ATTRIBUTE.to_owned(), value)]);
+    assert_eq!(
+      secret_expiry_of(&attributes(json!("1800000000"))),
+      SecretReading::ExpiresAt(1_800_000_000)
+    );
+    assert_eq!(
+      secret_expiry_of(&attributes(json!(1_800_000_000))),
+      SecretReading::ExpiresAt(1_800_000_000)
+    );
+    assert_eq!(secret_expiry_of(&attributes(json!("0"))), SecretReading::NoExpiry);
+    assert_eq!(secret_expiry_of(&HashMap::new()), SecretReading::NoExpiry);
   }
 }

@@ -14,13 +14,19 @@
 //! from the QUIC connection, which acknowledges every packet (loss of the SFU's packets to the
 //! client, i.e. the downlink). Media is never retransmitted, so there are no NACKs to count; a
 //! keyframe request is the SFU's PLI.
+//!
+//! Beside the histograms, the same samples are counted in a small window that the roster report
+//! takes and empties ([`CallQuality::take_window`]): the server's health check `call_quality` reads
+//! it, so it needs no Prometheus (#1666).
 
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use teamcraft_ops::metrics::{
   Histogram, HistogramOpts, IntCounter, IntCounterVec, Metrics, MetricsError, Opts,
 };
+use teamcraft_proto::{CALL_LOSS_BUCKETS_PERMILLE, SfuCallQuality};
 use wtransport::Connection;
 
 /// How often a session's QUIC path statistics go into the histograms.
@@ -34,8 +40,11 @@ const MIN_PACKETS_FOR_LOSS: u64 = 100;
 /// Buckets of the round-trip time, in seconds: from a LAN to a bad mobile link.
 const RTT_BUCKETS_SECS: [f64; 10] = [0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1.0, 2.0];
 
-/// Buckets of the loss ratio: about 2 % is where audio starts to suffer, 10 % where video does.
-const LOSS_BUCKETS: [f64; 8] = [0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5];
+/// Buckets of the loss ratio, in tenths of a percent: about 2 % is where audio starts to suffer,
+/// 10 % where video does. Shared with the server, which sums the window's counts.
+const LOSS_BUCKETS_PERMILLE: [u32; 8] = CALL_LOSS_BUCKETS_PERMILLE;
+/// The window's loss buckets: one per bound and one above the last.
+const WINDOW_BUCKETS: usize = LOSS_BUCKETS_PERMILLE.len() + 1;
 
 /// The aggregates. Clones of the prometheus values share their counts, so the metrics registry
 /// reads what the sessions write; with metrics off they are counted and never read.
@@ -46,6 +55,15 @@ pub struct CallQuality {
   forwarded_bytes: IntCounter,
   sessions: IntCounterVec,
   session_switches: IntCounter,
+  window: Window,
+}
+
+/// What happened since the last roster report; emptied by [`CallQuality::take_window`].
+#[derive(Default)]
+struct Window {
+  loss: [AtomicU32; WINDOW_BUCKETS],
+  quic_sessions: AtomicU32,
+  fallback_sessions: AtomicU32,
 }
 
 /// What a session reaches the SFU on.
@@ -95,6 +113,26 @@ impl CallQuality {
       .sessions
       .with_label_values(&[transport.label(), family.label()])
       .inc();
+    let counter = match transport {
+      Transport::Quic => &self.window.quic_sessions,
+      Transport::Fallback => &self.window.fallback_sessions,
+    };
+    saturating_inc(counter);
+  }
+
+  /// The window since the last call, and a new one from now. The counters are taken one by one: a
+  /// sample that comes in between lands in this window or the next, never in none.
+  pub fn take_window(&self) -> SfuCallQuality {
+    SfuCallQuality {
+      loss_buckets: self
+        .window
+        .loss
+        .iter()
+        .map(|bucket| bucket.swap(0, Ordering::Relaxed))
+        .collect(),
+      quic_sessions: self.window.quic_sessions.swap(0, Ordering::Relaxed),
+      fallback_sessions: self.window.fallback_sessions.swap(0, Ordering::Relaxed),
+    }
   }
 
   /// A running session moved onto a new QUIC connection.
@@ -119,6 +157,7 @@ impl CallQuality {
     self.rtt_seconds.observe(rtt.as_secs_f64());
     if let Some(ratio) = loss_ratio(previous, now) {
       self.downlink_loss_ratio.observe(ratio);
+      saturating_inc(&self.window.loss[loss_bucket(ratio)]);
     }
   }
 
@@ -149,7 +188,12 @@ impl CallQuality {
           "teamcraft_sfu_downlink_loss_ratio",
           "Share of the SFU's QUIC packets to a client that were lost, one sample per busy session every 10 s.",
         )
-        .buckets(LOSS_BUCKETS.to_vec()),
+        .buckets(
+          LOSS_BUCKETS_PERMILLE
+            .iter()
+            .map(|permille| f64::from(*permille) / 1000.0)
+            .collect(),
+        ),
       )?,
       keyframe_requests: IntCounter::new(
         "teamcraft_sfu_keyframe_requests_total",
@@ -164,6 +208,7 @@ impl CallQuality {
         "Running sessions that moved onto a new QUIC connection, mostly from the WebSocket fallback once UDP got through.",
       )?,
       sessions,
+      window: Window::default(),
     })
   }
 }
@@ -224,6 +269,21 @@ pub async fn sample_path(connection: &Connection, quality: &CallQuality) {
     quality.record_path(connection.rtt(), previous, now);
     previous = now;
   }
+}
+
+/// The window's bucket of a loss ratio: the first whose bound it doesn't exceed, as in the
+/// histogram (`le`), else the one above the last bound.
+fn loss_bucket(ratio: f64) -> usize {
+  LOSS_BUCKETS_PERMILLE
+    .iter()
+    .position(|permille| ratio <= f64::from(*permille) / 1000.0)
+    .unwrap_or(LOSS_BUCKETS_PERMILLE.len())
+}
+
+/// One more, stopping at the top: a window is taken every half minute, so it never gets there.
+fn saturating_inc(counter: &AtomicU32) {
+  // Ignored: `None` from the closure means the counter is already at the top and stays there.
+  let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| count.checked_add(1));
 }
 
 /// The share of packets lost between two readings of a path's counters; `None` when too few went
@@ -316,6 +376,30 @@ mod tests {
       assert_eq!(count(Transport::Quic, AddressFamily::Ipv4), 2);
       assert_eq!(count(Transport::Quic, AddressFamily::Ipv6), 0);
       assert_eq!(count(Transport::Fallback, AddressFamily::Ipv6), 1);
+    }
+
+    #[test]
+    fn the_window_counts_what_the_histograms_count_and_starts_again_when_taken() {
+      let quality = CallQuality::new();
+      quality.record_path(Duration::from_millis(40), counters(0, 0), counters(1_000, 1));
+      quality.record_path(Duration::from_millis(40), counters(0, 0), counters(1_000, 30));
+      quality.record_path(Duration::from_millis(40), counters(0, 0), counters(1_000, 900));
+      quality.session_joined(Transport::Quic, IpAddr::V4(Ipv4Addr::LOCALHOST));
+      quality.session_joined(Transport::Fallback, IpAddr::V4(Ipv4Addr::LOCALHOST));
+      let window = quality.take_window();
+      // 0.1 % is in the first bucket (le), 3 % in the one up to 5 %, 90 % above the last bound.
+      assert_eq!(window.loss_buckets, vec![1, 0, 0, 0, 1, 0, 0, 0, 1]);
+      assert_eq!((window.quic_sessions, window.fallback_sessions), (1, 1));
+      let empty = quality.take_window();
+      assert_eq!(empty.loss_buckets, vec![0; WINDOW_BUCKETS]);
+      assert_eq!((empty.quic_sessions, empty.fallback_sessions), (0, 0));
+    }
+
+    #[test]
+    fn a_full_counter_stays_full() {
+      let counter = AtomicU32::new(u32::MAX);
+      saturating_inc(&counter);
+      assert_eq!(counter.load(Ordering::Relaxed), u32::MAX);
     }
   }
 
