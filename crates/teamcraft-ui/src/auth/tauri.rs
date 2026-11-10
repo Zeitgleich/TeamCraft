@@ -29,6 +29,8 @@ use crate::reactive::OwnerLiveness;
 
 /// Prefix of the i18n keys the server commands answer with.
 const SERVER_KEY_PREFIX: &str = "server-entry-";
+/// Prefix of the i18n keys the account commands answer with (#214).
+const ACCOUNT_KEY_PREFIX: &str = "account-";
 /// The message of a server step that failed for another reason.
 const SERVER_FAILED_KEY: &str = "server-entry-failed";
 
@@ -403,6 +405,75 @@ pub async fn server_forget() -> Result<(), ServerProblem> {
   server_call("server_forget", &serde_json::json!({})).await
 }
 
+/// One account of the desktop app (#214), as the shell lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct AccountView {
+  pub origin: String,
+  pub host: String,
+  pub display_name: String,
+  pub is_active: bool,
+  /// The unread state of an account that is not active.
+  #[serde(default)]
+  pub background: BackgroundState,
+}
+
+/// What the switcher shows of an account that is not active, as its server counts it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum BackgroundState {
+  SignedOut,
+  Unread {
+    /// Unread messages and thread replies that mention the user.
+    mentions: u32,
+    /// Conversations and followed threads with something unread.
+    unread: u32,
+  },
+  /// Not read yet, or a state this page doesn't know (a newer shell).
+  #[default]
+  #[serde(other)]
+  Unknown,
+}
+
+/// The accounts on this computer.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct AccountsView {
+  pub accounts: Vec<AccountView>,
+  /// Another account may be added (not on a computer locked to one server).
+  pub can_add: bool,
+}
+
+/// What removing an account deleted.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct RemovedAccount {
+  /// The users whose data on this computer is gone.
+  pub user_ids: Vec<UserId>,
+  /// It was the active account: the page loads afresh.
+  pub was_active: bool,
+}
+
+/// The event the shell sends when the account list or a background badge changed.
+pub const ACCOUNTS_CHANGED_EVENT: &str = "accounts-changed";
+
+/// The accounts the shell keeps.
+pub async fn accounts_list() -> Result<AccountsView, ServerProblem> {
+  server_call("accounts_list", &serde_json::json!({})).await
+}
+
+/// Makes the account of `origin` the active one; the page loads afresh afterwards.
+pub async fn account_switch(origin: &str) -> Result<(), ServerProblem> {
+  server_call("account_switch", &serde_json::json!({ "origin": origin })).await
+}
+
+/// Leaves the active account signed in but not active, for the server entry of another one.
+pub async fn account_add() -> Result<(), ServerProblem> {
+  server_call("account_add", &serde_json::json!({})).await
+}
+
+/// Removes the account of `origin` from this computer: its session ends, its data and keys go.
+pub async fn account_remove(origin: &str) -> Result<RemovedAccount, ServerProblem> {
+  server_call("account_remove", &serde_json::json!({ "origin": origin })).await
+}
+
 /// Like [`call`], keeping the error's kind, which the server commands set to an i18n key.
 async fn server_call<T: for<'de> Deserialize<'de>>(
   command: &str,
@@ -424,9 +495,13 @@ async fn server_call<T: for<'de> Deserialize<'de>>(
     JsFuture::from(promise)
       .await
       .map_err(|value| match serde_wasm_json::<CommandError>(&value) {
-        Ok(error) if error.kind.starts_with(SERVER_KEY_PREFIX) => ServerProblem {
-          key: error.kind,
-          detail: error.message,
+        Ok(error)
+          if error.kind.starts_with(SERVER_KEY_PREFIX) || error.kind.starts_with(ACCOUNT_KEY_PREFIX) =>
+        {
+          ServerProblem {
+            key: error.kind,
+            detail: error.message,
+          }
         },
         Ok(error) => failed(error.message),
         Err(_) => failed(value.as_string().unwrap_or_default()),

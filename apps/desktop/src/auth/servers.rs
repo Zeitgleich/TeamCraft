@@ -1,8 +1,13 @@
 //! The servers the user signed in to, and the server a company preconfigured (docs/operations.md
 //! "Server address in the apps").
 //!
-//! Accounts are kept as a list with one active entry, so several accounts (#214) only add UI. The
-//! file holds no secrets: tokens are in the OS keyring, keyed by the server origin.
+//! Accounts are kept as a list with at most one active entry: several accounts on several servers
+//! (#214), one per server origin. The file holds no secrets: tokens and keys are in the sealed file
+//! of local secrets, keyed by the server origin, and each server's store has its own directory.
+//!
+//! Locked to a managed server (`lock_server`, #220), the list holds that server's account only:
+//! accounts on other servers are dropped at the start (as the one account was before #214) and no
+//! account can be added.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -72,22 +77,44 @@ impl ServerState {
     }
   }
 
-  /// The account to start with: the active one, unless the managed configuration forbids its
-  /// server. A forbidden one is forgotten and returned as `Err`, so its tokens can be deleted;
-  /// the managed server is offered instead.
-  pub fn startup_account(&self) -> Result<Option<ServerProfile>, Box<ServerProfile>> {
-    let Some(active) = self.directory.active() else {
-      return Ok(None);
+  /// The accounts to start with: the active one, if any, and the accounts the managed configuration
+  /// forbids. Those are forgotten here and returned, so their tokens can be deleted; without an
+  /// active account the managed server is offered.
+  pub fn startup_accounts(&self) -> StartupAccounts {
+    let forbidden = match self
+      .directory
+      .retain(|profile| self.managed.allows(&profile.origin))
+    {
+      Ok(forbidden) => forbidden,
+      Err(error) => {
+        tracing::warn!(%error, "could not update the account list");
+        Vec::new()
+      },
     };
-    if self.managed.allows(&active.origin) {
-      return Ok(Some(active));
+    if !forbidden.is_empty() {
+      tracing::info!(
+        count = forbidden.len(),
+        "the managed configuration does not allow stored servers; forgetting them"
+      );
     }
-    tracing::info!("the managed configuration does not allow the stored server; forgetting it");
-    if let Err(error) = self.directory.forget_active() {
-      tracing::warn!(%error, "could not update the account list");
+    StartupAccounts {
+      maybe_active: self.directory.active(),
+      forbidden,
     }
-    Err(Box::new(active))
   }
+
+  /// Whether another account may be added: not while the computer is locked to one server.
+  pub fn can_add_account(&self) -> bool {
+    !self.managed.is_locked
+  }
+}
+
+/// What [`ServerState::startup_accounts`] found.
+#[derive(Debug, Default)]
+pub struct StartupAccounts {
+  pub maybe_active: Option<ServerProfile>,
+  /// Accounts on servers the managed configuration doesn't allow, no longer in the list.
+  pub forbidden: Vec<ServerProfile>,
 }
 
 impl ServerDirectory {
@@ -112,6 +139,11 @@ impl ServerDirectory {
     }
   }
 
+  /// Every account, in the order they were added; the switcher shows them so.
+  pub fn accounts(&self) -> Vec<ServerProfile> {
+    self.lock().accounts.clone()
+  }
+
   /// The account in use, if any.
   pub fn active(&self) -> Option<ServerProfile> {
     let accounts = self.lock();
@@ -133,24 +165,83 @@ impl ServerDirectory {
       .cloned()
   }
 
-  /// Stores `profile` (replacing an older one of the same server) and makes it the active account.
-  /// The login hint of the older one stays while the identity provider is the same.
+  /// Stores `profile` (replacing an older one of the same server in its place) and makes it the
+  /// active account; a new server's account comes last. The login hint of the older one stays
+  /// while the identity provider is the same.
   pub fn activate(&self, mut profile: ServerProfile) -> std::io::Result<()> {
     let mut accounts = self.lock();
-    if profile.maybe_login_hint.is_none()
-      && let Some(older) = accounts
-        .accounts
-        .iter()
-        .find(|existing| existing.origin == profile.origin && existing.issuer == profile.issuer)
-    {
-      profile.maybe_login_hint.clone_from(&older.maybe_login_hint);
-    }
-    accounts
-      .accounts
-      .retain(|existing| existing.origin != profile.origin);
     accounts.maybe_active = Some(profile.origin.clone());
-    accounts.accounts.push(profile);
+    match accounts
+      .accounts
+      .iter_mut()
+      .find(|existing| existing.origin == profile.origin)
+    {
+      Some(older) => {
+        if profile.maybe_login_hint.is_none() && older.issuer == profile.issuer {
+          profile.maybe_login_hint = older.maybe_login_hint.take();
+        }
+        *older = profile;
+      },
+      None => accounts.accounts.push(profile),
+    }
     save(&self.path, &accounts)
+  }
+
+  /// Makes the stored account of `origin` the active one; `false` when there is none.
+  pub fn switch_to(&self, origin: &ServerOrigin) -> std::io::Result<bool> {
+    let mut accounts = self.lock();
+    if !accounts.accounts.iter().any(|profile| &profile.origin == origin) {
+      return Ok(false);
+    }
+    if accounts.maybe_active.as_ref() == Some(origin) {
+      return Ok(true);
+    }
+    accounts.maybe_active = Some(origin.clone());
+    save(&self.path, &accounts).map(|()| true)
+  }
+
+  /// No account is active while another one is added: the list stays, and the next start shows
+  /// the server entry with the way back to them.
+  pub fn park(&self) -> std::io::Result<()> {
+    let mut accounts = self.lock();
+    if accounts.maybe_active.take().is_none() {
+      return Ok(());
+    }
+    save(&self.path, &accounts)
+  }
+
+  /// Takes the account of `origin` out of the list; answers it, `None` when there was none. When it
+  /// was the active one, no account is active afterwards.
+  pub fn remove(&self, origin: &ServerOrigin) -> std::io::Result<Option<ServerProfile>> {
+    let mut accounts = self.lock();
+    let Some(index) = accounts
+      .accounts
+      .iter()
+      .position(|profile| &profile.origin == origin)
+    else {
+      return Ok(None);
+    };
+    let removed = accounts.accounts.remove(index);
+    if accounts.maybe_active.as_ref() == Some(origin) {
+      accounts.maybe_active = None;
+    }
+    save(&self.path, &accounts).map(|()| Some(removed))
+  }
+
+  /// Keeps the accounts `is_kept` takes and answers the others, which are gone from the list.
+  fn retain(&self, is_kept: impl Fn(&ServerProfile) -> bool) -> std::io::Result<Vec<ServerProfile>> {
+    let mut accounts = self.lock();
+    let (kept, dropped): (Vec<_>, Vec<_>) = accounts.accounts.drain(..).partition(|profile| is_kept(profile));
+    accounts.accounts = kept;
+    if dropped.is_empty() {
+      return Ok(dropped);
+    }
+    if let Some(active) = &accounts.maybe_active
+      && !accounts.accounts.iter().any(|profile| &profile.origin == active)
+    {
+      accounts.maybe_active = None;
+    }
+    save(&self.path, &accounts).map(|()| dropped)
   }
 
   /// Remembers the account last signed in with on the server `origin` of `issuer`, for the next
@@ -338,6 +429,127 @@ mod tests {
     directory.activate(profile("team.example.com", "Team")).unwrap();
     directory.forget_active().unwrap();
     assert!(ServerDirectory::load(&dir.0).active().is_none());
+  }
+
+  #[test]
+  fn several_accounts_stay_in_their_order_and_one_is_active() {
+    let dir = TempDir::new("several");
+    let directory = ServerDirectory::load(&dir.0);
+    directory.activate(profile("a.example.com", "A")).unwrap();
+    directory.activate(profile("b.example.com", "B")).unwrap();
+    // Signing in again on A (new scopes) keeps it in its place.
+    directory.activate(profile("a.example.com", "A again")).unwrap();
+    assert!(directory.switch_to(&origin("b.example.com")).unwrap());
+    assert!(!directory.switch_to(&origin("c.example.com")).unwrap());
+
+    let reloaded = ServerDirectory::load(&dir.0);
+    let hosts: Vec<_> = reloaded
+      .accounts()
+      .iter()
+      .map(|profile| profile.origin.host().to_owned())
+      .collect();
+    assert_eq!(hosts, ["a.example.com", "b.example.com"]);
+    assert_eq!(reloaded.accounts()[0].display_name, "A again");
+    assert_eq!(reloaded.active().unwrap().origin.host(), "b.example.com");
+  }
+
+  #[test]
+  fn parking_keeps_every_account_and_none_is_active() {
+    let dir = TempDir::new("park");
+    let directory = ServerDirectory::load(&dir.0);
+    directory.activate(profile("a.example.com", "A")).unwrap();
+    directory.park().unwrap();
+    let reloaded = ServerDirectory::load(&dir.0);
+    assert!(reloaded.active().is_none());
+    assert_eq!(reloaded.accounts().len(), 1);
+    assert!(reloaded.switch_to(&origin("a.example.com")).unwrap());
+    assert_eq!(reloaded.active().unwrap().origin.host(), "a.example.com");
+  }
+
+  #[test]
+  fn removing_an_account_leaves_the_others() {
+    let dir = TempDir::new("remove");
+    let directory = ServerDirectory::load(&dir.0);
+    directory.activate(profile("a.example.com", "A")).unwrap();
+    directory.activate(profile("b.example.com", "B")).unwrap();
+
+    let removed = directory.remove(&origin("a.example.com")).unwrap().unwrap();
+    assert_eq!(removed.display_name, "A");
+    assert_eq!(directory.active().unwrap().origin.host(), "b.example.com");
+    assert!(directory.remove(&origin("a.example.com")).unwrap().is_none());
+
+    directory.remove(&origin("b.example.com")).unwrap();
+    let reloaded = ServerDirectory::load(&dir.0);
+    assert!(reloaded.active().is_none());
+    assert!(reloaded.accounts().is_empty());
+  }
+
+  /// The file of the version before #214 is read as it is: its account stays the active one, under
+  /// the same origin, so its tokens, keys and store directory (all keyed by the origin) are found.
+  #[test]
+  fn the_single_account_of_an_older_version_is_the_active_account() {
+    let dir = TempDir::new("older");
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let older = r#"{"accounts":[{"origin":"https://team.example.com","issuer":"https://auth.example.com/realms/company","client_id":"teamcraft","scopes":["openid"],"display_name":"Team","server_version":"1.0.0","has_local_accounts":false,"is_login_page_always_shown":true,"login_hint":"me@example.com"}],"active":"https://team.example.com"}"#;
+    std::fs::write(dir.0.join(ACCOUNTS_FILE), older).unwrap();
+
+    let directory = ServerDirectory::load(&dir.0);
+    let active = directory.active().unwrap();
+    assert_eq!(active.origin.as_str(), "https://team.example.com");
+    assert_eq!(active.maybe_login_hint.as_deref(), Some("me@example.com"));
+    assert_eq!(directory.accounts().len(), 1);
+    let config = crate::auth::DesktopConfig::from_profile(&active);
+    assert_eq!(config.storage_key().unwrap(), "team.example.com");
+    assert_eq!(
+      config.token_key(),
+      "https://team.example.com|https://auth.example.com/realms/company|teamcraft"
+    );
+
+    // Adding a second account writes the same format, with the first one still first.
+    directory.activate(profile("other.example.com", "Other")).unwrap();
+    let written: serde_json::Value =
+      serde_json::from_slice(&std::fs::read(dir.0.join(ACCOUNTS_FILE)).unwrap()).unwrap();
+    assert_eq!(written["active"], "https://other.example.com");
+    assert_eq!(written["accounts"][0]["origin"], "https://team.example.com");
+    assert_eq!(written["accounts"][0]["login_hint"], "me@example.com");
+  }
+
+  #[test]
+  fn a_lock_drops_the_accounts_on_other_servers_at_the_start() {
+    let dir = TempDir::new("lock");
+    let directory = ServerDirectory::load(&dir.0);
+    directory.activate(profile("team.example.com", "Team")).unwrap();
+    directory.activate(profile("other.example.com", "Other")).unwrap();
+    let locked = ManagedServer {
+      maybe_address: Some("team.example.com".into()),
+      is_locked: true,
+    };
+
+    let state = ServerState::new(ServerDirectory::load(&dir.0), locked);
+    let startup = state.startup_accounts();
+    assert!(!state.can_add_account());
+    assert!(
+      startup.maybe_active.is_none(),
+      "the active account was on the other server"
+    );
+    let forbidden: Vec<_> = startup
+      .forbidden
+      .iter()
+      .map(|profile| profile.origin.host().to_owned())
+      .collect();
+    assert_eq!(forbidden, ["other.example.com"]);
+    let hosts: Vec<_> = state
+      .directory
+      .accounts()
+      .iter()
+      .map(|profile| profile.origin.host().to_owned())
+      .collect();
+    assert_eq!(hosts, ["team.example.com"]);
+    assert_eq!(ServerDirectory::load(&dir.0).accounts().len(), 1, "persisted");
+
+    let unlocked = ServerState::new(ServerDirectory::load(&dir.0), ManagedServer::default());
+    assert!(unlocked.can_add_account());
+    assert!(unlocked.startup_accounts().forbidden.is_empty());
   }
 
   #[test]

@@ -28,6 +28,8 @@ use crate::dropped_files::DroppedFilesState;
 /// Headers of [`core_stage_file`]; the webview's `large_files` sends the same names.
 const STAGE_ID_HEADER: &str = "x-stage-id";
 const STAGE_OFFSET_HEADER: &str = "x-stage-offset";
+/// The folder of the stores in the app's data directory ([`core_dir`]).
+const CORE_DIR: &str = "core";
 
 /// Holds the running core, if a user is signed in.
 pub struct CoreHost {
@@ -160,7 +162,7 @@ pub async fn core_start(
     .active_server()
     .ok_or_else(|| "no server is chosen".to_owned())?;
   // Everything local is per server: the store (with the workspace root it pinned) and its key.
-  let core_dir = base_dir(&app)?.join("core");
+  let core_dir = core_dir(&app)?;
   super::media::finish_pending_clear(&core_dir);
   let data_dir = core_dir.join(server.storage_key()?);
   let status = host
@@ -631,6 +633,14 @@ pub async fn core_stop(app: AppHandle, host: State<'_, CoreHost>) -> Result<(), 
     runtime.forget_unfinished_setup().await;
   }
   Ok(host.stop()?)
+}
+
+/// Where the stores live: one directory per server ([`DesktopConfig::storage_key`]), each with
+/// the databases of its users, their media caches and upload staging.
+///
+/// [`DesktopConfig::storage_key`]: crate::auth::DesktopConfig::storage_key
+pub fn core_dir(app: &AppHandle) -> Result<PathBuf, String> {
+  Ok(base_dir(app)?.join(CORE_DIR))
 }
 
 /// The app's data directory; `TEAMCRAFT_DATA_DIR` overrides the platform's.

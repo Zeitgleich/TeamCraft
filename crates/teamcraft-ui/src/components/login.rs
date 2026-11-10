@@ -20,6 +20,7 @@ use crate::auth::{self, AppConfig};
 use crate::backend::Backend;
 use crate::brand::{Brand, image_src};
 use crate::clock::now_ms;
+use crate::components::account_switcher::AuthAccountsLine;
 use crate::components::app::Shell;
 use crate::components::brand_logo::{BrandImage, BrandLogo};
 use crate::components::bundle_banner::BundleBanner;
@@ -56,6 +57,8 @@ pub fn SessionGate(settings: Settings) -> impl IntoView {
   let config = AppConfig::load();
   let control = SessionControl::new(auth::detect(config));
   provide_context(control);
+  // One list of the desktop app's accounts for the sign-in screens and the app (#214).
+  crate::components::account_switcher::provide_accounts();
   control.start();
   // "Sign in there" on a link to an instance (app_links.rs): the usual check and confirmation.
   if let Some(links) = use_context::<crate::app_links::AppLinks>() {
@@ -570,6 +573,10 @@ fn LoginScreen(problem: Option<LoginProblem>, control: SessionControl) -> impl I
       }}
       <SignInHelp page=sign_in.page />
       <ServerLine control=control />
+      // The other accounts on this computer, instead of signing in here (#214).
+      <Show when=tauri::is_available fallback=|| ()>
+        <AuthAccountsLine />
+      </Show>
       {demo_switch()}
     </AuthFrame>
   }
@@ -1014,6 +1021,10 @@ fn ServerEntryScreen(
           <span>{move || i18n.t("server-entry-continue")}</span>
         </button>
       </form>
+      // Adding an account, or the active one removed: the way back to the others (#214).
+      <Show when=tauri::is_available fallback=|| ()>
+        <AuthAccountsLine />
+      </Show>
     </AuthFrame>
   }
 }

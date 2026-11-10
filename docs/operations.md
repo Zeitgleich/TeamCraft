@@ -1051,6 +1051,40 @@ the lock, the desktop app accepts no other server, and an account stored for ano
 the next start. The settings are `server_url` (an address as a user would type it) and `lock_server`
 (`true` or `false`, default `false`; a lock without an address does nothing).
 
+**The lock with several accounts** (#214). The desktop app can hold accounts on several servers
+(below). A lock means one account, on the managed server: "Add account" is not offered and refused
+by the shell, switching to an account of another server is refused, and every stored account of
+another server is taken off the list at the next start, its stored session deleted, as the single
+account was before. Its encrypted store stays on disk as it did then (signing in to that server again
+after the lock is lifted finds it); removing an account by hand deletes it. The lock decides which
+servers an account may be on, not how many accounts there are: without a lock the user adds any
+number, also next to the managed server's account.
+
+**Several accounts in the desktop app** (#214, desktop first). The account menu lists the other
+accounts on this computer with their unread mentions (a number) or other unread messages (a dot),
+"Add account" (the server entry and sign-in, while the current account stays signed in) and "Manage
+accounts" (switch, remove). The server entry and the sign-in screen offer the way back to the other
+accounts. One account is active at a time: it runs the client core (store, gateway, notifications,
+calls). Each other signed-in account is asked for its counts every 2 minutes (`GET /api/v1/unread`,
+with its own session and DPoP key; the server's counts include muted conversations, so only mentions
+show as a number). Switching is refused during a call. Isolation is by server origin, as before:
+
+| Kept per account (server origin)              | Where                                                                  |
+|-----------------------------------------------|------------------------------------------------------------------------|
+| Refresh token, local session, DPoP key, notes | Sealed file of local secrets, items named by the origin (e2ee.md §9.7) |
+| Database and backup keys                      | The same file and the keys file, items `{origin}\|{user}`              |
+| Store, media cache, upload staging            | `core/{storage key of the origin}/` in the app's data directory        |
+| Server profile and login hint                 | `accounts.json` (no secrets)                                           |
+
+Shared between accounts: the window, the theme and language and the other device settings, and the
+sealed file's one keychain item. Removing an account ends its session at the identity provider (or the
+server, for a local account), deletes every item of its origin from the sealed files, gives the files
+a new key (an older copy put back opens no more, as after a sign-out) and deletes its store directory;
+the other accounts' items and directories are not touched. An installation from before #214 needs no
+migration: its one account was already stored under its origin and stays the active one. Not done
+yet: the device stays in the server's device list after a removal (revoke it from another device),
+and links open in the active account.
+
 **Precedence** (issue #220; the one place that states it is `ManagedServer::load` in
 `apps/desktop/src/auth/servers.rs`). The first source that names a server wins, and the lock comes from
 that same source, never from a lower one:
@@ -1196,7 +1230,8 @@ optionally lock the apps to it:
 | iOS      | Managed app configuration (`com.apple.configuration.managed`): `server_url`, `lock_server`                                                      |
 
 With a preconfigured server the app checks it on first start and goes straight to the confirmation.
-`lock_server` hides "Change server" and drops an account of another server.
+`lock_server` hides "Change server" and drops an account of another server; on the desktop it also
+hides "Add account" (see "The lock with several accounts" above).
 
 **The sign-in page.** Every client renders the same page from `server-info`: a prominent "Sign in
 with <provider>" button, and the e-mail and password form of local accounts inline, in the order the
