@@ -4,8 +4,9 @@
 use teamcraft_db::{BrakeConfirmation, HeldDeactivation, OidcSyncStatusRow, User};
 use teamcraft_proto::{
   AdminOidcSyncPreviewResponse, AdminOidcSyncResponse, ConfirmOidcSyncBrakeRequest, DeactivationCause,
-  HeldDeactivationResponse, OidcSyncBrakeSettings, OidcSyncError, OidcSyncMode, OidcSyncOutcome,
-  OidcSyncRunResponse, OidcSyncState, Permission, PlannedDeactivationResponse, Target, UserId,
+  DeactivationSource, HeldDeactivationResponse, OidcSyncBrakeSettings, OidcSyncError, OidcSyncMode,
+  OidcSyncOutcome, OidcSyncRunResponse, OidcSyncState, Permission, PlannedDeactivationResponse, Target,
+  UserId,
 };
 use time::{Duration, OffsetDateTime};
 use tracing::warn;
@@ -15,6 +16,7 @@ use super::audit::{self, Target as AuditTarget};
 use super::convert::unix_millis;
 use super::oidc::{self, preview_plan};
 use super::oidc_brake::PlannedDeactivation;
+use super::scim;
 use crate::auth::AuthenticatedUser;
 use crate::config::OidcSyncRunMode;
 use crate::error::ApiError;
@@ -170,10 +172,14 @@ pub async fn confirm_brake(
   request: ConfirmOidcSyncBrakeRequest,
 ) -> Result<AdminOidcSyncResponse, ApiError> {
   require(state, caller, Permission::ManageUsers, &Target::Instance)?;
-  if state.settings.get().maybe_oidc_sync.is_none() {
+  let held = state.database.list_held_deactivations().await?;
+  let is_sync_active = state.settings.get().maybe_oidc_sync.is_some();
+  let has_scim_holds = held
+    .iter()
+    .any(|entry| entry.source == DeactivationSource::Scim.as_str());
+  if !is_sync_active && !has_scim_holds {
     return Err(ApiError::Unavailable("identity provider sync (oidc.sync)".into()));
   }
-  let held = state.database.list_held_deactivations().await?;
   let caller_rank = rank(Some(caller.role.as_str()));
   let may_confirm_all = held
     .iter()
@@ -201,7 +207,11 @@ pub async fn confirm_brake(
     },
     BrakeConfirmation::Confirmed(0) => {},
     BrakeConfirmation::Confirmed(_) => {
-      if let Err(error) = oidc::sync_once(state).await {
+      if has_scim_holds && let Err(error) = scim::apply_confirmed_holds(state).await {
+        // The confirmation stands: the next confirmation applies what is left.
+        warn!(%error, "applying confirmed SCIM deactivations failed");
+      }
+      if is_sync_active && let Err(error) = oidc::sync_once(state).await {
         // The confirmation stands: the next run applies it.
         warn!(%error, "the sync after a confirmation failed");
       }

@@ -49,6 +49,46 @@ pub const MAX_EMAIL_CHARS: usize = 320;
 /// The deepest nesting of JSON objects and arrays in a request body.
 pub const MAX_JSON_DEPTH: usize = 16;
 
+crate::wire_enum::wire_enum! {
+  /// TeamCraft's stable `error_code` of a SCIM error answer (api-conventions.md).
+  pub enum ScimErrorCode {
+    /// No token, a malformed one, or one no client has (also while the client was revoked).
+    InvalidToken => "invalid_token",
+    /// Too many requests of this client; `Retry-After` says when to come back.
+    RateLimited => "rate_limited",
+    /// No such resource of this client.
+    NotFound => "scim_not_found",
+    /// The body is not JSON, or not the JSON a resource or PATCH is.
+    InvalidSyntax => "scim_invalid_syntax",
+    /// An attribute has a value TeamCraft doesn't take.
+    InvalidValue => "scim_invalid_value",
+    /// The filter can't be parsed.
+    InvalidFilter => "scim_invalid_filter",
+    /// A PATCH path can't be parsed or names nothing.
+    InvalidPath => "scim_invalid_path",
+    /// Too many operations or members in one request, or a filter that would read too much.
+    TooMany => "scim_too_many",
+    /// The body is larger than the server takes.
+    BodyTooLarge => "scim_body_too_large",
+    /// This client has another user with the `userName`, or another group with the `displayName`.
+    Uniqueness => "scim_uniqueness",
+    /// The account belongs to another SCIM client.
+    LinkedElsewhere => "scim_linked_elsewhere",
+    /// An admin deleted the account of this identity; it comes back at its own next sign-in.
+    IdentityReleased => "scim_identity_released",
+    /// The attribute that is the sign-in subject is missing or would change.
+    IdentityImmutable => "scim_identity_immutable",
+    /// A group member that is no user of this client.
+    UnknownMember => "scim_unknown_member",
+    /// `If-Match` names another version.
+    VersionMismatch => "scim_version_mismatch",
+    /// The server can't take the request right now; `Retry-After` says when to come back.
+    Unavailable => "unavailable",
+    /// Something failed on the server.
+    Internal => "internal",
+  }
+}
+
 /// `scimType` of an error answer (RFC 7644 §3.12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,13 +118,18 @@ pub struct ScimErrorBody {
 }
 
 impl ScimErrorBody {
-  pub fn new(status: u16, maybe_scim_type: Option<ScimType>, error_code: &str, detail: String) -> Self {
+  pub fn new(
+    status: u16,
+    maybe_scim_type: Option<ScimType>,
+    error_code: &ScimErrorCode,
+    detail: String,
+  ) -> Self {
     Self {
       schemas: vec![ERROR_SCHEMA.to_owned()],
       status: status.to_string(),
       maybe_scim_type,
       detail,
-      error_code: error_code.to_owned(),
+      error_code: error_code.as_str().to_owned(),
     }
   }
 }

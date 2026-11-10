@@ -65,6 +65,7 @@ pub mod retention;
 pub mod role_evidence;
 pub mod runtime_settings;
 pub mod scheduled_messages;
+pub mod scim;
 pub mod session;
 pub mod shares;
 pub mod space_images;

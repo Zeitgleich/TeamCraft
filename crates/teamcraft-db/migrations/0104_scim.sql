@@ -28,6 +28,10 @@ CREATE TABLE scim_users (
   external_id text,
   given_name  text,
   family_name text,
+  -- What the provider sent as `displayName` and the address it chose; the account takes them only
+  -- until its first sign-in, from then on the sign-in's token is the source of them.
+  display_name text,
+  email        text,
   -- The ETag (`W/"<version>"`): raised by every change through SCIM.
   version     bigint      NOT NULL DEFAULT 1,
   created_at  timestamptz NOT NULL DEFAULT now(),

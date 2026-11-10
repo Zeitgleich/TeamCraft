@@ -27,6 +27,7 @@ mod org_recovery;
 mod presence;
 mod profiles;
 mod retention;
+mod scim;
 mod shares;
 mod spaces;
 mod sync;
@@ -149,6 +150,7 @@ pub(crate) fn routes() -> OpenApiRouter<AppState> {
     .merge(presence::routes())
     .merge(profiles::routes())
     .merge(retention::routes())
+    .merge(scim::routes())
     .merge(shares::routes())
     .merge(spaces::routes())
     .merge(sync::routes())

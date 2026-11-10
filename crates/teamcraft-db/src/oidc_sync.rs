@@ -55,6 +55,8 @@ pub struct OidcSyncStatusRow {
 pub struct HeldDeactivation {
   pub user: UserId,
   pub cause: String,
+  /// `oidc_sync` or `scim` (`DeactivationSource`).
+  pub source: String,
   pub held_at: OffsetDateTime,
   pub is_confirmed: bool,
   pub display_name: String,
@@ -157,7 +159,7 @@ impl Database {
   /// The deactivations held back, oldest first, with who they are about.
   pub async fn list_held_deactivations(&self) -> Result<Vec<HeldDeactivation>, DbError> {
     let rows = sqlx::query!(
-      r#"SELECT h.user_id, h.cause, h.held_at, h.confirmed_at IS NOT NULL AS "is_confirmed!",
+      r#"SELECT h.user_id, h.cause, h.source, h.held_at, h.confirmed_at IS NOT NULL AS "is_confirmed!",
                 u.display_name, u.username, u.oidc_role
          FROM oidc_sync_held_deactivations h JOIN users u ON u.id = h.user_id
          ORDER BY h.held_at, h.user_id"#
@@ -170,6 +172,7 @@ impl Database {
         Ok(HeldDeactivation {
           user: from_db(row.user_id)?,
           cause: row.cause,
+          source: row.source,
           held_at: row.held_at,
           is_confirmed: row.is_confirmed,
           display_name: row.display_name,
@@ -188,7 +191,7 @@ impl Database {
     let ids: Vec<i64> = held.iter().map(|entry| to_db(entry.user)).collect();
     let causes: Vec<&str> = held.iter().map(|entry| entry.cause).collect();
     let removed = sqlx::query!(
-      "DELETE FROM oidc_sync_held_deactivations WHERE NOT (user_id = ANY($1))",
+      "DELETE FROM oidc_sync_held_deactivations WHERE source = 'oidc_sync' AND NOT (user_id = ANY($1))",
       &ids,
     )
     .execute(&mut *tx)
@@ -334,7 +337,9 @@ impl Database {
   }
 }
 
-async fn bump_held_revision(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<(), DbError> {
+pub(crate) async fn bump_held_revision(
+  tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), DbError> {
   sqlx::query!(
     r#"INSERT INTO oidc_sync_status (id, held_revision) VALUES (true, 1)
        ON CONFLICT (id) DO UPDATE SET held_revision = oidc_sync_status.held_revision + 1"#
