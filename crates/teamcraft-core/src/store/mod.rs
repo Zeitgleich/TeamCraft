@@ -518,9 +518,10 @@ pub struct MessageMeta {
   pub group_mentions: Vec<String>,
   /// The workspace's custom emoji the text names by `:shortcode:` (issue #207), with their
   /// pictures' hashes, inside the ciphertext only. Receivers show those words as the pictures
-  /// they hold; an older client ignores the field and shows the text.
-  #[serde(default, skip_serializing_if = "Vec::is_empty")]
-  pub custom_emoji: Vec<teamcraft_proto::CustomEmojiRef>,
+  /// they hold; an older client ignores the field and shows the text. A boxed slice: the text
+  /// variant of [`MessageContent`] stays small enough.
+  #[serde(default, skip_serializing_if = "<[_]>::is_empty")]
+  pub custom_emoji: Box<[teamcraft_proto::CustomEmojiRef]>,
   /// A poll (issue #205, e2ee.md §4.12): the message's text is what an older version shows (the
   /// question and options as text), this is what a current one shows. Votes and the close are
   /// [`MessageContent::PollVote`] and [`MessageContent::PollClose`] messages naming the message.

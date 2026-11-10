@@ -1356,12 +1356,14 @@ fn apply_control_with(
       let MessageContent::Text { body: old, meta, .. } = &mut stored.content else {
         return Ok(());
       };
-      for reference in custom_emoji {
-        if meta.custom_emoji.len() < teamcraft_proto::MAX_CUSTOM_EMOJI_PER_MESSAGE
-          && !meta.custom_emoji.contains(reference)
-        {
-          meta.custom_emoji.push(reference.clone());
+      if !custom_emoji.is_empty() {
+        let mut named = meta.custom_emoji.to_vec();
+        for reference in custom_emoji {
+          if named.len() < teamcraft_proto::MAX_CUSTOM_EMOJI_PER_MESSAGE && !named.contains(reference) {
+            named.push(reference.clone());
+          }
         }
+        meta.custom_emoji = named.into_boxed_slice();
       }
       if old != body {
         let previous = std::mem::replace(old, body.clone());

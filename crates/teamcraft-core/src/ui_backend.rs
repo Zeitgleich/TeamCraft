@@ -2237,7 +2237,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
   ) -> MessageContent {
     meta.custom_emoji = self
       .read(crate::custom_emoji::stored_set(&self.store))
-      .refs_in(body);
+      .refs_in(body)
+      .into_boxed_slice();
     if !body.contains('@') {
       meta.group_mentions = Vec::new();
       return MessageContent::Text {
@@ -4303,7 +4304,7 @@ fn reactions_of<'a>(
 /// The custom emoji a text message names (issue #207); those of its `:shortcode:` words only.
 fn shown_custom_emoji(content: &MessageContent) -> Vec<teamcraft_proto::CustomEmojiRef> {
   match content {
-    MessageContent::Text { meta, .. } => meta.custom_emoji.clone(),
+    MessageContent::Text { meta, .. } => meta.custom_emoji.to_vec(),
     _ => Vec::new(),
   }
 }
