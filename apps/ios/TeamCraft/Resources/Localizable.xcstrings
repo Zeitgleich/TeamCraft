@@ -18464,6 +18464,134 @@
           }
         }
       }
+    },
+    "channel_mention_confirm_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notify everyone?"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alle benachrichtigen?"
+          }
+        }
+      }
+    },
+    "channel_mention_confirm %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "This message notifies %lld member."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "This message notifies all %lld members."
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Diese Nachricht benachrichtigt %lld Mitglied."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Diese Nachricht benachrichtigt alle %lld Mitglieder."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "group_mention_confirm_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notify the groups?"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gruppen benachrichtigen?"
+          }
+        }
+      }
+    },
+    "group_mention_confirm %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "This message notifies %lld person in the mentioned groups."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "This message notifies %lld people in the mentioned groups."
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Diese Nachricht benachrichtigt %lld Person in den erwähnten Gruppen."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "Diese Nachricht benachrichtigt %lld Personen in den erwähnten Gruppen."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "group_mention_confirm_capped %lld %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This message notifies only the first %1$lld of the %2$lld people in the mentioned groups."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Nachricht benachrichtigt nur die ersten %1$lld von %2$lld Personen in den erwähnten Gruppen."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

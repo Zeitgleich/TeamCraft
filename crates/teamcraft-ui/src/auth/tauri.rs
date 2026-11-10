@@ -578,14 +578,20 @@ pub async fn withdraw_tags(tags: &[NotificationTag]) {
 }
 
 /// Starts or stops the ringtone of an incoming call: in the desktop shell, or in the page.
-pub async fn set_ringtone(is_ringing: bool) {
+/// `speaker_id` is the call speakers chosen in the settings (empty: the default output) and
+/// `volume_percent` the ringtone volume; the browser's ringtone ignores both.
+pub async fn set_ringtone(is_ringing: bool, speaker_id: String, volume_percent: u8) {
   if !is_available() {
     // The browser rings in the page, in the tab that runs the calls.
     #[cfg(target_arch = "wasm32")]
     crate::web_calls::set_ringing(is_ringing);
     return;
   }
-  let args = serde_json::json!({ "is_ringing": is_ringing });
+  let args = serde_json::json!({
+    "is_ringing": is_ringing,
+    "maybe_speakers": Some(speaker_id).filter(|id| !id.is_empty()),
+    "volume_percent": volume_percent,
+  });
   if let Err(error) = call::<()>("set_ringtone", &args).await {
     tracing::debug!(%error, "could not switch the ringtone");
   }

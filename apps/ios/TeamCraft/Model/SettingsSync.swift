@@ -196,8 +196,7 @@ final class AppSettingsStores: SettingsSyncStores {
       firstNameIsMention: mentions.isFirstNameMention,
       channelMentionsNotify: mentions.doChannelMentionsNotify,
       keywords: mentions.keywords,
-      confirmChannelOver: defaults.object(forKey: Self.confirmChannelOverKey) == nil
-        ? Self.defaultConfirmChannelOver : UInt32(clamping: defaults.integer(forKey: Self.confirmChannelOverKey)),
+      confirmChannelOver: Self.confirmChannelOver(in: defaults),
       callStatusSounds: CallStatusSoundsSetting.stored(defaults.string(forKey: CallStatusSoundsSetting.key)).sounds,
       colorTheme: ColorThemeSetting.stored(in: defaults),
       font: defaults.string(forKey: Self.fontKey) ?? Self.defaultFont
@@ -242,6 +241,13 @@ final class AppSettingsStores: SettingsSyncStores {
   }
 
   static let shareTypingKey = "share_typing"
+
+  /// Ask before `@channel`, and before group mentions, in conversations with more than this many
+  /// people (`0` never asks): the value last synced, or the record's default.
+  static func confirmChannelOver(in defaults: UserDefaults = .standard) -> UInt32 {
+    defaults.object(forKey: confirmChannelOverKey) == nil
+      ? defaultConfirmChannelOver : UInt32(clamping: defaults.integer(forKey: confirmChannelOverKey))
+  }
 
   static func listLayout(_ maybeRaw: String?) -> AppListLayout {
     maybeRaw.flatMap(ChatListLayout.init(rawValue:)) == .list ? .list : .spaces

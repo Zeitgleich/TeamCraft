@@ -51,6 +51,8 @@ mod retention_limits;
 #[cfg(feature = "browser")]
 mod role_signing_web;
 mod server_robustness;
+#[cfg(feature = "browser")]
+mod sw_update;
 mod sync_perf;
 mod threads_policy;
 #[cfg(feature = "browser")]

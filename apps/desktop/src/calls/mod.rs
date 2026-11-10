@@ -1744,7 +1744,7 @@ fn play_test_sound(choice: &AudioDeviceChoice) -> Result<(), ActionFailure> {
   }
 }
 
-fn device_choice(maybe_id: Option<String>) -> AudioDeviceChoice {
+pub(crate) fn device_choice(maybe_id: Option<String>) -> AudioDeviceChoice {
   match maybe_id {
     Some(id) => AudioDeviceChoice::Device(AudioDeviceId::new(id)),
     None => AudioDeviceChoice::Default,

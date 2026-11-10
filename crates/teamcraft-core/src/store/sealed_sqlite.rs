@@ -221,7 +221,7 @@ impl SealedStore<SqliteRecords> {
       inner: Mutex::new(Inner {
         connection,
         group,
-        purge: PurgeState::new(),
+        purge: PurgeState::new(BUSY_TIMEOUT),
         is_reading: false,
         writer: OsRng.next_u64(),
       }),
@@ -740,8 +740,25 @@ mod tests {
       })
       .unwrap();
     store.put(Table::MlsStorage, "state", &[2; 64]).unwrap();
+    let started = std::time::Instant::now();
     store.purge_freed().unwrap();
+    // TEAMCRAFT-F: it waited the busy timeout for the reader, under the writer's locks.
+    assert!(
+      started.elapsed() < BUSY_TIMEOUT / 2,
+      "the checkpoint doesn't wait for the reader"
+    );
     assert!(is_purge_due(&store), "an unfinished checkpoint is retried");
+    let busy_timeout_ms: i64 = store
+      .backend()
+      .lock()
+      .connection
+      .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+      .unwrap();
+    assert_eq!(
+      u128::try_from(busy_timeout_ms).unwrap(),
+      BUSY_TIMEOUT.as_millis(),
+      "other statements still wait"
+    );
     reader.execute_batch("COMMIT").unwrap();
     store.purge_freed().unwrap();
     assert!(!is_purge_due(&store));
