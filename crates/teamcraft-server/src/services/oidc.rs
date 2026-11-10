@@ -122,6 +122,8 @@ pub struct SyncReport {
   pub groups_created: u32,
   pub groups_changed: u32,
   pub groups_deleted: u32,
+  /// Space and channel memberships the group mapping added (docs/provisioning.md §5).
+  pub mapped_memberships: u32,
   /// Deactivations the safety brake holds back after this run.
   pub held: u32,
   /// Changes that failed; the next run tries them again.
@@ -430,6 +432,13 @@ async fn apply(
       report.failed += 1;
     }
   }
+  if settings.mode == OidcSyncRunMode::Apply {
+    let provider = Provider::resume(settings, &plan.provider_session);
+    if let Err(error) = apply_group_mappings(state, settings, &provider, &mut report).await {
+      warn!(%error, "applying the group mapping failed");
+      report.failed += 1;
+    }
+  }
   if report != SyncReport::default() {
     info!(?report, "oidc sync finished");
   }
@@ -639,6 +648,62 @@ async fn provision_one(
     .await?;
   info!(user_id = %user.id, "provisioned an account from the identity provider");
   Ok((Some(user.id), ProvisionStatus::Created))
+}
+
+/// Adds the provider's members of each mapped group to the rule's spaces and public channels, once
+/// per account and revision of the rule (docs/provisioning.md §5). Additions only. A group the
+/// provider doesn't have (renamed, deleted) is skipped with a warning; the others go on.
+async fn apply_group_mappings(
+  state: &AppState,
+  settings: &OidcSyncSettings,
+  provider: &Provider<'_>,
+  report: &mut SyncReport,
+) -> Result<(), ApiError> {
+  for mapping in state.database.list_group_mappings().await? {
+    let Some(group) = provider
+      .group_by_path(&mapping.group_path)
+      .await
+      .map_err(unavailable)?
+    else {
+      warn!(group_path = %mapping.group_path, "a mapped group is not at the identity provider; skipped");
+      continue;
+    };
+    let subjects = provider.group_member_ids(&group.id).await.map_err(unavailable)?;
+    let members = state
+      .database
+      .find_users_by_subjects(&settings.issuer, &subjects)
+      .await?;
+    for member in members {
+      let applied = state.database.apply_group_mapping(&mapping, member).await?;
+      if applied.is_empty() {
+        continue;
+      }
+      report.mapped_memberships += u32::try_from(
+        applied
+          .iter()
+          .map(|invite| 1 + invite.joined_channels.len())
+          .sum::<usize>(),
+      )
+      .unwrap_or(u32::MAX);
+      super::audit::record(
+        state,
+        None,
+        "group_mapping_applied",
+        Some(AuditTarget::new("user", member)),
+        &json!({
+          "source": "oidc_sync",
+          "group_path": mapping.group_path,
+          "spaces": applied.iter().map(|invite| invite.space_id.to_string()).collect::<Vec<_>>(),
+          "channels": applied.iter().flat_map(|invite| invite.joined_channels.iter().map(ToString::to_string)).collect::<Vec<_>>(),
+        }),
+      )
+      .await?;
+      if let Some(user) = state.database.get_user(member).await? {
+        super::accounts::announce_applied(state, &user, applied).await?;
+      }
+    }
+  }
+  Ok(())
 }
 
 /// Mirrors the provider's top-level groups as user groups. The provider is the source of truth for
@@ -883,6 +948,22 @@ impl<'a> Provider<'a> {
       if count < page_size {
         return Ok(groups);
       }
+    }
+  }
+
+  /// The group at `path` (e.g. `/engineering`), or `None` if the provider has none there.
+  async fn group_by_path(&self, path: &str) -> Result<Option<RemoteGroup>, ProviderError> {
+    let encoded: Vec<String> = path
+      .trim_matches('/')
+      .split('/')
+      .map(|segment| url::form_urlencoded::byte_serialize(segment.as_bytes()).collect())
+      .collect();
+    match self.get(&format!("/group-by-path/{}", encoded.join("/"))).await {
+      Ok(group) => Ok(Some(group)),
+      Err(ProviderError::Request(error)) if error.status() == Some(reqwest::StatusCode::NOT_FOUND) => {
+        Ok(None)
+      },
+      Err(error) => Err(error),
     }
   }
 

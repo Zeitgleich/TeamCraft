@@ -1,0 +1,74 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, group_path, space_ids, channel_ids, revision\n       FROM identity_provider_group_mappings ORDER BY group_path",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "identity_provider_group_mappings",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "group_path",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "identity_provider_group_mappings",
+            "name": "group_path"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "space_ids",
+        "type_info": "Int8Array",
+        "origin": {
+          "Table": {
+            "table": "identity_provider_group_mappings",
+            "name": "space_ids"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "channel_ids",
+        "type_info": "Int8Array",
+        "origin": {
+          "Table": {
+            "table": "identity_provider_group_mappings",
+            "name": "channel_ids"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "revision",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "identity_provider_group_mappings",
+            "name": "revision"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "19b1e15de23c4a3299ad4ef72312fb9bcb937a04c102034e45250e5c14ad5065"
+}

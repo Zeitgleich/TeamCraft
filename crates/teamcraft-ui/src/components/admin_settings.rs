@@ -430,6 +430,7 @@ pub fn SettingsSection() -> impl IntoView {
     {move || (!loaded.get()).then(|| view! { <p class="muted-text" role="status">{i18n.t("admin-settings-loading")}</p> })}
     <div class="policy-form">
       {GROUPS.into_iter().map(|slug| view! { <GroupForm slug=slug /> }).collect_view()}
+      <crate::components::admin_group_mappings::GroupMappingsForm />
     </div>
   }
 }
