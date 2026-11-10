@@ -100,6 +100,17 @@ impl BrowserSession {
       }
       let url = self.page.url().await.ok().flatten().unwrap_or_default();
       eprintln!("page at the failure: {url}");
+      // The message of the panic is printed only when the whole suite is done; a suite that runs out
+      // of time loses it, so it is kept next to the screenshot too.
+      let message = panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_owned()))
+        .unwrap_or_default();
+      let _ = std::fs::write(
+        artifact_dir().join(format!("{test_name}.txt")),
+        format!("page: {url}\n{message}\n"),
+      );
       resume_unwind(panic);
     }
   }
