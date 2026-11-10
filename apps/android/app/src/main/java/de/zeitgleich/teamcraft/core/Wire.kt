@@ -265,7 +265,17 @@ data class MessageTail(
   val undecrypted: Int = 0,
   /** History this device never read between [messages], oldest first (issues #1156, #1438). */
   val gaps: List<HistoryGap> = emptyList(),
-)
+  /** The reader: the feed knows its own messages before the snapshot is read. */
+  @SerialName("maybe_me") val maybeMe: User? = null,
+  /** The other authors of [messages] this device knows: the feed names them before the snapshot is read. */
+  val authors: List<User> = emptyList(),
+) {
+  /**
+   * A stand-in for the snapshot that knows only the reader and these authors, for a feed opened
+   * before the snapshot was read (from a notification, on a cold start); `null` without the reader.
+   */
+  fun authorsSnapshot(): ChatSnapshot? = maybeMe?.let { ChatSnapshot(me = it, formerUsers = authors) }
+}
 
 /**
  * A hole in the history among a [MessageTail]'s messages: a catch-up after a long absence read a
