@@ -59,8 +59,13 @@ fn search_on_a_large_workspace() {
     .ok()
     .and_then(|value| value.parse().ok())
     .unwrap_or(DEFAULT_MESSAGES);
-  let directory =
-    std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("search-scale-{}", std::process::id()));
+  // `TEAMCRAFT_SEARCH_DIR` puts the store elsewhere (a faster disk than the target directory's).
+  let directory = std::env::var_os("TEAMCRAFT_SEARCH_DIR")
+    .map_or_else(
+      || std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
+      std::path::PathBuf::from,
+    )
+    .join(format!("search-scale-{}", std::process::id()));
   std::fs::create_dir_all(&directory).unwrap();
   let path = directory.join("store.db");
   let key = SymmetricKey::generate(&mut OsRng);

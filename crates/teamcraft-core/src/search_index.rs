@@ -46,7 +46,7 @@ use crate::search::{
   BundleDirectory, ENGLISH, FLAG_FILE, FLAG_LINK, FLAG_THREAD, GERMAN, MAX_CANDIDATES, SearchMatch,
   SearchQuery, WRITER_MEMORY_BYTES, analyzers, fuzzy_query, raw, search_error, searchable_body, tokenizers,
 };
-use crate::store::{LocalStore, MessageFilter, StoreError, StoredMessage, Table, read_together, write_group};
+use crate::store::{LocalStore, StoreError, StoredMessage, Table, read_together, write_group};
 
 /// The index's layout; a store with another one is indexed again from its messages.
 const FORMAT: u32 = 1;
@@ -135,10 +135,11 @@ pub struct IndexStep {
   pub is_done: bool,
 }
 
-/// Work taken from the queue for one step, with the store's messages as they are now.
+/// The queue records one step handled: they are dropped when it saves.
+#[derive(Default)]
 struct Batch {
-  conversations: Vec<(ConversationId, Vec<u8>, Vec<StoredMessage>)>,
-  messages: Vec<(ConversationId, ClientMessageId, Vec<u8>, Option<StoredMessage>)>,
+  conversations: Vec<(ConversationId, Vec<u8>)>,
+  messages: Vec<(ConversationId, ClientMessageId, Vec<u8>)>,
 }
 
 impl SearchIndexer {
@@ -168,28 +169,36 @@ impl SearchIndexer {
         is_done: true,
       });
     }
-    let batch = Batch::take(store, pending, budget)?;
-    let result = self.apply(store, &manifest, &batch);
+    let result = self.apply(store, &manifest, pending, budget, || {});
     if result.is_err() {
       // What is in memory may be ahead of the store: read it again next time.
       self.maybe_loaded = None;
     }
-    result?;
-    let handled = batch.conversations.len() + batch.messages.len();
+    let handled = result?;
     Ok(IndexStep {
       handled,
       is_done: read_pending(store)?.is_empty(),
     })
   }
 
-  fn apply(&mut self, store: &impl LocalStore, manifest: &Manifest, batch: &Batch) -> Result<(), CoreError> {
+  /// Indexes queued records up to `budget` messages (whole conversations first, at least one
+  /// record) with what the store holds of them now, and saves. Returns how many records it handled.
+  /// `before_save` runs between the reads and the save (a test writes there).
+  fn apply(
+    &mut self,
+    store: &impl LocalStore,
+    manifest: &Manifest,
+    pending: Pending,
+    budget: usize,
+    before_save: impl FnOnce(),
+  ) -> Result<usize, CoreError> {
     let loaded = match LoadedIndex::follow(self.maybe_loaded.take(), store, manifest) {
       Ok(loaded) => loaded,
       // A file of the index is missing or damaged: start over rather than stop indexing.
       Err(CoreError::Corrupt(error)) => {
         tracing::warn!(%error, "the local search index is unreadable; indexing again");
         start_over(store)?;
-        return Ok(());
+        return Ok(0);
       },
       Err(error) => return Err(error),
     };
@@ -201,38 +210,67 @@ impl SearchIndexer {
     let mut policy = LogMergePolicy::default();
     policy.set_max_docs_before_merge(MAX_DOCS_BEFORE_MERGE);
     writer.set_merge_policy(Box::new(policy));
-    for (conversation, _, messages) in &batch.conversations {
-      writer.delete_term(Term::from_field_u64(fields.conversation, raw(*conversation)));
-      for message in messages {
-        if let Some(document) = local_document(&fields, message) {
-          writer.add_document(document).map_err(search_error)?;
-        }
+    let mut batch = Batch::default();
+    let mut left = budget;
+    for (conversation, nonce) in pending.conversations {
+      if left == 0 {
+        break;
       }
+      writer.delete_term(Term::from_field_u64(fields.conversation, raw(conversation)));
+      // Read whole, one conversation at a time, without a copy of what the store caches.
+      let mut read = 0;
+      let mut maybe_failed = None;
+      store.with_all_messages(conversation, &mut |messages| {
+        read = messages.len();
+        for document in messages
+          .iter()
+          .filter_map(|message| local_document(&fields, message))
+        {
+          if let Err(error) = writer.add_document(document) {
+            maybe_failed = Some(error);
+            break;
+          }
+        }
+      })?;
+      if let Some(error) = maybe_failed {
+        return Err(search_error(error));
+      }
+      left = left.saturating_sub(read.max(1));
+      batch.conversations.push((conversation, nonce));
     }
     let whole: BTreeSet<ConversationId> = batch
       .conversations
       .iter()
-      .map(|(conversation, ..)| *conversation)
+      .map(|(conversation, _)| *conversation)
       .collect();
-    for (conversation, client_message_id, _, maybe_message) in &batch.messages {
-      if whole.contains(conversation) {
-        // Read with the whole conversation above.
+    for ((conversation, client_message_id), nonce) in pending.messages {
+      let client_message_id = ClientMessageId::from_bytes(client_message_id);
+      if whole.contains(&conversation) {
+        // Read with its conversation, after the record was written: handled with it.
+        batch.messages.push((conversation, client_message_id, nonce));
         continue;
       }
-      writer.delete_term(key_term(&fields, *conversation, *client_message_id));
-      if let Some(document) = maybe_message
-        .as_ref()
-        .and_then(|message| local_document(&fields, message))
+      if left == 0 && !(batch.conversations.is_empty() && batch.messages.is_empty()) {
+        // Over the budget; records of conversations read whole may still come.
+        continue;
+      }
+      writer.delete_term(key_term(&fields, conversation, client_message_id));
+      if let Some(document) = store
+        .message(conversation, client_message_id)?
+        .and_then(|message| local_document(&fields, &message))
       {
         writer.add_document(document).map_err(search_error)?;
       }
+      left = left.saturating_sub(1);
+      batch.messages.push((conversation, client_message_id, nonce));
     }
     writer.commit().map_err(search_error)?;
     writer.wait_merging_threads().map_err(search_error)?;
+    before_save();
     let live = loaded.live_files()?;
-    let maybe_saved = write_group(store, || save(store, manifest, &loaded, &live, batch))?;
+    let maybe_saved = write_group(store, || save(store, manifest, &loaded, &live, &batch))?;
     self.maybe_loaded = maybe_saved.map(|saved| loaded.after_save(saved));
-    Ok(())
+    Ok(batch.conversations.len() + batch.messages.len())
   }
 }
 
@@ -241,37 +279,6 @@ impl std::fmt::Debug for SearchIndexer {
     f.debug_struct("SearchIndexer")
       .field("is_loaded", &self.maybe_loaded.is_some())
       .finish()
-  }
-}
-
-impl Batch {
-  /// Takes queued records up to `budget` messages (whole conversations first, at least one record)
-  /// and reads what the store holds of them now.
-  fn take(store: &impl LocalStore, pending: Pending, budget: usize) -> Result<Self, CoreError> {
-    let mut left = budget;
-    let mut conversations = Vec::new();
-    for (conversation, nonce) in pending.conversations {
-      if left == 0 {
-        break;
-      }
-      let messages = store.messages(conversation, MessageFilter::All)?;
-      left = left.saturating_sub(messages.len().max(1));
-      conversations.push((conversation, nonce, messages));
-    }
-    let mut messages = Vec::new();
-    for ((conversation, client_message_id), nonce) in pending.messages {
-      if left == 0 && !(conversations.is_empty() && messages.is_empty()) {
-        break;
-      }
-      let client_message_id = ClientMessageId::from_bytes(client_message_id);
-      let maybe_message = store.message(conversation, client_message_id)?;
-      left = left.saturating_sub(1);
-      messages.push((conversation, client_message_id, nonce, maybe_message));
-    }
-    Ok(Self {
-      conversations,
-      messages,
-    })
   }
 }
 
@@ -717,10 +724,10 @@ fn save(
     files,
   };
   write_manifest(store, &saved)?;
-  for (conversation, nonce, _) in &batch.conversations {
+  for (conversation, nonce) in &batch.conversations {
     drop_if_unchanged(store, &conversation.to_string(), nonce)?;
   }
-  for (conversation, client_message_id, nonce, _) in &batch.messages {
+  for (conversation, client_message_id, nonce) in &batch.messages {
     drop_if_unchanged(
       store,
       &format!("{conversation}/{}", client_message_id.to_hex()),
@@ -898,7 +905,7 @@ mod tests {
   use super::*;
   use crate::search::{SearchService, export_segment, is_searchable};
   use crate::search_scope::ConversationScope;
-  use crate::store::{MemoryStore, MessageContent, TrackedStore};
+  use crate::store::{MemoryStore, MessageContent, MessageFilter, TrackedStore};
 
   type Store = TrackedStore<Arc<MemoryStore>>;
 
@@ -937,7 +944,9 @@ mod tests {
       }
       assert!(steps < 100, "the index never caught up");
     }
-    assert!(steps > 5, "{steps} steps");
+    // Starting over, then one conversation (more than the budget) per step; the messages queued
+    // one by one went with their conversations.
+    assert_eq!(steps, 4);
     assert!(read_pending(&store).unwrap().is_empty());
 
     // Edits, deletions (by the sender: the message turns `Deleted`), a dropped message, a
@@ -1016,10 +1025,15 @@ mod tests {
       .upsert_message(&message(1, 1, "first draft of the budget"))
       .unwrap();
     let manifest = read_manifest(&store).unwrap().unwrap();
-    let batch = Batch::take(&store, read_pending(&store).unwrap(), 100).unwrap();
+    let pending = read_pending(&store).unwrap();
     // Written again after the step read it.
-    store.upsert_message(&message(1, 1, "final invoice")).unwrap();
-    indexer.apply(&store, &manifest, &batch).unwrap();
+    let write_again = || store.upsert_message(&message(1, 1, "final invoice")).unwrap();
+    assert_eq!(
+      indexer
+        .apply(&store, &manifest, pending, 100, write_again)
+        .unwrap(),
+      1
+    );
     assert_eq!(read_pending(&store).unwrap().messages.len(), 1);
     let mut service = SearchService::new();
     assert!(search(&mut service, &store, &["draft"]).is_empty());
