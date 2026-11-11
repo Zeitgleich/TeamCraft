@@ -397,6 +397,20 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   (a still screen) answers a keyframe request with its last picture after 150 ms, and screen
   shares send their last picture again about once a second while the screen doesn't change
   (`VideoSendConfig::maybe_idle_refresh`).
+- **Lost video packets (#1762):** the SFU keeps the video datagrams it forwarded for about a second
+  (per track and layer, bounded in count) and resends those a receiver names in a `nack`, to that
+  receiver only, still DAVE encrypted and restamped for its bandwidth estimation. A receiver asks
+  as soon as a gap in a layer's RTP sequence numbers (or a frame's fragment index) shows a packet
+  missing, again after about one and a half round trips (measured on the answers), at most three
+  times; complete frames behind a missing packet wait for it so the decoder gets them in order. A
+  packet given up on is a loss as before: a keyframe is asked for. The SFU announces its window in
+  `joined` (`retransmit_window_ms`); clients ask only SFUs that do, and older clients never ask.
+  Resent bytes come out of a per-receiver budget (30 % of its downlink estimate, bursts of 64 KiB)
+  and count in its estimate like any others, so a lossy receiver can't make the SFU flood its link.
+  Audio isn't resent: Opus conceals losses and carries FEC, and a late frame couldn't be played.
+  Losses on a publisher's uplink aren't repaired: the SFU alone covers the common case (viewers
+  behind worse links than the presenter, each repaired without a cost to the others), and the
+  publisher's uplink estimate already drops layers its link loses.
 - **Layers that are sent (#921):** a publisher's uplink budget pauses its top layers; it tells the
   SFU which layers it carries (`uplink_layers`), and the SFU allocates no higher one. A layer that
   stops arriving while a lower one keeps coming (an older publisher, a failing encoder) is

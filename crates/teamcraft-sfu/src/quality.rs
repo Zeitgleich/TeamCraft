@@ -12,8 +12,8 @@
 //!
 //! Calls run on QUIC datagrams, not RTP, so there are no RTCP receiver reports: loss and RTT come
 //! from the QUIC connection, which acknowledges every packet (loss of the SFU's packets to the
-//! client, i.e. the downlink). Media is never retransmitted, so there are no NACKs to count; a
-//! keyframe request is the SFU's PLI.
+//! client, i.e. the downlink). A keyframe request is the SFU's PLI; video packets it resends on a
+//! receiver's NACK (#1762) are counted too.
 //!
 //! Beside the histograms, the same samples are counted in a small window that the roster report
 //! takes and empties ([`CallQuality::take_window`]): the server's health check `call_quality` reads
@@ -52,6 +52,7 @@ pub struct CallQuality {
   rtt_seconds: Histogram,
   downlink_loss_ratio: Histogram,
   keyframe_requests: IntCounter,
+  retransmitted_packets: IntCounter,
   forwarded_bytes: IntCounter,
   sessions: IntCounterVec,
   session_switches: IntCounter,
@@ -101,6 +102,7 @@ impl CallQuality {
     metrics.register(&self.rtt_seconds)?;
     metrics.register(&self.downlink_loss_ratio)?;
     metrics.register(&self.keyframe_requests)?;
+    metrics.register(&self.retransmitted_packets)?;
     metrics.register(&self.forwarded_bytes)?;
     metrics.register(&self.sessions)?;
     metrics.register(&self.session_switches)
@@ -143,6 +145,13 @@ impl CallQuality {
   /// The SFU asked a publisher for a keyframe.
   pub fn keyframe_requested(&self) {
     self.keyframe_requests.inc();
+  }
+
+  /// `packets` lost video packets went out to a receiver once more.
+  pub fn retransmitted(&self, packets: usize) {
+    self
+      .retransmitted_packets
+      .inc_by(u64::try_from(packets).unwrap_or(u64::MAX));
   }
 
   /// One datagram went out to receivers, `bytes` in all.
@@ -198,6 +207,10 @@ impl CallQuality {
       keyframe_requests: IntCounter::new(
         "teamcraft_sfu_keyframe_requests_total",
         "Keyframes the SFU asked publishers for (a receiver switched layers or lost the picture).",
+      )?,
+      retransmitted_packets: IntCounter::new(
+        "teamcraft_sfu_retransmitted_packets_total",
+        "Video packets the SFU sent to a receiver once more because it reported them lost (NACK).",
       )?,
       forwarded_bytes: IntCounter::new(
         "teamcraft_sfu_forwarded_bytes_total",

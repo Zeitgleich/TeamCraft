@@ -20,8 +20,10 @@
 //! all before).
 //!
 //! The SFU reads it to switch simulcast layers on keyframes and to drop whole frames; it never
-//! reads the payload. A frame is complete when all `count` fragments arrived; incomplete frames are
-//! dropped once a newer frame completes (the decoder then needs a keyframe or tolerates the gap).
+//! reads the payload. A frame is complete when all `count` fragments arrived, in any order: an
+//! older frame waiting for a resent fragment (#1762) may complete after a newer one. Incomplete
+//! frames are dropped once the receiver releases a newer frame to the decoder
+//! ([`FrameAssembler::release`]; the decoder then needs a keyframe or tolerates the gap).
 
 use std::collections::BTreeMap;
 
@@ -60,7 +62,7 @@ pub struct CompleteFrame {
 #[derive(Debug, Default)]
 pub struct FrameAssembler {
   partial: BTreeMap<u16, PartialFrame>,
-  maybe_last_completed: Option<u16>,
+  maybe_last_released: Option<u16>,
   dropped_frames: u64,
 }
 
@@ -212,10 +214,10 @@ impl FrameAssembler {
     payload: &[u8],
   ) -> Result<Option<CompleteFrame>, FragmentError> {
     if self
-      .maybe_last_completed
+      .maybe_last_released
       .is_some_and(|last| !is_newer(fragment.frame_number, last))
     {
-      // A late fragment of a frame we already completed or gave up on.
+      // A late fragment of a frame released already or given up on.
       return Ok(None);
     }
     let partial = self
@@ -241,13 +243,18 @@ impl FrameAssembler {
     let Some(partial) = self.partial.remove(&fragment.frame_number) else {
       return Ok(None);
     };
-    self.drop_older_than(fragment.frame_number);
-    self.maybe_last_completed = Some(fragment.frame_number);
     Ok(Some(CompleteFrame {
       frame_number: fragment.frame_number,
       is_keyframe: partial.is_keyframe,
       data: partial.fragments.into_iter().flatten().flatten().collect(),
     }))
+  }
+
+  /// The complete frame `frame_number` went on to the decoder: older frames still incomplete
+  /// can't be used any more and are dropped, and their late fragments ignored.
+  pub fn release(&mut self, frame_number: u16) {
+    self.drop_older_than(frame_number);
+    self.maybe_last_released = Some(frame_number);
   }
 
   /// Frames given up on because fragments were missing.
@@ -388,16 +395,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn incomplete_frame_is_dropped_when_a_newer_one_completes() {
+    fn incomplete_frame_is_dropped_when_a_newer_one_is_released() {
       let mut assembler = FrameAssembler::new();
       let lost = fragment_frame(&[1; 20], 1, false, 10).unwrap();
       assert_eq!(assembler.push(lost[0].0, lost[0].1).unwrap(), None);
       let next = fragment_frame(&[2; 5], 2, false, 10).unwrap();
       let complete = assembler.push(next[0].0, next[0].1).unwrap().unwrap();
       assert_eq!(complete.frame_number, 2);
+      assert_eq!(assembler.dropped_frames(), 0, "frame 1 may still complete");
+      assembler.release(2);
       assert_eq!(assembler.dropped_frames(), 1);
       // The rest of frame 1 arrives too late and is ignored.
       assert_eq!(assembler.push(lost[1].0, lost[1].1).unwrap(), None);
+    }
+
+    /// #1762: a fragment resent by the SFU completes its frame after a newer one completed.
+    #[test]
+    fn an_older_frame_completes_after_a_newer_one() {
+      let mut assembler = FrameAssembler::new();
+      let older = fragment_frame(&[1; 20], 1, true, 10).unwrap();
+      assert_eq!(assembler.push(older[0].0, older[0].1).unwrap(), None);
+      let newer = fragment_frame(&[2; 5], 2, false, 10).unwrap();
+      assert!(assembler.push(newer[0].0, newer[0].1).unwrap().is_some());
+      let resent = assembler.push(older[1].0, older[1].1).unwrap().unwrap();
+      assert_eq!((resent.frame_number, resent.data), (1, vec![1; 20]));
     }
 
     #[test]

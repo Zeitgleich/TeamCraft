@@ -673,6 +673,7 @@ mod tests {
         maybe_max_simulcast_layers: Some(teamcraft_proto::MAX_SIMULCAST_LAYERS),
         maybe_switch_secret: None,
         maybe_screen_share_taken_over: None,
+        maybe_retransmit_window_ms: None,
       };
       engine
         .handle_signal(

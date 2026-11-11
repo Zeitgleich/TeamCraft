@@ -129,6 +129,9 @@ pub struct ReceivedVideoStats {
   pub packets: u64,
   pub bytes: u64,
   pub packets_lost: u64,
+  /// Packets that went missing, were asked for again and came (#1762). Older reports lack it.
+  #[serde(default)]
+  pub packets_recovered: u64,
   /// Complete, decrypted frames handed to the decoder.
   pub frames: u64,
   /// Complete frames that couldn't be used: a reference went missing, or they didn't decrypt.

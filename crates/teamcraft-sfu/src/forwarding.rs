@@ -23,6 +23,10 @@
 //!   once a padding burst showed its link carries it ([`crate::probe`]); a burst that falls short
 //!   limits the estimate instead of a picture that stalls.
 //!
+//! - **Resending lost video (#1762):** forwarded video packets are kept for a short while per
+//!   track and layer; a receiver's NACK gets the ones it names again, restamped for it, within a
+//!   budget of its downlink ([`crate::retransmit`]). Audio is never resent.
+//!
 //! - **Reconnecting participants** keep their streams and subscriptions but receive nothing until
 //!   they are back ([`Forwarder::suspend`], [`Forwarder::resume`]); a new path starts with fresh
 //!   bandwidth estimates.
@@ -39,8 +43,9 @@ use teamcraft_media::{
   rtp::{AudioLevel, RtpError, RtpHeader},
 };
 use teamcraft_proto::{
-  DeviceId, KNOWN_VIDEO_CODECS, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack,
-  TransportFeedback, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
+  DeviceId, KNOWN_VIDEO_CODECS, MAX_NACK_SEQUENCE_NUMBERS, MAX_SIMULCAST_LAYERS, MediaCapabilities,
+  MediaStreamId, ScreenAudioTrack, TransportFeedback, VideoCodec, VideoLayerInfo, VideoPublicationId,
+  VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 
@@ -48,6 +53,7 @@ use crate::layers::{
   LayerAllocationConfig, LayerAllocator, ProbeRequest, TrackDemand, UpgradeProof, full_demand_bps,
 };
 use crate::probe::{DownlinkProbe, ProbeConfig, ProbeOutcome, padding_datagram};
+use crate::retransmit::{PacketHistory, RetransmitBudget, RetransmitConfig};
 use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
 
 /// Video tracks (camera, screen share) one participant may publish at the same time.
@@ -78,6 +84,8 @@ pub struct ForwardingConfig {
   /// layer that runs (a still screen sends its picture again every second, `SCREEN_IDLE_REFRESH`),
   /// short enough that a frozen picture doesn't last.
   pub layer_stalled_after: Duration,
+  /// Resending lost video packets to the receiver that asks.
+  pub retransmit: RetransmitConfig,
 }
 
 /// How often publishers are asked for keyframes. Keyframes are large: a receiver that keeps
@@ -157,6 +165,8 @@ struct ParticipantRoute {
   has_feedback: bool,
   /// The connection was lost: nothing is sent to it until it is back.
   is_suspended: bool,
+  /// What may still be resent to it.
+  retransmit_budget: RetransmitBudget,
 }
 
 #[derive(Debug)]
@@ -172,6 +182,8 @@ struct VideoTrackRoute {
   /// The most fragments a frame of each layer had: a receiver that reassembles fewer (clients
   /// from before #941 take 255) doesn't get the layer, it would wait for its keyframes forever.
   frame_fragments: [u16; MAX_SIMULCAST_LAYERS as usize],
+  /// The packets forwarded recently per layer, to resend to a receiver that lost them.
+  history: [PacketHistory; MAX_SIMULCAST_LAYERS as usize],
 }
 
 /// The latest run of packets per layer; `None` before the first.
@@ -227,6 +239,7 @@ impl Default for ForwardingConfig {
       keyframes: KeyframeRequestConfig::default(),
       probe: ProbeConfig::default(),
       layer_stalled_after: Duration::from_millis(1500),
+      retransmit: RetransmitConfig::default(),
     }
   }
 }
@@ -271,6 +284,7 @@ impl Forwarder {
       maybe_probe_request: None,
       has_feedback: false,
       is_suspended: false,
+      retransmit_budget: RetransmitBudget::default(),
     };
     self.participants.insert(device_id, route);
   }
@@ -326,6 +340,7 @@ impl Forwarder {
     participant.maybe_probe_request = None;
     participant.has_feedback = false;
     participant.is_suspended = false;
+    participant.retransmit_budget = RetransmitBudget::default();
     self
       .video_tracks
       .iter()
@@ -488,6 +503,7 @@ impl Forwarder {
       layers_needed: Vec::new(),
       arrivals: [None; MAX_SIMULCAST_LAYERS as usize],
       frame_fragments: [0; MAX_SIMULCAST_LAYERS as usize],
+      history: Default::default(),
     };
     self.video_tracks.insert(stream_id, route);
     Ok(track)
@@ -680,7 +696,11 @@ impl Forwarder {
         Vec::new()
       }
     } else {
-      self.video_receivers(header.stream_id, header.layer.value(), &rtp_header, now)?
+      let receivers = self.video_receivers(header.stream_id, header.layer.value(), &rtp_header, now)?;
+      if !receivers.is_empty() {
+        self.keep_for_retransmission(header, rtp_header.sequence_number.0, datagram, now);
+      }
+      receivers
     };
     for receiver in receivers {
       if let Some(target) = self.participants.get_mut(&receiver) {
@@ -691,6 +711,57 @@ impl Forwarder {
       }
     }
     Ok(route)
+  }
+
+  /// Datagrams to resend to `receiver`, restamped for it: those of `sequence_numbers` (the RTP
+  /// sequence numbers of `layer` of `stream_id`) that are still kept, while the receiver gets that
+  /// layer and as far as its budget goes. Numbers beyond [`MAX_NACK_SEQUENCE_NUMBERS`] are
+  /// ignored, and so is a NACK for a track or layer it doesn't receive.
+  pub fn resend(
+    &mut self,
+    receiver: DeviceId,
+    stream_id: StreamId,
+    layer: u8,
+    sequence_numbers: &[u16],
+    now: Instant,
+  ) -> Vec<Vec<u8>> {
+    let config = self.config.retransmit;
+    let Some(route) = self.video_tracks.get(&stream_id) else {
+      return Vec::new();
+    };
+    let is_received = route
+      .subscribers
+      .get(&receiver)
+      .is_some_and(|subscription| subscription.current == Some(layer));
+    let (Some(history), Some(participant)) = (
+      route.history.get(usize::from(layer)),
+      self.participants.get_mut(&receiver),
+    ) else {
+      return Vec::new();
+    };
+    if !is_received || participant.is_suspended {
+      return Vec::new();
+    }
+    let estimate_bps = participant.downlink.estimate_bps();
+    let mut resent = Vec::new();
+    for &sequence_number in sequence_numbers.iter().take(MAX_NACK_SEQUENCE_NUMBERS) {
+      let Some(datagram) = history.get(sequence_number, now, config.window) else {
+        continue;
+      };
+      if !participant
+        .retransmit_budget
+        .try_spend(datagram.len(), estimate_bps, now, &config)
+      {
+        break;
+      }
+      let seq = participant.downlink.on_send(datagram.len() + 2, now);
+      // Invariant: the datagram parsed when it was forwarded, so restamping it can't fail; one
+      // that does is skipped.
+      if let Ok(stamped) = DatagramHeader::restamp(datagram, seq) {
+        resent.push(stamped);
+      }
+    }
+    resent
   }
 
   /// Applies a receiver's transport feedback and re-runs its layer allocation.
@@ -801,6 +872,30 @@ impl Forwarder {
       now,
     );
     Some(Effect::Padding { receiver, datagrams })
+  }
+
+  /// Keeps a video datagram that went to receivers, to resend it to one that lost it.
+  fn keep_for_retransmission(
+    &mut self,
+    header: DatagramHeader,
+    sequence_number: u16,
+    datagram: &[u8],
+    now: Instant,
+  ) {
+    let config = self.config.retransmit;
+    if let Some(history) = self
+      .video_tracks
+      .get_mut(&header.stream_id)
+      .and_then(|route| route.history.get_mut(usize::from(header.layer.value())))
+    {
+      history.push(sequence_number, datagram, now, &config);
+    }
+  }
+
+  /// How long video packets are kept for [`Self::resend`], as `joined` tells clients; `None`
+  /// when nothing is resent.
+  pub fn retransmit_window_ms(&self) -> Option<u32> {
+    self.config.retransmit.announced_window_ms()
   }
 
   /// Current downlink estimate of a receiver.
@@ -1383,6 +1478,144 @@ mod tests {
         stream_id: VIDEO,
         layer,
       }
+    }
+  }
+
+  mod retransmission {
+    use super::*;
+
+    #[test]
+    fn a_lost_packet_is_resent_to_the_asker_only() {
+      let (mut forwarder, now) = video_room();
+      // Device 3 decodes no AV1; device 4 does.
+      forwarder.add_participant(device(4), stream(4), capabilities_av1(), now);
+      on_layer_zero(&mut forwarder, &[2, 4], now);
+      let sent = send_numbered(&mut forwarder, 0, 7, now);
+      assert_eq!(receivers_of(&sent), devices(&[2, 4]));
+      let resent = forwarder.resend(device(2), VIDEO, 0, &[7], now);
+      assert_eq!(resent.len(), 1);
+      let original = &sent.deliveries[0].1;
+      let header = DatagramHeader::parse(&resent[0]).unwrap();
+      assert_eq!(
+        &resent[0][header.encoded_len()..],
+        &original[header.encoded_len()..],
+        "the same (encrypted) packet"
+      );
+      // Numbered for the asker's estimation, after what it got so far.
+      let first = DatagramHeader::parse(original)
+        .unwrap()
+        .maybe_transport_seq
+        .unwrap();
+      assert!(header.maybe_transport_seq.is_some_and(|seq| seq != first));
+      // Packet 8 was never forwarded: nothing to resend.
+      assert!(forwarder.resend(device(4), VIDEO, 0, &[8], now).is_empty());
+    }
+
+    #[test]
+    fn nothing_for_a_layer_or_track_not_received() {
+      let (mut forwarder, now) = video_room();
+      on_layer_zero(&mut forwarder, &[2], now);
+      send_numbered(&mut forwarder, 0, 7, now);
+      assert!(
+        forwarder.resend(device(2), VIDEO, 1, &[7], now).is_empty(),
+        "another layer"
+      );
+      assert!(
+        forwarder.resend(device(3), VIDEO, 0, &[7], now).is_empty(),
+        "not subscribed"
+      );
+      assert!(
+        forwarder
+          .resend(device(2), StreamId(999), 0, &[7], now)
+          .is_empty(),
+        "unknown"
+      );
+      assert!(
+        forwarder.resend(device(2), VIDEO, 9, &[7], now).is_empty(),
+        "no such layer"
+      );
+    }
+
+    #[test]
+    fn nothing_after_the_window_or_while_suspended() {
+      let (mut forwarder, now) = video_room();
+      on_layer_zero(&mut forwarder, &[2], now);
+      send_numbered(&mut forwarder, 0, 7, now);
+      let window = ForwardingConfig::default().retransmit.window;
+      let late = now + window + Duration::from_millis(1);
+      assert!(forwarder.resend(device(2), VIDEO, 0, &[7], late).is_empty());
+      send_numbered(&mut forwarder, 0, 8, now);
+      forwarder.suspend(device(2), now);
+      assert!(forwarder.resend(device(2), VIDEO, 0, &[8], now).is_empty());
+    }
+
+    #[test]
+    fn packets_nobody_receives_are_not_kept() {
+      let (mut forwarder, now) = video_room();
+      send_numbered(&mut forwarder, 0, 7, now);
+      assert!(forwarder.video_tracks[&VIDEO].history[0].is_empty());
+    }
+
+    #[test]
+    fn a_receiver_that_keeps_losing_gets_no_more_than_its_budget() {
+      let (mut forwarder, now) = video_room();
+      on_layer_zero(&mut forwarder, &[2], now);
+      let mut datagram_bytes = 0;
+      for sequence_number in 0..200 {
+        datagram_bytes = send_numbered(&mut forwarder, 0, sequence_number, now).deliveries[0]
+          .1
+          .len();
+      }
+      forwarder.config.retransmit.burst_bytes = u32::try_from(10 * datagram_bytes).unwrap();
+      let all: Vec<u16> = (0..200).collect();
+      let resent = forwarder.resend(device(2), VIDEO, 0, &all, now);
+      assert_eq!(resent.len(), 10, "the burst");
+      // Asking again at once gets (almost) nothing more: the budget refills with time.
+      let again = forwarder.resend(device(2), VIDEO, 0, &all, now);
+      assert!(again.is_empty(), "{} more resent", again.len());
+    }
+
+    #[test]
+    fn no_more_numbers_than_a_nack_may_name_are_looked_at() {
+      let (mut forwarder, now) = video_room();
+      on_layer_zero(&mut forwarder, &[2], now);
+      for sequence_number in 0..10 {
+        send_numbered(&mut forwarder, 0, sequence_number, now);
+      }
+      // The packets kept come after a long run of numbers that aren't.
+      let mut asked: Vec<u16> = (1000..1000 + MAX_NACK_SEQUENCE_NUMBERS as u16).collect();
+      asked.extend(0..10);
+      assert!(forwarder.resend(device(2), VIDEO, 0, &asked, now).is_empty());
+    }
+
+    /// `receivers` subscribe to [`VIDEO`] and receive its layer 0 from a keyframe on.
+    fn on_layer_zero(forwarder: &mut Forwarder, receivers: &[u64], now: Instant) {
+      for &receiver in receivers {
+        forwarder
+          .subscribe(device(receiver), VIDEO, Some(0), now)
+          .unwrap();
+      }
+      assert_eq!(send_frame(forwarder, 0, true, now), devices(receivers));
+    }
+
+    /// One delta of a single fragment on `layer` of [`VIDEO`] with RTP `sequence_number`.
+    fn send_numbered(forwarder: &mut Forwarder, layer: u8, sequence_number: u16, now: Instant) -> Route {
+      let mut rtp = header();
+      rtp.sequence_number = SequenceNumber(sequence_number);
+      FrameFragment {
+        frame_number: sequence_number,
+        index: 0,
+        count: 1,
+        is_keyframe: false,
+      }
+      .write_to(&mut rtp);
+      forwarder
+        .route(device(1), &rtp_datagram(VIDEO.0, layer, rtp), now)
+        .unwrap()
+    }
+
+    fn receivers_of(route: &Route) -> Vec<DeviceId> {
+      route.deliveries.iter().map(|(receiver, _)| *receiver).collect()
     }
   }
 

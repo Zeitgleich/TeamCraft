@@ -126,6 +126,7 @@ mod tests {
           "teamcraft_sfu_forwarded_bytes_total",
           "teamcraft_sfu_keyframe_requests_total",
           "teamcraft_sfu_participants",
+          "teamcraft_sfu_retransmitted_packets_total",
           "teamcraft_sfu_rooms",
           "teamcraft_sfu_rtt_seconds",
           "teamcraft_sfu_session_switches_total",

@@ -165,7 +165,8 @@ the start; only an IPv6 address that fails after another one worked is skipped (
 | `teamcraft_sfu_fallback_connections`           | gauge     |                           | SFU            | Open connections on the WebSocket fallback, for networks that block UDP           |
 | `teamcraft_sfu_rtt_seconds`                    | histogram |                           | SFU            | Round-trip time of its QUIC paths, per session every 10 s (10 ms to 2 s)          |
 | `teamcraft_sfu_downlink_loss_ratio`            | histogram |                           | SFU            | Share of its packets to a client lost, per session that sent ≥ 100 in 10 s        |
-| `teamcraft_sfu_keyframe_requests_total`        | counter   |                           | SFU            | Keyframes asked of publishers: the SFU's PLI (media is never retransmitted)       |
+| `teamcraft_sfu_keyframe_requests_total`        | counter   |                           | SFU            | Keyframes asked of publishers: the SFU's PLI                                      |
+| `teamcraft_sfu_retransmitted_packets_total`    | counter   |                           | SFU            | Video packets resent to a receiver that reported them lost (NACK, #1762)          |
 | `teamcraft_sfu_forwarded_bytes_total`          | counter   |                           | SFU            | Media bytes forwarded to receivers; its `rate()` is the bitrate forwarded         |
 | `teamcraft_sfu_sessions_total`                 | counter   | `transport`, `family`     | SFU            | Sessions that joined a call, by transport and the client's address family         |
 | `teamcraft_sfu_session_switches_total`         | counter   |                           | SFU            | Sessions that moved to QUIC, from the fallback once UDP got through               |
@@ -495,6 +496,16 @@ depend on any of it.
   per container). The SFU logs a warning at start when it got less. With less, a 1440p share's
   keyframe can get lost while the SFU is busy: viewers ask for another, and fall back to the lower
   layer if that keeps happening, so a share turns blurry or freezes for seconds rather than ends.
+- **Lost video packets are resent (#1762).** The SFU keeps the video datagrams it forwarded for
+  `TEAMCRAFT_SFU_RETRANSMIT_WINDOW_MS` (default 1000, at most 5000; `0` turns it off) and at most
+  `TEAMCRAFT_SFU_RETRANSMIT_MAX_PACKETS_PER_LAYER` (default 1024) per track and layer, and sends
+  those a receiver reports lost once more, to that receiver only. Memory is about a second of what
+  the SFU forwards. What one receiver gets resent is capped by a budget that refills at
+  `TEAMCRAFT_SFU_RETRANSMIT_MAX_SHARE_PERCENT` (default 30) of its downlink estimate, with bursts up
+  to `TEAMCRAFT_SFU_RETRANSMIT_BURST_BYTES` (default 65536). The datagrams stay DAVE encrypted; the
+  SFU learns nothing it didn't forward already. Audio isn't resent. `rate()` of
+  `teamcraft_sfu_retransmitted_packets_total` against the forwarded bytes shows how lossy the
+  viewers' links are.
 - Keep the SFU's UDP port out of anything that tracks UDP "connections" by address and port (a
   load balancer without QUIC connection-ID routing, a strict stateful firewall): when a client
   changes networks its QUIC connection continues from a new address (connection migration,
