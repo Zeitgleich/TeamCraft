@@ -505,6 +505,18 @@
   letter-spacing: var(--tracking-xs);
 }
 
+.tile-status-warning {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--danger);
+}
+
+.tile-status-warning .icon {
+  width: 12px;
+  height: 12px;
+}
+
 .video-surface {
   position: absolute;
   inset: 0;

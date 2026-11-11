@@ -1283,6 +1283,15 @@ impl RoomState {
         maybe_switch_secret,
       },
     );
+    // Right after `joined`: a device that rejoins with a group held takes anything else as "not
+    // resumed" (e2ee.md §8, "Short reconnects").
+    let dave_event = match dave {
+      WelcomeDave::ExternalSender(package) => CallEvent::DaveExternalSender {
+        package: Base64Bytes::new(package),
+      },
+      WelcomeDave::Resumed(epoch) => CallEvent::DaveResumed { epoch: epoch.0 },
+    };
+    self.send_to(participant_id, dave_event);
     for (device_id, other) in &self.participants {
       if *device_id != participant_id && other.is_muted {
         self.send_to(
@@ -1294,13 +1303,6 @@ impl RoomState {
         );
       }
     }
-    let dave_event = match dave {
-      WelcomeDave::ExternalSender(package) => CallEvent::DaveExternalSender {
-        package: Base64Bytes::new(package),
-      },
-      WelcomeDave::Resumed(epoch) => CallEvent::DaveResumed { epoch: epoch.0 },
-    };
-    self.send_to(participant_id, dave_event);
     let active_speakers = self.forwarder.active_speakers().to_vec();
     if !active_speakers.is_empty() {
       self.send_to(

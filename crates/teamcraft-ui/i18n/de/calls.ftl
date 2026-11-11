@@ -114,6 +114,7 @@ tile-muted = stummgeschaltet
 tile-hand = Hand gehoben
 tile-speaking = spricht
 tile-reconnecting = Verbindung wird wiederhergestellt
+tile-unverified = Nicht verifiziert, erhält kein Bild und keinen Ton
 tile-notetaker = Notetaker – transkribiert
 video-stalled = Video pausiert: schwache Verbindung
 

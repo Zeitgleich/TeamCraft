@@ -493,7 +493,7 @@ impl Network {
     let client = self.client_mut(id);
     let connection = client.maybe_connection.take().unwrap();
     connection.link.is_dead.store(true, Ordering::Relaxed);
-    client.engine.connection_lost();
+    client.engine.connection_lost(Instant::now());
     client
       .lost_sessions
       .push((Arc::clone(&connection.room), connection.session));

@@ -1762,8 +1762,8 @@ impl CallState<'_> {
     if !engine.is_in_call() {
       self.lost_before_joining += 1;
     }
-    engine.connection_lost();
     let now = Instant::now();
+    engine.connection_lost(now);
     let is_new_loss = self.maybe_lost_at.is_none();
     let lost_at = *self.maybe_lost_at.get_or_insert(now);
     let grace = engine
@@ -4090,7 +4090,7 @@ mod tests {
       assert_eq!(publications[0].own.maybe_stream_id, Some(MediaStreamId(50)));
 
       // The SFU restarted and lost the slot: the engine unpublishes and publishes again.
-      engine.connection_lost();
+      engine.connection_lost(now);
       engine.rejoin("fresh".into(), now);
       follow(&mut engine, &mut publications);
       engine.handle_signal(event(1, joined(&[2])), now).unwrap();

@@ -114,6 +114,7 @@ tile-muted = muted
 tile-hand = hand raised
 tile-speaking = speaking
 tile-reconnecting = reconnecting
+tile-unverified = not verified, gets no audio or video
 tile-notetaker = Notetaker – transcribing
 video-stalled = Video paused: weak connection
 

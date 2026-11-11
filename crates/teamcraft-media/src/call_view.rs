@@ -28,6 +28,8 @@ pub struct CallRoster {
   reconnecting: BTreeSet<DeviceId>,
   /// Others' devices whose microphone is muted (their own report).
   muted: BTreeSet<DeviceId>,
+  /// Others' devices whose call key didn't verify: kept out of the encryption.
+  refused: BTreeSet<DeviceId>,
 }
 
 impl CallRoster {
@@ -68,6 +70,14 @@ impl CallRoster {
         roster.reconnecting.remove(&device_id);
         roster.muted.remove(&device_id);
         active.reconnecting = roster.reconnecting_users();
+        if roster.refused.remove(&device_id) {
+          active.unverified = roster.refused_users();
+        }
+      },
+      CallEngineEvent::MemberRefused(device_id) => {
+        roster.refused.insert(device_id);
+        active.unverified = roster.refused_users();
+        return true;
       },
       CallEngineEvent::ParticipantMuted { device_id, is_muted } => {
         if is_muted {
@@ -250,6 +260,17 @@ impl CallRoster {
   }
 
   /// People all of whose devices in the call are reconnecting.
+  /// People with a device refused: a person whose phone is fine but whose laptop's key is forged
+  /// is shown as not verified all the same.
+  fn refused_users(&self) -> Vec<UserId> {
+    let users: BTreeSet<UserId> = self
+      .refused
+      .iter()
+      .filter_map(|device| self.users_by_device.get(device).copied())
+      .collect();
+    users.into_iter().collect()
+  }
+
   fn reconnecting_users(&self) -> Vec<UserId> {
     let mut users: BTreeSet<UserId> = self
       .reconnecting

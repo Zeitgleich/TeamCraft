@@ -1224,7 +1224,7 @@ impl CallConnection {
       self.lost_links.push(moving);
     }
     let was_in_call = engine.is_in_call();
-    engine.connection_lost();
+    engine.connection_lost(now);
     let resilience = self.resilience;
     let pacer = &mut self.pacer;
     let schedule = self.maybe_schedule.get_or_insert_with(|| {

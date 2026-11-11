@@ -720,6 +720,10 @@ pub struct ActiveCall {
   /// Others whose connection was lost and who are rejoining.
   #[serde(default)]
   pub reconnecting: Vec<UserId>,
+  /// Others with a device whose call key didn't verify: it is kept out of the call's encryption,
+  /// and the UI marks them (e2ee.md §8).
+  #[serde(default)]
+  pub unverified: Vec<UserId>,
   /// The call runs on the fallback for networks that block UDP (ARCHITECTURE.md §6.6): the UI says
   /// quality may be lower.
   #[serde(default)]
