@@ -795,6 +795,9 @@ pub struct ScheduleForm {
   /// The notetaker's account when "Notetaker joins the calls" is ticked (e2ee.md §8.2): invited like
   /// a member, so it is in the chat's group before any call.
   pub maybe_notetaker: Option<UserId>,
+  /// Invited people who host with the organizer (#1720); signed by the organizer's device once the
+  /// meeting is saved (`co_hosts_from_dialog`).
+  pub co_hosts: Vec<UserId>,
   /// Made when the dialog opens and kept for every submit of it, so a retry after a lost answer
   /// (or a second click) schedules the meeting only once.
   pub maybe_idempotency_key: Option<IdempotencyKey>,
@@ -818,6 +821,7 @@ impl ScheduleForm {
       skips_holidays: false,
       has_lobby: true,
       maybe_notetaker: None,
+      co_hosts: Vec::new(),
       maybe_idempotency_key: Some(IdempotencyKey::random()),
     }
   }
@@ -831,6 +835,7 @@ impl ScheduleForm {
     form.description = meeting.maybe_description.clone().unwrap_or_default();
     form.duration_minutes = u32::try_from(minutes).unwrap_or(0);
     form.has_lobby = meeting.has_lobby;
+    form.co_hosts = meeting.co_host_user_ids.clone();
     form.maybe_idempotency_key = None;
     if let Some(recurrence) = &meeting.maybe_recurrence {
       form.set_repeat(Repeat::of(&recurrence.frequency));
@@ -1714,6 +1719,7 @@ mod tests {
       is_occurrence_cancelled: false,
       is_occurrence_holiday: false,
       can_host_lobby: false,
+      co_host_user_ids: Vec::new(),
       attendees: Vec::new(),
       undelivered_invitations: Vec::new(),
     };
@@ -1872,6 +1878,7 @@ mod tests {
       is_occurrence_cancelled: false,
       is_occurrence_holiday: false,
       can_host_lobby: false,
+      co_host_user_ids: Vec::new(),
       attendees: Vec::new(),
       undelivered_invitations: Vec::new(),
     }

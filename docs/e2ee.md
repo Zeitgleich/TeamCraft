@@ -1844,11 +1844,15 @@ never by the server's member list:
 - **Whose group.** The answer for a single meeting chat (`GET /conversations/{id}`) names the
   meeting's organizer. A device that joins the chat's group, from a welcome or by external commit,
   checks that the group's first member (the founder's leaf) is the organizer's device and refuses
-  the group otherwise, so a member can't found the group and add the others. Remaining gap: the
-  organizer is the server's word, not a signature, so a hostile server can name somebody else (a
-  signed organizer in the invitation would close it); an invitee who places the organizer's key
-  package at leaf 0 passes the check, which the anchor closes (§4.6.5, "Meetings", #1725); and a group whose first leaf was reused after
-  the organizer's first device was removed is refused as well.
+  the group otherwise, so a member can't found the group and add the others. After a handover
+  (#1720, "Meeting hosts" below) the founder is a former organizer: the group is accepted only if
+  the signed host lists, followed from the founder's identity key (as the leaf's certificate
+  verified it), hand the meeting to the organizer's key as this device pinned it. Remaining gap:
+  the organizer is the server's word, not a signature, so a hostile server can name somebody else
+  (a signed organizer in the invitation would close it); an invitee who places the organizer's key
+  package at leaf 0 passes the check, which the anchor closes (§4.6.5, "Meetings", #1725); and a
+  group whose first leaf was reused after the organizer's first device was removed is refused as
+  well.
 - **Later invitees.** When the organizer saves a changed invitee list (`PATCH /meetings/{id}`),
   the organizer's device adds the new users to the group with signed adds (`update_meeting_chat_members`,
   from the list the organizer saved, never the server's member list) and removes the users taken
@@ -1968,10 +1972,12 @@ never by the server's member list:
       key next to the guest links.
     Without the comparison the guest is exactly what the name says: "Guest (unverified)".
   - *How the guest verifies the admission.* The guest's device is marked as a guest device when
-    it enrolls, and it accepts a group only from a welcome whose committer is a device the
-    identity key with the fingerprint `v` certified, or a device of an admitter the statement
-    that key signed for the meeting names (below). Anybody else's app refuses to let a guest in
-    ("only the organizer's devices and the admitters the organizer named can let guests in"), and
+    it enrolls, and it accepts a group only from a welcome whose committer is a device of a host
+    by the host lists that follow from the key with the fingerprint `v` (that key itself while
+    there are none; the organizer after a handover, or a co-host: "Meeting hosts" below), or a
+    device of an admitter the statement the current organizer's key signed for the meeting names
+    (below). Anybody else's app refuses to let a guest in ("only the organizer's devices, the
+    co-hosts and the admitters the organizer named can let guests in"), and
     so does the guest for a welcome from any other device: a **forged admission fails closed**. A guest
     device offered a group by external commit joins nothing. The check is about who added the
     guest, not about who is in the group (a group the server made with devices of its own can
@@ -2040,6 +2046,74 @@ never by the server's member list:
       gap: the list is as good as the organizer's device's view of who is a guest, so a guest the
       server relabels as a member to it after another admitter let them in could get on the next
       list (the gap noted below).
+  - *Meeting hosts* (#1720, docs/meetings.md "Hosts"). The organizer names co-hosts, who let
+    people in and make guest links like the organizer, and can hand the meeting over. Both are a
+    **host list** the organizer's identity key signs (`teamcraft_crypto::meeting_hosts`), so that a
+    co-host's device can let guests in while the organizer is away, and a server can't make
+    anybody a host:
+    - *The list* names the meeting and its chat, a **sequence** that only grows, the **signer**
+      (user and identity key: the organizer until this list), the **organizer from this list on**
+      (the signer, or the one the signer hands the meeting to) and the **co-hosts**, each with the
+      identity key that certifies their devices. The identity key signs it under a label of its
+      own (§2); at most 100 co-hosts and 8 KiB. A list naming another organizer is a
+      **handover**; the former organizer stays co-host (the app's choice, which the list carries).
+    - *The chain.* From a handover on only the new organizer's key signs. The server keeps every
+      handover and the newest list (at most 32 handovers per meeting) and serves them oldest first
+      (`GET /conversations/{id}/meeting-hosts`, members and admitted guests). A checker follows
+      them from the key it trusts, the **anchor**: in the order of their sequence a list counts
+      only if the organizer the counted list before it named (at first the anchor) signed it, and
+      only for this chat (and meeting, where known); every other list is passed over. The newest
+      counted list says who hosts: its organizer (by key) and its co-hosts (by user and key);
+      without one the anchor alone hosts, as before. A newest counted list older than one the
+      checker saw is a rollback: it keeps the hosts it verified before.
+    - *Anchors.* A guest's anchor is `v` of its link: a link made before a handover carries the
+      former organizer's key and follows the handover to the new one; a link copied afterwards
+      carries the new organizer's (a member's app copies the organizer the server names, with the
+      key it pinned). A member's anchor is the key of the group's founder, from the founder's leaf
+      as this device verified its certificate (the organizer's pinned key before it has the
+      group): the founder founded the group as organizer ("Whose group"), so its key is where the
+      chain starts.
+    - *What hosts may do in the encryption.* A guest accepts a welcome from a host's device by the
+      chain from `v`, and from an admitter the current organizer's key signed (the admitters
+      statement is checked against that key, so the new organizer's admitters count for a link of
+      the former one). A member's device lets a guest in when the server names its user organizer,
+      when the chain from the founder lists its user with its own key, or as an admitter. In the
+      members' rule for commits in a meeting chat (§4.6.2) co-hosts of the chain this device
+      verified may add people and take guests out, like admitters, and the organizer the chain
+      names counts like the one the server names (after a handover the conversation record may
+      still name the former one). Before judging a commit by somebody the roster doesn't vouch
+      for, a device reads the host lists again, like the admitters.
+    - *Handover and the new organizer.* The new organizer's device signs the same hosts again with
+      its own key as soon as it sees the handover (with the admitters' upkeep), so that guests of
+      links with its key find the co-hosts; until then such a guest accepts the new organizer's
+      devices only. It also signs the admitters from then on; a "no lobby" it has no record of is
+      taken from the admitters the former organizer signed, as this device verified them.
+    - *The server* keeps the lists (`PUT /conversations/{id}/meeting-hosts`, the meeting's
+      organizer only; a sequence not above the stored one gets `409`), checks their shape (the
+      signature by the key the list names, this meeting and chat), that the signer is the caller
+      and that everybody named is a person in the meeting chat, and reads the co-hosts and a new
+      organizer from them for its own rules (lobby, guest links, host controls, who may change
+      the meeting). Whose keys they are, it never checks.
+    - *Threat notes.* A co-host is trusted with admissions like the organizer: people of the
+      meeting who are in the group and read the chat anyway. A server can't add a host, hand the
+      meeting to anybody, or move a list to another chat or meeting: a list somebody else signed
+      is passed over, an altered one doesn't verify. It can withhold the newest lists: a guest or
+      member that saw a newer one refuses an older one, but a guest that saw none can be shown an
+      older chain, so a co-host the organizer took off since (or a former organizer, with lists
+      they signed before the handover was published) can then admit that guest, with the server's
+      help into a group of their own making. Unlike the admitters there is no end of validity:
+      the guest's session ends with the meeting's access, which bounds it, and a member's device
+      reads the lists again before it judges a commit. A former organizer can't take the meeting
+      back from anybody who saw the handover: their later lists aren't signed by the organizer the
+      handover named. The founder check after a handover is no weaker than before: a server that
+      can name the organizer could already name a member who founded a group of their own.
+
+    | Who                         | Can                                                                                                      | Can't                                                                                                    |
+    |-----------------------------|----------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|
+    | A co-host                   | Let guests in like the organizer, make guest links, use the host controls                                | Change or cancel the meeting, name hosts, hand it over; be one for anybody without the organizer's list  |
+    | A co-host taken off         | With the server, admit a guest who saw no newer list, until the guest's access ends                      | Fool a guest or member who saw the newer list (sequence)                                                 |
+    | A former organizer          | Admit as a co-host if the new organizer keeps them; with the server, mislead a guest who saw no handover | Take the meeting back: lists they sign after the handover count for nobody who saw it                    |
+    | A forged or moved host list | –                                                                                                        | Be accepted: signed by the organizer the chain names at that point, for this chat (a guest: and meeting) |
   - *Where `v` comes from.* A link copied in a member's app carries the fingerprint of the
     organizer's key as that device has it pinned; the app waits for it ("Verifying…") and never
     hands out a link with the server's. The **invitation e-mails and the calendar event carry the
@@ -2058,7 +2132,7 @@ never by the server's member list:
     |------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
     | A malicious server     | Not compared: enroll a device of its own for a waiting guest (or invent a guest), and after the host's "admit" read the chat and the media from then on; with a mailed link, pose as the meeting to a mail-only guest. Without a lobby, the same with no click. Serve a leaking page to a first-visit guest. Withhold knocks and admissions. | Compared: swap the guest's key or the organizer's without the codes differing. Ever: read what was said before an admission; hide that a guest is in (shown "Guest (unverified)" to everybody) |
     | Somebody with the mail | Knock, as the name they type                                                                                                                                                                                                                                                                                                                 | Decrypt anything: there is no key in the link; get past the lobby without a host's click (or, without a lobby, past being listed and announced); use the link after it was made anew           |
-    | A forged admission     | –                                                                                                                                                                                                                                                                                                                                            | Be accepted: the welcome's committer must carry the identity key of `v` or a listed admitter's                                                                                                 |
+    | A forged admission     | –                                                                                                                                                                                                                                                                                                                                            | Be accepted: the welcome's committer must carry a host's key by the chain from `v`, or a listed admitter's                                                                                     |
     | A listed admitter      | Let guests in like the organizer: on a host's click, or by itself where the organizer signed "no lobby"; with the server, put a guest into a group of their own making                                                                                                                                                                       | Be one without the organizer's signature for this chat; stay one for anybody who saw a newer list without them                                                                                 |
     | An admitter taken off  | With the server, until the older list ends: admit a guest who saw no newer list                                                                                                                                                                                                                                                              | Fool a guest or member who saw the newer list (sequence); act after the older list ended                                                                                                       |
     | A swapped list         | –                                                                                                                                                                                                                                                                                                                                            | Be accepted: signed by the key of `v` (guest) or the pinned organizer key (members), for this chat (a guest: and meeting), in force, not older than one seen                                   |

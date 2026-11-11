@@ -455,6 +455,7 @@ mod tests {
       is_occurrence_cancelled: false,
       is_occurrence_holiday: false,
       can_host_lobby: false,
+      co_host_user_ids: Vec::new(),
       attendees: vec![attendee(RsvpStatus::Accepted)],
       undelivered_invitations: Vec::new(),
     }

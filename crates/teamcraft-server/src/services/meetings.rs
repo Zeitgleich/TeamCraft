@@ -670,17 +670,18 @@ pub async fn restore_meeting(
   })
 }
 
-/// Makes the meeting's link anew (organizer only), in one transaction: a new token, so the old link
-/// names nothing any more; the shared guest link and every unredeemed personal link of the meeting
-/// are revoked; guests still waiting lose the "came with the link" mark and wait for a click.
-/// Guests already let in stay. The invitees get an update with the new link.
+/// Makes the meeting's link anew (hosts: the organizer, chat admins and co-hosts, #1720), in one
+/// transaction: a new token, so the old link names nothing any more; the shared guest link and
+/// every unredeemed personal link of the meeting are revoked; guests still waiting lose the "came
+/// with the link" mark and wait for a click. Guests already let in stay. The invitees get an
+/// update with the new link.
 pub async fn renew_link(
   state: &AppState,
   caller: &AuthenticatedUser,
   id: MeetingId,
 ) -> Result<MeetingResponse, ApiError> {
   let service = service_of(state)?;
-  let meeting = organizer_meeting(state, caller, id).await?;
+  let meeting = super::meeting_guests::host_meeting(state, caller, id).await?;
   let token = MeetingLinkToken::generate(&mut OsRng);
   state.database.renew_meeting_link(id, token.as_str()).await?;
   // The new link must reach the calendar, but a calendar that is down doesn't undo the new link.
@@ -948,7 +949,7 @@ async fn after_rsvp(
 }
 
 /// Writes the meeting's event to the calendar, if one is configured.
-async fn sync_calendar(
+pub(super) async fn sync_calendar(
   state: &AppState,
   service: &MeetingService,
   meeting: &StoredMeeting,
@@ -1187,6 +1188,17 @@ enum MailKind {
   Invitation,
   Update,
   Cancellation,
+}
+
+/// The update of a changed meeting to `recipients` (a handover, #1720); the addresses it could not
+/// be sent to.
+pub(super) async fn send_update_mails(
+  state: &AppState,
+  service: &MeetingService,
+  meeting: &StoredMeeting,
+  recipients: &[StoredAttendee],
+) -> Result<Vec<String>, ApiError> {
+  send_invitations(state, service, meeting, MailKind::Update, recipients, None).await
 }
 
 /// Sends the iMIP e-mail of `kind` to the attendees that have an address and returns the addresses
@@ -1894,6 +1906,12 @@ async fn respond_with_link(
 ) -> Result<MeetingResponse, ApiError> {
   let attendees = state.database.list_attendees(meeting.id).await?;
   let names = presented_attendee_names(state, &attendees).await?;
+  let co_host_user_ids = state
+    .database
+    .meeting_co_hosts(&[meeting.id])
+    .await?
+    .remove(&meeting.id)
+    .unwrap_or_default();
   Ok(MeetingResponse {
     id: meeting.id,
     title: meeting.title.clone(),
@@ -1914,6 +1932,7 @@ async fn respond_with_link(
     is_occurrence_cancelled: false,
     is_occurrence_holiday: false,
     can_host_lobby: false,
+    co_host_user_ids,
     attendees: attendees
       .iter()
       .map(|attendee| attendee_response(attendee, &names))

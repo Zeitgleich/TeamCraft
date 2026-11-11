@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT user_id FROM memberships WHERE conversation_id = $1 AND role = 'admin' ORDER BY user_id",
+  "query": "SELECT user_id FROM memberships WHERE conversation_id = $1\n           AND (role = 'admin' OR user_id IN (SELECT user_id FROM meeting_co_hosts WHERE meeting_id = $2))\n         ORDER BY user_id",
   "describe": {
     "columns": [
       {
@@ -17,6 +17,7 @@
     ],
     "parameters": {
       "Left": [
+        "Int8",
         "Int8"
       ]
     },
@@ -24,5 +25,5 @@
       false
     ]
   },
-  "hash": "c4f5d836bcf4cc615c02750c40d84fb89da013d9752747101635e1a3009ddadc"
+  "hash": "971764b3cc031b71aa56f2d5d39ef967301a94484ffa3888f92d628767161893"
 }

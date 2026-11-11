@@ -689,6 +689,33 @@ fn watch_meetings(state: AppState, i18n: I18n, hub: MeetingsHub) {
       },
     );
   }
+  // Made a co-host, or handed a meeting (#1720): said once. A meeting handed to this user gets its
+  // hosts and admitters signed with this user's key right away, so links made from now on (with
+  // this key) find the co-hosts and the admitters.
+  Effect::new(move |maybe_last: Option<Vec<teamcraft_proto::MeetingResponse>>| {
+    let current = hub.meetings.get();
+    let me = state.me().id;
+    if let Some(last) = maybe_last.filter(|last| !last.is_empty()) {
+      use teamcraft_client_api::meeting_hosts::{MeetingRole, hosting_news};
+      for news in hosting_news(&last, &current, me) {
+        let key = if news.role == MeetingRole::Organizer {
+          "meetings-now-organizer"
+        } else {
+          "meetings-now-co-host"
+        };
+        state.show_toast(i18n.t_with(key, &[("title", &news.title)]));
+        if news.role != MeetingRole::Organizer {
+          continue;
+        }
+        if let Some(meeting) = current.iter().find(|meeting| meeting.id == news.meeting) {
+          let until = meeting.ends_at.0 + crate::components::meetings_view::GUEST_ACCESS_GRACE_MS;
+          let (id, conversation) = (meeting.id, meeting.conversation_id);
+          state.try_write(|backend| backend.sync_meeting_admitters(id, conversation, until));
+        }
+      }
+    }
+    current
+  });
   // A meeting created, moved or cancelled elsewhere (gateway `meeting_update`), and a reconnect
   // (updates in between may be lost): read the list again now. This replaces a periodic refresh.
   {

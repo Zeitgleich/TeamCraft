@@ -25,6 +25,7 @@ mod join_requests;
 mod logging;
 mod markup;
 mod media_viewer;
+mod meeting_hosts;
 mod notetaker;
 mod perf_jobs;
 mod picture_retries;
@@ -82,6 +83,7 @@ pub use media_viewer::{
   AlbumLayout, MediaScope, MediaViewer, MediaViewerItem, MediaViewerLimits, MediaViewerState,
   OriginalDownload, album_layout, fetches_original_automatically, media_viewer_limits,
 };
+pub use meeting_hosts::{MeetingHostAction, MeetingHosts, MeetingPart};
 pub use notetaker::{MovedCallHint, NotetakerAddition};
 pub use perf_jobs::{
   PerfJobKind, PerfJobSpan, PerfListener, perf_job_spans, set_perf_listener, set_slow_job_threshold_ms,
@@ -1262,6 +1264,86 @@ impl TeamCraft {
   ) -> Result<Option<MovedCallHint>, TeamCraftError> {
     self
       .call(move |engine| Box::pin(async move { engine.moved_call_hint(&conversation_id).await }))
+      .await
+  }
+
+  /// Who hosts the meeting whose chat is `conversation_id` (#1720): the organizer, the co-hosts
+  /// and the user's own part, for the "Host" / "Co-host" badges and the participant menu. `None`
+  /// for a conversation of no meeting.
+  pub async fn meeting_hosts(&self, conversation_id: String) -> Result<Option<MeetingHosts>, TeamCraftError> {
+    self
+      .call(move |engine| Box::pin(async move { engine.meeting_hosts(&conversation_id).await }))
+      .await
+  }
+
+  /// The organizer's participant menu in the meeting whose chat is `conversation_id`: "Make
+  /// co-host", "Remove as co-host" or "Hand over host role" (the organizer stays co-host). The
+  /// core signs the new host list with the user's identity key and publishes it (e2ee.md §4.6,
+  /// "Meeting hosts"); [`Self::meeting_hosts_change`] tells how it went, and the meeting list
+  /// shows the result after the server's `meeting_update`.
+  pub async fn change_meeting_host(
+    &self,
+    conversation_id: String,
+    user_id: String,
+    action: MeetingHostAction,
+  ) -> Result<(), TeamCraftError> {
+    let change = self
+      .call(move |engine| {
+        Box::pin(async move {
+          engine
+            .meeting_host_change(&conversation_id, &user_id, action)
+            .await
+        })
+      })
+      .await?;
+    self
+      .act_locally(move |reads| reads.apply_action(ChatAction::ChangeMeetingHosts { change }))
+      .await
+  }
+
+  /// How the last change of the hosts of the meeting whose chat is `conversation_id` went on this
+  /// device: `None` before one, else "saving", "saved" or the failure in words (#1720).
+  pub async fn meeting_hosts_change(
+    &self,
+    conversation_id: String,
+  ) -> Result<Option<String>, TeamCraftError> {
+    use teamcraft_client_api::backend::ChatBackend as _;
+    use teamcraft_client_api::meeting_hosts::HostsChangeState;
+    let conversation = engine::parse_id(&conversation_id)?;
+    self
+      .read_queue()?
+      .query(move |reads| {
+        Ok(
+          reads
+            .backend()?
+            .meeting_hosts_change(conversation)
+            .map(|state| match state {
+              HostsChangeState::Saving => "saving".to_owned(),
+              HostsChangeState::Saved => "saved".to_owned(),
+              HostsChangeState::Failed { reason } => reason,
+            }),
+        )
+      })
+      .await
+  }
+
+  /// Whether leaving the call of `conversation_id` should first offer to hand the meeting over
+  /// (#1720): the user organizes it, `waiting` people wait in its lobby, nobody else hosts it, and
+  /// one of `candidate_ids` (the others in the call who aren't guests) could take it.
+  pub async fn offers_meeting_handover(
+    &self,
+    conversation_id: String,
+    waiting: u32,
+    candidate_ids: Vec<String>,
+  ) -> Result<bool, TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move {
+          engine
+            .offers_handover(&conversation_id, waiting, &candidate_ids)
+            .await
+        })
+      })
       .await
   }
 

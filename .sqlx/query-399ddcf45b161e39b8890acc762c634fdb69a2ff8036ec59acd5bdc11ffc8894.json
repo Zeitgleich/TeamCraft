@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO meeting_attendees (id, meeting_id, user_id, rsvp) VALUES ($1, $2, $3, 'accepted')\n           ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "399ddcf45b161e39b8890acc762c634fdb69a2ff8036ec59acd5bdc11ffc8894"
+}

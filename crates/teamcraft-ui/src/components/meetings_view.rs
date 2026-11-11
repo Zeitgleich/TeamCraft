@@ -8,6 +8,7 @@ use std::time::Duration;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::failure::ActionFailure;
+use teamcraft_client_api::meeting_hosts::co_hosts_from_dialog;
 use teamcraft_crypto::guest_link::code_of_fingerprint;
 use teamcraft_proto::{
   CancelScope, IdempotencyKey, LobbyEntry, LobbyState, MeetingId, MeetingResponse, MeetingStatus, RsvpStatus,
@@ -253,6 +254,8 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
   let locale = i18n.locale().tag();
   let id = meeting.id;
   let is_host = meeting.organizer_user_id == me;
+  // A co-host the organizer named (#1720): guest links and the host controls, not the edit.
+  let is_co_host = meeting.co_host_user_ids.contains(&me);
   let is_cancelled = meeting.status == MeetingStatus::Cancelled;
   let over = is_over(&meeting, now_ms());
   let rsvp = my_rsvp(&meeting, me);
@@ -287,7 +290,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
   let attendees_for_list = meeting.attendees.clone();
   let conversation = meeting.conversation_id;
   // Host controls matter while the meeting runs (a little before the start counts, people dial in early).
-  let is_live_host = is_host && is_joinable;
+  let is_live_host = (is_host || is_co_host) && is_joinable;
   let meeting_for_join = meeting.clone();
   let has_recurrence = meeting.maybe_recurrence.is_some();
   let has_lobby = hosts_lobby(&meeting, me);
@@ -341,6 +344,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
         <h3 class="meeting-title" translate="no">{meeting.title.clone()}</h3>
         {is_live.then(|| view! { <span class="badge badge-live">{move || i18n.t("meetings-live")}</span> })}
         {has_recurrence.then(|| view! { <span class="meeting-flag" title=move || i18n.t("meetings-recurring")><Icon name=IconName::Rotate /></span> })}
+        {is_co_host.then(|| view! { <span class="badge badge-host">{move || i18n.t("host-role-co-host")}</span> })}
         {is_cancelled
           .then(|| {
             let key = if is_holiday { "meetings-holiday" } else { "meetings-cancelled" };
@@ -397,7 +401,7 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
               </div>
             }
           })}
-        {(!over && is_host)
+        {(!over && (is_host || is_co_host))
           .then(|| {
             view! {
               <button
@@ -407,6 +411,11 @@ fn MeetingCard(meeting: MeetingResponse) -> impl IntoView {
               >
                 {move || i18n.t("meetings-invite-guests")}
               </button>
+            }
+          })}
+        {(!over && is_host)
+          .then(|| {
+            view! {
               <button class="btn" on:click=move |_| state.overlay.set(Overlay::EditMeeting(id))>
                 {move || i18n.t("meetings-edit")}
               </button>
@@ -1409,8 +1418,18 @@ pub fn ScheduleMeetingDialog(
               backend.request_notetaker(conversation, teamcraft_proto::NotetakerRequest::Stop)
             });
           }
+          let co_hosts = form.get_untracked().co_hosts;
+          let meeting_id = before.id;
           spawn_local(async move {
             if save_meeting_edit(state, hub, me, before, request).await {
+              // The co-hosts as ticked, signed by this device once the invitees are saved (#1720).
+              let maybe_saved = hub
+                .meetings
+                .try_with_untracked(|all| all.iter().find(|meeting| meeting.id == meeting_id).cloned())
+                .flatten();
+              if let Some(change) = maybe_saved.and_then(|saved| co_hosts_from_dialog(&saved, &co_hosts)) {
+                state.try_write(|backend| backend.change_meeting_hosts(change));
+              }
               state.close_overlay();
             }
             if has_notetaker && !had_notetaker {
@@ -1430,6 +1449,7 @@ pub fn ScheduleMeetingDialog(
         // Listed in the space it is scheduled from, so it shows where the user just was.
         request.maybe_space = untrack(|| state.maybe_scoped_space());
         let has_notetaker = form.get_untracked().maybe_notetaker.is_some();
+        let co_hosts = form.get_untracked().co_hosts;
         spawn_local(async move {
           let client = hub.client();
           if let Some(meeting) = hub.run(me, now_ms(), client.create(&request)).await {
@@ -1450,6 +1470,10 @@ pub fn ScheduleMeetingDialog(
             // Queued behind the chat's setup, so it goes into the group the notetaker is in.
             if has_notetaker {
               state.try_write(|backend| backend.request_notetaker(meeting.conversation_id, every_call()));
+            }
+            // The co-hosts ticked here, signed by this device (#1720).
+            if let Some(change) = co_hosts_from_dialog(&meeting, &co_hosts) {
+              state.try_write(|backend| backend.change_meeting_hosts(change));
             }
             show_created(state, hub, meeting);
           }
@@ -1581,6 +1605,60 @@ pub fn ScheduleMeetingDialog(
               </For>
             </ul>
           </fieldset>
+          // Who hosts with the organizer: among the people ticked above (#1720).
+          {move || {
+            let invited = form.with(|form| {
+              form
+                .members
+                .iter()
+                .copied()
+                .filter(|member| Some(*member) != form.maybe_notetaker)
+                .collect::<Vec<_>>()
+            });
+            (!invited.is_empty()).then(|| {
+              let people = others.with(|all| {
+                all
+                  .iter()
+                  .filter(|user| invited.contains(&user.id) && !user.is_guest)
+                  .cloned()
+                  .collect::<Vec<_>>()
+              });
+              view! {
+                <fieldset class="field">
+                  <legend>{move || i18n.t("schedule-co-hosts")}</legend>
+                  <ul class="invite-list">
+                    {people
+                      .into_iter()
+                      .map(|user| {
+                        let id: UserId = user.id;
+                        view! {
+                          <li>
+                            <label class="checkbox">
+                              <input
+                                type="checkbox"
+                                prop:checked=move || form.with(|form| form.co_hosts.contains(&id))
+                                on:change=move |ev| {
+                                  let checked = event_target_checked(&ev);
+                                  form.update(|form| {
+                                    form.co_hosts.retain(|co_host| *co_host != id);
+                                    if checked {
+                                      form.co_hosts.push(id);
+                                    }
+                                  });
+                                }
+                              />
+                              <span translate="no">{user.display_name.clone()}</span>
+                            </label>
+                          </li>
+                        }
+                      })
+                      .collect_view()}
+                  </ul>
+                  <p class="muted-text small">{move || i18n.t("schedule-co-hosts-hint")}</p>
+                </fieldset>
+              }
+            })
+          }}
           <fieldset
             class="field"
             id=FormField::Externals.id()
@@ -2023,6 +2101,7 @@ mod tests {
       is_occurrence_cancelled: false,
       is_occurrence_holiday: false,
       can_host_lobby: false,
+      co_host_user_ids: Vec::new(),
       attendees: Vec::new(),
       undelivered_invitations: Vec::new(),
     }

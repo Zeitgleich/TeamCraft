@@ -767,9 +767,9 @@ async fn release_claim(state: &AppState, invite: MeetingInviteId) {
   }
 }
 
-/// The meeting, if the caller hosts it (organizer or chat admin); other members get "forbidden",
-/// strangers "not found". Cancelled meetings have no lobby.
-async fn host_meeting(
+/// The meeting, if the caller hosts it (organizer, chat admin or co-host, #1720); other members get
+/// "forbidden", strangers "not found". Cancelled meetings have no lobby.
+pub(super) async fn host_meeting(
   state: &AppState,
   caller: &AuthenticatedUser,
   id: MeetingId,
@@ -788,7 +788,13 @@ async fn host_meeting(
   else {
     return Err(ApiError::meeting_not_found());
   };
-  if !is_meeting_host(&meeting, caller.user.id, &role) {
+  let co_hosts = state
+    .database
+    .meeting_co_hosts(&[meeting.id])
+    .await?
+    .remove(&meeting.id)
+    .unwrap_or_default();
+  if !is_meeting_host(&meeting, caller.user.id, &role, &co_hosts) {
     return Err(ApiError::Forbidden("only hosts can do that".into()));
   }
   if meeting.status != MeetingStatus::Scheduled.as_str() {
@@ -798,8 +804,8 @@ async fn host_meeting(
 }
 
 /// The meetings among `meetings` whose lobby the caller hosts, by the rule of [`host_meeting`]
-/// (`ListLobbyResponse::is_host`): in the meeting chat, organizer or chat admin, scheduled. One
-/// query for the whole meeting list, whose `can_host_lobby` it sets (#1305).
+/// (`ListLobbyResponse::is_host`): in the meeting chat, organizer, chat admin or co-host,
+/// scheduled. One query each for the whole meeting list, whose `can_host_lobby` it sets (#1305).
 pub async fn hosted_lobbies(
   state: &AppState,
   caller: &AuthenticatedUser,
@@ -810,30 +816,33 @@ pub async fn hosted_lobbies(
     .database
     .member_roles(caller.user.id, &conversations)
     .await?;
+  let ids: Vec<MeetingId> = meetings.iter().map(|meeting| meeting.id).collect();
+  let co_hosts = state.database.meeting_co_hosts(&ids).await?;
   Ok(
     meetings
       .iter()
       .filter(|meeting| meeting.status == MeetingStatus::Scheduled.as_str())
       .filter(|meeting| {
-        roles
-          .get(&meeting.conversation)
-          .is_some_and(|role| is_meeting_host(meeting, caller.user.id, role))
+        roles.get(&meeting.conversation).is_some_and(|role| {
+          let co_hosts = co_hosts.get(&meeting.id).map_or(&[][..], Vec::as_slice);
+          is_meeting_host(meeting, caller.user.id, role, co_hosts)
+        })
       })
       .map(|meeting| meeting.id)
       .collect(),
   )
 }
 
-/// Whether a member of the meeting chat with `role` there hosts the meeting: its organizer or a
-/// chat admin (`Database::meeting_host_ids`).
-fn is_meeting_host(meeting: &StoredMeeting, user: UserId, role: &ChannelRole) -> bool {
-  meeting.organizer == user || *role == ChannelRole::Admin
+/// Whether a member of the meeting chat with `role` there hosts the meeting: its organizer, a chat
+/// admin or a co-host the organizer named (#1720; `Database::meeting_host_ids`).
+fn is_meeting_host(meeting: &StoredMeeting, user: UserId, role: &ChannelRole, co_hosts: &[UserId]) -> bool {
+  meeting.organizer == user || *role == ChannelRole::Admin || co_hosts.contains(&user)
 }
 
 /// How the caller may act on a meeting's lobby.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LobbyRole {
-  /// Organizer or chat admin: decides on everybody.
+  /// Organizer, chat admin or co-host: decides on everybody.
   Host,
   /// Another member (no guest) of a meeting without a lobby: may let in those who came with the
   /// meeting link, as the organizer's device does by itself (#1103).

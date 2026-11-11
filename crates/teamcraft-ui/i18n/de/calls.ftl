@@ -117,6 +117,8 @@ tile-hand = Hand gehoben
 tile-speaking = spricht
 tile-reconnecting = Verbindung wird wiederhergestellt
 tile-notetaker = Notetaker – transkribiert
+tile-host = Gastgeber
+tile-co-host = Co-Gastgeber
 video-stalled = Video pausiert: schwache Verbindung
 
 ## Videoqualität (#967): wie scharf das Video einer anderen Person ankommt, wie im Menü eines Videoplayers

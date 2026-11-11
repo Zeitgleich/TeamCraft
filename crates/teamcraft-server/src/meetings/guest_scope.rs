@@ -42,6 +42,8 @@ const READ_ONLY: &[&str] = &[
   "/meetings/{meeting_id}/lobby/me",
   // The organizer-signed admitters, which an admitted guest checks a welcome against.
   "/conversations/{conversation_id}/meeting-admitters",
+  // The organizer-signed host lists (#1720): a co-host's welcome counts for the guest too.
+  "/conversations/{conversation_id}/meeting-hosts",
 ];
 
 /// Routes a guest may read and change: the chat of their meeting and the key material of their own
@@ -112,6 +114,10 @@ mod tests {
     let admitters = Some("/api/v1/conversations/{conversation_id}/meeting-admitters");
     assert!(allows(&Method::GET, admitters));
     assert!(!allows(&Method::PUT, admitters));
+    // Nor the host lists (#1720).
+    let hosts = Some("/api/v1/conversations/{conversation_id}/meeting-hosts");
+    assert!(allows(&Method::GET, hosts));
+    assert!(!allows(&Method::PUT, hosts));
   }
 
   #[test]

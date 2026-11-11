@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM meeting_co_hosts WHERE meeting_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "849e0c6f5f038731e04f2e89a36b778b61e6266022fda9006bc6ffddcd2c29cf"
+}

@@ -444,6 +444,13 @@ pub enum CoreCommand {
   CheckMeetingAdmission {
     conversation: ConversationId,
   },
+  /// The organizer's device signs who hosts a meeting, or hands it over (#1720).
+  ChangeMeetingHosts {
+    meeting: teamcraft_proto::MeetingId,
+    conversation: ConversationId,
+    co_hosts: Vec<UserId>,
+    maybe_new_organizer: Option<UserId>,
+  },
   InviteToSpace {
     space: SpaceId,
     email: String,
@@ -647,6 +654,7 @@ impl CoreCommand {
       | Self::NoteMeetingLobby { .. }
       | Self::SyncMeetingAdmitters { .. }
       | Self::CheckMeetingAdmission { .. }
+      | Self::ChangeMeetingHosts { .. }
       | Self::RefreshMembers { .. }
       | Self::LoadHistoryAt { .. }
       | Self::LoadOlderHistory { .. }
@@ -3213,6 +3221,27 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn admits_link_arrivals(&self, conversation: ConversationId, now_ms: i64) -> bool {
     crate::client::admits_link_arrivals(self.store_ref(), conversation, now_ms)
+  }
+
+  fn change_meeting_hosts(&self, change: teamcraft_client_api::meeting_hosts::MeetingHostsChange) {
+    self.command(CoreCommand::ChangeMeetingHosts {
+      meeting: change.meeting,
+      conversation: change.conversation,
+      co_hosts: change.co_hosts,
+      maybe_new_organizer: change.maybe_new_organizer,
+    });
+  }
+
+  fn meeting_hosts_change(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::meeting_hosts::HostsChangeState> {
+    use teamcraft_client_api::meeting_hosts::HostsChangeState;
+    crate::client::meeting_hosts_change(self.store_ref(), conversation).map(|record| match record {
+      crate::client::HostsChangeRecord::Saving => HostsChangeState::Saving,
+      crate::client::HostsChangeRecord::Saved => HostsChangeState::Saved,
+      crate::client::HostsChangeRecord::Failed { reason } => HostsChangeState::Failed { reason },
+    })
   }
 
   fn unconfirmed_removals(&self) -> Vec<(ConversationId, UserId)> {

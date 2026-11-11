@@ -545,6 +545,17 @@ pub trait ChatBackend {
   /// A member's device checks the organizer-signed admitters of the meeting whose chat is
   /// `conversation`, which [`Self::admits_link_arrivals`] then answers from.
   fn check_meeting_admission(&self, _conversation: ConversationId) {}
+  /// The organizer's device signs and publishes who hosts the meeting, or hands it over (#1720);
+  /// [`Self::meeting_hosts_change`] tells how it went.
+  fn change_meeting_hosts(&self, _change: crate::meeting_hosts::MeetingHostsChange) {}
+  /// How the last change of the hosts of the meeting whose chat is `conversation` went on this
+  /// device; `None` before one.
+  fn meeting_hosts_change(
+    &self,
+    _conversation: ConversationId,
+  ) -> Option<crate::meeting_hosts::HostsChangeState> {
+    None
+  }
   /// Whether this member's device lets people of the meeting link in by itself: the
   /// organizer-signed admitters of the meeting chat name this user and say "no lobby", and are in
   /// force at `now_ms`.

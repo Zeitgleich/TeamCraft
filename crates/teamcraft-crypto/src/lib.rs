@@ -23,6 +23,7 @@ pub mod ids;
 pub mod key_bag;
 pub mod local_store;
 pub mod meeting_admitters;
+pub mod meeting_hosts;
 pub mod meeting_link;
 pub mod membership;
 pub mod message;

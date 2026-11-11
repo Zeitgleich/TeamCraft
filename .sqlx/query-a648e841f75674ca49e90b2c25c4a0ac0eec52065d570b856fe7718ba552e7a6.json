@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM meeting_host_lists WHERE meeting_id = $1 AND sequence < $2 AND NOT is_handover",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a648e841f75674ca49e90b2c25c4a0ac0eec52065d570b856fe7718ba552e7a6"
+}

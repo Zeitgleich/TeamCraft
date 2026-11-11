@@ -69,6 +69,8 @@ pub(crate) const CHANNEL_NAME: &str = "TeamCraft-v1 channel name";
 pub(crate) const CHANNEL_PROPERTIES: &str = "TeamCraft-v1 channel properties";
 /// Hash input label of a channel anchor's founding, the pin devices keep (e2ee.md §4.6.5).
 pub(crate) const CHANNEL_ANCHOR_PIN: &str = "TeamCraft-v1 channel anchor pin";
+/// The organizer's signature on who hosts a meeting (e2ee.md §4.6, "Meeting hosts").
+pub(crate) const MEETING_HOSTS: &str = "TeamCraft-v1 meeting hosts";
 
 /// Returns `len(label) || label || body`.
 pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
@@ -85,7 +87,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 46] = [
+  const ALL_LABELS: [&str; 47] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -132,6 +134,7 @@ mod tests {
     CHANNEL_NAME,
     CHANNEL_PROPERTIES,
     CHANNEL_ANCHOR_PIN,
+    MEETING_HOSTS,
   ];
 
   #[test]

@@ -137,6 +137,37 @@ pub struct AttendeeDiff {
   pub revoked_guests: Vec<UserId>,
 }
 
+/// A signed host list to keep (#1720), with what the server reads from it.
+#[derive(Debug, Clone)]
+pub struct NewHostList<'a> {
+  pub sequence: i64,
+  pub statement: &'a [u8],
+  /// The co-hosts it names.
+  pub co_hosts: &'a [UserId],
+  /// It names another organizer: the meeting is handed over.
+  pub maybe_handover: Option<Handover>,
+}
+
+/// A meeting handed to another member of its chat: the new organizer leaves the invitee list
+/// (an organizer is no invitee) and the former one joins it, under `former_attendee`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Handover {
+  pub new_organizer: UserId,
+  pub former_attendee: MeetingAttendeeId,
+}
+
+/// What became of a host list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostListOutcome {
+  Kept,
+  /// A list with the same or a higher sequence is stored already.
+  Stale,
+  /// The caller isn't the organizer (any more).
+  NotOrganizer,
+  /// The meeting was handed over too often; its chain would get too long for guests to read.
+  TooManyHandovers,
+}
+
 /// Which invitee an answer belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttendeeKey<'a> {
@@ -383,6 +414,14 @@ impl Database {
           sqlx::query!(
             "DELETE FROM memberships WHERE conversation_id = $1 AND user_id = $2",
             to_db(meeting.conversation),
+            to_db(user),
+          )
+          .execute(&mut *tx)
+          .await?;
+          // Somebody taken off the meeting hosts it no more (#1720).
+          sqlx::query!(
+            "DELETE FROM meeting_co_hosts WHERE meeting_id = $1 AND user_id = $2",
+            to_db(meeting.id),
             to_db(user),
           )
           .execute(&mut *tx)
@@ -1235,6 +1274,146 @@ impl Database {
     Ok(row.map(|row| row.statement))
   }
 
+  /// Keeps a host list the organizer signed (#1720) and the co-hosts it names; a handover also
+  /// makes the new organizer the meeting's organizer (and chat admin, the former one a member and
+  /// an invitee who accepted) and increases the iCalendar sequence. Refused when `caller` no longer
+  /// organizes the meeting, when a list with the same or a higher sequence is stored, or after
+  /// `max_handovers` handovers. Every handover is kept; of the other lists only the newest.
+  pub async fn put_meeting_hosts(
+    &self,
+    meeting: MeetingId,
+    caller: UserId,
+    list: &NewHostList<'_>,
+    max_handovers: i64,
+  ) -> Result<HostListOutcome, DbError> {
+    let mut tx = self.pool().begin().await?;
+    let Some(row) = sqlx::query!(
+      "SELECT organizer_user_id, conversation_id FROM meetings WHERE id = $1 FOR UPDATE",
+      to_db(meeting),
+    )
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+      return Ok(HostListOutcome::NotOrganizer);
+    };
+    if from_db::<UserId>(row.organizer_user_id)? != caller {
+      return Ok(HostListOutcome::NotOrganizer);
+    }
+    let stored = sqlx::query!(
+      r#"SELECT max(sequence) AS newest, count(*) FILTER (WHERE is_handover) AS "handovers!"
+         FROM meeting_host_lists WHERE meeting_id = $1"#,
+      to_db(meeting),
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if stored.newest.is_some_and(|newest| newest >= list.sequence) {
+      return Ok(HostListOutcome::Stale);
+    }
+    if list.maybe_handover.is_some() && stored.handovers >= max_handovers {
+      return Ok(HostListOutcome::TooManyHandovers);
+    }
+    sqlx::query!(
+      r#"INSERT INTO meeting_host_lists (meeting_id, sequence, statement, is_handover)
+         VALUES ($1, $2, $3, $4)"#,
+      to_db(meeting),
+      list.sequence,
+      list.statement,
+      list.maybe_handover.is_some(),
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+      "DELETE FROM meeting_host_lists WHERE meeting_id = $1 AND sequence < $2 AND NOT is_handover",
+      to_db(meeting),
+      list.sequence,
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+      "DELETE FROM meeting_co_hosts WHERE meeting_id = $1",
+      to_db(meeting)
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query!(
+      r#"INSERT INTO meeting_co_hosts (meeting_id, user_id) SELECT $1, unnest($2::bigint[])
+         ON CONFLICT DO NOTHING"#,
+      to_db(meeting),
+      &to_db_all(list.co_hosts),
+    )
+    .execute(&mut *tx)
+    .await?;
+    if let Some(handover) = list.maybe_handover {
+      sqlx::query!(
+        "UPDATE meetings SET organizer_user_id = $2, sequence = sequence + 1 WHERE id = $1",
+        to_db(meeting),
+        to_db(handover.new_organizer),
+      )
+      .execute(&mut *tx)
+      .await?;
+      sqlx::query!(
+        "DELETE FROM meeting_attendees WHERE meeting_id = $1 AND user_id = $2",
+        to_db(meeting),
+        to_db(handover.new_organizer),
+      )
+      .execute(&mut *tx)
+      .await?;
+      sqlx::query!(
+        r#"INSERT INTO meeting_attendees (id, meeting_id, user_id, rsvp) VALUES ($1, $2, $3, 'accepted')
+           ON CONFLICT DO NOTHING"#,
+        to_db(handover.former_attendee),
+        to_db(meeting),
+        to_db(caller),
+      )
+      .execute(&mut *tx)
+      .await?;
+      sqlx::query!(
+        r#"UPDATE memberships SET role = CASE WHEN user_id = $2 THEN 'admin' ELSE 'member' END
+           WHERE conversation_id = $1 AND user_id IN ($2, $3)"#,
+        row.conversation_id,
+        to_db(handover.new_organizer),
+        to_db(caller),
+      )
+      .execute(&mut *tx)
+      .await?;
+    }
+    tx.commit().await?;
+    Ok(HostListOutcome::Kept)
+  }
+
+  /// The host lists a checker follows (#1720): every handover and the newest list, oldest first.
+  pub async fn meeting_host_lists(&self, meeting: MeetingId) -> Result<Vec<Vec<u8>>, DbError> {
+    Ok(
+      sqlx::query_scalar!(
+        "SELECT statement FROM meeting_host_lists WHERE meeting_id = $1 ORDER BY sequence",
+        to_db(meeting),
+      )
+      .fetch_all(self.pool())
+      .await?,
+    )
+  }
+
+  /// The co-hosts of each of `meetings` that has any (#1720). One query for a whole list.
+  pub async fn meeting_co_hosts(
+    &self,
+    meetings: &[MeetingId],
+  ) -> Result<HashMap<MeetingId, Vec<UserId>>, DbError> {
+    let rows = sqlx::query!(
+      "SELECT meeting_id, user_id FROM meeting_co_hosts WHERE meeting_id = ANY($1) ORDER BY meeting_id, user_id",
+      &to_db_all(meetings),
+    )
+    .fetch_all(self.pool())
+    .await?;
+    let mut co_hosts: HashMap<MeetingId, Vec<UserId>> = HashMap::new();
+    for row in rows {
+      co_hosts
+        .entry(from_db(row.meeting_id)?)
+        .or_default()
+        .push(from_db(row.user_id)?);
+    }
+    Ok(co_hosts)
+  }
+
   /// Guests waiting for a decision, longest waiting first.
   pub async fn list_waiting(&self, meeting: MeetingId) -> Result<Vec<LobbyRow>, DbError> {
     let rows = sqlx::query!(
@@ -1292,11 +1471,14 @@ impl Database {
     Ok(true)
   }
 
-  /// Members of the meeting chat who may host: the organizer and chat admins.
+  /// Members of the meeting chat who may host: the organizer, chat admins and co-hosts (#1720).
   pub async fn meeting_host_ids(&self, meeting: &StoredMeeting) -> Result<Vec<UserId>, DbError> {
     let ids = sqlx::query_scalar!(
-      "SELECT user_id FROM memberships WHERE conversation_id = $1 AND role = 'admin' ORDER BY user_id",
+      r#"SELECT user_id FROM memberships WHERE conversation_id = $1
+           AND (role = 'admin' OR user_id IN (SELECT user_id FROM meeting_co_hosts WHERE meeting_id = $2))
+         ORDER BY user_id"#,
       to_db(meeting.conversation),
+      to_db(meeting.id),
     )
     .fetch_all(self.pool())
     .await?;

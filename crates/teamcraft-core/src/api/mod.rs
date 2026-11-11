@@ -83,8 +83,8 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkRequest};
 use teamcraft_proto::{
-  CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingId, MeetingResponse,
-  PutMeetingAdmittersRequest,
+  CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingHostsResponse, MeetingId, MeetingResponse,
+  PutMeetingAdmittersRequest, PutMeetingHostsRequest,
 };
 use teamcraft_proto::{
   DirectoryChannelsQuery, DirectoryChannelsResponse, DirectoryFiltersQuery, DirectoryFiltersResponse,
@@ -553,6 +553,23 @@ pub trait ServerApi {
     &self,
     conversation: ConversationId,
   ) -> impl Future<Output = Result<MeetingAdmittersResponse, ApiError>>;
+
+  /// Publishes an organizer-signed host list of the meeting whose chat this is
+  /// (`PUT /conversations/{id}/meeting-hosts`, the organizer only, #1720); one naming another
+  /// organizer hands the meeting over. `409` when the server holds the same or a newer sequence.
+  fn put_meeting_hosts(
+    &self,
+    conversation: ConversationId,
+    request: &PutMeetingHostsRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+
+  /// Every handover and the newest host list (`GET /conversations/{id}/meeting-hosts`, members of
+  /// the meeting chat), oldest first; empty before the first. Unverified: the caller follows them
+  /// from the key it trusts.
+  fn meeting_hosts(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<MeetingHostsResponse, ApiError>>;
 
   /// Moves the conversation's call into a meeting the user started for it (docs/meetings.md).
   fn move_call(

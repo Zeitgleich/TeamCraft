@@ -159,9 +159,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     access_ends_at_ms: i64,
   ) -> Result<(), CoreError> {
     let organizer = self.api.conversation(conversation).await?.maybe_organizer_user_id;
-    // The guest accepts a welcome only from the organizer's devices (`v` in the link) and from
-    // those of the admitters the organizer signed: anybody else's would fail on the guest's side.
-    if organizer != Some(self.account.user_id) && self.own_admission(conversation).await?.is_none() {
+    // The guest accepts a welcome only from the hosts by the lists that follow from `v` in the
+    // link (the organizer and the co-hosts, #1720) and from the admitters the organizer signed:
+    // anybody else's would fail on the guest's side.
+    if organizer != Some(self.account.user_id)
+      && !self.is_own_hosting(conversation).await?
+      && self.own_admission(conversation).await?.is_none()
+    {
       return Err(CoreError::GuestRefused(GuestRefusal::NotAnAdmitter));
     }
     let identity = self
@@ -256,6 +260,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     records::get_json(&self.store, Table::SyncState, &organizer_anchor_key(conversation))
   }
 
+  /// The meeting a guest's page joined for this chat (`set_guest_organizer_anchor`).
+  pub(super) fn guest_meeting(&self, conversation: ConversationId) -> Result<Option<MeetingId>, CoreError> {
+    records::get_json(
+      &self.store,
+      Table::SyncState,
+      &format!("{GUEST_MEETING_PREFIX}{conversation}"),
+    )
+  }
+
   /// Whether a guest's welcome came from a device of an admitter the organizer signed for this
   /// meeting chat (#1103): the statement must verify against `anchor` (`v` of the link), name the
   /// meeting the guest joined and its chat, be in force by this device's clock and not be older
@@ -302,6 +315,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if !is_organizer || !self.has_group(conversation)? {
       return Ok(false);
     }
+    // A meeting handed over to this user: its hosts are signed with this user's key first (#1720).
+    if let Err(error) = self.sync_meeting_hosts(meeting, conversation).await {
+      tracing::warn!(meeting_id = %meeting, %error, "could not sign the hosts of a meeting handed over");
+    }
     let admitters = self.admitter_candidates(conversation).await?;
     let own = self.account.identity_public_key().fingerprint();
     // The organizer's own statement sets the next sequence even once it ended: no end of
@@ -309,6 +326,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let maybe_current = self
       .verified_admitters(conversation, Some(meeting), &own, 0)
       .await?;
+    // Without a record of its own (a meeting handed to this user, #1720) the device keeps what the
+    // organizer before signed, as this device verified it.
+    let maybe_kept_admission = self.admitters_record(conversation)?.map(|record| {
+      if record.admits_by_link {
+        LinkAdmission::ByThemselves
+      } else {
+        LinkAdmission::Lobby
+      }
+    });
     let link_admission = match records::get_json::<bool>(
       &self.store,
       Table::SyncState,
@@ -318,7 +344,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Some(true) => LinkAdmission::Lobby,
       None => maybe_current
         .as_ref()
-        .map_or(LinkAdmission::Lobby, VerifiedMeetingAdmitters::link_admission),
+        .map(VerifiedMeetingAdmitters::link_admission)
+        .or(maybe_kept_admission)
+        .unwrap_or(LinkAdmission::Lobby),
     };
     let wanted_until = u64::try_from(expires_at_ms).unwrap_or(0);
     if let Some(current) = &maybe_current
@@ -412,6 +440,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if let Err(error) = self.organizers_admitters(conversation).await {
       tracing::warn!(conversation_id = %conversation, %error, "could not read the meeting's admitters before a commit");
     }
+    self.refresh_meeting_hosts_for_commit(conversation).await;
   }
 
   /// The admitters of the meeting chat that count for a commit at the server's time `at_ms`: the

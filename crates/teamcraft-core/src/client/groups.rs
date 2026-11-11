@@ -3285,7 +3285,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if is_meeting_chat {
       // In a meeting chat only the roster's members manage others: a guest the server calls a
       // member still doesn't (the organizer is in the roster like any member). The admitters the
-      // organizer signed let guests in besides (#1103).
+      // organizer signed let guests in besides (#1103), and so do the co-hosts of the host lists
+      // this device verified (#1720).
+      let admitters = self
+        .meeting_admitters_at(conversation, at_ms)?
+        .into_iter()
+        .chain(self.kept_co_hosts(conversation)?);
+      // After a handover the organizer the verified lists name counts like the server's (#1720).
+      let maybe_listed_organizer = self.kept_organizer(conversation)?;
       authority = authority
         .for_meeting_chat(
           workspace
@@ -3293,9 +3300,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             .members
             .iter()
             .map(|member| member.user_id)
-            .chain(maybe_organizer),
+            .chain(maybe_organizer)
+            .chain(maybe_listed_organizer),
         )
-        .with_meeting_admitters(self.meeting_admitters_at(conversation, at_ms)?);
+        .with_meeting_admitters(admitters);
     }
     Ok(authority)
   }
