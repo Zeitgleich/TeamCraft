@@ -7,7 +7,6 @@
 
 use std::collections::BTreeSet;
 
-use teamcraft_crypto::identity::IdentityFingerprint;
 use teamcraft_crypto::mls::{ContentKeyBundle, ConversationGroup, GroupMember, MlsError};
 use teamcraft_proto::{
   Base64Bytes, ConversationId, ConversationKind, DeviceId, Id, ListMlsMessagesQuery, MessageResponse,
@@ -637,20 +636,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       };
       // The organizer and the co-hosts by the host lists that follow from the key of the link
       // (#1720), else an admitter the current organizer's key signed (#1103).
-      let (is_hosts, organizer) = match anchor.parse::<IdentityFingerprint>() {
-        Ok(anchor) => {
-          let maybe_meeting = self.guest_meeting(conversation)?;
-          self
-            .guest_hosts_check(conversation, maybe_meeting, &anchor, &device)
-            .await?
-        },
-        Err(_) => return Ok(false),
-      };
-      if !is_hosts
-        && !self
-          .is_signed_admitters_device(conversation, &organizer.to_string(), &device)
-          .await?
-      {
+      if !self.is_hosts_welcome(conversation, &anchor, &device).await? {
         tracing::warn!(conversation_id = %conversation, "the guest's welcome came neither from a host of the meeting by the key in the link nor from an admitter its organizer signed; dropped");
         return Ok(false);
       }
@@ -679,11 +665,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // A meeting handed over (#1720) keeps the group its former organizer founded: the host lists
     // must hand it from the founder's key to the organizer's, each list signed by the organizer
     // before (e2ee.md §4.6, "Meeting hosts").
-    let Some(founder_device) = group.verified_member(founder, directory)? else {
-      return Ok(false);
-    };
     self
-      .is_handed_over_from(conversation, founder_device.identity_key(), organizer)
+      .is_handed_over_group(conversation, group, founder, directory, organizer)
       .await
   }
 

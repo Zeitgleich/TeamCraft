@@ -7,12 +7,16 @@
 //! made). So a co-host's device lets guests in and a guest accepts its welcome without the
 //! server's word, and a group founded by a former organizer stays the meeting's.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::identity::{IdentityFingerprint, IdentityPublicKey, VerifiedDevice};
 use teamcraft_crypto::meeting_hosts::{
   Host, HostsDraft, HostsExpectation, SignedMeetingHosts, VerifiedMeetingHosts, verify_chain,
 };
 use teamcraft_crypto::membership::IdentityDirectory;
+use teamcraft_crypto::mls::{ConversationGroup, GroupMember};
 use teamcraft_proto::{Base64Bytes, ConversationId, MeetingId, PutMeetingHostsRequest, UserId};
 
 use super::Client;
@@ -21,6 +25,12 @@ use crate::convert;
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
+use crate::trust::PinnedDirectory;
+
+/// The futures this module hands to the sync, catch-up and command paths, boxed where they are
+/// made: the callers' futures, and their frames while polled, hold a pointer instead of the
+/// checks' state (the core suite's catch-up tests overflowed their stack on Windows otherwise).
+type HostsFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 /// The hosts of a meeting chat this device verified last ([`HostsRecord`]).
 const HOSTS_PREFIX: &str = "meeting-hosts/";
@@ -68,7 +78,97 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// the meeting is handed to. The sequence is above every list the server holds and the time of
   /// signing, so the newest of two organizer devices stays ahead. The outcome is kept for the UI
   /// ([`meeting_hosts_change`]).
-  pub async fn change_meeting_hosts(&mut self, change: &HostsChange) -> Result<(), CoreError> {
+  pub fn change_meeting_hosts<'a>(
+    &'a mut self,
+    change: &'a HostsChange,
+  ) -> HostsFuture<'a, Result<(), CoreError>> {
+    Box::pin(self.change_meeting_hosts_unboxed(change))
+  }
+
+  /// After a handover to this user, signs the hosts the handover named again with this user's key,
+  /// so that links with this key (made from now on) find the co-hosts too. `Ok(true)` when it
+  /// published a list; nothing to do otherwise.
+  pub fn sync_meeting_hosts(
+    &mut self,
+    meeting: MeetingId,
+    conversation: ConversationId,
+  ) -> HostsFuture<'_, Result<bool, CoreError>> {
+    Box::pin(self.sync_meeting_hosts_unboxed(meeting, conversation))
+  }
+
+  /// Whether this member's device hosts the meeting chat by the verified host lists (organizer or
+  /// co-host with this device's own key): such a device may let guests in, whose pages accept its
+  /// welcome by the same lists.
+  pub(super) fn is_own_hosting(
+    &mut self,
+    conversation: ConversationId,
+  ) -> HostsFuture<'_, Result<bool, CoreError>> {
+    Box::pin(self.is_own_hosting_unboxed(conversation))
+  }
+
+  /// Whether a meeting chat's group whose first member is `founder` is the meeting's although the
+  /// server names another organizer, `organizer`: the host lists hand the meeting over from the
+  /// key that certified the founder's leaf, in a chain of lists each signed by the organizer
+  /// before, to the organizer's key as this device pinned it.
+  pub(super) fn is_handed_over_group<'a>(
+    &'a mut self,
+    conversation: ConversationId,
+    group: &'a ConversationGroup,
+    founder: GroupMember,
+    directory: &'a PinnedDirectory,
+    organizer: UserId,
+  ) -> HostsFuture<'a, Result<bool, CoreError>> {
+    Box::pin(async move {
+      let Some(founder_device) = group.verified_member(founder, directory)? else {
+        return Ok(false);
+      };
+      self
+        .is_handed_over_from(conversation, founder_device.identity_key(), organizer)
+        .await
+    })
+  }
+
+  /// For a guest's device: whether the device that sent its welcome may let the guest in, by the
+  /// key of the link (`anchor`, hex): a host by the lists that follow from that key (the current
+  /// organizer or a co-host, #1720), else an admitter the current organizer's key signed for the
+  /// meeting (#1103). A list older than one seen falls back on the hosts kept from before.
+  pub(super) fn is_hosts_welcome<'a>(
+    &'a mut self,
+    conversation: ConversationId,
+    anchor: &'a str,
+    device: &'a VerifiedDevice,
+  ) -> HostsFuture<'a, Result<bool, CoreError>> {
+    Box::pin(async move {
+      let Ok(anchor) = anchor.parse::<IdentityFingerprint>() else {
+        return Ok(false);
+      };
+      let maybe_meeting = self.guest_meeting(conversation)?;
+      let (is_hosts, organizer) = self
+        .guest_hosts_check(conversation, maybe_meeting, &anchor, device)
+        .await?;
+      if is_hosts {
+        return Ok(true);
+      }
+      self
+        .is_signed_admitters_device(conversation, &organizer.to_string(), device)
+        .await
+    })
+  }
+
+  /// Before a commit by somebody the roster doesn't vouch for is judged or made in a meeting chat:
+  /// reads the host lists again, so a co-host's add is judged by the newest list. A failure keeps
+  /// what this device had.
+  pub(super) fn refresh_meeting_hosts_for_commit(
+    &mut self,
+    conversation: ConversationId,
+  ) -> HostsFuture<'_, ()> {
+    Box::pin(self.refresh_meeting_hosts_for_commit_unboxed(conversation))
+  }
+}
+
+impl<A: ServerApi, S: LocalStore> Client<A, S> {
+  /// The body of [`Self::change_meeting_hosts`].
+  async fn change_meeting_hosts_unboxed(&mut self, change: &HostsChange) -> Result<(), CoreError> {
     self.note_hosts_change(change.conversation, &HostsChangeRecord::Saving)?;
     let result = self.sign_meeting_hosts(change).await;
     let record = match &result {
@@ -81,10 +181,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     result
   }
 
-  /// After a handover to this user, signs the hosts the handover named again with this user's key,
-  /// so that links with this key (made from now on) find the co-hosts too. `Ok(true)` when it
-  /// published a list; nothing to do otherwise.
-  pub async fn sync_meeting_hosts(
+  /// The body of [`Self::sync_meeting_hosts`].
+  async fn sync_meeting_hosts_unboxed(
     &mut self,
     meeting: MeetingId,
     conversation: ConversationId,
@@ -116,10 +214,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(true)
   }
 
-  /// Whether this member's device hosts the meeting chat by the verified host lists (organizer or
-  /// co-host with this device's own key): such a device may let guests in, whose pages accept its
-  /// welcome by the same lists.
-  pub(super) async fn is_own_hosting(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
+  /// The body of [`Self::is_own_hosting`].
+  async fn is_own_hosting_unboxed(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
     let me = convert::user(self.account.user_id);
     let own = self.account.identity_public_key();
     Ok(
@@ -130,11 +226,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Whether a meeting chat's group whose first member (its founder) has `founder_key` is the
-  /// meeting's although the server names another organizer, `organizer`: the host lists hand the
-  /// meeting over from the founder's key, in a chain of lists each signed by the organizer before,
-  /// to the organizer's key as this device pinned it.
-  pub(super) async fn is_handed_over_from(
+  /// Whether the host lists hand the meeting from `founder_key` to `organizer`'s pinned key.
+  async fn is_handed_over_from(
     &mut self,
     conversation: ConversationId,
     founder_key: &IdentityPublicKey,
@@ -155,11 +248,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(verify_chain(&statements, &expectation).is_ok_and(|hosts| hosts.is_organizer_key(&organizer_key)))
   }
 
-  /// For a guest's device: whether the device that sent its welcome hosts the meeting by the lists
-  /// that follow from `anchor` (`v` of its link) for `meeting`: the current organizer or a co-host.
-  /// Also gives the current organizer's fingerprint, which the meeting's admitters must be signed
-  /// by. A list older than one seen falls back on the hosts kept from before.
-  pub(super) async fn guest_hosts_check(
+  /// Whether `device` hosts the meeting by the lists that follow from `anchor`, and the current
+  /// organizer's fingerprint (what the admitters must be signed by).
+  async fn guest_hosts_check(
     &mut self,
     conversation: ConversationId,
     meeting: Option<MeetingId>,
@@ -370,10 +461,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Before a commit by somebody the roster doesn't vouch for is judged or made in a meeting chat:
-  /// reads the host lists again, so a co-host's add is judged by the newest list. A failure keeps
-  /// what this device had.
-  pub(super) async fn refresh_meeting_hosts_for_commit(&mut self, conversation: ConversationId) {
+  /// The body of [`Self::refresh_meeting_hosts_for_commit`].
+  async fn refresh_meeting_hosts_for_commit_unboxed(&mut self, conversation: ConversationId) {
     let is_guest_device = self.is_guest_device().unwrap_or(false);
     let result = if is_guest_device {
       Ok(None)

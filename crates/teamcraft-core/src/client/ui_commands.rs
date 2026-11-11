@@ -348,14 +348,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         co_hosts,
         maybe_new_organizer,
       } => {
-        self
-          .change_meeting_hosts(&super::HostsChange {
-            meeting,
-            conversation,
-            co_hosts,
-            maybe_new_organizer,
-          })
-          .await
+        let change = super::HostsChange {
+          meeting,
+          conversation,
+          co_hosts,
+          maybe_new_organizer,
+        };
+        self.change_meeting_hosts(&change).await
       },
       CoreCommand::RefreshMembers { conversation } => self.refresh_members(conversation).await,
       CoreCommand::SetCustomStatus { maybe_status } => {
