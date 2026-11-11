@@ -18,8 +18,26 @@ use std::{
 use webkit2gtk::{
   ApplicationInfo, AutomationSessionExt, CookiePersistentStorage, DownloadExt, SecurityManagerExt,
   URIRequest, URIRequestExt, URISchemeRequest, URISchemeRequestExt, URISchemeResponse,
-  URISchemeResponseExt, WebContext, WebContextExt as Webkit2gtkContextExt, WebView, WebViewExt,
+  MemoryPressureSettings, URISchemeResponseExt, WebContext, WebContextExt as Webkit2gtkContextExt,
+  WebView, WebViewExt,
 };
+
+thread_local! {
+  /// What [`set_memory_pressure_settings`] set; read when a web context is created.
+  static MEMORY_PRESSURE_SETTINGS: RefCell<Option<MemoryPressureSettings>> = const { RefCell::new(None) };
+}
+
+/// Sets WebKit's memory pressure settings for the web processes of every
+/// [`WebContext`](crate::WebContext) created afterwards on this thread (the GTK main thread, where
+/// webviews are built); `None` returns to WebKit's defaults.
+///
+/// WebKit only reads them when a web context is constructed (`memory-pressure-settings` is a
+/// construct-only property), so they can't be changed on a context that exists. By default WebKit
+/// sets the memory limit to the machine's RAM, at most 3 GB, and only starts releasing caches at a
+/// third of it.
+pub fn set_memory_pressure_settings(settings: Option<MemoryPressureSettings>) {
+  MEMORY_PRESSURE_SETTINGS.with(|cell| *cell.borrow_mut() = settings);
+}
 
 #[derive(Debug)]
 pub struct WebContextImpl {
@@ -45,6 +63,9 @@ impl WebContextImpl {
         );
       }
       context_builder = context_builder.website_data_manager(&data_manager);
+    }
+    if let Some(settings) = MEMORY_PRESSURE_SETTINGS.with(|cell| cell.borrow().clone()) {
+      context_builder = context_builder.memory_pressure_settings(&settings);
     }
     let context = context_builder.build();
 

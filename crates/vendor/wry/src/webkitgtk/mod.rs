@@ -52,7 +52,7 @@ use webkit2gtk_sys::{
 #[cfg(feature = "x11")]
 use x11_dl::xlib::*;
 
-pub use web_context::WebContextImpl;
+pub use web_context::{set_memory_pressure_settings, WebContextImpl};
 
 use crate::{
   proxy::ProxyConfig, web_context::WebContext, Error, NewWindowFeatures, NewWindowOpener,

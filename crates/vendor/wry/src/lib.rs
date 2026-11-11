@@ -374,6 +374,8 @@ pub use raw_window_handle;
 use raw_window_handle::HasWindowHandle;
 #[cfg(gtk)]
 use webkitgtk::*;
+#[cfg(gtk)]
+pub use webkitgtk::set_memory_pressure_settings;
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use objc2::rc::Retained;
