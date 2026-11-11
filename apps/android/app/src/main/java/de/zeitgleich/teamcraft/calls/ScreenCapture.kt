@@ -20,6 +20,7 @@ import android.os.HandlerThread
 import android.util.Log
 import android.view.Display
 import androidx.core.content.ContextCompat
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -63,7 +64,10 @@ internal class ScreenCapture(
   @Volatile private var isStopped = false
   private var maybeDisplay: VirtualDisplay? = null
   private var maybeReader: ImageReader? = null
-  private var maybeSize: ScreenCaptureSize? = null
+  /** Read on the capture thread for every picture, written under [lock]. */
+  @Volatile private var maybeSize: ScreenCaptureSize? = null
+  /** A turn is being followed; pictures arriving meanwhile don't start another. */
+  private val isFollowingTurn = AtomicBoolean(false)
   private var maybeAudio: AudioRecord? = null
   private var maybeAudioThread: Thread? = null
   /** Reused for every picture: the engine copies it before the push returns. */
@@ -84,7 +88,7 @@ internal class ScreenCapture(
     override fun onDisplayRemoved(displayId: Int) = Unit
 
     override fun onDisplayChanged(displayId: Int) {
-      if (displayId == Display.DEFAULT_DISPLAY) scope.launch { followTurn() }
+      if (displayId == Display.DEFAULT_DISPLAY) followTurnIfTurned()
     }
   }
 
@@ -142,6 +146,30 @@ internal class ScreenCapture(
   }
 
   /**
+   * Starts [followTurn] when the screen's shape no longer matches the share's. Checked on display
+   * changes and on every picture: the display event alone sometimes comes while the display still
+   * reports its old size, and a turn back to portrait then went unnoticed (the portrait picture
+   * went out pillarboxed in the landscape share until the next turn).
+   */
+  private fun followTurnIfTurned() {
+    val current = maybeSize ?: return
+    if (isStopped || !isTurned(current)) return
+    if (!isFollowingTurn.compareAndSet(false, true)) return
+    scope.launch {
+      try {
+        followTurn()
+      } finally {
+        isFollowingTurn.set(false)
+      }
+    }
+  }
+
+  private fun isTurned(current: ScreenCaptureSize): Boolean {
+    val screen = screenSize()
+    return (screen.x > screen.y) != (current.width > current.height)
+  }
+
+  /**
    * The screen turned: the share restarts at the new shape so a landscape picture doesn't go out
    * shrunk into the portrait one. The virtual display only resizes (Android 14+ allows one display
    * per projection).
@@ -149,10 +177,8 @@ internal class ScreenCapture(
   private suspend fun followTurn() = lock.withLock {
     val display = maybeDisplay ?: return@withLock
     val current = maybeSize ?: return@withLock
-    if (isStopped) return@withLock
+    if (isStopped || !isTurned(current)) return@withLock
     val screen = screenSize()
-    val isTurned = (screen.x > screen.y) != (current.width > current.height)
-    if (!isTurned) return@withLock
     val size = try {
       session.startScreenShare(screen.x.toUInt(), screen.y.toUInt())
     } catch (error: Exception) {
@@ -179,6 +205,7 @@ internal class ScreenCapture(
         if (isStopped) return@use
         if (lastFrameNanos != Long.MIN_VALUE && it.timestamp - lastFrameNanos < intervalNanos) return@use
         lastFrameNanos = it.timestamp
+        followTurnIfTurned()
         val plane = it.planes[0]
         val buffer = plane.buffer
         buffer.rewind()

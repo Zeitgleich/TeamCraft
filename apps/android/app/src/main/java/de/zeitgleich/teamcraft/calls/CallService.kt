@@ -21,7 +21,8 @@ import de.zeitgleich.teamcraft.notifications.NotificationChannels
 
 /**
  * Keeps the process, the microphone, the camera and a screen share alive while a call runs, with
- * the ongoing-call notification (CallStyle) that lets the user return to it or hang up. A screen
+ * the ongoing-call notification (CallStyle) that lets the user return to it, hang up, or stop
+ * sharing the screen (the share goes on behind other apps, so it has to end from there). A screen
  * share's projection is taken here: Android 14+ hands it out only to a service that already runs
  * in the foreground as `mediaProjection`.
  */
@@ -33,10 +34,14 @@ class CallService : Service() {
       TeamCraftApplication.graph(this).calls.hangUp()
       return START_NOT_STICKY
     }
+    if (intent?.action == ACTION_STOP_SHARING) {
+      TeamCraftApplication.graph(this).calls.stopScreenShare()
+      return START_NOT_STICKY
+    }
     val hasCamera = intent?.getBooleanExtra(EXTRA_CAMERA, false) == true
     val maybeConsent = intent?.let { IntentCompat.getParcelableExtra(it, EXTRA_PROJECTION_CONSENT, Intent::class.java) }
     val hasScreen = intent?.getBooleanExtra(EXTRA_SCREEN, false) == true || maybeConsent != null
-    ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(), types(hasCamera, hasScreen))
+    ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(hasScreen), types(hasCamera, hasScreen))
     if (intent != null && maybeConsent != null) {
       takeProjection(intent.getIntExtra(EXTRA_PROJECTION_RESULT, 0), maybeConsent)
     }
@@ -64,7 +69,7 @@ class CallService : Service() {
     calls.onScreenProjection(maybeProjection)
   }
 
-  private fun notification(): Notification {
+  private fun notification(isSharingScreen: Boolean): Notification {
     val open = PendingIntent.getActivity(
       this,
       0,
@@ -78,18 +83,31 @@ class CallService : Service() {
       PendingIntent.FLAG_IMMUTABLE,
     )
     val caller = Person.Builder().setName(getString(R.string.call_ongoing)).build()
-    return NotificationCompat.Builder(this, NotificationChannels.CALLS)
+    val builder = NotificationCompat.Builder(this, NotificationChannels.CALLS)
       .setSmallIcon(R.drawable.ic_notification)
       .setContentIntent(open)
       .setOngoing(true)
       .setCategory(NotificationCompat.CATEGORY_CALL)
       .setStyle(NotificationCompat.CallStyle.forOngoingCall(caller, hangUp))
-      .build()
+    if (isSharingScreen) builder.addAction(stopSharingAction())
+    return builder.build()
+  }
+
+  /** "Stop sharing" next to "Hang up", while the screen is shared or the share is starting. */
+  private fun stopSharingAction(): NotificationCompat.Action {
+    val stop = PendingIntent.getService(
+      this,
+      2,
+      Intent(this, CallService::class.java).setAction(ACTION_STOP_SHARING),
+      PendingIntent.FLAG_IMMUTABLE,
+    )
+    return NotificationCompat.Action.Builder(R.drawable.ic_stop, getString(R.string.call_stop_sharing), stop).build()
   }
 
   companion object {
     private const val NOTIFICATION_ID = 2001
     private const val ACTION_HANG_UP = "de.zeitgleich.teamcraft.calls.HANG_UP"
+    private const val ACTION_STOP_SHARING = "de.zeitgleich.teamcraft.calls.STOP_SHARING"
     private const val EXTRA_CAMERA = "camera"
     private const val EXTRA_SCREEN = "screen"
     private const val EXTRA_PROJECTION_RESULT = "projection_result"
