@@ -240,6 +240,7 @@ mod tests {
           packets: 10,
           bytes: 9_000,
           packets_lost: 1,
+          packets_recovered: 0,
           frames: 3,
           frames_discarded: 0,
           maybe_jitter_ms: Some(4.5),

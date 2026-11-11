@@ -285,6 +285,7 @@ mod tests {
         packets: bytes / 1000,
         bytes,
         packets_lost: 0,
+        packets_recovered: 0,
         frames: bytes / 4000,
         frames_discarded: 0,
         maybe_jitter_ms: None,
