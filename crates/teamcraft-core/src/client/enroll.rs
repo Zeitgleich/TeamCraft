@@ -95,8 +95,9 @@ pub fn parse_recovery_key(text: &str) -> Result<RecoveryKey, CoreError> {
 
 /// What a recovering device received from the combining admin.
 pub struct OrgRecoveryUnlock {
-  /// The one-time key whose public part the admins sealed to.
-  pub key: RecoveryRequestKey,
+  /// The one-time key whose public part the admins sealed to (shared with the request that keeps
+  /// it, so a failed enrollment can be retried).
+  pub key: std::sync::Arc<RecoveryRequestKey>,
   /// The request this device made (its code was compared with the admin).
   pub request: RecoveryRequest,
   /// The user's backup key, sealed to the request.
@@ -713,6 +714,23 @@ fn unwrap_any(
     }
   }
   Err(last_error.map_or(CoreError::NotEnrolled, CoreError::from))
+}
+
+/// Whether one of `wrapped_keys` (as stored with the key bag) opens with `recovery_key`.
+pub(crate) fn is_wrapped_with(
+  user: UserId,
+  recovery_key: &RecoveryKey,
+  wrapped_keys: &[u8],
+) -> Result<bool, CoreError> {
+  let wraps = decode_wrapped_keys(wrapped_keys)?;
+  Ok(
+    unwrap_any(
+      convert::user(user),
+      &RecoveryKeyWrapper::new(recovery_key),
+      &wraps,
+    )
+    .is_ok(),
+  )
 }
 
 /// Opens the key bag the server stores, checking it against the wraps stored next to it.

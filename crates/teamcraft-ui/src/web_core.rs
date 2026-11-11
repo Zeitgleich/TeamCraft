@@ -36,8 +36,8 @@ use teamcraft_client_api::data_export::{DataExportRequest, DataExportStatus};
 use teamcraft_client_api::model::{Message, ThreadId};
 use teamcraft_client_api::remote::{
   AttachmentPriority, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection,
-  CoreStatus, EnrollRequest, EnrollSecret, LinkRequestView, LinkStatus, MessageWindow, PhoneLinkStatus,
-  SecuritySnapshot, StoreHealth, StoreProblem,
+  CoreStatus, EnrollRequest, EnrollSecret, LinkRequestView, LinkStatus, MessageWindow, OrgRecoveryStatus,
+  PhoneLinkStatus, SecuritySnapshot, StoreHealth, StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::dpop::DpopProver;
@@ -45,7 +45,7 @@ use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi}
 use teamcraft_core::client::files::BlobUpload;
 use teamcraft_core::client::{
   CatchUpFocus, LinkAnnouncement, LinkApproval, LinkReceipt, LinkWait, LinkWaitCancel, LinkedSecrets,
-  ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE,
+  OrgRecoveryFlow, ReceiptCancel, SIGN_OUT_REVOKE_PATIENCE,
 };
 use teamcraft_core::clock::{Clock, SystemClock, rewound, sleep_ms_until};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
@@ -71,7 +71,8 @@ use teamcraft_crypto::identity::{IdentityPublicKey, VerifiedDevice};
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::DeviceLinkPlatform;
 use teamcraft_proto::{
-  ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage, MessageId, UserId,
+  ConversationId, DeviceActivity, GatewayClientMessage, GatewayServerMessage, MessageId, RecoveryRequestId,
+  UserId,
 };
 use wasm_bindgen::JsCast;
 
@@ -642,6 +643,21 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
     "core_phone_link_status" => to_value(ask(Request::PhoneLinkStatus).await?),
     "core_link_announce" => {
       ask(Request::LinkAnnounce).await??;
+      Ok(Value::Null)
+    },
+    "core_org_recovery_start" => {
+      let maybe_previous: Option<RecoveryRequestId> = field(&args, "maybe_previous")?;
+      to_value(
+        ask(|reply| Request::OrgRecoveryStart {
+          maybe_previous,
+          reply,
+        })
+        .await??,
+      )
+    },
+    "core_org_recovery_status" => to_value(ask(Request::OrgRecoveryStatus).await??),
+    "core_org_recovery_cancel" => {
+      send(Request::OrgRecoveryCancel)?;
       Ok(Value::Null)
     },
     "core_link_requests" => to_value(ask(Request::LinkRequests).await?),
@@ -1256,6 +1272,14 @@ enum Request {
   PhoneLinkStart(oneshot::Sender<Result<(), String>>),
   PhoneLinkStatus(oneshot::Sender<PhoneLinkStatus>),
   LinkAnnounce(oneshot::Sender<Result<(), String>>),
+  /// New device without kit or other device: asks the organization to recover the account
+  /// (e2ee.md §6.3.1), withdrawing `maybe_previous`, a request made before the page reloaded.
+  OrgRecoveryStart {
+    maybe_previous: Option<RecoveryRequestId>,
+    reply: oneshot::Sender<Result<OrgRecoveryStatus, String>>,
+  },
+  OrgRecoveryStatus(oneshot::Sender<Result<OrgRecoveryStatus, String>>),
+  OrgRecoveryCancel,
   LinkRequests(oneshot::Sender<Vec<LinkRequestView>>),
   LinkRequestReview {
     id: String,
@@ -1317,6 +1341,8 @@ struct Core {
   approval_misses: u8,
   /// A code this signed-in device shows for a new phone (issue #998).
   maybe_phone_link: Option<PhoneLinkRun>,
+  /// This new device's request for organization recovery (e2ee.md §6.3.1).
+  org_recovery: OrgRecoveryFlow,
   /// Stops the wait for the receipt of the keys this device sent, which runs on a task of its own
   /// (issue #415).
   maybe_receipt: Option<ReceiptCancel>,
@@ -1425,6 +1451,7 @@ impl Core {
       approval: None,
       approval_misses: 0,
       maybe_phone_link: None,
+      org_recovery: OrgRecoveryFlow::default(),
       maybe_receipt: None,
       maybe_attention: None,
       is_idle: false,
@@ -1972,6 +1999,10 @@ impl Core {
           && let Some(store) = &self.store
         {
           self.link = None;
+          // An open recovery request would only wait for admins to approve a key that is gone.
+          if let Err(error) = self.org_recovery.cancel(&self.api()).await {
+            tracing::info!(%error, "could not withdraw the recovery request");
+          }
           // The keys go at once; the server gets a few seconds to revoke the device they registered
           // (issue #415), the next start of this account does it otherwise. Flushed: the core stops
           // right after, and queued writes would be lost with it.
@@ -2000,6 +2031,29 @@ impl Core {
       Request::PhoneLinkStart(reply) => drop(reply.send(self.phone_link_start().await)),
       Request::PhoneLinkStatus(reply) => drop(reply.send(self.phone_link_status())),
       Request::LinkAnnounce(reply) => drop(reply.send(self.link_announce().await)),
+      Request::OrgRecoveryStart {
+        maybe_previous,
+        reply,
+      } => {
+        let started = self.org_recovery.start(&self.api(), maybe_previous).await;
+        drop(reply.send(started.map_err(describe_failure)));
+      },
+      Request::OrgRecoveryStatus(reply) => {
+        drop(
+          reply.send(
+            self
+              .org_recovery
+              .status(&self.api())
+              .await
+              .map_err(describe_failure),
+          ),
+        );
+      },
+      Request::OrgRecoveryCancel => {
+        if let Err(error) = self.org_recovery.cancel(&self.api()).await {
+          tracing::info!(%error, "could not withdraw the recovery request");
+        }
+      },
       Request::LinkRequests(reply) => drop(reply.send(self.link_requests())),
       Request::LinkRequestReview { id, reply } => drop(reply.send(self.link_request_review(&id).await)),
       Request::LinkRequestReject { id, reply } => drop(reply.send(self.link_request_reject(&id).await)),
@@ -2143,6 +2197,11 @@ impl Core {
       },
       EnrollSecret::Passphrase { passphrase } => EnrollmentSecret::passphrase(passphrase),
       EnrollSecret::KeptOnDevice => return Err("the browser keeps no key for the account".to_owned()),
+      EnrollSecret::OrgRecovery { recovery_key } => self
+        .org_recovery
+        .enrollment_secret(&self.api(), &recovery_key)
+        .await
+        .map_err(describe_failure)?,
     };
     let options = EnrollmentOptions {
       device_name: request.device_name,
@@ -2203,6 +2262,7 @@ impl Core {
 
   async fn complete_enrollment(&mut self, options: EnrollmentOptions) -> Result<(), String> {
     let store = self.store.clone().ok_or("the local database is not open")?;
+    let was_org_recovery = matches!(options.secret, EnrollmentSecret::OrgRecovery { .. });
     tracing::info!("enrolling this device");
     let client = PendingEnrollment::new()
       .complete(
@@ -2218,6 +2278,7 @@ impl Core {
       .await
       .map_err(describe_failure)?;
     tracing::info!("device enrolled");
+    self.org_recovery.settle(&self.api(), was_org_recovery).await;
     self.status = self.adopt(client);
     Ok(())
   }

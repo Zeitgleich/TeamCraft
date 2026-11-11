@@ -5,7 +5,8 @@
 //!   check it → how to keep it safe, name the device, finish. The key protects nothing until the
 //!   last step.
 //! - **Account with keys** (§6.5.5, §5): choose how to bring the key here → this computer's
-//!   keychain (at once), another device (link), or the recovery kit.
+//!   keychain (at once), another device (link), the recovery kit, or the IT department
+//!   (`org_recovery_setup`, e2ee.md §6.3.1).
 //!
 //! A restart mid-way resumes where it can without keeping a secret: the chosen way for an account
 //! with keys, and for a new account the kit step, with a note that the key shown before (and a kit
@@ -22,6 +23,7 @@ use crate::auth::tauri;
 use crate::clock::now_ms;
 use crate::components::icons::{Icon, IconName};
 use crate::components::login::AuthFrame;
+use crate::components::org_recovery_setup::AskTheItDepartment;
 use crate::components::recovery_kit_setup::{
   KitCheckStep, KitFilePicker, KitSaveStep, SecondaryAction, new_kit_key,
 };
@@ -63,7 +65,8 @@ enum Way {
   Choose,
   Kit,
   Link,
-  /// No device and no kit: what the IT department can do (the request itself starts on a phone).
+  /// No device and no kit: what the IT department can do, and the recovery through the
+  /// organization when it is set up (`org_recovery_setup`).
   It,
 }
 
@@ -102,6 +105,7 @@ pub(crate) fn EnrollScreen(
         {if has_existing_identity {
           view! {
             <ExistingAccountFlow
+              name=name.clone()
               maybe_user=maybe_user
               device_name=device_name
               was_data_lost=was_data_lost
@@ -260,6 +264,7 @@ fn NewAccountFlow(
 /// An account with keys: choose how to bring them here, then that way.
 #[component]
 fn ExistingAccountFlow(
+  name: String,
   maybe_user: Option<UserId>,
   device_name: RwSignal<String>,
   was_data_lost: bool,
@@ -294,6 +299,7 @@ fn ExistingAccountFlow(
   };
   focus_title_on_change(way);
   let back = Callback::new(move |()| choose(Way::Choose));
+  let name = StoredValue::new(name);
   let restore_here = move |_| {
     control.enroll(
       EnrollSecret::KeptOnDevice,
@@ -355,12 +361,25 @@ fn ExistingAccountFlow(
         .into_any(),
         Way::Kit => view! { <UnlockWithKit device_name=device_name control=control on_back=back /> }.into_any(),
         Way::Link => view! { <LinkThisDevice device_name=device_name.get_untracked() control=control on_back=back /> }.into_any(),
-        Way::It => view! { <AskTheItDepartment on_back=back /> }.into_any(),
+        // Its own steps, with their own progress.
+        Way::It => {
+          return view! {
+            <AskTheItDepartment
+              account=name.get_value()
+              maybe_user=maybe_user
+              device_name=device_name
+              control=control
+              on_back=back
+            />
+          }
+          .into_any();
+        },
       };
       view! {
         <StepProgress current=if current == Way::Choose { 1 } else { 2 } total=2 />
         <div class="step-body">{body}</div>
       }
+      .into_any()
     }}
   }
 }
@@ -618,25 +637,9 @@ fn LinkThisDevice(device_name: String, control: SessionControl, on_back: Callbac
   }
 }
 
-/// No other device and no kit: what to tell the IT department. Not a self-service: the IT
-/// department resets the account, or (if the organization set up recovery) asks for the code the
-/// phone app shows (e2ee.md §6.3.1; the request doesn't start in the browser or the desktop app).
-#[component]
-fn AskTheItDepartment(on_back: Callback<()>) -> impl IntoView {
-  let i18n = use_i18n();
-  view! {
-    <StepTitle text=Signal::derive(move || i18n.t("onboarding-it-title")) />
-    <p class="step-lead">{move || i18n.t("onboarding-it-lead")}</p>
-    <p class="muted-text small">{move || i18n.t("onboarding-it-code")}</p>
-    <div class="step-actions">
-      <button type="button" class="btn" on:click=move |_| on_back.run(())>{move || i18n.t("onboarding-back")}</button>
-    </div>
-  }
-}
-
 /// "Step 2 of 4" with a bar of as many segments; the text is what screen readers read.
 #[component]
-fn StepProgress(current: u8, total: u8) -> impl IntoView {
+pub(crate) fn StepProgress(current: u8, total: u8) -> impl IntoView {
   let i18n = use_i18n();
   view! {
     <div class="step-progress">
@@ -652,13 +655,13 @@ fn StepProgress(current: u8, total: u8) -> impl IntoView {
 
 /// The step's heading: focusable, so a new step can take the focus (see [`focus_title_on_change`]).
 #[component]
-fn StepTitle(#[prop(into)] text: Signal<String>) -> impl IntoView {
+pub(crate) fn StepTitle(#[prop(into)] text: Signal<String>) -> impl IntoView {
   view! { <h1 id=STEP_TITLE_ID tabindex="-1" translate="no">{move || text.get()}</h1> }
 }
 
 /// One explained point of a step: an icon, a short title and a plain sentence.
 #[component]
-fn StepPoint(icon: IconName, title: &'static str, text: &'static str) -> impl IntoView {
+pub(crate) fn StepPoint(icon: IconName, title: &'static str, text: &'static str) -> impl IntoView {
   let i18n = use_i18n();
   view! {
     <li class="step-point">
@@ -712,7 +715,7 @@ fn ChoiceRow(
 
 /// The name this device gets in the account's device list.
 #[component]
-fn DeviceNameField(device_name: RwSignal<String>) -> impl IntoView {
+pub(crate) fn DeviceNameField(device_name: RwSignal<String>) -> impl IntoView {
   let i18n = use_i18n();
   view! {
     <div class="field">
@@ -733,7 +736,7 @@ fn DeviceNameField(device_name: RwSignal<String>) -> impl IntoView {
 
 /// The core's answer to the last setup attempt, under `message_key` with the details.
 #[component]
-fn EnrollError(message_key: &'static str, control: SessionControl) -> impl IntoView {
+pub(crate) fn EnrollError(message_key: &'static str, control: SessionControl) -> impl IntoView {
   let i18n = use_i18n();
   move || {
     control.enroll_error.get().map(|message| {
@@ -755,7 +758,7 @@ fn EnrollError(message_key: &'static str, control: SessionControl) -> impl IntoV
 
 /// After the first render, every change of `step` moves the focus to the new step's heading (the
 /// step's content was replaced, the old focus is gone). The first step keeps `data-autofocus`.
-fn focus_title_on_change<T: Clone + PartialEq + Send + Sync + 'static>(step: RwSignal<T>) {
+pub(crate) fn focus_title_on_change<T: Clone + PartialEq + Send + Sync + 'static>(step: RwSignal<T>) {
   Effect::new(move |previous: Option<T>| {
     let current = step.get();
     if previous.is_some_and(|previous| previous != current) {

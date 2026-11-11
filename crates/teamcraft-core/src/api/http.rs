@@ -59,6 +59,9 @@ use teamcraft_proto::{
   CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingId, MeetingResponse,
   PutMeetingAdmittersRequest,
 };
+use teamcraft_proto::{
+  CreateRecoveryRequest, RecoveryRequestId, RecoveryRequestResponse, RecoveryResultPayload,
+};
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest, UserEnrollmentResponse};
 use teamcraft_proto::{
   DirectoryChannelsQuery, DirectoryChannelsResponse, DirectoryFiltersQuery, DirectoryFiltersResponse,
@@ -90,6 +93,7 @@ use super::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use super::{DetachedRange, RangedBlob};
+use crate::client::OrgRecoveryRequestApi;
 use crate::clock::{Clock, SystemClock};
 use crate::retry::parse_retry_after;
 use crate::transfers::ByteCounter;
@@ -2929,6 +2933,37 @@ async fn send_api_noting(
   #[cfg(target_arch = "wasm32")]
   let maybe_timeout = None;
   send_traced(request, note, maybe_timeout).await
+}
+
+/// The recovering device's side of organization recovery (e2ee.md §6.3.1).
+impl<T: AccessTokenSource> OrgRecoveryRequestApi for HttpServerApi<T> {
+  async fn create_recovery_request(
+    &self,
+    request: &CreateRecoveryRequest,
+  ) -> Result<RecoveryRequestResponse, ApiError> {
+    self
+      .send_json(Method::POST, "/org-recovery/requests", request)
+      .await
+  }
+
+  async fn recovery_request(&self, id: RecoveryRequestId) -> Result<RecoveryRequestResponse, ApiError> {
+    self.get(&format!("/org-recovery/requests/{id}")).await
+  }
+
+  async fn recovery_result(&self, id: RecoveryRequestId) -> Result<RecoveryResultPayload, ApiError> {
+    self.get(&format!("/org-recovery/requests/{id}/result")).await
+  }
+
+  async fn cancel_recovery_request(&self, id: RecoveryRequestId) -> Result<(), ApiError> {
+    self
+      .send_without_response::<()>(Method::DELETE, &format!("/org-recovery/requests/{id}"), None)
+      .await
+  }
+
+  async fn stored_wrapped_keys(&self) -> Result<Vec<u8>, ApiError> {
+    let key_bag = ServerApi::key_bag(self).await?;
+    Ok(key_bag.wrapped_backup_keys.into_vec())
+  }
 }
 
 /// The JSON of an API answer, read by [`read_api_body`].

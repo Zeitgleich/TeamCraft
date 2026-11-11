@@ -684,6 +684,10 @@ impl SessionControl {
   fn sign_out_with(&self, maybe_problem: Option<LoginProblem>) {
     let control = *self;
     let maybe_user = control.state.with_untracked(SessionState::maybe_user);
+    // A recovery request still open is withdrawn with the unfinished setup (the core does it).
+    if let Some(user) = maybe_user {
+      crate::settings::store_string(&crate::settings::org_recovery_request_key(user), "");
+    }
     control.next_core_round();
     control.is_account_unconfirmed.set(false);
     spawn_local(async move {

@@ -211,6 +211,10 @@ pub enum CoreError {
   /// members' apps don't count it (e2ee.md §4.6.1).
   #[error("the role changed on the server, but this device could not confirm it for the channel's members")]
   RoleChangeNotConfirmed,
+  /// Finishing an organization recovery this device no longer holds: its core restarted and the
+  /// one-time request key went with it (e2ee.md §6.3.1). Ask again.
+  #[error("org_recovery_lost: this device no longer holds the recovery request; ask again")]
+  OrgRecoveryLost,
   /// The app asked for something that can't be done as asked (a caller bug or stale UI state).
   #[error("invalid request: {0}")]
   InvalidRequest(String),

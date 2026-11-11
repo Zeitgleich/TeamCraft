@@ -49,6 +49,7 @@ mod notifications;
 pub(crate) mod older_history;
 mod org_backgrounds;
 mod org_recovery;
+mod org_recovery_attempt;
 mod pending_actions;
 mod pending_add;
 pub mod people;
@@ -138,6 +139,11 @@ pub use notifications::PushRegistrar;
 pub(crate) use notifications::registered_push_token;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 pub use org_recovery::{SealedShare, recovery_request};
+#[cfg(feature = "ui")]
+pub use org_recovery_attempt::OrgRecoveryFlow;
+pub use org_recovery_attempt::{
+  OrgRecoveryAttempt, OrgRecoveryProgress, OrgRecoveryRequestApi, OrgRecoveryStart,
+};
 pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange, pending_action_count};
 pub use pending_add::{UserAddWait, pending_user_additions};
 pub use role_signing::{RoleSigningProblem, RoleSigningRecord, role_signing_record};

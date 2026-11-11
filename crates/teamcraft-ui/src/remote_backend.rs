@@ -33,8 +33,8 @@ use teamcraft_client_api::model::{
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
-  CoreStatus, EnrollRequest, EnrollSecret, LinkRequestView, LinkStatus, MessageWindow, PhoneLinkStatus,
-  StoreHealth,
+  CoreStatus, EnrollRequest, EnrollSecret, LinkRequestView, LinkStatus, MessageWindow, OrgRecoveryStatus,
+  PhoneLinkStatus, StoreHealth,
 };
 use teamcraft_client_api::scheduled::ScheduledOverview;
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
@@ -215,6 +215,28 @@ pub async fn approval_confirm(short_code: &str) -> Result<(), String> {
 /// the server; only on the user's choice).
 pub async fn link_announce() -> Result<(), String> {
   call("core_link_announce", &json!({})).await
+}
+
+/// New device without kit or other device: asks the organization to recover the account
+/// (e2ee.md §6.3.1). `maybe_previous` is a request made before the page reloaded; it is withdrawn.
+pub async fn org_recovery_start(
+  maybe_previous: Option<teamcraft_proto::RecoveryRequestId>,
+) -> Result<OrgRecoveryStatus, String> {
+  call(
+    "core_org_recovery_start",
+    &json!({ "maybe_previous": maybe_previous }),
+  )
+  .await
+}
+
+/// Where this device's recovery request stands (asked from the server).
+pub async fn org_recovery_status() -> Result<OrgRecoveryStatus, String> {
+  call("core_org_recovery_status", &json!({})).await
+}
+
+/// The person went back: withdraws the request.
+pub async fn org_recovery_cancel() -> Result<(), String> {
+  call("core_org_recovery_cancel", &json!({})).await
 }
 
 /// The settings the account holds (e2ee.md §6.4), fresh from the core rather than from the cache of

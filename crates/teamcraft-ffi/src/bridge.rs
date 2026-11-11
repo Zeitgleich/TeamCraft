@@ -9,26 +9,16 @@ use teamcraft_client_api::remote::{
   ChatAction, ChatQuery, ChatSnapshot, ContactKeys, MessageTail, MessageWindow, SecuritySnapshot,
 };
 use teamcraft_core::api::ServerApi as _;
+use teamcraft_core::client::OrgRecoveryAttempt;
 use teamcraft_core::records;
 use teamcraft_core::ui_backend::FeedAnchor;
 use teamcraft_crypto::identity::IdentityPublicKey;
-use teamcraft_crypto::org_recovery::RecoveryRequestKey;
-use teamcraft_proto::{
-  AvatarContentType, AvatarResponse, Base64Bytes, ConversationId, CreateRecoveryRequest, DeviceActivity,
-  ErrorCode, RecoveryRequestId, RecoveryRequestResponse, RecoveryResultPayload,
-};
+use teamcraft_proto::{AvatarContentType, AvatarResponse, ConversationId, DeviceActivity, ErrorCode};
 
 use crate::engine::{Api, Engine, feed_anchor, older_len, parse_id};
 use crate::error::TeamCraftError;
 use crate::reads::Reads;
 use crate::types::{AccountState, OrgRecoveryStart};
-
-/// A recovery this (new) device asked the organization for (e2ee.md §6.3.1).
-pub(crate) struct PendingRecovery {
-  key: RecoveryRequestKey,
-  request_id: RecoveryRequestId,
-  user: teamcraft_proto::UserId,
-}
 
 /// The [`ChatSnapshot`] as the apps read it. Its `users` are the people to offer in lists, pickers
 /// and mentions; `former_users` are the deactivated and deleted accounts, offered nowhere but still
@@ -347,38 +337,27 @@ impl Engine {
   }
 
   /// New device without the passphrase: asks the organization's admins to recover the account.
-  /// Returns the code the user reads to an admin.
+  /// Returns the code the user reads to an admin. A request this device made before is withdrawn.
   pub(crate) async fn start_org_recovery(&mut self) -> Result<OrgRecoveryStart, TeamCraftError> {
-    use teamcraft_core::api::ServerApi as _;
     let api = self.api();
-    let me = api.me().await.map_err(teamcraft_core::CoreError::from)?;
-    let key = RecoveryRequestKey::generate(&mut rand_core::OsRng);
-    let body = serde_json::to_string(&CreateRecoveryRequest {
-      request_public_key: Base64Bytes::new(key.public_key().as_bytes().to_vec()),
-    })
-    .map_err(|error| TeamCraftError::Core(error.to_string()))?;
-    // Switched off for this person (403), not set up or nothing to recover (409): say so plainly.
-    let reply: RecoveryRequestResponse = match self
-      .api()
-      .raw_request("POST", "/org-recovery/requests", Some(body))
-      .await
-    {
-      Ok(text) => from_json(&text)?,
-      Err(error) if error.is_forbidden() || error.is_conflict() => {
+    if let Some(previous) = self.maybe_recovery.take() {
+      // Best effort: an open request whose key is gone can only expire.
+      if let Err(error) = OrgRecoveryAttempt::cancel(&api, previous.request_id()).await {
+        tracing::info!(%error, "could not withdraw the previous recovery request");
+      }
+    }
+    // Switched off for this person, not set up or nothing to recover: say so plainly.
+    let attempt = match OrgRecoveryAttempt::start(&api).await? {
+      teamcraft_core::client::OrgRecoveryStart::Started(attempt) => attempt,
+      teamcraft_core::client::OrgRecoveryStart::Unavailable => {
         return Err(TeamCraftError::OrgRecoveryUnavailable);
       },
-      Err(error) => return Err(teamcraft_core::CoreError::from(error).into()),
     };
-    let request = teamcraft_core::client::recovery_request(reply.id, me.id, key.public_key());
     let start = OrgRecoveryStart {
-      request_id: reply.id.to_string(),
-      verification_code: request.verification_code(),
+      request_id: attempt.request_id().to_string(),
+      verification_code: attempt.verification_code(),
     };
-    self.maybe_recovery = Some(PendingRecovery {
-      key,
-      request_id: reply.id,
-      user: me.id,
-    });
+    self.maybe_recovery = Some(attempt);
     Ok(start)
   }
 
@@ -390,38 +369,25 @@ impl Engine {
     device_name: String,
     recovery_key: teamcraft_crypto::recovery_key::RecoveryKey,
   ) -> Result<AccountState, TeamCraftError> {
-    let pending = self
+    let attempt = self
       .maybe_recovery
       .as_ref()
       .ok_or(TeamCraftError::NoLinkInProgress)?;
-    let path = format!("/org-recovery/requests/{}/result", pending.request_id);
-    let result: RecoveryResultPayload = match self.api_request("GET", &path, None).await {
-      Ok(text) => from_json(&text)?,
-      Err(TeamCraftError::Core(_)) | Err(TeamCraftError::Network(_)) => {
-        return Err(TeamCraftError::RecoveryPending);
-      },
-      Err(other) => return Err(other),
+    let new_secret = teamcraft_core::NewBackupSecret::RecoveryKey(recovery_key);
+    let secret = match attempt.enrollment_secret(&self.api(), new_secret).await {
+      Ok(Some(secret)) => secret,
+      Ok(None) | Err(teamcraft_core::CoreError::Api(_)) => return Err(TeamCraftError::RecoveryPending),
+      Err(other) => return Err(other.into()),
     };
-    let pending = self
-      .maybe_recovery
-      .take()
-      .ok_or(TeamCraftError::NoLinkInProgress)?;
-    let request =
-      teamcraft_core::client::recovery_request(pending.request_id, pending.user, pending.key.public_key());
     let options = teamcraft_core::EnrollmentOptions {
       device_name,
-      secret: teamcraft_core::EnrollmentSecret::OrgRecovery {
-        unlock: teamcraft_core::OrgRecoveryUnlock {
-          key: pending.key,
-          request,
-          sealed_backup_key: result.sealed_backup_key.into_vec(),
-        },
-        new_secret: teamcraft_core::NewBackupSecret::RecoveryKey(recovery_key),
-      },
+      secret,
       argon2: teamcraft_crypto::backup::Argon2Settings::default(),
       maybe_attestation: None,
     };
-    self.complete_enrollment(options).await
+    let state = self.complete_enrollment(options).await?;
+    self.maybe_recovery = None;
+    Ok(state)
   }
 }
 
