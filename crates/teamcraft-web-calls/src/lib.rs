@@ -39,7 +39,7 @@ use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInf
 use teamcraft_media::audio_level::SharedLevel;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallKeyAuthenticator, CallKeyError};
-use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent};
+use teamcraft_media::call_engine::{CallEngineConfig, CallEngineError, CallEngineEvent};
 use teamcraft_media::call_resilience::{
   JoinTicket, JoinTicketError, ResilienceConfig, certificate_hashes_from_hex,
 };
@@ -1560,8 +1560,14 @@ impl Host {
       state.release_camera();
       state.screen_preview.end_stream();
     }
-    if let Err(error) = result {
-      tracing::warn!(%error, "the call ended with an error");
+    match result {
+      // Said by the end reason above, or the user's own leave.
+      Ok(()) | Err(WebCallError::ConnectionLost | WebCallError::Ended) => {},
+      // Never silent (robustness.md): the page shows why and sends it with the crash reports.
+      Err(error) => {
+        tracing::warn!(%error, "the call ended with an error");
+        self.report(&failure(error));
+      },
     }
     // Ended on its own: no media left to control.
     self.maybe_media.borrow_mut().take();
@@ -1887,6 +1893,10 @@ fn failure(error: WebCallError) -> ActionFailure {
       media_failure(*input, *reason).map_or(FailureKind::Other, FailureKind::Call)
     },
     WebCallError::Unsupported(_) => FailureKind::Call(CallFailure::Unsupported),
+    // e2ee.md §8: media stops when a member's key doesn't check out or a DAVE change fails.
+    WebCallError::Engine(
+      CallEngineError::Dave(_) | CallEngineError::CallKey(_) | CallEngineError::UnverifiedMember(_),
+    ) => FailureKind::Call(CallFailure::EncryptionFailed),
     // The page's own failure text (a refused join token, offline), already in wire form.
     WebCallError::Ticket(error) => return ActionFailure::from_wire(&error.reason),
     // The chat server answered (it handed out the token); the SFU didn't: likely UDP blocked.

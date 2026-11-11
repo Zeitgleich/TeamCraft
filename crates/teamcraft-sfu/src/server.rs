@@ -213,6 +213,19 @@ pub(crate) enum SessionError {
   Room(#[from] RoomError),
 }
 
+impl SessionError {
+  /// The client sent something the SFU refuses (too large, unreadable, not a join first, refused by
+  /// the room), as opposed to a connection that broke or timed out.
+  fn is_client_fault(&self) -> bool {
+    matches!(
+      self,
+      Self::Signaling(SignalingError::TooLarge { .. } | SignalingError::Json(_))
+        | Self::ExpectedJoin
+        | Self::Room(_)
+    )
+  }
+}
+
 impl Sfu {
   pub fn bind(
     config: SfuConfig,
@@ -343,8 +356,12 @@ impl Sfu {
       let shared = Arc::clone(&self.shared);
       tokio::spawn(
         async move {
-          if let Err(error) = handle_session(incoming, &shared).await {
-            debug!(%error, "session ended");
+          match handle_session(incoming, &shared).await {
+            Ok(()) => {},
+            // The SFU closed the session for what the client sent: the client's log only says
+            // "closed", so this is the one place that names the cause.
+            Err(error) if error.is_client_fault() => info!(%error, "session closed for a protocol violation"),
+            Err(error) => debug!(%error, "session ended"),
           }
         }
         .instrument(info_span!("session", session_number)),

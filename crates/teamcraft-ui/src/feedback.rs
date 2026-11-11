@@ -175,6 +175,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::VideoOffAfterCrashes => "error-call-video-off-after-crashes",
       CallFailure::ServerLost => "error-call-server-lost",
       CallFailure::ConnectionLost => "error-call-connection-lost",
+      CallFailure::EncryptionFailed => "error-call-encryption-failed",
     },
     FailureKind::Server(code) => match code {
       ErrorCode::NotSpaceMember => "error-not-space-member",

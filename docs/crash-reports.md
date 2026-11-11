@@ -224,6 +224,19 @@ never the exception's message, which may name a database or a key. `VersionError
 upgraded the database) and `ConstraintError` (a key another page stored first) are expected and
 not reported. At most five per page life; the service worker reports none.
 
+### Call failures
+
+A call that fails on the web page, at the join or after it started (the call module ends it), is a
+handled warning of type `CallFailed`, besides the toast that says why: its message is the failure's
+wire text (`call_encryption_failed: DAVE: …`, `call_server_unreachable: …`), with runs of six or
+more digits (device, call and user IDs) as `[id]`, so one cause is one issue. Only failures the
+user can't fix are sent: the call's own (encryption, a browser API that failed), the call server
+out of reach, and a browser that lacks what calls need; a refused or missing microphone or camera
+is not. At most five per page life. The call module is a wasm instance of its own with its own log
+ring: every report of the page carries both logs as breadcrumbs, merged by time, so a script error
+of the call module or a failed call shows what the call did before (GlitchTip TEAMCRAFT-23, the
+guest of 2026-11-11 whose join ended silently twelve times).
+
 ## Processes without a page
 
 - **Desktop shell** (the core, calls, the shell's own code): its panic hook writes the panic

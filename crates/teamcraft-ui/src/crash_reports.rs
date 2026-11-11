@@ -19,9 +19,10 @@ use teamcraft_client_api::crash_reporting::trace::{self, TraceSettings, WireTrac
 use teamcraft_client_api::crash_reporting::{
   AppInfo, AppPlatform, CrashEvent, CrashLevel, CrashReporter, CrashReportingConfig, CrashReportingConsent,
   CrashSendOutcome, ErrorSource, EventId, InstallationId, PanicParts, PendingPanic, StackFrame, Transaction,
-  frames_from_script_stack,
+  frames_from_script_stack, without_ids,
 };
 use teamcraft_client_api::debug_log;
+use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
 use teamcraft_client_api::server_entry::SERVER_INFO_PATH;
 use teamcraft_proto::{CRASH_REPORTS_PATH, ServerInfoResponse};
 use wasm_bindgen::JsCast;
@@ -40,6 +41,8 @@ const MAX_SCRIPT_ERRORS: u32 = 5;
 const MAX_SIGN_OUT_REPORTS: u32 = 3;
 /// IndexedDB failures reported per page life at most: a broken store fails on every access.
 const MAX_STORAGE_REPORTS: u32 = 5;
+/// Call failures reported per page life at most: somebody who keeps trying to join sends a few.
+const MAX_CALL_REPORTS: u32 = 5;
 
 thread_local! {
   static REPORTER: RefCell<Option<CrashReporter>> = const { RefCell::new(None) };
@@ -48,6 +51,7 @@ thread_local! {
   static SCRIPT_ERRORS: Cell<u32> = const { Cell::new(0) };
   static SIGN_OUT_REPORTS: Cell<u32> = const { Cell::new(0) };
   static STORAGE_REPORTS: Cell<u32> = const { Cell::new(0) };
+  static CALL_REPORTS: Cell<u32> = const { Cell::new(0) };
   static STATUS: RwSignal<Option<CrashReportsStatus>> = RwSignal::new(None);
 }
 
@@ -84,7 +88,8 @@ pub fn capture_panic(info: &PanicHookInfo<'_>) {
   if IS_DEAD.with(|dead| dead.replace(true)) {
     return;
   }
-  let event = PanicParts::from_hook(info, String::new()).into_event(event_id(), now_ms(), breadcrumbs());
+  // Only the page's own log: the hook calls nothing that might borrow what the panic left borrowed.
+  let event = PanicParts::from_hook(info, String::new()).into_event(event_id(), now_ms(), page_breadcrumbs());
   with_reporter(|reporter| reporter.capture(event, random_roll()));
   store_queue();
 }
@@ -375,6 +380,19 @@ pub fn capture_lost_sign_in(reason: &'static str) {
   capture_handled("LostSignIn", reason.to_owned());
 }
 
+/// A call failed on this device for a reason that isn't the user's or the device's (a blocked
+/// microphone, a missing camera): the join, or the call breaking off after it had started. The
+/// message starts with the failure's stable wire name (`call_encryption_failed: …`), IDs taken
+/// out, so one cause is one issue; the breadcrumbs carry the call module's log next to the page's.
+pub fn capture_call_failure(failure: &ActionFailure) {
+  if !is_reported_call_failure(&failure.kind)
+    || CALL_REPORTS.with(|count| count.replace(count.get() + 1)) >= MAX_CALL_REPORTS
+  {
+    return;
+  }
+  capture_handled("CallFailed", without_ids(&failure.to_wire()));
+}
+
 /// IndexedDB failed (`teamcraft_core::store::IdbFailureHook`): the operation and the
 /// `DOMException` name, both fixed identifiers.
 fn capture_storage_error(operation: &'static str, error_name: &str) {
@@ -524,10 +542,35 @@ fn random_roll() -> f64 {
 }
 
 /// The redacted debug log, then what the page's own spans did and which are still open.
+/// The page's log and the call module's (a wasm instance with a log of its own), merged by time:
+/// every line starts with its UTC time. Then the trace lines.
 fn breadcrumbs() -> Vec<String> {
+  let mut lines = debug_log::recent_lines();
+  lines.extend(crate::web_calls::call_module_log());
+  // Stable: lines of the same second keep their order within each log.
+  lines.sort_by(|a, b| a.get(..20).cmp(&b.get(..20)));
+  lines.extend(trace::breadcrumb_lines(js_sys::Date::now()));
+  lines
+}
+
+/// The page's log and the trace lines, without the call module's.
+fn page_breadcrumbs() -> Vec<String> {
   let mut lines = debug_log::recent_lines();
   lines.extend(trace::breadcrumb_lines(js_sys::Date::now()));
   lines
+}
+
+/// Failures worth a report: the call's own (encryption, a browser API that failed, the call server
+/// out of reach) and the browser lacking what calls need. Refused devices and the like are the
+/// user's to fix and say nothing new.
+fn is_reported_call_failure(kind: &FailureKind) -> bool {
+  matches!(
+    kind,
+    FailureKind::Other
+      | FailureKind::Call(
+        CallFailure::EncryptionFailed | CallFailure::Unsupported | CallFailure::ServerUnreachable
+      )
+  )
 }
 
 /// Collection follows the reporter (docs/tracing.md): in the page's own process, and on desktop in
