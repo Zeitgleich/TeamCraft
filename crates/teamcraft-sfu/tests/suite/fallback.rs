@@ -1172,6 +1172,7 @@ mod switch_back {
       let mut session = Self::connect(sfu).await;
       session
         .send(CallClientMessage::Join {
+          maybe_dave_resume_epoch: None,
           token: token(device),
           capabilities: MediaCapabilities::default(),
           dave_transition_mode: DaveTransitionMode::AtOnce,
@@ -1749,6 +1750,7 @@ async fn wait_until(condition: impl Fn() -> bool) {
 
 async fn send_join(socket: &mut Socket, token: &str) {
   let join = CallClientMessage::Join {
+    maybe_dave_resume_epoch: None,
     token: token.to_owned(),
     capabilities: MediaCapabilities::default(),
     dave_transition_mode: DaveTransitionMode::AtOnce,

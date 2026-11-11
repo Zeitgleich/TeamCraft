@@ -70,6 +70,7 @@ async fn invalid_join_token_is_rejected() {
   write_message(
     &mut send,
     &CallClientMessage::Join {
+      maybe_dave_resume_epoch: None,
       token: "forged".into(),
       capabilities: MediaCapabilities::default(),
       dave_transition_mode: DaveTransitionMode::AtOnce,
@@ -97,6 +98,7 @@ async fn a_ping_is_answered_without_taking_an_event_number() {
   write_message(
     &mut send,
     &CallClientMessage::Join {
+      maybe_dave_resume_epoch: None,
       token,
       capabilities: MediaCapabilities::default(),
       dave_transition_mode: DaveTransitionMode::Coordinated,
@@ -288,6 +290,7 @@ async fn run_client(
   write_message(
     &mut send,
     &CallClientMessage::Join {
+      maybe_dave_resume_epoch: None,
       token,
       capabilities: MediaCapabilities::default(),
       dave_transition_mode: DaveTransitionMode::Coordinated,

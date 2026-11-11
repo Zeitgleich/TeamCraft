@@ -279,6 +279,7 @@ mod tests {
         grant,
         MediaCapabilities::default(),
         teamcraft_proto::DaveTransitionMode::Coordinated,
+        None,
         handle,
         None,
       )

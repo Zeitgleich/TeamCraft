@@ -33,6 +33,8 @@ use std::{
 };
 
 use socket2::{Domain, Protocol, Socket, Type};
+use teamcraft_media::dave::DaveEpoch;
+
 use teamcraft_media::quic_send::set_datagram_send_buffer;
 use teamcraft_proto::{
   CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, ErrorBody, ErrorCode,
@@ -48,12 +50,13 @@ use wtransport::{
   Connection, Endpoint, Identity, RecvStream, SendStream, ServerConfig,
   config::QuicTransportConfig,
   endpoint::{IncomingSession, endpoint_side::Server},
+  quinn::congestion::{BbrConfig, CubicConfig},
   tls::Sha256Digest,
 };
 
 use crate::{
   auth::{JoinGrant, JoinTokenVerifier},
-  config::SfuConfig,
+  config::{QuicCongestion, SfuConfig},
   fallback,
   net::bind_dual_stack,
   prejoin::{PreJoinLimiter, PreJoinSlot},
@@ -241,6 +244,7 @@ impl Sfu {
     // The datagram buffer each receiver's queue fills only while QUIC keeps up (`QuicLink`).
     let mut transport = QuicTransportConfig::default();
     set_datagram_send_buffer(&mut transport);
+    set_congestion_control(&mut transport, config.quic_congestion);
     let server_config = ServerConfig::builder()
       .with_bind_socket(bind_socket(&config).map_err(SfuError::Bind)?)
       .with_custom_transport(identity, transport)
@@ -592,6 +596,7 @@ pub(crate) async fn admit(shared: &Shared, first: CallClientMessage, handle: Par
     token,
     capabilities,
     dave_transition_mode,
+    maybe_dave_resume_epoch,
   } = first
   else {
     return Admission::Refused(Refusal {
@@ -644,6 +649,7 @@ pub(crate) async fn admit(shared: &Shared, first: CallClientMessage, handle: Par
     grant,
     capabilities,
     dave_transition_mode,
+    maybe_dave_resume_epoch.map(DaveEpoch),
     handle,
     maybe_wire_secret,
   ) {
@@ -954,5 +960,20 @@ async fn reject(send: &mut SendStream, refusal: CallServerMessage) {
   // Best effort: the session is being closed anyway.
   if write_message(send, &refusal).await.is_ok() {
     let _ = send.finish().await;
+  }
+}
+
+/// The SFU's congestion control towards its receivers (#1762). BBR paces by the bandwidth and
+/// round trip it measures, so the random loss of Wi-Fi and mobile links doesn't shrink the window to
+/// nothing: a loss-based controller (quinn's default, Cubic) on a 300 ms link with a few percent of
+/// loss let no datagram out for seconds, audio included, and the client gave the session up.
+fn set_congestion_control(transport: &mut QuicTransportConfig, control: QuicCongestion) {
+  match control {
+    QuicCongestion::Bbr => {
+      transport.congestion_controller_factory(Arc::new(BbrConfig::default()));
+    },
+    QuicCongestion::Cubic => {
+      transport.congestion_controller_factory(Arc::new(CubicConfig::default()));
+    },
   }
 }

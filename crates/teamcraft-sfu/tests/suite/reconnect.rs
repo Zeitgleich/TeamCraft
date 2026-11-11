@@ -837,7 +837,7 @@ impl Network {
     };
     let (room, session, outcome) = self
       .rooms
-      .join(grant, capabilities, dave_transition_mode, handle, None)
+      .join(grant, capabilities, dave_transition_mode, None, handle, None)
       .unwrap();
     self.client_mut(id).maybe_connection = Some(MemoryConnection {
       link,

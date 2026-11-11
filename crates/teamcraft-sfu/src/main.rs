@@ -63,7 +63,7 @@ use teamcraft_ops::metrics::{bind_metrics, spawn_metrics_endpoint};
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
 use teamcraft_sfu::{
   auth::{DevTokenVerifier, JoinTokenVerifier, JwtJoinTokenConfig, JwtJoinTokenVerifier, RejectAllVerifier},
-  config::{FallbackConfig, SfuConfig, parse_trusted_proxies},
+  config::{FallbackConfig, QuicCongestion, SfuConfig, parse_trusted_proxies},
   control::control_router,
   dev_page::serve_dev_page,
   health::{DEFAULT_HEALTH_ADDR, serve_health},
@@ -148,6 +148,13 @@ async fn run() -> anyhow::Result<()> {
   }
   if let Some(window) = env_duration_secs("TEAMCRAFT_SFU_DAVE_REFUSAL_WINDOW_SECS")? {
     config.dave_refusal_window = window;
+  }
+  if let Some(grace) = env_duration_secs("TEAMCRAFT_SFU_DAVE_RESUME_GRACE_SECS")? {
+    config.dave_resume_grace = grace;
+  }
+  if let Ok(value) = std::env::var("TEAMCRAFT_SFU_QUIC_CONGESTION") {
+    config.quic_congestion = QuicCongestion::parse(&value)
+      .ok_or_else(|| anyhow::anyhow!("TEAMCRAFT_SFU_QUIC_CONGESTION must be bbr or cubic"))?;
   }
   if let Some(bytes) = env_count("TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES")? {
     config.udp_receive_buffer_bytes = bytes;

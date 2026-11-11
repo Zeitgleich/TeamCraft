@@ -30,6 +30,11 @@
 //! current key. Strikes and refusals outlast reconnects for a while, so each joiner costs at most
 //! two restarts per refusal window.
 //!
+//! A member whose connection drops stays in the group for [`DaveDeadlines::resume`]: back within it
+//! with the group as it was ([`DaveCoordinator::on_resume`]), it carries on and nobody re-keys, so
+//! a flapping link doesn't rotate everybody's media key every few seconds. Otherwise it leaves the
+//! group then, as it does at once when it leaves the call (e2ee.md §8).
+//!
 //! Pure state machine: every input returns the messages to send, and time comes in as an argument
 //! ([`DaveCoordinator::on_timer`]), so it is tested without network or clock.
 
@@ -84,6 +89,9 @@ pub struct DaveCoordinator {
   /// for them, at most until `maybe_restart_deadline`.
   restarting: BTreeSet<DeviceId>,
   maybe_restart_deadline: Option<Instant>,
+  /// Members whose connection dropped, with when they leave the group unless back. Their leaves,
+  /// bindings and transition modes stay meanwhile; they commit nothing and hold up no execution.
+  away: HashMap<DeviceId, Instant>,
 }
 
 /// How long the coordinator waits for its members.
@@ -96,6 +104,9 @@ pub struct DaveDeadlines {
   /// How long a joiner's strikes count after its last stall, and so how long a refused joiner
   /// stays refused, reconnects included.
   pub refusal: Duration,
+  /// How long a member whose connection dropped keeps its leaf, so it can come back without a new
+  /// epoch for everybody. Zero: it leaves the group at once, as before.
+  pub resume: Duration,
 }
 
 /// A joiner whose proposals stalled.
@@ -177,6 +188,7 @@ impl DaveCoordinator {
       suspects: HashMap::new(),
       restarting: BTreeSet::new(),
       maybe_restart_deadline: None,
+      away: HashMap::new(),
     })
   }
 
@@ -290,6 +302,15 @@ impl DaveCoordinator {
   pub fn on_timer(&mut self, now: Instant) -> Vec<Outbound> {
     self.forget_expired_suspects(now);
     let mut outbound = Vec::new();
+    let gone: Vec<DeviceId> = self
+      .away
+      .iter()
+      .filter(|(_, until)| now >= **until)
+      .map(|(id, _)| *id)
+      .collect();
+    for participant_id in gone {
+      outbound.extend(self.on_leave(participant_id, now));
+    }
     if self
       .maybe_execution
       .as_ref()
@@ -316,9 +337,51 @@ impl DaveCoordinator {
     outbound
   }
 
-  /// A participant left the call (or its connection dropped). Its strikes stay: a reconnect
-  /// doesn't buy a joiner nobody accepts two more restarts.
+  /// A member's connection dropped. Its leaf stays for [`DaveDeadlines::resume`]: back within it
+  /// with the group as it was, it carries on ([`Self::on_resume`]); otherwise it leaves the group
+  /// then. A device that isn't a member yet leaves at once.
+  pub fn on_lost(&mut self, participant_id: DeviceId, now: Instant) -> Vec<Outbound> {
+    if self.leaf_of(participant_id).is_none() || self.deadlines.resume.is_zero() {
+      return self.on_leave(participant_id, now);
+    }
+    self.away.insert(participant_id, now + self.deadlines.resume);
+    if let Some(transition) = &mut self.maybe_transition {
+      transition.committers.remove(&participant_id);
+    }
+    let Some(execution) = &mut self.maybe_execution else {
+      return Vec::new();
+    };
+    execution.awaiting.remove(&participant_id);
+    self.execute_when_ready()
+  }
+
+  /// A device joined again; `maybe_epoch` is the epoch of the group it still holds. `true` when it
+  /// carries on in that group: it was away, nothing changed meanwhile and no change is under way,
+  /// so nobody re-keys. Otherwise it is out of the group from now on and joins with a new key
+  /// package, as every device did before resumes.
+  pub fn on_resume(
+    &mut self,
+    participant_id: DeviceId,
+    maybe_epoch: Option<DaveEpoch>,
+    now: Instant,
+  ) -> (bool, Vec<Outbound>) {
+    let was_away = self.away.remove(&participant_id).is_some();
+    let is_unchanged = maybe_epoch.is_some()
+      && maybe_epoch == self.maybe_epoch
+      && self.maybe_transition.is_none()
+      && self.maybe_execution.is_none()
+      && self.leaf_of(participant_id).is_some();
+    if was_away && is_unchanged {
+      debug!(?participant_id, "a member came back to the group as it was");
+      return (true, Vec::new());
+    }
+    (false, self.on_leave(participant_id, now))
+  }
+
+  /// A participant left the call (or the group, its connection having dropped). Its strikes stay: a
+  /// reconnect doesn't buy a joiner nobody accepts two more restarts.
   pub fn on_leave(&mut self, participant_id: DeviceId, now: Instant) -> Vec<Outbound> {
+    self.away.remove(&participant_id);
     self.waiting.retain(|(id, _)| *id != participant_id);
     self.key_bindings.remove(&participant_id);
     self.transition_modes.remove(&participant_id);
@@ -441,7 +504,10 @@ impl DaveCoordinator {
           return Vec::new();
         },
       };
-    let committers: BTreeSet<DeviceId> = self.members().collect();
+    let committers: BTreeSet<DeviceId> = self
+      .members()
+      .filter(|member| !self.away.contains_key(member))
+      .collect();
     let expected_participants: Vec<DeviceId> = committers
       .iter()
       .copied()
@@ -614,6 +680,7 @@ impl DaveCoordinator {
           )
         })
         .map(|message| message.recipient)
+        .filter(|recipient| !self.away.contains_key(recipient))
         .collect();
       self.maybe_execution = Some(Execution {
         id,
@@ -873,6 +940,89 @@ mod tests {
       harness.join(3);
       harness.join(4);
       harness.assert_all_exchange_frames(&[3, 4]);
+    }
+  }
+
+  mod resumes {
+    use super::*;
+
+    const RESUME_GRACE: Duration = Duration::from_secs(10);
+
+    #[test]
+    fn a_member_back_within_the_grace_carries_on_and_nobody_re_keys() {
+      let mut harness = Harness::with_resume(RESUME_GRACE);
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      let epoch = harness.coordinator.maybe_epoch();
+      let away = harness.lose(2);
+      harness.advance(RESUME_GRACE / 2);
+      assert!(harness.resume(2, away));
+      assert_eq!(harness.coordinator.maybe_epoch(), epoch, "no new epoch");
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
+    }
+
+    #[test]
+    fn a_member_not_back_in_time_leaves_the_group() {
+      let mut harness = Harness::with_resume(RESUME_GRACE);
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      let epoch = harness.coordinator.maybe_epoch().unwrap();
+      let away = harness.lose(2);
+      harness.advance(RESUME_GRACE + Duration::from_millis(1));
+      assert!(
+        harness.coordinator.maybe_epoch().unwrap() > epoch,
+        "removed with a new epoch"
+      );
+      harness.assert_all_exchange_frames(&[1, 3]);
+      assert!(!harness.resume(2, away));
+      harness.join(2);
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
+    }
+
+    #[test]
+    fn a_member_back_after_the_group_moved_joins_with_a_new_key_package() {
+      let mut harness = Harness::with_resume(RESUME_GRACE);
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      let away = harness.lose(2);
+      harness.join(4);
+      assert!(!harness.resume(2, away));
+      harness.join(2);
+      harness.assert_all_exchange_frames(&[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn an_away_member_holds_up_no_commit() {
+      let mut harness = Harness::with_resume(RESUME_GRACE);
+      harness.join(1);
+      harness.join(2);
+      let epoch = harness.coordinator.maybe_epoch().unwrap();
+      let away = harness.lose(2);
+      // Only 1 can commit 3's addition; it doesn't wait for 2, whose leaf stays meanwhile.
+      harness.join(3);
+      assert!(
+        harness.coordinator.maybe_epoch().unwrap() > epoch,
+        "committed without the away member"
+      );
+      // The group moved on: 2 comes back with a new key package.
+      assert!(!harness.resume(2, away));
+      harness.join(2);
+      harness.assert_all_exchange_frames(&[1, 2, 3]);
+    }
+
+    #[test]
+    fn without_a_grace_a_lost_member_leaves_at_once() {
+      let mut harness = Harness::new();
+      for id in 1..=3 {
+        harness.join(id);
+      }
+      let epoch = harness.coordinator.maybe_epoch().unwrap();
+      let away = harness.lose(2);
+      assert!(harness.coordinator.maybe_epoch().unwrap() > epoch);
+      assert!(!harness.resume(2, away));
     }
   }
 
@@ -1531,6 +1681,14 @@ mod tests {
     }
 
     fn with_mode(mode: DaveTransitionMode) -> Self {
+      Self::with(mode, Duration::ZERO)
+    }
+
+    fn with_resume(grace: Duration) -> Self {
+      Self::with(DaveTransitionMode::Coordinated, grace)
+    }
+
+    fn with(mode: DaveTransitionMode, resume: Duration) -> Self {
       Self {
         coordinator: DaveCoordinator::new(
           call(),
@@ -1538,6 +1696,7 @@ mod tests {
             transition: DEADLINE,
             commit: COMMIT_DEADLINE,
             refusal: REFUSAL_WINDOW,
+            resume,
           },
         )
         .unwrap(),
@@ -1638,6 +1797,28 @@ mod tests {
         .count()
     }
 
+    /// `id`'s connection drops: it hears nothing until it is back; its session is returned.
+    fn lose(&mut self, id: u64) -> DaveParticipant {
+      let client = self.clients.remove(&device(id)).unwrap();
+      let outbound = self.coordinator.on_lost(device(id), self.now);
+      self.queue.extend(outbound);
+      self.deliver_all();
+      client
+    }
+
+    /// `id` joins again holding `client`'s group; whether it carries on in it.
+    fn resume(&mut self, id: u64, client: DaveParticipant) -> bool {
+      let (is_resumed, outbound) = self
+        .coordinator
+        .on_resume(device(id), client.maybe_epoch(), self.now);
+      if is_resumed {
+        self.clients.insert(device(id), client);
+      }
+      self.queue.extend(outbound);
+      self.deliver_all();
+      is_resumed
+    }
+
     fn leave(&mut self, id: u64) {
       self.clients.remove(&device(id));
       let outbound = self.coordinator.on_leave(device(id), self.now);
@@ -1713,7 +1894,14 @@ mod tests {
             maybe_transition_id,
             ..
           } => {
-            let roster: Vec<_> = self.clients.keys().map(|id| dave_participant_id(*id)).collect();
+            // The trusted roster comes from the conversation: members whose connection dropped
+            // are on it too.
+            let roster: Vec<_> = self
+              .clients
+              .keys()
+              .chain(self.coordinator.away.keys())
+              .map(|id| dave_participant_id(*id))
+              .collect();
             let client = self.clients.get_mut(&recipient).unwrap();
             client.process_welcome(welcome.as_slice(), &roster).unwrap();
             Some(maybe_transition_id)

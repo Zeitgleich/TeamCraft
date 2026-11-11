@@ -5323,7 +5323,7 @@ keys.
    bound keys of the group's members only. Once a device leaves the call its bound key is retired
    for the rest of the call on every member that saw it leave: a proposal that brings that device
    back with the same key (the SFU replaying its old binding and key package) is refused there
-   (`RetiredKey`, which still ends that member's call, #1753); a device that really comes back joins
+   (`RetiredKey`); a device that really comes back joins
    with a fresh DAVE key and binding. A member that was reconnecting meanwhile retires the keys of
    the devices missing from the participant list of its rejoin. Each engine remembers at most
    `MAX_RETIRED_CALL_KEYS` (4096) retired keys, the oldest evicted first. **Limits:** a device that
@@ -5340,6 +5340,21 @@ keys.
    member without a verified binding stops media for the call (no unencrypted fallback).
 4. Members only accept proposed devices that are on the call roster they trust (from the server,
    verified like chat membership); the SFU's own list of expected members is not trusted.
+
+**Short reconnects** (#1762). A member whose connection drops keeps its DAVE leaf, and its device
+keeps its MLS state, for `TEAMCRAFT_SFU_DAVE_RESUME_GRACE_SECS` (default 10). Back within it, the
+rejoin's `join` names the epoch the device holds; when the group is still at that epoch and no
+change is under way, the SFU answers `dave_resumed` and the device carries on with its keys, so
+nobody re-keys. Otherwise (it came back late, somebody joined or left meanwhile, a transition was in
+flight) the leaf goes and the device joins with a fresh key package and binding, as before. Before,
+every lost connection removed the leaf at once and the rejoin added a new one: two epochs for
+everybody per flap, and on a lossy link a member flapping every few seconds kept the whole call
+re-keying and left other members without keys for some senders. The trade-off: a device whose
+connection dropped can still decrypt, for the grace at most, what the others send meanwhile, which
+the SFU doesn't forward to it; it was admitted and nothing about its membership changed. Leaving the
+call, being removed by a host, and the end of the grace still take its leaf (and the key) at once.
+On a resume the device checks the group's leaves against the bindings it verified before the loss;
+a key of a device that left meanwhile stays retired. `0` turns resumes off.
 
 This way the SFU can neither add a device of its own choosing nor swap a member's DAVE key: the
 calls are verified with no extra prompts, and the DAVE privacy code and per-member verification codes
