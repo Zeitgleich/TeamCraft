@@ -14,6 +14,7 @@ mod backgrounds;
 pub mod bug_reports;
 mod calls;
 mod catch_up;
+mod channel_anchor;
 mod channel_roles;
 mod custom_emoji;
 mod custom_status;

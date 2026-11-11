@@ -1119,6 +1119,10 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.inner.web_push_key()
   }
 
+  fn client_compatibility(&self) -> impl Future<Output = Result<ClientCompatibilityResponse, ApiError>> {
+    self.inner.client_compatibility()
+  }
+
   fn gateway_info(&self, _gateway_url: &str) -> impl Future<Output = Result<GatewayInfoResponse, ApiError>> {
     self.refused("gateway_info")
   }

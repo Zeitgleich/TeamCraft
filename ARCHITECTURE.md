@@ -355,6 +355,10 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   an `AudioWorklet` for audio and `<video>` → `VideoFrame` for video there. Codec availability (e.g.
   Opus in `AudioEncoder`) is checked at runtime with `isConfigSupported()`; fallback is a WASM Opus
   encoder.
+- The call's audio graph runs at Opus' 48 kHz. Firefox before 148 connects a microphone only to an
+  `AudioContext` at its default device's rate (`NotSupportedError` otherwise, Mozilla bug 1674892),
+  so with a 44.1 kHz headset the join failed there (#1721); the graph then runs at the browser's
+  rate, and the call module resamples the capture to 48 kHz and the mix back (`GraphRate`).
 
 ### 6.2 E2EE: DAVE
 

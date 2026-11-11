@@ -380,6 +380,11 @@ jobs:
       - name: Clippy (call media)
         run: cargo clippy -p teamcraft-media --all-targets --features native,mediafoundation,graphics-capture,wasapi-loopback,effects,segmentation,openh264-source -- -D warnings
       - name: Test (desktop shell and core)
+        env:
+          # The test thread polls the whole test body, and in a debug build the futures of the core's
+          # sync tests don't fit the default stack (as on Linux above). Set here, not on the job:
+          # rust-cache hashes the job's RUST* variables into its key, and would miss main's cache.
+          RUST_MIN_STACK: "16777216"
         run: cargo test -p teamcraft-desktop -p teamcraft-core
       - name: Test (call media)
         run: cargo test -p teamcraft-media --features native,mediafoundation,graphics-capture,wasapi-loopback,effects,segmentation,openh264-source

@@ -1,6 +1,7 @@
 //! Managing spaces and channels through the core: creating and editing them, the channel browser
 //! and joining, categories, invitations, and announcing changes as encrypted system messages.
 
+use teamcraft_proto::channel_name::checked_channel_name;
 use teamcraft_proto::{
   AddSpaceMemberRequest, CategoryId, ConversationId, ConversationKind, ConversationResponse,
   ConversationVisibility, CreateCategoryRequest, CreateChannelRequest, CreateInviteRequest,
@@ -11,6 +12,7 @@ use teamcraft_proto::{
 };
 
 use super::Client;
+use super::channel_anchor::PropertiesWish;
 use super::member_device::GroupInfoOutcome;
 use super::self_add::SelfAddState;
 use super::server_changes::{Asked, Observed};
@@ -87,6 +89,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_topic: options.maybe_topic,
       maybe_description: None,
       is_integration: options.is_integration,
+      is_anchored: false,
       maybe_idempotency_key: options.maybe_idempotency_key,
     };
     self.create_channel_from(space, &request).await
@@ -98,6 +101,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     request: &UpdateConversationRequest,
   ) -> Result<(), CoreError> {
+    // A new name is checked and sent in NFC, as it is signed (e2ee.md §4.6.5); the field checks
+    // it first.
+    let normalized;
+    let request = match &request.maybe_name {
+      Some(name) => {
+        let checked = checked_channel_name(name)?;
+        normalized = UpdateConversationRequest {
+          maybe_name: Some(checked),
+          ..request.clone()
+        };
+        &normalized
+      },
+      None => request,
+    };
     let maybe_before: Option<ConversationResponse> =
       records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
     let after = self.api.update_conversation(conversation, request).await?;
@@ -107,6 +124,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       asked: Asked::update(request),
     };
     self.store_conversation_from(maybe_before.as_ref(), &after, observed)?;
+    // Only what the server took and lists: a name it changed on the way would sign a name nobody
+    // is shown.
+    if let Some(name) = request
+      .maybe_name
+      .as_ref()
+      .filter(|name| after.maybe_name.as_ref() == Some(*name))
+    {
+      self
+        .sign_properties_after(
+          conversation,
+          PropertiesWish {
+            maybe_space: None,
+            maybe_name: Some(name),
+          },
+        )
+        .await;
+    }
     let Some(before) = maybe_before else {
       return Ok(());
     };
@@ -124,6 +158,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<(), CoreError> {
     let after = self.api.move_conversation(conversation, request).await?;
     self.store_conversation(&after, Observed::OwnChange { asked: Asked::MOVE })?;
+    if after.maybe_space_id == Some(request.space_id) {
+      self
+        .sign_properties_after(
+          conversation,
+          PropertiesWish {
+            maybe_space: Some(request.space_id),
+            maybe_name: None,
+          },
+        )
+        .await;
+    }
     let maybe_space: Option<SpaceResponse> =
       records::get_json(&self.store, Table::Spaces, &request.space_id.to_string())?;
     self
@@ -134,6 +179,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       )
       .await
+  }
+
+  /// Brings a move or rename the server took into the channel's anchor (e2ee.md §4.6.5). It
+  /// doesn't fail the change: unsigned, the anchor keeps the old value and the property is stale.
+  async fn sign_properties_after(&mut self, conversation: ConversationId, wish: PropertiesWish<'_>) {
+    if let Err(error) = Box::pin(self.sign_channel_properties(conversation, wish)).await {
+      tracing::warn!(conversation_id = %conversation, %error, "could not sign the change into the channel's anchor; it stays stale");
+    }
   }
 
   /// Public channels of a space the user hasn't joined, kept for the channel browser.

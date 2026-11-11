@@ -9,7 +9,8 @@
 use teamcraft_db::testing::TestDatabase;
 use teamcraft_db::{
   ImageChange, KeyPackageCounts, NewConversation, NewDevice, NewKeyPackage, NewMessage, NewPushRetry,
-  NewSpace, OidcIdentity, PostOutcome, SnowflakeGenerator, StoredSpaceImage, participants_key,
+  NewSpace, OidcIdentity, PostOutcome, RoleLogFounding, SnowflakeGenerator, StoredSpaceImage,
+  participants_key,
 };
 use teamcraft_proto::{
   ClientMessageId, ConversationId, ConversationKind, ConversationVisibility, DeviceId, HistoryPolicy, Id,
@@ -486,6 +487,7 @@ async fn a_channel_picture_is_set_replaced_and_removed_with_the_previous_key_ret
       is_integration: false,
     },
     alice.id,
+    RoleLogFounding::Open,
     None,
   )
   .await
@@ -589,6 +591,7 @@ async fn sending_the_same_client_message_id_twice_stores_one_message() {
       is_integration: false,
     },
     alice.id,
+    RoleLogFounding::Open,
     None,
   )
   .await
@@ -870,7 +873,10 @@ async fn creating_a_space_or_channel_twice_with_one_key_creates_one() {
     maybe_participants_key: None,
     is_integration: false,
   };
-  let created = db.create_channel(&channel, alice.id, Some(&key)).await.unwrap();
+  let created = db
+    .create_channel(&channel, alice.id, RoleLogFounding::Open, Some(&key))
+    .await
+    .unwrap();
   let again = db
     .create_channel(
       &NewConversation {
@@ -878,6 +884,7 @@ async fn creating_a_space_or_channel_twice_with_one_key_creates_one() {
         ..channel
       },
       alice.id,
+      RoleLogFounding::Open,
       Some(&key),
     )
     .await

@@ -29,7 +29,7 @@ use teamcraft_proto::{
   SyncHeadsResponse, UnixMillis, UpdateConversationMemberRequest, UpdateScheduledMessageRequest,
   UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserGroupRoster, UserId, UserKind, UserSummary,
 };
-use teamcraft_proto::{AdminJoinRequestChange, AdminJoinRequestResponse};
+use teamcraft_proto::{AdminJoinRequestChange, AdminJoinRequestResponse, ClientCompatibilityResponse};
 use teamcraft_proto::{
   AppendWorkspaceLogRequest, ListWorkspaceLogQuery, ListWorkspaceLogResponse, WorkspaceLogEntryResponse,
   WorkspaceLogKind,
@@ -131,6 +131,8 @@ pub struct FakeGateway {
 
 #[derive(Default)]
 struct State {
+  /// `GET /client-compatibility`'s minimum; `None`: `1.0.0`.
+  maybe_minimum_client_version: Option<String>,
   /// `GET /user-groups/rosters` as a real server answers it.
   user_groups: Vec<UserGroupRoster>,
   /// The built-in `@admins` the rosters announce.
@@ -546,6 +548,8 @@ struct Conversation {
   maybe_group_info: Option<(u64, Base64Bytes)>,
   /// The signed channel role log (issue #380), oldest first.
   role_log: Vec<teamcraft_proto::ChannelRoleLogEntryResponse>,
+  /// The creator of a channel created anchored: the only one whose first role entry is taken.
+  maybe_anchored_founder: Option<UserId>,
 }
 
 struct Session {
@@ -959,6 +963,11 @@ impl FakeServer {
   /// channel roles (issue #380).
   pub fn set_role_log_lacking(&self, is_lacking: bool) {
     self.lock().lacks_role_log = is_lacking;
+  }
+
+  /// The oldest app version the server names (`GET /client-compatibility`); `1.0.0` until set.
+  pub fn set_minimum_client_version(&self, version: &str) {
+    self.lock().maybe_minimum_client_version = Some(version.to_owned());
   }
 
   /// The user's `GET /conversations` answers only after `delay` (a long full sync).
@@ -3309,6 +3318,9 @@ impl ServerApi for FakeServerApi {
       entry.response.visibility = request.visibility.clone();
       entry.response.maybe_topic = request.maybe_topic.clone();
       entry.response.maybe_category_id = request.maybe_category_id;
+      if request.is_anchored {
+        entry.maybe_anchored_founder = Some(me);
+      }
       if let Some(key) = request.maybe_idempotency_key {
         state.created_channels.insert((me, key), id);
       }
@@ -6060,6 +6072,14 @@ impl ServerApi for FakeServerApi {
           "the document names another channel or version",
         ));
       }
+      // Like the server: an anchored channel's first entry only from its creator.
+      if request.expected_version == 0 && entry.maybe_anchored_founder.is_some_and(|founder| founder != me) {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "only the channel's founder signs its first role entry",
+        ));
+      }
       if is_in_conflict || request.expected_version != current {
         return Err(ApiError::status(
           409,
@@ -6702,6 +6722,18 @@ impl ServerApi for FakeServerApi {
   async fn web_push_key(&self) -> Result<WebPushKeyResponse, ApiError> {
     Ok(WebPushKeyResponse {
       maybe_public_key: Some(FAKE_WEB_PUSH_KEY.to_owned()),
+    })
+  }
+
+  async fn client_compatibility(&self) -> Result<ClientCompatibilityResponse, ApiError> {
+    Ok(ClientCompatibilityResponse {
+      server_version: "1.0.0".into(),
+      minimum_client_version: self
+        .server
+        .lock()
+        .maybe_minimum_client_version
+        .clone()
+        .unwrap_or_else(|| "1.0.0".into()),
     })
   }
 
@@ -7616,6 +7648,7 @@ impl State {
         pinned: HashSet::new(),
         maybe_group_info: None,
         role_log: Vec::new(),
+        maybe_anchored_founder: None,
       },
     );
     id

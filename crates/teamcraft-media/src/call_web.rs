@@ -124,6 +124,7 @@ use crate::call_resilience::{
 use crate::call_video::ReceivedVideoFrame;
 use crate::datagram::SimulcastLayer;
 use crate::jitter::{JitterBuffer, JitterBufferConfig, Playout};
+use crate::resample::MonoResampler;
 use crate::rtp::AudioLevel;
 use crate::video::{EncodedVideoFrame, ScreenProfile, TOP_LAYER, VideoResolution, chosen_layer};
 use crate::web_api::{
@@ -139,12 +140,12 @@ const MAX_FRAMES_PER_PULSE: u32 = 5;
 const TIMER_INTERVAL: Duration = Duration::from_millis(100);
 /// The page timer's pulse period (the fallback clock; throttled in hidden tabs).
 const PULSE_INTERVAL_MS: i32 = 10;
-/// The audio clock pulses every this many frames of audio (10 ms at 48 kHz).
-const CLOCK_EVERY_FRAMES: u32 = SAMPLE_RATE_HZ / 100;
+/// Pulses of the audio clock per second of audio (one every 10 ms).
+const CLOCK_PULSES_PER_SECOND: u32 = 100;
 /// Upper bound of one signaling message.
 const MAX_SIGNALING_BYTES: usize = 1024 * 1024;
-/// At most this much audio waits in the playback worklet (latency bound).
-const MAX_PLAYBACK_SAMPLES: u32 = 48_000 / 5;
+/// The playback worklet holds at most a second of audio divided by this (200 ms, latency bound).
+const MAX_PLAYBACK_PER_SECOND: u32 = 5;
 /// Decoded audio kept per sender before the mixer takes it; more means the sender runs fast.
 const MAX_DECODED_SAMPLES: usize = 5 * FRAME_SAMPLES_PER_CHANNEL;
 /// Opus bitrate for voice.
@@ -299,6 +300,11 @@ pub enum WebCallError {
   },
   #[error("this browser lacks {0}")]
   Unsupported(&'static str),
+  /// The audio graph refused a stream at its sample rate: Firefox before 148 connects a microphone
+  /// only to a graph at the default device's rate (#1721). [`WebCall::join`] then runs the call's
+  /// audio at that rate.
+  #[error("the browser can't connect the audio at this sample rate: {0}")]
+  SampleRate(String),
   #[error(transparent)]
   Engine(#[from] CallEngineError),
   #[error(transparent)]
@@ -395,6 +401,8 @@ enum Input {
   Pulse,
   VideoEncoded {
     kind: VideoTrackKind,
+    /// What the layer's encoder encodes: a share's is AV1 where every viewer decodes it (#565).
+    codec: VideoCodec,
     layer: u8,
     data: Vec<u8>,
     is_keyframe: bool,
@@ -426,6 +434,31 @@ enum Input {
   #[cfg(feature = "call-view")]
   RoundTrip(Option<u32>),
   Command(Command),
+}
+
+/// What a layer's encoder put out, before it goes to the engine.
+#[derive(Debug, Clone, PartialEq)]
+struct EncodedChunk {
+  codec: VideoCodec,
+  layer: u8,
+  data: Vec<u8>,
+  is_keyframe: bool,
+  timestamp_us: f64,
+}
+
+impl EncodedChunk {
+  /// The frame the engine sends, in the codec the encoder encoded (#1733); `None` for a layer
+  /// number out of range.
+  fn into_frame(self) -> Option<EncodedVideoFrame> {
+    Some(EncodedVideoFrame {
+      codec: self.codec,
+      layer: SimulcastLayer::new(self.layer).ok()?,
+      // Encoder timestamps start at 0 and stay far below u64::MAX microseconds.
+      timestamp: EncodedVideoFrame::rtp_timestamp(self.timestamp_us.max(0.0) as u64),
+      is_keyframe: self.is_keyframe,
+      data: self.data,
+    })
+  }
 }
 
 enum Command {
@@ -529,7 +562,16 @@ struct WebAudio {
   context: AudioContext,
   maybe_capture: Option<Capture>,
   maybe_playback: Option<AudioWorkletNode>,
+  /// The mix (48 kHz) to the graph's rate, where that differs.
+  to_graph: RefCell<Option<MonoResampler>>,
 }
+
+/// The sample rate the call's audio graph runs at: the codec's 48 kHz, so samples go to and from
+/// Opus as they are, or the browser's own where it connects a microphone only at the rate of its
+/// default device (Firefox before 148, #1721). Captured samples are resampled to 48 kHz then, and
+/// the mix from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GraphRate(u32);
 
 /// Wakes the call task for its periodic work ([`Input::Pulse`]). Pulses of both clocks coalesce
 /// while one waits in the channel, so a busy task (a permission prompt, a slow capture) doesn't
@@ -1413,6 +1455,7 @@ impl CallState<'_> {
       Input::Pulse => return self.on_pulse(engine, audio).await,
       Input::VideoEncoded {
         kind,
+        codec,
         layer,
         data,
         is_keyframe,
@@ -1421,7 +1464,14 @@ impl CallState<'_> {
         if let Some(sender) = self.sender_of_kind(&kind) {
           sender.on_encoded(layer);
         }
-        self.send_video_frame(engine, &kind, layer, data, is_keyframe, timestamp_us);
+        let encoded = EncodedChunk {
+          codec,
+          layer,
+          data,
+          is_keyframe,
+          timestamp_us,
+        };
+        self.send_video_frame(engine, &kind, encoded);
       },
       Input::VideoEnded(kind) => self.end_video(engine, &kind),
       Input::VideoEncodeFailed {
@@ -2405,15 +2455,7 @@ impl CallState<'_> {
       .find(|sender| sender.publication.kind == *kind)
   }
 
-  fn send_video_frame(
-    &mut self,
-    engine: &mut CallEngine,
-    kind: &VideoTrackKind,
-    layer: u8,
-    data: Vec<u8>,
-    is_keyframe: bool,
-    timestamp_us: f64,
-  ) {
+  fn send_video_frame(&mut self, engine: &mut CallEngine, kind: &VideoTrackKind, encoded: EncodedChunk) {
     let has_sender = self.sender_of_kind(kind).is_some();
     if has_sender && !self.encoded_kinds.contains(kind) {
       self.encoded_kinds.push(kind.clone());
@@ -2426,17 +2468,11 @@ impl CallState<'_> {
     else {
       return;
     };
-    let Ok(layer) = SimulcastLayer::new(layer) else {
+    let Some(frame) = encoded.into_frame() else {
       return;
     };
-    let frame = EncodedVideoFrame {
-      codec: VideoCodec::H264,
-      layer,
-      // Encoder timestamps start at 0 and stay far below u64::MAX microseconds.
-      timestamp: EncodedVideoFrame::rtp_timestamp(timestamp_us.max(0.0) as u64),
-      is_keyframe,
-      data,
-    };
+    // A late frame of the encoders a codec switch replaced is refused (`WrongCodec`); the new
+    // ones start with keyframes.
     engine.send_video(stream_id, &frame, Instant::now());
   }
 }
@@ -2773,23 +2809,65 @@ fn reconnect_schedule(
 }
 
 impl WebAudio {
+  /// The graph at 48 kHz; at the browser's own rate where it refuses the microphone at 48 kHz
+  /// ([`WebCallError::SampleRate`]).
   async fn open(
     source: &AudioSource,
     sink: &AudioSink,
     maybe_worklet_url: Option<&str>,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
+    let at_codec_rate = Self::open_at(Some(GraphRate::CODEC), source, sink, maybe_worklet_url, inputs).await;
+    let Err(WebCallError::SampleRate(message)) = at_codec_rate else {
+      return at_codec_rate;
+    };
+    warn!(%message, "the microphone doesn't connect at 48 kHz: the call's audio runs at the browser's rate");
+    Self::open_at(None, source, sink, maybe_worklet_url, inputs).await
+  }
+
+  /// A graph at `maybe_rate` (the browser's default without one) with the source and sink; a
+  /// graph that doesn't start is closed again.
+  async fn open_at(
+    maybe_rate: Option<GraphRate>,
+    source: &AudioSource,
+    sink: &AudioSink,
+    maybe_worklet_url: Option<&str>,
+    inputs: &mpsc::UnboundedSender<Input>,
+  ) -> Result<Self, WebCallError> {
     let options = AudioContextOptions::new();
-    options.set_sample_rate(SAMPLE_RATE_HZ as f32);
+    if let Some(rate) = maybe_rate {
+      options.set_sample_rate(rate.0 as f32);
+    }
     let context = AudioContext::new_with_context_options(&options).map_err(browser("AudioContext"))?;
-    load_worklet(&context, maybe_worklet_url).await?;
+    let rate = GraphRate::of(&context);
     let mut audio = Self {
       context,
       maybe_capture: None,
       maybe_playback: None,
+      to_graph: RefCell::new(rate.codec_to_graph()),
     };
-    audio.switch(source, sink, inputs).await?;
+    if let Err(error) = audio.start(source, sink, maybe_worklet_url, inputs).await {
+      audio.close();
+      return Err(error);
+    }
+    if rate != GraphRate::CODEC {
+      info!(
+        rate_hz = rate.0,
+        "the call's audio is resampled to and from 48 kHz"
+      );
+    }
     Ok(audio)
+  }
+
+  async fn start(
+    &mut self,
+    source: &AudioSource,
+    sink: &AudioSink,
+    maybe_worklet_url: Option<&str>,
+    inputs: &mpsc::UnboundedSender<Input>,
+  ) -> Result<(), WebCallError> {
+    load_worklet(&self.context, maybe_worklet_url).await?;
+    self.switch(source, sink, inputs).await
   }
 
   /// Opens the new microphone and speakers before releasing the old ones.
@@ -2826,9 +2904,15 @@ impl WebAudio {
     let Some(node) = &self.maybe_playback else {
       return Ok(());
     };
+    let maybe_resampled = self
+      .to_graph
+      .borrow_mut()
+      .as_mut()
+      .map(|resampler| resampler.process(mix));
+    let samples = maybe_resampled.as_deref().unwrap_or(mix);
     node
       .port()
-      .and_then(|port| port.post_message(&Float32Array::from(mix)))
+      .and_then(|port| port.post_message(&Float32Array::from(samples)))
       .map_err(browser("playback"))
   }
 
@@ -2838,6 +2922,45 @@ impl WebAudio {
     }
     // Closing releases the audio hardware; the result only says when that finished.
     let _ = self.context.close();
+  }
+}
+
+impl GraphRate {
+  const CODEC: Self = Self(SAMPLE_RATE_HZ);
+
+  /// The rate `context` runs at; one that reports none counts as the codec's.
+  fn of(context: &AudioContext) -> Self {
+    Self::from_hz(context.sample_rate())
+  }
+
+  fn from_hz(rate_hz: f32) -> Self {
+    // A browser's rates are whole numbers of Hz well inside u32.
+    let rounded = rate_hz.round();
+    if rounded.is_finite() && rounded >= 1.0 {
+      Self(rounded as u32)
+    } else {
+      Self::CODEC
+    }
+  }
+
+  /// Frames of audio between two pulses of the audio clock.
+  fn clock_every_frames(self) -> u32 {
+    (self.0 / CLOCK_PULSES_PER_SECOND).max(1)
+  }
+
+  /// Samples the playback worklet holds at most.
+  fn max_playback_samples(self) -> u32 {
+    self.0 / MAX_PLAYBACK_PER_SECOND
+  }
+
+  /// Captured samples to the codec's rate; `None` at the codec's rate.
+  fn graph_to_codec(self) -> Option<MonoResampler> {
+    (self != Self::CODEC).then(|| MonoResampler::between(1, self.0, SAMPLE_RATE_HZ))
+  }
+
+  /// The mix to this rate; `None` at the codec's rate.
+  fn codec_to_graph(self) -> Option<MonoResampler> {
+    (self != Self::CODEC).then(|| MonoResampler::between(1, SAMPLE_RATE_HZ, self.0))
   }
 }
 
@@ -2862,8 +2985,9 @@ impl AudioClock {
     let options = AudioWorkletNodeOptions::new();
     options.set_number_of_inputs(0);
     options.set_output_channel_count(&Array::of1(&JsValue::from(1)));
+    let every_frames = GraphRate::of(context).clock_every_frames();
     let processor_options =
-      dictionary(&[("everyFrames", JsValue::from(CLOCK_EVERY_FRAMES))]).map_err(browser("clock worklet"))?;
+      dictionary(&[("everyFrames", JsValue::from(every_frames))]).map_err(browser("clock worklet"))?;
     options.set_processor_options(Some(&processor_options));
     let node = AudioWorkletNode::new_with_options(context, "teamcraft-clock", &options)
       .map_err(browser("clock worklet"))?;
@@ -2899,11 +3023,13 @@ impl Capture {
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<Self, WebCallError> {
     let stream = capture_microphone(choice).await?;
-    Self::from_stream(context, stream, CaptureMix::FirstChannel, inputs)
+    // A microphone the graph refuses is released again (the graph may be opened anew for it).
+    Self::from_stream(context, stream.clone(), CaptureMix::FirstChannel, inputs)
+      .inspect_err(|_| stop_tracks(&stream))
   }
 
-  /// Captures an audio stream; its samples arrive as [`Input::Captured`]: the first channel as the
-  /// microphone's, or every channel mixed down as a shared screen's sound.
+  /// Captures an audio stream; its samples arrive as [`Input::Captured`] at 48 kHz: the first
+  /// channel as the microphone's, or every channel mixed down as a shared screen's sound.
   fn from_stream(
     context: &AudioContext,
     stream: MediaStream,
@@ -2916,7 +3042,8 @@ impl Capture {
     };
     let source = context
       .create_media_stream_source(&stream)
-      .map_err(browser("audio source"))?;
+      .map_err(audio_source_error)?;
+    let mut maybe_to_codec = GraphRate::of(context).graph_to_codec();
     let options = AudioWorkletNodeOptions::new();
     options.set_number_of_outputs(1);
     if mix == CaptureMix::DownToMono {
@@ -2933,12 +3060,13 @@ impl Capture {
       .map_err(browser("capture worklet"))?;
     let sender = inputs.clone();
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
-      let samples: Float32Array = event.data().unchecked_into();
+      let samples = event.data().unchecked_into::<Float32Array>().to_vec();
+      let samples = match maybe_to_codec.as_mut() {
+        Some(resampler) => resampler.process(&samples),
+        None => samples,
+      };
       // The call task may be gone; the capture stops when it drops this closure.
-      let _ = sender.unbounded_send(Input::Captured {
-        origin,
-        samples: samples.to_vec(),
-      });
+      let _ = sender.unbounded_send(Input::Captured { origin, samples });
     });
     node
       .port()
@@ -3403,8 +3531,9 @@ fn open_playback(context: &AudioContext) -> Result<AudioWorkletNode, WebCallErro
   let options = AudioWorkletNodeOptions::new();
   options.set_number_of_inputs(0);
   options.set_output_channel_count(&Array::of1(&JsValue::from(1)));
-  let processor_options = dictionary(&[("maxSamples", JsValue::from(MAX_PLAYBACK_SAMPLES))])
-    .map_err(browser("playback worklet"))?;
+  let max_samples = GraphRate::of(context).max_playback_samples();
+  let processor_options =
+    dictionary(&[("maxSamples", JsValue::from(max_samples))]).map_err(browser("playback worklet"))?;
   options.set_processor_options(Some(&processor_options));
   let node = AudioWorkletNode::new_with_options(context, "teamcraft-playback", &options)
     .map_err(browser("playback worklet"))?;
@@ -3546,6 +3675,25 @@ fn media_access_reason(input: MediaInput, dom_exception_name: &str) -> MediaAcce
   }
 }
 
+/// A stream the audio graph didn't take. `NotSupportedError` is Firefox before 148 refusing a
+/// microphone in a graph that doesn't run at its default device's rate (#1721).
+fn audio_source_error(error: JsValue) -> WebCallError {
+  let name = Reflect::get(&error, &JsValue::from_str("name"))
+    .ok()
+    .and_then(|name| name.as_string());
+  if name.as_deref() == Some("NotSupportedError") {
+    WebCallError::SampleRate(js_message(&error))
+  } else {
+    browser("audio source")(error)
+  }
+}
+
+fn stop_tracks(stream: &MediaStream) {
+  for track in stream.get_tracks().iter() {
+    track.unchecked_into::<MediaStreamTrack>().stop();
+  }
+}
+
 /// A readable message from a thrown JS value (usually a `DOMException` or `Error`).
 fn js_message(error: &JsValue) -> String {
   Reflect::get(error, &JsValue::from_str("message"))
@@ -3570,6 +3718,50 @@ mod tests {
   use crate::call_engine::{OwnPublication, VideoSendOutcome};
 
   const GRACE: Duration = Duration::from_secs(30);
+
+  /// #1721: Firefox before 148 runs the call's audio graph at its device's rate.
+  mod graph_rates {
+    use super::*;
+
+    #[test]
+    fn at_48_khz_nothing_is_resampled() {
+      let rate = GraphRate::from_hz(48_000.0);
+      assert_eq!(rate, GraphRate::CODEC);
+      assert!(rate.graph_to_codec().is_none() && rate.codec_to_graph().is_none());
+      // 10 ms pulses and 200 ms in the playback worklet, as before.
+      assert_eq!(rate.clock_every_frames(), 480);
+      assert_eq!(rate.max_playback_samples(), 9_600);
+    }
+
+    #[test]
+    fn a_44_1_khz_graph_sends_and_plays_48_khz_frames() {
+      let rate = GraphRate::from_hz(44_100.0);
+      assert_eq!(rate.clock_every_frames(), 441);
+      assert_eq!(rate.max_playback_samples(), 8_820);
+      // A second of the worklet's 128-sample captures is a second of 20 ms Opus frames.
+      let mut to_codec = rate.graph_to_codec().expect("a resampler to 48 kHz");
+      let captured: usize = (0..44_100 / 128)
+        .map(|_| to_codec.process(&[0.1; 128]).len())
+        .sum();
+      let expected = 44_100 / 128 * 128 * 48_000 / 44_100;
+      assert!(captured.abs_diff(expected) <= 1, "{captured} of {expected}");
+      // And 50 mixed frames fill a second of the graph.
+      let mut from_codec = rate.codec_to_graph().expect("a resampler from 48 kHz");
+      let played: usize = (0..50)
+        .map(|_| from_codec.process(&[0.1; FRAME_SAMPLES_PER_CHANNEL]).len())
+        .sum();
+      assert!(played.abs_diff(44_100) <= 1, "{played}");
+    }
+
+    #[test]
+    fn a_rate_the_browser_does_not_report_counts_as_48_khz() {
+      for broken in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+        assert_eq!(GraphRate::from_hz(broken), GraphRate::CODEC, "{broken}");
+      }
+      assert_eq!(GraphRate::from_hz(47_999.6), GraphRate::CODEC);
+      assert_eq!(GraphRate::from_hz(16_000.0).clock_every_frames(), 160);
+    }
+  }
 
   mod opus_profiles {
     use super::*;
@@ -3964,6 +4156,40 @@ mod tests {
         kind,
         own: OwnPublication::new(id),
       }
+    }
+  }
+
+  mod encoded_chunks {
+    use super::*;
+
+    /// #1733: a share's AV1 encoder output went out labelled H.264, and viewers got empty frames.
+    #[test]
+    fn a_frame_goes_out_in_the_codec_its_encoder_encoded() {
+      let chunk = EncodedChunk {
+        codec: VideoCodec::Av1,
+        layer: 1,
+        data: vec![0x12, 0x00, 0x0a, 0x04, 0, 1, 2, 3],
+        is_keyframe: true,
+        timestamp_us: 1_000_000.0,
+      };
+      let frame = chunk.clone().into_frame().unwrap();
+      assert_eq!(frame.codec, VideoCodec::Av1);
+      assert_eq!(frame.layer.value(), 1);
+      assert_eq!(frame.data, chunk.data);
+      assert!(frame.is_keyframe);
+      assert_eq!(frame.timestamp, EncodedVideoFrame::rtp_timestamp(1_000_000));
+    }
+
+    #[test]
+    fn a_layer_out_of_range_is_dropped() {
+      let chunk = EncodedChunk {
+        codec: VideoCodec::H264,
+        layer: u8::MAX,
+        data: vec![0, 0, 0, 1, 0x65],
+        is_keyframe: true,
+        timestamp_us: 0.0,
+      };
+      assert!(chunk.into_frame().is_none());
     }
   }
 

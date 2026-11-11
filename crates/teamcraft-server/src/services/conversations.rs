@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 use teamcraft_db::{
-  ConversationChanges, ConversationFilter, ConversationView, NewConversation, StoredRetention,
-  participants_key,
+  ConversationChanges, ConversationFilter, ConversationView, NewConversation, RoleLogFounding,
+  StoredRetention, participants_key,
 };
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, ConvertChannelRequest,
@@ -20,7 +20,7 @@ use super::access::{
 use super::audit::{self, Target as AuditTarget};
 use super::convert::{ConversationExtras, conversation_response};
 use super::system_events;
-use super::{validate_name, validate_text};
+use super::{validate_channel_name, validate_text};
 use crate::auth::AuthenticatedUser;
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -146,7 +146,7 @@ pub async fn create_channel(
     return Err(ApiError::Conflict("the space is archived".into()));
   }
   let limits = &state.settings.get().limits;
-  let name = validate_name(&request.name, "channel name", limits.max_name_length)?;
+  let name = validate_channel_name(&request.name, limits.max_name_length)?;
   for text in [&request.maybe_topic, &request.maybe_description]
     .into_iter()
     .flatten()
@@ -184,6 +184,11 @@ pub async fn create_channel(
         is_integration: request.is_integration,
       },
       caller.user.id,
+      if request.is_anchored {
+        RoleLogFounding::Anchored
+      } else {
+        RoleLogFounding::Open
+      },
       request.maybe_idempotency_key.as_ref(),
     )
     .await?;
@@ -287,7 +292,7 @@ pub async fn update_conversation(
   let maybe_name = request
     .maybe_name
     .as_deref()
-    .map(|n| validate_name(n, "channel name", limits.max_name_length))
+    .map(|n| validate_channel_name(n, limits.max_name_length))
     .transpose()?;
   for text in [&request.maybe_topic, &request.maybe_description]
     .into_iter()

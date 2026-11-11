@@ -19,6 +19,8 @@ use teamcraft_proto::{
   SetHolidayRegionRequest, SetRsvpRequest, UnixMillis, UpdateMeetingRequest, Weekday,
 };
 
+use zeroize::Zeroizing;
+
 use crate::auth::fetch::fetch;
 use crate::auth::{ApiMethod, ApiResponse, AppConfig, AuthError, Authenticator};
 use crate::clock::{format_local_datetime_input, local_day, now_ms, parse_local_datetime};
@@ -1157,16 +1159,30 @@ pub fn is_plausible_email(text: &str) -> bool {
 /// What a meeting link holds for a guest's page (docs/meetings.md, "Links"): the path's handle
 /// (the meeting link's token, or an old link's meeting ID), a personal link's one-time token, and
 /// the organizer's key fingerprint `v` from the fragment, which never reaches a server. No secret.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GuestLink {
   pub handle: MeetingHandle,
   pub maybe_invite_token: Option<String>,
   pub maybe_organizer_fingerprint: Option<String>,
+  /// The key of the guest's session kept in this browser (`#r=`), on the address the page moved to
+  /// after the guest joined, so a reload carries on (`crate::guest_resume`).
+  pub maybe_resume_key: Option<Zeroizing<String>>,
+}
+
+impl std::fmt::Debug for GuestLink {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("GuestLink")
+      .field("handle", &self.handle)
+      .field("has_invite_token", &self.maybe_invite_token.is_some())
+      .field("maybe_organizer_fingerprint", &self.maybe_organizer_fingerprint)
+      .field("has_resume_key", &self.maybe_resume_key.is_some())
+      .finish()
+  }
 }
 
 /// The guest link of a page, if it is one: `/meeting/<token>[#v=<fingerprint>]`, a personal link
-/// with `#invite=<token>`, or an old `/meeting/<id>#invite=<token>`. An old link with the ID alone
-/// is a member's link, not a guest's.
+/// with `#invite=<token>`, an old `/meeting/<id>#invite=<token>`, or a guest's own address after
+/// joining (`#r=<key>`). An old link with the ID alone is a member's link, not a guest's.
 pub fn parse_guest_link(path: &str, fragment: &str) -> Option<GuestLink> {
   let segment = path.strip_prefix(MEETING_PATH_PREFIX)?.trim_end_matches('/');
   let handle = MeetingHandle::parse(segment)?;
@@ -1179,7 +1195,8 @@ pub fn parse_guest_link(path: &str, fragment: &str) -> Option<GuestLink> {
       .map(str::to_owned)
   };
   let maybe_invite_token = value(INVITE_FRAGMENT_KEY);
-  if matches!(handle, MeetingHandle::Id(_)) && maybe_invite_token.is_none() {
+  let maybe_resume_key = value(crate::guest_resume::RESUME_FRAGMENT_KEY).map(Zeroizing::new);
+  if matches!(handle, MeetingHandle::Id(_)) && maybe_invite_token.is_none() && maybe_resume_key.is_none() {
     return None;
   }
   Some(GuestLink {
@@ -1187,6 +1204,7 @@ pub fn parse_guest_link(path: &str, fragment: &str) -> Option<GuestLink> {
     maybe_invite_token,
     maybe_organizer_fingerprint: value(VERIFIER_FRAGMENT_KEY)
       .or_else(|| value(LEGACY_ORGANIZER_FRAGMENT_KEY)),
+    maybe_resume_key,
   })
 }
 
@@ -1602,6 +1620,21 @@ mod tests {
     assert!(parse_guest_link("/meeting/not-a-token", "#invite=abc").is_none());
     assert!(parse_guest_link("/threads", "#invite=abc").is_none());
     assert!(parse_guest_link("/meeting/123456789/", "#x=1&invite=abc").is_some());
+  }
+
+  #[test]
+  fn a_guests_own_address_carries_the_resume_key() {
+    let by_token = parse_guest_link(&format!("/meeting/{TOKEN}"), "#r=k3y").expect("link");
+    assert_eq!(
+      by_token.maybe_resume_key.as_deref().map(String::as_str),
+      Some("k3y")
+    );
+    assert!(!format!("{by_token:?}").contains("k3y"));
+    // A personal link's address after joining: the ID with the key, the one-time token gone.
+    let by_id = parse_guest_link("/meeting/123456789", "#r=k3y").expect("link");
+    assert_eq!(by_id.maybe_invite_token, None);
+    assert_eq!(by_id.maybe_resume_key.as_deref().map(String::as_str), Some("k3y"));
+    assert!(parse_guest_link("/meeting/123456789", "#r=").is_none());
   }
 
   #[test]

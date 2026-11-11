@@ -55,16 +55,22 @@ impl<S: LocalStore + Clone> Peer<S> {
     store: S,
     settings: ClientSettings,
   ) -> Peer<S> {
+    Self::enroll_with_options(stack, user, store, settings, enrollment_options(device_name)).await
+  }
+
+  /// [`Self::enroll_with_settings`] with enrollment options of the caller's own (another recovery
+  /// passphrase, as the demo seed uses).
+  pub async fn enroll_with_options(
+    stack: &Stack,
+    user: &str,
+    store: S,
+    settings: ClientSettings,
+    options: EnrollmentOptions,
+  ) -> Peer<S> {
     let tokens = stack.tokens(user);
     let api = HttpServerApi::new(stack.base_url.clone(), tokens.clone());
     let mut client = PendingEnrollment::new()
-      .complete(
-        api,
-        store.clone(),
-        Box::new(SystemClock),
-        settings,
-        enrollment_options(device_name),
-      )
+      .complete(api, store.clone(), Box::new(SystemClock), settings, options)
       .await
       .unwrap_or_else(|error| {
         let log = stack.server_log();

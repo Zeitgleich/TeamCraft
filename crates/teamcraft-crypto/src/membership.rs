@@ -12,6 +12,7 @@ use std::fmt;
 use rand_core::CryptoRngCore;
 use tls_codec::{DeserializeBytes as _, Serialize as _, TlsDeserializeBytes, TlsSerialize, TlsSize};
 
+use crate::channel_anchor::{Judged, Standing};
 use crate::domain;
 use crate::identity::{
   DeviceKeyPair, Ed25519Signature, IdentityError, IdentityPublicKey, SignedDeviceCertificate, VerifiedDevice,
@@ -50,6 +51,22 @@ pub trait IdentityDirectory {
     let _ = user_id;
     false
   }
+
+  /// Whether the user's signed device list names this device and doesn't revoke it (e2ee.md
+  /// §4.6.5, check 3).
+  ///
+  /// - [`Judged::AsNamed`]: the list at `list_version` names it; later lists don't count.
+  /// - [`Judged::Newest`]: the newest list this device holds names it unrevoked, and that list is
+  ///   at least `list_version` (an older one can't name a device added later: `Unknown`). Here
+  ///   `list_version` is only a lower bound: `0` asks "on the newest list", which is how a
+  ///   properties change, naming no list version, is judged. An implementation must not look up
+  ///   a list *at* version 0, or it refuses every move and rename.
+  ///
+  /// `Unknown` while the list isn't fetched or verified: the anchor grants nothing until it is.
+  fn device_listing(&self, device: &VerifiedDevice, list_version: u64, judged: Judged) -> Standing {
+    let _ = (device, list_version, judged);
+    Standing::Unknown
+  }
 }
 
 /// Decides whether a user may make a membership change in a conversation (admin.md §2.3).
@@ -59,6 +76,15 @@ pub trait IdentityDirectory {
 /// policy – never on the server's word. That roster is not built yet; this trait is the seam.
 pub trait MembershipAuthority {
   fn is_authorized(&self, actor: UserId, conversation_id: ConversationId, action: &MembershipAction) -> bool;
+
+  /// Whether the user is a workspace owner or admin at `roster_version` of the signed roster
+  /// (e2ee.md §4.6.5, check 4, moves and renames): with [`Judged::Newest`] that roster must also
+  /// be fresh (the newest one held, and no newer one demotes or removes them). `Unknown` while the
+  /// roster can't be verified: it grants nothing.
+  fn workspace_signer(&self, user_id: UserId, roster_version: u64, judged: Judged) -> Standing {
+    let _ = (user_id, roster_version, judged);
+    Standing::Unknown
+  }
 }
 
 /// Random identifier of a change, so a member client can refuse to apply the same signed change
@@ -565,6 +591,10 @@ pub(crate) mod tests {
     fn is_listed_device(&self, _device: &VerifiedDevice) -> bool {
       true
     }
+
+    fn device_listing(&self, _device: &VerifiedDevice, _list_version: u64, _judged: Judged) -> Standing {
+      Standing::Confirmed
+    }
   }
 
   /// Lets the listed users make any change, plus everyone remove themselves.
@@ -584,6 +614,15 @@ pub(crate) mod tests {
       action: &MembershipAction,
     ) -> bool {
       self.0.contains(&actor) || action.target_user() == actor
+    }
+
+    /// The listed users are workspace admins of every roster.
+    fn workspace_signer(&self, user_id: UserId, _roster_version: u64, _judged: Judged) -> Standing {
+      if self.0.contains(&user_id) {
+        Standing::Confirmed
+      } else {
+        Standing::Refused
+      }
     }
   }
 }

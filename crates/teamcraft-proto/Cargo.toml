@@ -24,5 +24,8 @@ zeroize = { version = "1.9.1", features = ["derive"] }
 # The crash reports DSN (src/api/crash_reports.rs): server and apps parse it the same way. Already a
 # dependency of every client and the server.
 url.workspace = true
+# Channel names in NFC (src/channel_name.rs, e2ee.md §4.6.5): every client checks them alike.
+# Already in the tree (sqlx's stringprep); no_std-friendly and wasm-compatible.
+unicode-normalization = "0.1.26"
 
 [dev-dependencies]

@@ -31,6 +31,7 @@ pub use group::{
 pub use rejoin::{RejoinRequest, SignedRejoinRequest, VerifiedRejoinRequest};
 pub use stored_key_packages::{StoredKeyPackage, delete_key_package, key_package_ref, stored_key_packages};
 
+use crate::channel_anchor::{AnchorError, CHANNEL_ANCHOR_EXTENSION_TYPE, PropertiesChangeError};
 use crate::identity::{DeviceKeyPair, IdentityError, SignedDeviceCertificate, VerifiedDevice};
 use crate::ids::{ConversationId, DeviceId, UserId};
 use crate::membership::{
@@ -134,6 +135,21 @@ pub enum MlsError {
   /// moved to another group, epoch or sender.
   #[error("sealed content keys rejected")]
   SealedKeysRejected,
+  /// The group's anchor doesn't verify; the group is treated as not anchored.
+  #[error("channel anchor: {0}")]
+  Anchor(#[from] AnchorError),
+  #[error("properties change refused: {0}")]
+  PropertiesChange(#[from] PropertiesChangeError),
+  /// A commit changes the group context beyond what its signed properties change says.
+  #[error("commit changes the group context beyond the anchor's properties")]
+  ContextChangeMismatch,
+  /// The device's app doesn't announce what the group requires (the channel anchor): its user has
+  /// to update before they can be added.
+  #[error("device {0} has to update its app to join this group")]
+  MustUpdate(DeviceId),
+  /// A properties change for a group without an anchor (adding one is #1728's review).
+  #[error("the group has no anchor to change")]
+  NotAnchored,
   #[error("encoding failed: {0}")]
   Encoding(#[from] tls_codec::Error),
 }
@@ -156,7 +172,9 @@ pub fn create_key_package(
   certificate: &SignedDeviceCertificate,
   now_unix_secs: u64,
 ) -> Result<Vec<u8>, MlsError> {
-  let builder = KeyPackage::builder().key_package_lifetime(lifetime_from(now_unix_secs));
+  let builder = KeyPackage::builder()
+    .leaf_node_capabilities(leaf_capabilities(&[]))
+    .key_package_lifetime(lifetime_from(now_unix_secs));
   build_key_package(provider, device, certificate, builder)
 }
 
@@ -170,9 +188,8 @@ pub fn create_last_resort_key_package(
   now_unix_secs: u64,
 ) -> Result<Vec<u8>, MlsError> {
   // The leaf must announce support for the last_resort extension the key package carries.
-  let capabilities = Capabilities::new(None, None, Some(&[ExtensionType::LastResort]), None, None);
   let builder = KeyPackage::builder()
-    .leaf_node_capabilities(capabilities)
+    .leaf_node_capabilities(leaf_capabilities(&[ExtensionType::LastResort]))
     .key_package_lifetime(lifetime_from(now_unix_secs))
     .mark_as_last_resort();
   build_key_package(provider, device, certificate, builder)
@@ -221,6 +238,15 @@ pub fn users_named_in_change(message: &[u8]) -> Vec<UserId> {
     | MembershipAction::RemoveDevice { user_id, .. } => *user_id,
   };
   vec![target, signed.signer_user()]
+}
+
+/// The capabilities every leaf of this device announces: the channel anchor (e2ee.md §4.6.5,
+/// "Who can be in an anchored group"), so the device can be added to anchored groups, plus
+/// `extra`. Without it openmls refuses the leaf wherever a group requires the anchor.
+pub(crate) fn leaf_capabilities(extra: &[ExtensionType]) -> Capabilities {
+  let mut extensions = extra.to_vec();
+  extensions.push(ExtensionType::Unknown(CHANNEL_ANCHOR_EXTENSION_TYPE));
+  Capabilities::new(None, None, Some(&extensions), None, None)
 }
 
 fn lifetime_from(now_unix_secs: u64) -> Lifetime {

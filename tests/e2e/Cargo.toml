@@ -38,6 +38,11 @@ browser = ["e2e", "dep:chromiumoxide"]
 # Starts the Linux desktop app (a debug build named by `E2E_DESKTOP_BIN`) and measures it (#1022).
 desktop = ["browser", "dep:zbus"]
 
+# Seeds the demo instance for store reviews (docs/operations.md, "Demo instance").
+[[bin]]
+name = "demo-seed"
+required-features = ["e2e"]
+
 [dependencies]
 teamcraft-client-api = { path = "../../crates/teamcraft-client-api", optional = true }
 # `sealed-sqlite`: the mobile apps' store, so the network tests run on both stores.

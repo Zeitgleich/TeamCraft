@@ -1896,8 +1896,17 @@ never by the server's member list:
     again as a new guest. The store is the web client's encrypted store (§9). "Leave the meeting" deletes its
     database (only a guest device accepts that command), and a guest page opened later deletes the
     database an earlier page left behind (closed without leaving), as far as no other tab holds it
-    open. Until then the encrypted data stays in the browser; nothing reuses it, since the session
-    token is gone and the server deactivates the account when access ends. No push, no search index, no account data sync.
+    open, unless it is the guest's own address coming back. *Reloading* (meetings.md, "Guests in the
+    browser"): after the lobby entry the page seals the session token, the meeting, the chat, the
+    guest's user and the organizer's fingerprint with a fresh random key (XChaCha20-Poly1305, label
+    `TeamCraft-v1 guest resume`), keeps the ciphertext in the tab's session storage and puts the key
+    only into the address fragment (`#r=`), which never reaches a server. A reload of the tab opens
+    the session and the device's database again and asks the server for the lobby state; the server
+    alone decides whether the token still counts. Session storage goes with the tab, so a stolen
+    browser profile or history holds the key at most next to a copy a tab still has open (session
+    restore). Leaving, a refusal, any 401 and a turned-away guest forget the copy.
+    Otherwise the encrypted data stays in the browser until the next guest page; nothing reuses it,
+    and the server deactivates the account when access ends. No push, no search index, no account data sync.
   - *The meeting link* (#987). A meeting has one link for members and guests alike,
     `<base>/meeting/<token>#v=<fingerprint>`, the same in "Copy link", the invitation e-mails and
     the calendar event:
@@ -2398,7 +2407,8 @@ workspace roster (admin.md §2.3):
   in **this device's MLS group** of the channel, are members of the instance (no guest, bot or
   deactivated account), and this device has their identity key, the one it pinned for them, which their
   place in the group is verified against. It carries the signed mark `has_server_listed_roles`.
-  An anchored channel (§4.6.5) is never founded this way: its founding is the anchor's.
+  An anchored channel (§4.6.5) is never founded this way: its founding is the anchor's, signed only by its founder,
+  and a device that holds an anchor or a pin for the channel signs nothing at first sight.
 
   This trusts the server at first sight, which is a decision and not an oversight: nothing signed
   says who a channel's admins were before there was a log, and the alternative, a co-owner who can
@@ -3164,10 +3174,17 @@ accepts Alice promoting Dave, then Dave's entry. Bob's device, given Carol's old
 
 ### 4.6.5 Anchoring a channel's founder, space and name (issue #1171)
 
-**Status: decided, not implemented.** The owner decided D1 to D10 (table at the end) on #1171. A crypto review of
-this section comes before any code; the work is split into #1725 (the anchor), #1727 (signed space
-deletions), #1728 (anchoring older channels), #1729 (strict from creation) and #1726 (the
-meeting invitee list).
+**Status: decided; implemented for channels.** The owner decided D1 to D10 (table at the end) on #1171, and a
+crypto review changed the design (end of this section). `teamcraft-crypto`'s `channel_anchor` and `mls` hold the
+encoding, the hashes, the signatures, the verdicts, the pin and floor record, anchored founding and the move and
+rename commits (#1725, first part). `teamcraft-core` founds channels anchored, checks the anchor against the pin and
+floor on every join path, signs moves and renames, binds a deletion to the name (#1740), and takes only the
+anchored founding in the role log, with `may_anchor` for it (#1748; "Implementation notes" below). Still open:
+meeting chats (D10, #1747), what the
+apps show of the anchor and the mobile name checks (#1749), and re-founding with its chain in the account data:
+`AnchorFloor` keeps no re-founding chain yet, so a re-founding is refused as another founding until #1728. The parts
+split off before: #1727 (signed space deletions), #1728 (anchoring older channels and re-founding), #1729 (strict
+from creation) and #1726 (the meeting invitee list).
 
 **The gap.** Facts that decisions rest on are the server's word, or trust on first use:
 
@@ -3206,9 +3223,9 @@ vector with a varint length) and at most `max_anchor_bytes` (client, 4 KiB):
 struct {
   uint8  format;                     // 1
   ChannelAnchorFounding founding;
-  opaque founding_entry<V>;          // SignedLogEntry over founding (below)
-  ChannelProperties properties;
-  opaque properties_entry<V>;        // SignedLogEntry that authorized properties
+  ChannelProperties founding_properties;   // version 1, byte for byte for ever
+  opaque founding_entry<V>;          // SignedLogEntry over founding ‖ founding_properties (below)
+  optional<SignedPropertiesChange> last_change;   // none at version 1 (below, "Moves and renames")
 } ChannelAnchor;
 
 struct {
@@ -3246,7 +3263,7 @@ struct {
   |---------------------|----------------------------------------------------------------------------------------------------------|
   | The name hash       | `labeled("TeamCraft-v1 channel name", name<V>)`                                                          |
   | The properties hash | `labeled("TeamCraft-v1 channel properties", ChannelProperties)`, the value `prev_hash` holds             |
-  | The founding hash   | `labeled("TeamCraft-v1 channel anchor pin", ChannelAnchorFounding ‖ ChannelProperties)` (the version 1)  |
+  | The founding hash   | `labeled("TeamCraft-v1 channel anchor pin", ChannelAnchorFounding ‖ founding_properties)` (version 1)    |
 
   The founding hash leaves out the signature and the certificate, so a re-encoded or re-signed founding of the
   same content has the same pin; signatures are verified with `verify_strict` (`ed25519-dalek`) everywhere, so a
@@ -3264,9 +3281,10 @@ struct {
   | A move or rename   | `ChannelProperties` (7) | the new `version` | `ChannelPropertiesChange` (below)                       |
   | A space's deletion | `SpaceDeletion` (8)     | `signed_at_ms`    | `SpaceDeletionDocument` (below)                         |
 
-  At version 1, `properties_entry` is empty and the founding entry covers the properties; later it holds the change
-  that set them. So **the extension verifies on its own**: a device that only ever saw the current epoch (a
-  newcomer's welcome, an add-back) checks the founding and the last change without the history of commits.
+  The current properties are the last change's, or `founding_properties` while there is none. The founding entry
+  covers `founding_properties`, which stay in the anchor, and the last change carries its own signed document. So
+  **the extension verifies on its own**: a device that only ever saw the current epoch (a newcomer's welcome, an
+  add-back) checks the founding and the last change without the history of commits.
 - **The name hash** is over the UTF-8 bytes of the name exactly as the client sent them in the create or rename
   request; nothing normalizes on the verifying side. Before sending, the client brings the name to NFC and refuses
   bidi controls, other control characters and invisible characters (zero-width, default-ignorable code points) at
@@ -3311,11 +3329,12 @@ changes it, and when it creates the group. It checks, in this order:
    "Freshness"); a device welcomed later checks that `signed_for_epoch` isn't past the epoch it is welcomed into.
    A roster it can't verify grants nothing yet and is fetched again. For `refounded`, see "Re-founding" below.
 5. The properties: at version 1, `prev_hash` is zero, `name_set_by` names the founder (`founder`, or `workspace`
-   for the reviewer or re-founder), and the founding entry covered them. Above 1, `properties_entry` is a
-   `ChannelProperties` entry for this conversation and this founding hash whose new values and version are these,
-   and whose signer may (D4, D5, below) as far as this device can tell from the current context, tree and roster. A
-   signer it can't confirm (a member who has since left, a roster it can't read) makes that property **stale for
-   this device**, not the anchor invalid.
+   for the reviewer or re-founder), and the founding entry covered them. Above 1, `last_change` is a signed
+   `ChannelPropertiesChange` for this conversation and this founding hash whose new values and version are these,
+   signed by a device on its user's newest signed device list, and whose signer may (D4, D5, below) as far as this
+   device can tell from the current context, tree and roster, judged as of the change (its own 32-epoch window,
+   "Implementation notes" below). A signer it can't confirm (a member who has since left, a guest, a revoked
+   device, a roster it can't read) makes that property **stale for this device**, not the anchor invalid.
 6. The pin and the floor (below): when the device **enters** a group state (a welcome, an add-back, an external
    commit, a re-founding), the context is at or above what this device and its user's other devices have seen of
    this conversation. At a commit inside a group state it already holds, only the founding pin is checked and the
@@ -3379,9 +3398,9 @@ the forger's to show anyway, and falls out of it later. The forger can't sign an
 
 #### Moves and renames
 
-A move or rename is one group context extensions proposal that replaces only the anchor's `properties` and
-`properties_entry`. Any member commits it, like a role commit in §4.6.2 ("Role changes while strict"), with the
-signed entry also in the commit's authenticated data, so a device judges it before it merges anything:
+A move or rename is one group context extensions proposal that replaces only the anchor's `last_change`. Any member
+commits it, like a role commit in §4.6.2 ("Role changes while strict"), with the signed change also in the commit's
+authenticated data (after the four bytes `TCAP`), so a device judges it before it merges anything:
 
 ```
 struct {
@@ -3389,19 +3408,26 @@ struct {
   opaque founding_hash[32];          // the anchor's founding hash: a change counts under one founding only
   uint64 signed_for_epoch;           // accepted up to 32 epochs later (§4.6, "Freshness")
   ChannelProperties properties;      // the new version, prev_hash = properties hash of the replaced properties
-  uint64 roster_version;             // for a workspace signer: the roster that made them one
+  uint64 roster_version;             // for a workspace signer: the roster that made them one; 0 otherwise
 } ChannelPropertiesChange;
+
+struct {
+  ChannelPropertiesChange change;
+  opaque entry<V>;                   // SignedLogEntry over change, log kind ChannelProperties, version = properties.version
+} SignedPropertiesChange;
 ```
 
-Every member checks that `format` and `founding` stay byte for byte, `founding_hash` is the anchor's, the version is
-one up, `prev_hash` is the properties hash of the properties it replaces, the extension's new properties are exactly
-the signed ones, `name_set_by` names the signer with the class the verdict gives them if the name changed and stays
+Every member checks that `format`, `founding`, `founding_properties` and `founding_entry` stay byte for byte,
+`founding_hash` is the anchor's, the version is one up, `prev_hash` is the properties hash of the properties it
+replaces, the extension's `last_change` is exactly the signed change in the authenticated data, `name_set_by` names the signer with the class the verdict gives them if the name changed and stays
 byte for byte if it didn't, the proposal changes no other extension (§4.6.2's strict roles and
 `required_capabilities` stay byte for byte; a role commit likewise keeps the anchor), the commit carries nothing
 else, and the signer may:
 
 - **A rename** (D5): any member with a leaf, as anybody in the group may add people (§4.6); in a strict channel only
-  its admins; workspace owners and admins of a fresh roster, also from outside the group. A member's rename counts
+  its admins; workspace owners and admins of a fresh roster, also from outside the group. A workspace signer's
+  class is `workspace` even when they are also a member; `founder` is set only by the founding (a founder's later
+  rename is a member's or a workspace signer's, until a strict channel's admin class exists). A member's rename counts
   for what the channel is called, and is shown with their name. It doesn't count for a purge: a name lets a
   deletion purge at once only when `name_set_by` is the founder, a strict channel's admin or a workspace signer.
   A name a member set (`member`) is **stale for deletions**, which take the retention; otherwise a member and the
@@ -3428,7 +3454,7 @@ nobody (#1276).
 | An add-back or welcome into a group without the anchor, or with another one | The pin refuses it: the device stays out and shows the channel as unreachable, rather than take a re-founded group. A device that never pinned the channel gets today's guarantees (the anchor only grants) |
 | A copy of the real founding with old properties, in a fork                  | The floor refuses a lower version or an older epoch, on every device of a user who saw more, new ones included (§6.4)                                                                                       |
 | An external commit from an old `GroupInfo`                                  | The joiner checks the anchor in the signed `GroupInfo` against the pin and floor of its user's account data                                                                                                 |
-| A member commits properties nobody authorized                               | Honest members refuse the commit; a device brought back into it by that member's welcome sees a `properties_entry` it can't confirm, and the property is stale for it                                       |
+| A member commits properties nobody authorized                               | Honest members refuse the commit; a device brought back into it by that member's welcome sees a `last_change` it can't confirm, and the property is stale for it                                            |
 | The server replays an old properties change                                 | `version` must be one up, `prev_hash` and `founding_hash` must match; `signed_for_epoch` limits it to 32 epochs                                                                                             |
 | The server serves an old welcome or `GroupInfo`                             | The device is at an old epoch and can't read the current one: availability. A deletion names an epoch, and a device behind it takes the retention                                                           |
 | A held-back re-founding, replayed against a group that is still healthy     | Refused where a floor epoch is above `replaces_last_epoch`; the device stays in the group it holds                                                                                                          |
@@ -3627,6 +3653,123 @@ and couldn't count for a purge.
     `UpdatePath` leaf, an external commit's leaf, and a group context extensions proposal while some leaf lacks it.
   - A `reviewed` anchor's roster version alone isn't enough when the roster is withheld past it: hence the epoch
     and the fresh roster. A roster withheld from every verifier remains (residual risks), as in §4.6.2.
+
+**Implementation notes** (#1725, first part: `teamcraft-crypto`). Writing the code changed or pinned down:
+
+- **The anchor keeps its version 1.** The design had `properties` and a `properties_entry` holding a
+  `SignedLogEntry`. That can't verify on its own: after the first change, the founding entry covers properties
+  that are no longer in the anchor, and a `SignedLogEntry` holds only the certificate and signature, not the
+  change's `signed_for_epoch` and `roster_version` it signed. So the anchor carries `founding_properties` (byte for
+  byte for ever, under the founding entry and the pin) and `optional<SignedPropertiesChange> last_change`, the
+  change document with its entry. The current properties are the last change's, else the founding's. Same content,
+  no new primitive; one more `ChannelProperties` (about 90 bytes).
+- **The last change on its own** (welcome, add-back, external commit): its signature must verify under the signer's
+  pinned key, its device must be on the newest signed device list (a change names no list version), and it must
+  name this conversation and founding. It is judged as of the change: a change signed for a later epoch than the
+  group's is stale; within `signed_for_epoch` and the 32 epochs after it the newest roster decides (a demoted
+  admin's change counts for nothing), later the roster version it names, which the members of the window checked
+  fresh. A workspace signer confirms space and name. A member with a leaf (never a guest) confirms the name only if
+  `name_set_by` is that member, and the space only if it is still the founding's (a member never moves; the
+  history in between isn't visible). Anything else makes both properties stale for this device; the anchor still
+  verifies. The commit verdict likewise refuses a change from a device that isn't listed, from a guest signer, and
+  a properties commit by a guest.
+- **The committer's own change.** The pending commit keeps the signed change, so `confirm_commit` returns it and
+  the committer raises its floor like every other member. It is stored in the old encoding unless it carries one,
+  so older apps keep reading every other pending commit.
+- **openmls is stricter than the design assumed.** All seven `required_capabilities` paths refuse an old leaf (tests
+  in `mls/group/tests/anchored.rs`); a welcome to an old app can't even be built by an honest adder. openmls also
+  refuses a group context whose unknown extension `required_capabilities` doesn't name, so a commit that keeps the
+  anchor and drops the requirement isn't built either. Before openmls, `ConversationGroup` refuses a key package
+  without the capability with `MustUpdate`, which the clients turn into "has to update".
+- **Interfaces.** Check 3 asks `IdentityDirectory::device_listing`, check 4 and the move and rename verdict ask
+  `MembershipAuthority::workspace_signer`; both answer `Unknown` by default, which grants nothing. The verdict of a
+  commit judges a workspace signer's roster as `Newest` (fresh); a verified anchor's properties are `Confirmed` or
+  `Stale` each. `AnchorFloor` is the pin and floor record for the account data (hashes as hex), merged by maximum;
+  two foundings or two hashes for one version mark it forked (no grants). Re-founding and its chain are the
+  account data's part (#1725, second part) and #1728's.
+- **The core's part** (#1740):
+  - **When:** `anchoring::ANCHORING_RELEASE` is 1.0.31, the first release whose apps all announce the anchor. A device
+    asks `GET /client-compatibility` when it founds a channel and keeps the highest minimum it saw in its store.
+  - **Check 3 and 4 on a device:** it holds only the newest verified device list and roster. `Newest` asks that the
+    newest list names the device unrevoked and is at least `device_list_version`; `list_version` is only a lower
+    bound there, and a properties change's 0 means "any" (`IdentityDirectory::device_listing`). `AsNamed` takes a
+    device the newest list still names, and answers `Unknown` for a revoked one, which may have been revoked before
+    the version named (the anchor only grants). A workspace signer is an admin of the fresh roster at or above the
+    version named; a stale roster or a newer named version is `Unknown`. Only the founder's and the last change's
+    signer's device lists are fetched, never every member's.
+  - **The pin and floor in practice:** the founder pins at creation; a welcome or add-back is checked once
+    completed and deleted if refused; an external commit is checked before it is sent and the group deleted if
+    refused. Whether to check never rests on the server's kind for the conversation: a group that carries an
+    anchor, or a conversation the user's devices pinned, is checked as a channel, so relisting a pinned channel as
+    a DM skips nothing. A pinned conversation whose anchor doesn't verify right now (a device list not fetched,
+    which a server can cause) is held to the floor on its own unverified word: the pinned founding, no older
+    properties version, no other hash for the same version, no older epoch; it then raises nothing and grants
+    nothing. Another founding, none, or anything below the floor is refused, and the device stays out. Every merged
+    move or rename raises the floor, the committer's own included (`maybe_properties_change`).
+  - **Founding needs the own device list:** once D2 is reached, a device that can't find itself on its own signed
+    device list (after fetching it again) creates no channel and says so, rather than found one unanchored.
+  - **Moves and renames:** the apps sign them after the server took them, as a workspace signer if the user is an
+    admin of the fresh roster, else a rename as a member; a move by anybody else, or a change that can't be signed,
+    leaves the property stale. A move without a rename signs the listed name only if it hashes to the anchor's,
+    else nothing.
+  - **Names:** clients trim the name, bring it to NFC and refuse bidi controls, control characters and
+    default-ignorable code points (`teamcraft_proto::channel_name`). The emoji presentation selector after an
+    `Extended_Pictographic` character, and the zero-width joiner between them (a skin tone or the selector may
+    come before it), stay allowed, so emoji typed with them work; next to anything else (letters, dashes,
+    bullets, private-use characters) they are refused. The server stores channel names byte for byte: it trims
+    and normalizes nothing, and refuses a name that breaks these rules (`invalid_channel_name`, shown at the
+    field) instead of repairing it.
+  - **A deletion's name (D3):** `ChannelDeletionDocument.name_hash` is the hash of the name the deleter's device
+    lists. A member purges an anchored channel at once only if the anchor verifies, the floor grants, the name
+    counts for deletions (`name_set_by` not a member), the deletion names it and the listed name hashes to it and
+    keeps the rules. A pinned channel whose anchor doesn't verify takes the retention.
+  - **The role log's founding (#1748):** the role verifier (`RoleVerifier::founding`) takes a `RoleFounding` from
+    the anchor, asked only while the device accepted no entry yet, as it decides nothing after that:
+    `Anchored` with the verified anchor's founder and identity key while the floor grants (no floor recorded yet
+    counts as granting, as for a deletion, so a founder whose pin failed to record still reads their own founding);
+    `Withheld` for a channel whose group carries an anchor or which is pinned, when the anchor doesn't verify here
+    (pin or not: a server that refuses the founder's device list before the first pin must not turn the channel
+    back to trust on first use), shows a fork, or names no founder (a review or a re-founding, until #1728);
+    `Claimed`, today's trust on first use, only for a channel with neither anchor nor pin. Under `Anchored`, a
+    first entry counts only as the founder's, signed under the anchor's key and naming them admin; every other
+    first entry, a workspace admin's included, is junk and starts no unverified stretch. The founding anchors the
+    snapshot (`is_workspace_anchored`) on the same conditions as a workspace admin's own founding (no
+    server-listed mark, no key other than this device pinned).
+    **Nothing refused before the founding moves the cursor**, under `Anchored` or `Withheld`: the log is read from
+    its start until the founding is accepted, and no such read is marked as at the roster. A server that hides the
+    founding and shows what came after can't push a device past it for good; read and refused, it would be lost
+    when it shows. Under `Withheld` nothing is read at all. Either way, a read that leaves the founding open (the
+    anchor gave no founder, or the log showed entries but no founding this device takes) waits before the next:
+    the anchor is asked and the log read again only after five minutes, doubling up to six hours
+    (`FoundingWait`; a wait set while the clock was ahead lasts no longer than that), or at once when the pin or
+    floor changes. So a server can't have every sync (`ChannelRolesUpdate`) fetch and verify the whole log and the
+    anchor's device lists anew. Meanwhile the channel counts as unsigned on that device, as on one that never read
+    the log, and a read without new entries isn't marked as at the roster.
+    **Who signs the founding:** nobody at first sight on a channel whose group carries an anchor or which is pinned,
+    whether in the upkeep (`found_listed_channels`) or with a role change. Only the anchor's founder, under their own
+    key (`may_found_roles`): at creation, and again, if it never reached the server, in their upkeep (whatever the
+    server lists) or with their next role change, naming themselves admin and that change, nothing the server lists.
+    It signs only as founder while the founding is open, never as a workspace admin it may also be: members take no
+    other authority then. **The server's part:** the creator's app says the channel is anchored when creating it
+    (`CreateChannelRequest::is_anchored`), and the server keeps the creator (`anchored_channel_founders`) and takes
+    the role log's version 1 only from them. Nobody else it lets append (a channel admin it lists, a workspace
+    admin, an older or modified app) can take the version the founding needs. Members never rely on this.
+    What a server gets from showing a founder's other device an empty log: a second founding by the same founder,
+    naming only them, on a fork only devices at cursor 0 can join. It reinstates no demoted founder for a purge:
+    D8 keeps §4.6.3's time limit, and on such a fork nobody else signed. A channel admin's deletion on a
+    member-founded channel purges at once only while somebody else's entry (the founder appointing them, say) is
+    younger than `channel_roles_max_age`; the founder alone purges nothing at once.
+    Residuals: **a server-side denial of service, permanent until #1728's re-founding.** Any entry at version 1
+    that isn't the founder's founding (planted by a malicious server, or appended by anybody a server lets append,
+    which an honest server since this change refuses) keeps the founding from ever getting its version: members
+    skip the entry, the founder's device stays at cursor 0 and its append gets `409`, and a workspace admin's
+    reviewed list doesn't count while the founding is open. The roles then stay the server's word on every
+    member's device. A malicious server can do as much by refusing the append. A device outside the channel's group with no pin
+    (a workspace admin who never joined) can't tell the channel is anchored and reads its log as before anchors; a
+    deletion asks for a group anyway.
+- **The name hash's known answer:** `name_hash("general")` is
+  `e0c5e1a616c7db0ab0a95802b91233f845bc3d1194ef04a22aebee68280c9174` (SHA-256 of the one-byte label length, the
+  label, the varint length 7 and the bytes).
 
 **What implementing it takes.**
 
@@ -4665,7 +4808,7 @@ restored together with them on a new device.
 - **Group epoch floors.** Per conversation, the newest MLS epoch in which one of the user's devices
   switched the content key; merging keeps the higher one. A new device of the user doesn't join a
   group from information older than that (§4.6).
-- **Channel anchor pins and floors** (§4.6.5, not implemented yet). Per anchored conversation, the founding hash
+- **Channel anchor pins and floors** (§4.6.5; re-founding chain not implemented yet, #1728). Per anchored conversation, the founding hash
   first accepted, the highest properties version with its hash, the highest epoch the anchor was seen in, and the
   chain of verified re-foundings (old founding hash, the re-founding, new founding hash). Merging keeps the higher
   version and epoch; a founding reached from the other copy's through that chain wins with its floor; only two
@@ -5286,12 +5429,41 @@ keys.
 1. For every call a device generates a **fresh P-256 key pair** (never reused across calls) for its
    DAVE MLS leaf.
 2. It signs a **call key binding** with its device key: `{ call_id, user_id, device_id, DAVE public
-   key, not_after }`, domain-separated with the label `TeamCraft-v1 call key binding` (validity at
-   most one hour; it is only needed while the device joins). The binding travels to the SFU with the
+   key, not_after }`, domain-separated with the label `TeamCraft-v1 call key binding` (`not_after`
+   10 minutes after signing, by the signer's clock). The binding travels to the SFU with the
    DAVE key package; the SFU hands it to the members together with the proposal to add the device,
    and to a joining device together with the welcome (the bindings of the existing members).
 3. Members verify a binding against the device's certificate (§3, the same `VerifiedDevice` as in
-   chat) and reject it if it is for another call, another device, expired, or valid for too long.
+   chat) and reject it if it is for another call or another device. **Time.** Only a joining
+   device's binding (the one that comes with the proposal) is checked for time, by the verifying
+   member's clock against the signer's `not_after`; neither clock is trusted, so both checks
+   allow `CALL_KEY_BINDING_CLOCK_LEEWAY_SECS` (one day): a joiner's binding is accepted until
+   one day after its `not_after` (so up to 24 h 10 min after signing by a correct clock) and
+   refused if its `not_after` is more than 25 h ahead. The day is deliberate: guests bring
+   PCs with a wrong time zone (up to 14 h off), Windows reading the hardware clock as local time
+   (an hour or two) or no time sync, and a refused binding throws them out of the call. The window
+   is not what stops a replay (below). The bindings in a welcome belong to devices already in the
+   group, signed when each of them joined, possibly hours ago; the members present then checked
+   their time, so a late joiner checks them without it (before, every device that joined more than
+   10 minutes after the others was refused and left the call).
+   **What a binding vouches for.** A device is added only with its own binding, in the proposal
+   that adds it and checked as a joiner's: a key that only came with a welcome, or with an earlier
+   proposal, vouches for nobody's addition. After a welcome or a commit each member keeps the
+   bound keys of the group's members only. Once a device leaves the call its bound key is retired
+   for the rest of the call on every member that saw it leave: a proposal that brings that device
+   back with the same key (the SFU replaying its old binding and key package) is refused there
+   (`RetiredKey`, which still ends that member's call, #1753); a device that really comes back joins
+   with a fresh DAVE key and binding. A member that was reconnecting meanwhile retires the keys of
+   the devices missing from the participant list of its rejoin. Each engine remembers at most
+   `MAX_RETIRED_CALL_KEYS` (4096) retired keys, the oldest evicted first. **Limits:** a device that
+   joined after the departure never saw the key and can't retire it; for such a late joiner a
+   replayed binding is caught only by the time check, so the SFU can propose the departed device
+   to it again within the one-day leeway (a device that shows as present but holds none of the
+   group's keys: the member's leaf must still be signed with the bound key, which the departed
+   device discarded when it left). Members that saw the departure refuse that proposal, so it is
+   never committed while one of them is in the call. Across calls the call id stops a replay. A welcome binding without
+   a time check doesn't let the SFU swap or invent a key either: the member's MLS leaf must be
+   signed with the bound key, which only that device holds.
    Before committing proposals, and after every epoch change, each member checks that every other
    member's MLS leaf signature key equals the key in that member's verified binding. A mismatch or a
    member without a verified binding stops media for the call (no unencrypted fallback).
@@ -6187,7 +6359,10 @@ newer number drops just those from its caches, and drops everything for a number
 (another process, the notification extension). Reads see only committed writes: the notes of a group
 (what the UI reads again, the journal of written messages) are published after its commit, and a
 reader whose snapshot is older than a note takes a new one first. A read thread's own writes go
-through the writer, and its next read sees them. The notification extension opens no reader. The
+through the writer, and its next read sees them; an action's local half (an outbox write, a read
+marker) runs on a thread of its own, so the reads don't wait while it waits for the writer's lock
+(issue #1756), and a read thread's cache write (the sidebar's counts) is put off while another thread
+holds the lock. The notification extension opens no reader. The
 write-ahead log is purged on a connection of its own, which counts the connections' open transactions
 and truncates when they are idle (§4.3.1, issue #1684). A truncation moves SQLite's data version on
 the other connections; the writer counts it as another process's commit (which drops its caches and

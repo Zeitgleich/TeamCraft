@@ -2447,6 +2447,15 @@ The storm's sync writes through a connection of its own (another process to the 
 commits still drop every cache on both sides; the engine's own commits now cost the reader what they
 changed (the last two rows), where a plain second connection would pay the cold pass every time.
 
+### Actions and cache writes off the read threads (issue #1756)
+
+A read thread used to run an action's local half (`ReadQueue::act`), which waits for the writer's
+lock: while the engine held a group of writes (a catch-up), every read queued behind the action
+waited with it, up to 21 s for 3 ms of work in the crash reports. Actions now have a thread of their
+own (`teamcraft-actions`, span `queue.act`), which reads and writes through the writer inside its
+group. The chat list pass keeps the sidebar's counts (`flush_entry_tallies`) only when the lock is
+free (`LocalStore::try_begin_writes`); otherwise they wait for the next pass, since they are a cache.
+
 ### Files view on a large workspace (issue #1509)
 
 `crates/teamcraft-ffi/tests/files_budget.rs` measures the Files view through the API the apps call:

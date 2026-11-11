@@ -44,7 +44,8 @@ use teamcraft_proto::{
   OrgBackgroundId,
 };
 use teamcraft_proto::{
-  Base64Bytes, GatewayInfoResponse, GatewayRevokeRequest, PushGatewayResponse, WebPushKeyResponse,
+  Base64Bytes, ClientCompatibilityResponse, GatewayInfoResponse, GatewayRevokeRequest, PushGatewayResponse,
+  WebPushKeyResponse,
 };
 use teamcraft_proto::{
   CallJoinTokenResponse, CallStateResponse, ChangeWebPushSubscriptionRequest, CreateCallJoinTokenRequest,
@@ -2020,6 +2021,10 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
 
   async fn web_push_key(&self) -> Result<WebPushKeyResponse, ApiError> {
     self.get("/push/web-key").await
+  }
+
+  async fn client_compatibility(&self) -> Result<ClientCompatibilityResponse, ApiError> {
+    self.get("/client-compatibility").await
   }
 
   async fn gateway_info(&self, gateway_url: &str) -> Result<GatewayInfoResponse, ApiError> {

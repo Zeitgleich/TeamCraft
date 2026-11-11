@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use common::{Peer, settle};
 use teamcraft_client_api::call_view::CallView;
 use teamcraft_core::api::fake::FakeServer;
-use teamcraft_crypto::call_binding::{CallId, SignedCallKeyBinding};
+use teamcraft_crypto::call_binding::{BindingTimeCheck, CallId, SignedCallKeyBinding};
 use teamcraft_proto::{ConversationId, DeviceId, UserId};
 
 const NOW_SECS: u64 = 1_800_000_000;
@@ -40,14 +40,26 @@ async fn dm_peers_verify_each_others_call_keys() {
     .sign_call_key_binding(call, &DAVE_KEY, NOW_SECS + 300)
     .unwrap();
   let decoded = SignedCallKeyBinding::from_bytes(&signed.to_bytes().unwrap()).unwrap();
-  let key = decoded.verify(alice_device, call, NOW_SECS).unwrap();
+  let key = decoded
+    .verify(
+      alice_device,
+      call,
+      BindingTimeCheck::Joining {
+        now_unix_secs: NOW_SECS,
+      },
+    )
+    .unwrap();
   assert_eq!(key.dave_public_key(), DAVE_KEY);
   // Bob's certificate doesn't verify Alice's binding.
   let bob_device = devices
     .iter()
     .find(|device| device.device_id().get() != alice_device_id(&alice))
     .unwrap();
-  assert!(decoded.verify(bob_device, call, NOW_SECS).is_err());
+  assert!(
+    decoded
+      .verify(bob_device, call, BindingTimeCheck::Member)
+      .is_err()
+  );
 }
 
 /// Issue #976: after a 1:1 call both left, the conversation's call bar ("You are in this call on

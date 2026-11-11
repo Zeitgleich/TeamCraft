@@ -10,7 +10,7 @@
 #   scripts/e2e.sh -- calls::       # arguments after -- go to the test binary (a name filter, --ignored, ...)
 #
 # Needs Docker with Compose, python3 (dev tokens), a Rust toolchain and, for the browser tests, Chrome
-# or Chromium (CHROME=/path/to/chrome if it is not on PATH).
+# or Chromium (CHROME=/path/to/chrome if it is not on PATH) and Firefox (FIREFOX=/path/to/firefox).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"

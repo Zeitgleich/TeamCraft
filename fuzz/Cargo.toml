@@ -122,3 +122,10 @@ path = "fuzz_targets/scim.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "channel_anchor"
+path = "fuzz_targets/channel_anchor.rs"
+test = false
+doc = false
+bench = false

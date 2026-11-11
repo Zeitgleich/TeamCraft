@@ -114,9 +114,10 @@ fn details(info: &PanicHookInfo<'_>) -> String {
   format!("TeamCraft {}\n{location}\n{message}", env!("CARGO_PKG_VERSION"))
 }
 
-/// The current page without its fragment: following a link to the same URL with a fragment would
-/// only scroll, not reload. The desktop webview starts over at its root, the one page its asset
-/// protocol is sure to serve.
+/// The current page, loaded anew. Following a link to the same URL with a fragment would only
+/// scroll, not reload, so a page with a fragment (a meeting guest's address carries the key that
+/// brings them back) gets a query that differs by an empty part. The desktop webview starts over at
+/// its root, the one page its asset protocol is sure to serve.
 fn reload_href() -> String {
   if crate::auth::tauri::is_available() {
     return "/".to_owned();
@@ -124,11 +125,35 @@ fn reload_href() -> String {
   web_sys::window()
     .map(|window| window.location())
     .and_then(|location| {
-      Some(format!(
-        "{}{}",
-        location.pathname().ok()?,
-        location.search().ok()?
+      Some(reload_target(
+        &location.pathname().ok()?,
+        &location.search().ok()?,
+        &location.hash().ok()?,
       ))
     })
     .unwrap_or_else(|| "/".to_owned())
+}
+
+fn reload_target(path: &str, search: &str, hash: &str) -> String {
+  if hash.is_empty() {
+    return format!("{path}{search}");
+  }
+  let search = if search.is_empty() {
+    "?".to_owned()
+  } else {
+    format!("{search}&")
+  };
+  format!("{path}{search}{hash}")
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn reload_target_differs_from_the_page_and_keeps_the_fragment() {
+    assert_eq!(reload_target("/threads", "", ""), "/threads");
+    assert_eq!(reload_target("/meeting/x", "", "#r=k&v=f"), "/meeting/x?#r=k&v=f");
+    assert_eq!(reload_target("/meeting/x", "?a=1", "#r=k"), "/meeting/x?a=1&#r=k");
+  }
 }

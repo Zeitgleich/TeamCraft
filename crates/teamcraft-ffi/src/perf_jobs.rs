@@ -124,6 +124,20 @@ pub fn perf_job_spans(start_ms: f64, end_ms: f64) -> Vec<PerfJobSpan> {
   spans_between(&records, start_ms, end_ms)
 }
 
+/// The queue jobs recorded here that overlap `start_ms` to `end_ms`, all of them: tests run in
+/// parallel and share the records, so another test's longer jobs may push a job out of
+/// [`perf_job_spans`]' longest few.
+#[cfg(test)]
+pub(crate) fn recorded_between(start_ms: f64, end_ms: f64) -> Vec<PerfJobSpan> {
+  RECORDS
+    .lock()
+    .unwrap_or_else(PoisonError::into_inner)
+    .iter()
+    .filter(|span| span.done_at_ms >= start_ms && span.enqueued_at_ms <= end_ms)
+    .cloned()
+    .collect()
+}
+
 /// Where slow jobs and kept traces are reported; replaces the one before.
 #[uniffi::export]
 pub fn set_perf_listener(listener: Arc<dyn PerfListener>) {
@@ -155,11 +169,18 @@ pub(crate) fn queued_for_query(type_name: &'static str) -> Queued {
   queued_on(PerfJobKind::ReadQueue, Lane::Query, type_name)
 }
 
+/// [`queued`] on the actions' thread (issue #1756): an action that waits for the store's write lock
+/// is named there, never on a read thread.
+pub(crate) fn queued_for_action(type_name: &'static str) -> Queued {
+  queued_on(PerfJobKind::ReadQueue, Lane::Act, type_name)
+}
+
 /// Which thread of its kind a job runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lane {
   Main,
   Query,
+  Act,
 }
 
 fn queued_on(kind: PerfJobKind, lane: Lane, type_name: &'static str) -> Queued {
@@ -168,6 +189,7 @@ fn queued_on(kind: PerfJobKind, lane: Lane, type_name: &'static str) -> Queued {
   let span = match (kind, lane) {
     (PerfJobKind::ReadQueue, Lane::Main) => tracing::trace_span!("queue.read", name, depth),
     (PerfJobKind::ReadQueue, Lane::Query) => tracing::trace_span!("queue.query", name, depth),
+    (PerfJobKind::ReadQueue, Lane::Act) => tracing::trace_span!("queue.act", name, depth),
     (PerfJobKind::EngineQueue, _) => tracing::trace_span!("queue.engine", name, depth),
     _ => tracing::Span::none(),
   };

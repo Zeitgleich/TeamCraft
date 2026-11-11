@@ -55,6 +55,7 @@ impl Authenticator for GuestAuth {
       )
       .await
       .map_err(AuthError::Network)?;
+      forget_if_refused(response.status);
       Ok(ApiResponse {
         status: response.status,
         body: String::from_utf8_lossy(&response.body).into_owned(),
@@ -77,6 +78,7 @@ impl Authenticator for GuestAuth {
       let response = fetch(method.as_str(), &url, &headers, maybe_body.map(|body| body.bytes))
         .await
         .map_err(AuthError::Network)?;
+      forget_if_refused(response.status);
       Ok(ApiBytes {
         status: response.status,
         maybe_content_type: response.maybe_content_type,
@@ -87,6 +89,14 @@ impl Authenticator for GuestAuth {
 
   fn access_token(&self) -> LocalFuture<'_, Result<String, AuthError>> {
     Box::pin(async { Ok(self.token.clone()) })
+  }
+}
+
+/// The server no longer takes the token (the meeting's access over, the guest removed or gone):
+/// the tab's copy for a reload is forgotten.
+fn forget_if_refused(status: u16) {
+  if status == 401 {
+    crate::guest_resume::StoredGuestSession::forget();
   }
 }
 

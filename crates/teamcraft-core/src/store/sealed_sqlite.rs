@@ -376,6 +376,13 @@ impl RecordBackend for SqliteRecords {
     }
   }
 
+  fn holds_writes(&self) -> bool {
+    self
+      .maybe_purge
+      .as_ref()
+      .is_some_and(|purge| purge.holds_writes())
+  }
+
   fn begin_writes(&self) -> Result<(), StoreError> {
     let mut inner = self.lock();
     let Inner {

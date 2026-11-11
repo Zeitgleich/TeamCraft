@@ -18,7 +18,9 @@
 //!   workspace root of trust). A channel is founded by its creator; an older one by the first app
 //!   the server lists as its admin that sees it without a log, naming who the server lists then, if
 //!   they are in this device's encryption group. That is trust in the server at first sight: such a
-//!   snapshot is marked, and never anchors (e2ee.md §4.6.1, "Founding at first sight").
+//!   snapshot is marked, and never anchors (e2ee.md §4.6.1, "Founding at first sight"). In a
+//!   channel with an anchor only the anchor's founder founds, under its key, and that founding
+//!   anchors; nobody founds at first sight ([`RoleFounding`], e2ee.md §4.6.5).
 //!
 //! An entry that fails any check is skipped, not fatal: honest signers build on the last entry they
 //! accepted, so a junk entry can't block the log. Only an entry from somebody entitled to sign that
@@ -167,9 +169,10 @@ pub struct ChannelRoleState {
   /// A member's head newer than ours, to check after the next sync.
   #[serde(rename = "ahead", default, skip_serializing_if = "Option::is_none")]
   pub maybe_ahead: Option<ChannelRolesHead>,
-  /// Whether the accepted snapshot goes back to a workspace admin's entry, not only to a founder's
-  /// claim, which is trust on first use: a member and the server together can make one up. Only a
-  /// decision that destroys history asks this (e2ee.md §4.6, "A signed deletion purges at once").
+  /// Whether the accepted snapshot goes back to a workspace admin's entry or to the founding a
+  /// channel's anchor proves (e2ee.md §4.6.5), not only to a founder's claim, which is trust on
+  /// first use: a member and the server together can make one up. Only a decision that destroys
+  /// history asks this (e2ee.md §4.6, "A signed deletion purges at once").
   #[serde(default)]
   pub is_workspace_anchored: bool,
   /// Who appointed each role of the accepted snapshot. Empty for a snapshot accepted before this
@@ -329,6 +332,23 @@ pub enum SignerAuthority {
   FormerWorkspace { is_owner: bool },
 }
 
+/// Who may found a channel's roles, from its anchor (e2ee.md §4.6.5, "What the founding decides").
+/// It decides only while this device accepted nothing yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoleFounding {
+  /// The channel carries no anchor and none is pinned: the first entry is its signer's claim, with
+  /// the key this device pinned for them (trust on first use, e2ee.md §4.6.1), as before anchors.
+  Claimed,
+  /// The anchor verifies and the floor grants: only this founder's entry, under the anchor's
+  /// identity key and naming them admin, founds the roles, and it anchors them (`may_anchor`). Any
+  /// other first entry is junk.
+  Anchored { founder: UserId, identity_key: [u8; 32] },
+  /// The channel is anchored, but this device can't take a founder from it now: the anchor doesn't
+  /// verify, the floor shows a fork, or it names no founder. Nothing founds and nothing anchors:
+  /// the entries wait unread until the anchor decides (fail closed).
+  Withheld,
+}
+
 /// What verifying a channel's entries needs besides the log itself.
 pub struct RoleVerifier<'a, D: IdentityDirectory> {
   pub conversation: ConversationId,
@@ -342,6 +362,8 @@ pub struct RoleVerifier<'a, D: IdentityDirectory> {
   pub tenure_clock_skew_ms: i64,
   /// Identity keys this device pinned: a founder must hold the key pinned for them.
   pub pinned: &'a D,
+  /// Who may found the roles: the channel's anchor decides that, where it has one.
+  pub founding: RoleFounding,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -376,6 +398,24 @@ enum FormerAdmin {
   /// The server dates it inside the tenure, but this device can't place it: a real entry it can't
   /// verify, or a backdated one. It can't tell which.
   Unplaceable,
+}
+
+impl RoleFounding {
+  /// Whether `assignment`, an admin a first entry names, may be its founder.
+  fn may_found<D: IdentityDirectory>(&self, assignment: &ChannelRoleAssignment, pinned: &D) -> bool {
+    let key = assignment.identity_key.as_slice();
+    match self {
+      // Only keys this device pinned itself: the server can't make up a founder of its own.
+      Self::Claimed => pinned
+        .pinned_identity(convert::user(assignment.user_id))
+        .is_some_and(|pinned| pinned.as_bytes().as_slice() == key),
+      Self::Anchored {
+        founder,
+        identity_key,
+      } => assignment.user_id == *founder && identity_key.as_slice() == key,
+      Self::Withheld => false,
+    }
+  }
 }
 
 impl ChannelRoleState {
@@ -574,6 +614,9 @@ impl ChannelRoleState {
     mut entries: Vec<ChannelRoleLogEntryResponse>,
     verifier: &RoleVerifier<'_, D>,
   ) -> Vec<ChannelRoleError> {
+    if self.waits_for_founding(verifier.founding) {
+      return Vec::new();
+    }
     entries.sort_by_key(|entry| entry.version);
     if self.maybe_read_at_roster_version.is_none() && self.version == 0 {
       self.maybe_read_at_roster_version = Some(0);
@@ -583,13 +626,36 @@ impl ChannelRoleState {
       if entry.version <= self.cursor {
         continue;
       }
+      let before = self.cursor;
+      let holds_cursor = self.is_founding_open(verifier.founding);
       self.cursor = entry.version;
       if let Err(error) = self.apply_entry(&entry, verifier) {
+        // e2ee.md §4.6.5: while an anchored channel's founding isn't accepted, nothing it refuses moves
+        // the cursor. A server that shows entries after the founding but hides the founding itself
+        // can't push this device past it for good: it is read when the log shows it.
+        if holds_cursor {
+          self.cursor = before;
+        }
         self.maybe_rejection = Some(error.to_string());
         skipped.push(error);
       }
     }
     skipped
+  }
+
+  /// Whether an anchored channel's founding is still to come on this device: the anchor decides
+  /// who founds, and nothing is accepted yet. The log is then read from its start each time, and no
+  /// read counts as seen at a roster.
+  pub fn is_founding_open(&self, founding: RoleFounding) -> bool {
+    founding != RoleFounding::Claimed && !self.is_signed()
+  }
+
+  /// Whether the entries must wait unread: nothing is accepted yet, and the channel's anchor can't
+  /// say who founded it right now (e2ee.md §4.6.5). Read and refused, the founding would be lost for
+  /// good once the anchor verifies; read as a claim, it would be the trust on first use the anchor
+  /// closes.
+  pub fn waits_for_founding(&self, founding: RoleFounding) -> bool {
+    founding == RoleFounding::Withheld && !self.is_signed()
   }
 
   /// Before a read: a state from before reads were recorded may have skipped entries it would mark
@@ -966,7 +1032,13 @@ impl ChannelRoleState {
       && signers
         .iter()
         .any(|(_, authority)| matches!(authority, SignerAuthority::Workspace { .. }));
+    // e2ee.md §4.6.5: in an anchored channel only the anchor's founder founds; any other first entry
+    // is junk, whoever signed it, and shows no gap.
+    let is_anchored_unsigned = !self.is_signed() && verifier.founding != RoleFounding::Claimed;
     for (signer, authority) in signers.iter().copied() {
+      if is_anchored_unsigned && authority != SignerAuthority::Founder {
+        continue;
+      }
       outcome = self.check_document(&document, verifier.conversation, signer, authority);
       if outcome.is_ok() {
         maybe_authority = Some(authority);
@@ -985,7 +1057,7 @@ impl ChannelRoleState {
       reason: error.to_string(),
     })?;
     if outcome.is_err() {
-      if self.shows_a_gap(entry, &document, &signers, &former, verifier) {
+      if !is_anchored_unsigned && self.shows_a_gap(entry, &document, &signers, &former, verifier) {
         self.maybe_unverified_from.get_or_insert(version);
         self.is_workspace_anchored = false;
       }
@@ -994,6 +1066,11 @@ impl ChannelRoleState {
       }
     }
     outcome?;
+    // The anchor proves the founding (e2ee.md §4.6.5): a snapshot going back to it is anchored, as
+    // a workspace admin's own founding is, on the same conditions otherwise.
+    let is_anchored_founding = may_anchor
+      && matches!(verifier.founding, RoleFounding::Anchored { .. })
+      && maybe_authority == Some(SignerAuthority::Founder);
     self.keep_before_head();
     self.maybe_head_signer = maybe_signer.map(|(signer, _)| signer);
     if let Some((signer, authority)) = maybe_signer
@@ -1029,7 +1106,7 @@ impl ChannelRoleState {
       );
     }
     match maybe_authority {
-      _ if is_by_workspace_admin => self.is_workspace_anchored = true,
+      _ if is_by_workspace_admin || is_anchored_founding => self.is_workspace_anchored = true,
       // A claim, a roster admin on a roster too old to anchor anything, or somebody who left and
       // whose dates this device can only take their word for: their snapshot replaces what was
       // anchored before. A purge is the one thing that can't be repaired.
@@ -1154,13 +1231,8 @@ impl ChannelRoleState {
       found.push((signer, SignerAuthority::ChannelAdmin));
     }
     if !self.is_signed() {
-      // Only keys this device pinned itself: the server can't make up a founder of its own.
       let claimed = document.assignments.iter().filter(|assignment| {
-        assignment.role == ChannelRole::Admin
-          && verifier
-            .pinned
-            .pinned_identity(convert::user(assignment.user_id))
-            .is_some_and(|pinned| pinned.as_bytes().as_slice() == assignment.identity_key.as_slice())
+        assignment.role == ChannelRole::Admin && verifier.founding.may_found(assignment, verifier.pinned)
       });
       if let Some(signer) = verify_with(&KeyDirectory::from_assignments(claimed)) {
         found.push((signer, SignerAuthority::Founder));
@@ -1383,6 +1455,14 @@ impl ChannelRoleState {
   }
 
   fn remember_skipped(&mut self, hash: &[u8; HASH_BYTES]) {
+    // An anchored channel's log is read again from its start until the founding comes.
+    if self
+      .skipped_hashes
+      .iter()
+      .any(|known| known.as_slice() == hash.as_slice())
+    {
+      return;
+    }
     self.skipped_hashes.push(Base64Bytes::new(hash.to_vec()));
     if self.skipped_hashes.len() > MAX_SKIPPED_HASHES {
       self.skipped_hashes.remove(0);
@@ -1679,6 +1759,186 @@ mod tests {
   const DAY_MS: i64 = 24 * 60 * 60 * 1000;
   const MAX_AGE_MS: i64 = 30 * DAY_MS;
   const SKEW_MS: i64 = 10 * 60 * 1000;
+
+  /// e2ee.md §4.6.5, "What the founding decides": in an anchored channel only the anchor's founder
+  /// founds, and that founding anchors the roles (`may_anchor`).
+  mod anchored_founding {
+    use super::*;
+
+    /// Alice, a plain member, founded the channel's anchor: her founding anchors, and so does what
+    /// she appoints on it.
+    #[test]
+    fn an_anchored_founders_entry_anchors() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let world = anchored_by(&alice, &[&alice, &bob], &[]);
+      let mut state = founded(&world, &alice, &[]);
+      assert_eq!(state.role_of(alice.user_id), ChannelRole::Admin);
+      assert!(state.is_workspace_anchored, "the anchor proves her founding");
+
+      let appoint = alice.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, appoint).is_empty());
+      assert!(state.is_workspace_anchored);
+      let appointment = state.appointment_of(bob.user_id).unwrap();
+      assert_eq!(
+        (appointment.by, appointment.authority),
+        (alice.user_id, AppointmentAuthority::ChannelAdmin)
+      );
+    }
+
+    /// The same entry on a channel without an anchor is a claim, as before.
+    #[test]
+    fn an_unanchored_founders_entry_stays_a_claim() {
+      let alice = Person::new(1);
+      let world = World::new(&[&alice], &[]);
+      let state = founded(&world, &alice, &[]);
+      assert_eq!(state.role_of(alice.user_id), ChannelRole::Admin);
+      assert!(!state.is_workspace_anchored);
+    }
+
+    /// A member, a workspace admin and the founder under another key all sign a first entry naming
+    /// themselves admin: junk, which starts no stretch. The founder's own entry after them founds.
+    #[test]
+    fn another_first_entry_is_skipped() {
+      let (alice, bob, admin) = (Person::new(1), Person::new(2), Person::new(9));
+      let world = anchored_by(&alice, &[&alice, &bob], &[&admin]);
+      let mut state = ChannelRoleState::default();
+      let by_bob = bob.entry(&state, &[(&bob, ChannelRole::Admin)]);
+      assert_eq!(world.apply(&mut state, by_bob).len(), 1);
+      let by_admin = admin.entry(&state, &[(&admin, ChannelRole::Admin)]);
+      assert_eq!(world.apply(&mut state, by_admin).len(), 1);
+      // A workspace admin's ordinary entry naming somebody else is no founding either.
+      let appointing = admin.entry(&state, &[(&bob, ChannelRole::Admin)]);
+      assert_eq!(world.apply(&mut state, appointing).len(), 1);
+      let other_key = Person::new(1);
+      let by_other_key = other_key.entry(&state, &[(&other_key, ChannelRole::Admin)]);
+      assert_eq!(world.apply(&mut state, by_other_key).len(), 1);
+      assert!(!state.is_signed(), "nothing founded, no stretch");
+      assert_eq!(state.role_of(bob.user_id), ChannelRole::Member);
+      assert_eq!(state.cursor, 0, "the founding may still come");
+
+      // Alice founds after the junk, at version 5.
+      let behind_the_junk = ChannelRoleState {
+        cursor: 4,
+        ..state.clone()
+      };
+      let founding = alice.entry(&behind_the_junk, &[(&alice, ChannelRole::Admin)]);
+      assert!(world.apply(&mut state, founding).is_empty());
+      assert_eq!(state.role_of(alice.user_id), ChannelRole::Admin);
+      assert!(state.is_workspace_anchored);
+    }
+
+    /// Review of #1748: the server hides the founding and shows what came after it. Nothing it
+    /// refuses moves the cursor, so the founding is read once the log shows it.
+    #[test]
+    fn a_hidden_founding_is_read_when_the_log_shows_it() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let world = anchored_by(&alice, &[&alice, &bob], &[]);
+      let mut on_time = ChannelRoleState::default();
+      let founding = alice.entry(&on_time, &[(&alice, ChannelRole::Admin)]);
+      assert!(world.apply(&mut on_time, founding.clone()).is_empty());
+      let roles = [(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)];
+      let appoint = alice.entry(&on_time, &roles);
+      assert!(world.apply(&mut on_time, appoint.clone()).is_empty());
+      let by_bob = bob.entry(&on_time, &[(&bob, ChannelRole::Admin)]);
+      assert!(world.apply(&mut on_time, by_bob.clone()).is_empty());
+
+      let mut late = ChannelRoleState::default();
+      let after = vec![appoint.clone(), by_bob.clone()];
+      assert_eq!(world.apply_all(&mut late, after).len(), 2);
+      assert_eq!((late.version, late.cursor), (0, 0));
+      assert!(!late.is_signed());
+
+      assert!(
+        world
+          .apply_all(&mut late, vec![founding, appoint, by_bob])
+          .is_empty()
+      );
+      assert_eq!((late.version, late.cursor), (3, 3));
+      assert_eq!(late.role_of(alice.user_id), ChannelRole::Member);
+      assert_eq!(late.role_of(bob.user_id), ChannelRole::Admin);
+      assert!(late.is_workspace_anchored);
+    }
+
+    /// A founding that names the anchor's founder only as a moderator, or as admin under another
+    /// signer, founds nothing.
+    #[test]
+    fn a_founding_signed_by_another_or_without_the_founder_as_admin_is_skipped() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let world = anchored_by(&alice, &[&alice, &bob], &[]);
+      let mut state = ChannelRoleState::default();
+      let as_moderator = alice.entry(
+        &state,
+        &[(&alice, ChannelRole::Moderator), (&bob, ChannelRole::Admin)],
+      );
+      assert_eq!(world.apply(&mut state, as_moderator).len(), 1);
+      let by_bob = bob.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert_eq!(world.apply(&mut state, by_bob).len(), 1);
+      assert!(!state.is_signed());
+    }
+
+    /// The floor doesn't grant (a fork), or the anchor doesn't verify here: nobody founds and
+    /// nothing anchors. The entries wait unread, and once the anchor decides they are read.
+    #[test]
+    fn without_a_founder_from_the_anchor_the_entries_wait() {
+      let alice = Person::new(1);
+      let mut world = anchored_by(&alice, &[&alice], &[]);
+      let anchored = world.founding;
+      world.founding = RoleFounding::Withheld;
+      let mut state = ChannelRoleState::default();
+      let founding = alice.entry(&state, &[(&alice, ChannelRole::Admin)]);
+      assert!(world.apply(&mut state, founding.clone()).is_empty());
+      assert_eq!((state.version, state.cursor), (0, 0), "read nothing");
+      assert!(!state.is_workspace_anchored);
+      assert!(state.waits_for_founding(RoleFounding::Withheld));
+
+      world.founding = anchored;
+      assert!(world.apply(&mut state, founding).is_empty());
+      assert_eq!(state.role_of(alice.user_id), ChannelRole::Admin);
+      assert!(state.is_workspace_anchored);
+    }
+
+    /// Once something is accepted, the anchor decides nothing more: entries are read as ever.
+    #[test]
+    fn a_withheld_anchor_doesnt_stop_a_signed_log() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let mut world = anchored_by(&alice, &[&alice, &bob], &[]);
+      let mut state = founded(&world, &alice, &[]);
+      world.founding = RoleFounding::Withheld;
+      let appoint = alice.entry(
+        &state,
+        &[(&alice, ChannelRole::Admin), (&bob, ChannelRole::Admin)],
+      );
+      assert!(world.apply(&mut state, appoint).is_empty());
+      assert_eq!(state.role_of(bob.user_id), ChannelRole::Admin);
+    }
+
+    /// A founder's founding that names somebody under another key than this device pinned counts
+    /// for the roles, but doesn't anchor, as for a workspace admin's.
+    #[test]
+    fn a_founding_naming_another_key_than_pinned_doesnt_anchor() {
+      let (alice, bob) = (Person::new(1), Person::new(2));
+      let world = anchored_by(&alice, &[&alice, &Person::new(2)], &[]);
+      let state = founded(&world, &alice, &[(&bob, ChannelRole::Moderator)]);
+      assert_eq!(state.role_of(bob.user_id), ChannelRole::Moderator);
+      assert!(!state.is_workspace_anchored);
+    }
+
+    /// A device whose anchor names `founder`, pinning `people` and with `roster_admins`.
+    fn anchored_by(founder: &Person, people: &[&Person], roster_admins: &[&Person]) -> World {
+      let mut world = World::new(people, roster_admins);
+      world.founding = RoleFounding::Anchored {
+        founder: founder.user_id,
+        identity_key: key_bytes(founder),
+      };
+      world
+    }
+  }
 
   mod accepted {
     use super::*;
@@ -4384,6 +4644,7 @@ mod tests {
     pinned: KeyDirectory,
     workspace: WorkspaceState,
     now_ms: i64,
+    founding: RoleFounding,
   }
 
   impl World {
@@ -4423,6 +4684,7 @@ mod tests {
         pinned,
         workspace,
         now_ms: NOW_MS,
+        founding: RoleFounding::Claimed,
       }
     }
 
@@ -4455,6 +4717,7 @@ mod tests {
         now_ms: self.now_ms,
         tenure_clock_skew_ms: SKEW_MS,
         pinned: &self.pinned,
+        founding: self.founding,
       }
     }
   }

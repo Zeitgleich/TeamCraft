@@ -37,6 +37,7 @@ four-core runner, most of it the browser tests, which share two ports).
 | `meetings.rs`           | Scheduling sends iMIP invitations (caught by Mailpit), RSVP, an external guest joins with the mailed link, lobby, admission, cancellation   |
 | `calls.rs`              | 1:1 DM call through the server's join tokens and the SFU: device-bound DAVE keys, both sides decode audio, equal privacy codes              |
 | `web_calls.rs`          | Browser and native client in one channel call: call module, DAVE keys signed by the page, audio and camera                                  |
+| `meetings_firefox.rs`   | A guest joins a meeting by its link in Firefox (44.1 kHz sound device), is let in, and shares the call with the organizer (#1721)           |
 | `moderator.rs`          | Channel moderator role: removes members (keys rotate), can't manage roles, properties or the admin                                          |
 | `conversion.rs`         | Public/private conversion: who may, who can join afterwards, newcomers' history, system event, audit                                        |
 | `threads_policy.rs`     | Signed policy: auto-follow default for people who never chose, threaded view switch the server enforces                                     |
@@ -79,6 +80,10 @@ and the bugs found are in [docs/acceptance.md](../../docs/acceptance.md).
   and test tones. The `teamcraft-call` binary only supports unauthenticated development tokens, so the
   tests use the library behind it.
 - **`src/browser.rs`** (feature `browser`): headless Chromium over the DevTools protocol.
+- **`src/firefox.rs`** (feature `browser`): headless Firefox over WebDriver BiDi, the protocol
+  Firefox itself serves with `--remote-debugging-port` (no geckodriver, no new crate: JSON over the
+  suite's `tokio-tungstenite`). Its tests skip without a Firefox (`FIREFOX`, else `firefox` on
+  `PATH`), unless `E2E_REQUIRED=1`.
 
 ### Why chromiumoxide for the browser
 
@@ -146,6 +151,7 @@ cargo test -p teamcraft-e2e --features browser --test suite -- --include-ignored
 | `E2E_WEB_DIR`            | The `trunk build` output (default `target/e2e-web`)                                        |
 | `E2E_ARTIFACTS`          | Where failure screenshots go (default `target/e2e-artifacts`)                              |
 | `CHROME`                 | Chrome or Chromium executable (default: first of `google-chrome`, `chromium`, ... on PATH) |
+| `FIREFOX`                | Firefox executable (default: `firefox` on PATH, or the macOS app)                          |
 | `E2E_CONSOLE`            | Browser tests print the page's console as it happens (`web_calls.rs`)                      |
 | `RUST_MIN_STACK`         | Stack of a test thread: 16 MiB in `scripts/e2e.sh`, set it for a plain `cargo test`        |
 | `E2E_DESKTOP_BIN`        | The desktop app's binary for `desktop_perf.rs` (without it the test skips)                 |

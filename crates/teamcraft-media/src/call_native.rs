@@ -2431,7 +2431,7 @@ impl VideoState {
         stats.pictures_dropped += 1;
         debug!(?kind, ?outcome, "video picture not sent");
       },
-      VideoSendOutcome::Failed => {
+      VideoSendOutcome::Failed | VideoSendOutcome::WrongCodec => {
         stats.pictures_dropped += 1;
         self
           .send_warning

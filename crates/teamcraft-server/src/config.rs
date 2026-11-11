@@ -177,6 +177,14 @@ pub struct OidcConfig {
   pub http_timeout_secs: u64,
   #[serde(default)]
   pub roles: RoleNames,
+  /// Name of a top-level access-token claim with role names (a list, or one string), read besides
+  /// `resource_access.<client_id>.roles`: for providers without client roles, e.g. Dex's `groups`.
+  /// Every name in it that equals an `[oidc.roles]` name grants that role, so the claim must be
+  /// fully controlled by the provider, and the role names should be distinctive
+  /// (`teamcraft-owner`): an upstream group called `admin` would otherwise make admins. Unset:
+  /// client roles only.
+  #[serde(rename = "roles_claim", default)]
+  pub maybe_roles_claim: Option<String>,
   /// Name of the access-token claim that holds the user's organization (a string, or a list whose
   /// first entry counts), shown as a badge next to their name. Without it users have no
   /// organization. In Keycloak add a token mapper (user attribute or group name) to the client.
@@ -236,6 +244,24 @@ pub enum OidcSyncRunMode {
   #[default]
   Apply,
   DryRun,
+}
+
+/// Claims that name the person, never a role: taking one as `roles_claim` would let a user name
+/// themselves `owner`.
+const IDENTITY_CLAIMS: [&str; 5] = ["sub", "name", "preferred_username", "email", "nickname"];
+
+impl OidcConfig {
+  /// Rejects a `roles_claim` that people choose themselves.
+  pub fn validate(&self) -> Result<(), String> {
+    if let Some(claim) = &self.maybe_roles_claim
+      && (claim.trim().is_empty() || IDENTITY_CLAIMS.contains(&claim.trim()))
+    {
+      return Err(format!(
+        "oidc.roles_claim must name a claim only the provider controls, not {claim:?}"
+      ));
+    }
+    Ok(())
+  }
 }
 
 impl OidcSyncConfig {
@@ -2324,6 +2350,32 @@ mod tests {
     let rendezvous = RendezvousConfig::default();
     assert!(rendezvous.max_frame_bytes >= transfer);
     assert!(rendezvous.max_total_bytes >= transfer + 64 * 1024);
+  }
+
+  #[test]
+  fn a_roles_claim_people_choose_is_refused() {
+    let with = |claim: &str| {
+      let mut config = Config::from_toml(MINIMAL).unwrap();
+      config.oidc.maybe_roles_claim = Some(claim.into());
+      config.oidc.validate()
+    };
+    for claim in ["name", "preferred_username", "email", "sub", "nickname", " ", ""] {
+      assert!(with(claim).is_err(), "{claim:?}");
+    }
+    assert!(with("groups").is_ok());
+    assert!(Config::from_toml(MINIMAL).unwrap().oidc.validate().is_ok());
+  }
+
+  #[test]
+  fn demo_instance_file_parses_without_keycloak() {
+    let text = include_str!("../../../dev/demo/teamcraft.demo.toml");
+    let config = Config::from_toml(text).unwrap();
+    assert_eq!(config.oidc.maybe_roles_claim.as_deref(), Some("groups"));
+    assert!(config.oidc.validate().is_ok());
+    assert_eq!(config.oidc.roles.owner, "teamcraft-owner");
+    assert!(config.oidc.app_scopes.iter().any(|scope| scope == "groups"));
+    assert!(!config.oidc.sync.is_requested());
+    assert!(config.oidc.sync.maybe_client_secret.is_none());
   }
 
   #[test]

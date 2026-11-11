@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use teamcraft_crypto::channel_anchor::AnchorFloor;
 use teamcraft_proto::synced_settings::StoredSettings;
 use teamcraft_proto::{
   BackgroundId, Base64Bytes, ClientMessageId, ConversationId, MessageId, ThreadId, UserId,
@@ -73,6 +74,14 @@ pub struct AccountData {
   /// a group that still holds a removed member (e2ee.md §4.6). Only grows.
   #[serde(default)]
   pub group_epochs: BTreeMap<String, u64>,
+  /// Per conversation ID, the pin and floor of its channel anchor (e2ee.md §4.6.5, "The pin and
+  /// the floor"): the founding the user's devices accepted first, the highest properties version
+  /// with its hash and the highest epoch they saw it in. A new device, a reinstall and a recovery
+  /// start from it, not from trust on first use. Merged by maximum; two foundings or two hashes for
+  /// one version mark a fork, which grants nothing. An older app drops the field on upload, and the
+  /// next newer device puts it back.
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub anchor_floors: BTreeMap<String, AnchorFloor>,
   /// When devices left conversations and came back, keyed `conversation/user/device`, in the server
   /// times of the commits, as the user's devices processed them: a new device of the user refuses
   /// messages a device signs while it is out (e2ee.md §4.4). Merging keeps the later time of each,
@@ -268,6 +277,13 @@ impl AccountData {
       let entry = self.group_epochs.entry(conversation.clone()).or_insert(*epoch);
       *entry = (*entry).max(*epoch);
     }
+    for (conversation, floor) in &other.anchor_floors {
+      self
+        .anchor_floors
+        .entry(conversation.clone())
+        .or_insert(*floor)
+        .merge(floor);
+    }
     // Reading only moves forward: the later read time wins whatever device recorded it.
     let newer_read = [self.maybe_activity_read.take(), other.maybe_activity_read.clone()]
       .into_iter()
@@ -419,6 +435,24 @@ impl AccountData {
     }
     self.group_epochs.insert(conversation.to_string(), epoch);
     true
+  }
+
+  /// The pin and floor of the conversation's channel anchor, `None` while none of the user's
+  /// devices accepted one.
+  pub fn anchor_floor(&self, conversation: ConversationId) -> Option<AnchorFloor> {
+    self.anchor_floors.get(&conversation.to_string()).copied()
+  }
+
+  /// Takes this device's pin and floor of the conversation's anchor, merged by maximum into what
+  /// the user's devices recorded; returns whether that changed anything.
+  pub fn note_anchor_floor(&mut self, conversation: ConversationId, floor: &AnchorFloor) -> bool {
+    match self.anchor_floors.get_mut(&conversation.to_string()) {
+      Some(existing) => existing.merge(floor),
+      None => {
+        self.anchor_floors.insert(conversation.to_string(), *floor);
+        true
+      },
+    }
   }
 
   /// Activity entries sent up to this time (Unix milliseconds) were read; 0 if never.
@@ -1105,6 +1139,51 @@ mod tests {
       (laptop.group_epoch(conversation), phone.group_epoch(conversation)),
       (7, 7)
     );
+  }
+
+  /// e2ee.md §4.6.5: the pin and floor merge across two devices by maximum, survive the key bag's
+  /// JSON, and two foundings mark a fork that grants nothing.
+  #[test]
+  fn anchor_floors_merge_across_devices_by_maximum() {
+    use teamcraft_crypto::channel_anchor::{AnchorHash, FloorState};
+    let conversation = ConversationId::from_snowflake(Snowflake::new(9).unwrap());
+    let floor = |version, hash, epoch| AnchorFloor {
+      founding_hash: AnchorHash::from_bytes([1; 32]),
+      properties_version: version,
+      properties_hash: AnchorHash::from_bytes([hash; 32]),
+      epoch,
+      state: FloorState::Agreed,
+    };
+    let mut phone = AccountData::default();
+    let mut laptop = AccountData::default();
+    assert!(phone.note_anchor_floor(conversation, &floor(2, 2, 10)));
+    assert!(laptop.note_anchor_floor(conversation, &floor(1, 1, 30)));
+    assert!(
+      !laptop.note_anchor_floor(conversation, &floor(1, 1, 20)),
+      "never back"
+    );
+    laptop.merge(&phone, 0);
+    phone.merge(&laptop, 0);
+    let merged = floor(2, 2, 30);
+    assert_eq!(phone.anchor_floor(conversation), Some(merged));
+    assert_eq!(laptop.anchor_floor(conversation), Some(merged));
+    let json = serde_json::to_string(&phone).unwrap();
+    assert_eq!(serde_json::from_str::<AccountData>(&json).unwrap(), phone);
+    assert!(
+      !serde_json::to_string(&AccountData::default())
+        .unwrap()
+        .contains("anchor_floors"),
+      "no field without floors"
+    );
+
+    let mut other = floor(2, 2, 30);
+    other.founding_hash = AnchorHash::from_bytes([9; 32]);
+    let mut forked = AccountData::default();
+    forked.note_anchor_floor(conversation, &other);
+    phone.merge(&forked, 0);
+    let after = phone.anchor_floor(conversation).unwrap();
+    assert_eq!(after.state, FloorState::ForkedFounding);
+    assert!(!after.grants());
   }
 
   #[test]
