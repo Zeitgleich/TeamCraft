@@ -1591,8 +1591,9 @@ holds:
     limit bounds it.
   - A channel admin's signature purges at once only if somebody else signed a role entry of the channel this
     device accepted within `channel_roles_max_age` (client, 30 days), counted from that signer's own date and
-    never from the server's (§4.6.3, part 3). Otherwise it takes the retention. A workspace admin's doesn't
-    need this; the roster's window bounds them.
+    never from the server's (§4.6.3, part 3). Otherwise it takes the retention. A workspace admin's ordinary
+    entry isn't such a signature (issue #1264, §4.6.1); their reviewed list or founding is. A workspace admin's
+    deletion doesn't need this; the roster's window bounds them.
 - **Nothing looks wrong.** A channel's role state or the workspace state with an alarm or a member's unexplained
   head (a sign of being shown different logs) purges nothing.
 - **The server doesn't list it.** A claim about what the server still lists changes nothing, signed or not.
@@ -2535,13 +2536,29 @@ workspace roster (admin.md §2.3):
     the entry in the channel's message applies, and a head from a member's message raises the alarm, after which it
     vouches for nothing unseen (above). **What remains** is a server that withholds the entry and every message that would
     tell of it from a workspace admin's device, typically one outside the channel's group, which gets no messages: its
-    ordinary entry then carries the old anchor on to the devices shown the same old log, and counts as a recent other
-    signer for the purge's time limit. That is §4.6.3's "Other signers on the same old log" with a workspace admin as the
-    other signer; what would close it is an owner's decision, listed in issue #1264.
-  - **Nobody hears of a member's stuck device.** A stretch or a lost anchor is known only to the device it happened on: a
-    workspace admin whose device read on time sees nothing, and isn't offered a look for it. The member's own app refuses
-    what needs a signed role, with words; telling an admin is up to them. A signal from that device to the workspace's
-    admins would be a new message format and a member's claim, an owner's decision (issue #1264).
+    ordinary entry then carries the old anchor on to the devices shown the same old log. **It is no recent other signer
+    for the purge's time limit** (§4.6.3, D1; issue #1264, the owner chose option B): an entry signed by somebody the roster
+    names as owner or admin, or who signed as one and has left, keeps no channel admin's purge open, whatever authority it
+    passed under (a workspace admin who is also a channel admin, or on a roster too old to vouch for them, alike). A list
+    they looked at and their own founding still count: they name what that admin chose, not a snapshot handed to them.
+    So the demoted admin's purge on those devices takes the retention, and the part that can't be repaired is closed. No
+    format changes; older clients still count such an entry. **Residual:** the old anchor itself carries on there, so the
+    appointer line can name an appointment the demotion ended, until a member's head or a reviewed list reaches those
+    devices. A workspace admin's own purge is unaffected (it never asked for another signer).
+  - **A member's stuck device asks in its messages** (issue #1264, the owner chose option A). A stretch, a snapshot resting
+    on somebody who left (the anchor lost on a late read) or an alarm is known only to the device it happened on
+    (`ChannelRoleState::needs_review`). Such a device marks the head its text messages already carry (`needs_review: true`
+    in `ChannelRolesHead`, left out when false). A newer head not read yet doesn't count: the next read settles it, and an
+    honest concurrent change would raise it everywhere for a moment. A workspace admin's device in the channel that reads
+    such a head records the request (`is_review_asked`) and its members section says the roles need a look, in the
+    existing words, with "Check roles" as before: no new dialog, line or notification (issue #1276). Nobody else sees
+    anything. A reviewed list the device accepts ends the request, and a request from a head below that list's version
+    (`reviewed_version`), a message sent before it, doesn't raise it again. It is a member's claim and changes nothing
+    else: a member can make a workspace admin's panel say "look" for a channel, as any member's head can raise the alarm
+    already. **Limits:** it reaches only workspace admins in the channel's group, since it travels in messages; an admin
+    outside the group, or a channel nobody writes in, hears nothing, and the member's own app stays the way to know
+    (it refuses what needs a signed role, with words). A device that never accepted an entry sends no head, so it can't
+    ask. Older clients neither send nor read the mark; their heads compare as before.
 
   **Compatibility.** No signed format and nothing on the server changes; the new state is local and additive, and a reviewed
   entry is an ordinary checkpoint to older clients. A state from before this looks once more at what it skipped, and since
@@ -3023,7 +3040,9 @@ Older signers' entries reach the others through the log and heads as before.
   A workspace admin's reviewed list clears both. A read that can't get the log (refused, not a member) changes
   nothing.
 - **Who signed lately.** `recent_signers` keeps, per signer, the latest start of an accepted entry: its
-  `signed_at_ms`, capped at this device's clock when it accepted it (at most 16 signers, the most recent).
+  `signed_at_ms`, capped at this device's clock when it accepted it (at most 16 signers, the most recent). A
+  workspace admin's ordinary entry isn't recorded, only their reviewed list or founding (issue #1264, option B,
+  §4.6.1): their device may sit outside the group, shown an old log.
   `verify_signed_deletion` refuses a channel admin's deletion with `NoRecentOtherSigner` unless somebody else,
   whose role doesn't go back to the deleter through the recorded appointments, has a start at or after the end minus `channel_roles_max_age`; the end is the latest of the device's clock,
   the deletion's `signed_at_ms` and the newest server time it saw (`Client::newest_server_ms`). A state from

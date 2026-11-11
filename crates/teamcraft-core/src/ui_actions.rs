@@ -588,6 +588,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
           && signed.role_of(member.user.id) != member.role
       });
     let needs_a_look = signed.must_review_before_vouching()
+      // A member's device said it is stuck here (issue #1264, option 2A).
+      || signed.is_review_asked
       || lists_a_role_nobody_confirmed
       || signed.maybe_alarm.is_some()
       // A log this device took nothing from: only such a list gets it out.

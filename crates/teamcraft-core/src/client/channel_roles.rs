@@ -467,12 +467,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// The channel's signed head, to send along inside an encrypted message (`None` while nothing is
-  /// signed, or for direct messages).
+  /// signed, or for direct messages). Marked when this device is stuck on the channel's roles, so a
+  /// workspace admin in the channel is offered the review (issue #1264, option 2A).
   pub(crate) fn channel_roles_head(
     &self,
     conversation: ConversationId,
   ) -> Result<Option<ChannelRolesHead>, CoreError> {
-    Ok(self.channel_role_state(conversation)?.head())
+    Ok(self.channel_role_state(conversation)?.head_to_send())
   }
 
   /// Compares a member's head of the channel's roles (from a message) with this device's.
