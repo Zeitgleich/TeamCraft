@@ -342,6 +342,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .await
         .map(drop),
       CoreCommand::CheckMeetingAdmission { conversation } => self.check_meeting_admission(conversation).await,
+      CoreCommand::ChangeMeetingHosts {
+        meeting,
+        conversation,
+        co_hosts,
+        maybe_new_organizer,
+      } => {
+        self
+          .change_meeting_hosts(&super::HostsChange {
+            meeting,
+            conversation,
+            co_hosts,
+            maybe_new_organizer,
+          })
+          .await
+      },
       CoreCommand::RefreshMembers { conversation } => self.refresh_members(conversation).await,
       CoreCommand::SetCustomStatus { maybe_status } => {
         let now = self.now_ms();

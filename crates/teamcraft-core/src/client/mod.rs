@@ -41,6 +41,7 @@ mod linking;
 #[cfg(feature = "ui")]
 pub(crate) mod list_outcomes;
 mod live_catch_up;
+mod meeting_hosts;
 mod member_device;
 mod messaging;
 mod missing_keys;
@@ -129,6 +130,7 @@ pub use linking::{
   LinkAnnouncement, LinkApproval, LinkCodeKind, LinkOffer, LinkReceipt, LinkRequestInfo, LinkRequestList,
   LinkWait, LinkWaitCancel, LinkedSecrets, NewDeviceLink, ReceiptCancel,
 };
+pub use meeting_hosts::{HostsChange, HostsChangeRecord, meeting_hosts_change};
 pub use member_device::{GroupAccess, is_waiting_for_device};
 pub use messaging::FlushReport;
 pub(crate) use messaging::{REMOVED_SENDER_GRACE_MS, decrypt_plaintext};

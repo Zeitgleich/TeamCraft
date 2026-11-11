@@ -106,6 +106,8 @@ schedule-notetaker = Notetaker joins the calls
 schedule-notetaker-hint = It makes a transcript of the meeting's calls and posts a summary in its chat. For this, the audio of those calls is sent to OpenRouter; everyone in the call sees that it is there.
 schedule-edit-title = Edit meeting
 schedule-save = Save
+schedule-co-hosts = Co-hosts
+schedule-co-hosts-hint = Co-hosts let people in, make guest links and use the host controls. Only you change or cancel the meeting.
 schedule-submit = Schedule
 meeting-error-title = Give the meeting a title.
 meeting-error-start = Pick a start date and time.
@@ -151,6 +153,25 @@ host-unlock = Unlock meeting
 host-end = End for everyone
 host-end-confirm = End the meeting now
 host-remove = Remove
+# Co-hosts and handing a meeting over (#1720)
+host-role-organizer = Host
+host-role-co-host = Co-host
+host-make-co-host = Make co-host
+host-remove-co-host = Remove as co-host
+host-hand-over = Hand over host role
+host-hand-over-confirm = Hand the meeting over to { $name }? They change and cancel it from now on; you stay co-host.
+host-hand-over-do = Hand over
+host-hosts-saving = Saving the hosts…
+host-hosts-failed = The hosts could not be changed: { $detail }
+host-leave-title = People are waiting to join
+host-leave-body = { $count ->
+    [one] One person is waiting in the lobby, and nobody else here can let them in once you leave.
+   *[other] { $count } people are waiting in the lobby, and nobody else here can let them in once you leave.
+}
+host-leave-hand-over = Hand over to { $name } and leave
+host-leave-anyway = Leave anyway
+meetings-now-co-host = You are now a co-host of “{ $title }”.
+meetings-now-organizer = “{ $title }” was handed over to you: you host it now.
 
 ## Settings: sections, search and rows (#327)
 # Home pages (issue #585)

@@ -53,6 +53,11 @@ pub enum CoreError {
   DeviceList(#[from] teamcraft_crypto::device_list::DeviceListError),
   #[error("meeting admitters: {0}")]
   MeetingAdmitters(#[from] teamcraft_crypto::meeting_admitters::MeetingAdmittersError),
+  #[error("meeting hosts: {0}")]
+  MeetingHosts(#[from] teamcraft_crypto::meeting_hosts::MeetingHostsError),
+  /// Only the meeting's organizer names its hosts or hands it over (#1720).
+  #[error("only the organizer of the meeting of conversation {0} names its hosts")]
+  NotMeetingOrganizer(ConversationId),
   #[error("channel roles: {0}")]
   ChannelRoles(#[from] crate::channel_roles::ChannelRoleError),
   #[error("problem report: {0}")]
@@ -397,10 +402,12 @@ pub enum GuestRefusal {
   /// The server offers another identity key for the guest than the one pinned before.
   #[error("the guest's identity key changed while they were let in")]
   KeyChanged,
-  /// Only the meeting organizer's devices and those of the admitters the organizer signed let
-  /// guests into the encryption: a guest accepts a welcome from nobody else (the fingerprint in the
-  /// link, and the admitters it signed).
-  #[error("only the organizer's devices and the admitters the organizer named can let guests in")]
+  /// Only the meeting organizer's devices, those of the co-hosts and of the admitters the organizer
+  /// signed let guests into the encryption: a guest accepts a welcome from nobody else (the
+  /// fingerprint in the link, the host lists and the admitters that key's chain signed).
+  #[error(
+    "only the organizer's devices, the co-hosts and the admitters the organizer named can let guests in"
+  )]
   NotAnAdmitter,
   /// The key the server presents for the guest is not the one their page reported with its device.
   #[error("the guest's identity key is not the one their device reported")]

@@ -85,7 +85,7 @@ pub async fn admitters(
 
 /// The meeting whose chat is `conversation`, if the caller is in the chat; "not found" for
 /// everybody else and for chats of no meeting.
-async fn member_meeting(
+pub(super) async fn member_meeting(
   state: &AppState,
   caller: &AuthenticatedUser,
   conversation: ConversationId,

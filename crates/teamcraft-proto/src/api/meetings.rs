@@ -249,6 +249,11 @@ pub struct MeetingResponse {
   /// ask for the lobby of the meetings a chat admin hosts too (#1305); absent from older servers.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub can_host_lobby: bool,
+  /// The co-hosts as the server holds them (#1720): users who host the meeting with the
+  /// organizer, from the organizer's last signed host list. For the badge and the menus; whose
+  /// devices may let guests in is the signed list's word (`PUT .../meeting-hosts`), not this.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub co_host_user_ids: Vec<UserId>,
   pub attendees: Vec<MeetingAttendeeResponse>,
   /// Invitees whose invitation e-mail could not be sent (only set in replies to create and update).
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -430,6 +435,23 @@ pub struct PutMeetingAdmittersRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct MeetingAdmittersResponse {
   pub statement: Base64Bytes,
+}
+
+/// `PUT /api/v1/conversations/{id}/meeting-hosts` (the meeting's organizer): who hosts the meeting,
+/// as the organizer's identity key signs it (`teamcraft_crypto::meeting_hosts`, e2ee.md §4.6,
+/// "Meeting hosts", #1720). A list naming another organizer hands the meeting over. The server
+/// checks the shape and that the people named are in the meeting chat; clients verify it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PutMeetingHostsRequest {
+  pub statement: Base64Bytes,
+}
+
+/// `GET /api/v1/conversations/{id}/meeting-hosts` (members of the meeting chat, admitted guests
+/// too): every handover and the newest list, oldest first; empty before the first list. A checker
+/// follows them from the organizer key it trusts (`meeting_hosts::verify_chain`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MeetingHostsResponse {
+  pub statements: Vec<Base64Bytes>,
 }
 
 /// `GET /api/v1/meetings/{id}/lobby/me`: the caller's own place in the lobby.

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT statement FROM meeting_host_lists WHERE meeting_id = $1 ORDER BY sequence",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "statement",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "meeting_host_lists",
+            "name": "statement"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5e0b6bf665b5bdd83b2f824d39be19db432c20b4481459e247a2740750ee6ad0"
+}

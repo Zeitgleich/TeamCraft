@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE meetings SET organizer_user_id = $2, sequence = sequence + 1 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "464b28dbd2489ed21cd12e4c01af47939b6a159c9457be082acfcd281d8ea409"
+}

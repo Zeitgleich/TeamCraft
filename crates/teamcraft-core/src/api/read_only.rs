@@ -652,6 +652,21 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.inner.meeting_admitters(conversation)
   }
 
+  fn put_meeting_hosts(
+    &self,
+    _conversation: ConversationId,
+    _request: &PutMeetingHostsRequest,
+  ) -> impl Future<Output = Result<(), ApiError>> {
+    self.refused("put_meeting_hosts")
+  }
+
+  fn meeting_hosts(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<MeetingHostsResponse, ApiError>> {
+    self.inner.meeting_hosts(conversation)
+  }
+
   fn move_call(
     &self,
     _conversation: ConversationId,

@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT max(sequence) AS newest, count(*) FILTER (WHERE is_handover) AS \"handovers!\"\n         FROM meeting_host_lists WHERE meeting_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "newest",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "handovers!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "d7c74c702052713b78332f96ccf2ed0c7121abc1d0d5b1de8edd889f815eeba5"
+}

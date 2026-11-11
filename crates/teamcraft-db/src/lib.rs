@@ -121,8 +121,8 @@ pub use last_seen::StoredLastSeen;
 pub use leavers::{LeaverClaim, StoredLeaver};
 pub use local_account::{LOCAL_ISSUER, LocalAccount, SessionLimits, SessionState};
 pub use meeting::{
-  AttendeeDiff, AttendeeKey, LobbyRow, MeetingChanges, NewAttendee, NewMeeting, SharedInviteClaim,
-  StoredAttendee, StoredMeeting, StoredMeetingInvite,
+  AttendeeDiff, AttendeeKey, Handover, HostListOutcome, LobbyRow, MeetingChanges, NewAttendee, NewHostList,
+  NewMeeting, SharedInviteClaim, StoredAttendee, StoredMeeting, StoredMeetingInvite,
 };
 pub use meeting_notice::{MeetingNoticeDismissal, MeetingNoticeKind, MeetingNoticeRecipient};
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};

@@ -27,7 +27,8 @@ the change, and people taken off the list are removed from the group.
 | Meeting link       | `<base>/meeting/<token>#v=<fingerprint>` for everybody; lets the holder knock (see "Links")       |
 | Invite (guest)     | A personal one-time join link for somebody without an account (`meeting_invites`)                |
 | Shared guest link  | One link per meeting for many guests (`meeting_invites.is_shared`); revocable, ends with it      |
-| Lobby              | Guests and knocking members wait until a host (organizer or chat admin) admits them              |
+| Lobby              | Guests and knocking members wait until a host (organizer, co-host or chat admin) admits them     |
+| Host               | The organizer, the co-hosts the organizer names (#1720) and the chat's admins (see "Hosts")      |
 
 ## Flows
 
@@ -126,8 +127,8 @@ the change, and people taken off the list are removed from the group.
    wait for a host's click.
    Hosts see who waits on the meeting's card and, while in the meeting's call, on the call screen.
    The meeting list (`GET /meetings`) marks each meeting whose lobby the caller hosts with
-   `can_host_lobby: true` (the rule of the lobby's `is_host`: organizer or chat admin, in the
-   meeting chat, meeting scheduled; #1305), so the devices of a host who isn't the organizer ask
+   `can_host_lobby: true` (the rule of the lobby's `is_host`: organizer, co-host or chat admin, in
+   the meeting chat, meeting scheduled; #1305), so the devices of a host who isn't the organizer ask
    for its lobby and show it on the card outside the call too. With an older server, which sends
    no flag, such a host sees it on the call screen only, while in the call. A knock (`lobby_join`)
    reloads the lobby at once, without polling.
@@ -139,7 +140,7 @@ the change, and people taken off the list are removed from the group.
    may wait at once, each for 15 minutes (the lobby timeout), so a leaked link fills the lobby
    for a while, not the meeting. The link ends with the meeting (its end plus
    `guest_grace_secs`, or its cancellation). A guest who reloads the page loses their ephemeral
-   device and knocks anew; the waiting place they leave behind is free after the lobby timeout. **Making the link anew** (`POST /meetings/{id}/link`, organizer only;
+   device and knocks anew; the waiting place they leave behind is free after the lobby timeout. **Making the link anew** (`POST /meetings/{id}/link`, hosts: organizer, co-hosts and chat admins;
    `DELETE .../shared-guest-link` does the same for older apps) does in one transaction: a new
    token (the old link opens nothing any more, `404`), every shared and unredeemed personal link
    of the meeting revoked, and guests still waiting no longer counted as "came with the link"
@@ -237,6 +238,72 @@ the change, and people taken off the list are removed from the group.
      list names this user and says "no lobby", admits them by itself like the organizer's
      (`POST .../lobby/{user}/admit` is allowed to them for people of the link; turning people away
      stays with the hosts).
+10. **Co-hosts and handing the meeting over** (#1720; see "Hosts").
+
+## Hosts
+
+A meeting has one **organizer** and any number of **co-hosts** the organizer names; the meeting
+chat's admins host too (as before). The organizer picks co-hosts among the invited people in the
+schedule and edit dialogs ("Co-hosts", under the people invited) and in the call's host controls
+(each participant: "Make co-host", "Remove as co-host", "Hand over host role"); the call's tiles
+and the host controls' list label the organizer "Host" and co-hosts "Co-host", and the meeting
+card shows "Co-host" to a co-host.
+
+| What                                                                 | Organizer | Co-host | Chat admin | Member              | Guest |
+|----------------------------------------------------------------------|-----------|---------|------------|---------------------|-------|
+| Admit and deny in the lobby (members and guests)                     | yes       | yes     | yes        | link arrivals only¹ | no    |
+| One-time guest links, the shared guest link, a new link              | yes       | yes     | yes        | no                  | no    |
+| Host controls in the call (mute all, remove, lock, end for everyone) | yes       | yes     | yes        | no                  | no    |
+| Change and cancel the meeting, restore, take it off the lists        | yes       | no      | no         | no                  | no    |
+| Name co-hosts, hand the meeting over (`PUT .../meeting-hosts`)       | yes       | no      | no         | no                  | no    |
+| Publish the admitters (`PUT .../meeting-admitters`)                  | yes       | no      | no         | no                  | no    |
+
+¹ Without a lobby, as the organizer's signed admitters say (step 9). Hosts can't be removed from
+the call by the host controls.
+
+**Signed, not the server's word.** Who hosts is a list the organizer's identity key signs
+(e2ee.md §4.6, "Meeting hosts"): the co-hosts with their identity keys, and the organizer from then
+on. The organizer's device signs it and publishes it with `PUT /conversations/{id}/meeting-hosts`
+(the organizer only; a sequence not above the stored one gets `409`); the server checks its shape,
+that it is signed as the caller and that everybody it names is a person (no guest, no bot, not
+deactivated) in the meeting chat, keeps it and reads from it who the co-hosts are
+(`meeting_co_hosts`, shown as `co_host_user_ids` in the meeting). `GET .../meeting-hosts` serves
+every handover and the newest list to the chat's members and admitted guests, who check them: so a
+co-host's device lets guests into the encryption while the organizer is away, and the guest accepts
+its welcome without trusting the server. Taking somebody off the invitees takes them off the
+co-hosts on the server; the organizer's next list leaves them out.
+
+**Handover.** "Hand over host role" signs a list naming the new organizer (a person in the meeting
+chat) and keeps the former organizer as a co-host. The server makes them the meeting's organizer
+(and the chat's admin, the former one a member and an invitee who accepted), raises the calendar
+`SEQUENCE`, writes the event again with the new `ORGANIZER` and sends the invitees the update
+(a calendar or mailer that is down doesn't undo the handover; the next change writes the event).
+From then on the new organizer changes, cancels and names hosts. A series is handed over as a
+whole: hosts belong to the meeting, not to one occurrence. Links made before keep working until
+they expire or are made anew: they carry the former organizer's fingerprint, and guests follow the
+signed handover from it; links copied afterwards carry the new organizer's. The new organizer's
+device signs the hosts again with its own key as soon as it sees the handover (and with the
+admitters' upkeep), so guests of new links find the co-hosts too. A meeting can be handed over at
+most 32 times (the chain a guest reads stays short).
+
+**When the organizer leaves.** Leaving the call of a meeting with people in its lobby and nobody
+else to let them in (no co-host) asks first: "Hand over to …" (up to five people of the call, no
+guests) signs the handover and leaves, "Leave anyway" leaves.
+
+**Telling people.** Every change sends `meeting_update` to the organizer, the invitees and the
+co-hosts before and after; a handover also `conversation_update` to the chat's members, whose
+devices then read who organizes the chat. An app that sees its user became a co-host or the
+organizer says so ("You are now a co-host of …"); there is no push for it yet. Every change is an
+audit entry (`meeting_hosts`, `meeting_handover`, with the co-hosts added and removed).
+
+| Condition                                       | What happens                                                                                                    |
+|-------------------------------------------------|-----------------------------------------------------------------------------------------------------------------|
+| Two organizer devices change the hosts at once  | The second gets `409`; the UI shows the failure and the list reloads with the first change                      |
+| The organizer's app is offline when it is asked | The change fails and the host controls say so; nothing changes on the server, the organizer tries again         |
+| Network loss during a handover                  | The server took it or not as a whole (one transaction); a lost answer shows the result after the next reload    |
+| A co-host without a device or identity key yet  | The organizer's device can't sign their key: the change fails with "unknown identity" and nothing is sent       |
+| An app from before #1720                        | Ignores `co_host_user_ids`; a co-host on it decides in the lobby, its device lets guests in as an admitter only |
+| The server serves an older or a forged list     | Devices that saw a newer one refuse it; a forged one (another key) is passed over (e2ee.md §4.6)                |
 
 ## Repeating meetings
 
@@ -366,11 +433,11 @@ Opening one in an installed app: [app-links.md](app-links.md).
 
 What a host copies and sends, and what each link lets the holder do:
 
-| Link                                         | Who it is for                       | What it does                                                    |
-|----------------------------------------------|-------------------------------------|-----------------------------------------------------------------|
-| `<base>/meeting/<token>#v=<fingerprint>`     | everybody: members and guests       | Opens the meeting for its members; others knock; a lobby decides |
-| `<base>/meeting/<token>#invite=<jwt>&v=<fp>` | one guest without an account        | One-time; always waits for a host's click                       |
-| `<base>/meeting/<id>` (and `#invite=…`)      | old links from before #987          | Still open the meeting, always through the lobby                |
+| Link                                         | Who it is for                 | What it does                                                     |
+|----------------------------------------------|-------------------------------|------------------------------------------------------------------|
+| `<base>/meeting/<token>#v=<fingerprint>`     | everybody: members and guests | Opens the meeting for its members; others knock; a lobby decides |
+| `<base>/meeting/<token>#invite=<jwt>&v=<fp>` | one guest without an account  | One-time; always waits for a host's click                        |
+| `<base>/meeting/<id>` (and `#invite=…`)      | old links from before #987    | Still open the meeting, always through the lobby                 |
 
 The **token** is 32 base64url characters (192 random bits, e2ee.md §4.6, "Meeting guests"); the
 server resolves it to the meeting, and it is all the server needs. The **fragment** `v` is the
@@ -412,11 +479,12 @@ A guest's page keeps going after "You are in" (#446; design in e2ee.md §4.6, "M
    of the meeting, `leave`, calls). Anything else answers 403. Guests only ever see conversations
    they are members of, which for a guest is the one meeting chat.
 4. **Keys at admission.** The link carries no secret (e2ee.md §4.6, "Meeting guests"). The
-   guest's page makes its own keys (the ephemeral device), and a device of the organizer or of an
-   admitter seals the meeting chat's keys to them when it adds the device: a new epoch, so nothing
-   said before the admission is readable. The page checks that the device that added it is the
-   organizer's (the fingerprint `v` from the link) or an admitter's the organizer signed for the
-   meeting (checked against `v` too). Guest sessions are also ended by the server when the
+   guest's page makes its own keys (the ephemeral device), and a device of the organizer, of a
+   co-host or of an admitter seals the meeting chat's keys to them when it adds the device: a new
+   epoch, so nothing said before the admission is readable. The page checks that the device that
+   added it is a host's by the signed host lists that follow from the fingerprint `v` of the link
+   (the organizer, also after a handover, or a co-host; #1720), or an admitter's the current
+   organizer signed for the meeting. Guest sessions are also ended by the server when the
    meeting's access ends (end plus `guest_grace_secs`) or it is cancelled, by a sweep at least
    every ten minutes. A guest sees the other attendees' names, never their e-mail addresses. A
    guest can't replace their identity key.
@@ -468,12 +536,13 @@ chat and call chunks load after admission).
 
 ## Gateway events
 
-| Event            | To                                                                  | When                                                   |
-|------------------|---------------------------------------------------------------------|--------------------------------------------------------|
-| `meeting_update` | organizer and invited users                                         | created, changed, cancelled, answered                  |
-| `lobby_join`     | hosts; without a lobby also the chat's other members (no guests)    | a guest knocked or set up its device, a member knocked |
-| `lobby_decision` | the guest or member                                                 | admitted or denied                                     |
-| `call_move`      | members of the DM                                                   | its call moved into a meeting room                     |
+| Event                 | To                                                               | When                                                   |
+|-----------------------|------------------------------------------------------------------|--------------------------------------------------------|
+| `meeting_update`      | organizer and invited users; on a host change also the co-hosts  | created, changed, cancelled, answered, hosts changed   |
+| `conversation_update` | the meeting chat's members                                       | the meeting was handed over (the chat's organizer)     |
+| `lobby_join`          | hosts; without a lobby also the chat's other members (no guests) | a guest knocked or set up its device, a member knocked |
+| `lobby_decision`      | the guest or member                                              | admitted or denied                                     |
+| `call_move`           | members of the DM                                                | its call moved into a meeting room                     |
 
 ## Configuration
 
@@ -500,6 +569,10 @@ fake calendar and mailer; one test sends through the real SMTP sender to Mailpit
   cancelling one), holidays per organizer, host controls (mute all, remove, lock, end for everyone) and
   meetings created in other CalDAV clients.
 - Per-organizer calendars (see above).
+- Hosts (#1720): a push to a new co-host or organizer whose apps are closed (an open app says so);
+  the Android and iOS apps' screens for naming co-hosts, the leave prompt and the schedule dialog's
+  co-host field (they reach the core's `change_meeting_hosts` through the FFI); the tray's "Leave
+  call" leaves without the handover prompt.
 - Meeting links: member clients reacting to `lobby_decision` instead of asking; making the link
   anew also turning away the guests still waiting from it; the desktop and mobile apps opening
   `/meeting/…` links themselves; hosts seeing how many guests the link let in; a guest's reload

@@ -18,6 +18,7 @@ All TeamCraft cryptography. No other crate implements or combines primitives
 | `recovery_key`      | Recovery kit key: 128 bit, Crockford Base32, checksum, `tcrecovery1:` form  | e2ee.md §6.5                     |
 | `membership`        | Signed membership changes, `IdentityDirectory`, `MembershipAuthority`       | e2ee.md §4.6, admin.md §2.2–§2.3 |
 | `meeting_admitters` | Organizer-signed admitters of a meeting chat: sequence, end, "no lobby"     | e2ee.md §4.6 ("Meeting guests")  |
+| `meeting_hosts`     | Organizer-signed host lists of a meeting, handover chain from an anchor     | e2ee.md §4.6 ("Meeting hosts")   |
 | `mls`               | `openmls` groups, key packages, content key bundles, commit authorization   | e2ee.md §4.1, §4.6               |
 | `push`              | Push wake-up sealed with the device push key; Web Push (RFC 8291) + VAPID   | e2ee.md §7                       |
 | `workspace`         | Owner signatures on the admin roster and policy log entries                 | admin.md §2.3, e2ee.md §11       |

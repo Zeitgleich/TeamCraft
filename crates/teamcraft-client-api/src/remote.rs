@@ -1153,6 +1153,10 @@ pub enum ChatAction {
   CheckMeetingAdmission {
     conversation: ConversationId,
   },
+  /// [`ChatBackend::change_meeting_hosts`].
+  ChangeMeetingHosts {
+    change: crate::meeting_hosts::MeetingHostsChange,
+  },
   SetBookmarks {
     conversation: ConversationId,
     bookmarks: Vec<crate::model::Bookmark>,
@@ -1594,6 +1598,7 @@ impl ChatAction {
         expires_at_ms,
       } => backend.sync_meeting_admitters(meeting, conversation, expires_at_ms),
       Self::CheckMeetingAdmission { conversation } => backend.check_meeting_admission(conversation),
+      Self::ChangeMeetingHosts { change } => backend.change_meeting_hosts(change),
       Self::SetBookmarks {
         conversation,
         bookmarks,
@@ -1770,6 +1775,10 @@ pub enum ChatQuery {
   AdmitsLinkArrivals {
     conversation: ConversationId,
     now_ms: i64,
+  },
+  /// [`ChatBackend::meeting_hosts_change`].
+  MeetingHostsChange {
+    conversation: ConversationId,
   },
   MembershipIssues {
     conversation: ConversationId,
@@ -2070,6 +2079,9 @@ pub enum ChatAnswer {
   Flag {
     value: bool,
   },
+  HostsChange {
+    maybe_state: Option<crate::meeting_hosts::HostsChangeState>,
+  },
   Threads {
     threads: Vec<ThreadSummary>,
   },
@@ -2177,6 +2189,9 @@ impl ChatQuery {
       },
       Self::AdmitsLinkArrivals { conversation, now_ms } => ChatAnswer::Flag {
         value: backend.admits_link_arrivals(conversation, now_ms),
+      },
+      Self::MeetingHostsChange { conversation } => ChatAnswer::HostsChange {
+        maybe_state: backend.meeting_hosts_change(conversation),
       },
       Self::IsWaitingForDevice { conversation } => ChatAnswer::Flag {
         value: backend.is_waiting_for_device(conversation),

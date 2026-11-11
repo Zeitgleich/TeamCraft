@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO meeting_co_hosts (meeting_id, user_id) SELECT $1, unnest($2::bigint[])\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "97adbe7dbf738d693f1ecd3d54a20fb0255c4a1993367c644db7c5e20f4e226a"
+}

@@ -701,6 +701,309 @@ mod admitters {
   }
 }
 
+/// Co-hosts and handing the meeting over (#1720): the host lists the organizer signs, which a
+/// guest follows from the key of its link and a member from the group's founder.
+mod hosts {
+  use rand_core::OsRng;
+  use teamcraft_core::client::HostsChange;
+  use teamcraft_crypto::identity::{IdentityKeyPair, IdentityPublicKey};
+  use teamcraft_crypto::ids::{
+    ConversationId as SignedChatId, MeetingId as SignedMeetingId, UserId as SignedUserId,
+  };
+  use teamcraft_crypto::meeting_hosts::{Host, HostsDraft};
+
+  use super::*;
+
+  #[tokio::test]
+  async fn a_co_host_lets_a_guest_in_while_the_organizer_is_away() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    // No admitters were published: only the host list names Bob.
+    rig.name_hosts(&[bob.client.user_id()], None).await;
+    bob
+      .client
+      .send_text(rig.chat, None, "before the guest")
+      .await
+      .unwrap();
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+
+    // The organizer left the call; Bob's device lets the guest in.
+    rig.member_lets_the_guest_in(&mut bob).await.unwrap();
+    bob
+      .client
+      .send_text(rig.chat, None, "after the guest")
+      .await
+      .unwrap();
+    settle(&mut [&mut bob, &mut rig.guest]).await;
+    rig.guest.client.full_sync().await.unwrap();
+
+    assert!(rig.guest.client.has_group(rig.chat).unwrap());
+    assert_eq!(rig.guest.texts(rig.chat), vec!["after the guest"]);
+    // The organizer's device takes the co-host's add when it is back.
+    settle(&mut [&mut rig.alice]).await;
+    rig.alice.client.full_sync().await.unwrap();
+    assert_eq!(rig.call_devices().await, 3);
+  }
+
+  #[tokio::test]
+  async fn a_co_host_the_organizer_took_off_lets_no_guest_in() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    rig.name_hosts(&[bob.client.user_id()], None).await;
+    rig.name_hosts(&[], None).await;
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+
+    let refused = rig.member_lets_the_guest_in(&mut bob).await.unwrap_err();
+
+    assert!(
+      matches!(refused, CoreError::GuestRefused(GuestRefusal::NotAnAdmitter)),
+      "{refused}"
+    );
+  }
+
+  #[tokio::test]
+  async fn a_host_list_the_server_forges_lets_nobody_in() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    // The server serves a list in the organizer's name, signed with a key of its own.
+    let forged = rig.host_draft(rig.alice.client.user_id(), &bob).await;
+    let forger = IdentityKeyPair::generate(&mut OsRng);
+    let forged = HostsDraft {
+      organizer: Host {
+        user_id: signed_user(rig.alice.client.user_id()),
+        identity_key: forger.public_key(),
+      },
+      ..forged
+    }
+    .sign(&forger)
+    .unwrap();
+    rig
+      .server
+      .set_meeting_hosts(rig.chat, vec![forged.to_bytes().unwrap()]);
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+
+    let refused = rig.member_lets_the_guest_in(&mut bob).await.unwrap_err();
+
+    assert!(
+      matches!(refused, CoreError::GuestRefused(GuestRefusal::NotAnAdmitter)),
+      "{refused}"
+    );
+  }
+
+  #[tokio::test]
+  async fn a_guest_refuses_a_co_hosts_welcome_once_the_server_swaps_the_list() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    rig.name_hosts(&[bob.client.user_id()], None).await;
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+    rig.member_lets_the_guest_in(&mut bob).await.unwrap();
+    // Before the guest opens the welcome, the server swaps the organizer's list for one naming
+    // Bob that another key signed.
+    let forger = IdentityKeyPair::generate(&mut OsRng);
+    let forged = rig
+      .host_draft(rig.alice.client.user_id(), &bob)
+      .await
+      .sign(&forger)
+      .unwrap();
+    rig
+      .server
+      .set_meeting_hosts(rig.chat, vec![forged.to_bytes().unwrap()]);
+
+    rig.guest.client.full_sync().await.unwrap();
+
+    assert!(!rig.guest.client.has_group(rig.chat).unwrap());
+  }
+
+  #[tokio::test]
+  async fn a_guest_with_a_link_from_before_the_handover_is_let_in_by_the_new_organizer() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    // Alice hands the meeting to Bob and stays co-host.
+    let alice_id = rig.alice.client.user_id();
+    rig.name_hosts(&[alice_id], Some(bob.client.user_id())).await;
+    let organizer = bob
+      .api
+      .conversation(rig.chat)
+      .await
+      .unwrap()
+      .maybe_organizer_user_id;
+    assert_eq!(organizer, Some(bob.client.user_id()));
+    // The guest has the link Alice copied before: her key.
+    rig.guest_knows_the_link();
+    rig.server_admits_the_guest().await;
+
+    rig.member_lets_the_guest_in(&mut bob).await.unwrap();
+    bob
+      .client
+      .send_text(rig.chat, None, "from the new organizer")
+      .await
+      .unwrap();
+    settle(&mut [&mut bob, &mut rig.guest]).await;
+    rig.guest.client.full_sync().await.unwrap();
+
+    assert!(rig.guest.client.has_group(rig.chat).unwrap());
+    assert_eq!(rig.guest.texts(rig.chat), vec!["from the new organizer"]);
+  }
+
+  #[tokio::test]
+  async fn after_the_handover_links_carry_the_new_key_and_the_former_organizer_still_admits() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    let alice_id = rig.alice.client.user_id();
+    rig.name_hosts(&[alice_id], Some(bob.client.user_id())).await;
+    // Bob's device signs the hosts again with his key (it does so with the admitters' upkeep).
+    assert!(
+      bob
+        .client
+        .sync_meeting_hosts(rig.meeting, rig.chat)
+        .await
+        .unwrap()
+    );
+    assert!(
+      !bob
+        .client
+        .sync_meeting_hosts(rig.meeting, rig.chat)
+        .await
+        .unwrap(),
+      "once"
+    );
+    bob
+      .client
+      .prepare_guest_link(rig.chat, rig.meeting)
+      .await
+      .unwrap();
+    let new_fingerprint = guest_link_fragment(&bob.store, rig.meeting)
+      .unwrap()
+      .strip_prefix(&format!("{VERIFIER_KEY}="))
+      .unwrap()
+      .to_owned();
+    assert_ne!(new_fingerprint, rig.fingerprint, "Bob's key now");
+    rig
+      .guest
+      .client
+      .set_guest_organizer_anchor(rig.chat, rig.meeting, &new_fingerprint)
+      .unwrap();
+    rig.server_admits_the_guest().await;
+
+    // Alice, co-host now, lets the guest with Bob's link in.
+    rig.organizer_lets_the_guest_in(ACCESS_ENDS_MS).await.unwrap();
+    settle(&mut [&mut rig.alice, &mut bob, &mut rig.guest]).await;
+    rig.guest.client.full_sync().await.unwrap();
+
+    assert!(rig.guest.client.has_group(rig.chat).unwrap());
+    // Bob's device takes his co-host's add.
+    bob.client.full_sync().await.unwrap();
+    assert_eq!(bob.client.verified_call_devices(rig.chat).await.unwrap().len(), 3);
+  }
+
+  #[tokio::test]
+  async fn a_member_added_after_the_handover_joins_the_group_the_former_organizer_founded() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+    rig
+      .name_hosts(&[rig.alice.client.user_id()], Some(bob.client.user_id()))
+      .await;
+    let mut carol = rig.member("Carol").await;
+
+    bob
+      .client
+      .let_into_meeting_chat(rig.chat, carol.client.user_id())
+      .await
+      .unwrap();
+    settle(&mut [&mut bob, &mut carol]).await;
+    carol.client.full_sync().await.unwrap();
+
+    assert!(carol.client.has_group(rig.chat).unwrap());
+  }
+
+  #[tokio::test]
+  async fn only_the_organizer_names_hosts() {
+    let mut rig = rig().await;
+    let mut bob = rig.member("Bob").await;
+    rig.let_into_group(&mut bob).await;
+
+    let refused = bob
+      .client
+      .change_meeting_hosts(&HostsChange {
+        meeting: rig.meeting,
+        conversation: rig.chat,
+        co_hosts: vec![bob.client.user_id()],
+        maybe_new_organizer: None,
+      })
+      .await
+      .unwrap_err();
+
+    assert!(matches!(refused, CoreError::NotMeetingOrganizer(_)), "{refused}");
+    assert!(matches!(
+      teamcraft_core::client::meeting_hosts_change(&bob.store, rig.chat),
+      Some(teamcraft_core::client::HostsChangeRecord::Failed { .. })
+    ));
+    assert!(rig.server.meeting_hosts(rig.chat).is_empty());
+  }
+
+  impl Rig {
+    /// Alice's device names the co-hosts, or hands the meeting over.
+    async fn name_hosts(&mut self, co_hosts: &[UserId], maybe_new_organizer: Option<UserId>) {
+      self
+        .alice
+        .client
+        .change_meeting_hosts(&HostsChange {
+          meeting: self.meeting,
+          conversation: self.chat,
+          co_hosts: co_hosts.to_vec(),
+          maybe_new_organizer,
+        })
+        .await
+        .unwrap();
+      assert_eq!(
+        teamcraft_core::client::meeting_hosts_change(&self.alice.store, self.chat),
+        Some(teamcraft_core::client::HostsChangeRecord::Saved)
+      );
+    }
+
+    /// A list for this meeting and chat naming `co_host`, signed as `signer`, unsigned yet.
+    async fn host_draft(&self, signer: UserId, co_host: &Peer) -> HostsDraft {
+      let response = self
+        .alice
+        .api
+        .identity_key(co_host.client.user_id())
+        .await
+        .unwrap()
+        .unwrap();
+      let identity_key = IdentityPublicKey::from_bytes(response.public_key.as_slice().try_into().unwrap());
+      HostsDraft {
+        meeting_id: SignedMeetingId::new(self.meeting.to_string().parse().unwrap()),
+        conversation_id: SignedChatId::new(self.chat.to_string().parse().unwrap()),
+        sequence: u64::MAX / 2,
+        signer_user_id: signed_user(signer),
+        organizer: Host {
+          user_id: signed_user(signer),
+          identity_key,
+        },
+        co_hosts: vec![Host {
+          user_id: signed_user(co_host.client.user_id()),
+          identity_key,
+        }],
+      }
+    }
+  }
+
+  fn signed_user(user: UserId) -> SignedUserId {
+    SignedUserId::new(user.to_string().parse().unwrap())
+  }
+}
+
 impl Rig {
   fn guest_id(&self) -> UserId {
     self.guest.client.user_id()

@@ -64,8 +64,8 @@ use teamcraft_proto::{
 };
 use teamcraft_proto::{CreateDeviceLinkRequest, DeviceLinkClosedReason, DeviceLinkRequest};
 use teamcraft_proto::{
-  CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingKind, MeetingResponse, MeetingStatus,
-  PutMeetingAdmittersRequest,
+  CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingHostsResponse, MeetingKind, MeetingResponse,
+  MeetingStatus, PutMeetingAdmittersRequest, PutMeetingHostsRequest,
 };
 use teamcraft_proto::{DeviceListResponse, PutDeviceListRequest};
 use teamcraft_proto::{DevicePushHealth, PushDeliveryCounts, PushHealthResponse, UpdateDeviceRequest};
@@ -189,6 +189,8 @@ struct State {
   cancelled_meetings: Vec<teamcraft_proto::MeetingId>,
   /// The newest signed admitters of each meeting chat, as published (or swapped in by a test).
   meeting_admitters: HashMap<ConversationId, Vec<u8>>,
+  /// The signed host lists of each meeting chat a checker follows: every handover and the newest.
+  meeting_hosts: HashMap<ConversationId, Vec<Vec<u8>>>,
   /// The running call of each conversation (a new one after [`FakeServer::end_call`]).
   calls: HashMap<ConversationId, CallId>,
   /// Who is in each conversation's call, as the SFU reported it ([`FakeServer::join_call`]); a
@@ -1516,6 +1518,22 @@ impl FakeServer {
   /// server swapping lists, or bringing back an older one.
   pub fn set_meeting_admitters(&self, conversation: ConversationId, statement: Vec<u8>) {
     self.lock().meeting_admitters.insert(conversation, statement);
+  }
+
+  /// A meeting chat's host lists as the server holds them (every handover and the newest).
+  pub fn meeting_hosts(&self, conversation: ConversationId) -> Vec<Vec<u8>> {
+    self
+      .lock()
+      .meeting_hosts
+      .get(&conversation)
+      .cloned()
+      .unwrap_or_default()
+  }
+
+  /// Serves `statements` as the meeting chat's host lists from now on, whatever it holds: a hostile
+  /// server adding, withholding or bringing back lists.
+  pub fn set_meeting_hosts(&self, conversation: ConversationId, statements: Vec<Vec<u8>>) {
+    self.lock().meeting_hosts.insert(conversation, statements);
   }
 
   /// How many channels have this name.
@@ -4086,6 +4104,7 @@ impl ServerApi for FakeServerApi {
         is_occurrence_cancelled: false,
         is_occurrence_holiday: false,
         can_host_lobby: false,
+        co_host_user_ids: Vec::new(),
         attendees: Vec::new(),
         undelivered_invitations: Vec::new(),
       };
@@ -4156,6 +4175,101 @@ impl ServerApi for FakeServerApi {
         .clone();
       Ok(MeetingAdmittersResponse {
         statement: Base64Bytes::new(stored),
+      })
+    })
+  }
+
+  /// Like the server: the meeting chat's organizer publishes a host list for this chat signed as
+  /// themselves, one not newer than the stored lists is refused, the people named must be members
+  /// of the chat, and a list naming another organizer hands the meeting over (the chat names the
+  /// new organizer from then on). Every handover is kept, of the rest the newest.
+  async fn put_meeting_hosts(
+    &self,
+    conversation: ConversationId,
+    request: &PutMeetingHostsRequest,
+  ) -> Result<(), ApiError> {
+    use teamcraft_crypto::meeting_hosts::SignedMeetingHosts;
+    let bytes = request.statement.as_slice().to_vec();
+    let malformed = || ApiError::status(400, ErrorCode::InvalidRequest, "malformed host list");
+    let list = SignedMeetingHosts::from_bytes(&bytes).map_err(|_| malformed())?;
+    list.check_shape().map_err(|_| malformed())?;
+    if crate::convert::conversation_from_crypto(list.unverified_conversation_id()).ok() != Some(conversation)
+    {
+      return Err(malformed());
+    }
+    let signer = crate::convert::user_from_crypto(list.unverified_signer()).map_err(|_| malformed())?;
+    let organizer = crate::convert::user_from_crypto(list.unverified_organizer()).map_err(|_| malformed())?;
+    let co_hosts = list
+      .unverified_co_hosts()
+      .into_iter()
+      .map(crate::convert::user_from_crypto)
+      .collect::<Result<Vec<UserId>, _>>()
+      .map_err(|_| malformed())?;
+    self.with(|state, me| {
+      let entry = state.member_conversation(conversation, me)?;
+      if entry.response.maybe_organizer_user_id != Some(me) {
+        return Err(ApiError::status(403, ErrorCode::Forbidden, "only the organizer"));
+      }
+      if signer != me {
+        return Err(malformed());
+      }
+      let named_outside = std::iter::once(organizer)
+        .chain(co_hosts.iter().copied())
+        .any(|user| !entry.members.contains_key(&user));
+      if named_outside {
+        return Err(ApiError::status(
+          400,
+          ErrorCode::InvalidRequest,
+          "not in the chat",
+        ));
+      }
+      let stored = state.meeting_hosts.entry(conversation).or_default();
+      let newest = stored
+        .iter()
+        .filter_map(|bytes| SignedMeetingHosts::from_bytes(bytes).ok())
+        .map(|stored| stored.unverified_sequence())
+        .max();
+      if newest.is_some_and(|newest| newest >= list.unverified_sequence()) {
+        return Err(ApiError::status(
+          409,
+          ErrorCode::Conflict,
+          "a newer list is stored",
+        ));
+      }
+      stored.retain(|bytes| SignedMeetingHosts::from_bytes(bytes).is_ok_and(|stored| stored.is_handover()));
+      stored.push(bytes);
+      if organizer != me
+        && let Some(entry) = state.conversations.get_mut(&conversation)
+      {
+        entry.response.maybe_organizer_user_id = Some(organizer);
+        if let Some(role) = entry.members.get_mut(&organizer) {
+          role.0 = ChannelRole::Admin;
+        }
+        if let Some(role) = entry.members.get_mut(&me) {
+          role.0 = ChannelRole::Member;
+        }
+        let members: Vec<UserId> = entry.members.keys().copied().collect();
+        state.publish(
+          members,
+          &GatewayEvent::ConversationUpdate {
+            conversation_id: conversation,
+          },
+        );
+      }
+      Ok(())
+    })
+  }
+
+  /// The stored host lists, for members of the chat.
+  async fn meeting_hosts(&self, conversation: ConversationId) -> Result<MeetingHostsResponse, ApiError> {
+    self.with(|state, me| {
+      state.member_conversation(conversation, me)?;
+      Ok(MeetingHostsResponse {
+        statements: state
+          .meeting_hosts
+          .get(&conversation)
+          .map(|stored| stored.iter().cloned().map(Base64Bytes::new).collect())
+          .unwrap_or_default(),
       })
     })
   }

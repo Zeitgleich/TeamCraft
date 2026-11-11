@@ -106,6 +106,8 @@ schedule-notetaker = Notetaker nimmt an den Anrufen teil
 schedule-notetaker-hint = Er erstellt Transkripte der Anrufe dieses Meetings und schreibt eine Zusammenfassung in den Chat. Dazu wird der Ton dieser Anrufe an OpenRouter gesendet; alle im Anruf sehen, dass er dabei ist.
 schedule-edit-title = Meeting bearbeiten
 schedule-save = Speichern
+schedule-co-hosts = Co-Gastgeber
+schedule-co-hosts-hint = Co-Gastgeber lassen Personen ein, erstellen Gastlinks und nutzen die Host-Steuerung. Nur du änderst das Meeting oder sagst es ab.
 schedule-submit = Planen
 meeting-error-title = Gib dem Meeting einen Titel.
 meeting-error-start = Wähle Datum und Uhrzeit des Beginns.
@@ -151,6 +153,25 @@ host-unlock = Meeting entsperren
 host-end = Für alle beenden
 host-end-confirm = Meeting jetzt beenden
 host-remove = Entfernen
+# Co-Gastgeber und Übergabe eines Meetings (#1720)
+host-role-organizer = Gastgeber
+host-role-co-host = Co-Gastgeber
+host-make-co-host = Zum Co-Gastgeber machen
+host-remove-co-host = Als Co-Gastgeber entfernen
+host-hand-over = Gastgeberrolle übergeben
+host-hand-over-confirm = Das Meeting an { $name } übergeben? Ab dann ändert nur noch diese Person es oder sagt es ab; du bleibst Co-Gastgeber.
+host-hand-over-do = Übergeben
+host-hosts-saving = Gastgeber werden gespeichert …
+host-hosts-failed = Die Gastgeber konnten nicht geändert werden: { $detail }
+host-leave-title = Es warten Personen auf Einlass
+host-leave-body = { $count ->
+    [one] Eine Person wartet in der Lobby, und sobald du gehst, kann sie hier niemand mehr einlassen.
+   *[other] { $count } Personen warten in der Lobby, und sobald du gehst, kann sie hier niemand mehr einlassen.
+}
+host-leave-hand-over = An { $name } übergeben und gehen
+host-leave-anyway = Trotzdem gehen
+meetings-now-co-host = Du bist jetzt Co-Gastgeber von „{ $title }“.
+meetings-now-organizer = „{ $title }“ wurde an dich übergeben: Du bist jetzt der Gastgeber.
 
 ## Settings: sections, search and rows (#327)
 # Startseiten (Issue #585)

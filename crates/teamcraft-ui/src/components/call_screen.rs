@@ -71,6 +71,8 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       .find(|tile| tile.participant.as_ref().is_some_and(|p| p.is_sharing_screen))
   });
   let host_open = RwSignal::new(false);
+  // The organizer asked to hand the meeting over before leaving (#1720).
+  let leave_prompt = RwSignal::new(None::<crate::components::meeting_controls::HandoverOffer>);
   // The tray's "End for everyone…" opens the host controls, which ask to confirm.
   Effect::new(move |_| {
     if call.is_end_for_everyone_asked.get() {
@@ -284,10 +286,35 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       && !cameras.with(|cameras| selected_camera_is_rear(cameras, &call.camera_id.get()))
   });
 
+  // Who hosts this call's meeting (#1720): the organizer and the co-hosts, for the tiles' labels.
+  let meeting_hosts = Memo::new(move |_| {
+    maybe_hub.and_then(|hub| {
+      hub.meetings.with(|all| {
+        all
+          .iter()
+          .find(|meeting| meeting.conversation_id == request.conversation)
+          .map(|meeting| (meeting.organizer_user_id, meeting.co_host_user_ids.clone()))
+      })
+    })
+  });
+  let host_role_label = move |hosts: Memo<Option<(UserId, Vec<UserId>)>>, id: UserId| {
+    hosts.with_untracked(|maybe| {
+      maybe.as_ref().and_then(|(organizer, co_hosts)| {
+        if *organizer == id {
+          Some(i18n.t("tile-host"))
+        } else if co_hosts.contains(&id) {
+          Some(i18n.t("tile-co-host"))
+        } else {
+          None
+        }
+      })
+    })
+  };
   let self_tile = move |is_large: bool| {
     view! {
       <VideoTile
         user=state.me()
+        maybe_role=host_role_label(meeting_hosts, state.me().id)
         is_self=true
         is_large=is_large
         is_muted=Signal::derive(move || !call.is_mic_on.get())
@@ -322,7 +349,8 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
     });
     let maybe_role = notetaker
       .with_untracked(|notetaker| notetaker.as_ref().is_some_and(|notetaker| notetaker.bot == id))
-      .then(|| i18n.t("tile-notetaker"));
+      .then(|| i18n.t("tile-notetaker"))
+      .or_else(|| host_role_label(meeting_hosts, id));
     maybe_user.map(|user| {
       view! {
         <VideoTile
@@ -365,6 +393,8 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
   });
 
   let stage = move || {
+    // A new host (#1720) relabels the tiles: rare enough to build the stage again for.
+    meeting_hosts.track();
     let remote_tiles = remote_ids.get();
     if is_share_layout() {
       let maybe_screen = shared_screen.get();
@@ -526,10 +556,14 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           <span class="muted-text" role="status">{move || i18n.t("call-limited-network")}</span>
         </Show>
       </header>
+      // The organizer, and a host of somebody else's meeting (a co-host, #1720, or a chat admin,
+      // #1103): the host controls and the lobby.
       {move || {
         let hub = use_context::<crate::meetings::MeetingsHub>()?;
         let me = state.me().id;
-        let meeting = hub.hosted_meeting_for(request.conversation, me)?;
+        let meeting = hub
+          .hosted_meeting_for(request.conversation, me)
+          .or_else(|| hub.cohosted_meeting_for(request.conversation))?;
         Some(view! {
           <div class="call-host">
             <button class="btn btn-small" aria-expanded=move || host_open.get().to_string() on:click=move |_| host_open.update(|open| *open = !*open)>
@@ -543,20 +577,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           </div>
         })
       }}
-      // A host of somebody else's meeting (a chat admin) decides on the lobby too (#1103).
-      {move || {
-        let hub = use_context::<crate::meetings::MeetingsHub>()?;
-        let me = state.me().id;
-        if hub.hosted_meeting_for(request.conversation, me).is_some() {
-          return None;
-        }
-        let meeting = hub.cohosted_meeting_for(request.conversation)?;
-        Some(view! {
-          <div class="call-host">
-            <crate::components::meetings_view::Lobby meeting=meeting />
-          </div>
-        })
-      }}
+      {move || leave_prompt.get().map(|offer| view! { <crate::components::meeting_controls::LeavePrompt offer=offer prompt=leave_prompt /> })}
       <crate::components::add_to_call::CallMoveBanner />
       <crate::components::call_encryption::EncryptionFailureBanner request=request />
       <NotetakerBanner conversation=request.conversation notetaker=notetaker is_asked=notetaker_invite.is_asked />
@@ -827,7 +848,25 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           label=Signal::derive(move || i18n.t("call-minimize"))
           on_press=move || call.is_minimized.set(true)
         />
-        <button class="leave-btn" on:click=move |_| call.leave()>
+        <button
+          class="leave-btn"
+          on:click=move |_| {
+            // The organizer leaving with people in the lobby and nobody else to let them in is
+            // asked to hand the meeting over first (#1720).
+            let me = state.me();
+            let candidates: Vec<crate::model::User> = remote.with_untracked(|tiles| {
+              tiles
+                .iter()
+                .map(|tile| tile.user.clone())
+                .filter(|user| !user.is_guest && !user.is_bot && user.id != me.id)
+                .collect()
+            });
+            match maybe_hub.and_then(|hub| crate::components::meeting_controls::handover_offer(hub, request.conversation, me.id, candidates)) {
+              Some(offer) => leave_prompt.set(Some(offer)),
+              None => call.leave(),
+            }
+          }
+        >
           <Icon name=IconName::Phone class="hangup" />
           <span>{move || i18n.t("call-leave")}</span>
         </button>

@@ -1765,6 +1765,20 @@ impl ChatBackend for RemoteChat {
     )
   }
 
+  fn change_meeting_hosts(&self, change: teamcraft_client_api::meeting_hosts::MeetingHostsChange) {
+    self.act(ChatAction::ChangeMeetingHosts { change });
+  }
+
+  fn meeting_hosts_change(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::meeting_hosts::HostsChangeState> {
+    match self.ask(ChatQuery::MeetingHostsChange { conversation }) {
+      Some(ChatAnswer::HostsChange { maybe_state }) => maybe_state,
+      _ => None,
+    }
+  }
+
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {
     self.act(ChatAction::DiscardRemoval { conversation, user });
   }

@@ -2,7 +2,13 @@
 .host-controls { margin-top: .5rem; padding: .5rem; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .host-buttons { display: flex; gap: .35rem; flex-wrap: wrap; }
 .host-participants { list-style: none; margin: .5rem 0 0; padding: 0; }
-.host-participants li { display: flex; align-items: center; justify-content: space-between; padding: .15rem 0; }
+.host-participants li { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .35rem; padding: .15rem 0; }
+/* Co-hosts and the handover (#1720): the part in the meeting next to the name, the organizer's buttons after it. */
+.host-participant-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-participant-actions { display: flex; gap: .35rem; flex-wrap: wrap; }
+.badge-host { background: var(--accent-soft); color: var(--text); white-space: nowrap; }
+.host-confirm { flex-basis: 100%; display: flex; gap: .35rem; align-items: center; flex-wrap: wrap; }
+.host-confirm p { flex-basis: 100%; margin: .25rem 0; }
 .rsvp-list h4 { margin: .5rem 0 .15rem; }
 .rsvp-list ul { margin: 0; padding-inline-start: 1.2rem; }
 .call-host { position: absolute; inset-inline-end: 1rem; top: 3.5rem; z-index: 5; }
@@ -18,3 +24,20 @@
 .diff-removed { background: rgba(248, 81, 73, .25); text-decoration: line-through; border-radius: 2px; }
 /* The lobby on the call screen: readable over video, below the host's button. */
 .call-host .lobby { max-width: 22rem; background: var(--surface); box-shadow: var(--shadow-card); }
+/* The organizer leaving with people in the lobby is asked to hand the meeting over (#1720). */
+.leave-prompt {
+  position: absolute;
+  inset-inline: 1rem;
+  bottom: 5.5rem;
+  z-index: 6;
+  max-width: 26rem;
+  margin-inline: auto;
+  padding: .75rem 1rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-card);
+}
+.leave-prompt h2 { font-size: var(--text-md); margin: 0 0 .35rem; }
+.leave-prompt p { margin: 0 0 .5rem; }
+.leave-prompt-choices { display: flex; flex-wrap: wrap; gap: .35rem; }

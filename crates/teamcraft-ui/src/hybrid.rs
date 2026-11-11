@@ -704,6 +704,17 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.admits_link_arrivals(conversation, now_ms)
   }
 
+  fn change_meeting_hosts(&self, change: teamcraft_client_api::meeting_hosts::MeetingHostsChange) {
+    self.chat.change_meeting_hosts(change);
+  }
+
+  fn meeting_hosts_change(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::meeting_hosts::HostsChangeState> {
+    self.chat.meeting_hosts_change(conversation)
+  }
+
   fn discard_removal(&self, conversation: ConversationId, user: UserId) {
     self.chat.discard_removal(conversation, user);
   }

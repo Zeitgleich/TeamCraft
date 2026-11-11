@@ -56,8 +56,8 @@ use teamcraft_proto::{
   UpdateSpaceRequest,
 };
 use teamcraft_proto::{
-  CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingId, MeetingResponse,
-  PutMeetingAdmittersRequest,
+  CreateInstantMeetingRequest, MeetingAdmittersResponse, MeetingHostsResponse, MeetingId, MeetingResponse,
+  PutMeetingAdmittersRequest, PutMeetingHostsRequest,
 };
 use teamcraft_proto::{
   CreateRecoveryRequest, RecoveryRequestId, RecoveryRequestResponse, RecoveryResultPayload,
@@ -1087,6 +1087,26 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   ) -> Result<MeetingAdmittersResponse, ApiError> {
     self
       .get(&format!("/conversations/{conversation}/meeting-admitters"))
+      .await
+  }
+
+  async fn put_meeting_hosts(
+    &self,
+    conversation: ConversationId,
+    request: &PutMeetingHostsRequest,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response(
+        Method::PUT,
+        &format!("/conversations/{conversation}/meeting-hosts"),
+        Some(request),
+      )
+      .await
+  }
+
+  async fn meeting_hosts(&self, conversation: ConversationId) -> Result<MeetingHostsResponse, ApiError> {
+    self
+      .get(&format!("/conversations/{conversation}/meeting-hosts"))
       .await
   }
 
