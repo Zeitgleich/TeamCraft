@@ -3115,7 +3115,9 @@ struct {
                                      //               uint64 roster_version; uint64 signed_for_epoch;
                                      //               opaque role_log_head[32]; }
                                      // refounded(3) { uint64 signer_user_id; opaque signer_identity_key[32];
-                                     //                uint64 roster_version; opaque replaces_founding[32]; }
+                                     //                uint64 roster_version; opaque replaces_founding[32];
+                                     //                uint64 replaces_last_epoch; }
+  uint64 device_list_version;        // the signer's signed device list that names the signing device
   uint64 signed_at_ms;               // the signer's clock; shown, never decided on
 } ChannelAnchorFounding;
 
@@ -3164,8 +3166,11 @@ struct {
 - **The name hash** is over the UTF-8 bytes of the name exactly as the client sent them in the create or rename
   request; nothing normalizes on the verifying side. Before sending, the client brings the name to NFC and refuses
   bidi controls, other control characters and invisible characters (zero-width, default-ignorable code points) at
-  the field, so two names that look alike are rarely two hashes. A server that normalizes or truncates makes the
-  name stale (below), which only costs the retention. The server knows names anyway: the hash isn't for secrecy, it
+  the field, so two names that look alike are rarely two hashes. A modified founder app could sign a name that
+  breaks these rules, so **receiving apps check them too**: a name counts for a deletion only if the device holds a
+  name (the server's listing) that hashes to the anchor's name hash and keeps the rules; a name that breaks them, or
+  that no listed name matches, is stale for deletions and takes the retention. A server that normalizes or
+  truncates makes the name stale the same way, which only costs the retention. The server knows names anyway: the hash isn't for secrecy, it
   keeps the context small. Encrypting names later needs a keyed hash (a key of the group) instead: an unkeyed hash
   of a short name is found by trying names.
 - **Not in it:** members, roles (that is §4.6.2's extension, kept apart so a channel can be anchored without being
@@ -3193,33 +3198,55 @@ changes it, and when it creates the group. It checks, in this order:
    certificate's device key, over the log kind `ChannelAnchor`. The key is judged as a role entry's (§4.6.1,
    "Whose key a role names"): a pin of this device that names another key for that user refuses it; an unpinned key
    is trust on first use (§3) and attestation (§3.1) closes it. The certificate's device must be on that user's
-   signed device list (§3) and not revoked there; a device the list doesn't name (yet) grants nothing until the
-   list is fetched again.
-4. For `reviewed` and `refounded`: the signer is a workspace owner or admin on a **fresh roster**, the same rule as
-   a move (D4): `roster_version` is one this device can verify, the newest roster it holds is fresh, and no roster
-   it holds newer than `roster_version` demotes or removes the signer. For `reviewed`, the commit that adds the
-   anchor is at most 32 epochs after `signed_for_epoch` (§4.6, "Freshness"); a device welcomed later checks that
-   `signed_for_epoch` isn't past the epoch it is welcomed into. A roster it can't verify grants nothing yet and is
-   fetched again. For `refounded`, see "Re-founding" below.
+   signed device list at `device_list_version` (§3); a device the list doesn't name (yet) grants nothing until the
+   list is fetched again. Revocation is judged as of the anchoring (below, "Judged as of the anchoring").
+4. For `reviewed` and `refounded`: the signer is a workspace owner or admin at `roster_version`, which this device
+   can verify. Within the anchoring window (below) that roster must be **fresh**, the same rule as a move (D4): the
+   newest roster the device holds is fresh, and no roster it holds newer than `roster_version` demotes or removes
+   the signer. For `reviewed`, the commit that adds the anchor is at most 32 epochs after `signed_for_epoch` (§4.6,
+   "Freshness"); a device welcomed later checks that `signed_for_epoch` isn't past the epoch it is welcomed into.
+   A roster it can't verify grants nothing yet and is fetched again. For `refounded`, see "Re-founding" below.
 5. The properties: at version 1, `prev_hash` is zero, `name_set_by` names the founder (`founder`, or `workspace`
    for the reviewer or re-founder), and the founding entry covered them. Above 1, `properties_entry` is a
    `ChannelProperties` entry for this conversation and this founding hash whose new values and version are these,
    and whose signer may (D4, D5, below) as far as this device can tell from the current context, tree and roster. A
    signer it can't confirm (a member who has since left, a roster it can't read) makes that property **stale for
    this device**, not the anchor invalid.
-6. The pin and the floor (below): the context is at or above what this device and its user's other devices have
-   seen of this conversation.
+6. The pin and the floor (below): when the device **enters** a group state (a welcome, an add-back, an external
+   commit, a re-founding), the context is at or above what this device and its user's other devices have seen of
+   this conversation. At a commit inside a group state it already holds, only the founding pin is checked and the
+   floor only advances.
+
+**Judged as of the anchoring.** A revocation or a demotion that comes after the anchoring doesn't unanchor the
+channel: the signer had to be valid when it signed, not for ever. The anchoring epoch is 0 for `founded` and
+`refounded` and `signed_for_epoch` for `reviewed`; the anchoring window is that epoch and the 32 after it. A device
+that verifies the anchor within the window (the members present then, newcomers welcomed then) judges checks 3
+and 4 on the newest device list and roster it holds: a newer list that revokes the signing device, or a newer roster
+that demotes the signer, refuses the anchor. A device that verifies it later (a newcomer welcomed into epoch 40)
+judges only the versions the anchor names: the device on `device_list_version`, the signer an admin at
+`roster_version`; later versions don't count against it, because the members of the window checked them fresh and
+the MLS chain carries their verdict. A device that was compromised before it signed is the one case this doesn't
+cover once the window is over: a workspace admin re-founds the channel (below), which also takes back the founder's
+authority there. Rejected: rechecking revocations at every welcome, which made the anchors of a founder who later
+lost a phone, or an admin who later left the role, decay into unanchored channels for every newcomer.
 
 **The pin and the floor.** Per conversation, a device records the first founding hash it accepts and, from then on,
 the highest properties version it accepted with its properties hash and the highest epoch in which it saw the
-anchor. A later context of the same conversation is refused if it has no anchor, another founding, a lower
-properties version, the same version with another hash, or an epoch below the floor; a refused context reads as
-"Stripping and replacing" below says. The record lives in the account data (§6.4), next to the group epoch floor,
-so a new device, a reinstall and a recovery start from what the user's devices saw, not from trust on first use.
-Merging keeps the higher version and epoch. Two copies with another founding, or the same version under two hashes,
-are a fork the user's devices saw both sides of: the device keeps the record it holds, grants nothing from the
-anchor in that conversation (deletions take the retention) and shows a workspace admin the channel as forked in the
-look at the roles, until a re-founding or a higher version on its side settles it.
+anchor. Every later context of the conversation must carry the pinned founding; one without an anchor or with
+another founding is refused. **On entering** a group state, a context is also refused if it has a lower properties
+version, the same version with another hash, or an epoch below the floor; a refused context reads as "Stripping and
+replacing" below says. **Inside** a group state the device already holds, the MLS chain guarantees continuity and a
+move or rename is checked one version up from the context it replaces (below): there the floor isn't checked, only
+raised. The floor is merged across the user's devices, so checking it there would make a lagging device refuse a
+legitimate move below a sibling's floor and fall out of a healthy group. The record lives in the account data
+(§6.4), next to the group epoch floor, so a new device, a reinstall and a recovery start from what the user's
+devices saw, not from trust on first use. It also keeps the **re-founding chain**: each verified re-founding with
+the founding hash it replaced and the one it set. Merging keeps the higher version and epoch; when one copy's
+founding is reached from the other's through verified re-foundings in that chain, the later founding wins with its
+own floor, and the other copy's floor is dropped. Two copies with foundings no chain connects, or the same version
+under two hashes, are a fork the user's devices saw both sides of: the device keeps the record it holds, grants
+nothing from the anchor in that conversation (deletions take the retention) and shows a workspace admin the channel
+as forked in the look at the roles, until a re-founding or a higher version on its side settles it.
 
 A founding that fails checks 1 to 4 means the device treats the group as not anchored, as a channel from before
 this, and shows a workspace admin "The channel's founding doesn't verify" in the look at the roles (§4.6.1); it
@@ -3300,16 +3327,21 @@ nobody (#1276).
 | A member commits properties nobody authorized                               | Honest members refuse the commit; a device brought back into it by that member's welcome sees a `properties_entry` it can't confirm, and the property is stale for it                                       |
 | The server replays an old properties change                                 | `version` must be one up, `prev_hash` and `founding_hash` must match; `signed_for_epoch` limits it to 32 epochs                                                                                             |
 | The server serves an old welcome or `GroupInfo`                             | The device is at an old epoch and can't read the current one: availability. A deletion names an epoch, and a device behind it takes the retention                                                           |
+| A held-back re-founding, replayed against a group that is still healthy     | Refused where a floor epoch is above `replaces_last_epoch`; the device stays in the group it holds                                                                                                          |
 | A founding from another conversation or meeting                             | `conversation_id` and the group ID, and `meeting_id`, must match; the log kind keeps it from passing for another entry                                                                                      |
 | The creating device is told a low `minimum_client_version`                  | The channel is founded unanchored, as today: availability of the new guarantees, nothing below today (D2)                                                                                                   |
 | A member founds another group under the channel's ID                        | A fork under his own anchor; members of the real group never read it (§4.6.2, finding 4); a newcomer welcomed into it falls out later                                                                       |
 
 **Re-founding.** A group can be truly lost: every device with its state is gone, or the pins of the users who are
 left disagree after a fork. Then a workspace owner or admin of a fresh roster founds the group again with origin
-`refounded`, naming in `replaces_founding` the founding hash it replaces (the one the look at the roles shows). A
-device whose pin is that hash accepts it once check 4 holds: it moves its pin to the new founding hash and its floor
-to the new anchor's version 1 and the new group's epoch, and shows "This channel was founded again by" the signer.
-A device pinned to another founding refuses it as any other founding. A re-founding grants what a `reviewed` anchor
+`refounded`, naming in `replaces_founding` the founding hash it replaces (the one the look at the roles shows) and
+in `replaces_last_epoch` the last epoch of the old group it replaces (the floor epoch its own user's devices hold).
+A device whose pin is that hash and whose floor epoch for the conversation is at most `replaces_last_epoch` accepts
+it once check 4 holds: it records the re-founding in its chain (above), moves its pin to the new founding hash and
+its floor to the new anchor's version 1 and the new group's epoch, and shows "This channel was founded again by"
+the signer. A device whose floor epoch is above `replaces_last_epoch` saw the old group go on after the signer's
+view of it: it refuses the re-founding, so a re-founding the server held back can't be replayed against a group
+that is still healthy. A device pinned to another founding refuses it as any other founding. A re-founding grants what a `reviewed` anchor
 grants: its role log head is the signer's list. Its signer is a workspace signer like any other, and members see
 who did it.
 
@@ -3442,6 +3474,8 @@ and couldn't count for a purge.
 | Malicious member | Changing the space or the name                                              | Refused unless they may (D4, D5); a member's rename is shown with their name                                                           |
 | Malicious member | Renaming an important channel "old-test" so an admin deletes it             | The name is stale for deletions (`name_set_by` a member): the retention; the confirmation names who renamed it                         |
 | Demoted admin    | Reviewing or re-founding with an old roster version                         | A fresh roster is required and a newer roster that demotes them refuses it; `signed_for_epoch` limits a held-back review to 32 epochs  |
+| Hostile server   | Replaying a held-back re-founding against a healthy group                   | Refused by every device whose floor epoch is above `replaces_last_epoch`, new devices of those users included (§6.4)                   |
+| Malicious member | Signing a name that breaks the NFC and invisible-character rules            | Receiving apps check the rules on the listed name that matches the hash; a breaking or unmatched name is stale for deletions           |
 | Malicious member | Copying an organizer's anchor and leaf into a meeting group of his own      | No authority; a fork, availability                                                                                                     |
 | Stale device     | Judging with an old context                                                 | It judges a deletion only at or after the deletion's epoch, otherwise as a claim                                                       |
 | Old app          | Joining an anchored channel                                                 | Refused by openmls before anything is sent; the adder is told to have them update                                                      |
@@ -3472,6 +3506,14 @@ and couldn't count for a purge.
   - Names are NFC and refused with bidi, control or invisible characters at the client; the hashes are labelled
     and length-prefixed; the pin holds no signature bytes and signatures use `verify_strict`;
     `minimum_client_version` is monotonic on a device; group context extensions proposals keep unknown extensions.
+- **The verification** (on #1717) changed it once more:
+  - The floor is checked only on entering a group state (welcome, add-back, external commit, re-founding); inside
+    one it only rises, so a lagging device doesn't refuse a move below a sibling's floor.
+  - A re-founding names `replaces_last_epoch`; a device whose floor epoch is above it refuses the re-founding.
+  - The account data keeps the re-founding chain, so a verified successor wins the merge instead of marking a fork.
+  - Checks 3 and 4 judge revocation and demotion as of the anchoring (the founding names `device_list_version`), so
+    anchors don't decay for newcomers when the founder loses a device or an admin leaves the role.
+  - Receiving apps check the name rules too; a name that breaks them is stale for deletions.
 - **The reviewer's answers.**
   - The founding needn't bind the founder's device key directly: the certificate does, but check 3 must require
     that device on the user's signed device list and not revoked.
@@ -3517,6 +3559,12 @@ and couldn't count for a purge.
   count, as in §4.6.2; `workspace_max_age` bounds it.
 - A member's rename is shown as the channel's name; it only can't purge.
 - Pins are trust on first use where nothing attests them (§3), the founder's key included.
+- A device revoked, or an admin demoted, only after the anchoring window keeps the anchor valid for newcomers; a
+  revocation withheld from every member during the window, or a device that was compromised when it signed, needs
+  a re-founding by a workspace admin to take the anchor back.
+- A device offline since before `replaces_last_epoch` accepts a re-founding the server replays later, and a device
+  that saw the old group go on refuses a genuine one; the re-founder then founds again naming the later epoch.
+  Availability, not a purge: the floor only refuses.
 - Founder authority in a channel that isn't strict ends at the founding: later roles come from the role log, with
   §4.6.1's and §4.6.3's limits.
 - A refused properties or founding commit costs availability: a non-strict channel falls out and waits for an
@@ -4514,9 +4562,12 @@ restored together with them on a new device.
   switched the content key; merging keeps the higher one. A new device of the user doesn't join a
   group from information older than that (§4.6).
 - **Channel anchor pins and floors** (§4.6.5, not implemented yet). Per anchored conversation, the founding hash
-  first accepted, the highest properties version with its hash and the highest epoch the anchor was seen in;
-  merging keeps the higher version and epoch, and two foundings or two hashes for one version mark a fork. A new
-  device or a reinstall doesn't take an anchored channel on first use again.
+  first accepted, the highest properties version with its hash, the highest epoch the anchor was seen in, and the
+  chain of verified re-foundings (old founding hash, the re-founding, new founding hash). Merging keeps the higher
+  version and epoch; a founding reached from the other copy's through that chain wins with its floor; only two
+  foundings no chain connects, or two hashes for one version, mark a fork. The floor is checked when a device
+  enters a group state, not at commits inside one. A new device or a reinstall doesn't take an anchored channel on
+  first use again.
 - **Removed senders.** When devices last left conversations and last came back (the removal commit
   and the commit that added them back, server times; only the last absence), so every device of the
   user refuses what they signed while out, by the server's message timestamp (§4.4).
