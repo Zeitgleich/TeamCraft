@@ -724,8 +724,8 @@ impl Forwarder {
   }
 
   /// Feedback for the datagrams `sender` sent since the last call (its uplink estimation).
-  pub fn take_uplink_feedback(&mut self, sender: DeviceId) -> Option<TransportFeedback> {
-    self.participants.get_mut(&sender)?.uplink.take_feedback()
+  pub fn take_uplink_feedback(&mut self, sender: DeviceId, now: Instant) -> Option<TransportFeedback> {
+    self.participants.get_mut(&sender)?.uplink.take_feedback(now)
   }
 
   /// The current speaker set, loudest first.
@@ -1990,7 +1990,9 @@ mod tests {
         let datagram = stamped(audio(1, 20), seq);
         forwarder.route(device(1), &datagram, now).unwrap();
       }
-      let feedback = forwarder.take_uplink_feedback(device(1)).unwrap();
+      // The gap is a loss once 3 arrived a reordering's while ago.
+      let later = now + teamcraft_media::bwe::REORDER_WINDOW;
+      let feedback = forwarder.take_uplink_feedback(device(1), later).unwrap();
       assert_eq!(feedback.base_seq, 0);
       assert_eq!(
         feedback
@@ -2000,7 +2002,7 @@ mod tests {
           .collect::<Vec<_>>(),
         vec![true, true, false, true]
       );
-      assert_eq!(forwarder.take_uplink_feedback(device(1)), None);
+      assert_eq!(forwarder.take_uplink_feedback(device(1), later), None);
     }
 
     /// #978: a 1080p camera's fourth layer (180p) keeps a receiver that can't take 360p in the
@@ -2174,7 +2176,7 @@ mod tests {
         });
         if now >= next_feedback {
           next_feedback += Duration::from_millis(100);
-          let effects = match recorder.take_feedback() {
+          let effects = match recorder.take_feedback(now) {
             Some(feedback) => forwarder.on_transport_feedback(device(2), &feedback, now),
             None => forwarder.on_timer(device(2), now),
           };

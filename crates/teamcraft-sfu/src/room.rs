@@ -833,8 +833,8 @@ impl Room {
   }
 
   /// Feedback on the datagrams `sender` sent since the last call, for its uplink estimation.
-  pub fn take_uplink_feedback(&self, sender: DeviceId) -> Option<TransportFeedback> {
-    lock(&self.state).forwarder.take_uplink_feedback(sender)
+  pub fn take_uplink_feedback(&self, sender: DeviceId, now: Instant) -> Option<TransportFeedback> {
+    lock(&self.state).forwarder.take_uplink_feedback(sender, now)
   }
 
   pub fn on_key_package(

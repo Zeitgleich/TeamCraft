@@ -835,8 +835,9 @@ impl ParticipantSession {
     let mut interval = tokio::time::interval(PERIODIC_INTERVAL);
     loop {
       interval.tick().await;
-      self.room.on_timer(self.grant.device_id, Instant::now());
-      if let Some(feedback) = self.room.take_uplink_feedback(self.grant.device_id) {
+      let now = Instant::now();
+      self.room.on_timer(self.grant.device_id, now);
+      if let Some(feedback) = self.room.take_uplink_feedback(self.grant.device_id, now) {
         // Fails only when the writer task ended, i.e. the session is closing anyway.
         let _ = self
           .signal_tx

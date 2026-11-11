@@ -1128,7 +1128,7 @@ impl CallEngine {
 
   /// Periodic work (every ~100 ms): reports arrival times of received datagrams to the SFU.
   pub fn on_timer(&mut self, now: Instant) {
-    if let Some(feedback) = self.downlink_feedback.take_feedback() {
+    if let Some(feedback) = self.downlink_feedback.take_feedback(now) {
       self.signal(CallClientMessage::TransportFeedback { feedback });
     }
     self.execute_overdue_transition(now);
