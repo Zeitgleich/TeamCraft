@@ -178,6 +178,13 @@ pub enum CoreError {
   /// first, this is the backstop. The message starts with a stable code the UI localizes.
   #[error("channel_name_invalid: {0}")]
   ChannelName(#[from] teamcraft_proto::channel_name::ChannelNameError),
+  /// New channels are founded anchored (e2ee.md §4.6.5, D2), and this device isn't on its own
+  /// signed device list as far as it can read it: an anchor it signed would verify nowhere, so
+  /// nothing was created. The message starts with a stable code.
+  #[error(
+    "own_device_list_missing: this device isn't on its own signed device list yet, so it can't create channels; try again later or link it again"
+  )]
+  OwnDeviceListMissing,
   /// Every device of the user runs an app from before the channel anchor, which can't be in an
   /// anchored channel (e2ee.md §4.6.5): they have to update first. Nothing was sent. The message
   /// starts with a stable code the UI localizes.

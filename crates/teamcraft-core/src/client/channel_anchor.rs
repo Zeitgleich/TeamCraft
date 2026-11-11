@@ -7,12 +7,12 @@
 //! don't hand the meeting's ID to the chat's founding.
 
 use teamcraft_crypto::channel_anchor::{
-  AnchorExpectation, AnchorKind, ChannelAnchor, ChannelProperties, DEFAULT_MAX_ANCHOR_BYTES, ExpectedKind,
-  FloorError, Founding, NameAuthority, PropertiesChangeError, PropertiesTarget, VerifiedAnchor, name_hash,
+  AnchorKind, ChannelAnchor, ChannelProperties, DEFAULT_MAX_ANCHOR_BYTES, FloorError, Founding,
+  NameAuthority, PropertiesChangeError, PropertiesTarget, VerifiedAnchor, name_hash,
 };
 use teamcraft_crypto::membership::IdentityDirectory;
 use teamcraft_crypto::mls::{ConversationGroup, MlsError};
-use teamcraft_proto::{ConversationId, ConversationKind, ConversationResponse, SpaceId, UserId};
+use teamcraft_proto::{ConversationId, ConversationResponse, SpaceId, UserId};
 
 use super::Client;
 use crate::anchoring::{self, AnchorOutcome, AnchorVerdict, ReleaseVersion};
@@ -83,15 +83,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     records::get_json(&self.store, Table::SyncState, MINIMUM_VERSION_KEY)
   }
 
-  /// The signed anchor for a channel this device is about to found, or `None` to found it as
-  /// before (D2 not reached yet, or this device's own device list isn't known: an anchor it signs
-  /// then would verify nowhere). What it signs is what it asked the server for.
-  pub(crate) async fn anchor_for_new_channel(
-    &mut self,
-    conversation: ConversationId,
-    space: SpaceId,
-    name: &str,
-  ) -> Option<ChannelAnchor> {
+  /// Whether a channel this device is about to create is founded anchored, and if so the version
+  /// of its own signed device list the founding names. Asked **before** the server creates the
+  /// channel: once D2 is reached, a channel is never founded unanchored silently. If this device's
+  /// own list can't be found even after fetching it again, the create fails with
+  /// [`CoreError::OwnDeviceListMissing`] and nothing is created.
+  pub(crate) async fn prepare_anchored_founding(&mut self) -> Result<Option<u64>, CoreError> {
     match self.api.client_compatibility().await {
       Ok(compatibility) => {
         if let Err(error) = self.note_minimum_client_version(&compatibility.minimum_client_version) {
@@ -100,41 +97,47 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       Err(error) => tracing::debug!(%error, "founding on the minimum client version seen before"),
     }
-    if !anchoring::founds_anchored(self.highest_minimum_client_version().ok().flatten()) {
-      return None;
+    if !anchoring::founds_anchored(self.highest_minimum_client_version()?) {
+      return Ok(None);
     }
     let me = self.user_id();
     let identity = self.account.identity_public_key();
-    let maybe_list = match self.stored_device_list(me, &identity) {
-      Ok(Some(list)) => Some(list),
-      _ => self.fetch_device_list(me, &identity).await.ok().flatten(),
-    };
-    let is_listed = |list: &teamcraft_crypto::device_list::VerifiedDeviceList| {
-      self
-        .account
-        .certificate
-        .verify(&identity)
-        .is_ok_and(|device| list.is_active(&device))
-    };
-    let Some(list) = maybe_list.filter(is_listed) else {
-      tracing::warn!(conversation_id = %conversation, "this device isn't on its own device list yet; the channel is founded unanchored");
-      return None;
-    };
+    let device = self.account.certificate.verify(&identity)?;
+    if let Some(list) = self.stored_device_list(me, &identity)?
+      && list.is_active(&device)
+    {
+      return Ok(Some(list.sequence()));
+    }
+    // Fetched again, twice: a list published a moment ago may not be read back at once.
+    for _ in 0..2 {
+      if let Some(list) = self.fetch_device_list(me, &identity).await?
+        && list.is_active(&device)
+      {
+        return Ok(Some(list.sequence()));
+      }
+    }
+    Err(CoreError::OwnDeviceListMissing)
+  }
+
+  /// Signs a new channel's anchor with what this device asked the server for (e2ee.md §4.6.5,
+  /// "Founding"), naming its own device list at `device_list_version`.
+  pub(crate) fn sign_founding(
+    &self,
+    conversation: ConversationId,
+    space: SpaceId,
+    name: &str,
+    device_list_version: u64,
+  ) -> Result<ChannelAnchor, CoreError> {
     let founding = Founding {
       conversation_id: convert::conversation(conversation),
       kind: AnchorKind::Channel,
-      device_list_version: list.sequence(),
+      device_list_version,
       signed_at_ms: u64::try_from(self.now_ms()).unwrap_or(0),
       maybe_space_id: Some(convert::space(space)),
       name,
     };
-    match ChannelAnchor::found(&self.account.device, &self.account.certificate, &founding) {
-      Ok(anchor) => Some(anchor),
-      Err(error) => {
-        tracing::warn!(conversation_id = %conversation, %error, "could not sign the channel's anchor; founded unanchored");
-        None
-      },
-    }
+    ChannelAnchor::found(&self.account.device, &self.account.certificate, &founding)
+      .map_err(|error| CoreError::Mls(MlsError::from(error)))
   }
 
   /// Check 6 for a group state this device enters (a welcome, an add-back, an external commit, its
@@ -145,13 +148,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     group: &ConversationGroup,
   ) -> Result<Result<(), FloorError>, CoreError> {
-    let Some(expected) = self.anchor_expectation(conversation)? else {
+    let maybe_floor = self.account_data().anchor_floor(conversation);
+    let Some(expected) = anchoring::anchor_expectation(
+      convert::conversation(conversation),
+      maybe_floor.is_some(),
+      group.anchor_bytes().is_some(),
+    ) else {
       return Ok(Ok(()));
     };
-    let maybe_floor = self.account_data().anchor_floor(conversation);
-    if maybe_floor.is_none() && group.anchor_bytes().is_none() {
-      return Ok(Ok(()));
-    }
     let tree_users = users_of(group)?;
     let directory = self.anchor_directory(group.anchor_bytes(), tree_users).await?;
     let authority = self.anchor_authority()?;
@@ -169,7 +173,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Some(group) = self.groups.remove(&conversation) else {
       return;
     };
-    let admitted = self.admit_anchor_entering(conversation, &group).await;
+    let admitted = Box::pin(self.admit_anchor_entering(conversation, &group)).await;
     self.groups.insert(conversation, group);
     match admitted {
       Ok(Ok(())) => {},
@@ -190,17 +194,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     directory: &PinnedDirectory,
   ) -> Result<(), CoreError> {
-    let Some(expected) = self.anchor_expectation(conversation)? else {
-      return Ok(());
-    };
+    let maybe_floor = self.account_data().anchor_floor(conversation);
     let authority = self.anchor_authority()?;
     let group = self.group_or_error(conversation)?;
+    let Some(expected) = anchoring::anchor_expectation(
+      convert::conversation(conversation),
+      maybe_floor.is_some(),
+      group.anchor_bytes().is_some(),
+    ) else {
+      return Ok(());
+    };
     let outcome = AnchorOutcome::of(
       group.verified_anchor(&expected, directory, &authority),
       group.anchor_bytes(),
     );
     let epoch = group.epoch();
-    let maybe_floor = self.account_data().anchor_floor(conversation);
     let verdict = anchoring::judge_inside(maybe_floor.as_ref(), &outcome, epoch);
     if let Err(error) = self.apply_anchor_verdict(conversation, verdict)? {
       // The commit is merged already, and the crypto layer refuses any commit that touches the
@@ -213,17 +221,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// The channel's anchor as this device holds it, verified now (for a deletion, D3).
   pub(crate) async fn held_anchor(&mut self, conversation: ConversationId) -> Result<HeldAnchor, CoreError> {
-    let Some(expected) = self.anchor_expectation(conversation)? else {
-      return Ok(HeldAnchor::Unanchored);
-    };
     let maybe_floor = self.account_data().anchor_floor(conversation);
     let Some(group) = self.group(conversation)? else {
       return Ok(HeldAnchor::Unanchored);
     };
     let maybe_bytes = group.anchor_bytes().map(<[u8]>::to_vec);
-    if maybe_bytes.is_none() && maybe_floor.is_none() {
+    let Some(expected) = anchoring::anchor_expectation(
+      convert::conversation(conversation),
+      maybe_floor.is_some(),
+      maybe_bytes.is_some(),
+    ) else {
       return Ok(HeldAnchor::Unanchored);
-    }
+    };
     let tree_users = users_of(self.group_or_error(conversation)?)?;
     let directory = self.anchor_directory(maybe_bytes.as_deref(), tree_users).await?;
     let authority = self.anchor_authority()?;
@@ -259,7 +268,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Ok(());
       }
       self.resolve_pending_commit(conversation).await?;
-      let HeldAnchor::Anchored { anchor, .. } = self.held_anchor(conversation).await? else {
+      let HeldAnchor::Anchored { anchor, .. } = Box::pin(self.held_anchor(conversation)).await? else {
         tracing::info!(conversation_id = %conversation, "the channel's anchor doesn't verify here; the change stays the server's word");
         return Ok(());
       };
@@ -328,21 +337,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       attempts,
       reason: "other commits kept winning the epoch".into(),
     })
-  }
-
-  /// What an anchor of `conversation` must name: a channel the server lists as one. `None` for any
-  /// other conversation (DMs and the notes get no anchor; meeting chats not yet, D10).
-  fn anchor_expectation(&self, conversation: ConversationId) -> Result<Option<AnchorExpectation>, CoreError> {
-    let maybe_known: Option<ConversationResponse> =
-      records::get_json(&self.store, Table::Conversations, &conversation.to_string())?;
-    Ok(
-      maybe_known
-        .filter(|known| known.kind == ConversationKind::Channel)
-        .map(|_| AnchorExpectation {
-          conversation_id: convert::conversation(conversation),
-          kind: ExpectedKind::Channel,
-        }),
-    )
   }
 
   fn listed_name(&self, conversation: ConversationId) -> Result<Option<String>, CoreError> {

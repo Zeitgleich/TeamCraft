@@ -221,6 +221,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       };
       &normalized
     };
+    // Before the server creates anything: once anchoring is on, a channel this device can't anchor
+    // isn't created at all (e2ee.md §4.6.5, D2).
+    let maybe_list_version = Box::pin(self.prepare_anchored_founding()).await?;
     let mut attempt = 1;
     // A lost answer is retried with the same request, hence the same idempotency key: the server
     // returns the channel it already made instead of a second one.
@@ -241,12 +244,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // A repeated create (idempotency key) returns the channel we already founded.
     if !self.has_group(conversation.id)? {
       // What this device asked for, never the server's answer (e2ee.md §4.6.5, "Founding").
-      let maybe_anchor = self
-        .anchor_for_new_channel(conversation.id, space, &request.name)
-        .await;
+      let maybe_anchor = maybe_list_version
+        .map(|version| self.sign_founding(conversation.id, space, &request.name, version))
+        .transpose()?;
       self.found_group_anchored(conversation.id, maybe_anchor.as_ref())?;
       if maybe_anchor.is_some() {
-        self.pin_own_founding(conversation.id).await;
+        Box::pin(self.pin_own_founding(conversation.id)).await;
       }
       // The creator is the channel's first admin, signed so members don't take the server's word
       // for it (e2ee.md §4.6.1).
@@ -2996,7 +2999,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     // A welcome or add-back into a group without the pinned anchor, with another founding or
     // below the floor: the device stays out (e2ee.md §4.6.5, "Stripping and replacing").
-    match self.admit_anchor_entering(conversation, &group).await {
+    match Box::pin(self.admit_anchor_entering(conversation, &group)).await {
       Ok(Ok(())) => {},
       Ok(Err(refusal)) => {
         group.delete(&self.provider)?;

@@ -10,13 +10,14 @@ use crate::common;
 
 use common::{Peer, settle};
 use teamcraft_core::anchoring::ANCHORING_RELEASE;
+use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::error::CoreError;
 use teamcraft_core::records;
-use teamcraft_core::store::Table;
+use teamcraft_core::store::{LocalStore, Table};
 use teamcraft_core::workspace::RosterRole;
 use teamcraft_proto::channel_name::ChannelNameError;
-use teamcraft_proto::{ConversationId, ConversationResponse, UpdateConversationRequest};
+use teamcraft_proto::{ConversationId, ConversationKind, ConversationResponse, UpdateConversationRequest};
 
 mod founding {
   use super::*;
@@ -41,6 +42,29 @@ mod founding {
     assert_eq!(alice_floor.founding_hash, bob_floor.founding_hash);
     assert_eq!(bob_floor.properties_version, 1);
     assert!(bob_floor.grants());
+  }
+
+  /// Once anchoring is on, a device that can't find itself on its own device list creates no
+  /// channel at all, rather than one founded unanchored without a word.
+  #[tokio::test]
+  async fn a_device_off_its_own_list_creates_nothing() {
+    let server = anchoring_server();
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let alice_id = alice.client.user_id();
+    server.forget_device_list(alice_id);
+    alice
+      .store
+      .delete(Table::DeviceLists, &alice_id.to_string())
+      .unwrap();
+    let space = alice.space().await;
+    let before = alice.api.list_conversations().await.unwrap().conversations.len();
+    let result = alice.client.create_channel(space, "general").await;
+    assert!(
+      matches!(result, Err(CoreError::OwnDeviceListMissing)),
+      "{result:?}"
+    );
+    let after = alice.api.list_conversations().await.unwrap().conversations.len();
+    assert_eq!(after, before, "nothing was created on the server");
   }
 
   /// D2: a lower minimum the server reports later doesn't turn anchoring off again.
@@ -134,6 +158,35 @@ mod names {
     );
     assert_eq!(bob_floor.properties_version, 2);
     assert_eq!(alice_floor.properties_hash, bob_floor.properties_hash);
+  }
+}
+
+mod relisted {
+  use super::*;
+
+  /// The server relists a pinned channel as a group DM: Bob's device still checks the anchor on a
+  /// commit that changes it and raises its floor, instead of skipping it on the server's word.
+  #[tokio::test]
+  async fn a_pinned_channel_relisted_as_a_dm_is_still_checked() {
+    let server = anchoring_server();
+    let (mut alice, mut bob) = two(&server).await;
+    let alice_id = alice.client.user_id();
+    alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner)])
+      .await
+      .unwrap();
+    bob.client.full_sync().await.unwrap();
+    let channel = shared_channel(&mut alice, &mut bob, "general").await;
+    rename(&mut alice, channel, "announcements").await;
+    server.relabel_conversation(channel, ConversationKind::Group);
+    bob.client.full_sync().await.unwrap();
+    settle(&mut [&mut alice, &mut bob]).await;
+    let floor = bob.client.account_data().anchor_floor(channel).unwrap();
+    assert_eq!(
+      floor.properties_version, 2,
+      "checked and raised despite the relisting"
+    );
   }
 }
 

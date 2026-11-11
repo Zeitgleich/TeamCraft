@@ -208,6 +208,7 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::SpaceHasHiddenChannels => "error-space-has-hidden-channels",
       ErrorCode::ChannelNeedsAdmin => "error-channel-needs-admin",
       ErrorCode::NotAChannel => "error-not-a-channel",
+      ErrorCode::InvalidChannelName => "channel-name-error-refused",
       ErrorCode::AdminJoinRequestNotFound => "error-admin-join-request-gone",
       ErrorCode::AdminJoinRequestTooSoon => "error-admin-join-request-too-soon",
       ErrorCode::CallDeviceLimit => "error-call-device-limit",

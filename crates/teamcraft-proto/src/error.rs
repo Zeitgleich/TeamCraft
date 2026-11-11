@@ -111,6 +111,9 @@ wire_enum! {
     ChannelNeedsAdmin => "channel_needs_admin",
     /// Only channels can be left or deleted this way, not DMs and group DMs.
     NotAChannel => "not_a_channel",
+    /// A channel name breaks the rules every client keeps (`channel_name`, e2ee.md §4.6.5): not
+    /// trimmed, not in NFC, or with a bidi, control or invisible character. Shown at the name field.
+    InvalidChannelName => "invalid_channel_name",
     /// A guest tried to start a direct message the instance policy doesn't allow them to start
     /// (`guest_dm_start`, PLAN.md §12). Only given to guests about people they can already see.
     GuestDmNotAllowed => "guest_dm_not_allowed",

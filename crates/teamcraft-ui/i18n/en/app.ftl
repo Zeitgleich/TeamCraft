@@ -252,6 +252,7 @@ form-error-name = Enter a name.
 channel-name-error-bidi = Remove the character that changes the writing direction.
 channel-name-error-control = Remove the line break or control character.
 channel-name-error-invisible = Remove the invisible character, such as a zero-width space.
+channel-name-error-refused = Use a name without invisible, control or direction-changing characters.
 error-last-channel-admin = Make someone else channel admin in the channel's settings first, or delete the channel.
 error-must-update = { $name } has to update TeamCraft before they can be added to this channel.
 error-role-change-not-confirmed = The role changed, but this device couldn't confirm it for the channel's members, so their apps don't count it yet. A workspace admin who is in this channel can.

@@ -69,18 +69,106 @@ fn is_emoji_joiner(chars: &[char], index: usize) -> bool {
   let maybe_before = index.checked_sub(1).and_then(|before| chars.get(before)).copied();
   let maybe_after = chars.get(index + 1).copied();
   match chars.get(index) {
-    Some('\u{FE0F}') => maybe_before.is_some_and(is_symbol),
+    Some('\u{FE0F}') => maybe_before.is_some_and(is_extended_pictographic),
     Some('\u{200D}') => {
-      maybe_before.is_some_and(|c| is_symbol(c) || c == '\u{FE0F}') && maybe_after.is_some_and(is_symbol)
+      maybe_before.is_some_and(|c| is_extended_pictographic(c) || c == '\u{FE0F}' || is_skin_tone(c))
+        && maybe_after.is_some_and(is_extended_pictographic)
     },
     _ => false,
   }
 }
 
-/// A visible character outside letters, digits, spaces and ASCII: what emoji are made of, roughly.
-/// Exact emoji properties would need Unicode's emoji data; this errs on refusing.
-fn is_symbol(c: char) -> bool {
-  u32::from(c) >= 0x2000 && !c.is_alphanumeric() && !c.is_whitespace() && !is_default_ignorable(c)
+/// The emoji skin tone modifiers (`Emoji_Modifier`), which may come before a joiner.
+fn is_skin_tone(c: char) -> bool {
+  matches!(c, '\u{1F3FB}'..='\u{1F3FF}')
+}
+
+/// Unicode's `Extended_Pictographic` property (emoji-data.txt, Unicode 16), the characters emoji
+/// sequences are built from. Dashes, bullets, punctuation, private-use and unassigned code points
+/// outside these ranges are not, so the selector and the joiner next to them stay refused. The
+/// table includes the ranges Unicode reserves for future pictographs, as the property does.
+fn is_extended_pictographic(c: char) -> bool {
+  matches!(
+    c,
+    '\u{00A9}'
+      | '\u{00AE}'
+      | '\u{203C}'
+      | '\u{2049}'
+      | '\u{2122}'
+      | '\u{2139}'
+      | '\u{2194}'..='\u{2199}'
+      | '\u{21A9}'..='\u{21AA}'
+      | '\u{231A}'..='\u{231B}'
+      | '\u{2328}'
+      | '\u{2388}'
+      | '\u{23CF}'
+      | '\u{23E9}'..='\u{23F3}'
+      | '\u{23F8}'..='\u{23FA}'
+      | '\u{24C2}'
+      | '\u{25AA}'..='\u{25AB}'
+      | '\u{25B6}'
+      | '\u{25C0}'
+      | '\u{25FB}'..='\u{25FE}'
+      | '\u{2600}'..='\u{2605}'
+      | '\u{2607}'..='\u{2612}'
+      | '\u{2614}'..='\u{2685}'
+      | '\u{2690}'..='\u{2705}'
+      | '\u{2708}'..='\u{2712}'
+      | '\u{2714}'
+      | '\u{2716}'
+      | '\u{271D}'
+      | '\u{2721}'
+      | '\u{2728}'
+      | '\u{2733}'..='\u{2734}'
+      | '\u{2744}'
+      | '\u{2747}'
+      | '\u{274C}'
+      | '\u{274E}'
+      | '\u{2753}'..='\u{2755}'
+      | '\u{2757}'
+      | '\u{2763}'..='\u{2767}'
+      | '\u{2795}'..='\u{2797}'
+      | '\u{27A1}'
+      | '\u{27B0}'
+      | '\u{27BF}'
+      | '\u{2934}'..='\u{2935}'
+      | '\u{2B05}'..='\u{2B07}'
+      | '\u{2B1B}'..='\u{2B1C}'
+      | '\u{2B50}'
+      | '\u{2B55}'
+      | '\u{3030}'
+      | '\u{303D}'
+      | '\u{3297}'
+      | '\u{3299}'
+      | '\u{1F000}'..='\u{1F0FF}'
+      | '\u{1F10D}'..='\u{1F10F}'
+      | '\u{1F12F}'
+      | '\u{1F16C}'..='\u{1F171}'
+      | '\u{1F17E}'..='\u{1F17F}'
+      | '\u{1F18E}'
+      | '\u{1F191}'..='\u{1F19A}'
+      | '\u{1F1AD}'..='\u{1F1E5}'
+      | '\u{1F201}'..='\u{1F20F}'
+      | '\u{1F21A}'
+      | '\u{1F22F}'
+      | '\u{1F232}'..='\u{1F23A}'
+      | '\u{1F23C}'..='\u{1F23F}'
+      | '\u{1F249}'..='\u{1F3FA}'
+      | '\u{1F400}'..='\u{1F53D}'
+      | '\u{1F546}'..='\u{1F64F}'
+      | '\u{1F680}'..='\u{1F6FF}'
+      | '\u{1F774}'..='\u{1F77F}'
+      | '\u{1F7D5}'..='\u{1F7FF}'
+      | '\u{1F80C}'..='\u{1F80F}'
+      | '\u{1F848}'..='\u{1F84F}'
+      | '\u{1F85A}'..='\u{1F85F}'
+      | '\u{1F888}'..='\u{1F88F}'
+      | '\u{1F8AE}'..='\u{1F8FF}'
+      | '\u{1F90C}'..='\u{1F93A}'
+      | '\u{1F93C}'..='\u{1F945}'
+      | '\u{1F947}'..='\u{1FAFF}'
+      | '\u{1FC00}'..='\u{1FFFD}'
+  )
 }
 
 /// Unicode's `Bidi_Control` property (PropList.txt).
@@ -190,6 +278,25 @@ mod tests {
     assert!(!keeps_channel_name_rules(" general"));
   }
 
+  /// Only real emoji take the selector or the joiner: next to dashes, bullets or private-use
+  /// characters they are invisible.
+  #[test]
+  fn the_selector_and_joiner_next_to_other_symbols_are_refused() {
+    for name in [
+      "Projekt \u{00C4} \u{2013}\u{FE0F} 2026",
+      "a \u{2013}\u{200D}\u{2014} b",
+      "\u{2022}\u{200D}\u{2022}",
+      "\u{E000}\u{FE0F}",
+      "\u{2060}\u{FE0F}",
+    ] {
+      assert_eq!(
+        checked_channel_name(name),
+        Err(ChannelNameError::InvisibleCharacter),
+        "{name:?}"
+      );
+    }
+  }
+
   #[test]
   fn an_empty_or_blank_name_is_refused() {
     assert_eq!(checked_channel_name(""), Err(ChannelNameError::Empty));
@@ -203,6 +310,9 @@ mod tests {
     // A heart with its presentation selector, and a family joined by zero-width joiners.
     assert!(checked_channel_name("team \u{2764}\u{FE0F}").is_ok());
     assert!(checked_channel_name("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}").is_ok());
+    // A rainbow flag, and a woman technologist with a skin tone.
+    assert!(checked_channel_name("\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}").is_ok());
+    assert!(checked_channel_name("\u{1F469}\u{1F3FD}\u{200D}\u{1F4BB}").is_ok());
     // The same two next to letters are invisible.
     assert_eq!(
       checked_channel_name("ab\u{200D}cd"),

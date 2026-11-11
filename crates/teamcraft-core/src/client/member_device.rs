@@ -198,7 +198,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self.request_device_addition(conversation).await?;
       return Ok(MemberDeviceJoin::Unjoinable);
     }
-    if let Err(refusal) = self.admit_anchor_entering(conversation, &group).await? {
+    if let Err(refusal) = Box::pin(self.admit_anchor_entering(conversation, &group)).await? {
       // The group information's anchor is stripped, replaced or below the floor of what this
       // user's devices saw (an old `GroupInfo`): nothing was sent, and the device stays out
       // (e2ee.md §4.6.5).

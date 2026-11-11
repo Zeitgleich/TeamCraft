@@ -65,7 +65,11 @@ mod entering {
       AnchorVerdict::Unanchored
     );
     let unverified = AnchorOutcome::Unverified {
-      maybe_founding_hash: Some(anchor.founding_hash()),
+      maybe_parsed: Some(ParsedAnchor {
+        founding_hash: anchor.founding_hash(),
+        properties_version: 1,
+        properties_hash: anchor.properties_hash(),
+      }),
     };
     assert_eq!(judge_entering(None, &unverified, 3), AnchorVerdict::Unanchored);
   }
@@ -83,6 +87,34 @@ mod entering {
     assert_eq!(
       judge_entering(Some(&floor), &AnchorOutcome::Verified(Box::new(other)), 5),
       AnchorVerdict::Refuse(FloorError::OtherFounding)
+    );
+  }
+
+  /// The server relists a pinned channel as a DM (or the welcome comes before its record): the
+  /// device still checks it, and a stripped or rolled-back state is refused.
+  #[test]
+  fn a_pinned_conversation_relisted_as_another_kind_is_still_checked() {
+    let world = World::new();
+    let floor = world.floor("general", 9);
+    assert_eq!(
+      anchor_expectation(CONVERSATION, false, false),
+      None,
+      "nothing pinned or carried"
+    );
+    let expected = anchor_expectation(CONVERSATION, true, false).expect("pinned: checked");
+    assert_eq!(expected.kind, ExpectedKind::Channel);
+    assert!(
+      anchor_expectation(CONVERSATION, false, true).is_some(),
+      "carried: checked"
+    );
+    assert_eq!(
+      judge_entering(Some(&floor), &AnchorOutcome::Absent, 10),
+      AnchorVerdict::Refuse(FloorError::Stripped)
+    );
+    let old = world.verified(&world.founded("general"), 3).unwrap();
+    assert_eq!(
+      judge_entering(Some(&floor), &AnchorOutcome::Verified(Box::new(old)), 3),
+      AnchorVerdict::Refuse(FloorError::OlderEpoch { offered: 3, floor: 9 })
     );
   }
 
@@ -110,6 +142,40 @@ mod entering {
     assert_eq!(
       judge_entering(Some(&floor), &garbage, 4),
       AnchorVerdict::Refuse(FloorError::OtherFounding)
+    );
+  }
+
+  /// A server can make the anchor unverifiable (withholding a device list): that never gets a
+  /// rolled-back state past the floor, an old epoch or old properties alike.
+  #[test]
+  fn an_unverified_welcome_below_the_floor_is_refused() {
+    let world = World::new();
+    let founding = world.founded("general");
+    let renamed = world.renamed(&founding, "renamed", 1);
+    let floor = world.floor_of(&renamed, 1, 9);
+    world.listing.set(Standing::Unknown);
+    let unverified = |anchor: &ChannelAnchor, epoch| {
+      let bytes = anchor.to_bytes().unwrap();
+      let outcome = AnchorOutcome::of(world.verified(anchor, epoch).map(Some), Some(&bytes));
+      assert!(outcome.verified().is_none(), "the device list is withheld");
+      outcome
+    };
+    assert_eq!(
+      judge_entering(Some(&floor), &unverified(&renamed, 4), 4),
+      AnchorVerdict::Refuse(FloorError::OlderEpoch { offered: 4, floor: 9 })
+    );
+    assert_eq!(
+      judge_entering(Some(&floor), &unverified(&founding, 12), 12),
+      AnchorVerdict::Refuse(FloorError::OlderProperties { offered: 1, floor: 2 })
+    );
+    let other_rename = world.renamed(&founding, "other", 1);
+    assert_eq!(
+      judge_entering(Some(&floor), &unverified(&other_rename, 12), 12),
+      AnchorVerdict::Refuse(FloorError::OtherProperties(2))
+    );
+    assert_eq!(
+      judge_entering(Some(&floor), &unverified(&renamed, 12), 12),
+      AnchorVerdict::KeepPin
     );
   }
 

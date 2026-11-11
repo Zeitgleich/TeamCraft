@@ -79,6 +79,8 @@ pub mod user_groups;
 pub mod webhooks;
 pub mod workspace;
 
+use teamcraft_proto::channel_name::{checked_channel_name, keeps_channel_name_rules};
+
 use crate::error::ApiError;
 
 /// Trims a required human-readable name and checks its length.
@@ -98,17 +100,21 @@ pub fn validate_name(value: &str, what: &str, max_chars: usize) -> Result<String
 
 /// Checks a channel's name and keeps it **byte for byte** (e2ee.md §4.6.5): members hash the name
 /// they are listed against the anchor the founder signed, so trimming or normalizing it here would
-/// make it stale for deletions. Clients send it trimmed and in NFC.
+/// make it stale for deletions. A name that breaks the rules every client keeps (trimmed, NFC, no
+/// bidi, control or invisible characters) is refused, never repaired.
 pub fn validate_channel_name(value: &str, max_chars: usize) -> Result<String, ApiError> {
   let what = "channel name";
   if value.trim().is_empty() {
     return Err(ApiError::InvalidRequest(format!("{what} must not be empty")));
   }
   validate_text(value, what, max_chars)?;
-  if value.chars().any(char::is_control) {
-    return Err(ApiError::InvalidRequest(format!(
-      "{what} must not contain control characters"
-    )));
+  if !keeps_channel_name_rules(value) {
+    let reason = match checked_channel_name(value) {
+      Err(error) => error.to_string(),
+      // The checked form differs: surrounding whitespace, or not in NFC.
+      Ok(_) => "the name isn't trimmed and in NFC".to_owned(),
+    };
+    return Err(ApiError::InvalidChannelName(reason));
   }
   Ok(value.to_owned())
 }
@@ -131,12 +137,27 @@ mod tests {
   #[test]
   fn a_channel_name_is_kept_byte_for_byte() {
     assert_eq!(
-      validate_channel_name(" Caf\u{0065}\u{0301} ", 80).unwrap(),
-      " Caf\u{0065}\u{0301} "
+      validate_channel_name("Caf\u{00E9} 2026", 80).unwrap(),
+      "Caf\u{00E9} 2026"
     );
     assert!(validate_channel_name("  ", 80).is_err());
-    assert!(validate_channel_name("a\nb", 80).is_err());
     assert!(validate_channel_name(&"x".repeat(81), 80).is_err());
+    // Refused, not repaired: the stored name stays what the founder signed.
+    for name in [
+      " general",
+      "Cafe\u{0301}",
+      "a\nb",
+      "gen\u{200B}eral",
+      "abc\u{202E}gpj",
+    ] {
+      assert!(
+        matches!(
+          validate_channel_name(name, 80),
+          Err(ApiError::InvalidChannelName(_))
+        ),
+        "{name:?}"
+      );
+    }
   }
 
   #[test]

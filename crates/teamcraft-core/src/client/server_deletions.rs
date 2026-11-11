@@ -135,7 +135,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let workspace = self.workspace()?;
     let group_users = self.group_users(conversation)?;
     let epoch = self.group_epoch(conversation)?;
-    let held = self.held_anchor(conversation).await?;
+    let held = Box::pin(self.held_anchor(conversation)).await?;
     let maybe_listed_name = maybe_known.as_ref().and_then(|known| known.maybe_name.as_deref());
     let anchor = held.facts(maybe_listed_name);
     let verifier = DeletionVerifier {

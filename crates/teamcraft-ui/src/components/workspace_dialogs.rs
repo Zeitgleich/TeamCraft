@@ -20,7 +20,7 @@ use teamcraft_client_api::role_rules::{
   RoleTarget, SpaceStanding, assignable_roles, can_manage_channel_roles,
 };
 use teamcraft_proto::channel_name::{ChannelNameError, checked_channel_name};
-use teamcraft_proto::{CategoryId, HistoryPolicy, IdempotencyKey, Permission};
+use teamcraft_proto::{CategoryId, ErrorCode, HistoryPolicy, IdempotencyKey, Permission};
 use wasm_bindgen::JsCast;
 
 use crate::channel_access::ChannelAccess;
@@ -558,18 +558,31 @@ fn ChannelGeneral(conversation: ConversationId, name: String, topic: String) -> 
       return;
     }
     has_saved.set(true);
-    pending.run(|| {
-      state.write(|backend| {
-        backend.update_channel(
-          conversation,
-          ChannelChanges {
-            maybe_name: non_empty(&name.get_untracked()),
-            maybe_topic: Some(topic.get_untracked().trim().to_owned()),
-            ..ChannelChanges::default()
-          },
-        )
-      })
-    });
+    pending.run_with(
+      || {
+        state.write(|backend| {
+          backend.update_channel(
+            conversation,
+            ChannelChanges {
+              maybe_name: non_empty(&name.get_untracked()),
+              maybe_topic: Some(topic.get_untracked().trim().to_owned()),
+              ..ChannelChanges::default()
+            },
+          )
+        })
+      },
+      // The server refuses a name that breaks the rules (another client's): at the field.
+      move |maybe_failure| {
+        if let Some(failure) = maybe_failure {
+          errors.refuse_server(
+            "channel-general-form",
+            failure,
+            &[(ErrorCode::InvalidChannelName, "cs-name")],
+            i18n.t("channel-name-error-refused"),
+          );
+        }
+      },
+    );
   };
   view! {
     <Show when=move || !can_edit.get() fallback=|| ()>
