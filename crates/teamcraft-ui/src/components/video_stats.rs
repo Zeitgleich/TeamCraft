@@ -288,6 +288,9 @@ mod tests {
         frames: bytes / 4000,
         frames_discarded: 0,
         maybe_jitter_ms: None,
+        keyframe_requests: 0,
+        maybe_longest_gap_ms: None,
+        maybe_max_framerate: None,
       })],
       ..VideoStatsReport::default()
     }

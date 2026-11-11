@@ -939,6 +939,7 @@ impl CallEngine {
       && let Some(track) = self.remote_video.get_mut(&stream)
     {
       track.wait_for_keyframe();
+      track.restart_gaps();
     }
     self.signal(CallClientMessage::Subscribe {
       stream_id,
@@ -1026,7 +1027,7 @@ impl CallEngine {
         return VideoSendOutcome::Failed;
       },
     };
-    track.count_sent(frame.layer, &packets);
+    track.count_sent(frame.layer, frame.is_keyframe, &packets);
     for rtp in packets {
       self.send_media(stream, frame.layer, &rtp, now);
     }
@@ -1071,6 +1072,7 @@ impl CallEngine {
             is_target: maybe_target.is_none_or(|target| target.contains(&info.layer)),
             pictures: counted.pictures,
             bytes: counted.bytes,
+            keyframes: counted.keyframes,
           }
         })
         .collect();
@@ -1086,6 +1088,9 @@ impl CallEngine {
         maybe_frames_captured: None,
         pictures_dropped: track.counters.pictures_dropped,
         maybe_frames_black: None,
+        maybe_frames_given: None,
+        maybe_frames_skipped: None,
+        maybe_held_back_ms: Some(u64::try_from(track.counters.held_back.as_millis()).unwrap_or(u64::MAX)),
       })
     });
     let mut remote: Vec<(&StreamId, &IncomingVideo)> = self.remote_video.iter().collect();
@@ -1113,6 +1118,15 @@ impl CallEngine {
         frames_discarded: counters.frames_discarded,
         // Milliseconds don't need more than f32.
         maybe_jitter_ms: counters.jitter_ms().map(|jitter| jitter as f32),
+        keyframe_requests: counters.keyframe_requests,
+        maybe_longest_gap_ms: Some(u64::try_from(counters.longest_gap.as_millis()).unwrap_or(u64::MAX)),
+        maybe_max_framerate: track.layer().and_then(|layer| {
+          track
+            .layers
+            .iter()
+            .find(|info| info.layer == layer.value())
+            .map(|info| info.max_framerate)
+        }),
       })
     });
     VideoStatsReport {
@@ -1589,8 +1603,22 @@ impl CallEngine {
       self.announce_layers(true);
       self.announce_uplink_layers();
     }
+    self.note_held_back_layers(now);
     let loss_percent = loss_percent(self.uplink.loss_ratio());
     self.event(CallEngineEvent::UplinkEstimate { bps, loss_percent });
+  }
+
+  /// Counts the time the uplink holds each own track's top layer back (screen-share quality,
+  /// #1733): looked at with every feedback, a few times a second.
+  fn note_held_back_layers(&mut self, now: Instant) {
+    for (stream, video) in &mut self.own_video {
+      let maybe_top = self
+        .own_tracks
+        .get(stream)
+        .and_then(|track| track.layers.iter().map(|info| info.layer).max());
+      let is_top_held = maybe_top.is_some_and(|top| !self.uplink_layers.allows(*stream, top));
+      video.note_uplink(is_top_held, now);
+    }
   }
 
   /// Tells the driver which layers of each own track to encode: those the SFU needs and the uplink
@@ -2121,7 +2149,9 @@ impl CallEngine {
     let is_decrypted = decrypted.is_ok();
     if let Some(track) = self.remote_video.get_mut(&stream) {
       track.count_frame(is_decrypted);
-      if !is_decrypted {
+      if is_decrypted {
+        track.note_used(now);
+      } else {
         track.wait_for_keyframe();
       }
     }

@@ -732,6 +732,7 @@ mod tests {
           is_target: layer < 2,
           pictures,
           bytes,
+          keyframes: 0,
         })
         .collect(),
       packets: 0,
@@ -739,6 +740,9 @@ mod tests {
       maybe_frames_captured: Some(captured),
       pictures_dropped: 4,
       maybe_frames_black: Some(7),
+      maybe_frames_given: None,
+      maybe_frames_skipped: None,
+      maybe_held_back_ms: None,
     })
   }
 
@@ -761,6 +765,9 @@ mod tests {
       frames,
       frames_discarded: 3,
       maybe_jitter_ms: Some(4.5),
+      keyframe_requests: 0,
+      maybe_longest_gap_ms: None,
+      maybe_max_framerate: None,
     }
   }
 

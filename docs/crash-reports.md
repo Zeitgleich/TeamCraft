@@ -265,6 +265,7 @@ thread) and the Android fixes #1431, #1428 and #1375: each of them must be visib
 | `sync.reconnect`        | The core connecting again → connected                                       | All                        | How long reconnects take; `link` = `slow`                                                                                       |
 | `file.download`         | An attachment's download and decryption                                     | Web, desktop               | Download speed per `rendition`, `bytes`                                                                                         |
 | `call.setup`            | Joining a call → its media secured                                          | Web, desktop               | Call setup time                                                                                                                 |
+| `call.screen_share`     | A screen share seen in the call → it ended (sent by the sharer and by each viewer) | Web, desktop        | Why a share was choppy: the sharer's encoder, its uplink, or a viewer's losses ("Screen shares" below, #1733)                     |
 | SDK: app start, `ui.load` | Process start → first frame; a screen until displayed; slow/frozen frames | Android, iOS               | The platform's view of the same start                                                                                           |
 
 **The core's jobs as steps (mobile).** Everything the apps ask of the core runs on two serial
@@ -326,6 +327,51 @@ outliers made the averages of `start.channel_list` and the SDK's `ui.load` meani
 - The process's first activity is a cold start, timed from the process start, only when it is
   created within 30 s of it; a process started for a push and opened later makes a warm start from
   the activity's creation.
+
+### Screen shares
+
+Issue #1733 (a share that was choppy for its viewers, and nothing to tell why). While this device
+shares its screen or receives another's, the page reads the media layer's video report every 2 s
+(the report "stats for nerds" shows, `VideoStatsReport`; on the web from the call module, on desktop
+from the shell's `call_video_stats`). When a share ends (its track is gone from the report, the call
+ended, or nothing is shared any more) the sharer and each viewer send a `call.screen_share`
+transaction (`share_quality.rs`). Rates cover the time between the first and the last report; counts
+are since the share started. A codec switch (#565) publishes a new stream and so ends one
+transaction and starts the next. A share still running when the page closes is not sent.
+
+- **Sharer** (tag `role` = `sender`): tags `codec` (`av1`, `h264`, `vp9`), `encoder` (`browser`
+  for WebCodecs, `hardware`, `software`), `top_layer` (lines of the highest layer that sent:
+  `1440p` means at least 1440), `held_back`, `choppy`; measurements `captured_fps`, `sent_fps` (top
+  layer), `skipped_percent` (frames the layers' encoders had no room for, `skipped_queue_full`,
+  web only), `keyframes` (top layer), `bitrate_kbps` (all layers), `uplink_min_kbps`,
+  `uplink_loss_max_percent`, `held_back_ms` (how long the uplink carried only lower layers); the
+  step `media` / `screen_share_sent` adds capture and top layer size, frames captured, given to the
+  encoders and skipped, pictures dropped, the average uplink estimate and the longest round trip.
+- **Viewer** (`role` = `viewer`): tags `codec`, `layer` (`top`, `lower`: the layer arriving at the
+  end against the highest offered), `size`, `choppy`; measurements `decoded_fps`,
+  `discarded_percent` (complete frames the decoder couldn't use: a reference went missing),
+  `lost_percent` (packets), `jitter_max_ms`, `keyframe_requests`, `longest_freeze_ms` (the longest
+  time between two frames handed to the decoder; a new subscription starts over), `below_asked_percent`
+  (reports at which a lower layer arrived than was asked for and offered), `bitrate_kbps`; the step
+  `media` / `screen_share_received` adds the frames, the lost packets, the size and announced frame
+  rate of the layer arriving, and the layers arriving, asked for and offered.
+
+**`ScreenShareChoppy`:** a handled warning, sampled like the others, besides the transaction (which
+follows the trace rate). Its message names the side, the cause and the codec only, so one cause is
+one issue (`sender: encoder skipped frames (av1, browser encoder, 1440p)`, `viewer: frames
+discarded (av1, 1440p)`, `viewer: picture froze (h264, 1080p)`); the numbers are in the log line
+before it, which the breadcrumbs carry. Choppy is, over at least 10 s: the sharer's encoders
+skipped more than 10 % of the frames; a viewer discarded more than 10 % of the complete frames it
+got (its decoded rate far below what arrived), or its picture stood still for 2 s or longer. A
+viewer's decoded rate is not held against the announced frame rate: a still screen shared from
+the desktop app sends about one picture a second.
+
+**Cost:** nothing while no screen is shared. During a share one report every 2 s (a few kilobytes
+of JSON from the call module or the shell). In the media layer a few counters, none per packet:
+keyframes per layer when a picture goes out, the time between used frames when one goes to the
+decoder, keyframe requests that go out, and the time the uplink holds the top layer back, looked at
+with each uplink feedback. At most 20 transactions and 3 warnings per page life, 8 shares at once.
+Mobile apps don't measure shares yet.
 
 ### What a transaction contains
 
@@ -435,6 +481,7 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
 | iOS dSYM upload, device test                                 | Next (#1515)                     |
 | GlitchTip in teamcraft-deploy                                | teamcraft-deploy                 |
 | Performance data: web, desktop, Android, iOS SDK (#1521)     | Done; iOS untested (#1515)       |
+| Screen-share quality, web and desktop (#1733)                | Done; real-hardware codec test open |
 | Core job steps, slow-job warnings, catch-up (#1521 review)   | Done; iOS built in CI only       |
 | Named core steps on every platform                           | Done                             |
 | Uploads and MLS commits as transactions of their own         | Next                             |

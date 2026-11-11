@@ -69,6 +69,16 @@ pub struct SentVideoStats {
   /// Captured frames that showed nothing but black.
   #[serde(default)]
   pub maybe_frames_black: Option<u64>,
+  /// Frames handed to the layers' encoders, one per layer and picture (the browser's WebCodecs
+  /// encoders; screen-share quality, #1733).
+  #[serde(default)]
+  pub maybe_frames_given: Option<u64>,
+  /// Frames a layer's encoder didn't get because its queue was full: the encoder doesn't keep up.
+  #[serde(default)]
+  pub maybe_frames_skipped: Option<u64>,
+  /// How long the uplink held the top layer back (it carried only lower ones), in milliseconds.
+  #[serde(default)]
+  pub maybe_held_back_ms: Option<u64>,
 }
 
 /// One simulcast layer of an own track.
@@ -80,6 +90,9 @@ pub struct SentLayerStats {
   pub is_target: bool,
   pub pictures: u64,
   pub bytes: u64,
+  /// Pictures of the layer that went out as keyframes.
+  #[serde(default)]
+  pub keyframes: u64,
 }
 
 /// Which encoder works for an own track.
@@ -123,6 +136,17 @@ pub struct ReceivedVideoStats {
   /// Interarrival jitter (RFC 3550) of the track's packets.
   #[serde(default)]
   pub maybe_jitter_ms: Option<f32>,
+  /// Keyframes this device asked the SFU for (a lost packet, a frame that didn't decrypt).
+  #[serde(default)]
+  pub keyframe_requests: u64,
+  /// The longest time between two frames handed to the decoder while subscribed, in
+  /// milliseconds: the longest the picture stood still. A still screen shared from the desktop
+  /// app sends about one picture a second.
+  #[serde(default)]
+  pub maybe_longest_gap_ms: Option<u64>,
+  /// The frame rate the sender announced for the layer arriving now.
+  #[serde(default)]
+  pub maybe_max_framerate: Option<u8>,
 }
 
 /// A layer another device offers.
@@ -216,6 +240,9 @@ mod tests {
           frames: 3,
           frames_discarded: 0,
           maybe_jitter_ms: Some(4.5),
+          keyframe_requests: 2,
+          maybe_longest_gap_ms: Some(120),
+          maybe_max_framerate: Some(30),
         }),
       ],
     };
@@ -283,6 +310,7 @@ mod tests {
           is_target: true,
           pictures,
           bytes: pictures * 1000,
+          keyframes: 1,
         })
         .collect(),
       packets: 0,
@@ -290,6 +318,9 @@ mod tests {
       maybe_frames_captured: None,
       pictures_dropped: 0,
       maybe_frames_black: None,
+      maybe_frames_given: None,
+      maybe_frames_skipped: None,
+      maybe_held_back_ms: Some(0),
     }
   }
 }
