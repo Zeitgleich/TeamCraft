@@ -11,7 +11,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
+use teamcraft_crypto::call_binding::{
+  BindingTimeCheck, CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding,
+};
 use teamcraft_crypto::identity::{DeviceKeyPair, VerifiedDevice};
 use teamcraft_crypto::ids::DeviceId as CryptoDeviceId;
 use teamcraft_proto::{CallId, DeviceId, Id, Snowflake};
@@ -26,7 +28,22 @@ pub trait CallKeyAuthenticator: fmt::Debug + Send + Sync {
   /// A signed binding of `dave_public_key` to this device for `call_id`.
   fn sign(&self, call_id: CallId, dave_public_key: &[u8]) -> Result<Vec<u8>, CallKeyError>;
   /// Verifies `device_id`'s binding for `call_id`; returns the bound DAVE public key.
-  fn verify(&self, call_id: CallId, device_id: DeviceId, binding: &[u8]) -> Result<Vec<u8>, CallKeyError>;
+  fn verify(
+    &self,
+    call_id: CallId,
+    device_id: DeviceId,
+    binding: &[u8],
+    role: BindingRole,
+  ) -> Result<Vec<u8>, CallKeyError>;
+}
+
+/// Whose binding is verified, which decides its time check (e2ee.md §8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindingRole {
+  /// A device the SFU proposes to add: its binding was just signed.
+  Joiner,
+  /// A device already in the group, named in a welcome: its binding may be hours old.
+  Member,
 }
 
 /// Signs call key bindings with this device's key. The client core implements it so the private
@@ -61,6 +78,24 @@ pub enum CallKeyError {
   /// Signing or verifying happens elsewhere (the web client's page) and failed there.
   #[error("{0}")]
   Remote(String),
+}
+
+impl BindingRole {
+  /// The role as the web call module passes it to the page.
+  pub const fn as_wire(self) -> &'static str {
+    match self {
+      Self::Joiner => "joiner",
+      Self::Member => "member",
+    }
+  }
+
+  pub fn from_wire(wire: &str) -> Option<Self> {
+    match wire {
+      "joiner" => Some(Self::Joiner),
+      "member" => Some(Self::Member),
+      _ => None,
+    }
+  }
 }
 
 impl DeviceCallKeyAuthenticator {
@@ -108,7 +143,13 @@ impl CallKeyAuthenticator for DeviceCallKeyAuthenticator {
     Ok(signed.to_bytes()?)
   }
 
-  fn verify(&self, call_id: CallId, device_id: DeviceId, binding: &[u8]) -> Result<Vec<u8>, CallKeyError> {
+  fn verify(
+    &self,
+    call_id: CallId,
+    device_id: DeviceId,
+    binding: &[u8],
+    role: BindingRole,
+  ) -> Result<Vec<u8>, CallKeyError> {
     let device = self
       .devices
       .get(&device_id)
@@ -119,8 +160,14 @@ impl CallKeyAuthenticator for DeviceCallKeyAuthenticator {
         actual: device.device_id().get(),
       });
     }
+    let time_check = match role {
+      BindingRole::Joiner => BindingTimeCheck::Joining {
+        now_unix_secs: now_unix_secs()?,
+      },
+      BindingRole::Member => BindingTimeCheck::Member,
+    };
     let key =
-      SignedCallKeyBinding::from_bytes(binding)?.verify(device, crypto_call_id(call_id), now_unix_secs()?)?;
+      SignedCallKeyBinding::from_bytes(binding)?.verify(device, crypto_call_id(call_id), time_check)?;
     Ok(key.dave_public_key().to_vec())
   }
 }

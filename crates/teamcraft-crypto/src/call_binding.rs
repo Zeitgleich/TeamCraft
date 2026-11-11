@@ -22,6 +22,9 @@ const CALL_KEY_BINDING_LABEL: &str = "TeamCraft-v1 call key binding";
 /// Bindings valid for longer than this are rejected even if signed: they are only needed while a
 /// device joins.
 pub const MAX_CALL_KEY_BINDING_VALIDITY_SECS: u64 = 3600;
+/// How far the signer's clock may be from the verifier's: wrong time zones, a PC that reads its
+/// hardware clock as local time, no time sync. Both time checks of a joining device allow it.
+pub const CALL_KEY_BINDING_CLOCK_LEEWAY_SECS: u64 = 24 * 3600;
 
 /// A call (one DAVE group); the server's Snowflake call id.
 #[derive(
@@ -47,6 +50,18 @@ pub struct CallKeyBinding {
 pub struct SignedCallKeyBinding {
   binding: CallKeyBinding,
   signature: Ed25519Signature,
+}
+
+/// Which time rule a binding is checked under (e2ee.md §8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindingTimeCheck {
+  /// A device joining now: its binding was just signed, so it must not be expired or valid for too
+  /// long, each with [`CALL_KEY_BINDING_CLOCK_LEEWAY_SECS`] for clocks that differ.
+  Joining { now_unix_secs: u64 },
+  /// A device already in the group (the bindings a welcome carries). Its binding was signed when it
+  /// joined, maybe hours ago, and its time checked by the members then; the call id still limits
+  /// it to this call, and its DAVE key to the leaf that device signed.
+  Member,
 }
 
 /// A DAVE key whose binding was verified. Only [`SignedCallKeyBinding::verify`] creates it.
@@ -121,12 +136,13 @@ impl SignedCallKeyBinding {
     &self.binding
   }
 
-  /// Checks the binding against the device's verified certificate, the call and the time.
+  /// Checks the binding against the device's verified certificate, the call and, for a joining
+  /// device, the time.
   pub fn verify(
     &self,
     device: &VerifiedDevice,
     call_id: CallId,
-    now_unix_secs: u64,
+    time_check: BindingTimeCheck,
   ) -> Result<VerifiedCallKey, CallBindingError> {
     let binding = &self.binding;
     if binding.version != CALL_KEY_BINDING_VERSION {
@@ -149,17 +165,27 @@ impl SignedCallKeyBinding {
     if binding.call_id != call_id {
       return Err(CallBindingError::WrongCall);
     }
-    if binding.not_after < now_unix_secs {
-      return Err(CallBindingError::Expired);
-    }
-    if binding.not_after - now_unix_secs > MAX_CALL_KEY_BINDING_VALIDITY_SECS {
-      return Err(CallBindingError::ValidityTooLong);
+    if let BindingTimeCheck::Joining { now_unix_secs } = time_check {
+      check_joining_time(binding.not_after, now_unix_secs)?;
     }
     Ok(VerifiedCallKey {
       device_id: binding.device_id,
       dave_public_key: binding.dave_public_key.as_slice().to_vec(),
     })
   }
+}
+
+fn check_joining_time(not_after: u64, now_unix_secs: u64) -> Result<(), CallBindingError> {
+  if not_after.saturating_add(CALL_KEY_BINDING_CLOCK_LEEWAY_SECS) < now_unix_secs {
+    return Err(CallBindingError::Expired);
+  }
+  let latest = now_unix_secs
+    .saturating_add(MAX_CALL_KEY_BINDING_VALIDITY_SECS)
+    .saturating_add(CALL_KEY_BINDING_CLOCK_LEEWAY_SECS);
+  if not_after > latest {
+    return Err(CallBindingError::ValidityTooLong);
+  }
+  Ok(())
 }
 
 impl VerifiedCallKey {
@@ -212,10 +238,45 @@ mod tests {
       let (laptop, verified_laptop, _) = devices();
       let signed = laptop.sign_call_key_binding(CALL, &DAVE_KEY, NOW + 600).unwrap();
       let decoded = SignedCallKeyBinding::from_bytes(&signed.to_bytes().unwrap()).unwrap();
-      let key = decoded.verify(&verified_laptop, CALL, NOW).unwrap();
+      let key = decoded.verify(&verified_laptop, CALL, joining()).unwrap();
       assert_eq!(key.device_id(), LAPTOP);
       assert_eq!(key.dave_public_key(), DAVE_KEY);
       key.ensure_matches(&DAVE_KEY).unwrap();
+    }
+  }
+
+  mod clocks_and_late_joins {
+    use super::*;
+
+    #[test]
+    fn member_binding_from_hours_ago_verifies_for_a_late_joiner() {
+      let (laptop, verified_laptop, _) = devices();
+      // Signed when the laptop joined, ten hours before the late joiner checks it.
+      let signed = laptop
+        .sign_call_key_binding(CALL, &DAVE_KEY, NOW - 10 * 3600)
+        .unwrap();
+      let key = signed
+        .verify(&verified_laptop, CALL, BindingTimeCheck::Member)
+        .unwrap();
+      assert_eq!(key.dave_public_key(), DAVE_KEY);
+    }
+
+    #[test]
+    fn joiner_whose_clock_is_an_hour_ahead() {
+      let (laptop, verified_laptop, _) = devices();
+      let signed = laptop
+        .sign_call_key_binding(CALL, &DAVE_KEY, NOW + 3600 + 600)
+        .unwrap();
+      signed.verify(&verified_laptop, CALL, joining()).unwrap();
+    }
+
+    #[test]
+    fn joiner_whose_clock_is_hours_behind() {
+      let (laptop, verified_laptop, _) = devices();
+      let signed = laptop
+        .sign_call_key_binding(CALL, &DAVE_KEY, NOW - 5 * 3600 + 600)
+        .unwrap();
+      signed.verify(&verified_laptop, CALL, joining()).unwrap();
     }
   }
 
@@ -227,7 +288,7 @@ mod tests {
       let (laptop, verified_laptop, _) = devices();
       let signed = laptop.sign_call_key_binding(CALL, &DAVE_KEY, NOW + 600).unwrap();
       assert!(matches!(
-        signed.verify(&verified_laptop, CallId::new(501), NOW),
+        signed.verify(&verified_laptop, CallId::new(501), BindingTimeCheck::Member),
         Err(CallBindingError::WrongCall)
       ));
     }
@@ -237,20 +298,36 @@ mod tests {
       let (laptop, _, verified_phone) = devices();
       let signed = laptop.sign_call_key_binding(CALL, &DAVE_KEY, NOW + 600).unwrap();
       // Signed by the laptop's key, presented as the phone: the signature doesn't verify.
-      assert!(signed.verify(&verified_phone, CALL, NOW).is_err());
+      assert!(
+        signed
+          .verify(&verified_phone, CALL, BindingTimeCheck::Member)
+          .is_err()
+      );
     }
 
     #[test]
-    fn expired_and_too_long() {
+    fn joiner_expired_beyond_the_clock_leeway() {
       let (laptop, verified_laptop, _) = devices();
-      let expired = laptop.sign_call_key_binding(CALL, &DAVE_KEY, NOW - 1).unwrap();
+      let not_after = NOW - CALL_KEY_BINDING_CLOCK_LEEWAY_SECS - 1;
+      let expired = laptop.sign_call_key_binding(CALL, &DAVE_KEY, not_after).unwrap();
       assert!(matches!(
-        expired.verify(&verified_laptop, CALL, NOW),
+        expired.verify(&verified_laptop, CALL, joining()),
         Err(CallBindingError::Expired)
+      ));
+    }
+
+    #[test]
+    fn joiner_valid_for_too_long() {
+      let (laptop, verified_laptop, _) = devices();
+      let not_after = NOW + MAX_CALL_KEY_BINDING_VALIDITY_SECS + CALL_KEY_BINDING_CLOCK_LEEWAY_SECS + 1;
+      let too_long = laptop.sign_call_key_binding(CALL, &DAVE_KEY, not_after).unwrap();
+      assert!(matches!(
+        too_long.verify(&verified_laptop, CALL, joining()),
+        Err(CallBindingError::ValidityTooLong)
       ));
       let forever = laptop.sign_call_key_binding(CALL, &DAVE_KEY, u64::MAX).unwrap();
       assert!(matches!(
-        forever.verify(&verified_laptop, CALL, NOW),
+        forever.verify(&verified_laptop, CALL, joining()),
         Err(CallBindingError::ValidityTooLong)
       ));
     }
@@ -261,7 +338,7 @@ mod tests {
       let key = laptop
         .sign_call_key_binding(CALL, &DAVE_KEY, NOW + 600)
         .unwrap()
-        .verify(&verified_laptop, CALL, NOW)
+        .verify(&verified_laptop, CALL, joining())
         .unwrap();
       let mut other = DAVE_KEY;
       other[64] ^= 1;
@@ -283,7 +360,7 @@ mod tests {
       bytes[30] ^= 0x01;
       let tampered = SignedCallKeyBinding::from_bytes(&bytes).unwrap();
       assert!(matches!(
-        tampered.verify(&verified_laptop, CALL, NOW),
+        tampered.verify(&verified_laptop, CALL, joining()),
         Err(CallBindingError::InvalidSignature)
       ));
       assert!(SignedCallKeyBinding::from_bytes(&bytes[..bytes.len() - 1]).is_err());
@@ -294,6 +371,10 @@ mod tests {
       assert!(CALL_KEY_BINDING_LABEL.starts_with("TeamCraft-v1 "));
       assert!(CALL_KEY_BINDING_LABEL.len() < 64);
     }
+  }
+
+  fn joining() -> BindingTimeCheck {
+    BindingTimeCheck::Joining { now_unix_secs: NOW }
   }
 
   /// Alice's laptop key pair plus verified certificates of her laptop and phone.

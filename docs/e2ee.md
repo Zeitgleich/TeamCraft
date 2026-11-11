@@ -5261,12 +5261,21 @@ keys.
 1. For every call a device generates a **fresh P-256 key pair** (never reused across calls) for its
    DAVE MLS leaf.
 2. It signs a **call key binding** with its device key: `{ call_id, user_id, device_id, DAVE public
-   key, not_after }`, domain-separated with the label `TeamCraft-v1 call key binding` (validity at
-   most one hour; it is only needed while the device joins). The binding travels to the SFU with the
+   key, not_after }`, domain-separated with the label `TeamCraft-v1 call key binding` (`not_after`
+   10 minutes after signing, by the signer's clock). The binding travels to the SFU with the
    DAVE key package; the SFU hands it to the members together with the proposal to add the device,
    and to a joining device together with the welcome (the bindings of the existing members).
 3. Members verify a binding against the device's certificate (§3, the same `VerifiedDevice` as in
-   chat) and reject it if it is for another call, another device, expired, or valid for too long.
+   chat) and reject it if it is for another call or another device. The time is checked only for a
+   **joining** device's binding (the one that comes with the proposal): it must not have expired or
+   be valid for longer than one hour, each with a leeway of one day for clocks that differ (wrong
+   time zone, a PC that reads its hardware clock as local time, no time sync;
+   `CALL_KEY_BINDING_CLOCK_LEEWAY_SECS`). The bindings in a welcome belong to devices already in
+   the group, signed when each of them joined, possibly hours ago; the members present then checked
+   their time, so a late joiner checks them without it (before, every device that joined more than 10
+   minutes after the others was refused and left the call). Leaving out the time there gives the SFU
+   nothing: the call id ties a binding to this call, every call uses fresh DAVE keys, and the
+   member's MLS leaf must still be signed with the bound key, which only that device holds.
    Before committing proposals, and after every epoch change, each member checks that every other
    member's MLS leaf signature key equals the key in that member's verified binding. A mismatch or a
    member without a verified binding stops media for the call (no unencrypted fallback).

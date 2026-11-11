@@ -37,7 +37,7 @@ use web_time::Instant;
 
 use crate::audio_frame::EncodedAudioFrame;
 use crate::bwe::{BweConfig, FeedbackRecorder, SendSideEstimator};
-use crate::call_auth::{CallKeyAuthenticator, CallKeyError};
+use crate::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
 use crate::call_resilience::CallTransport;
 use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame};
 use crate::datagram::{DatagramHeader, MediaDatagram, SimulcastLayer, StreamId};
@@ -1846,7 +1846,7 @@ impl CallEngine {
         expected_participants,
         key_bindings,
       } => {
-        self.verify_bindings(&key_bindings)?;
+        self.verify_bindings(&key_bindings, BindingRole::Joiner)?;
         self.on_proposals(epoch, proposals.as_slice(), &expected_participants)
       },
       CallEvent::DaveAnnounceCommit {
@@ -1866,7 +1866,9 @@ impl CallEngine {
         key_bindings,
         maybe_transition_id,
       } => {
-        self.verify_bindings(&key_bindings)?;
+        // The welcome carries the bindings of everyone already in the group, signed when each of
+        // them joined: a late joiner can't expect them to be fresh (e2ee.md §8).
+        self.verify_bindings(&key_bindings, BindingRole::Member)?;
         let recognized = self.recognized_participants();
         self.dave()?.process_welcome(welcome.as_slice(), &recognized)?;
         self.verify_members()?;
@@ -1949,7 +1951,11 @@ impl CallEngine {
   }
 
   /// Verifies relayed call key bindings and remembers the bound keys.
-  fn verify_bindings(&mut self, bindings: &[DaveKeyBinding]) -> Result<(), CallEngineError> {
+  fn verify_bindings(
+    &mut self,
+    bindings: &[DaveKeyBinding],
+    role: BindingRole,
+  ) -> Result<(), CallEngineError> {
     let (Some(authenticator), Some(call_id)) = (self.maybe_authenticator.clone(), self.call_id()) else {
       return Ok(());
     };
@@ -1957,7 +1963,7 @@ impl CallEngine {
       if *device_id == self.config.device_id {
         continue;
       }
-      let key = authenticator.verify(call_id, *device_id, binding.as_slice())?;
+      let key = authenticator.verify(call_id, *device_id, binding.as_slice(), role)?;
       self.verified_keys.insert(*device_id, key);
     }
     Ok(())
@@ -4936,6 +4942,32 @@ mod tests {
     }
 
     #[test]
+    fn late_joiner_accepts_a_member_binding_from_hours_ago() {
+      let now = Instant::now();
+      // Alice signed her binding when she joined, three hours before Bob joins.
+      let authenticators = authenticators_with_clocks(&[(1, -3 * 3600), (2, 0)]);
+      let (alice, bob) = paired_with(&authenticators, now, None);
+      assert!(alice.is_secured() && bob.is_secured());
+    }
+
+    #[test]
+    fn joiner_whose_clock_is_an_hour_ahead_is_accepted() {
+      let now = Instant::now();
+      // Bob's PC reads its hardware clock as local time: an hour ahead of everybody else.
+      let authenticators = authenticators_with_clocks(&[(1, 0), (2, 3600)]);
+      let (alice, bob) = paired_with(&authenticators, now, None);
+      assert!(alice.is_secured() && bob.is_secured());
+    }
+
+    #[test]
+    fn joiner_whose_clock_is_hours_behind_is_accepted() {
+      let now = Instant::now();
+      let authenticators = authenticators_with_clocks(&[(1, 0), (2, -5 * 3600)]);
+      let (alice, bob) = paired_with(&authenticators, now, None);
+      assert!(alice.is_secured() && bob.is_secured());
+    }
+
+    #[test]
     fn welcome_without_verified_members_stops_media() {
       let now = Instant::now();
       let authenticators = authenticators(&[1, 2]);
@@ -5185,7 +5217,15 @@ mod tests {
 
   /// Alice founds the group with Bob; the commit and the welcome carry `maybe_transition_id`.
   fn paired(now: Instant, maybe_transition_id: Option<DaveTransitionId>) -> (CallEngine, CallEngine) {
-    let authenticators = authenticators(&[1, 2]);
+    paired_with(&authenticators(&[1, 2]), now, maybe_transition_id)
+  }
+
+  /// [`paired`] with the given authenticators of devices 1 (Alice) and 2 (Bob).
+  fn paired_with(
+    authenticators: &HashMap<i64, Arc<dyn CallKeyAuthenticator>>,
+    now: Instant,
+    maybe_transition_id: Option<DaveTransitionId>,
+  ) -> (CallEngine, CallEngine) {
     let gateway = DaveExternalSender::new().unwrap();
     let mut alice = joined_engine(1, &[], &gateway, Some(&authenticators[&1]), now);
     let mut bob = joined_engine(2, &[1], &gateway, Some(&authenticators[&2]), now);
@@ -5262,31 +5302,67 @@ mod tests {
 
   /// Device identities (one user each) whose certificates every authenticator trusts.
   fn authenticators(ids: &[i64]) -> HashMap<i64, Arc<dyn CallKeyAuthenticator>> {
+    let clocks: Vec<(i64, i64)> = ids.iter().map(|&id| (id, 0)).collect();
+    authenticators_with_clocks(&clocks)
+  }
+
+  /// [`authenticators`] for `(device, clock offset in seconds)`: each device signs its binding as if
+  /// its clock were that far off (a binding signed hours ago, a PC an hour ahead).
+  fn authenticators_with_clocks(clocks: &[(i64, i64)]) -> HashMap<i64, Arc<dyn CallKeyAuthenticator>> {
     use rand_core::OsRng;
     use teamcraft_crypto::identity::{DeviceKeyPair, IdentityKeyPair};
     use teamcraft_crypto::ids::{DeviceId as CryptoDeviceId, UserId as CryptoUserId};
 
     let mut key_pairs = Vec::new();
     let mut verified = HashMap::new();
-    for &id in ids {
+    for &(id, offset_secs) in clocks {
       let identity = IdentityKeyPair::generate(&mut OsRng);
       let user = CryptoUserId::new(u64::try_from(1000 + id).unwrap());
       let key_pair =
         DeviceKeyPair::generate(user, CryptoDeviceId::new(u64::try_from(id).unwrap()), &mut OsRng);
       let certificate = identity.certify_device(user, &key_pair.public_keys()).unwrap();
       verified.insert(device(id), certificate.verify(&identity.public_key()).unwrap());
-      key_pairs.push((id, key_pair));
+      key_pairs.push((
+        id,
+        SkewedSigner {
+          key_pair,
+          offset_secs,
+        },
+      ));
     }
     key_pairs
       .into_iter()
-      .map(|(id, key_pair)| {
+      .map(|(id, signer)| {
         let authenticator: Arc<dyn CallKeyAuthenticator> = Arc::new(DeviceCallKeyAuthenticator::new(
-          Arc::new(key_pair),
+          Arc::new(signer),
           verified.clone(),
         ));
         (id, authenticator)
       })
       .collect()
+  }
+
+  /// Signs with a device key as if the device's clock were `offset_secs` off.
+  struct SkewedSigner {
+    key_pair: teamcraft_crypto::identity::DeviceKeyPair,
+    offset_secs: i64,
+  }
+
+  impl crate::call_auth::CallBindingSigner for SkewedSigner {
+    fn sign_call_key_binding(
+      &self,
+      call_id: teamcraft_crypto::call_binding::CallId,
+      dave_public_key: &[u8],
+      not_after: u64,
+    ) -> Result<
+      teamcraft_crypto::call_binding::SignedCallKeyBinding,
+      teamcraft_crypto::call_binding::CallBindingError,
+    > {
+      let not_after = not_after.saturating_add_signed(self.offset_secs);
+      self
+        .key_pair
+        .sign_call_key_binding(call_id, dave_public_key, not_after)
+    }
   }
 
   fn key_package_of(engine: &mut CallEngine) -> (Vec<u8>, Option<Vec<u8>>) {

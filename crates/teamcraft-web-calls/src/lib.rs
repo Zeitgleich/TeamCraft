@@ -38,7 +38,7 @@ use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource};
 use teamcraft_media::audio_level::SharedLevel;
 use teamcraft_media::bwe::BweConfig;
-use teamcraft_media::call_auth::{CallKeyAuthenticator, CallKeyError};
+use teamcraft_media::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineError, CallEngineEvent};
 use teamcraft_media::call_resilience::{
   JoinTicket, JoinTicketError, ResilienceConfig, certificate_hashes_from_hex,
@@ -1753,16 +1753,23 @@ impl CallKeyAuthenticator for PageAuthenticator {
     bytes(answer)
   }
 
-  fn verify(&self, call_id: CallId, device_id: DeviceId, binding: &[u8]) -> Result<Vec<u8>, CallKeyError> {
+  fn verify(
+    &self,
+    call_id: CallId,
+    device_id: DeviceId,
+    binding: &[u8],
+    role: BindingRole,
+  ) -> Result<Vec<u8>, CallKeyError> {
     let host = host().map_err(|_| remote_error("the page is gone"))?;
     let answer = host
       .callbacks
       .verify
-      .call3(
+      .call4(
         &JsValue::NULL,
         &json_value(&call_id)?,
         &json_value(&device_id)?,
         &Uint8Array::from(binding),
+        &JsValue::from_str(role.as_wire()),
       )
       .map_err(|error| remote_error(&js_text(&error)))?;
     bytes(answer)
