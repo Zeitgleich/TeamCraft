@@ -391,6 +391,7 @@ mod tests {
       let head = ChannelRolesHead {
         version: 9,
         hash: Base64Bytes::new(vec![1; 32]),
+        needs_review: false,
       };
       let mut cases = Vec::new();
       let mut with = World::with_channel_admin_of(&admin, &world);
