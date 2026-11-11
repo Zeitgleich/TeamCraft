@@ -371,9 +371,16 @@ impl ChannelRoleState {
   /// knows. Every member takes a workspace admin's entry as vouching for each role it lists, and it
   /// anchors them; so during a stretch, or on a snapshot that rests on somebody who left, such an
   /// admin signs only a list they looked at ([`Self::reviewed_document`]), never this snapshot with
-  /// one change, or the signature would launder what it never saw into an anchor.
+  /// one change, or the signature would launder what it never saw into an anchor. The same holds
+  /// while a member showed this device another or a newer entry than it holds (an alarm, or a head
+  /// not read yet): it may have been shown an old log, a withheld demotion (e2ee.md §4.6.3), and its
+  /// signature would carry the old snapshot's anchor on to every device that was shown the same
+  /// (issue #1264).
   pub fn must_review_before_vouching(&self) -> bool {
-    self.has_unverified_stretch() || self.has_former_admin_entry
+    self.has_unverified_stretch()
+      || self.has_former_admin_entry
+      || self.maybe_alarm.is_some()
+      || self.maybe_ahead.is_some()
   }
 
   /// What the accepted snapshot says of `user`, whether or not this device can vouch for it today.
@@ -2995,6 +3002,55 @@ mod tests {
         assert!(!device.must_review_before_vouching());
         assert!(device.is_workspace_anchored);
         assert_eq!(device.admins(), vec![story.frank.user_id]);
+      }
+
+      /// Issue #1264: the workspace admin's device is anchored and was shown an old log, a withheld
+      /// demotion. A member's head says so: another entry for its version, or a newer one it isn't
+      /// shown. Its ordinary signature would carry the old snapshot's anchor on, so it reviews first.
+      #[test]
+      fn a_device_told_of_another_or_a_newer_entry_must_review() {
+        let story = Story::new();
+        let world = story.world();
+        let device = story.first_read(&world);
+        assert!(device.is_workspace_anchored);
+        assert!(!device.must_review_before_vouching());
+
+        let mut forked = device.clone();
+        forked.note_head(&ChannelRolesHead {
+          version: device.version,
+          hash: Base64Bytes::new(vec![7; 32]),
+        });
+        assert!(forked.maybe_alarm.is_some());
+        assert!(forked.must_review_before_vouching());
+
+        let mut behind = device.clone();
+        behind.note_head(&ChannelRolesHead {
+          version: device.version + 1,
+          hash: Base64Bytes::new(vec![7; 32]),
+        });
+        assert!(behind.must_review_before_vouching(), "until the log is read");
+        // The log still doesn't show it: the alarm stays, and so does the review.
+        behind.check_ahead();
+        assert!(behind.maybe_alarm.is_some());
+        assert!(behind.must_review_before_vouching());
+
+        // A list a workspace admin looked at ends it.
+        let reviewed = story.frank.signed(
+          forked
+            .reviewed_document(
+              conversation(CHANNEL),
+              &[(story.frank.user_id, ChannelRole::Admin)],
+              &BTreeMap::from([(story.frank.user_id, key_bytes(&story.frank))]),
+              NOW_MS,
+            )
+            .unwrap(),
+        );
+        assert!(
+          world
+            .apply(&mut forked, at_server_time(reviewed, world.now_ms))
+            .is_empty()
+        );
+        assert!(!forked.must_review_before_vouching());
       }
 
       /// Variant B, honest: the device is in a stretch and its snapshot names Alice, demoted. What was
