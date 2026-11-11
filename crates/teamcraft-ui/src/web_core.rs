@@ -77,6 +77,7 @@ use teamcraft_proto::{
 use wasm_bindgen::JsCast;
 
 use crate::auth::{AuthError, Authenticator};
+use crate::remote_backend::{CoreRead, CoreReadAnswer};
 use crate::settings::{load_string, store_string};
 use crate::start_timing::{self, Part};
 use crate::sync_reads::{StoredWorkspace, SyncRead, SyncReadAnswer, answer_during_sync};
@@ -84,7 +85,7 @@ use crate::tab_handover::{
   Blocker, OnTaken, PERSIST_DRAFTS_EVENT, TabEvent, TabState, TakeoverAnswer, answer_takeover, keeps_lock,
   on_taken,
 };
-use crate::web_export::{BlobSink, WebExportRun, WebExportSlot};
+use crate::web_export::{BlobSink, ExportTurn, WebExportRun, WebExportSlot};
 use crate::web_tabs::{self, Follower, OwnerChannel, OwnerLock, Ownership};
 
 /// A catalog build shorter than this shows nothing: a small store would only flash a screen.
@@ -552,40 +553,14 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
       .await??;
       Ok(Value::Null)
     },
-    "core_snapshot" => to_value(ask(Request::Snapshot).await??),
-    "core_snapshot_changes" => {
-      let maybe_since: Option<SnapshotCursor> = field(&args, "since")?;
-      to_value(ask(|reply| Request::SnapshotChanges(maybe_since, reply)).await??)
-    },
-    "core_messages" => {
-      let (conversation, start, len) = (
-        field(&args, "conversation")?,
-        field(&args, "start")?,
-        field(&args, "len")?,
-      );
-      let window = ask(|reply| Request::Messages {
-        conversation,
-        start,
-        len,
-        reply,
-      })
-      .await??;
-      to_value(window)
-    },
-    "core_thread" => {
-      let (conversation, thread) = (field(&args, "conversation")?, field(&args, "thread")?);
-      to_value(
-        ask(|reply| Request::Thread {
-          conversation,
-          thread,
-          reply,
-        })
-        .await??,
-      )
-    },
-    // The page itself asks typed ([`act`], [`query`]); as JSON they only come from another tab of
-    // the account, and are read in the `tabs` chunk (#1413).
-    "core_action" | "core_query" => {
+    // The page itself asks typed ([`act`], [`query`], [`read`]); as JSON they only come from
+    // another tab of the account, and are read in the `tabs` chunk (#1413, #1699).
+    "core_action"
+    | "core_query"
+    | "core_snapshot"
+    | "core_snapshot_changes"
+    | "core_messages"
+    | "core_thread" => {
       crate::areas::chat_request_from_json(command.to_owned(), args)
         .await
         .map_err(|error| error.to_string())?
@@ -708,7 +683,51 @@ pub async fn query(query: ChatQuery) -> Result<ChatAnswer, String> {
   }
 }
 
-/// `core_action` and `core_query` as JSON, from another tab of the account (in the `tabs` chunk).
+/// Reads the core's snapshot or a feed (`core_snapshot`, … as [`CoreRead`]), typed like [`act`].
+pub(crate) async fn read(read: CoreRead) -> Result<CoreReadAnswer, String> {
+  match current_follower() {
+    Some(follower) => {
+      crate::areas::read_in_owner_tab(follower, read)
+        .await
+        .map_err(|error| error.to_string())?
+        .await
+    },
+    None => read_here(read).await,
+  }
+}
+
+/// A read from this tab's core.
+async fn read_here(read: CoreRead) -> Result<CoreReadAnswer, String> {
+  Ok(match read {
+    CoreRead::Snapshot => CoreReadAnswer::Snapshot(Box::new(ask(Request::Snapshot).await??)),
+    CoreRead::Changes(maybe_since) => CoreReadAnswer::Changes(Box::new(
+      ask(|reply| Request::SnapshotChanges(maybe_since, reply)).await??,
+    )),
+    CoreRead::Messages {
+      conversation,
+      start,
+      len,
+    } => CoreReadAnswer::Messages(
+      ask(|reply| Request::Messages {
+        conversation,
+        start,
+        len,
+        reply,
+      })
+      .await??,
+    ),
+    CoreRead::Thread { conversation, thread } => CoreReadAnswer::Thread(
+      ask(|reply| Request::Thread {
+        conversation,
+        thread,
+        reply,
+      })
+      .await??,
+    ),
+  })
+}
+
+/// Chat requests and reads as JSON, from another tab of the account (in the `tabs` chunk).
 pub(crate) async fn serve_chat_json(command: String, args: Value) -> Result<Value, String> {
   match command.as_str() {
     "core_action" => {
@@ -720,8 +739,35 @@ pub(crate) async fn serve_chat_json(command: String, args: Value) -> Result<Valu
       let query: ChatQuery = field(&args, "query")?;
       to_value(ask(|reply| Request::Query(query, reply)).await??)
     },
+    "core_snapshot" => read_here(CoreRead::Snapshot).await?.to_json(),
+    "core_snapshot_changes" => read_here(CoreRead::Changes(field(&args, "since")?))
+      .await?
+      .to_json(),
+    "core_messages" => read_here(CoreRead::Messages {
+      conversation: field(&args, "conversation")?,
+      start: field(&args, "start")?,
+      len: field(&args, "len")?,
+    })
+    .await?
+    .to_json(),
+    "core_thread" => read_here(CoreRead::Thread {
+      conversation: field(&args, "conversation")?,
+      thread: field(&args, "thread")?,
+    })
+    .await?
+    .to_json(),
     other => Err(format!("{other} is not a chat request")),
   }
+}
+
+/// A follower tab's read, for the tab that runs the core (in the `tabs` chunk).
+pub(crate) async fn read_in_owner_tab(
+  follower: Rc<Follower>,
+  read: CoreRead,
+) -> Result<CoreReadAnswer, String> {
+  let (command, args) = read.to_json();
+  let answer = follower.call(command, args).await?;
+  read.answer_from_json(answer)
 }
 
 /// A follower tab's chat action, for the tab that runs the core (in the `tabs` chunk).
@@ -2951,7 +2997,11 @@ impl Core {
     let maybe_outcome = self
       .serve_during(requests, async |client: &mut Client<Api, Store>| {
         let WebExportRun { job, sink, .. } = run.as_mut();
-        Box::pin(job.step(client, sink)).await
+        // The export's card is in the security settings, so their module is there already.
+        match crate::areas::export_step(ExportTurn { job, sink, client }).await {
+          Ok(stepping) => stepping.await,
+          Err(error) => Err(ExportError::Core(part_not_loaded(&error))),
+        }
       })
       .await;
     let outcome = match maybe_outcome {
