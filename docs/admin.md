@@ -975,6 +975,8 @@ Mbit/s per share and viewer, instead of up to 1440p and 8 Mbit/s. With `standard
 offered and a share asked for in 4K is sent at the standard size. Each share starts at the standard
 size unless its sharer picks 4K, so the default changes nothing for people who don't.
 
+- **Phones:** the Android app shares the phone's screen at its own size within the standard size
+  (it never asks for 4K), so either setting lets it through.
 - **Enforcement:** member clients apply it (they read the verified policy); the SFU doesn't check
   picture sizes, so it is a bandwidth setting, not a security boundary. Clients from before the
   setting (#565) offer no 4K. An owner client from before it that signs the policy again drops the

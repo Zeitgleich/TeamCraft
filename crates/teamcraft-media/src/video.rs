@@ -441,7 +441,8 @@ pub fn screen_bitrate_bps(resolution: VideoResolution, framerate: u8, size: &Scr
 /// plus a half-size layer at a quarter of the bitrate for viewers on weak links (the uplink budget
 /// drops the big layer first, so a slow link or viewer doesn't lower the quality for the others).
 /// A picture above 1440p (a 4K share) gets a quarter-size layer too: from 4K the half-size one is
-/// 1080p at about 4 Mbit/s, and a weak link needs a step below it.
+/// 1080p at about 4 Mbit/s, and a weak link needs a step below it. A portrait source (a phone, a
+/// turned monitor) fits the limit turned upright, so it keeps as many pixels as a landscape one.
 pub fn screen_layers(
   source: VideoResolution,
   framerate: u8,
@@ -449,7 +450,7 @@ pub fn screen_layers(
   size: &ScreenShareResolution,
 ) -> Vec<VideoLayerInfo> {
   let (limit, max_framerate) = screen_limits(mode, size);
-  let resolution = fit_within(source, limit);
+  let resolution = fit_within(source, oriented_like(limit, source));
   let framerate = framerate.clamp(1, max_framerate);
   let layers = if u32::from(resolution.width) * u32::from(resolution.height) > QHD_PIXELS {
     3
@@ -465,6 +466,20 @@ pub fn screen_layers(
 }
 
 const QHD_PIXELS: u32 = 2560 * 1440;
+
+/// `limit` turned to portrait when `source` is taller than wide.
+fn oriented_like(limit: VideoResolution, source: VideoResolution) -> VideoResolution {
+  let is_portrait = source.height > source.width;
+  let is_limit_portrait = limit.height > limit.width;
+  if is_portrait == is_limit_portrait {
+    limit
+  } else {
+    VideoResolution {
+      width: limit.height,
+      height: limit.width,
+    }
+  }
+}
 
 /// How a screen share is sent (#530, #565): what it keeps under pressure and how large it may be.
 /// The default is a standard-size detail share.
@@ -972,6 +987,20 @@ mod tests {
       (small.last().unwrap().width, small.last().unwrap().height),
       (800, 600)
     );
+  }
+
+  /// A phone's portrait screen keeps its sharpness: it fits 1440p turned upright, not 1440 lines
+  /// of height (#1667).
+  #[test]
+  fn portrait_screens_fit_the_limit_turned_upright() {
+    let res = |width, height| VideoResolution { width, height };
+    let standard = ScreenShareResolution::Standard;
+    let phone = screen_layers(res(1080, 2400), 15, ScreenContentMode::Detail, &standard);
+    let top = phone.last().unwrap();
+    assert_eq!((top.width, top.height, top.max_framerate), (1080, 2400, 15));
+    let tall = screen_layers(res(1440, 3200), 15, ScreenContentMode::Detail, &standard);
+    let top = tall.last().unwrap();
+    assert_eq!((top.width, top.height), (1152, 2560));
   }
 
   /// A 4K share (#565) keeps a 4K screen's pixels, with two lower layers to step down to.

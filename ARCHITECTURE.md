@@ -422,6 +422,20 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   Today browsers with an AV1 WebCodecs encoder (Chrome, Edge, Firefox) send AV1; browsers and
   desktops decode it where their WebCodecs does (the desktop's page tells its shell); the desktop's
   own encoders and the phone apps are H.264 only, and older clients and SFUs H.264 too.
+- **Screen share on Android** (#1667): MediaProjection behind the system's consent dialog (per
+  share; Android 14+ asks every time), taken by the ongoing-call foreground service as
+  `mediaProjection`. A virtual display mirrors the screen into an `ImageReader` (RGBA) at the size
+  `CallSession::start_screen_share` returns: the screen as it is turned, a detail share within the
+  standard size turned upright (a portrait screen fits 1440x2560, not 1440 lines of height), at up
+  to 15 fps and two layers, H.264 through MediaCodec. The core converts the pictures to I420; a
+  still screen sends nothing new and the call repeats its last picture. Turning the screen restarts
+  the share at the new shape on the same projection. Other apps' sound goes along through
+  `AudioPlaybackCapture` (Android 10+; never the call's own playback, which uses the
+  voice-communication usage, nor apps that opt out). The share ends with the projection (the
+  system's indicator, the lock screen, another app's projection), the call, a move of the call or
+  the process; a track the engine ends by itself turns `is_sharing_screen` off and the app stops
+  capturing. Phones never ask for 4K. Screens with `FLAG_SECURE` (the app's own call screen with
+  "Secure screen" on, banking apps) show black.
 - **Screen share sound** (opt-in): the computer's playback without the call itself, as a second
   Opus stream per device (music mode, 64 kbit/s). The SFU forwards it to everyone regardless of
   the speaker selection. It is encrypted with the device's DAVE audio key, like the microphone.

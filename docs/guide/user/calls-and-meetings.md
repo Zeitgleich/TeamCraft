@@ -25,7 +25,7 @@ graphics hardware where the system offers it.
 | Part                                              | Status                                               |
 |---------------------------------------------------|------------------------------------------------------|
 | Desktop calls, camera, screen share, push-to-talk | Works; needs the admin to run the media server (SFU) |
-| Android calls (system call UI, Android Auto)      | Works                                                |
+| Android calls (system call UI, Android Auto)      | Works; screen share on Android 8 and later           |
 | Browser calls, camera, screen share               | Works in current Chrome, Edge, Firefox and Safari (26.4 or later, also on iPhone and iPad) |
 | Background blur and scenes                        | Works on desktop and in the browser (also before joining) |
 | iOS calls                                         | In preparation                                       |
@@ -51,6 +51,22 @@ either, the app says so: allow it with the icon in the address bar and try again
 - **Networks that block UDP** (some companies, hotels and guest networks): the call still connects,
   over a slower path, if your administrator has set it up. It says "Limited network, call quality may
   be lower".
+### Sharing your screen
+
+| Platform          | How                                                       | Sound                                                                         |
+|-------------------|-----------------------------------------------------------|-------------------------------------------------------------------------------|
+| Windows and Linux | **Share screen** in the call, pick a screen or window     | Optional: the computer's sound, without the call itself                       |
+| macOS             | **Share screen**, pick in the system's picker             | Optional: the sound of what you picked                                        |
+| Browser           | **Share screen**, the browser asks what                   | Not yet                                                                       |
+| Android           | **More options** → **Share screen**, then the system asks | Other apps' sound goes along on Android 10 and later, where the app allows it |
+| iOS               | Not yet                                                   | –                                                                             |
+
+On Android, a bar above the call's controls says "You're sharing your screen" with **Stop sharing**;
+the system's own indicator stops it too. Android 14 and later asks again for every share and can
+share a single app instead of the whole screen. Turning the phone turns the share with it. The
+share stops when the call ends. Apps that protect their screen (banking apps, TeamCraft itself with
+"Secure screen" on) show black to the others.
+
 If calls fail to start with *service unavailable*, the admin has not configured the call service
 ([Admin: calls and SFU](../admin/calls-sfu.md)).
 
