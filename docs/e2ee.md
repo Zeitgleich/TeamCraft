@@ -5266,16 +5266,28 @@ keys.
    DAVE key package; the SFU hands it to the members together with the proposal to add the device,
    and to a joining device together with the welcome (the bindings of the existing members).
 3. Members verify a binding against the device's certificate (§3, the same `VerifiedDevice` as in
-   chat) and reject it if it is for another call or another device. The time is checked only for a
-   **joining** device's binding (the one that comes with the proposal): it must not have expired or
-   be valid for longer than one hour, each with a leeway of one day for clocks that differ (wrong
-   time zone, a PC that reads its hardware clock as local time, no time sync;
-   `CALL_KEY_BINDING_CLOCK_LEEWAY_SECS`). The bindings in a welcome belong to devices already in
-   the group, signed when each of them joined, possibly hours ago; the members present then checked
-   their time, so a late joiner checks them without it (before, every device that joined more than 10
-   minutes after the others was refused and left the call). Leaving out the time there gives the SFU
-   nothing: the call id ties a binding to this call, every call uses fresh DAVE keys, and the
-   member's MLS leaf must still be signed with the bound key, which only that device holds.
+   chat) and reject it if it is for another call or another device. **Time.** Only a joining
+   device's binding (the one that comes with the proposal) is checked for time, by the verifying
+   member's clock against the signer's `not_after`; neither clock is trusted, so both checks
+   allow `CALL_KEY_BINDING_CLOCK_LEEWAY_SECS` (one day): a joiner's binding is accepted until
+   one day after its `not_after` (so up to 24 h 10 min after signing by a correct clock) and
+   refused if its `not_after` is more than 25 h ahead. The day is deliberate: guests bring
+   PCs with a wrong time zone (up to 14 h off), Windows reading the hardware clock as local time
+   (an hour or two) or no time sync, and a refused binding throws them out of the call. The window
+   is not what stops a replay (below). The bindings in a welcome belong to devices already in the
+   group, signed when each of them joined, possibly hours ago; the members present then checked
+   their time, so a late joiner checks them without it (before, every device that joined more than
+   10 minutes after the others was refused and left the call).
+   **What a binding vouches for.** A device is added only with its own binding, in the proposal
+   that adds it and checked as a joiner's: a key that only came with a welcome, or with an earlier
+   proposal, vouches for nobody's addition. After a welcome or a commit each member keeps the
+   bound keys of the group's members only. Once a device leaves the call its bound key is retired
+   for the rest of the call: a proposal that brings that device back with the same key (the SFU
+   replaying its old binding and key package) is refused; a device that really comes back joins
+   with a fresh DAVE key and binding. So within one call a binding can't be replayed to make a
+   departed device look present, and across calls the call id stops it. A welcome binding without
+   a time check doesn't let the SFU swap or invent a key either: the member's MLS leaf must be
+   signed with the bound key, which only that device holds.
    Before committing proposals, and after every epoch change, each member checks that every other
    member's MLS leaf signature key equals the key in that member's verified binding. A mismatch or a
    member without a verified binding stops media for the call (no unencrypted fallback).

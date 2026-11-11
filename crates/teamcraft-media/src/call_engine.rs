@@ -132,6 +132,10 @@ pub struct CallEngine {
   maybe_authenticator: Option<Arc<dyn CallKeyAuthenticator>>,
   /// DAVE keys of other members from verified call key bindings (e2ee.md §8).
   verified_keys: HashMap<DeviceId, Vec<u8>>,
+  /// DAVE keys of devices that left this call: never accepted again in it, so the SFU can't bring a
+  /// departed device back with its old binding and key package (e2ee.md §8). Kept across
+  /// reconnects; a device that comes back joins with a fresh key.
+  retired_keys: HashSet<(DeviceId, Vec<u8>)>,
   /// The driver can bring the trusted roster up to date during the call
   /// ([`Self::enable_roster_refresh`]).
   refreshes_roster: bool,
@@ -453,6 +457,8 @@ pub enum CallEngineError {
   CallKey(#[from] CallKeyError),
   #[error("device {0} is in the DAVE group without a verified call key")]
   UnverifiedMember(DeviceId),
+  #[error("device {0} came with the call key it had before it left the call")]
+  RetiredKey(DeviceId),
 }
 
 impl CallEngine {
@@ -490,6 +496,7 @@ impl CallEngine {
       maybe_trusted_roster: None,
       maybe_authenticator: None,
       verified_keys: HashMap::new(),
+      retired_keys: HashSet::new(),
       refreshes_roster: false,
       held_dave: Vec::new(),
       is_roster_requested: false,
@@ -1561,6 +1568,9 @@ impl CallEngine {
 
   fn remove_participant(&mut self, device_id: DeviceId) {
     self.participants.remove(&device_id);
+    if let Some(key) = self.verified_keys.remove(&device_id) {
+      self.retired_keys.insert((device_id, key));
+    }
     self.audio_streams.retain(|_, (owner, _)| *owner != device_id);
     let streams: Vec<StreamId> = self
       .remote_video
@@ -1846,8 +1856,8 @@ impl CallEngine {
         expected_participants,
         key_bindings,
       } => {
-        self.verify_bindings(&key_bindings, BindingRole::Joiner)?;
-        self.on_proposals(epoch, proposals.as_slice(), &expected_participants)
+        let joiner_keys = self.verify_bindings(&key_bindings, BindingRole::Joiner)?;
+        self.on_proposals(epoch, proposals.as_slice(), &expected_participants, &joiner_keys)
       },
       CallEvent::DaveAnnounceCommit {
         commit,
@@ -1859,6 +1869,7 @@ impl CallEngine {
           return Ok(());
         }
         self.verify_members()?;
+        self.keep_member_keys_only()?;
         self.prepare_transition(maybe_transition_id)
       },
       CallEvent::DaveWelcome {
@@ -1872,6 +1883,8 @@ impl CallEngine {
         let recognized = self.recognized_participants();
         self.dave()?.process_welcome(welcome.as_slice(), &recognized)?;
         self.verify_members()?;
+        // A binding for a device that isn't in the group must not vouch for it later.
+        self.keep_member_keys_only()?;
         self.prepare_transition(maybe_transition_id)
       },
       CallEvent::DaveExecuteTransition { transition_id } => self.execute_transition(transition_id),
@@ -1950,22 +1963,46 @@ impl CallEngine {
     self.has_reported_encryption_failure = false;
   }
 
-  /// Verifies relayed call key bindings and remembers the bound keys.
+  /// Verifies relayed call key bindings and remembers the bound keys; returns the keys these
+  /// bindings vouch for. A key of a device that left the call is refused (e2ee.md §8).
   fn verify_bindings(
     &mut self,
     bindings: &[DaveKeyBinding],
     role: BindingRole,
-  ) -> Result<(), CallEngineError> {
+  ) -> Result<HashMap<DeviceId, Vec<u8>>, CallEngineError> {
     let (Some(authenticator), Some(call_id)) = (self.maybe_authenticator.clone(), self.call_id()) else {
-      return Ok(());
+      return Ok(HashMap::new());
     };
+    let mut keys = HashMap::new();
     for DaveKeyBinding { device_id, binding } in bindings {
       if *device_id == self.config.device_id {
         continue;
       }
       let key = authenticator.verify(call_id, *device_id, binding.as_slice(), role)?;
-      self.verified_keys.insert(*device_id, key);
+      if self.retired_keys.contains(&(*device_id, key.clone())) {
+        return Err(CallEngineError::RetiredKey(*device_id));
+      }
+      keys.insert(*device_id, key);
     }
+    self
+      .verified_keys
+      .extend(keys.iter().map(|(device, key)| (*device, key.clone())));
+    Ok(keys)
+  }
+
+  /// Forgets the keys of devices that aren't in the group (after a welcome or a commit), so only a
+  /// joiner's own binding in a later proposal can vouch for adding it.
+  fn keep_member_keys_only(&mut self) -> Result<(), CallEngineError> {
+    if self.maybe_authenticator.is_none() {
+      return Ok(());
+    }
+    let members: HashSet<DeviceId> = self
+      .dave()?
+      .member_signature_keys()
+      .into_iter()
+      .filter_map(|(member, _)| member.to_device().ok())
+      .collect();
+    self.verified_keys.retain(|device, _| members.contains(device));
     Ok(())
   }
 
@@ -1990,8 +2027,12 @@ impl CallEngine {
     Ok(())
   }
 
-  /// Members the pending commit would add must have verified keys; otherwise don't commit.
-  fn verify_pending_additions(&self) -> Result<(), CallEngineError> {
+  /// Members the pending commit would add must come with their own verified binding in these
+  /// proposals (`joiner_keys`); otherwise don't commit.
+  fn verify_pending_additions(
+    &self,
+    joiner_keys: &HashMap<DeviceId, Vec<u8>>,
+  ) -> Result<(), CallEngineError> {
     if self.maybe_authenticator.is_none() {
       return Ok(());
     }
@@ -2002,7 +2043,7 @@ impl CallEngine {
       let device = member
         .to_device()
         .map_err(|_| CallEngineError::Protocol("member id"))?;
-      if self.verified_keys.get(&device) != Some(&leaf_key) {
+      if joiner_keys.get(&device) != Some(&leaf_key) {
         return Err(CallEngineError::UnverifiedMember(device));
       }
     }
@@ -2030,6 +2071,7 @@ impl CallEngine {
     epoch: u64,
     proposals: &[u8],
     sfu_expected: &[DeviceId],
+    joiner_keys: &HashMap<DeviceId, Vec<u8>>,
   ) -> Result<(), CallEngineError> {
     let expected: Vec<DaveParticipantId> = match &self.maybe_trusted_roster {
       Some(roster) => roster
@@ -2047,7 +2089,7 @@ impl CallEngine {
     };
     if let Some(commit) = self.dave()?.process_proposals(proposals, &expected)? {
       // The commit stays unsent if it would add a device with an unverified key.
-      self.verify_pending_additions()?;
+      self.verify_pending_additions(joiner_keys)?;
       self.signal(CallClientMessage::DaveCommit {
         epoch,
         commit: Base64Bytes::new(commit.commit),
@@ -4968,6 +5010,110 @@ mod tests {
     }
 
     #[test]
+    fn welcome_binding_of_a_non_member_does_not_vouch_for_a_later_addition() {
+      let now = Instant::now();
+      // Carol signed hours ago and left; the SFU still has her binding and key package.
+      let authenticators = authenticators_with_clocks(&[(1, 0), (2, 0), (3, -3 * 3600)]);
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut carol = joined_engine(3, &[1], &gateway, Some(&authenticators[&3]), now);
+      let (carol_package, carol_binding) = key_package_of(&mut carol);
+      // It slips her binding into Bob's welcome although she is no member ...
+      let (_alice, mut bob) = paired_in(
+        &gateway,
+        &authenticators,
+        now,
+        None,
+        vec![binding(3, carol_binding.unwrap())],
+      );
+      bob.set_trusted_roster([device(1), device(3)]);
+      drain(&mut bob);
+      // ... then proposes her old key package without a binding.
+      let proposals = gateway
+        .propose(
+          DaveCallId::from_call(call()),
+          DaveEpoch(1),
+          &[(DaveParticipantId(3), &carol_package)],
+          &[],
+        )
+        .unwrap();
+      let result = bob.handle_signal(
+        event(4, dave_proposals(1, proposals, &[1, 2, 3], Vec::new())),
+        now,
+      );
+      assert!(matches!(result, Err(CallEngineError::UnverifiedMember(member)) if member == device(3)));
+      assert!(
+        drain(&mut bob)
+          .iter()
+          .all(|output| !matches!(output, EngineOutput::Signal(CallClientMessage::DaveCommit { .. }))),
+        "no commit adds a device whose binding came only with the welcome"
+      );
+    }
+
+    #[test]
+    fn departed_device_is_not_added_again_with_its_old_key() {
+      let now = Instant::now();
+      let authenticators = authenticators(&[1, 2, 3]);
+      let gateway = DaveExternalSender::new().unwrap();
+      let (mut alice, _bob) = paired_in(&gateway, &authenticators, now, None, Vec::new());
+      alice.set_trusted_roster([device(2), device(3)]);
+      let mut carol = joined_engine(3, &[1, 2], &gateway, Some(&authenticators[&3]), now);
+      let (package, carol_binding) = key_package_of(&mut carol);
+      let carol_binding = carol_binding.unwrap();
+      let add_carol = |epoch: u64| {
+        gateway
+          .propose(
+            DaveCallId::from_call(call()),
+            DaveEpoch(epoch),
+            &[(DaveParticipantId(3), &package)],
+            &[],
+          )
+          .unwrap()
+      };
+      alice
+        .handle_signal(
+          event(
+            6,
+            CallEvent::ParticipantJoined {
+              participant: participant(3),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      let bindings = vec![binding(3, carol_binding.clone())];
+      alice
+        .handle_signal(
+          event(7, dave_proposals(1, add_carol(1), &[1, 2, 3], bindings)),
+          now,
+        )
+        .unwrap();
+      let (commit, _) = take_commit(&mut alice);
+      alice
+        .handle_signal(
+          event(
+            8,
+            CallEvent::DaveAnnounceCommit {
+              epoch: 1,
+              commit,
+              maybe_transition_id: None,
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      alice
+        .handle_signal(event(9, CallEvent::ParticipantLeft { device_id: device(3) }), now)
+        .unwrap();
+      // The SFU replays her binding with her old key package.
+      let replayed = vec![binding(3, carol_binding)];
+      let result = alice.handle_signal(
+        event(10, dave_proposals(2, add_carol(2), &[1, 2, 3], replayed)),
+        now,
+      );
+      assert!(matches!(result, Err(CallEngineError::RetiredKey(member)) if member == device(3)));
+    }
+
+    #[test]
     fn welcome_without_verified_members_stops_media() {
       let now = Instant::now();
       let authenticators = authenticators(&[1, 2]);
@@ -5227,8 +5373,20 @@ mod tests {
     maybe_transition_id: Option<DaveTransitionId>,
   ) -> (CallEngine, CallEngine) {
     let gateway = DaveExternalSender::new().unwrap();
-    let mut alice = joined_engine(1, &[], &gateway, Some(&authenticators[&1]), now);
-    let mut bob = joined_engine(2, &[1], &gateway, Some(&authenticators[&2]), now);
+    paired_in(&gateway, authenticators, now, maybe_transition_id, Vec::new())
+  }
+
+  /// [`paired_with`] under `gateway`, with `extra_welcome_bindings` slipped into Bob's welcome.
+  /// Alice has seen events 1 to 5, Bob 1 to 3.
+  fn paired_in(
+    gateway: &DaveExternalSender,
+    authenticators: &HashMap<i64, Arc<dyn CallKeyAuthenticator>>,
+    now: Instant,
+    maybe_transition_id: Option<DaveTransitionId>,
+    extra_welcome_bindings: Vec<DaveKeyBinding>,
+  ) -> (CallEngine, CallEngine) {
+    let mut alice = joined_engine(1, &[], gateway, Some(&authenticators[&1]), now);
+    let mut bob = joined_engine(2, &[1], gateway, Some(&authenticators[&2]), now);
     let (_, alice_binding) = key_package_of(&mut alice);
     alice
       .handle_signal(
@@ -5270,9 +5428,11 @@ mod tests {
         now,
       )
       .unwrap();
+    let mut key_bindings = vec![binding(1, alice_binding.unwrap())];
+    key_bindings.extend(extra_welcome_bindings);
     let welcome = CallEvent::DaveWelcome {
       welcome,
-      key_bindings: vec![binding(1, alice_binding.unwrap())],
+      key_bindings,
       maybe_transition_id,
     };
     bob.handle_signal(event(3, welcome), now).unwrap();
