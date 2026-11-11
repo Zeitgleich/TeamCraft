@@ -267,6 +267,27 @@ impl Measure {
     }
   }
 
+  /// A step with both ends known and numbers from the code as its data.
+  pub fn span_with_data(
+    &mut self,
+    op: &'static str,
+    description: &'static str,
+    (start_ms, end_ms): (f64, f64),
+    data: Vec<(&'static str, f64)>,
+  ) {
+    if let Some(transaction) = &mut self.maybe_transaction {
+      transaction.add_span(PerfSpan {
+        op,
+        description: description.into(),
+        start_ms,
+        end_ms,
+        status: PerfStatus::Ok,
+        maybe_ids: None,
+        data,
+      });
+    }
+  }
+
   pub fn tag(&mut self, key: &'static str, value: &'static str) {
     if let Some(transaction) = &mut self.maybe_transaction {
       transaction.set_tag(key, value);

@@ -426,7 +426,7 @@ fn capture_script_error(error_type: &str, message: String, frames: Vec<StackFram
 
 /// A handled problem of the app's own code, as a sampled warning without a stack trace: the
 /// breadcrumbs (the redacted debug log) tell what led there. Queued at once.
-fn capture_handled(error_type: &str, message: String) {
+pub(crate) fn capture_handled(error_type: &str, message: String) {
   let event = CrashEvent {
     event_id: event_id(),
     timestamp_ms: now_ms(),
