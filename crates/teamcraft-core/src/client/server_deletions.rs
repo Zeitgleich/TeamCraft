@@ -8,6 +8,7 @@
 //! the quarantine.
 
 use serde::{Deserialize, Serialize};
+use teamcraft_crypto::channel_anchor::name_hash;
 use teamcraft_proto::{
   ConversationId, ConversationKind, ConversationResponse, DeleteConversationRequest, SignedChannelDeletion,
   SpaceId,
@@ -134,9 +135,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let workspace = self.workspace()?;
     let group_users = self.group_users(conversation)?;
     let epoch = self.group_epoch(conversation)?;
+    let held = Box::pin(self.held_anchor(conversation)).await?;
+    let maybe_listed_name = maybe_known.as_ref().and_then(|known| known.maybe_name.as_deref());
+    let anchor = held.facts(maybe_listed_name);
     let verifier = DeletionVerifier {
       conversation,
-      is_channel: maybe_known.is_some_and(|known| known.kind == ConversationKind::Channel),
+      is_channel: maybe_known
+        .as_ref()
+        .is_some_and(|known| known.kind == ConversationKind::Channel),
       maybe_group: epoch.map(|epoch| GroupFacts {
         epoch,
         users: &group_users,
@@ -150,6 +156,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       channel_roles_max_age_ms: i64::try_from(self.settings.channel_roles_max_age.as_millis())
         .unwrap_or(i64::MAX),
       newest_server_ms: self.newest_server_ms(),
+      anchor,
     };
     let verified = match verify_signed_deletion(signed, &verifier) {
       Ok(verified) => verified,
@@ -232,12 +239,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     epoch: u64,
   ) -> Result<SignedChannelDeletion, CoreError> {
+    // The name this user was shown: the server's listing (e2ee.md §4.6.5, D3). Members compare it
+    // with their anchor; a swapped one takes the retention there.
+    let maybe_name_hash = records::get_json::<ConversationResponse>(
+      &self.store,
+      Table::Conversations,
+      &conversation.to_string(),
+    )?
+    .and_then(|known| known.maybe_name)
+    .map(|name| name_hash(&name));
     sign_channel_deletion(
       &self.account.device,
       &self.account.certificate,
       conversation,
       epoch,
       self.now_ms(),
+      maybe_name_hash,
     )
   }
 

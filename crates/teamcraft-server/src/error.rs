@@ -95,6 +95,10 @@ pub enum ApiError {
   ChannelNeedsAdmin,
   #[error("not allowed for DMs and group DMs")]
   NotAChannel,
+  /// The name breaks the channel name rules (e2ee.md §4.6.5); the server refuses it rather than
+  /// normalize, as names are stored byte for byte.
+  #[error("invalid channel name: {0}")]
+  InvalidChannelName(String),
   /// Channel members must belong to the channel's space; the user is not in it (yet).
   #[error("the user is not a member of the space")]
   NotSpaceMember,
@@ -422,6 +426,7 @@ impl ApiError {
       Self::Auth(AuthError::DpopUserLimit) => StatusCode::TOO_MANY_REQUESTS,
       Self::NotFound { .. } => StatusCode::NOT_FOUND,
       Self::NotAChannel
+      | Self::InvalidChannelName(_)
       | Self::InvalidRequest(_)
       | Self::ScheduledTimeInvalid(_)
       | Self::InvalidKeyPackage(_)
@@ -497,6 +502,7 @@ impl ApiError {
       Self::SpaceHasHiddenChannels => ErrorCode::SpaceHasHiddenChannels,
       Self::ChannelNeedsAdmin => ErrorCode::ChannelNeedsAdmin,
       Self::NotAChannel => ErrorCode::NotAChannel,
+      Self::InvalidChannelName(_) => ErrorCode::InvalidChannelName,
       Self::NotSpaceMember => ErrorCode::NotSpaceMember,
       Self::AdminJoinRequestTooSoon => ErrorCode::AdminJoinRequestTooSoon,
       Self::CallDeviceLimit { .. } => ErrorCode::CallDeviceLimit,
@@ -663,6 +669,16 @@ mod tests {
       let error = ApiError::from(auth);
       assert_eq!((error.status(), error.error_code()), (status, code));
     }
+  }
+
+  #[test]
+  fn an_invalid_channel_name_is_a_bad_request_with_its_own_code() {
+    let error = ApiError::InvalidChannelName("x".into());
+    assert_eq!(
+      (error.status(), error.error_code()),
+      (StatusCode::BAD_REQUEST, ErrorCode::InvalidChannelName)
+    );
+    assert_eq!(ErrorCode::InvalidChannelName.as_str(), "invalid_channel_name");
   }
 
   #[test]

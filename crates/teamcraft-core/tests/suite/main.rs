@@ -16,6 +16,7 @@ mod bug_reports;
 mod calls;
 mod canvas;
 mod catch_up;
+mod channel_anchor;
 mod channel_deletion;
 mod channel_roles;
 mod chat_actions;

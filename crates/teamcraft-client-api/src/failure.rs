@@ -20,6 +20,8 @@ const UNTRUSTED_CERTIFICATE_PREFIX: &str = "untrusted_certificate";
 const ROLE_CHANGE_NOT_CONFIRMED_PREFIX: &str = "role_change_not_confirmed";
 /// What marks an approval refused while the channel's role logs are proven to differ.
 const CHANNEL_ROLES_DISPUTED_PREFIX: &str = "channel_roles_disputed";
+/// Wire prefix of [`FailureKind::MustUpdate`].
+const MUST_UPDATE_PREFIX: &str = "must_update";
 /// Prefix of a system notification that could not be shown on this device: `notification_<failure>`.
 const NOTIFICATION_PREFIX: &str = "notification_";
 /// Prefix of a device link that failed ([`LinkFailure`]): `link_<failure>`.
@@ -61,6 +63,9 @@ pub enum FailureKind {
   Link(LinkFailure),
   /// A problem report can't be queued (docs/bug-reports.md).
   BugReport(BugReportBlocker),
+  /// The person being added runs an app from before the channel anchor, which can't be in this
+  /// channel (e2ee.md §4.6.5): they have to update first. The detail's first line names them.
+  MustUpdate,
   /// Anything else (local store, encryption, a stopped core).
   Other,
 }
@@ -366,6 +371,7 @@ impl ActionFailure {
       UNTRUSTED_CERTIFICATE_PREFIX => Some(FailureKind::UntrustedCertificate),
       ROLE_CHANGE_NOT_CONFIRMED_PREFIX => Some(FailureKind::RoleChangeNotConfirmed),
       CHANNEL_ROLES_DISPUTED_PREFIX => Some(FailureKind::ChannelRolesDisputed),
+      MUST_UPDATE_PREFIX => Some(FailureKind::MustUpdate),
       _ => None,
     };
     if let Some(kind) = maybe_kind {
@@ -410,6 +416,7 @@ impl ActionFailure {
       FailureKind::UntrustedCertificate => format!("{UNTRUSTED_CERTIFICATE_PREFIX}: {}", self.detail),
       FailureKind::RoleChangeNotConfirmed => format!("{ROLE_CHANGE_NOT_CONFIRMED_PREFIX}: {}", self.detail),
       FailureKind::ChannelRolesDisputed => format!("{CHANNEL_ROLES_DISPUTED_PREFIX}: {}", self.detail),
+      FailureKind::MustUpdate => format!("{MUST_UPDATE_PREFIX}: {}", self.detail),
       FailureKind::Other => self.detail.clone(),
     }
   }
@@ -418,6 +425,13 @@ impl ActionFailure {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn must_update_round_trips_with_the_persons_name() {
+    let failure = ActionFailure::new(FailureKind::MustUpdate, "Anna Example");
+    assert_eq!(failure.to_wire(), "must_update: Anna Example");
+    assert_eq!(ActionFailure::from_wire(&failure.to_wire()), failure);
+  }
 
   #[test]
   fn server_failures_round_trip() {

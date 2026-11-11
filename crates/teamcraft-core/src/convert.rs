@@ -2,7 +2,7 @@
 //! (crypto README: those switch to proto IDs later; the u64 encoding stays the same).
 
 use teamcraft_crypto::ids as crypto;
-use teamcraft_proto::{ClientMessageId, ConversationId, DeviceId, Id, MeetingId, Snowflake, UserId};
+use teamcraft_proto::{ClientMessageId, ConversationId, DeviceId, Id, MeetingId, Snowflake, SpaceId, UserId};
 
 use crate::error::CoreError;
 
@@ -16,6 +16,10 @@ pub(crate) fn device(id: DeviceId) -> crypto::DeviceId {
 
 pub(crate) fn conversation(id: ConversationId) -> crypto::ConversationId {
   crypto::ConversationId::new(raw(id))
+}
+
+pub(crate) fn space(id: SpaceId) -> crypto::SpaceId {
+  crypto::SpaceId::new(raw(id))
 }
 
 pub(crate) fn meeting(id: MeetingId) -> crypto::MeetingId {

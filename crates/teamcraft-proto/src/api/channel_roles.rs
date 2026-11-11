@@ -61,6 +61,11 @@ pub struct ChannelDeletionDocument {
   /// When the signer's device signed it (its own clock): the workspace roster has to be fresh at
   /// this time as well as at the verifying device's.
   pub signed_at_ms: i64,
+  /// The labelled hash of the name the deleter was shown (e2ee.md §4.6.5, D3): on an anchored
+  /// channel a member purges at once only if it is the anchor's name, and a deletion without it
+  /// takes the retention. Older clients neither send nor read it.
+  #[serde(rename = "name_hash", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_name_hash: Option<Base64Bytes>,
 }
 
 /// A channel's deletion, signed by a device of somebody allowed to delete it. `signature` is a
@@ -197,14 +202,23 @@ mod signed_deletion_tests {
 
   #[test]
   fn the_document_and_request_keep_their_wire_format() {
-    let document = ChannelDeletionDocument {
+    let mut document = ChannelDeletionDocument {
       conversation_id: conversation(7),
       epoch: 12,
       signed_at_ms: 1_000,
+      maybe_name_hash: None,
     };
     assert_eq!(
       serde_json::to_string(&document).unwrap(),
       r#"{"conversation_id":"7","epoch":12,"signed_at_ms":1000}"#
+    );
+    // The name hash (D3) is added only when there is one; older documents read without it.
+    document.maybe_name_hash = Some(Base64Bytes::new(vec![3]));
+    let json = r#"{"conversation_id":"7","epoch":12,"signed_at_ms":1000,"name_hash":"Aw=="}"#;
+    assert_eq!(serde_json::to_string(&document).unwrap(), json);
+    assert_eq!(
+      serde_json::from_str::<ChannelDeletionDocument>(json).unwrap(),
+      document
     );
     let request = DeleteConversationRequest {
       maybe_signed_deletion: Some(signed()),
