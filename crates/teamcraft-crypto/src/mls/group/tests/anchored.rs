@@ -98,6 +98,27 @@ mod changes {
   use super::*;
 
   #[test]
+  fn a_pending_membership_commit_keeps_the_encoding_older_apps_read() {
+    let mut world = AnchoredWorld::new();
+    let change = world.signed_add_bob();
+    world
+      .alice_group
+      .commit_membership_change(
+        &world.alice.provider,
+        &world.alice.user.device,
+        &change,
+        &[world.bob.key_package()],
+        &world.directory,
+        &world.authority,
+      )
+      .unwrap();
+    let pending = world.alice_group.pending_commit().unwrap().clone();
+    let bytes = pending.to_bytes().unwrap();
+    assert!(LegacyPendingCommit::tls_deserialize_exact_bytes(&bytes).is_ok());
+    assert_eq!(PendingCommit::from_bytes(&bytes).unwrap(), pending);
+  }
+
+  #[test]
   fn a_members_rename_is_committed_and_every_member_holds_it() {
     let mut world = AnchoredWorld::new();
     let anchor = world.current_anchor();
@@ -129,7 +150,14 @@ mod changes {
     };
     assert_eq!(update.maybe_properties_change, Some(Box::new(signed)));
     assert!(update.added.is_empty() && update.removed.is_empty());
-    world.carol_group.confirm_commit(&world.carol.provider).unwrap();
+    // The pending commit keeps the change across a restart, and the committer learns it too.
+    let pending = world.carol_group.pending_commit().unwrap().clone();
+    assert_eq!(
+      PendingCommit::from_bytes(&pending.to_bytes().unwrap()).unwrap(),
+      pending
+    );
+    let own = world.carol_group.confirm_commit(&world.carol.provider).unwrap();
+    assert_eq!(own.maybe_properties_change, update.maybe_properties_change);
     assert_eq!(world.carol_group.anchor_bytes(), world.alice_group.anchor_bytes());
     let verified = world
       .alice_group

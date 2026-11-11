@@ -23,7 +23,7 @@ use tls_codec::{
 };
 
 use crate::domain;
-use crate::identity::{DeviceKeyPair, IdentityPublicKey, SignedDeviceCertificate};
+use crate::identity::{DeviceKeyPair, IdentityPublicKey, SignedDeviceCertificate, VerifiedDevice};
 use crate::ids::{ConversationId, MeetingId, SpaceId, UserId};
 use crate::membership::{IdentityDirectory, MembershipAuthority};
 use crate::workspace::{WorkspaceLog, WorkspaceLogError, claimed_signer, sign_log_entry, verify_log_entry};
@@ -259,6 +259,9 @@ pub enum FloorState {
   ForkedProperties,
   /// Two foundings no re-founding connects: settled only by a re-founding.
   ForkedFounding,
+  /// A state a newer app wrote: grants nothing, and no higher version settles it here.
+  #[serde(other)]
+  Unknown,
 }
 
 /// What a founding device signs (e2ee.md §4.6.5, "Founding"): what it asked the server for, never
@@ -343,6 +346,9 @@ pub enum PropertiesChangeError {
   Signature(WorkspaceLogError),
   #[error("{0} may not make this change")]
   NotAllowed(UserId),
+  /// The signing device isn't on its user's newest signed device list (or was revoked).
+  #[error("the device of {0} that signed the change isn't on its signed device list")]
+  DeviceNotListed(UserId),
   #[error("the name's setter doesn't match the signer")]
   WrongNameSetter,
 }
@@ -408,7 +414,7 @@ impl ChannelAnchor {
       Some(_) => {},
     }
     Self::tls_deserialize_exact_bytes(bytes).map_err(|error| match error {
-      tls_codec::Error::UnknownValue(_) => AnchorError::MustUpdate,
+      tls_codec::Error::UnknownValue(_) if has_newer_kind_or_origin(bytes) => AnchorError::MustUpdate,
       other => AnchorError::Malformed(other),
     })
   }
@@ -507,7 +513,7 @@ impl ChannelAnchor {
     self.check_workspace_signer(epoch, authority, judged)?;
     self.check_founding_properties()?;
     let founding_hash = self.founding_hash()?;
-    let (space, name) = self.last_change_confidence(founding_hash, tree_users, directory, authority);
+    let (space, name) = self.last_change_confidence(founding_hash, epoch, tree_users, directory, authority);
     Ok(VerifiedAnchor {
       properties_hash: self.properties().hash()?,
       anchor: self.clone(),
@@ -559,14 +565,19 @@ impl ChannelAnchor {
         current_epoch: epoch,
       });
     }
-    let signer = signed
+    let device = signed
       .verify_signature(directory)
       .map_err(PropertiesChangeError::Signature)?;
+    let signer = device.user_id();
+    if !is_listed_signer(&device, directory) {
+      return Err(PropertiesChangeError::DeviceNotListed(signer));
+    }
     let class = signer_class(
       signer,
       change.roster_version,
       Judged::Newest,
       tree_users,
+      directory,
       authority,
     )
     .ok_or(PropertiesChangeError::NotAllowed(signer))?;
@@ -723,6 +734,7 @@ impl ChannelAnchor {
   fn last_change_confidence(
     &self,
     founding_hash: AnchorHash,
+    epoch: u64,
     tree_users: &BTreeSet<UserId>,
     directory: &impl IdentityDirectory,
     authority: &impl MembershipAuthority,
@@ -734,16 +746,30 @@ impl ChannelAnchor {
     let is_ours = change.conversation_id == self.founding.conversation_id
       && change.founding_hash == founding_hash
       && change.properties.version >= 2;
+    // The change's own anchoring window (§4.6, "Freshness"): within it, the newest roster the
+    // device holds (a demoted signer counts for nothing); later, the roster the change names,
+    // which the members of the window checked fresh. A change signed after this epoch is no
+    // change this device can place.
+    if change.signed_for_epoch > epoch {
+      return (Confidence::Stale, Confidence::Stale);
+    }
+    let judged = if epoch <= change.signed_for_epoch.saturating_add(ANCHORING_WINDOW_EPOCHS) {
+      Judged::Newest
+    } else {
+      Judged::AsNamed
+    };
     let maybe_class = signed
       .verify_signature(directory)
       .ok()
-      .filter(|_| is_ours)
-      .and_then(|signer| {
+      .filter(|device| is_ours && is_listed_signer(device, directory))
+      .and_then(|device| {
+        let signer = device.user_id();
         signer_class(
           signer,
           change.roster_version,
-          Judged::AsNamed,
+          judged,
           tree_users,
+          directory,
           authority,
         )
         .map(|class| (signer, class))
@@ -842,17 +868,19 @@ impl SignedPropertiesChange {
     claimed_signer(self.entry.as_slice())
   }
 
-  /// Verifies the signature under the signer's pinned identity key; returns the signer.
-  fn verify_signature(&self, directory: &impl IdentityDirectory) -> Result<UserId, WorkspaceLogError> {
+  /// Verifies the signature under the signer's pinned identity key; returns the signing device.
+  fn verify_signature(
+    &self,
+    directory: &impl IdentityDirectory,
+  ) -> Result<VerifiedDevice, WorkspaceLogError> {
     let payload = self.change.tls_serialize_detached()?;
-    let device = verify_log_entry(
+    verify_log_entry(
       self.entry.as_slice(),
       WorkspaceLog::ChannelProperties,
       self.change.properties.version,
       &payload,
       directory,
-    )?;
-    Ok(device.user_id())
+    )
   }
 }
 
@@ -872,7 +900,7 @@ impl AnchorHash {
   }
 
   fn from_hex(text: &str) -> Option<Self> {
-    if text.len() != 64 || !text.is_ascii() {
+    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
       return None;
     }
     let mut bytes = [0u8; 32];
@@ -1013,8 +1041,8 @@ impl AnchorFloor {
       self.state = FloorState::ForkedFounding;
       return *self != before;
     }
-    if other.state == FloorState::ForkedFounding {
-      self.state = FloorState::ForkedFounding;
+    if matches!(other.state, FloorState::ForkedFounding | FloorState::Unknown) {
+      self.state = self.state.max_with(other.state);
     }
     self.take(other.properties_version, other.properties_hash, other.epoch);
     // The other side's fork of properties stands while its version is still the highest.
@@ -1054,6 +1082,7 @@ impl FloorState {
   fn max_with(self, other: Self) -> Self {
     match (self, other) {
       (Self::ForkedFounding, _) | (_, Self::ForkedFounding) => Self::ForkedFounding,
+      (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
       (Self::ForkedProperties, _) | (_, Self::ForkedProperties) => Self::ForkedProperties,
       _ => Self::Agreed,
     }
@@ -1088,22 +1117,46 @@ pub fn name_hash(name: &str) -> AnchorHash {
 }
 
 /// The user's role for a properties change: a workspace owner or admin (of a roster judged as
-/// `judged`) first, else a member with a leaf; `None` for anybody else. Strict channels' admins
-/// (§4.6.2) join once #1197's extension exists.
+/// `judged`) first, else a member with a leaf; `None` for anybody else, a meeting guest included
+/// (a guest manages nothing in a group, §4.6, "Meeting guests"). Strict channels' admins (§4.6.2)
+/// join once #1197's extension exists.
 fn signer_class(
   signer: UserId,
   roster_version: u64,
   judged: Judged,
   tree_users: &BTreeSet<UserId>,
+  directory: &impl IdentityDirectory,
   authority: &impl MembershipAuthority,
 ) -> Option<NameAuthority> {
-  if authority.workspace_signer(signer, roster_version, judged) == Standing::Confirmed {
+  if directory.is_guest(signer) {
+    None
+  } else if authority.workspace_signer(signer, roster_version, judged) == Standing::Confirmed {
     Some(NameAuthority::Workspace)
   } else if tree_users.contains(&signer) {
     Some(NameAuthority::Member)
   } else {
     None
   }
+}
+
+/// Whether the device that signed a properties change is on its user's newest signed device list.
+/// A change names no list version, so it is judged on the newest one: a revoked device's change
+/// counts for nothing.
+fn is_listed_signer(device: &VerifiedDevice, directory: &impl IdentityDirectory) -> bool {
+  directory.device_listing(device, 0, Judged::Newest) == Standing::Confirmed
+}
+
+/// Whether a value the decoder didn't know sits in the founding's kind or origin, the parts a newer
+/// app may add to (an update helps); an unknown value anywhere else is a malformed anchor.
+fn has_newer_kind_or_origin(bytes: &[u8]) -> bool {
+  // format (1) ‖ conversation_id (8) ‖ kind tag; a meeting chat's kind carries its meeting ID (8).
+  const KIND: usize = 1 + 8;
+  let origin = match bytes.get(KIND) {
+    Some(1) => KIND + 1,
+    Some(2) => KIND + 1 + 8,
+    _ => return true,
+  };
+  !matches!(bytes.get(origin), Some(1..=3))
 }
 
 fn founding_payload(

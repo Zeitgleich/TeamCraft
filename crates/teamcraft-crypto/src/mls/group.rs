@@ -78,6 +78,18 @@ pub struct PendingCommit {
   removed: Vec<GroupMember>,
   /// The device a rejoin commit adds back, and the request it answers.
   maybe_rejoin: Option<(GroupMember, ChangeId)>,
+  /// The move or rename a properties commit makes, so the committer raises its anchor floor too.
+  /// Encoded only when set, so older apps keep reading every other pending commit.
+  maybe_properties_change: Option<SignedPropertiesChange>,
+}
+
+/// [`PendingCommit`] as apps before the anchor stored it.
+#[derive(TlsSerialize, TlsDeserializeBytes, TlsSize)]
+struct LegacyPendingCommit {
+  commit: Vec<u8>,
+  maybe_change: Option<MembershipChange>,
+  removed: Vec<GroupMember>,
+  maybe_rejoin: Option<(GroupMember, ChangeId)>,
 }
 
 /// A decrypted welcome whose leaves aren't verified yet ([`ConversationGroup::stage_join`]).
@@ -269,6 +281,7 @@ impl ConversationGroup {
       maybe_change: None,
       removed: Vec::new(),
       maybe_rejoin: None,
+      maybe_properties_change: None,
     });
     Ok((founded, output))
   }
@@ -687,6 +700,7 @@ impl ConversationGroup {
       maybe_change: Some(change.clone()),
       removed: proposed.removed,
       maybe_rejoin: None,
+      maybe_properties_change: None,
     });
     Ok(output)
   }
@@ -720,6 +734,7 @@ impl ConversationGroup {
       maybe_change: None,
       removed: Vec::new(),
       maybe_rejoin: None,
+      maybe_properties_change: Some(signed.clone()),
     });
     Ok(output)
   }
@@ -768,6 +783,7 @@ impl ConversationGroup {
       maybe_change: None,
       removed: Vec::new(),
       maybe_rejoin: None,
+      maybe_properties_change: None,
     });
     Ok(output)
   }
@@ -819,6 +835,7 @@ impl ConversationGroup {
       maybe_change: None,
       removed: vec![member],
       maybe_rejoin: Some((member, verified.request().request_id())),
+      maybe_properties_change: None,
     });
     Ok(output)
   }
@@ -851,7 +868,7 @@ impl ConversationGroup {
       maybe_rejoined: pending.maybe_rejoin.map(|(member, _)| member),
       is_self_removed: false,
       maybe_committer: None,
-      maybe_properties_change: None,
+      maybe_properties_change: pending.maybe_properties_change.map(Box::new),
     })
   }
 
@@ -1162,6 +1179,15 @@ impl ConversationGroup {
     }
     if proposals != 1 {
       return Err(MlsError::ContextChangeMismatch);
+    }
+    // A guest manages nothing in a group (§4.6, "Meeting guests"), not even by committing
+    // somebody else's signed change.
+    let committer = self
+      .group
+      .member(sender_index)
+      .ok_or(MlsError::ChangeDoesNotMatchCommit)?;
+    if directory.is_guest(credential::member_of(committer)?.user_id) {
+      return Err(MlsError::GuestOverreach);
     }
     if let Some(leaf) = staged.update_path_leaf_node() {
       self.verify_same_identity(sender_index, leaf, directory)?;
@@ -1638,12 +1664,35 @@ impl StagedJoin {
 }
 
 impl PendingCommit {
+  /// The encoding older apps read too, unless the commit is a move or rename.
   pub fn to_bytes(&self) -> Result<Vec<u8>, MlsError> {
-    Ok(self.tls_serialize_detached()?)
+    if self.maybe_properties_change.is_some() {
+      return Ok(self.tls_serialize_detached()?);
+    }
+    Ok(
+      LegacyPendingCommit {
+        commit: self.commit.clone(),
+        maybe_change: self.maybe_change.clone(),
+        removed: self.removed.clone(),
+        maybe_rejoin: self.maybe_rejoin,
+      }
+      .tls_serialize_detached()?,
+    )
   }
 
+  /// Reads both encodings: the legacy one lacks the trailing properties change.
   pub fn from_bytes(bytes: &[u8]) -> Result<Self, MlsError> {
-    Ok(Self::tls_deserialize_exact_bytes(bytes)?)
+    if let Ok(pending) = Self::tls_deserialize_exact_bytes(bytes) {
+      return Ok(pending);
+    }
+    let legacy = LegacyPendingCommit::tls_deserialize_exact_bytes(bytes)?;
+    Ok(Self {
+      commit: legacy.commit,
+      maybe_change: legacy.maybe_change,
+      removed: legacy.removed,
+      maybe_rejoin: legacy.maybe_rejoin,
+      maybe_properties_change: None,
+    })
   }
 
   /// Whether `bytes`, an entry of the group's queue, is this commit (the server accepted it, even
@@ -1663,9 +1712,6 @@ impl ChangeHistory {
   }
 }
 
-/// Whether the tree in a group information holds a leaf with this signature key. Read as it comes,
-/// without checking lifetimes or signatures: an old leaf must not hide this device's own, and a
-/// made-up one only makes the device ask to be added.
 /// What to send for a staged commit.
 fn commit_output(bundle: CommitMessageBundle) -> Result<CommitOutput, MlsError> {
   let maybe_welcome = bundle
@@ -1720,6 +1766,9 @@ fn with_anchor(
   Extensions::from_vec(replaced).map_err(|error| MlsError::openmls("anchor extension", error))
 }
 
+/// Whether the tree in a group information holds a leaf with this signature key. Read as it comes,
+/// without checking lifetimes or signatures: an old leaf must not hide this device's own, and a
+/// made-up one only makes the device ask to be added.
 fn holds_signature_key(info: &VerifiableGroupInfo, signature_key: &[u8]) -> bool {
   info.extensions().ratchet_tree().is_some_and(|tree| {
     tree

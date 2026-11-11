@@ -3211,11 +3211,12 @@ changes it, and when it creates the group. It checks, in this order:
    "Freshness"); a device welcomed later checks that `signed_for_epoch` isn't past the epoch it is welcomed into.
    A roster it can't verify grants nothing yet and is fetched again. For `refounded`, see "Re-founding" below.
 5. The properties: at version 1, `prev_hash` is zero, `name_set_by` names the founder (`founder`, or `workspace`
-   for the reviewer or re-founder), and the founding entry covered them. Above 1, `properties_entry` is a
-   `ChannelProperties` entry for this conversation and this founding hash whose new values and version are these,
-   and whose signer may (D4, D5, below) as far as this device can tell from the current context, tree and roster. A
-   signer it can't confirm (a member who has since left, a roster it can't read) makes that property **stale for
-   this device**, not the anchor invalid.
+   for the reviewer or re-founder), and the founding entry covered them. Above 1, `last_change` is a signed
+   `ChannelPropertiesChange` for this conversation and this founding hash whose new values and version are these,
+   signed by a device on its user's newest signed device list, and whose signer may (D4, D5, below) as far as this
+   device can tell from the current context, tree and roster, judged as of the change (its own 32-epoch window,
+   "Implementation notes" below). A signer it can't confirm (a member who has since left, a guest, a revoked
+   device, a roster it can't read) makes that property **stale for this device**, not the anchor invalid.
 6. The pin and the floor (below): when the device **enters** a group state (a welcome, an add-back, an external
    commit, a re-founding), the context is at or above what this device and its user's other devices have seen of
    this conversation. At a commit inside a group state it already holds, only the founding pin is checked and the
@@ -3335,7 +3336,7 @@ nobody (#1276).
 | An add-back or welcome into a group without the anchor, or with another one | The pin refuses it: the device stays out and shows the channel as unreachable, rather than take a re-founded group. A device that never pinned the channel gets today's guarantees (the anchor only grants) |
 | A copy of the real founding with old properties, in a fork                  | The floor refuses a lower version or an older epoch, on every device of a user who saw more, new ones included (§6.4)                                                                                       |
 | An external commit from an old `GroupInfo`                                  | The joiner checks the anchor in the signed `GroupInfo` against the pin and floor of its user's account data                                                                                                 |
-| A member commits properties nobody authorized                               | Honest members refuse the commit; a device brought back into it by that member's welcome sees a `properties_entry` it can't confirm, and the property is stale for it                                       |
+| A member commits properties nobody authorized                               | Honest members refuse the commit; a device brought back into it by that member's welcome sees a `last_change` it can't confirm, and the property is stale for it                                            |
 | The server replays an old properties change                                 | `version` must be one up, `prev_hash` and `founding_hash` must match; `signed_for_epoch` limits it to 32 epochs                                                                                             |
 | The server serves an old welcome or `GroupInfo`                             | The device is at an old epoch and can't read the current one: availability. A deletion names an epoch, and a device behind it takes the retention                                                           |
 | A held-back re-founding, replayed against a group that is still healthy     | Refused where a floor epoch is above `replaces_last_epoch`; the device stays in the group it holds                                                                                                          |
@@ -3545,11 +3546,18 @@ and couldn't count for a purge.
   change document with its entry. The current properties are the last change's, else the founding's. Same content,
   no new primitive; one more `ChannelProperties` (about 90 bytes).
 - **The last change on its own** (welcome, add-back, external commit): its signature must verify under the signer's
-  pinned key and name this conversation and founding. A workspace signer of the roster version it names (as of the
-  anchoring: the members of the time checked freshness) confirms space and name. A member with a leaf confirms the
-  name only if `name_set_by` is that member, and the space only if it is still the founding's (a member never
-  moves; the history in between isn't visible). Anything else makes both properties stale for this device; the
-  anchor still verifies.
+  pinned key, its device must be on the newest signed device list (a change names no list version), and it must
+  name this conversation and founding. It is judged as of the change: a change signed for a later epoch than the
+  group's is stale; within `signed_for_epoch` and the 32 epochs after it the newest roster decides (a demoted
+  admin's change counts for nothing), later the roster version it names, which the members of the window checked
+  fresh. A workspace signer confirms space and name. A member with a leaf (never a guest) confirms the name only if
+  `name_set_by` is that member, and the space only if it is still the founding's (a member never moves; the
+  history in between isn't visible). Anything else makes both properties stale for this device; the anchor still
+  verifies. The commit verdict likewise refuses a change from a device that isn't listed, from a guest signer, and
+  a properties commit by a guest.
+- **The committer's own change.** The pending commit keeps the signed change, so `confirm_commit` returns it and
+  the committer raises its floor like every other member. It is stored in the old encoding unless it carries one,
+  so older apps keep reading every other pending commit.
 - **openmls is stricter than the design assumed.** All seven `required_capabilities` paths refuse an old leaf (tests
   in `mls/group/tests/anchored.rs`); a welcome to an old app can't even be built by an honest adder. openmls also
   refuses a group context whose unknown extension `required_capabilities` doesn't name, so a commit that keeps the

@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::*;
 use crate::identity::VerifiedDevice;
@@ -89,6 +89,21 @@ mod encoding {
   }
 
   #[test]
+  fn an_unknown_value_outside_kind_and_origin_is_malformed() {
+    let world = World::new();
+    let mut bytes = world.found(AnchorKind::Channel, "general").to_bytes().unwrap();
+    // format (1) ‖ conversation (8) ‖ kind (1) ‖ founded origin (1 + 8 + 32) ‖ list version (8)
+    // ‖ signed at (8) ‖ version (8) ‖ space (1 + 8) ‖ name hash (32) ‖ name setter's authority
+    let authority = 1 + 8 + 1 + 41 + 8 + 8 + 8 + 9 + 32;
+    assert_eq!(bytes[authority], NameAuthority::Founder as u8);
+    bytes[authority] = 9;
+    assert!(matches!(
+      ChannelAnchor::from_bytes(&bytes, DEFAULT_MAX_ANCHOR_BYTES),
+      Err(AnchorError::Malformed(tls_codec::Error::UnknownValue(_)))
+    ));
+  }
+
+  #[test]
   fn the_hashes_are_labelled_length_prefixed_and_stable() {
     // Known answer, computed apart: SHA-256(25 ‖ label ‖ 7 ‖ "general"). Part of every pin.
     assert_eq!(
@@ -109,6 +124,11 @@ mod encoding {
     assert_eq!(json, format!("\"{}\"", hash.to_hex()));
     assert_eq!(serde_json::from_str::<AnchorHash>(&json).unwrap(), hash);
     assert!(serde_json::from_str::<AnchorHash>("\"zz\"").is_err());
+    let signed = format!("\"+f{}\"", "0".repeat(62));
+    assert!(
+      serde_json::from_str::<AnchorHash>(&signed).is_err(),
+      "a sign is no hex digit"
+    );
     assert!(serde_json::from_str::<AnchorHash>(&format!("\"{}\"", "é".repeat(32))).is_err());
   }
 }
@@ -520,6 +540,110 @@ mod changes {
   }
 }
 
+mod change_signers {
+  use super::*;
+
+  #[test]
+  fn a_demoted_admins_change_counts_only_after_its_window() {
+    let mut world = World::new();
+    let anchor = world.found(AnchorKind::Channel, "general");
+    let moved = anchor.with_change(world.change(
+      &anchor,
+      ADMIN,
+      NameAuthority::Workspace,
+      Some(OTHER_SPACE),
+      "a",
+      4,
+    ));
+    world.authority.demoted.insert(UserId::new(ADMIN));
+    // Within the change's window this device judges the newest roster: the demotion counts.
+    let verified = world.verify(&moved, ExpectedKind::Channel, 36).unwrap();
+    assert_eq!(verified.space_confidence(), Confidence::Stale);
+    assert_eq!(verified.name_confidence(), Confidence::Stale);
+    // After it, the roster the change names: the members of the window checked it fresh.
+    let verified = world.verify(&moved, ExpectedKind::Channel, 37).unwrap();
+    assert_eq!(verified.space_confidence(), Confidence::Confirmed);
+    assert_eq!(verified.name_confidence(), Confidence::Confirmed);
+    // A commit by the demoted admin is refused outright.
+    let next = world.change(
+      &anchor,
+      ADMIN,
+      NameAuthority::Workspace,
+      Some(OTHER_SPACE),
+      "b",
+      4,
+    );
+    assert!(matches!(
+      anchor.check_change(&next, 4, &world.tree, &world.directory, &world.authority),
+      Err(PropertiesChangeError::NotAllowed(_))
+    ));
+  }
+
+  #[test]
+  fn a_change_signed_after_the_epoch_is_stale() {
+    let world = World::new();
+    let anchor = world.found(AnchorKind::Channel, "general");
+    let moved = anchor.with_change(world.change(
+      &anchor,
+      ADMIN,
+      NameAuthority::Workspace,
+      Some(OTHER_SPACE),
+      "a",
+      4,
+    ));
+    let verified = world.verify(&moved, ExpectedKind::Channel, 3).unwrap();
+    assert_eq!(verified.space_confidence(), Confidence::Stale);
+    assert_eq!(verified.name_confidence(), Confidence::Stale);
+    assert_eq!(
+      world
+        .verify(&moved, ExpectedKind::Channel, 4)
+        .unwrap()
+        .space_confidence(),
+      Confidence::Confirmed
+    );
+  }
+
+  #[test]
+  fn a_guest_renames_nothing() {
+    let mut world = World::new();
+    let anchor = world.found(AnchorKind::Channel, "general");
+    let renamed = world.change(&anchor, MEMBER, NameAuthority::Member, Some(SPACE), "x", 4);
+    world.directory.guests.insert(UserId::new(MEMBER));
+    assert!(matches!(
+      anchor.check_change(&renamed, 4, &world.tree, &world.directory, &world.authority),
+      Err(PropertiesChangeError::NotAllowed(_))
+    ));
+    let verified = world
+      .verify(&anchor.with_change(renamed), ExpectedKind::Channel, 5)
+      .unwrap();
+    assert_eq!(verified.name_confidence(), Confidence::Stale);
+  }
+
+  #[test]
+  fn a_revoked_device_changes_nothing() {
+    let mut world = World::new();
+    let anchor = world.found(AnchorKind::Channel, "general");
+    let moved = world.change(
+      &anchor,
+      ADMIN,
+      NameAuthority::Workspace,
+      Some(OTHER_SPACE),
+      "a",
+      4,
+    );
+    world.directory.revoked.insert(UserId::new(ADMIN));
+    assert!(matches!(
+      anchor.check_change(&moved, 4, &world.tree, &world.directory, &world.authority),
+      Err(PropertiesChangeError::DeviceNotListed(user)) if user == UserId::new(ADMIN)
+    ));
+    let verified = world
+      .verify(&anchor.with_change(moved), ExpectedKind::Channel, 5)
+      .unwrap();
+    assert_eq!(verified.space_confidence(), Confidence::Stale);
+    assert_eq!(verified.name_confidence(), Confidence::Stale);
+  }
+}
+
 mod floor {
   use super::*;
 
@@ -646,6 +770,29 @@ mod floor {
   }
 
   #[test]
+  fn a_state_from_a_newer_app_grants_nothing() {
+    let world = World::new();
+    let anchor = world.found(AnchorKind::Channel, "general");
+    let v1 = world.verify(&anchor, ExpectedKind::Channel, 0).unwrap();
+    let mut json = serde_json::to_value(AnchorFloor::first(&v1, 0)).unwrap();
+    json["state"] = serde_json::Value::from("forked_by_something_new");
+    let newer: AnchorFloor = serde_json::from_value(json).unwrap();
+    assert_eq!(newer.state, FloorState::Unknown);
+    assert!(!newer.grants());
+    let mut agreed = AnchorFloor::first(&v1, 0);
+    agreed.merge(&newer);
+    assert_eq!(agreed.state, FloorState::Unknown);
+    let v2_anchor =
+      anchor.with_change(world.change(&anchor, ADMIN, NameAuthority::Workspace, Some(SPACE), "a", 4));
+    let v2 = world.verify(&v2_anchor, ExpectedKind::Channel, 5).unwrap();
+    agreed.raise(&v2, 5);
+    assert!(
+      !agreed.grants(),
+      "a higher version doesn't settle a state it doesn't know"
+    );
+  }
+
+  #[test]
   fn a_floor_survives_the_account_data() {
     let world = World::new();
     let anchor = world.found(AnchorKind::Channel, "general");
@@ -685,10 +832,13 @@ impl World {
       directory: Directory {
         pins,
         listing: Standing::Confirmed,
+        revoked: HashSet::new(),
+        guests: HashSet::new(),
         judged: Cell::new(None),
       },
       authority: Authority {
         admins: HashMap::from([(UserId::new(ADMIN), Standing::Confirmed)]),
+        demoted: HashSet::new(),
       },
       tree: [FOUNDER, MEMBER].into_iter().map(UserId::new).collect(),
       founder,
@@ -836,6 +986,9 @@ impl World {
 struct Directory {
   pins: HashMap<UserId, IdentityPublicKey>,
   listing: Standing,
+  /// Users whose devices the newest lists revoke.
+  revoked: HashSet<UserId>,
+  guests: HashSet<UserId>,
   /// How the last device list check was judged.
   judged: Cell<Option<Judged>>,
 }
@@ -845,14 +998,24 @@ impl IdentityDirectory for Directory {
     self.pins.get(&user_id).copied()
   }
 
-  fn device_listing(&self, _device: &VerifiedDevice, _list_version: u64, judged: Judged) -> Standing {
+  fn device_listing(&self, device: &VerifiedDevice, _list_version: u64, judged: Judged) -> Standing {
     self.judged.set(Some(judged));
-    self.listing
+    if self.revoked.contains(&device.user_id()) {
+      Standing::Refused
+    } else {
+      self.listing
+    }
+  }
+
+  fn is_guest(&self, user_id: UserId) -> bool {
+    self.guests.contains(&user_id)
   }
 }
 
 struct Authority {
   admins: HashMap<UserId, Standing>,
+  /// Admins a newer roster demoted: refused on the newest roster, confirmed on the one named.
+  demoted: HashSet<UserId>,
 }
 
 impl MembershipAuthority for Authority {
@@ -865,7 +1028,10 @@ impl MembershipAuthority for Authority {
     false
   }
 
-  fn workspace_signer(&self, user_id: UserId, _roster_version: u64, _judged: Judged) -> Standing {
+  fn workspace_signer(&self, user_id: UserId, _roster_version: u64, judged: Judged) -> Standing {
+    if self.demoted.contains(&user_id) && judged == Judged::Newest {
+      return Standing::Refused;
+    }
     self.admins.get(&user_id).copied().unwrap_or(Standing::Refused)
   }
 }
