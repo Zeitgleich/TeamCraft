@@ -82,6 +82,11 @@ http_timeout_secs = 10
 # directory; nothing else depends on it. In Keycloak add a token mapper for it to the `client_id` client.
 # organization_claim = "organization"
 
+# Optional: a top-level access-token claim with role names (a list, or one string), read besides the
+# client roles, for providers that can't nest client roles: Dex puts its users' groups in `groups`
+# (add "groups" to app_scopes). See docs/operations.md, "Demo instance".
+# roles_claim = "groups"
+
 # TeamCraft role = client role of `client_id` in the provider. Users with several roles get the
 # highest (owner > admin > member > guest); users with none of them are rejected.
 # Example for an existing setup: guest = "external"

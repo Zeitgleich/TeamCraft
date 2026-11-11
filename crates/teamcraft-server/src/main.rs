@@ -958,6 +958,11 @@ fn build_oidc_sync(config: &Config) -> anyhow::Result<Option<OidcSyncSettings>> 
       warn!(
         "the identity provider sync is switched off (oidc.sync.is_enabled = false): deactivated users keep access until their tokens end; required for production (admin.md 3.2.3)"
       );
+    } else {
+      // A provider without an admin API (operations.md, "Demo instance") runs like this on purpose.
+      info!(
+        "the identity provider sync is off (no oidc.sync.client_secret): no admin API, group sync, pre-created accounts or leaver events; deactivated users keep access until their tokens end"
+      );
     }
     return Ok(None);
   }
@@ -1263,6 +1268,9 @@ fn build_validator(config: &Config, dependencies: &Dependencies) -> anyhow::Resu
   .with_guard(dependencies.guard(DependencyName::IdentityProvider));
   let algorithms = TokenValidator::parse_algorithms(&oidc.algorithms)
     .map_err(|e| anyhow::anyhow!("oidc.algorithms: {e}"))?;
+  if let Some(claim) = &oidc.maybe_roles_claim {
+    info!(claim = %claim, "roles are read from this token claim besides the client roles");
+  }
   Ok(TokenValidator::new(
     keys,
     RoleMapping::new(oidc.roles.clone()),
@@ -1273,6 +1281,7 @@ fn build_validator(config: &Config, dependencies: &Dependencies) -> anyhow::Resu
       leeway_secs: oidc.leeway_secs,
       logout_audiences: vec![oidc.client_id.clone(), oidc.server_client.clone()],
       maybe_organization_claim: oidc.maybe_organization_claim.clone(),
+      maybe_roles_claim: oidc.maybe_roles_claim.clone(),
     },
   ))
 }

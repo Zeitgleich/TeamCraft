@@ -177,6 +177,11 @@ pub struct OidcConfig {
   pub http_timeout_secs: u64,
   #[serde(default)]
   pub roles: RoleNames,
+  /// Name of a top-level access-token claim with role names (a list, or one string), read besides
+  /// `resource_access.<client_id>.roles`: for providers without client roles, e.g. Dex's `groups`.
+  /// Unset: client roles only.
+  #[serde(rename = "roles_claim", default)]
+  pub maybe_roles_claim: Option<String>,
   /// Name of the access-token claim that holds the user's organization (a string, or a list whose
   /// first entry counts), shown as a badge next to their name. Without it users have no
   /// organization. In Keycloak add a token mapper (user attribute or group name) to the client.
@@ -2324,6 +2329,16 @@ mod tests {
     let rendezvous = RendezvousConfig::default();
     assert!(rendezvous.max_frame_bytes >= transfer);
     assert!(rendezvous.max_total_bytes >= transfer + 64 * 1024);
+  }
+
+  #[test]
+  fn demo_instance_file_parses_without_keycloak() {
+    let text = include_str!("../../../dev/demo/teamcraft.demo.toml");
+    let config = Config::from_toml(text).unwrap();
+    assert_eq!(config.oidc.maybe_roles_claim.as_deref(), Some("groups"));
+    assert!(config.oidc.app_scopes.iter().any(|scope| scope == "groups"));
+    assert!(!config.oidc.sync.is_requested());
+    assert!(config.oidc.sync.maybe_client_secret.is_none());
   }
 
   #[test]
