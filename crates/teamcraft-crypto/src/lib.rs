@@ -17,6 +17,7 @@ pub mod device_list;
 pub mod dpop;
 pub mod fingerprint;
 pub mod guest_link;
+pub mod guest_resume;
 pub mod identity;
 pub mod ids;
 pub mod key_bag;
