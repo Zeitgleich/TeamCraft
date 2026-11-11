@@ -2,7 +2,8 @@
 //! `#invite=<token>` link, or an old `/meeting/<id>#invite=<token>`) for somebody without an
 //! account: a guest enters a name, waits in the lobby until the organizer's device lets them in,
 //! then is in. No sign-in. The link holds no secret: the page makes the guest's keys itself
-//! (e2ee.md §4.6, "Meeting guests").
+//! (e2ee.md §4.6, "Meeting guests"). Once in the lobby, the page moves to the guest's own address
+//! (`#r=<key>`), which brings them back after a reload without knocking again (`crate::guest_resume`).
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -19,6 +20,7 @@ use crate::auth::{AppConfig, Authenticator};
 use crate::components::guest_meeting::GuestSession;
 use crate::components::login::AuthFrame;
 use crate::form_errors::{FieldError, FieldErrors, FormErrors};
+use crate::guest_resume::StoredGuestSession;
 use crate::i18n::use_i18n;
 use crate::meetings::{GuestClient, GuestLink, MeetingError};
 use crate::reactive::{SetIfAlive, pause, use_interval};
@@ -57,6 +59,20 @@ enum FailureKind {
   Network,
 }
 
+/// The page's state that the join, a resumed session and the lobby poll share.
+#[derive(Clone, Copy)]
+struct LobbyPage {
+  phase: RwSignal<GuestPhase>,
+  joined: StoredValue<Option<Joined>, LocalStorage>,
+  is_device_ready: RwSignal<bool>,
+  /// The codes the guest may compare out of band (#987 review): their own key's, which the hosts
+  /// see on the lobby entry, and the organizer's from the link, which the organizer's app shows.
+  codes: RwSignal<Option<(String, String)>>,
+  is_organizer_app_outdated: RwSignal<bool>,
+  /// The fingerprint still to report with the knock, when the first report failed.
+  unreported: StoredValue<Option<String>>,
+}
+
 /// What the page knows about the guest once the server let them into the lobby.
 #[derive(Clone)]
 struct Joined {
@@ -71,7 +87,16 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
   let i18n = use_i18n();
   let config = AppConfig::load();
   let client = GuestClient::new(config.clone());
-  let phase = RwSignal::new(GuestPhase::AskName);
+  // A reload of the guest's own address carries on with the session this browser keeps.
+  let maybe_resumed = link
+    .maybe_resume_key
+    .as_deref()
+    .and_then(StoredGuestSession::load);
+  let phase = RwSignal::new(if maybe_resumed.is_some() {
+    GuestPhase::Waiting
+  } else {
+    GuestPhase::AskName
+  });
   let name = RwSignal::new(String::new());
   let errors = FormErrors::new();
   let name_errors = move || {
@@ -90,17 +115,28 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
   );
   let is_one_time = link.maybe_invite_token.is_some();
   let link = StoredValue::new(link);
-  let joined = StoredValue::new_local(None::<Joined>);
-  let is_device_ready = RwSignal::new(false);
-  // The codes the guest may compare out of band (#987 review): their own key's, which the hosts see
-  // on the lobby entry, and the organizer's from the link, which the organizer's app shows.
-  let codes = RwSignal::new(None::<(String, String)>);
-  let is_organizer_app_outdated = RwSignal::new(false);
-  // The fingerprint still to report with the knock, when the first report failed.
-  let unreported = StoredValue::new(None::<String>);
+  let page = LobbyPage {
+    phase,
+    joined: StoredValue::new_local(None::<Joined>),
+    is_device_ready: RwSignal::new(false),
+    codes: RwSignal::new(None),
+    is_organizer_app_outdated: RwSignal::new(false),
+    unreported: StoredValue::new(None),
+  };
+  let LobbyPage {
+    codes,
+    is_organizer_app_outdated,
+    ..
+  } = page;
   crate::startup::first_view();
-  // What an earlier guest page left in this browser (closed without "Leave") goes now.
-  spawn_local(delete_stale_guest_store());
+  match maybe_resumed {
+    Some(session) => spawn_local(enter(session, client.clone(), config.clone(), page)),
+    None => {
+      StoredGuestSession::forget();
+      // What an earlier guest page left in this browser (closed without "Leave") goes now.
+      spawn_local(delete_stale_guest_store());
+    },
+  }
 
   let join: StoredValue<Rc<dyn Fn(leptos::ev::SubmitEvent)>, LocalStorage> = StoredValue::new_local({
     let client = client.clone();
@@ -131,93 +167,36 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
           phase.set_if_alive(GuestPhase::Denied);
           return;
         }
-        let auth: Rc<dyn Authenticator> =
-          Rc::new(GuestAuth::new(config.clone(), response.guest_token.clone()));
-        let is_gone = joined
-          .try_set_value(Some(Joined {
-            guest_token: response.guest_token.clone(),
-            meeting: response.meeting_id,
-            conversation_id: response.conversation_id,
-            auth: auth.clone(),
-          }))
-          .is_some();
-        if is_gone {
-          return;
-        }
-        phase.set_if_alive(GuestPhase::Waiting);
-        let organizer_fingerprint = parts
-          .maybe_organizer_fingerprint
-          .clone()
-          .or(response.maybe_organizer_fingerprint.clone());
-        let setup = prepare_device(
-          &client,
-          &config,
-          auth,
-          &response.guest_token,
-          response.user_id,
-          response.conversation_id,
-          response.meeting_id,
+        let session = StoredGuestSession {
+          meeting: response.meeting_id,
+          conversation: response.conversation_id,
+          user_id: response.user_id,
+          guest_token: response.guest_token,
           // A link without `v` (mailed before #987) takes the server's word (e2ee.md §4.6).
-          organizer_fingerprint.as_deref(),
-        )
-        .await;
-        match setup {
-          Ok((own_code, maybe_unreported)) => {
-            unreported.try_set_value(maybe_unreported);
-            let organizer_code = organizer_fingerprint
-              .as_deref()
-              .map(code_of_fingerprint)
-              .unwrap_or_default();
-            codes.set_if_alive(Some((own_code, organizer_code)));
-            is_device_ready.set_if_alive(true);
-          },
-          Err(kind) => phase.set_if_alive(GuestPhase::Failed(kind)),
+          maybe_organizer_fingerprint: parts
+            .maybe_organizer_fingerprint
+            .clone()
+            .or(response.maybe_organizer_fingerprint),
+        };
+        if let Some(address) = session.keep(&parts.handle) {
+          replace_address(&address);
         }
+        enter(session, client, config, page).await;
       });
     }) as Rc<dyn Fn(leptos::ev::SubmitEvent)>
   });
 
   use_interval(POLL_MS, move || {
-    if phase.get_untracked() != GuestPhase::Waiting || !is_device_ready.get_untracked() {
+    if phase.get_untracked() != GuestPhase::Waiting || !page.is_device_ready.get_untracked() {
       return;
     }
-    let Some((guest_token, meeting)) = joined.with_value(|joined| {
-      joined
-        .as_ref()
-        .map(|joined| (joined.guest_token.clone(), joined.meeting))
-    }) else {
-      return;
-    };
-    let client = client.clone();
-    let maybe_fingerprint = unreported.get_value();
-    spawn_local(async move {
-      if let Some(fingerprint) = maybe_fingerprint
-        && report_device(&client, meeting, &guest_token, &fingerprint).await
-      {
-        unreported.try_set_value(None);
-      }
-      match client.lobby_state(meeting, &guest_token).await {
-        Ok(answer) => {
-          is_organizer_app_outdated.set_if_alive(answer.is_organizer_app_outdated);
-          match answer.state {
-            LobbyState::Admitted => phase.set_if_alive(GuestPhase::Admitted),
-            LobbyState::Denied => phase.set_if_alive(GuestPhase::Denied),
-            LobbyState::Waiting | LobbyState::Unknown(_) => {},
-          }
-        },
-        // A hiccup keeps waiting; a refused session ends it.
-        Err(MeetingError::Refused { .. }) => {
-          phase.set_if_alive(GuestPhase::Failed(FailureKind::LinkUnusable))
-        },
-        Err(_) => {},
-      }
-    });
+    spawn_local(check_lobby(client.clone(), page));
   });
 
   view! {
     {move || {
       if phase.get() == GuestPhase::Admitted
-        && let Some(joined) = joined.get_value()
+        && let Some(joined) = page.joined.get_value()
       {
         let session = GuestSession {
           meeting: joined.meeting,
@@ -316,6 +295,88 @@ pub fn GuestJoinPage(link: GuestLink) -> impl IntoView {
   }
 }
 
+/// Carries the guest on from the lobby entry, after joining or after a reload: the page's session
+/// signs with the guest's token, the device is set up (or opened again), and the lobby is asked
+/// at once whether the guest was let in meanwhile.
+async fn enter(session: StoredGuestSession, client: GuestClient, config: AppConfig, page: LobbyPage) {
+  let auth: Rc<dyn Authenticator> = Rc::new(GuestAuth::new(config.clone(), session.guest_token.clone()));
+  let is_gone = page
+    .joined
+    .try_set_value(Some(Joined {
+      guest_token: session.guest_token.clone(),
+      meeting: session.meeting,
+      conversation_id: session.conversation,
+      auth: auth.clone(),
+    }))
+    .is_some();
+  if is_gone {
+    return;
+  }
+  page.phase.set_if_alive(GuestPhase::Waiting);
+  let organizer_fingerprint = session.maybe_organizer_fingerprint.as_deref();
+  let setup = prepare_device(
+    &client,
+    &config,
+    auth,
+    &session.guest_token,
+    session.user_id,
+    session.conversation,
+    session.meeting,
+    organizer_fingerprint,
+  )
+  .await;
+  match setup {
+    Ok((own_code, maybe_unreported)) => {
+      page.unreported.try_set_value(maybe_unreported);
+      let organizer_code = organizer_fingerprint.map(code_of_fingerprint).unwrap_or_default();
+      page.codes.set_if_alive(Some((own_code, organizer_code)));
+      page.is_device_ready.set_if_alive(true);
+      check_lobby(client, page).await;
+    },
+    Err(kind) => page.phase.set_if_alive(GuestPhase::Failed(kind)),
+  }
+}
+
+/// Asks the lobby whether the guest was let in, reporting the device first if that failed before.
+/// A refusal or a turned-away guest ends the session this browser keeps.
+async fn check_lobby(client: GuestClient, page: LobbyPage) {
+  let Some((guest_token, meeting)) = page.joined.with_value(|joined| {
+    joined
+      .as_ref()
+      .map(|joined| (joined.guest_token.clone(), joined.meeting))
+  }) else {
+    return;
+  };
+  if let Some(fingerprint) = page.unreported.get_value()
+    && report_device(&client, meeting, &guest_token, &fingerprint).await
+  {
+    page.unreported.try_set_value(None);
+  }
+  match client.lobby_state(meeting, &guest_token).await {
+    Ok(answer) => {
+      page
+        .is_organizer_app_outdated
+        .set_if_alive(answer.is_organizer_app_outdated);
+      match answer.state {
+        LobbyState::Admitted => page.phase.set_if_alive(GuestPhase::Admitted),
+        LobbyState::Denied => {
+          StoredGuestSession::forget();
+          page.phase.set_if_alive(GuestPhase::Denied);
+        },
+        LobbyState::Waiting | LobbyState::Unknown(_) => {},
+      }
+    },
+    // A hiccup keeps waiting; a refused session (left, ended, removed) ends it.
+    Err(MeetingError::Refused { .. }) => {
+      StoredGuestSession::forget();
+      page
+        .phase
+        .set_if_alive(GuestPhase::Failed(FailureKind::LinkUnusable));
+    },
+    Err(_) => {},
+  }
+}
+
 /// Sets up the encryption of the guest's page while they wait: the client core opens and enrolls an
 /// ephemeral device (no passphrase, no backup; its keys are the guest's own), keeps the organizer's
 /// key from the link (or, for a link without one, the one the server names), and tells the
@@ -384,6 +445,15 @@ async fn report_device(
       false
     },
   }
+}
+
+/// Moves the page to `address` (history entry replaced, nothing reloads).
+fn replace_address(address: &str) {
+  let Some(history) = web_sys::window().and_then(|window| window.history().ok()) else {
+    return;
+  };
+  // A failure leaves the address as it was: the page works, a reload knocks anew.
+  let _ = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(address));
 }
 
 /// Removes the fragment (`#invite=…&v=…`) from the address (history entry replaced, nothing reloads).

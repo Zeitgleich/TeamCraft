@@ -156,6 +156,7 @@ fn GuestShell(
       let client = GuestClient::new(AppConfig::load());
       // The server ends the session either way; this device's keys and data go with the page.
       let _ = client.leave(meeting, &token).await;
+      crate::guest_resume::StoredGuestSession::forget();
       if let Err(error) = crate::remote_backend::wipe_guest_store().await {
         tracing::warn!(%error, "could not delete the guest device's local data");
       }

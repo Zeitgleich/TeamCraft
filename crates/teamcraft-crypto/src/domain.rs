@@ -46,6 +46,9 @@ pub(crate) const LOCAL_STORE_RECORD: &str = "TeamCraft-v1 local store record";
 pub(crate) const MEDIA_CACHE_ROOT_KEY: &str = "TeamCraft-v1 media cache root key";
 /// Associated data of the desktop's sealed file of local secrets (e2ee.md §9).
 pub(crate) const LOCAL_SECRETS_FILE: &str = "TeamCraft-v1 local secrets file";
+/// Associated data of a meeting guest's sealed session in the browser (meetings.md, "Guests in the
+/// browser"): its key is in the address fragment only.
+pub(crate) const GUEST_RESUME: &str = "TeamCraft-v1 guest resume";
 pub(crate) const SHARE_LINK_KEY_WRAP: &str = "TeamCraft-v1 share link key wrap";
 pub(crate) const SHARE_LINK_NAME: &str = "TeamCraft-v1 share link name";
 pub(crate) const SERVER_SETTING_KEY: &str = "TeamCraft-v1 server setting key";
@@ -82,7 +85,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 45] = [
+  const ALL_LABELS: [&str; 46] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -119,6 +122,7 @@ mod tests {
     LOCAL_STORE_RECORD,
     MEDIA_CACHE_ROOT_KEY,
     LOCAL_SECRETS_FILE,
+    GUEST_RESUME,
     SHARE_LINK_KEY_WRAP,
     SHARE_LINK_NAME,
     SERVER_SETTING_KEY,

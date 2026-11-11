@@ -1892,8 +1892,16 @@ never by the server's member list:
     again as a new guest. The store is the web client's encrypted store (§9). "Leave the meeting" deletes its
     database (only a guest device accepts that command), and a guest page opened later deletes the
     database an earlier page left behind (closed without leaving), as far as no other tab holds it
-    open. Until then the encrypted data stays in the browser; nothing reuses it, since the session
-    token is gone and the server deactivates the account when access ends. No push, no search index, no account data sync.
+    open, unless it is the guest's own address coming back. *Reloading* (meetings.md, "Guests in the
+    browser"): after the lobby entry the page seals the session token, the meeting, the chat, the
+    guest's user and the organizer's fingerprint with a fresh random key (XChaCha20-Poly1305, label
+    `TeamCraft-v1 guest resume`), keeps the ciphertext in local storage and puts the key only into
+    the address fragment (`#r=`), which never reaches a server. A reload of that address opens the
+    session and the device's database again and asks the server for the lobby state; the server
+    alone decides whether the token still counts. Leaving, a refusal or a turned-away guest forget the
+    copy. Without the address the copy can't be opened; the address is no use in another browser.
+    Otherwise the encrypted data stays in the browser until the next guest page; nothing reuses it,
+    and the server deactivates the account when access ends. No push, no search index, no account data sync.
   - *The meeting link* (#987). A meeting has one link for members and guests alike,
     `<base>/meeting/<token>#v=<fingerprint>`, the same in "Copy link", the invitation e-mails and
     the calendar event:

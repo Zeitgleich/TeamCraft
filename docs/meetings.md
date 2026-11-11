@@ -138,8 +138,8 @@ the change, and people taken off the list are removed from the group.
    and is free again when the guest is turned away, leaves or their access ends. At most as many
    may wait at once, each for 15 minutes (the lobby timeout), so a leaked link fills the lobby
    for a while, not the meeting. The link ends with the meeting (its end plus
-   `guest_grace_secs`, or its cancellation). A guest who reloads the page loses their ephemeral
-   device and knocks anew; the waiting place they leave behind is free after the lobby timeout. **Making the link anew** (`POST /meetings/{id}/link`, organizer only;
+   `guest_grace_secs`, or its cancellation). A guest who reloads the page keeps their place, their
+   ephemeral device and, once admitted, the meeting (below, "Guests in the browser"). **Making the link anew** (`POST /meetings/{id}/link`, organizer only;
    `DELETE .../shared-guest-link` does the same for older apps) does in one transaction: a new
    token (the old link opens nothing any more, `404`), every shared and unredeemed personal link
    of the meeting revoked, and guests still waiting no longer counted as "came with the link"
@@ -460,8 +460,20 @@ A member's app copies a link with the organizer's fingerprint as its core has it
 (`PrepareGuestLink`, made once per meeting); until it has it, "Copy link" says "Verifying…" and
 copies nothing: a link with the server's fingerprint is never handed out from the app.
 
-Not done yet: reloading the page loses the guest's device (the guest knocks again as a new guest);
-a host the organizer's list doesn't name (not in the chat's group when the organizer's device
+**Reloading.** Once the server let the guest into the lobby, the page seals what it needs to
+carry on (the session token, the meeting, the chat, the guest's user and the organizer's
+fingerprint) with a fresh random key (XChaCha20-Poly1305, `teamcraft_crypto::guest_resume`), keeps
+only the ciphertext in this browser's local storage and moves to the guest's own address,
+`/meeting/<link>#r=<key>`. The key is in the fragment only, so it never reaches a server, and the
+address opens nothing in another browser. A reload (or the address opened again in this browser)
+opens the session, keeps the device's database instead of deleting it, and asks the server for the
+lobby state: admitted goes straight into the meeting, waiting keeps the place, a turned-away guest or
+a refused token (left, removed, the meeting's access over) forgets the copy and ends the page. The
+server decides each time; the stored copy proves nothing it doesn't accept. "Leave" forgets it too.
+Somebody with access to this browser's storage and history has what the guest has; that is the
+same for any open guest page. A call the guest was in is joined again with "Join call".
+
+Not done yet: a host the organizer's list doesn't name (not in the chat's group when the organizer's device
 last signed it) lets nobody's device in, and the guest waits for another; the size of
 what a guest downloads is not measured yet (the guest entry path is the initial chunk; the
 chat and call chunks load after admission).
@@ -502,5 +514,5 @@ fake calendar and mailer; one test sends through the real SMTP sender to Mailpit
 - Per-organizer calendars (see above).
 - Meeting links: member clients reacting to `lobby_decision` instead of asking; making the link
   anew also turning away the guests still waiting from it; the desktop and mobile apps opening
-  `/meeting/…` links themselves; hosts seeing how many guests the link let in; a guest's reload
-  keeping their device and place.
+  `/meeting/…` links themselves; hosts seeing how many guests the link let in; a reloaded guest
+  page joining the call by itself when the guest was in it.
